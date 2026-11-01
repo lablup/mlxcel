@@ -16,7 +16,6 @@
 use safetensors::SafeTensors;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use super::super::{DenseInput, DensePredictor};
@@ -364,7 +363,7 @@ fn assert_processor_pixels(predictor: &Sam3Predictor, image: &image::DynamicImag
     let resized = resize_pillow_rgb8(&image.to_rgb8(), 1008, 1008, PillowResizeFilter::Bilinear)
         .expect("Pillow-compatible cat resize");
     assert_eq!(
-        format!("{:x}", Sha256::digest(resized.as_raw())),
+        crate::sha256_hex::sha256_hex(resized.as_raw()),
         "a05b0197d0c56d9761ff0dd7d0370c00b7f9275d464e15c2bccedb1860051583",
         "full resized RGB8 output differs from Pillow"
     );

@@ -326,7 +326,7 @@ describe('provider-backed WebUI shell', () => {
     await waitFor(() => expect(document.querySelector('[data-testid="toolbar-loaded-count"]')?.textContent).toBe('1 loaded'));
     const chips = document.querySelectorAll<HTMLButtonElement>('[data-testid="toolbar-loaded-chip"]');
     expect(chips).toHaveLength(1);
-    expect(chips[0].textContent).toBe('alphaReady');
+    expect(chips[0].textContent).toBe('alpha Ready');
     expect(chips[0].title).toBe('alpha');
     // Named by what it shows: the model name, then its lifecycle state.
     expect(accessibleName(chips[0])).toBe('alpha Ready');

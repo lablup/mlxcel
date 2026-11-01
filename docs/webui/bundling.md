@@ -10,7 +10,7 @@ The frontend lives in `webui/`, independently of the existing `webpage/` site. S
 
 ## Canonical build pipeline
 
-Run commands from the repository root, with Python 3, Node **26.5.1**, and pnpm **11.18.0** installed:
+Run commands from the repository root, with Python 3, Node **26.5.1**, and pnpm **12.16.1** installed:
 
 ```bash
 pnpm --dir webui install --frozen-lockfile

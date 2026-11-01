@@ -347,7 +347,7 @@ async fn prompt_cache_hit_and_per_request_disable_match_a_cold_evaluation() {
         "4",
         "--no-warmup",
     ]);
-    let client = reqwest::Client::builder()
+    let client = mlxcel::http_tls::client_builder()
         .timeout(Duration::from_secs(120))
         .build()
         .expect("client");
@@ -538,7 +538,7 @@ async fn raw_prompt_routes_hit_the_cache_and_honor_the_per_request_disable() {
         "4",
         "--no-warmup",
     ]);
-    let client = reqwest::Client::builder()
+    let client = mlxcel::http_tls::client_builder()
         .timeout(Duration::from_secs(120))
         .build()
         .expect("client");
@@ -659,7 +659,7 @@ async fn concurrent_requests_of_mixed_widths_match_their_solo_runs() {
         "4",
         "--no-warmup",
     ]);
-    let client = reqwest::Client::builder()
+    let client = mlxcel::http_tls::client_builder()
         .timeout(Duration::from_secs(180))
         .build()
         .expect("client");

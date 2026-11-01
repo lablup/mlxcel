@@ -29,7 +29,7 @@ pub(crate) fn write_self_signed(dir: &std::path::Path) -> TlsPaths {
     let cert = dir.join("cert.pem");
     let key = dir.join("key.pem");
     std::fs::write(&cert, issued.cert.pem()).expect("write cert");
-    std::fs::write(&key, issued.key_pair.serialize_pem()).expect("write key");
+    std::fs::write(&key, issued.signing_key.serialize_pem()).expect("write key");
     TlsPaths { cert, key }
 }
 

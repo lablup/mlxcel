@@ -28,9 +28,20 @@ const routes: RouteId[] = ['models', 'chat', 'activity', 'settings', 'gallery'];
 function splitRoute<P extends object>(load: () => Promise<React.ComponentType<P>>): { Route: (props: P) => React.JSX.Element; preload: () => Promise<React.ComponentType<P>> } {
   type Chunk = Promise<React.ComponentType<P>>;
   let pending: Chunk | null = null;
-  // A chunk that failed to arrive is fetched again the next time its route renders. A fetched
-  // chunk is marked fulfilled the way React reads a thenable, so use() returns it without suspending.
-  const preload = (): Chunk => (pending ??= load().then((component) => { if (pending) Object.assign(pending, { status: 'fulfilled', value: component }); return component; }, (error: unknown) => { pending = null; throw error; }));
+  // A settled chunk is marked the way React reads a thenable, so use() returns it or throws without
+  // suspending. A failed chunk stays failed: browsers keep a failed dynamic import for the document's
+  // lifetime, and handing use() a fresh promise per render would suspend forever instead of reaching
+  // RouteLoadBoundary.
+  const preload = (): Chunk => {
+    if (pending) return pending;
+    const chunk: Chunk = load();
+    pending = chunk;
+    chunk.then(
+      (value) => { Object.assign(chunk, { status: 'fulfilled', value }); },
+      (reason: unknown) => { Object.assign(chunk, { status: 'rejected', reason }); },
+    );
+    return chunk;
+  };
   function Route(props: P): React.JSX.Element {
     // use() runs on every render: skipping it once the chunk arrived trips React's conditional-use() error.
     const Component = use(preload());

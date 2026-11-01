@@ -140,7 +140,7 @@ async fn chat_accepts_top_level_chat_template_kwargs() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     // Primary llama.cpp shape.
@@ -181,7 +181,7 @@ async fn chat_accepts_extra_body_nested_chat_template_kwargs() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let body = serde_json::json!({
@@ -225,7 +225,7 @@ async fn chat_accepts_dashscope_flat_preserve_thinking() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let body = serde_json::json!({
@@ -268,7 +268,7 @@ async fn chat_accepts_flattened_openai_extra_body_preserve_thinking() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let body = serde_json::json!({
@@ -313,7 +313,7 @@ async fn server_default_chat_template_kwargs_applies_without_override() {
         r#"{"preserve_thinking": true}"#,
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     // Request does NOT set chat_template_kwargs; the server default must

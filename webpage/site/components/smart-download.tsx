@@ -2,7 +2,8 @@
 
 import { usePlatform, OS, Arch } from "@/hooks/use-os";
 import { Button } from "@/components/ui/button";
-import { Download, Github } from "lucide-react";
+import { Download } from "lucide-react";
+import { Github } from "@/components/brand-icons";
 import { MotionDiv } from "@/components/motion-wrapper";
 import type { Dictionary } from "@/dictionaries/en";
 import type { ReleaseData } from "@/lib/release";

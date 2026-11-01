@@ -363,7 +363,7 @@ pub fn load_yaml_config(path: &PathBuf) -> Result<LangBiasYamlConfig, CliError> 
     let options = serde_saphyr::options! {
         merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
         strict_booleans: true,
-        reject_non_finite_typeless_float: false,
+        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::AsString,
     };
     serde_saphyr::from_str_with_options(&content, options).map_err(|e| {
         // Only bias mapping keys can be valid language codes in this schema.

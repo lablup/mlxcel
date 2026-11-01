@@ -308,7 +308,7 @@ async fn wait_for_tcp(addr: &str, deadline: Instant) -> bool {
 /// no longer needed to avoid a 503; the tests keep it so a peer that is not
 /// listening yet fails here, with a clear message, rather than in a request.
 async fn wait_for_router_peers_online(http_port: &str, deadline: Instant) -> bool {
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     let url = format!("http://127.0.0.1:{http_port}/router/stats");
     while Instant::now() < deadline {
         // Bound each request so a hung connection cannot outlast the deadline.
@@ -331,7 +331,7 @@ async fn wait_for_router_peers_online(http_port: &str, deadline: Instant) -> boo
 /// Poll the router's `/health` HTTP endpoint until it returns 200 or the
 /// deadline passes.
 async fn wait_for_http_health(url: &str, deadline: Instant) -> bool {
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     while Instant::now() < deadline {
         if let Ok(resp) = client.get(url).send().await
             && resp.status().is_success()
@@ -460,7 +460,7 @@ async fn disaggregated_router_streams_correct_output() {
     );
 
     // POST a streaming chat-completions request to the router.
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     let chat_url = format!("http://127.0.0.1:{router_http}/v1/chat/completions");
     let response = client
         .post(&chat_url)
@@ -641,7 +641,7 @@ async fn disaggregated_router_filters_thinking_output() {
     long_body["max_tokens"] = serde_json::json!(LONG_MAX_TOKENS);
     let mut long_nonstream_body = long_body.clone();
     long_nonstream_body["stream"] = serde_json::json!(false);
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
 
     // ---- Single-node hybrid reference ----
     let (ref_body, ref_nonstream, ref_long_body, ref_long_nonstream) = {
@@ -1022,7 +1022,7 @@ async fn disaggregated_router_completions_match_single_node() {
         "temperature": 0.0,
         "stream": true
     });
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
 
     // ---- Single-node reference (started with --alias for model parity) ----
     let (ref_nonstream, ref_stream_chunks) = {
@@ -1277,7 +1277,7 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
     }
     let model_arg = model_dir.to_string_lossy().to_string();
     let roles = ClusterRoles::new();
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     // The characters this checkpoint's vocabulary can emit without `<0xXX>`
     // byte pieces, used to prove a case really exercises byte fallback.
     let vocab_chars = minicpm_vocab_chars(&model_dir);
@@ -1560,7 +1560,7 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
     }
     let model_arg = model_dir.to_string_lossy().to_string();
     let roles = ClusterRoles::new();
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     // See the completions twin: proves a case really exercises byte fallback.
     let vocab_chars = minicpm_vocab_chars(&model_dir);
 
@@ -1908,7 +1908,7 @@ async fn disaggregated_router_rejects_model_owned_family_and_keeps_serving() {
     }
     let model_arg = model_dir.to_string_lossy().to_string();
     let roles = ClusterRoles::new();
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
 
     // ---- Three-process disaggregated router run ----
     let ports = reserve_ports(6);
@@ -2222,7 +2222,7 @@ async fn disaggregated_router_balances_and_survives_node_failure() {
         "the router never saw every peer online"
     );
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     let completions_url = format!("http://127.0.0.1:{router_http}/v1/completions");
     let stats_url = format!("http://127.0.0.1:{router_http}/router/stats");
     let prompt = "The capital of France is";
@@ -2290,7 +2290,7 @@ async fn wait_for_router_node_status(
     status: &str,
     deadline: Instant,
 ) -> bool {
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     let url = format!("http://127.0.0.1:{http_port}/router/stats");
     while Instant::now() < deadline {
         let per_request = deadline
@@ -2394,7 +2394,7 @@ async fn disaggregated_router_started_before_prefill_serves_first_request() {
 
     // No wait for `/router/stats` here: the router still has the prefill node
     // marked down unless a monitor cycle happened to land since it bound.
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     let (status, text) = post_completion(
         &client,
         &format!("http://127.0.0.1:{router_http}/v1/completions"),

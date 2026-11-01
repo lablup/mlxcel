@@ -151,11 +151,19 @@ pub(super) fn reconcile_config_added_tokens(
     // Runs of the same `special` flag keep the declared order, so ids are
     // handed out exactly as planned.
     for batch in planned.chunk_by(|left, right| left.1.special == right.1.special) {
-        let tokens: Vec<AddedToken> = batch.iter().map(|(_, token)| token.clone()).collect();
-        if batch[0].1.special {
-            tokenizer.add_special_tokens(&tokens);
+        let tokens = batch.iter().map(|(_, token)| token.clone());
+        let registered = if batch[0].1.special {
+            tokenizer.add_special_tokens(tokens)
         } else {
-            tokenizer.add_tokens(&tokens);
+            tokenizer.add_tokens(tokens)
+        };
+        if let Err(err) = registered {
+            tracing::warn!(
+                model = %model_path.display(),
+                error = %err,
+                "tokenizers refused a tokenizer_config.json added token batch; leaving it and later entries unregistered"
+            );
+            return added;
         }
         for (id, token) in batch {
             let assigned = tokenizer.token_to_id(&token.content);

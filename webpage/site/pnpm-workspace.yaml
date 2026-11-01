@@ -1,0 +1,4 @@
+# eslint-resolver's native binding ships prebuilt; pnpm stops the install until
+# each build script is allowed or declined.
+allowBuilds:
+  "unrs-resolver": false

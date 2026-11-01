@@ -326,7 +326,7 @@ async fn wait_for_server(client: &reqwest::Client, server_url: &str) -> Result<(
 async fn main() {
     let args = Args::parse();
 
-    let client = reqwest::Client::builder()
+    let client = mlxcel::http_tls::client_builder()
         .timeout(Duration::from_secs(300))
         .build()
         .expect("failed to create HTTP client");

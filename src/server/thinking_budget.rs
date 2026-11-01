@@ -1175,7 +1175,7 @@ mod tests {
             .iter()
             .map(|s| AddedToken::from(*s, /*special=*/ true))
             .collect();
-        hf.add_tokens(&added);
+        hf.add_tokens(added).expect("added tokens register");
         crate::tokenizer::MlxcelTokenizer::HuggingFace(hf)
     }
 

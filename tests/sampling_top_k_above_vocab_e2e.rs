@@ -101,7 +101,7 @@ async fn chat_completion_with_top_k_above_vocab_returns_a_normal_response() {
         .expect("spawn mlxcel-server");
     let mut server = ServerGuard(child);
     let base_url = format!("http://127.0.0.1:{port}");
-    let client = reqwest::Client::builder()
+    let client = mlxcel::http_tls::client_builder()
         .timeout(Duration::from_secs(120))
         .build()
         .expect("http client");

@@ -379,7 +379,11 @@ fn sha256_file(path: &Path) -> String {
         }
         digest.update(&buffer[..count]);
     }
-    format!("{:x}", digest.finalize())
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn verify_artifact_manifest(root: &Path, manifest: &ArtifactManifest) {
@@ -426,7 +430,10 @@ fn verify_artifact_manifest(root: &Path, manifest: &ArtifactManifest) {
         canonical.push_str(expected);
         canonical.push('\n');
     }
-    let actual_canonical = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+    let actual_canonical = Sha256::digest(canonical.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     assert_eq!(
         actual_canonical, manifest.canonical_sha256,
         "converted snapshot canonical manifest hash differs"

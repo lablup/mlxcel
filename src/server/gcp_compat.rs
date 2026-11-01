@@ -168,7 +168,7 @@ pub(crate) fn check_predict_collision(config: &crate::server::ServerConfig) -> R
 
 /// Derive the camelCase `@requestFormat` alias for a registered path, the
 /// port of upstream's `path_to_gcp_format`: strip a leading `/v1`, strip the
-/// leading `/`, stop before the first `:` path parameter, and capitalise
+/// leading `/`, stop before the first `{` path parameter, and capitalise
 /// after `/`, `-`, `_` boundaries (`/v1/chat/completions` becomes
 /// `chatCompletions`, `/apply-template` becomes `applyTemplate`).
 pub(crate) fn path_to_gcp_format(path: &str) -> String {
@@ -180,7 +180,7 @@ pub(crate) fn path_to_gcp_format(path: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut cap = false;
     for c in s.chars() {
-        if c == ':' {
+        if c == '{' {
             break;
         }
         if c == '/' || c == '-' || c == '_' {

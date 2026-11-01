@@ -3,7 +3,6 @@
 //! Small authenticated MHR geometry and deterministic accumulation contracts.
 use super::super::mhr_utils;
 use super::*;
-use sha2::{Digest, Sha256};
 
 fn exact(actual: &MlxArray, expected: &MlxArray, name: &str) -> Result<()> {
     assert_eq!(mx::array_dtype(actual), mx::array_dtype(expected), "{name}");
@@ -85,7 +84,7 @@ fn sam3d_body_mhr_authentic_cpu_geometry_oracle() -> Result<()> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/sam3d_body/geometry.safetensors");
     assert_eq!(
-        format!("{:x}", Sha256::digest(std::fs::read(&path)?)),
+        crate::sha256_hex::sha256_hex(std::fs::read(&path)?),
         "7ab6a64bb6f0459ad6687ce50253a9e0f3e627d78e975460384c1ce9eed33b26"
     );
     let w = mx::weights::load_safetensors(path).map_err(anyhow::Error::msg)?;

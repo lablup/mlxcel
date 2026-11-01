@@ -738,7 +738,7 @@ jobs:
         with:
           node-version: '26.5.1'
       - name: Install pnpm
-        run: npm install --global pnpm@11.18.0
+        run: npm install --global pnpm@12.16.1
       - name: Install WebUI dependencies
         run: pnpm --dir webui install --frozen-lockfile
       - name: Typecheck WebUI
@@ -884,7 +884,7 @@ jobs:
         with:
           node-version: '26.5.1'
       - name: Install pnpm for real-router browser harness
-        run: npm install --global pnpm@11.18.0
+        run: npm install --global pnpm@12.16.1
       - name: Install WebUI dependencies for real-router browser harness
         run: pnpm --dir webui install --frozen-lockfile
       - name: Install Chromium runtime for real-router browser harness

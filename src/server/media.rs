@@ -1722,7 +1722,7 @@ fn validate_payload_size(bytes: Vec<u8>, kind: &str, max_size: usize) -> Result<
 /// Split out of [`http_image_client`] so tests build the same client with a
 /// proxy of their own.
 pub(super) fn media_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
+    crate::http_tls::client_builder()
         // Total deadline for any single request; the redirect helper narrows
         // it per hop to what is left of the chain's shared deadline.
         .timeout(media_net::MEDIA_FETCH_TIMEOUT)

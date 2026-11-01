@@ -663,7 +663,7 @@ fn build_reqwest_client(token: Option<&str>, enforce_https: bool) -> Result<reqw
             )?,
         );
     }
-    let mut builder = reqwest::Client::builder()
+    let mut builder = crate::http_tls::client_builder()
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(30))
         .default_headers(headers);

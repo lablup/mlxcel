@@ -23,7 +23,7 @@ MAX_TOTAL_JS_GZIP = 700 * 1024
 MAX_EMBEDDED_BYTES = 5 * 1024 * 1024
 LICENSE_PATH = "third-party-licenses.txt"
 REQUIRED_NODE_VERSION = "v26.5.1"
-REQUIRED_PNPM_VERSION = "11.18.0"
+REQUIRED_PNPM_VERSION = "12.16.1"
 SOURCE_FILES = [
     ROOT / "scripts" / "webui" / "build_bundle.py",
     WEBUI / "package.json",
@@ -144,7 +144,7 @@ def manifest_for(out_dir: Path, manifest_bytes: int = 0) -> dict[str, object]:
     files.sort(key=lambda item: item["path"])
     manifest: dict[str, object] = {
         "schema_version": 1,
-        "package_manager": "pnpm@11.18.0",
+        "package_manager": "pnpm@12.16.1",
         "node_version": node_version,
         "pnpm_version": pnpm_version,
         "source_digest_sha256": digest_sources(),

@@ -216,6 +216,11 @@ pub fn resolve_api_prefix(raw: &str) -> Result<String> {
     if trimmed.contains("//") {
         return Err(bad("it must not contain an empty path segment ('//')"));
     }
+    // axum 0.8 reads `{` and `}` in a route path as a parameter, so a prefix
+    // holding one would make the nest call panic at startup instead of serving.
+    if trimmed.contains('{') || trimmed.contains('}') {
+        return Err(bad("it must not contain '{' or '}'"));
+    }
     if trimmed.contains('?') || trimmed.contains('#') {
         return Err(bad("it must not contain a query string or a fragment"));
     }

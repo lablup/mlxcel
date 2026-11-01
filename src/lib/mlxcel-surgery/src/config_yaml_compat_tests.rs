@@ -30,7 +30,7 @@ fn shipped_examples_keep_their_enum_and_numeric_syntax() {
         serde_saphyr::options! {
             merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
             strict_booleans: true,
-            reject_non_finite_typeless_float: false,
+            non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::AsString,
         }
     };
     for yaml in [

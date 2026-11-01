@@ -1,5 +1,5 @@
 import Image from "next/image";
-import { Github, Linkedin, Youtube } from "lucide-react";
+import { Github, Linkedin, Youtube } from "@/components/brand-icons";
 import type { Dictionary } from "@/dictionaries/en";
 import type { Locale } from "@/lib/dictionary";
 

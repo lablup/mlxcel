@@ -129,7 +129,7 @@ test('more than three loaded models collapse into a +n chip that opens the palet
   await page.getByLabel('Session key').fill('good-key');
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.getByTestId('toolbar-loaded-count')).toHaveText('4 loaded');
-  await expect(page.getByTestId('toolbar-loaded-chip')).toHaveText(['alphaReady', 'bravoReady', 'charlieReady']);
+  await expect(page.getByTestId('toolbar-loaded-chip')).toHaveText(['alpha Ready', 'bravo Ready', 'charlie Ready']);
   const more = page.getByRole('button', { name: '+1, show all loaded models', exact: true });
   await expect(more).toHaveText('+1');
   await more.click();

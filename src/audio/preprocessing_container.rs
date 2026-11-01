@@ -31,14 +31,14 @@
 //! than the cap allows, which is what bounds a file whose header understates
 //! its length (a frame count is advisory in both containers).
 
-use symphonia::core::audio::AudioBufferRef;
-use symphonia::core::audio::Signal;
-use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+use symphonia::core::audio::GenericAudioBufferRef;
+use symphonia::core::codecs::CodecParameters;
+use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 use super::wav::{NativeWaveform, decode_wav, inspect_wav};
 use super::{
@@ -141,7 +141,8 @@ pub(crate) fn probe_compressed(bytes: &[u8]) -> Option<Result<CompressedGeometry
     Some(
         open(probe_prefix(bytes), container, 0)
             .map_err(|e| e.to_string())
-            .and_then(|(_, params)| {
+            .and_then(|opened| {
+                let params = &opened.params;
                 let sample_rate = params.sample_rate.unwrap_or(0);
                 if sample_rate == 0 {
                     return Err(format!(
@@ -151,11 +152,12 @@ pub(crate) fn probe_compressed(bytes: &[u8]) -> Option<Result<CompressedGeometry
                 }
                 let channels = params
                     .channels
+                    .as_ref()
                     .map(|c| u16::try_from(c.count()).unwrap_or(u16::MAX))
                     .unwrap_or(1)
                     .max(1);
-                let duration_seconds = params
-                    .n_frames
+                let duration_seconds = opened
+                    .num_frames
                     .and_then(|n| u32::try_from(n).ok().map(f64::from).or(Some(n as f64)))
                     .filter(|n| *n > 0.0)
                     .map(|frames| frames / f64::from(sample_rate));
@@ -240,8 +242,9 @@ fn probe(
     if container == AudioContainer::Flac {
         validate_flac_header(bytes, clip_index)?;
     }
-    let (_, params) = open(probe_prefix(bytes), container, clip_index)?;
-    let sample_rate = params
+    let opened = open(probe_prefix(bytes), container, clip_index)?;
+    let sample_rate = opened
+        .params
         .sample_rate
         .ok_or_else(|| AudioPreprocessError::Corrupt {
             clip_index,
@@ -253,8 +256,8 @@ fn probe(
             reason: format!("{} stream declares a zero sample rate", container.name()),
         });
     }
-    let frames = params
-        .n_frames
+    let frames = opened
+        .num_frames
         .and_then(|n| usize::try_from(n).ok())
         .filter(|n| *n > 0);
     Ok(Probed {
@@ -361,21 +364,24 @@ fn validate_flac_header(bytes: &[u8], clip_index: usize) -> Result<(), AudioPrep
     }
 }
 
-/// Probe the container and return its reader plus the default track's codec
-/// parameters. The reader is consumed by the decode path; `probe` throws it
-/// away, which costs one header parse and keeps the two entry points honest
+/// The reader, the default audio track and its codec parameters.
+struct Opened {
+    reader: Box<dyn FormatReader>,
+    track_id: u32,
+    params: AudioCodecParameters,
+    /// The track's playable frame count, when the container declares one.
+    num_frames: Option<u64>,
+}
+
+/// Probe the container and return its reader plus the default audio track's
+/// codec parameters. The reader is consumed by the decode path; `probe` throws
+/// it away, which costs one header parse and keeps the two entry points honest
 /// about reading the same track.
 fn open(
     bytes: &[u8],
     container: AudioContainer,
     clip_index: usize,
-) -> Result<
-    (
-        Box<dyn symphonia::core::formats::FormatReader>,
-        symphonia::core::codecs::CodecParameters,
-    ),
-    AudioPreprocessError,
-> {
+) -> Result<Opened, AudioPreprocessError> {
     // The clip is already fully in memory (the acquisition layer bounded its
     // encoded size before this point), so the media source is a cursor over
     // those bytes and no decode can reach the filesystem or the network.
@@ -385,28 +391,34 @@ fn open(
     );
     let mut hint = Hint::new();
     hint.with_extension(container.hint());
-    let probed = symphonia::default::get_probe()
-        .format(
+    let reader = symphonia::default::get_probe()
+        .probe(
             &hint,
             source,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .map_err(|e| AudioPreprocessError::Corrupt {
             clip_index,
             reason: format!("{} container could not be parsed: {e}", container.name()),
         })?;
-    let reader = probed.format;
+    let no_track = || AudioPreprocessError::Corrupt {
+        clip_index,
+        reason: format!("{} container carries no decodable track", container.name()),
+    };
     let track = reader
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| AudioPreprocessError::Corrupt {
-            clip_index,
-            reason: format!("{} container carries no decodable track", container.name()),
-        })?;
-    let params = track.codec_params.clone();
-    Ok((reader, params))
+        .first_track_known_codec(TrackType::Audio)
+        .ok_or_else(no_track)?;
+    let Some(CodecParameters::Audio(params)) = track.codec_params.clone() else {
+        return Err(no_track());
+    };
+    let (track_id, num_frames) = (track.id, track.num_frames);
+    Ok(Opened {
+        reader,
+        track_id,
+        params,
+        num_frames,
+    })
 }
 
 fn max_frames(sample_rate: u32, policy: AudioFamilyPolicy) -> Result<usize, AudioPreprocessError> {
@@ -469,18 +481,17 @@ fn decode_compressed(
     if container == AudioContainer::Flac {
         validate_flac_header(bytes, clip_index)?;
     }
-    let (mut reader, params) = open(bytes, container, clip_index)?;
-    let track_id = reader
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .map(|t| t.id)
-        .ok_or_else(|| AudioPreprocessError::Corrupt {
-            clip_index,
-            reason: format!("{} container carries no decodable track", container.name()),
-        })?;
+    let Opened {
+        mut reader,
+        track_id,
+        params,
+        ..
+    } = open(bytes, container, clip_index)?;
+    // symphonia 0.5 only trimmed encoder delay and padding when gapless
+    // playback was requested, which this module never did; 0.6 trims by
+    // default. Keep the untrimmed samples so decoded lengths do not move.
     let mut decoder = symphonia::default::get_codecs()
-        .make(&params, &DecoderOptions::default())
+        .make_audio_decoder(&params, &AudioDecoderOptions::default().gapless(false))
         .map_err(|e| AudioPreprocessError::Corrupt {
             clip_index,
             reason: format!("{} codec is not supported: {e}", container.name()),
@@ -495,6 +506,7 @@ fn decode_compressed(
     let mut sample_rate = declared_rate;
     let mut channels: u16 = 1;
     let mut mono: Vec<f32> = Vec::new();
+    let mut planes: Vec<Vec<f32>> = Vec::new();
     let mut cap = if declared_rate > 0 {
         max_frames(declared_rate, policy)?
     } else {
@@ -508,7 +520,9 @@ fn decode_compressed(
             Some(clip_index),
         )?;
         let packet = match reader.next_packet() {
-            Ok(packet) => packet,
+            Ok(Some(packet)) => packet,
+            // symphonia 0.6 reports the end of the media as `Ok(None)`.
+            Ok(None) => break,
             // Both containers signal "no more packets" as an I/O
             // end-of-stream through the cursor, which is the normal exit.
             Err(SymphoniaError::IoError(ref e))
@@ -524,7 +538,7 @@ fn decode_compressed(
                 });
             }
         };
-        if packet.track_id() != track_id {
+        if packet.track_id != track_id {
             continue;
         }
         let decoded = match decoder.decode(&packet) {
@@ -540,25 +554,25 @@ fn decode_compressed(
                 });
             }
         };
-        let spec = *decoded.spec();
+        let spec = decoded.spec().clone();
         if sample_rate == 0 {
-            sample_rate = spec.rate;
+            sample_rate = spec.rate();
             check_sample_rate(sample_rate, clip_index, policy)?;
             cap = max_frames(sample_rate, policy)?;
-        } else if spec.rate != sample_rate {
+        } else if spec.rate() != sample_rate {
             return Err(AudioPreprocessError::Corrupt {
                 clip_index,
                 reason: format!(
                     "{} stream changes sample rate mid-clip ({sample_rate} Hz to {} Hz)",
                     container.name(),
-                    spec.rate
+                    spec.rate()
                 ),
             });
         }
-        channels = u16::try_from(spec.channels.count())
+        channels = u16::try_from(spec.channels().count())
             .unwrap_or(u16::MAX)
             .max(1);
-        append_mono(&decoded, &mut mono, clip_index)?;
+        append_mono(&decoded, &mut planes, &mut mono, clip_index)?;
         if mono.len() > cap {
             return Err(AudioPreprocessError::Limit {
                 limit: "source duration samples",
@@ -583,46 +597,31 @@ fn decode_compressed(
 /// Downmix one decoded buffer to mono and append it, matching the WAV path's
 /// arithmetic: mean across channels, clamped to `[-1, 1]`, with a non-finite
 /// sample failing the clip rather than propagating a NaN into the features.
+///
+/// `planes` is reusable scratch for the per-channel `f32` samples. symphonia
+/// converts every sample format to `f32` with the formulas this module used
+/// to spell out per format (`i16 / 32768`, `i24 / 8388608`, `i32` through
+/// `f64`, and the unsigned variants offset by one).
 fn append_mono(
-    decoded: &AudioBufferRef<'_>,
+    decoded: &GenericAudioBufferRef<'_>,
+    planes: &mut Vec<Vec<f32>>,
     out: &mut Vec<f32>,
     clip_index: usize,
 ) -> Result<(), AudioPreprocessError> {
-    macro_rules! mix {
-        ($buf:expr, $conv:expr) => {{
-            let buf = $buf;
-            let channels = buf.spec().channels.count().max(1);
-            let frames = buf.frames();
-            out.reserve(frames);
-            for frame in 0..frames {
-                let mut sum = 0.0f64;
-                for channel in 0..channels {
-                    let sample: f32 = $conv(buf.chan(channel)[frame]);
-                    if !sample.is_finite() {
-                        return Err(AudioPreprocessError::NonFinite { clip_index, frame });
-                    }
-                    sum += sample as f64;
-                }
-                out.push((sum / channels as f64).clamp(-1.0, 1.0) as f32);
+    decoded.copy_to_vecs_planar::<f32>(planes);
+    let channels = planes.len().max(1);
+    let frames = decoded.frames();
+    out.reserve(frames);
+    for frame in 0..frames {
+        let mut sum = 0.0f64;
+        for plane in planes.iter() {
+            let sample = plane[frame];
+            if !sample.is_finite() {
+                return Err(AudioPreprocessError::NonFinite { clip_index, frame });
             }
-        }};
-    }
-    match decoded {
-        AudioBufferRef::F32(buf) => mix!(buf.as_ref(), |s: f32| s),
-        AudioBufferRef::F64(buf) => mix!(buf.as_ref(), |s: f64| s as f32),
-        AudioBufferRef::S32(buf) => mix!(buf.as_ref(), |s: i32| s as f32 / 2_147_483_648.0),
-        AudioBufferRef::S24(buf) => mix!(buf.as_ref(), |s: symphonia::core::sample::i24| {
-            s.inner() as f32 / 8_388_608.0
-        }),
-        AudioBufferRef::S16(buf) => mix!(buf.as_ref(), |s: i16| s as f32 / 32_768.0),
-        AudioBufferRef::S8(buf) => mix!(buf.as_ref(), |s: i8| s as f32 / 128.0),
-        AudioBufferRef::U32(buf) => mix!(buf.as_ref(), |s: u32| (s as f64 / 2_147_483_648.0 - 1.0)
-            as f32),
-        AudioBufferRef::U24(buf) => mix!(buf.as_ref(), |s: symphonia::core::sample::u24| {
-            (s.inner() as f64 / 8_388_608.0 - 1.0) as f32
-        }),
-        AudioBufferRef::U16(buf) => mix!(buf.as_ref(), |s: u16| (s as f32 / 32_768.0) - 1.0),
-        AudioBufferRef::U8(buf) => mix!(buf.as_ref(), |s: u8| (s as f32 / 128.0) - 1.0),
+            sum += f64::from(sample);
+        }
+        out.push((sum / channels as f64).clamp(-1.0, 1.0) as f32);
     }
     Ok(())
 }
@@ -686,6 +685,17 @@ mod tests {
                 "{name} produced a non-finite sample"
             );
         }
+    }
+
+    /// FLAC is lossless, so its decode must equal the WAV source sample for
+    /// sample. This pins the symphonia sample-format scaling and the absence of
+    /// gapless trimming, neither of which the correlation check above can see.
+    #[test]
+    fn flac_decodes_to_the_wav_samples_exactly() {
+        let wav = decode(WAV, 0, policy(), &NeverCancel).expect("wav");
+        let flac = decode(FLAC, 0, policy(), &NeverCancel).expect("flac");
+        assert_eq!(flac.frames, wav.frames);
+        assert_eq!(flac.samples, wav.samples);
     }
 
     /// A file of the new container types whose header parses but whose payload

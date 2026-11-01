@@ -24,6 +24,7 @@ pub mod distributed;
 pub mod downloader;
 pub mod embeddings;
 pub mod execution;
+pub mod http_tls;
 pub mod imagegen;
 pub mod lang_bias;
 pub mod lora;
@@ -32,6 +33,7 @@ pub mod multimodal;
 pub mod reasoning_display;
 pub mod rerank;
 pub mod server;
+pub(crate) mod sha256_hex;
 #[cfg(feature = "surgery")]
 pub mod surgery;
 pub mod token_classification;
