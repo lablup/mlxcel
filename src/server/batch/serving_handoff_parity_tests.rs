@@ -204,7 +204,7 @@ fn make_request_with(
         created_at: Instant::now(),
         prefill_start: None,
         first_token_time: None,
-        prompt_lookup: None,
+        token_only: None,
         token_history: Vec::new(),
         sampler: Default::default(),
         merged_eos: Vec::new(),

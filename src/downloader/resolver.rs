@@ -275,6 +275,23 @@ fn resolve_model_source_with_options_inner(
     Err(not_a_model_error(value))
 }
 
+/// Resolve a `--draft-model` value the way `-m` is resolved, minus the revision.
+///
+/// A drafter is an ordinary checkpoint reference: an existing path is used
+/// verbatim, an `owner/name` repo id is reused from the stores or downloaded.
+/// `opts.revision` is dropped on purpose, because `--revision` pins the target
+/// and applying it to a different repository would either fail on a local
+/// drafter path or fetch a revision that repository never had.
+pub fn resolve_draft_model_source(value: &Path, opts: ModelSourceOptions<'_>) -> Result<PathBuf> {
+    resolve_model_source_with_options(
+        value,
+        ModelSourceOptions {
+            revision: None,
+            ..opts
+        },
+    )
+}
+
 /// Override-aware variant of [`resolve_model_source`] (issue #107).
 ///
 /// `models_dir` is the inline `--models-dir <path>` flag (or `None`). It is

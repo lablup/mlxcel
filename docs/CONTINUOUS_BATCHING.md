@@ -833,6 +833,77 @@ and unwinds each, as `mlxcel generate --prompt-lookup` does before it decodes,
 so the first requests do not pay each width's first-use kernel cost
 mid-decode.
 
+### A full model as the drafter under continuous batching
+
+`--draft-model <ordinary model>` (auto-detected: a directory with no
+DFlash-family marker and no MTP `model_type`; or `--draft-kind full-model`,
+which b10621's `--spec-type draft-simple` maps onto) serves an ordinary smaller
+checkpoint as a token-only drafter on the same per-row tick as prompt lookup
+(#2757). The worker loads the drafter next to the target at startup, so a
+checkpoint that cannot load, or a target or drafter whose state a trim cannot
+roll back (#2495), fails startup rather than decoding plainly: chat routes
+report the worker as unavailable and `/health` never turns ready. The startup
+log reports the resident memory after the load. An eligible request gets a
+`DraftModelState` at prefill completion that records its prompt and holds no
+draft KV. Once gated in it catches the draft model up on the prompt, one chunk
+per tick, and every round after that costs `--draft-block-size` (default 4) draft
+forwards plus one verify forward on the target; a rejected block is trimmed from
+both. The drafter proposes its argmax
+and the target's own draw decides every position, so a sampled stream keeps the
+target's distribution. Temperature 0 follows the target's greedy choice at the
+token-only loop's bar, which is not byte-identity with plain decode: see
+[`docs/speculative-acceptance.md`](speculative-acceptance.md#offline-routing).
+
+**Batch widths.** Each row drafts and rolls back on its own caches, so no batched
+drafter is needed, but verification is per row and serial, not batched.
+`--prompt-lookup-max-batch` (default 2) decides how many concurrent rows verify. On a tick
+with more active rows than that, every row takes the plain batched step and gets
+no speculation at all, and resumes when the batch shrinks. So with the default
+a server at a steady B = 4 runs plain decode with the drafter loaded and idle.
+The flag can be raised to verify at wider batches; each extra row then adds its
+draft forwards and verify forward to every tick, which cost 35 to 68 percent of
+throughput at B = 4 and B = 8 in the measurement below. Rows above the gate hold no
+draft KV until they are first asked. Verify rounds also stay off under
+`--kv-unified`, and the drafter stays loaded there.
+
+**Catch-up.** A gated-in row that owes the draft model more than a steady tail
+(its prompt at first, or the tokens it missed while gated out) proposes nothing
+and decodes plainly while it catches up, and it proposes once it has caught up.
+A tick feeds at most one catch-up chunk, to the first row in the batch that owes
+one, whatever `--prompt-lookup-max-batch` is, so catching up costs live rows one
+chunk of draft forward per tick. Other rows that owe wait their turn and decode
+plainly. The chunk is the server's prefill chunk (`--prefill-chunk-size`, by
+default 2048 alone and 512 with other rows decoding), and `0`, which disables
+chunking for the target's prefill, takes those defaults here, since the draft has
+no prompt cache and a forward of the whole tail could not be interrupted. A row
+does not catch up unless its budget repays it: `max_tokens` left, capped by the
+context bound, must cover `ticks * (--draft-block-size + 2)`, one plain token and
+one full round per catch-up tick, so a request with a short budget decodes
+plainly and pays no draft forward at all. A row cancelled during catch-up feeds
+nothing further and leaves as any cancelled row does.
+
+Not served by this drafter, with the reason: `--no-batch` (the legacy sequential
+worker has no speculative dispatch and warns at startup); disaggregated
+`--node-role` rows adopted through a KV handoff (they carry no prefill for the
+drafter to record and decode plainly); requests with images, audio, video,
+structured output, logprobs or an extended sampler chain (eligibility is prompt
+lookup's, decoded plainly with a `debug` log). A vocabulary larger than the
+target's, or one either config leaves undeclared, is refused at startup, since a
+proposal past the target's embedding table cannot be verified and an undeclared
+pair cannot be checked. A row whose context passes `--max-kv-size` stops drafting
+and decodes plainly, since the draft caches have no `--context-shift` path. In
+router mode (`--models-dir`) each model's worker loads its own copy of the
+drafter. A finished request reports `draft_kind: "full-model"` in `timings`.
+
+**No speedup has been measured.** This drafter keeps the capability on the
+engine; do not expect it to raise throughput. On an idle M1 Ultra (Metal, 256
+tokens, temperature 0) Qwen3-8B 4-bit with a 0.6B 4-bit drafter fell from 93.5 to
+56.1 tok/s at B = 1, and Llama 3.1 8B bf16 with a 1B 4-bit drafter held at 40.3.
+Acceptance was 0.58 to 0.80, so a high acceptance rate did not repay the draft
+forwards. Llama's 34.1 against 25.8 at B = 2 is not counted as a gain, because
+plain B = 2 on that checkpoint is unexplainedly slower than plain B = 1. The full
+tables and the catch-up cost are in the pull request for #2757.
+
 ## Disaggregated serving
 
 Prefill is compute-bound and decode is memory-bound, so a deployment can run them

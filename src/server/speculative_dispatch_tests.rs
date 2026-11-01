@@ -50,6 +50,19 @@ fn write_drafter_config(model_type: Option<&str>) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
+/// A checkpoint directory that declares `model_type` and `vocab_size`, as a
+/// full-model pair must on both sides.
+fn write_vocab_config(vocab_size: usize) -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        format!(r#"{{"model_type": "qwen3", "vocab_size": {vocab_size}}}"#),
+    )
+    .expect("write config.json");
+    let path = dir.path().to_path_buf();
+    (dir, path)
+}
+
 /// A target checkpoint path with no `config.json`, so the #1797 block-width
 /// policy classifies it as `TargetQuantization::Unknown` and every
 /// expectation below stays the flat per-kind default. The policy's own arms
@@ -221,25 +234,35 @@ fn resolve_unknown_kind_returns_invalid_kind_error() {
 }
 
 #[test]
-fn resolve_with_missing_drafter_config_falls_back_to_default_kind() {
-    // Drafter directory has no `config.json`. The upstream
-    // `resolve_drafter_kind` falls back to the default (DFlash) with a
-    // log line rather than erroring — this preserves the historical
-    // `--draft-model <path>` workflow for older drafter checkpoints
-    // missing a `model_type` field. The dispatch reflects that with a
-    // `DFlash` variant.
+fn resolve_with_missing_drafter_config_reports_the_config_at_startup() {
+    // Drafter directory has no `config.json`. The resolver swallows that
+    // and falls back to DFlash, where the real cause would only surface as
+    // a drafter load error on the first request; with no explicit kind the
+    // dispatch reports the config problem at startup instead (#2754, #2757).
+    // An explicit `--draft-kind dflash` keeps the historical lazy path.
     let dir = tempfile::tempdir().expect("create temp dir");
     let path = dir.path().to_path_buf();
 
     let mut cfg = base_config();
     cfg.draft_model_path = Some(path.clone());
-    // Drop the `_dir` guard at end of scope — we intentionally don't
-    // hold it across `resolve` because the resolve only does a path
-    // scan; the file is read inside.
     let _keep_dir_alive = dir;
 
+    let err = SpeculativeDispatch::resolve(&cfg, unmeasured_target())
+        .expect_err("an unreadable config is reported at startup");
+    match err {
+        SpeculativeDispatchError::DrafterConfig {
+            path: reported,
+            message,
+        } => {
+            assert_eq!(reported, path);
+            assert!(message.contains("config.json"), "{message}");
+        }
+        other => panic!("expected DrafterConfig, got {other:?}"),
+    }
+
+    cfg.draft_kind = Some("dflash".to_string());
     let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target())
-        .expect("must resolve via default fallback");
+        .expect("an explicit kind keeps the lazy load path");
     match dispatch {
         SpeculativeDispatch::DFlash {
             draft_model_path,
@@ -248,14 +271,164 @@ fn resolve_with_missing_drafter_config_falls_back_to_default_kind() {
             ..
         } => {
             assert_eq!(draft_model_path, path);
-            assert!(
-                !user_requested_explicit_kind,
-                "fallback path must not flip the explicit-kind flag"
-            );
+            assert!(user_requested_explicit_kind);
             assert_eq!(block_size, 16);
         }
-        other => panic!("expected DFlash (default fallback), got {other:?}"),
+        other => panic!("expected DFlash, got {other:?}"),
     }
+}
+
+/// #2757: an ordinary model directory (`model_type` with no mapping, no
+/// DFlash-family marker) resolves to the full-model arm, auto-detected or
+/// under `--draft-kind full-model`, with the token-only tick's settings and
+/// no kind-specific burst.
+#[test]
+fn resolve_full_model_auto_detected_and_explicit() {
+    let (_dir, path) = write_vocab_config(151936);
+    let (_target_dir, target) = write_vocab_config(151936);
+    for (kind, explicit) in [(None, false), (Some("full-model".to_string()), true)] {
+        let mut cfg = base_config();
+        cfg.draft_model_path = Some(path.clone());
+        cfg.draft_kind = kind;
+        let dispatch = SpeculativeDispatch::resolve(&cfg, &target).expect("resolve");
+        match &dispatch {
+            SpeculativeDispatch::FullModel {
+                draft_model_path,
+                block_size,
+                user_requested_explicit_kind,
+                max_batch,
+                ..
+            } => {
+                assert_eq!(draft_model_path, &path);
+                assert_eq!(
+                    *block_size,
+                    crate::cli::speculative_args::DEFAULT_FULL_MODEL_BLOCK_SIZE
+                );
+                assert_eq!(*user_requested_explicit_kind, explicit);
+                assert_eq!(*max_batch, cfg.prompt_lookup_max_batch);
+            }
+            other => panic!("expected FullModel, got {other:?}"),
+        }
+        assert!(!dispatch.is_kind_specific());
+        assert_eq!(dispatch.drafter_kind(), Some(DrafterKind::FullModel));
+        assert_eq!(dispatch.full_model_draft_path(), Some(path.as_path()));
+        let rounds = dispatch.token_only_rounds().expect("token-only rounds");
+        assert_eq!(
+            rounds.max_draft,
+            crate::cli::speculative_args::DEFAULT_FULL_MODEL_BLOCK_SIZE as usize
+        );
+        assert_eq!(rounds.max_batch, cfg.prompt_lookup_max_batch);
+        assert!(dispatch.summary().starts_with("speculative=full-model"));
+    }
+}
+
+/// `--draft-block-size` reaches the full-model arm, and a draft vocabulary
+/// larger than the target's is refused at startup.
+#[test]
+fn resolve_full_model_block_size_and_vocab_guard() {
+    let (_dir, path) = write_vocab_config(151936);
+    let (_target_dir, smaller_target) = write_vocab_config(151936);
+    let mut cfg = base_config();
+    cfg.draft_model_path = Some(path.clone());
+    cfg.draft_block_size = Some(3);
+    let dispatch = SpeculativeDispatch::resolve(&cfg, &smaller_target).expect("resolve");
+    assert_eq!(dispatch.block_size(), Some(3));
+
+    let draft = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        draft.path().join("config.json"),
+        r#"{"model_type": "qwen3", "vocab_size": 152064}"#,
+    )
+    .unwrap();
+    let target = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        target.path().join("config.json"),
+        r#"{"model_type": "qwen3", "vocab_size": 151936}"#,
+    )
+    .unwrap();
+    cfg.draft_model_path = Some(draft.path().to_path_buf());
+    let err = SpeculativeDispatch::resolve(&cfg, target.path()).expect_err("vocab guard");
+    match err {
+        SpeculativeDispatchError::InvalidKind { message } => {
+            assert!(message.contains("vocabulary"), "{message}");
+        }
+        other => panic!("expected InvalidKind, got {other:?}"),
+    }
+    // The other way round (a smaller draft vocabulary) passes.
+    cfg.draft_model_path = Some(target.path().to_path_buf());
+    SpeculativeDispatch::resolve(&cfg, draft.path()).expect("smaller draft vocabulary");
+}
+
+/// A pair with no declared vocabulary on either side cannot be checked, and
+/// neither MLX's `take` nor the drafter's input clamp would catch an id past
+/// the table, so it is refused at startup with the path that lacks it. Both a
+/// config without the key and a target with no config at all count.
+#[test]
+fn resolve_full_model_refuses_an_undeclared_vocabulary() {
+    let (_declared_dir, declared) = write_vocab_config(151936);
+    let (_undeclared_dir, undeclared) = write_drafter_config(Some("qwen3"));
+    let cases = [
+        (&undeclared, undeclared.as_path(), "draft model's"),
+        (&declared, undeclared.as_path(), "target's"),
+        (&declared, unmeasured_target(), "target's"),
+    ];
+    for (draft, target, side) in cases {
+        let mut cfg = base_config();
+        cfg.draft_model_path = Some(draft.clone());
+        cfg.draft_kind = Some("full-model".to_string());
+        // The draft-side case names the draft path, the others the target's.
+        let named = if side == "target's" {
+            target
+        } else {
+            draft.as_path()
+        };
+        match SpeculativeDispatch::resolve(&cfg, target).expect_err("undeclared vocabulary") {
+            SpeculativeDispatchError::InvalidKind { message } => {
+                assert!(message.contains(side), "{message}");
+                assert!(message.contains("vocab_size"), "{message}");
+                assert!(message.contains("text_config"), "{message}");
+                assert!(message.contains("cannot be checked"), "{message}");
+                assert!(message.contains(&named.display().to_string()), "{message}");
+            }
+            other => panic!("expected InvalidKind, got {other:?}"),
+        }
+    }
+    // Declared under `text_config` counts.
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type": "qwen3", "text_config": {"vocab_size": 151936}}"#,
+    )
+    .unwrap();
+    let mut cfg = base_config();
+    cfg.draft_model_path = Some(dir.path().to_path_buf());
+    SpeculativeDispatch::resolve(&cfg, &declared).expect("vocabulary under text_config");
+}
+
+/// `--draft-kind full-model` on a DFlash drafter directory is refused at
+/// startup; the same directory with no kind still resolves to DFlash.
+#[test]
+fn resolve_full_model_refuses_a_dflash_directory() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type": "qwen3", "architectures": ["DFlashDraftModel"], "dflash_config": {"mask_token_id": 1}}"#,
+    )
+    .unwrap();
+    let mut cfg = base_config();
+    cfg.draft_model_path = Some(dir.path().to_path_buf());
+    cfg.draft_kind = Some("full-model".to_string());
+    match SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect_err("refused") {
+        SpeculativeDispatchError::InvalidKind { message } => {
+            assert!(message.contains("DFlash-family"), "{message}");
+        }
+        other => panic!("expected InvalidKind, got {other:?}"),
+    }
+    cfg.draft_kind = None;
+    assert!(matches!(
+        SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("dflash"),
+        SpeculativeDispatch::DFlash { .. }
+    ));
 }
 
 #[test]

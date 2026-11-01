@@ -23,7 +23,10 @@ use anyhow::Context;
 use mlxcel::cli::ggml_compat_args::read_model_layer_count;
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
-use mlxcel::downloader::{ModelSourceOptions, resolve_model_source_with_options, set_offline_mode};
+use mlxcel::downloader::{
+    ModelSourceOptions, resolve_draft_model_source, resolve_model_source_with_options,
+    set_offline_mode,
+};
 use mlxcel::memory_estimate::{
     QuantHint, SERVE_PREFLIGHT_REMEDIATION, enforce_preflight, estimate_total_memory,
     format_estimate,
@@ -667,6 +670,26 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         })
         .transpose()?;
 
+    // `--draft-model` accepts the same path-or-repo-id shapes as `-m`. The
+    // target's `--revision` is not applied to it.
+    let draft_model_path = args
+        .draft_model
+        .as_deref()
+        .map(|value| {
+            resolve_draft_model_source(
+                value,
+                ModelSourceOptions {
+                    models_dir: args.model_store_root.as_deref(),
+                    revision: None,
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                    cwd_models_dir: None,
+                },
+            )
+            .with_context(|| format!("resolving --draft-model {}", value.display()))
+        })
+        .transpose()?;
+
     Ok(ServerStartupInput {
         chat_compat: args
             .chat_compat
@@ -725,7 +748,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         cors_headers: args.cors_headers,
         cors_credentials: args.cors_credentials,
         no_cors_credentials: args._no_cors_credentials,
-        draft_model_path: args.draft_model,
+        draft_model_path,
         draft_max: args.draft_max,
         // forward the speculative-decoding selector flags
         // resolved above via env-var fallbacks. Reconciliation into a

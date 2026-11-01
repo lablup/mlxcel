@@ -1010,6 +1010,44 @@ fn offline_mode_still_answers_from_the_mlxcel_store() {
 }
 
 #[test]
+fn draft_model_source_resolves_a_repo_id_and_ignores_the_target_revision() {
+    // `--draft-model owner/name` must go through the same store lookup as `-m`,
+    // and the target's `--revision` must not be applied to the drafter.
+    let tmp = tempfile::tempdir().unwrap();
+    let models_root = tmp.path().join("store-root");
+    let store_dir = models_root.join("mlx-community").join("Qwen3-0.6B-4bit");
+    make_complete_snapshot(&store_dir);
+    let empty_cwd_models = tmp.path().join("cwd-models");
+    let resolved = with_empty_caches(tmp.path(), || {
+        resolve_draft_model_source(
+            Path::new("mlx-community/Qwen3-0.6B-4bit"),
+            ModelSourceOptions {
+                models_dir: Some(models_root.as_path()),
+                revision: Some("target-only-rev"),
+                offline: true,
+                cwd_models_dir: Some(empty_cwd_models.as_path()),
+                ..ModelSourceOptions::default()
+            },
+        )
+        .expect("a cached drafter snapshot must resolve")
+    });
+    assert_eq!(resolved, store_dir);
+
+    // A local drafter directory is returned verbatim even with a target revision.
+    let local = tmp.path().join("local-drafter");
+    fs::create_dir_all(&local).unwrap();
+    let resolved = resolve_draft_model_source(
+        &local,
+        ModelSourceOptions {
+            revision: Some("target-only-rev"),
+            ..ModelSourceOptions::default()
+        },
+    )
+    .expect("a local drafter path must pass through");
+    assert_eq!(resolved, local);
+}
+
+#[test]
 fn offline_mode_leaves_an_existing_local_path_alone() {
     let tmp = tempfile::tempdir().unwrap();
     let model = tmp.path().join("Qwen3-4B-4bit");

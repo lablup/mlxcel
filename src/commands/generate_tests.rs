@@ -117,7 +117,12 @@ const FULL_MODEL_CONFIG: &str = r#"{
 }"#;
 
 fn assert_names_every_alternative(error: &str) {
-    for alternative in ["--draft-kind mtp", "--draft-kind dflash", "--prompt-lookup"] {
+    for alternative in [
+        "--draft-kind mtp",
+        "--draft-kind dflash",
+        "--draft-kind full-model",
+        "--prompt-lookup",
+    ] {
         assert!(
             error.contains(alternative),
             "must name {alternative}: {error}"
@@ -131,19 +136,66 @@ fn assert_names_every_alternative(error: &str) {
     }
 }
 
+/// #2757: an ordinary full model routes to the engine's token-only loop,
+/// auto-detected (the resolver's DFlash default plus the structural rule) or
+/// under an explicit `--draft-kind full-model`, on any target.
 #[test]
-fn offline_route_refuses_an_ordinary_full_model_drafter() {
+fn offline_route_takes_an_ordinary_full_model_drafter() {
     let dir = drafter_fixture_dir(FULL_MODEL_CONFIG);
-    // The kind a full model resolves to (the `DEFAULT_DRAFTER_KIND` fallback),
-    // on a target with and without an offline DFlash arm.
     let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
     assert_eq!(resolved, DrafterKind::Dflash);
     for target_has_arm in [true, false] {
-        let error = resolve_offline_draft_route(dir.path(), resolved, target_has_arm)
-            .unwrap_err()
-            .to_string();
+        assert_eq!(
+            resolve_offline_draft_route(dir.path(), None, resolved, target_has_arm).unwrap(),
+            OfflineDraftRoute::FullModel
+        );
+        assert_eq!(
+            resolve_offline_draft_route(
+                dir.path(),
+                Some(DrafterKind::FullModel),
+                DrafterKind::FullModel,
+                target_has_arm
+            )
+            .unwrap(),
+            OfflineDraftRoute::FullModel
+        );
+    }
+}
+
+/// An explicit `--draft-kind dflash` on an ordinary model directory is not
+/// rerouted behind the operator's back: it is refused, naming the kinds.
+#[test]
+fn offline_route_refuses_an_explicit_dflash_kind_on_an_ordinary_model() {
+    let dir = drafter_fixture_dir(FULL_MODEL_CONFIG);
+    let error = resolve_offline_draft_route(
+        dir.path(),
+        Some(DrafterKind::Dflash),
+        DrafterKind::Dflash,
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("not a DFlash drafter"), "{error}");
+    assert_names_every_alternative(&error);
+}
+
+/// `--draft-kind full-model` on a DFlash drafter directory is refused before
+/// any load: the structural check keeps a DFlash directory from loading as
+/// a full model.
+#[test]
+fn offline_route_refuses_full_model_kind_on_a_dflash_directory() {
+    let dir = drafter_fixture_dir(DFLASH_DRAFTER_CONFIG);
+    for target_has_arm in [true, false] {
+        let error = resolve_offline_draft_route(
+            dir.path(),
+            Some(DrafterKind::FullModel),
+            DrafterKind::FullModel,
+            target_has_arm,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("DFlash-family drafter"), "{error}");
         assert_names_every_alternative(&error);
-        assert!(error.contains("ordinary full model"), "{error}");
     }
 }
 
@@ -151,14 +203,14 @@ fn offline_route_refuses_an_ordinary_full_model_drafter() {
 fn offline_route_takes_an_auto_detected_dflash_drafter_on_a_target_with_an_arm() {
     let dir = drafter_fixture_dir(DFLASH_DRAFTER_CONFIG);
     let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
-    let route = resolve_offline_draft_route(dir.path(), resolved, true).unwrap();
+    let route = resolve_offline_draft_route(dir.path(), None, resolved, true).unwrap();
     assert_eq!(route, OfflineDraftRoute::Dflash);
 }
 
 #[test]
 fn offline_route_refuses_a_dflash_drafter_on_a_target_without_an_arm() {
     let dir = drafter_fixture_dir(DFLASH_DRAFTER_CONFIG);
-    let error = resolve_offline_draft_route(dir.path(), DrafterKind::Dflash, false)
+    let error = resolve_offline_draft_route(dir.path(), None, DrafterKind::Dflash, false)
         .unwrap_err()
         .to_string();
     assert_names_every_alternative(&error);
@@ -174,7 +226,7 @@ fn offline_route_recognizes_a_dflash_drafter_on_either_marker_alone() {
         r#"{"dflash_config": {"mask_token_id": 1}, "model_type": "qwen3"}"#,
     ] {
         let dir = drafter_fixture_dir(config);
-        let route = resolve_offline_draft_route(dir.path(), DrafterKind::Dflash, true);
+        let route = resolve_offline_draft_route(dir.path(), None, DrafterKind::Dflash, true);
         assert_eq!(route.unwrap(), OfflineDraftRoute::Dflash, "{config}");
     }
 }
@@ -184,14 +236,15 @@ fn offline_route_takes_mtp_for_an_explicit_or_auto_detected_kind() {
     let auto = drafter_fixture_dir(r#"{"model_type": "qwen3_5_mtp"}"#);
     let resolved = resolve_drafter_kind(auto.path(), None).unwrap();
     assert_eq!(
-        resolve_offline_draft_route(auto.path(), resolved, false).unwrap(),
+        resolve_offline_draft_route(auto.path(), None, resolved, false).unwrap(),
         OfflineDraftRoute::Mtp
     );
     // An explicit `--draft-kind mtp` resolves to MTP whatever the config says.
     let explicit = drafter_fixture_dir(FULL_MODEL_CONFIG);
     let resolved = resolve_drafter_kind(explicit.path(), Some(DrafterKind::Mtp)).unwrap();
     assert_eq!(
-        resolve_offline_draft_route(explicit.path(), resolved, false).unwrap(),
+        resolve_offline_draft_route(explicit.path(), Some(DrafterKind::Mtp), resolved, false)
+            .unwrap(),
         OfflineDraftRoute::Mtp
     );
 }
@@ -203,7 +256,11 @@ fn offline_route_reports_an_unusable_drafter_config_not_a_full_model() {
     let empty = tempfile::tempdir().expect("temp dir");
     let malformed = drafter_fixture_dir(r#"{"model_type": "#);
     let non_object = drafter_fixture_dir("[1, 2]");
-    for kind in [DrafterKind::Dflash, DrafterKind::InternalMtp] {
+    for (explicit, kind) in [
+        (None, DrafterKind::Dflash),
+        (None, DrafterKind::InternalMtp),
+        (Some(DrafterKind::FullModel), DrafterKind::FullModel),
+    ] {
         for target_has_arm in [true, false] {
             for path in [
                 nonexistent.as_path(),
@@ -211,7 +268,7 @@ fn offline_route_reports_an_unusable_drafter_config_not_a_full_model() {
                 malformed.path(),
                 non_object.path(),
             ] {
-                let error = resolve_offline_draft_route(path, kind, target_has_arm)
+                let error = resolve_offline_draft_route(path, explicit, kind, target_has_arm)
                     .unwrap_err()
                     .to_string();
                 assert!(error.contains("config.json"), "{error}");
@@ -222,16 +279,21 @@ fn offline_route_reports_an_unusable_drafter_config_not_a_full_model() {
     }
 }
 
+/// A valid config with no markers is an ordinary model directory: the
+/// auto-detected default routes to the full-model loop, a kind that cannot
+/// apply (`internal-mtp`) is refused by name.
 #[test]
-fn offline_route_keeps_the_full_model_text_for_a_valid_config_with_no_markers() {
+fn offline_route_treats_a_valid_config_with_no_markers_as_a_full_model() {
     let dir = drafter_fixture_dir("{}");
-    for kind in [DrafterKind::Dflash, DrafterKind::InternalMtp] {
-        let error = resolve_offline_draft_route(dir.path(), kind, true)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("ordinary full model"), "{error}");
-        assert_names_every_alternative(&error);
-    }
+    assert_eq!(
+        resolve_offline_draft_route(dir.path(), None, DrafterKind::Dflash, true).unwrap(),
+        OfflineDraftRoute::FullModel
+    );
+    let error = resolve_offline_draft_route(dir.path(), None, DrafterKind::InternalMtp, true)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("internal-mtp"), "{error}");
+    assert_names_every_alternative(&error);
 }
 
 // issue #166: the offline MTP loop must exclude the terminal EOS / stop token so
@@ -1597,21 +1659,24 @@ fn validate_prompt_lookup_args_refuses_before_the_model_loads() {
 
 #[test]
 fn the_repl_uses_a_drafter_only_with_an_explicit_server_kind() {
-    // issue #2173 review: the REPL passes a drafter to the in-process server
-    // only for `--draft-kind dflash|mtp`, never for `--draft-model` alone.
+    // #2757: the REPL passes `--draft-model` to the in-process server as
+    // `mlxcel run` does, with `--draft-kind` when one was given; the server
+    // resolves the kind (an ordinary full model included) or refuses it.
     let mut args = sample_generate_args(PathBuf::from("/m"));
     assert_eq!(repl_drafter(&args), None, "no drafter");
     args.model.draft_model = Some(PathBuf::from("/d"));
-    assert_eq!(repl_drafter(&args), None, "no explicit kind");
-    for kind in ["dflash", "mtp"] {
+    assert_eq!(
+        repl_drafter(&args),
+        Some((PathBuf::from("/d"), None)),
+        "auto-detected kind"
+    );
+    for kind in ["dflash", "mtp", "full-model"] {
         args.speculative.draft_kind = Some(kind.to_string());
         assert_eq!(
             repl_drafter(&args),
-            Some((PathBuf::from("/d"), kind.to_string()))
+            Some((PathBuf::from("/d"), Some(kind.to_string())))
         );
     }
-    args.speculative.draft_kind = Some("internal-mtp".to_string());
-    assert_eq!(repl_drafter(&args), None, "not a server drafter kind");
     args.model.draft_model = None;
     args.speculative.draft_kind = Some("mtp".to_string());
     assert_eq!(repl_drafter(&args), None, "a kind without a drafter");

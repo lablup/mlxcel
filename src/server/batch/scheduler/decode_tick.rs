@@ -169,7 +169,7 @@ impl BatchScheduler {
             victim.merged_eos.clear();
             // The drafter's context is the discarded decode's; the re-prefill
             // primes a fresh one (#2255).
-            victim.prompt_lookup = None;
+            victim.token_only = None;
 
             // Allocate a fresh cache slot
             match self.allocate_sequence_state() {
@@ -1176,7 +1176,7 @@ impl BatchScheduler {
                 // Classic decode reports no acceptance block (#1314); a
                 // prompt-lookup row reports its verify rounds (#2255).
                 let speculative = seq
-                    .prompt_lookup
+                    .token_only
                     .as_ref()
                     .and_then(|row| row.speculative_stats());
                 let result = seq.take_generation_result(&self.tokenizer, cached, speculative);

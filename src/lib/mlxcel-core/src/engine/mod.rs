@@ -556,6 +556,8 @@ mod shared_cache_tests;
 #[cfg(test)]
 mod speculative_distribution_tests;
 #[cfg(test)]
+mod speculative_full_model_tests;
+#[cfg(test)]
 mod speculative_plain_tests;
 #[cfg(test)]
 mod tests;
