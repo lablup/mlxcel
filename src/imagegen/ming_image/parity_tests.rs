@@ -63,8 +63,11 @@ use crate::imagegen::testing::{
 /// misses upstream's CUDA draw by one ulp at element 0, and its whole-draw
 /// checksum is 1107051371 against CUDA's 909872115 (the CPU stream gives a
 /// third value), so the checksum is checked on CUDA only. See
-/// [`noise_checksum_is_exact`].
-const MAX_NOISE_ULPS: u32 = 2;
+/// [`noise_checksum_is_exact`]. On gfx1151 element 1 misses by three ulps, and
+/// every value of the whole draw sits within three ulps of a correctly rounded
+/// `sqrt(2) * erfinv(u)`, so that is rounding too. A wrong key or sampling order
+/// misses by millions of ulps.
+const MAX_NOISE_ULPS: u32 = 3;
 
 pub(crate) const GEN_PROMPT: &str = "a minimalist poster, bold word HELLO, blue background";
 pub(crate) const RGBA_PROMPT: &str = "RGBA, 4-channel, transparent background, a red apple icon";
