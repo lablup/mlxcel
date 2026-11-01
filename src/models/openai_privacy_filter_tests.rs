@@ -133,7 +133,6 @@ fn config_validation_names_the_problem() {
     for (key, value) in [
         ("attention_chunk_size", 4_294_967_296u64),
         ("moe_chunk_size", 2_147_483_648),
-        ("sliding_window", 4_294_967_424),
         ("num_attention_heads", 1 << 28),
     ] {
         let mut config = checkpoint_config();
@@ -147,6 +146,17 @@ fn config_validation_names_the_problem() {
             "{key}: {error}"
         );
     }
+
+    // The band radius is a rotating window, so it takes the shared
+    // sliding-window message rather than the array-dimension one (issue
+    // #2798).
+    let mut config = checkpoint_config();
+    config["sliding_window"] = json!(4_294_967_424u64);
+    let error = PrivacyFilterArgs::from_json(&config.to_string()).unwrap_err();
+    assert!(
+        error.contains("OpenAI Privacy Filter: sliding_window must be between"),
+        "{error}"
+    );
 
     // Defaults cover a config that only names the family.
     let args = PrivacyFilterArgs::from_json(r#"{"model_type": "openai_privacy_filter"}"#).unwrap();
@@ -592,4 +602,17 @@ fn generation_dispatch_refuses_and_embedding_detection_declines() {
     assert!(!crate::models::detection::is_encoder_only_model_type(
         "openai_privacy_filter"
     ));
+}
+
+// Issue #2798: the band radius is validated, not clamped or wrapped.
+#[test]
+fn rejects_a_band_radius_that_cannot_back_a_window() {
+    for window in [0u64, i32::MAX as u64 + 1] {
+        let mut config = checkpoint_config();
+        config["sliding_window"] = json!(window);
+        let err = PrivacyFilterArgs::from_json(&config.to_string())
+            .expect_err("an unusable band radius must fail the load");
+        assert!(err.contains("OpenAI Privacy Filter"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
 }

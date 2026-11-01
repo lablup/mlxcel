@@ -335,3 +335,17 @@ fn widened_norms_hold_the_stored_one_plus_w_in_f32() {
         .unwrap();
     assert_eq!(mlxcel_core::array_dtype(&out), dtype::FLOAT32);
 }
+
+// Issue #2798: the backbone takes the text model's validated window.
+#[test]
+fn rejects_a_sliding_window_a_rotating_cache_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut args = tiny_args();
+        args.sliding_window = window;
+        let err = Gemma3Backbone::from_weights(&tiny_weights("bb", &args), "bb", &args)
+            .err()
+            .expect("an unusable sliding window must fail the load");
+        assert!(err.contains("Gemma 3"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}

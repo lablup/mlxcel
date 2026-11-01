@@ -50,7 +50,7 @@ pub struct MuseGlimmerTextModel {
     layers: Vec<MuseGlimmerDecoderLayer>,
     norm: MuseRmsNorm,
     lm_head: UnifiedLinear,
-    sliding_window: usize,
+    sliding_cache_window: i32,
     hidden_size: usize,
     vocab_size: usize,
     eos_token_ids: Vec<i32>,
@@ -113,7 +113,7 @@ impl MuseGlimmerTextModel {
             .iter()
             .map(|layer| {
                 if layer.use_sliding {
-                    MuseCache::Rotating(RotatingKVCache::new(self.sliding_window as i32))
+                    MuseCache::Rotating(RotatingKVCache::new(self.sliding_cache_window))
                 } else {
                     MuseCache::Standard(KVCache::new())
                 }
@@ -143,6 +143,7 @@ impl MuseGlimmerTextModel {
             config.bits(),
         )?;
         let embed_norm = MuseRmsNorm::no_weight(config.rms_norm_eps);
+        let sliding_cache_window = config.validated_sliding_window()?;
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
             layers.push(MuseGlimmerDecoderLayer::from_weights(
@@ -151,6 +152,7 @@ impl MuseGlimmerTextModel {
                 i,
                 model_prefix,
                 get_weight_copy,
+                sliding_cache_window,
             )?);
         }
         let norm = MuseRmsNorm::standard(
@@ -170,7 +172,7 @@ impl MuseGlimmerTextModel {
             layers,
             norm,
             lm_head,
-            sliding_window: config.sliding_window,
+            sliding_cache_window,
             hidden_size: config.hidden_size,
             vocab_size: config.vocab_size,
             eos_token_ids,

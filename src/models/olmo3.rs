@@ -274,6 +274,7 @@ impl OLMo3Attention {
         args: &OLMo3Config,
         layer_idx: usize,
         prefix: &str,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
@@ -311,11 +312,7 @@ impl OLMo3Attention {
             rope_dims: head_dim,
             rope_base: args.rope_theta,
             is_sliding,
-            window_size: if is_sliding {
-                args.sliding_window as i32
-            } else {
-                0
-            },
+            window_size: if is_sliding { sliding_cache_window } else { 0 },
         })
     }
 }
@@ -520,6 +517,7 @@ impl OLMo3TransformerBlock {
         weights: &WeightMap,
         args: &OLMo3Config,
         layer_idx: usize,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let prefix = format!("model.layers.{}", layer_idx);
 
@@ -528,6 +526,7 @@ impl OLMo3TransformerBlock {
             args,
             layer_idx,
             &format!("{}.self_attn", prefix),
+            sliding_cache_window,
         )?;
         let mlp = MLP::from_weights(weights, args, &format!("{}.mlp", prefix))?;
 
@@ -560,6 +559,9 @@ pub struct OLMo3Model {
     pub norm: RMSNorm,
     pub lm_head: UnifiedLinear,
     pub config: OLMo3Config,
+    /// The validated sliding window the dense prefill mask uses (issue
+    /// #2798), computed once at load.
+    sliding_cache_window: i32,
     // Pre-computed layer type info
     layer_types: Vec<String>,
     swa_idx: usize,
@@ -622,7 +624,7 @@ impl OLMo3Model {
             let sliding = Some(create_sliding_window_prefill_mask_dense(
                 l as i32,
                 swa_live_len,
-                self.config.sliding_window as i32,
+                self.sliding_cache_window,
             ));
             (full, sliding)
         } else {
@@ -677,6 +679,14 @@ impl OLMo3Model {
         let bits = args.bits();
 
         let layer_types = args.get_layer_types();
+        // `is_sliding_window_layer` treats every kind that is not
+        // `full_attention` as sliding, so the predicate does the same and an
+        // unknown kind cannot slip past the window check (issue #2798).
+        let sliding_cache_window = mlxcel_core::cache::cache_window(
+            "OLMo3",
+            args.sliding_window,
+            layer_types.iter().any(|t| t != "full_attention"),
+        )?;
 
         // Find first indices for each attention type
         let swa_idx = layer_types
@@ -695,7 +705,8 @@ impl OLMo3Model {
         // Load layers
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for i in 0..args.num_hidden_layers {
-            let layer = OLMo3TransformerBlock::from_weights(weights, args, i)?;
+            let layer =
+                OLMo3TransformerBlock::from_weights(weights, args, i, sliding_cache_window)?;
             layers.push(layer);
         }
 
@@ -717,6 +728,7 @@ impl OLMo3Model {
             norm,
             lm_head,
             config: args.clone(),
+            sliding_cache_window,
             layer_types,
             swa_idx,
             ga_idx,
@@ -898,5 +910,60 @@ mod batched_decode_tests {
                 "masked OLMo3 row {row} differs from sequential attention"
             );
         }
+    }
+
+    // Issue #2798: the sliding window is validated before the dense prefill
+    // mask reads it.
+    #[test]
+    fn rejects_a_sliding_window_a_dense_prefill_mask_cannot_take() {
+        for window in [0usize, i32::MAX as usize + 1] {
+            let config: OLMo3Config = serde_json::from_value(serde_json::json!({
+                "model_type": "olmo3",
+                "hidden_size": 8,
+                "num_hidden_layers": 2,
+                "intermediate_size": 16,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 4,
+                "rms_norm_eps": 1e-5,
+                "vocab_size": 12,
+                "sliding_window": window,
+                "layer_types": ["sliding_attention", "sliding_attention"],
+                "tie_word_embeddings": true
+            }))
+            .expect("tiny olmo3 config parses");
+            let err = OLMo3Model::from_weights(&WeightMap::new(), &config)
+                .err()
+                .expect("an unusable sliding window must fail the load");
+            assert!(err.contains("OLMo3"), "{err}");
+            assert!(err.contains(&format!("got {window}")), "{err}");
+        }
+    }
+
+    // `is_sliding_window_layer` treats every kind that is not `full_attention`
+    // as sliding, so an unknown kind must not slip past the window check
+    // (issue #2798 review).
+    #[test]
+    fn an_unknown_layer_kind_still_validates_the_window() {
+        let config: OLMo3Config = serde_json::from_value(serde_json::json!({
+            "model_type": "olmo3",
+            "hidden_size": 8,
+            "num_hidden_layers": 2,
+            "intermediate_size": 16,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 4,
+            "rms_norm_eps": 1e-5,
+            "vocab_size": 12,
+            "sliding_window": 0,
+            "layer_types": ["chunked_attention", "chunked_attention"],
+            "tie_word_embeddings": true
+        }))
+        .expect("tiny olmo3 config parses");
+        let err = OLMo3Model::from_weights(&WeightMap::new(), &config)
+            .err()
+            .expect("an unknown kind takes the sliding mask");
+        assert!(err.contains("OLMo3"), "{err}");
+        assert!(err.contains("got 0"), "{err}");
     }
 }

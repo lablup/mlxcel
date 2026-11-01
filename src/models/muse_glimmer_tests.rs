@@ -419,3 +419,24 @@ fn default_rope_parameters_still_resolve_to_plain_rope() {
 
 #[path = "muse_glimmer_batch_tests.rs"]
 mod batch_tests;
+
+// Issue #2798: the sliding window is validated at load, not cast or clamped.
+#[test]
+fn config_rejects_a_sliding_window_a_rotating_cache_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut config = test_config();
+        config.sliding_window = window;
+        let err = config
+            .validate()
+            .expect_err("an unusable sliding window must fail the load");
+        assert!(err.contains("Muse Glimmer"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+    // A config with no sliding layer never builds a rotating cache.
+    let mut config = test_config();
+    config.sliding_window = 0;
+    config.layer_types = vec!["full_attention".to_string(); config.num_hidden_layers];
+    config
+        .validate()
+        .expect("an all-global config keeps its unused window");
+}

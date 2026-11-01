@@ -132,6 +132,20 @@ impl DrafterTextConfig {
             .unwrap_or(4)
     }
 
+    /// The validated sliding window every sliding drafter layer's mask and
+    /// attention use (issue #2798): `0` would window every key out and a
+    /// value above `i32::MAX` would wrap. A config with no sliding layer
+    /// keeps any window, unused.
+    pub(crate) fn validated_sliding_window(&self) -> Result<i32, String> {
+        crate::cache::cache_window(
+            "Gemma 4 assistant",
+            self.sliding_window,
+            self.layer_types
+                .iter()
+                .any(|kind| kind == "sliding_attention"),
+        )
+    }
+
     /// Layer-type string (`"full_attention"` or `"sliding_attention"`) for the
     /// given layer index. Panics on out-of-range index — the caller must
     /// validate against `num_hidden_layers` first.

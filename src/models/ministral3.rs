@@ -672,7 +672,8 @@ pub struct Ministral3Model {
     pub rope_params: Option<RopeParameters>,
     /// The window the sliding layers' `RotatingKVCache`s are built with
     /// (`sliding_window`, default 512), validated at load (issue #2790).
-    sliding_cache_window: i32,
+    /// The embedding path reads it for its bidirectional band (issue #2798).
+    pub(crate) sliding_cache_window: i32,
 }
 
 impl Ministral3Model {

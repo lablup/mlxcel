@@ -4306,6 +4306,38 @@ impl Default for KVCache {
     }
 }
 
+/// Validate a config's sliding window for a family that builds
+/// [`RotatingKVCache`]s from it (issue #2790): `0` would build a cache whose
+/// ring arithmetic divides by zero, and a value above `i32::MAX` does not
+/// fit the cache's `i32` size. Call it at load, before any cache is built,
+/// and only when the config has a sliding layer.
+///
+/// Lives beside [`RotatingKVCache`] rather than in the model layer (issue
+/// #2798) so the drafters and `mlxcel-xla` can share the same check.
+pub fn validate_sliding_window(family: &str, window: usize) -> Result<i32, String> {
+    i32::try_from(window)
+        .ok()
+        .filter(|window| *window > 0)
+        .ok_or_else(|| {
+            format!(
+                "{family}: sliding_window must be between 1 and {}, got {window}",
+                i32::MAX
+            )
+        })
+}
+
+/// The [`RotatingKVCache`] window of a family's sliding layers: validated
+/// with [`validate_sliding_window`] when the model has a sliding layer, and
+/// otherwise kept (unused, saturated to `i32`) so a config whose layers are
+/// all full attention still loads.
+pub fn cache_window(family: &str, window: usize, has_sliding_layer: bool) -> Result<i32, String> {
+    if has_sliding_layer {
+        validate_sliding_window(family, window)
+    } else {
+        Ok(i32::try_from(window).unwrap_or(i32::MAX))
+    }
+}
+
 /// Rotating KV Cache for sliding window attention (e.g. Gemma 3, Ministral 3).
 ///
 /// Maintains a fixed-size circular buffer for keys/values. Oversized prefill
@@ -7648,6 +7680,35 @@ mod rotating_truncation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #2790, moved here with the helper in #2798: the window a
+    /// rotating cache may take is exactly `1..=i32::MAX`.
+    #[test]
+    fn validate_sliding_window_accepts_exactly_the_i32_range_above_zero() {
+        let max = i32::MAX as usize;
+        assert_eq!(validate_sliding_window("Fam", 1), Ok(1));
+        assert_eq!(validate_sliding_window("Fam", max), Ok(i32::MAX));
+        for window in [0, max + 1] {
+            let err = validate_sliding_window("Fam", window).expect_err("out of range");
+            assert_eq!(
+                err,
+                format!("Fam: sliding_window must be between 1 and {max}, got {window}")
+            );
+        }
+    }
+
+    /// A config whose layers are all global keeps any window unused, per
+    /// [`cache_window`], rather than failing the load.
+    #[test]
+    fn cache_window_keeps_an_unused_window_when_no_layer_slides() {
+        assert_eq!(cache_window("Fam", 0, false), Ok(0));
+        assert_eq!(
+            cache_window("Fam", i32::MAX as usize + 1, false),
+            Ok(i32::MAX)
+        );
+        assert!(cache_window("Fam", 0, true).is_err());
+        assert!(cache_window("Fam", i32::MAX as usize + 1, true).is_err());
+    }
 
     fn f32_rows(arr: &MlxArray) -> Vec<f32> {
         let a = ffi::astype(arr, dtype::FLOAT32);

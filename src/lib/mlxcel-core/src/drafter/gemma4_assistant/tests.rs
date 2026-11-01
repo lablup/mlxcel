@@ -841,3 +841,22 @@ fn runner_up_names_the_second_best_token_and_its_margin() {
         "a chosen token outside the top two must decline"
     );
 }
+
+// Issue #2798: the drafter's sliding window is validated, not clamped.
+#[test]
+fn text_config_rejects_a_sliding_window_a_draft_mask_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut config = make_test_config(2, true);
+        config
+            .text_config
+            .as_mut()
+            .expect("test config carries a text config")
+            .sliding_window = window;
+        let err = config
+            .text_config()
+            .validated_sliding_window()
+            .expect_err("an unusable sliding window must fail the load");
+        assert!(err.contains("Gemma 4 assistant"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}

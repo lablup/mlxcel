@@ -314,7 +314,7 @@ impl IQuestLoopCoderModel {
             gates,
             norm,
             lm_head,
-            loop_window_size: args.loop_window_size as i32,
+            loop_window_size: args.validated_loop_window_size()?,
             eos_token_ids: args.eos_token_ids(),
         })
     }

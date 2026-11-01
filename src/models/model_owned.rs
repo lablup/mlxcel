@@ -70,38 +70,10 @@ pub(crate) fn table_less_storage_modes(
     )
 }
 
-/// Validate a config's sliding window for a family that builds
-/// `RotatingKVCache`s from it (issue #2790): `0` would build a cache whose
-/// ring arithmetic divides by zero, and a value above `i32::MAX` does not
-/// fit the cache's `i32` size. Call it at load, before any cache is built,
-/// and only when the config has a sliding layer.
-pub(crate) fn validate_sliding_window(family: &str, window: usize) -> Result<i32, String> {
-    i32::try_from(window)
-        .ok()
-        .filter(|window| *window > 0)
-        .ok_or_else(|| {
-            format!(
-                "{family}: sliding_window must be between 1 and {}, got {window}",
-                i32::MAX
-            )
-        })
-}
-
-/// The `RotatingKVCache` window of a family's sliding layers: validated
-/// with [`validate_sliding_window`] when the model has a sliding layer, and
-/// otherwise kept (unused, saturated to `i32`) so a config whose layers are
-/// all full attention still loads.
-pub(crate) fn cache_window(
-    family: &str,
-    window: usize,
-    has_sliding_layer: bool,
-) -> Result<i32, String> {
-    if has_sliding_layer {
-        validate_sliding_window(family, window)
-    } else {
-        Ok(i32::try_from(window).unwrap_or(i32::MAX))
-    }
-}
+// The shared window helpers live in `mlxcel_core::cache` (issue #2798) so the
+// drafters and `mlxcel-xla` can call them; the model layer re-exports the one
+// its families use.
+pub(crate) use mlxcel_core::cache::cache_window;
 
 /// Shared per-layer KV cache mode table for families whose attention caches
 /// live inside the model wrapper instead of the external generator cache slice.
