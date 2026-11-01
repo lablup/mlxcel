@@ -655,19 +655,26 @@ fn drain_generation_events_impl_detects_phase2_decode_hang() {
 
     let (tx, rx) = mpsc::channel::<GenerateEvent>();
 
-    // Send one Token event to transition into Phase 2, then drop the sender
-    // so no further events will arrive — simulating a worker that goes silent
-    // after producing the first token.
+    // Leak one sender clone so the channel never disconnects: Phase 2's
+    // recv_timeout then fires deterministically. The original held the
+    // sender alive with a 200 ms timed sleep, which raced the 150 ms timeout
+    // against scheduler noise on a loaded runner (nightly 41227995596): when
+    // the main thread was slow to enter Phase 2, the drop won, the channel
+    // disconnected first, and drain returned ChatWorkerGoneError, whose
+    // message carries no hang text and flipped the message assertion.
+    std::mem::forget(tx.clone());
+
+    // Send one Token event to transition into Phase 2; no further events
+    // will arrive — simulating a worker that goes silent after producing
+    // the first token.
     let worker = thread::spawn(move || {
         tx.send(GenerateEvent::Token(
             "first".to_string(),
             TokenMeta::default(),
         ))
         .expect("send first token");
-        // Hold sender alive briefly so Phase 2 enters recv_timeout, then drop
-        // it to also trigger Disconnected — whichever fires first is fine.
-        thread::sleep(Duration::from_millis(200));
-        // sender dropped here — channel disconnects if timeout didn't fire yet
+        // The worker's own sender drops here; the leaked clone above keeps
+        // the channel connected so the timeout path is the only outcome.
     });
 
     let mut received_tokens: Vec<String> = Vec::new();
