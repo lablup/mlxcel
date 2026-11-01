@@ -568,8 +568,8 @@ at-capacity verdict in #2692, 5 added the verdict authenticator in #2714); a
 pair of processes built from different versions fails with an explicit
 version message rather than a confusing I/O error. Mixed versions in one
 cluster are not supported: every node must be upgraded together. Every
-version bump so far landed after v0.8.0-beta.1, so no released version is
-affected.
+version bump so far landed after v0.8.0-beta.1, so v0.8.0 and that beta cannot
+share a cluster.
 
 Residual risks:
 

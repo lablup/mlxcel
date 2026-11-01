@@ -118,7 +118,7 @@ const MAGIC: &[u8; 8] = b"MLXCAUTH";
 /// client would read a 1-byte verdict where a 33-byte record is sent. Mixed
 /// versions are unsupported (discovery beacons already pin
 /// `CARGO_PKG_VERSION`), and every bump so far landed after v0.8.0-beta.1,
-/// so no released version is affected.
+/// so v0.8.0 and that beta cannot share a cluster.
 pub const PROTOCOL_VERSION: u16 = 5;
 const NONCE_LEN: usize = 32;
 const TAG_LEN: usize = 32;
