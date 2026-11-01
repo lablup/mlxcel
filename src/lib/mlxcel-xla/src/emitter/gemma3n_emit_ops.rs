@@ -452,6 +452,11 @@ pub(super) struct SparseGeluStages {
 /// stored through BF16 before it feeds the next operation. The activation is
 /// the tanh GELU, the formula of the eager `compiled_gelu_topk` kernel, mlx-lm's
 /// `gelu_topk` and Hugging Face `gelu_pytorch_tanh` (erf before #2548).
+///
+/// The multiplier and constants are bf16 values and the cube rounds once
+/// (#2795), so the tape equals mlx-lm's `gelu_topk` evaluated op by op (MLX CPU
+/// semantics). MLX's CUDA compiled kernels additionally contract two mul+add
+/// sites into FMAs; that one-ulp residual is a backend artifact, not targeted.
 pub(super) fn sparse_gelu_stages(
     b: &mut Builder,
     x: &Val,
@@ -476,8 +481,10 @@ pub(super) fn sparse_gelu_stages(
     let variance = round_bf16(b, &variance);
     let stddev = b.sqrt(&variance);
     let stddev = round_bf16(b, &stddev);
+    // mlx-lm casts the f32 multiplier to the stddev dtype (bf16), so the emitter
+    // authors the host-rounded bf16 value (#2795).
     let multiplier = std::f32::consts::SQRT_2 * erfinv(2.0 * sparsity - 1.0);
-    let multiplier = b.const_f32(multiplier);
+    let multiplier = bf16_scalar(b, multiplier);
     let multiplier = b.broadcast(&multiplier, &[], vec![rows]);
     let spread = b.multiply(&stddev, &multiplier);
     let spread = round_bf16(b, &spread);
@@ -490,14 +497,17 @@ pub(super) fn sparse_gelu_stages(
     let positive = b.compare("GT", &shifted_raw, &zeros, "FLOAT");
     let shifted = b.select(&positive, &shifted_raw, &zeros);
     let shifted = round_bf16(b, &shifted);
-    // `gelu_tanh_approx`: x * (0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 x^3)))).
+    // mlx-lm `nn.gelu_approx` in the bf16 carrier, op for op:
+    // `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x**3)))`. Python's weak
+    // scalars make every constant a bf16 value, and `x**3` is one `power` op
+    // rounded once. A bf16 value cubed needs at most 24 significand bits, so the
+    // f32 product `x*x*x` is exact and a single round reproduces that `power`.
     let shape = vec![rows, width];
-    let root = b.const_f32((2.0f32 / std::f32::consts::PI).sqrt());
+    let root = bf16_scalar(b, (2.0f32 / std::f32::consts::PI).sqrt());
     let root = b.broadcast(&root, &[], shape.clone());
-    let cubic = b.const_f32(0.044_715);
+    let cubic = bf16_scalar(b, 0.044_715);
     let cubic = b.broadcast(&cubic, &[], shape.clone());
     let squared_x = b.multiply(&shifted, &shifted);
-    let squared_x = round_bf16(b, &squared_x);
     let cubed = b.multiply(&squared_x, &shifted);
     let cubed = round_bf16(b, &cubed);
     let cubic_term = b.multiply(&cubic, &cubed);
@@ -510,12 +520,12 @@ pub(super) fn sparse_gelu_stages(
     let tanh = round_bf16(b, &tanh);
     let half = b.const_f32(0.5);
     let half = b.broadcast(&half, &[], shape.clone());
+    let half_x = b.multiply(&half, &shifted);
+    let half_x = round_bf16(b, &half_x);
     let one = b.broadcast(one, &[], shape);
     let one_tanh = b.add(&one, &tanh);
     let one_tanh = round_bf16(b, &one_tanh);
-    let scale = b.multiply(&half, &one_tanh);
-    let scale = round_bf16(b, &scale);
-    let activated = b.multiply(&shifted, &scale);
+    let activated = b.multiply(&half_x, &one_tanh);
     let activated = round_bf16(b, &activated);
     SparseGeluStages {
         mean,
@@ -1134,8 +1144,8 @@ mod tests {
         let body = b.body();
         assert_eq!(
             body.matches("stablehlo.convert").count(),
-            36,
-            "18 dynamic MLX intermediates must each round through bf16"
+            34,
+            "17 dynamic MLX intermediates must each round through bf16 (the cube is one rounded power)"
         );
         assert_eq!(body.matches("stablehlo.sqrt").count(), 1);
         // The activation is the tanh GELU (#2548), not erf.

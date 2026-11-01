@@ -72,6 +72,12 @@ void test_acls(const fs::path& base) {
       {"users-add-subdir", "S-1-5-32-545", "(AD)"},
       {"users-delete-child", "S-1-5-32-545", "(DC)"},
       {"users-write-dac", "S-1-5-32-545", "(WDAC)"},
+      {"users-write-data", "S-1-5-32-545", "(WD)"},
+      {"users-write-attributes", "S-1-5-32-545", "(WA)"},
+      {"users-delete", "S-1-5-32-545", "(D)"},
+      {"users-write-owner", "S-1-5-32-545", "(WO)"},
+      {"users-generic-all", "S-1-5-32-545", "(GA)"},
+      {"users-generic-write", "S-1-5-32-545", "(GW)"},
   };
   for (const auto& grant : grants) {
     const std::string acl = std::string("*") + grant.sid + ":" + grant.right;
@@ -187,6 +193,148 @@ void test_acls(const fs::path& base) {
   }
 }
 
+std::vector<BYTE> well_known(WELL_KNOWN_SID_TYPE type) {
+  std::vector<BYTE> sid(SECURITY_MAX_SID_SIZE);
+  DWORD size = SECURITY_MAX_SID_SIZE;
+  check(::CreateWellKnownSid(type, nullptr, sid.data(), &size) != FALSE, "SID");
+  return sid;
+}
+
+PACL acl_with(
+    std::vector<BYTE>& storage,
+    bool allow,
+    PSID sid,
+    DWORD mask,
+    DWORD flags = 0) {
+  storage.assign(1024, 0);
+  auto* acl = reinterpret_cast<PACL>(storage.data());
+  check(::InitializeAcl(acl, 1024, ACL_REVISION) != FALSE, "InitializeAcl");
+  const BOOL added = allow
+      ? ::AddAccessAllowedAceEx(acl, ACL_REVISION, flags, mask, sid)
+      : ::AddAccessDeniedAceEx(acl, ACL_REVISION, flags, mask, sid);
+  check(added != FALSE, "add ACE");
+  return acl;
+}
+
+// The ownership and ACL rule on ACLs built in memory, so a foreign owner, a null
+// DACL and unmapped generic rights need no second account or FAT volume.
+void test_security_rule() {
+  WindowsTrustedSids trusted;
+  check(trusted.ok, "the trusted SIDs resolve");
+  auto users = well_known(WinBuiltinUsersSid);
+  PSID me = trusted.user.data();
+  std::vector<BYTE> storage;
+  auto* empty = acl_with(storage, false, users.data(), 0);
+  check(
+      windows_security_refusal(users.data(), empty, trusted, true) ==
+          "is not owned by the current user",
+      "a foreign owner, whatever the ACL says");
+  check(
+      windows_security_refusal(nullptr, empty, trusted, true) ==
+          "is not owned by the current user",
+      "no owner");
+  for (std::vector<BYTE>* owner :
+       {&trusted.user,
+        &trusted.system,
+        &trusted.administrators,
+        &trusted.trusted_installer}) {
+    check(
+        windows_security_refusal(owner->data(), empty, trusted, true).empty(),
+        "a trusted owner");
+  }
+  check(
+      windows_security_refusal(me, nullptr, trusted, true) ==
+          "has no access control list",
+      "a null DACL");
+  const struct {
+    const char* name;
+    DWORD mask;
+  } rights[] = {
+      {"WD", FILE_WRITE_DATA},
+      {"AD", FILE_APPEND_DATA},
+      {"WA", FILE_WRITE_ATTRIBUTES},
+      {"DC", FILE_DELETE_CHILD},
+      {"D", DELETE},
+      {"WDAC", WRITE_DAC},
+      {"WO", WRITE_OWNER},
+      {"GA", GENERIC_ALL},
+      {"GW", GENERIC_WRITE},
+  };
+  for (const auto& right : rights) {
+    auto* acl = acl_with(storage, true, users.data(), right.mask);
+    check(
+        windows_security_refusal(me, acl, trusted, true).find("S-1-5-32-545") !=
+            std::string::npos,
+        std::string("the right ") + right.name);
+    acl = acl_with(storage, true, trusted.trusted_installer.data(), right.mask);
+    check(
+        windows_security_refusal(me, acl, trusted, true).empty(),
+        std::string("TrustedInstaller holding ") + right.name);
+  }
+  auto* acl = acl_with(
+      storage, true, users.data(), FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
+  check(windows_security_refusal(me, acl, trusted, true).empty(), "read access");
+}
+
+// An entry is checked on its own: a directory that was shared and later made
+// private passes its check and can still hold another account's entries.
+void test_entry_acls(const fs::path& base) {
+  const auto euid = cache_current_euid();
+  const std::string source = "src";
+  const auto over = make_dir(base / "entry-acls");
+  const auto leaf = over / kArch;
+  // Written and renamed as write_cached_hsaco does, so it inherits a private ACL.
+  plant_entry(leaf, source);
+  const auto got = resolve_hsaco_cache_dir({over, {}, {}}, kVersion, kArch, euid);
+  check(got.refusal.empty(), "the directory passes: " + got.refusal);
+  check(blob_loaded(got.dir, &source), "control: a private entry loads");
+
+  for (const char* ext : {".hsaco", ".txt", ".hip"}) {
+    for (const char* right : {"(WD)", "(M)", "(WDAC)", "(WA)"}) {
+      const std::string what = std::string(ext) + " with " + right;
+      plant_entry(leaf, source);
+      const auto file = leaf / (std::string(kModule) + ext);
+      run_or_fail("icacls " + q(file) + " /grant *S-1-5-32-545:" + right);
+      const auto again =
+          resolve_hsaco_cache_dir({over, {}, {}}, kVersion, kArch, euid);
+      check(again.refusal.empty(), what + ": the directory passes: " + again.refusal);
+      check(!blob_loaded(again.dir, &source), what + ": no blob loaded");
+      // Republishing replaces the file, and the ACL with it.
+      fs::remove(file);
+      plant_entry(leaf, source);
+      check(blob_loaded(again.dir, &source), what + ": a republished entry loads");
+    }
+  }
+  std::string contents;
+  run_or_fail("mklink /J " + q(leaf / "link") + " " + q(base));
+  check(!read_trusted_cache_entry(leaf / "link", contents), "a junction is no entry");
+  // A symlink to a private file: creating one needs a privilege or Developer Mode,
+  // which the elevated CI runner has.
+  if (::CreateSymbolicLinkW(
+          (leaf / "link-to-file").c_str(),
+          (leaf / "planted_module.hsaco").c_str(),
+          SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+    check(
+        !read_trusted_cache_entry(leaf / "link-to-file", contents),
+        "a symlink is no entry, whatever it points at");
+  } else {
+    std::fprintf(stderr, "skipping the symlink case: no privilege to create one\n");
+  }
+}
+
+// The profile of a service running as SYSTEM or NetworkService is under
+// C:\Windows, owned by TrustedInstaller.
+void test_windows_directory() {
+  wchar_t windows[MAX_PATH];
+  const UINT size = ::GetWindowsDirectoryW(windows, MAX_PATH);
+  check(size != 0 && size < MAX_PATH, "the Windows directory");
+  fs::path resolved;
+  std::string reason;
+  check(
+      cache_dir_is_trusted(windows, cache_current_euid(), resolved, reason),
+      "the Windows directory passes: " + reason);
+}
+
 // The cache root must agree with Rust's cache_root(): dirs::home_dir reads the
 // Known Folder profile, not the USERPROFILE variable.
 void test_home_directory() {
@@ -206,5 +354,8 @@ void test_home_directory() {
 
 void test_platform(const fs::path& base) {
   test_acls(base);
+  test_security_rule();
+  test_entry_acls(base);
+  test_windows_directory();
   test_home_directory();
 }

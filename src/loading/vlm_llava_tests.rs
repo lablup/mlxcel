@@ -128,13 +128,45 @@ fn parse_bunny_vision_config_uses_defaults_for_sparse_configs() {
         &json!({
             "intermediate_size": 5120
         }),
-    );
+    )
+    .unwrap();
 
     assert_eq!(config.model_type, "siglip_vision_model");
     assert_eq!(config.hidden_size, 1408);
     assert_eq!(config.intermediate_size, 5120);
     assert_eq!(config.patch_size, 14);
     assert_eq!(config.image_size, 384);
+}
+
+#[test]
+fn parse_bunny_vision_config_rejects_a_non_gelu_hidden_act() {
+    // Before #2794 the parse error was swallowed by the sparse-config fallback
+    // and `relu` silently ran as the tanh GELU.
+    for vision_config in [
+        json!({ "hidden_act": "relu" }),
+        json!({
+            "model_type": "siglip_vision_model",
+            "num_hidden_layers": 2,
+            "hidden_size": 768,
+            "intermediate_size": 1536,
+            "num_attention_heads": 12,
+            "patch_size": 16,
+            "hidden_act": "relu"
+        }),
+    ] {
+        let err = parse_bunny_vision_config(&json!({}), &vision_config)
+            .expect_err("relu is not a SigLIP activation")
+            .to_string();
+        assert!(err.contains("unsupported vision hidden_act"), "{err}");
+    }
+
+    // A sparse block still takes the fallback, with the SigLIP tanh default.
+    let sparse = parse_bunny_vision_config(&json!({}), &json!({})).unwrap();
+    assert_eq!(sparse.hidden_size, 1152);
+    assert_eq!(
+        sparse.hidden_act,
+        crate::vision::config::VisionHiddenActivation::GeluPytorchTanh
+    );
 }
 
 #[test]
@@ -165,7 +197,8 @@ fn parse_bunny_vision_config_preserves_full_configs() {
             "num_channels": 3,
             "layer_norm_eps": 1e-5
         }),
-    );
+    )
+    .unwrap();
 
     assert_eq!(config.hidden_size, 768);
     assert_eq!(config.intermediate_size, 1536);

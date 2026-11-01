@@ -52,10 +52,10 @@ use crate::vision::config::{VisionConfig, VisionHiddenActivation};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VisionMlpActivation {
     Exact,
-    PytorchTanh,
-    /// The tanh GELU of a SigLIP tower whose config omits `hidden_act` (Gemma 3,
-    /// PaliGemma, Aya Vision, Granite Vision 3.x, Bunny), evaluated by the
-    /// compiled f32 kernel (#2423, #2548).
+    /// The tanh GELU, declared by the checkpoint or resolved from an omitted
+    /// key on a SigLIP tower, evaluated by the compiled f32 kernel (#2423,
+    /// #2548). Before #2794 a declared `gelu_pytorch_tanh` ran the eager f32
+    /// helper instead; the two agree up to f32 rounding.
     PytorchTanhCompiled,
     FastSigmoid,
 }
@@ -73,8 +73,7 @@ pub(crate) fn select_mlp_activation(
         VisionMlpActivation::FastSigmoid
     } else {
         match hidden_act {
-            VisionHiddenActivation::GeluPytorchTanh => VisionMlpActivation::PytorchTanh,
-            VisionHiddenActivation::SiglipDefaultTanh => VisionMlpActivation::PytorchTanhCompiled,
+            VisionHiddenActivation::GeluPytorchTanh => VisionMlpActivation::PytorchTanhCompiled,
             VisionHiddenActivation::QuickGelu => VisionMlpActivation::FastSigmoid,
             VisionHiddenActivation::ExactGelu => VisionMlpActivation::Exact,
         }
@@ -94,13 +93,11 @@ pub(crate) struct VisionMLP {
 impl VisionMlpActivation {
     /// The shared `mlxcel_core` formula this activation computes.
     ///
-    /// `PytorchTanh` keeps the f32 evaluation the private helper this replaced
-    /// used (#2423); `PytorchTanhCompiled` is the same formula as one compiled
-    /// kernel; `Exact` is erf.
+    /// `PytorchTanhCompiled` is the tanh form as one compiled f32 kernel;
+    /// `Exact` is erf.
     fn gelu(self) -> GeluActivation {
         match self {
             VisionMlpActivation::Exact => GeluActivation::Erf,
-            VisionMlpActivation::PytorchTanh => GeluActivation::TanhF32,
             VisionMlpActivation::PytorchTanhCompiled => GeluActivation::TanhF32Compiled,
             VisionMlpActivation::FastSigmoid => GeluActivation::Fast,
         }
@@ -581,10 +578,12 @@ impl SigLipVisionModel {
     }
 
     /// Like [`Self::from_weights_with_quant`] but selects the encoder MLP GELU
-    /// variant. `use_fast_gelu = true` uses the sigmoid `GELU(approx="fast")`
-    /// that the Idefics2 vision tower uses. Otherwise `hidden_act` selects the
-    /// explicit PyTorch tanh approximation, with exact-erf GELU as the
-    /// compatibility default for missing and unknown values.
+    /// variant. `use_fast_gelu = true` forces the sigmoid `GELU(approx="fast")`
+    /// regardless of `hidden_act`. No caller passes `true` since #2794 moved
+    /// Idefics2 and Granite 4 Vision to the Hugging Face tanh GELU; the
+    /// parameter is kept because the entry point is shared with LLM-jp-VL and
+    /// its test support. Otherwise `hidden_act` selects the formula (see
+    /// [`VisionHiddenActivation`]).
     pub fn from_weights_with_quant_and_gelu(
         weights: &WeightMap,
         config: &VisionConfig,
@@ -881,17 +880,15 @@ mod tests {
             select_mlp_activation(VisionHiddenActivation::ExactGelu, false),
             VisionMlpActivation::Exact
         );
+        // A declared tanh runs the compiled kernel, same as an omitted key
+        // resolved to the SigLIP default (#2794).
         assert_eq!(
             select_mlp_activation(VisionHiddenActivation::GeluPytorchTanh, false),
-            VisionMlpActivation::PytorchTanh
+            VisionMlpActivation::PytorchTanhCompiled
         );
         assert_eq!(
             select_mlp_activation(VisionHiddenActivation::GeluPytorchTanh, true),
             VisionMlpActivation::FastSigmoid
-        );
-        assert_eq!(
-            select_mlp_activation(VisionHiddenActivation::SiglipDefaultTanh, false),
-            VisionMlpActivation::PytorchTanhCompiled
         );
         // CLIP's `quick_gelu` (#2548), declared or the class default.
         assert_eq!(
@@ -908,7 +905,9 @@ mod tests {
         // process inside `cudaStreamEndCapture` in roughly one run in four.
         let _guard = crate::models::siglip_text::test_guard::lock();
         let input = mlxcel_core::from_slice_f32(&[-3.0, -1.0, 0.0, 1.0, 3.0], &[5]);
-        let output = VisionMlpActivation::PytorchTanh.gelu().apply(&input);
+        let output = VisionMlpActivation::PytorchTanhCompiled
+            .gelu()
+            .apply(&input);
         mlxcel_core::eval(&output);
         let expected = [-0.003_637_433, -0.158_808, 0.0, 0.841_192, 2.996_362_7];
         for (index, expected) in expected.into_iter().enumerate() {
