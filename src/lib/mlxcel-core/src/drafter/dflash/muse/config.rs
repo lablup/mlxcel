@@ -166,6 +166,17 @@ impl MuseAssistantConfig {
     }
 
     /// Structural checks that need no target in hand.
+    /// The validated context window every drafter cache keeps (issue
+    /// #2798): every drafter layer is a sliding layer, so `0` or a value
+    /// above `i32::MAX` cannot back its window.
+    pub(crate) fn validated_sliding_window(&self) -> Result<i32, String> {
+        crate::cache::cache_window(
+            "Muse Glimmer assistant",
+            self.sliding_window,
+            self.num_hidden_layers > 0,
+        )
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.model_type != MUSE_ASSISTANT_MODEL_TYPE {
             return Err(format!(
@@ -204,7 +215,6 @@ impl MuseAssistantConfig {
             ("num_attention_heads", self.num_attention_heads),
             ("num_key_value_heads", self.num_key_value_heads),
             ("num_hidden_layers", self.num_hidden_layers),
-            ("sliding_window", self.sliding_window),
             ("block_size", self.block_size),
         ] {
             if value > DIMENSION_CEILING {
@@ -254,9 +264,7 @@ impl MuseAssistantConfig {
                 }
             }
         }
-        if self.sliding_window == 0 {
-            return Err("Muse Glimmer assistant sliding_window must be non-zero".to_string());
-        }
+        self.validated_sliding_window()?;
         if self.target_layer_ids.len() != self.num_hidden_layers {
             return Err(format!(
                 "Muse Glimmer assistant target_layer_ids {:?} must name one target layer per \

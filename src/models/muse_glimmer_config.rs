@@ -301,6 +301,7 @@ impl MuseGlimmerTextConfig {
                 ));
             }
         }
+        self.validated_sliding_window()?;
         Ok(())
     }
 
@@ -319,6 +320,19 @@ impl MuseGlimmerTextConfig {
         self.layer_types
             .get(layer_idx)
             .is_some_and(|kind| kind == "sliding_attention")
+    }
+
+    /// The `RotatingKVCache` window of the sliding layers, validated at load
+    /// (issue #2798): `0` would divide by zero in the ring arithmetic once a
+    /// sliding layer builds a cache, and a value above `i32::MAX` does not
+    /// fit. A config whose layers are all full attention keeps any window,
+    /// unused.
+    pub fn validated_sliding_window(&self) -> Result<i32, String> {
+        mlxcel_core::cache::cache_window(
+            "Muse Glimmer",
+            self.sliding_window,
+            (0..self.num_hidden_layers).any(|idx| self.is_sliding_layer(idx)),
+        )
     }
 
     /// The RoPE scheme for layer `layer_idx`: `None` for a NoPE

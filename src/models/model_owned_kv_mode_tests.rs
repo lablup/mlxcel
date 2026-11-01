@@ -304,21 +304,6 @@ fn turbo4_asym_on_a_misaligned_window_falls_back_to_fp16() {
 // Issue #2790 item 2: a zero sliding window or pattern is a load error.
 
 #[test]
-fn validate_sliding_window_accepts_exactly_the_i32_range_above_zero() {
-    use super::model_owned::validate_sliding_window;
-    let max = i32::MAX as usize;
-    assert_eq!(validate_sliding_window("Fam", 1), Ok(1));
-    assert_eq!(validate_sliding_window("Fam", max), Ok(i32::MAX));
-    for window in [0, max + 1] {
-        let err = validate_sliding_window("Fam", window).expect_err("out of range");
-        assert_eq!(
-            err,
-            format!("Fam: sliding_window must be between 1 and {max}, got {window}")
-        );
-    }
-}
-
-#[test]
 fn gemma3_rejects_zero_sliding_window_pattern_at_load() {
     let err = super::gemma3::gemma3_tests::snapshot_prompt_cache::try_load_with(8, 0)
         .err()

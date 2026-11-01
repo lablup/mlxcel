@@ -62,12 +62,14 @@ impl MuseAssistantDecoderLayer {
         weights: &WeightMap,
         prefix: &str,
         config: &MuseAssistantConfig,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         Ok(Self {
             self_attn: MuseAssistantAttention::from_weights(
                 weights,
                 &format!("{prefix}.self_attn"),
                 config,
+                sliding_cache_window,
             )?,
             mlp: DFlashMlp::from_weights(
                 weights,
@@ -113,6 +115,8 @@ pub struct MuseAssistantModel {
     pub output_norm_enc: RMSNorm,
     pub layers: Vec<MuseAssistantDecoderLayer>,
     pub norm: RMSNorm,
+    /// The context window, validated at load (issue #2798).
+    sliding_cache_window: i32,
 }
 
 impl MuseAssistantModel {
@@ -135,6 +139,7 @@ impl MuseAssistantModel {
     /// `lm_head` are loaded only when the checkpoint ships them.
     pub fn from_weights(weights: &WeightMap, config: MuseAssistantConfig) -> Result<Self, String> {
         config.validate()?;
+        let sliding_cache_window = config.validated_sliding_window()?;
         let group_size = config.group_size();
         let bits = config.bits();
 
@@ -179,6 +184,7 @@ impl MuseAssistantModel {
                 weights,
                 &format!("layers.{i}"),
                 &config,
+                sliding_cache_window,
             )?);
         }
         let norm = load_norm(weights, "norm", &config)?;
@@ -191,6 +197,7 @@ impl MuseAssistantModel {
             output_norm_enc,
             layers,
             norm,
+            sliding_cache_window,
         })
     }
 
@@ -240,7 +247,7 @@ impl MuseAssistantModel {
     /// One fresh context window per drafter layer.
     pub fn make_caches(&self) -> Vec<MuseAssistantContextCache> {
         (0..self.layers.len())
-            .map(|_| MuseAssistantContextCache::new(self.config.sliding_window as i32))
+            .map(|_| MuseAssistantContextCache::new(self.sliding_cache_window))
             .collect()
     }
 
@@ -285,7 +292,7 @@ impl MuseAssistantModel {
         // `[1, S, 5 * 6656]` slab alone is 1.1 GB in f16, and projecting all
         // of it to throw away seven eighths cost that again in the cast and
         // in `fc`'s output.
-        let window = self.config.sliding_window as i32;
+        let window = self.sliding_cache_window;
         let incoming = ffi::array_shape(target_hidden);
         let target_hidden = if incoming.len() == 3 && incoming[1] > window {
             for cache in caches.iter_mut() {

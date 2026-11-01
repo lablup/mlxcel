@@ -950,3 +950,17 @@ fn model_owned_batched_multistep() {
         IQuestLoopCoderWrapper::new(tiny_model(&tiny_args(4, 2)))
     });
 }
+
+// Issue #2798: the pass-2 ring window is validated, not only checked for zero.
+#[test]
+fn rejects_loop_window_sizes_a_rotating_cache_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut args: ModelArgs = serde_json::from_str(LOOP_40B_CONFIG).unwrap();
+        args.loop_window_size = window;
+        let err = args
+            .validate()
+            .expect_err("an unusable loop window must fail the load");
+        assert!(err.contains("IQuest Loop Coder loop_window_size"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}

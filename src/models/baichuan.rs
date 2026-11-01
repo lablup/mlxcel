@@ -104,6 +104,7 @@ impl BaichuanAttention {
         prefix: &str,
         cfg: &BaichuanConfig,
         layer_idx: usize,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let is_swa = cfg.sliding_window_layers.contains(&layer_idx);
         let group_size = cfg.group_size();
@@ -128,7 +129,7 @@ impl BaichuanAttention {
         let head_dim = (cfg.hidden_size / n_heads as usize) as i32;
 
         let sliding_window = if is_swa {
-            Some(cfg.sliding_window as i32)
+            Some(sliding_cache_window)
         } else {
             None
         };
@@ -369,12 +370,14 @@ impl BaichuanDecoderLayer {
         prefix: &str,
         cfg: &BaichuanConfig,
         layer_idx: usize,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let self_attn = BaichuanAttention::from_weights(
             weights,
             &format!("{}.self_attn", prefix),
             cfg,
             layer_idx,
+            sliding_cache_window,
         )?;
         let mlp = BaichuanMLP::from_weights(weights, &format!("{}.mlp", prefix), cfg)?;
 
@@ -605,6 +608,17 @@ impl BaichuanModel {
     pub fn from_weights(weights: &WeightMap, config: &BaichuanConfig) -> Result<Self, String> {
         let group_size = config.group_size();
         let bits = config.bits();
+        // The consumer looks the layer index up in this list, so a list of
+        // out-of-range indices has no sliding layer and must not reject an
+        // unused window (issue #2798).
+        let sliding_cache_window = mlxcel_core::cache::cache_window(
+            "Baichuan",
+            config.sliding_window,
+            config
+                .sliding_window_layers
+                .iter()
+                .any(|&layer| layer < config.num_hidden_layers),
+        )?;
 
         // Load embedding
         let embed_tokens =
@@ -615,7 +629,11 @@ impl BaichuanModel {
         for i in 0..config.num_hidden_layers {
             let prefix = format!("model.layers.{}", i);
             layers.push(BaichuanDecoderLayer::from_weights(
-                weights, &prefix, config, i,
+                weights,
+                &prefix,
+                config,
+                i,
+                sliding_cache_window,
             )?);
         }
 
