@@ -50,10 +50,14 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # MMA quantized matmul) after upstream's instantiations; quantized.cpp
   # dispatches it for 5- to 8-row affine products on GPU generations 13 and
   # 14. Refresh: take the new upstream file and re-append the marked block.
+  # matmul.cpp keeps few-row dense products on GEMV on GPU generations 13 and
+  # 14 (#2587). Refresh: take the new upstream file and re-apply the marked
+  # helper and the branch before the steel GEMM route.
   set(_metal_patch_files
       "mlx/backend/metal/device.cpp"
       "mlx/backend/metal/kernels/quantized.metal"
       "mlx/backend/metal/kernels/utils.h"
+      "mlx/backend/metal/matmul.cpp"
       "mlx/backend/metal/quantized.cpp")
   # A cached _deps/mlx-src is reused while the pin is unchanged (build.rs
   # only compares the pin), so a file this list no longer carries would keep

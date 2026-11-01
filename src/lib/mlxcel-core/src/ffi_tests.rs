@@ -4865,6 +4865,62 @@ fn qmv_matches_qmm_across_bits_and_group_sizes() {
     }
 }
 
+/// Metal few-row dense products keep each row's single-row result.
+///
+/// On GPU generations 13 and 14 the matmul overlay runs up to
+/// `kDenseGemvDefaultRows` rows through the GEMV kernel as a batch. The grid
+/// depth, the row stride and the fixed matrix stride all have to be right for
+/// a row to land where it belongs, so every row is compared with the same row
+/// computed alone: contiguous activations, a strided slice of a wider
+/// activation (row stride larger than K), and a weight that is not transposed.
+#[cfg(feature = "metal")]
+#[test]
+fn metal_few_row_dense_matmul_matches_single_rows() {
+    random_seed(2587);
+    for dt in [dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
+        for rows in 2..=8 {
+            for (n, k) in [(64, 32), (6144, 2048), (2048, 8192)] {
+                let w = unsafe { random_normal(&[n, k], dt, std::ptr::null()) };
+                let wt = transpose(&w);
+                let plain = unsafe { random_normal(&[k, n], dt, std::ptr::null()) };
+                let wide = unsafe { random_normal(&[rows, k + 8], dt, std::ptr::null()) };
+                let strided = slice(&wide, &[0, 4], &[rows, k + 4]);
+                let packed = unsafe { random_normal(&[rows, k], dt, std::ptr::null()) };
+                for (x, weight) in [(&packed, &wt), (&strided, &wt), (&packed, &plain)] {
+                    let together = matmul(x, weight);
+                    let singles: Vec<_> = (0..rows)
+                        .map(|row| matmul(&slice(x, &[row, 0], &[row + 1, k]), weight))
+                        .collect();
+                    let refs: Vec<&MlxArray> = singles.iter().map(|o| &**o).collect();
+                    let alone = concatenate_many(&refs, 0);
+                    // Rows the overlay keeps on GEMV run the same kernel alone
+                    // and together, so they match bit for bit.
+                    let narrow_gpu = matches!(
+                        crate::hardware::get_hardware().silicon_gen,
+                        crate::hardware::AppleSiliconGen::M1 | crate::hardware::AppleSiliconGen::M2
+                    );
+                    if narrow_gpu && rows <= 6 {
+                        let equal = array_equal(&together, &alone, false);
+                        eval(&equal);
+                        assert!(item_bool(&equal), "rows={rows} n={n} k={k}");
+                    }
+                    let tolerance = if dt == dtype::FLOAT32 { 1e-2 } else { 2.0 };
+                    let diff = max_all(&abs(&subtract(
+                        &astype(&together, dtype::FLOAT32),
+                        &astype(&alone, dtype::FLOAT32),
+                    )));
+                    eval(&diff);
+                    assert!(
+                        item_f32(&diff) <= tolerance,
+                        "rows={rows} n={n} k={k}: {}",
+                        item_f32(&diff)
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Metal few-row affine products against an f32 reference, at every row
 /// count a decode batch can have.
 ///
