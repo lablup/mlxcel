@@ -306,7 +306,7 @@ fn qwen3_vl_moe_switch_linear_rejects_quantization_params_that_would_abort_gathe
 
 /// Qwen3-VL-MoE built the Qwen3-MoE expert copy by hand before issue #1884, so
 /// it inherited that copy's missing `dff` bound. Through the family's own block
-/// loader, experts of Dff 8256 (above the 4096 Metal and 8192 CUDA defaults)
+/// loader, experts of Dff 14400 (above the 4096 Metal, 8192 CUDA and 14336 ROCm defaults)
 /// must now decline the fused kernel, while Dff 64 on the same geometry must
 /// still dispatch it. The positive half launches the kernel, which aborts on a
 /// backend without a port (issue #1803), so it is gated on
@@ -345,11 +345,11 @@ fn qwen3_vl_moe_fused_kernel_declines_experts_wider_than_the_dff_bound() {
     let scores = mlxcel_core::from_slice_f32(&[0.5, 0.5], &[1, 2]);
 
     assert!(
-        block(8256)
+        block(14400)
             .experts
             .forward_fused_kernel(&x, &indices, &scores)
             .is_none(),
-        "Dff 8256 is above both default bounds, so the fused kernel must decline"
+        "Dff 14400 is above every default bound, so the fused kernel must decline"
     );
 
     if !mlxcel_core::fused_moe_kernels_available() {

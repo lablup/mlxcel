@@ -159,10 +159,22 @@ const FUSED_MOE_MAX_DFF_METAL: i32 = 4096;
 /// `docs/benchmark_results/fused-moe-decode-kernel-design.md`.
 const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 
+/// ROCm default for the same bound. On gfx1151, Mixtral-8x7B (Dff 14336) decodes
+/// at 24.9 tok/s through the fused kernels and 8.2 through `gather_qmm`. No wider
+/// expert has been measured, so the bound stops at that shape.
+const FUSED_MOE_MAX_DFF_ROCM: i32 = 14336;
+
+/// The default bound of a non-Metal build, whose fused kernels are its GPU port.
+const FUSED_MOE_MAX_DFF_GPU_PORT: i32 = if cfg!(feature = "rocm") {
+    FUSED_MOE_MAX_DFF_ROCM
+} else {
+    FUSED_MOE_MAX_DFF_CUDA
+};
+
 /// Resolve the fused-MoE Dff upper bound. An explicit positive
 /// `MLXCEL_FUSED_MOE_MAX_DFF` wins on both backends; otherwise the default is
 /// backend-specific (Metal keeps the conservative 4096, CUDA uses the higher
-/// measured crossover). Split out as a pure function so the backend-aware
+/// measured crossover, ROCm its own measured width). Split out as a pure function so the backend-aware
 /// default is unit-testable without mutating process-global env or querying the
 /// live device; `metal_available` mirrors `mlx::core::metal::is_available()`.
 ///
@@ -191,7 +203,7 @@ pub(crate) fn fused_moe_max_dff_from(env: Option<&str>, metal_available: bool) -
         .unwrap_or(if metal_available {
             FUSED_MOE_MAX_DFF_METAL
         } else {
-            FUSED_MOE_MAX_DFF_CUDA
+            FUSED_MOE_MAX_DFF_GPU_PORT
         })
 }
 
@@ -1915,7 +1927,8 @@ impl SwitchGLU {
         // Large experts: gather_qmm already saturates the GPU, so the two-kernel
         // fused path's all-cores advantage disappears and its extra dispatch +
         // global-memory activation staging becomes a net loss. The break-even is
-        // backend-dependent (Metal ~4096, CUDA ~8192; see FUSED_MOE_MAX_DFF_*),
+        // backend-dependent (Metal ~4096, CUDA ~8192, ROCm above 14336; see
+        // FUSED_MOE_MAX_DFF_*),
         // so the default follows the live backend and the env var overrides both.
         // Decline above the bound so the caller falls back to gather_qmm.
         let max_dff = fused_moe_max_dff_from(
@@ -2681,7 +2694,10 @@ mod tests {
         // Unset: Metal keeps the conservative 4096; CUDA (no Metal) uses the
         // higher measured GB10 crossover (#626).
         assert_eq!(fused_moe_max_dff_from(None, true), FUSED_MOE_MAX_DFF_METAL);
-        assert_eq!(fused_moe_max_dff_from(None, false), FUSED_MOE_MAX_DFF_CUDA);
+        assert_eq!(
+            fused_moe_max_dff_from(None, false),
+            FUSED_MOE_MAX_DFF_GPU_PORT
+        );
         // The CUDA default must exceed Metal's, which is the whole point of #626.
         const { assert!(FUSED_MOE_MAX_DFF_CUDA > FUSED_MOE_MAX_DFF_METAL) };
         // An explicit positive value overrides the default on both backends.
@@ -2697,7 +2713,7 @@ mod tests {
             );
             assert_eq!(
                 fused_moe_max_dff_from(Some(bad), false),
-                FUSED_MOE_MAX_DFF_CUDA
+                FUSED_MOE_MAX_DFF_GPU_PORT
             );
         }
     }
@@ -2715,12 +2731,13 @@ mod tests {
         assert!(!declines(FUSED_MOE_MAX_DFF_METAL, None, true));
         assert!(declines(FUSED_MOE_MAX_DFF_METAL + 1, None, true));
 
-        // CUDA default 8192: phi-3.5-moe (Dff 6400) and llama-4-scout (Dff 8192)
-        // dispatch, mixtral (Dff 14336) declines.
+        // CUDA default 8192 (ROCm 14336): phi-3.5-moe (Dff 6400) and llama-4-scout
+        // (Dff 8192) dispatch.
         assert!(!declines(6400, None, false));
-        assert!(!declines(FUSED_MOE_MAX_DFF_CUDA, None, false));
-        assert!(declines(FUSED_MOE_MAX_DFF_CUDA + 1, None, false));
-        assert!(declines(14336, None, false));
+        assert!(!declines(FUSED_MOE_MAX_DFF_GPU_PORT, None, false));
+        assert!(declines(FUSED_MOE_MAX_DFF_GPU_PORT + 1, None, false));
+        // Mixtral (Dff 14336) takes the fused path on ROCm alone.
+        assert_eq!(declines(14336, None, false), !cfg!(feature = "rocm"));
 
         // Metal keeps 4096, so the same mid-size experts decline there.
         assert!(declines(6400, None, true));
