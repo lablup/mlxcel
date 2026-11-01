@@ -17,8 +17,8 @@
 //! A drafter that needs no second model. When the last few tokens of the
 //! sequence also appear earlier in the context (prompt plus everything emitted
 //! so far), the tokens that followed that earlier occurrence are proposed as
-//! the draft, and the target verifies the whole block in one forward, exactly
-//! as [`super::SpeculativeGenerator`] verifies a draft model's proposals.
+//! the draft, and the target verifies the whole block in one forward, through
+//! [`crate::engine::Engine::verify_round`].
 //!
 //! It pays off on replies that copy long runs of the prompt: editing a
 //! function, fixing typos, adding a field to a JSON document, turning a CSV

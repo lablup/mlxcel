@@ -42,14 +42,7 @@
 //! fields into one of:
 //!
 //! - [`SpeculativeDispatch::Disabled`] — no `--draft-model`; plain decode
-//!   runs (the offline draft-model loop of `mlxcel generate` is never used by
-//!   the server, and is deprecated since #2176).
-//! - [`SpeculativeDispatch::Classic { .. }`] — `--draft-model` set,
-//!   `--draft-kind` unset, drafter's `config.json::model_type` resolves to
-//!   a kind that the server has not yet wired to its kind-specific round
-//!   loop. The server logs the auto-detected kind and falls back to plain
-//!   decode, the `Classic` dispatch, for backward compatibility with the
-//!   historical `--draft-model <path>` workflow.
+//!   runs.
 //! - [`SpeculativeDispatch::Mtp { .. }`] — `--draft-kind mtp` (or auto-
 //!   detect resolved to MTP). The scheduler constructs the kind-specific
 //!   [`mlxcel_core::speculative::mtp::MtpGenerator`] (B=1) or
@@ -113,23 +106,6 @@ pub enum SpeculativeDispatch {
     /// No drafter configured. Scheduler runs the classic per-step decode
     /// loop. This is the default and the bit-exact preserved path.
     Disabled,
-
-    /// Drafter is configured but its resolved kind is one the server has
-    /// not yet wired to a kind-specific round loop. Scheduler falls back
-    /// to plain decode (where the offline `mlxcel generate` command takes
-    /// its deprecated draft-model loop when `--draft-kind` is unset and the
-    /// auto-detect resolves to a known kind). The auto-detected kind is
-    /// logged for operator visibility.
-    Classic {
-        /// Drafter checkpoint directory.
-        draft_model_path: PathBuf,
-        /// `--num-draft-tokens` / `ServerConfig::num_draft_tokens`, kept
-        /// for the startup summary only: this arm drafts nothing.
-        num_draft_tokens: usize,
-        /// The auto-detected drafter kind. Stored for diagnostic logging
-        /// only: this arm decodes plainly, so nothing branches on it.
-        auto_detected_kind: DrafterKind,
-    },
 
     /// MTP speculative decoding (Gemma 4 assistant drafter family).
     /// Scheduler constructs a kind-specific
@@ -238,8 +214,10 @@ fn draft_policy_name(policy: DraftPolicy) -> &'static str {
 /// inner messages are stable and unit-tested.
 #[derive(Debug, thiserror::Error)]
 pub enum SpeculativeDispatchError {
-    /// `--draft-kind` was passed an unrecognized value (not one of
-    /// `KNOWN_DRAFTER_KINDS - {internal-mtp}`).
+    /// The speculative settings cannot be served: `--draft-kind` was passed an
+    /// unrecognized or non-user-selectable value (not one of
+    /// `KNOWN_DRAFTER_KINDS - {internal-mtp}`), `--draft-model` resolved to a
+    /// kind with no server round loop, or the prompt-lookup settings are invalid.
     #[error("invalid --draft-kind: {message}")]
     InvalidKind { message: String },
 
@@ -269,14 +247,8 @@ impl SpeculativeDispatch {
     ///    default is keyed on the target's quantization mode, not the
     ///    drafter's. The resolved width carries its own provenance so
     ///    [`Self::summary`] can name it.
-    /// 4. Returns the kind-specific variant.
-    ///
-    /// The classic [`Self::Classic`] arm is selected only when the
-    /// operator did **not** pass `--draft-kind` and the auto-detect
-    /// resolved to [`DrafterKind::InternalMtp`] (which is not currently
-    /// wired to a server-side round loop). This preserves the historical
-    /// `--draft-model <path>` workflow for older operator scripts that
-    /// pre-date the `--draft-kind` flag.
+    /// 4. Returns the kind-specific variant. A kind with no server round loop
+    ///    returns [`SpeculativeDispatchError::InvalidKind`].
     ///
     /// **Note**: when `--draft-kind` is explicitly passed AND the kind is
     /// supported by a server-side round loop, this method returns the
@@ -350,9 +322,9 @@ impl SpeculativeDispatch {
         // - explicit MTP / DFlash → kind-specific generator
         // - auto-detected MTP / DFlash → kind-specific generator
         //   (the scheduler logs the auto-detect for visibility)
-        // - InternalMtp (peer) is auto-detected only and falls
-        //   back to the Classic path until it has a server-side round
-        //   loop.
+        // - any other kind (`InternalMtp`, which no drafter `model_type` maps
+        //   to, or a future `#[non_exhaustive]` variant) has no server-side
+        //   round loop and is refused at startup.
         match resolved_kind {
             DrafterKind::Mtp => Ok(Self::Mtp {
                 draft_model_path,
@@ -366,18 +338,13 @@ impl SpeculativeDispatch {
                 block_size_source: block_size.source,
                 user_requested_explicit_kind,
             }),
-            DrafterKind::InternalMtp => Ok(Self::Classic {
-                draft_model_path,
-                num_draft_tokens: config.num_draft_tokens,
-                auto_detected_kind: resolved_kind,
-            }),
-            // `DrafterKind` is `#[non_exhaustive]`; route unknown future
-            // variants through Classic so a stale binary does not panic
-            // when an operator points at a newer drafter checkpoint.
-            _ => Ok(Self::Classic {
-                draft_model_path,
-                num_draft_tokens: config.num_draft_tokens,
-                auto_detected_kind: resolved_kind,
+            other => Err(SpeculativeDispatchError::InvalidKind {
+                message: format!(
+                    "--draft-model {} resolved to drafter kind {other}, which has no server-side \
+                     round loop; pass --draft-kind dflash or --draft-kind mtp with a matching \
+                     drafter, or --draft-kind prompt-lookup with no drafter checkpoint.",
+                    draft_model_path.display()
+                ),
             }),
         }
     }
@@ -427,15 +394,6 @@ impl SpeculativeDispatch {
     pub fn summary(&self) -> String {
         match self {
             Self::Disabled => "speculative=off".to_string(),
-            Self::Classic {
-                draft_model_path,
-                num_draft_tokens,
-                auto_detected_kind,
-            } => format!(
-                "speculative=classic (drafter={}, num_draft_tokens={num_draft_tokens}, \
-                 auto_detected_kind={auto_detected_kind})",
-                draft_model_path.display()
-            ),
             Self::Mtp {
                 draft_model_path,
                 block_size,
@@ -474,10 +432,7 @@ impl SpeculativeDispatch {
     pub fn draft_model_path(&self) -> Option<&std::path::Path> {
         match self {
             Self::Disabled | Self::PromptLookup { .. } => None,
-            Self::Classic {
-                draft_model_path, ..
-            }
-            | Self::Mtp {
+            Self::Mtp {
                 draft_model_path, ..
             }
             | Self::DFlash {
@@ -486,15 +441,11 @@ impl SpeculativeDispatch {
         }
     }
 
-    /// Returns the resolved [`DrafterKind`] when the dispatch is a
-    /// kind-specific variant or carries an auto-detected kind. Returns
+    /// Returns the resolved [`DrafterKind`] of an active dispatch. Returns
     /// `None` for [`Self::Disabled`].
     pub fn drafter_kind(&self) -> Option<DrafterKind> {
         match self {
             Self::Disabled => None,
-            Self::Classic {
-                auto_detected_kind, ..
-            } => Some(*auto_detected_kind),
             Self::Mtp { .. } => Some(DrafterKind::Mtp),
             Self::DFlash { .. } => Some(DrafterKind::Dflash),
             Self::PromptLookup { .. } => Some(DrafterKind::PromptLookup),
@@ -502,9 +453,7 @@ impl SpeculativeDispatch {
     }
 
     /// Returns the resolved draft block size for [`Self::Mtp`] and
-    /// [`Self::DFlash`]. `None` for [`Self::Disabled`] and
-    /// [`Self::Classic`] (which declines to plain decode and has no block
-    /// size).
+    /// [`Self::DFlash`]. `None` otherwise.
     pub fn block_size(&self) -> Option<u32> {
         match self {
             Self::Mtp { block_size, .. } | Self::DFlash { block_size, .. } => Some(*block_size),

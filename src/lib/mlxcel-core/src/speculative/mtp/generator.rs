@@ -469,7 +469,7 @@ impl MtpStepOutput {
 /// ## Threading
 ///
 /// Single-threaded by design. The MTP round-loop's drafter ↔ target
-/// dependence is too tight for the classic generator's
+/// dependence is too tight for the
 /// `install_thread_local_default_stream` pattern to help. Future
 /// concurrency lands (batched MTP).
 pub struct MtpGenerator<T: MtpTarget> {

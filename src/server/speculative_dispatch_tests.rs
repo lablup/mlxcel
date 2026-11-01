@@ -273,21 +273,8 @@ fn summary_contains_block_size_for_kind_specific_variants() {
 }
 
 #[test]
-fn block_size_accessor_is_none_for_disabled_and_classic() {
-    let dispatch = SpeculativeDispatch::Disabled;
-    assert!(dispatch.block_size().is_none());
-
-    let classic = SpeculativeDispatch::Classic {
-        draft_model_path: PathBuf::from("/tmp/drafter"),
-        num_draft_tokens: 3,
-        auto_detected_kind: mlxcel_core::drafter::DrafterKind::InternalMtp,
-    };
-    assert!(classic.block_size().is_none());
-    assert!(!classic.is_kind_specific());
-    assert_eq!(
-        classic.drafter_kind(),
-        Some(mlxcel_core::drafter::DrafterKind::InternalMtp)
-    );
+fn block_size_accessor_is_none_for_disabled() {
+    assert!(SpeculativeDispatch::Disabled.block_size().is_none());
 }
 
 #[test]

@@ -88,7 +88,7 @@ fn make_dflash_drafter_dir() -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-/// Ordinary small full model used as a classic `--draft-model` drafter. It
+/// Ordinary small full model passed as `--draft-model`. It
 /// carries no DFlash marker, and it must stay loadable as a standalone model.
 fn make_ordinary_full_model_dir() -> (TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("create temp dir");
@@ -428,27 +428,6 @@ fn dispatch_block_size_override_propagates_to_burst() {
 
     let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert_eq!(dispatch.block_size(), Some(8));
-}
-
-#[test]
-fn dispatch_classic_fallback_is_not_burstable() {
-    // The `Classic` variant (auto-detected `internal-mtp` kind) is NOT
-    // `is_kind_specific()` and therefore never enters the burst path —
-    // it stays on the historical `SpeculativeGenerator` dispatch
-    // (which the server today doesn't expose; the scheduler falls
-    // back to classic decode). This is the operator-facing
-    // backward-compat guarantee /.
-    //
-    // We can't easily construct a `Classic` variant from outside
-    // (auto-detect requires `model_type` field that resolves to
-    // InternalMtp), so we assert the invariant via the matching
-    // accessor methods on a fresh `Disabled` plus the kind-specific
-    // ones above. The unit tests in
-    // `src/server/speculative_dispatch_tests.rs` cover the Classic
-    // variant directly.
-    let cfg = base_server_config();
-    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
-    assert!(!dispatch.is_kind_specific());
 }
 
 // =============================================================================

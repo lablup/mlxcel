@@ -65,9 +65,8 @@ src/
   for request bias, language bias and output suppression, called once per request by the CLI and
   the server.
 - `src/lib/mlxcel-core/src/generate.rs` — the `LanguageModel` trait, `SamplingConfig` and `GenerationStats`. Decode loops live in `engine/`: `engine/direct.rs` is `DirectEngine`, the raw-completion client `mlxcel generate`, the benchmarks and the inference session run (ADR 0007, #2176), and `engine/speculative.rs` is its token-only speculative loop for drafters such as prompt lookup.
-- `src/lib/mlxcel-core/src/drafter/` and `src/lib/mlxcel-core/src/speculative/` — speculative decoding support.
-  `speculative/stochastic_accept.rs` holds the acceptance rules and the distribution-preservation
-  guarantee; see [`speculative-acceptance.md`](speculative-acceptance.md) for which rule each path runs.
+- `src/lib/mlxcel-core/src/drafter/` and `src/lib/mlxcel-core/src/speculative/` — speculative decoding support; see
+  [`speculative-acceptance.md`](speculative-acceptance.md) for which rule each path runs.
 - `src/lib/mlxcel-core/src/layers.rs`, `src/lib/mlxcel-core/src/weights.rs`, `src/lib/mlxcel-core/src/utils.rs` — model building blocks,
   SafeTensors loading, masks, and helper operations.
 - `src/lib/mlxcel-core/src/autotune/`: shape-bucketed kernel autotuner (issue #906), covering the

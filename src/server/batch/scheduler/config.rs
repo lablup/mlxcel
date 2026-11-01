@@ -518,9 +518,8 @@ impl BatchScheduler {
     /// don't pass `--draft-model` keep the bit-exact classic decode path
     /// with zero overhead.
     ///
-    /// When `dispatch` is one of [`crate::server::SpeculativeDispatch::Mtp`],
-    /// [`crate::server::SpeculativeDispatch::DFlash`], or
-    /// [`crate::server::SpeculativeDispatch::Classic`], the scheduler logs
+    /// When `dispatch` is [`crate::server::SpeculativeDispatch::Mtp`] or
+    /// [`crate::server::SpeculativeDispatch::DFlash`], the scheduler logs
     /// the dispatch at the next decode tick and (in a follow-up issue)
     /// constructs the matching round-loop driver per request when the
     /// per-request preconditions hold.

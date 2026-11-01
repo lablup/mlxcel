@@ -78,13 +78,10 @@ pub use execution::runtime::{
 pub use execution::sampling;
 pub use mlxcel_core::generate;
 pub use mlxcel_core::generate::{GenerationStats, LanguageModel, SamplingConfig};
-// Deprecated with the classic draft-model loop (#2176), removed in v0.8.0.
 pub use mlxcel_core::speculative::prompt_lookup::{
     DraftPolicy, PromptLookupConfig, prompt_lookup_unsupported_reason, supports_prompt_lookup,
 };
 pub use mlxcel_core::speculative::prompt_lookup_drafter::PromptLookupDrafter;
-#[allow(deprecated)]
-pub use mlxcel_core::speculative::{SpeculativeGenerateError, SpeculativeGenerator};
 #[cfg(feature = "xla-iree")]
 pub use multimodal::host_preprocessor::Gemma3IreeHostPreprocessor;
 #[cfg(feature = "xla-diagnostics")]

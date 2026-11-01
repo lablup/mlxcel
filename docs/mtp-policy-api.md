@@ -63,7 +63,7 @@ On a model-serving node, the endpoint is always mounted, unlike `/props`, `/slot
 | `samples_required` | integer | Qualifying samples a profiling window needs before it settles. |
 | `samples_remaining` | integer or null | Qualifying samples still needed. Non-null only while `state` is `"profiling"`, because nothing is pending in any other state. |
 
-The four fields `target`, `drafter`, `hardware`, and `block_size` are the pairing key. A consumer showing a verdict should confirm they match the pairing it is showing, in particular `block_size`: a verdict profiled at one K does not carry to another, and changing `--draft-block-size` / `MLXCEL_DRAFT_BLOCK_SIZE` starts a fresh profiling window. `--num-draft-tokens` is a separate, offline-only `generate` setting and does not reach the policy key.
+The four fields `target`, `drafter`, `hardware`, and `block_size` are the pairing key. A consumer showing a verdict should confirm they match the pairing it is showing, in particular `block_size`: a verdict profiled at one K does not carry to another, and changing `--draft-block-size` / `MLXCEL_DRAFT_BLOCK_SIZE` starts a fresh profiling window.
 
 ### States
 

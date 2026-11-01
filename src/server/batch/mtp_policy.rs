@@ -535,9 +535,7 @@ impl ProfileAccumulator {
 /// both depend on K: a verdict profiled at K=8 must not be reused at K=4 (or
 /// vice versa). Changing `--draft-block-size` / `MLXCEL_DRAFT_BLOCK_SIZE`
 /// therefore produces a different key and triggers a fresh profiling window.
-/// `--num-draft-tokens` is a separate, offline-only `generate` setting (the
-/// per-step draft-token budget) and never reaches this key; see
-/// [`crate::cli::speculative_args::resolve_draft_block_size`].
+/// See [`crate::cli::speculative_args::resolve_draft_block_size`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PolicyKey {
     target: String,

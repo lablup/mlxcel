@@ -554,9 +554,13 @@ mod direct_decode_tests;
 #[cfg(test)]
 mod shared_cache_tests;
 #[cfg(test)]
+mod speculative_distribution_tests;
+#[cfg(test)]
 mod speculative_plain_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod verify_round_rollback_tests;
 #[cfg(test)]
 mod verify_round_tests;
 

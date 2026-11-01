@@ -17,11 +17,9 @@
 //!
 //! ## Why a trait?
 //!
-//! mlxcel originally shipped one speculative path — the classic
-//! [`crate::speculative::SpeculativeGenerator`] — where the drafter owns its
-//! own KV cache and emits tokens one at a time. The Gemma 4 Multi-Token
-//! Prediction (MTP) "assistant" drafter and the Qwen 3.5 DFlash drafter have
-//! fundamentally different lifecycles than that classic path:
+//! The Gemma 4 Multi-Token Prediction (MTP) "assistant" drafter and the Qwen 3.5
+//! DFlash drafter have different lifecycles, and neither can be driven as a
+//! standalone model that owns its KV cache and emits tokens one at a time:
 //!
 //! - **MTP-style** (Gemma 4 assistant) — shares K/V from the target (no own
 //!   KV cache), runs `K` small autoregressive forwards per draft block,
@@ -1157,7 +1155,7 @@ pub trait Drafter {
     /// - `sampler`: sampling configuration applied to each proposal step.
     ///
     /// Note: token type is `i32` to match
-    /// [`LanguageModel::eos_token_ids`] / `SpeculativeGenerator` /
+    /// [`LanguageModel::eos_token_ids`] /
     /// `generated_tokens: Vec<i32>` throughout the crate.
     fn draft_block(
         &mut self,
