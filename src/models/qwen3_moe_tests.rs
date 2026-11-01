@@ -339,9 +339,9 @@ fn fused_geometry_block(dff: i32) -> SparseMoeBlock {
 
 /// Before issue #1884 the family's own `forward_fused_kernel` had no `dff`
 /// bound, so an expert wider than `MLXCEL_FUSED_MOE_MAX_DFF` (4096 on Metal,
-/// 8192 on CUDA) still took the fused path in the regime measured as a net
-/// loss, and the override was silently ignored. Dff 8256 (129 groups of 64) is
-/// above both defaults; the shared kernel must decline it and the production
+/// 8192 on CUDA, 14336 on ROCm) still took the fused path in the regime measured as a net
+/// loss, and the override was silently ignored. Dff 14400 (225 groups of 64) is
+/// above every default; the shared kernel must decline it and the production
 /// dispatch must report `gather_qmm` for that single routed token.
 ///
 /// The positive control at Dff 64 on the same geometry proves every other
@@ -371,12 +371,12 @@ fn qwen3_moe_fused_kernel_declines_experts_wider_than_the_dff_bound() {
         mlxcel_core::dtype::BFLOAT16,
     );
 
-    let wide = fused_geometry_block(8256);
+    let wide = fused_geometry_block(14400);
     assert!(
         wide.experts
             .forward_fused_kernel(&x, &indices, &scores)
             .is_none(),
-        "Dff 8256 is above both default bounds, so the fused kernel must decline"
+        "Dff 14400 is above every default bound, so the fused kernel must decline"
     );
     let (_, profile) = wide.forward_profiled(&x);
     assert_eq!(profile.tokens, 1);
