@@ -116,12 +116,12 @@ The final analyzer exited zero with `"passed": true` and no failures.
 
 ## Evidence Archive
 
-All attempts remain preserved under `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/`:
+All attempts are preserved under `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/`:
 
-- parent directory and `attempt-1.md`: complete failed attempt 1;
-- `attempt-2/`: intentionally stopped failed partial attempt 2;
-- `attempt-3/`: complete failed attempt 3;
+- `attempt-1.md` and `attempt-1.7z`: complete failed attempt 1;
+- `attempt-2/` (notes) and `attempt-2.7z`: intentionally stopped failed partial attempt 2;
+- `attempt-3/` (notes and corrected summary) and `attempt-3.7z`: complete failed attempt 3;
 - `attempt-4/`: final passing matrix;
 - trajectory diagnostic directories: causal and selective-policy counter evidence.
 
-Each attempt has its own summary or checkpoint note and checksum manifest. Failed observations were retained rather than overwritten.
+Each attempt has its own summary or checkpoint note and checksum manifest; for failed attempts the manifest is inside the archive. Failed observations were retained rather than overwritten. Uncited per-run server logs and build logs were pruned on 2026-11-01 and remain available in git history.

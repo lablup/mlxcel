@@ -34,6 +34,10 @@ rebuilding after a pull or a rebase records provenance its binary does not have.
 The harness now refuses to run in that state, and `BENCH_ALLOW_STALE_BINARY=1`
 opts out for a bisect.
 
+## What to keep under `benchmark_results/data/`
+
+Keep what a reader needs to check or repeat a report: summaries, machine-readable results, drivers, instrumentation patches and provenance. Do not commit per-run server logs, build, format or lint logs, or empty captures; `make verify-benchmark-raw-logs` fails on them. A log a report cites by name or indexes in its manifest goes in `scripts/ci/benchmark_raw_logs_allowlist.txt`. Evidence from a failed attempt can be stored as a `.7z` of at most 32 KB, with its conclusions in plain text next to it.
+
 ## Current result snapshot
 
 Keep public result summaries in a single place so aggregate numbers do not drift

@@ -17,10 +17,6 @@
   },
   "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
   "artifacts": {
-    "greedy.err": {
-      "bytes": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
     "greedy.out": {
       "bytes": 544,
       "sha256": "deb3eafb316483bc87e17227ab008576c323660716d5a629e8285e79c6894519"
@@ -28,10 +24,6 @@
     "greedy.status.json": {
       "bytes": 238,
       "sha256": "5b42781d475cc298af88b18d92f045529181fb83c4eed6dcff6915bb0051cf24"
-    },
-    "ladder.err": {
-      "bytes": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "ladder.out": {
       "bytes": 2458,

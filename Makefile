@@ -959,6 +959,12 @@ verify-binary-assets: ## Assert every tracked binary file is declared with a siz
 	@python3 scripts/ci/check_binary_assets.py
 	@bash scripts/ci/check_binary_assets_test.sh
 
+.PHONY: verify-benchmark-raw-logs
+verify-benchmark-raw-logs: ## Assert benchmark data holds no uncited raw logs
+	@echo "$(CYAN)[verify] benchmark raw logs...$(RESET)"
+	@python3 scripts/ci/check_benchmark_raw_logs.py
+	@bash scripts/ci/check_benchmark_raw_logs_test.sh
+
 .PHONY: verify-windows-paths
 verify-windows-paths: ## Assert no tracked path is a Windows device name such as AUX (issue #2531)
 	@echo "$(CYAN)[verify] Windows device-name paths...$(RESET)"

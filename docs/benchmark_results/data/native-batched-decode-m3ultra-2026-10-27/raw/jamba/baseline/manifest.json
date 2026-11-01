@@ -21,10 +21,6 @@
   "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
   "provenance_limitation": "Legacy run has no original runner manifest or runtime binary hashes; original phase status/commands preserved.",
   "artifacts": {
-    "greedy.err": {
-      "bytes": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
     "greedy.out": {
       "bytes": 943,
       "sha256": "d41a81662d3baed90fc9cb60c3eacf30179297d24c0dd2e44724813b6be3b395"
@@ -32,10 +28,6 @@
     "greedy.status.json": {
       "bytes": 259,
       "sha256": "fe6e0c2c82c0452c128dff73fae0a4e45c31aefbe7b9d32adec65e03b9d9c005"
-    },
-    "ladder.err": {
-      "bytes": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "ladder.out": {
       "bytes": 2455,

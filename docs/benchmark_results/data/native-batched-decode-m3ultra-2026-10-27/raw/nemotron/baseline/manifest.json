@@ -21,10 +21,6 @@
       "bytes": 878,
       "sha256": "bcf484d5da569638ab45b38b17e9d4ac24fa09a2888d02d998036286d2894405"
     },
-    "greedy.err": {
-      "bytes": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
     "greedy.out": {
       "bytes": 581,
       "sha256": "ecfdc7aea6b0b13ef746a6d41ab91b7e06c4f4c9dd74a102093df908c3f65b75"
@@ -32,10 +28,6 @@
     "greedy.status.json": {
       "bytes": 281,
       "sha256": "90a21d3c7e084b0bb22c697132b2e1f081275ef9c6d8b0f966ede97418cb50c4"
-    },
-    "ladder.err": {
-      "bytes": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "ladder.out": {
       "bytes": 2464,

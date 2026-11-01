@@ -523,6 +523,16 @@ DECLARED = (
             "outside the repository."
         ),
     ),
+    Rule(
+        pattern="docs/benchmark_results/data/*.7z",
+        max_bytes=32 * 1024,
+        why=(
+            "Evidence from a failed acceptance attempt whose report keeps the "
+            "conclusions in plain text. One archive per attempt replaces hundreds "
+            "of loose files nobody reads in review, following the archived-log "
+            "precedent of #2267. Same 32 KB ceiling as the tarballs above."
+        ),
+    ),
 )
 
 
