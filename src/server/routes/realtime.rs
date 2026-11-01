@@ -170,7 +170,7 @@ impl Drop for Reservation {
 }
 
 async fn send(socket: &mut WebSocket, event: &ServerEvent) -> Result<(), axum::Error> {
-    socket.send(Message::Text(to_wire_json(event))).await
+    socket.send(Message::Text(to_wire_json(event).into())).await
 }
 
 async fn send_error(socket: &mut WebSocket, code: &str, message: impl Into<String>) -> bool {

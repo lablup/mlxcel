@@ -41,8 +41,8 @@ fn alias_format_matches_upstream_examples() {
     assert_eq!(path_to_gcp_format("/tokenize"), "tokenize");
     assert_eq!(path_to_gcp_format("/v1/streams/lookup"), "streamsLookup");
     // Path parameters stop the conversion.
-    assert_eq!(path_to_gcp_format("/v1/responses/:id"), "responses");
-    assert_eq!(path_to_gcp_format("/v1/responses/:id/cancel"), "responses");
+    assert_eq!(path_to_gcp_format("/v1/responses/{id}"), "responses");
+    assert_eq!(path_to_gcp_format("/v1/responses/{id}/cancel"), "responses");
     // The root produces the empty alias, which the table skips.
     assert_eq!(path_to_gcp_format("/"), "");
     // Underscore boundaries capitalise too.
@@ -153,7 +153,7 @@ fn alias_collisions_resolve_deterministically_to_the_v1_routes() {
 fn observability_routes_are_always_aliased() {
     // Since #1440 the /props, /slots and /metrics routes mount
     // unconditionally (their gates live in the handlers), so their aliases
-    // are always present; /slots/:id_slot collapses onto the earlier
+    // are always present; /slots/{id_slot} collapses onto the earlier
     // /slots alias by the first-wins rule.
     let (aliases, _) = dispatch_table(&ServerConfig::default());
     assert_eq!(aliases["props"].path, "/props");

@@ -448,7 +448,7 @@ async fn zero_config_cli_matches_single_node(mode: ClusterDiscoveryMode) {
         ],
     );
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     assert!(
         wait_for_models(&client, single, Duration::from_secs(240)).await,
         "single-node server did not come up:\n{}",

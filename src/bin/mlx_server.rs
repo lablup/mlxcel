@@ -2119,6 +2119,9 @@ struct ServerArgs {
 }
 
 fn main() -> anyhow::Result<()> {
+    // reqwest is built without a bundled rustls provider; install ring before
+    // any client exists (the client builders also do this, so it is belt only).
+    mlxcel::http_tls::install_default_crypto_provider();
     // Hidden machine interface for the llama-server b10621 compatibility
     // manifest (issue #1443): `mlxcel-server --dump-flag-surface` prints the
     // complete clap surface, hidden compatibility arguments included, as

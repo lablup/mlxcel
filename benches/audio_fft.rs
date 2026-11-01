@@ -15,7 +15,8 @@
 use std::f64::consts::PI;
 use std::time::Duration;
 
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 
 #[allow(dead_code)]
 #[path = "../src/audio/fft.rs"]

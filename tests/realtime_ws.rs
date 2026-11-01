@@ -164,7 +164,10 @@ async fn close_code(socket: &mut Socket) -> Option<CloseCode> {
 }
 
 async fn send(socket: &mut Socket, value: Value) {
-    socket.send(Message::Text(value.to_string())).await.unwrap();
+    socket
+        .send(Message::Text(value.to_string().into()))
+        .await
+        .unwrap();
 }
 
 fn pcm16(samples: usize) -> String {

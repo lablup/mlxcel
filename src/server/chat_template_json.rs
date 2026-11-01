@@ -607,16 +607,18 @@ mod tests {
 
     #[test]
     fn default_separators_have_the_python_spaces() {
-        let value = Value::from_serialize(serde_json::json!({"b": [1, 2], "a": "x"}));
+        let value = Value::from(minijinja::value::Serde(
+            serde_json::json!({"b": [1, 2], "a": "x"}),
+        ));
         assert_eq!(dump(value, &[]), r#"{"b": [1, 2], "a": "x"}"#);
     }
 
     #[test]
     fn compact_separators_and_sort_keys_apply_recursively() {
-        let value = Value::from_serialize(serde_json::json!({
+        let value = Value::from(minijinja::value::Serde(serde_json::json!({
             "b": {"z": 1, "y": 2},
             "a": [{"n": 1, "m": 2}]
-        }));
+        })));
         let rendered = dump(
             value,
             &[
@@ -659,7 +661,9 @@ mod tests {
 
     #[test]
     fn indent_switches_to_python_item_separators() {
-        let value = Value::from_serialize(serde_json::json!({"a": 1, "b": [1, 2]}));
+        let value = Value::from(minijinja::value::Serde(
+            serde_json::json!({"a": 1, "b": [1, 2]}),
+        ));
         let rendered = dump(value, &[("indent", Value::from(2))]);
         assert_eq!(
             rendered,
@@ -669,7 +673,7 @@ mod tests {
 
     #[test]
     fn indent_true_means_two_spaces() {
-        let value = Value::from_serialize(serde_json::json!({"a": 1}));
+        let value = Value::from(minijinja::value::Serde(serde_json::json!({"a": 1})));
         assert_eq!(
             dump(value, &[("indent", Value::from(true))]),
             "{\n  \"a\": 1\n}"
@@ -678,7 +682,9 @@ mod tests {
 
     #[test]
     fn empty_containers_stay_on_one_line_under_indent() {
-        let value = Value::from_serialize(serde_json::json!({"a": {}, "b": []}));
+        let value = Value::from(minijinja::value::Serde(
+            serde_json::json!({"a": {}, "b": []}),
+        ));
         assert_eq!(
             dump(value, &[("indent", Value::from(2))]),
             "{\n  \"a\": {},\n  \"b\": []\n}"
@@ -687,7 +693,7 @@ mod tests {
 
     #[test]
     fn explicit_separators_win_over_the_indent_default() {
-        let value = Value::from_serialize(serde_json::json!({"a": 1, "b": 2}));
+        let value = Value::from(minijinja::value::Serde(serde_json::json!({"a": 1, "b": 2})));
         let rendered = dump(
             value,
             &[
@@ -756,7 +762,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(r#"{"pattern":1,"include":2,"a":3}"#).unwrap();
         assert_eq!(
-            dump(Value::from_serialize(value), &[]),
+            dump(Value::from(minijinja::value::Serde(value)), &[]),
             r#"{"pattern": 1, "include": 2, "a": 3}"#
         );
     }
@@ -777,11 +783,11 @@ mod tests {
         // matters because a failed render costs the template its tools block.
         let value: serde_json::Value = serde_json::from_str(r#"[1]"#).unwrap();
         let huge = dump(
-            Value::from_serialize(&value),
+            Value::from(minijinja::value::Serde(&value)),
             &[("indent", Value::from(u64::MAX))],
         );
         let clamped = dump(
-            Value::from_serialize(&value),
+            Value::from(minijinja::value::Serde(&value)),
             &[("indent", Value::from(MAX_INDENT as u64))],
         );
         assert_eq!(huge, clamped);
@@ -795,7 +801,7 @@ mod tests {
         // supplied and could be an enormous lazy range.
         let value: serde_json::Value = serde_json::from_str(r#"[1]"#).unwrap();
         let message = dump_err(
-            Value::from_serialize(&value),
+            Value::from(minijinja::value::Serde(&value)),
             &[(
                 "separators",
                 Value::from(vec![
@@ -827,7 +833,7 @@ mod tests {
         for _ in 0..(MAX_DEPTH + 2) {
             nested = serde_json::Value::Array(vec![nested]);
         }
-        let message = dump_err(Value::from_serialize(&nested), &[]);
+        let message = dump_err(Value::from(minijinja::value::Serde(&nested)), &[]);
         assert!(
             message.contains("nests deeper than"),
             "expected a depth rejection, got: {message}"

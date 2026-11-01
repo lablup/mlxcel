@@ -1489,13 +1489,13 @@ fn router_ui_routes(state: RouterServerState) -> axum::Router<RouterServerState>
         .route("/ui-api/v1/bootstrap", get(ui_bootstrap))
         .route("/ui-api/v1/catalog", get(ui_catalog_list))
         .route("/ui-api/v1/catalog/refresh", post(ui_catalog_refresh))
-        .route("/ui-api/v1/catalog/:id", get(ui_catalog_get))
+        .route("/ui-api/v1/catalog/{id}", get(ui_catalog_get))
         .route("/ui-api/v1/runtime", get(ui_runtime))
         .route("/ui-api/v1/model-actions", post(ui_model_actions))
         .route("/ui-api/v1/operations", get(ui_operations_list))
-        .route("/ui-api/v1/operations/:id", get(ui_operation_get))
+        .route("/ui-api/v1/operations/{id}", get(ui_operation_get))
         .route(
-            "/ui-api/v1/operations/:id/cancel",
+            "/ui-api/v1/operations/{id}/cancel",
             post(ui_operation_cancel),
         )
         .route("/ui-api/v1/events", get(ui_events))

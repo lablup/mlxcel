@@ -3342,6 +3342,9 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // reqwest is built without a bundled rustls provider; install ring before
+    // any client exists (the client builders also do this, so it is belt only).
+    mlxcel::http_tls::install_default_crypto_provider();
     // Hidden machine interface for the llama-server b10621 compatibility
     // manifest (issue #1443): `mlxcel serve --dump-flag-surface` prints the
     // complete clap surface of the `serve` subcommand, hidden compatibility

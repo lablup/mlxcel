@@ -51,9 +51,9 @@ mlxcel-core = { path = "../mlxcel-core" }
 
 # Weight loading (bf16 safetensors -> f32). Only pulled in under the `iree`
 # feature, where the session uploads the real weights to the device.
-safetensors = { version = "0.4", optional = true }
+safetensors = { version = "0.8.0", optional = true }
 memmap2 = { version = "0.9", optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 # config.json parsing: the emitter reads model dimensions from it to generate the
 # graphs at load (always compiled with the crate), and the iree path also uses it.
 serde = { version = "1.0", features = ["derive"] }
@@ -65,4 +65,4 @@ cc = "1"
 [dev-dependencies]
 # Auxiliary artifact qualification is pure Rust and must remain testable
 # without enabling/linking the native IREE runtime.
-sha2 = "0.10"
+sha2 = "0.11"

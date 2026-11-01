@@ -462,7 +462,7 @@ async fn chat_completions_long_uniform_array_succeeds_end_to_end() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_server_health(&client, &base_url).await;
     let response = client
         .post(format!("{base_url}/v1/chat/completions"))

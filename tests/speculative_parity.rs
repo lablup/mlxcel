@@ -263,7 +263,7 @@ async fn server_round(
     eprintln!("[{pairing_name}] {label}: spawning mlxcel-server with args {args:?}");
     let mut child = spawn_server(&args);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
     eprintln!("[{pairing_name}] {label}: server healthy, submitting fixed prompt");
 

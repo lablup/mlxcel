@@ -158,7 +158,6 @@ fn head_norm_constructor_rejects_malformed_gamma_rank_and_shape() -> Result<()> 
 }
 
 fn tanh_oracle() -> Result<WeightMap> {
-    use sha2::{Digest, Sha256};
     let (name, digest) = if mx::default_device_is_gpu() {
         (
             "gelu-tanh-power.safetensors",
@@ -175,7 +174,7 @@ fn tanh_oracle() -> Result<WeightMap> {
         .join(name);
     let bytes = std::fs::read(&path)?;
     assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
+        crate::sha256_hex::sha256_hex(&bytes),
         digest,
         "authenticated tanh GELU fixture changed"
     );

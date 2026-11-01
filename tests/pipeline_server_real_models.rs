@@ -134,7 +134,7 @@ async fn pipeline_server_llama_multi_request_smoke() {
         "2",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let base_url_a = base_url.clone();
@@ -225,7 +225,7 @@ async fn pipeline_server_llama_dense_baseline_smoke() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let response = post_completion(

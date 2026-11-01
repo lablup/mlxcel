@@ -2418,7 +2418,7 @@ fn log_endpoints(startup: &ServerStartupConfig, addr: &str) {
         tracing::info!("  GET  {prefix}/slots                - Slot status");
     }
     if startup.slot_save_path.is_some() {
-        tracing::info!("  POST {prefix}/slots/:id_slot       - Slot save/restore/erase");
+        tracing::info!("  POST {prefix}/slots/{{id_slot}}       - Slot save/restore/erase");
     }
     tracing::info!("  GET  {prefix}/health               - Health check");
     if startup.webui_enabled {

@@ -120,7 +120,16 @@ fn api_prefix_accepts_a_leading_slash_without_a_trailing_one() {
 
 #[test]
 fn api_prefix_rejects_the_shapes_that_would_404_every_route() {
-    for bad in ["llama", "/llama/", "/", "//llama", "/llama?x=1", "/llama#f"] {
+    for bad in [
+        "llama",
+        "/llama/",
+        "/",
+        "//llama",
+        "/llama?x=1",
+        "/llama#f",
+        "/llama/{id}",
+        "/lla}ma",
+    ] {
         let err = resolve_api_prefix(bad)
             .err()
             .unwrap_or_else(|| panic!("{bad:?} must be rejected"));

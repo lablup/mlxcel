@@ -273,7 +273,7 @@ async fn multi_turn_chat_reports_cached_tokens_and_lowers_prefill_latency() {
         "4",
     ]);
 
-    let client = reqwest::Client::builder()
+    let client = mlxcel::http_tls::client_builder()
         .timeout(Duration::from_secs(120))
         .build()
         .expect("build reqwest client");
@@ -493,7 +493,7 @@ async fn multi_turn_chat_with_cache_disabled_never_reports_cached_tokens() {
         "--prompt-cache-enabled=false",
     ]);
 
-    let client = reqwest::Client::builder()
+    let client = mlxcel::http_tls::client_builder()
         .timeout(Duration::from_secs(120))
         .build()
         .expect("build reqwest client");
@@ -610,7 +610,7 @@ async fn identical_prompt_replay_restores_all_but_the_last_token() {
         "--apc-block-size",
         "1",
     ]);
-    let client = reqwest::Client::builder()
+    let client = mlxcel::http_tls::client_builder()
         .timeout(Duration::from_secs(120))
         .build()
         .expect("build reqwest client");

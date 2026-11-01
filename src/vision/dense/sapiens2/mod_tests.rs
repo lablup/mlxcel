@@ -11,7 +11,6 @@ struct StagePoseReference {
 
 fn write_stage_dump(path: &std::path::Path, tensors: &[(&str, &mlxcel_core::MlxArray)]) {
     use safetensors::tensor::{Dtype, TensorView};
-    use sha2::{Digest, Sha256};
 
     let owned: Vec<(String, Vec<usize>, Vec<u8>)> = tensors
         .iter()
@@ -44,7 +43,7 @@ fn write_stage_dump(path: &std::path::Path, tensors: &[(&str, &mlxcel_core::MlxA
             serde_json::json!({
                 "dtype": "F32",
                 "shape": shape,
-                "sha256": format!("{:x}", Sha256::digest(bytes)),
+                "sha256": crate::sha256_hex::sha256_hex(bytes),
             })
             .to_string(),
         );
@@ -53,9 +52,9 @@ fn write_stage_dump(path: &std::path::Path, tensors: &[(&str, &mlxcel_core::MlxA
         .expect("write Sapiens2 stage dump");
     let file = std::fs::read(path).expect("read Sapiens2 stage dump");
     eprintln!(
-        "Sapiens2 stage dump: path={}, sha256={:x}",
+        "Sapiens2 stage dump: path={}, sha256={}",
         path.display(),
-        Sha256::digest(file)
+        crate::sha256_hex::sha256_hex(file)
     );
 }
 

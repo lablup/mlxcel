@@ -158,7 +158,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session["system_prompt"] = json!(prompt);
     }
     outgoing.send(Message::Text(
-        json!({"type": "session.update", "session": session}).to_string(),
+        json!({"type": "session.update", "session": session})
+            .to_string()
+            .into(),
     ))?;
 
     let mut writer = None;
@@ -196,7 +198,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "audio": base64::engine::general_purpose::STANDARD.encode(bytes),
                                 "sample_rate": 16_000,
                             });
-                            if outgoing.send(Message::Text(append.to_string())).is_err() {
+                            if outgoing
+                                .send(Message::Text(append.to_string().into()))
+                                .is_err()
+                            {
                                 return;
                             }
                             if realtime {
@@ -204,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         let commit = json!({"type": "input_audio_buffer.commit"});
-                        let _ = outgoing.send(Message::Text(commit.to_string()));
+                        let _ = outgoing.send(Message::Text(commit.to_string().into()));
                     }));
                 }
             }

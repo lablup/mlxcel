@@ -72,7 +72,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
@@ -145,7 +144,7 @@ impl ModelIdentity {
         let config_path = model_dir.join("config.json");
         let config_bytes = std::fs::read(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?;
-        let config_sha256 = format!("{:x}", Sha256::digest(&config_bytes));
+        let config_sha256 = crate::sha256_hex::sha256_hex(&config_bytes);
         let mut weight_files = Vec::new();
         let entries = std::fs::read_dir(model_dir)
             .with_context(|| format!("failed to list {}", model_dir.display()))?;

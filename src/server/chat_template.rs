@@ -1023,7 +1023,7 @@ impl ChatTemplateProcessor {
         add_generation_prompt: bool,
     ) -> Result<String> {
         // Convert serde_json::Value to minijinja::Value
-        let messages_val = minijinja::Value::from_serialize(messages);
+        let messages_val = minijinja::Value::from(minijinja::value::Serde(messages));
 
         // Leave `tools` UNDEFINED when the request carries no tools, and count
         // an explicit empty list as no tools (issue #1597). Three guard shapes
@@ -1052,7 +1052,7 @@ impl ChatTemplateProcessor {
         // identically to undefined for every guard shape above.
         let tools_val = tools
             .filter(|t| !t.is_empty())
-            .map(minijinja::Value::from_serialize);
+            .map(|v| minijinja::Value::from(minijinja::value::Serde(v)));
 
         let context = build_template_context(
             messages_val,
@@ -1130,7 +1130,7 @@ impl ChatTemplateProcessor {
         // agrees on.
         let tools_val = tools
             .filter(|t| !t.is_empty())
-            .map(minijinja::Value::from_serialize);
+            .map(|v| minijinja::Value::from(minijinja::value::Serde(v)));
 
         let wrapped_messages = self.wrap_string_content.then(|| {
             messages
@@ -1139,8 +1139,8 @@ impl ChatTemplateProcessor {
                 .collect::<Vec<_>>()
         });
         let messages_val = match wrapped_messages.as_ref() {
-            Some(messages) => minijinja::Value::from_serialize(messages),
-            None => minijinja::Value::from_serialize(messages),
+            Some(messages) => minijinja::Value::from(minijinja::value::Serde(messages)),
+            None => minijinja::Value::from(minijinja::value::Serde(messages)),
         };
         let context = build_template_context(
             messages_val,
@@ -1168,7 +1168,7 @@ fn compile_chat_template_environment(
     template: &str,
 ) -> std::result::Result<Environment<'static>, minijinja::Error> {
     let mut env = Environment::new();
-    configure_environment(&mut env);
+    configure_environment(&mut env)?;
     env.add_template_owned(template_name.to_string(), template.to_string())?;
     Ok(env)
 }
@@ -1390,7 +1390,10 @@ fn build_template_context(
             dropped_keys.push(truncate_key_for_log(k));
             continue;
         }
-        owned.insert(k.clone(), minijinja::Value::from_serialize(v));
+        owned.insert(
+            k.clone(),
+            minijinja::Value::from(minijinja::value::Serde(v)),
+        );
     }
     if !dropped_keys.is_empty() {
         tracing::warn!(
@@ -1445,7 +1448,7 @@ fn build_template_context(
         );
     }
 
-    minijinja::Value::from_serialize(&owned)
+    minijinja::Value::from(minijinja::value::Serde(&owned))
 }
 
 /// Security (M-1): truncate an attacker-controlled kwargs key to at most 64
@@ -1638,10 +1641,17 @@ fn preprocess_python_conditional_expressions(mut out: String) -> String {
 }
 
 /// Configure a minijinja environment with common settings and Python-compat methods.
-fn configure_environment(env: &mut Environment<'_>) {
-    env.set_keep_trailing_newline(true);
-    env.set_trim_blocks(true);
-    env.set_lstrip_blocks(true);
+fn configure_environment(env: &mut Environment<'_>) -> std::result::Result<(), minijinja::Error> {
+    // Whitespace settings live in the syntax config since minijinja 3; the
+    // delimiters stay at their defaults.
+    let syntax = env
+        .syntax()
+        .to_builder()
+        .keep_trailing_newline(true)
+        .trim_blocks(true)
+        .lstrip_blocks(true)
+        .build()?;
+    env.set_syntax(syntax);
 
     // Bound rendering cost as defense-in-depth against denial-of-service from a
     // pathological chat template (e.g. deeply nested or effectively unbounded
@@ -1985,6 +1995,7 @@ fn configure_environment(env: &mut Environment<'_>) {
 
         Err(minijinja::Error::from(ErrorKind::UnknownMethod))
     });
+    Ok(())
 }
 
 /// Extract a token from config, handling both string and object formats
@@ -2279,7 +2290,7 @@ mod tests {
         add_generation_prompt: bool,
     ) -> Result<String> {
         let mut env = Environment::new();
-        configure_environment(&mut env);
+        configure_environment(&mut env)?;
 
         env.add_template("chat", &processor.template)
             .with_context(|| "Failed to parse chat template")?;
@@ -2291,7 +2302,7 @@ mod tests {
         // these helpers stop reproducing what the server renders.
         let tools_val = tools
             .filter(|t| !t.is_empty())
-            .map(minijinja::Value::from_serialize);
+            .map(|v| minijinja::Value::from(minijinja::value::Serde(v)));
         let context = build_template_context(
             messages_val,
             &processor.bos_token,
@@ -2317,7 +2328,7 @@ mod tests {
     ) -> Result<String> {
         fresh_render_context(
             processor,
-            minijinja::Value::from_serialize(messages),
+            minijinja::Value::from(minijinja::value::Serde(messages)),
             tools,
             kwargs,
             add_generation_prompt,
@@ -2333,7 +2344,7 @@ mod tests {
     ) -> Result<String> {
         fresh_render_context(
             processor,
-            minijinja::Value::from_serialize(messages),
+            minijinja::Value::from(minijinja::value::Serde(messages)),
             tools,
             kwargs,
             add_generation_prompt,

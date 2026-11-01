@@ -12,7 +12,7 @@ edition = "2024"
 # read the bf16 Llama weights, drive prefill/decode through the shim, check
 # token-exact. The original gate bin (src/main.rs) stays as the smoke test.
 [dependencies]
-safetensors = "0.4"
+safetensors = "0.8.0"
 memmap2 = "0.9"
 serde_json = "1"
 

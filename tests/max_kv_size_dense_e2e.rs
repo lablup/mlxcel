@@ -213,7 +213,7 @@ async fn run_completion(model_path: &str, port: u16, extra_args: &[&str]) -> Opt
     args.extend_from_slice(extra_args);
 
     let mut child = spawn_server(&args);
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
 
     if !wait_for_health_soft(&client, &base_url, Duration::from_secs(180)).await {
         stop_server(&mut child);

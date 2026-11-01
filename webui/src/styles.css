@@ -13,6 +13,8 @@ button { cursor: pointer; }
 .app-sidebar { min-width: 0; color: var(--color-text-primary); }
 .desktop-sidebar { width: 224px; height: 100%; border-width: 0 1px 0 0; border-radius: 0; box-shadow: none; }
 .brand-mark { min-height: 44px; display: flex; align-items: center; gap: var(--mx-space-2); min-width: 0; color: var(--color-text-primary); font-weight: 760; letter-spacing: -0.03em; }
+/* The monogram is decoration: as text it would be visible text missing from the link's accessible name (WCAG 2.5.3). */
+.brand-symbol::before { content: 'mx'; }
 .brand-symbol { flex: none; width: 26px; height: 26px; display: grid; place-items: center; border-radius: var(--mx-radius-xs); background: var(--color-overlay-hover); font-size: 0.78rem; letter-spacing: -0.05em; }
 .brand-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* In the bar the mark spans the side navigation's column, so the title starts over the content. */

@@ -86,7 +86,7 @@ async fn predict_serves_a_chat_completions_batch_against_a_real_model() {
         .spawn()
         .expect("spawn mlxcel-server");
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     let base_url = format!("http://127.0.0.1:{aip_port}");
     wait_for_health(&client, &base_url).await;
 

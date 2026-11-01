@@ -23,7 +23,6 @@ use axum::{
     routing::any,
 };
 use rust_embed::RustEmbed;
-use sha2::{Digest, Sha256};
 
 use super::security::{CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY};
 
@@ -48,7 +47,7 @@ where
     Router::new()
         .route(WEBUI_PREFIX, any(redirect_to_trailing_slash))
         .route(&format!("{WEBUI_PREFIX}/"), any(serve_index))
-        .route(&format!("{WEBUI_PREFIX}/*path"), any(serve_asset))
+        .route(&format!("{WEBUI_PREFIX}/{{*path}}"), any(serve_asset))
 }
 
 pub fn manifest_json() -> &'static str {
@@ -191,8 +190,7 @@ fn internal_error(_: axum::http::Error) -> Response {
 }
 
 fn etag_for(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    format!("\"{digest:x}\"")
+    format!("\"{}\"", crate::sha256_hex::sha256_hex(bytes))
 }
 
 fn cache_control_for(path: &str) -> &'static str {
