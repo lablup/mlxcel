@@ -116,6 +116,24 @@ pub fn fused_moe_enabled() -> bool {
         && mlxcel_core::fused_moe_kernels_available()
 }
 
+/// Whether [`SwitchGLU::forward`] tries the gate/up kernel for this batch.
+///
+/// Batched decode on M1 Ultra loses about 10% to it against `gather_qmm`:
+/// Qwen3-30B-A3B 4-bit is 94.2 vs 104.1 tok/s at B=2 and 115.3 vs 124.5 at B=4,
+/// and Mixtral 8x7B 4-bit is 34.3 vs 41.1 at B=4 (#2587). The M3 Ultra numbers
+/// in `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-10-21.md` keep
+/// it on where it was measured. M2 shares M1's narrow quantized paths and is
+/// declined with it, as is an unenumerated generation, on the rule
+/// [`AppleSiliconGen::wide_quantized_projections`] documents.
+///
+/// [`AppleSiliconGen::wide_quantized_projections`]: mlxcel_core::hardware::AppleSiliconGen::wide_quantized_projections
+pub(crate) fn switch_gate_up_preferred_in_forward(
+    tokens: i32,
+    silicon_gen: mlxcel_core::hardware::AppleSiliconGen,
+) -> bool {
+    tokens == 1 || silicon_gen.wide_quantized_projections()
+}
+
 /// Pure decision behind [`fused_moe_enabled`], split out so it can be unit-tested
 /// without mutating process-global environment state. `None` (unset) is on; an
 /// explicit `0`/`false`/`off`/`no` (case-insensitive, trimmed) is off; any other
@@ -1597,7 +1615,13 @@ impl SwitchGLU {
             let activated = self.activate(&x_gate, &x_up);
             let output = self.down_proj.forward(&activated, &rhs, true);
             scatter_unsort(&output, &inv_order, &indices_shape)
-        } else if let Some(activated) = self.forward_switch_gate_up_kernel(x, indices) {
+        } else if let Some(activated) = switch_gate_up_preferred_in_forward(
+            n_tokens,
+            mlxcel_core::hardware::get_hardware().silicon_gen,
+        )
+        .then(|| self.forward_switch_gate_up_kernel(x, indices))
+        .flatten()
+        {
             // The kernel's activated output is `[tokens, top_k, dff]`; the
             // down projection's indexed path consumes the gather layout's
             // `[tokens, top_k, 1, dff]`, so one ExpandDims bridges the shapes
@@ -2686,6 +2710,20 @@ mod tests {
                 fused_moe_enabled_from(Some(v)),
                 "{v:?} should keep the kernel on"
             );
+        }
+    }
+
+    #[test]
+    fn switch_gate_up_in_forward_is_batched_only_on_wide_generations() {
+        use mlxcel_core::hardware::AppleSiliconGen as Gen;
+        for silicon_gen in [Gen::M1, Gen::M2, Gen::M3, Gen::M4, Gen::M5, Gen::Unknown] {
+            assert!(switch_gate_up_preferred_in_forward(1, silicon_gen));
+        }
+        for silicon_gen in [Gen::M1, Gen::M2, Gen::Unknown] {
+            assert!(!switch_gate_up_preferred_in_forward(2, silicon_gen));
+        }
+        for silicon_gen in [Gen::M3, Gen::M4, Gen::M5] {
+            assert!(switch_gate_up_preferred_in_forward(2, silicon_gen));
         }
     }
 
