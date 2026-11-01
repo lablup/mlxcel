@@ -19,7 +19,7 @@
 //! its hosts file, or use an injected resolver, so they need no network.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use reqwest::dns::Resolve;
@@ -315,28 +315,67 @@ async fn one_domain_cannot_fill_the_dns_pool() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn permit_wait_does_not_eat_resolver_time() {
-    // The second lookup waits about 200 ms for the only permit, then its
-    // resolver takes 400 ms: 600 ms in all, past the 500 ms lookup timeout,
-    // which must start only once the permit is held (issue #2764).
+    // The second lookup waits for the only permit while the first resolver
+    // runs, then its own resolver runs: the lookup timeout must start only
+    // once the permit is held (issue #2764). The resolver signals when the
+    // permit is held so the interleaving is deterministic, and every margin
+    // is wide enough that scheduler noise on a loaded runner cannot flip a
+    // side (nightly 41227995596 flaked the original 100 ms resolve-vs-timeout
+    // margin): the second lookup waits ~1.5 s for the permit (3 s
+    // permit_wait), its resolver takes 1.5 s (2.4 s lookup timeout), and
+    // under the rejected semantics (timeout starts at lookup start) it would
+    // need about 3 s in all and fail.
     const LIMITS: DnsLimits = DnsLimits {
-        permit_wait: Duration::from_millis(300),
-        lookup_timeout: Duration::from_millis(500),
+        permit_wait: Duration::from_millis(3000),
+        lookup_timeout: Duration::from_millis(2400),
         per_domain: 4,
     };
-    let resolver = |host: &str, port: u16| -> std::io::Result<Vec<SocketAddr>> {
-        let hold = if host == "first.a.test" { 200 } else { 400 };
-        std::thread::sleep(Duration::from_millis(hold));
-        Ok(vec![SocketAddr::from(([93, 184, 216, 34], port))])
-    };
+    let first_started = Arc::new(AtomicBool::new(false));
     let pool = Arc::new(DnsPool::new(1));
     let first = {
         let pool = pool.clone();
+        let started = first_started.clone();
         tokio::spawn(async move {
-            lookup_bounded_with(resolver, "first.a.test", 443, LIMITS, &pool).await
+            lookup_bounded_with(
+                move |host: &str, port: u16| -> std::io::Result<Vec<SocketAddr>> {
+                    if host == "first.a.test" {
+                        started.store(true, Ordering::SeqCst);
+                    }
+                    std::thread::sleep(Duration::from_millis(1500));
+                    Ok(vec![SocketAddr::from(([93, 184, 216, 34], port))])
+                },
+                "first.a.test",
+                443,
+                LIMITS,
+                &pool,
+            )
+            .await
         })
     };
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    let second = lookup_bounded_with(resolver, "second.b.test", 443, LIMITS, &pool).await;
+    // Wait until the first lookup actually holds the permit (its resolver is
+    // running) instead of a fixed sleep, which raced runtime startup under
+    // load and could hand the permit to the second lookup first.
+    for _ in 0..1000 {
+        if first_started.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        first_started.load(Ordering::SeqCst),
+        "first lookup never started its resolver"
+    );
+    let second = lookup_bounded_with(
+        move |_host: &str, port: u16| -> std::io::Result<Vec<SocketAddr>> {
+            std::thread::sleep(Duration::from_millis(1500));
+            Ok(vec![SocketAddr::from(([93, 184, 216, 34], port))])
+        },
+        "second.b.test",
+        443,
+        LIMITS,
+        &pool,
+    )
+    .await;
     first
         .await
         .expect("first lookup task")
