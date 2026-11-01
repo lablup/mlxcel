@@ -3629,6 +3629,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
                 "{summary}"
             );
         }
+        // What MLX reads for the variables written at startup, including the
+        // graph capture switch `start_server` wrote above (#2803).
+        mlxcel_core::native_env::log_effective_native_env();
     }
 
     // Invalid explicit request caps fail startup, rather than silently disabling admission.

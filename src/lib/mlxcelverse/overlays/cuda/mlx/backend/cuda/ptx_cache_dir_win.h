@@ -33,11 +33,10 @@
 namespace mlx::core::cu {
 
 // Read a variable from the process environment block; empty when it is unset or
-// empty. ensure_persistent_ptx_cache sets MLX_PTX_CACHE_DIR after startup through
-// SetEnvironmentVariableW (Rust's set_var), and the C runtime's tables do not
-// follow that call: getenv reads the table built at startup, and _wgetenv the one
-// built at its first call in the process, which only shows the value when nothing
-// made a wide call before it.
+// empty. ensure_persistent_ptx_cache sets MLX_PTX_CACHE_DIR through set_native_var,
+// which reaches the C runtime too (lablup/mlxcel#2803), but getenv returns the
+// active code page and a path may hold a character outside it. A variable set by
+// plain Rust set_var (a test, for one) is in this block alone.
 inline std::filesystem::path windows_env_value(const wchar_t* name) {
   const DWORD needed = ::GetEnvironmentVariableW(name, nullptr, 0);
   if (needed == 0) {

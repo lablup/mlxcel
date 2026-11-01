@@ -511,7 +511,7 @@ pub fn apply_metal_ops_per_buffer_default() {
         // src/bin/mlx_server.rs, src/bin/bench_decode.rs), before any model load,
         // MLX op, or worker thread touches the environment, so no other thread is
         // accessing it here.
-        unsafe { std::env::set_var("MLX_MAX_OPS_PER_BUFFER", value.to_string()) };
+        unsafe { crate::native_env::set_native_var("MLX_MAX_OPS_PER_BUFFER", value.to_string()) };
     }
 }
 
@@ -750,7 +750,9 @@ pub fn apply_cuda_graph_cache_default() {
         // src/bin/mlx_server.rs, src/bin/bench_decode.rs,
         // src/bin/speculative_bench.rs), before any model load, MLX op, or worker
         // thread touches the environment, so no other thread is accessing it here.
-        unsafe { std::env::set_var("MLX_CUDA_GRAPH_CACHE_SIZE", value.to_string()) };
+        unsafe {
+            crate::native_env::set_native_var("MLX_CUDA_GRAPH_CACHE_SIZE", value.to_string())
+        };
     }
 }
 
@@ -800,7 +802,7 @@ pub fn apply_cuda_sdpa_cache_default() {
         // src/bin/bench_decode.rs, src/bin/speculative_bench.rs), before any
         // model load, MLX op, or worker thread touches the environment, so no
         // other thread is accessing it here.
-        unsafe { std::env::set_var("MLX_CUDA_SDPA_CACHE_SIZE", value.to_string()) };
+        unsafe { crate::native_env::set_native_var("MLX_CUDA_SDPA_CACHE_SIZE", value.to_string()) };
     }
 }
 

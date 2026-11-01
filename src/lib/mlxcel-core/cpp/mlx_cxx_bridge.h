@@ -565,6 +565,8 @@ std::unique_ptr<MlxArray> swiglu_mlp_forward(
 // One-shot report for MLXCEL_SHAPELESS_COMPILE_AUDIT=1. Each audited compile
 // site is compared against its eager graph on first-use and warmed calls.
 rust::String shapeless_compile_audit_report();
+bool native_env_read(rust::Str name, rust::Vec<uint8_t>& value);
+int32_t mlx_env_get_var_int(rust::Str name, int32_t default_value);
 
 // Compiled relu_squared: square(maximum(x, 0)) — single fused kernel
 std::unique_ptr<MlxArray> compiled_relu_squared(const MlxArray& x);

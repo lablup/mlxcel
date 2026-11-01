@@ -685,7 +685,8 @@ fn maybe_disable_cuda_graphs_for_model(model_type: ModelType) {
     // `hardware::apply_metal_ops_per_buffer_default`, and
     // `TurboKvCacheArgs::apply_to_environment`, all written upstream of runtime
     // bring-up.
-    unsafe { std::env::set_var("MLX_USE_CUDA_GRAPHS", "0") };
+    unsafe { mlxcel_core::native_env::set_native_var("MLX_USE_CUDA_GRAPHS", "0") };
+    mlxcel_core::native_env::log_effective_native_env();
     tracing::info!(
         "{family} detected: disabling CUDA graph capture (MLX_USE_CUDA_GRAPHS=0) to \
          avoid the decode-path graph hazard from issue {issue}. Set MLX_USE_CUDA_GRAPHS \

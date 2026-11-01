@@ -280,7 +280,7 @@ impl TunableOp for QmmTileOp {
         // process out), which runs before any model, server, or request worker
         // exists; the `synchronize_default()` above additionally parks MLX's
         // own stream worker, so no thread is inside `getenv` here.
-        unsafe { std::env::set_var(QMM_TILE_M_ENV, tile_m.to_string()) };
+        unsafe { crate::native_env::set_native_var(QMM_TILE_M_ENV, tile_m.to_string()) };
 
         let s = self.shape;
         let biases_ptr = workload
@@ -611,6 +611,6 @@ fn apply_env_once(var: &'static str, value: i64) -> Option<(&'static str, String
     // `apply_tuned_cuda_kernel_env`'s documented contract, callers invoke it
     // once at the top of `main`, before any model load, MLX op, or worker
     // thread touches the environment.
-    unsafe { std::env::set_var(var, &rendered) };
+    unsafe { crate::native_env::set_native_var(var, &rendered) };
     Some((var, rendered))
 }
