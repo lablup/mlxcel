@@ -45,6 +45,8 @@ Current GitHub-facing docs:
 
 ## mlxcelverse maintenance
 
+The [cuda-oxide feasibility review](mlxcelverse/cuda-oxide-feasibility.md) evaluates optional Rust-authored CUDA kernels, the MLX integration boundary, hardware/toolchain constraints, and a proposed validation plan.
+
 `mlxcelverse/rocm-overlay.md` is the procedure for keeping the ROCm overlay in step with the MLX pin and with the NripeshN/mlx fork it is vendored from, including the `scripts/mlxcelverse/` tools and the `make verify-rocm-overlay` gate. `mlxcelverse/upstream/` holds fork-side fix packages kept as historical reference, not submitted: fixes to the fork stay in the overlay and no PRs go to NripeshN/mlx; its README is the index.
 
 ## Architecture Decision Records
