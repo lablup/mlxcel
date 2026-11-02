@@ -390,3 +390,41 @@ fn build_startup_input_lang_bias_propagates_when_active() {
     let cfg = input.lang_bias_config.expect("resolved config");
     assert_eq!(cfg.bias_set.ordered.len(), 1);
 }
+
+// ── image-only serving (#2825) ─────────────────────────────────────────────
+
+#[test]
+fn image_model_without_model_leaves_the_chat_path_empty() {
+    let mut args = sample_args();
+    args.model = None;
+    args.image_model = Some(std::env::temp_dir().to_string_lossy().into_owned());
+    let input = build_startup_input(args).expect("image-only input resolves");
+    assert!(
+        input.model_path.as_os_str().is_empty(),
+        "image-only leaves the chat path empty"
+    );
+    assert!(input.image_model_path.is_some());
+}
+
+#[test]
+fn no_model_and_no_image_model_names_both_ways_to_start() {
+    let mut args = sample_args();
+    args.model = None;
+    args.image_model = None;
+    let err = build_startup_input(args).expect_err("no model source at all");
+    let message = err.to_string();
+    assert!(message.contains("--model/-m is required"), "{message}");
+    assert!(message.contains("--image-model"), "{message}");
+}
+
+#[test]
+fn image_only_refuses_embeddings_naming_both_flags() {
+    let mut args = sample_args();
+    args.model = None;
+    args.image_model = Some(std::env::temp_dir().to_string_lossy().into_owned());
+    args.embedding_compat.embedding = true;
+    let err = build_startup_input(args).expect_err("image-only cannot serve embeddings");
+    let message = err.to_string();
+    assert!(message.contains("--image-model"), "{message}");
+    assert!(message.contains("--embeddings"), "{message}");
+}

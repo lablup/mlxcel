@@ -442,6 +442,7 @@
     "embedding_serving_mode": [
       "any",
       "embedding_only",
+      "image_only",
       "rerank_only"
     ],
     "kv_cache_budget": [

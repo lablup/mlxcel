@@ -132,18 +132,28 @@ impl MlxcelTokenizer {
             .is_some_and(|bos| !bos.is_empty() && prompt.starts_with(bos.as_str()))
     }
 
-    /// Create a stub tokenizer for unit tests.
+    /// Create an empty tokenizer that returns identity results.
     ///
-    /// The stub returns empty/identity results; it exists so that types like
-    /// `StreamingDecodeState` can be constructed without loading a real model.
-    #[cfg(test)]
-    pub(crate) fn stub() -> Self {
+    /// Used by image-only serving (`--image-model` with no `-m`), where no
+    /// chat checkpoint is loaded and every chat or tokenizer route refuses
+    /// before touching this value (#2825). The stub constructor below shares
+    /// it so tests exercise the same value the server builds.
+    pub(crate) fn empty() -> Self {
         // Build a minimal HuggingFace tokenizer with a single-character
         // alphabet so encode/decode never panic.
         use tokenizers::models::bpe::BPE;
         let model = BPE::default();
         let tokenizer = tokenizers::Tokenizer::new(model);
         Self::HuggingFace(tokenizer)
+    }
+
+    /// Create a stub tokenizer for unit tests.
+    ///
+    /// The stub returns empty/identity results; it exists so that types like
+    /// `StreamingDecodeState` can be constructed without loading a real model.
+    #[cfg(test)]
+    pub(crate) fn stub() -> Self {
+        Self::empty()
     }
 
     /// Create a minimal tokenizer with byte-fallback support for regression tests

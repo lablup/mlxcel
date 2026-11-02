@@ -52,6 +52,9 @@ fn side_model_ready(state: &AppState) -> bool {
     match state.config.embedding_serving_mode {
         EmbeddingServingMode::RerankOnly => state.rerank_model.is_some(),
         EmbeddingServingMode::EmbeddingOnly => state.embedding_model.is_some(),
+        // The image worker finishes loading before the listener binds, so its
+        // presence is the same readiness signal (#2825).
+        EmbeddingServingMode::ImageOnly => state.image_model.is_some(),
         EmbeddingServingMode::Any => true,
     }
 }

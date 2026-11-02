@@ -439,6 +439,11 @@ fn load_llama_family_from_weights(
 /// Returns an empty default set when the file is missing, unreadable, or
 /// malformed so legacy callers keep their built-in sampling defaults.
 pub fn read_generation_config_defaults(model_dir: &Path) -> GenerationConfigDefaults {
+    // An empty path (image-only serving, #2825) would resolve to the process
+    // working directory; there is no checkpoint there to read.
+    if model_dir.as_os_str().is_empty() {
+        return GenerationConfigDefaults::default();
+    }
     let config_path = model_dir.join("generation_config.json");
     let Ok(content) = std::fs::read_to_string(&config_path) else {
         return GenerationConfigDefaults::default();
@@ -562,6 +567,11 @@ pub fn read_hidden_size(model_dir: &Path) -> Option<usize> {
 /// context length; callers fall back to
 /// [`crate::cli::max_tokens::DEFAULT_CONTEXT_WINDOW_FALLBACK`].
 pub fn read_model_context_window(model_dir: &Path) -> Option<usize> {
+    // An empty path (image-only serving, #2825) would resolve to the process
+    // working directory; there is no checkpoint there to read.
+    if model_dir.as_os_str().is_empty() {
+        return None;
+    }
     let config_path = resolve_model_dir(model_dir).join("config.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: serde_json::Value = parse_model_config(&content).ok()?;

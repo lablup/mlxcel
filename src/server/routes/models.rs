@@ -36,8 +36,13 @@ fn b10621_model_info(state: &AppState, created: i64) -> serde_json::Value {
     // routes this id may be sent to. The primary entry matters most: when
     // `-m` is itself an embedding or reranker checkpoint its id is the only
     // one listed, and without this a client cannot tell that chat would 501.
+    // Image-only serving (#2825) reports the image id and never `completion`.
+    let image_only = state.config.embedding_serving_mode
+        == crate::server::config::EmbeddingServingMode::ImageOnly;
     let mut capabilities: Vec<&'static str> = Vec::new();
-    if !state.model_provider.is_chat_unavailable()
+    if image_only {
+        capabilities.push("image");
+    } else if !state.model_provider.is_chat_unavailable()
         && !state.config.embedding_serving_mode.blocks_generation()
     {
         capabilities.push("completion");
@@ -84,7 +89,13 @@ fn b10621_model_info(state: &AppState, created: i64) -> serde_json::Value {
 fn b10621_ollama_entry(state: &AppState) -> serde_json::Value {
     let multimodal =
         state.media_support.image || state.media_support.video() || state.media_support.audio;
-    let capabilities = if multimodal {
+    // Image-only serving advertises the image id with only the `image`
+    // capability (#2825); with a chat model the list is unchanged.
+    let capabilities = if state.config.embedding_serving_mode
+        == crate::server::config::EmbeddingServingMode::ImageOnly
+    {
+        serde_json::json!(["image"])
+    } else if multimodal {
         serde_json::json!(["completion", "multimodal"])
     } else {
         serde_json::json!(["completion"])

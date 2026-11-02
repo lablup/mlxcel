@@ -66,6 +66,12 @@ fn facts_cache() -> &'static Mutex<HashMap<PathBuf, ModelFacts>> {
 
 /// Facts for the checkpoint at `model_path`, cached per path.
 pub fn model_facts(model_path: &Path) -> ModelFacts {
+    // Image-only serving has no chat checkpoint, and an empty path would make
+    // `join` read `config.json` / `*.safetensors` from the process working
+    // directory (#2825). Report the zero facts instead.
+    if model_path.as_os_str().is_empty() {
+        return ModelFacts::default();
+    }
     let key = model_path
         .canonicalize()
         .unwrap_or_else(|_| model_path.to_path_buf());
