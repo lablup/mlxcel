@@ -87,4 +87,12 @@ pub trait ImageModelProvider: Send + Sync {
     fn default_edit_size(&self, width: u32, height: u32) -> (u32, u32) {
         (width, height)
     }
+
+    /// Ask the provider's worker to exit and wait until it has released the
+    /// model, up to `timeout`.
+    ///
+    /// Called by the process exit path before `main` returns so the worker's
+    /// MLX arrays are freed on the worker thread first (#2738, #2745).
+    /// Idempotent; `Err` names the timeout or carries the panic message.
+    fn shutdown_and_wait(&self, timeout: std::time::Duration) -> anyhow::Result<()>;
 }

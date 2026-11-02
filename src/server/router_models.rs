@@ -60,6 +60,17 @@ use super::{AppState, ChatTemplateProcessor, ModelProvider, ServerStartupConfig}
 const ROUTER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const ROUTER_WORKER_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const ROUTER_LOAD_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long the router's `shutdown_all` drain waits for each model worker at
+/// process exit (#2738).
+///
+/// The drain covers every worker in the pool; `ROUTER_WORKER_EXIT_TIMEOUT`
+/// bounds one worker's exit observation inside it. Model load has no
+/// cancellation point, so a worker still loading when this deadline expires
+/// keeps running. `main` then returns while that worker may still free MLX
+/// arrays, and a CPU build (the only backend whose allocator is a
+/// function-local static) may abort with `pure virtual method called` at
+/// exit. The drain logs that it finished with pending resources instead of
+/// treating it as a clean exit.
 pub const ROUTER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
 
 #[cfg(test)]

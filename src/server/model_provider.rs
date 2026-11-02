@@ -691,7 +691,35 @@ impl WorkerExitObserver {
     }
 }
 
-fn observe_worker_exit(
+/// Why a worker did not confirm a clean exit within its deadline.
+///
+/// Kept as a typed error so a caller that owns the process exit path can tell
+/// a worker that is still running from one that panicked, and say the right
+/// thing in its log and returned error (#2745).
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerShutdownError {
+    /// The worker had not exited when the caller's deadline expired. A worker
+    /// that is still loading cannot be cancelled, and on a CPU build a free
+    /// that reaches MLX after `main` returns aborts the process.
+    #[error("server model worker did not exit within {timeout:?}")]
+    Timeout {
+        /// The deadline the caller allowed.
+        timeout: Duration,
+    },
+    /// The worker thread panicked during teardown.
+    #[error("server model worker panicked: {message}")]
+    Panicked {
+        /// The panic payload rendered as text.
+        message: String,
+    },
+}
+
+/// Watch a worker thread and report when it has exited.
+///
+/// Shared by every worker that must be joined before the process returns from
+/// `main`: the chat model worker and the audio, embedding, image, rerank and
+/// realtime side workers (#2738, #2745).
+pub(crate) fn observe_worker_exit(
     worker_handle: thread::JoinHandle<()>,
 ) -> (thread::JoinHandle<()>, Arc<WorkerExitObserver>) {
     let observer = Arc::new(WorkerExitObserver::default());
@@ -701,6 +729,62 @@ fn observe_worker_exit(
         observer_for_thread.mark_observed(panic_message);
     });
     (watcher, observer)
+}
+
+/// Enqueue a `Shutdown` command on a bounded worker channel, giving up after
+/// `timeout`.
+///
+/// Worker command channels are bounded and use `try_send` for admission, so a
+/// full queue means the worker is still busy. Retrying with a bounded backoff
+/// keeps the exit join inside its deadline; a plain `send` could block past it
+/// behind a long inference.
+///
+/// Returns `true` when the command was enqueued. `false` means the worker is
+/// already gone (the channel disconnected) or no slot freed before the
+/// deadline; the caller then waits on the exit observer with whatever time is
+/// left.
+pub(crate) fn enqueue_shutdown_command<T>(
+    sender: &Mutex<mpsc::SyncSender<T>>,
+    mut command: T,
+    timeout: Duration,
+) -> bool {
+    let started = std::time::Instant::now();
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        let queued = match sender.lock() {
+            Ok(sender) => sender.try_send(command),
+            Err(_) => return false,
+        };
+        match queued {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            Err(mpsc::TrySendError::Full(returned)) => command = returned,
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return false;
+        }
+        std::thread::sleep(backoff.min(timeout - elapsed));
+        backoff = (backoff * 2).min(Duration::from_millis(50));
+    }
+}
+
+/// Wait for `observer` up to `timeout` and turn its state into a `Result`.
+///
+/// `what` names the worker in the error, so a side worker failure reads
+/// distinctly from the chat model worker's.
+pub(crate) fn wait_for_worker_exit(
+    observer: &WorkerExitObserver,
+    timeout: Duration,
+    what: &str,
+) -> Result<()> {
+    if !observer.wait_timeout(timeout) {
+        anyhow::bail!("{what} did not exit within {timeout:?}");
+    }
+    if let Some(message) = observer.panic_message() {
+        anyhow::bail!("{what} panicked: {message}");
+    }
+    Ok(())
 }
 
 fn worker_panic_message(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
@@ -2710,15 +2794,22 @@ impl ModelProvider {
     /// (the worker is already past its request loop). Returns `Err` naming the
     /// timeout when the worker is still running after `timeout`, and `Err`
     /// carrying the panic message when the worker panicked.
+    ///
+    /// The error is a [`WorkerShutdownError`], so an exit-path caller can tell
+    /// a timeout from a panic. A timeout means the worker is still running,
+    /// and on a CPU build the process may abort with `pure virtual method
+    /// called` at exit if it does not finish before `main` returns.
     pub fn shutdown_and_wait(&self, timeout: Duration) -> Result<()> {
         let _ = send_shutdown_signal(&self.request_tx);
         if !self.worker_exit.wait_timeout(timeout) {
             // `Debug` keeps whole seconds as "120s" and prints a sub-second
             // timeout as "500ms" instead of "0s".
-            anyhow::bail!("server model worker did not exit within {timeout:?}");
+            return Err(anyhow::Error::new(WorkerShutdownError::Timeout { timeout }));
         }
         if let Some(message) = self.worker_exit.panic_message() {
-            anyhow::bail!("server model worker panicked: {message}");
+            return Err(anyhow::Error::new(WorkerShutdownError::Panicked {
+                message,
+            }));
         }
         Ok(())
     }
@@ -2753,6 +2844,13 @@ fn send_shutdown_signal(request_tx: &mpsc::Sender<ModelRequest>) -> bool {
 /// How long a process-owning caller of [`ModelProvider::shutdown_and_wait`]
 /// (the in-process chat server, `start_server`, the pipeline smoke tests)
 /// waits for the worker thread to release the model before giving up.
+///
+/// The wait is the only bound on exit: model load has no cancellation point,
+/// so a worker that is still loading when this deadline expires keeps
+/// running. `main` then returns while that worker may still free MLX arrays,
+/// and a CPU build (the only backend whose allocator is a function-local
+/// static) may abort with `pure virtual method called` at exit. The timeout
+/// is logged with that warning rather than treated as a clean exit.
 pub const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Default timeout applied after the first generated token has been received

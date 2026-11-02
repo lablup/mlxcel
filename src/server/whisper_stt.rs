@@ -90,6 +90,10 @@ impl AudioModelProvider for WhisperSttProvider {
     ) -> Result<AudioSynthesizeOutput, AudioModelError> {
         self.worker.synthesize(input)
     }
+
+    fn shutdown_and_wait(&self, timeout: std::time::Duration) -> anyhow::Result<()> {
+        self.worker.shutdown_and_wait(timeout)
+    }
 }
 
 /// Whisper [`AudioEngine`] confined to the worker thread that loaded it.

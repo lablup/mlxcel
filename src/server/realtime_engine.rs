@@ -32,8 +32,9 @@
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
@@ -42,6 +43,9 @@ use mlxcel_core::streams::{
 use tokio::sync::oneshot;
 
 use crate::models::nemotron_voicechat::streaming::VoiceChatError;
+use crate::server::model_provider::{
+    WorkerExitObserver, observe_worker_exit, wait_for_worker_exit,
+};
 use crate::server::realtime_protocol::{ServerEvent, serialize_event};
 pub use crate::server::realtime_session::{
     RealtimeModel, RealtimeSession, RealtimeSessionConfig, RealtimeSessionInfo,
@@ -114,7 +118,11 @@ pub struct RealtimeVoiceChatEngine {
     commands: mpsc::Sender<Message>,
     reserved: Mutex<Option<String>>,
     model_id: String,
+    /// Watcher thread handle; joining it waits for the engine thread to drop
+    /// the model. Taken in `Drop`.
     handle: Mutex<Option<JoinHandle<()>>>,
+    /// Signalled once the engine thread has returned and dropped the model.
+    worker_exit: Arc<WorkerExitObserver>,
 }
 
 impl fmt::Debug for RealtimeVoiceChatEngine {
@@ -153,12 +161,16 @@ impl RealtimeVoiceChatEngine {
             .spawn(move || worker_loop(loader, receiver, ready_tx))
             .map_err(|err| format!("failed to spawn the realtime engine thread: {err}"))?;
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
-                commands,
-                reserved: Mutex::new(None),
-                model_id: model_id.into(),
-                handle: Mutex::new(Some(handle)),
-            }),
+            Ok(Ok(())) => {
+                let (handle, worker_exit) = observe_worker_exit(handle);
+                Ok(Self {
+                    commands,
+                    reserved: Mutex::new(None),
+                    model_id: model_id.into(),
+                    handle: Mutex::new(Some(handle)),
+                    worker_exit,
+                })
+            }
             Ok(Err(message)) => {
                 let _ = handle.join();
                 Err(format!(
@@ -185,6 +197,18 @@ impl RealtimeVoiceChatEngine {
 
     pub fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    /// Ask the engine thread to exit and wait until it has released the model.
+    ///
+    /// The process exit path calls this before `main` returns so the model's
+    /// MLX arrays are freed on the engine thread first (#2738, #2745).
+    /// Idempotent: an already-exited engine returns `Ok` at once. Returns
+    /// `Err` when the engine is still running after `timeout` or panicked
+    /// during teardown.
+    pub fn shutdown_and_wait(&self, timeout: Duration) -> anyhow::Result<()> {
+        let _ = self.commands.send(Message::Shutdown);
+        wait_for_worker_exit(&self.worker_exit, timeout, "realtime VoiceChat engine")
     }
 
     /// Admit `session_id` as the one connection; `false` when another holds

@@ -78,6 +78,10 @@ impl EmbeddingModelProvider for SideEmbeddingProvider {
     fn max_length(&self) -> usize {
         1
     }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 struct SideRerankProvider;
@@ -107,6 +111,10 @@ impl RerankModelProvider for SideRerankProvider {
     fn max_length(&self) -> usize {
         1
     }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 struct SideAudioProvider;
@@ -114,6 +122,10 @@ struct SideAudioProvider;
 impl AudioModelProvider for SideAudioProvider {
     fn supports(&self, kind: AudioModelKind) -> bool {
         kind == AudioModelKind::Stt
+    }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 

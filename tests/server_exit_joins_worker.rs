@@ -41,6 +41,10 @@ use std::time::{Duration, Instant};
 use common::{repo_binary_path, repo_model_dir};
 
 const MODEL: &str = "qwen3-0.6b-4bit";
+/// Side-model checkpoints for the #2745 cases. Each test skips when its
+/// checkpoint is absent.
+const WHISPER_MODEL: &str = "whisper-base";
+const EMBEDDING_MODEL: &str = "embeddinggemma-300m-4bit";
 
 /// Generous bound for "load a 0.6B checkpoint, fail to bind, join the
 /// worker": the join itself is bounded by `WORKER_EXIT_TIMEOUT` (120 s).
@@ -118,8 +122,8 @@ fn assert_exited_through_the_join(outcome: &ChildOutcome, join_log_line: &str) {
     );
 }
 
-fn skip_without_model() -> Option<std::path::PathBuf> {
-    let model_dir = repo_model_dir(MODEL);
+fn skip_without_model(name: &str) -> Option<std::path::PathBuf> {
+    let model_dir = repo_model_dir(name);
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",
@@ -144,7 +148,7 @@ fn path_arg(path: &Path) -> String {
 
 #[test]
 fn single_model_server_joins_its_worker_when_the_listener_fails() {
-    let Some(model_dir) = skip_without_model() else {
+    let Some(model_dir) = skip_without_model(MODEL) else {
         return;
     };
     let (_held, port) = held_port();
@@ -163,7 +167,7 @@ fn single_model_server_joins_its_worker_when_the_listener_fails() {
 
 #[test]
 fn router_server_drains_a_loading_model_when_the_listener_fails() {
-    let Some(model_dir) = skip_without_model() else {
+    let Some(model_dir) = skip_without_model(MODEL) else {
         return;
     };
     let preset_dir = tempfile::tempdir().expect("temp dir for the preset");
@@ -194,5 +198,108 @@ fn router_server_drains_a_loading_model_when_the_listener_fails() {
     assert_exited_through_the_join(
         &outcome,
         "router: lifecycle shutdown completed attempted=1 completed=1",
+    );
+}
+
+/// A single-model server whose `-m` is a Whisper checkpoint loaded on the
+/// audio worker must join that side worker on the bind-failure exit (#2745).
+#[test]
+fn whisper_server_joins_its_side_worker_when_the_listener_fails() {
+    let Some(model_dir) = skip_without_model(WHISPER_MODEL) else {
+        return;
+    };
+    let (_held, port) = held_port();
+    let model_arg = path_arg(&model_dir);
+    let outcome = run_server_until_exit(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port,
+        "--no-warmup",
+    ]);
+    assert_exited_through_the_join(&outcome, "side model workers exited before process exit");
+}
+
+/// A side-model resolution error after the embedding worker loaded must still
+/// shut that worker down before the process exits (#2745).
+#[test]
+fn embedding_worker_is_joined_when_a_later_side_model_fails_to_load() {
+    let (Some(chat_dir), Some(embedding_dir)) = (
+        skip_without_model(MODEL),
+        skip_without_model(EMBEDDING_MODEL),
+    ) else {
+        return;
+    };
+    // A path that cannot be a checkpoint makes `--image-model` fail after the
+    // embedding worker has already loaded.
+    let missing_image =
+        std::env::temp_dir().join(format!("mlxcel-absent-image-model-{}", std::process::id()));
+    let (_held, port) = held_port();
+    let chat_arg = path_arg(&chat_dir);
+    let embedding_arg = path_arg(&embedding_dir);
+    let image_arg = path_arg(&missing_image);
+    let outcome = run_server_until_exit(&[
+        "-m",
+        &chat_arg,
+        "--embedding-model",
+        &embedding_arg,
+        "--image-model",
+        &image_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port,
+        "--no-warmup",
+    ]);
+    assert_exited_through_the_join(&outcome, "side model workers exited before process exit");
+    let logs = format!(
+        "--- stdout ---\n{}\n--- stderr ---\n{}",
+        outcome.stdout, outcome.stderr
+    );
+    assert!(
+        logs.contains("failed to load --image-model"),
+        "the resolution error must be the exit reason\n{logs}"
+    );
+}
+
+/// Under `--sleep-idle-seconds`, a shutdown request must exit the sleeping
+/// worker without reloading the model (#2745).
+#[test]
+fn sleeping_worker_exits_on_shutdown_without_reloading() {
+    let Some(model_dir) = skip_without_model(MODEL) else {
+        return;
+    };
+    let config = mlxcel::server::ServerConfig {
+        sleep_idle_seconds: 1,
+        ..Default::default()
+    };
+    let provider = mlxcel::server::ModelProvider::new_with_server_config(
+        model_dir,
+        None,
+        &config,
+        std::sync::Arc::new(mlxcel::server::BatchMetrics::new()),
+        std::sync::Arc::new(mlxcel::server::batch::BatchObservability::new()),
+    )
+    .expect("spawn the model worker");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !provider.is_sleeping() {
+        assert!(
+            Instant::now() < deadline,
+            "the worker never entered idle sleep within 60 s"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    provider
+        .shutdown_and_wait(Duration::from_secs(10))
+        .expect("a sleeping worker must exit on a shutdown request");
+    // The reload path clears the flag; a shutdown that breaks before
+    // reloading leaves it set.
+    assert!(
+        provider.is_sleeping(),
+        "shutdown while sleeping must not wake and reload the model"
     );
 }
