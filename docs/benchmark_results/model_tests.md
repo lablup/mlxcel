@@ -16,6 +16,7 @@ M5 Max, and mlx-lm / mlx-vlm baselines, see
 |----------|------|--------|-------------|
 | Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-09-06 through 2026-09-08 at `30ab5a39`, with 18 rows re-measured on 2026-09-08 after lablup/mlxcel#1709 and #1711 (mlxcel 0.7.0-beta.1, MLX pin `9a795735`). Full text and VLM re-measurement on the pp512/tg128 shape against same-day mlx-lm 0.31.3 and mlx-vlm 0.6.17 baselines, so this host is now directly comparable to M5 Max. Earlier sweeps used a different shape and were not carried forward. Speculative and batched-serving families not yet re-run |
 | MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-09-09 partial pass at `0accedd9`: 21 text checkpoints measured here for the first time, having arrived when the two hosts' stores were synchronised, plus four rows re-measured at `fea72611` to close the commit gap against M1 Ultra's 2026-09-08 pass. Full sweep 2026-09-06 at `a50ff440` (mlxcel 0.7.0-beta.1, MLX pin `9a795735`). First sweep on the fixed pp512/tg128 interval; prefill is not comparable to any earlier sweep on this host. M1 Ultra has since been re-swept on the same shape, so the two hosts are compared under Cross-Hardware Comparison below. Full text, VLM, speculative, batched-serving and embeddings campaign |
+| AMD Strix Halo gfx1151 (ROCm) | [model_tests_strixhalo-gfx1151.md](model_tests_strixhalo-gfx1151.md) | Active | 2026-10-30 through 2026-10-31 at `2806f500` (mlxcel 0.8.0-beta.1, MLX pin `7ca40033`): all 44 checkpoints under `models/`, three rounds on pp512/tg128, plus a three-model B = 1/2/4 ladder. No same-revision mlx-lm baseline on this host |
 | NVIDIA GB10 (DGX Spark) | [model_tests_gb10.md](model_tests_gb10.md) | Active | 2026-07-12 (mlxcel 0.4.0-rc.1, full 159-dir sweep; 7 memory-gated skips) |
 
 ## Benchmark CSVs
@@ -24,6 +25,8 @@ Current source-of-truth data lives in `benchmarks/`:
 
 | CSV | Hardware | Date | Type |
 |-----|----------|------|------|
+| `rocm_strixhalo-gfx1151_2026-10-30_models44.csv` | Strix Halo gfx1151 | 2026-10-30 (mlxcel 0.8.0-beta.1 at `2806f500`, MLX pin `7ca40033`, ROCm overlay `75915908`, `--cooldown 30 --big-cooldown 30`; 44 checkpoints, 3 rounds, 132 of 132 rows ok; rows after midnight are dated 2026-10-31) | Text (VLM checkpoints on their text decoder) |
+| `rocm_strixhalo-gfx1151_batch_2026-10-31.csv` | Strix Halo gfx1151 | 2026-10-31 (`2806f500`, `--parallel 4 --max-batch-prefill 4`, pp512/tg128; 3 models, B = 1/2/4) | Batched serving |
 | `metal_m1ultra_2026-09-06.csv` | M1 Ultra | 2026-09-06 (mlxcel 0.7.0-beta.1 at `30ab5a39`, MLX pin `9a795735`, `--cooldown 30 --big-cooldown 30`; 199 directories, 165 measured, 16 collapsed by checkpoint dedup #1615. The 15 failures are all non-targets or one unsupported architecture, none a runtime defect) | Text |
 | `pylm_m1ultra_2026-09-06.csv` | M1 Ultra | 2026-09-06 (mlx-lm 0.31.3, same host and day; 123 measured, giving 106 models both sides ran. Median decode parity 100%, quartiles 98 and 105; MoE median 106% against dense 100%) | Text baseline |
 | `metal_m1ultra_vlm_2026-09-07.csv` | M1 Ultra | 2026-09-07 (mlxcel 0.7.0-beta.1 at `30ab5a39`; 87 VLM checkpoints after the non-VLM filter, 70 measured. Every row has 128 generated tokens) | VLM |
@@ -86,6 +89,8 @@ Current source-of-truth data lives in `benchmarks/`:
 Two questions live in these tables and they answer differently. **Does mlxcel beat the Python reference on a given machine**, and **how much faster is one machine than another**. Read them in that order: a cross-hardware ratio taken on mlxcel alone cannot tell a hardware gap from a place where mlxcel fails to exploit the hardware.
 
 M1 Ultra and M5 Max are directly comparable as of the 2026-09-06 sweeps: same mlxcel version (0.7.0-beta.1), same MLX pin (`9a795735`), same pp512/tg128 shape, same cooldowns, each against a same-day mlx-lm 0.31.3 run on its own host. Their mlxcel commits differ by eight (`30ab5a39` against `a50ff440`), of which one touches shared inference code (#1656, pre-Ampere CUDA bf16 handling) and is inert on Metal. Rows added after that date do not share a commit: M1 Ultra re-measured 18 of them on 2026-09-08 and M5 Max added 21 checkpoints on 2026-09-09, so any single row can pair readings taken across a fix. Section 3 says what that cost and how it was caught. GB10 is still on 0.4.0-rc.1 and the old measurement shape, so it is absent from both tables below; see [model_tests_gb10.md](model_tests_gb10.md) until it is re-swept.
+
+Strix Halo gfx1151 is not in the tables below: its 2026-10-30 sweep is at `2806f500` and MLX pin `7ca40033`, which differ from the Apple Silicon sweeps' mlxcel revisions and MLX pin, and it has no same-revision Python baseline. See [its own page](model_tests_strixhalo-gfx1151.md).
 
 ### 1. mlxcel against the Python baseline, on each machine
 
