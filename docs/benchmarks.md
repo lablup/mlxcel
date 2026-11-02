@@ -16,7 +16,7 @@ For every benchmark run, include:
 - model checkpoint name and quantization format;
 - prompt length, requested decode length, batch size, and warmup policy;
 - cache mode and server/generation flags;
-- raw per-model prefill and decode throughput where available;
+- the per-model prefill and decode rows, committed as a CSV result file;
 - for op-level microbenchmarks, the memory mode (warm or cold last-level cache) and the rotation count, per the section below.
 
 Averages are useful only after the raw rows are available. Avoid statements such
@@ -36,7 +36,28 @@ opts out for a bisect.
 
 ## What to keep under `benchmark_results/data/`
 
-Keep what a reader needs to check or repeat a report: summaries, machine-readable results, drivers, instrumentation patches and provenance. Do not commit per-run server logs, build, format or lint logs, or empty captures; `make verify-benchmark-raw-logs` fails on them. A log a report cites by name or indexes in its manifest goes in `scripts/ci/benchmark_raw_logs_allowlist.txt`. Evidence from a failed attempt can be stored as a `.7z` of at most 32 KB, with its conclusions in plain text next to it.
+Keep what a reader needs to check or repeat a report: the Markdown record, the
+measurement result as **CSV**, drivers, instrumentation patches and provenance.
+The CSV is the machine-readable evidence: one row per measurement, carrying the
+columns the record's tables are built from.
+
+Do not commit raw per-run records or captures:
+
+- JSONL/NDJSON record streams from a driver, or any other raw dump of per-run
+  measurements. Convert the rows to CSV and commit that.
+- per-run server logs, build, format or lint logs, and empty captures.
+  `make verify-benchmark-raw-logs` fails on these.
+- driver stdout/stderr captures. A derived summary belongs in the Markdown
+  record, not in a committed text dump.
+
+A log a report cites by name or indexes in its manifest goes in
+`scripts/ci/benchmark_raw_logs_allowlist.txt`. Raw record streams cannot be
+allowlisted; `scripts/ci/benchmark_raw_data_baseline.txt` lists the files that
+predate this rule and can only shrink. Files under a campaign's `harness/`
+directory are drivers and their inputs, not results, so they are exempt. The
+check enforces the log and record stream parts; captured driver output is up to
+review. Evidence from a failed attempt can be stored as a `.7z` of at most 32 KB,
+with its conclusions in plain text next to it.
 
 ## Current result snapshot
 
