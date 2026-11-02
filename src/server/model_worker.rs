@@ -937,6 +937,15 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     "Server is entering sleeping state, model freed"
                 );
                 match request_rx.recv() {
+                    Ok(ModelRequest::Shutdown) => {
+                        // A shutdown is not a wake request: reload the model
+                        // and a slow load reopens the #2738 exit race, and
+                        // nothing waits on it anyway. Leave `sleeping` set so
+                        // the observable state stays truthful until exit
+                        // (#2745).
+                        tracing::info!("Shutdown requested while sleeping, worker exiting");
+                        break;
+                    }
                     Ok(req) => {
                         sleeping.store(false, Ordering::Release);
                         tracing::info!("Server is exiting sleeping state, reloading model");

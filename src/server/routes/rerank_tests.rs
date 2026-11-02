@@ -69,6 +69,10 @@ impl RerankModelProvider for NonFiniteRerankProvider {
     fn max_length(&self) -> usize {
         32
     }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 fn stub_provider(kind: RerankerKind, supports_images: bool) -> Arc<dyn RerankModelProvider> {

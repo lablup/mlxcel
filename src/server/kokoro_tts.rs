@@ -114,6 +114,10 @@ impl AudioModelProvider for KokoroTtsProvider {
     ) -> Result<AudioSynthesizeOutput, AudioModelError> {
         self.worker.synthesize(input)
     }
+
+    fn shutdown_and_wait(&self, timeout: std::time::Duration) -> anyhow::Result<()> {
+        self.worker.shutdown_and_wait(timeout)
+    }
 }
 
 /// Kokoro [`AudioEngine`] confined to the worker thread that loaded it.

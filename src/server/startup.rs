@@ -3128,13 +3128,86 @@ async fn resolve_distributed_startup(
     })
 }
 
+/// A stage service that runs on its own thread and must be joined before the
+/// process returns from `main`.
+///
+/// `exited` borrows the handle so the same value can be shut down after the
+/// select completes; `shutdown` consumes it because the join is the end of
+/// the service's life.
+trait StageServiceHandle: Send + 'static {
+    fn local_addr(&self) -> &str;
+    fn exited(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+    fn shutdown(self) -> Result<()>;
+}
+
+impl StageServiceHandle for RemoteStageServiceHandle {
+    fn local_addr(&self) -> &str {
+        RemoteStageServiceHandle::local_addr(self)
+    }
+
+    fn exited(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(RemoteStageServiceHandle::exited(self))
+    }
+
+    fn shutdown(self) -> Result<()> {
+        RemoteStageServiceHandle::shutdown(self)
+    }
+}
+
+/// Wait for the first of a shutdown signal or the stage service exiting on
+/// its own, then shut the service down and return the signal error if there
+/// was one.
+///
+/// The shutdown always runs, so a signal handler that cannot be installed
+/// does not leave the stage thread unjoined (`pure virtual method called` at
+/// exit on a CPU build, #2738). `RemoteStageServiceHandle::shutdown` joins
+/// that thread, so it runs on the blocking pool rather than on a tokio worker
+/// (#2745).
+async fn wait_for_stage_shutdown<H, S>(mut handle: H, signal: S) -> Result<()>
+where
+    H: StageServiceHandle,
+    S: std::future::Future<Output = std::io::Result<()>>,
+{
+    let local_addr = handle.local_addr().to_string();
+    let signal_result = tokio::select! {
+        signal = signal => {
+            match &signal {
+                Ok(()) => tracing::info!(
+                    "Shutting down remote pipeline stage service on {local_addr}"
+                ),
+                Err(err) => tracing::error!(
+                    "failed to wait for the shutdown signal on {local_addr}: {err}; shutting down"
+                ),
+            }
+            signal.context("failed to wait for shutdown signal")
+        }
+        _ = handle.exited() => {
+            tracing::error!(
+                "Remote pipeline stage service on {local_addr} exited on its own; shutting down"
+            );
+            Ok(())
+        }
+    };
+    let shutdown = tokio::task::spawn_blocking(move || handle.shutdown())
+        .await
+        .unwrap_or_else(|join_err| {
+            Err(anyhow::anyhow!(
+                "remote stage shutdown task failed: {join_err}"
+            ))
+        });
+    match signal_result {
+        Err(err) => Err(err),
+        Ok(()) => shutdown,
+    }
+}
+
 async fn serve_remote_pipeline_stage(service_config: RemoteStageServiceConfig) -> Result<()> {
     let bind_address = service_config.bind_address.clone();
     let stage_index = service_config.stage_assignment.stage_index;
     let num_stages = service_config.num_stages;
     let upstream = service_config.upstream_peer.clone();
     let downstream = service_config.downstream_peer.clone();
-    let mut handle = RemoteStageServiceHandle::spawn(service_config)?;
+    let handle = RemoteStageServiceHandle::spawn(service_config)?;
     tracing::info!(
         "Starting remote pipeline stage service on {} (stage={}/{}, upstream={:?}, downstream={:?})",
         bind_address,
@@ -3147,22 +3220,7 @@ async fn serve_remote_pipeline_stage(service_config: RemoteStageServiceConfig) -
     // handshake, the model failed to load, the transport closed) must take
     // the process down with its error instead of parking here as a zombie a
     // supervisor would never restart (#2637).
-    tokio::select! {
-        signal = tokio::signal::ctrl_c() => {
-            signal.context("failed to wait for shutdown signal")?;
-            tracing::info!(
-                "Shutting down remote pipeline stage service on {}",
-                handle.local_addr()
-            );
-        }
-        _ = handle.exited() => {
-            tracing::error!(
-                "Remote pipeline stage service on {} exited on its own; shutting down",
-                handle.local_addr()
-            );
-        }
-    }
-    handle.shutdown()
+    wait_for_stage_shutdown(handle, tokio::signal::ctrl_c()).await
 }
 
 /// Install the configured `--surgery <FILE>` YAML pipeline into the
@@ -3844,11 +3902,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     )?);
 
     // From here on the worker owns a model (or is loading one). Every exit
-    // below, the side-model resolution errors included, goes through
-    // `join_model_worker_before_exit` so the process never returns from
-    // `main` while the worker still frees MLX state (#2738).
-    let model_provider_for_exit = Arc::clone(&model_provider);
-    let served = serve_with_model_provider(
+    // below, the side-model resolution errors included, goes through the join
+    // inside `serve_with_model_provider`, which shuts down the side workers
+    // first and then this chat worker, so the process never returns from
+    // `main` while a worker still frees MLX state (#2738, #2745).
+    serve_with_model_provider(
         startup,
         ChatServeInputs {
             config,
@@ -3862,8 +3920,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             model_provider,
         },
     )
-    .await;
-    join_model_worker_before_exit(model_provider_for_exit, served).await
+    .await
 }
 
 /// What `start_server` has resolved by the time the chat model worker exists,
@@ -3884,11 +3941,90 @@ struct ChatServeInputs {
 }
 
 /// The second half of `start_server`: warmup, side models, `AppState` and the
-/// listener. Split out so that every return, `?` included, reaches the worker
-/// join in `start_server` (#2738).
+/// listener.
+///
+/// Every return, the `?` early exits included, reaches the exit join below.
+/// The side models are registered in `side_workers` as they are created, so a
+/// resolution error after an earlier side worker loaded still shuts that
+/// worker down before the chat worker (#2745).
 async fn serve_with_model_provider(
     startup: ServerStartupConfig,
     inputs: ChatServeInputs,
+) -> Result<()> {
+    let model_provider_for_exit = Arc::clone(&inputs.model_provider);
+    let mut side_workers = Vec::new();
+    let served = serve_with_side_model_workers(startup, inputs, &mut side_workers).await;
+    join_model_workers_before_exit(
+        side_workers,
+        model_provider_for_exit,
+        served,
+        super::WORKER_EXIT_TIMEOUT,
+    )
+    .await
+}
+
+/// A side worker whose thread must be joined before the process exits.
+///
+/// The closure owns one `Arc` clone of the provider, so the worker outlives
+/// the `AppState` that also holds it and `shutdown_and_wait` can run after
+/// the HTTP server has stopped.
+struct SideWorkerExit {
+    name: &'static str,
+    shutdown: Box<dyn FnOnce(std::time::Duration) -> Result<()> + Send>,
+}
+
+impl SideWorkerExit {
+    fn new<P>(name: &'static str, provider: P) -> Self
+    where
+        P: SideWorkerProvider,
+    {
+        Self {
+            name,
+            shutdown: Box::new(move |timeout| provider.shutdown_and_wait(timeout)),
+        }
+    }
+}
+
+/// The one operation the exit path needs from a side provider, so audio,
+/// embedding, image, rerank and realtime providers share one collector.
+trait SideWorkerProvider: Send + 'static {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()>;
+}
+
+impl SideWorkerProvider for Arc<dyn crate::server::audio_model::AudioModelProvider> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
+impl SideWorkerProvider for Arc<dyn crate::server::embedding_model::EmbeddingModelProvider> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
+impl SideWorkerProvider for Arc<dyn crate::server::image_model::ImageModelProvider> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
+impl SideWorkerProvider for Arc<dyn crate::server::rerank_model::RerankModelProvider> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
+impl SideWorkerProvider for Arc<crate::server::realtime_engine::RealtimeVoiceChatEngine> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
+async fn serve_with_side_model_workers(
+    startup: ServerStartupConfig,
+    inputs: ChatServeInputs,
+    side_workers: &mut Vec<SideWorkerExit>,
 ) -> Result<()> {
     let ChatServeInputs {
         config,
@@ -4032,6 +4168,9 @@ async fn serve_with_model_provider(
             }
             _ => None,
         };
+    if let Some(provider) = &audio_model {
+        side_workers.push(SideWorkerExit::new("audio", Arc::clone(provider)));
+    }
 
     // Realtime VoiceChat wiring (#1376): load the checkpoint on the engine's
     // own thread and block until it is ready, so `/health` is truthful once
@@ -4056,6 +4195,9 @@ async fn serve_with_model_provider(
     } else {
         None
     };
+    if let Some(engine) = &realtime_engine {
+        side_workers.push(SideWorkerExit::new("realtime", Arc::clone(engine)));
+    }
 
     // Embedding wiring (#1353): `--embedding-model` loads a second checkpoint
     // on its own worker thread; without it, an `-m` that detects as an
@@ -4100,15 +4242,24 @@ async fn serve_with_model_provider(
     // choice into this one.
     crate::embeddings::set_pooling_override(startup.pooling);
     let embedding_model = resolve_embedding_provider(&startup, &config, &served_chat_id)?;
+    if let Some(provider) = &embedding_model {
+        side_workers.push(SideWorkerExit::new("embedding", Arc::clone(provider)));
+    }
     // `--image-model` is an explicit side model: failing to load it is fatal,
     // so a command line that asked for image routes never serves 501 for them.
     let image_model = resolve_image_provider(&startup)?;
+    if let Some(provider) = &image_model {
+        side_workers.push(SideWorkerExit::new("image", Arc::clone(provider)));
+    }
     // Rerank wiring (#1356) follows the same rule, with one addition: a
     // generative reranker's checkpoint is indistinguishable from a chat
     // model's, so `--reranker-model` is the only way to reach it and naming
     // the same path in `-m` and `--reranker-model` loads it once on the rerank
     // worker instead of being an error.
     let rerank_model = resolve_rerank_provider(&startup, &config, &served_chat_id)?;
+    if let Some(provider) = &rerank_model {
+        side_workers.push(SideWorkerExit::new("rerank", Arc::clone(provider)));
+    }
     // A mode flag that resolved no worker is a command line that cannot do
     // what it asked for, so it fails here rather than answering 501 to every
     // request for the life of the process (#1452).
@@ -4145,6 +4296,54 @@ async fn serve_with_model_provider(
     serve_http(&startup, app).await
 }
 
+/// Join the side workers and then the chat model worker before
+/// `start_server` returns (#2738, #2745).
+///
+/// The side workers run first, each with whatever remains of `timeout`, so
+/// one deadline covers the whole teardown. A side-worker shutdown failure is
+/// logged with `warn!` and never replaces the error that ended serving: a
+/// side model was optional, and reporting it instead of the real failure
+/// (a bind error, an unloadable `--image-model`) would hide why the process
+/// is exiting. The chat worker is joined next by
+/// [`join_model_worker_before_exit`], which owns the error precedence.
+async fn join_model_workers_before_exit(
+    side_workers: Vec<SideWorkerExit>,
+    model_provider: Arc<ModelProvider>,
+    served: Result<()>,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    if !side_workers.is_empty() {
+        let side_join = tokio::task::spawn_blocking(move || {
+            let mut all_exited = true;
+            for worker in side_workers {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                match (worker.shutdown)(remaining) {
+                    Ok(()) => {}
+                    Err(ref err) => {
+                        all_exited = false;
+                        tracing::warn!(
+                            worker = worker.name,
+                            "side model worker did not exit cleanly before process exit: {err:#}"
+                        );
+                    }
+                }
+            }
+            all_exited
+        })
+        .await;
+        match side_join {
+            Ok(true) => tracing::info!("side model workers exited before process exit"),
+            Ok(false) => {}
+            Err(join_err) => {
+                tracing::warn!("side model worker shutdown task failed: {join_err}");
+            }
+        }
+    }
+    let remaining = timeout.saturating_sub(started.elapsed());
+    join_model_worker_before_exit(model_provider, served, remaining).await
+}
+
 /// Join the chat model worker before `start_server` returns (#2738).
 ///
 /// `serve_http` returns only once the listener is gone (a bind or TLS error,
@@ -4158,22 +4357,47 @@ async fn serve_with_model_provider(
 /// TLS failure during a long model load reads as a failure in the log rather
 /// than a silent wait; it is still returned unchanged for `main` to print. A
 /// shutdown failure is logged and never replaces that error.
+///
+/// `timeout` is the whole budget for this join; callers pass
+/// [`super::WORKER_EXIT_TIMEOUT`]. Model load has no cancellation point, so a
+/// timeout means the worker is still running: the `warn!` and the returned
+/// error say so, and that a CPU build may abort with `pure virtual method
+/// called` at exit if the worker does not finish first.
 async fn join_model_worker_before_exit(
     model_provider: Arc<ModelProvider>,
     served: Result<()>,
+    timeout: std::time::Duration,
 ) -> Result<()> {
     if let Err(ref err) = served {
         tracing::error!("server stopped: {err:#}; waiting for the model worker to exit");
     }
-    let shutdown = tokio::task::spawn_blocking(move || {
-        model_provider.shutdown_and_wait(super::WORKER_EXIT_TIMEOUT)
-    })
-    .await
-    .unwrap_or_else(|join_err| {
+    let shutdown = tokio::task::spawn_blocking(move || model_provider.shutdown_and_wait(timeout))
+        .await
+        .unwrap_or_else(|join_err| {
+            Err(anyhow::anyhow!(
+                "model worker shutdown task failed: {join_err}"
+            ))
+        });
+    let timed_out = shutdown
+        .as_ref()
+        .err()
+        .and_then(|err| err.downcast_ref::<super::model_provider::WorkerShutdownError>())
+        .is_some_and(|err| {
+            matches!(
+                err,
+                super::model_provider::WorkerShutdownError::Timeout { .. }
+            )
+        });
+    let shutdown = if timed_out {
+        let err = shutdown
+            .err()
+            .unwrap_or_else(|| unreachable!("checked above"));
         Err(anyhow::anyhow!(
-            "model worker shutdown task failed: {join_err}"
+            "{err:#}; the model worker is still running, and a CPU build may abort with `pure virtual method called` at exit"
         ))
-    });
+    } else {
+        shutdown
+    };
     match shutdown {
         Ok(()) => tracing::info!("model worker exited before process exit"),
         Err(ref err) => {
