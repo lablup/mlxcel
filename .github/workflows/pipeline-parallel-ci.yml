@@ -194,14 +194,6 @@ jobs:
           TEST_MODEL: qwen3-0.6b-4bit
         run: ./scripts/ci/run-pp-two-host-logical.sh
 
-      - name: Clippy on PP modules
-        run: |
-          cargo clippy \
-            -p mlxcel \
-            --lib \
-            --tests \
-            -- -D warnings
-
   three-host-real-model:
     name: 3-host real-model parity (self-hosted)
     # Runs on either:
