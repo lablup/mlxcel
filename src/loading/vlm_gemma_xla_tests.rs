@@ -45,7 +45,6 @@ pub mod reference_boundary {
 
     use mlxcel_core::layers::UnifiedEmbedding;
     use mlxcel_core::session::{OwnedTensor, PreparedPrefill, PreparedTensorDType};
-    use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::multimodal::host_preprocessor::{
@@ -427,7 +426,7 @@ pub mod reference_boundary {
     fn sha256(path: &Path) -> String {
         let bytes =
             fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        format!("{:x}", Sha256::digest(bytes))
+        crate::sha256_hex::sha256_hex(bytes)
     }
 
     fn assert_sha256(path: &Path, expected: &str, label: &str) {

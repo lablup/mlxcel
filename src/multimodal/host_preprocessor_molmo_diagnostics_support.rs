@@ -151,11 +151,8 @@ pub(super) fn compare_exact_i32(
 }
 
 pub(super) fn sha256(path: &Path) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(
-            fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
-        )
+    crate::sha256_hex::sha256_hex(
+        fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
     )
 }
 
@@ -173,7 +170,7 @@ pub(super) fn digest_f32(values: &[f32]) -> String {
     for value in values {
         digest.update(value.to_bits().to_le_bytes());
     }
-    format!("{:x}", digest.finalize())
+    crate::sha256_hex::sha256_hex(digest.finalize())
 }
 
 pub(super) fn digest_i32(values: &[i32]) -> String {
@@ -181,7 +178,7 @@ pub(super) fn digest_i32(values: &[i32]) -> String {
     for value in values {
         digest.update(value.to_le_bytes());
     }
-    format!("{:x}", digest.finalize())
+    crate::sha256_hex::sha256_hex(digest.finalize())
 }
 
 #[cfg(test)]
