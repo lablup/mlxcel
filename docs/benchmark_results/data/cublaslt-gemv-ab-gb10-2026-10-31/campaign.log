@@ -1,0 +1,31 @@
+start 2026-11-02T17:49:28+09:00 host spark-102 commit ceb76567 kernel 7.0.0-1019-nvidia
+driver NVIDIA GB10, 580.178.04
+linked cuBLASLt: /usr/local/cuda/targets/sbsa-linux/lib/libcublasLt.so.13
+alt cuBLASLt: /tmp/cublas138/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 
+== version llama-3.2-1b-instruct-bf16 17:49:28
+rc=0
+== version qwen3.5-9b-bf16 18:09:45
+rc=0
+== version qwen3-1.7b-4bit 18:38:51
+rc=0
+end 2026-11-02T18:58:51+09:00
+start 2026-11-02T19:01:30+09:00 host spark-102 commit ceb76567 kernel 7.0.0-1019-nvidia
+driver NVIDIA GB10, 580.178.04
+linked cuBLASLt: /usr/local/cuda/targets/sbsa-linux/lib/libcublasLt.so.13
+alt cuBLASLt: /tmp/cublas138/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 
+== gemv llama-3.2-1b-instruct-bf16 19:01:30
+rc=0
+== gemv qwen3.5-9b-bf16 19:32:02
+rc=0
+== gemv llama-3.1-8b-instruct-bf16 20:19:51
+rc=0
+end 2026-11-02T20:59:19+09:00
+start 2026-11-02T20:59:25+09:00 host spark-102 commit ceb76567 kernel 7.0.0-1019-nvidia
+driver NVIDIA GB10, 580.178.04
+linked cuBLASLt: /usr/local/cuda/targets/sbsa-linux/lib/libcublasLt.so.13
+alt cuBLASLt: /tmp/cublas138/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 
+== ladder llama-3.2-1b-instruct-bf16 20:59:26
+rc=0
+== ladder llama-3.1-8b-instruct-bf16 21:12:14
+rc=0
+end 2026-11-02T21:30:21+09:00

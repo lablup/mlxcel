@@ -1,0 +1,66 @@
+round 0 sys                cli    prompt   256 TTFT 178.26 ms  decode 14.56 tok/s
+round 0 sys                cli    prompt  4096 TTFT 2782.76 ms  decode 14.44 tok/s
+round 0 alt                cli    prompt   256 TTFT 166.92 ms  decode 14.05 tok/s
+round 0 alt                cli    prompt  4096 TTFT 2771.84 ms  decode 14.10 tok/s
+round 0 sys-null           cli    prompt   256 TTFT 156.90 ms  decode 14.29 tok/s
+round 0 sys-null           cli    prompt  4096 TTFT 2698.42 ms  decode 14.15 tok/s
+round 0 alt-null           cli    prompt   256 TTFT 152.00 ms  decode 14.24 tok/s
+round 0 alt-null           cli    prompt  4096 TTFT 2718.47 ms  decode 14.10 tok/s
+round 1 alt                cli    prompt   256 TTFT 152.78 ms  decode 14.22 tok/s
+round 1 alt                cli    prompt  4096 TTFT 2739.54 ms  decode 14.08 tok/s
+round 1 sys-null           cli    prompt   256 TTFT 160.81 ms  decode 14.22 tok/s
+round 1 sys-null           cli    prompt  4096 TTFT 2681.45 ms  decode 14.08 tok/s
+round 1 alt-null           cli    prompt   256 TTFT 155.70 ms  decode 14.22 tok/s
+round 1 alt-null           cli    prompt  4096 TTFT 2717.95 ms  decode 14.06 tok/s
+round 1 sys                cli    prompt   256 TTFT 154.79 ms  decode 14.21 tok/s
+round 1 sys                cli    prompt  4096 TTFT 2691.61 ms  decode 14.06 tok/s
+round 2 sys-null           cli    prompt   256 TTFT 155.95 ms  decode 14.21 tok/s
+round 2 sys-null           cli    prompt  4096 TTFT 2683.70 ms  decode 14.07 tok/s
+round 2 alt-null           cli    prompt   256 TTFT 152.64 ms  decode 14.19 tok/s
+round 2 alt-null           cli    prompt  4096 TTFT 2728.16 ms  decode 14.05 tok/s
+round 2 sys                cli    prompt   256 TTFT 155.96 ms  decode 14.17 tok/s
+round 2 sys                cli    prompt  4096 TTFT 2698.43 ms  decode 14.04 tok/s
+round 2 alt                cli    prompt   256 TTFT 161.01 ms  decode 14.17 tok/s
+round 2 alt                cli    prompt  4096 TTFT 2745.25 ms  decode 14.04 tok/s
+round 3 alt-null           cli    prompt   256 TTFT 159.19 ms  decode 14.18 tok/s
+round 3 alt-null           cli    prompt  4096 TTFT 2733.00 ms  decode 14.04 tok/s
+round 3 sys                cli    prompt   256 TTFT 162.47 ms  decode 14.19 tok/s
+round 3 sys                cli    prompt  4096 TTFT 2694.33 ms  decode 14.04 tok/s
+round 3 alt                cli    prompt   256 TTFT 158.99 ms  decode 14.17 tok/s
+round 3 alt                cli    prompt  4096 TTFT 2725.51 ms  decode 14.05 tok/s
+round 3 sys-null           cli    prompt   256 TTFT 156.28 ms  decode 14.17 tok/s
+round 3 sys-null           cli    prompt  4096 TTFT 2691.21 ms  decode 14.04 tok/s
+round 4 sys                cli    prompt   256 TTFT 159.50 ms  decode 14.17 tok/s
+round 4 sys                cli    prompt  4096 TTFT 2690.26 ms  decode 14.03 tok/s
+round 4 alt                cli    prompt   256 TTFT 154.53 ms  decode 14.18 tok/s
+round 4 alt                cli    prompt  4096 TTFT 2756.41 ms  decode 14.04 tok/s
+round 4 sys-null           cli    prompt   256 TTFT 155.54 ms  decode 14.18 tok/s
+round 4 sys-null           cli    prompt  4096 TTFT 2701.49 ms  decode 14.04 tok/s
+round 4 alt-null           cli    prompt   256 TTFT 153.24 ms  decode 14.17 tok/s
+round 4 alt-null           cli    prompt  4096 TTFT 2735.68 ms  decode 14.04 tok/s
+
+arm medians (min..max) per path and prompt length
+  cli    prompt   256  sys                n=5  ttft_ms 159.50 (154.79..178.26)  decode_tok_s 14.19 (14.17..14.56)
+  cli    prompt   256  alt                n=5  ttft_ms 158.99 (152.78..166.92)  decode_tok_s 14.17 (14.05..14.22)
+  cli    prompt   256  sys-null           n=5  ttft_ms 156.28 (155.54..160.81)  decode_tok_s 14.21 (14.17..14.29)
+  cli    prompt   256  alt-null           n=5  ttft_ms 153.24 (152.00..159.19)  decode_tok_s 14.19 (14.17..14.24)
+  cli    prompt  4096  sys                n=5  ttft_ms 2694.33 (2690.26..2782.76)  decode_tok_s 14.04 (14.03..14.44)
+  cli    prompt  4096  alt                n=5  ttft_ms 2745.25 (2725.51..2771.84)  decode_tok_s 14.05 (14.04..14.10)
+  cli    prompt  4096  sys-null           n=5  ttft_ms 2691.21 (2681.45..2701.49)  decode_tok_s 14.07 (14.04..14.15)
+  cli    prompt  4096  alt-null           n=5  ttft_ms 2728.16 (2717.95..2735.68)  decode_tok_s 14.05 (14.04..14.10)
+
+paired per-round deltas, arm vs reference (positive = higher than the reference)
+  cli    prompt   256  alt                vs sys            ttft_ms      median -2.15%  range -6.36%..+3.24%
+  cli    prompt   256  alt                vs sys            decode_tok_s median -0.01%  range -3.47%..+0.08%
+  cli    prompt   256  sys-null           vs sys            ttft_ms      median -2.48%  range -11.98%..+3.89%
+  cli    prompt   256  sys-null           vs sys            decode_tok_s median +0.04%  range -1.83%..+0.26%
+  cli    prompt   256  alt-null           vs alt            ttft_ms      median -0.83%  range -8.93%..+1.91%
+  cli    prompt   256  alt-null           vs alt            decode_tok_s median +0.00%  range -0.11%..+1.33%
+  cli    prompt  4096  alt                vs sys            ttft_ms      median +1.74%  range -0.39%..+2.46%
+  cli    prompt  4096  alt                vs sys            decode_tok_s median +0.03%  range -2.39%..+0.12%
+  cli    prompt  4096  sys-null           vs sys            ttft_ms      median -0.38%  range -3.03%..+0.42%
+  cli    prompt  4096  sys-null           vs sys            decode_tok_s median +0.08%  range -2.05%..+0.23%
+  cli    prompt  4096  alt-null           vs alt            ttft_ms      median -0.75%  range -1.93%..+0.27%
+  cli    prompt  4096  alt-null           vs alt            decode_tok_s median +0.02%  range -0.11%..+0.03%
+
+the *-null rows are the noise floor: an A/B delta whose range overlaps the null range is unresolved

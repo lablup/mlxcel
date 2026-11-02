@@ -5,6 +5,8 @@
 // BlockMaskedMM::eval_gpu taken verbatim from upstream bff10220 (#58): the
 // overlay predated it, so the BlockMaskedMM vtable referenced an undefined
 // symbol. GNU ld dropped the unused vtable; MSVC's link refuses it.
+// MLXCEL_CUDA_DISABLE_GEMV diagnostic switch on the dense gemv dispatch
+// (gemv-vs-cuBLASLt decode A/B).
 
 #include "mlx/backend/common/matmul.h"
 #include "mlx/backend/cuda/device.h"
@@ -16,6 +18,7 @@
 #include "mlx/primitives.h"
 
 #include <nvtx3/nvtx3.hpp>
+#include <cstdlib>
 #include <numeric>
 
 namespace mlx::core {
@@ -100,8 +103,18 @@ void gemm_and_bias(
     batch_shape = {1};
   }
 
+  // [mlxcel] MLXCEL_CUDA_DISABLE_GEMV=1 sends M=1 (and N=1) dense matmuls to
+  // cuBLASLt instead of MLX's gemv kernel. Diagnostic A/B switch for the
+  // gemv-vs-cuBLASLt decode measurement; read once so getenv stays off the
+  // per-launch path. gather_mm keeps its own gemv path.
+  static const bool disable_gemv = []() {
+    const char* e = std::getenv("MLXCEL_CUDA_DISABLE_GEMV");
+    return e && e[0] == '1' && e[1] == '\0';
+  }();
+
   // Use gemmv when possible
-  if (!bias && cu::can_use_gemv(M, N, K, a_transposed, b_transposed)) {
+  if (!bias && !disable_gemv &&
+      cu::can_use_gemv(M, N, K, a_transposed, b_transposed)) {
     cu::gemv(
         a,
         b,

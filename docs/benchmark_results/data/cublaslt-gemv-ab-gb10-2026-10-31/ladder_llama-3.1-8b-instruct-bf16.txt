@@ -1,0 +1,26 @@
+[21:13:46] r0 sys      rows=3 libs=['/usr/local/cuda-13.0/targets/sbsa-linux/lib/libcublasLt.so.13.1.1.3']
+[21:15:16] r0 alt      rows=3 libs=['/tmp/cublas138/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13']
+[21:16:47] r0 sys-null rows=3 libs=['/usr/local/cuda-13.0/targets/sbsa-linux/lib/libcublasLt.so.13.1.1.3']
+[21:18:16] r0 alt-null rows=3 libs=['/tmp/cublas138/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13']
+[21:19:47] r1 alt      rows=3 libs=['/tmp/cublas138/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13']
+[21:21:18] r1 sys-null rows=3 libs=['/usr/local/cuda-13.0/targets/sbsa-linux/lib/libcublasLt.so.13.1.1.3']
+[21:22:49] r1 alt-null rows=3 libs=['/tmp/cublas138/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13']
+[21:24:20] r1 sys      rows=3 libs=['/usr/local/cuda-13.0/targets/sbsa-linux/lib/libcublasLt.so.13.1.1.3']
+[21:25:50] r2 sys-null rows=3 libs=['/usr/local/cuda-13.0/targets/sbsa-linux/lib/libcublasLt.so.13.1.1.3']
+[21:27:20] r2 alt-null rows=3 libs=['/tmp/cublas138/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13']
+[21:28:51] r2 sys      rows=3 libs=['/usr/local/cuda-13.0/targets/sbsa-linux/lib/libcublasLt.so.13.1.1.3']
+[21:30:21] r2 alt      rows=3 libs=['/tmp/cublas138/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13']
+
+conc  arm       n  ttft_mean_ms(med)  decode_tok_s(med)  aggregate_tok_s(med)
+   1  alt       3              147.3               14.9                  14.7
+   1  alt-null  3              145.2               14.9                  14.7
+   1  sys       3              149.1               14.8                  14.7
+   1  sys-null  3              146.9               14.8                  14.7
+   4  alt       3              281.8               13.2                  51.8
+   4  alt-null  3              266.3               13.3                  52.0
+   4  sys       3              283.7               13.3                  52.0
+   4  sys-null  3              268.9               13.3                  52.1
+   7  alt       3              310.6               12.0                  82.0
+   7  alt-null  3              313.5               11.9                  81.2
+   7  sys       3              314.6               12.0                  82.1
+   7  sys-null  3              313.9               11.9                  81.3
