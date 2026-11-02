@@ -154,7 +154,8 @@ pub use media_net::{
 pub use model_provider::{GenerationResult, ModelProvider, WORKER_EXIT_TIMEOUT};
 pub use model_source::{
     LLAMA_ARG_OFFLINE, LlamaModelSourceArgs, ResolvedModelSource, env_fallback_offline,
-    parse_hf_repo, parse_model_aliases, resolve_llama_model_source, superseded_model_notice,
+    parse_hf_repo, parse_model_aliases, resolve_image_only_mode, resolve_llama_model_source,
+    superseded_model_notice,
 };
 pub use prompt_cache::{
     ApcBlockHash, ApcConfig, ApcHashAlgo, BlockHashChain, CacheEntry, DEFAULT_APC_BLOCK_SIZE,

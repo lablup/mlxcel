@@ -1097,6 +1097,49 @@ impl ModelProvider {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
+        Self::new_without_chat_model_with_id(
+            model_id,
+            thread_name,
+            reason,
+            batch_metrics,
+            batch_observability,
+            decode_hang_timeout,
+        )
+    }
+
+    /// The no-chat-model provider for an image-only server (#2825).
+    ///
+    /// There is no chat checkpoint to take an id from, so the caller passes
+    /// the served image id (the first `--alias`, else the image checkpoint's
+    /// directory name). Reporting it here makes
+    /// [`AppState::display_model_id`](crate::server::AppState::display_model_id)
+    /// and the image provider agree, which is what lets a `model` copied from
+    /// `/v1/models` pass the image routes' `check_model`.
+    pub(crate) fn new_without_chat_model_for_image(
+        model_id: String,
+        reason: String,
+        config: &crate::server::ServerConfig,
+        batch_metrics: Arc<BatchMetrics>,
+        batch_observability: Arc<BatchObservability>,
+    ) -> Result<Self> {
+        Self::new_without_chat_model_with_id(
+            model_id,
+            "model-worker-image-only",
+            reason,
+            batch_metrics,
+            batch_observability,
+            validated_decode_hang_timeout(config.decode_timeout_seconds),
+        )
+    }
+
+    fn new_without_chat_model_with_id(
+        model_id: String,
+        thread_name: &str,
+        reason: String,
+        batch_metrics: Arc<BatchMetrics>,
+        batch_observability: Arc<BatchObservability>,
+        decode_hang_timeout: Duration,
+    ) -> Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let chat_unavailable = Arc::new(AtomicBool::new(true));
         let worker_handle =

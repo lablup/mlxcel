@@ -52,7 +52,7 @@ use mlxcel::server::{
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
     env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
-    resolve_llama_model_source, start_server, superseded_model_notice,
+    resolve_image_only_mode, resolve_llama_model_source, start_server, superseded_model_notice,
 };
 
 /// mlxcel-server: llama-server compatible HTTP server for MLX inference
@@ -778,9 +778,11 @@ struct ServerArgs {
     /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
     /// `-m`). Loads on its own worker thread and serves
     /// POST /v1/images/generations and POST /v1/images/edits (JSON bodies, base64
-    /// PNG responses); `-m` keeps serving chat. Requests run one at a time.
-    /// Startup fails when the checkpoint is not a supported image-generation
-    /// family. Also reads `MLXCEL_IMAGE_MODEL`. See docs/image-generation.md.
+    /// PNG responses); `-m` keeps serving chat. Without `-m`, the server starts
+    /// image-only: this checkpoint is the served model, and chat, completion and
+    /// tokenizer routes answer 501. Requests run one at a time. Startup fails
+    /// when the checkpoint is not a supported image-generation family. Also
+    /// reads `MLXCEL_IMAGE_MODEL`. See docs/image-generation.md.
     #[arg(
         long = "image-model",
         env = "MLXCEL_IMAGE_MODEL",
@@ -2623,6 +2625,12 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // inside a loader (the moondream starmie tokenizer, request-path media
     // URLs) honour --offline too, not just the `-m` resolver.
     set_offline_mode(args.offline);
+    // The side-model environment aliases are folded in before the image-only
+    // decision below, so `MLXCEL_EMBEDDING_MODEL` / `MLXCEL_RERANKER_MODEL`
+    // conflict with `--image-model` exactly as their flags do (#2825).
+    env_fallback_embedding_model(&mut args.embedding_model, &mut startup_notices);
+    env_fallback_reranker_model(&mut args.reranker_model, &mut startup_notices);
+
     // b10621 router mode (#1438): `--models-dir` with no model argument
     // serves the router surface and never resolves a checkpoint here.
     let has_model_source = args.model.is_some()
@@ -2635,6 +2643,38 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     if webui_enabled && router_mode {
         args.models_autoload = false;
     }
+    // #2825: `--image-model` with no model source serves image generation
+    // alone. A router selector would serve a front that never reaches the
+    // image worker, and the embedding/reranking surfaces belong to a second
+    // workload this mode does not serve, so both combinations are refused.
+    let image_only = {
+        let (embeddings, reranking) = if args.image_model.is_some() && !has_model_source {
+            let resolved = args
+                .embedding_compat
+                .resolve()
+                .map_err(|message| anyhow::anyhow!(message))?;
+            (
+                resolved.embedding_only && !resolved.rerank_only,
+                resolved.rerank_only,
+            )
+        } else {
+            (false, false)
+        };
+        resolve_image_only_mode(
+            args.image_model.is_some(),
+            has_model_source,
+            &[
+                ("--models-dir", args.models_dir.is_some()),
+                ("--models-preset", args.models_preset.is_some()),
+                ("--webui", webui_enabled),
+                ("--embedding-model", args.embedding_model.is_some()),
+                ("--reranker-model", args.reranker_model.is_some()),
+                ("--embeddings", embeddings),
+                ("--reranking", reranking),
+            ],
+        )?
+    };
+    let modelless = router_mode || image_only;
     // The #1438 migration guard, raised BEFORE model resolution so the old
     // store-root combination fails in milliseconds instead of after a
     // multi-gigabyte download. `into_startup_config` re-checks it for
@@ -2647,7 +2687,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
              variable; to start the router, drop the model argument"
         );
     }
-    let model_path = if router_mode {
+    let model_path = if modelless {
         PathBuf::new()
     } else {
         let source = resolve_llama_model_source(&LlamaModelSourceArgs {
@@ -2681,8 +2721,9 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // The `--gpu-layers` half of the b10621 GGML classification, deferred
     // until the checkpoint is known: only its layer count distinguishes a full
     // offload (inert, since mlxcel always runs every layer on the accelerator)
-    // from a partial one (issue #1445).
-    if !router_mode {
+    // from a partial one (issue #1445). Image-only mode has no checkpoint for
+    // this to describe, so it is skipped as in router mode.
+    if !modelless {
         args.ggml_compat
             .ensure_inert(read_model_layer_count(&model_path))
             .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
@@ -2690,7 +2731,6 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
 
     // `--embedding-model` accepts the same path-or-repo-id shapes as `-m`
     // and resolves through the same store lookup / auto-download.
-    env_fallback_embedding_model(&mut args.embedding_model, &mut startup_notices);
     let embedding_model_path = args
         .embedding_model
         .as_deref()
@@ -2727,7 +2767,6 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .transpose()?;
 
     // `--reranker-model` accepts the same path-or-repo-id shapes as `-m`.
-    env_fallback_reranker_model(&mut args.reranker_model, &mut startup_notices);
     let reranker_model_path = args
         .reranker_model
         .as_deref()
@@ -4364,5 +4403,45 @@ mod tests {
                 err.kind()
             );
         }
+    }
+
+    // ── image-only serving (#2825) ─────────────────────────────────────────
+
+    #[test]
+    fn image_model_without_model_leaves_the_chat_path_empty() {
+        let image_model = std::env::temp_dir().to_string_lossy().into_owned();
+        let args = parse_server_args(&["mlxcel-server", "--image-model", image_model.as_str()]);
+        let input = build_startup_input(args).expect("image-only input resolves");
+        assert!(
+            input.model_path.as_os_str().is_empty(),
+            "image-only leaves the chat path empty"
+        );
+        assert!(input.image_model_path.is_some());
+    }
+
+    #[test]
+    fn neither_model_nor_image_model_names_both_ways_to_start() {
+        let args = parse_server_args(&["mlxcel-server"]);
+        let err = build_startup_input(args).expect_err("no model source at all");
+        let message = err.to_string();
+        assert!(message.contains("--model/-m is required"), "{message}");
+        assert!(message.contains("--image-model"), "{message}");
+    }
+
+    #[test]
+    fn image_only_refuses_a_router_selector_naming_both_flags() {
+        let image_model = std::env::temp_dir().to_string_lossy().into_owned();
+        let models_dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let args = parse_server_args(&[
+            "mlxcel-server",
+            "--image-model",
+            image_model.as_str(),
+            "--models-dir",
+            models_dir.as_str(),
+        ]);
+        let err = build_startup_input(args).expect_err("image-only cannot start the router");
+        let message = err.to_string();
+        assert!(message.contains("--image-model"), "{message}");
+        assert!(message.contains("--models-dir"), "{message}");
     }
 }

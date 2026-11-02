@@ -137,6 +137,11 @@ pub(crate) fn geometry_block(config: &ServerConfig) -> serde_json::Value {
 
 /// Read a JSON file below the model directory, `None` on any failure.
 fn read_model_json(state: &AppState, name: &str) -> Option<serde_json::Value> {
+    // Image-only serving has no chat checkpoint (#2825), and an empty path
+    // would read from the process working directory.
+    if state.model_path.as_os_str().is_empty() {
+        return None;
+    }
     let raw = std::fs::read_to_string(state.model_path.join(name)).ok()?;
     serde_json::from_str(&raw).ok()
 }

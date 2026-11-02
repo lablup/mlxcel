@@ -124,10 +124,48 @@ pub fn resolve_llama_model_source(args: &LlamaModelSourceArgs) -> Result<Resolve
         }),
         _ => Err(anyhow!(
             "--model/-m is required to start the server (set the LLAMA_ARG_MODEL \
-             environment variable, pass -m <PATH_OR_REPO_ID>, or pass --hf-repo \
-             <owner>/<name>)"
+             environment variable, pass -m <PATH_OR_REPO_ID>, pass --hf-repo \
+             <owner>/<name>, or pass --image-model <PATH_OR_REPO_ID> to serve image \
+             generation only)"
         )),
     }
+}
+
+/// Whether `--image-model` with no model source selects image-only serving.
+///
+/// Both server binaries leave `model_path` empty when this returns `true`, so
+/// `start_server` can serve the image worker alone (#2825). `conflicts` lists
+/// the flags that name a second workload; a router selector would silently
+/// ignore the image model, and the embedding/reranking flags would leave the
+/// server restricted to a route this mode does not serve. Each entry is
+/// `(flag, was_given)`, so the error names the flags the operator actually
+/// typed.
+///
+/// # Errors
+///
+/// Returns an error naming every conflicting flag when `--image-model` is the
+/// only model source and one of them is present.
+pub fn resolve_image_only_mode(
+    image_model_given: bool,
+    has_model_source: bool,
+    conflicts: &[(&str, bool)],
+) -> Result<bool> {
+    if !image_model_given || has_model_source {
+        return Ok(false);
+    }
+    let named: Vec<&str> = conflicts
+        .iter()
+        .filter_map(|(flag, given)| given.then_some(*flag))
+        .collect();
+    if !named.is_empty() {
+        let flags = named.join(", ");
+        return Err(anyhow!(
+            "--image-model without -m serves only /v1/images/generations and \
+             /v1/images/edits, so it cannot be combined with {flags}. Pass -m <chat model> \
+             to serve both from one process, or drop {flags}."
+        ));
+    }
+    Ok(true)
 }
 
 /// Validate a `--hf-repo` value and return the `owner/name` repo id.

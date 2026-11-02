@@ -105,6 +105,19 @@ pub use tokenize::tokenize;
 /// Explain a terminal generation-unavailable state without exposing worker or
 /// channel implementation details.
 pub(crate) fn chat_unavailable_message(state: &AppState) -> Option<String> {
+    // `--image-model` with no `-m` serves image generation alone (#2825).
+    // Its own wording is used rather than the embedding-only sentence below,
+    // because the remedy (add `-m`, or a second server) differs from dropping
+    // a restriction flag.
+    if state.config.embedding_serving_mode == crate::server::config::EmbeddingServingMode::ImageOnly
+    {
+        return Some(
+            "This server was started with --image-model and no -m and serves only \
+             /v1/images/generations and /v1/images/edits; generation is disabled. Add -m <chat \
+             model> to serve generation from the same process, or start a second server."
+                .to_string(),
+        );
+    }
     // b10621's `--embeddings` / `--reranking` restrict the server to that
     // workload, so generation is refused even when a chat model is loaded next
     // to the side model (#1452). The flag is named in the body, because
@@ -174,6 +187,22 @@ pub(crate) fn chat_unavailable_message(state: &AppState) -> Option<String> {
 /// provider state.
 pub(crate) fn chat_not_available(state: &AppState) -> Option<ErrorResponse> {
     chat_unavailable_message(state).map(ErrorResponse::not_implemented)
+}
+
+/// The same refusal, but only on an image-only server (#2825).
+///
+/// `/tokenize`, `/detokenize` and `/apply-template` are not generation routes,
+/// so they stay available in every other mode, including `-m --image-model`.
+/// In image-only mode there is no tokenizer or chat template behind them, and
+/// running on the empty tokenizer would return wrong answers rather than an
+/// error.
+pub(crate) fn chat_not_available_image_only(state: &AppState) -> Option<ErrorResponse> {
+    if state.config.embedding_serving_mode == crate::server::config::EmbeddingServingMode::ImageOnly
+    {
+        chat_not_available(state)
+    } else {
+        None
+    }
 }
 
 /// Map generation dispatch failures consistently across OpenAI-compatible

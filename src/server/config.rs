@@ -497,6 +497,11 @@ pub const DEFAULT_RERANK_BATCH_SIZE: usize = crate::rerank::DEFAULT_RERANK_BATCH
 /// with no chat model, and the body names the flag that turned them off, so an
 /// operator can tell "this deployment is embedding-only" from "the chat model
 /// failed to load".
+///
+/// [`EmbeddingServingMode::ImageOnly`] (#2825) generalizes the same gate to
+/// `--image-model` with no chat checkpoint. It is selected by that flag rather
+/// than by a restriction flag, but reusing the enum keeps `blocks_generation`
+/// as the single switch behind health, props and the model capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EmbeddingServingMode {
     /// No mode flag: every loaded worker serves its routes.
@@ -506,6 +511,13 @@ pub enum EmbeddingServingMode {
     EmbeddingOnly,
     /// `--reranking`: reranking routes only.
     RerankOnly,
+    /// `--image-model` with no model source: image generation only (#2825).
+    ///
+    /// Unlike the two flags above, this mode is selected by the side-model
+    /// flag itself rather than by a restriction flag, because the server has no
+    /// chat checkpoint at all. Generation and tokenizer routes answer the same
+    /// 501, naming `--image-model`, and `/health` waits on the image worker.
+    ImageOnly,
 }
 
 impl EmbeddingServingMode {
@@ -516,6 +528,7 @@ impl EmbeddingServingMode {
             Self::Any => None,
             Self::EmbeddingOnly => Some("--embeddings"),
             Self::RerankOnly => Some("--reranking"),
+            Self::ImageOnly => Some("--image-model"),
         }
     }
 
@@ -532,6 +545,7 @@ impl EmbeddingServingMode {
             Self::Any => "any",
             Self::EmbeddingOnly => "embedding_only",
             Self::RerankOnly => "rerank_only",
+            Self::ImageOnly => "image_only",
         }
     }
 }

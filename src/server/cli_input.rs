@@ -781,6 +781,28 @@ impl ServerStartupInput {
             .resolve()
             .map_err(|message| anyhow::anyhow!(message))?;
 
+        // `--image-model` with no model source serves image generation alone
+        // (#2825). The binaries leave `model_path` empty in that mode, so its
+        // emptiness is the model-source signal here; a router selector and the
+        // embedding/reranking modes are refused because either would leave the
+        // image worker unreachable behind another surface.
+        let image_only = crate::server::model_source::resolve_image_only_mode(
+            self.image_model_path.is_some(),
+            !self.model_path.as_os_str().is_empty(),
+            &[
+                ("--models-dir", self.router_models_dir.is_some()),
+                ("--models-preset", self.models_preset.is_some()),
+                ("--webui", self.webui_enabled),
+                ("--embedding-model", self.embedding_model_path.is_some()),
+                ("--reranker-model", self.reranker_model_path.is_some()),
+                ("--reranking", embedding_compat.rerank_only),
+                (
+                    "--embeddings",
+                    embedding_compat.embedding_only && !embedding_compat.rerank_only,
+                ),
+            ],
+        )?;
+
         // b10621's prompt-cache and batching spellings, folded onto mlxcel's
         // own settings below. Resolved here for the same reason: a
         // `--cache-reuse` mlxcel cannot serve must fail the command line, not
@@ -1126,7 +1148,11 @@ impl ServerStartupInput {
             model_store_root: self.model_store_root,
             spm_infill: self.infill.spm_infill,
             embd_normalize: embedding_compat.embd_normalize,
-            embedding_serving_mode: embedding_serving_mode(&embedding_compat),
+            embedding_serving_mode: if image_only {
+                crate::server::config::EmbeddingServingMode::ImageOnly
+            } else {
+                embedding_serving_mode(&embedding_compat)
+            },
             pooling: embedding_compat.pooling,
             enable_metrics: self.metrics || self.metrics_port.is_some(),
             enable_settings: self.settings,

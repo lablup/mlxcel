@@ -2136,18 +2136,36 @@ fn a_mode_flag_with_no_matching_worker_fails_startup() {
         &mode_config(EmbeddingServingMode::EmbeddingOnly),
         false,
         true,
+        false,
     )
     .expect_err("--embeddings with no embedder must fail");
     let message = err.to_string();
     assert!(message.contains("--embeddings"), "{message}");
     assert!(message.contains("--embedding-model"), "{message}");
 
-    let err =
-        super::check_serving_mode(&mode_config(EmbeddingServingMode::RerankOnly), true, false)
-            .expect_err("--reranking with no reranker must fail");
+    let err = super::check_serving_mode(
+        &mode_config(EmbeddingServingMode::RerankOnly),
+        true,
+        false,
+        false,
+    )
+    .expect_err("--reranking with no reranker must fail");
     let message = err.to_string();
     assert!(message.contains("--reranking"), "{message}");
     assert!(message.contains("--reranker-model"), "{message}");
+
+    // #2825: the image-only mode has the same gate, naming the flag that
+    // selected it.
+    let err = super::check_serving_mode(
+        &mode_config(EmbeddingServingMode::ImageOnly),
+        false,
+        false,
+        false,
+    )
+    .expect_err("--image-model with no image worker must fail");
+    let message = err.to_string();
+    assert!(message.contains("--image-model without -m"), "{message}");
+    assert!(message.contains("--image-model <path>"), "{message}");
 }
 
 #[test]
@@ -2158,19 +2176,44 @@ fn a_mode_flag_with_its_worker_starts() {
         &mode_config(EmbeddingServingMode::EmbeddingOnly),
         true,
         false,
+        false,
     )
     .expect("--embeddings with an embedder starts");
-    super::check_serving_mode(&mode_config(EmbeddingServingMode::RerankOnly), false, true)
-        .expect("--reranking with a reranker starts");
+    super::check_serving_mode(
+        &mode_config(EmbeddingServingMode::RerankOnly),
+        false,
+        true,
+        false,
+    )
+    .expect("--reranking with a reranker starts");
+    // #2825: the image-only mode starts once its worker resolved.
+    super::check_serving_mode(
+        &mode_config(EmbeddingServingMode::ImageOnly),
+        false,
+        false,
+        true,
+    )
+    .expect("--image-model with an image worker starts");
 }
 
 #[test]
 fn an_unrestricted_server_never_fails_the_mode_gate() {
     use crate::server::config::EmbeddingServingMode;
 
-    for (embedding, rerank) in [(false, false), (true, false), (false, true), (true, true)] {
-        super::check_serving_mode(&mode_config(EmbeddingServingMode::Any), embedding, rerank)
-            .expect("no mode flag, nothing to check");
+    for (embedding, rerank, image) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+    ] {
+        super::check_serving_mode(
+            &mode_config(EmbeddingServingMode::Any),
+            embedding,
+            rerank,
+            image,
+        )
+        .expect("no mode flag, nothing to check");
     }
 }
 

@@ -65,6 +65,19 @@ mlxcel-server -m <chat model> --image-model <image checkpoint>
 
 `--image-model` (also `MLXCEL_IMAGE_MODEL`, on both `mlxcel-server` and `mlxcel serve`) loads a side worker the way `--embedding-model` does: a dedicated thread owns the model, a bounded queue admits requests, a per-request timeout frees the caller. A load failure is fatal at startup, so a command line that asked for image routes never serves `501` for them. Requests run one at a time, since a diffusion run holds the GPU for seconds; a full queue is `503`, a timeout is `504`. The queue depth (8) and the timeout (900 s) are constants in `src/server/image_worker.rs`.
 
+### Image-only mode
+
+Drop `-m` to serve image generation without a chat model:
+
+```bash
+mlxcel-server --image-model <image checkpoint> --port 8080
+mlxcel serve --image-model <image checkpoint>
+```
+
+The image checkpoint is then the served model instead of a side model. Its id is the first `--alias` entry when given, otherwise the checkpoint directory name, and the provider, `/props` display id and `/v1/models` all report that one value, so a `model` copied from `/v1/models` passes the image routes' model check. `/health` reports ready once the checkpoint loads (a load failure is still fatal at startup), and `/v1/models` lists the id with the `image` capability and never `completion`.
+
+Chat, completion and prompt-inspection routes answer the same structured `501` the embedding-only mode uses, naming `--image-model` and `no -m`. That includes `/tokenize`, `/detokenize` and `/apply-template`, which have no chat checkpoint's tokenizer or template to run on. `/v1/embeddings` and `/v1/rerank` answer their usual `501` asking for a worker, since this mode loads neither model. `--image-model` without `-m` cannot be combined with `--models-dir`, `--models-preset`, `--webui`, `--embedding-model`, `--reranker-model`, `--embeddings` or `--reranking`; startup fails naming both flags. Passing `-m` as well keeps the two-model behavior described above, including a working `/tokenize` and a `/v1/models` list that advertises `completion`.
+
 | Method | Path | Notes |
 |--------|------|-------|
 | POST | `/v1/images/generations` | Alias `/images/generations`. |

@@ -4555,6 +4555,12 @@
       "test_id": "settings-startup-embedding-serving-mode-values-rerank-only"
     },
     {
+      "key": "settings.startup.embedding_serving_mode.values.image_only",
+      "en": "Image generation only",
+      "ko": "이미지 생성 전용",
+      "test_id": "settings-startup-embedding-serving-mode-values-image-only"
+    },
+    {
       "key": "settings.startup.preemption_policy.values.longest-first",
       "en": "Most generated tokens first",
       "ko": "가장 많이 생성한 요청부터",

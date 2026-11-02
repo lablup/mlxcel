@@ -406,6 +406,7 @@ fn every_enum_variant_configs() -> Vec<ServerConfig> {
         EmbeddingServingMode::Any,
         EmbeddingServingMode::EmbeddingOnly,
         EmbeddingServingMode::RerankOnly,
+        EmbeddingServingMode::ImageOnly,
     });
     let preemption = every_variant!(PreemptionPolicy {
         PreemptionPolicy::LongestFirst,

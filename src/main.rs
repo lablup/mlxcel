@@ -1822,9 +1822,11 @@ pub(crate) struct ServeArgs {
     /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
     /// `-m`). Loads on its own worker thread and serves
     /// POST /v1/images/generations and POST /v1/images/edits (JSON bodies, base64
-    /// PNG responses); `-m` keeps serving chat. Requests run one at a time.
-    /// Startup fails when the checkpoint is not a supported image-generation
-    /// family. Also reads `MLXCEL_IMAGE_MODEL`. See docs/image-generation.md.
+    /// PNG responses); `-m` keeps serving chat. Without `-m`, the server starts
+    /// image-only: this checkpoint is the served model, and chat, completion and
+    /// tokenizer routes answer 501. Requests run one at a time. Startup fails
+    /// when the checkpoint is not a supported image-generation family. Also
+    /// reads `MLXCEL_IMAGE_MODEL`. See docs/image-generation.md.
     #[arg(long, env = "MLXCEL_IMAGE_MODEL", value_name = "PATH_OR_REPO_ID")]
     image_model: Option<String>,
 

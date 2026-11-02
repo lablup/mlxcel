@@ -1262,6 +1262,12 @@ fn warn_on_insecure_video_allowlist(allowlist: &[PathBuf]) {
 pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport {
     use crate::models::ModelType;
 
+    // Image-only serving (empty path, #2825) has no chat checkpoint, and an
+    // empty path would resolve to the working directory. No media support.
+    if model_path.as_os_str().is_empty() {
+        return ModelMediaSupport::none();
+    }
+
     // b10621's `--no-mmproj` / `--no-mmproj-auto` refuses every media part,
     // whatever the checkpoint could do (issue #1451).
     if crate::server::media_admission_disabled() {
@@ -2012,6 +2018,12 @@ pub(super) fn resolve_generation_sampling_defaults(
 /// detection error (unreadable config) returns `false`, preserving the baseline.
 fn detect_gemma4_family(model_path: &Path) -> bool {
     use crate::models::ModelType;
+
+    // Image-only serving has no chat checkpoint (#2825), and an empty path
+    // would resolve to the working directory.
+    if model_path.as_os_str().is_empty() {
+        return false;
+    }
     matches!(
         crate::models::get_model_type(model_path),
         Ok(ModelType::Gemma4 | ModelType::Gemma4VLM | ModelType::Gemma4Unified)
@@ -3418,6 +3430,23 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
     log_startup_notices(&startup);
 
+    // `--image-model` with no `-m` (#2825): no chat checkpoint exists, so
+    // `model_path` is empty. Every consumer of it below is either skipped or
+    // guarded so the router branch, model facts and media detection cannot
+    // read the working directory in place of a checkpoint.
+    let image_only =
+        startup.embedding_serving_mode == crate::server::config::EmbeddingServingMode::ImageOnly;
+    if image_only {
+        // The tensor- and pipeline-parallel planners read the chat checkpoint
+        // to derive a shard plan, and there is none here. Refuse rather than
+        // silently start a single-rank server.
+        anyhow::ensure!(
+            startup.tp_size == 1 && startup.pp_layers.is_none() && startup.pp_auto.is_none(),
+            "tensor and pipeline parallelism require a chat model loaded with -m; \
+             --image-model without -m serves image generation only"
+        );
+    }
+
     // Vertex AI (GCP) custom-container compat (b10621, #1456): resolved
     // purely from the AIP_* environment variables, before anything binds or
     // loads. With AIP_MODE=PREDICTION, AIP_HTTP_PORT (default 8080)
@@ -3517,10 +3546,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // wiring); the chat provider skips its worker for this model type, the
     // text warmup is skipped, and the chat routes answer 501 naming the
     // socket.
-    let is_voicechat = matches!(
-        crate::models::get_model_type(&startup.model_path),
-        Ok(crate::models::ModelType::NemotronVoiceChat)
-    );
+    let is_voicechat = !image_only
+        && matches!(
+            crate::models::get_model_type(&startup.model_path),
+            Ok(crate::models::ModelType::NemotronVoiceChat)
+        );
 
     // Issue #688 (M1/M2 hardening): disable CUDA graph capture for hazard-family
     // models (Gemma 4) here, on the main startup thread, before any generation or
@@ -3536,8 +3566,10 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // `serve_remote_pipeline_stage` branch below) all load `startup.model_path`.
     // Unaffected model families and an explicit `MLX_USE_CUDA_GRAPHS` operator
     // override are left untouched.
-    crate::loading::maybe_disable_cuda_graphs_for_model_for_path(&startup.model_path);
-    validate_muse_glimmer_unsupported_startup(&startup)?;
+    if !image_only {
+        crate::loading::maybe_disable_cuda_graphs_for_model_for_path(&startup.model_path);
+        validate_muse_glimmer_unsupported_startup(&startup)?;
+    }
 
     super::media::configure_image_input_limits(super::media::ImageInputLimits {
         max_payload_bytes: startup.max_image_payload_size,
@@ -3595,7 +3627,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
 
     validate_parallel_context_startup(&startup)?;
     validate_pipeline_parallel_startup(&startup)?;
-    let tp_support = resolve_tensor_parallel_runtime_support(&startup)?;
+    let tp_support = if image_only {
+        None
+    } else {
+        Some(resolve_tensor_parallel_runtime_support(&startup)?)
+    };
 
     // One line naming what the context and batch flags actually resolved to.
     // Until #1450 none of these was logged anywhere: `--ctx-size` reached a
@@ -3773,7 +3809,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     config.pipeline_parallel_runtime = distributed
         .pipeline_runtime
         .or(config.pipeline_parallel_runtime.take());
-    config.no_batch |= tp_support.force_no_batch;
+    if let Some(tp_support) = tp_support {
+        config.no_batch |= tp_support.force_no_batch;
+    }
     if config.tensor_parallel.tp_size > 1 {
         if config.no_batch {
             tracing::info!(
@@ -3808,7 +3846,18 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     if let Some(service_config) = distributed.remote_stage_service {
         return serve_remote_pipeline_stage(service_config).await;
     }
-    let (tokenizer, chat_template) = load_chat_front(&startup)?;
+    // Image-only serving has no checkpoint for a tokenizer or a chat template;
+    // every route that would read them refuses in this mode (#2825). The
+    // router branch below is unreachable here because a router selector is a
+    // startup error alongside `--image-model` without `-m`.
+    let (tokenizer, chat_template) = if image_only {
+        (
+            crate::tokenizer::MlxcelTokenizer::empty(),
+            ChatTemplateProcessor::default(),
+        )
+    } else {
+        load_chat_front(&startup)?
+    };
 
     // `--dry-sequence-breaker` carries b10621's string value domain since
     // #1485; the effective set (default set, replacement values, or the
@@ -3886,20 +3935,47 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     let batch_metrics = Arc::new(BatchMetrics::new());
     let batch_observability = Arc::new(BatchObservability::new());
 
-    let prompt_cache_store =
-        resolve_prompt_cache_store(&mut config, &startup.model_path, &batch_metrics);
+    // The id an image-only server answers to: the first `--alias` entry, else
+    // the image checkpoint's directory name. The chat provider, `AppState`'s
+    // display id and the image provider all report this one value (#2825).
+    let served_image_id = startup.model_alias.clone().unwrap_or_else(|| {
+        startup
+            .image_model_path
+            .as_deref()
+            .map(side_model_id_for_path)
+            .unwrap_or_default()
+    });
+
+    let prompt_cache_store = if image_only {
+        // No chat worker exists to donate or adopt a prefix (#2825).
+        None
+    } else {
+        resolve_prompt_cache_store(&mut config, &startup.model_path, &batch_metrics)
+    };
 
     // `--timeout` is validated inside `new_with_server_config_and_prompt_cache` and
     // the resolved `Duration` is stashed on `ModelProvider`, where it flows into the drain loops.
     // A zero value triggers a logged warning and falls back to the 300 s default.
-    let model_provider = Arc::new(ModelProvider::new_with_server_config_and_prompt_cache(
-        startup.model_path.clone(),
-        startup.adapter_path.clone(),
-        &config,
-        prompt_cache_store.clone(),
-        batch_metrics.clone(),
-        batch_observability.clone(),
-    )?);
+    let model_provider = Arc::new(if image_only {
+        ModelProvider::new_without_chat_model_for_image(
+            served_image_id.clone(),
+            "Chat generation is disabled: this server was started with --image-model and no -m \
+             and serves only /v1/images/generations and /v1/images/edits"
+                .to_string(),
+            &config,
+            batch_metrics.clone(),
+            batch_observability.clone(),
+        )?
+    } else {
+        ModelProvider::new_with_server_config_and_prompt_cache(
+            startup.model_path.clone(),
+            startup.adapter_path.clone(),
+            &config,
+            prompt_cache_store.clone(),
+            batch_metrics.clone(),
+            batch_observability.clone(),
+        )?
+    });
 
     // From here on the worker owns a model (or is loading one). Every exit
     // below, the side-model resolution errors included, goes through the join
@@ -4037,7 +4113,11 @@ async fn serve_with_side_model_workers(
         webui_policy,
         model_provider,
     } = inputs;
-    if startup.warmup {
+    let image_only =
+        config.embedding_serving_mode == crate::server::config::EmbeddingServingMode::ImageOnly;
+    // Warmup generates a chat token, and image-only has no chat worker to run
+    // it on (#2825).
+    if startup.warmup && !image_only {
         run_startup_warmup(&startup.model_path, model_provider.as_ref());
     }
 
@@ -4130,7 +4210,11 @@ async fn serve_with_side_model_workers(
         } else {
             config.audio_request_timeout_secs
         });
-    let audio_model: Option<Arc<dyn crate::server::audio_model::AudioModelProvider>> =
+    let audio_model: Option<Arc<dyn crate::server::audio_model::AudioModelProvider>> = if image_only
+    {
+        // Empty model path: no checkpoint to classify (#2825).
+        None
+    } else {
         match crate::models::get_model_type(&startup.model_path) {
             Ok(crate::models::ModelType::Whisper) => {
                 tracing::info!(
@@ -4167,7 +4251,8 @@ async fn serve_with_side_model_workers(
                 }
             }
             _ => None,
-        };
+        }
+    };
     if let Some(provider) = &audio_model {
         side_workers.push(SideWorkerExit::new("audio", Arc::clone(provider)));
     }
@@ -4263,7 +4348,12 @@ async fn serve_with_side_model_workers(
     // A mode flag that resolved no worker is a command line that cannot do
     // what it asked for, so it fails here rather than answering 501 to every
     // request for the life of the process (#1452).
-    check_serving_mode(&config, embedding_model.is_some(), rerank_model.is_some())?;
+    check_serving_mode(
+        &config,
+        embedding_model.is_some(),
+        rerank_model.is_some(),
+        image_model.is_some(),
+    )?;
 
     let state = AppState::with_observability(
         model_provider,
@@ -4422,12 +4512,14 @@ pub(crate) fn check_serving_mode(
     config: &ServerConfig,
     has_embedding: bool,
     has_rerank: bool,
+    has_image: bool,
 ) -> Result<()> {
     use crate::server::config::EmbeddingServingMode;
     match config.embedding_serving_mode {
         EmbeddingServingMode::Any => Ok(()),
         EmbeddingServingMode::EmbeddingOnly if has_embedding => Ok(()),
         EmbeddingServingMode::RerankOnly if has_rerank => Ok(()),
+        EmbeddingServingMode::ImageOnly if has_image => Ok(()),
         EmbeddingServingMode::EmbeddingOnly => anyhow::bail!(
             "--embeddings restricts this server to embedding requests, but no embedding \
              checkpoint was loaded: pass an embedding checkpoint to -m, or name one with \
@@ -4439,6 +4531,10 @@ pub(crate) fn check_serving_mode(
              pass a sequence-classifier checkpoint to -m, or name a reranker with \
              --reranker-model <path>. The Qwen3 and Qwen3-VL generative rerankers are only \
              reachable through --reranker-model."
+        ),
+        EmbeddingServingMode::ImageOnly => anyhow::bail!(
+            "--image-model without -m restricts this server to image generation, but no image \
+             checkpoint was loaded: pass --image-model <path> (or set MLXCEL_IMAGE_MODEL)."
         ),
     }
 }
@@ -4460,8 +4556,12 @@ pub(crate) fn resolve_embedding_source(
     model_path: &Path,
     embedding_model_path: Option<&Path>,
 ) -> Result<EmbeddingSource> {
-    let primary_is_embedding = crate::models::get_model_type(model_path)
-        .is_ok_and(crate::model_metadata::is_embedding_model_type);
+    // An empty model path (image-only serving, #2825) names no primary
+    // checkpoint, and `get_model_type` would otherwise read the working
+    // directory.
+    let primary_is_embedding = !model_path.as_os_str().is_empty()
+        && crate::models::get_model_type(model_path)
+            .is_ok_and(crate::model_metadata::is_embedding_model_type);
     match (embedding_model_path, primary_is_embedding) {
         (Some(explicit), true) => anyhow::bail!(
             "two embedding models: -m {} is an embedding checkpoint and --embedding-model {} \
@@ -4499,7 +4599,18 @@ fn resolve_image_provider(
     let Some(path) = startup.image_model_path.as_deref() else {
         return Ok(None);
     };
-    let model_id = side_model_id_for_path(path);
+    // Image-only serving reports the first `--alias` entry as the served id;
+    // the two-model shape keeps the checkpoint's directory name (#2825).
+    let model_id = if startup.embedding_serving_mode
+        == crate::server::config::EmbeddingServingMode::ImageOnly
+    {
+        startup
+            .model_alias
+            .clone()
+            .unwrap_or_else(|| side_model_id_for_path(path))
+    } else {
+        side_model_id_for_path(path)
+    };
     tracing::info!(
         path = %path.display(),
         model_id = %model_id,
@@ -4614,8 +4725,12 @@ pub(crate) fn resolve_rerank_source(
     model_path: &Path,
     reranker_model_path: Option<&Path>,
 ) -> Result<RerankSource> {
-    let primary_is_reranker = crate::models::get_model_type(model_path)
-        .is_ok_and(crate::model_metadata::is_reranker_model_type);
+    // An empty model path (image-only serving, #2825) names no primary
+    // checkpoint, and `get_model_type` would otherwise read the working
+    // directory.
+    let primary_is_reranker = !model_path.as_os_str().is_empty()
+        && crate::models::get_model_type(model_path)
+            .is_ok_and(crate::model_metadata::is_reranker_model_type);
     match (reranker_model_path, primary_is_reranker) {
         // The same directory in both flags is the rerank-only shape: `-m` is
         // required, and a generative reranker is only reachable through
