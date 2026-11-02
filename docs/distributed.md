@@ -567,9 +567,10 @@ frame protection suite and the derived per-frame keys in #2656, 4 added the
 at-capacity verdict in #2692, 5 added the verdict authenticator in #2714); a
 pair of processes built from different versions fails with an explicit
 version message rather than a confusing I/O error. Mixed versions in one
-cluster are not supported: every node must be upgraded together. Every
-version bump so far landed after v0.8.0-beta.1, so v0.8.0 and that beta cannot
-share a cluster.
+cluster are not supported: every node must be upgraded together. Discovery
+beacons and stage assignments both pin `CARGO_PKG_VERSION`, so the rule
+applies to release versions as well as to protocol versions, and v0.8.0 and
+v0.8.1 cannot share a cluster.
 
 Residual risks:
 

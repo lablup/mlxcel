@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v0.8.1] - 2026-11-03
+
+### Added
+
+- **Xiaomi MiMo v2 Flash support** (`model_type` `mimo_v2_flash`) through detection, the loaded-model dispatch, the architecture registry and the tensor-parallel fallback table (#2829). The family is a 48-layer hybrid sliding/full attention sparse decoder with 256 routed experts: Q/K and V use different head widths (192 and 128), sliding layers have their own head counts, multiply V by `attention_value_scale` and carry a learned per-head `attention_sink_bias`; RoPE is partial (64 of 192) with a per-layer base (10000 on sliding layers, 5000000 on full ones); and the router is `noaux_tc`, with float32 sigmoid scores, a selection-only `e_score_correction_bias`, and weights gathered from the unbiased scores. `mlx-community/MiMo-V2-Flash-4bit` loads in about 9 s at 161.8 GiB resident and decodes coherently.
+- **Image-only serving on both server binaries** (#2830). `--image-model` (or `MLXCEL_IMAGE_MODEL`) with no chat model source now selects an image-only mode instead of failing on a missing `--model`: the image worker is the primary model, and chat, completion, tokenizer and prompt-inspection routes answer the structured 501 that names the mode. Startup skips chat loading, warmup and the prompt cache, `/health` follows the image worker, and `/v1/models` advertises the image id with only the `image` capability. Image-only mode combined with a router selector, `--embedding-model`, `--reranker-model`, `--embeddings` or `--reranking` fails at startup naming both flags.
+
+### Changed
+
+- Offline CLI commands install a stderr `warn` subscriber when `RUST_LOG` is unset, so WARN and ERROR from `generate`, `inspect`, `tune`, environment fallbacks and deprecated-flag notices are no longer discarded (#2826). stdout is byte-for-byte unchanged; a set `RUST_LOG` keeps its directives and `serve` still installs its own filter.
+- `MLXCEL_CUDA_DISABLE_GEMV=1` sends gemv-eligible dense matmuls to cuBLASLt, default off and read once, as a diagnostic for the small-M GEMM kernel differences tracked in #2732 (#2775). Measured on GB10, gemv remains the default: disabling it cost 21.2% on llama-3.2-1b, 8.9% on llama-3.1-8b and 18.9% on qwen3.5-9b decode throughput, and cuBLASLt 13.8 against the linked 13.1 resolved only one prefill point, a 2.3% TTFT win on the 1B at prompt 4096 that the 9B did not reproduce.
+
+### Fixed
+
+- **Side-model workers join on server exit** (#2827). Audio, realtime, embedding, image and rerank workers joined only in their unbounded `Drop`, so on a CPU build an MLX free that ran after the C runtime's static destructors started aborted with `pure virtual method called`. Each side provider now exposes `shutdown_and_wait` sharing the chat worker's `WorkerExitObserver`, and `serve_with_model_provider` joins the side workers first and the chat worker second on the blocking pool under one `WORKER_EXIT_TIMEOUT` deadline. Side-worker failures log at `warn` and never replace the error that ended serving, the sleeping worker exits on `Shutdown` without reloading, and the remote pipeline stage path shuts its stage down and joins it even when the Ctrl-C handler cannot be installed.
+- The OpenXLA feature compile job builds again after the dependency update in #2819 (#2837). `safetensors` 0.8 returns `&str` from `SafeTensors::names()`, so the `name.as_str()` left in the Youtu-VL runtime resolved to the unstable `str_as_str` library feature, and `sha2` 0.11 returns a digest type that no longer implements `LowerHex`, which broke four `format!("{:x}", ...)` sites. Both now go through the borrowed name and the `sha256_hex` helper.
+- The headed WebKit arm of the WebUI navigation-feedback test allows 150 ms, because Playwright 1.64.1 ships WebKit 27.2 whose two-rAF paint tail measured 74 to 80 ms on the hosted runner against 36 to 57 ms on WebKit 26.6, with the application half unchanged at 30 to 34 ms (#2828). Chromium and Firefox keep the 100 ms budget, and the effective value is recorded in the evidence.
+- `scripts/bench_decode.sh` help matches the script: `--max-tokens` defaults to 128 rather than 100, `--prompt-tokens` defaults to 512 and replaces `--prompt`, and `--no-ignore-eos` is documented (#2838). The stale-build check moved after argument parsing, so `--help` works on a binary older than the tree.
+
+### CI/CD
+
+- CPU-only gates moved off the single GB10 runner: `clippy` and `cpu-link` run on `self-hosted-linux-26.04-x64`, and `cuda-sm70-compile` is disabled because no runner carries the CUDA 12.x toolkit Volta needs. GB10 keeps the four jobs that touch a GPU or the aarch64 release toolchain.
+- The duplicate clippy pass in `pipeline-parallel-ci.yml` is removed, and `cargo-deny`, `overlay-host-tests`, `webui-contract`, `webui-bundle` and `webui-installed-artifact` are skipped on changes their inputs cannot affect. The missing filter paths (`rust-toolchain.toml`, `docs/webui/**` and the pin-extraction script) are added.
+- The startup-notice guard scans every compiled `.rs` under `src/` instead of a fixed file list, and resolves calls by module path and enclosing `impl` type (#2826).
+
+### Docs
+
+- The ROCm gfx1151 benchmark page and both CSVs record all 44 checkpoints under `models/` at `2806f500` (pp512/tg128, three guarded rounds, 132 of 132 rows ok) plus a B = 1/2/4 serving ladder on three models (#2774).
+- Benchmark evidence is a CSV result file, one row per measurement, and new raw per-run record streams (`*.jsonl`, `*.ndjson`) under `docs/benchmark_results/data/` fail the check (#2836). The 77 files that predate the rule are listed in a baseline that can only shrink.
+- The cuBLASLt and gemv A/B campaign on GB10 records its three stages, the library-mapping check and its decisions; no interleaved rounds have run, and the single smoke run per arm is recorded as not evidence (#2775).
+
 ## [v0.8.0] - 2026-11-01
 
 ### Breaking Changes
@@ -1571,6 +1602,7 @@ Initial public release of mlxcel.
 - GitHub Actions release workflow for macOS ARM64
 - Profile mode for prefill/decode timing analysis
 
+[v0.8.1]: https://github.com/lablup/mlxcel/compare/v0.8.0...v0.8.1
 [v0.8.0]: https://github.com/lablup/mlxcel/compare/v0.7.0...v0.8.0
 [v0.7.0]: https://github.com/lablup/mlxcel/compare/v0.6.0...v0.7.0
 [v0.6.0]: https://github.com/lablup/mlxcel/compare/v0.5.2...v0.6.0
