@@ -157,7 +157,7 @@ The [WebUI guide](docs/webui/README.md) ([한국어](docs/webui/user-guide.ko.md
 
 ### Embed and rerank
 
-The offline commands use the same loaders and batching paths as the HTTP endpoints.
+The offline commands use the same loaders and batching paths as `POST /v1/embeddings` and `POST /v1/rerank`.
 
 ```bash
 # Embed two texts and print vectors plus cosine similarity.
@@ -168,7 +168,7 @@ mlxcel embed -m sentence-transformers/all-MiniLM-L6-v2 \
 mlxcel rerank -m BAAI/bge-reranker-v2-m3 \
   -q "what is panda?" -d "hi" -d "The giant panda is a bear species."
 
-# Serve embeddings alone, or a reranker beside a chat model.
+# Serve an embedding model alone, or a reranker beside a chat model.
 mlxcel-server -m sentence-transformers/all-MiniLM-L6-v2 --port 8080
 mlxcel-server -m Qwen3.5-0.8B-4bit \
   --reranker-model mlx-community/Qwen3-Reranker-0.6B-4bit --port 8080
@@ -190,7 +190,7 @@ See [Token classification and span extraction](docs/token-classification.md) for
 
 ### Transcribe and synthesize audio
 
-An audio-capable chat checkpoint serves transcription. Phi-4 Multimodal and Gemma 3n accept WAV, MP3, and FLAC detected from their bytes; other current audio families accept WAV. A dedicated Whisper checkpoint also provides a WAV-only transcription server.
+An audio-capable chat checkpoint serves transcription, a Whisper checkpoint serves transcription and translation, and a Kokoro checkpoint serves text-to-speech.
 
 ```bash
 mlxcel-server -m models/whisper-base --port 8080
@@ -199,32 +199,22 @@ curl http://localhost:8080/v1/audio/transcriptions \
   -F file=@recording.wav -F model=whisper-base
 ```
 
-Kokoro-82M checkpoints serve `POST /v1/audio/speech`. See [Audio API](docs/audio-api.md) for model layout, request formats, limits, streaming, and current backend constraints.
-
-A Nemotron VoiceChat checkpoint serves the full-duplex `/v1/realtime` WebSocket (base64 PCM16 in at 16 kHz, text, transcript and 22.05 kHz speech events out, one session at a time). `examples/voicechat_file_client.rs` drives a WAV file through it and `examples/voicechat_microphone.rs` (feature `voicechat-mic`, headphones recommended) holds a live microphone/speaker exchange; the protocol is in [Nemotron VoiceChat](docs/nemotron-voicechat.md#realtime-websocket-v1realtime).
-
-```bash
-mlxcel-server -m models/NemotronLabs-VoiceChat-11B-4bit --port 8080
-cargo run --release --example voicechat_file_client -- \
-  ws://127.0.0.1:8080/v1/realtime question.wav answer.wav \
-  --system-prompt "Be concise and answer in one sentence."
-```
+A Nemotron VoiceChat checkpoint adds the full-duplex `/v1/realtime` WebSocket. See [Audio API](docs/audio-api.md) for accepted containers, model layout, request formats, streaming, and limits, and [Nemotron VoiceChat](docs/nemotron-voicechat.md#realtime-websocket-v1realtime) for the realtime protocol and its example clients.
 
 ### Generate and edit images
 
-`mlxcel generate-image` runs a Diffusers-layout checkpoint for text-to-image generation and image editing, and both server entry points expose the same runtime at `POST /v1/images/generations` and `POST /v1/images/edits` behind `--image-model`.
+`mlxcel generate-image` runs a Diffusers-layout checkpoint for text-to-image generation and editing, and both server entry points serve the same models at `POST /v1/images/generations` and `POST /v1/images/edits` behind `--image-model`.
 
 ```bash
-# Generate an image, or edit a reference image.
+# Generate, or edit a reference image.
 mlxcel generate-image -m models/flux2-klein -p "a watercolor fox" -o fox.png
 mlxcel generate-image -m models/flux2-klein --task edit --image fox.png -p "make it night"
 
-# Serve the image routes beside a chat model, or with no chat model at all.
-mlxcel-server -m Qwen3.5-0.8B-4bit --image-model models/flux2-klein --port 8080
+# Image-only serving, with no chat model loaded.
 mlxcel-server --image-model models/flux2-klein --port 8080
 ```
 
-Registered families are FLUX.2 Klein, Z-Image, Prism Bonsai, ERNIE-Image, Mage-Flow, Qwen-Image, Ideogram 4, Ming-Image and LLaDA-Image. With `--image-model` and no `-m`, the server runs image-only: the image worker is the primary model and the chat routes answer a 501 that names the mode. See [Image generation](docs/image-generation.md) for the family table, per-family step and guidance defaults, the request schema, and the queue and timeout limits.
+See [Image generation](docs/image-generation.md) for the registered families, per-family step and guidance defaults, the request schema, and the image-only mode.
 
 ### Manage downloaded models
 
