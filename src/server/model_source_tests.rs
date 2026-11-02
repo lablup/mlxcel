@@ -413,3 +413,60 @@ fn an_explicit_offline_flag_survives_a_falsey_environment() {
     });
     assert!(resolved, "--offline must win over LLAMA_ARG_OFFLINE=0");
 }
+
+// ── image-only mode (#2825) ────────────────────────────────────────────────
+
+#[test]
+fn image_model_alone_selects_image_only_serving() {
+    assert!(
+        resolve_image_only_mode(true, false, &[]).expect("no conflicting flag"),
+        "--image-model with no model source selects the mode"
+    );
+}
+
+#[test]
+fn a_model_source_keeps_the_two_model_shape() {
+    // `-m`, `--hf-repo` and the other model-source flags keep today's
+    // behavior even next to `--image-model`.
+    assert!(
+        !resolve_image_only_mode(true, true, &[("--embeddings", true)])
+            .expect("a model source means the two-model shape"),
+        "a model source never selects image-only serving"
+    );
+    assert!(
+        !resolve_image_only_mode(false, false, &[]).expect("no image model requested"),
+        "no --image-model selects nothing"
+    );
+}
+
+#[test]
+fn image_only_names_every_conflicting_flag() {
+    let err = resolve_image_only_mode(
+        true,
+        false,
+        &[
+            ("--models-dir", true),
+            ("--webui", false),
+            ("--embedding-model", true),
+            ("--reranker-model", false),
+            ("--embeddings", true),
+            ("--reranking", false),
+        ],
+    )
+    .expect_err("conflicting flags must fail");
+    let message = err.to_string();
+    assert!(message.contains("--image-model"), "{message}");
+    assert!(message.contains("--models-dir"), "{message}");
+    assert!(message.contains("--embedding-model"), "{message}");
+    assert!(message.contains("--embeddings"), "{message}");
+    assert!(!message.contains("--webui"), "{message}");
+    assert!(!message.contains("--reranker-model"), "{message}");
+    assert!(!message.contains("--reranking"), "{message}");
+}
+
+#[test]
+fn the_missing_model_error_mentions_image_only_serving() {
+    let err = resolve_llama_model_source(&args()).expect_err("no source");
+    let message = err.to_string();
+    assert!(message.contains("--image-model"), "{message}");
+}

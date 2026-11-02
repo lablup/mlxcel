@@ -3269,6 +3269,15 @@ __global__ void qmv_idot_kernel(
 // sustains ~175 GB/s on real 8MB matmuls vs qmv_tiled's ~108 (kernel-bound, not
 // size/interleaving). Activation from global (L2-cached). Default on; opt out
 // with MLX_QMV_NO_WIDE. Requires K % 32 == 0; GROUP_SIZE in {32,64,128}.
+//
+// Each block starts its walk over K at its own offset (`stagger`). Otherwise all
+// running warps read the same offset of their columns, and when the column
+// stride is a multiple of a large power of two those addresses pile up in memory:
+// on gfx1151 a 9.44 MB GEMV took 122 us at K = 8192 (stride 4096 bytes) and 48 us
+// at K = 8160. At other strides it costs a few percent (granite-4.0-h-tiny at
+// K = 1536: -5%), so the launch sets it only for 4 bits with K % 2048 == 0 (a
+// stride multiple of 1024 bytes). 8 bits is unmeasured and stays unstaggered.
+// Opt out with MLX_ROCM_QMV_WIDE_STAGGER=0.
 template <typename T, typename ScaleT, int GROUP_SIZE, int BITS>
 __global__ void __launch_bounds__(1024) qmv_wide_kernel(
     const T* __restrict__ x,
@@ -3279,7 +3288,8 @@ __global__ void __launch_bounds__(1024) qmv_wide_kernel(
     int M,
     int N,
     int K,
-    bool has_bias) {
+    bool has_bias,
+    bool stagger) {
   constexpr int WPER = 128 / BITS;
   int lane = threadIdx.x;
   int col = blockIdx.x * blockDim.y + threadIdx.y;
@@ -3293,7 +3303,13 @@ __global__ void __launch_bounds__(1024) qmv_wide_kernel(
   const ScaleT* bcr = has_bias ? (biases + static_cast<size_t>(col) * ng) : nullptr;
   const T* xr = x + static_cast<size_t>(row) * K;
   float acc = 0.0f;
-  for (int k = lane * WPER; k < K; k += 32 * WPER) {
+  const int steps = (K + 32 * WPER - 1) / (32 * WPER);
+  const int first = stagger ? blockIdx.x % steps : 0;
+  for (int i = 0; i < steps; ++i) {
+    const int step = i + first < steps ? i + first : i + first - steps;
+    const int k = lane * WPER + step * 32 * WPER;
+    if (k >= K)
+      continue;
     int g = k / GROUP_SIZE;
     float s = load_scale_value<ScaleT, GROUP_SIZE, true>(scr[g]);
     float b = has_bias ? static_cast<float>(bcr[g]) : 0.0f;
@@ -4048,6 +4064,10 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   // (opt out with MLX_QMV_NO_WIDE): +14-20% on dense decode, never regresses.
   // Replaces qmv_tiled for decode; ~175 vs ~108 GB/s.
   static bool use_wide_qmv = (std::getenv("MLX_QMV_NO_WIDE") == nullptr);
+  static const bool wide_stagger = [] {
+    const char* e = std::getenv("MLX_ROCM_QMV_WIDE_STAGGER");
+    return !(e && e[0] == '0' && e[1] == '\0');
+  }();
   bool wide_ok = use_wide_qmv && (bits_ == 4 || bits_ == 8) &&
       mode_ == QuantizationMode::Affine &&
       has_bias && transpose_ && batch_count == 1 && non_batched && M >= 1 &&
@@ -4062,11 +4082,12 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     } else {
     dim3 wblock(32, wcols);
     dim3 wgrid((N + wcols - 1) / wcols, M);
+    const bool stagger_wide = wide_stagger && bits_ == 4 && K % 2048 == 0;
 #define LAUNCH_QMV_WIDE(TT, ST, GS, BV)                                      \
   enc.add_kernel_node(                                                       \
       &rocm::qmv_wide_kernel<TT, ST, GS, BV>, wgrid, wblock, 0u,             \
       (const TT*)x_ptr, w_ptr, (const ST*)scales_ptr, (const ST*)biases_ptr, \
-      (TT*)out_ptr, M, N, K, has_bias)
+      (TT*)out_ptr, M, N, K, has_bias, stagger_wide)
 #define LAUNCH_QMV_WIDE_GS(TT, ST, BV)                                       \
   do {                                                                       \
     if (group_size_ == 32) { LAUNCH_QMV_WIDE(TT, ST, 32, BV); }             \

@@ -1531,9 +1531,15 @@ async fn fetch_remote_bytes_with_limit_cancel(
         media_net::ensure_socket_addr_allowed(final_host, peer).map_err(|err| rejected(&err))?;
     }
 
+    // reqwest's error text carries the URL it failed on, which after a
+    // redirect is a hop the origin chose; only the client's own `url` is
+    // rendered (issue #2728).
     let response = match response.error_for_status() {
         Ok(response) => response,
-        Err(err) => bail!("{kind} URL returned error status {url}: {err}"),
+        Err(err) => bail!(
+            "{kind} URL returned error status {url}: {}",
+            err.without_url()
+        ),
     };
 
     if let Some(content_length) = response.content_length()
@@ -1550,7 +1556,9 @@ async fn fetch_remote_bytes_with_limit_cancel(
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         check_media_cancel(cancelled, bytes.len())?;
-        let chunk = chunk.with_context(|| format!("Failed to read {kind} response body {url}"))?;
+        let chunk = chunk
+            .map_err(reqwest::Error::without_url)
+            .with_context(|| format!("Failed to read {kind} response body {url}"))?;
         if bytes.len().saturating_add(chunk.len()) > max_size {
             bail!(
                 "{kind} payload too large: response body exceeded {} bytes",
@@ -1714,7 +1722,7 @@ fn validate_payload_size(bytes: Vec<u8>, kind: &str, max_size: usize) -> Result<
 /// Split out of [`http_image_client`] so tests build the same client with a
 /// proxy of their own.
 pub(super) fn media_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
+    crate::http_tls::client_builder()
         // Total deadline for any single request; the redirect helper narrows
         // it per hop to what is left of the chain's shared deadline.
         .timeout(media_net::MEDIA_FETCH_TIMEOUT)

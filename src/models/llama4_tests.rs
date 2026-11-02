@@ -162,11 +162,11 @@ mod snapshot_prompt_cache {
         mlxcel_core::from_slice_f32(&vec![1.0_f32; len], shape)
     }
 
-    fn synthetic_args() -> TextArgs {
+    fn synthetic_args(layers: usize) -> TextArgs {
         serde_json::from_value(serde_json::json!({
             "model_type": "llama4",
             "hidden_size": HIDDEN,
-            "num_hidden_layers": LAYERS,
+            "num_hidden_layers": layers,
             "intermediate_size": INTER,
             "intermediate_size_mlp": INTER,
             "num_attention_heads": HEADS,
@@ -183,7 +183,7 @@ mod snapshot_prompt_cache {
         .expect("synthetic Llama 4 config must parse")
     }
 
-    fn synthetic_weights() -> WeightMap {
+    fn synthetic_weights(layers: usize) -> WeightMap {
         let mut w = WeightMap::new();
         w.insert(
             "language_model.model.embed_tokens.weight".into(),
@@ -194,7 +194,7 @@ mod snapshot_prompt_cache {
             tensor(&[VOCAB, HIDDEN], 2),
         );
         w.insert("language_model.model.norm.weight".into(), ones(&[HIDDEN]));
-        for layer in 0..LAYERS {
+        for layer in 0..layers {
             let seed = 200 + layer as u64 * 20;
             let prefix = format!("language_model.model.layers.{layer}");
             let attn = format!("{prefix}.self_attn");
@@ -255,8 +255,12 @@ mod snapshot_prompt_cache {
     }
 
     pub(super) fn build_wrapper() -> Llama4Wrapper {
-        let args = synthetic_args();
-        let weights = synthetic_weights();
+        build_wrapper_with_layers(LAYERS)
+    }
+
+    fn build_wrapper_with_layers(layers: usize) -> Llama4Wrapper {
+        let args = synthetic_args(layers);
+        let weights = synthetic_weights(layers);
         Llama4Wrapper::new(
             Llama4CxxModel::from_weights(&weights, &args).expect("synthetic Llama 4 must load"),
         )
@@ -382,6 +386,25 @@ mod snapshot_prompt_cache {
             .snapshot_into(&mut after, "layer0")
             .expect("snapshot");
         assert!(!Llama4Cache::snapshot_truncatable_to(&after, "layer0", 4));
+    }
+
+    /// Issue #2790: the chunked (MoE) layers build `ChunkedKVCache`s, which
+    /// store FP16 whatever the table says, so under `int8` only the dense
+    /// layers (every fourth: 3 and 7 of 8) report `Int8`.
+    #[test]
+    fn llama4_chunked_layers_report_fp16_storage_under_int8() {
+        let wrapper = build_wrapper_with_layers(8);
+        wrapper.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; 8]);
+        let expected: Vec<_> = (0..8)
+            .map(|layer| {
+                Some(if layer % 4 == 3 {
+                    KVCacheMode::Int8
+                } else {
+                    KVCacheMode::Fp16
+                })
+            })
+            .collect();
+        assert_eq!(wrapper.kv_cache_storage_modes(), Some(expected));
     }
 
     #[test]

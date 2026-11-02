@@ -191,6 +191,7 @@ impl MuseGlimmerAttention {
         config: &MuseGlimmerTextConfig,
         layer_idx: usize,
         prefix: &str,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let group_size = config.group_size();
         let bits = config.bits();
@@ -249,7 +250,7 @@ impl MuseGlimmerAttention {
             rope_freqs,
             rope_mscale,
             sliding_window: if config.is_sliding_layer(layer_idx) {
-                config.sliding_window as i32
+                sliding_cache_window
             } else {
                 0
             },
@@ -337,6 +338,7 @@ impl MuseGlimmerDecoderLayer {
         layer_idx: usize,
         model_prefix: &str,
         load_weight: impl Fn(&WeightMap, &str) -> Result<UniquePtr<MlxArray>, String>,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let prefix = format!("{model_prefix}.layers.{layer_idx}");
         let self_attn = MuseGlimmerAttention::from_weights(
@@ -344,6 +346,7 @@ impl MuseGlimmerDecoderLayer {
             config,
             layer_idx,
             &format!("{prefix}.self_attn"),
+            sliding_cache_window,
         )?;
         let mlp = MuseGlimmerMlp::from_weights(weights, config, &format!("{prefix}.mlp"))?;
         let load = |suffix: &str| load_weight(weights, &format!("{prefix}.{suffix}.weight"));

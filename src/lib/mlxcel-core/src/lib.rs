@@ -736,6 +736,13 @@ mod ffi {
         /// Report collected by the opt-in shapeless compile hardware audit.
         fn shapeless_compile_audit_report() -> String;
 
+        /// `std::getenv(name)` in the bridge. Fills `value` and returns true
+        /// when set (#2803).
+        fn native_env_read(name: &str, value: &mut Vec<u8>) -> bool;
+
+        /// `mlx::core::env::get_var(name, default_value)`, inside MLX (#2803).
+        fn mlx_env_get_var_int(name: &str, default_value: i32) -> i32;
+
         /// Compiled SwiGLU activation with kernel fusion
         /// Uses mlx::core::compile(shapeless=true) like Python's @mx.compile
         /// output = silu(gate) * x
@@ -801,10 +808,6 @@ mod ffi {
             eps: f32,
         ) -> UniquePtr<MlxArray>;
 
-        /// Compiled gelu: x * 0.5 * (1 + erf(x / sqrt(2))) — single fused kernel
-        /// Used by: StarCoder2 and other precise GELU-based models
-        fn compiled_gelu(x: &MlxArray) -> UniquePtr<MlxArray>;
-
         /// Compiled `gelu_approx`: despite the name, the exact erf GELU
         /// `x * 0.5 * (1 + erf(x / sqrt(2)))` (MLX `nn.gelu`), not MLX's tanh
         /// `nn.gelu_approx`. For the tanh form use `gelu_tanh` (#2423).
@@ -826,8 +829,8 @@ mod ffi {
         fn compiled_geglu_approx_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
-        /// erf_gelu(max(0, x - (mean + std * multiplier))). Upstream applies the
-        /// tanh GELU here; see the C++ note (#2423).
+        /// gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype,
+        /// matching mlx-lm's `gelu_topk` and Hugging Face (#2548).
         /// Used by: Gemma3n MLP layers with activation_sparsity > 0
         fn compiled_gelu_topk(x: &MlxArray, std_multiplier: f32) -> UniquePtr<MlxArray>;
 
@@ -968,9 +971,10 @@ mod ffi {
             down_bias: *const MlxArray,
         ) -> UniquePtr<MlxArray>;
 
-        /// Compiled GELU MLP forward for non-quantized (FP16/BF16) weights
-        /// Fuses gate_proj + gelu + up_proj + multiply + down_proj into compiled graph
-        /// Used by: Gemma, Gemma4 and other GELU-gated FP models
+        /// Compiled GELU MLP forward for non-quantized (FP16/BF16) weights:
+        /// `down_proj(gelu_tanh(gate_proj(x)) * up_proj(x))`, the tanh GeGLU
+        /// compiled, the matmuls eager (#2548; erf before).
+        /// Used by: Gemma v1, Gemma4 dense MLP and the Gemma4 assistant drafter
         unsafe fn compiled_gelu_mlp_forward_fp16(
             x: &MlxArray,
             gate_weight: &MlxArray,
@@ -3999,21 +4003,24 @@ pub use lang_analyzer::cache_root;
 /// Default the CUDA NVRTC PTX cache to a persistent, MLX-pin-scoped directory
 /// under the mlxcel cache root, unless `MLX_PTX_CACHE_DIR` is already set.
 ///
-/// MLX's own default places the JIT cache in the system temp dir
-/// (`$TMPDIR/mlx/<version>/ptx`), which is cleared on reboot, so the first-run
-/// kernel compilation is paid again every boot. A persistent location pays it
-/// once per machine. The directory is scoped by the pinned MLX commit because
-/// built-in kernels are keyed by kernel name alone and are not validated
-/// against the kernel source, so those entries must not survive an MLX upgrade.
-/// Custom kernels (`mx.fast.cuda_kernel`) are keyed by name, template arguments
-/// and a hash of the full source. No-op on non-CUDA
-/// builds, when `MLX_PTX_CACHE_DIR` is already set, and when the cache root
-/// cannot be resolved. Call once at startup before the first inference.
+/// MLX's own default places the JIT cache in the system temp dir (the
+/// overlay's per-user `$TMPDIR/mlx-<euid>/<version>/ptx`, #2539), which is
+/// cleared on reboot, so the first-run kernel compilation is paid again every
+/// boot. A persistent location pays it once per machine. The directory is
+/// scoped by the pinned MLX commit because built-in kernels are keyed by
+/// kernel name alone and are not validated against the kernel source, so those
+/// entries must not survive an MLX upgrade. Custom kernels
+/// (`mx.fast.cuda_kernel`) are keyed by name, template arguments and a hash of
+/// the full source. No-op on non-CUDA builds, when `MLX_PTX_CACHE_DIR` is
+/// already set, and when the cache root cannot be resolved or is relative
+/// (the overlay then refuses `MLXCEL_CACHE_DIR` with its notice, #2797). Call
+/// once at startup before the first inference.
 pub fn ensure_persistent_ptx_cache() {
     if !cfg!(feature = "cuda") {
         return;
     }
-    if std::env::var_os("MLX_PTX_CACHE_DIR").is_some() {
+    // An empty value counts as unset, as in the overlay (#2797).
+    if std::env::var_os("MLX_PTX_CACHE_DIR").is_some_and(|value| !value.is_empty()) {
         return;
     }
     let Some(root) = cache_root() else {
@@ -4021,15 +4028,34 @@ pub fn ensure_persistent_ptx_cache() {
     };
     let commit = env!("MLXCEL_MLX_COMMIT");
     let scope = &commit[..commit.len().min(12)];
-    let dir = root.join("cuda-ptx").join(scope);
-    if std::fs::create_dir_all(&dir).is_ok() {
+    let Some(dir) = ptx_cache_dirs::persistent_ptx_cache_dir(&root, scope) else {
+        return;
+    };
+    // The jit_module.cpp overlay refuses a cache directory with a group- or
+    // other-writable component (#2539), and a umask of 002 (user private
+    // groups) would make create_dir_all produce a group-writable one, so every
+    // directory created here is private. Group write left that way by earlier
+    // releases is repaired: on the directories mlxcel manages, plus the root
+    // when it is the default (an explicit MLXCEL_CACHE_DIR is left as the user
+    // set it). On Windows the overlay checks ACLs and nothing is repaired.
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    if builder.create(&dir).is_ok() {
+        #[cfg(unix)]
+        ptx_cache_dirs::tighten_persistent_ptx_dirs(
+            &root,
+            &dir,
+            std::env::var_os("MLXCEL_CACHE_DIR").is_none_or(|value| value.is_empty()),
+        );
         // SAFETY: set_var mutates the process-global environment and is unsound
         // only under a concurrent getenv/setenv on another thread. Per this
         // function's documented contract, all in-tree callers invoke it once at
         // startup right after CLI parsing (src/main.rs, src/bin/mlx_server.rs),
         // before the first CUDA NVRTC JIT compile, any model load, or any worker
         // thread touches the environment, so no other thread is accessing it here.
-        unsafe { std::env::set_var("MLX_PTX_CACHE_DIR", &dir) };
+        unsafe { native_env::set_native_var("MLX_PTX_CACHE_DIR", &dir) };
     }
 }
 
@@ -4395,6 +4421,12 @@ pub fn fast_scaled_dot_product_attention_causal(
 }
 
 // High-level layer abstractions
+pub mod native_env;
+
+#[cfg(test)]
+#[path = "native_env_tests.rs"]
+mod native_env_tests;
+
 pub mod layers;
 
 // Cache state machines shared by attention families.
@@ -4483,10 +4515,6 @@ pub mod speculative;
 
 // Drafter trait + DrafterKind enum + model_type auto-detection. Foundational scaffolding for the Gemma 4 MTP and Qwen 3.5
 // DFlash drafter ports. Concrete drafter impls land.
-// The existing classic `SpeculativeGenerator` above is unchanged — MTP and
-// DFlash are peer code paths, not replacements.
-// TODO: wrap the existing SpeculativeGenerator in a
-// Drafter-trait adapter so the round-loop drivers can dispatch uniformly.
 pub mod drafter;
 /// Shared Inkling decoder-layer primitives used by the target and native MTP drafter.
 pub mod inkling_layer;
@@ -4573,6 +4601,9 @@ pub mod runtime_lora;
 // can consume it without further structural changes.
 pub mod lang_analyzer;
 
+// Path and mode rules for the persistent PTX cache directories (#2539, #2797).
+mod ptx_cache_dirs;
+
 // Shape-bucketed kernel autotuner (issue #906): the TunableOp contract, the
 // median-of-N profiling harness, the persistent tactic cache, and the first
 // consumers. Default off; see the module docs for the precedence chain.
@@ -4609,6 +4640,11 @@ pub(crate) mod test_support;
 #[path = "ffi_tests.rs"]
 mod ffi_tests;
 
+// Bit-exact bf16 carrier of the Gemma3n sparse `compiled_gelu_topk` (#2795).
+#[cfg(test)]
+#[path = "ffi_gelu_topk_tests.rs"]
+mod ffi_gelu_topk_tests;
+
 #[cfg(test)]
 #[path = "array_evaluated_bytes_tests.rs"]
 mod array_evaluated_bytes_tests;
@@ -4627,6 +4663,12 @@ mod one_bit_tests;
 #[cfg(test)]
 #[path = "compiled_dtype_cast_tests.rs"]
 mod compiled_dtype_cast_tests;
+
+// A convolution cuDNN has no execution plan for falls back to the gemm
+// convolution on CUDA instead of throwing at eval (issue #2739).
+#[cfg(test)]
+#[path = "conv_no_plan_tests.rs"]
+mod conv_no_plan_tests;
 
 // CPU quantized matmul accumulates in f32 for bf16 and f16 activations (issue
 // #2248): affine transposed and plain, 3/4/6/8-bit, and MXFP4, each against a
@@ -4650,6 +4692,14 @@ mod cuda_arch_tests;
 #[cfg(test)]
 #[path = "qmm_naive_tile_tests.rs"]
 mod qmm_naive_tile_tests;
+
+// The CUDA QuantizedMatmul batch fold (#2690): a [B, 1, K] activation against
+// a shared 2D weight agrees bit for bit with the same rows as [B, K], and both
+// stay within a dequantized reference. Needs a GPU default device; skips
+// otherwise.
+#[cfg(all(test, feature = "cuda"))]
+#[path = "qmm_fold_batch_tests.rs"]
+mod qmm_fold_batch_tests;
 
 // The pre-first-token phase breakdown (#1545) reported by
 // `MLXCEL_PROFILE_TTFT`. The phases are timed around GPU work, but whether

@@ -128,13 +128,45 @@ fn parse_bunny_vision_config_uses_defaults_for_sparse_configs() {
         &json!({
             "intermediate_size": 5120
         }),
-    );
+    )
+    .unwrap();
 
     assert_eq!(config.model_type, "siglip_vision_model");
     assert_eq!(config.hidden_size, 1408);
     assert_eq!(config.intermediate_size, 5120);
     assert_eq!(config.patch_size, 14);
     assert_eq!(config.image_size, 384);
+}
+
+#[test]
+fn parse_bunny_vision_config_rejects_a_non_gelu_hidden_act() {
+    // Before #2794 the parse error was swallowed by the sparse-config fallback
+    // and `relu` silently ran as the tanh GELU.
+    for vision_config in [
+        json!({ "hidden_act": "relu" }),
+        json!({
+            "model_type": "siglip_vision_model",
+            "num_hidden_layers": 2,
+            "hidden_size": 768,
+            "intermediate_size": 1536,
+            "num_attention_heads": 12,
+            "patch_size": 16,
+            "hidden_act": "relu"
+        }),
+    ] {
+        let err = parse_bunny_vision_config(&json!({}), &vision_config)
+            .expect_err("relu is not a SigLIP activation")
+            .to_string();
+        assert!(err.contains("unsupported vision hidden_act"), "{err}");
+    }
+
+    // A sparse block still takes the fallback, with the SigLIP tanh default.
+    let sparse = parse_bunny_vision_config(&json!({}), &json!({})).unwrap();
+    assert_eq!(sparse.hidden_size, 1152);
+    assert_eq!(
+        sparse.hidden_act,
+        crate::vision::config::VisionHiddenActivation::GeluPytorchTanh
+    );
 }
 
 #[test]
@@ -165,7 +197,8 @@ fn parse_bunny_vision_config_preserves_full_configs() {
             "num_channels": 3,
             "layer_norm_eps": 1e-5
         }),
-    );
+    )
+    .unwrap();
 
     assert_eq!(config.hidden_size, 768);
     assert_eq!(config.intermediate_size, 1536);
@@ -267,4 +300,40 @@ fn iree_vision_contract_processor_metadata_must_match_host_pixel_producer() {
     std::fs::write(&path, serde_json::to_vec(&drifted).unwrap()).unwrap();
     let error = validate_iree_processor_metadata(model.path(), &processor).unwrap_err();
     assert!(error.to_string().contains("image_mean[0]"));
+}
+
+/// #2729: `llava-1.5-7b-4bit` declares no `eos_token_id` in `text_config`
+/// (vocab 32064), so the text model used to report no EOS ids although
+/// `tokenizer_config.json` resolves `</s>` (2). The loader now merges the
+/// sidecar ids into what the model reports.
+#[test]
+#[ignore = "loads llava-1.5-7b-4bit; run with --ignored"]
+fn llava_text_model_reports_tokenizer_eos() {
+    const LLAVA_DIR: &str = "llava-1.5-7b-4bit";
+    let _runtime = crate::initialize_runtime();
+    let models = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models");
+    let nested = models.join("mlx").join(LLAVA_DIR);
+    let dir = if nested.exists() {
+        nested
+    } else {
+        models.join(LLAVA_DIR)
+    };
+    if !dir.exists() {
+        let reason = format!(
+            "{LLAVA_DIR}: model directory not found at {}",
+            dir.display()
+        );
+        if std::env::var("MLXCEL_REQUIRE_MODELS").is_ok_and(|v| v != "0") {
+            panic!("MLXCEL_REQUIRE_MODELS is set: {reason}");
+        }
+        eprintln!("Skipping {reason}");
+        return;
+    }
+    let (model, _tokenizer) =
+        crate::load_model(&dir).unwrap_or_else(|e| panic!("load {LLAVA_DIR}: {e:?}"));
+    assert_eq!(crate::read_eos_token_ids(&dir), vec![2]);
+    assert_eq!(
+        mlxcel_core::generate::LanguageModel::eos_token_ids(&model),
+        vec![2]
+    );
 }

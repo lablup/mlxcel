@@ -44,7 +44,8 @@ pub(crate) enum MediaSendError {
     /// Per-hop policy refusal, `TooManyRedirects`, or a [`MediaUrlError`] found
     /// by [`MediaUrlError::find_in`] inside a reqwest error (`PolicyResolver`).
     Refused(MediaUrlError),
-    /// Any other failure to send a hop or read its response head.
+    /// Any other failure to send a hop or read its response head, with its URL
+    /// stripped so the error text names no hop.
     Transport(reqwest::Error),
     /// A followed 3xx whose `Location` is missing, not UTF-8, or does not join.
     BadRedirect { status: reqwest::StatusCode },
@@ -134,11 +135,18 @@ fn redirect_target(response: &reqwest::Response) -> Option<reqwest::Url> {
 /// Run the full policy check on a redirect target, inside the chain deadline.
 ///
 /// The local lookup is bounded by the deadline as well, so a slow resolver
-/// cannot stretch the chain past it. See [`check_hop_with`] for how each
-/// outcome is reported.
+/// cannot stretch the chain past it. A refused scheme or malformed target is
+/// reported through [`MediaUrlError::for_redirect_target`], so the scheme or
+/// URL the origin's `Location` chose never reaches the client (issue #2764).
+/// See [`check_hop_with`] for how each outcome is reported.
 async fn check_hop(next: reqwest::Url, deadline: Instant) -> Result<reqwest::Url, MediaSendError> {
     let host = next.host_str().unwrap_or_default();
-    check_hop_with(host, deadline, ensure_media_url_allowed(next.as_str())).await
+    let check = async {
+        ensure_media_url_allowed(next.as_str())
+            .await
+            .map_err(MediaUrlError::for_redirect_target)
+    };
+    check_hop_with(host, deadline, check).await
 }
 
 /// [`check_hop`] with the policy check supplied, so tests can stall it.
@@ -166,9 +174,17 @@ where
 }
 
 /// A send failure, reported as the policy refusal it wraps when there is one.
+///
+/// A transport error loses its URL before it is stored: after a redirect that
+/// URL is the hop the origin's `Location` named, which an attacker controls
+/// and the client must not be shown (issue #2728). The hop goes to the log at
+/// `debug` instead.
 fn transport_or_refusal(err: reqwest::Error) -> MediaSendError {
     match MediaUrlError::find_in(&err) {
         Some(refusal) => MediaSendError::Refused(refusal.clone()),
-        None => MediaSendError::Transport(err),
+        None => {
+            tracing::debug!(hop = ?err.url(), "media fetch transport error: {err}");
+            MediaSendError::Transport(err.without_url())
+        }
     }
 }

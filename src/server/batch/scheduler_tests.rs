@@ -78,7 +78,7 @@ fn make_test_sequence(id_val: u64) -> (SequenceInfo, mpsc::Receiver<GenerateEven
         created_at: Instant::now(),
         prefill_start: None,
         first_token_time: None,
-        prompt_lookup: None,
+        token_only: None,
         token_history: Vec::new(),
         sampler: Default::default(),
         merged_eos: Vec::new(),
@@ -271,7 +271,7 @@ fn make_test_sequence_with_priority(
         cancelled: Arc::new(AtomicBool::new(false)),
         created_at: Instant::now(),
         prefill_start: None,
-        prompt_lookup: None,
+        token_only: None,
         first_token_time: None,
         token_history: Vec::new(),
         sampler: Default::default(),
@@ -1128,9 +1128,10 @@ fn paged_decode_storage_falls_back_when_batching_is_unavailable() {
 }
 
 /// Hybrid-SSM carve-out (#121): Mamba / Mamba2 / Jamba / NemotronH /
-/// NemotronNAS / RecurrentGemma / Qwen3Next / RWKV7 all keep their recurrent
-/// state in internal model-owned caches, so they override
-/// `supports_batching()` to `false` and never opt into the paged decode
+/// RecurrentGemma / Qwen3Next / RWKV7 all keep their recurrent state in
+/// internal model-owned caches (NemotronNAS has no recurrent state but keeps
+/// its per-attention-block `KVCache`s model-owned the same way), so they
+/// override `supports_batching()` to `false` and never opt into the paged decode
 /// backend (`supports_paged_decode_backend()` keeps the trait default
 /// `false`). Either flag alone already forces the dense backend; this test
 /// pins the combined SSM profile — `supports_batching == false` AND

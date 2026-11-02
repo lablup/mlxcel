@@ -42,8 +42,10 @@ pub const CACHE_SUBDIR: &str = "tokenizer-scripts";
 /// Resolve the mlxcel cache root directory.
 ///
 /// Reads `MLXCEL_CACHE_DIR` from the environment; falls back to
-/// `$HOME/.cache/mlxcel` via [`dirs::home_dir`]. Returns `None` only when
-/// neither `MLXCEL_CACHE_DIR` nor a home directory can be determined.
+/// `$HOME/.cache/mlxcel` via [`dirs::home_dir`]. An empty value counts as
+/// unset: as a path it would be relative to the current directory (#2797).
+/// Returns `None` only when neither `MLXCEL_CACHE_DIR` nor a home directory
+/// can be determined.
 ///
 /// This is the single source of truth for the cache root across the codebase.
 /// The tokenizer language-analysis disk cache stores its files under
@@ -53,6 +55,7 @@ pub const CACHE_SUBDIR: &str = "tokenizer-scripts";
 /// every consumer.
 pub fn cache_root() -> Option<PathBuf> {
     std::env::var_os("MLXCEL_CACHE_DIR")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".cache/mlxcel")))
 }
@@ -237,6 +240,26 @@ mod tests {
     fn build_test_index(json: &str) -> TokenLanguageIndex {
         let tok = make_tokenizer(json);
         TokenLanguageIndex::build(&tok, json.as_bytes()).expect("build should succeed")
+    }
+
+    /// An empty `MLXCEL_CACHE_DIR` is unset, not a path relative to the
+    /// current directory (#2797).
+    #[test]
+    fn empty_mlxcel_cache_dir_counts_as_unset() {
+        let _guard = env_lock();
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::set_var("MLXCEL_CACHE_DIR", "") };
+        let root = cache_root();
+        // SAFETY: test-only; env mutation is serialized by the env_lock() guard held above.
+        unsafe { std::env::remove_var("MLXCEL_CACHE_DIR") };
+        let unset = cache_root();
+        drop(_guard);
+
+        assert_eq!(root, unset);
+        assert!(
+            root.as_ref().is_some_and(|path| path.is_absolute()),
+            "the default root is absolute, got {root:?}"
+        );
     }
 
     // -------------------------------------------------------------------------

@@ -252,6 +252,45 @@ impl ModelProvider {
         }
     }
 
+    /// Build a model-free provider whose worker sleeps for `delay` before it
+    /// reads its request channel (#2745).
+    ///
+    /// A real model load has no cancellation point, so the process exit path
+    /// must handle a worker that has not reached its request loop yet. This
+    /// fake reproduces that window: a shutdown sent before the sleep ends is
+    /// queued but not observed until it does.
+    pub(crate) fn slow_to_start_worker_for_tests(delay: std::time::Duration) -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+        let worker_handle = thread::spawn(move || {
+            thread::sleep(delay);
+            while let Ok(request) = request_rx.recv() {
+                if matches!(request, ModelRequest::Shutdown) {
+                    break;
+                }
+            }
+        });
+        let (worker_handle, worker_exit) = observe_worker_exit(worker_handle);
+        Self {
+            request_tx,
+            model_id: "slow-start-test-model".to_string(),
+            created_at: 0,
+            loaded: Arc::new(AtomicBool::new(true)),
+            snapshot_reuse_capable: Arc::new(AtomicBool::new(false)),
+            chat_unavailable: Arc::new(AtomicBool::new(false)),
+            batch_metrics: Arc::new(BatchMetrics::new()),
+            batch_observability: Arc::new(BatchObservability::new()),
+            max_queue_depth: usize::MAX,
+            request_memory_admission: false,
+            single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
+            sleeping: Arc::new(AtomicBool::new(false)),
+            prompt_cache: None,
+            prompt_tokenizer: None,
+            decode_hang_timeout: DECODE_HANG_TIMEOUT,
+            worker_exit,
+            _worker_handle: worker_handle,
+        }
+    }
+
     /// Build a model-free provider whose streaming output is driven step by
     /// step from the test (#1444). Each `ModelRequest::Generate` consumes
     /// [`ScriptedStreamStep`]s from the returned handle until a `Finish`,

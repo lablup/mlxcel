@@ -336,7 +336,7 @@ async fn sweep_depths(cache_enabled: bool) -> Vec<DepthSample> {
     }
     let mut child = spawn_server(&args);
 
-    let client = reqwest::Client::builder()
+    let client = mlxcel::http_tls::client_builder()
         .timeout(Duration::from_secs(180))
         .build()
         .expect("build reqwest client");

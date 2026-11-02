@@ -218,7 +218,7 @@ function LoadedModels(props: { locale: Locale; models: ReadonlyArray<ShellLoaded
         {shown.map((model) => (
           <Button key={model.id} tone="ghost" className="toolbar-chip" title={model.name} data-testid="toolbar-loaded-chip" onClick={() => props.onOpenModel(model.id)}>
             <span className="toolbar-chip-content">
-              <span className="truncate">{model.name}</span>
+              <span className="truncate">{model.name}</span>{' '}
               <StatusBadge state={model.state} appearance="inline">{model.stateLabel}</StatusBadge>
             </span>
           </Button>
@@ -241,7 +241,7 @@ function revealFocusedChip(event: React.FocusEvent<HTMLDivElement>): void {
 // The product mark, a link home: in the bar beside the side navigation, and at the top of the
 // compact drawer (the bar hides its copy there). Neither copy carries a test id.
 function BrandMark(props: { locale: Locale; onHome: () => void; className?: string }): React.JSX.Element {
-  return <a className={props.className ?? 'brand-mark'} href="#models" aria-label={t(props.locale, 'nav.home')} onClick={(event) => { event.preventDefault(); props.onHome(); }}><span className="brand-symbol" aria-hidden="true">mx</span><span className="brand-name">mlxcel</span></a>;
+  return <a className={props.className ?? 'brand-mark'} href="#models" aria-label={t(props.locale, 'nav.home')} onClick={(event) => { event.preventDefault(); props.onHome(); }}><span className="brand-symbol" aria-hidden="true" /><span className="brand-name">mlxcel</span></a>;
 }
 
 // AppShell renders the side navigation above its breakpoint and the drawer below it, never both,

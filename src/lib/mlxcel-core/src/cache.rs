@@ -90,6 +90,9 @@ mod delegated_parity_diag;
 #[path = "cache/delegated_parity_diag_tests.rs"]
 mod delegated_parity_diag_tests;
 mod detach;
+#[cfg(test)]
+#[path = "cache/kv_trim_tests.rs"]
+mod kv_trim_tests;
 mod paged;
 #[cfg(test)]
 #[path = "cache/paged_append_need_tests.rs"]
@@ -3596,35 +3599,48 @@ impl KVCache {
     /// that would follow from evaluating the full `[1, step, vocab_size]`
     /// logits tensor.
     ///
-    /// Used by: `SpeculativeGenerator::generate` (chunked prefill loop)
+    /// Used by: Diffusion Gemma prefill (`src/models/diffusion_gemma/generate.rs`), LLaDA2 MoE
+    /// block decode (`src/models/llada2_moe/generate.rs`). DeepSeek V4's `eval_state` calls
+    /// (`src/models/deepseek_v4.rs`) act on `V4LayerCache` and `PoolingCache`, not `KVCache`.
     pub fn eval_state(&self) {
-        if let Some(k) = self.keys.as_ref() {
-            ffi::eval(k);
+        for array in self.state_arrays() {
+            ffi::eval(array);
         }
-        if let Some(v) = self.values.as_ref() {
-            ffi::eval(v);
+    }
+
+    /// [`Self::eval_state`] through the fallible boundary: an MLX throw (an
+    /// allocation failure on a long prompt, say) comes back as an `Err` and
+    /// the evaluation stops at that array. Code on the server's scheduler
+    /// thread must use this form, where `ffi::eval`'s throw would abort the
+    /// process (#822).
+    ///
+    /// Used by: `speculative::full_model_drafter::FullModelDrafter`
+    /// (catch-up chunks).
+    pub fn try_eval_state(&self) -> Result<(), String> {
+        for array in self.state_arrays() {
+            crate::try_eval(array).map_err(|e| e.to_string())?;
         }
-        if let Some(ks) = self.key_scales.as_ref() {
-            ffi::eval(ks);
-        }
-        if let Some(vs) = self.val_scales.as_ref() {
-            ffi::eval(vs);
-        }
-        if let Some(vp) = self.v_packed.as_ref() {
-            ffi::eval(vp);
-        }
-        if let Some(vn) = self.v_norms.as_ref() {
-            ffi::eval(vn);
-        }
-        if let Some(vr) = self.v_rescale.as_ref() {
-            ffi::eval(vr);
-        }
-        if let Some(kp) = self.k_packed.as_ref() {
-            ffi::eval(kp);
-        }
-        if let Some(kn) = self.k_norms.as_ref() {
-            ffi::eval(kn);
-        }
+        Ok(())
+    }
+
+    /// The tensor fields that make up the cache state, present ones only, in
+    /// a fixed order.
+    ///
+    /// Used by: [`Self::eval_state`], [`Self::try_eval_state`].
+    fn state_arrays(&self) -> impl Iterator<Item = &MlxArray> {
+        [
+            self.keys.as_deref(),
+            self.values.as_deref(),
+            self.key_scales.as_deref(),
+            self.val_scales.as_deref(),
+            self.v_packed.as_deref(),
+            self.v_norms.as_deref(),
+            self.v_rescale.as_deref(),
+            self.k_packed.as_deref(),
+            self.k_norms.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     /// Returns `true` iff this cache holds a packed V (the Turbo4 family)
@@ -4344,6 +4360,38 @@ impl Default for KVCache {
     }
 }
 
+/// Validate a config's sliding window for a family that builds
+/// [`RotatingKVCache`]s from it (issue #2790): `0` would build a cache whose
+/// ring arithmetic divides by zero, and a value above `i32::MAX` does not
+/// fit the cache's `i32` size. Call it at load, before any cache is built,
+/// and only when the config has a sliding layer.
+///
+/// Lives beside [`RotatingKVCache`] rather than in the model layer (issue
+/// #2798) so the drafters and `mlxcel-xla` can share the same check.
+pub fn validate_sliding_window(family: &str, window: usize) -> Result<i32, String> {
+    i32::try_from(window)
+        .ok()
+        .filter(|window| *window > 0)
+        .ok_or_else(|| {
+            format!(
+                "{family}: sliding_window must be between 1 and {}, got {window}",
+                i32::MAX
+            )
+        })
+}
+
+/// The [`RotatingKVCache`] window of a family's sliding layers: validated
+/// with [`validate_sliding_window`] when the model has a sliding layer, and
+/// otherwise kept (unused, saturated to `i32`) so a config whose layers are
+/// all full attention still loads.
+pub fn cache_window(family: &str, window: usize, has_sliding_layer: bool) -> Result<i32, String> {
+    if has_sliding_layer {
+        validate_sliding_window(family, window)
+    } else {
+        Ok(i32::try_from(window).unwrap_or(i32::MAX))
+    }
+}
+
 /// Rotating KV Cache for sliding window attention (e.g. Gemma 3, Ministral 3).
 ///
 /// Maintains a fixed-size circular buffer for keys/values. Oversized prefill
@@ -4602,6 +4650,25 @@ impl RotatingKVCache {
             | KVCacheMode::Turbo4
             | KVCacheMode::Turbo4Delegated
             | KVCacheMode::Turbo3Asym => incoming_dtype,
+        }
+    }
+
+    /// Storage mode a cache built with `max_size` and `requested` actually
+    /// holds, mirroring the per-mode branches of [`Self::update_and_fetch`].
+    ///
+    /// Only `Turbo4Asym` on a positive multiple of [`turbo::BLOCK_SIZE`] is
+    /// quantized; `Int8`, `Turbo4`, `Turbo4Delegated` and `Turbo3Asym` fall
+    /// back to FP16 storage there, and a misaligned `Turbo4Asym` window cannot
+    /// be built at all (see [`Self::new_with_mode`]), so model builders
+    /// downgrade it to FP16. Keep this function and the `update_and_fetch`
+    /// match in step: per-layer KV reports (issue #2783) count only the
+    /// layers this returns a quantized mode for.
+    pub const fn stored_mode(max_size: i32, requested: KVCacheMode) -> KVCacheMode {
+        match requested {
+            KVCacheMode::Turbo4Asym if max_size > 0 && max_size % turbo::BLOCK_SIZE == 0 => {
+                KVCacheMode::Turbo4Asym
+            }
+            _ => KVCacheMode::Fp16,
         }
     }
 
@@ -7667,6 +7734,35 @@ mod rotating_truncation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #2790, moved here with the helper in #2798: the window a
+    /// rotating cache may take is exactly `1..=i32::MAX`.
+    #[test]
+    fn validate_sliding_window_accepts_exactly_the_i32_range_above_zero() {
+        let max = i32::MAX as usize;
+        assert_eq!(validate_sliding_window("Fam", 1), Ok(1));
+        assert_eq!(validate_sliding_window("Fam", max), Ok(i32::MAX));
+        for window in [0, max + 1] {
+            let err = validate_sliding_window("Fam", window).expect_err("out of range");
+            assert_eq!(
+                err,
+                format!("Fam: sliding_window must be between 1 and {max}, got {window}")
+            );
+        }
+    }
+
+    /// A config whose layers are all global keeps any window unused, per
+    /// [`cache_window`], rather than failing the load.
+    #[test]
+    fn cache_window_keeps_an_unused_window_when_no_layer_slides() {
+        assert_eq!(cache_window("Fam", 0, false), Ok(0));
+        assert_eq!(
+            cache_window("Fam", i32::MAX as usize + 1, false),
+            Ok(i32::MAX)
+        );
+        assert!(cache_window("Fam", 0, true).is_err());
+        assert!(cache_window("Fam", i32::MAX as usize + 1, true).is_err());
+    }
 
     fn f32_rows(arr: &MlxArray) -> Vec<f32> {
         let a = ffi::astype(arr, dtype::FLOAT32);

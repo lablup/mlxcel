@@ -349,6 +349,11 @@ impl LanguageModel for Granite4VisionVLModel {
         self.text_model.sequence_state_layout()
     }
 
+    /// The text model owns the KV caches; forward what it stores (#2790).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
+        self.text_model.kv_cache_storage_modes()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

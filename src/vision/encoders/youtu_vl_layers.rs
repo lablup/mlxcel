@@ -209,8 +209,10 @@ impl VisionMLP {
 
     pub(super) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let x = self.fc1.forward(x);
-        // gelu_pytorch_tanh — matches `nn.gelu_approx` in upstream MLX usage.
-        let x = mlxcel_core::utils::gelu_approx(&x);
+        // `vision_config.hidden_act = gelu_pytorch_tanh`, mlx-vlm
+        // `nn.gelu_approx`, and the OpenXLA Youtu-VL graph: tanh, in f32 as one
+        // compiled kernel (erf before #2548).
+        let x = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&x);
         self.fc2.forward(&x)
     }
 }

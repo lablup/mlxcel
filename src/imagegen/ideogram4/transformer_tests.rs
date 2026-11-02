@@ -94,7 +94,7 @@ fn the_rope_tables_match_upstream() {
 
 /// Bound of the bf16 forwards against upstream's CUDA run.
 ///
-/// Metal and CUDA reproduce upstream bit for bit at this size, so a last-bit
+/// CUDA reproduces upstream bit for bit at this size, so a last-bit
 /// kernel change after an MLX bump is the only thing the 1e-3 allows for, and
 /// a port with the pairwise (Z-Image) rotation, the fused RMSNorm kernel or a
 /// missing mask on the biased projections moves the result by 1e-2 or more.
@@ -105,18 +105,17 @@ fn the_rope_tables_match_upstream() {
 /// f32 forward of the same weights, so two bf16 runs that do not match bit for
 /// bit land about 1e-2 apart. Measured against the CUDA reference: ROCm
 /// (gfx1151) 1.41e-2 conditional and 2.37e-2 unconditional, the CPU stream
-/// 1.61e-2 conditional. The same f32 forward on the ROCm GPU and on the CPU
-/// agree to 3e-5, so the gap is rounding and not a kernel defect
+/// 1.61e-2 conditional, the M1 Ultra Metal GPU 1.53e-2 conditional and
+/// 2.04e-2 unconditional. The same f32 forward on the GPU and on the CPU
+/// agrees to 3e-5 on ROCm and passes the same 1e-4 on M1 Ultra, so the gap
+/// is rounding and not a kernel defect
 /// (`the_f32_forward_agrees_between_the_gpu_and_the_cpu`). The bound there is
 /// 5e-2: the pairwise rotation measured 5.2e-1 and 3.2e-1 and the missing
 /// mask 2.0e-1 on ROCm. The fused RMSNorm kernel (1.5e-2 on ROCm) is below
-/// that noise and is only caught on the bit-exact backends.
+/// that noise and is only caught on CUDA.
 fn max_rel_rms() -> f64 {
     use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
-    if matches!(
-        gpu_backend_kind(),
-        GpuBackendKind::Metal | GpuBackendKind::Cuda
-    ) {
+    if matches!(gpu_backend_kind(), GpuBackendKind::Cuda) {
         1e-3
     } else {
         5e-2

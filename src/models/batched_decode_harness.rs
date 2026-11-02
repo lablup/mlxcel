@@ -358,7 +358,12 @@ fn assert_model_owned_multistep_impl<M: LanguageModel>(
                 let input = mlxcel_core::from_slice_i32(&tokens, &[3, 1]);
                 let mut rows: Vec<_> = caches.iter_mut().map(Vec::as_mut_slice).collect();
                 let actual = model.forward_batched_with_ids(&input, Some(&ids), &mut rows, None);
-                assert_rows_absolute(&actual, &expected, 1e-5);
+                assert_rows_absolute(
+                    &format!("batched multistep step {step}"),
+                    &actual,
+                    &expected,
+                    1e-5,
+                );
             } else {
                 for row in [2, 0, 1] {
                     let input = mlxcel_core::from_slice_i32(&[tokens[row]], &[1, 1]);
@@ -368,7 +373,12 @@ fn assert_model_owned_multistep_impl<M: LanguageModel>(
                         &mut caches[row],
                         None,
                     );
-                    assert_rows_absolute(&actual, &[mlxcel_core::copy(&expected[row])], 1e-5);
+                    assert_rows_absolute(
+                        &format!("solo multistep step {step}"),
+                        &actual,
+                        &[mlxcel_core::copy(&expected[row])],
+                        1e-5,
+                    );
                 }
             }
         }
@@ -380,6 +390,11 @@ fn assert_model_owned_multistep_impl<M: LanguageModel>(
 /// one row has initialized recurrence/attention state. The latter must choose
 /// the scalar fallback before any shared layer mutates either row. A B=1 call
 /// between native steps also pins native -> scalar -> native transitions.
+///
+/// Every forward is evaluated before the next reference is built. The
+/// recurrent caches are written lazily, so a hand-rolled copy that drops the
+/// `eval` calls lets the B=1 transition read its own pending cache write and
+/// compare as NaN (issue #2807).
 pub(crate) fn assert_model_owned_fresh_and_mixed<M: LanguageModel>(make: impl Fn() -> M) {
     for mixed in [false, true] {
         let batched = make();
@@ -407,7 +422,7 @@ pub(crate) fn assert_model_owned_fresh_and_mixed<M: LanguageModel>(make: impl Fn
             mlxcel_core::eval(&actual);
             let expected =
                 solo[0].forward_with_sequence_id(&prompt, Some(ids[0]), &mut solo_caches[0], None);
-            assert_rows_absolute(&actual, &[expected], 1e-5);
+            assert_rows_absolute(&format!("mixed={mixed} prompt"), &actual, &[expected], 1e-5);
         }
         for step in 0..3 {
             if step == 1 {
@@ -428,7 +443,12 @@ pub(crate) fn assert_model_owned_fresh_and_mixed<M: LanguageModel>(make: impl Fn
                 // Strict B=1 routing is checked above on two states of the
                 // same model. These transition arms use independently built
                 // models and can differ by normal f32 scheduling noise.
-                assert_rows_absolute(&actual, &[expected], 1e-5);
+                assert_rows_absolute(
+                    &format!("mixed={mixed} step {step} transition"),
+                    &actual,
+                    &[expected],
+                    1e-5,
+                );
             }
             let tokens = [2 + step, 3 + step];
             let input = mlxcel_core::from_slice_i32(&tokens, &[2, 1]);
@@ -445,7 +465,12 @@ pub(crate) fn assert_model_owned_fresh_and_mixed<M: LanguageModel>(make: impl Fn
                     model.forward_with_sequence_id(&input, Some(id), cache, None)
                 })
                 .collect();
-            assert_rows_absolute(&actual, &expected, 1e-5);
+            assert_rows_absolute(
+                &format!("mixed={mixed} step {step}"),
+                &actual,
+                &expected,
+                1e-5,
+            );
         }
         release_ids(&batched, &ids);
         for model in &solo {
@@ -606,7 +631,7 @@ fn assert_model_owned_validation_is_atomic<M: LanguageModel>(make: &impl Fn() ->
         // checked for exact equality separately above; use the same tolerance
         // as the multistep model-owned parity checks for this state-invariance
         // assertion.
-        assert_rows_absolute(&actual, &[expected], 1e-5);
+        assert_rows_absolute("rejected-call continuation", &actual, &[expected], 1e-5);
     }
     release_ids(&model, &ids);
     for reference in &references {
@@ -614,16 +639,30 @@ fn assert_model_owned_validation_is_atomic<M: LanguageModel>(make: &impl Fn() ->
     }
 }
 
-fn assert_rows_absolute(actual: &MlxArray, expected: &[UniquePtr<MlxArray>], tolerance: f32) {
+fn assert_rows_absolute(
+    context: &str,
+    actual: &MlxArray,
+    expected: &[UniquePtr<MlxArray>],
+    tolerance: f32,
+) {
     for (row, expected) in expected.iter().enumerate() {
         let actual = mlxcel_core::utils::slice_axis(actual, 0, row as i32, row as i32 + 1);
         let difference = mlxcel_core::subtract(&actual, expected);
         let values = mlxcel_core::utils::array_to_vec_f32(&difference);
+        // A non-finite element makes `max` skip it, so report it as infinite
+        // rather than as a small delta.
+        let worst = values.iter().fold(0.0_f32, |worst, value| {
+            if value.is_finite() {
+                worst.max(value.abs())
+            } else {
+                f32::INFINITY
+            }
+        });
         assert!(
             values
                 .iter()
                 .all(|value| value.is_finite() && value.abs() <= tolerance),
-            "row {row} exceeds absolute tolerance {tolerance}: {values:?}"
+            "{context} row {row} exceeds absolute tolerance {tolerance}: max |diff| {worst:e}, values {values:?}"
         );
     }
 }

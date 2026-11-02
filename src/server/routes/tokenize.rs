@@ -32,6 +32,11 @@ pub async fn tokenize(
     State(state): State<AppState>,
     Json(request): Json<TokenizeRequest>,
 ) -> Result<Json<TokenizeResponse>, ErrorResponse> {
+    // Image-only serving has no tokenizer (#2825); every other mode keeps
+    // this route.
+    if let Some(response) = super::chat_not_available_image_only(&state) {
+        return Err(response);
+    }
     let add_special = request.add_special.unwrap_or(false);
     let parse_special = request.parse_special.unwrap_or(true);
     let with_pieces = request.with_pieces.unwrap_or(false);

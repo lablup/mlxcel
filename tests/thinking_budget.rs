@@ -149,7 +149,7 @@ async fn chat_nonstream_budget_enforced_end_to_end() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let capped = chat_message_text(
@@ -217,7 +217,7 @@ async fn chat_streaming_budget_enforced_end_to_end() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let resp = client
@@ -282,7 +282,7 @@ async fn native_completion_budget_enforced_end_to_end() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let content = completion_content(
@@ -333,7 +333,7 @@ async fn server_cli_default_applies_to_every_request() {
         "4",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let body = chat_message_text(
@@ -384,7 +384,7 @@ async fn per_request_minus_one_reverts_server_default() {
         "2",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let capped = chat_message_text(
@@ -451,7 +451,7 @@ async fn alias_thinking_token_budget_is_honored() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
     let body = chat_message_text(
         post_chat(
@@ -495,7 +495,7 @@ async fn alias_thinking_budget_is_honored() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
     let body = chat_message_text(
         post_chat(
@@ -539,7 +539,7 @@ async fn invalid_budget_returns_400() {
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     wait_for_health(&client, &base_url).await;
 
     let resp = client

@@ -132,18 +132,28 @@ impl MlxcelTokenizer {
             .is_some_and(|bos| !bos.is_empty() && prompt.starts_with(bos.as_str()))
     }
 
-    /// Create a stub tokenizer for unit tests.
+    /// Create an empty tokenizer that returns identity results.
     ///
-    /// The stub returns empty/identity results; it exists so that types like
-    /// `StreamingDecodeState` can be constructed without loading a real model.
-    #[cfg(test)]
-    pub(crate) fn stub() -> Self {
+    /// Used by image-only serving (`--image-model` with no `-m`), where no
+    /// chat checkpoint is loaded and every chat or tokenizer route refuses
+    /// before touching this value (#2825). The stub constructor below shares
+    /// it so tests exercise the same value the server builds.
+    pub(crate) fn empty() -> Self {
         // Build a minimal HuggingFace tokenizer with a single-character
         // alphabet so encode/decode never panic.
         use tokenizers::models::bpe::BPE;
         let model = BPE::default();
         let tokenizer = tokenizers::Tokenizer::new(model);
         Self::HuggingFace(tokenizer)
+    }
+
+    /// Create a stub tokenizer for unit tests.
+    ///
+    /// The stub returns empty/identity results; it exists so that types like
+    /// `StreamingDecodeState` can be constructed without loading a real model.
+    #[cfg(test)]
+    pub(crate) fn stub() -> Self {
+        Self::empty()
     }
 
     /// Create a minimal tokenizer with byte-fallback support for regression tests
@@ -1372,7 +1382,11 @@ fn build_qwen2_bpe_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer>
         .map_err(|e| anyhow::anyhow!("Failed to build Qwen2 BPE model: {}", e))?;
 
     let mut tokenizer = Tokenizer::new(model);
-    tokenizer.with_normalizer(Some(tokenizers::normalizers::unicode::NFC));
+    // Set before any token is added: since tokenizers 0.23 the normalizer is
+    // applied to added tokens as they are registered.
+    tokenizer
+        .with_normalizer(Some(tokenizers::normalizers::unicode::NFC))
+        .map_err(|e| anyhow::anyhow!("Failed to set Qwen2 NFC normalizer: {}", e))?;
 
     let add_prefix_space = std::fs::read_to_string(model_path.join("tokenizer_config.json"))
         .ok()
@@ -1434,13 +1448,13 @@ fn build_qwen2_bpe_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer>
     // collapses to a single call, while a perfectly alternating one degrades to
     // the previous one-call-per-token cost without ever moving an id.
     for batch in added.chunk_by(|left, right| left.1.special == right.1.special) {
-        let tokens: Vec<tokenizers::AddedToken> =
-            batch.iter().map(|(_, token)| token.clone()).collect();
-        if batch[0].1.special {
-            tokenizer.add_special_tokens(&tokens);
+        let tokens = batch.iter().map(|(_, token)| token.clone());
+        let registered = if batch[0].1.special {
+            tokenizer.add_special_tokens(tokens)
         } else {
-            tokenizer.add_tokens(&tokens);
-        }
+            tokenizer.add_tokens(tokens)
+        };
+        registered.map_err(|err| anyhow::anyhow!("failed to register added tokens: {err}"))?;
         for (id, token) in batch {
             let assigned = tokenizer.token_to_id(&token.content);
             if assigned != Some(*id) {
@@ -2501,7 +2515,7 @@ mod tests {
             .iter()
             .map(|s| AddedToken::from(*s, /*special=*/ true))
             .collect();
-        hf.add_tokens(&added);
+        hf.add_tokens(added).expect("added tokens register");
         MlxcelTokenizer::HuggingFace(hf)
     }
 
@@ -2509,8 +2523,10 @@ mod tests {
     /// post-processor prepends it on every `encode(_, true)`.
     fn mlxcel_with_bos_template(bos: &str) -> MlxcelTokenizer {
         let mut hf = Tokenizer::new(BPE::default());
-        hf.add_tokens(&[AddedToken::from("a", false)]);
-        hf.add_special_tokens(&[AddedToken::from(bos, true)]);
+        hf.add_tokens([AddedToken::from("a", false)])
+            .expect("added token registers");
+        hf.add_special_tokens([AddedToken::from(bos, true)])
+            .expect("special token registers");
         let bos_id = hf.token_to_id(bos).expect("bos registered");
         let template = tokenizers::processors::template::TemplateProcessing::builder()
             .try_single(format!("{bos} $A"))

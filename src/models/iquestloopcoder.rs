@@ -228,6 +228,18 @@ impl ModelArgs {
     /// `RotatingKVCache` that stores nothing, leaving every local-branch
     /// attention row empty and softmaxing to NaN at the first token rather than
     /// at load.
+    /// The validated pass-2 `RotatingKVCache` window (issue #2798): every
+    /// layer builds a `loop_window_size` ring, so `0` or a value above
+    /// `i32::MAX` must fail here rather than leave the local branch with no
+    /// keys or narrow the window silently.
+    pub(crate) fn validated_loop_window_size(&self) -> Result<i32, String> {
+        mlxcel_core::cache::cache_window(
+            "IQuest Loop Coder loop_window_size",
+            self.loop_window_size,
+            self.num_hidden_layers > 0,
+        )
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.loop_num != SUPPORTED_LOOP_NUM {
             return Err(format!(
@@ -236,13 +248,7 @@ impl ModelArgs {
                 self.loop_num, SUPPORTED_LOOP_NUM
             ));
         }
-        if self.loop_window_size == 0 {
-            return Err(
-                "iquestloopcoder: loop_window_size must be positive; 0 leaves the pass-2 local \
-                 attention branch with no keys"
-                    .to_string(),
-            );
-        }
+        self.validated_loop_window_size()?;
         Ok(())
     }
 

@@ -113,6 +113,13 @@ use super::transport::{
 /// Default maximum number of concurrent inbound connections.
 const DEFAULT_MAX_CONNECTIONS: usize = 512;
 
+/// Largest RPC response frame `rpc_call` reads (#2726). `read_frame`
+/// allocates the claimed length before the frame authenticates, so the
+/// transport-wide `max_frame_size` (256 MiB by default) would let a peer,
+/// or a party on the path, force that allocation per call. The only caller
+/// (the latency benchmark) exchanges a few bytes.
+const MAX_RPC_RESPONSE_FRAME: usize = 1 << 20;
+
 /// TCP transport configuration.
 #[derive(Debug, Clone)]
 pub struct TcpTransportConfig {
@@ -404,7 +411,10 @@ impl Transport for TcpTransport {
             // timeout or any error it is dropped, so a late response can
             // never be left unread on a connection the pool hands out again.
             let timeout = self.config.pool_config.connect_timeout;
-            let max_frame_size = self.config.max_frame_size;
+            // A response is read under a reply-sized cap (#2726): the frame
+            // body is allocated before it authenticates, and no caller needs
+            // more than a few KiB.
+            let max_frame_size = MAX_RPC_RESPONSE_FRAME.min(self.config.max_frame_size);
             let mut stream = self.pool.acquire(&peer).await?;
             let exchange = async {
                 stream
@@ -607,13 +617,22 @@ async fn accept_loop(
                                             } else if let Some(full) =
                                                 err.downcast_ref::<ConnectionLimitReached>()
                                             {
-                                                // An authenticated peer, so not
-                                                // rate limited: a stranger cannot
-                                                // reach this line.
-                                                tracing::warn!(
-                                                    "Rejecting connection from {}: max connections ({max_connections}) reached",
-                                                    full.peer
-                                                );
+                                                // Only an authenticated peer
+                                                // reaches this line, but a burst
+                                                // of refused (and retried)
+                                                // connects must not flood the log
+                                                // (#2726): its own budget class.
+                                                if handshake_warn_allowed(HandshakeWarnClass::AtCapacity) {
+                                                    tracing::warn!(
+                                                        "Rejecting connection from {}: max connections ({max_connections}) reached",
+                                                        full.peer
+                                                    );
+                                                } else {
+                                                    tracing::debug!(
+                                                        "Rejecting connection from {}: max connections ({max_connections}) reached",
+                                                        full.peer
+                                                    );
+                                                }
                                             } else if handshake_warn_allowed(handshake_warn_class(&err)) {
                                                 tracing::warn!(
                                                     "Rejecting connection from {}: cluster handshake failed: {err}",

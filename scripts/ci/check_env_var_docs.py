@@ -130,6 +130,11 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_MLX_COMMIT",
         "MLXCEL_ROCM_ARCHITECTURES",
     )),
+    ("build-internal: a CMake option the mlxcel-core build script sets from "
+     "the Cargo profile (config.define), which compiles the PTX disk cache's "
+     "test-only hook into jit_module.cpp; not an environment variable", (
+        "MLXCEL_PTX_CACHE_TEST_HOOKS",
+    )),
     ("build-internal: set by the mlxcel-xla build script through "
      "cargo:rustc-env from the build-time IREE_DIST, which is the documented "
      "override", (
@@ -282,6 +287,12 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
      "docs/image-generation.md", (
         "MLXCEL_IDEOGRAM4_ORACLE_DIR",
         "MLXCEL_IDEOGRAM4_OUT",
+    )),
+    ("test-only: oracle and output directories of the opt-in Ming-Image "
+     "parity tests (ming_image/parity_tests.rs), documented in "
+     "docs/image-generation.md", (
+        "MLXCEL_MING_IMAGE_ORACLE_DIR",
+        "MLXCEL_MING_IMAGE_OUT",
     )),
     ("test-only: oracle directory, checkpoint paths and output directory of "
      "the opt-in LLaDA-Image parity test (llada_image/parity_tests.rs), "

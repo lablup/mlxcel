@@ -84,6 +84,11 @@ struct ExpectedDetection {
     reading_order: u32,
 }
 
+/// Lowercase hex of a digest; `sha2` 0.11 digests no longer implement `LowerHex`.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(FIXTURE_DIR)
@@ -110,7 +115,7 @@ fn sha256(path: &Path) -> String {
         }
         digest.update(&buffer[..read]);
     }
-    format!("{:x}", digest.finalize())
+    hex(&digest.finalize())
 }
 
 fn authenticate_checkpoint(
@@ -325,8 +330,8 @@ fn real_cli_preserves_two_column_model_order_into_falcon_ocr() {
         assert_bound_hip_device(&detected, &format!("mlxcel detect ({layout})"));
         let path = artifact_dir.join(format!("{artifact_stem}.stdout"));
         eprintln!(
-            "PP-DocLayoutV3 actual_layout={layout} actual_device=hip actual_layout_json_sha256={:x}",
-            Sha256::digest(&detected.stdout)
+            "PP-DocLayoutV3 actual_layout={layout} actual_device=hip actual_layout_json_sha256={}",
+            hex(&Sha256::digest(&detected.stdout))
         );
         let parsed: DetectorOutput = serde_json::from_slice(&detected.stdout).unwrap();
         assert_eq!(parsed.detections.len(), acceptance.detector_expected_count);
@@ -386,7 +391,7 @@ fn real_cli_preserves_two_column_model_order_into_falcon_ocr() {
         previous = Some(position);
     }
     eprintln!(
-        "Falcon-OCR actual_device=hip actual_transcript_sha256={:x}",
-        Sha256::digest(transcript.as_bytes())
+        "Falcon-OCR actual_device=hip actual_transcript_sha256={}",
+        hex(&Sha256::digest(transcript.as_bytes()))
     );
 }

@@ -18,7 +18,7 @@ use super::builder::{Builder, Ty, Val};
 use super::molmo_vision_config::{
     MolmoVisionConfig, MolmoVisionWeightDType, MolmoVisionWeightSpec,
 };
-use super::molmo_vision_ops::{scalar_broadcast, silu, softmax_last, tanh_gelu};
+use super::molmo_vision_ops::{scalar_broadcast, silu, softmax_last};
 
 struct Args {
     values: Vec<Val>,
@@ -180,7 +180,10 @@ fn encoder_layer(
     let residual = builder.add(hidden, &attention);
     let norm = layer_norm(builder, &residual, &args.take(), &args.take(), epsilon);
     let expanded = quant_linear(builder, args, config, &norm, true);
-    let activated = tanh_gelu(builder, &expanded);
+    // Molmo's remote code builds its CLIP ViT with
+    // `image_mlp_activations="quick_gelu"`, as the eager encoder evaluates it
+    // (#2548; tanh before).
+    let activated = super::numeric_ops::quick_gelu(builder, &expanded);
     let contracted = quant_linear(builder, args, config, &activated, true);
     builder.add(&residual, &contracted)
 }

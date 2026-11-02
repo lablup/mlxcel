@@ -257,6 +257,7 @@ unsafe extern "C" {
         deepstack_visual_positions: c_int,
         deepstack_target_layers: *const c_int,
         has_adapter_modes: c_int,
+        local_task_workers: c_int,
     ) -> *mut XlaCtx;
     fn xla_llama_upload_weight(
         c: *mut XlaCtx,
@@ -788,7 +789,7 @@ mod gemma3_vlm_compatibility_tests {
 
         for component in [
             "prepared_prefill=gemma3-vlm-owned-f32-embeddings",
-            "mask_mode=gemma3-vlm-bidirectional-padding-f32-min-v1",
+            "mask_mode=gemma3-vlm-causal-image-blocks-sliding-band-f32-min-v2",
             "post_scale_policy=gemma3-vlm-post-scale-text-sqrt-hidden-image-identity-pad-zero-v1",
             "newline_wrapper_token_id=108",
             "image_token_id=99",
@@ -2331,6 +2332,7 @@ fn create_ctx_with_diagnostics(
         effective_precision(device, cfg)? == Precision::F16 && cfg.supports_f16_resident();
     let ffi = runtime_ffi_dimensions(cfg, cfg.weight_specs().len())?;
     let c_dev = CString::new(device).map_err(|_| "device has interior nul".to_string())?;
+    let local_task_workers = crate::local_task::local_task_workers_for(device)?;
     let c_pre = path_cstring(&bundle.prefill_vmfb)?;
     let c_pre_embeddings = path_cstring(&bundle.prefill_embeddings_vmfb)?;
     let c_pre_embeddings_deepstack = bundle
@@ -2387,6 +2389,7 @@ fn create_ctx_with_diagnostics(
                 deepstack_target_layers.as_ptr()
             },
             i32::from(cfg.has_adapter_modes()),
+            local_task_workers,
         )
     };
     if ctx.is_null() {
@@ -3103,7 +3106,7 @@ impl IreeRaggedLlama {
     /// Production batching retains slots between scheduler steps. Diagnostic
     /// baselines instead compare independent prepared payloads on the same
     /// loaded engine, so each capture must start from an empty cache.
-    #[cfg(feature = "diagnostics")]
+    #[cfg(any(feature = "test-support", feature = "diagnostics"))]
     pub(crate) fn reset_slots_for_diagnostics(&mut self) -> Result<(), String> {
         let b_max = checked_ffi_int(self.b_max, "b_max")?;
         // Safety: `self.ctx` remains valid for the lifetime of this engine, and

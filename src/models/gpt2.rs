@@ -25,12 +25,10 @@
 //! - `LayerNorm` with bias (`layer_norm_epsilon`), not RMSNorm.
 //! - One fused `c_attn` projection that is split three ways on the last axis
 //!   into Q, K and V. Multi-head attention: `n_kv_heads == n_head`.
-//! - Simple MLP `c_proj(gelu_approx(c_fc(x)))` with an intermediate width of
-//!   `4 * n_embd`. `mlxcel_core::utils::gelu_approx` is the erf-based exact
-//!   GELU in this tree despite its name (see its own doc comment), not the
-//!   tanh approximation that upstream's `nn.gelu_approx` evaluates for the
-//!   checkpoint's `gelu_new` activation; the erf/tanh difference is under
-//!   1e-3 and produces identical generated tokens.
+//! - Simple MLP `c_proj(gelu(c_fc(x)))` with an intermediate width of
+//!   `4 * n_embd`. The GELU is the tanh form the checkpoint's
+//!   `activation_function = gelu_new` and upstream's `nn.gelu_approx` compute,
+//!   evaluated in f32 as one compiled kernel (it was erf before #2548).
 //! - Tied output head: logits come from `wte.as_linear`, there is no separate
 //!   `lm_head` tensor in the checkpoint.
 //!
@@ -586,7 +584,7 @@ impl SplitAttention for Attention {
     }
 }
 
-// MLP (erf-based exact GELU via `gelu_approx`, no gate/up pattern).
+// MLP (tanh GELU for `gelu_new`, no gate/up pattern).
 
 pub struct MLP {
     pub c_fc: UnifiedLinear,
@@ -596,7 +594,7 @@ pub struct MLP {
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.c_fc.forward(x);
-        let h = mlxcel_core::utils::gelu_approx(&h);
+        let h = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&h);
         self.c_proj.forward(&h)
     }
 

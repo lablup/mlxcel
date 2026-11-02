@@ -181,6 +181,22 @@ CompiledArrayFn compile_shapeless_audited(
 
 } // namespace
 
+bool native_env_read(rust::Str name, rust::Vec<uint8_t>& value) {
+    const char* raw = std::getenv(std::string(name).c_str());
+    if (raw == nullptr) {
+        return false;
+    }
+    value.clear();
+    for (const char* c = raw; *c != 0; ++c) {
+        value.push_back(static_cast<uint8_t>(*c));
+    }
+    return true;
+}
+
+int32_t mlx_env_get_var_int(rust::Str name, int32_t default_value) {
+    return mlx::core::env::get_var(std::string(name).c_str(), default_value);
+}
+
 rust::String shapeless_compile_audit_report() {
     std::ostringstream out;
     out << "site\tcalls\tsignatures\twarmed\tstatus\n";
@@ -1933,30 +1949,6 @@ std::unique_ptr<MlxArray> compiled_gpt_oss_swiglu_activation(
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Compiled GELU: x * 0.5 * (1 + erf(x / sqrt(2)))
-// Used by: StarCoder2
-namespace {
-    static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu() {
-        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
-            const auto& x = inputs[0];
-            auto sqrt2 = array(std::sqrt(2.0f));
-            auto half = array(0.5f);
-            auto one = array(1.0f);
-            auto erf_val = mlx::core::erf(mlx::core::divide(x, sqrt2));
-            auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-            auto result = mlx::core::multiply(x, scale);
-            return {mlx::core::astype(result, x.dtype())};
-        };
-        return compile_shapeless_audited("compiled_gelu", fn);
-    }
-}
-
-std::unique_ptr<MlxArray> compiled_gelu(const MlxArray& x) {
-    static auto compiled_fn = get_compiled_gelu();
-    auto result = compiled_fn({x.inner});
-    return std::make_unique<MlxArray>(std::move(result[0]));
-}
-
 // Compiled `gelu_approx`: despite the name this is the exact erf GELU,
 // x * 0.5 * (1 + erf(x / sqrt(2))), i.e. MLX `nn.gelu` / `nn.GELU()`. It is
 // NOT MLX `nn.gelu_approx` (the tanh form); for that use `gelu_tanh` or
@@ -2066,39 +2058,44 @@ std::unique_ptr<MlxArray> compiled_geglu_approx_activation(
 }
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold,
-// gelu(max(0, x - (mean + std * multiplier))) with the EXACT erf GELU.
-// mlx-lm's `gelu_topk` applies `nn.gelu_approx` (tanh) and Hugging Face applies
-// `gelu_pytorch_tanh`, so this kernel's activation departs from both; the
-// switch needs this kernel, the fused `gemma3n_mlp_forward` sparse branch and
-// the XLA Gemma3n host oracle changed together (#2423 follow-up).
+// gelu_tanh(max(0, x - (mean + std * multiplier))).
+// Bit-exact with mlx-lm's `gelu_topk` (#2795): every intermediate stays in the
+// input dtype. The f32 multiplier is cast to `x.dtype()` like mlx-lm's
+// `std_multiplier.astype(inputs_std.dtype)`, the zero and the GELU constants are
+// built in `x.dtype()` like Python's weak scalars, and the activation follows
+// `nn.gelu_approx` op for op: `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 *
+// x**3)))` with the cube as one `power` (one rounding). The shared
+// `gelu_tanh_approx` helper computes the cube as `x*x*x` (two roundings), so it
+// is not used here. Before #2795 the strong f32 multiplier and zero promoted the
+// whole tape to f32, which disagreed with mlx-lm on about 4% of bf16 elements.
+// The XLA Gemma3n emitter (`sparse_gelu_stages`) mirrors this bf16 carrier.
 // Used by: Gemma3n MLP layers with activation_sparsity > 0
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu_topk() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
             const auto& x = inputs[0];
-            const auto& std_multiplier = inputs[1];
+            const auto dtype = x.dtype();
+            auto std_multiplier = mlx::core::astype(inputs[1], dtype);
 
-            // mean and std along last axis
+            // mean and std along last axis (mlx-lm: mx.mean, mx.std)
             auto mean = mlx::core::mean(x, /* axis */ -1, /* keepdims */ true);
-            auto diff = mlx::core::subtract(x, mean);
-            auto var = mlx::core::mean(mlx::core::square(diff), -1, true);
-            auto stddev = mlx::core::sqrt(var);
+            auto stddev = mlx::core::std(x, /* axis */ -1, /* keepdims */ true);
 
             // cutoff = mean + std * multiplier
             auto cutoff = mlx::core::add(mean, mlx::core::multiply(stddev, std_multiplier));
 
-            // zeroed = max(x - cutoff, 0)
-            auto shifted = mlx::core::subtract(x, cutoff);
-            auto zeroed = mlx::core::maximum(shifted, array(0.0f));
+            // z = max(0, x - cutoff)
+            auto z = mlx::core::maximum(array(0, dtype), mlx::core::subtract(x, cutoff));
 
-            // exact erf GELU (see the note above the namespace)
-            auto sqrt2 = array(std::sqrt(2.0f));
-            auto half = array(0.5f);
-            auto one = array(1.0f);
-            auto erf_val = mlx::core::erf(mlx::core::divide(zeroed, sqrt2));
-            auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-            auto result = mlx::core::multiply(zeroed, scale);
-            return {mlx::core::astype(result, x.dtype())};
+            // nn.gelu_approx: 0.5 * z * (1 + tanh(sqrt(2/pi) * (z + 0.044715 * z**3)))
+            auto cube = mlx::core::power(z, array(3, dtype));
+            auto inner = mlx::core::multiply(
+                array(0.7978845608028654f, dtype),  // sqrt(2/pi)
+                mlx::core::add(z, mlx::core::multiply(array(0.044715f, dtype), cube)));
+            auto half_z = mlx::core::multiply(array(0.5f, dtype), z);
+            auto result = mlx::core::multiply(
+                half_z, mlx::core::add(array(1.0f, dtype), mlx::core::tanh(inner)));
+            return {result};
         };
         return compile_shapeless_audited("compiled_gelu_topk", fn);
     }
@@ -3068,15 +3065,15 @@ std::unique_ptr<MlxArray> compiled_swiglu_mlp_forward_fp16(
 }
 
 // GELU MLP forward for non-quantized (FP16/BF16) weights:
-//   down_proj(gelu(gate_proj(x)) * up_proj(x))
+//   down_proj(gelu_tanh(gate_proj(x)) * up_proj(x))
 //
 // Matmul operations run outside the compile boundary because
 // mlx::core::compile with matmul+transpose can produce incorrect results
 // when the compiled graph is reused across layers with different weights.
-// The GeGLU activation (gelu(gate) * up) uses the compiled geglu kernel
-// which correctly fuses element-wise ops only.
+// The GeGLU activation (gelu_tanh(gate) * up) uses the compiled tanh geglu
+// kernel which correctly fuses element-wise ops only.
 //
-// Used by: Gemma, Gemma4 and other GELU-gated FP models
+// Used by: Gemma v1, Gemma4 dense MLP and the Gemma4 assistant drafter
 std::unique_ptr<MlxArray> compiled_gelu_mlp_forward_fp16(
     const MlxArray& x,
     const MlxArray& gate_weight,
@@ -3096,8 +3093,11 @@ std::unique_ptr<MlxArray> compiled_gelu_mlp_forward_fp16(
     auto up = mlx::core::matmul(x.inner, up_t);
     if (up_bias) up = mlx::core::add(up, up_bias->inner);
 
-    // GeGLU activation: gelu(gate) * up — compiled element-wise fusion
-    static auto compiled_act = get_compiled_geglu();
+    // GeGLU activation: gelu_tanh(gate) * up, compiled element-wise fusion.
+    // Every caller is a Gemma MLP whose checkpoint declares
+    // `gelu_pytorch_tanh`, so this uses the same tanh GeGLU as the quantized
+    // `compiled_gelu_approx_mlp_forward` (erf before #2548).
+    static auto compiled_act = get_compiled_geglu_approx();
     auto activated = compiled_act({gate, up});
 
     // down_proj(activated) = activated @ down_w.T [+ bias]
@@ -3382,8 +3382,8 @@ std::unique_ptr<MlxArray> gelu(const MlxArray& a) {
     // gelu(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
     //
     // The f32 constants promote a half-precision input, so the result is cast
-    // back to the input dtype before it is returned. `compiled_gelu` has always
-    // done this; leaving it out here let the f32 activation reach the next
+    // back to the input dtype before it is returned, as the compiled GELU
+    // helpers do; leaving it out here let the f32 activation reach the next
     // projection, where MLX promotes the f16 weight to f32 to match it. See
     // `gelu_approx` for the measurement.
     auto sqrt2 = array(std::sqrt(2.0f));

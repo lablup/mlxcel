@@ -629,14 +629,19 @@ fn dequantize_affine_with_metadata(
     Ok(w)
 }
 
-/// Match MLX CUDA's affine dequantization for BF16 scales and biases.
-///
-/// The CUDA kernel materializes `q * scale` as BF16 before adding the BF16
-/// zero point, so both operations round independently:
-/// `bf16(bf16(q * scale) + bias)`. Preserve those values in f32 carriers for
-/// the public IREE graph ABI.
+/// Validated geometry and BF16 metadata shared by the MLX-matching BF16
+/// carrier variants ([`dequantize_affine_bf16_sequential`] and
+/// [`dequantize_affine_bf16_single_round`]).
+struct AffineBf16Carrier {
+    per_u32: usize,
+    in_: usize,
+    n_groups: usize,
+    scales: Vec<f32>,
+    biases: Vec<f32>,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn dequantize_affine_bf16_sequential(
+fn validate_affine_bf16_carrier(
     packed: &[u8],
     scales: &[u8],
     biases: &[u8],
@@ -644,7 +649,7 @@ pub(crate) fn dequantize_affine_bf16_sequential(
     in_packed: usize,
     bits: usize,
     group_size: usize,
-) -> Result<Vec<f32>, String> {
+) -> Result<AffineBf16Carrier, String> {
     if !(bits == 4 || bits == 8) {
         return Err(format!(
             "unsupported quantization bits {bits} (expected 4 or 8)"
@@ -675,6 +680,40 @@ pub(crate) fn dequantize_affine_bf16_sequential(
             out * n_groups
         ));
     }
+    Ok(AffineBf16Carrier {
+        per_u32,
+        in_,
+        n_groups,
+        scales,
+        biases,
+    })
+}
+
+/// Match MLX CPU's affine dequantization for BF16 scales and biases.
+///
+/// The CPU kernel materializes `q * scale` as BF16 before adding the BF16
+/// zero point, so both operations round independently:
+/// `bf16(bf16(q * scale) + bias)`. Preserve those values in f32 carriers for
+/// the public IREE graph ABI. MLX's GPU kernel rounds once instead; use
+/// [`dequantize_affine_bf16_single_round`] to match a GPU-executed
+/// `mx.dequantize`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dequantize_affine_bf16_sequential(
+    packed: &[u8],
+    scales: &[u8],
+    biases: &[u8],
+    out: usize,
+    in_packed: usize,
+    bits: usize,
+    group_size: usize,
+) -> Result<Vec<f32>, String> {
+    let AffineBf16Carrier {
+        per_u32,
+        in_,
+        n_groups,
+        scales,
+        biases,
+    } = validate_affine_bf16_carrier(packed, scales, biases, out, in_packed, bits, group_size)?;
     let mask = (1u32 << bits) - 1;
     let mut weights = vec![0.0; out * in_];
     if bits == 4 {
@@ -724,6 +763,85 @@ pub(crate) fn dequantize_affine_bf16_sequential(
                     let group = group_row + input / group_size;
                     let scaled = round_bf16_f32(quantized * scales[group]);
                     weights[weight_row + input] = round_bf16_f32(scaled + biases[group]);
+                }
+            }
+        }
+    }
+    Ok(weights)
+}
+
+/// Match MLX GPU's affine dequantization for BF16 scales and biases.
+///
+/// MLX's GPU `mx.dequantize` kernel computes `q * scale + bias` in f32 and
+/// rounds the result once to BF16, while the CPU kernel materializes
+/// `bf16(q * scale)` before adding the BF16 zero point (see
+/// [`dequantize_affine_bf16_sequential`]). Verified bit-exact against
+/// `mx.dequantize` on CUDA for the pinned Gemma3n E2B checkpoint
+/// (4194304/4194304 values) and synthetic wide-magnitude weights (262144/262144
+/// values). A carrier built with the wrong variant fails a weight-carrier
+/// comparison by construction: the two roundings disagree by one ulp on about
+/// half of 4-bit values. Diagnostics-only: the production loaders use the
+/// sequential variant, so this is gated to keep the non-diagnostics build free
+/// of dead code.
+#[cfg(feature = "diagnostics")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dequantize_affine_bf16_single_round(
+    packed: &[u8],
+    scales: &[u8],
+    biases: &[u8],
+    out: usize,
+    in_packed: usize,
+    bits: usize,
+    group_size: usize,
+) -> Result<Vec<f32>, String> {
+    let AffineBf16Carrier {
+        per_u32,
+        in_,
+        n_groups,
+        scales,
+        biases,
+    } = validate_affine_bf16_carrier(packed, scales, biases, out, in_packed, bits, group_size)?;
+    let mask = (1u32 << bits) - 1;
+    let mut weights = vec![0.0; out * in_];
+    if bits == 4 {
+        // Reuse one LUT bank across all output rows, as in the sequential
+        // variant: the LUT entry depends only on the quantized value, the
+        // group's scale and the group's bias.
+        let mut luts = vec![[0.0f32; 16]; n_groups];
+        for output in 0..out {
+            let row = &packed[output * in_packed * 4..(output + 1) * in_packed * 4];
+            let group_row = output * n_groups;
+            let weight_row = output * in_;
+            for (group_index, lut) in luts.iter_mut().enumerate() {
+                let group = group_row + group_index;
+                for (quantized, value) in lut.iter_mut().enumerate() {
+                    *value = round_bf16_f32(quantized as f32 * scales[group] + biases[group]);
+                }
+            }
+            for packed_index in 0..in_packed {
+                let offset = packed_index * 4;
+                let word = u32::from_le_bytes(row[offset..offset + 4].try_into().unwrap());
+                for lane in 0..per_u32 {
+                    let input = packed_index * per_u32 + lane;
+                    let quantized = ((word >> (bits * lane)) & mask) as usize;
+                    weights[weight_row + input] = luts[input / group_size][quantized];
+                }
+            }
+        }
+    } else {
+        for output in 0..out {
+            let row = &packed[output * in_packed * 4..(output + 1) * in_packed * 4];
+            let group_row = output * n_groups;
+            let weight_row = output * in_;
+            for packed_index in 0..in_packed {
+                let offset = packed_index * 4;
+                let word = u32::from_le_bytes(row[offset..offset + 4].try_into().unwrap());
+                for lane in 0..per_u32 {
+                    let input = packed_index * per_u32 + lane;
+                    let quantized = ((word >> (bits * lane)) & mask) as f32;
+                    let group = group_row + input / group_size;
+                    weights[weight_row + input] =
+                        round_bf16_f32(quantized * scales[group] + biases[group]);
                 }
             }
         }

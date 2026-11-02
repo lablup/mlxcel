@@ -59,7 +59,11 @@ pub struct EmbeddingGemma2Config {
 impl EmbeddingGemma2Config {
     /// Parse an `EmbeddingGemma2Config` from `config.json` (accepting either a
     /// nested `text_config` block or flat top-level fields).
-    pub fn from_json(config: &Value, weights: Option<&WeightMap>) -> Self {
+    ///
+    /// Fails when `sliding_window` cannot back the bidirectional band
+    /// (issue #2798): `0`, a negative value, or anything above `i32::MAX`
+    /// would silently mean full attention or a wrapped, narrowed window.
+    pub fn from_json(config: &Value, weights: Option<&WeightMap>) -> Result<Self, String> {
         let tc = config.get("text_config").unwrap_or(config);
 
         let vocab_size = i32_field(tc, "vocab_size")
@@ -104,10 +108,31 @@ impl EmbeddingGemma2Config {
         let rms_norm_eps = f32_field(tc, "rms_norm_eps")
             .or_else(|| f32_field(config, "rms_norm_eps"))
             .unwrap_or(1e-6);
-        let sliding_window = i32_field(tc, "sliding_window")
-            .or_else(|| i32_field(config, "sliding_window"))
-            .unwrap_or(512)
-            .max(1);
+        // Parsed from the raw JSON rather than through `i32_field` so a value
+        // above `i32::MAX` reaches the validator instead of wrapping (issue
+        // #2798). The band's consumer reads `sliding_window + 1`, so the raw
+        // value is validated before any clamp. A JSON null, or a value that is
+        // not an integer at all, is not a window: it falls through to the
+        // default as `i32_field` did, rather than failing a config that loaded
+        // before.
+        let sliding_window_value = tc
+            .get("sliding_window")
+            .or_else(|| config.get("sliding_window"));
+        // `as_i64` keeps a negative value visible to the error below instead of
+        // hiding it behind a saturating conversion.
+        let sliding_window_int = sliding_window_value.and_then(Value::as_i64);
+        // `as_u64` first so a positive integer above `i64::MAX` still reaches
+        // the validator instead of falling back to the default.
+        let sliding_window_raw = match sliding_window_value {
+            Some(value) => value
+                .as_u64()
+                .map(|window| usize::try_from(window).unwrap_or(usize::MAX))
+                .or_else(|| {
+                    sliding_window_int.map(|window| usize::try_from(window).unwrap_or(usize::MAX))
+                })
+                .unwrap_or(512),
+            None => 512,
+        };
 
         let embedding_dim = i32_field(tc, "embedding_dim")
             .or_else(|| i32_field(config, "embedding_dim"))
@@ -223,7 +248,26 @@ impl EmbeddingGemma2Config {
             });
         }
 
-        Self {
+        let has_sliding_layer = layers.iter().any(|layer| layer.is_sliding);
+        // A negative value saturates to `usize::MAX` on the way to the
+        // validator, so report the config's own value here instead of the
+        // saturated one (issue #2798).
+        if let Some(window) = sliding_window_int
+            && window < 1
+            && has_sliding_layer
+        {
+            return Err(format!(
+                "EmbeddingGemma 2: sliding_window must be between 1 and {}, got {window}",
+                i32::MAX
+            ));
+        }
+        let sliding_window = mlxcel_core::cache::cache_window(
+            "EmbeddingGemma 2",
+            sliding_window_raw,
+            has_sliding_layer,
+        )?;
+
+        Ok(Self {
             vocab_size,
             hidden_size,
             intermediate_size,
@@ -251,7 +295,7 @@ impl EmbeddingGemma2Config {
                 .or_else(|| i32_field(tc, "eoa_token_id"))
                 .unwrap_or(258_883),
             layers,
-        }
+        })
     }
 }
 

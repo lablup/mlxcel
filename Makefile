@@ -941,6 +941,7 @@ verify-rocm-overlay: ## Assert the ROCm overlay records agree with the MLX pin a
 	@bash scripts/mlxcelverse/rocm_overlay_test.sh
 	@bash scripts/mlxcelverse/allocator_ownership_test.sh
 	@bash scripts/mlxcelverse/rocm_runtime_dir_test.sh
+	@bash scripts/mlxcelverse/rocm_hsaco_cache_test.sh
 
 # Host half of the Windows CUDA runtime bundle (issue #2640): the runtime
 # directory choice, the plain-name preload check and the NVRTC header order of
@@ -957,6 +958,12 @@ verify-binary-assets: ## Assert every tracked binary file is declared with a siz
 	@echo "$(CYAN)[verify] tracked binary assets...$(RESET)"
 	@python3 scripts/ci/check_binary_assets.py
 	@bash scripts/ci/check_binary_assets_test.sh
+
+.PHONY: verify-benchmark-raw-logs
+verify-benchmark-raw-logs: ## Assert benchmark data holds no uncited raw logs
+	@echo "$(CYAN)[verify] benchmark raw logs...$(RESET)"
+	@python3 scripts/ci/check_benchmark_raw_logs.py
+	@bash scripts/ci/check_benchmark_raw_logs_test.sh
 
 .PHONY: verify-windows-paths
 verify-windows-paths: ## Assert no tracked path is a Windows device name such as AUX (issue #2531)
@@ -1140,9 +1147,9 @@ example-dry: build-cli ## Example: DRY penalty
 .PHONY: example-speculative
 example-speculative: build-cli ## Example: speculative decoding
 	@echo "$(BOLD)Example: Speculative Decoding$(RESET)"
-	@echo "Requires DRAFT_MODEL variable"
+	@echo "Requires DRAFT_MODEL variable (an MTP drafter for MODEL)"
 	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p $(PROMPT_ARG) \
-		--draft-model $(DRAFT_MODEL_ARG) --num-draft-tokens 4
+		--draft-model $(DRAFT_MODEL_ARG) --draft-kind mtp --draft-block-size 4
 
 # ============================================================================
 # Aliases

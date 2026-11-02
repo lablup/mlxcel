@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! HIP launchers that size a grid from the element count (issue #2234,
-//! `patches-rocm/LOCAL_FIXES.md` item 46).
+//! `overlays/rocm/LOCAL_FIXES.md` item 46).
 //!
 //! The overlay's elementwise, reduce, arange, indexing, sort, quantize and
 //! transpose-copy launchers computed the block count from the element count

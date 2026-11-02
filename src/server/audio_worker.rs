@@ -35,6 +35,7 @@
 //! Whisper engine today; the text-to-speech provider can supply its own engine
 //! over the same channel and thread-ownership pattern.
 
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
@@ -48,6 +49,9 @@ use mlxcel_core::streams::{
 use crate::server::audio_model::{
     AudioModelError, AudioModelKind, AudioSynthesizeInput, AudioSynthesizeOutput,
     AudioTranscribeInput, AudioTranscribeOutput,
+};
+use crate::server::model_provider::{
+    WorkerExitObserver, enqueue_shutdown_command, observe_worker_exit, wait_for_worker_exit,
 };
 
 /// Reported when a request cannot reach the worker thread because it has
@@ -120,8 +124,13 @@ pub(crate) struct AudioWorker {
     /// because the reply receiver was already dropped. This is intentional and
     /// matches the issue: a stuck request frees its thread instead of hanging.
     request_timeout: Duration,
-    /// Join handle, taken in `Drop` after the loop is asked to stop.
+    /// Join handle of the watcher thread, taken in `Drop` after the loop is
+    /// asked to stop. The watcher joins the worker and signals `worker_exit`.
     handle: Option<JoinHandle<()>>,
+    /// Signalled once the worker thread has returned and dropped the engine.
+    /// [`shutdown_and_wait`](Self::shutdown_and_wait) waits on this instead of
+    /// joining, so the process exit path can bound the wait (#2745).
+    worker_exit: Arc<WorkerExitObserver>,
 }
 
 impl AudioWorker {
@@ -168,11 +177,15 @@ impl AudioWorker {
             .map_err(|e| anyhow::anyhow!("failed to spawn audio worker thread: {e}"))?;
 
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
-                sender: Mutex::new(command_tx),
-                request_timeout,
-                handle: Some(handle),
-            }),
+            Ok(Ok(())) => {
+                let (handle, worker_exit) = observe_worker_exit(handle);
+                Ok(Self {
+                    sender: Mutex::new(command_tx),
+                    request_timeout,
+                    handle: Some(handle),
+                    worker_exit,
+                })
+            }
             Ok(Err(message)) => {
                 let _ = handle.join();
                 Err(anyhow::anyhow!(
@@ -220,6 +233,20 @@ impl AudioWorker {
                 Err(AudioModelError::Inference(WORKER_GONE.to_string()))
             }
         }
+    }
+
+    /// Ask the worker to exit and wait until it has released the engine.
+    ///
+    /// The process exit path uses this instead of relying on `Drop`: the
+    /// engine's MLX arrays must be freed on the worker thread before `main`
+    /// returns (#2738, #2745). Idempotent: an already-exited worker returns
+    /// `Ok` at once. Returns `Err` when the worker is still running after
+    /// `timeout` or panicked during teardown.
+    pub(crate) fn shutdown_and_wait(&self, timeout: Duration) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+        let _ = enqueue_shutdown_command(&self.sender, AudioCommand::Shutdown, timeout);
+        let remaining = timeout.saturating_sub(started.elapsed());
+        wait_for_worker_exit(&self.worker_exit, remaining, "audio worker")
     }
 
     /// Enqueue a command without blocking, releasing the sender lock before the

@@ -22,7 +22,9 @@
 //! linear weights remain `[out, in]`.
 
 use super::builder::{Builder, Ty, Val};
-use super::numeric_ops::{exact_gelu, layer_norm_2d as layer_norm, stable_softmax, tanh_gelu};
+use super::numeric_ops::{
+    exact_gelu, layer_norm_2d as layer_norm, quick_gelu, stable_softmax, tanh_gelu,
+};
 use super::vision_config::{
     LlavaVisionConfig, VisionActivation, VisionProjector, VisionWeightSpec,
 };
@@ -152,6 +154,7 @@ fn activate(builder: &mut Builder, value: &Val, activation: VisionActivation) ->
     match activation {
         VisionActivation::ExactGelu => exact_gelu(builder, value),
         VisionActivation::GeluPytorchTanh => tanh_gelu(builder, value),
+        VisionActivation::QuickGelu => quick_gelu(builder, value),
     }
 }
 

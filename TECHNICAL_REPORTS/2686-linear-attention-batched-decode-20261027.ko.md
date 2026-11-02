@@ -40,7 +40,7 @@ Qwen3.5 원본 자유형 VLM은 기준과 후보 모두 `[true, false, true]`다
 
 ## 후속 조치 및 증거
 
-최종 통합 검증을 완료했으며 Ring·VLM 차이는 이슈 기준에 따라 그대로 기록한다. [구조화 결과](../benchmarks/epic-2574/linear-attention.json)는 각 원본 실행으로 연결된다. 원본 증거는 단계별 출력·stderr·상태, 원본 실행 manifest와 참조 로그, 소스·입력 해시, 정확한 VLM 요청, fixture 이미지 및 재생 드라이버를 보존한다. 원본 루트 manifest는 이전 epic 증거와의 합집합을 포함한다. 현재 빌드에서 과거 바이너리 해시를 추정하지 않는다.
+최종 통합 검증을 완료했으며 Ring·VLM 차이는 이슈 기준에 따라 그대로 기록한다. [구조화 결과](../docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/linear-attention.json)는 각 원본 실행으로 연결된다. 원본 증거는 단계별 출력·stderr·상태, 원본 실행 manifest와 참조 로그, 소스·입력 해시, 정확한 VLM 요청, fixture 이미지 및 재생 드라이버를 보존한다. 원본 루트 manifest는 이전 epic 증거와의 합집합을 포함한다. 현재 빌드에서 과거 바이너리 해시를 추정하지 않는다.
 
 ## 최종 통합 검증
 

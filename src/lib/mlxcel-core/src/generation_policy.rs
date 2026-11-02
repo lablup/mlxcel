@@ -21,14 +21,14 @@
 use crate::ffi;
 use crate::generate::SamplingConfig;
 
-/// Used by: the engine's raw-completion client, SpeculativeGenerator, BatchScheduler
+/// Used by: the engine's raw-completion client, BatchScheduler
 pub fn seed_rng_if_needed(sampling: &SamplingConfig) {
     if let Some(seed) = sampling.seed {
         ffi::random_seed(seed);
     }
 }
 
-/// Used by: the engine's raw-completion client, SpeculativeGenerator, BatchScheduler
+/// Used by: the engine's raw-completion client, BatchScheduler
 pub fn merged_eos_token_ids(model_eos: Vec<i32>, stop_token_ids: &[i32]) -> Vec<i32> {
     let mut eos_tokens = model_eos;
     for &id in stop_token_ids {
@@ -39,7 +39,7 @@ pub fn merged_eos_token_ids(model_eos: Vec<i32>, stop_token_ids: &[i32]) -> Vec<
     eos_tokens
 }
 
-/// Used by: the engine's raw-completion client, SpeculativeGenerator, BatchScheduler
+/// Used by: the engine's raw-completion client, BatchScheduler
 pub fn initial_token_history(prompt_tokens: &[i32], needs_history: bool) -> Vec<i32> {
     if needs_history {
         prompt_tokens.to_vec()

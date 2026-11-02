@@ -506,7 +506,14 @@ fn real_drafter_loads_and_refuses_an_unsupported_scheme() {
         for entry in std::fs::read_dir(dir).expect("list checkpoint").flatten() {
             let name = entry.file_name();
             if name.to_string_lossy().ends_with(".safetensors") {
-                std::os::unix::fs::symlink(entry.path(), scratch.path().join(&name))
+                let link = scratch.path().join(&name);
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(entry.path(), &link).expect("link weights");
+                // Windows symlinks need a privilege; a hard link (or, across
+                // volumes, a copy) gives the loader the same bytes.
+                #[cfg(not(unix))]
+                std::fs::hard_link(entry.path(), &link)
+                    .or_else(|_| std::fs::copy(entry.path(), &link).map(|_| ()))
                     .expect("link weights");
             }
         }

@@ -109,6 +109,7 @@ pub use model_format::{
 pub use progress::should_show_progress;
 pub use resolver::ModelSourceOptions;
 pub use resolver::normalize_repo_id;
+pub use resolver::resolve_draft_model_source;
 pub use resolver::resolve_model_source;
 pub use resolver::resolve_model_source_quietly_with_options;
 pub use resolver::resolve_model_source_with_options;
@@ -662,7 +663,7 @@ fn build_reqwest_client(token: Option<&str>, enforce_https: bool) -> Result<reqw
             )?,
         );
     }
-    let mut builder = reqwest::Client::builder()
+    let mut builder = crate::http_tls::client_builder()
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(30))
         .default_headers(headers);

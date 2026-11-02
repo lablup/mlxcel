@@ -86,6 +86,10 @@ impl EmbeddingModelProvider for ImageEmbeddingProvider {
     fn max_length(&self) -> usize {
         32
     }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[tokio::test]

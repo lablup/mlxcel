@@ -135,6 +135,11 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     // Kimi K3 reuses Kimi Linear's absorbed MLA and the same unconditional
     // `update_and_fetch(kv_latent, k_pe)` (`src/models/kimi_k3.rs`).
     "kimi_k3",
+    // Both LongCat `model_type`s load `LongcatFlashNgramModel`, whose MLA
+    // stores `update_and_fetch(kv_latent, k_pe)` on every step
+    // (`src/models/longcat_flash_ngram.rs`); the plain variant only swaps
+    // the n-gram embedding for a token embedding.
+    "longcat_flash",
     "longcat_flash_ngram",
 ];
 
@@ -475,6 +480,7 @@ mod tests {
             "glm_moe_dsa",
             "kimi_linear",
             "kimi_k3",
+            "longcat_flash",
             "longcat_flash_ngram",
         ] {
             assert!(caches_mla_latent_pair(family), "{family}");

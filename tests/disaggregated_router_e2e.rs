@@ -300,10 +300,38 @@ async fn wait_for_tcp(addr: &str, deadline: Instant) -> bool {
     false
 }
 
+/// Poll the router's `GET /router/stats` until every registered peer reports
+/// `online` or the deadline passes. The router's health monitor probes its
+/// peers once at startup and then every 3 s, so a peer still loading its model
+/// then is marked down until a later probe finds it. The router re-probes a
+/// prefill node marked down before refusing a request (#2763), so this wait is
+/// no longer needed to avoid a 503; the tests keep it so a peer that is not
+/// listening yet fails here, with a clear message, rather than in a request.
+async fn wait_for_router_peers_online(http_port: &str, deadline: Instant) -> bool {
+    let client = mlxcel::http_tls::client();
+    let url = format!("http://127.0.0.1:{http_port}/router/stats");
+    while Instant::now() < deadline {
+        // Bound each request so a hung connection cannot outlast the deadline.
+        let per_request = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(5));
+        if let Ok(resp) = client.get(&url).timeout(per_request).send().await
+            && let Ok(stats) = resp.json::<serde_json::Value>().await
+            && let Some(nodes) = stats["nodes"].as_array()
+            && !nodes.is_empty()
+            && nodes.iter().all(|n| n["status"] == "online")
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    false
+}
+
 /// Poll the router's `/health` HTTP endpoint until it returns 200 or the
 /// deadline passes.
 async fn wait_for_http_health(url: &str, deadline: Instant) -> bool {
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     while Instant::now() < deadline {
         if let Ok(resp) = client.get(url).send().await
             && resp.status().is_success()
@@ -426,9 +454,13 @@ async fn disaggregated_router_streams_correct_output() {
         wait_for_http_health(&health_url, deadline).await,
         "router HTTP /health never returned 200 at {health_url}"
     );
+    assert!(
+        wait_for_router_peers_online(&router_http, deadline).await,
+        "the router never saw every peer online"
+    );
 
     // POST a streaming chat-completions request to the router.
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     let chat_url = format!("http://127.0.0.1:{router_http}/v1/chat/completions");
     let response = client
         .post(&chat_url)
@@ -517,6 +549,57 @@ fn parse_sse_deltas(body: &str) -> (String, String) {
     (content, reasoning)
 }
 
+/// The `delta.reasoning_only` of an SSE body's finish chunk (the chunk that
+/// carries `finish_reason`), `Null` when the field is absent (#2729).
+fn sse_finish_reasoning_only(body: &str) -> serde_json::Value {
+    body.lines()
+        .filter_map(|line| line.trim().strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .find(|v| v["choices"][0]["finish_reason"].is_string())
+        .map(|v| v["choices"][0]["delta"]["reasoning_only"].clone())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The token budget of the thinking test's long turn (#2729): enough for
+/// qwen3-0.6b to close its thinking block and answer "What is 2 + 2?".
+const LONG_MAX_TOKENS: u64 = 1024;
+
+/// POST a chat body to the server on `http_port` and return the response text
+/// (an SSE body for a streamed request).
+async fn post_chat_text(
+    client: &reqwest::Client,
+    http_port: &str,
+    body: &serde_json::Value,
+) -> String {
+    let response = client
+        .post(format!("http://127.0.0.1:{http_port}/v1/chat/completions"))
+        .json(body)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("POST to port {http_port}: {e}"));
+    assert!(
+        response.status().is_success(),
+        "port {http_port} returned {}",
+        response.status()
+    );
+    response
+        .text()
+        .await
+        .unwrap_or_else(|e| panic!("read body from port {http_port}: {e}"))
+}
+
+/// [`post_chat_text`] for a non-stream body, parsed as JSON.
+async fn post_chat_json(
+    client: &reqwest::Client,
+    http_port: &str,
+    body: &serde_json::Value,
+) -> serde_json::Value {
+    let text = post_chat_text(client, http_port, body).await;
+    serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("parse JSON from port {http_port}: {e}: {text}"))
+}
+
 /// Issue #198: a THINKING-ENABLED request through the disaggregated router
 /// must produce the same `content` / `reasoning_content` split as the
 /// single-node chat route, with no structural markers (`<think>`) leaking
@@ -551,10 +634,17 @@ async fn disaggregated_router_filters_thinking_output() {
     // must carry single node's non-stream `content` and `reasoning_content`.
     let mut nonstream_body = request_body.clone();
     nonstream_body["stream"] = serde_json::json!(false);
-    let client = reqwest::Client::new();
+    // #2729: the same turn with room to close the thinking block, so both
+    // `content` and `reasoning_content` are non-empty and the reasoning /
+    // answer split is compared between two real processes.
+    let mut long_body = request_body.clone();
+    long_body["max_tokens"] = serde_json::json!(LONG_MAX_TOKENS);
+    let mut long_nonstream_body = long_body.clone();
+    long_nonstream_body["stream"] = serde_json::json!(false);
+    let client = mlxcel::http_tls::client();
 
     // ---- Single-node hybrid reference ----
-    let ((ref_content, ref_reasoning), ref_nonstream) = {
+    let (ref_body, ref_nonstream, ref_long_body, ref_long_nonstream) = {
         let ports = reserve_ports(1);
         let hybrid_http = ports[0].to_string();
         let _hybrid = spawn_role_server(&[
@@ -598,9 +688,12 @@ async fn disaggregated_router_filters_thinking_output() {
             .json::<serde_json::Value>()
             .await
             .expect("parse hybrid non-stream JSON");
-        (parse_sse_deltas(&body), ns_json)
+        let long_sse = post_chat_text(&client, &hybrid_http, &long_body).await;
+        let long_ns_json = post_chat_json(&client, &hybrid_http, &long_nonstream_body).await;
+        (body, ns_json, long_sse, long_ns_json)
         // _hybrid drops here, killing the reference server.
     };
+    let (ref_content, ref_reasoning) = parse_sse_deltas(&ref_body);
     eprintln!(
         "hybrid reference: content={ref_content:?} reasoning ({} chars)",
         ref_reasoning.len()
@@ -619,6 +712,49 @@ async fn disaggregated_router_filters_thinking_output() {
         "thinking-enabled hybrid non-stream reference produced no reasoning_content; \
          the non-stream parity comparison would be vacuous"
     );
+    // #2729: the 32-token turn is expected to end mid-thought, so single node
+    // marks both the non-stream message and the stream finish chunk
+    // `reasoning_only: true`. If a model or template change closes thinking
+    // within 32 tokens, the router-equals-reference checks would be vacuous.
+    assert_eq!(
+        ref_ns_message["reasoning_only"],
+        serde_json::Value::Bool(true),
+        "single-node 32-token non-stream reply is not reasoning_only; the turn is expected to \
+         end mid-thought, so the reasoning_only parity check would be vacuous"
+    );
+    assert_eq!(
+        sse_finish_reasoning_only(&ref_body),
+        serde_json::Value::Bool(true),
+        "single-node 32-token stream finish chunk is not reasoning_only; the turn is expected to \
+         end mid-thought, so the reasoning_only parity check would be vacuous"
+    );
+    // #2729: the long turn must have closed its thinking block on single node,
+    // or the reasoning / answer comparison below would be vacuous.
+    let ref_long_message = &ref_long_nonstream["choices"][0]["message"];
+    eprintln!("hybrid long non-stream reference message: {ref_long_message}");
+    let ref_long_deltas = parse_sse_deltas(&ref_long_body);
+    for (label, content, reasoning) in [
+        (
+            "non-stream",
+            ref_long_message["content"].as_str().unwrap_or_default(),
+            ref_long_message["reasoning_content"]
+                .as_str()
+                .unwrap_or_default(),
+        ),
+        (
+            "stream",
+            ref_long_deltas.0.as_str(),
+            ref_long_deltas.1.as_str(),
+        ),
+    ] {
+        assert!(
+            !content.is_empty() && !reasoning.is_empty(),
+            "the {LONG_MAX_TOKENS}-token {label} reference must carry both content and \
+             reasoning_content (content {content:?}, reasoning {} chars); if the model did \
+             not finish thinking, raise LONG_MAX_TOKENS",
+            reasoning.len()
+        );
+    }
 
     // ---- Three-process disaggregated router run ----
     let ports = reserve_ports(6);
@@ -701,6 +837,10 @@ async fn disaggregated_router_filters_thinking_output() {
         wait_for_http_health(&health_url, deadline).await,
         "router HTTP /health never returned 200"
     );
+    assert!(
+        wait_for_router_peers_online(&router_http, deadline).await,
+        "the router never saw every peer online"
+    );
 
     let response = client
         .post(format!(
@@ -734,6 +874,12 @@ async fn disaggregated_router_filters_thinking_output() {
         content, ref_content,
         "router content does not match the single-node chat route"
     );
+    // #2729: the finish chunk's `reasoning_only` matches single node's.
+    assert_eq!(
+        sse_finish_reasoning_only(&body),
+        sse_finish_reasoning_only(&ref_body),
+        "router stream finish chunk reasoning_only does not match the single-node chat route"
+    );
 
     // Non-stream parity (#2715): the router shapes the reply with the same
     // helper as single node, so both fields match byte for byte.
@@ -762,6 +908,33 @@ async fn disaggregated_router_filters_thinking_output() {
     assert_eq!(
         router_ns_message["reasoning_content"], ref_ns_message["reasoning_content"],
         "router non-stream reasoning_content does not match the single-node chat route"
+    );
+    // #2729: the 32-token turn never closes `</think>`, so single node marks
+    // it `reasoning_only: true`; the router must carry the same flag.
+    assert_eq!(
+        router_ns_message["reasoning_only"], ref_ns_message["reasoning_only"],
+        "router non-stream reasoning_only does not match the single-node chat route"
+    );
+
+    // #2729: the long turn's reasoning / answer split, non-stream and stream.
+    let router_long_ns = post_chat_json(&client, &router_http, &long_nonstream_body).await;
+    let router_long_message = &router_long_ns["choices"][0]["message"];
+    eprintln!("router long non-stream message: {router_long_message}");
+    assert_eq!(
+        router_long_message["content"], ref_long_message["content"],
+        "router {LONG_MAX_TOKENS}-token non-stream content does not match the single-node chat route"
+    );
+    assert_eq!(
+        router_long_message["reasoning_content"], ref_long_message["reasoning_content"],
+        "router {LONG_MAX_TOKENS}-token non-stream reasoning_content does not match the \
+         single-node chat route"
+    );
+    let router_long_body = post_chat_text(&client, &router_http, &long_body).await;
+    assert_eq!(
+        parse_sse_deltas(&router_long_body),
+        ref_long_deltas,
+        "router {LONG_MAX_TOKENS}-token streamed (content, reasoning_content) does not match \
+         the single-node chat route"
     );
     eprintln!("OK: router thinking-enabled output matches the single-node split.");
 }
@@ -849,7 +1022,7 @@ async fn disaggregated_router_completions_match_single_node() {
         "temperature": 0.0,
         "stream": true
     });
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
 
     // ---- Single-node reference (started with --alias for model parity) ----
     let (ref_nonstream, ref_stream_chunks) = {
@@ -1002,6 +1175,10 @@ async fn disaggregated_router_completions_match_single_node() {
         wait_for_http_health(&health_url, deadline).await,
         "router HTTP /health never returned 200"
     );
+    assert!(
+        wait_for_router_peers_online(&router_http, deadline).await,
+        "the router never saw every peer online"
+    );
     let router_completions_url = format!("http://127.0.0.1:{router_http}/v1/completions");
 
     // Non-streaming parity.
@@ -1100,7 +1277,7 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
     }
     let model_arg = model_dir.to_string_lossy().to_string();
     let roles = ClusterRoles::new();
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     // The characters this checkpoint's vocabulary can emit without `<0xXX>`
     // byte pieces, used to prove a case really exercises byte fallback.
     let vocab_chars = minicpm_vocab_chars(&model_dir);
@@ -1269,6 +1446,10 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
         wait_for_http_health(&health_url, deadline).await,
         "router HTTP /health never returned 200"
     );
+    assert!(
+        wait_for_router_peers_online(&router_http, deadline).await,
+        "the router never saw every peer online"
+    );
     let router_completions_url = format!("http://127.0.0.1:{router_http}/v1/completions");
 
     for (case, (ref_nonstream, ref_stream_chunks)) in
@@ -1379,7 +1560,7 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
     }
     let model_arg = model_dir.to_string_lossy().to_string();
     let roles = ClusterRoles::new();
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     // See the completions twin: proves a case really exercises byte fallback.
     let vocab_chars = minicpm_vocab_chars(&model_dir);
 
@@ -1559,6 +1740,10 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
         wait_for_http_health(&health_url, deadline).await,
         "router HTTP /health never returned 200"
     );
+    assert!(
+        wait_for_router_peers_online(&router_http, deadline).await,
+        "the router never saw every peer online"
+    );
     let router_chat_url = format!("http://127.0.0.1:{router_http}/v1/chat/completions");
 
     for (case, (ref_nonstream, ref_usage_chunk, ref_stream_content)) in
@@ -1723,7 +1908,7 @@ async fn disaggregated_router_rejects_model_owned_family_and_keeps_serving() {
     }
     let model_arg = model_dir.to_string_lossy().to_string();
     let roles = ClusterRoles::new();
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
 
     // ---- Three-process disaggregated router run ----
     let ports = reserve_ports(6);
@@ -1773,6 +1958,10 @@ async fn disaggregated_router_rejects_model_owned_family_and_keeps_serving() {
     assert!(
         wait_for_http_health(&health_url, deadline).await,
         "router HTTP /health never returned 200"
+    );
+    assert!(
+        wait_for_router_peers_online(&router_http, deadline).await,
+        "the router never saw every peer online"
     );
     let completions_url = format!("http://127.0.0.1:{router_http}/v1/completions");
     let body = serde_json::json!({
@@ -2028,8 +2217,12 @@ async fn disaggregated_router_balances_and_survives_node_failure() {
         wait_for_http_health(&health_url, deadline).await,
         "router HTTP /health never returned 200"
     );
+    assert!(
+        wait_for_router_peers_online(&router_http, deadline).await,
+        "the router never saw every peer online"
+    );
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
     let completions_url = format!("http://127.0.0.1:{router_http}/v1/completions");
     let stats_url = format!("http://127.0.0.1:{router_http}/router/stats");
     let prompt = "The capital of France is";
@@ -2087,4 +2280,136 @@ async fn disaggregated_router_balances_and_survives_node_failure() {
         );
     }
     eprintln!("OK: router balanced both pools and survived a prefill-node failure.");
+}
+
+/// Poll the router's `GET /router/stats` until node `id` reports `status` or
+/// the deadline passes.
+async fn wait_for_router_node_status(
+    http_port: &str,
+    id: &str,
+    status: &str,
+    deadline: Instant,
+) -> bool {
+    let client = mlxcel::http_tls::client();
+    let url = format!("http://127.0.0.1:{http_port}/router/stats");
+    while Instant::now() < deadline {
+        let per_request = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(5));
+        if let Ok(resp) = client.get(&url).timeout(per_request).send().await
+            && let Ok(stats) = resp.json::<serde_json::Value>().await
+            && let Some(nodes) = stats["nodes"].as_array()
+            && nodes.iter().any(|n| n["id"] == id && n["status"] == status)
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// Issue #2763: a router started before its prefill peer serves the first
+/// request the moment that peer's port accepts, with no 503.
+///
+/// The router comes up first, so its health monitor's startup probe marks the
+/// prefill node unreachable (asserted through `GET /router/stats`). The prefill
+/// node then starts, and the request goes out as soon as its serving port
+/// accepts a connection, without waiting for a monitor cycle to restore the
+/// node: the admission check re-probes the node it has marked down and admits
+/// the request instead of answering 503.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "spawns three real mlxcel-server processes loading qwen3-0.6b-4bit; run with --ignored"]
+async fn disaggregated_router_started_before_prefill_serves_first_request() {
+    let model_dir = repo_model_dir(QWEN3_DIR);
+    if !model_dir.exists() {
+        eprintln!(
+            "Skipping {QWEN3_DIR}: model directory not found at {}",
+            model_dir.display()
+        );
+        return;
+    }
+    let binary = repo_binary_path("mlxcel-server");
+    if !binary.exists() {
+        eprintln!(
+            "Skipping: mlxcel-server binary not found at {}",
+            binary.display()
+        );
+        return;
+    }
+
+    let ports = reserve_ports(6);
+    let prefill_http = ports[0].to_string();
+    let decode_http = ports[1].to_string();
+    let router_http = ports[2].to_string();
+    let prefill_serving_addr = format!("127.0.0.1:{}", ports[3]);
+    let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
+    let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
+    let model_arg = model_dir.to_string_lossy().to_string();
+    let roles = ClusterRoles::new();
+    let deadline = Instant::now() + Duration::from_secs(240);
+
+    let _decode = spawn_decode(&roles, &model_arg, &decode_http, &decode_serving_addr);
+    assert!(
+        wait_for_tcp(&decode_serving_addr, deadline).await,
+        "decode node serving transport never came up at {decode_serving_addr}"
+    );
+    let _router = roles.spawn(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &router_http,
+        "--node-role",
+        "router",
+        "--serving-bind",
+        &router_serving_addr,
+        "--prefill-peers",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+    let health_url = format!("http://127.0.0.1:{router_http}/health");
+    assert!(
+        wait_for_http_health(&health_url, deadline).await,
+        "router HTTP /health never returned 200 at {health_url}"
+    );
+    assert!(
+        wait_for_router_node_status(&router_http, "prefill-0", "unreachable", deadline).await,
+        "the router never marked the not-yet-started prefill node unreachable"
+    );
+
+    let _prefill = spawn_prefill(
+        &roles,
+        &model_arg,
+        &prefill_http,
+        &prefill_serving_addr,
+        &decode_serving_addr,
+    );
+    assert!(
+        wait_for_tcp(&prefill_serving_addr, deadline).await,
+        "prefill node serving transport never came up at {prefill_serving_addr}"
+    );
+
+    // No wait for `/router/stats` here: the router still has the prefill node
+    // marked down unless a monitor cycle happened to land since it bound.
+    let client = mlxcel::http_tls::client();
+    let (status, text) = post_completion(
+        &client,
+        &format!("http://127.0.0.1:{router_http}/v1/completions"),
+        "qwen3",
+        "The capital of France is",
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the first request after the prefill node came up was refused: {text}"
+    );
+    assert!(!text.is_empty(), "the router returned an empty completion");
+    assert!(
+        wait_for_router_node_status(&router_http, "prefill-0", "online", deadline).await,
+        "the router did not report the prefill node online after serving through it"
+    );
 }

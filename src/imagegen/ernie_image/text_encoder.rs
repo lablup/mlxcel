@@ -46,7 +46,8 @@ const VLM_TEXT_PREFIX: &str = "language_model.";
 
 /// Load the Ministral 3 decoder of `dir` (a `Ministral3ForCausalLM`, or a
 /// `Mistral3Model` VLM whose `text_config` and `language_model.*` tensors are
-/// used), with the project's text-weight dtype policy.
+/// used), in the checkpoint's own dtype (bf16), outside the text-weight load
+/// policy.
 ///
 /// Used by: [`ErnieTextEncoder::load`] and
 /// [`super::prompt_enhancer::ErniePromptEnhancer::load`].
@@ -56,10 +57,15 @@ pub fn load_ministral3(dir: &Path) -> Result<(Ministral3Model, ModelArgs)> {
         .with_context(|| format!("cannot read {}", config_path.display()))?;
     let config: Value = serde_json::from_str(&text)
         .with_context(|| format!("cannot parse {}", config_path.display()))?;
+    reject_quantized_config(&config, &config_path)?;
     let text_config = config.get("text_config").cloned().unwrap_or(config);
     let args: ModelArgs = serde_json::from_value(text_config)
         .with_context(|| format!("{} is not a Ministral 3 config", config_path.display()))?;
-    let weights = crate::models::load_text_weights(dir, None)
+    // Raw load, not `load_text_weights`: that applies the bf16 -> f16 load
+    // policy (`MLXCEL_CUDA_F16_NORMALIZE`, Apple Silicon), which moves the
+    // conditioning off upstream's bf16 (rel-RMS 3.509e-3 vs bit-exact) and
+    // Turbo from bit-exact to 2.93e-1 / 26.04 dB. The checkpoint stays bf16.
+    let weights = mlxcel_core::weights::load_weights_from_dir(dir)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("cannot load weights from {}", dir.display()))?;
     let prefix = if weights.contains_key(&format!("{VLM_TEXT_PREFIX}model.embed_tokens.weight")) {
@@ -77,6 +83,26 @@ pub fn load_ministral3(dir: &Path) -> Result<(Ministral3Model, ModelArgs)> {
             )
         })?;
     Ok((model, args))
+}
+
+/// Refuse a quantized checkpoint: the raw loader does not run the NVFP4 or
+/// ModelOpt repack, so quantized tensors would fail later with a confusing
+/// missing-weight error.
+fn reject_quantized_config(config: &Value, config_path: &Path) -> Result<()> {
+    let quantized = ["quantization", "quantization_config"].iter().any(|key| {
+        config.get(key).is_some_and(|v| !v.is_null())
+            || config
+                .get("text_config")
+                .and_then(|t| t.get(key))
+                .is_some_and(|v| !v.is_null())
+    });
+    if quantized {
+        anyhow::bail!(
+            "{} declares quantization; the ERNIE-Image Ministral 3 loader supports only unquantized bf16 checkpoints",
+            config_path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Keep only the decoder tensors: drops the VLM's vision tower and projector

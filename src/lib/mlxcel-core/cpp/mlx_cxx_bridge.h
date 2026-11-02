@@ -59,8 +59,8 @@ struct MlxStream {
 // `mlx::core::stream_from_thread_local_stream`. Holding the same handle
 // across threads gives every thread its own dedicated MLX stream
 // without any explicit coordination between them. Used by
-// `mlxcel-core` to back the generation stream of `BatchScheduler`,
-// the engine's raw-completion client, and `SpeculativeGenerator` (upstream MLX commit `728fab1` in mlx-vlm PR #1050).
+// `mlxcel-core` to back the generation stream of `BatchScheduler`
+// and the engine's raw-completion client (upstream MLX commit `728fab1` in mlx-vlm PR #1050).
 struct MlxThreadLocalStream {
     mlx::core::ThreadLocalStream inner;
 
@@ -575,6 +575,8 @@ std::unique_ptr<MlxArray> swiglu_mlp_forward(
 // One-shot report for MLXCEL_SHAPELESS_COMPILE_AUDIT=1. Each audited compile
 // site is compared against its eager graph on first-use and warmed calls.
 rust::String shapeless_compile_audit_report();
+bool native_env_read(rust::Str name, rust::Vec<uint8_t>& value);
+int32_t mlx_env_get_var_int(rust::Str name, int32_t default_value);
 
 // Compiled relu_squared: square(maximum(x, 0)) — single fused kernel
 std::unique_ptr<MlxArray> compiled_relu_squared(const MlxArray& x);
@@ -588,10 +590,6 @@ std::unique_ptr<MlxArray> qwen4_hyper_inject(const MlxArray& branch, const MlxAr
 std::unique_ptr<MlxArray> compiled_scaled_rms_norm(const MlxArray& x, const MlxArray& scale, float eps);
 std::unique_ptr<MlxArray> compiled_silu(const MlxArray& x);
 
-// Compiled gelu: x * 0.5 * (1 + erf(x / sqrt(2))) — single fused kernel
-// Used by: StarCoder2 and other precise GELU-based models
-std::unique_ptr<MlxArray> compiled_gelu(const MlxArray& x);
-
 // Compiled gelu_approx: despite the name, exact erf GELU
 // (x * 0.5 * (1 + erf(x / sqrt(2)))), MLX `nn.gelu`, not MLX's tanh
 // `nn.gelu_approx`; use `gelu_tanh` for that (#2423).
@@ -604,7 +602,7 @@ std::unique_ptr<MlxArray> compiled_gelu_approx(const MlxArray& x);
 std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x);
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
-// erf_gelu(max(0, x - (mean + std * multiplier))); upstream uses tanh (#2423)
+// gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype (#2548)
 // Used by: Gemma3n MLP layers with activation_sparsity > 0
 std::unique_ptr<MlxArray> compiled_gelu_topk(
     const MlxArray& x,
@@ -811,9 +809,9 @@ std::unique_ptr<MlxArray> compiled_swiglu_mlp_forward_fp16(
 );
 
 // Compiled GELU MLP forward for non-quantized (FP16/BF16) weights:
-//   down_proj(gelu(gate_proj(x)) * up_proj(x))
-// Fuses gate_proj + gelu + up_proj + multiply + down_proj into compiled graph.
-// Used by: Gemma, Gemma4 and other GELU-gated FP models
+//   down_proj(gelu_tanh(gate_proj(x)) * up_proj(x))
+// Runs the matmuls eagerly and the tanh GeGLU as one compiled kernel (#2548).
+// Used by: Gemma v1, Gemma4 dense MLP and the Gemma4 assistant drafter
 std::unique_ptr<MlxArray> compiled_gelu_mlp_forward_fp16(
     const MlxArray& x,
     const MlxArray& gate_weight,

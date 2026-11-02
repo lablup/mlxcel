@@ -23,7 +23,10 @@ use anyhow::Context;
 use mlxcel::cli::ggml_compat_args::read_model_layer_count;
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
-use mlxcel::downloader::{ModelSourceOptions, resolve_model_source_with_options, set_offline_mode};
+use mlxcel::downloader::{
+    ModelSourceOptions, resolve_draft_model_source, resolve_model_source_with_options,
+    set_offline_mode,
+};
 use mlxcel::memory_estimate::{
     QuantHint, SERVE_PREFLIGHT_REMEDIATION, enforce_preflight, estimate_total_memory,
     format_estimate,
@@ -321,6 +324,11 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     if webui_enabled && router_mode {
         args.models_autoload = false;
     }
+    // #2825: `--image-model` with no model source serves image generation
+    // alone. `build_startup_input` names any conflicting flag after folding in
+    // the environment aliases; here the decision only needs to skip the chat
+    // checkpoint resolution and the memory preflight below.
+    let image_only = args.image_model.is_some() && !has_model_source;
     // The #1438 migration guard, raised BEFORE model resolution so the old
     // store-root combination fails in milliseconds instead of after a
     // multi-gigabyte download. `into_startup_config` re-checks it for
@@ -332,6 +340,9 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
              meaning), use --model-store-root <PATH> or the MLXCEL_MODELS_DIR environment \
              variable; to start the router, drop the model argument"
         );
+    }
+    if image_only {
+        return start_server(build_startup_input(args)?.into_startup_config()?).await;
     }
     if router_mode {
         return start_server(build_startup_input(args)?.into_startup_config()?).await;
@@ -613,6 +624,47 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     // `--embedding-model` accepts the same path-or-repo-id shapes as `-m`
     // and resolves through the same store lookup / auto-download.
     env_fallback_embedding_model(&mut args.embedding_model, &mut args.startup_notices);
+    // `--reranker-model` accepts the same path-or-repo-id shapes as `-m`.
+    // Both aliases are folded in before the image-only decision below so the
+    // environment forms conflict with `--image-model` exactly as the flags do.
+    env_fallback_reranker_model(&mut args.reranker_model, &mut args.startup_notices);
+
+    // #2825: `--image-model` with no model source serves image generation
+    // alone, so a router selector or a flag naming another workload fails here,
+    // before the image checkpoint is resolved (and possibly downloaded).
+    let has_model_source = args.model.is_some()
+        || args.hf_repo.is_some()
+        || args.model_url.is_some()
+        || args.docker_repo.is_some()
+        || args.hf_file.is_some();
+    let image_only = {
+        let (embeddings, reranking) = if args.image_model.is_some() && !has_model_source {
+            let resolved = args
+                .embedding_compat
+                .resolve()
+                .map_err(|message| anyhow::anyhow!(message))?;
+            (
+                resolved.embedding_only && !resolved.rerank_only,
+                resolved.rerank_only,
+            )
+        } else {
+            (false, false)
+        };
+        mlxcel::server::resolve_image_only_mode(
+            args.image_model.is_some(),
+            has_model_source,
+            &[
+                ("--models-dir", args.models_dir.is_some()),
+                ("--models-preset", args.models_preset.is_some()),
+                ("--webui", webui_enabled),
+                ("--embedding-model", args.embedding_model.is_some()),
+                ("--reranker-model", args.reranker_model.is_some()),
+                ("--embeddings", embeddings),
+                ("--reranking", reranking),
+            ],
+        )?
+    };
+
     let embedding_model_path = args
         .embedding_model
         .as_deref()
@@ -648,8 +700,6 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         })
         .transpose()?;
 
-    // `--reranker-model` accepts the same path-or-repo-id shapes as `-m`.
-    env_fallback_reranker_model(&mut args.reranker_model, &mut args.startup_notices);
     let reranker_model_path = args
         .reranker_model
         .as_deref()
@@ -667,6 +717,26 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         })
         .transpose()?;
 
+    // `--draft-model` accepts the same path-or-repo-id shapes as `-m`. The
+    // target's `--revision` is not applied to it.
+    let draft_model_path = args
+        .draft_model
+        .as_deref()
+        .map(|value| {
+            resolve_draft_model_source(
+                value,
+                ModelSourceOptions {
+                    models_dir: args.model_store_root.as_deref(),
+                    revision: None,
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                    cwd_models_dir: None,
+                },
+            )
+            .with_context(|| format!("resolving --draft-model {}", value.display()))
+        })
+        .transpose()?;
+
     Ok(ServerStartupInput {
         chat_compat: args
             .chat_compat
@@ -675,14 +745,20 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         reasoning_alias_field: args.reasoning_alias_field,
         model_path: match args.model.clone() {
             Some(path) => path,
-            // Router/WebUI model-free mode: no startup checkpoint.
-            None if args.models_dir.is_some() || args.models_preset.is_some() || webui_enabled => {
+            // Router/WebUI model-free mode and the image-only mode (#2825)
+            // have no startup chat checkpoint.
+            None if image_only
+                || args.models_dir.is_some()
+                || args.models_preset.is_some()
+                || webui_enabled =>
+            {
                 std::path::PathBuf::new()
             }
             None => anyhow::bail!(
                 "--model/-m is required to start the server (set the \
                  LLAMA_ARG_MODEL environment variable, pass -m \
-                 <PATH_OR_REPO_ID>, or pass --hf-repo <owner>/<name>)"
+                 <PATH_OR_REPO_ID>, pass --hf-repo <owner>/<name>, or pass \
+                 --image-model <PATH_OR_REPO_ID> to serve image generation only)"
             ),
         },
         adapter_path: None,
@@ -725,7 +801,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         cors_headers: args.cors_headers,
         cors_credentials: args.cors_credentials,
         no_cors_credentials: args._no_cors_credentials,
-        draft_model_path: args.draft_model,
+        draft_model_path,
         draft_max: args.draft_max,
         // forward the speculative-decoding selector flags
         // resolved above via env-var fallbacks. Reconciliation into a

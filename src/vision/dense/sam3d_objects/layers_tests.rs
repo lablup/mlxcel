@@ -82,7 +82,14 @@ fn exact_bf16(actual: &MlxArray, expected: &MlxArray, name: &str) {
 
 #[test]
 fn compiled_layers_match_pinned_bf16_oracle() -> Result<()> {
+    // The modulate and residual fixtures follow the default device; hold it.
+    let _device_lock = mx::streams::lock_default_device();
     let w = layer_oracle()?;
+    // CUDA's fused bf16 kernels round 11 modulate and 7 residual elements
+    // differently from this ROCm capture; upstream `mlx` 0.32.4 CUDA on GB10
+    // returns the keyed values (see `dense::cuda_oracle`).
+    let modulate = crate::vision::dense::cuda_oracle::keyed("modulate", &w["modulate.out"]);
+    let residual = crate::vision::dense::cuda_oracle::keyed("residual", &w["residual.out"]);
     // The fixture records equivalence for these inputs; it does not establish
     // that eager and compiled operations always agree. Test cached calls too.
     for _ in 0..2 {
@@ -92,7 +99,7 @@ fn compiled_layers_match_pinned_bf16_oracle() -> Result<()> {
                 &w["modulate.scale"],
                 &w["modulate.shift"],
             )?,
-            &w["modulate.out"],
+            &modulate,
             "modulate",
         );
         exact_bf16(
@@ -101,7 +108,7 @@ fn compiled_layers_match_pinned_bf16_oracle() -> Result<()> {
                 &w["residual.h"],
                 &w["residual.gate"],
             )?,
-            &w["residual.out"],
+            &residual,
             "gated residual",
         );
         exact_bf16(
@@ -151,7 +158,6 @@ fn head_norm_constructor_rejects_malformed_gamma_rank_and_shape() -> Result<()> 
 }
 
 fn tanh_oracle() -> Result<WeightMap> {
-    use sha2::{Digest, Sha256};
     let (name, digest) = if mx::default_device_is_gpu() {
         (
             "gelu-tanh-power.safetensors",
@@ -168,7 +174,7 @@ fn tanh_oracle() -> Result<WeightMap> {
         .join(name);
     let bytes = std::fs::read(&path)?;
     assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
+        crate::sha256_hex::sha256_hex(&bytes),
         digest,
         "authenticated tanh GELU fixture changed"
     );
@@ -194,9 +200,22 @@ fn compiled_objects_gelu_tanh_matches_authentic_power_oracle() -> Result<()> {
             continue;
         }
         let x = &w[&format!("{prefix}_x")];
-        let expected = &w[&format!("{prefix}_upstream")];
+        let pinned = &w[&format!("{prefix}_upstream")];
         let power = &w[&format!("{prefix}_power")];
-        let old = &w[&format!("{prefix}_multiply")];
+        let pinned_old = &w[&format!("{prefix}_multiply")];
+        // On CUDA, upstream `mlx` 0.32.4 rounds 75 bf16-grid elements of the
+        // power graph and 57 of the multiply graph differently from the ROCm
+        // capture (measured on GB10, see `dense::cuda_oracle`); the probe
+        // matches everywhere.
+        let (expected, old) = if prefix == "bf16_grid" {
+            (
+                crate::vision::dense::cuda_oracle::keyed("bf16_grid_upstream", pinned),
+                crate::vision::dense::cuda_oracle::keyed("bf16_grid_multiply", pinned_old),
+            )
+        } else {
+            (mx::copy(pinned), mx::copy(pinned_old))
+        };
+        let (expected, old) = (&*expected, &*old);
         let actual = mx::compiled_objects_gelu_tanh(x)?;
         assert_eq!(mx::array_dtype(&actual), mx::array_dtype(x), "{prefix}");
         assert_eq!(
@@ -211,11 +230,11 @@ fn compiled_objects_gelu_tanh_matches_authentic_power_oracle() -> Result<()> {
         );
         assert_eq!(
             mx::array_to_raw_bytes(power),
-            mx::array_to_raw_bytes(expected),
+            mx::array_to_raw_bytes(pinned),
             "{prefix}"
         );
-        let expected_values = mx::utils::array_to_vec_f32(expected);
-        let old_values = mx::utils::array_to_vec_f32(old);
+        let expected_values = mx::utils::array_to_vec_f32(pinned);
+        let old_values = mx::utils::array_to_vec_f32(pinned_old);
         assert_eq!(
             expected_values
                 .iter()

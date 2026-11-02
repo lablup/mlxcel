@@ -24,15 +24,17 @@
 // - FFNSubblock enum: None, Linear, MLP
 // - ffn_mult_to_intermediate_size for variable FFN widths
 
+use crate::models::model_owned::KvCacheLayerModes;
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::create_causal_mask;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{
-    MlxArray, UniquePtr, add, array_shape, copy, fast_rope, gelu, multiply, relu, reshape, silu,
-    transpose_axes,
+    MlxArray, UniquePtr, add, array_shape, copy, fast_rope, multiply, reshape, transpose_axes,
 };
 use serde::Deserialize;
+use std::cell::RefCell;
 use std::path::Path;
 
 // Configuration.
@@ -349,7 +351,7 @@ struct NASMLP {
     gate_proj: UnifiedLinear,
     up_proj: UnifiedLinear,
     down_proj: UnifiedLinear,
-    act_fn: String,
+    act_fn: NasActivation,
 }
 
 impl NASMLP {
@@ -357,13 +359,7 @@ impl NASMLP {
         let gate = self.gate_proj.forward(x);
         let up = self.up_proj.forward(x);
 
-        // Apply activation function
-        let activated = match self.act_fn.as_str() {
-            "silu" => silu(&gate),
-            "relu" => relu(&gate),
-            "gelu" => gelu(&gate),
-            _ => silu(&gate),
-        };
+        let activated = self.act_fn.apply(&gate);
 
         let combined = multiply(&activated, &up);
         self.down_proj.forward(&combined)
@@ -461,6 +457,12 @@ impl NASTransformerBlock {
     fn has_attention(&self) -> bool {
         !matches!(self.self_attn, AttentionSubblock::None)
     }
+
+    /// Whether this block stores keys and values: only full attention does.
+    /// A linear replacement keeps a cache slot it never writes.
+    fn has_kv_cache(&self) -> bool {
+        matches!(self.self_attn, AttentionSubblock::Attention(_))
+    }
 }
 
 // Full NAS Model.
@@ -470,6 +472,15 @@ pub struct NemotronNASModel {
     layers: Vec<NASTransformerBlock>,
     norm_f: RMSNorm,
     lm_head: Option<UnifiedLinear>,
+    /// One `KVCache` per block that is not a `no_op` attention block, owned
+    /// by the model (#2544). The family cannot batch, so the engine's pool
+    /// entry for its sequence is model-owned and `Engine::prefill` hands
+    /// `forward` an empty slice; `make_caches` resets these instead.
+    caches: RefCell<Vec<KVCache>>,
+    /// KV cache mode per block, indexed by the block's layer index (the
+    /// table the server and CLI resolve over `num_layers()`), not by the
+    /// slot's position in `caches`.
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl NemotronNASModel {
@@ -516,6 +527,9 @@ impl NemotronNASModel {
         // Embeddings
         let embeddings =
             UnifiedEmbedding::from_weights(&weights, "model.embed_tokens", group_size, bits)?;
+
+        // Resolve `hidden_act` once; an unknown name is a load error (#2548).
+        let act_fn = NasActivation::from_hf_name(&config.hidden_act)?;
 
         // Build layers
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
@@ -654,7 +668,7 @@ impl NemotronNASModel {
                     gate_proj,
                     up_proj,
                     down_proj,
-                    act_fn: config.hidden_act.clone(),
+                    act_fn,
                 })
             };
 
@@ -681,14 +695,59 @@ impl NemotronNASModel {
             None
         };
 
+        let kv_cache_layer_modes = KvCacheLayerModes::new();
+        let caches = RefCell::new(fresh_caches(&layers, &kv_cache_layer_modes));
         Ok(Self {
             config,
             embeddings,
             layers,
             norm_f,
             lm_head,
+            caches,
+            kv_cache_layer_modes,
         })
     }
+
+    /// Longest live window across the model-owned slot (0 when it is empty).
+    #[cfg(test)]
+    pub(crate) fn slot_live_len(&self) -> i32 {
+        self.caches
+            .borrow()
+            .iter()
+            .map(KVCache::live_len)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Storage mode of every cache in the model-owned slot, in slot order.
+    #[cfg(test)]
+    pub(crate) fn slot_kv_modes(&self) -> Vec<KVCacheMode> {
+        self.caches
+            .borrow()
+            .iter()
+            .map(|cache| cache.mode)
+            .collect()
+    }
+
+    /// Cache slot of the first full attention block, if any.
+    fn first_attention_slot(&self) -> Option<usize> {
+        self.layers
+            .iter()
+            .filter(|layer| layer.has_attention())
+            .position(|layer| matches!(layer.self_attn, AttentionSubblock::Attention(_)))
+    }
+}
+
+/// One cache per block that has an attention subblock (full or linear
+/// replacement), in layer order: the slot `forward` indexes per block. Each
+/// cache takes the mode of its block's layer index.
+fn fresh_caches(layers: &[NASTransformerBlock], modes: &KvCacheLayerModes) -> Vec<KVCache> {
+    layers
+        .iter()
+        .enumerate()
+        .filter(|(_, layer)| layer.has_attention())
+        .map(|(layer_idx, _)| KVCache::new_with_mode(modes.mode_for_layer(layer_idx)))
+        .collect()
 }
 
 // LanguageModel trait implementation.
@@ -696,9 +755,12 @@ impl LanguageModel for NemotronNASModel {
     fn forward(
         &self,
         input_ids: &MlxArray,
-        caches: &mut [KVCache],
+        _caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        // The caller's slice is ignored: it is empty on the engine path, and
+        // the model-owned caches are the only state this family reads.
+        let mut caches = self.caches.borrow_mut();
         let mut h = self.embeddings.forward(input_ids);
 
         // Create causal mask if not provided. Size it from the cache's live
@@ -712,7 +774,13 @@ impl LanguageModel for NemotronNASModel {
         let computed_mask = if mask.is_none() {
             let shape = array_shape(&h);
             let seq_len = shape[1];
-            let live_len = caches.first().map(|c| c.live_len()).unwrap_or(0);
+            // Read a slot a full attention block writes: a
+            // `replace_with_linear` block holds a slot it never touches.
+            let live_len = self
+                .first_attention_slot()
+                .and_then(|slot| caches.get(slot))
+                .map(|c| c.live_len())
+                .unwrap_or(0);
             if seq_len > 1 {
                 Some(create_causal_mask(seq_len, live_len))
             } else {
@@ -747,14 +815,36 @@ impl LanguageModel for NemotronNASModel {
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        // Only create caches for layers with attention
-        let num_attention_layers = self
-            .layers
-            .iter()
-            .filter(|layer| layer.has_attention())
-            .count();
+        // Reset the model-owned caches: the engine (`DirectEngine` opening a
+        // sequence) and the scheduler (at prefill) call this per sequence.
+        // The returned vector keeps its old shape but is never read.
+        self.reset_runtime_state();
+        fresh_caches(&self.layers, &self.kv_cache_layer_modes)
+    }
 
-        (0..num_attention_layers).map(|_| KVCache::new()).collect()
+    fn reset_runtime_state(&self) {
+        *self.caches.borrow_mut() = fresh_caches(&self.layers, &self.kv_cache_layer_modes);
+    }
+
+    /// Full attention reads its K/V through `KVCache::update_and_fetch`,
+    /// which stores and dequantizes every mode, so the table is honored. A
+    /// `replace_with_linear` block keeps a slot it never writes.
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_runtime_state();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Skipped (`no_op`) and linear-replacement attention blocks hold no KV (issue #2790).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        self.kv_cache_layer_modes
+            .storage_modes(|layer_idx| match self.layers.get(layer_idx) {
+                Some(layer) if layer.has_kv_cache() => crate::models::model_owned::LayerKv::Full,
+                _ => crate::models::model_owned::LayerKv::None,
+            })
     }
 
     fn num_layers(&self) -> usize {
@@ -762,12 +852,16 @@ impl LanguageModel for NemotronNASModel {
     }
 
     fn supports_padded_prefill(&self) -> bool {
-        false // Padding tokens corrupt Mamba recurrent state in hybrid architecture
+        // No recurrent state here, only a plain `KVCache` per attention
+        // block, but those caches are model-owned: pad positions would land
+        // in state the caller's trim never reaches (#1755).
+        false
     }
 
     fn supports_batching(&self) -> bool {
-        // Attention-only cache allocation differs from num_layers(); keep the
-        // scheduler single-row until the cache-layout contract is corrected (#2544).
+        // One model-owned cache per attention block, not one per
+        // `num_layers()`, so the server's paged layout does not describe
+        // this family; keep it single-row (#2544).
         false
     }
 
@@ -782,6 +876,14 @@ impl LanguageModel for NemotronNASModel {
             .unwrap_or_else(|| vec![128001, 128009])
     }
 }
+
+#[path = "nemotron_nas_activation.rs"]
+mod activation;
+use activation::NasActivation;
+
+#[cfg(test)]
+#[path = "nemotron_nas_engine_tests.rs"]
+pub(crate) mod engine_tests;
 
 #[cfg(test)]
 mod tests {

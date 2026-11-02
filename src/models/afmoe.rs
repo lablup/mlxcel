@@ -114,7 +114,7 @@ use std::path::Path;
 use crate::models::gemma3::{Cache, CacheInterface};
 use crate::models::gpt2::{dim_eq, validate_embedding_table};
 use crate::models::kv_snapshot::KvSnapshotNames;
-use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, group_mask_scores};
 
 /// Tensor-name and error-message vocabulary AFMoE hands to the shared
@@ -487,13 +487,13 @@ impl ModelArgs {
                 ));
             }
         }
-        if self.sliding_index().is_some() && self.sliding_window == 0 {
-            return Err(
-                "AFMoE sliding_window must be at least 1 when layer_types declares a \
-                 sliding_attention layer; a zero window would keep no keys at all"
-                    .to_string(),
-            );
-        }
+        // A zero window would keep no keys at all, and one above `i32::MAX`
+        // does not fit a `RotatingKVCache` (issue #2790).
+        crate::models::model_owned::cache_window(
+            "AFMoE",
+            self.sliding_window,
+            self.sliding_index().is_some(),
+        )?;
         if self.intermediate_size == 0 || self.intermediate_size > MAX_INTERMEDIATE_SIZE {
             return Err(format!(
                 "AFMoE intermediate_size ({}) must be between 1 and {MAX_INTERMEDIATE_SIZE}",
@@ -1386,10 +1386,13 @@ impl AfmoeModel {
             .iter()
             .enumerate()
             .map(|(layer_idx, layer)| {
-                let mode = self.kv_cache_layer_modes.mode_for_layer(layer_idx);
                 if layer.uses_sliding {
+                    let mode = self
+                        .kv_cache_layer_modes
+                        .rotating_mode_for_layer(layer_idx, self.sliding_window);
                     Cache::Rotating(RotatingKVCache::new_with_mode(self.sliding_window, mode))
                 } else {
+                    let mode = self.kv_cache_layer_modes.mode_for_layer(layer_idx);
                     Cache::Standard(KVCache::new_with_mode(mode))
                 }
             })
@@ -1448,6 +1451,11 @@ impl AfmoeModel {
             "hidden_size",
         )?;
 
+        let sliding_window = crate::models::model_owned::cache_window(
+            "AFMoE",
+            args.sliding_window,
+            args.sliding_index().is_some(),
+        )?;
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for i in 0..args.num_hidden_layers {
             layers.push(DecoderLayer::from_weights(weights, args, i)?);
@@ -1466,7 +1474,7 @@ impl AfmoeModel {
             .iter()
             .map(|layer| {
                 if layer.uses_sliding {
-                    Cache::Rotating(RotatingKVCache::new(args.sliding_window as i32))
+                    Cache::Rotating(RotatingKVCache::new(sliding_window))
                 } else {
                     Cache::Standard(KVCache::new())
                 }
@@ -1479,7 +1487,7 @@ impl AfmoeModel {
             norm,
             lm_head,
             embedding_scale: args.embedding_scale(),
-            sliding_window: args.sliding_window as i32,
+            sliding_window,
             full_attention_index: args.full_attention_index(),
             sliding_index: args.sliding_index(),
             eos_token_ids: args.eos_token_ids(),
@@ -1872,6 +1880,18 @@ impl LanguageModel for AfmoeModel {
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
+    /// mode but an aligned `Turbo4Asym` (issue #2783).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
+            self.layers
+                .get(layer_idx)
+                .is_some_and(|layer| layer.uses_sliding)
+                .then_some(self.sliding_window)
+                .map_or(LayerKv::Full, LayerKv::Sliding)
+        })
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {

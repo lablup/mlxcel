@@ -302,9 +302,11 @@ pub struct MLP {
 
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        // Simple MLP: fc2(gelu(fc1(x)))
+        // Simple MLP: fc2(gelu(fc1(x))). Phi-1/1.5/2 declare
+        // `hidden_act = gelu_new` (tanh; mlx-lm `nn.gelu_approx`), evaluated in
+        // f32 as one compiled kernel (erf before #2548).
         let h = self.fc1.forward(x);
-        let h = mlxcel_core::utils::gelu_approx(&h);
+        let h = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&h);
         self.fc2.forward(&h)
     }
 

@@ -8,12 +8,16 @@ export default defineConfig({
   workers: 1,
   reporter: 'list',
   timeout: 45_000,
-  // Paint-latency budgets stay at their committed values. A shared two-core hosted runner can
-  // stall a single event-to-paint sample by tens of milliseconds without any application change:
-  // headless Firefox measured 10 ms event-to-predicate at c61ff73b and 97 ms at 3d65d1b8 with an
-  // identical webui/src tree. Retries repeat the whole cold measurement on a fresh page rather
-  // than relaxing a threshold, and each attempt writes its own evidence file recording its index,
-  // so a genuine regression still fails every attempt.
+  // Paint-latency budgets stay at their committed values except for the headed WebKit arm, which
+  // carries an engine-calibrated navigation budget in performance.spec.ts: Playwright 1.64.1 ships
+  // WebKit 27.2 (v2370), whose two-rAF paint tail measured 74-80 ms against 36-57 ms under
+  // Playwright 1.63.0's WebKit 26.6 (v2359) while event-to-predicate stayed at 30-34 ms and the
+  // same commit both passed and failed. A shared two-core hosted runner can also stall a single
+  // event-to-paint sample by tens of milliseconds without any application change: headless Firefox
+  // measured 10 ms event-to-predicate at c61ff73b and 97 ms at 3d65d1b8 with an identical
+  // webui/src tree. Retries repeat the whole cold measurement on a fresh page rather than relaxing
+  // a threshold, and each attempt writes its own evidence file recording its index, so a genuine
+  // regression still fails every attempt.
   retries: process.env.CI ? 2 : 0,
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },

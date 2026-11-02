@@ -139,7 +139,7 @@ fn fixture() -> (EncoderLayer, UniquePtr<MlxArray>) {
         &block_config(),
         64,
         4,
-        VisionMlpActivation::PytorchTanh,
+        VisionMlpActivation::PytorchTanhCompiled,
     )
     .unwrap();
     let x = mlxcel_core::from_slice_f32(&rng.values(32, 1.0), &[1, 4, 8]);

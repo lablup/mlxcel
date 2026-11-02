@@ -8,14 +8,17 @@
 # here too (lablup/mlxcel#1992).
 self-hosted-runner:
   labels:
-    # The single shared Linux GPU runner: CUDA jobs, clippy, the WebUI
-    # installed-artifact check, and the release build.
+    # The single shared Linux GPU runner: CUDA jobs, the WebUI installed-artifact
+    # check, and the aarch64 release build.
     - GB10
+    # The self-hosted Linux x64 runner for compile gates that need a warm cache
+    # but no GPU: clippy and the CPU-only link.
+    - self-hosted-linux-26.04-x64
     # The AMD gfx1151 runner the ROCm gate waits for (lablup/mlxcel#1811).
     - rocm-gfx1151
     # Used as one element of a `[self-hosted, Linux, X64, CUDA]` label set.
     - CUDA
-    # Apple Silicon runner with the macOS 26 SDK and Metal 4.
-    - self-hosted-macos-26-arm64
+    # Apple Silicon runner with the macOS 27 SDK and Metal 4.
+    - self-hosted-macos-27-arm64
     # The three-host pipeline-parallel rig in pipeline-parallel-ci.yml.
     - pp-three-host

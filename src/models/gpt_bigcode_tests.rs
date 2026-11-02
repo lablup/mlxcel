@@ -21,8 +21,9 @@
 //! HuggingFace export. The forward tests build tiny single-layer models and run
 //! them on the default device.
 
-use super::{GptBigCodeModel, ModelArgs, TokenIdField, detect_prefix, load_linear};
+use super::{GptBigCodeModel, MLP, ModelArgs, TokenIdField, detect_prefix, load_linear};
 use mlxcel_core::layers::UnifiedLinear;
+use mlxcel_core::utils::{GeluActivation, array_to_vec_f32};
 use mlxcel_core::weights::WeightMap;
 
 // Config surface.
@@ -78,6 +79,45 @@ fn parses_the_real_santacoder_config() {
     assert!(args.quantization.is_none());
     assert_eq!(args.eos_token_ids(), vec![49152]);
     assert!(args.validate().is_ok());
+    // `activation_function: gelu_pytorch_tanh` is honored (#2794; erf before).
+    assert_eq!(args.activation(), Ok(GeluActivation::TanhF32Compiled));
+}
+
+#[test]
+fn activation_function_follows_the_hugging_face_act2fn_names() {
+    let with = |name: Option<&str>| -> ModelArgs {
+        let mut config = serde_json::json!({ "model_type": "gpt_bigcode" });
+        if let Some(name) = name {
+            config["activation_function"] = name.into();
+        }
+        serde_json::from_value(config).expect("parses")
+    };
+
+    // Absent or null: the GPTBigCodeConfig default `gelu_pytorch_tanh`.
+    assert_eq!(with(None).activation(), Ok(GeluActivation::TanhF32Compiled));
+    let null: ModelArgs =
+        serde_json::from_str(r#"{"model_type": "gpt_bigcode", "activation_function": null}"#)
+            .expect("parses");
+    assert_eq!(null.activation(), Ok(GeluActivation::TanhF32Compiled));
+    for name in ["gelu_pytorch_tanh", "gelu_new", "gelu_fast"] {
+        assert_eq!(
+            with(Some(name)).activation(),
+            Ok(GeluActivation::TanhF32Compiled),
+            "{name}"
+        );
+    }
+    assert_eq!(with(Some("gelu")).activation(), Ok(GeluActivation::Erf));
+    assert_eq!(
+        with(Some("quick_gelu")).activation(),
+        Ok(GeluActivation::Fast)
+    );
+
+    let relu = with(Some("relu"));
+    let err = relu
+        .validate()
+        .expect_err("relu is not a GPT-BigCode MLP activation");
+    assert!(err.contains("unsupported activation_function"), "{err}");
+    assert!(err.contains("\"relu\""), "{err}");
 }
 
 #[test]
@@ -331,6 +371,47 @@ fn hf_weights(args: &ModelArgs) -> WeightMap {
         w.insert(format!("{p}.mlp.c_proj.bias"), filled(&[h]));
     }
     w
+}
+
+/// `MLP::forward` evaluates `c_proj(gelu_tanh(c_fc(x)))` for the default
+/// config, not the erf GELU mlx-lm applies (#2794).
+#[test]
+fn mlp_forward_applies_the_configured_tanh_gelu() {
+    let args = tiny_args();
+    let weights = hf_weights(&args);
+    let mlp = MLP::from_weights(&weights, &args, "transformer.h.0.mlp").expect("MLP loads");
+    assert_eq!(mlp.activation, GeluActivation::TanhF32Compiled);
+
+    // Inputs in [-3, 3] so the pre-activations reach the range where the two
+    // GELU forms differ by ~1e-3.
+    let data: Vec<f32> = (0..24).map(|i| ((i % 13) as f32 - 6.0) * 0.5).collect();
+    let x = mlxcel_core::from_slice_f32(&data, &[1, 3, 8]);
+
+    let out = array_to_vec_f32(&mlp.forward(&x));
+    let h = mlp.c_fc.forward(&x);
+    let tanh_ref = array_to_vec_f32(
+        &mlp.c_proj
+            .forward(&GeluActivation::TanhF32Compiled.apply(&h)),
+    );
+    let erf_ref = array_to_vec_f32(&mlp.c_proj.forward(&GeluActivation::Erf.apply(&h)));
+
+    let max_diff = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max)
+    };
+    assert_eq!(out.len(), tanh_ref.len());
+    let to_tanh = max_diff(&out, &tanh_ref);
+    let to_erf = max_diff(&out, &erf_ref);
+    assert!(
+        to_tanh <= 1e-5,
+        "MLP output is {to_tanh} from the tanh GELU"
+    );
+    assert!(
+        to_erf > 1e-4,
+        "MLP output is only {to_erf} from the erf GELU"
+    );
 }
 
 // Key layout.

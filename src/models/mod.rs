@@ -212,6 +212,7 @@ pub mod mamba;
 pub mod mamba2;
 pub mod mellum;
 pub mod mimo;
+pub mod mimo_v2_flash;
 pub mod minicpm;
 pub mod minicpm3;
 pub mod minimax;
@@ -370,6 +371,7 @@ pub use mamba::MambaModel;
 pub use mamba2::Mamba2Model;
 pub use mellum::{MellumModel, MellumWrapper};
 pub use mimo::MiMoModel;
+pub use mimo_v2_flash::MiMoV2FlashModel;
 pub use minicpm::MiniCPMModel;
 pub use minicpm3::MiniCPM3Model;
 pub use minimax::MiniMaxModel;
@@ -598,6 +600,10 @@ pub enum ModelType {
     HunyuanMoe,
     HunyuanV1Dense,
     MiMo,
+    /// Xiaomi MiMo v2 Flash (`mimo_v2_flash`): hybrid sliding/full attention
+    /// MoE with a separate V head width, partial RoPE, dual RoPE bases, and
+    /// learned attention sinks on the sliding layers.
+    MiMoV2Flash,
     /// Ant Group Ling / Bailing MoE (`bailing_moe`): DeepSeek-shaped sparse
     /// decoder with a fused GQA `query_key_value` and a single wide shared
     /// expert.
@@ -871,6 +877,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::HunyuanMoe,
     ModelType::HunyuanV1Dense,
     ModelType::MiMo,
+    ModelType::MiMoV2Flash,
     ModelType::BailingMoe,
     ModelType::BailingMoeLinear,
     ModelType::Afmoe,
@@ -1286,6 +1293,10 @@ impl ModelType {
             ModelType::MiniCPM3 => ("MiniCPM 3", "Specialized"),
             ModelType::SmolLM3 => ("SmolLM 3", "Specialized"),
             ModelType::MiMo => ("MiMo (multi-token prediction)", "Specialized"),
+            ModelType::MiMoV2Flash => (
+                "Xiaomi MiMo v2 Flash (hybrid sliding/full attention MoE)",
+                "Xiaomi",
+            ),
             ModelType::Apertus => ("Apertus (dense)", "Specialized"),
             ModelType::SeedOss => ("Seed-OSS", "Specialized"),
 
@@ -1526,6 +1537,7 @@ mod metadata_tests {
             HunyuanMoe,
             HunyuanV1Dense,
             MiMo,
+            MiMoV2Flash,
             BailingMoe,
             BailingMoeLinear,
             Afmoe,
@@ -1786,3 +1798,7 @@ mod modernbert_real_checkpoint_tests;
 
 #[cfg(test)]
 mod mixed_cache_batched_decode_tests;
+
+#[cfg(test)]
+#[path = "model_owned_kv_mode_tests.rs"]
+mod model_owned_kv_mode_tests;

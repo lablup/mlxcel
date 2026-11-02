@@ -42,6 +42,11 @@ pub async fn detokenize(
     State(state): State<AppState>,
     Json(request): Json<DetokenizeRequest>,
 ) -> Result<Json<DetokenizeResponse>, ErrorResponse> {
+    // Image-only serving has no tokenizer (#2825); every other mode keeps
+    // this route.
+    if let Some(response) = super::chat_not_available_image_only(&state) {
+        return Err(response);
+    }
     let Some(tokens) = request.tokens.as_ref() else {
         return Ok(Json(DetokenizeResponse {
             content: String::new(),

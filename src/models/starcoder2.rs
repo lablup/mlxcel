@@ -235,8 +235,12 @@ impl StarCoder2MLP {
 
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let x = self.c_fc.forward(x);
-        // Use compiled GELU for kernel fusion (matches Python's gelu activation)
-        let x = mlxcel_core::compiled_gelu(&x);
+        // StarCoder2 checkpoints declare `hidden_act = gelu_pytorch_tanh` (also
+        // the `Starcoder2Config` default), so this is the tanh GELU, evaluated
+        // in f32 as one compiled kernel. mlx-lm uses erf (`nn.gelu`) and this
+        // path did too before #2548; the OpenXLA StarCoder2 graph, proven
+        // token-exact against the Hugging Face oracle, was already tanh.
+        let x = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&x);
         self.c_proj.forward(&x)
     }
 }

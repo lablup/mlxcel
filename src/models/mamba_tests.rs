@@ -667,3 +667,15 @@ fn mamba_block_prefill_rows_match_token_by_token_forward() {
         }
     }
 }
+
+/// Issue #2790: Mamba has no mode table and no KV at all. Its storage
+/// report says so (every layer stateless) instead of returning `None`,
+/// which made the server count the configured table as applied.
+#[test]
+fn mamba_reports_every_layer_stateless() {
+    use mlxcel_core::generate::LanguageModel;
+    let model = batching_model();
+    let storage = model.kv_cache_storage_modes().expect("a storage report");
+    assert_eq!(storage.len(), model.num_layers());
+    assert!(storage.iter().all(Option::is_none), "{storage:?}");
+}

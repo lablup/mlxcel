@@ -1023,7 +1023,7 @@ impl ChatTemplateProcessor {
         add_generation_prompt: bool,
     ) -> Result<String> {
         // Convert serde_json::Value to minijinja::Value
-        let messages_val = minijinja::Value::from_serialize(messages);
+        let messages_val = minijinja::Value::from(minijinja::value::Serde(messages));
 
         // Leave `tools` UNDEFINED when the request carries no tools, and count
         // an explicit empty list as no tools (issue #1597). Three guard shapes
@@ -1052,7 +1052,7 @@ impl ChatTemplateProcessor {
         // identically to undefined for every guard shape above.
         let tools_val = tools
             .filter(|t| !t.is_empty())
-            .map(minijinja::Value::from_serialize);
+            .map(|v| minijinja::Value::from(minijinja::value::Serde(v)));
 
         let context = build_template_context(
             messages_val,
@@ -1130,7 +1130,7 @@ impl ChatTemplateProcessor {
         // agrees on.
         let tools_val = tools
             .filter(|t| !t.is_empty())
-            .map(minijinja::Value::from_serialize);
+            .map(|v| minijinja::Value::from(minijinja::value::Serde(v)));
 
         let wrapped_messages = self.wrap_string_content.then(|| {
             messages
@@ -1139,8 +1139,8 @@ impl ChatTemplateProcessor {
                 .collect::<Vec<_>>()
         });
         let messages_val = match wrapped_messages.as_ref() {
-            Some(messages) => minijinja::Value::from_serialize(messages),
-            None => minijinja::Value::from_serialize(messages),
+            Some(messages) => minijinja::Value::from(minijinja::value::Serde(messages)),
+            None => minijinja::Value::from(minijinja::value::Serde(messages)),
         };
         let context = build_template_context(
             messages_val,
@@ -1168,7 +1168,7 @@ fn compile_chat_template_environment(
     template: &str,
 ) -> std::result::Result<Environment<'static>, minijinja::Error> {
     let mut env = Environment::new();
-    configure_environment(&mut env);
+    configure_environment(&mut env)?;
     env.add_template_owned(template_name.to_string(), template.to_string())?;
     Ok(env)
 }
@@ -1390,7 +1390,10 @@ fn build_template_context(
             dropped_keys.push(truncate_key_for_log(k));
             continue;
         }
-        owned.insert(k.clone(), minijinja::Value::from_serialize(v));
+        owned.insert(
+            k.clone(),
+            minijinja::Value::from(minijinja::value::Serde(v)),
+        );
     }
     if !dropped_keys.is_empty() {
         tracing::warn!(
@@ -1445,7 +1448,7 @@ fn build_template_context(
         );
     }
 
-    minijinja::Value::from_serialize(&owned)
+    minijinja::Value::from(minijinja::value::Serde(&owned))
 }
 
 /// Security (M-1): truncate an attacker-controlled kwargs key to at most 64
@@ -1638,10 +1641,17 @@ fn preprocess_python_conditional_expressions(mut out: String) -> String {
 }
 
 /// Configure a minijinja environment with common settings and Python-compat methods.
-fn configure_environment(env: &mut Environment<'_>) {
-    env.set_keep_trailing_newline(true);
-    env.set_trim_blocks(true);
-    env.set_lstrip_blocks(true);
+fn configure_environment(env: &mut Environment<'_>) -> std::result::Result<(), minijinja::Error> {
+    // Whitespace settings live in the syntax config since minijinja 3; the
+    // delimiters stay at their defaults.
+    let syntax = env
+        .syntax()
+        .to_builder()
+        .keep_trailing_newline(true)
+        .trim_blocks(true)
+        .lstrip_blocks(true)
+        .build()?;
+    env.set_syntax(syntax);
 
     // Bound rendering cost as defense-in-depth against denial-of-service from a
     // pathological chat template (e.g. deeply nested or effectively unbounded
@@ -1985,6 +1995,7 @@ fn configure_environment(env: &mut Environment<'_>) {
 
         Err(minijinja::Error::from(ErrorKind::UnknownMethod))
     });
+    Ok(())
 }
 
 /// Extract a token from config, handling both string and object formats
@@ -2099,6 +2110,34 @@ const GOT_OCR_CHAT_TEMPLATE: &str = concat!(
     "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"
 );
 
+/// MiniCPM-V 4.6 and MiniCPM-o's fallback template: plain ChatML turns with
+/// the assistant opener as the generation prompt (issue #2547).
+///
+/// The model store's `minicpm-v-4.6-bf16` copy ships no template. The image
+/// expansion (`minicpmv46_prompt`, `minicpmo_prompt`) wraps a prompt with no
+/// ChatML turn in `<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n`,
+/// which is what `mlxcel generate` gets for the bare question. The generic
+/// `User:`/`Assistant:` template rendered a prompt the expansion then wrapped a
+/// second time, so the server prompt carried both framings (88 tokens against
+/// the CLI's 82 for one image). Rendering the same ChatML turn here lets the
+/// expansion open the user turn instead, so the two fronts build one prompt.
+/// Text parts of a typed content list are rendered and image items dropped,
+/// as the images travel as tokens spliced in after rendering.
+const MINICPM_CHATML_TEMPLATE: &str = concat!(
+    "{%- for message in messages %}",
+    "{{- '<|im_start|>' + message['role'] + '\n' }}",
+    "{%- if message['content'] is string %}",
+    "{{- message['content'] }}",
+    "{%- else %}",
+    "{%- for part in message['content'] %}",
+    "{%- if part['type'] == 'text' %}{{- part['text'] }}{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
+    "{{- '<|im_end|>\n' }}",
+    "{%- endfor %}",
+    "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"
+);
+
 /// A chat template for a checkpoint that ships none of its own.
 ///
 /// Reached only when `tokenizer_config.json`, `chat_template.jinja` and
@@ -2137,6 +2176,9 @@ fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
         // that seeds the decoder, and the page travels out-of-band.
         crate::models::ModelType::NemotronParseVLM => Some(FLORENCE2_CHAT_TEMPLATE),
         crate::models::ModelType::GotOcrVLM => Some(GOT_OCR_CHAT_TEMPLATE),
+        crate::models::ModelType::MiniCPMV46VLM | crate::models::ModelType::MiniCPMOVLM => {
+            Some(MINICPM_CHATML_TEMPLATE)
+        }
         _ => None,
     }
 }
@@ -2248,7 +2290,7 @@ mod tests {
         add_generation_prompt: bool,
     ) -> Result<String> {
         let mut env = Environment::new();
-        configure_environment(&mut env);
+        configure_environment(&mut env)?;
 
         env.add_template("chat", &processor.template)
             .with_context(|| "Failed to parse chat template")?;
@@ -2260,7 +2302,7 @@ mod tests {
         // these helpers stop reproducing what the server renders.
         let tools_val = tools
             .filter(|t| !t.is_empty())
-            .map(minijinja::Value::from_serialize);
+            .map(|v| minijinja::Value::from(minijinja::value::Serde(v)));
         let context = build_template_context(
             messages_val,
             &processor.bos_token,
@@ -2286,7 +2328,7 @@ mod tests {
     ) -> Result<String> {
         fresh_render_context(
             processor,
-            minijinja::Value::from_serialize(messages),
+            minijinja::Value::from(minijinja::value::Serde(messages)),
             tools,
             kwargs,
             add_generation_prompt,
@@ -2302,7 +2344,7 @@ mod tests {
     ) -> Result<String> {
         fresh_render_context(
             processor,
-            minijinja::Value::from_serialize(messages),
+            minijinja::Value::from(minijinja::value::Serde(messages)),
             tools,
             kwargs,
             add_generation_prompt,
@@ -3165,6 +3207,56 @@ mod tests {
                 "{name} must still declare a tool that was actually sent"
             );
         }
+    }
+
+    /// Issue #2761: VLM prompt parity keeps the server-wide thinking default.
+    /// `gemma-4-e2b-it-4bit`'s tokenizer carries think markers, so the template
+    /// `load_model_chat_template` returns (the one `mlxcel generate`, the server
+    /// and the image trace render) opens a system turn with `<|think|>` for a
+    /// plain user turn. transformers and mlx-vlm leave `enable_thinking` off;
+    /// `MLXCEL_TRACE_ENABLE_THINKING=0` reproduces that through
+    /// `set_default_enable_thinking(false)`, which must drop the turn. Gated on
+    /// the local `models/` tree; `MLXCEL_REQUIRE_MODELS=1` makes a missing
+    /// checkpoint fail.
+    #[test]
+    #[ignore = "requires local models/ directory; run with --ignored"]
+    fn local_gemma4_template_thinks_by_default_and_not_when_disabled() {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models/mlx/gemma-4-e2b-it-4bit");
+        if !directory.exists() {
+            let reason = format!("{} not found", directory.display());
+            if std::env::var("MLXCEL_REQUIRE_MODELS").is_ok_and(|v| v != "0") {
+                panic!("MLXCEL_REQUIRE_MODELS is set: {reason}");
+            }
+            eprintln!("skip: {reason}");
+            return;
+        }
+        let tokenizer = crate::tokenizer::load_tokenizer(&directory).expect("load tokenizer");
+        let mut processor =
+            crate::server::chat_front::load_model_chat_template(&directory, &tokenizer)
+                .expect("checkpoint carries a chat template");
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Describe the image.".to_string(),
+        }];
+
+        let thinking = processor.apply(&messages, None).expect("render");
+        assert!(
+            thinking.contains("<|turn>system\n<|think|>"),
+            "the loaded default must render the think turn: {thinking:?}"
+        );
+        assert!(
+            processor.default_enable_thinking(),
+            "the think markers must turn the default on"
+        );
+
+        processor.set_default_enable_thinking(false);
+        let plain = processor.apply(&messages, None).expect("render");
+        assert!(
+            !plain.contains("<|think|>"),
+            "enable_thinking=false must drop the think turn: {plain:?}"
+        );
+        assert!(plain.ends_with("<|turn>model\n"), "{plain:?}");
     }
 
     #[test]

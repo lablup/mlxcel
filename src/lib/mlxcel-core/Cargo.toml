@@ -1,6 +1,6 @@
 [package]
 name = "mlxcel-core"
-version = "0.8.0-beta.1"
+version = "0.8.0"
 edition = "2024"
 authors = ["Jeongkyu Shin"]
 description = "Low-level MLX building blocks for mlxcel"
@@ -28,11 +28,17 @@ smallvec = { version = "1.13", features = ["serde"] }
 sha2 = "0.11"
 thiserror = "2.0"
 # Default features minus `esaxx_fast`; see the root Cargo.toml (#58).
-tokenizers = { version = "0.22.2", default-features = false, features = ["onig", "progressbar"] }
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig", "progressbar"] }
 postcard = { version = "1", features = ["alloc"] }
-dirs = "6"
+dirs = "7"
 libm = "0.2"
 tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+# geteuid and the O_DIRECTORY / O_NOFOLLOW / O_NONBLOCK open flags for the PTX
+# cache directory repair in src/ptx_cache_dirs.rs (#2765). Same pin as the
+# root crate's.
+libc = "0.2"
 
 [dev-dependencies]
 ctor = "1.0.13"

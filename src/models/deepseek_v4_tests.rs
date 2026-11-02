@@ -2079,3 +2079,36 @@ fn model_owned_batched_multistep() {
         [2, 7, 127],
     );
 }
+
+/// Issue #2790: DeepSeek V4 has no mode table; every layer keeps an FP16
+/// local `RotatingKVCache`. Its storage report says so instead of returning
+/// `None`, which made the server count the configured table as applied.
+#[test]
+fn deepseek_v4_reports_fp16_storage_for_every_layer() {
+    let args = tiny_args();
+    let model =
+        DeepSeekV4Model::from_weights(&tiny_weight_map(&args), &args).expect("tiny model builds");
+    let storage = model.kv_cache_storage_modes().expect("a storage report");
+    assert_eq!(storage.len(), model.num_layers());
+    assert!(
+        storage
+            .iter()
+            .all(|mode| *mode == Some(mlxcel_core::cache::KVCacheMode::Fp16)),
+        "{storage:?}"
+    );
+}
+
+// Issue #2798: the local-cache window is validated, not only checked for zero.
+#[test]
+fn deepseek_v4_config_rejects_an_unusable_sliding_window() {
+    for window in [0u64, i32::MAX as u64 + 1] {
+        let mut config: serde_json::Value = serde_json::from_str(tiny_args_json()).expect("parse");
+        config["sliding_window"] = serde_json::json!(window);
+        let args: ModelArgs = serde_json::from_value(config).expect("parse tiny args");
+        let err = args
+            .normalized()
+            .expect_err("an unusable sliding window must fail the load");
+        assert!(err.contains("DeepSeek-V4"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}

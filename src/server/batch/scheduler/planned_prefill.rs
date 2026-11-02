@@ -57,12 +57,23 @@ fn boundary_releases_cached_memory() -> bool {
 }
 
 /// Why a prefill piece did not complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PieceFailure {
     /// The request must be aborted with this message.
     Abort(String),
     /// The piece's graph evaluation threw (#822): abort the request and let
     /// the scheduler decide whether the backend has failed too often.
     EvalFailed(String),
+}
+
+/// The piece failure for an engine prefill error: a failed forward carries
+/// the model's client-safe message (#2727); a sequence the engine no
+/// longer holds keeps the historical text.
+pub(super) fn prefill_piece_failure(err: EngineError) -> PieceFailure {
+    match err {
+        EngineError::Forward(msg) => PieceFailure::Abort(msg),
+        _ => PieceFailure::Abort("Cache not found for sequence during prefill".into()),
+    }
 }
 
 impl BatchScheduler {
@@ -210,9 +221,7 @@ impl BatchScheduler {
                 trim_excess: piece.trim_after().unwrap_or(0) as i32,
                 eval: !plan.is_terminal(piece),
             })
-            .map_err(|_| {
-                PieceFailure::Abort("Cache not found for sequence during prefill".into())
-            })?;
+            .map_err(prefill_piece_failure)?;
         self.record_eval_outcome(outcome.eval)
             .map_err(PieceFailure::EvalFailed)?;
         // A pad trim that could not rewind the model's own state leaves its
@@ -309,9 +318,7 @@ impl BatchScheduler {
         .entered();
 
         // Reset internal caches for non-batching models (same as execute_full_prefill).
-        if !self.engine.model().supports_batching() {
-            let _ = self.engine.model().make_caches();
-        }
+        self.reset_model_owned_slot_for(seq.seq_id);
         // Counter reflects only the work the model actually runs.
         self.batch_observability
             .record_prefill_start(plan.forwarded_len());

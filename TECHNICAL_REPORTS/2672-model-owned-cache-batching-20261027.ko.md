@@ -35,7 +35,7 @@ release `metal,accelerate`, 512 GB Apple M3 Ultra에서 기준 `a29a2692`와 구
 
 제공된 Ministral VLM 체크포인트는 기본적으로 다른 텍스트 구현을 선택한다. 측정용 텍스트 뷰는 원본 파일을 링크하고 `vision_config`를 제거하며 `architectures`를 `Mistral3ForCausalLM`으로 바꾼다. 외부 모델 타입과 중첩 텍스트 설정은 유지한다. Mellum의 기준 `docs/architecture.md` 추적은 비유한 NLL로 실패했고 BF16 유지 진단에서는 통과했다. 실제 기본 설정 비교에는 양쪽 모두 통과하는 고정 Rust 소스 `git show a29a2692:src/models/mellum.rs`를 사용한다. 문서 입력의 기존 정밀도 문제는 이번 변경에서 해결하지 않았다. Step3p5/Step3p7의 실제 로컬 체크포인트는 없었다.
 
-`--parallel 4` 서버에서 `scripts/bench_serving_concurrency.py --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128`로 재현한다. 로짓은 `MLXCEL_TRACE_BATCH_ROWS=1`과 `=4`, 인자 `MODEL CORPUS 64 4 8 512`로 추적한다. 요약 근거는 `benchmarks/epic-2574/mixed-cache-families.json`에 있다.
+`--parallel 4` 서버에서 `scripts/bench_serving_concurrency.py --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128`로 재현한다. 로짓은 `MLXCEL_TRACE_BATCH_ROWS=1`과 `=4`, 인자 `MODEL CORPUS 64 4 8 512`로 추적한다. 요약 근거는 `docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/mixed-cache-families.json`에 있다.
 
 ## 변경 요약
 

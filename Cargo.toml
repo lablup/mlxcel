@@ -29,7 +29,7 @@ resolver = "2"
 
 [package]
 name = "mlxcel"
-version = "0.8.0-beta.1"
+version = "0.8.0"
 edition = "2024"
 description = "High-performance LLM/VLM/VLA inference on Apple Silicon and CUDA GPUs"
 repository = "https://github.com/lablup/mlxcel"
@@ -91,7 +91,10 @@ cuda = ["mlxcel-core/cuda"]
 # AMD GPU (ROCm/HIP) backend on Linux and Windows x86_64 MSVC, issues #1802 and
 # #2601. Mutually exclusive with `cuda` and `metal`; see docs/installation.md.
 rocm = ["mlxcel-core/rocm"]
-test-utils = []
+# Test-only surfaces. With `xla-iree` it also compiles mlxcel-xla's
+# `test-support` (the prepared-prefill parity type and the local-task
+# executor probe, issue #2790), which production builds never include.
+test-utils = ["mlxcel-xla?/test-support"]
 # Seam scaffold for an optional non-MLX forward-execution backend (issue #338).
 #
 # Default OFF. Shipping binaries (Apple Silicon, CUDA) compile no backend code
@@ -172,15 +175,15 @@ mlxcel-xla = { path = "src/lib/mlxcel-xla", optional = true }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-serde-saphyr = { version = "1.3", default-features = false, features = ["deserialize"] }
+serde-saphyr = { version = "2.0", default-features = false, features = ["deserialize"] }
 
 # Tensors & Models
-safetensors = "0.7.0"
+safetensors = "0.8.0"
 # Default features minus `esaxx_fast`, which only speeds up Unigram training
 # and compiles esaxx-rs C++ against the static CRT (/MT); on Windows MSVC that
 # object cannot link with the /MD C++ (sentencepiece, MLX) in this binary (#58).
-tokenizers = { version = "0.22.2", default-features = false, features = ["onig", "progressbar"] }
-sentencepiece = "0.13"
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig", "progressbar"] }
+sentencepiece = "0.14"
 hf-hub = "0.5.0"
 
 # Zero-copy buffers
@@ -188,14 +191,14 @@ bytes = "1.9"
 memmap2 = "0.9"
 
 # LZ4 compression (pure Rust, used for tensor transfer)
-lz4_flex = "0.11"
+lz4_flex = "0.14"
 
 # Error Handling
 anyhow = "1.0.100"
 thiserror = "2.0.11"
 
 # Cryptographic hashing (for vision feature cache keys)
-sha2 = "0.10"
+sha2 = "0.11"
 # HMAC-SHA256 and CSPRNG nonces for the cluster transport handshake and the
 # discovery beacon MAC (#2637). `ring` is already compiled into every build
 # through rustls/reqwest, so the direct dependency adds no new crate; keep the
@@ -218,7 +221,7 @@ clap = { version = "4.6.1", features = ["derive", "env"] }
 # Ctrl-C / Ctrl-D handling) for `mlxcel`'s interactive chat loop. Only the
 # offline CLI REPL uses it; the server is unaffected. Default features pull
 # in the terminal backend so arrow-key history works out of the box.
-rustyline = "14"
+rustyline = "19"
 
 # Image processing (for VLM)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
@@ -229,10 +232,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # two compressed containers here. Pure Rust, no C dependency, MPL-2.0 (allowed
 # by deny.toml). Only the two codecs b10621 accepts are enabled, so the
 # dependency does not drag in aac/alac/isomp4/ogg decoders nobody reaches.
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac"] }
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "id3v2"] }
 
 # Base64 (for VLM image data URIs in server API)
-base64 = "0.22"
+base64 = "0.23"
 
 # Utils
 # `dirs` resolves the platform home directory for the downloader's HF-cache
@@ -242,10 +245,10 @@ base64 = "0.22"
 # can call `dirs::home_dir()` without leaning on a transitive re-export. The
 # mlxcel store root itself comes from `mlxcel_core::cache_root()`, which uses
 # the same crate.
-dirs = "6"
+dirs = "7"
 glob = "0.3.2"
 path-clean = "1.0.1"
-minijinja = { version = "2.20", features = ["loop_controls", "fuel", "json", "preserve_order"] }
+minijinja = { version = "3.0", features = ["loop_controls", "fuel", "json", "preserve_order", "serde"] }
 # Used by `src/downloader/mod.rs::file_url` to percent-encode `repo_id` /
 # `revision` / `filename` path segments before composing the HF download URL
 # (L1). Already transitively present via reqwest -> url; promoting
@@ -271,7 +274,7 @@ toktrie_hf_tokenizers = "1.7"
 # HTTP Server
 tokio = { version = "1.52", features = ["full"] }
 # `ws`: the `/v1/realtime` VoiceChat WebSocket (#1376).
-axum = { version = "0.7", features = ["json", "macros", "multipart", "ws"] }
+axum = { version = "0.8", features = ["json", "macros", "multipart", "ws"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 futures = "0.3"
@@ -283,15 +286,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CORS layer with the b10621-shaped middleware in `src/server/cors.rs`, which
 # has to set `Access-Control-Allow-Origin` on every response and answer
 # `OPTIONS` before authentication and before routing.
-tower-http = { version = "0.5", features = ["trace"] }
-tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.7", features = ["trace"] }
+tower = { version = "0.5", features = ["util"] }
 hyper = { version = "1.10", features = ["server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 # HTTPS listener for `--ssl-cert-file` / `--ssl-key-file` (#1432). `ring` is
 # selected explicitly and `aws-lc-rs` (the tokio-rustls default) is left off:
-# reqwest already resolves rustls onto the ring provider in this workspace, and
-# pulling a second provider in would both add a C toolchain dependency to the
-# build and make rustls's process-default provider ambiguous at runtime.
+# reqwest is built with `rustls-no-provider` and is handed the ring provider by
+# `mlxcel::http_tls`, so pulling a second provider in would both add a C
+# toolchain dependency to the build and make rustls's process-default provider
+# ambiguous at runtime.
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
 # PEM parsing for the `--ssl-cert-file` / `--ssl-key-file` material (#1432).
 # `rustls-pemfile` is the older spelling of the same code and is unmaintained
@@ -305,11 +309,20 @@ http-body = "1"
 # SO_REUSEPORT for `--reuse-port` (#1432); the `all` feature is what exposes
 # `Socket::set_reuse_port`. Already in the dependency graph through tokio.
 socket2 = { version = "0.6", features = ["all"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# `rustls-no-provider` keeps reqwest's `aws-lc-rs` provider (a C/cmake build)
+# out of the graph. reqwest 0.13 then panics at client build unless a process
+# default rustls provider exists, so every client is created through
+# `mlxcel::http_tls` (`src/http_tls.rs`), which installs `ring`. Server
+# certificates are verified against the operating system trust store through
+# rustls-platform-verifier, not the bundled webpki roots reqwest 0.12 used;
+# `MLXCEL_EXTRA_CA_CERTS` is still added on top. Do not move to hf-hub 1.x while
+# it depends on hf-xet: that enables reqwest's `rustls` feature and with it
+# `aws-lc-rs`.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
 indicatif = "0.18"
 async-stream = "0.3"
-fancy-regex = "0.17.0"
-toml = "0.8"
+fancy-regex = "0.20.0"
+toml = "1"
 rust-embed = { version = "=8.13.0", features = ["debug-embed"], optional = true }
 mime_guess = { version = "2.0.5", optional = true }
 # Audio devices for the `voicechat-mic` example feature only.
@@ -412,14 +425,14 @@ tokio = { version = "1.52", features = ["full", "test-util"] }
 # Self-signed certificates for the `--ssl-cert-file` / `--ssl-key-file` tests
 # (#1432). Generating the keypair in-test keeps a private key out of the
 # repository; `ring` matches the provider the server itself pins.
-rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 # `BodyExt::collect` for the read-budget body tests (#1432). Already in the
 # graph through axum and hyper-util.
 http-body-util = "0.1"
-criterion = "0.5"
+criterion = "0.8"
 # WebSocket client for the `/v1/realtime` tests and the VoiceChat file client
 # example (#1376). Same version axum's `ws` feature already pulls in.
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 
 [[bench]]
 name = "audio_fft"
@@ -439,7 +452,7 @@ required-features = ["test-utils"]
 
 [[test]]
 name = "xla_prepared_prefill"
-required-features = ["xla-iree"]
+required-features = ["xla-iree", "test-utils"]
 
 [[test]]
 name = "molmo2_xla_vision_parity"

@@ -88,7 +88,7 @@ fn make_dflash_drafter_dir() -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-/// Ordinary small full model used as a classic `--draft-model` drafter. It
+/// Ordinary small full model passed as `--draft-model`. It
 /// carries no DFlash marker, and it must stay loadable as a standalone model.
 fn make_ordinary_full_model_dir() -> (TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("create temp dir");
@@ -98,7 +98,8 @@ fn make_ordinary_full_model_dir() -> (TempDir, PathBuf) {
             "architectures": ["Qwen3ForCausalLM"],
             "model_type": "qwen3",
             "hidden_size": 1024,
-            "num_hidden_layers": 28
+            "num_hidden_layers": 28,
+            "vocab_size": 151936
         }"#,
     )
     .expect("write config.json");
@@ -430,27 +431,6 @@ fn dispatch_block_size_override_propagates_to_burst() {
     assert_eq!(dispatch.block_size(), Some(8));
 }
 
-#[test]
-fn dispatch_classic_fallback_is_not_burstable() {
-    // The `Classic` variant (auto-detected `internal-mtp` kind) is NOT
-    // `is_kind_specific()` and therefore never enters the burst path —
-    // it stays on the historical `SpeculativeGenerator` dispatch
-    // (which the server today doesn't expose; the scheduler falls
-    // back to classic decode). This is the operator-facing
-    // backward-compat guarantee /.
-    //
-    // We can't easily construct a `Classic` variant from outside
-    // (auto-detect requires `model_type` field that resolves to
-    // InternalMtp), so we assert the invariant via the matching
-    // accessor methods on a fresh `Disabled` plus the kind-specific
-    // ones above. The unit tests in
-    // `src/server/speculative_dispatch_tests.rs` cover the Classic
-    // variant directly.
-    let cfg = base_server_config();
-    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
-    assert!(!dispatch.is_kind_specific());
-}
-
 // =============================================================================
 // DFlash drafter is not a standalone model (#1168)
 //
@@ -478,10 +458,12 @@ fn ordinary_full_model_is_not_mistaken_for_a_dflash_drafter() {
     // The regression this discriminator exists to avoid. `DEFAULT_DRAFTER_KIND`
     // is `Dflash`, so this directory resolves to `DrafterKind::Dflash` even
     // though it is an ordinary full model: a check keyed on the resolved kind
-    // would reject a working classic-drafter pairing.
+    // would reject a working full-model pairing. The structural rule on top
+    // of the resolver is what routes it to the full-model arm (#2757).
     let (_dir, ordinary) = make_ordinary_full_model_dir();
+    let resolved = mlxcel_core::drafter::resolve_drafter_kind(&ordinary, None).expect("resolve");
     assert_eq!(
-        mlxcel_core::drafter::resolve_drafter_kind(&ordinary, None).expect("resolve"),
+        resolved,
         DrafterKind::Dflash,
         "an ordinary full model auto-resolves to Dflash; that is why the \
          discriminator must be structural",
@@ -490,6 +472,22 @@ fn ordinary_full_model_is_not_mistaken_for_a_dflash_drafter() {
         !mlxcel_core::drafter::dflash::is_dflash_drafter_dir(&ordinary),
         "an ordinary full model is not a DFlash drafter",
     );
+    assert!(mlxcel_core::drafter::auto_detected_full_model_dir(
+        &ordinary, None, resolved
+    ));
+
+    let cfg = ServerConfig {
+        draft_model_path: Some(ordinary.clone()),
+        ..ServerConfig::default()
+    };
+    // A full-model pair needs a declared vocabulary on the target as well.
+    let (_target_dir, target) = make_ordinary_full_model_dir();
+    let dispatch = SpeculativeDispatch::resolve(&cfg, &target).expect("resolve");
+    assert!(
+        matches!(dispatch, SpeculativeDispatch::FullModel { .. }),
+        "an ordinary full model serves through the full-model arm, got {dispatch:?}"
+    );
+    assert!(!dispatch.is_kind_specific());
 }
 
 #[test]

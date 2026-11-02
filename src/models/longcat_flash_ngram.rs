@@ -24,6 +24,7 @@
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/longcat_flash.py, longcat_flash_ngram.py
 
 use crate::models::switch_layers::SwitchGLU;
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{
@@ -33,6 +34,7 @@ use mlxcel_core::utils::{create_causal_mask, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -453,8 +455,11 @@ impl LongcatFlashTopkRouter {
         let neg_corrected = mlxcel_core::negative(&corrected);
         let indices = mlxcel_core::argpartition(&neg_corrected, self.top_k as i32 - 1, -1);
 
-        let shape = mlxcel_core::array_shape(&indices);
-        let topk_indices = mlxcel_core::slice(&indices, &[0, 0], &[shape[0], self.top_k as i32]);
+        // `[..., :top_k]` on the expert axis. The router input is
+        // `[B, L, hidden]`, so the scores are rank 3: a two-axis `slice`
+        // threw from MLX (an uncatchable abort across the bridge) on every
+        // forward, and on a rank-2 input it would have cut the token axis.
+        let topk_indices = slice_axis(&indices, -1, 0, self.top_k as i32);
 
         // Gather original scores (not corrected) for topk
         let topk_weights = mlxcel_core::take_along_axis(&scores, &topk_indices, -1);
@@ -758,21 +763,13 @@ impl NgramEmbedding {
 
         let input_i64 = mlxcel_core::astype(input_ids, dtype::INT64);
 
-        // Update context for autoregressive decoding
-        let cur_context = if let Some(prev_ctx) = context.as_ref() {
-            let prev = prev_ctx.as_ref().unwrap();
-            let joined = mlxcel_core::concatenate(prev, &input_i64, -1);
-            let ctx_shape = mlxcel_core::array_shape(&joined);
-            let ctx_len = ctx_shape[ctx_shape.len() - 1];
-            let keep = (self.n as i32 - 1).max(0);
-            if ctx_len > keep {
-                let start = ctx_len - keep;
-                slice_axis(&joined, 1, start, ctx_len)
-            } else {
-                joined
-            }
-        } else {
-            mlxcel_core::copy(&input_i64)
+        // The hashes of this call's tokens read up to `n - 1` tokens back, so
+        // they run over the carried tail joined with the new tokens. Only the
+        // saved tail is cut to `n - 1`: cutting the joined context too, as
+        // this once did, dropped the oldest neighbour of every decode step.
+        let cur_context = match context.as_ref() {
+            Some(prev) => mlxcel_core::concatenate(prev, &input_i64, -1),
+            None => mlxcel_core::copy(&input_i64),
         };
 
         // Save context for next call
@@ -890,6 +887,25 @@ impl NgramEmbedding {
     }
 }
 
+/// Per-sequence state the model owns (#2544): the dual sub-layer KV caches
+/// and the n-gram token tail. The family cannot batch, so the engine hands
+/// `forward` an empty cache slice; `make_caches` resets this instead.
+struct LongcatState {
+    caches: Vec<[KVCache; 2]>,
+    ngram_context: Option<UniquePtr<MlxArray>>,
+}
+
+impl LongcatState {
+    fn new(num_layers: usize) -> Self {
+        Self {
+            caches: (0..num_layers)
+                .map(|_| [KVCache::new(), KVCache::new()])
+                .collect(),
+            ngram_context: None,
+        }
+    }
+}
+
 // LongcatFlashNgramModel - top-level model.
 pub struct LongcatFlashNgramModel {
     // For ngram model
@@ -902,6 +918,10 @@ pub struct LongcatFlashNgramModel {
     lm_head: UnifiedLinear,
     num_layers: usize,
     _is_ngram: bool,
+    state: RefCell<LongcatState>,
+    /// Set once the FP16-only warning has been logged, so a client that
+    /// injects modes per sequence (`DirectEngine`) does not repeat it.
+    kv_mode_warned: Cell<bool>,
 }
 
 impl LongcatFlashNgramModel {
@@ -961,6 +981,8 @@ impl LongcatFlashNgramModel {
             lm_head,
             num_layers: args.num_layers,
             _is_ngram: args.is_ngram_model(),
+            state: RefCell::new(LongcatState::new(args.num_layers)),
+            kv_mode_warned: Cell::new(false),
         })
     }
 }
@@ -980,12 +1002,14 @@ impl LongcatFlashNgramModel {
             self.embed_tokens.as_ref().unwrap().forward(input_ids)
         };
 
-        // Create causal mask using first sub-layer cache of first layer
+        // Causal mask from the first sub-layer cache of the first layer,
+        // sized by its live window rather than the monotonic `offset` so it
+        // matches the K/V `update_and_fetch` returns (#421).
         let h_shape = mlxcel_core::array_shape(&h);
         let seq_len = h_shape[h_shape.len() - 2];
-        let offset = caches[0][0].offset;
+        let live_len = caches.first().map_or(0, |c| c[0].live_len());
         let mask = if seq_len > 1 {
-            Some(create_causal_mask(seq_len, offset))
+            Some(create_causal_mask(seq_len, live_len))
         } else {
             None
         };
@@ -1011,13 +1035,16 @@ impl LanguageModel for LongcatFlashNgramModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // Create fresh internal caches (2 KVCaches per layer for dual sub-layer arch)
-        let mut internal_caches: Vec<[KVCache; 2]> = (0..self.num_layers)
-            .map(|_| [KVCache::new(), KVCache::new()])
-            .collect();
-        let mut ngram_context = None;
-
-        self.internal_forward(input_ids, &mut internal_caches, &mut ngram_context)
+        // The caller's slice is ignored (empty on the engine path). Building
+        // fresh caches and an empty n-gram context here, as this once did,
+        // made every decode step attend to its own token alone at RoPE
+        // position 0 and lost every earlier prefill chunk.
+        let mut state = self.state.borrow_mut();
+        let LongcatState {
+            caches,
+            ngram_context,
+        } = &mut *state;
+        self.internal_forward(input_ids, caches, ngram_context)
     }
 
     fn num_layers(&self) -> usize {
@@ -1025,8 +1052,14 @@ impl LanguageModel for LongcatFlashNgramModel {
     }
 
     fn supports_batching(&self) -> bool {
-        // forward currently recreates dual-layer caches and n-gram context.
-        // Persistent single-sequence state must be fixed before batching (#2544).
+        // One model-owned state slot (#2544); batching would need it keyed
+        // per sequence.
+        false
+    }
+
+    fn supports_padded_prefill(&self) -> bool {
+        // Pad positions would land in the model-owned caches and n-gram tail,
+        // which no caller trim reaches (#1755).
         false
     }
 
@@ -1035,8 +1068,40 @@ impl LanguageModel for LongcatFlashNgramModel {
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        // Return dummy caches; real caches are managed internally
+        // Reset the model-owned state: the engine (`DirectEngine` opening a
+        // sequence) and the scheduler (at prefill) call this per sequence.
+        // The returned vector is never read.
+        self.reset_runtime_state();
         (0..self.num_layers).map(|_| KVCache::new()).collect()
+    }
+
+    fn reset_runtime_state(&self) {
+        *self.state.borrow_mut() = LongcatState::new(self.num_layers);
+    }
+
+    /// The caches hold FP16 only, so a quantized table is refused with one
+    /// warning and `kv_cache_layer_modes` reports FP16.
+    ///
+    /// Each layer's MLA attention stores the `(kv_latent, k_pe)` pair through
+    /// one `KVCache::update_and_fetch`: the "K" slot is `kv_lora_rank` wide and
+    /// the "V" slot is the RoPE key, so neither is a per-head K/V row. That is
+    /// the latent layout `mlxcel_core::mla::latent_layout_supports_mode`
+    /// restricts to FP16 (a Turbo codebook calibrated from one slot would be
+    /// applied to the other, and an asymmetric mode would quantize the RoPE
+    /// key while leaving the latent exact), and the mode resolver already
+    /// maps both LongCat `model_type`s to FP16 on that rule.
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        if modes.iter().any(|mode| *mode != KVCacheMode::Fp16) && !self.kv_mode_warned.replace(true)
+        {
+            tracing::warn!(
+                "longcat_flash serves FP16 KV only (its MLA caches hold a latent pair); the \
+                 requested per-layer KV cache modes are ignored"
+            );
+        }
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        Some(vec![KVCacheMode::Fp16; self.num_layers])
     }
 }
 
@@ -1177,6 +1242,10 @@ pub fn sanitize_weights(
 
     Ok(weights)
 }
+
+#[cfg(test)]
+#[path = "longcat_flash_ngram_engine_tests.rs"]
+mod engine_tests;
 
 #[cfg(test)]
 mod tests {

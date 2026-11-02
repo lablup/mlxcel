@@ -21,9 +21,12 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use crate::embeddings::{EmbedOptions, EmbedReply, ImageInput};
+use crate::imagegen::{GeneratedImage, ImageRequest, ImageSamplingDefaults, ImageTask};
 use crate::rerank::{RerankItem, RerankScores, RerankerKind};
 use crate::server::audio_model::{AudioModelKind, AudioModelProvider};
+use crate::server::config::EmbeddingServingMode;
 use crate::server::embedding_model::{EmbeddingError, EmbeddingModelProvider};
+use crate::server::image_model::{ImageError, ImageModelProvider};
 use crate::server::rerank_model::{RerankError, RerankModelProvider};
 use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig, create_app};
 use crate::tokenizer::MlxcelTokenizer;
@@ -78,6 +81,10 @@ impl EmbeddingModelProvider for SideEmbeddingProvider {
     fn max_length(&self) -> usize {
         1
     }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 struct SideRerankProvider;
@@ -107,6 +114,10 @@ impl RerankModelProvider for SideRerankProvider {
     fn max_length(&self) -> usize {
         1
     }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 struct SideAudioProvider;
@@ -114,6 +125,55 @@ struct SideAudioProvider;
 impl AudioModelProvider for SideAudioProvider {
     fn supports(&self, kind: AudioModelKind) -> bool {
         kind == AudioModelKind::Stt
+    }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// A stub image provider whose id is the one an image-only server reports.
+///
+/// `generate` answers a terminal error so a request that passed `check_model`
+/// never blocks on a diffusion loop; the routes' model check runs before it.
+struct SideImageProvider(&'static str);
+
+impl ImageModelProvider for SideImageProvider {
+    fn generate(&self, _req: ImageRequest) -> Result<Vec<GeneratedImage>, ImageError> {
+        Err(ImageError::Internal(
+            "stub image provider reached".to_string(),
+        ))
+    }
+
+    fn model_id(&self) -> &str {
+        self.0
+    }
+
+    fn created_at(&self) -> i64 {
+        0
+    }
+
+    fn family(&self) -> &str {
+        "stub"
+    }
+
+    fn supports(&self, _task: ImageTask) -> bool {
+        true
+    }
+
+    fn defaults(&self, _task: ImageTask) -> ImageSamplingDefaults {
+        ImageSamplingDefaults {
+            steps: 1,
+            guidance: 1.0,
+        }
+    }
+
+    fn size_multiple(&self) -> u32 {
+        16
+    }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -352,4 +412,224 @@ async fn count_routes_refuse_like_their_generating_siblings() {
             );
         }
     }
+}
+
+// ── image-only serving (#2825) ──────────────────────────────────────────────
+
+/// An image-only server: no chat checkpoint, `--image-model` as the only
+/// model, and the image worker registered under the served id (`alias` when
+/// given).
+fn image_only_state(alias: Option<&str>, image_id: &'static str) -> AppState {
+    let provider = ModelProvider::chat_unavailable_for_route_tests();
+    let batch_metrics = provider.batch_metrics().clone();
+    let config = ServerConfig {
+        embedding_serving_mode: EmbeddingServingMode::ImageOnly,
+        model_alias: alias.map(str::to_string),
+        ..ServerConfig::default()
+    };
+    AppState::new(
+        Arc::new(provider),
+        config,
+        ChatTemplateProcessor::with_template("ok".to_string()),
+        MlxcelTokenizer::stub(),
+        PathBuf::from("route-test-model"),
+        batch_metrics,
+    )
+    .with_image_model(Some(Arc::new(SideImageProvider(image_id))))
+}
+
+#[tokio::test]
+async fn image_only_server_refuses_generation_and_tokenizer_routes() {
+    let cases = [
+        (
+            "/v1/chat/completions",
+            json!({"model": "route-test-model", "messages": [{"role": "user", "content": "hi"}]}),
+        ),
+        (
+            "/v1/completions",
+            json!({"model": "route-test-model", "prompt": "hi"}),
+        ),
+        (
+            "/v1/responses",
+            json!({"model": "route-test-model", "input": "hi"}),
+        ),
+        (
+            "/v1/messages",
+            json!({
+                "model": "route-test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1
+            }),
+        ),
+        ("/completion", json!({"prompt": "hi", "n_predict": 1})),
+        // These three are not generation routes, but they read the chat
+        // checkpoint's tokenizer and template, which do not exist here.
+        ("/tokenize", json!({"content": "hi"})),
+        ("/detokenize", json!({"tokens": []})),
+        (
+            "/apply-template",
+            json!({"messages": [{"role": "user", "content": "hi"}]}),
+        ),
+    ];
+
+    for (path, body) in cases {
+        let state = image_only_state(None, "route-test-model");
+        let (status, body) = post(create_app(state), path, body).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}: {body}");
+        assert_eq!(body["error"]["type"], "not_implemented", "{path}: {body}");
+        let message = body["error"]["message"].as_str().expect("message");
+        assert!(message.contains("--image-model"), "{path}: {message}");
+        assert!(message.contains("no -m"), "{path}: {message}");
+        assert!(
+            message.contains("/v1/images/generations"),
+            "{path}: {message}"
+        );
+        assert!(message.contains("/v1/images/edits"), "{path}: {message}");
+        assert!(
+            message.contains("generation is disabled"),
+            "{path}: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn image_only_health_follows_the_image_worker() {
+    // The image worker loads before the listener binds, so its presence is
+    // readiness. Without it, `/health` keeps the loading envelope.
+    let (status, body) = get(
+        create_app(image_only_state(None, "route-test-model")),
+        "/health",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "status": "ok" }));
+
+    let state = image_only_state(None, "route-test-model");
+    let mut state = state;
+    state.image_model = None;
+    let (status, body) = get(create_app(state), "/health").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"]["message"], "Loading model", "{body}");
+}
+
+#[tokio::test]
+async fn image_only_models_lists_the_image_id_and_no_completion() {
+    let (status, body) = get(
+        create_app(image_only_state(Some("flux-alias"), "flux-alias")),
+        "/v1/models",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"][0]["id"], "flux-alias", "{body}");
+    assert_eq!(body["data"][0]["capabilities"], json!(["image"]), "{body}");
+    assert_eq!(body["models"][0]["name"], "flux-alias", "{body}");
+    assert_eq!(body["models"][0]["model"], "flux-alias", "{body}");
+    assert_eq!(
+        body["models"][0]["capabilities"],
+        json!(["image"]),
+        "{body}"
+    );
+    assert!(
+        !body.to_string().contains("completion"),
+        "image-only must never advertise completion: {body}"
+    );
+}
+
+/// The value a client copies out of `/v1/models` must pass the image routes'
+/// `check_model`, with and without `--alias`.
+async fn image_generation_model_status(state: AppState, model: &str) -> (StatusCode, Value) {
+    let (status, body) = post(
+        create_app(state),
+        "/v1/images/generations",
+        json!({"prompt": "a red cube", "model": model}),
+    )
+    .await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn a_model_copied_from_models_passes_check_model_without_alias() {
+    // No `--alias`: the served id is the image checkpoint's directory name,
+    // which the stub provider reports and `display_model_id` inherits.
+    let (status, body) = image_generation_model_status(
+        image_only_state(None, "route-test-model"),
+        "route-test-model",
+    )
+    .await;
+    assert_ne!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        !body.to_string().contains("not the served image model"),
+        "the id from /v1/models must pass check_model: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_model_copied_from_models_passes_check_model_with_alias() {
+    let state = image_only_state(Some("flux-alias"), "flux-alias");
+    let (status, body) = image_generation_model_status(state, "flux-alias").await;
+    assert_ne!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        !body.to_string().contains("not the served image model"),
+        "the aliased id must pass check_model: {body}"
+    );
+
+    // A different id is still refused, naming the served one.
+    let (status, body) =
+        image_generation_model_status(image_only_state(Some("flux-alias"), "flux-alias"), "other")
+            .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string()
+            .contains("not the served image model `flux-alias`"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_chat_server_with_image_model_keeps_the_tokenizer_routes() {
+    // `-m --image-model` stays exactly as it was: no mode, a real chat
+    // worker, and a working tokenizer surface.
+    let (options_tx, _options_rx) = std::sync::mpsc::channel();
+    let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
+    let batch_metrics = provider.batch_metrics().clone();
+    let state = AppState::new(
+        provider,
+        ServerConfig::default(),
+        ChatTemplateProcessor::with_template("ok".to_string()),
+        MlxcelTokenizer::stub(),
+        PathBuf::from("route-test-model"),
+        batch_metrics,
+    )
+    .with_image_model(Some(Arc::new(SideImageProvider("image-side"))))
+    .with_embedding_model(Some(Arc::new(SideEmbeddingProvider)));
+
+    for (path, body) in [
+        ("/tokenize", json!({})),
+        ("/detokenize", json!({"tokens": []})),
+        (
+            "/apply-template",
+            json!({"messages": [{"role": "user", "content": "hi"}]}),
+        ),
+    ] {
+        let (status, response) = post(create_app(state.clone()), path, body).await;
+        assert_ne!(
+            status,
+            StatusCode::NOT_IMPLEMENTED,
+            "{path}: the chat-server shape must keep this route: {response}"
+        );
+    }
+
+    // `/v1/models` keeps advertising completion; the image side model does not
+    // change the list.
+    let (status, body) = get(create_app(state), "/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"][0]["id"], "route-test-model", "{body}");
+    assert!(
+        body["data"][0]["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .any(|capability| capability == "completion"),
+        "the two-model shape still advertises completion: {body}"
+    );
 }

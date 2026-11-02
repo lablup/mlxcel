@@ -36,7 +36,7 @@ use mlxcel_core::cache::{
     BatchKvQuantConfig, CachePool, DetachedPagedCacheSet, KVCacheMode, PagedKvLayout, SequenceId,
     SequenceStateBackend, SequenceStateLayout,
 };
-use mlxcel_core::engine::{Engine, PrefillStep, RowError, RowOutcome, StepBatch};
+use mlxcel_core::engine::{Engine, EngineError, PrefillStep, RowError, RowOutcome, StepBatch};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
@@ -496,7 +496,26 @@ pub struct BatchScheduler {
     /// refused at admission and a decode that reaches the bound stops with
     /// `truncated: true`. With it on, the trim retains each sequence's
     /// resolved `keep` prefix and discards its resolved `discard` depth.
+    /// Stored with shifting forced off for a model-owned layout under
+    /// `--max-kv-size` (see [`Self::with_context_retention`]).
     context_retention: ContextRetentionPolicy,
+
+    /// Whether the builder turned `--context-shift` off for a model-owned
+    /// layout under `--max-kv-size` (logged by
+    /// [`Self::warn_context_shift_fallback_once`]).
+    context_shift_forced_off: bool,
+
+    /// Set once that fallback has been logged for this model. The worker
+    /// shares one flag across the schedulers it rebuilds on wake from idle
+    /// sleep (see [`Self::with_context_shift_fallback_warned`]).
+    context_shift_fallback_warned: Arc<AtomicBool>,
+
+    /// The sequence whose prefill last reset the single model-owned slot of
+    /// a family that cannot batch (NemotronNAS, LongCat). Releasing exactly
+    /// this sequence frees the slot's KV; releasing any other one (a queued
+    /// request that never prefilled, say) must leave it alone, because the
+    /// slot may hold an in-flight sequence's state.
+    model_owned_slot_holder: Option<SequenceId>,
 
     /// Experimental VLM prompt-prefix cache sharing toggle (#124 step c,
     /// `--enable-vlm-prefix-cache`).
@@ -642,6 +661,17 @@ pub struct BatchScheduler {
     /// Whether the prompt-lookup verify widths have been warmed up on this
     /// scheduler (#2255, [`Self::warm_up_prompt_lookup_widths`]).
     prompt_lookup_widths_warmed: bool,
+
+    /// The one loaded draft model of a
+    /// [`crate::server::SpeculativeDispatch::FullModel`] dispatch (#2757),
+    /// loaded by the worker next to the target and handed over through
+    /// [`Self::with_full_model_drafter`]. Every eligible row pairs it with
+    /// its own caches (`prompt_lookup::RowDrafter::FullModel`) for the
+    /// duration of each drafter call; `None` under every other dispatch.
+    full_model_drafter: Option<LoadedModel>,
+    /// The draft checkpoint's declared vocabulary size, read once when the
+    /// model is handed over; every row's `DraftModelState` takes it.
+    full_model_input_vocab: Option<usize>,
 
     /// Adaptive MTP enable/decline policy (issue #333). `Some` only when the
     /// dispatch is [`crate::server::SpeculativeDispatch::Mtp`] and the adaptive
@@ -1013,6 +1043,14 @@ mod scheduler_muse_glimmer_parallel_tests;
 #[cfg(test)]
 #[path = "../scheduler_model_owned_cache_tests.rs"]
 mod scheduler_model_owned_cache_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_model_owned_slot_tests.rs"]
+mod scheduler_model_owned_slot_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_pipeline_failure_tests.rs"]
+mod scheduler_pipeline_failure_tests;
 
 #[cfg(test)]
 #[path = "../scheduler_prompt_cache_plan_tests.rs"]

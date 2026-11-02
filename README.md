@@ -14,7 +14,7 @@ Apple Silicon is the primary target. Linux/CUDA is supported as a secondary targ
 
 ## Current main highlights
 
-The current `main` branch is v0.8.0-beta.1 plus unreleased work. Install from source to use features that have not reached the latest tagged release; see the [changelog](CHANGELOG.md) for the release-by-release record.
+The current `main` branch is v0.8.0 plus unreleased work. Install from source to use features that have not reached the latest tagged release; see the [changelog](CHANGELOG.md) for the release-by-release record.
 
 - **Experimental AMD GPU (ROCm) support.** `--features rocm` builds mlxcel on Linux against an MLX ROCm backend vendored into the source tree as the ROCm part of mlxcelverse, applied on the same pinned MLX commit as the Metal and CUDA builds. Affine, mxfp8, and mxfp4 checkpoints, including gpt-oss MoE experts, run on RDNA 3.5 (`gfx1151`); the fused kernels with a HIP port (BitLinear, the samplers, the SSM update step, the Mamba1 scan, the decode-MoE kernels, xIELU, the add3 LayerNorm, and the fused add-RMSNorm and RoPE + append, which are on by default on ROCm) run natively and the rest fall back to MLX graphs. See [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental) for the build and the open gaps.
 - **Bundled WebUI.** `--webui` serves a browser interface from `mlxcel serve` or `mlxcel-server`: a model library with download, load, unload, and delete; local streaming chat; runtime activity; and scoped settings with next-load profiles. See the [WebUI guide](docs/webui/README.md).
@@ -28,6 +28,7 @@ The current `main` branch is v0.8.0-beta.1 plus unreleased work. Install from so
 - **DeepSeek-V4 support.** The `deepseek_v4` architecture includes HyperConnections, rotating shared-KV attention, per-layer compression, HiSA sparse selection, and hash-routed early MoE layers.
 - **Inkling across four modalities.** The text backbone runs hybrid sliding/global NoPE attention with per-layer short-convolution state and logsigmoid-normalized experts, and carries HMLP image tiling, adjacent-frame video, dMel audio, and a native MTP drafter.
 - **Half-precision paths keep their dtype.** Activation helpers, the multimodal rotary, the Gemma3n load policy, and the GraniteMoeHybrid gated norm no longer widen a half-precision hidden state to f32, which had made every later matmul promote its own weight. The affected checkpoints move by up to 3.26x, and the bridge's reductions accumulate in f32 to close a bfloat16 `max` that returned NaN for a finite input.
+- **Native batched decode across most families.** Dense, MoE, MLA, VLM text, recurrent and tensor-parallel models run one batched forward under `--parallel` instead of one forward per row. On M1 Ultra, Llama 3.1 8B 4-bit reaches 1.99x aggregate at 8 concurrent requests over 1.
 
 See [Server features](docs/server-features.md) for the route and deployment map and [llama-server compatibility](docs/llama-server-compat.md) for the exact b10621 boundary.
 
@@ -90,7 +91,7 @@ mlxcel inspect --json -m Qwen3.5-0.8B-4bit --max-tokens 32768 | python3 -m json.
 mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello" -n 32768 --estimate-memory
 ```
 
-`generate` is the raw-completion client of the same batch-native engine (`mlxcel_core::engine::DirectEngine`): no server worker or HTTP request path in between, the rendered prompt goes straight through the engine's prefill and decode, so it decodes with the same sampler, finish step and lookahead pipeline as the server's single-sequence row (`MLXCEL_FORCE_SYNC` turns the pipeline off). `--prompt-lookup` runs drafter-free speculative decoding on that engine for any model. The classic draft-model path (`--draft-model` without `--draft-kind mtp` or `dflash`) is deprecated and will be removed in v0.8.0.
+`generate` is the raw-completion client of the same batch-native engine (`mlxcel_core::engine::DirectEngine`): no server worker or HTTP request path in between, the rendered prompt goes straight through the engine's prefill and decode, so it decodes with the same sampler, finish step and lookahead pipeline as the server's single-sequence row (`MLXCEL_FORCE_SYNC` turns the pipeline off). `--prompt-lookup` runs drafter-free speculative decoding on that engine for any model. `--draft-model` takes an MTP drafter, a DFlash drafter on a target with an offline round loop, or an ordinary smaller checkpoint that shares the target's tokenizer, which drafts from its own KV caches on the same engine loop (`--draft-kind full-model`, auto-detected); `mlxcel-server` serves the same pairing.
 
 `mlxcel inspect --json` prints a single JSON object with byte-exact `weights_bytes`, `kv_bytes_total`, `activation_bytes`, `backend_inflight_bytes` (ROCm builds only, else 0), `headroom_bytes`, `budget_bytes`, `total_bytes`, `fits`, input flags, and per-token FP16/INT8 KV rates when the model config exposes KV geometry. TurboQuant per-token sizing is reported as `null` until the estimator models those widths directly.
 

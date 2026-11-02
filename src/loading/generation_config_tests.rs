@@ -14,7 +14,10 @@
 
 use std::fs;
 
-use super::{GenerationConfigDefaults, read_eos_token_ids, read_generation_config_defaults};
+use super::{
+    GenerationConfigDefaults, merged_eos_token_ids, read_eos_token_ids,
+    read_generation_config_defaults,
+};
 
 fn write_generation_config(contents: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -114,4 +117,15 @@ fn eos_token_ids_are_the_union_of_every_sidecar() {
     .expect("write config");
 
     assert_eq!(read_eos_token_ids(dir.path()), vec![2, 7, 9]);
+}
+
+/// #2729: the declared ids keep their order and the sidecar ids not already
+/// declared follow them.
+#[test]
+fn merged_eos_token_ids_appends_sidecar_ids() {
+    let dir = write_generation_config(r#"{"eos_token_id": [7, 1]}"#);
+    assert_eq!(merged_eos_token_ids(vec![1], dir.path()), vec![1, 7]);
+    assert_eq!(merged_eos_token_ids(Vec::new(), dir.path()), vec![7, 1]);
+    let empty = tempfile::tempdir().expect("tempdir");
+    assert_eq!(merged_eos_token_ids(vec![3], empty.path()), vec![3]);
 }

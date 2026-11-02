@@ -52,7 +52,7 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   worker restores the whole configured context as the one effective request
   window and publishes that post-load value to `/props`, `/slots`, and
   `/v1/models`.
-  The remaining clamps are the epic's class D exclusions: diffusion generation (`diffusion_gemma`, `llada2_moe`); document/encoder-decoder runtimes (`florence2`, `nemotron_parse`, Falcon OCR text/VLM and `unlimited_ocr`); the session-owned `nemotron_voicechat` speech pipeline; Phi4MM-VL's per-request LoRA selection; NemotronNAS and LongCat Flash/Flash Ngram pending the single-sequence cache corrections in #2544; and the loaded-model fallback of `TensorParallelGemma4Model`. The rank-sharded Gemma 4 path and `Gemma4UnifiedModel` already support batching and are not clamped. These exclusions have no batched-decode throughput claim in #2574.
+  The remaining clamps are the epic's class D exclusions: diffusion generation (`diffusion_gemma`, `llada2_moe`); document/encoder-decoder runtimes (`florence2`, `nemotron_parse`, Falcon OCR text/VLM and `unlimited_ocr`); the session-owned `nemotron_voicechat` speech pipeline; Phi4MM-VL's per-request LoRA selection; NemotronNAS and LongCat Flash/Flash Ngram, which keep one model-owned cache set (#2544; NemotronNAS allocates one cache per attention block rather than per `num_layers()`, so a batch-capable layout is a follow-up); and the loaded-model fallback of `TensorParallelGemma4Model`. The rank-sharded Gemma 4 path and `Gemma4UnifiedModel` already support batching and are not clamped. These exclusions have no batched-decode throughput claim in #2574.
   `supports_batching()` being true does not by itself mean a family runs one
   forward per tick: families with a native decode path include Llama 3,
   Llama 4, Qwen 3, Gemma 3, Gemma 3n text/VLM, Gemma 4 text/VLM/Unified,
@@ -203,13 +203,14 @@ On ROCm the invariant holds without `MLXCEL_SDPA_DETERMINISTIC` (the variable is
 > across the batch, so aggregate decode now scales with concurrency on CUDA
 > too: 40.4 / 68.5 / 74.2 tok/s at 1/2/4 clients on llama-3.1-8b-4bit on GB10
 > (vs 40.5 / 49.8 / 49.6 with the kill switch off). Scaling stays sublinear
-> versus Metal because attention KV reads still grow with B; the small-M
-> `qmm_sm80` tile shape (`M*B >= 8`) remains upstream MLX territory. For the
-> same reason, keep `--parallel` at 7 or below on CUDA (both server binaries
-> also accept `--n-parallel`): the multirow window covers 2-7 rows, and a full batch of 8+ decode
-> rows crosses into the under-tiled `qmm_sm80` shape, which measures worse
-> than per-row decode until the upstream small-M tile lands. The shipped
-> default of 4 sits comfortably inside the window. See
+> versus Metal because attention KV reads still grow with B. A decode batch
+> `[B, 1, K]` over a shared 2D weight also folds into rows (#2690): from 8 rows,
+> and on compute capability 12.1 from 5 rows of a weight of at least 2^24
+> elements, it runs one GEMM that reads the weight once. On an RTX Spark N1X that
+> lifts 8-client aggregate decode 1.2x to 3.2x across four models
+> (`docs/benchmark_results/cuda-qmm-fold-batch-n1x-2026-10-31.md`). The older
+> advice to keep `--parallel` at 7 or below predates the fold, and GB10 has not
+> been re-measured with it. See
 > `docs/benchmark_results/qmv-multirow-gb10-2026-07-11.md`. `--max-batch-prefill`
 > (large-M, tile-tuned, `docs/benchmark_results/qmm-sm121-tile-tuning-gb10-2026-07-10.md`)
 > and the prompt cache remain independent wins on CUDA.
@@ -832,6 +833,77 @@ and unwinds each, as `mlxcel generate --prompt-lookup` does before it decodes,
 so the first requests do not pay each width's first-use kernel cost
 mid-decode.
 
+### A full model as the drafter under continuous batching
+
+`--draft-model <ordinary model>` (auto-detected: a directory with no
+DFlash-family marker and no MTP `model_type`; or `--draft-kind full-model`,
+which b10621's `--spec-type draft-simple` maps onto) serves an ordinary smaller
+checkpoint as a token-only drafter on the same per-row tick as prompt lookup
+(#2757). The worker loads the drafter next to the target at startup, so a
+checkpoint that cannot load, or a target or drafter whose state a trim cannot
+roll back (#2495), fails startup rather than decoding plainly: chat routes
+report the worker as unavailable and `/health` never turns ready. The startup
+log reports the resident memory after the load. An eligible request gets a
+`DraftModelState` at prefill completion that records its prompt and holds no
+draft KV. Once gated in it catches the draft model up on the prompt, one chunk
+per tick, and every round after that costs `--draft-block-size` (default 4) draft
+forwards plus one verify forward on the target; a rejected block is trimmed from
+both. The drafter proposes its argmax
+and the target's own draw decides every position, so a sampled stream keeps the
+target's distribution. Temperature 0 follows the target's greedy choice at the
+token-only loop's bar, which is not byte-identity with plain decode: see
+[`docs/speculative-acceptance.md`](speculative-acceptance.md#offline-routing).
+
+**Batch widths.** Each row drafts and rolls back on its own caches, so no batched
+drafter is needed, but verification is per row and serial, not batched.
+`--prompt-lookup-max-batch` (default 2) decides how many concurrent rows verify. On a tick
+with more active rows than that, every row takes the plain batched step and gets
+no speculation at all, and resumes when the batch shrinks. So with the default
+a server at a steady B = 4 runs plain decode with the drafter loaded and idle.
+The flag can be raised to verify at wider batches; each extra row then adds its
+draft forwards and verify forward to every tick, which cost 35 to 68 percent of
+throughput at B = 4 and B = 8 in the measurement below. Rows above the gate hold no
+draft KV until they are first asked. Verify rounds also stay off under
+`--kv-unified`, and the drafter stays loaded there.
+
+**Catch-up.** A gated-in row that owes the draft model more than a steady tail
+(its prompt at first, or the tokens it missed while gated out) proposes nothing
+and decodes plainly while it catches up, and it proposes once it has caught up.
+A tick feeds at most one catch-up chunk, to the first row in the batch that owes
+one, whatever `--prompt-lookup-max-batch` is, so catching up costs live rows one
+chunk of draft forward per tick. Other rows that owe wait their turn and decode
+plainly. The chunk is the server's prefill chunk (`--prefill-chunk-size`, by
+default 2048 alone and 512 with other rows decoding), and `0`, which disables
+chunking for the target's prefill, takes those defaults here, since the draft has
+no prompt cache and a forward of the whole tail could not be interrupted. A row
+does not catch up unless its budget repays it: `max_tokens` left, capped by the
+context bound, must cover `ticks * (--draft-block-size + 2)`, one plain token and
+one full round per catch-up tick, so a request with a short budget decodes
+plainly and pays no draft forward at all. A row cancelled during catch-up feeds
+nothing further and leaves as any cancelled row does.
+
+Not served by this drafter, with the reason: `--no-batch` (the legacy sequential
+worker has no speculative dispatch and warns at startup); disaggregated
+`--node-role` rows adopted through a KV handoff (they carry no prefill for the
+drafter to record and decode plainly); requests with images, audio, video,
+structured output, logprobs or an extended sampler chain (eligibility is prompt
+lookup's, decoded plainly with a `debug` log). A vocabulary larger than the
+target's, or one either config leaves undeclared, is refused at startup, since a
+proposal past the target's embedding table cannot be verified and an undeclared
+pair cannot be checked. A row whose context passes `--max-kv-size` stops drafting
+and decodes plainly, since the draft caches have no `--context-shift` path. In
+router mode (`--models-dir`) each model's worker loads its own copy of the
+drafter. A finished request reports `draft_kind: "full-model"` in `timings`.
+
+**No speedup has been measured.** This drafter keeps the capability on the
+engine; do not expect it to raise throughput. On an idle M1 Ultra (Metal, 256
+tokens, temperature 0) Qwen3-8B 4-bit with a 0.6B 4-bit drafter fell from 93.5 to
+56.1 tok/s at B = 1, and Llama 3.1 8B bf16 with a 1B 4-bit drafter held at 40.3.
+Acceptance was 0.58 to 0.80, so a high acceptance rate did not repay the draft
+forwards. Llama's 34.1 against 25.8 at B = 2 is not counted as a gain, because
+plain B = 2 on that checkpoint is unexplainedly slower than plain B = 1. The full
+tables and the catch-up cost are in the pull request for #2757.
+
 ## Disaggregated serving
 
 Prefill is compute-bound and decode is memory-bound, so a deployment can run them
@@ -900,13 +972,23 @@ The router tracks node health and fails over without wedging:
   attempts from 100 ms, so a refused connect fails over within about 150 ms
   of backoff rather than after 3 s (issue #2712). A node that dies after
   accepting a request still costs that request the full handoff timeout.
-- A background health monitor TCP-probes every peer's serving address on an
-  interval. A node that stops accepting connections is marked unreachable (so
-  routing skips it, including a dead decode node the router never sends to
-  directly), and a node that starts accepting again is restored to online.
+- A background health monitor TCP-probes every peer's serving address, once
+  when the router starts and then every 3 s (2 s connect timeout). A node that
+  stops accepting connections is marked unreachable (so routing skips it,
+  including a dead decode node the router never sends to directly), and a node
+  that starts accepting again is restored to online.
 - Admission control runs before every dispatch: when the prefill queue is full
   or no prefill node is available, the router returns HTTP 503 instead of
-  attempting a dispatch that cannot succeed.
+  attempting a dispatch that cannot succeed. When no prefill node is available
+  and at least one prefill node is marked unreachable, the router first re-probes
+  the nodes marked unreachable
+  with a 500 ms connect timeout, restores any that accept, and admits the
+  request if one did (issue #2763). The re-probe is single-flight and runs at
+  most once per 250 ms router-wide: concurrent requests wait for the running
+  one and reuse its result, so a pool that is really down costs at most one
+  500 ms probe timeout per 250 ms window (a refused connect returns at once, a
+  host that silently drops packets takes the full timeout). A full queue is
+  refused without probing.
 
 `GET /router/stats` reports the per-node dispatch counts for both pools, the
 registered nodes with their current health status, and the routing-metrics

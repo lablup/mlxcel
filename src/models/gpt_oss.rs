@@ -28,8 +28,8 @@
 use crate::models::gpt_oss_common::{
     ExpertLinear, YarnRopeParams, gpt_oss_swiglu, yarn_rope_freqs,
 };
-use crate::models::model_owned::ModelOwnedSequenceState;
-use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
@@ -235,6 +235,17 @@ impl ModelArgs {
                 result
             })
             .unwrap_or_else(|| (64, 4, "affine".to_string()))
+    }
+
+    /// The sliding window as the `i32` the rotating caches take, checked at
+    /// load when `layer_types` has a sliding layer (issue #2790); a config
+    /// with none keeps any window, unused.
+    pub(crate) fn validated_sliding_window(&self) -> Result<i32, String> {
+        let has_sliding_layer = self
+            .layer_types_list()
+            .iter()
+            .any(|layer_type| layer_type != "full_attention");
+        crate::models::model_owned::cache_window("GPT-OSS", self.sliding_window, has_sliding_layer)
     }
 
     /// Get the layer_types list, defaulting to alternating sliding/full pattern
@@ -847,7 +858,8 @@ pub struct GptOssModel {
     norm: RMSNorm,
     lm_head: Option<UnifiedLinear>,
     layer_types: Vec<String>,
-    sliding_window: usize,
+    /// Validated at load ([`ModelArgs::validated_sliding_window`]).
+    sliding_window: i32,
 }
 
 impl GptOssModel {
@@ -880,7 +892,7 @@ impl GptOssModel {
             let full_mask = create_causal_mask(seq_len, global_offset);
 
             let sliding_offset = caches[swa_idx].as_interface().offset();
-            let max_cache = self.sliding_window as i32;
+            let max_cache = self.sliding_window;
             // Full-width windowed mask for a fresh single-pass prefill that
             // exceeds the window (RotatingKVCache keeps all prefill keys),
             // clamped mask otherwise. See issue #408.
@@ -931,14 +943,24 @@ impl GptOssModel {
         }
     }
 
-    fn make_caches(&self) -> Vec<Cache> {
+    /// One cache per layer: `KVCache` on full-attention layers and
+    /// `RotatingKVCache(sliding_window)` elsewhere, each stored in its
+    /// resolved KV cache mode (`None` keeps all layers FP16).
+    fn make_caches_with_modes(&self, modes: Option<&KvCacheLayerModes>) -> Vec<Cache> {
         self.layer_types
             .iter()
-            .map(|lt| {
+            .enumerate()
+            .map(|(layer_idx, lt)| {
                 if lt == "full_attention" {
-                    Cache::Standard(KVCache::new())
+                    let mode =
+                        modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
+                    Cache::Standard(KVCache::new_with_mode(mode))
                 } else {
-                    Cache::Rotating(RotatingKVCache::new(self.sliding_window as i32))
+                    let window = self.sliding_window;
+                    let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
+                        modes.rotating_mode_for_layer(layer_idx, window)
+                    });
+                    Cache::Rotating(RotatingKVCache::new_with_mode(window, mode))
                 }
             })
             .collect()
@@ -974,6 +996,7 @@ impl GptOssModel {
             None => (None, 1.0),
         };
 
+        let sliding_window = args.validated_sliding_window()?;
         let layer_types = args.layer_types_list();
 
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
@@ -1001,7 +1024,7 @@ impl GptOssModel {
             norm,
             lm_head,
             layer_types,
-            sliding_window: args.sliding_window,
+            sliding_window,
         })
     }
 }
@@ -1011,20 +1034,42 @@ impl GptOssModel {
 pub struct GptOssWrapper {
     model: GptOssModel,
     sequence_state: ModelOwnedSequenceState<Cache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl GptOssWrapper {
+    #[cfg(test)]
+    pub(crate) fn sequence_kv_modes(&self, id: SequenceId) -> Vec<KVCacheMode> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        Cache::Standard(c) => c.mode,
+                        Cache::Rotating(c) => c.mode,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
     pub fn new(model: GptOssModel) -> Self {
-        let caches = model.make_caches();
+        let caches = model.make_caches_with_modes(None);
         Self {
             model,
             sequence_state: ModelOwnedSequenceState::new(caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         }
     }
 
+    /// Fresh caches in the KV cache modes the server or CLI injected.
+    fn fresh_caches(&self) -> Vec<Cache> {
+        self.model
+            .make_caches_with_modes(Some(&self.kv_cache_layer_modes))
+    }
+
     fn reset_caches(&self) {
-        self.sequence_state
-            .replace_internal(self.model.make_caches());
+        self.sequence_state.replace_internal(self.fresh_caches());
     }
 
     fn assert_prepared_sequence_ids(&self, seq_ids: &[SequenceId]) {
@@ -1043,7 +1088,7 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             None,
-            || self.model.make_caches(),
+            || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
     }
@@ -1058,6 +1103,29 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
 
     fn num_layers(&self) -> usize {
         self.model.layers.len()
+    }
+
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_caches();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
+    /// mode but an aligned `Turbo4Asym` (issue #2783).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        let window = self.model.sliding_window;
+        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
+            self.model
+                .layer_types
+                .get(layer_idx)
+                .is_some_and(|layer_type| layer_type != "full_attention")
+                .then_some(window)
+                .map_or(LayerKv::Full, LayerKv::Sliding)
+        })
     }
 
     fn supports_batching(&self) -> bool {
@@ -1079,7 +1147,7 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
 
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
-            .prepare_sequence_state(seq_id, self.model.make_caches());
+            .prepare_sequence_state(seq_id, self.fresh_caches());
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
@@ -1095,7 +1163,7 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
     }
@@ -1196,7 +1264,8 @@ pub(crate) struct GptOssStageModel {
     norm: Option<RMSNorm>,
     lm_head: Option<UnifiedLinear>,
     layer_types: Vec<String>,
-    sliding_window: usize,
+    /// Validated at load ([`ModelArgs::validated_sliding_window`]).
+    sliding_window: i32,
 }
 
 impl GptOssStageModel {
@@ -1247,6 +1316,7 @@ impl GptOssStageModel {
             None => (None, 1.0),
         };
 
+        let sliding_window = args.validated_sliding_window()?;
         let layer_types = args.layer_types_list()[filter.layer_range.clone()].to_vec();
 
         let mut layers = Vec::with_capacity(filter.num_layers());
@@ -1291,7 +1361,7 @@ impl GptOssStageModel {
             norm,
             lm_head,
             layer_types,
-            sliding_window: args.sliding_window,
+            sliding_window,
         })
     }
 
@@ -1306,7 +1376,7 @@ impl GptOssStageModel {
                 if lt == "full_attention" {
                     Cache::Standard(KVCache::new())
                 } else {
-                    Cache::Rotating(RotatingKVCache::new(self.sliding_window as i32))
+                    Cache::Rotating(RotatingKVCache::new(self.sliding_window))
                 }
             })
             .collect()
@@ -1363,7 +1433,7 @@ impl GptOssStageModel {
                 .map(|offset| {
                     // See issue #408: full-width windowed mask for a fresh
                     // >window prefill, clamped otherwise.
-                    let max_cache = self.sliding_window as i32;
+                    let max_cache = self.sliding_window;
                     create_sliding_window_prefill_mask(seq_len, offset, max_cache)
                 })
         } else {
@@ -1773,4 +1843,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "gpt_oss_tests.rs"]
-mod batching_tests;
+pub(super) mod batching_tests;

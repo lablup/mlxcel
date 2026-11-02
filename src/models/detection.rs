@@ -1010,6 +1010,10 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "hunyuan_vl" => Ok(ModelType::HunyuanVLM),
         "hunyuan" => Ok(detect_hunyuan_model_type(v)),
         "mimo" => Ok(ModelType::MiMo),
+        // MiMo v2 Flash is a different family from MiMo v1: hybrid
+        // sliding/full attention, a sparse MoE decoder, and its own
+        // `mimo_v2_flash` model type.
+        "mimo_v2_flash" => Ok(ModelType::MiMoV2Flash),
         "bailing_moe" => Ok(ModelType::BailingMoe),
         "bailing_moe_linear" => Ok(ModelType::BailingMoeLinear),
         "afmoe" => Ok(ModelType::Afmoe),

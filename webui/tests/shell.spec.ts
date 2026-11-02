@@ -1,5 +1,5 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
 import { bootGallery, bootProduct, installMockApi, loginWithMockApi, readyCatalog, selectGalleryTab, type CatalogPage } from './browser-fixtures';
 import { fixtureString, type FixtureLocale } from './strings-fixture';
@@ -50,6 +50,12 @@ async function expectFloor(page: Page, label: string): Promise<void> {
   expect(geometry.collisions, label).toEqual([]);
 }
 
+// Mid-slide the sheet's scrollWidth still includes its offset, so measure after the transition.
+async function expectDrawerFits(drawer: Locator): Promise<void> {
+  await drawer.evaluate((element) => Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished)));
+  expect(await drawer.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+}
+
 for (const width of FLOOR_WIDTHS) {
   for (const locale of LOCALES) {
     test(`${width} gallery tabs and drawer hold without horizontal scroll (${locale})`, async ({ page }) => {
@@ -63,7 +69,7 @@ for (const width of FLOOR_WIDTHS) {
       const drawer = page.getByTestId('mobile-nav-sheet');
       await expect(drawer).toBeVisible();
       await expectFloor(page, `${width}-${locale}-gallery-drawer`);
-      expect(await drawer.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+      await expectDrawerFits(drawer);
     });
 
     test(`${width} product routes hold without horizontal scroll, signed out and signed in with a loaded model (${locale})`, async ({ page }) => {
@@ -85,7 +91,7 @@ for (const width of FLOOR_WIDTHS) {
       const drawer = page.getByTestId('mobile-nav-sheet');
       await drawer.getByText(fixtureString(locale, 'connection.footer.details'), { exact: true }).click();
       await expect(drawer.getByTestId('connection-footer-instance')).toBeVisible();
-      expect(await drawer.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+      await expectDrawerFits(drawer);
       await expectFloor(page, `${width}-${locale}-drawer-details`);
     });
   }
@@ -123,7 +129,7 @@ test('more than three loaded models collapse into a +n chip that opens the palet
   await page.getByLabel('Session key').fill('good-key');
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.getByTestId('toolbar-loaded-count')).toHaveText('4 loaded');
-  await expect(page.getByTestId('toolbar-loaded-chip')).toHaveText(['alphaReady', 'bravoReady', 'charlieReady']);
+  await expect(page.getByTestId('toolbar-loaded-chip')).toHaveText(['alpha Ready', 'bravo Ready', 'charlie Ready']);
   const more = page.getByRole('button', { name: '+1, show all loaded models', exact: true });
   await expect(more).toHaveText('+1');
   await more.click();

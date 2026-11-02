@@ -46,7 +46,7 @@ The final Granite Vision wrapper uses `PerRowFallback` while its text tower reta
 
 ## Change Summary
 
-The shared recurrent helper, five model towers, two VLM wrappers, isolation harness, coverage inventory, provider admission gate and continuous-batching documentation changed. No new SSM kernel or dependency is introduced. Related: #2571, #2574, #2555; follow-up families reuse the shared helper. Compact evidence: `benchmarks/epic-2574/mamba2-families.json`.
+The shared recurrent helper, five model towers, two VLM wrappers, isolation harness, coverage inventory, provider admission gate and continuous-batching documentation changed. No new SSM kernel or dependency is introduced. Related: #2571, #2574, #2555; follow-up families reuse the shared helper. Compact evidence: `docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/mamba2-families.json`.
 
 ## Integration fixes
 

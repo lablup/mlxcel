@@ -85,7 +85,10 @@ fn compile_gemma3n_qmv_ptx() {
 }
 
 fn add_iree_shim_sources(build: &mut cc::Build) {
-    build.file("csrc/xla_iree.c").file("csrc/xla_aux.c");
+    build
+        .file("csrc/xla_iree.c")
+        .file("csrc/xla_aux.c")
+        .file("csrc/xla_local_task.c");
     if env::var_os("CARGO_FEATURE_DIAGNOSTICS").is_some() {
         build.file("csrc/xla_diagnostic_flags.c");
     }
@@ -98,6 +101,8 @@ fn main() {
 
     println!("cargo:rerun-if-changed=csrc/xla_iree.c");
     println!("cargo:rerun-if-changed=csrc/xla_aux.c");
+    println!("cargo:rerun-if-changed=csrc/xla_local_task.c");
+    println!("cargo:rerun-if-changed=csrc/xla_local_task.h");
     println!("cargo:rerun-if-changed=csrc/xla_diagnostic_flags.c");
     println!("cargo:rerun-if-changed=csrc/gemma3n_qmv.cu");
     println!("cargo:rerun-if-env-changed=NVCC");

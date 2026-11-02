@@ -40,7 +40,7 @@ Serving prompts request approximately 512 tokens; actual tokenized lengths vary,
 
 ## Follow-up and Evidence
 
-The integrated gate is complete; Ring/VLM differences remain explicitly recorded against the issue criteria. [Structured results](../benchmarks/epic-2574/linear-attention.json) link each raw run. Raw evidence preserves phase outputs/stderr/status, original runtime manifests and their referenced logs, source and input hashes, exact VLM requests, fixture images and replay drivers. The raw root manifest covers the union with earlier epic evidence. No historical binary hash is inferred from a current build.
+The integrated gate is complete; Ring/VLM differences remain explicitly recorded against the issue criteria. [Structured results](../docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/linear-attention.json) link each raw run. Raw evidence preserves phase outputs/stderr/status, original runtime manifests and their referenced logs, source and input hashes, exact VLM requests, fixture images and replay drivers. The raw root manifest covers the union with earlier epic evidence. No historical binary hash is inferred from a current build.
 
 ## Final integrated validation
 

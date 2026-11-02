@@ -87,6 +87,7 @@ mod aux_smoke;
 mod auxiliary;
 #[cfg(feature = "iree")]
 mod iree;
+mod local_task;
 #[cfg(any(feature = "iree", test))]
 mod molmo2;
 #[cfg(feature = "iree")]
@@ -163,6 +164,12 @@ mod validation;
 pub use aux_smoke::{AuxiliaryAbiSmokeReport, run_auxiliary_abi_smoke};
 #[cfg(feature = "iree")]
 pub use batch::XlaBucketSet;
+/// Test support only (issue #2790): production builds do not compile it.
+#[cfg(all(
+    feature = "iree",
+    any(feature = "test-support", feature = "diagnostics")
+))]
+pub use batch::XlaPreparedPrefillLogits;
 #[cfg(feature = "iree")]
 pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, XlaReferenceEngine};
 #[cfg(feature = "diagnostics")]
@@ -196,6 +203,14 @@ pub use emitter::{
 };
 #[cfg(feature = "diagnostics")]
 pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
+pub use local_task::{
+    LOCAL_TASK_WORKERS_ENV, is_local_task_device, local_task_workers_for, parse_local_task_workers,
+};
+#[cfg(all(
+    feature = "iree",
+    any(feature = "test-support", feature = "diagnostics")
+))]
+pub use local_task::{LocalTaskProbe, local_task_executor_probe};
 #[cfg(feature = "diagnostics")]
 pub use molmo_vision_runtime::{IreeMolmoVisionDiagnosticProjector, MolmoVisionDiagnostics};
 #[cfg(feature = "iree")]
@@ -261,6 +276,11 @@ pub fn llava_diagnostic_device_memory_note(device: &str) -> &'static str {
     }
 }
 #[cfg(feature = "diagnostics")]
+/// Expose the MLX CPU affine dequantization semantics to diagnostics: the CPU
+/// kernel rounds sequentially, `bf16(bf16(q * scale) + bias)`, and this
+/// reproduces it exactly. Compare only against an MLX weight dequantized on
+/// CPU; a GPU-executed `mx.dequantize` rounds once instead, so see
+/// [`dequantize_affine_bf16_single_round_diagnostic`].
 pub fn dequantize_gemma3n_affine_diagnostic(
     packed: &[u8],
     scales: &[u8],
@@ -271,6 +291,28 @@ pub fn dequantize_gemma3n_affine_diagnostic(
     group_size: usize,
 ) -> Result<Vec<f32>, String> {
     weights::dequantize_affine_bf16_sequential(
+        packed, scales, biases, out, in_packed, bits, group_size,
+    )
+}
+
+#[cfg(feature = "diagnostics")]
+/// Expose the MLX GPU affine dequantization semantics to diagnostics: the GPU
+/// `mx.dequantize` kernel computes `q * scale + bias` in f32 and rounds once to
+/// BF16 (verified bit-exact on CUDA for the pinned Gemma3n E2B checkpoint and
+/// synthetic wide-magnitude weights). A weight-carrier comparison against an
+/// MLX weight dequantized on GPU must use this variant; the CPU-semantics
+/// carrier fails by construction on about half of 4-bit values (issue #2808).
+#[allow(clippy::too_many_arguments)]
+pub fn dequantize_affine_bf16_single_round_diagnostic(
+    packed: &[u8],
+    scales: &[u8],
+    biases: &[u8],
+    out: usize,
+    in_packed: usize,
+    bits: usize,
+    group_size: usize,
+) -> Result<Vec<f32>, String> {
+    weights::dequantize_affine_bf16_single_round(
         packed, scales, biases, out, in_packed, bits, group_size,
     )
 }

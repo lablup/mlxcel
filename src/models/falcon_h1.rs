@@ -1319,6 +1319,14 @@ impl LanguageModel for FalconH1Model {
         self.config.num_hidden_layers
     }
 
+    /// No mode table: report the real storage so the server does not fall back to the configured
+    /// table (issue #2790). Every layer keeps an FP16 `KVCache` beside its Mamba state.
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
+        crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |_| {
+            crate::models::model_owned::LayerKv::Fp16Only
+        })
+    }
+
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
     }

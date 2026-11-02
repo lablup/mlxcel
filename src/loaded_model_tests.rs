@@ -66,6 +66,7 @@ fn test_vision_module() -> VisionModule {
         block_prefix_tokens: Vec::new(),
         block_suffix_tokens: Vec::new(),
         pixtral_layout: None,
+        newline_runs: std::sync::OnceLock::new(),
     }
 }
 

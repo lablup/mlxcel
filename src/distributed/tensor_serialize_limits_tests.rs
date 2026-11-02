@@ -83,6 +83,7 @@ fn limits_refuse_flags_dtype_and_shape_before_the_payload() {
 
     let uniform = limits(ShapeBound::Uniform {
         rank: 2..=3,
+        min_dim: 0,
         max_dim: 8,
     });
     expect_limit_err(&header_only(0, f16, &[4], 8), &uniform, "rank 2..=3");

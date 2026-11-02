@@ -33,6 +33,10 @@ pub mod sapiens2;
 pub mod sidecars;
 pub mod video_depth_anything;
 
+#[cfg(test)]
+#[path = "cuda_oracle_tests.rs"]
+pub(crate) mod cuda_oracle;
+
 pub use output::{DenseOutputInfo, write_dense_output};
 pub use predictor::{DenseInput, DenseOutput, DensePredictor, Instance, PersonKeypoints};
 pub use registry::{DenseFamily, FAMILIES, load_dense_model, resolve_family};

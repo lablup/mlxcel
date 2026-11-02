@@ -613,7 +613,10 @@ impl MLP {
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.fc1.forward(x);
-        let h = mlxcel_core::gelu(&h);
+        // `vision_config.hidden_act = gelu_pytorch_tanh` (also the HF
+        // `PaddleOCRVisionConfig` default; mlx-vlm `approx="precise"`): tanh,
+        // in f32 as one compiled kernel (erf before #2548).
+        let h = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&h);
         self.fc2.forward(&h)
     }
 }

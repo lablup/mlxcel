@@ -46,9 +46,18 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # decode steps and leaves at the device default for prefill. Upstream latches
   # the budget once from MLX_MAX_MB_PER_BUFFER and has no setter. Same refresh
   # rule: take the new upstream file and re-apply the three marked hunks.
+  # kernels/quantized.metal adds `mlxcel_affine_qmm_t_rows` (an 8-row steel
+  # MMA quantized matmul) after upstream's instantiations; quantized.cpp
+  # dispatches it for 5- to 8-row affine products on GPU generations 13 and
+  # 14. Refresh: take the new upstream file and re-append the marked block.
+  # matmul.cpp keeps few-row dense products on GEMV on GPU generations 13 and
+  # 14 (#2587). Refresh: take the new upstream file and re-apply the marked
+  # helper and the branch before the steel GEMM route.
   set(_metal_patch_files
       "mlx/backend/metal/device.cpp"
+      "mlx/backend/metal/kernels/quantized.metal"
       "mlx/backend/metal/kernels/utils.h"
+      "mlx/backend/metal/matmul.cpp"
       "mlx/backend/metal/quantized.cpp")
   # A cached _deps/mlx-src is reused while the pin is unchanged (build.rs
   # only compares the pin), so a file this list no longer carries would keep
@@ -317,6 +326,22 @@ if(MLX_BUILD_CUDA)
   if(EXISTS "${_cutlass_include}")
     target_compile_definitions(mlx
                                PRIVATE MLX_CUTLASS_DIR="${_cutlass_include}")
+  endif()
+
+  # Test-only hooks of the PTX disk cache in our jit_module.cpp overlay
+  # (MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX, lablup/mlxcel#2765). mlxcel-core's
+  # build script turns this on for the `debug` and `test-fast` Cargo profiles
+  # and off for every other one, `release` included, so a shipped binary
+  # ignores the variable. Set on that one source rather than on the target,
+  # so switching it recompiles nothing else.
+  option(MLXCEL_PTX_CACHE_TEST_HOOKS
+         "Compile the PTX disk cache's test-only hooks into jit_module.cpp" OFF)
+  if(MLXCEL_PTX_CACHE_TEST_HOOKS)
+    set_property(
+      SOURCE "${mlx_SOURCE_DIR}/mlx/backend/cuda/jit_module.cpp"
+      TARGET_DIRECTORY mlx
+      APPEND
+      PROPERTY COMPILE_DEFINITIONS MLXCEL_PTX_CACHE_TEST_HOOKS)
   endif()
 
   # CUDA runtime headers for the same NVRTC JIT on Windows (#58), consumed by

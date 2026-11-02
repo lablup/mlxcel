@@ -211,7 +211,7 @@ async fn apply_template_omits_the_tool_preamble_when_the_request_carries_no_tool
         return;
     }
 
-    let client = reqwest::Client::new();
+    let client = mlxcel::http_tls::client();
 
     // --- Youtu-LLM: `tools is defined and tools is not none` ---------------
     let port = reserve_port().to_string();

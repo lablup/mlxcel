@@ -220,7 +220,7 @@ pub fn parse_config_str(
     let options = serde_saphyr::options! {
         merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
         strict_booleans: true,
-        reject_non_finite_typeless_float: false,
+        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::AsString,
     };
     let config: SurgeryConfig = serde_saphyr::from_str_with_options(yaml, options)
         .map_err(|e| SurgeryError::Other(anyhow::anyhow!("failed to parse surgery YAML: {e}")))?;

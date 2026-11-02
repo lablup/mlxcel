@@ -19,23 +19,6 @@ pub(super) fn scalar_broadcast(builder: &mut Builder, value: f32, shape: Vec<usi
     builder.broadcast(&scalar, &[], shape)
 }
 
-pub(super) fn tanh_gelu(builder: &mut Builder, value: &Val) -> Val {
-    let shape = value.ty.shape.clone();
-    let half = scalar_broadcast(builder, 0.5, shape.clone());
-    let one = scalar_broadcast(builder, 1.0, shape.clone());
-    let coefficient = scalar_broadcast(builder, 0.044_715, shape.clone());
-    let scale = scalar_broadcast(builder, 0.797_884_6, shape);
-    let squared = builder.multiply(value, value);
-    let cubed = builder.multiply(&squared, value);
-    let nonlinear = builder.multiply(&coefficient, &cubed);
-    let inner = builder.add(value, &nonlinear);
-    let scaled = builder.multiply(&scale, &inner);
-    let tanh = builder.tanh(&scaled);
-    let cdf = builder.add(&one, &tanh);
-    let half_value = builder.multiply(value, &half);
-    builder.multiply(&half_value, &cdf)
-}
-
 pub(super) fn softmax_last(builder: &mut Builder, scores: &Val) -> Val {
     let last = scores.ty.shape.len() - 1;
     let negative_infinity = builder.const_f32(f32::NEG_INFINITY);

@@ -116,6 +116,24 @@ pub fn fused_moe_enabled() -> bool {
         && mlxcel_core::fused_moe_kernels_available()
 }
 
+/// Whether [`SwitchGLU::forward`] tries the gate/up kernel for this batch.
+///
+/// Batched decode on M1 Ultra loses about 10% to it against `gather_qmm`:
+/// Qwen3-30B-A3B 4-bit is 94.2 vs 104.1 tok/s at B=2 and 115.3 vs 124.5 at B=4,
+/// and Mixtral 8x7B 4-bit is 34.3 vs 41.1 at B=4 (#2587). The M3 Ultra numbers
+/// in `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-10-21.md` keep
+/// it on where it was measured. M2 shares M1's narrow quantized paths and is
+/// declined with it, as is an unenumerated generation, on the rule
+/// [`AppleSiliconGen::wide_quantized_projections`] documents.
+///
+/// [`AppleSiliconGen::wide_quantized_projections`]: mlxcel_core::hardware::AppleSiliconGen::wide_quantized_projections
+pub(crate) fn switch_gate_up_preferred_in_forward(
+    tokens: i32,
+    silicon_gen: mlxcel_core::hardware::AppleSiliconGen,
+) -> bool {
+    tokens == 1 || silicon_gen.wide_quantized_projections()
+}
+
 /// Pure decision behind [`fused_moe_enabled`], split out so it can be unit-tested
 /// without mutating process-global environment state. `None` (unset) is on; an
 /// explicit `0`/`false`/`off`/`no` (case-insensitive, trimmed) is off; any other
@@ -159,10 +177,22 @@ const FUSED_MOE_MAX_DFF_METAL: i32 = 4096;
 /// `docs/benchmark_results/fused-moe-decode-kernel-design.md`.
 const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 
+/// ROCm default for the same bound. On gfx1151, Mixtral-8x7B (Dff 14336) decodes
+/// at 24.9 tok/s through the fused kernels and 8.2 through `gather_qmm`. No wider
+/// expert has been measured, so the bound stops at that shape.
+const FUSED_MOE_MAX_DFF_ROCM: i32 = 14336;
+
+/// The default bound of a non-Metal build, whose fused kernels are its GPU port.
+const FUSED_MOE_MAX_DFF_GPU_PORT: i32 = if cfg!(feature = "rocm") {
+    FUSED_MOE_MAX_DFF_ROCM
+} else {
+    FUSED_MOE_MAX_DFF_CUDA
+};
+
 /// Resolve the fused-MoE Dff upper bound. An explicit positive
 /// `MLXCEL_FUSED_MOE_MAX_DFF` wins on both backends; otherwise the default is
 /// backend-specific (Metal keeps the conservative 4096, CUDA uses the higher
-/// measured crossover). Split out as a pure function so the backend-aware
+/// measured crossover, ROCm its own measured width). Split out as a pure function so the backend-aware
 /// default is unit-testable without mutating process-global env or querying the
 /// live device; `metal_available` mirrors `mlx::core::metal::is_available()`.
 ///
@@ -191,7 +221,7 @@ pub(crate) fn fused_moe_max_dff_from(env: Option<&str>, metal_available: bool) -
         .unwrap_or(if metal_available {
             FUSED_MOE_MAX_DFF_METAL
         } else {
-            FUSED_MOE_MAX_DFF_CUDA
+            FUSED_MOE_MAX_DFF_GPU_PORT
         })
 }
 
@@ -1585,7 +1615,13 @@ impl SwitchGLU {
             let activated = self.activate(&x_gate, &x_up);
             let output = self.down_proj.forward(&activated, &rhs, true);
             scatter_unsort(&output, &inv_order, &indices_shape)
-        } else if let Some(activated) = self.forward_switch_gate_up_kernel(x, indices) {
+        } else if let Some(activated) = switch_gate_up_preferred_in_forward(
+            n_tokens,
+            mlxcel_core::hardware::get_hardware().silicon_gen,
+        )
+        .then(|| self.forward_switch_gate_up_kernel(x, indices))
+        .flatten()
+        {
             // The kernel's activated output is `[tokens, top_k, dff]`; the
             // down projection's indexed path consumes the gather layout's
             // `[tokens, top_k, 1, dff]`, so one ExpandDims bridges the shapes
@@ -1915,7 +1951,8 @@ impl SwitchGLU {
         // Large experts: gather_qmm already saturates the GPU, so the two-kernel
         // fused path's all-cores advantage disappears and its extra dispatch +
         // global-memory activation staging becomes a net loss. The break-even is
-        // backend-dependent (Metal ~4096, CUDA ~8192; see FUSED_MOE_MAX_DFF_*),
+        // backend-dependent (Metal ~4096, CUDA ~8192, ROCm above 14336; see
+        // FUSED_MOE_MAX_DFF_*),
         // so the default follows the live backend and the env var overrides both.
         // Decline above the bound so the caller falls back to gather_qmm.
         let max_dff = fused_moe_max_dff_from(
@@ -2677,11 +2714,28 @@ mod tests {
     }
 
     #[test]
+    fn switch_gate_up_in_forward_is_batched_only_on_wide_generations() {
+        use mlxcel_core::hardware::AppleSiliconGen as Gen;
+        for silicon_gen in [Gen::M1, Gen::M2, Gen::M3, Gen::M4, Gen::M5, Gen::Unknown] {
+            assert!(switch_gate_up_preferred_in_forward(1, silicon_gen));
+        }
+        for silicon_gen in [Gen::M1, Gen::M2, Gen::Unknown] {
+            assert!(!switch_gate_up_preferred_in_forward(2, silicon_gen));
+        }
+        for silicon_gen in [Gen::M3, Gen::M4, Gen::M5] {
+            assert!(switch_gate_up_preferred_in_forward(2, silicon_gen));
+        }
+    }
+
+    #[test]
     fn fused_moe_max_dff_default_is_backend_aware_and_env_overrides() {
         // Unset: Metal keeps the conservative 4096; CUDA (no Metal) uses the
         // higher measured GB10 crossover (#626).
         assert_eq!(fused_moe_max_dff_from(None, true), FUSED_MOE_MAX_DFF_METAL);
-        assert_eq!(fused_moe_max_dff_from(None, false), FUSED_MOE_MAX_DFF_CUDA);
+        assert_eq!(
+            fused_moe_max_dff_from(None, false),
+            FUSED_MOE_MAX_DFF_GPU_PORT
+        );
         // The CUDA default must exceed Metal's, which is the whole point of #626.
         const { assert!(FUSED_MOE_MAX_DFF_CUDA > FUSED_MOE_MAX_DFF_METAL) };
         // An explicit positive value overrides the default on both backends.
@@ -2697,7 +2751,7 @@ mod tests {
             );
             assert_eq!(
                 fused_moe_max_dff_from(Some(bad), false),
-                FUSED_MOE_MAX_DFF_CUDA
+                FUSED_MOE_MAX_DFF_GPU_PORT
             );
         }
     }
@@ -2715,12 +2769,13 @@ mod tests {
         assert!(!declines(FUSED_MOE_MAX_DFF_METAL, None, true));
         assert!(declines(FUSED_MOE_MAX_DFF_METAL + 1, None, true));
 
-        // CUDA default 8192: phi-3.5-moe (Dff 6400) and llama-4-scout (Dff 8192)
-        // dispatch, mixtral (Dff 14336) declines.
+        // CUDA default 8192 (ROCm 14336): phi-3.5-moe (Dff 6400) and llama-4-scout
+        // (Dff 8192) dispatch.
         assert!(!declines(6400, None, false));
-        assert!(!declines(FUSED_MOE_MAX_DFF_CUDA, None, false));
-        assert!(declines(FUSED_MOE_MAX_DFF_CUDA + 1, None, false));
-        assert!(declines(14336, None, false));
+        assert!(!declines(FUSED_MOE_MAX_DFF_GPU_PORT, None, false));
+        assert!(declines(FUSED_MOE_MAX_DFF_GPU_PORT + 1, None, false));
+        // Mixtral (Dff 14336) takes the fused path on ROCm alone.
+        assert_eq!(declines(14336, None, false), !cfg!(feature = "rocm"));
 
         // Metal keeps 4096, so the same mid-size experts decline there.
         assert!(declines(6400, None, true));

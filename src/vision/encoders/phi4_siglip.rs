@@ -159,7 +159,10 @@ impl Phi4SigLipMlp {
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let x = self.fc1.forward(x);
-        let x = mlxcel_core::gelu_approx(&x);
+        // SigLIP2 tower: `hidden_act = gelu_pytorch_tanh` (the HF
+        // `Phi4MultimodalVisionConfig` and mlx-vlm config default), tanh in f32
+        // as one compiled kernel (erf before #2548).
+        let x = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&x);
         self.fc2.forward(&x)
     }
 }

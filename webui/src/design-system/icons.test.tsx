@@ -57,7 +57,7 @@ describe('WebUI icons', () => {
     const webui = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     const pkg = JSON.parse(readFileSync(join(webui, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
     const lockfile = readFileSync(join(webui, 'pnpm-lock.yaml'), 'utf8');
-    const snapshots = lockfile.slice(lockfile.indexOf('\nsnapshots:\n'));
+    const snapshots = lockfile.slice(lockfile.lastIndexOf('\nsnapshots:\n'));
     const copies = Array.from(snapshots.matchAll(/^ {2}'?lucide-react@([^:']+)'?:$/gm), (match) => match[1]);
     expect(copies).toHaveLength(1);
     expect(copies[0]?.startsWith(`${pkg.dependencies['lucide-react']}(`)).toBe(true);

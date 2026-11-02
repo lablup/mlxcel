@@ -96,13 +96,18 @@ pub(crate) fn load_granite_vision_vlm(model_path: &Path) -> Result<LoadedModel> 
     let text_args: models::granite::ModelArgs = serde_json::from_value(text_config_val)
         .map_err(|e| anyhow::anyhow!("Failed to parse Granite text config: {}", e))?;
 
-    let vision_config: vision::config::VisionConfig = serde_json::from_value(
-        full_config
-            .get("vision_config")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Missing vision_config in config.json"))?,
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to parse Granite vision config: {}", e))?;
+    let raw_vision_config = full_config
+        .get("vision_config")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing vision_config in config.json"))?;
+    let mut vision_config: vision::config::VisionConfig =
+        serde_json::from_value(raw_vision_config.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to parse Granite vision config: {}", e))?;
+    // Granite Vision 3.x's SigLIP tower omits `hidden_act`; Hugging Face
+    // (`LlavaNext` + `SiglipVisionConfig`) evaluates `gelu_pytorch_tanh`.
+    // mlx-vlm's `FastGELUMLP` departs from it; this follows HF (#2548; erf
+    // before).
+    vision_config.default_missing_hidden_act_by_model_type(&raw_vision_config);
 
     let group_size = text_args.group_size();
     let bits = text_args.bits();

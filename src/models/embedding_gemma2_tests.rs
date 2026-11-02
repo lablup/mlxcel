@@ -259,7 +259,7 @@ fn per_layer_config_resolves_local_and_global_layers() {
             }
         }
     });
-    let cfg = EmbeddingGemma2Config::from_json(&raw, None);
+    let cfg = EmbeddingGemma2Config::from_json(&raw, None).expect("config parses");
     assert_eq!(cfg.layers.len(), 24);
     for (i, layer) in cfg.layers.iter().enumerate() {
         if matches!(i, 5 | 11 | 17 | 23) {
@@ -336,7 +336,7 @@ fn sanitize_and_quant_params_handle_hf_and_mlx_layouts() {
 fn synthetic_forward_padding_invariance_bidirectionality_and_matryoshka() {
     let _guard = mlx_test_guard();
     let raw_cfg = synthetic_config(2, 2);
-    let parsed_cfg = EmbeddingGemma2Config::from_json(&raw_cfg, None);
+    let parsed_cfg = EmbeddingGemma2Config::from_json(&raw_cfg, None).expect("config parses");
     let mut weights = build_synthetic_weights(&parsed_cfg);
     let model = EmbeddingGemma2Model::from_weights(&mut weights, &raw_cfg, PoolingMode::Mean, true)
         .unwrap();
@@ -409,7 +409,7 @@ fn sliding_window_mask_blocks_tokens_beyond_window() {
     let _guard = mlx_test_guard();
     // 1-layer sliding-only model with sliding_window = 1 (allows |q - k| <= 1)
     let raw_cfg = synthetic_config(1, 1);
-    let parsed_cfg = EmbeddingGemma2Config::from_json(&raw_cfg, None);
+    let parsed_cfg = EmbeddingGemma2Config::from_json(&raw_cfg, None).expect("config parses");
     assert!(parsed_cfg.layers[0].is_sliding);
     let mut weights = build_synthetic_weights(&parsed_cfg);
     let model = EmbeddingGemma2Model::from_weights(&mut weights, &raw_cfg, PoolingMode::Mean, true)
@@ -437,7 +437,7 @@ fn sliding_window_mask_blocks_tokens_beyond_window() {
 #[test]
 fn expand_image_tokens_text_only_and_vision_paths() {
     let raw_cfg = synthetic_config(2, 2);
-    let parsed_cfg = EmbeddingGemma2Config::from_json(&raw_cfg, None);
+    let parsed_cfg = EmbeddingGemma2Config::from_json(&raw_cfg, None).expect("config parses");
     let mut weights = build_synthetic_weights(&parsed_cfg);
     let model = EmbeddingGemma2Model::from_weights(&mut weights, &raw_cfg, PoolingMode::Mean, true)
         .unwrap();
@@ -458,7 +458,7 @@ fn short_sequence_sliding_window_bypass_matches_explicit_window_mask() {
     let _guard = mlx_test_guard();
     // sliding_window = 10, input length = 4 (4 <= 10 + 1)
     let raw_cfg = synthetic_config(2, 10);
-    let parsed_cfg = EmbeddingGemma2Config::from_json(&raw_cfg, None);
+    let parsed_cfg = EmbeddingGemma2Config::from_json(&raw_cfg, None).expect("config parses");
     let mut weights = build_synthetic_weights(&parsed_cfg);
     let model = EmbeddingGemma2Model::from_weights(&mut weights, &raw_cfg, PoolingMode::Mean, true)
         .unwrap();
@@ -489,21 +489,56 @@ fn config_bounds_guard_against_malformed_nonpositive_values() {
             "num_attention_heads": -4,
             "num_key_value_heads": 0,
             "head_dim": -128,
-            "sliding_window": -512,
             "hidden_size_per_layer_input": -1
         }
     });
-    let cfg = EmbeddingGemma2Config::from_json(&bad_cfg, None);
+    let cfg = EmbeddingGemma2Config::from_json(&bad_cfg, None).expect("config parses");
     assert!(cfg.vocab_size >= 1);
     assert!(cfg.hidden_size >= 1);
     assert!(cfg.intermediate_size >= 1);
     assert!(cfg.num_hidden_layers >= 1);
-    assert!(cfg.sliding_window >= 1);
+    assert_eq!(cfg.sliding_window, 512);
     assert!(cfg.ple_dim >= 1);
     assert_eq!(cfg.layers.len(), 1);
     assert!(cfg.layers[0].num_attention_heads >= 1);
     assert!(cfg.layers[0].num_key_value_heads >= 1);
     assert!(cfg.layers[0].head_dim >= 1);
+}
+
+// Issue #2798: the sliding window is validated, not clamped, before the
+// bidirectional band reads it.
+#[test]
+fn config_rejects_a_sliding_window_that_cannot_back_the_band() {
+    for window in [
+        json!(0),
+        json!(-512),
+        json!(i64::from(i32::MAX) + 1),
+        // Above `i64::MAX` is still a window, not a missing one.
+        json!(i64::MAX as u64 + 1),
+    ] {
+        let cfg = json!({ "text_config": { "sliding_window": window } });
+        let err = EmbeddingGemma2Config::from_json(&cfg, None)
+            .expect_err("an unusable sliding window must fail the parse");
+        assert!(err.contains("EmbeddingGemma 2"), "{err}");
+        assert!(err.contains("sliding_window"), "{err}");
+    }
+    let all_global = json!({
+        "text_config": {
+            "sliding_window": 0,
+            "num_hidden_layers": 2,
+            "layer_types": ["full_attention", "full_attention"]
+        }
+    });
+    let cfg = EmbeddingGemma2Config::from_json(&all_global, None)
+        .expect("an all-global config keeps any unused window");
+    assert_eq!(cfg.sliding_window, 0);
+
+    // A JSON null is not a window: it falls back to the default rather than
+    // failing a config that loaded before (issue #2798 review).
+    let null_window = json!({ "text_config": { "sliding_window": null } });
+    let cfg = EmbeddingGemma2Config::from_json(&null_window, None)
+        .expect("a null window keeps the default");
+    assert_eq!(cfg.sliding_window, 512);
 }
 
 #[test]

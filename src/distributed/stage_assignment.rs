@@ -72,7 +72,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
@@ -87,6 +86,7 @@ use super::cluster_init::{
 use super::config::{ClusterConfig, NodeRole};
 use super::frame_protection::{FrameChannel, FrameRejected, FrameSuite};
 use super::handshake_warn::{HandshakeWarnClass, handshake_warn_allowed, handshake_warn_class};
+use super::peer_text::{MAX_PEER_TEXT_BYTES, loggable_peer_text, truncate_peer_text};
 use super::pending_handshakes::PendingHandshakeLimiter;
 use super::pipeline::{
     resolve_in_process_pipeline_num_layers, resolve_in_process_stage_assignments_for_model,
@@ -98,8 +98,9 @@ use super::transport::MessageKind;
 /// 2 added the `Activate` / `Abort` step after `Committed` (#2694).
 pub const ASSIGNMENT_PROTOCOL_VERSION: u16 = 2;
 /// Longest `Abort { detail }` the coordinator sends (bytes); a longer
-/// failure summary is cut at a character boundary.
-const MAX_ABORT_DETAIL_BYTES: usize = 1024;
+/// failure summary is cut at a character boundary. The same bound applies
+/// to every peer text this process logs (`peer_text`).
+const MAX_ABORT_DETAIL_BYTES: usize = MAX_PEER_TEXT_BYTES;
 /// Largest frame either side accepts (length prefix excluded).
 pub const MAX_ASSIGNMENT_FRAME_BYTES: usize = 64 * 1024;
 /// Bound on every single frame read or write.
@@ -143,7 +144,7 @@ impl ModelIdentity {
         let config_path = model_dir.join("config.json");
         let config_bytes = std::fs::read(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?;
-        let config_sha256 = format!("{:x}", Sha256::digest(&config_bytes));
+        let config_sha256 = crate::sha256_hex::sha256_hex(&config_bytes);
         let mut weight_files = Vec::new();
         let entries = std::fs::read_dir(model_dir)
             .with_context(|| format!("failed to list {}", model_dir.display()))?;
@@ -456,22 +457,18 @@ impl std::fmt::Display for AssignmentPushFailed {
 /// `text` cut to at most [`MAX_ABORT_DETAIL_BYTES`] at a character boundary,
 /// for the `Abort` frame.
 fn abort_detail(text: &str) -> String {
-    if text.len() <= MAX_ABORT_DETAIL_BYTES {
-        return text.to_string();
-    }
-    let mut end = MAX_ABORT_DETAIL_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_string()
+    let detail = truncate_peer_text(text);
+    debug_assert!(detail.len() <= MAX_ABORT_DETAIL_BYTES);
+    detail.to_string()
 }
 
 /// A received `Abort { detail }` made safe to log: bounded to
 /// [`MAX_ABORT_DETAIL_BYTES`] at a character boundary, with control
 /// characters (newlines, escapes) written as escape sequences so one frame
-/// cannot inject extra log lines.
+/// cannot inject extra log lines (shared with the pipeline log sites,
+/// #2782).
 fn loggable_abort_detail(detail: &str) -> String {
-    abort_detail(detail).escape_debug().to_string()
+    loggable_peer_text(detail)
 }
 
 /// Everything a `--pp-peer` process needs to wait for its assignment.

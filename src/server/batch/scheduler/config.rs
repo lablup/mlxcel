@@ -163,6 +163,9 @@ impl BatchScheduler {
             max_kv_size: None,
             shared_kv_budget: None,
             context_retention: ContextRetentionPolicy::default(),
+            context_shift_forced_off: false,
+            context_shift_fallback_warned: Arc::new(AtomicBool::new(false)),
+            model_owned_slot_holder: None,
             // multimodal prefix-cache sharing stays off until the operator
             // opts in via `with_vlm_prefix_cache` (#124 step c).
             enable_vlm_prefix_cache: false,
@@ -180,6 +183,8 @@ impl BatchScheduler {
                     &crate::server::SpeculativeDispatch::Disabled,
                 ),
             prompt_lookup_widths_warmed: false,
+            full_model_drafter: None,
+            full_model_input_vocab: None,
             // No adaptive MTP policy until `with_mtp_policy` builds one for an
             // MTP dispatch. The non-speculative hot path never touches it.
             mtp_policy: None,
@@ -359,6 +364,11 @@ impl BatchScheduler {
             // the dense backend (and therefore under Int8); no warning needed.
         }
         self.max_kv_size = max_kv_size;
+        let (policy, forced_off) = self.effective_context_retention(self.context_retention);
+        self.context_retention = policy;
+        // A policy forced off earlier already reads `context_shift: false`, so
+        // re-evaluating it never reports the fallback again; keep the record.
+        self.context_shift_forced_off |= forced_off;
         self
     }
 
@@ -377,9 +387,76 @@ impl BatchScheduler {
     /// Install the context-retention policy (#1472, b10621 `--context-shift`
     /// / `--keep`). Default: shifting disabled, retain 0, which is upstream's
     /// default and makes the KV bound a hard stop.
+    ///
+    /// A model whose K/V lives in the model (`SequenceStateBackend::ModelOwned`)
+    /// keeps no `KVCache` in the pool for [`Self::enforce_max_kv_size_for`] to
+    /// trim, so shifting would let it grow past `--max-kv-size` unnoticed.
+    /// With a bound set, such a model gets the policy with `context_shift`
+    /// off and one warning when the scheduler starts
+    /// ([`Self::warn_context_shift_fallback_once`]): the bound then holds
+    /// through admission refusal and the `truncated: true` stop.
     pub fn with_context_retention(mut self, policy: ContextRetentionPolicy) -> Self {
+        let (policy, forced_off) = self.effective_context_retention(policy);
         self.context_retention = policy;
+        self.context_shift_forced_off = forced_off;
         self
+    }
+
+    /// Share the "context-shift fallback already logged" flag with earlier
+    /// schedulers of the same model.
+    ///
+    /// The worker rebuilds the scheduler on every wake from idle sleep and
+    /// passes one flag per worker thread, so a model warns once however often
+    /// it wakes while every model of a multi-model server still warns for
+    /// itself (issue #2783). Default: a fresh flag per scheduler.
+    pub fn with_context_shift_fallback_warned(mut self, warned: Arc<AtomicBool>) -> Self {
+        self.context_shift_fallback_warned = warned;
+        self
+    }
+
+    /// `policy` with context shifting turned off when nothing could honor it
+    /// (a KV bound is set and the model owns its caches), and whether that
+    /// happened. The warning is left to [`Self::warn_context_shift_fallback_once`]
+    /// so it does not depend on builder order.
+    fn effective_context_retention(
+        &self,
+        policy: ContextRetentionPolicy,
+    ) -> (ContextRetentionPolicy, bool) {
+        if self.max_kv_size.is_none()
+            || !policy.context_shift
+            || self.engine.model().sequence_state_layout().backend
+                != SequenceStateBackend::ModelOwned
+        {
+            return (policy, false);
+        }
+        (
+            ContextRetentionPolicy {
+                context_shift: false,
+                ..policy
+            },
+            true,
+        )
+    }
+
+    /// Log the context-shift fallback warning unless this model already did.
+    ///
+    /// Returns whether it logged. Called when [`Self::run`] starts, after the
+    /// builder has settled the policy.
+    pub(crate) fn warn_context_shift_fallback_once(&self) -> bool {
+        if !self.context_shift_forced_off
+            || self
+                .context_shift_fallback_warned
+                .swap(true, Ordering::Relaxed)
+        {
+            return false;
+        }
+        tracing::warn!(
+            max_kv_size = self.max_kv_size.unwrap_or_default(),
+            "--context-shift cannot trim this model's KV caches (they live inside the \
+             model, not in the scheduler's cache pool); serving with context shifting \
+             disabled, so a sequence that reaches the KV bound stops with truncated: true"
+        );
+        true
     }
 
     /// The configured context-retention policy (for tests).
@@ -436,6 +513,20 @@ impl BatchScheduler {
         self
     }
 
+    /// Hand the scheduler the loaded draft model of a
+    /// [`crate::server::SpeculativeDispatch::FullModel`] dispatch (#2757).
+    /// The worker loads it on its own thread, next to the target, after
+    /// [`Self::with_speculative_dispatch`]; without it a full-model dispatch
+    /// primes no row and every request decodes plainly.
+    pub fn with_full_model_drafter(mut self, drafter: Option<LoadedModel>) -> Self {
+        self.full_model_input_vocab = self
+            .speculative_dispatch
+            .full_model_draft_path()
+            .and_then(mlxcel_core::drafter::checkpoint_vocab_size);
+        self.full_model_drafter = drafter;
+        self
+    }
+
     /// Attach the resolved speculative-decoding dispatch.
     ///
     /// Default (constructed by [`Self::with_config`]) is
@@ -443,9 +534,8 @@ impl BatchScheduler {
     /// don't pass `--draft-model` keep the bit-exact classic decode path
     /// with zero overhead.
     ///
-    /// When `dispatch` is one of [`crate::server::SpeculativeDispatch::Mtp`],
-    /// [`crate::server::SpeculativeDispatch::DFlash`], or
-    /// [`crate::server::SpeculativeDispatch::Classic`], the scheduler logs
+    /// When `dispatch` is [`crate::server::SpeculativeDispatch::Mtp`] or
+    /// [`crate::server::SpeculativeDispatch::DFlash`], the scheduler logs
     /// the dispatch at the next decode tick and (in a follow-up issue)
     /// constructs the matching round-loop driver per request when the
     /// per-request preconditions hold.

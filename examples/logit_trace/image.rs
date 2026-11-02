@@ -29,10 +29,18 @@
 //! a multi-token append runs at. Every continuation token is scored, and the
 //! rows are written as chunk 0 in the same TSV the text arm writes, so
 //! `scripts/compare_logit_traces.py` reads a pair unmodified.
+//!
+//! The template renders with the server-wide `enable_thinking` default, which
+//! is on for a tokenizer with think markers (`server::chat_front`), while
+//! transformers and mlx-vlm leave it off. `MLXCEL_TRACE_ENABLE_THINKING=0` or
+//! `=1` overrides that default for the trace, so both arms can be scored with
+//! the same setting (`scripts/mlx_vlm_image_logit_trace.py --enable-thinking`,
+//! issue #2761).
 
 use anyhow::{Context, Result};
 use mlxcel::LanguageModel;
 use mlxcel::server::chat_front::load_model_chat_template;
+use mlxcel::server::chat_template::ChatMessage;
 use mlxcel::tokenizer::MlxcelTokenizer;
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::{MlxArray, UniquePtr, eval, from_slice_i32};
@@ -44,25 +52,76 @@ const DEFAULT_PROMPT: &str = "Describe the image.";
 pub struct ImageArm {
     pub image_path: String,
     pub prompt: String,
+    /// `MLXCEL_TRACE_ENABLE_THINKING`; `None` keeps the server default.
+    pub enable_thinking: Option<bool>,
 }
 
 impl ImageArm {
     /// `Some` when `MLXCEL_TRACE_IMAGE` names an image.
-    pub fn from_env() -> Option<Self> {
-        let image_path = std::env::var("MLXCEL_TRACE_IMAGE").ok()?;
+    pub fn from_env() -> Result<Option<Self>> {
+        let Ok(image_path) = std::env::var("MLXCEL_TRACE_IMAGE") else {
+            return Ok(None);
+        };
         let prompt = std::env::var("MLXCEL_TRACE_IMAGE_PROMPT")
             .unwrap_or_else(|_| DEFAULT_PROMPT.to_string());
-        Some(Self { image_path, prompt })
+        let enable_thinking = parse_enable_thinking(
+            std::env::var("MLXCEL_TRACE_ENABLE_THINKING")
+                .ok()
+                .as_deref(),
+        )?;
+        Ok(Some(Self {
+            image_path,
+            prompt,
+            enable_thinking,
+        }))
+    }
+}
+
+/// `0` or `1`; unset (or empty) keeps the server default.
+fn parse_enable_thinking(value: Option<&str>) -> Result<Option<bool>> {
+    match value.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some("0") => Ok(Some(false)),
+        Some("1") => Ok(Some(true)),
+        Some(other) => anyhow::bail!("MLXCEL_TRACE_ENABLE_THINKING must be 0 or 1, got {other:?}"),
     }
 }
 
 /// Render the user turn with one image placeholder, as `mlxcel generate`
-/// does for a single `--image`.
-fn render_prompt(model_dir: &str, tokenizer: &MlxcelTokenizer, user_prompt: &str) -> String {
-    let Some(processor) = load_model_chat_template(std::path::Path::new(model_dir), tokenizer)
+/// does for a single `--image`: a typed `[image, text]` content list when the
+/// template has an image branch, otherwise the question alone through the
+/// text-only render (the image then reaches the prompt as tokens). Handing a
+/// template without an image branch the list made it fail and fall back to
+/// the bare question with no chat turn at all, which is how the InternVL trace
+/// lost its whole template (issue #2547).
+///
+/// `enable_thinking` replaces the server default the template was loaded with
+/// (`MLXCEL_TRACE_ENABLE_THINKING`).
+fn render_prompt(
+    model_dir: &str,
+    tokenizer: &MlxcelTokenizer,
+    user_prompt: &str,
+    enable_thinking: Option<bool>,
+) -> String {
+    let Some(mut processor) = load_model_chat_template(std::path::Path::new(model_dir), tokenizer)
     else {
         return user_prompt.to_string();
     };
+    if let Some(enable_thinking) = enable_thinking {
+        processor.set_default_enable_thinking(enable_thinking);
+    }
+    let text_only = || {
+        let messages = [ChatMessage {
+            role: "user".to_string(),
+            content: user_prompt.to_string(),
+        }];
+        processor
+            .apply(&messages, None)
+            .unwrap_or_else(|_| user_prompt.to_string())
+    };
+    if !processor.supports_image_content() {
+        return text_only();
+    }
     let messages = serde_json::json!([{
         "role": "user",
         "content": [
@@ -72,7 +131,7 @@ fn render_prompt(model_dir: &str, tokenizer: &MlxcelTokenizer, user_prompt: &str
     }]);
     processor
         .apply_raw(&messages, None)
-        .unwrap_or_else(|_| user_prompt.to_string())
+        .unwrap_or_else(|_| text_only())
 }
 
 fn encode(tokenizer: &MlxcelTokenizer, text: &str, add_special: bool) -> Vec<i32> {
@@ -89,8 +148,8 @@ pub struct ImageTrace {
     /// Row `j` predicts `targets[j]`; shape `[1, targets.len(), vocab]`.
     pub logits: UniquePtr<MlxArray>,
     pub targets: Vec<i32>,
-    /// Prompt length after image-token expansion.
-    pub prompt_tokens: usize,
+    /// The prompt after image-token expansion, as the model reads it.
+    pub prompt_ids: Vec<i32>,
 }
 
 /// Run the image-prompted arm over the first `max_tokens` tokens of `text`.
@@ -105,7 +164,7 @@ pub fn trace(
 ) -> Result<ImageTrace> {
     let image = image::open(&arm.image_path)
         .with_context(|| format!("loading image {}", arm.image_path))?;
-    let prompt = render_prompt(model_dir, tokenizer, &arm.prompt);
+    let prompt = render_prompt(model_dir, tokenizer, &arm.prompt, arm.enable_thinking);
     let add_special = !tokenizer.prompt_carries_bos(&prompt);
     let mut prompt_ids = encode(tokenizer, &prompt, add_special);
     let prepared = mlxcel::vlm_runtime::prepare_vlm_embeddings(
@@ -171,7 +230,7 @@ pub fn trace(
     Ok(ImageTrace {
         logits,
         targets,
-        prompt_tokens: prompt_ids.len(),
+        prompt_ids,
     })
 }
 
@@ -226,4 +285,24 @@ fn trace_batched_continuation(
     }
     let refs: Vec<&MlxArray> = traced.iter().map(|row| &**row).collect();
     Ok(mlxcel_core::concatenate_many(&refs, 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_enable_thinking;
+
+    #[test]
+    fn enable_thinking_accepts_zero_one_and_unset() {
+        assert_eq!(parse_enable_thinking(None).unwrap(), None);
+        assert_eq!(parse_enable_thinking(Some("")).unwrap(), None);
+        assert_eq!(parse_enable_thinking(Some(" ")).unwrap(), None);
+        assert_eq!(parse_enable_thinking(Some("0")).unwrap(), Some(false));
+        assert_eq!(parse_enable_thinking(Some("1")).unwrap(), Some(true));
+    }
+
+    #[test]
+    fn enable_thinking_rejects_other_values() {
+        assert!(parse_enable_thinking(Some("yes")).is_err());
+        assert!(parse_enable_thinking(Some("true")).is_err());
+    }
 }

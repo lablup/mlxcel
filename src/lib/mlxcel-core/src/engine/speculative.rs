@@ -61,7 +61,8 @@ impl<M: LanguageModel> Engine<M> {
         let logits = {
             let _speculative = DecodeLookaheadAppendScope::enter();
             self.model
-                .forward_with_sequence_id(input, Some(id), caches, None)
+                .try_forward_with_sequence_id(input, Some(id), caches, None)
+                .map_err(EngineError::Forward)?
         };
         self.sync_sequence_storage(id);
         Ok(logits)

@@ -29,8 +29,8 @@
 //! rest of the process.
 
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -42,6 +42,9 @@ use mlxcel_core::streams::{
 use crate::rerank::{
     LoadedReranker, RerankItem, RerankLoadOptions, RerankScores, RerankerKind,
     load_reranker_with_options,
+};
+use crate::server::model_provider::{
+    WorkerExitObserver, enqueue_shutdown_command, observe_worker_exit, wait_for_worker_exit,
 };
 use crate::server::rerank_model::{RerankError, RerankModelProvider};
 
@@ -82,7 +85,10 @@ pub(crate) struct RerankWorker {
     /// cancel the in-flight MLX work.
     request_timeout: Duration,
     info: RerankWorkerInfo,
+    /// Watcher thread handle; joining it waits for the worker to free the model.
     handle: Option<JoinHandle<()>>,
+    /// Signalled once the worker thread has returned and dropped the model.
+    worker_exit: Arc<WorkerExitObserver>,
 }
 
 impl RerankWorker {
@@ -116,12 +122,16 @@ impl RerankWorker {
             .map_err(|e| anyhow::anyhow!("failed to spawn rerank worker thread: {e}"))?;
 
         match ready_rx.recv() {
-            Ok(Ok(info)) => Ok(Self {
-                sender: Mutex::new(command_tx),
-                request_timeout,
-                info,
-                handle: Some(handle),
-            }),
+            Ok(Ok(info)) => {
+                let (handle, worker_exit) = observe_worker_exit(handle);
+                Ok(Self {
+                    sender: Mutex::new(command_tx),
+                    request_timeout,
+                    info,
+                    handle: Some(handle),
+                    worker_exit,
+                })
+            }
             Ok(Err(message)) => {
                 let _ = handle.join();
                 Err(anyhow::anyhow!(
@@ -140,6 +150,18 @@ impl RerankWorker {
     /// Static facts about the loaded reranker.
     pub(crate) fn info(&self) -> &RerankWorkerInfo {
         &self.info
+    }
+
+    /// Ask the worker to exit and wait until it has released the model.
+    ///
+    /// Used by the process exit path before `main` returns (#2745), so the
+    /// model's MLX arrays are freed on the worker thread first. Idempotent;
+    /// `Err` names the timeout or carries the panic message.
+    pub(crate) fn shutdown_and_wait(&self, timeout: Duration) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+        let _ = enqueue_shutdown_command(&self.sender, RerankCommand::Shutdown, timeout);
+        let remaining = timeout.saturating_sub(started.elapsed());
+        wait_for_worker_exit(&self.worker_exit, remaining, "rerank model worker")
     }
 
     pub(crate) fn score(
@@ -372,6 +394,10 @@ impl RerankModelProvider for RerankWorkerProvider {
 
     fn max_length(&self) -> usize {
         self.worker.info().max_length
+    }
+
+    fn shutdown_and_wait(&self, timeout: Duration) -> anyhow::Result<()> {
+        self.worker.shutdown_and_wait(timeout)
     }
 }
 

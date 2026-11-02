@@ -760,7 +760,7 @@ fn old_unknown_hardware_hint_is_not_reused_across_vendors() {
 
 /// A verdict profiled at block_size=K must not be reused when K changes.
 /// Different block sizes produce different hashes (and therefore different hint
-/// files), so a change in `--num-draft-tokens` / `MLXCEL_DRAFT_BLOCK_SIZE`
+/// files), so a change in `--draft-block-size` / `MLXCEL_DRAFT_BLOCK_SIZE`
 /// triggers a fresh profiling window rather than inheriting the old verdict.
 #[test]
 fn block_size_change_produces_different_key_and_re_profiles() {

@@ -37,7 +37,7 @@ Page-specific behavior is documented per screen: [catalog.md](catalog.md) (Model
 
 ## Build the frontend and regenerate assets
 
-The toolchain is pinned exactly: Node 26.5.1 and pnpm 11.18.0. From the repository root:
+The toolchain is pinned exactly: Node 26.5.1 and pnpm 12.16.1. From the repository root:
 
 ```bash
 pnpm --dir webui install --frozen-lockfile

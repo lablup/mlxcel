@@ -628,6 +628,7 @@ impl Gemma3nAttention {
         layer_idx: usize,
         is_kv_shared_layer: bool,
         prefix: &str,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let group_size = config
             .quantization
@@ -678,11 +679,7 @@ impl Gemma3nAttention {
             num_kv_heads: config.num_key_value_heads as i32,
             head_dim,
             is_sliding,
-            window_size: if is_sliding {
-                config.sliding_window as i32
-            } else {
-                0
-            },
+            window_size: if is_sliding { sliding_cache_window } else { 0 },
             is_kv_shared_layer,
             rope_theta,
             scale,
@@ -780,13 +777,15 @@ impl MLP {
     /// Uses a compiled fused kernel matching Python's @mx.compile gelu_topk.
     fn gelu_topk(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         if self.activation_sparsity <= 0.0 {
-            return mlxcel_core::gelu_approx(x);
+            // Unreachable from `forward` (it calls this only for sparse
+            // layers); kept on the dense layers' tanh GELU.
+            return mlxcel_core::utils::GeluActivation::Tanh.apply(x);
         }
 
         // Single compiled kernel: mean/std/cutoff/max/gelu fused together,
-        // mirroring mlx-lm's @partial(mx.compile, shapeless=True) gelu_topk
-        // except for the activation: this kernel applies erf GELU where
-        // mlx-lm applies `nn.gelu_approx` (tanh); tracked as a #2423 follow-up.
+        // mirroring mlx-lm's @partial(mx.compile, shapeless=True) gelu_topk,
+        // including its tanh GELU (`nn.gelu_approx`; HF `gelu_pytorch_tanh`).
+        // It applied the erf GELU before #2548.
         mlxcel_core::compiled_gelu_topk(x, self.std_multiplier)
     }
 
@@ -1254,6 +1253,7 @@ impl DecoderLayer {
         layer_idx: usize,
         is_kv_shared_layer: bool,
         prefix: &str,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let group_size = config
             .quantization
@@ -1272,6 +1272,7 @@ impl DecoderLayer {
             layer_idx,
             is_kv_shared_layer,
             &format!("{}.self_attn", prefix),
+            sliding_cache_window,
         )?;
         let mlp = MLP::from_weights(weights, config, layer_idx, &format!("{}.mlp", prefix))?;
         let altup = AltUp::from_weights(weights, config, &format!("{}.altup", prefix))?;
@@ -1355,6 +1356,9 @@ pub struct Gemma3nLanguageModel {
     pub altup_unembed_projections: Vec<UnifiedLinear>,
     pub norm: RMSNorm,
     pub config: TextConfig,
+    /// The validated sliding window every sliding layer's cache/mask takes
+    /// (issue #2798), computed once at load.
+    pub sliding_cache_window: i32,
     pub layer_idx_to_cache_idx: Vec<usize>,
     pub first_sliding_idx: usize,
     pub first_full_idx: usize,
@@ -1420,11 +1424,7 @@ impl Gemma3nLanguageModel {
         let sliding_live_len = caches[self.first_sliding_idx].live_len();
         let global_mask = (l > 1).then(|| create_causal_mask(l, global_live_len));
         let sliding_mask = (l > 1).then(|| {
-            create_sliding_window_prefill_mask_dense(
-                l,
-                sliding_live_len,
-                self.config.sliding_window as i32,
-            )
+            create_sliding_window_prefill_mask_dense(l, sliding_live_len, self.sliding_cache_window)
         });
 
         let target_magnitude = compute_magnitude(&scaled_embeddings);
@@ -1586,7 +1586,7 @@ impl Gemma3nLanguageModel {
             Some(create_sliding_window_prefill_mask_dense(
                 l,
                 sliding_live_len,
-                self.config.sliding_window as i32,
+                self.sliding_cache_window,
             ))
         } else {
             None
@@ -1779,7 +1779,7 @@ impl Gemma3nLanguageModel {
             Some(create_sliding_window_prefill_mask_dense(
                 l,
                 sliding_live_len,
-                self.config.sliding_window as i32,
+                self.sliding_cache_window,
             ))
         } else {
             None
@@ -1860,6 +1860,16 @@ impl Gemma3nLanguageModel {
         config: &TextConfig,
         prefix: &str,
     ) -> Result<Self, String> {
+        // The mask paths treat every kind that is not `full_attention` as
+        // sliding, so the predicate matches them (issue #2798).
+        let sliding_cache_window = mlxcel_core::cache::cache_window(
+            "Gemma 3n",
+            config.sliding_window,
+            config
+                .layer_types
+                .iter()
+                .any(|kind| kind != "full_attention"),
+        )?;
         let group_size = config
             .quantization
             .as_ref()
@@ -1913,6 +1923,7 @@ impl Gemma3nLanguageModel {
                 i,
                 is_kv_shared,
                 &format!("{}.layers.{}", prefix, i),
+                sliding_cache_window,
             )?;
             layers.push(layer);
         }
@@ -1986,6 +1997,7 @@ impl Gemma3nLanguageModel {
             altup_unembed_projections,
             norm,
             config: config.clone(),
+            sliding_cache_window,
             layer_idx_to_cache_idx,
             first_sliding_idx,
             first_full_idx,
@@ -2091,12 +2103,12 @@ mod xla_canonical_diagnostics {
     use super::*;
     use crate::loaded_model::LoadedModel;
     use mlxcel_xla::{
-        dequantize_gemma3n_affine_diagnostic, run_gemma3n_all_layer_diagnostics,
-        run_gemma3n_altup_correct_diagnostic_probe, run_gemma3n_altup_predict_diagnostic_probe,
-        run_gemma3n_attention_diagnostic_probe, run_gemma3n_canonical_diagnostics,
-        run_gemma3n_decode_attention_diagnostic_probe, run_gemma3n_dense_mlp_diagnostic_probe,
-        run_gemma3n_initial_altup_diagnostic_probe, run_gemma3n_ple_diagnostic_probe,
-        run_gemma3n_ple_injection_all_planes_diagnostic_probe,
+        dequantize_affine_bf16_single_round_diagnostic, dequantize_gemma3n_affine_diagnostic,
+        run_gemma3n_all_layer_diagnostics, run_gemma3n_altup_correct_diagnostic_probe,
+        run_gemma3n_altup_predict_diagnostic_probe, run_gemma3n_attention_diagnostic_probe,
+        run_gemma3n_canonical_diagnostics, run_gemma3n_decode_attention_diagnostic_probe,
+        run_gemma3n_dense_mlp_diagnostic_probe, run_gemma3n_initial_altup_diagnostic_probe,
+        run_gemma3n_ple_diagnostic_probe, run_gemma3n_ple_injection_all_planes_diagnostic_probe,
         run_gemma3n_ple_injection_diagnostic_probe, run_gemma3n_post_attention_diagnostic_probe,
         run_gemma3n_prefix_decode_diagnostic, run_gemma3n_qmv_diagnostic_probe,
         run_gemma3n_rms_diagnostic_probe, run_gemma3n_sdpa_vector_context_diagnostic_probe,
@@ -2124,7 +2136,7 @@ mod xla_canonical_diagnostics {
             }
             digest.update(&buffer[..read]);
         }
-        format!("{:x}", digest.finalize())
+        crate::sha256_hex::sha256_hex(digest.finalize())
     }
 
     fn array_to_f32(array: &MlxArray) -> Vec<f32> {
@@ -2365,6 +2377,38 @@ mod xla_canonical_diagnostics {
         }
     }
 
+    /// Build the Rust dequantization reference for an affine-quantized weight
+    /// with the rounding MLX applies on its default device (issue #2808).
+    ///
+    /// `mx.dequantize` on CPU rounds sequentially (`bf16(bf16(q*scale)+bias)`);
+    /// on GPU it computes `q*scale+bias` in f32 and rounds once (verified
+    /// bit-exact on CUDA for the pinned E2B checkpoint, 4194304/4194304, and
+    /// synthetic wide-magnitude weights, 262144/262144). The weight-carrier
+    /// comparison runs MLX on the default device, so a device-mismatched
+    /// carrier fails by construction: the two roundings disagree by one ulp on
+    /// about half of 4-bit values. The strict comparison itself is unchanged;
+    /// it still rejects any wrong scale, bias, group layout, or nibble order,
+    /// which move carriers far beyond one ulp.
+    fn dequantize_affine_carrier_on_default_device(
+        packed: &[u8],
+        scales: &[u8],
+        biases: &[u8],
+        out: usize,
+        in_packed: usize,
+        bits: usize,
+        group_size: usize,
+    ) -> Result<Vec<f32>, String> {
+        if mlxcel_core::default_device_is_gpu() {
+            dequantize_affine_bf16_single_round_diagnostic(
+                packed, scales, biases, out, in_packed, bits, group_size,
+            )
+        } else {
+            dequantize_gemma3n_affine_diagnostic(
+                packed, scales, biases, out, in_packed, bits, group_size,
+            )
+        }
+    }
+
     fn probe_real_projection(name: &str, linear: &UnifiedLinear, input: &MlxArray) {
         let input_shape = mlxcel_core::array_shape(input);
         let k = *input_shape.last().unwrap() as usize;
@@ -2406,7 +2450,7 @@ mod xla_canonical_diagnostics {
             .biases
             .as_ref()
             .expect("affine quantized weight requires biases");
-        let carrier_values = dequantize_gemma3n_affine_diagnostic(
+        let carrier_values = dequantize_affine_carrier_on_default_device(
             &mlxcel_core::array_to_raw_bytes(&quantized.weight),
             &mlxcel_core::array_to_raw_bytes(&quantized.scales),
             &mlxcel_core::array_to_raw_bytes(biases),
@@ -2473,7 +2517,7 @@ mod xla_canonical_diagnostics {
             .biases
             .as_ref()
             .expect("affine quantized weight requires biases");
-        let rust = dequantize_gemma3n_affine_diagnostic(
+        let rust = dequantize_affine_carrier_on_default_device(
             &mlxcel_core::array_to_raw_bytes(&quantized.weight),
             &mlxcel_core::array_to_raw_bytes(&quantized.scales),
             &mlxcel_core::array_to_raw_bytes(biases),
@@ -2591,6 +2635,117 @@ mod xla_canonical_diagnostics {
         );
     }
 
+    /// MLX per-op tape of Gemma3n's sparse `gelu_topk` in the gate dtype (#2795).
+    ///
+    /// Mirrors mlx-lm's `gelu_topk` op for op: native-dtype mean and variance,
+    /// the multiplier and every `nn.gelu_approx` constant in the gate dtype (the
+    /// weak Python scalars), and the cube as one `power`. Uncompiled, so each op
+    /// rounds once, which is what the XLA `sparse_gelu_stages` tape reproduces.
+    struct SparseGeluTape {
+        mean: UniquePtr<MlxArray>,
+        variance: UniquePtr<MlxArray>,
+        stddev: UniquePtr<MlxArray>,
+        cutoff: UniquePtr<MlxArray>,
+        shifted_raw: UniquePtr<MlxArray>,
+        shifted: UniquePtr<MlxArray>,
+        tanh: UniquePtr<MlxArray>,
+        activation: UniquePtr<MlxArray>,
+        /// The same tape with the two mul+add sites (`mean + std * multiplier`
+        /// and `x + 0.044715 * x**3`) rounded once, as MLX's CUDA compiled
+        /// kernels contract them into an FMA. The compiled production kernel
+        /// equals this on CUDA and `activation` on CPU.
+        activation_fma_sites: UniquePtr<MlxArray>,
+    }
+
+    /// `a + b * c` rounded once into `a`'s dtype. A bf16 product is exact in
+    /// f32, so only the f32 add can round before the final cast.
+    fn fused_multiply_add(a: &MlxArray, b: &MlxArray, c: &MlxArray) -> UniquePtr<MlxArray> {
+        let f32_of = |value: &MlxArray| mlxcel_core::astype(value, mlxcel_core::dtype::FLOAT32);
+        let wide = mlxcel_core::add(&f32_of(a), &mlxcel_core::multiply(&f32_of(b), &f32_of(c)));
+        mlxcel_core::astype(&wide, mlxcel_core::array_dtype(a))
+    }
+
+    fn sparse_gelu_manual_tape(gate: &MlxArray, std_multiplier: f32) -> SparseGeluTape {
+        let dtype = mlxcel_core::array_dtype(gate);
+        let scalar = |value: f32| mlxcel_core::full_f32(&[1], value, dtype);
+        let mean = mlxcel_core::mean_axis_native_dtype(gate, -1, true);
+        let centered = mlxcel_core::subtract(gate, &mean);
+        let variance =
+            mlxcel_core::mean_axis_native_dtype(&mlxcel_core::square(&centered), -1, true);
+        let stddev = mlxcel_core::sqrt(&variance);
+        let multiplier = scalar(std_multiplier);
+        let zero = scalar(0.0);
+        let three = scalar(3.0);
+        let cubic = scalar(0.044_715);
+        let root = scalar(0.797_884_6); // sqrt(2/pi)
+        let half = scalar(0.5);
+        let one = scalar(1.0);
+        // nn.gelu_approx: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x**3))).
+        let gelu = |cutoff: &MlxArray, fma_sites: bool| {
+            let shifted_raw = mlxcel_core::subtract(gate, cutoff);
+            let shifted = mlxcel_core::maximum(&zero, &shifted_raw);
+            let cube = mlxcel_core::power(&shifted, &three);
+            let poly = if fma_sites {
+                fused_multiply_add(&shifted, &cubic, &cube)
+            } else {
+                mlxcel_core::add(&shifted, &mlxcel_core::multiply(&cubic, &cube))
+            };
+            let tanh = mlxcel_core::tanh(&mlxcel_core::multiply(&root, &poly));
+            let activation = mlxcel_core::multiply(
+                &mlxcel_core::multiply(&half, &shifted),
+                &mlxcel_core::add(&one, &tanh),
+            );
+            (shifted_raw, shifted, tanh, activation)
+        };
+        let cutoff = mlxcel_core::add(&mean, &mlxcel_core::multiply(&stddev, &multiplier));
+        let (shifted_raw, shifted, tanh, activation) = gelu(&cutoff, false);
+        let fma_cutoff = fused_multiply_add(&mean, &stddev, &multiplier);
+        let (_, _, _, activation_fma_sites) = gelu(&fma_cutoff, true);
+        SparseGeluTape {
+            mean,
+            variance,
+            stddev,
+            cutoff,
+            shifted_raw,
+            shifted,
+            tanh,
+            activation,
+            activation_fma_sites,
+        }
+    }
+
+    /// Pin the compiled production `gelu_topk` to the manual tape bit for bit:
+    /// it must equal the per-op tape (CPU) or the FMA-site tape (CUDA). Both
+    /// counts are printed so the run records which one held.
+    fn compare_sparse_activation_manual_vs_compiled(
+        name: &str,
+        compiled: &MlxArray,
+        tape: &SparseGeluTape,
+        failures: &mut Vec<String>,
+    ) {
+        let compiled = array_to_f32(compiled);
+        let per_op = array_to_f32(&tape.activation);
+        let fma_sites = array_to_f32(&tape.activation_fma_sites);
+        let mismatches = |reference: &[f32]| {
+            compiled
+                .iter()
+                .zip(reference)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count()
+        };
+        let (to_per_op, to_fma_sites) = (mismatches(&per_op), mismatches(&fma_sites));
+        eprintln!(
+            "narrow_stage {name}: per_op_bit_mismatches={to_per_op}/{} \
+             fma_sites_bit_mismatches={to_fma_sites}/{}",
+            compiled.len(),
+            compiled.len()
+        );
+        if to_fma_sites == 0 {
+            return;
+        }
+        compare_narrow_stage(name, &compiled, &per_op, failures);
+    }
+
     fn compare_narrow_stage(name: &str, mlx: &[f32], xla: &[f32], failures: &mut Vec<String>) {
         assert_eq!(mlx.len(), xla.len(), "{name}: stage length mismatch");
         let mut max_abs = 0.0f32;
@@ -2623,6 +2778,138 @@ mod xla_canonical_diagnostics {
         if bit_mismatches != 0 {
             failures.push(format!(
                 "{name}: {bit_mismatches}/{} mismatches, max_abs={max_abs}",
+                mlx.len()
+            ));
+        }
+    }
+
+    /// Per-op tolerance for the AltUp coefficient chain (#932 rule, issue
+    /// #2808): the pinned coefficient stages run MLX's dense f32 matmul
+    /// against the compiled TF32 fixed-schedule projection, whose reduction
+    /// noise measured 1.513958e-5 (prediction) and 5.6028366e-6 (correction)
+    /// on the pinned GB10 run. `max_abs` bounds one element's f32 difference
+    /// at 1e-4, about 6.6x the measured noise and three orders below the
+    /// O(0.1+) differences a wrong formula, clip, or coefficient layout
+    /// produces. The bf16 stages that consume the coefficients cascade the
+    /// noise by at most one carrier step, so an element may also pass within
+    /// `bf16_ulp` bf16 steps when both operands are bf16 carriers.
+    #[derive(Clone, Copy)]
+    struct NarrowTolerance {
+        max_abs: f32,
+        bf16_ulp: u64,
+        /// Also accept within two bf16 ulps at the larger operand's magnitude:
+        /// the coefficient noise cascades through the bf16 stages as one ulp
+        /// of the value's binade for most elements (measured 0.00048828125 at
+        /// 0.07 and 0.03125 at 4-8 on the pinned GB10 run) and two ulps for
+        /// 16/24576 predicted elements at binade [2, 4), the expected shape of
+        /// the compiled TF32 reduction noise at these widths.
+        ulp_of_operand: bool,
+    }
+
+    const ALTUP_COEF_TOLERANCE: NarrowTolerance = NarrowTolerance {
+        max_abs: 1e-4,
+        bf16_ulp: 1,
+        ulp_of_operand: false,
+    };
+
+    /// Tolerance for the bf16 stages that consume the AltUp coefficients.
+    /// The measured cascade on the pinned GB10 run has two shapes the
+    /// relative term alone cannot cover: absolute f32 reduction noise on
+    /// near-zero values (0.00015258789 at 0.0047, five bf16 ulps) and a
+    /// relative reduction-noise drift mid-binade (0.0029296875 at 0.22,
+    /// three bf16 ulps). `max_abs` floors the former at 3.2e-3 and
+    /// `ulp_of_operand` allows two ulps at the operand's binade for the
+    /// larger magnitudes (0.03125 measured at [2, 4) is one ulp there).
+    /// Both stay three orders below the O(0.1+) differences a wrong formula,
+    /// clip, or coefficient layout produces.
+    const ALTUP_BF16_CASCADE_TOLERANCE: NarrowTolerance = NarrowTolerance {
+        max_abs: 3.2e-3,
+        bf16_ulp: 1,
+        ulp_of_operand: true,
+    };
+
+    /// One bf16 ulp at `value`'s magnitude: the step between consecutive bf16
+    /// values inside the binade containing `|value|` (2^(e-7) for values in
+    /// [2^e, 2^(e+1))).
+    fn bf16_ulp_at(value: f32) -> f32 {
+        let magnitude = value.abs();
+        if !(magnitude.is_finite() && magnitude > 0.0) {
+            return 0.0;
+        }
+        let exponent = ((magnitude.to_bits() >> 23) as i32) - 127;
+        f32::from_bits((((exponent + 127) as u32) & 0xFF) << 23) / 128.0
+    }
+
+    /// Total-order distance in bf16 ulps between two bf16 carriers: f32 bit
+    /// patterns remapped to IEEE total order, so adjacent bf16 values differ
+    /// by exactly 1 regardless of sign.
+    fn bf16_ulp_distance(left: f32, right: f32) -> u64 {
+        let ordered = |value: f32| -> i64 {
+            let bits = value.to_bits();
+            if bits & 0x8000_0000 == 0 {
+                bits as i64
+            } else {
+                !(bits as i64)
+            }
+        };
+        (ordered(left) - ordered(right)).unsigned_abs()
+    }
+
+    /// Compare a stage under the #932-based bound: an element passes when its
+    /// f32 difference is within `tolerance.max_abs`, within `tolerance.bf16_ulp`
+    /// carrier steps when both operands are bf16 carriers, or, when
+    /// `tolerance.ulp_of_operand` is set, within one bf16 ulp at the larger
+    /// operand's magnitude. The measured max_abs, the bit mismatch count, and
+    /// the bound are always printed so the run records the noise the bound is
+    /// justified with.
+    fn compare_narrow_stage_tolerant(
+        name: &str,
+        mlx: &[f32],
+        xla: &[f32],
+        tolerance: NarrowTolerance,
+        failures: &mut Vec<String>,
+    ) {
+        assert_eq!(mlx.len(), xla.len(), "{name}: stage length mismatch");
+        let mut max_abs = 0.0f32;
+        let mut first = None;
+        let mut first_exceeding = None;
+        let mut bit_mismatches = 0usize;
+        let mut exceeding = 0usize;
+        for (index, (&mlx, &xla)) in mlx.iter().zip(xla).enumerate() {
+            let delta = (mlx - xla).abs();
+            if delta > max_abs {
+                max_abs = delta;
+            }
+            if mlx.to_bits() != xla.to_bits() {
+                bit_mismatches += 1;
+                first.get_or_insert((index, mlx, xla, delta));
+            }
+            let both_bf16_carriers = mlx.to_bits() & 0xffff == 0 && xla.to_bits() & 0xffff == 0;
+            let operand_ulp_bound = if tolerance.ulp_of_operand {
+                2.0 * bf16_ulp_at(if mlx.abs() > xla.abs() { mlx } else { xla })
+            } else {
+                0.0
+            };
+            let within = delta <= tolerance.max_abs
+                || (both_bf16_carriers && bf16_ulp_distance(mlx, xla) <= tolerance.bf16_ulp)
+                || delta <= operand_ulp_bound;
+            if !within {
+                exceeding += 1;
+                first_exceeding.get_or_insert((index, mlx, xla, delta, operand_ulp_bound));
+            }
+        }
+        eprintln!(
+            "narrow_stage {name}: tolerant bit_mismatches={bit_mismatches}/{} \
+             max_abs={max_abs} first={first:?} first_exceeding={first_exceeding:?} \
+             bound(max_abs<={}, bf16_ulp<={}, ulp_of_operand<={})",
+            mlx.len(),
+            tolerance.max_abs,
+            tolerance.bf16_ulp,
+            tolerance.ulp_of_operand,
+        );
+        if exceeding != 0 {
+            failures.push(format!(
+                "{name}: {exceeding}/{} elements exceed the tolerance, max_abs={max_abs}",
                 mlx.len()
             ));
         }
@@ -3019,25 +3306,46 @@ mod xla_canonical_diagnostics {
         )
         .unwrap();
         let mut cursor = 0usize;
-        for (name, expected) in [
-            ("layer0_router_norm", array_to_f32(&router_norm)),
-            ("layer0_router_scale", array_to_f32(&router_scaled)),
-            ("layer0_modalities", array_to_f32(&modalities)),
+        // The coefficient chain and the bf16 stages that consume it carry the
+        // compiled TF32 projection's reduction noise (#932 rule); the router
+        // stages run on bit-identical inputs and stay strict.
+        for (name, expected, tolerance) in [
+            ("layer0_router_norm", array_to_f32(&router_norm), None),
+            ("layer0_router_scale", array_to_f32(&router_scaled), None),
+            ("layer0_modalities", array_to_f32(&modalities), None),
             (
                 "layer0_prediction_coefficients",
                 array_to_f32(&coefficients),
+                Some(ALTUP_COEF_TOLERANCE),
             ),
-            ("layer0_predicted_all", array_to_f32(&predicted_stacked)),
-            ("layer0_predicted_active", array_to_f32(&predicted_active)),
-            ("layer0_input_norm", array_to_f32(&input_norm)),
+            (
+                "layer0_predicted_all",
+                array_to_f32(&predicted_stacked),
+                Some(ALTUP_BF16_CASCADE_TOLERANCE),
+            ),
+            (
+                "layer0_predicted_active",
+                array_to_f32(&predicted_active),
+                Some(ALTUP_BF16_CASCADE_TOLERANCE),
+            ),
+            (
+                "layer0_input_norm",
+                array_to_f32(&input_norm),
+                Some(ALTUP_BF16_CASCADE_TOLERANCE),
+            ),
         ] {
             let len = expected.len();
-            compare_narrow_stage(
-                name,
-                &expected,
-                &xla_predict[cursor..cursor + len],
-                &mut failures,
-            );
+            let xla_stage = &xla_predict[cursor..cursor + len];
+            match tolerance {
+                Some(tolerance) => compare_narrow_stage_tolerant(
+                    name,
+                    &expected,
+                    xla_stage,
+                    tolerance,
+                    &mut failures,
+                ),
+                None => compare_narrow_stage(name, &expected, xla_stage, &mut failures),
+            }
             cursor += len;
         }
         assert_eq!(cursor, xla_predict.len());
@@ -3071,7 +3379,7 @@ mod xla_canonical_diagnostics {
             create_sliding_window_prefill_mask_dense(
                 rows as i32,
                 layer0_caches[cache_index].live_len(),
-                language_model.config.sliding_window as i32,
+                language_model.sliding_cache_window,
             )
         };
         let offset = rope_offset(&layer0_caches);
@@ -3318,38 +3626,27 @@ mod xla_canonical_diagnostics {
             layer0.mlp.activation_sparsity > 0.0,
             "pinned layer0 post-attention probe expects sparse gelu_topk"
         );
-        let sparse_mean = mlxcel_core::mean_axis(&gate, -1, true);
-        let sparse_centered = mlxcel_core::subtract(&gate, &sparse_mean);
-        let sparse_variance =
-            mlxcel_core::mean_axis(&mlxcel_core::square(&sparse_centered), -1, true);
-        let sparse_stddev = mlxcel_core::sqrt(&sparse_variance);
-        let sparse_multiplier =
-            mlxcel_core::full_f32(&[1], layer0.mlp.std_multiplier, mlxcel_core::dtype::FLOAT32);
-        let sparse_cutoff = mlxcel_core::add(
-            &sparse_mean,
-            &mlxcel_core::multiply(&sparse_stddev, &sparse_multiplier),
-        );
-        let sparse_shifted_raw = mlxcel_core::subtract(&gate, &sparse_cutoff);
-        let sparse_zero = mlxcel_core::full_f32(&[1], 0.0, mlxcel_core::dtype::FLOAT32);
-        let sparse_shifted = mlxcel_core::maximum(&sparse_shifted_raw, &sparse_zero);
-        let sparse_sqrt2 =
-            mlxcel_core::full_f32(&[1], std::f32::consts::SQRT_2, mlxcel_core::dtype::FLOAT32);
-        let sparse_erf = mlxcel_core::erf(&mlxcel_core::divide(&sparse_shifted, &sparse_sqrt2));
-        let sparse_half = mlxcel_core::full_f32(&[1], 0.5, mlxcel_core::dtype::FLOAT32);
-        let sparse_one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::dtype::FLOAT32);
-        let sparse_scale =
-            mlxcel_core::multiply(&sparse_half, &mlxcel_core::add(&sparse_one, &sparse_erf));
-        let sparse_activation_manual = mlxcel_core::astype(
-            &mlxcel_core::multiply(&sparse_shifted, &sparse_scale),
-            mlxcel_core::array_dtype(&gate),
-        );
-        let sparse_activation = layer0.mlp.gelu_topk(&gate);
-        compare_narrow_stage(
+        let sparse = sparse_gelu_manual_tape(&gate, layer0.mlp.std_multiplier);
+        let sparse_activation_compiled = layer0.mlp.gelu_topk(&gate);
+        compare_sparse_activation_manual_vs_compiled(
             "layer0_sparse_activation_manual_vs_compiled",
-            &array_to_f32(&sparse_activation),
-            &array_to_f32(&sparse_activation_manual),
+            &sparse_activation_compiled,
+            &sparse,
             &mut failures,
         );
+        // XLA reproduces the per-op tape, so the stages below continue from it;
+        // the check above ties it to the production kernel.
+        let SparseGeluTape {
+            mean: sparse_mean,
+            variance: sparse_variance,
+            stddev: sparse_stddev,
+            cutoff: sparse_cutoff,
+            shifted_raw: sparse_shifted_raw,
+            shifted: sparse_shifted,
+            tanh: sparse_tanh,
+            activation: sparse_activation,
+            ..
+        } = sparse;
         let sparse_product = mlxcel_core::multiply(&sparse_activation, &up);
         let mlp_down = layer0.mlp.down_proj.forward(&sparse_product);
         let post_ff_norm = layer0.post_feedforward_layernorm.forward(&mlp_down);
@@ -3488,7 +3785,7 @@ mod xla_canonical_diagnostics {
                 array_to_f32(&sparse_shifted_raw),
             ),
             ("layer0_sparse_shifted", array_to_f32(&sparse_shifted)),
-            ("layer0_sparse_erf", array_to_f32(&sparse_erf)),
+            ("layer0_sparse_tanh", array_to_f32(&sparse_tanh)),
             ("layer0_sparse_activation", array_to_f32(&sparse_activation)),
             ("layer0_sparse_product", array_to_f32(&sparse_product)),
             ("layer0_mlp_down", array_to_f32(&mlp_down)),
@@ -3523,45 +3820,68 @@ mod xla_canonical_diagnostics {
         )
         .unwrap();
         let mut altup_correct_cursor = 0usize;
-        for (name, expected) in [
+        // The correction coefficients carry the same compiled TF32 projection
+        // noise as the prediction chain (#932 rule); the router stages and the
+        // innovation run on bit-identical inputs and stay strict.
+        for (name, expected, tolerance) in [
             (
                 "layer0_correction_router_norm",
                 array_to_f32(&correction_router_norm),
+                None,
             ),
             (
                 "layer0_correction_router_scaled",
                 array_to_f32(&correction_router_scaled),
+                None,
             ),
             (
                 "layer0_correction_modalities",
                 array_to_f32(&correction_modalities),
+                None,
             ),
             (
                 "layer0_correction_coefficients",
                 array_to_f32(&correction_coefficients),
+                Some(ALTUP_COEF_TOLERANCE),
             ),
             (
                 "layer0_correction_innovation",
                 array_to_f32(&correction_innovation),
+                None,
             ),
             (
                 "layer0_correction_product",
                 array_to_f32(&correction_products),
+                None,
             ),
-            ("layer0_corrected_all", array_to_f32(&corrected_stacked)),
-            ("layer0_corrected_active", array_to_f32(&corrected_active)),
+            (
+                "layer0_corrected_all",
+                array_to_f32(&corrected_stacked),
+                None,
+            ),
+            (
+                "layer0_corrected_active",
+                array_to_f32(&corrected_active),
+                None,
+            ),
             (
                 "layer0_corrected_scaled_active",
                 array_to_f32(&scaled_corrected_active),
+                None,
             ),
         ] {
             let len = expected.len();
-            compare_narrow_stage(
-                name,
-                &expected,
-                &xla_altup_correct[altup_correct_cursor..altup_correct_cursor + len],
-                &mut failures,
-            );
+            let xla_stage = &xla_altup_correct[altup_correct_cursor..altup_correct_cursor + len];
+            match tolerance {
+                Some(tolerance) => compare_narrow_stage_tolerant(
+                    name,
+                    &expected,
+                    xla_stage,
+                    tolerance,
+                    &mut failures,
+                ),
+                None => compare_narrow_stage(name, &expected, xla_stage, &mut failures),
+            }
             altup_correct_cursor += len;
         }
         assert_eq!(altup_correct_cursor, xla_altup_correct.len());
@@ -3609,6 +3929,126 @@ mod xla_canonical_diagnostics {
             failures.is_empty(),
             "narrow Gemma3n stages diverged:\n{}",
             failures.join("\n")
+        );
+    }
+
+    /// Negative control for the weight-carrier check (issue #2808): the
+    /// device-matched carrier must reproduce the MLX dequantized weight bit
+    /// for bit on the default device, and the same strict comparison the probe
+    /// asserts must reject a deliberately broken reference. A real dequant bug
+    /// (a wrong scale sign, a wrong group layout, or a wrong nibble order)
+    /// moves carriers far beyond one ulp, so the device-consistent dispatch
+    /// cannot absorb it.
+    #[test]
+    fn weight_carrier_matches_mlx_and_rejects_broken_reference() {
+        let n = 4usize;
+        let k = 256usize;
+        let group_size = 64usize;
+        let bits = 4usize;
+        let per_u32 = 32 / bits;
+        let packed_cols = k / per_u32;
+        let n_groups = k / group_size;
+        let words: Vec<u32> = (0..n * packed_cols)
+            .map(|i| 0x9E37_79B9_u32.wrapping_mul(i as u32 + 1) ^ 0x1234_5678)
+            .collect();
+        // Scales and biases around magnitudes where the sequential and
+        // single-round BF16 roundings disagree, so the control also proves the
+        // two carrier variants stay distinguishable on either device.
+        let scales: Vec<f32> = (0..n * n_groups)
+            .map(|i| 0.05 + 0.01 * (i as f32 * 0.618_034).sin())
+            .collect();
+        let biases: Vec<f32> = (0..n * n_groups)
+            .map(|i| 0.02 * (i as f32 * 0.618_034 + 1.0).cos())
+            .collect();
+        let metadata_shape = [(n * n_groups) as i32];
+        let bf16_bytes = |values: &[f32]| {
+            let array = mlxcel_core::astype(
+                &mlxcel_core::from_slice_f32(values, &metadata_shape),
+                mlxcel_core::dtype::BFLOAT16,
+            );
+            mlxcel_core::eval(&array);
+            mlxcel_core::array_to_raw_bytes(&array)
+        };
+        let scales_bytes = bf16_bytes(&scales);
+        let biases_bytes = bf16_bytes(&biases);
+        let packed = mlxcel_core::from_slice_u32(&words, &[n as i32, packed_cols as i32]);
+        let packed_bytes = mlxcel_core::array_to_raw_bytes(&packed);
+        let layer = UnifiedLinear::new(
+            mlxcel_core::layers::QuantizedWeight::new(
+                packed,
+                mlxcel_core::astype(
+                    &mlxcel_core::from_slice_f32(&scales, &metadata_shape),
+                    mlxcel_core::dtype::BFLOAT16,
+                ),
+                mlxcel_core::astype(
+                    &mlxcel_core::from_slice_f32(&biases, &metadata_shape),
+                    mlxcel_core::dtype::BFLOAT16,
+                ),
+                group_size as i32,
+                bits as i32,
+            ),
+            None,
+        );
+        let mlx = array_to_f32(&layer.dequantized_weight());
+        assert_eq!(mlx.len(), n * k);
+        let mismatches = |carrier: &[f32]| {
+            assert_eq!(carrier.len(), mlx.len());
+            carrier
+                .iter()
+                .zip(&mlx)
+                .filter(|(rust, m)| rust.to_bits() != m.to_bits())
+                .count()
+        };
+        let carrier = |packed: &[u8], scales: &[u8]| {
+            dequantize_affine_carrier_on_default_device(
+                packed,
+                scales,
+                &biases_bytes,
+                n,
+                packed_cols,
+                bits,
+                group_size,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            mismatches(&carrier(&packed_bytes, &scales_bytes)),
+            0,
+            "device-matched carrier must match the MLX dequantized weight bit for bit"
+        );
+        // A wrong scale sign on one middle group flips that group's carriers.
+        let mut wrong_sign = scales.clone();
+        for row in 0..n {
+            let group = row * n_groups + n_groups / 2;
+            wrong_sign[group] = -wrong_sign[group];
+        }
+        assert!(
+            mismatches(&carrier(&packed_bytes, &bf16_bytes(&wrong_sign))) > 0,
+            "a wrong scale sign must be rejected"
+        );
+        // A wrong group layout shifts every group's scale by one lane.
+        let mut shifted = scales.clone();
+        shifted.rotate_left(1);
+        assert!(
+            mismatches(&carrier(&packed_bytes, &bf16_bytes(&shifted))) > 0,
+            "a wrong group layout must be rejected"
+        );
+        // A wrong nibble order reverses the lanes inside each packed word.
+        let reversed: Vec<u32> = words
+            .iter()
+            .map(|word| {
+                (0..per_u32)
+                    .map(|lane| ((word >> (bits * lane)) & 0xf) << (bits * (per_u32 - 1 - lane)))
+                    .fold(0u32, |acc, term| acc | term)
+            })
+            .collect();
+        let reversed_bytes = reversed
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect::<Vec<u8>>();
+        assert!(
+            mismatches(&carrier(&reversed_bytes, &scales_bytes)) > 0,
+            "a wrong nibble order must be rejected"
         );
     }
 
@@ -3846,7 +4286,7 @@ mod xla_canonical_diagnostics {
         let sliding_mask = create_sliding_window_prefill_mask_dense(
             rows as i32,
             sliding_live_len,
-            language_model.config.sliding_window as i32,
+            language_model.sliding_cache_window,
         );
         let mut traced_target = None;
         let offset = rope_offset(&caches);
@@ -4034,7 +4474,7 @@ mod xla_canonical_diagnostics {
         let sliding_mask = create_sliding_window_prefill_mask_dense(
             rows as i32,
             sliding_live_len,
-            language_model.config.sliding_window as i32,
+            language_model.sliding_cache_window,
         );
         let mut target_ple = None;
         let mut target_input_planes = None;
@@ -4712,24 +5152,28 @@ mod xla_canonical_diagnostics {
         let gate = layer0.mlp.gate_proj.forward(&pre_ff_norm);
         let up = layer0.mlp.up_proj.forward(&pre_ff_norm);
         assert!(layer0.mlp.activation_sparsity > 0.0);
-        let sparse_mean = mlxcel_core::mean_axis(&gate, -1, true);
-        let sparse_centered = mlxcel_core::subtract(&gate, &sparse_mean);
-        let sparse_variance =
-            mlxcel_core::mean_axis(&mlxcel_core::square(&sparse_centered), -1, true);
-        let sparse_stddev = mlxcel_core::sqrt(&sparse_variance);
-        let sparse_multiplier =
-            mlxcel_core::full_f32(&[1], layer0.mlp.std_multiplier, mlxcel_core::dtype::FLOAT32);
-        let sparse_cutoff = mlxcel_core::add(
-            &sparse_mean,
-            &mlxcel_core::multiply(&sparse_stddev, &sparse_multiplier),
+        let mut post_attention_failures = Vec::new();
+        let sparse = sparse_gelu_manual_tape(&gate, layer0.mlp.std_multiplier);
+        let sparse_activation_compiled = layer0.mlp.gelu_topk(&gate);
+        compare_sparse_activation_manual_vs_compiled(
+            "decode_sparse_activation_manual_vs_compiled",
+            &sparse_activation_compiled,
+            &sparse,
+            &mut post_attention_failures,
         );
-        let sparse_shifted_raw = mlxcel_core::subtract(&gate, &sparse_cutoff);
-        let sparse_zero = mlxcel_core::full_f32(&[1], 0.0, mlxcel_core::dtype::FLOAT32);
-        let sparse_shifted = mlxcel_core::maximum(&sparse_shifted_raw, &sparse_zero);
-        let sparse_sqrt2 =
-            mlxcel_core::full_f32(&[1], std::f32::consts::SQRT_2, mlxcel_core::dtype::FLOAT32);
-        let sparse_erf = mlxcel_core::erf(&mlxcel_core::divide(&sparse_shifted, &sparse_sqrt2));
-        let sparse_activation = layer0.mlp.gelu_topk(&gate);
+        // XLA reproduces the per-op tape, so the stages below continue from it;
+        // the check above ties it to the production kernel.
+        let SparseGeluTape {
+            mean: sparse_mean,
+            variance: sparse_variance,
+            stddev: sparse_stddev,
+            cutoff: sparse_cutoff,
+            shifted_raw: sparse_shifted_raw,
+            shifted: sparse_shifted,
+            tanh: sparse_tanh,
+            activation: sparse_activation,
+            ..
+        } = sparse;
         let sparse_product = mlxcel_core::multiply(&sparse_activation, &up);
         let mlp_down = layer0.mlp.down_proj.forward(&sparse_product);
         let post_ff_norm = layer0.post_feedforward_layernorm.forward(&mlp_down);
@@ -4755,7 +5199,6 @@ mod xla_canonical_diagnostics {
         )
         .unwrap();
         let mut post_attention_cursor = 0;
-        let mut post_attention_failures = Vec::new();
         for (name, expected) in [
             ("decode_pre_ff_norm", array_to_f32(&pre_ff_norm)),
             ("decode_mlp_gate", array_to_f32(&gate)),
@@ -4769,7 +5212,7 @@ mod xla_canonical_diagnostics {
                 array_to_f32(&sparse_shifted_raw),
             ),
             ("decode_sparse_shifted", array_to_f32(&sparse_shifted)),
-            ("decode_sparse_erf", array_to_f32(&sparse_erf)),
+            ("decode_sparse_tanh", array_to_f32(&sparse_tanh)),
             ("decode_sparse_activation", array_to_f32(&sparse_activation)),
             ("decode_sparse_product", array_to_f32(&sparse_product)),
             ("decode_mlp_down", array_to_f32(&mlp_down)),

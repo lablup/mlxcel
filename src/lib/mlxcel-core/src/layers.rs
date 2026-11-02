@@ -6220,12 +6220,14 @@ pub fn metal4_attention(
 /// GELU MLP forward for non-quantized (FP16/BF16) UnifiedLinear layers.
 ///
 /// When all three projections are non-quantized, calls the C++ path which
-/// runs matmul operations directly and fuses only the GELU activation via
-/// compiled element-wise kernels.
+/// runs matmul operations directly and fuses only the tanh GeGLU activation
+/// (`gelu_tanh(gate) * up`, the formula Gemma checkpoints declare as
+/// `gelu_pytorch_tanh`) via compiled element-wise kernels. It computed the erf
+/// GeGLU before #2548.
 ///
 /// Returns `None` if any projection is quantized (caller should use the quantized path).
 ///
-/// Used by: Gemma, Gemma4 and other GELU-gated FP models
+/// Used by: Gemma v1, Gemma4 dense MLP and the Gemma4 assistant drafter
 pub fn compiled_gelu_mlp_fp16(
     x: &MlxArray,
     gate_proj: &UnifiedLinear,

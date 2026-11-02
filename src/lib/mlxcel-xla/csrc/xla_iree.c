@@ -34,6 +34,8 @@
 #include <iree/runtime/api.h>
 #include <iree/hal/buffer_view_util.h>
 #include <iree/hal/buffer_transfer.h>
+
+#include "xla_local_task.h"
 // libc-backed implementation of the system allocator control function.
 iree_status_t iree_xla_libc_ctl(void* self, iree_allocator_command_t command,
                                 const void* params, void** inout_ptr) {
@@ -553,7 +555,7 @@ static iree_status_t xla_llama_create_impl(
     int32_t prefill_embeddings_kind,
     int32_t dense_ple_layers, int32_t dense_ple_hidden, int32_t model_layers,
     int32_t deepstack_layers, int32_t deepstack_visual_positions,
-    const int32_t* deepstack_target_layers) {
+    const int32_t* deepstack_target_layers, int32_t local_task_workers) {
   if (context_capacity <= 0 || hidden_size <= 0 ||
       compatibility_fingerprint == 0) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -627,8 +629,10 @@ static iree_status_t xla_llama_create_impl(
   IREE_RETURN_IF_ERROR(iree_runtime_instance_create(
       &inst_opts, iree_allocator_system(), &c->instance));
 
-  iree_status_t status = iree_runtime_instance_try_create_default_device(
-      c->instance, iree_make_cstring_view(device_uri), &c->device);
+  // local-task is built with an explicit executor (issue #2790); every other
+  // driver comes from the registry as before.
+  iree_status_t status = xla_open_device(c->instance, device_uri,
+                                         local_task_workers, &c->device);
   if (!iree_status_is_ok(status)) {
     return iree_status_annotate_f(
         status,
@@ -841,7 +845,8 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                           int32_t deepstack_layers,
                           int32_t deepstack_visual_positions,
                           const int32_t* deepstack_target_layers,
-                          int32_t has_adapter_modes) {
+                          int32_t has_adapter_modes,
+                          int32_t local_task_workers) {
   xla_ctx* c = (xla_ctx*)calloc(1, sizeof(xla_ctx));
   if (!c) return NULL;
   c->has_adapter_modes = has_adapter_modes != 0;
@@ -857,7 +862,7 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                             prefill_embeddings_kind, dense_ple_layers,
                             dense_ple_hidden, model_layers, deepstack_layers,
                             deepstack_visual_positions,
-                            deepstack_target_layers);
+                            deepstack_target_layers, local_task_workers);
   if (!iree_status_is_ok(s)) {
     fprintf(stderr, "xla_llama_create failed (code %d):\n",
             (int)iree_status_code(s));

@@ -336,10 +336,27 @@ What the secret protects:
   `ReleaseSequence` for it from any other identity, even one that passes the
   coordinator check (a coordinator configured with an unspecified IP such as
   `0.0.0.0:<port>` accepts any identity on that port), is answered with an
-  `Error` and changes nothing. Caches that commands or activations built
-  under an id before anyone owned it are discarded by its first
-  `PrepareSequence`, so the owner never inherits state another identity
-  seeded. The forward activation carries the
+  `Error` and changes nothing. A `RunEntry` for an id no coordinator
+  prepared on the stage is answered with an `Error` ("sequence <id> was not
+  prepared on this stage") before its tensors are decoded, and a forward
+  activation for such an id is refused without executing, so no command or
+  activation creates state for an unowned id. A stage holds at most 4096
+  prepared sequences: a `PrepareSequence` for a new id beyond that is
+  answered with an `Error` ("pipeline stage already holds 4096 prepared
+  sequences") and changes nothing, while the owner's re-prepare of an id it
+  holds is still accepted. Owned sequences do not leak past a coordinator
+  that crashed: a `PrepareSequence` for a new id that finds the stage at the
+  cap first releases every owned sequence whose owner has not sent a
+  command or activation for it in 10 minutes (one `warn` names how many),
+  and refuses the new id only if the stage is still full afterwards.
+  Nothing is reaped below the cap; a live request idle that long fails its
+  next `RunEntry` as not prepared, which fails that one request. A
+  `PrepareSequence` whose id is empty or longer
+  than 256 bytes (an id the coordinator cannot build) is likewise answered
+  with an `Error` that does not echo the id, and stores nothing. The coordinator's request ids carry a random
+  64-bit suffix (`pp-seq-<n>-<16 hex digits>`), so another holder of the
+  secret cannot prepare the id the coordinator will use next. The forward
+  activation carries the
   coordinator's exchange nonce, and the final stage sends the logits once,
   as the `RunResult` of that nonce, straight to the identity that prepared
   the sequence (3 frames per decoded token: `RunEntry`, forward activation,
@@ -353,9 +370,12 @@ What the secret protects:
   model's shape (`[1, seq_len, vocab_size]`); everything else is dropped while
   the exchange keeps waiting against an absolute deadline.
   Tensors a stage receives are bounded the same way before any payload is
-  copied: hidden states must be `[1, n, width]` float with `n` at most 2^20
-  and `width` the model's inbound activation width, token ids and attention
-  masks have fixed ranks and dtypes, and the activation path refuses
+  copied: hidden states must be `[1, n, width]` float with `n` between 1 and
+  2^20 and `width` the model's inbound activation width, token ids are
+  `[1, n]` int32 with `n` between 1 and 2^20, attention masks have rank 2 to
+  4 with every axis between 1 and 2^20, the coordinator accepts logits of
+  `[1, n, vocab_size]` with `n` between 1 and the request's input length, and
+  the activation path refuses
   compressed or quantized tensors. A frame outside those bounds is answered,
   without allocating its claimed size, with an `Error` to the coordinator
   that prepared the sequence, carrying the exchange nonce of the activation
@@ -363,6 +383,67 @@ What the secret protects:
   forward activation (an execution error, hidden states with no downstream,
   a failed forward) is reported the same way. The frame is dropped only when
   nothing can correlate it: no reply nonce, or no recorded owner.
+- **A stage failure fails one request, not the coordinator** (#2727). A
+  stage that fails a forward (an `Error` reply, a transport error, or an
+  exchange that reaches the stage timeout, which a dropped or corrupted
+  frame causes without any secret) fails only the request(s) of that
+  forward: the coordinator releases the sequence on every stage, answers
+  those requests with `model pipeline forward failed; see the server log
+  for the stage error`, and keeps serving; the stage's own error, with its
+  address and the remote sequence id, is logged at `warn` and never sent to
+  a client. A stage that refuses a `PrepareSequence` fails that request with
+  `model pipeline could not prepare this request; see the server log for
+  the stage error`; `Server busy: ...` is reserved for the coordinator's own
+  capacity limits. The teardown reaches every stage even when one stage
+  does not answer: cancel and release go to each stage in turn, so a stage
+  that is down never leaves the others holding the sequence. The failure
+  path is bounded (#2762): a failed forward discards the sequence's state
+  on the coordinator before it tears the sequence down, so the request's
+  later close sends nothing and each stage sees one release (an error before
+  anything is sent, such as a tensor that cannot be serialized, leaves the
+  mapping for that later close to release once), and the
+  coordinator waits at most 2 seconds (or the stage timeout, if shorter)
+  for a stage to acknowledge a cancel or release, since the frame is sent
+  either way and a late acknowledgement is dropped by the nonce matcher.
+  One silent stage therefore costs the single model worker one stage
+  timeout plus two short acknowledgement waits (about 34 seconds at the
+  fixed 30 second stage timeout) instead of about two minutes, and only
+  for the request that detects it: the coordinator keeps an availability
+  gate (#2782) that opens when a stage does not answer within the stage
+  timeout or a command cannot be sent to it (#2790) and, while open,
+  refuses every new prepare and forward at once with the prepare or
+  forward message above instead of letting each one wait a
+  stage timeout. The gate is not a fixed cooldown, because one dropped
+  reply must not refuse the requests that follow it: the first request
+  after the timeout probes every stage with the 2 second acknowledgement
+  wait, and is served normally when they all answer; while a stage stays
+  silent, at most one such probe is sent per 10 seconds and the requests
+  in between are refused without sending anything. A forward's reply
+  comes from the last stage after every stage ran, so when it times out
+  the gate opens without naming a stage, and the next probe names the
+  silent one; until then every stage keeps its acknowledgement wait.
+  Coordinator-local errors (a reply that cannot be serialized, a closed
+  receive channel), `Error` replies, which are answers, and missed
+  teardown acknowledgements never open the gate. While it is open the
+  teardown of a sequence is still sent to the named silent stage,
+  without waiting for its acknowledgement. The open and close
+  transitions are logged once each at `warn` and `info` with the stage
+  (or the cause, when none is named yet) and the outage length; the
+  refusals themselves are logged at `debug`. A stage that is slow to
+  acknowledge a cancel or release but is otherwise healthy (it is still
+  finishing a long forward) still applies the frame; the coordinator's
+  "did not acknowledge ... within ...; the frame was sent" line for such a
+  miss draws from its own `teardown-ack` budget of 5 warnings per minute,
+  the rest at debug. The text of a stage's `Error` reply, and the request
+  id an upstream stage sends, are bounded to 1024 bytes and written with
+  control characters escaped before they reach either side's log, so an
+  authenticated peer cannot forge log lines. The warning
+  a stage logs for an activation or an activation failure that names a
+  sequence nobody prepared on it (which only an authenticated upstream can
+  send) draws from its own `stage-drop` budget of 5 warnings per minute,
+  the rest at debug. A batched
+  forward whose rows return different logits widths is refused as a whole
+  and fails every row of that batch with the same forward message.
 - **Discovery beacons and stage assignment.** With `--cluster-discovery=mdns`
   every beacon carries a timestamp, a nonce, and an HMAC over its fields. The
   coordinator rejects beacons without a valid MAC, beacons more than 60
@@ -445,12 +526,17 @@ in the log:
   holds its maximum number of authenticated connections; retry later", which
   is not treated as fatal like a handshake rejection: the connection pool
   treats it like a refused connect and retries it with the same exponential
-  backoff (`max_reconnect_attempts` times from `reconnect_base_delay`), so a
+  backoff (`max_reconnect_attempts` times from `reconnect_base_delay`; each
+  sleep is drawn uniformly from half to all of the current delay, so clients
+  refused together do not retry in lockstep), so a
   peer that frees a slot during that budget is reached by the same `acquire`;
   only when the budget is spent is the error returned, with
   `ServerAtCapacity` still in its chain, and `Transport::connect` then logs a
   warning and continues; the accepting side logs "max connections (N)
-  reached". Every other handshake failure stays terminal without backoff. The
+  reached" at warn for the first few refusals per minute and at debug
+  afterwards (its own budget class, shared with the connecting side's
+  at-capacity line). Every other handshake failure stays terminal without
+  backoff. The
   verdict is sent only after the client's authenticator verified, so a party
   without the secret never learns the capacity state, and it carries its own
   authenticator (an HMAC over the whole transcript and the verdict byte), so
@@ -459,15 +545,17 @@ in the log:
   "server's handshake verdict does not verify under the cluster secret" and
   derives no keys.
 
-These warnings are rate limited in four classes so that junk connections (bad
+These warnings are rate limited in five classes so that junk connections (bad
 magic, a malformed hello, a stall to the 5 second timeout, a pending-pool
 refusal; the `noise` class) cannot push the typed refusals (probable secret
 mismatch, identity not owned, suite mismatch, a frame that failed
 authentication, an authenticated frame of an unknown kind; the `diagnostic`
-class) down to debug, and neither can the two operational warnings with
+class) down to debug, and neither can the three operational warnings with
 their own classes: a result frame the disaggregated router dropped because
-its sender is not a configured peer (`router-drop`) and a capacity refusal
-the connection pool is retrying (`at-capacity`). Each class may log 5
+its sender is not a configured peer (`router-drop`), a capacity refusal
+the connection pool is retrying (`at-capacity`), and an activation or
+activation failure a pipeline stage dropped because nobody prepared its
+sequence there or it carried no reply nonce (`stage-drop`). Each class may log 5
 warnings per minute, the rest go to debug, and the first warning of its class
 after a window that suppressed lines reports how many and when that window
 ended (`N cluster warnings (diagnostic) were logged at debug during the 60s
@@ -480,8 +568,8 @@ at-capacity verdict in #2692, 5 added the verdict authenticator in #2714); a
 pair of processes built from different versions fails with an explicit
 version message rather than a confusing I/O error. Mixed versions in one
 cluster are not supported: every node must be upgraded together. Every
-version bump so far landed after v0.8.0-beta.1, so no released version is
-affected.
+version bump so far landed after v0.8.0-beta.1, so v0.8.0 and that beta cannot
+share a cluster.
 
 Residual risks:
 
@@ -490,7 +578,7 @@ Residual risks:
 - Frames from authenticated members stay trusted inside the pipeline protocol and on the prefill and decode intakes of the disaggregated protocol: a host that holds the secret is a full member there. The router's result demux is the exception (it accepts frames only from its configured peers). Rotate the secret when a member is decommissioned.
 - Connections that have not finished the handshake do not count against the 512 authenticated-connection cap. They draw from a separate pending pool (64 in flight, at most 8 per source, each for at most the 5 second handshake timeout); a socket beyond either bound is closed at accept. A source is an IPv4 address or an IPv6 /64 (a host that owns a /64 would otherwise get one pending slot per address), which also means cluster nodes inside one IPv6 /64 share the per-source budget and a large IPv6 cluster in a single /64 may need a higher `max_pending_handshakes_per_ip`. A flood of unauthenticated connections from enough sources (8 or more at the defaults) can fill the pending pool and so delay new connections from any source, including a real peer reconnecting, by up to the 5 second timeout per slot while the flood lasts; it cannot take slots from established authenticated connections or inject frames. Failed inbound handshakes and pending-pool refusals are logged at warn for the first few per minute (per class, see above) and at debug afterwards.
 - A party without the secret can still produce the "probable secret mismatch" warning (send a well-formed hello naming its own IP, then close after the server's authenticator). The "identity not owned" and "suite mismatch" refusals are decided from the hello alone, before the client authenticates, so it can trigger those as well. Any of them can saturate the diagnostic warning budget. The per-minute summary of suppressed warnings is what keeps the operator informed then.
-- The receiver refuses an oversize `len` from the header alone, but a frame whose `len` is within the cap (256 MiB by default) makes it allocate and read the full body before the tag is checked. Only a peer that completed the handshake can reach this path, so it is a resource bound for authenticated members, not an exposure to the open network.
+- The receiver refuses an oversize `len` from the header alone, but a frame whose `len` is within the cap (256 MiB by default) makes it allocate and read the full body before the tag is checked. Only a peer that completed the handshake can reach this path, so it is a resource bound for authenticated members, not an exposure to the open network. The response of a transport `rpc_call` (used by the latency benchmark) is read under a 1 MiB cap instead, so a reply cannot force more than that per call; a larger reply fails the call and drops its connection.
 - `MLXCEL_CLUSTER_SECRET` is inherited by child processes of the server. Prefer `--cluster-secret-file` or `MLXCEL_CLUSTER_SECRET_FILE` so the value never sits in the environment.
 - The server identity is not bound to the socket IP on the connecting side, so a stage address that is reached through NAT or a port forward still authenticates by the secret alone.
 
@@ -700,9 +788,16 @@ picks both the prefill node and the decode node per request (round-robin over
 the nodes the registry marks online), ships the chosen decode node to the
 prefill node in the request frame so the prefill hands off to the
 router-balanced decode node, marks unreachable peers down (via send-error
-detection and a background liveness probe) and fails over to healthy nodes, and
-applies admission control that returns HTTP 503 when no node can take the
-request. `GET /router/stats` reports the per-node load spread and node health.
+detection and a background liveness probe whose first cycle runs at startup and
+then every 3 s) and fails over to healthy nodes, and applies admission control
+that returns HTTP 503 when no node can take the request. Before refusing
+because no prefill node is available while some prefill node is marked down,
+the router re-probes the nodes marked down (500 ms connect timeout, at most one
+re-probe per 250 ms router-wide, shared by concurrent requests) and serves the
+request if one has come back, so a peer
+that finishes starting after a probe cycle is not refused until the next one
+(issue #2763). `GET /health` stays a liveness check of the router process
+itself. `GET /router/stats` reports the per-node load spread and node health.
 See [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#multi-node-routing-load-balancing-and-failover)
 for the flags and behavior.
 

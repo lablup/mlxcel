@@ -176,9 +176,10 @@ impl Mlp {
     }
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        // hidden_act = "gelu_pytorch_tanh" (tanh-approximate GELU).
+        // hidden_act = "gelu_pytorch_tanh" (tanh-approximate GELU), in f32 as
+        // one compiled kernel (erf before #2548).
         let x = self.fc1.forward(x);
-        let x = mlxcel_core::gelu_approx(&x);
+        let x = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&x);
         self.fc2.forward(&x)
     }
 }

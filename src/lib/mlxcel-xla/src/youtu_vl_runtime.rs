@@ -138,7 +138,7 @@ fn tensor_locations(
         let tensors = SafeTensors::deserialize(&mmap)
             .map_err(|error| format!("parse {}: {error}", shard.display()))?;
         for name in tensors.names() {
-            if !required.contains(name.as_str()) {
+            if !required.contains(name) {
                 continue;
             }
             if let Some(previous) = locations.insert(name.to_string(), shard.clone()) {

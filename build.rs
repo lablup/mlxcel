@@ -73,6 +73,19 @@ fn main() {
         windows_rocm::emit_delayload_link_args(&layout);
     }
 
+    // The loader resolves a binary's static imports (openblas.dll, MSVCP140.dll,
+    // VCRUNTIME140.dll) before any code runs, so SetDllDirectoryW in the overlays'
+    // delayload.cpp comes too late for them, and the default search reaches the
+    // current directory. 0xA00 is LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+    // LOAD_LIBRARY_SEARCH_SYSTEM32 (#2641). OpenBLAS is copied beside every
+    // binary (`link_windows_openblas` in mlxcel-core's build script). A link arg
+    // does not cross crates, so mlxcel-core and this crate each emit it.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg=/DEPENDENTLOADFLAG:0xA00");
+    }
+
     println!("cargo:rerun-if-env-changed=IREE_DIST");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_HOME");
     println!("cargo:rerun-if-env-changed=IREE_ROCM_HOME");

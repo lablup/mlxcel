@@ -37,7 +37,7 @@ LFM2-VL 450M 4-bit passes the original free-form workload 3/3 on both baseline a
 
 Targeted recurrent isolation, mixed/fresh state, scalar/native transitions, invalid-input atomicity, cache accounting and wrapper delegation tests passed, as did targeted clippy and formatting. The VLM evidence runner's eight CPU tests cover input reconstruction, reasoning-sensitive equality, errors, overwrite protection, cleanup and the port-probe regression. RecurrentGemma and RWKV7 have synthetic coverage only; no real-checkpoint performance or output claim is made for them. The final integrated workspace gate passed as recorded below.
 
-Machine-readable results are in `benchmarks/epic-2574/recurrent-families.json`. Raw baseline/candidate text runs and LFM2-VL records retain original runner manifests as `run-metadata.json` where available; older text baselines explicitly lack runtime hashes. Every archived artifact is indexed by SHA-256. Reproduce the VLM workload with `scripts/bench_batched_decode_vlm.py`; keep its actual loaded Metal library with relocated binaries.
+Machine-readable results are in `docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/recurrent-families.json`. Raw baseline/candidate text runs and LFM2-VL records retain original runner manifests as `run-metadata.json` where available; older text baselines explicitly lack runtime hashes. Every archived artifact is indexed by SHA-256. Reproduce the VLM workload with `scripts/bench_batched_decode_vlm.py`; keep its actual loaded Metal library with relocated binaries.
 
 ## Change Summary
 

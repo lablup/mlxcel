@@ -50,7 +50,9 @@ fn sample_args() -> crate::ServeArgs {
         allowed_origins: Vec::new(),
         startup_notices: Vec::new(),
         n_predict: 128,
-        draft_model: Some(PathBuf::from("models/draft")),
+        // An existing path: `--draft-model` resolves like `-m`, and a value that
+        // does not exist would be fetched as a repo id.
+        draft_model: Some(std::env::temp_dir()),
         draft_max: 4,
         prompt_lookup_max_batch:
             mlxcel::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH,
@@ -239,7 +241,7 @@ fn build_startup_input_preserves_edge_flags_for_normalization() {
     // `adapter_path` inside `into_startup_config`.
     assert_eq!(input.adapter_path, None);
     assert_eq!(input.lora.as_deref(), Some("adapters/bar"));
-    assert_eq!(input.draft_model_path, Some(PathBuf::from("models/draft")));
+    assert_eq!(input.draft_model_path, Some(std::env::temp_dir()));
     assert!(input.slots);
     assert!(input.no_slots);
     assert!(input.warmup);
@@ -387,4 +389,42 @@ fn build_startup_input_lang_bias_propagates_when_active() {
     let input = build_startup_input(args).expect("resolve");
     let cfg = input.lang_bias_config.expect("resolved config");
     assert_eq!(cfg.bias_set.ordered.len(), 1);
+}
+
+// ── image-only serving (#2825) ─────────────────────────────────────────────
+
+#[test]
+fn image_model_without_model_leaves_the_chat_path_empty() {
+    let mut args = sample_args();
+    args.model = None;
+    args.image_model = Some(std::env::temp_dir().to_string_lossy().into_owned());
+    let input = build_startup_input(args).expect("image-only input resolves");
+    assert!(
+        input.model_path.as_os_str().is_empty(),
+        "image-only leaves the chat path empty"
+    );
+    assert!(input.image_model_path.is_some());
+}
+
+#[test]
+fn no_model_and_no_image_model_names_both_ways_to_start() {
+    let mut args = sample_args();
+    args.model = None;
+    args.image_model = None;
+    let err = build_startup_input(args).expect_err("no model source at all");
+    let message = err.to_string();
+    assert!(message.contains("--model/-m is required"), "{message}");
+    assert!(message.contains("--image-model"), "{message}");
+}
+
+#[test]
+fn image_only_refuses_embeddings_naming_both_flags() {
+    let mut args = sample_args();
+    args.model = None;
+    args.image_model = Some(std::env::temp_dir().to_string_lossy().into_owned());
+    args.embedding_compat.embedding = true;
+    let err = build_startup_input(args).expect_err("image-only cannot serve embeddings");
+    let message = err.to_string();
+    assert!(message.contains("--image-model"), "{message}");
+    assert!(message.contains("--embeddings"), "{message}");
 }

@@ -2136,18 +2136,36 @@ fn a_mode_flag_with_no_matching_worker_fails_startup() {
         &mode_config(EmbeddingServingMode::EmbeddingOnly),
         false,
         true,
+        false,
     )
     .expect_err("--embeddings with no embedder must fail");
     let message = err.to_string();
     assert!(message.contains("--embeddings"), "{message}");
     assert!(message.contains("--embedding-model"), "{message}");
 
-    let err =
-        super::check_serving_mode(&mode_config(EmbeddingServingMode::RerankOnly), true, false)
-            .expect_err("--reranking with no reranker must fail");
+    let err = super::check_serving_mode(
+        &mode_config(EmbeddingServingMode::RerankOnly),
+        true,
+        false,
+        false,
+    )
+    .expect_err("--reranking with no reranker must fail");
     let message = err.to_string();
     assert!(message.contains("--reranking"), "{message}");
     assert!(message.contains("--reranker-model"), "{message}");
+
+    // #2825: the image-only mode has the same gate, naming the flag that
+    // selected it.
+    let err = super::check_serving_mode(
+        &mode_config(EmbeddingServingMode::ImageOnly),
+        false,
+        false,
+        false,
+    )
+    .expect_err("--image-model with no image worker must fail");
+    let message = err.to_string();
+    assert!(message.contains("--image-model without -m"), "{message}");
+    assert!(message.contains("--image-model <path>"), "{message}");
 }
 
 #[test]
@@ -2158,19 +2176,44 @@ fn a_mode_flag_with_its_worker_starts() {
         &mode_config(EmbeddingServingMode::EmbeddingOnly),
         true,
         false,
+        false,
     )
     .expect("--embeddings with an embedder starts");
-    super::check_serving_mode(&mode_config(EmbeddingServingMode::RerankOnly), false, true)
-        .expect("--reranking with a reranker starts");
+    super::check_serving_mode(
+        &mode_config(EmbeddingServingMode::RerankOnly),
+        false,
+        true,
+        false,
+    )
+    .expect("--reranking with a reranker starts");
+    // #2825: the image-only mode starts once its worker resolved.
+    super::check_serving_mode(
+        &mode_config(EmbeddingServingMode::ImageOnly),
+        false,
+        false,
+        true,
+    )
+    .expect("--image-model with an image worker starts");
 }
 
 #[test]
 fn an_unrestricted_server_never_fails_the_mode_gate() {
     use crate::server::config::EmbeddingServingMode;
 
-    for (embedding, rerank) in [(false, false), (true, false), (false, true), (true, true)] {
-        super::check_serving_mode(&mode_config(EmbeddingServingMode::Any), embedding, rerank)
-            .expect("no mode flag, nothing to check");
+    for (embedding, rerank, image) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+    ] {
+        super::check_serving_mode(
+            &mode_config(EmbeddingServingMode::Any),
+            embedding,
+            rerank,
+            image,
+        )
+        .expect("no mode flag, nothing to check");
     }
 }
 
@@ -2588,5 +2631,69 @@ fn startup_notices_are_logged_once_a_subscriber_exists() {
     assert!(
         error_lines.len() == 1 && error_lines[0].contains("--grammar: failed to parse grammar"),
         "the grammar error must be a single ERROR line: {output:?}"
+    );
+}
+
+#[tokio::test]
+async fn join_model_worker_before_exit_reports_a_worker_still_loading() {
+    // Model load has no cancellation point, so a worker inside its load window
+    // cannot be joined by the deadline. The returned error must say the worker
+    // is still running and warn about the CPU abort mode (#2745).
+    let provider = std::sync::Arc::new(super::ModelProvider::slow_to_start_worker_for_tests(
+        std::time::Duration::from_secs(2),
+    ));
+    let err = super::join_model_worker_before_exit(
+        provider,
+        Ok(()),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .expect_err("a worker that has not read its channel cannot be joined");
+    let message = format!("{err:#}");
+    assert!(message.contains("still running"), "{message}");
+    assert!(message.contains("may abort"), "{message}");
+    assert!(message.contains("pure virtual method called"), "{message}");
+}
+
+#[tokio::test]
+async fn stage_shutdown_runs_when_the_signal_handler_fails() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct FakeStage {
+        shutdown_called: Arc<AtomicBool>,
+    }
+
+    impl super::StageServiceHandle for FakeStage {
+        fn local_addr(&self) -> &str {
+            "127.0.0.1:0"
+        }
+
+        fn exited(
+            &mut self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            // The real stage thread has not exited; only the signal resolves.
+            Box::pin(std::future::pending())
+        }
+
+        fn shutdown(self) -> anyhow::Result<()> {
+            self.shutdown_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let shutdown_called = Arc::new(AtomicBool::new(false));
+    let handle = FakeStage {
+        shutdown_called: shutdown_called.clone(),
+    };
+    let err = super::wait_for_stage_shutdown(handle, async {
+        Err(std::io::Error::other("ctrl_c unavailable"))
+    })
+    .await
+    .expect_err("the signal error wins over a clean shutdown");
+    assert!(format!("{err:#}").contains("ctrl_c unavailable"), "{err:#}");
+    assert!(
+        shutdown_called.load(Ordering::SeqCst),
+        "the stage shutdown must run even when the signal handler failed"
     );
 }

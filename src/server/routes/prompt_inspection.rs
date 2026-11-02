@@ -292,6 +292,11 @@ pub async fn apply_template(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
+    // Image-only serving has no chat template or tokenizer (#2825); every
+    // other mode keeps this route.
+    if let Some(response) = super::chat_not_available_image_only(&state) {
+        return response.into_response();
+    }
     let live = state.live();
     let request: ChatCompletionRequest = match parse_with_default_model(&state, body) {
         Ok(request) => request,

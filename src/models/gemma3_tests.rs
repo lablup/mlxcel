@@ -280,7 +280,7 @@ fn global_layer_rope_matches_scaled_positions() {
 // prefill leaves the sliding ring wrapped while the global layer keeps every
 // token. An exact restore has to survive both at once; a truncating restore
 // has to decline once the ring wraps.
-mod snapshot_prompt_cache {
+pub(crate) mod snapshot_prompt_cache {
     /// Sequence-id base for this module, so the ids stay readable as
     /// "issue 1335, sequence N" without tripping the inconsistent-digit-
     /// grouping lint that `1335_01` does.
@@ -334,6 +334,22 @@ mod snapshot_prompt_cache {
     /// the state a restored snapshot is in when the next turn's appended
     /// tokens arrive.
     fn synthetic_args_with_window(sliding_window: i32) -> ModelArgs {
+        synthetic_args_with(i64::from(sliding_window), 2)
+    }
+
+    /// The synthetic Gemma 3 model with the given window and pattern, as the
+    /// load returns it (issue #2790 checks that zeros are refused).
+    pub(crate) fn try_load_with(
+        sliding_window: i64,
+        pattern: usize,
+    ) -> Result<Gemma3Model, String> {
+        Gemma3Model::from_weights(
+            &synthetic_weights(),
+            &synthetic_args_with(sliding_window, pattern),
+        )
+    }
+
+    fn synthetic_args_with(sliding_window: i64, pattern: usize) -> ModelArgs {
         super::args(&format!(
             r#"{{
                 "model_type": "gemma3_text",
@@ -349,7 +365,7 @@ mod snapshot_prompt_cache {
                 "rope_local_base_freq": 10000.0,
                 "query_pre_attn_scalar": 2.0,
                 "sliding_window": {sliding_window},
-                "sliding_window_pattern": 2,
+                "sliding_window_pattern": {pattern},
                 "max_position_embeddings": 4096
             }}"#
         ))
@@ -418,7 +434,7 @@ mod snapshot_prompt_cache {
         build_wrapper_with_window(8)
     }
 
-    pub(super) fn build_wrapper_with_window(sliding_window: i32) -> Gemma3Wrapper {
+    pub(crate) fn build_wrapper_with_window(sliding_window: i32) -> Gemma3Wrapper {
         let args = synthetic_args_with_window(sliding_window);
         let weights = synthetic_weights();
         Gemma3Wrapper::new(
@@ -1127,3 +1143,6 @@ mod batched_decode_entry {
         }
     }
 }
+
+#[path = "gemma3_vlm_mask_tests.rs"]
+mod vlm_external_mask;

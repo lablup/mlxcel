@@ -28,6 +28,8 @@
 
 #include <iree/runtime/api.h>
 
+#include "xla_local_task.h"
+
 #define AUX_CHECK_GOTO(expr, label, rc_var)                              \
   do {                                                                   \
     iree_status_t _status = (expr);                                      \
@@ -164,7 +166,7 @@ static iree_status_t create_impl(
     const char* entry_name, uint64_t compatibility_fingerprint,
     int32_t n_weights, const void* const* weight_data,
     const int32_t* weight_dtypes, const int32_t* weight_ranks,
-    const int64_t* weight_dims) {
+    const int64_t* weight_dims, int32_t local_task_workers) {
   if (!device_uri || !module_vmfb || !entry_name || entry_name[0] == '\0' ||
       compatibility_fingerprint == 0 || n_weights <= 0 || !weight_data ||
       !weight_dtypes || !weight_ranks || !weight_dims) {
@@ -184,9 +186,8 @@ static iree_status_t create_impl(
   iree_runtime_instance_options_use_all_available_drivers(&instance_options);
   IREE_RETURN_IF_ERROR(iree_runtime_instance_create(
       &instance_options, iree_allocator_system(), &context->instance));
-  IREE_RETURN_IF_ERROR(iree_runtime_instance_try_create_default_device(
-      context->instance, iree_make_cstring_view(device_uri),
-      &context->device));
+  IREE_RETURN_IF_ERROR(xla_open_device(context->instance, device_uri,
+                                       local_task_workers, &context->device));
   iree_runtime_session_options_t session_options;
   iree_runtime_session_options_initialize(&session_options);
   IREE_RETURN_IF_ERROR(iree_runtime_session_create_with_device(
@@ -261,13 +262,14 @@ xla_aux_ctx* xla_aux_create(
     const char* device_uri, const char* module_vmfb, const char* entry_name,
     uint64_t compatibility_fingerprint, int32_t n_weights,
     const void* const* weight_data, const int32_t* weight_dtypes,
-    const int32_t* weight_ranks, const int64_t* weight_dims) {
+    const int32_t* weight_ranks, const int64_t* weight_dims,
+    int32_t local_task_workers) {
   xla_aux_ctx* context = (xla_aux_ctx*)calloc(1, sizeof(xla_aux_ctx));
   if (!context) return NULL;
   iree_status_t status = create_impl(
       context, device_uri, module_vmfb, entry_name,
       compatibility_fingerprint, n_weights, weight_data, weight_dtypes,
-      weight_ranks, weight_dims);
+      weight_ranks, weight_dims, local_task_workers);
   if (!iree_status_is_ok(status)) {
     fprintf(stderr, "xla_aux_create failed (status %d):\n",
             (int)iree_status_code(status));

@@ -41,7 +41,6 @@ pub mod chat;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -52,14 +51,10 @@ use crate::server::startup::{
 };
 use crate::server::{
     ApiKeys, AppState, BatchMetrics, ModelMediaSupport, ModelProvider, ServerConfig,
-    ServerStartupConfig,
+    ServerStartupConfig, WORKER_EXIT_TIMEOUT,
 };
 
 pub use chat::{ChatDelta, ChatTurn, ChatTurnToolCall};
-
-/// How long [`InProcessServer::shutdown`] waits for the worker thread to
-/// release the model before giving up.
-const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The chat model server, running in this process with no listener.
 ///
@@ -196,21 +191,12 @@ impl InProcessServer {
         &self.runtime
     }
 
-    /// Ask the worker to exit and wait until it has released the model.
+    /// Ask the worker to exit and wait until it has released the model
+    /// ([`ModelProvider::shutdown_and_wait`] with [`WORKER_EXIT_TIMEOUT`]).
     pub fn shutdown(self) -> Result<()> {
-        let provider = &self.state.model_provider;
-        provider.shutdown_worker();
-        let observer = provider.worker_exit_observer();
-        if !observer.wait_timeout(WORKER_EXIT_TIMEOUT) {
-            anyhow::bail!(
-                "server model worker did not exit within {}s",
-                WORKER_EXIT_TIMEOUT.as_secs()
-            );
-        }
-        if let Some(message) = observer.panic_message() {
-            anyhow::bail!("server model worker panicked: {message}");
-        }
-        Ok(())
+        self.state
+            .model_provider
+            .shutdown_and_wait(WORKER_EXIT_TIMEOUT)
     }
 }
 

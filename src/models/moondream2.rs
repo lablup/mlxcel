@@ -289,8 +289,10 @@ impl Moondream2Mlp {
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let hidden = self.fc1.forward(x);
-        // nn.GELU(approx="tanh")
-        let hidden = mlxcel_core::gelu_approx(&hidden);
+        // nn.GELU(approx="tanh"), as the remote code's `gelu_approx`
+        // (`F.gelu(approximate="tanh")`); evaluated in f32 as one compiled
+        // kernel (erf before #2548).
+        let hidden = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&hidden);
         self.fc2.forward(&hidden)
     }
 }

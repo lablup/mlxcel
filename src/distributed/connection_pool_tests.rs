@@ -14,6 +14,24 @@
 
 use super::*;
 
+/// #2726 item 5: the reconnect backoff sleeps a uniform value in
+/// `[delay / 2, delay]`, so clients refused together spread out.
+#[test]
+fn jittered_delay_stays_in_half_to_full_range() {
+    let delay = Duration::from_millis(100);
+    let samples: Vec<Duration> = (0..1000).map(|_| jittered(delay)).collect();
+    for sample in &samples {
+        assert!(
+            (Duration::from_millis(50)..=delay).contains(sample),
+            "{sample:?} is outside [50ms, 100ms]"
+        );
+    }
+    assert!(
+        samples.iter().any(|sample| *sample != samples[0]),
+        "1000 jittered delays must not all be equal"
+    );
+}
+
 #[test]
 fn pool_config_default_values() {
     let config = PoolConfig::default();

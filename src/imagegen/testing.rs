@@ -282,6 +282,49 @@ pub(crate) fn fnv1a32_bytes(bytes: &[u8]) -> u32 {
     })
 }
 
+/// Distance between two finite values of one sign in units of the last
+/// place of a float whose bits are the top `32 - shift` bits of an f32
+/// (`shift` 0 for f32, 16 for bf16 values widened to f32); `u32::MAX` when
+/// the signs differ, which no ulp bound should accept.
+///
+/// Used by: the Qwen-Image and Ming-Image parity tests.
+pub(crate) fn ulps(a: f32, b: f32, shift: u32) -> u32 {
+    if a == b {
+        return 0;
+    }
+    if a.is_sign_negative() != b.is_sign_negative() {
+        return u32::MAX;
+    }
+    (a.to_bits() >> shift).abs_diff(b.to_bits() >> shift)
+}
+
+/// Whether the initial-noise checksum has to match upstream's bit for bit:
+/// only on the backend the committed fixtures were drawn on.
+///
+/// `random_normal` goes through `erfinv` and `log`, which differ in the last
+/// bit or two between CUDA, the Metal GPU and the CPU stream, so a checksum
+/// over a whole 1024x1024 draw made on CUDA does not match elsewhere (both
+/// the M1 Ultra Metal GPU and the CPU stream miss it). A wrong key derivation
+/// or sampling order still shows in the head, which [`assert_noise_head`]
+/// gates to a few ulps everywhere.
+///
+/// Used by: the Qwen-Image and Ming-Image parity tests.
+pub(crate) fn noise_checksum_is_exact() -> bool {
+    use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
+    matches!(gpu_backend_kind(), GpuBackendKind::Cuda)
+}
+
+/// `got` within `max_ulps` of `want`, element by element (see [`ulps`]).
+///
+/// Used by: the Qwen-Image and Ming-Image parity tests.
+pub(crate) fn assert_noise_head(got: &[f32], want: &[f32], shift: u32, max_ulps: u32, label: &str) {
+    assert_eq!(got.len(), want.len(), "{label}");
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        let d = ulps(*g, *w, shift);
+        assert!(d <= max_ulps, "{label} element {i}: {g} vs {w} ({d} ulps)");
+    }
+}
+
 /// Average-pool `planes` CHW planes of `h x w` by `k` on both axes.
 ///
 /// Used by: the ERNIE-Image parity tests.

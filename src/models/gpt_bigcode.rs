@@ -57,6 +57,7 @@
 use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::utils::GeluActivation;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -128,6 +129,12 @@ pub struct ModelArgs {
 
     #[serde(default)]
     pub quantization: Option<Quantization>,
+
+    /// The MLP GELU, a Hugging Face `ACT2FN` name. `null` or absent means
+    /// `gelu_pytorch_tanh`, the `GPTBigCodeConfig` default. Resolved by
+    /// [`ModelArgs::activation`].
+    #[serde(default)]
+    pub activation_function: Option<String>,
 }
 
 /// A `config.json` token-id field, which may be a single int or a list of ints.
@@ -265,7 +272,30 @@ impl ModelArgs {
                 "GPT-BigCode n_inner ({intermediate}) must be between 1 and {MAX_N_INNER}"
             ));
         }
+        self.activation()?;
         Ok(())
+    }
+
+    /// The MLP activation the checkpoint declares in `activation_function`.
+    ///
+    /// Hugging Face builds the MLP as `ACT2FN[config.activation_function]`,
+    /// so the config decides; an omitted key is the `GPTBigCodeConfig`
+    /// default `gelu_pytorch_tanh`. mlx-lm departs from Hugging Face here by
+    /// always applying `nn.gelu` (erf), which mlxcel ran before #2794. The
+    /// tanh names run as the compiled f32 kernel. A non-GELU name is an error.
+    pub fn activation(&self) -> Result<GeluActivation, String> {
+        let name = self
+            .activation_function
+            .as_deref()
+            .unwrap_or("gelu_pytorch_tanh");
+        GeluActivation::from_hf_name(name)
+            .map(GeluActivation::in_f32_compiled)
+            .ok_or_else(|| {
+                format!(
+                    "GPT-BigCode: unsupported activation_function {name:?}; expected a GELU \
+                     variant (gelu, gelu_new, gelu_fast, gelu_pytorch_tanh, quick_gelu)"
+                )
+            })
     }
 
     pub fn head_dim(&self) -> usize {
@@ -575,18 +605,19 @@ impl SplitAttention for Attention {
 pub struct MLP {
     pub c_fc: UnifiedLinear,
     pub c_proj: UnifiedLinear,
+    /// Resolved once at load from `activation_function`.
+    pub activation: GeluActivation,
 }
 
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.c_fc.forward(x);
-        // Upstream applies `nn.gelu`, the erf-based exact GELU, which is what
-        // `mlxcel_core::utils::gelu_approx` evaluates in this tree (see its own
-        // doc comment). The checkpoint config names `gelu_pytorch_tanh`, whose
-        // tanh approximation differs from the erf form by under 1e-3; matching
-        // upstream keeps this port comparable against the mlx-lm reference,
-        // which is the same choice `src/models/gpt2.rs` makes.
-        let h = mlxcel_core::utils::gelu_approx(&h);
+        // Hugging Face applies `ACT2FN[config.activation_function]`, so the
+        // checkpoint config decides (`gelu_pytorch_tanh` for every published
+        // export and the class default). mlx-lm always applies `nn.gelu`
+        // (erf) and departs from Hugging Face; mlxcel follows Hugging Face
+        // (#2794). See `ModelArgs::activation`.
+        let h = self.activation.apply(&h);
         self.c_proj.forward(&h)
     }
 
@@ -617,7 +648,13 @@ impl MLP {
             bits,
         )?;
 
-        Ok(Self { c_fc, c_proj })
+        let activation = args.activation()?;
+
+        Ok(Self {
+            c_fc,
+            c_proj,
+            activation,
+        })
     }
 }
 

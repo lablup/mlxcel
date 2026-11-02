@@ -36,7 +36,11 @@ fn spec_type_resolves_the_translatable_values_and_rejects_the_rest() {
     a.ensure_inert().expect("none passes the inertness gate");
 
     // draft-mtp / draft-dflash are exact --draft-kind translations.
-    for (value, kind) in [("draft-mtp", "mtp"), ("draft-dflash", "dflash")] {
+    for (value, kind) in [
+        ("draft-mtp", "mtp"),
+        ("draft-dflash", "dflash"),
+        ("draft-simple", "full-model"),
+    ] {
         let mut a = args();
         a.spec_type = Some(value.to_string());
         let resolution = a.resolved_spec_type().expect("translatable draft type");
@@ -52,7 +56,6 @@ fn spec_type_resolves_the_translatable_values_and_rejects_the_rest() {
         "ngram-map-k",
         "ngram-map-k4v",
         "ngram-mod",
-        "draft-simple",
         "draft-eagle3",
         "draft-dspark",
         "draft-mtp,draft-dflash",

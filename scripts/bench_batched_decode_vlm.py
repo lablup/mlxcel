@@ -137,10 +137,15 @@ def write_json(path, data):
 
 
 def ensure_no_listener(port):
-    """Reject a live listener without confusing closed TCP TIME_WAIT sockets."""
+    """Reject a live listener without confusing closed TCP TIME_WAIT sockets.
+
+    A live loopback listener accepts at once. Windows answers a closed port by
+    retrying the SYN for about two seconds instead of refusing it, so a
+    timeout also means nothing is listening.
+    """
     try:
         connection = socket.create_connection(('127.0.0.1', port), timeout=0.5)
-    except ConnectionRefusedError:
+    except (ConnectionRefusedError, TimeoutError):
         return
     connection.close()
     raise ValueError(f'Port {port} already has a listening service')

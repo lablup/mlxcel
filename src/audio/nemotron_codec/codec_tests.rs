@@ -321,3 +321,47 @@ fn cache_update_semantics() {
     let wide = mlxcel_core::zeros(&[1, 1, 2], mlxcel_core::dtype::FLOAT32);
     assert!(cache.update(&wide, CacheKey::Block(1), 2, false).is_err());
 }
+
+/// #2548 folded the private weak-scalar erf GELU onto `GeluActivation::Erf`.
+/// f32 (the dtype the codec runs in) stays within f32 rounding of the former
+/// expression; half-precision inputs within a couple of rounding steps.
+#[test]
+fn folded_codec_gelu_stays_within_rounding_of_the_weak_scalar_form() {
+    use super::layers::{CODEC_GELU, scalar_like};
+    let weak_scalar_gelu = |x: &MlxArray| {
+        let scaled = mlxcel_core::divide(x, &scalar_like(std::f32::consts::SQRT_2, x));
+        let one_plus = mlxcel_core::add(&mlxcel_core::erf(&scaled), &scalar_like(1.0, x));
+        let prod = mlxcel_core::multiply(x, &one_plus);
+        mlxcel_core::divide(&prod, &scalar_like(2.0, x))
+    };
+    let grid: Vec<f32> = (0..=2048)
+        .map(|i| -8.0 + 16.0 * i as f32 / 2048.0)
+        .collect();
+    let xs = mlxcel_core::from_slice_f32(&grid, &[grid.len() as i32]);
+    for (name, dt, abs, rel) in [
+        ("f32", mlxcel_core::dtype::FLOAT32, 2e-6f32, 2e-6f32),
+        (
+            "bf16",
+            mlxcel_core::dtype::BFLOAT16,
+            2e-2,
+            2.0 * 2f32.powi(-8),
+        ),
+        (
+            "f16",
+            mlxcel_core::dtype::FLOAT16,
+            4e-3,
+            2.0 * 2f32.powi(-11),
+        ),
+    ] {
+        let x = mlxcel_core::astype(&xs, dt);
+        let got = CODEC_GELU.apply(&x);
+        assert_eq!(mlxcel_core::array_dtype(&got), dt, "{name}: dtype");
+        let (got, want) = (to_vec(&got), to_vec(&weak_scalar_gelu(&x)));
+        for ((xi, g), w) in grid.iter().zip(&got).zip(&want) {
+            assert!(
+                (g - w).abs() <= abs + rel * w.abs(),
+                "{name}: gelu({xi}) = {g}, former form {w}"
+            );
+        }
+    }
+}

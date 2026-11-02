@@ -130,7 +130,7 @@
 //! declined to the classic non-speculative path when any of the following
 //! hold:
 //!
-//! - Dispatch is `Disabled` or `Classic` (not a kind-specific variant).
+//! - Dispatch is `Disabled` (not a kind-specific variant).
 //! - The request carries multimodal payloads / VLM embeddings (image,
 //!   audio, or video-derived inputs): the burst path does not yet
 //!   support speculative tail decode after multimodal prefill. A
@@ -255,9 +255,16 @@ impl WorkerDrafterSlot {
     /// Construct a slot for the given dispatch. `Disabled` produces an
     /// empty slot that never loads anything.
     pub(crate) fn from_dispatch(dispatch: &crate::server::SpeculativeDispatch) -> Self {
+        // Only a kind-specific burst loads through this slot; a full-model
+        // drafter is loaded by the worker through the model loader and
+        // never reaches `load_drafter` (#2757).
+        let bursts = dispatch.is_kind_specific();
         Self {
-            draft_model_path: dispatch.draft_model_path().map(|p| p.to_path_buf()),
-            kind: dispatch.drafter_kind(),
+            draft_model_path: dispatch
+                .draft_model_path()
+                .filter(|_| bursts)
+                .map(|p| p.to_path_buf()),
+            kind: dispatch.drafter_kind().filter(|_| bursts),
             drafter: None,
         }
     }
@@ -426,11 +433,10 @@ pub(crate) fn should_burst_for_sequence(
         );
         return false;
     }
-    // #1485: mirostat and adaptive-p carry per-sequence feedback state the
-    // speculative acceptance arithmetic (`effective_token_distribution`)
-    // cannot represent, and the extended chain (dynatemp / min_keep) runs
-    // filter arithmetic outside `fused_sample_probs`'s chain; such requests
-    // decode classically.
+    // #1485: mirostat and adaptive-p carry per-sequence feedback state, and the
+    // extended chain (dynatemp / min_keep) runs filter arithmetic outside the
+    // fused sampler chain. The burst's verify rounds model neither, so such
+    // requests decode classically.
     if seq.sampling.effective_mirostat() != 0 || seq.sampling.needs_extended_chain() {
         tracing::debug!(
             "speculative burst declined for seq {}: mirostat / dynatemp / adaptive-p / min_keep sampler configured",
@@ -920,13 +926,14 @@ pub(crate) fn try_run_burst_b1(
             run_dflash_burst(ctx.reborrow(), &mut seq, bs)
         }
         // The gate (`should_burst_for_sequence`) already excluded
-        // `Disabled` / `Classic`. Re-asserting here makes the intent
+        // `Disabled`. Re-asserting here makes the intent
         // explicit for future maintainers.
-        // Prompt lookup never bursts (it is not kind-specific); its verify
-        // rounds run inside the regular decode tick (#2255).
+        // Prompt lookup and the full-model drafter never burst (they are
+        // not kind-specific); their verify rounds run inside the regular
+        // decode tick (#2255, #2757).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::Classic { .. }
-        | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
+        | crate::server::SpeculativeDispatch::PromptLookup { .. }
+        | crate::server::SpeculativeDispatch::FullModel { .. } => {
             Err(BurstOutcome::DeclineToClassic)
         }
     };
@@ -2464,11 +2471,12 @@ pub(crate) fn try_run_burst_batched(
             let bs = *block_size;
             run_dflash_burst_batched(ctx.reborrow(), &mut seqs, bs)
         }
-        // Prompt lookup never bursts (it is not kind-specific); its verify
-        // rounds run inside the regular decode tick (#2255).
+        // Prompt lookup and the full-model drafter never burst (they are
+        // not kind-specific); their verify rounds run inside the regular
+        // decode tick (#2255, #2757).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::Classic { .. }
-        | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
+        | crate::server::SpeculativeDispatch::PromptLookup { .. }
+        | crate::server::SpeculativeDispatch::FullModel { .. } => {
             Err(BurstOutcome::DeclineToClassic)
         }
     };

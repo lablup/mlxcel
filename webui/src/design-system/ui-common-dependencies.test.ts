@@ -12,8 +12,9 @@ const lockfile = readFileSync(join(webui, 'pnpm-lock.yaml'), 'utf8');
 describe('ui-common 0.2 dependency boundary', () => {
   it('resolves exactly one copy of Astryx core, so lab components share its theme and layer contexts', () => {
     // A second resolution of core (another version, or the same version under another peer
-    // set) would give the lab Drawer its own core. The lockfile's snapshot keys list each one.
-    const snapshots = lockfile.slice(lockfile.indexOf('\nsnapshots:\n'));
+    // set) would give the lab Drawer its own core. The lockfile's snapshot keys list each one;
+    // pnpm 12 writes a leading environment document with its own snapshots, so take the last.
+    const snapshots = lockfile.slice(lockfile.lastIndexOf('\nsnapshots:\n'));
     const cores = Array.from(snapshots.matchAll(/^ {2}'?@astryxdesign\/core@([^:']+)'?:$/gm), (match) => match[1]);
     expect(cores).toHaveLength(1);
     expect(cores[0]).toMatch(/^0\.7\.0\(/);

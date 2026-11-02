@@ -161,6 +161,16 @@ pub trait AudioModelProvider: Send + Sync {
     ) -> Result<AudioSynthesizeOutput, AudioModelError> {
         Err(AudioModelError::KindNotLoaded(AudioModelKind::Tts))
     }
+
+    /// Ask this provider's worker to exit and wait until it has released the
+    /// model, up to `timeout`.
+    ///
+    /// The process exit path calls this before `main` returns so the worker's
+    /// MLX arrays are freed on the worker thread first (#2738, #2745). The
+    /// semantics match `ModelProvider::shutdown_and_wait`: idempotent, `Ok`
+    /// when already exited, `Err` naming the timeout or carrying the panic
+    /// message.
+    fn shutdown_and_wait(&self, timeout: std::time::Duration) -> anyhow::Result<()>;
 }
 
 #[cfg(test)]
@@ -198,6 +208,9 @@ mod tests {
                 sample_rate: 24_000,
                 channels: 1,
             })
+        }
+        fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+            Ok(())
         }
     }
 

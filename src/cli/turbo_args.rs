@@ -147,7 +147,7 @@ impl TurboKvCacheArgs {
     /// process environment is left untouched, so any caller-set
     /// `MLXCEL_KV_BOUNDARY_V_LAYERS` continues to win).
     ///
-    /// SAFETY: this function calls `std::env::set_var`, which is
+    /// SAFETY: this function calls `set_native_var`, which is
     /// process-global and is not thread-safe with concurrent `getenv` from
     /// other threads (Rust 1.84 marks it `unsafe` for that reason). It MUST
     /// be invoked while:
@@ -174,7 +174,7 @@ impl TurboKvCacheArgs {
             // constant from mlxcel_core, eliminating any chance of
             // writing to the wrong key.
             unsafe {
-                std::env::set_var(
+                mlxcel_core::native_env::set_native_var(
                     mlxcel_core::cache::turbo::BOUNDARY_V_ENV,
                     boundary.to_string(),
                 );

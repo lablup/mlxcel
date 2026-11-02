@@ -23,9 +23,11 @@
 //! - Per-layer rope_theta and partial_rotary_factor
 //! - SwitchGLU experts with shared expert
 
-use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::cache::{KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows};
+use mlxcel_core::cache::{
+    KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
+};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
@@ -227,6 +229,21 @@ impl Step3p5Config {
             .as_ref()
             .and_then(|v| v.get(layer_idx).map(|s| s.as_str()))
             .unwrap_or("full_attention")
+    }
+
+    /// Reject a sliding window that cannot back a `RotatingKVCache` when a
+    /// layer is sliding (issue #2790); `sliding_window` is already an `i32`,
+    /// so only a value below 1 can be wrong.
+    pub(crate) fn validate_sliding_window(&self) -> Result<(), String> {
+        let has_sliding_layer = (0..self.num_hidden_layers).any(|idx| self.is_sliding(idx));
+        if has_sliding_layer && self.sliding_window < 1 {
+            return Err(format!(
+                "Step 3.5: sliding_window must be between 1 and {}, got {}",
+                i32::MAX,
+                self.sliding_window
+            ));
+        }
+        Ok(())
     }
 
     pub fn is_sliding(&self, layer_idx: usize) -> bool {
@@ -1112,6 +1129,7 @@ pub struct Step3p5Model {
     full_idx: Option<usize>,
     eos_token_ids: Vec<i32>,
     sequence_state: ModelOwnedSequenceState<Cache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl Step3p5Model {
@@ -1124,6 +1142,21 @@ impl Step3p5Model {
                     .map(|cache| match cache {
                         Cache::Standard(c) => c.offset,
                         Cache::Rotating(c) => c.offset,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sequence_kv_modes(&self, id: SequenceId) -> Vec<KVCacheMode> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        Cache::Standard(c) => c.mode,
+                        Cache::Rotating(c) => c.mode,
                     })
                     .collect()
             })
@@ -1144,21 +1177,41 @@ impl Step3p5Model {
         self.lm_head.forward(&h)
     }
 
+    #[cfg(test)]
     fn build_layer_caches(config: &Step3p5Config) -> Vec<Cache> {
+        Self::build_layer_caches_with_modes(config, None)
+    }
+
+    /// One cache per layer, each stored in its resolved KV cache mode;
+    /// `None` keeps all layers FP16.
+    fn build_layer_caches_with_modes(
+        config: &Step3p5Config,
+        modes: Option<&KvCacheLayerModes>,
+    ) -> Vec<Cache> {
         (0..config.num_hidden_layers)
             .map(|layer_idx| {
                 if config.is_sliding(layer_idx) {
-                    Cache::Rotating(RotatingKVCache::new(config.sliding_window))
+                    let window = config.sliding_window;
+                    let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
+                        modes.rotating_mode_for_layer(layer_idx, window)
+                    });
+                    Cache::Rotating(RotatingKVCache::new_with_mode(window, mode))
                 } else {
-                    Cache::Standard(KVCache::new())
+                    let mode =
+                        modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
+                    Cache::Standard(KVCache::new_with_mode(mode))
                 }
             })
             .collect()
     }
 
+    /// Fresh caches in the KV cache modes the server or CLI injected.
+    fn fresh_caches(&self) -> Vec<Cache> {
+        Self::build_layer_caches_with_modes(&self.config, Some(&self.kv_cache_layer_modes))
+    }
+
     fn reset_internal_caches(&self) {
-        self.sequence_state
-            .replace_internal(Self::build_layer_caches(&self.config));
+        self.sequence_state.replace_internal(self.fresh_caches());
     }
 
     fn forward_with_caches(
@@ -1321,6 +1374,7 @@ impl Step3p5Model {
     }
 
     pub fn from_weights(weights: &WeightMap, args: &Step3p5Config) -> Result<Self, String> {
+        args.validate_sliding_window()?;
         let group_size = args.group_size();
         let bits = args.bits();
 
@@ -1356,7 +1410,10 @@ impl Step3p5Model {
             swa_idx,
             full_idx,
             eos_token_ids: vec![2], // Default, overridden in load()
-            sequence_state: ModelOwnedSequenceState::new(Self::build_layer_caches(args)),
+            sequence_state: ModelOwnedSequenceState::new(Self::build_layer_caches_with_modes(
+                args, None,
+            )),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
 }
@@ -1405,6 +1462,26 @@ impl LanguageModel for Step3p5Model {
         self.layers.len()
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_internal_caches();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
+    /// mode but an aligned `Turbo4Asym` (issue #2783).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        let window = self.config.sliding_window;
+        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
+            (layer_idx < self.config.num_hidden_layers && self.config.is_sliding(layer_idx))
+                .then_some(window)
+                .map_or(LayerKv::Full, LayerKv::Sliding)
+        })
+    }
+
     fn supports_batching(&self) -> bool {
         true
     }
@@ -1419,7 +1496,7 @@ impl LanguageModel for Step3p5Model {
     }
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
-            .prepare_sequence_state(seq_id, Self::build_layer_caches(&self.config));
+            .prepare_sequence_state(seq_id, self.fresh_caches());
     }
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
@@ -1433,7 +1510,7 @@ impl LanguageModel for Step3p5Model {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || Self::build_layer_caches(&self.config),
+            || self.fresh_caches(),
             |caches| self.forward_with_caches(input_ids, None, caches, mask),
         )
     }
@@ -1516,7 +1593,7 @@ impl LanguageModel for Step3p5Model {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || Self::build_layer_caches(&self.config),
+            || self.fresh_caches(),
             |caches| self.forward_with_caches(input_ids, input_embeddings, caches, mask),
         )
     }

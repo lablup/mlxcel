@@ -312,6 +312,31 @@ fn klein_4b_transformer_f32_matches_upstream_f32() {
     assert!(rms < F32_REL_RMS_MAX, "f32 transformer rel RMS {rms:e}");
 }
 
+/// The bucketed prompt embeddings of the generate case against the ones
+/// upstream fed its first step (`embeds_bf16_bits`, `[1, 32, 7680]`).
+/// Recorded drift: 1.19e-2 on GB10, with the encoder's attention in bf16 or
+/// in f32 like upstream (#2666), so the bound is a sanity bound.
+#[test]
+#[ignore = "needs models/mlx/flux.2-klein-4b-bf16 and a GPU"]
+fn klein_4b_prompt_embeds_match_upstream() {
+    let Some(dir) = checkpoint() else {
+        eprintln!("skipping: FLUX.2-klein-4B checkpoint is absent");
+        return;
+    };
+    let prompt = "A cinematic portrait of a glass bonsai tree on a moonlit desk";
+    let (_, want) = bf16_fixture("transformer_step0_f32.safetensors", "embeds_bf16_bits");
+    let model = Flux2Model::load(&dir).unwrap();
+    let pipeline = model.pipeline();
+    let embeds = pipeline
+        .encode(prompt, DEFAULT_MAX_SEQUENCE_LENGTH, true)
+        .unwrap();
+    assert_eq!(mlxcel_core::array_shape(&embeds.embeds), vec![1, 32, 7680]);
+    let got = mlxcel_core::utils::array_to_vec_f32(&embeds.embeds);
+    let err = rel_rms(&got, &want);
+    eprintln!("flux2 prompt embeds parity: rel RMS {err:.3e}");
+    assert!(err < 0.1, "prompt embeds rel RMS {err:e}");
+}
+
 /// Decode upstream's final latents with this VAE and compare to its PNG.
 fn vae_only_psnr(file: &str, png: &str, auto_mode: bool) -> f64 {
     let dir = checkpoint().expect("checkpoint");

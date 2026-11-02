@@ -28,7 +28,10 @@ fn hash(path: &Path) -> Result<String> {
         }
         h.update(&b[..n]);
     }
-    Ok(format!("{:x}", h.finalize()))
+    Ok(h.finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
 }
 #[test]
 #[ignore = "requires authenticated real checkpoint/input and an exclusive GPU slot"]

@@ -503,3 +503,14 @@ fn draft_is_deterministic_and_reads_the_context() {
     assert!(weights.contains_key("norm.weight"));
     assert!(!weights.contains_key("model.norm.weight"));
 }
+
+// Issue #2798: the drafter's context window is validated, not clamped.
+#[test]
+fn config_rejects_a_sliding_window_a_context_cache_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let err = MuseAssistantConfig::from_json(&config_json(window))
+            .expect_err("an unusable sliding window must fail the load");
+        assert!(err.contains("Muse Glimmer assistant"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}

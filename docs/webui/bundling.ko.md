@@ -10,7 +10,7 @@
 
 ## 표준 빌드 파이프라인
 
-Python 3, Node **26.5.1**, pnpm **11.18.0**을 설치한 뒤 저장소 루트에서 실행합니다.
+Python 3, Node **26.5.1**, pnpm **12.16.1**을 설치한 뒤 저장소 루트에서 실행합니다.
 
 ```bash
 pnpm --dir webui install --frozen-lockfile

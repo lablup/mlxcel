@@ -46,7 +46,7 @@ Nemotron Nano Omni에서는 텍스트 요청 두 개와 이미지 요청 한 개
 
 ## 변경 요약
 
-공유 recurrent helper, 모델 tower 다섯 개, VLM wrapper 두 개, 상태 격리 harness, coverage 목록, provider admission 조건과 continuous-batching 문서를 변경했다. 새로운 SSM kernel이나 의존성은 추가하지 않는다. 관련 이슈는 #2571, #2574, #2555이며 후속 계열은 공유 helper를 재사용한다. 간결한 측정 근거는 `benchmarks/epic-2574/mamba2-families.json`에 기록한다.
+공유 recurrent helper, 모델 tower 다섯 개, VLM wrapper 두 개, 상태 격리 harness, coverage 목록, provider admission 조건과 continuous-batching 문서를 변경했다. 새로운 SSM kernel이나 의존성은 추가하지 않는다. 관련 이슈는 #2571, #2574, #2555이며 후속 계열은 공유 helper를 재사용한다. 간결한 측정 근거는 `docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/mamba2-families.json`에 기록한다.
 
 ## 통합 검증 수정
 

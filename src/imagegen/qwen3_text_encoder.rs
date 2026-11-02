@@ -24,7 +24,11 @@
 //! [`Qwen3TextEncoder::hidden_states`] returns `num_layers + 1` arrays: index 0
 //! is the token embeddings and index `i >= 1` is the output of decoder layer `i`
 //! (1-based) before the final norm, run under a causal plus key-padding
-//! additive mask with positions `0..T` and standard RoPE.
+//! additive mask with positions `0..T` and standard RoPE. Attention runs in
+//! the weights' dtype, where upstream (`qwen/attention.py`) runs SDPA in f32.
+//! Measured on the real checkpoints, f32 attention moves the conditioning by
+//! about 1e-3 while its distance to upstream's stays near 1.19e-2 (#2666), so
+//! the attention dtype is not the parity gap.
 //! [`Qwen3TextEncoder::stacked_prompt_embeds`] stacks chosen entries into the
 //! `[B, T, n * H]` layout FLUX.2 uses.
 //!
@@ -151,6 +155,16 @@ impl Qwen3TextEncoder {
         args.tie_word_embeddings = true;
         let weights = normalize_weights(weights);
         let hidden_size = args.hidden_size as i32;
+        // Upstream mlx-vlm `models/flux2/qwen/attention.py:148-162` (git
+        // 73d366ec) casts q, k and v to f32 for SDPA and the output back to
+        // the query dtype; this encoder keeps the activation dtype. Measured
+        // on GB10 against the CUDA oracle (#2666), f32 attention moves the
+        // FLUX.2 prompt embeddings by about 1e-3 while their distance to
+        // upstream's stays near 1.19e-2 (likewise for the Z-Image and
+        // Ideogram 4 features), and the end-to-end runs then move by
+        // bf16-noise amounts that take Bonsai and Ideogram 4 past their
+        // parity gates. The residual is likely bf16 GEMM reduction order
+        // between the two MLX builds (not measured).
         let model = Qwen3Model::from_weights(&weights, &args)
             .map_err(anyhow::Error::msg)
             .context("cannot build the Qwen3 text encoder")?;

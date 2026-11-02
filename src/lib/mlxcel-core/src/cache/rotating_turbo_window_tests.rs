@@ -247,3 +247,50 @@ fn decode_after_over_window_append_and_trim_drops_rolled_back_keys() {
         );
     }
 }
+
+/// Only an aligned `Turbo4Asym` window stores a quantized mode; every other
+/// mode (and a misaligned `Turbo4Asym` window) stores FP16 (issue #2783).
+#[test]
+fn stored_mode_reports_fp16_except_for_aligned_turbo4_asym() {
+    let cases = [
+        (KVCacheMode::Fp16, KVCacheMode::Fp16, KVCacheMode::Fp16),
+        (KVCacheMode::Int8, KVCacheMode::Fp16, KVCacheMode::Fp16),
+        (
+            KVCacheMode::Turbo4Asym,
+            KVCacheMode::Turbo4Asym,
+            KVCacheMode::Fp16,
+        ),
+        (
+            KVCacheMode::Turbo3Asym,
+            KVCacheMode::Fp16,
+            KVCacheMode::Fp16,
+        ),
+        (KVCacheMode::Turbo4, KVCacheMode::Fp16, KVCacheMode::Fp16),
+        (
+            KVCacheMode::Turbo4Delegated,
+            KVCacheMode::Fp16,
+            KVCacheMode::Fp16,
+        ),
+    ];
+    for (requested, aligned, misaligned) in cases {
+        assert_eq!(
+            RotatingKVCache::stored_mode(512, requested),
+            aligned,
+            "{requested:?} on a 512 window"
+        );
+        assert_eq!(
+            RotatingKVCache::stored_mode(100, requested),
+            misaligned,
+            "{requested:?} on a 100 window"
+        );
+    }
+    assert_eq!(
+        RotatingKVCache::stored_mode(0, KVCacheMode::Turbo4Asym),
+        KVCacheMode::Fp16
+    );
+    // The aligned Turbo4Asym answer must match what the constructor builds.
+    assert_eq!(
+        RotatingKVCache::new_with_mode(512, KVCacheMode::Turbo4Asym).mode,
+        RotatingKVCache::stored_mode(512, KVCacheMode::Turbo4Asym)
+    );
+}

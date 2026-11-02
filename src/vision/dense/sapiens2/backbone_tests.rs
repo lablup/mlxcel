@@ -181,12 +181,19 @@ fn sapiens2_bf16_rope_matches_upstream_compiled_graph() {
     // `tests/fixtures/sapiens2/generate_rope_oracle.py` refuses to write a
     // fixture on that host because the two agree. So the compiled route is
     // only observable by value on ROCm, and elsewhere the oracle is upstream's
-    // value for that backend. CUDA has no capture and is not keyed.
+    // value for that backend. CUDA's fused kernel rounds like ROCm's:
+    // upstream `mlx` 0.32.4 CUDA on an NVIDIA GB10 (sm_121, aarch64,
+    // `MLX_ENABLE_TF32=0`, this test's inputs through the
+    // `generate_rope_oracle.py` graphs) gives -4.559755325317383e-6 compiled
+    // and -4.589557647705078e-6 eager (issue #2739), so CUDA is keyed with ROCm.
     let _device_lock = mlxcel_core::streams::lock_default_device();
     let eager_value = -4.589557647705078e-6;
     let compiled_value = if mlxcel_core::default_device_is_gpu()
-        && mlxcel_core::hardware::gpu_backend_kind() == mlxcel_core::hardware::GpuBackendKind::Rocm
-    {
+        && matches!(
+            mlxcel_core::hardware::gpu_backend_kind(),
+            mlxcel_core::hardware::GpuBackendKind::Rocm
+                | mlxcel_core::hardware::GpuBackendKind::Cuda
+        ) {
         -4.559755325317383e-6
     } else {
         eager_value

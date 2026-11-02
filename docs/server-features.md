@@ -331,7 +331,18 @@ client disconnect continues to cancel generation normally.
 `--sleep-idle-seconds N` frees the model worker and prompt cache after the idle
 window. Health and inspection routes remain available while sleeping; the next
 inference request reloads the model and performs its own prefill. Negative
-values disable sleep, which is the default.
+values disable sleep, which is the default. A shutdown request that arrives
+while the worker is sleeping exits it without reloading the model, so process
+exit does not wait for a load it will never use.
+
+On exit, the server joins its chat model worker and every side worker (audio,
+embedding, image, rerank and realtime) before `main` returns, because a thread
+that frees MLX arrays after the C runtime's static destructors run aborts a CPU
+build with `pure virtual method called`. The join is bounded by a 120 s
+`WORKER_EXIT_TIMEOUT` (150 s for the router's pool drain). Model load has no
+cancellation point, so a worker that is still loading when the deadline
+expires keeps running: the server logs that the worker is still running and
+that a CPU build may abort at exit, rather than reporting a clean exit.
 
 ## Live settings
 

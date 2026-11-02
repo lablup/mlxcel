@@ -3257,6 +3257,18 @@ impl LanguageModel for NemotronHModel {
         self.config.num_hidden_layers
     }
 
+    /// No mode table: report the real storage so the server does not fall back to the configured
+    /// table (issue #2790). Attention blocks keep an FP16 `KVCache`; Mamba, MLP and MoE blocks
+    /// none.
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
+        crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |idx| {
+            match self.block_types.get(idx) {
+                Some(BlockType::Attention) => crate::models::model_owned::LayerKv::Fp16Only,
+                _ => crate::models::model_owned::LayerKv::None,
+            }
+        })
+    }
+
     fn supports_batching(&self) -> bool {
         true
     }

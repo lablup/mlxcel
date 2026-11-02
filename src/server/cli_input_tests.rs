@@ -2933,3 +2933,82 @@ mod grammar_flags {
         );
     }
 }
+
+// ── image-only serving (#2825) ─────────────────────────────────────────────
+
+/// The startup input both binaries build for `--image-model <dir>` with no
+/// model source: an empty chat path and the resolved image checkpoint.
+fn image_only_input() -> ServerStartupInput {
+    let mut input = sample_input();
+    input.model_path = PathBuf::new();
+    input.model_alias = None;
+    input.image_model_path = Some(PathBuf::from("models/flux-checkpoint"));
+    input
+}
+
+#[test]
+fn image_model_without_a_model_source_selects_image_only_serving() {
+    let startup = image_only_input()
+        .into_startup_config()
+        .expect("image-only input resolves");
+    assert_eq!(
+        startup.embedding_serving_mode,
+        crate::server::config::EmbeddingServingMode::ImageOnly
+    );
+    assert!(
+        startup.model_path.as_os_str().is_empty(),
+        "image-only has no chat checkpoint"
+    );
+}
+
+#[test]
+fn a_model_source_keeps_the_two_model_shape() {
+    // `-m --image-model` must stay exactly as it was: no mode restriction.
+    let mut input = sample_input();
+    input.image_model_path = Some(PathBuf::from("models/flux-checkpoint"));
+    let startup = input
+        .into_startup_config()
+        .expect("two-model input resolves");
+    assert_eq!(
+        startup.embedding_serving_mode,
+        crate::server::config::EmbeddingServingMode::Any
+    );
+    assert_eq!(startup.model_path, PathBuf::from("models/foo"));
+}
+
+#[test]
+fn image_only_names_each_conflicting_flag() {
+    type Mutator = fn(&mut ServerStartupInput);
+    let cases: [(&str, Mutator); 7] = [
+        ("--models-dir", |input| {
+            input.router_models_dir = Some(PathBuf::from("models"));
+        }),
+        ("--models-preset", |input| {
+            input.models_preset = Some(PathBuf::from("presets.ini"));
+        }),
+        ("--webui", |input| input.webui_enabled = true),
+        ("--embedding-model", |input| {
+            input.embedding_model_path = Some(PathBuf::from("models/embed"));
+        }),
+        ("--reranker-model", |input| {
+            input.reranker_model_path = Some(PathBuf::from("models/rerank"));
+        }),
+        ("--embeddings", |input| {
+            input.embedding_compat.embedding = true;
+        }),
+        ("--reranking", |input| {
+            input.embedding_compat.rerank = true;
+        }),
+    ];
+
+    for (flag, mutate) in cases {
+        let mut input = image_only_input();
+        mutate(&mut input);
+        let err = input
+            .into_startup_config()
+            .expect_err("image-only must refuse this combination");
+        let message = err.to_string();
+        assert!(message.contains("--image-model"), "{flag}: {message}");
+        assert!(message.contains(flag), "{flag}: {message}");
+    }
+}

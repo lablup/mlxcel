@@ -20,6 +20,15 @@
 // Off-switch only, matching MLXCEL_METAL4_ATTENTION: unset behaves exactly as
 // upstream, and the value is read once per process because this sits on the
 // dispatch path of every quantized matmul.
+//
+// The same switch also gates the second delta: on GPU generations 13 and 14,
+// affine 4- and 8-bit products with 5 to 8 rows go to
+// `mlxcel_affine_qmm_t_rows` (kernels/quantized.metal overlay) instead of one
+// `qmv` per row. That is the batched decode shape, and on M1 Ultra it cut the
+// Llama 3.1 8B 4-bit 8-row projections to about half. It reduces in a
+// different order than `qmv`, which is why it follows the qmv_wide switch:
+// the speculative exactness gate turns that off when it needs M >= 2 to match
+// M == 1 bitwise.
 
 #include <atomic>
 #include <cstdlib>
@@ -593,6 +602,76 @@ std::atomic<bool>& mlxcel_qmv_wide_flag() {
 inline bool use_qmv_wide(const std::string& mode, metal::Device& d) {
   return mlxcel_qmv_wide_flag().load(std::memory_order_relaxed) &&
       (mode != "affine" || d.get_architecture_gen() >= 15);
+}
+
+// mlxcel: whether `mlxcel_affine_qmm_t_rows` serves this product. Affine 4-
+// or 8-bit, transposed and non-batched (row-contiguous x over a 2D weight),
+// 5 to 8 rows below the qmm switch-over, and whole tiles. The kernel beats
+// per-row `qmv` from about 5 rows on M1 Ultra (gate_up from 4, the smaller
+// projections from 6); generation 15 and later keep upstream's `qmv_wide`.
+inline bool use_mlxcel_qmm_rows(
+    const std::optional<array>& biases,
+    QuantizationMode mode,
+    int group_size,
+    int bits,
+    int M,
+    int N,
+    int K,
+    int vector_limit,
+    metal::Device& d) {
+  return mode == QuantizationMode::Affine && biases.has_value() &&
+      (bits == 4 || bits == 8) &&
+      (group_size == 32 || group_size == 64 || group_size == 128) &&
+      M >= 5 && M <= 8 && M < vector_limit && N % 32 == 0 && K % 64 == 0 &&
+      d.get_architecture_gen() < 15 &&
+      mlxcel_qmv_wide_flag().load(std::memory_order_relaxed);
+}
+
+void mlxcel_qmm_rows(
+    const array& x,
+    const array& w,
+    const array& scales,
+    const array& biases,
+    array& out,
+    int group_size,
+    int bits,
+    int M,
+    int N,
+    int K,
+    metal::Device& d,
+    const Stream& s) {
+  // BK is 64 where the group size allows it (see the instantiations).
+  int bk = group_size >= 64 ? 64 : 32;
+  std::string kname;
+  kname.reserve(64);
+  concatenate(
+      kname,
+      "mlxcel_affine_qmm_t_rows_",
+      get_type_string(x.dtype()),
+      "_gs_",
+      group_size,
+      "_b_",
+      bits,
+      "_bk_",
+      bk);
+  auto kernel = d.get_kernel(kname);
+
+  // BN = 32 columns per threadgroup, two simdgroups across them.
+  constexpr int bn = 32;
+  MTL::Size group_dims(32, 2, 1);
+  MTL::Size grid_dims(N / bn, 1, 1);
+
+  auto& compute_encoder = metal::get_command_encoder(s);
+  compute_encoder.set_compute_pipeline_state(kernel);
+  compute_encoder.set_input_array(w, 0);
+  compute_encoder.set_input_array(scales, 1);
+  compute_encoder.set_input_array(biases, 2);
+  compute_encoder.set_input_array(x, 3);
+  compute_encoder.set_output_array(out, 4);
+  compute_encoder.set_bytes(K, 5);
+  compute_encoder.set_bytes(N, 6);
+  compute_encoder.set_bytes(M, 7);
+  compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
 }
 
 // Dispatches qmv_wide (fp modes -> fp_qmv_wide, affine -> affine_qmv_wide):
@@ -2276,6 +2355,15 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
       use_qmm_nax_splitk(x, biases, mode, M, N, K, group_size_)) {
     qmm_splitk_nax(
         x, w, scales, biases, out, group_size_, bits_, M, N, K, d, s, mode);
+    return;
+  }
+
+  // mlxcel: a decode batch of 5 to 8 rows on generations 13 and 14.
+  if (transpose_ && non_batched &&
+      use_mlxcel_qmm_rows(
+          biases, mode_, group_size_, bits_, M, N, K, vector_limit, d)) {
+    mlxcel_qmm_rows(
+        x, w, scales, *biases, out, group_size_, bits_, M, N, K, d, s);
     return;
   }
 

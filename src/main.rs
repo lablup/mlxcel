@@ -14,6 +14,7 @@
 
 use clap::{Args, Parser, Subcommand};
 use mlxcel::tokenizer::MlxcelTokenizer;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 mod commands;
@@ -566,8 +567,8 @@ pub(crate) struct GenerateArgs {
     pub(crate) lang_bias: LangBiasCliArgs,
 
     /// Speculative-decoding flag group (`--draft-kind`, `--draft-block-size`).
-    /// The `--draft-model` and `--num-draft-tokens` flags stay on
-    /// [`ModelOptions`] above to keep their existing scope and to preserve
+    /// The `--draft-model` flag stays on [`ModelOptions`] above to keep its
+    /// existing scope and to preserve
     /// the llama-server-compat naming on `mlxcel-server`. See
     /// [`SpeculativeArgs`] for the rationale.
     #[command(flatten)]
@@ -639,13 +640,15 @@ pub(crate) struct ModelOptions {
     #[arg(long, value_name = "PATH")]
     pub(crate) adapter: Option<PathBuf>,
 
-    /// Path to draft model for classic offline speculative decoding (optional)
+    /// Speculative drafter checkpoint (optional), a path or an `owner/name`
+    /// repo id resolved like `-m`. Takes an MTP or DFlash drafter
+    /// (`--draft-kind mtp`, `--draft-kind dflash`, or auto-detected), or an
+    /// ordinary smaller checkpoint that shares the target's tokenizer
+    /// (`--draft-kind full-model`, auto-detected for any other model directory),
+    /// which drafts from its own KV caches on the engine's token-only loop.
+    /// `--prompt-lookup` needs no checkpoint.
     #[arg(long, value_name = "PATH")]
     pub(crate) draft_model: Option<PathBuf>,
-
-    /// Number of draft tokens per speculation step (default: 3)
-    #[arg(long, default_value_t = 3, value_name = "N")]
-    pub(crate) num_draft_tokens: usize,
 }
 
 /// Text generation options
@@ -1757,8 +1760,9 @@ pub(crate) struct ServeArgs {
     )]
     draft_max: usize,
 
-    /// Largest active decode batch at which a prompt-lookup sequence runs
-    /// its own verify round (`--draft-kind prompt-lookup`). Each proposing
+    /// Largest active decode batch at which a prompt-lookup or full-model
+    /// sequence runs its own verify round (`--draft-kind prompt-lookup`, or a
+    /// full-model `--draft-model`). Each proposing
     /// row costs one verify forward on top of the batched step, so on ticks
     /// with more concurrent rows every row takes the plain batched step and
     /// the drafter keeps observing the emitted tokens until the batch
@@ -1818,9 +1822,11 @@ pub(crate) struct ServeArgs {
     /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
     /// `-m`). Loads on its own worker thread and serves
     /// POST /v1/images/generations and POST /v1/images/edits (JSON bodies, base64
-    /// PNG responses); `-m` keeps serving chat. Requests run one at a time.
-    /// Startup fails when the checkpoint is not a supported image-generation
-    /// family. Also reads `MLXCEL_IMAGE_MODEL`. See docs/image-generation.md.
+    /// PNG responses); `-m` keeps serving chat. Without `-m`, the server starts
+    /// image-only: this checkpoint is the served model, and chat, completion and
+    /// tokenizer routes answer 501. Requests run one at a time. Startup fails
+    /// when the checkpoint is not a supported image-generation family. Also
+    /// reads `MLXCEL_IMAGE_MODEL`. See docs/image-generation.md.
     #[arg(long, env = "MLXCEL_IMAGE_MODEL", value_name = "PATH_OR_REPO_ID")]
     image_model: Option<String>,
 
@@ -3279,36 +3285,56 @@ impl Default for DiffusionServeOptions {
     }
 }
 
-/// Install a `tracing` subscriber for the offline CLI commands when `RUST_LOG`
-/// is set.
+/// Install a `tracing` subscriber for the offline CLI commands.
 ///
 /// The CLI shipped without any global subscriber, so every `tracing::*` call
 /// reached by `mlxcel generate`, `inspect`, `tune` and friends was silently
 /// discarded no matter what `RUST_LOG` said. That is exactly backwards: the
 /// instrumentation is unreachable precisely when someone has set `RUST_LOG`
 /// because they are trying to diagnose something. Notably it hid the drafter
-/// auto-detection line, which is the difference between a benchmark that ran
-/// the classic `SpeculativeGenerator` and one that ran a kind-specific round
-/// loop.
+/// auto-detection line, which is what a benchmark needs to state which
+/// round loop it ran.
+///
+/// By default the subscriber filters at `warn`, so the warnings and errors an
+/// offline command raises (environment fallbacks, deprecated flags) reach
+/// stderr without any setup. `RUST_LOG` still overrides the filter and keeps
+/// its usual `tracing` directive syntax, which is how `info!` lines such as
+/// `autotune: applied ...` stay opt-in.
 ///
 /// Two deliberate constraints:
 ///
-/// * **Opt-in.** Nothing is installed unless `RUST_LOG` is set, so default
-///   command output is unchanged byte for byte.
-/// * **stderr.** Diagnostics must not contaminate the generated text on stdout,
-///   which callers pipe.
+/// * **stdout is untouched.** Every line the subscriber writes goes to stderr,
+///   so piped output stays byte-for-byte unchanged whether or not `RUST_LOG`
+///   is set.
+/// * **stderr carries a bounded default.** Only `WARN` and above are emitted
+///   when `RUST_LOG` is unset.
 ///
 /// `Serve` is skipped because `server::startup` installs its own subscriber and
 /// would panic on the double `init()`. `try_init` is used anyway so a future
 /// second initializer degrades to a no-op rather than aborting the process.
 fn init_cli_tracing(command: &Commands) {
-    if matches!(command, Commands::Serve(_)) || std::env::var_os("RUST_LOG").is_none() {
+    if matches!(command, Commands::Serve(_)) {
         return;
     }
+    let rust_log = std::env::var_os("RUST_LOG");
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(cli_tracing_filter(rust_log.as_deref()))
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+/// The filter an offline command's subscriber runs with.
+///
+/// Unset `RUST_LOG` means `warn`, so lost diagnostics are recovered without
+/// changing stdout. A set value is used verbatim, matching
+/// `EnvFilter::from_default_env()` at the call site. Kept pure and separate
+/// from installation so the selection is testable without touching the
+/// process environment or the global subscriber.
+fn cli_tracing_filter(rust_log: Option<&OsStr>) -> tracing_subscriber::EnvFilter {
+    match rust_log {
+        Some(value) => tracing_subscriber::EnvFilter::new(value.to_string_lossy()),
+        None => tracing_subscriber::EnvFilter::new("warn"),
+    }
 }
 
 /// The checkpoint a command was given, for the GB10 graph budget default
@@ -3340,6 +3366,9 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // reqwest is built without a bundled rustls provider; install ring before
+    // any client exists (the client builders also do this, so it is belt only).
+    mlxcel::http_tls::install_default_crypto_provider();
     // Hidden machine interface for the llama-server b10621 compatibility
     // manifest (issue #1443): `mlxcel serve --dump-flag-surface` prints the
     // complete clap surface of the `serve` subcommand, hidden compatibility
@@ -3459,6 +3488,11 @@ fn main() -> anyhow::Result<()> {
                 .push(mlxcel::server::StartupNotice::info(line)),
             _ => tracing::info!("{line}"),
         }
+    }
+
+    // `serve` reports these from `start_server`, where its subscriber exists.
+    if !matches!(cli.command, Commands::Serve(_)) {
+        mlxcel_core::native_env::log_effective_native_env();
     }
 
     match cli.command {

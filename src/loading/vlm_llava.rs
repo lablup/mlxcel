@@ -180,8 +180,14 @@ fn build_llava_text_model(
 
     match backend {
         LlavaTextBackend::Llama => {
-            let model = models::Llama3Model::from_weights(weights, &text_args)
+            let mut model = models::Llama3Model::from_weights(weights, &text_args)
                 .map_err(|e| anyhow::anyhow!("Failed to load text model: {}", e))?;
+            // `text_config` may declare no EOS id (llava-1.5-7b), so add the
+            // sidecar ids the tokenizer config resolves (#2729).
+            model.set_eos_token_ids(crate::loading::merged_eos_token_ids(
+                text_args.eos_token_ids(),
+                model_path,
+            ));
             Ok(LoadedModel::Llama(model))
         }
         LlavaTextBackend::Qwen2 => {
@@ -386,9 +392,10 @@ pub(crate) fn load_llava_host_preprocessor(
 
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)
         .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
-    let vlm_config: VLMConfig = parse_vlm_config(&config_str, "VLM config")
+    let mut vlm_config: VLMConfig = parse_vlm_config(&config_str, "VLM config")
         .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     require_llava_host_family(&vlm_config)?;
+    resolve_llava_vision_hidden_act(&mut vlm_config, &full_config);
 
     let text_model_type = vlm_config
         .text_config
@@ -627,11 +634,43 @@ fn sanitize_bunny_weight_keys(weights: &mut WeightMap) {
     }
 }
 
+/// Resolve an omitted `vision_config.hidden_act` to the tower's Hugging Face
+/// class default: `quick_gelu` for the CLIP towers of LLaVA 1.5 / LLaVA-NeXT,
+/// `gelu_pytorch_tanh` for a SigLIP tower (#2548; both were erf before). The
+/// IREE preprocessor resolves the same rule in the OpenXLA vision config.
+fn resolve_llava_vision_hidden_act(vlm_config: &mut VLMConfig, full_config: &Value) {
+    if let Some(raw) = full_config.get("vision_config") {
+        vlm_config
+            .vision_config
+            .default_missing_hidden_act_by_model_type(raw);
+    }
+}
+
+/// Parse Bunny's `vision_config`, falling back to the
+/// `google/siglip-so400m-patch14-384` tower shape when the block is too sparse
+/// to describe the tower.
+///
+/// A declared `hidden_act` that is not a GELU variant is an error even when
+/// the rest of the block is sparse, so the fallback cannot swallow it (#2794).
 fn parse_bunny_vision_config(
     full_config: &Value,
     vision_config_val: &Value,
-) -> vision::config::VisionConfig {
-    serde_json::from_value(vision_config_val.clone()).unwrap_or_else(|_| {
+) -> Result<vision::config::VisionConfig> {
+    use vision::config::VisionHiddenActivation;
+
+    let declared_act = match vision_config_val.get("hidden_act") {
+        Some(Value::String(name)) => Some(
+            VisionHiddenActivation::try_from(name.clone())
+                .map_err(|e| anyhow::anyhow!("Bunny vision_config: {e}"))?,
+        ),
+        _ => None,
+    };
+    let parsed: Option<vision::config::VisionConfig> =
+        serde_json::from_value(vision_config_val.clone()).ok();
+    if let Some(mut config) = parsed {
+        config.default_missing_hidden_act_by_model_type(vision_config_val);
+        Ok(config)
+    } else {
         let mm_hidden = full_config
             .get("mm_hidden_size")
             .and_then(|v| v.as_u64())
@@ -640,7 +679,7 @@ fn parse_bunny_vision_config(
             .get("intermediate_size")
             .and_then(|v| v.as_u64())
             .unwrap_or(4304) as usize;
-        vision::config::VisionConfig {
+        Ok(vision::config::VisionConfig {
             model_type: "siglip_vision_model".to_string(),
             num_hidden_layers: 27,
             hidden_size: mm_hidden,
@@ -650,9 +689,13 @@ fn parse_bunny_vision_config(
             image_size: 384,
             num_channels: 3,
             layer_norm_eps: 1e-6,
-            hidden_act: vision::config::VisionHiddenActivation::ExactGelu,
-        }
-    })
+            // Bunny's `mm_vision_tower` is `google/siglip-so400m-patch14-384`,
+            // whose remote config declares `gelu_pytorch_tanh` (#2548; erf
+            // before). mlx-vlm's `FastGELUMLP` departs from it. A key the
+            // sparse block does declare still decides.
+            hidden_act: declared_act.unwrap_or(VisionHiddenActivation::GeluPytorchTanh),
+        })
+    }
 }
 
 /// Load a LLaVA VLM model (CLIP/SigLIP vision + Llama/Qwen2 text + MLP projector).
@@ -662,7 +705,8 @@ pub(crate) fn load_llava_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::siglip::SigLipVisionModel;
 
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)?;
-    let vlm_config: VLMConfig = parse_vlm_config(&config_str, "VLM config")?;
+    let mut vlm_config: VLMConfig = parse_vlm_config(&config_str, "VLM config")?;
+    resolve_llava_vision_hidden_act(&mut vlm_config, &full_config);
 
     let mut weights = strip_language_model_prefix(load_vlm_weights_common(model_path, None)?);
 
@@ -745,6 +789,7 @@ pub(crate) fn load_llava_vlm(model_path: &Path) -> Result<LoadedModel> {
         block_prefix_tokens: Vec::new(),
         block_suffix_tokens: Vec::new(),
         pixtral_layout: None,
+        newline_runs: std::sync::OnceLock::new(),
     };
 
     let vlm = vision::VisionLanguageModel {
@@ -801,7 +846,7 @@ pub(crate) fn load_llava_bunny_vlm(model_path: &Path) -> Result<LoadedModel> {
         .get("vision_config")
         .cloned()
         .unwrap_or_default();
-    let vision_config = parse_bunny_vision_config(&full_config, &vision_config_val);
+    let vision_config = parse_bunny_vision_config(&full_config, &vision_config_val)?;
 
     let vision_feature_layer = full_config
         .get("vision_feature_layer")
@@ -873,6 +918,7 @@ pub(crate) fn load_llava_bunny_vlm(model_path: &Path) -> Result<LoadedModel> {
         block_prefix_tokens: Vec::new(),
         block_suffix_tokens: Vec::new(),
         pixtral_layout: None,
+        newline_runs: std::sync::OnceLock::new(),
     };
 
     let vlm = vision::VisionLanguageModel {

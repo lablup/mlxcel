@@ -22,11 +22,13 @@
 //! - `batched_dispatch`: shared per-row batched dispatch helper used by every
 //!   vision wrapper that needs `forward_batched_with_ids` to route
 //!   each row through `forward_with_sequence_id`.
+//! - `gemma3_vlm_prompt`: Gemma 3 image-block newline merging
 //! - `gemma4_vl`: Gemma 4 mixed-length batching helpers
 //! - `host_preprocessor`: owned host-first prefill production for compiler backends
 //! - `phi4mm_prompt`: Phi4MM numbered image/audio placeholder normalization
 //! - `phi4_siglip_prompt`: Phi4-SigLIP `<image>` placeholder handling
 //! - `minicpmo_prompt`: MiniCPM-o image placeholder expansion and bounds
+//! - `minicpmv46_prompt`: MiniCPM-V 4.6 image placeholder expansion
 //! - `moondream2_prompt`: Moondream2 query/caption template shaping
 //! - `moondream3_prompt`: Moondream3 query/caption template shaping
 //! - `qwen_vl`: Qwen-VL token insertion rules
@@ -40,6 +42,7 @@ pub mod deepseek_vl2_prompt;
 pub mod deepseekocr_prompt;
 pub mod falcon_ocr_prompt;
 pub mod fastvlm_prompt;
+pub mod gemma3_vlm_prompt;
 pub mod gemma4_vl;
 pub mod got_ocr_prompt;
 pub mod granite_vision_prompt;
@@ -52,6 +55,7 @@ pub mod lfm2_vl_prompt;
 pub mod llmjp_vl_prompt;
 pub mod locateanything_prompt;
 pub mod minicpmo_prompt;
+pub mod minicpmv46_prompt;
 pub mod moondream2_prompt;
 pub mod moondream3_prompt;
 pub mod muse_glimmer_prompt;

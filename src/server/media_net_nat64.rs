@@ -50,7 +50,10 @@ impl Nat64Prefix {
     ///
     /// A message naming the entry when it is not `addr/len`, the address does
     /// not parse as IPv6, the length is not an RFC 6052 length, bits past the
-    /// length are set, or a /96 prefix sets the reserved `u` octet.
+    /// length are set, a /96 prefix sets the reserved `u` octet, or the prefix
+    /// lies outside the space a translator may use (see
+    /// [`is_global_translator_space`]) or inside an IANA special-purpose block
+    /// no translator is numbered from (see [`SPECIAL_PURPOSE_BLOCKS`]).
     pub(crate) fn parse(raw: &str) -> Result<Self, String> {
         let entry = raw.trim();
         let (addr, len) = entry
@@ -82,11 +85,25 @@ impl Nat64Prefix {
                 "{entry:?} sets bits 64..72, which RFC 6052 reserves as zero"
             ));
         }
+        if !is_global_translator_space(network, len) {
+            return Err(format!(
+                "{entry:?} lies outside 2000::/3 and 64:ff9b:1::/48; a link-local, unique-local \
+                 or other non-global prefix would let synthesized addresses reach private hosts"
+            ));
+        }
+        if let Some(block) = special_purpose_block(network) {
+            return Err(format!(
+                "{entry:?} lies inside {block}, an IANA special-purpose block no NAT64 \
+                 translator is numbered from; listing it would judge addresses the media \
+                 policy refuses by the IPv4 address they embed"
+            ));
+        }
         Ok(Self { network, len })
     }
 
-    /// Build a prefix without the well-known overlap check (tests only), to
-    /// model an operator prefix that predates it.
+    /// Build a prefix without the policy checks (tests only), to model an
+    /// operator prefix that predates them or to decode the RFC 6052 examples,
+    /// which use the documentation prefix.
     #[cfg(test)]
     pub(crate) fn parse_unchecked_for_test(raw: &str) -> Self {
         let (addr, len) = raw.split_once('/').expect("addr/len");
@@ -125,6 +142,65 @@ impl std::fmt::Display for Nat64Prefix {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.network, self.len)
     }
+}
+
+/// The RFC 8215 local-use NAT64 block `64:ff9b:1::/48`.
+const LOCAL_USE: Ipv6Addr = Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0);
+
+/// True when the prefix `network/len` lies wholly inside global unicast
+/// `2000::/3` or the local-use block `64:ff9b:1::/48`, or is the well-known
+/// `64:ff9b::/96` itself (issue #2728).
+///
+/// A listed prefix outranks the `2000::/3` gate in
+/// [`super::address::is_public_address_with`], so a link-local or unique-local
+/// prefix would let any address inside it that embeds a public IPv4 address
+/// through, which reopens private ranges when the prefix is not really a
+/// translator.
+fn is_global_translator_space(network: Ipv6Addr, len: u8) -> bool {
+    let bits = u128::from(network);
+    let global_unicast = bits >> 125 == 0b001;
+    let local_use = len >= 48 && bits & mask(48) == u128::from(LOCAL_USE);
+    let well_known = len == 96 && network == WELL_KNOWN;
+    global_unicast || local_use || well_known
+}
+
+/// IANA special-purpose blocks inside `2000::/3` that a listed prefix may not
+/// fall in (issue #2764): `(network, length, name)`.
+///
+/// [`super::address::is_public_address_with`] refuses addresses in these
+/// blocks, but a listed prefix outranks that refusal, so a prefix here would
+/// judge them by their embedded IPv4 address instead. Every allowed prefix
+/// length is /32 or longer, and every block is /32 or shorter, so a prefix
+/// overlaps a block exactly when its network address lies inside it.
+const SPECIAL_PURPOSE_BLOCKS: [(Ipv6Addr, u8, &str); 4] = [
+    (
+        Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0),
+        23,
+        "2001::/23 (IETF protocol assignments, RFC 2928)",
+    ),
+    (
+        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+        32,
+        "2001:db8::/32 (documentation, RFC 3849)",
+    ),
+    (
+        Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0),
+        16,
+        "2002::/16 (6to4, RFC 3056)",
+    ),
+    (
+        Ipv6Addr::new(0x3fff, 0, 0, 0, 0, 0, 0, 0),
+        20,
+        "3fff::/20 (documentation, RFC 9637)",
+    ),
+];
+
+/// The special-purpose block `network` lies in, if any.
+fn special_purpose_block(network: Ipv6Addr) -> Option<&'static str> {
+    SPECIAL_PURPOSE_BLOCKS
+        .iter()
+        .find(|(block, len, _)| u128::from(network) & mask(*len) == u128::from(*block))
+        .map(|(_, _, name)| *name)
 }
 
 /// The network mask of a `len`-bit prefix.

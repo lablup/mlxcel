@@ -32,4 +32,4 @@ Trinity의 퇴화된 생성 결과와 높은 perplexity, Inkling의 매우 높�
 
 집중 네이티브·격리·다단계·위임 테스트, 잘못된 입력의 원자적 거절, 페이지드 집계, 포맷과 대상 clippy 검사를 통과했습니다. 최종 소스 커버리지 계약 12개도 머지 전에 통과했습니다. 전체 워크스페이스 검사는 에픽 최종 통합 단계에서 수행하며 여기서 완료됐다고 주장하지 않습니다.
 
-전체 수치와 비교 로그, 커밋 및 한계는 [`benchmarks/epic-2574/model-owned-attention.json`](../benchmarks/epic-2574/model-owned-attention.json)에 있습니다. `scripts/bench_serving_concurrency.py`의 동시성 1/2/4와 `MLXCEL_TRACE_BATCH_ROWS=1`/`=4`로 재현하며, 기준 로그에는 스칼라 참조 플래그를 추가합니다.
+전체 수치와 비교 로그, 커밋 및 한계는 [`docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/model-owned-attention.json`](../docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/model-owned-attention.json)에 있습니다. `scripts/bench_serving_concurrency.py`의 동시성 1/2/4와 `MLXCEL_TRACE_BATCH_ROWS=1`/`=4`로 재현하며, 기준 로그에는 스칼라 참조 플래그를 추가합니다.

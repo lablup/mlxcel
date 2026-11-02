@@ -649,6 +649,10 @@ impl LanguageModel for Gemma4VLModel {
         self.text_model.kv_cache_layer_modes()
     }
 
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        self.text_model.kv_cache_storage_modes()
+    }
+
     fn sequence_state_layout(&self) -> SequenceStateLayout {
         self.text_model.sequence_state_layout()
     }

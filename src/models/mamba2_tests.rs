@@ -414,65 +414,12 @@ fn mamba2_model_owned_batched_multistep() {
 
 #[test]
 fn mamba2_fresh_and_mixed_recurrent_states_match_solo_rows() {
-    use mlxcel_core::cache::SequenceId;
-    use mlxcel_core::generate::LanguageModel;
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
-    for mixed in [false, true] {
-        let batched = batching_model();
-        let solo = [batching_model(), batching_model()];
-        let ids = [SequenceId::from_raw(1001), SequenceId::from_raw(1002)];
-        let mut caches: Vec<_> = ids
-            .iter()
-            .map(|id| {
-                batched.prepare_sequence_state(*id);
-                LanguageModel::make_caches(&batched)
-            })
-            .collect();
-        let mut single: Vec<_> = solo
-            .iter()
-            .zip(ids)
-            .map(|(m, id)| {
-                m.prepare_sequence_state(id);
-                LanguageModel::make_caches(m)
-            })
-            .collect();
-        if mixed {
-            let prompt = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
-            let _ = batched.forward_with_sequence_id(&prompt, Some(ids[0]), &mut caches[0], None);
-            let _ = solo[0].forward_with_sequence_id(&prompt, Some(ids[0]), &mut single[0], None);
-        }
-        for step in 0..3 {
-            if step == 1 {
-                // Native split state is rank four, while the unchanged scalar
-                // carry retains a singleton token axis. Rejoin both shapes.
-                let token = mlxcel_core::from_slice_i32(&[5], &[1, 1]);
-                let _ = batched.forward_batched_with_ids(
-                    &token,
-                    Some(&ids[..1]),
-                    &mut [&mut caches[0]],
-                    None,
-                );
-                let _ =
-                    solo[0].forward_with_sequence_id(&token, Some(ids[0]), &mut single[0], None);
-            }
-            let tokens = [2 + step, 3 + step];
-            let input = mlxcel_core::from_slice_i32(&tokens, &[2, 1]);
-            let mut refs: Vec<_> = caches.iter_mut().map(Vec::as_mut_slice).collect();
-            let actual = batched.forward_batched_with_ids(&input, Some(&ids), &mut refs, None);
-            for row in 0..2 {
-                let input = mlxcel_core::from_slice_i32(&[tokens[row]], &[1, 1]);
-                let expected = solo[row].forward_with_sequence_id(
-                    &input,
-                    Some(ids[row]),
-                    &mut single[row],
-                    None,
-                );
-                let actual = slice_axis(&actual, 0, row as i32, row as i32 + 1);
-                let delta = mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::subtract(
-                    &actual, &expected,
-                )));
-                assert!(mlxcel_core::item_f32(&delta) <= 1e-5);
-            }
-        }
-    }
+    // The shared harness forces every forward before the next reference is
+    // built. The hand-rolled copy this replaced left the native -> B=1
+    // transition unevaluated, and that step then read its own pending cache
+    // write and compared as NaN (issue #2807).
+    crate::models::batched_decode_harness::assert_model_owned_fresh_mixed_and_transition(
+        batching_model,
+    );
 }

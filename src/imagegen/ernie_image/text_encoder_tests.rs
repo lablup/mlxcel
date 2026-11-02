@@ -247,3 +247,22 @@ fn the_real_encoder_matches_upstream() {
     eprintln!("ERNIE-Image conditioning rel-RMS vs upstream: {err:.3e}");
     assert!(err < 2e-2, "conditioning rel-RMS {err}");
 }
+
+#[test]
+fn quantized_configs_are_refused_before_any_weight_loads() {
+    let path = std::path::Path::new("config.json");
+    for cfg in [
+        serde_json::json!({"quantization": {"bits": 4}}),
+        serde_json::json!({"quantization_config": {"quant_method": "modelopt"}}),
+        serde_json::json!({"text_config": {"quantization": {"bits": 4}}}),
+    ] {
+        let err = reject_quantized_config(&cfg, path).unwrap_err().to_string();
+        assert!(err.contains("quantization"), "{err}");
+    }
+    for cfg in [
+        serde_json::json!({"hidden_size": 8}),
+        serde_json::json!({"text_config": {"hidden_size": 8}, "quantization": null}),
+    ] {
+        assert!(reject_quantized_config(&cfg, path).is_ok());
+    }
+}

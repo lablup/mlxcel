@@ -439,6 +439,11 @@ fn load_llama_family_from_weights(
 /// Returns an empty default set when the file is missing, unreadable, or
 /// malformed so legacy callers keep their built-in sampling defaults.
 pub fn read_generation_config_defaults(model_dir: &Path) -> GenerationConfigDefaults {
+    // An empty path (image-only serving, #2825) would resolve to the process
+    // working directory; there is no checkpoint there to read.
+    if model_dir.as_os_str().is_empty() {
+        return GenerationConfigDefaults::default();
+    }
     let config_path = model_dir.join("generation_config.json");
     let Ok(content) = std::fs::read_to_string(&config_path) else {
         return GenerationConfigDefaults::default();
@@ -486,6 +491,22 @@ pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
         }
     }
 
+    ids
+}
+
+/// The EOS ids a model reports when its args declare `declared` (#2729): the
+/// declared ids in order, then each id [`read_eos_token_ids`] resolves from the
+/// checkpoint sidecars that is not already present. Loaders whose args miss
+/// the sidecar ids (LLaVA's `text_config`, the tensor-parallel Llama runtime's
+/// top-level `config.json`) then report the same set as the
+/// `loading::special` loaders.
+pub(crate) fn merged_eos_token_ids(declared: Vec<i32>, model_dir: &Path) -> Vec<i32> {
+    let mut ids = declared;
+    for id in read_eos_token_ids(model_dir) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
     ids
 }
 
@@ -546,6 +567,11 @@ pub fn read_hidden_size(model_dir: &Path) -> Option<usize> {
 /// context length; callers fall back to
 /// [`crate::cli::max_tokens::DEFAULT_CONTEXT_WINDOW_FALLBACK`].
 pub fn read_model_context_window(model_dir: &Path) -> Option<usize> {
+    // An empty path (image-only serving, #2825) would resolve to the process
+    // working directory; there is no checkpoint there to read.
+    if model_dir.as_os_str().is_empty() {
+        return None;
+    }
     let config_path = resolve_model_dir(model_dir).join("config.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: serde_json::Value = parse_model_config(&content).ok()?;
@@ -669,7 +695,8 @@ fn maybe_disable_cuda_graphs_for_model(model_type: ModelType) {
     // `hardware::apply_metal_ops_per_buffer_default`, and
     // `TurboKvCacheArgs::apply_to_environment`, all written upstream of runtime
     // bring-up.
-    unsafe { std::env::set_var("MLX_USE_CUDA_GRAPHS", "0") };
+    unsafe { mlxcel_core::native_env::set_native_var("MLX_USE_CUDA_GRAPHS", "0") };
+    mlxcel_core::native_env::log_effective_native_env();
     tracing::info!(
         "{family} detected: disabling CUDA graph capture (MLX_USE_CUDA_GRAPHS=0) to \
          avoid the decode-path graph hazard from issue {issue}. Set MLX_USE_CUDA_GRAPHS \

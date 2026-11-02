@@ -814,6 +814,18 @@ fn make_tp_llama_model(tp_size: usize) -> TensorParallelLlamaModel {
     TensorParallelLlamaModel::from_full_weights(&args, &weights, &plan).unwrap()
 }
 
+/// #2729: the setter reaches every rank, and the model reports the new ids.
+#[test]
+fn tensor_parallel_llama_set_eos_token_ids_updates_every_rank() {
+    let mut model = make_tp_llama_model(2);
+    model.set_eos_token_ids(vec![1, 7]);
+    assert_eq!(model.ranks.len(), 2);
+    for rank in &model.ranks {
+        assert_eq!(LanguageModel::eos_token_ids(rank), vec![1, 7]);
+    }
+    assert_eq!(LanguageModel::eos_token_ids(&model), vec![1, 7]);
+}
+
 fn make_tp_qwen3_model(tp_size: usize) -> TensorParallelQwen3Model {
     let args = make_test_qwen3_args();
     let weights = make_test_qwen3_weight_map();

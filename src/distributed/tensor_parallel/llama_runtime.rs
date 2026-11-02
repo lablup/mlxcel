@@ -71,7 +71,21 @@ impl TensorParallelLlamaModel {
             serde_json::from_str(&config_str).context("failed to parse llama config")?;
         args.set_checkpoint_label(model_dir);
         let weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
-        Self::from_full_weights(&args, &weights, &support.summary.plan)
+        let mut model = Self::from_full_weights(&args, &weights, &support.summary.plan)?;
+        // `config.json` alone may miss the ids `generation_config.json` and
+        // `tokenizer_config.json` declare (#2729).
+        model.set_eos_token_ids(crate::loading::merged_eos_token_ids(
+            args.eos_token_ids(),
+            model_dir,
+        ));
+        Ok(model)
+    }
+
+    /// Replace the end-of-sequence ids every rank reports.
+    pub fn set_eos_token_ids(&mut self, ids: Vec<i32>) {
+        for rank in &mut self.ranks {
+            rank.set_eos_token_ids(ids.clone());
+        }
     }
 
     fn from_full_weights(
@@ -1491,9 +1505,11 @@ impl TensorParallelGemma4Model {
                     seq_len,
                     text_config.hidden_size_per_layer_input as i32,
                 );
+                // Same tanh GeGLU kernel as the single-host fallback in
+                // `gemma4.rs` (the per-layer gate is `gelu_pytorch_tanh`);
+                // this TP copy computed erf before #2548.
                 let gate = gate_proj.forward(&h);
-                let gate = mlxcel_core::gelu_approx(&gate);
-                let gate = mlxcel_core::multiply(&gate, &layer_input);
+                let gate = mlxcel_core::compiled_geglu_approx_activation(&gate, &layer_input);
                 let gate = proj.forward(&gate);
                 let gate = post_norm.forward(&gate);
                 h = mlxcel_core::add(&residual, &gate);
@@ -3419,7 +3435,7 @@ fn gemma3_masks(
     ));
     let sliding_mask = if rank0.sliding_window_pattern > 1 {
         let sliding_offset = gemma3_cache_offset(&mut rank0_caches[0]);
-        let max_cache = rank0.sliding_window as i32;
+        let max_cache = rank0.sliding_window;
         // Mirror the single-process gemma3 `sliding_prefill_mask` (issue #401/#408):
         // a fresh single-pass prefill longer than the window keeps every key (the
         // RotatingKVCache returns all of them) and needs the full-width windowed

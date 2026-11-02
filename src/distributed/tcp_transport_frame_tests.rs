@@ -761,10 +761,11 @@ async fn transport_closes_connection_on_oversize_header() {
 /// Captures `tracing` output for one test: the budget behind the close line
 /// is process wide and may already be spent by earlier tests in this
 /// binary, so the line is captured at debug level.
+/// Shared with the robustness tests (#2726).
 #[derive(Clone)]
-struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+pub(super) struct LogBuf(pub(super) Arc<std::sync::Mutex<Vec<u8>>>);
 
-struct LogBufGuard(Arc<std::sync::Mutex<Vec<u8>>>);
+pub(super) struct LogBufGuard(Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl std::io::Write for LogBufGuard {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {

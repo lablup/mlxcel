@@ -166,17 +166,21 @@ pub fn axis_selector(head_dim: i32, section: [i32; 3]) -> Vec<i32> {
 impl MRope {
     #[must_use]
     pub fn new(head_dim: i32, theta: f32, section: [i32; 3]) -> Self {
-        // `1 / base ** (arange(0, hd, 2, f32) / hd)`, on device in f32 like
-        // upstream.
-        let exponents = mlxcel_core::divide(
-            &mlxcel_core::astype(&mlxcel_core::arange_i32(0, head_dim, 2), dtype::FLOAT32),
-            &mlxcel_core::full_f32(&[1], head_dim as f32, dtype::FLOAT32),
-        );
-        let base = mlxcel_core::full_f32(&[1], theta, dtype::FLOAT32);
-        let inv_freq = mlxcel_core::divide(
-            &mlxcel_core::full_f32(&[1], 1.0, dtype::FLOAT32),
-            &mlxcel_core::power(&base, &exponents),
-        );
+        // `1 / base ** (arange(0, hd, 2, f32) / hd)` as upstream computes it
+        // in f32, with the power taken on the host in f64 and rounded once.
+        // The rope arguments reach past 65536, so one ulp of `inv_freq`
+        // moves them by about 1e-2. The M1 Ultra GPU's `pow` put the table
+        // up to 1.4e-3 (cos) from upstream's CUDA one; computed here it is
+        // within the 1e-4 the parity test allows.
+        let inv_freq: Vec<f32> = (0..head_dim)
+            .step_by(2)
+            .map(|i| {
+                let exponent = i as f32 / head_dim as f32;
+                let power = f64::from(theta).powf(f64::from(exponent)) as f32;
+                1.0 / power
+            })
+            .collect();
+        let inv_freq = mlxcel_core::from_slice_f32(&inv_freq, &[inv_freq.len() as i32]);
         let selector = axis_selector(head_dim, section);
         let n = selector.len() as i32;
         Self {

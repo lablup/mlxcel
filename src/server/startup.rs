@@ -1262,6 +1262,12 @@ fn warn_on_insecure_video_allowlist(allowlist: &[PathBuf]) {
 pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport {
     use crate::models::ModelType;
 
+    // Image-only serving (empty path, #2825) has no chat checkpoint, and an
+    // empty path would resolve to the working directory. No media support.
+    if model_path.as_os_str().is_empty() {
+        return ModelMediaSupport::none();
+    }
+
     // b10621's `--no-mmproj` / `--no-mmproj-auto` refuses every media part,
     // whatever the checkpoint could do (issue #1451).
     if crate::server::media_admission_disabled() {
@@ -2012,6 +2018,12 @@ pub(super) fn resolve_generation_sampling_defaults(
 /// detection error (unreadable config) returns `false`, preserving the baseline.
 fn detect_gemma4_family(model_path: &Path) -> bool {
     use crate::models::ModelType;
+
+    // Image-only serving has no chat checkpoint (#2825), and an empty path
+    // would resolve to the working directory.
+    if model_path.as_os_str().is_empty() {
+        return false;
+    }
     matches!(
         crate::models::get_model_type(model_path),
         Ok(ModelType::Gemma4 | ModelType::Gemma4VLM | ModelType::Gemma4Unified)
@@ -2418,7 +2430,7 @@ fn log_endpoints(startup: &ServerStartupConfig, addr: &str) {
         tracing::info!("  GET  {prefix}/slots                - Slot status");
     }
     if startup.slot_save_path.is_some() {
-        tracing::info!("  POST {prefix}/slots/:id_slot       - Slot save/restore/erase");
+        tracing::info!("  POST {prefix}/slots/{{id_slot}}       - Slot save/restore/erase");
     }
     tracing::info!("  GET  {prefix}/health               - Health check");
     if startup.webui_enabled {
@@ -3128,13 +3140,86 @@ async fn resolve_distributed_startup(
     })
 }
 
+/// A stage service that runs on its own thread and must be joined before the
+/// process returns from `main`.
+///
+/// `exited` borrows the handle so the same value can be shut down after the
+/// select completes; `shutdown` consumes it because the join is the end of
+/// the service's life.
+trait StageServiceHandle: Send + 'static {
+    fn local_addr(&self) -> &str;
+    fn exited(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+    fn shutdown(self) -> Result<()>;
+}
+
+impl StageServiceHandle for RemoteStageServiceHandle {
+    fn local_addr(&self) -> &str {
+        RemoteStageServiceHandle::local_addr(self)
+    }
+
+    fn exited(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(RemoteStageServiceHandle::exited(self))
+    }
+
+    fn shutdown(self) -> Result<()> {
+        RemoteStageServiceHandle::shutdown(self)
+    }
+}
+
+/// Wait for the first of a shutdown signal or the stage service exiting on
+/// its own, then shut the service down and return the signal error if there
+/// was one.
+///
+/// The shutdown always runs, so a signal handler that cannot be installed
+/// does not leave the stage thread unjoined (`pure virtual method called` at
+/// exit on a CPU build, #2738). `RemoteStageServiceHandle::shutdown` joins
+/// that thread, so it runs on the blocking pool rather than on a tokio worker
+/// (#2745).
+async fn wait_for_stage_shutdown<H, S>(mut handle: H, signal: S) -> Result<()>
+where
+    H: StageServiceHandle,
+    S: std::future::Future<Output = std::io::Result<()>>,
+{
+    let local_addr = handle.local_addr().to_string();
+    let signal_result = tokio::select! {
+        signal = signal => {
+            match &signal {
+                Ok(()) => tracing::info!(
+                    "Shutting down remote pipeline stage service on {local_addr}"
+                ),
+                Err(err) => tracing::error!(
+                    "failed to wait for the shutdown signal on {local_addr}: {err}; shutting down"
+                ),
+            }
+            signal.context("failed to wait for shutdown signal")
+        }
+        _ = handle.exited() => {
+            tracing::error!(
+                "Remote pipeline stage service on {local_addr} exited on its own; shutting down"
+            );
+            Ok(())
+        }
+    };
+    let shutdown = tokio::task::spawn_blocking(move || handle.shutdown())
+        .await
+        .unwrap_or_else(|join_err| {
+            Err(anyhow::anyhow!(
+                "remote stage shutdown task failed: {join_err}"
+            ))
+        });
+    match signal_result {
+        Err(err) => Err(err),
+        Ok(()) => shutdown,
+    }
+}
+
 async fn serve_remote_pipeline_stage(service_config: RemoteStageServiceConfig) -> Result<()> {
     let bind_address = service_config.bind_address.clone();
     let stage_index = service_config.stage_assignment.stage_index;
     let num_stages = service_config.num_stages;
     let upstream = service_config.upstream_peer.clone();
     let downstream = service_config.downstream_peer.clone();
-    let mut handle = RemoteStageServiceHandle::spawn(service_config)?;
+    let handle = RemoteStageServiceHandle::spawn(service_config)?;
     tracing::info!(
         "Starting remote pipeline stage service on {} (stage={}/{}, upstream={:?}, downstream={:?})",
         bind_address,
@@ -3147,22 +3232,7 @@ async fn serve_remote_pipeline_stage(service_config: RemoteStageServiceConfig) -
     // handshake, the model failed to load, the transport closed) must take
     // the process down with its error instead of parking here as a zombie a
     // supervisor would never restart (#2637).
-    tokio::select! {
-        signal = tokio::signal::ctrl_c() => {
-            signal.context("failed to wait for shutdown signal")?;
-            tracing::info!(
-                "Shutting down remote pipeline stage service on {}",
-                handle.local_addr()
-            );
-        }
-        _ = handle.exited() => {
-            tracing::error!(
-                "Remote pipeline stage service on {} exited on its own; shutting down",
-                handle.local_addr()
-            );
-        }
-    }
-    handle.shutdown()
+    wait_for_stage_shutdown(handle, tokio::signal::ctrl_c()).await
 }
 
 /// Install the configured `--surgery <FILE>` YAML pipeline into the
@@ -3360,6 +3430,23 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
     log_startup_notices(&startup);
 
+    // `--image-model` with no `-m` (#2825): no chat checkpoint exists, so
+    // `model_path` is empty. Every consumer of it below is either skipped or
+    // guarded so the router branch, model facts and media detection cannot
+    // read the working directory in place of a checkpoint.
+    let image_only =
+        startup.embedding_serving_mode == crate::server::config::EmbeddingServingMode::ImageOnly;
+    if image_only {
+        // The tensor- and pipeline-parallel planners read the chat checkpoint
+        // to derive a shard plan, and there is none here. Refuse rather than
+        // silently start a single-rank server.
+        anyhow::ensure!(
+            startup.tp_size == 1 && startup.pp_layers.is_none() && startup.pp_auto.is_none(),
+            "tensor and pipeline parallelism require a chat model loaded with -m; \
+             --image-model without -m serves image generation only"
+        );
+    }
+
     // Vertex AI (GCP) custom-container compat (b10621, #1456): resolved
     // purely from the AIP_* environment variables, before anything binds or
     // loads. With AIP_MODE=PREDICTION, AIP_HTTP_PORT (default 8080)
@@ -3459,10 +3546,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // wiring); the chat provider skips its worker for this model type, the
     // text warmup is skipped, and the chat routes answer 501 naming the
     // socket.
-    let is_voicechat = matches!(
-        crate::models::get_model_type(&startup.model_path),
-        Ok(crate::models::ModelType::NemotronVoiceChat)
-    );
+    let is_voicechat = !image_only
+        && matches!(
+            crate::models::get_model_type(&startup.model_path),
+            Ok(crate::models::ModelType::NemotronVoiceChat)
+        );
 
     // Issue #688 (M1/M2 hardening): disable CUDA graph capture for hazard-family
     // models (Gemma 4) here, on the main startup thread, before any generation or
@@ -3478,8 +3566,10 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // `serve_remote_pipeline_stage` branch below) all load `startup.model_path`.
     // Unaffected model families and an explicit `MLX_USE_CUDA_GRAPHS` operator
     // override are left untouched.
-    crate::loading::maybe_disable_cuda_graphs_for_model_for_path(&startup.model_path);
-    validate_muse_glimmer_unsupported_startup(&startup)?;
+    if !image_only {
+        crate::loading::maybe_disable_cuda_graphs_for_model_for_path(&startup.model_path);
+        validate_muse_glimmer_unsupported_startup(&startup)?;
+    }
 
     super::media::configure_image_input_limits(super::media::ImageInputLimits {
         max_payload_bytes: startup.max_image_payload_size,
@@ -3537,7 +3627,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
 
     validate_parallel_context_startup(&startup)?;
     validate_pipeline_parallel_startup(&startup)?;
-    let tp_support = resolve_tensor_parallel_runtime_support(&startup)?;
+    let tp_support = if image_only {
+        None
+    } else {
+        Some(resolve_tensor_parallel_runtime_support(&startup)?)
+    };
 
     // One line naming what the context and batch flags actually resolved to.
     // Until #1450 none of these was logged anywhere: `--ctx-size` reached a
@@ -3629,6 +3723,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
                 "{summary}"
             );
         }
+        // What MLX reads for the variables written at startup, including the
+        // graph capture switch `start_server` wrote above (#2803).
+        mlxcel_core::native_env::log_effective_native_env();
     }
 
     // Invalid explicit request caps fail startup, rather than silently disabling admission.
@@ -3712,7 +3809,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     config.pipeline_parallel_runtime = distributed
         .pipeline_runtime
         .or(config.pipeline_parallel_runtime.take());
-    config.no_batch |= tp_support.force_no_batch;
+    if let Some(tp_support) = tp_support {
+        config.no_batch |= tp_support.force_no_batch;
+    }
     if config.tensor_parallel.tp_size > 1 {
         if config.no_batch {
             tracing::info!(
@@ -3747,7 +3846,18 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     if let Some(service_config) = distributed.remote_stage_service {
         return serve_remote_pipeline_stage(service_config).await;
     }
-    let (tokenizer, chat_template) = load_chat_front(&startup)?;
+    // Image-only serving has no checkpoint for a tokenizer or a chat template;
+    // every route that would read them refuses in this mode (#2825). The
+    // router branch below is unreachable here because a router selector is a
+    // startup error alongside `--image-model` without `-m`.
+    let (tokenizer, chat_template) = if image_only {
+        (
+            crate::tokenizer::MlxcelTokenizer::empty(),
+            ChatTemplateProcessor::default(),
+        )
+    } else {
+        load_chat_front(&startup)?
+    };
 
     // `--dry-sequence-breaker` carries b10621's string value domain since
     // #1485; the effective set (default set, replacement values, or the
@@ -3825,22 +3935,189 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     let batch_metrics = Arc::new(BatchMetrics::new());
     let batch_observability = Arc::new(BatchObservability::new());
 
-    let prompt_cache_store =
-        resolve_prompt_cache_store(&mut config, &startup.model_path, &batch_metrics);
+    // The id an image-only server answers to: the first `--alias` entry, else
+    // the image checkpoint's directory name. The chat provider, `AppState`'s
+    // display id and the image provider all report this one value (#2825).
+    let served_image_id = startup.model_alias.clone().unwrap_or_else(|| {
+        startup
+            .image_model_path
+            .as_deref()
+            .map(side_model_id_for_path)
+            .unwrap_or_default()
+    });
+
+    let prompt_cache_store = if image_only {
+        // No chat worker exists to donate or adopt a prefix (#2825).
+        None
+    } else {
+        resolve_prompt_cache_store(&mut config, &startup.model_path, &batch_metrics)
+    };
 
     // `--timeout` is validated inside `new_with_server_config_and_prompt_cache` and
     // the resolved `Duration` is stashed on `ModelProvider`, where it flows into the drain loops.
     // A zero value triggers a logged warning and falls back to the 300 s default.
-    let model_provider = Arc::new(ModelProvider::new_with_server_config_and_prompt_cache(
-        startup.model_path.clone(),
-        startup.adapter_path.clone(),
-        &config,
-        prompt_cache_store.clone(),
-        batch_metrics.clone(),
-        batch_observability.clone(),
-    )?);
+    let model_provider = Arc::new(if image_only {
+        ModelProvider::new_without_chat_model_for_image(
+            served_image_id.clone(),
+            "Chat generation is disabled: this server was started with --image-model and no -m \
+             and serves only /v1/images/generations and /v1/images/edits"
+                .to_string(),
+            &config,
+            batch_metrics.clone(),
+            batch_observability.clone(),
+        )?
+    } else {
+        ModelProvider::new_with_server_config_and_prompt_cache(
+            startup.model_path.clone(),
+            startup.adapter_path.clone(),
+            &config,
+            prompt_cache_store.clone(),
+            batch_metrics.clone(),
+            batch_observability.clone(),
+        )?
+    });
 
-    if startup.warmup {
+    // From here on the worker owns a model (or is loading one). Every exit
+    // below, the side-model resolution errors included, goes through the join
+    // inside `serve_with_model_provider`, which shuts down the side workers
+    // first and then this chat worker, so the process never returns from
+    // `main` while a worker still frees MLX state (#2738, #2745).
+    serve_with_model_provider(
+        startup,
+        ChatServeInputs {
+            config,
+            is_voicechat,
+            chat_template,
+            tokenizer,
+            batch_metrics,
+            batch_observability,
+            prompt_cache_store,
+            webui_policy,
+            model_provider,
+        },
+    )
+    .await
+}
+
+/// What `start_server` has resolved by the time the chat model worker exists,
+/// handed to [`serve_with_model_provider`] as one value.
+struct ChatServeInputs {
+    config: ServerConfig,
+    is_voicechat: bool,
+    chat_template: ChatTemplateProcessor,
+    tokenizer: crate::tokenizer::MlxcelTokenizer,
+    batch_metrics: Arc<BatchMetrics>,
+    batch_observability: Arc<BatchObservability>,
+    prompt_cache_store: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
+    #[cfg(feature = "webui")]
+    webui_policy: Option<super::webui::security::WebUiSecurityPolicy>,
+    #[cfg(not(feature = "webui"))]
+    webui_policy: Option<()>,
+    model_provider: Arc<ModelProvider>,
+}
+
+/// The second half of `start_server`: warmup, side models, `AppState` and the
+/// listener.
+///
+/// Every return, the `?` early exits included, reaches the exit join below.
+/// The side models are registered in `side_workers` as they are created, so a
+/// resolution error after an earlier side worker loaded still shuts that
+/// worker down before the chat worker (#2745).
+async fn serve_with_model_provider(
+    startup: ServerStartupConfig,
+    inputs: ChatServeInputs,
+) -> Result<()> {
+    let model_provider_for_exit = Arc::clone(&inputs.model_provider);
+    let mut side_workers = Vec::new();
+    let served = serve_with_side_model_workers(startup, inputs, &mut side_workers).await;
+    join_model_workers_before_exit(
+        side_workers,
+        model_provider_for_exit,
+        served,
+        super::WORKER_EXIT_TIMEOUT,
+    )
+    .await
+}
+
+/// A side worker whose thread must be joined before the process exits.
+///
+/// The closure owns one `Arc` clone of the provider, so the worker outlives
+/// the `AppState` that also holds it and `shutdown_and_wait` can run after
+/// the HTTP server has stopped.
+struct SideWorkerExit {
+    name: &'static str,
+    shutdown: Box<dyn FnOnce(std::time::Duration) -> Result<()> + Send>,
+}
+
+impl SideWorkerExit {
+    fn new<P>(name: &'static str, provider: P) -> Self
+    where
+        P: SideWorkerProvider,
+    {
+        Self {
+            name,
+            shutdown: Box::new(move |timeout| provider.shutdown_and_wait(timeout)),
+        }
+    }
+}
+
+/// The one operation the exit path needs from a side provider, so audio,
+/// embedding, image, rerank and realtime providers share one collector.
+trait SideWorkerProvider: Send + 'static {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()>;
+}
+
+impl SideWorkerProvider for Arc<dyn crate::server::audio_model::AudioModelProvider> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
+impl SideWorkerProvider for Arc<dyn crate::server::embedding_model::EmbeddingModelProvider> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
+impl SideWorkerProvider for Arc<dyn crate::server::image_model::ImageModelProvider> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
+impl SideWorkerProvider for Arc<dyn crate::server::rerank_model::RerankModelProvider> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
+impl SideWorkerProvider for Arc<crate::server::realtime_engine::RealtimeVoiceChatEngine> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
+async fn serve_with_side_model_workers(
+    startup: ServerStartupConfig,
+    inputs: ChatServeInputs,
+    side_workers: &mut Vec<SideWorkerExit>,
+) -> Result<()> {
+    let ChatServeInputs {
+        config,
+        is_voicechat,
+        chat_template,
+        tokenizer,
+        batch_metrics,
+        batch_observability,
+        prompt_cache_store,
+        webui_policy,
+        model_provider,
+    } = inputs;
+    let image_only =
+        config.embedding_serving_mode == crate::server::config::EmbeddingServingMode::ImageOnly;
+    // Warmup generates a chat token, and image-only has no chat worker to run
+    // it on (#2825).
+    if startup.warmup && !image_only {
         run_startup_warmup(&startup.model_path, model_provider.as_ref());
     }
 
@@ -3933,7 +4210,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         } else {
             config.audio_request_timeout_secs
         });
-    let audio_model: Option<Arc<dyn crate::server::audio_model::AudioModelProvider>> =
+    let audio_model: Option<Arc<dyn crate::server::audio_model::AudioModelProvider>> = if image_only
+    {
+        // Empty model path: no checkpoint to classify (#2825).
+        None
+    } else {
         match crate::models::get_model_type(&startup.model_path) {
             Ok(crate::models::ModelType::Whisper) => {
                 tracing::info!(
@@ -3970,7 +4251,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
                 }
             }
             _ => None,
-        };
+        }
+    };
+    if let Some(provider) = &audio_model {
+        side_workers.push(SideWorkerExit::new("audio", Arc::clone(provider)));
+    }
 
     // Realtime VoiceChat wiring (#1376): load the checkpoint on the engine's
     // own thread and block until it is ready, so `/health` is truthful once
@@ -3995,6 +4280,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     } else {
         None
     };
+    if let Some(engine) = &realtime_engine {
+        side_workers.push(SideWorkerExit::new("realtime", Arc::clone(engine)));
+    }
 
     // Embedding wiring (#1353): `--embedding-model` loads a second checkpoint
     // on its own worker thread; without it, an `-m` that detects as an
@@ -4039,19 +4327,33 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // choice into this one.
     crate::embeddings::set_pooling_override(startup.pooling);
     let embedding_model = resolve_embedding_provider(&startup, &config, &served_chat_id)?;
+    if let Some(provider) = &embedding_model {
+        side_workers.push(SideWorkerExit::new("embedding", Arc::clone(provider)));
+    }
     // `--image-model` is an explicit side model: failing to load it is fatal,
     // so a command line that asked for image routes never serves 501 for them.
     let image_model = resolve_image_provider(&startup)?;
+    if let Some(provider) = &image_model {
+        side_workers.push(SideWorkerExit::new("image", Arc::clone(provider)));
+    }
     // Rerank wiring (#1356) follows the same rule, with one addition: a
     // generative reranker's checkpoint is indistinguishable from a chat
     // model's, so `--reranker-model` is the only way to reach it and naming
     // the same path in `-m` and `--reranker-model` loads it once on the rerank
     // worker instead of being an error.
     let rerank_model = resolve_rerank_provider(&startup, &config, &served_chat_id)?;
+    if let Some(provider) = &rerank_model {
+        side_workers.push(SideWorkerExit::new("rerank", Arc::clone(provider)));
+    }
     // A mode flag that resolved no worker is a command line that cannot do
     // what it asked for, so it fails here rather than answering 501 to every
     // request for the life of the process (#1452).
-    check_serving_mode(&config, embedding_model.is_some(), rerank_model.is_some())?;
+    check_serving_mode(
+        &config,
+        embedding_model.is_some(),
+        rerank_model.is_some(),
+        image_model.is_some(),
+    )?;
 
     let state = AppState::with_observability(
         model_provider,
@@ -4084,6 +4386,120 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     serve_http(&startup, app).await
 }
 
+/// Join the side workers and then the chat model worker before
+/// `start_server` returns (#2738, #2745).
+///
+/// The side workers run first, each with whatever remains of `timeout`, so
+/// one deadline covers the whole teardown. A side-worker shutdown failure is
+/// logged with `warn!` and never replaces the error that ended serving: a
+/// side model was optional, and reporting it instead of the real failure
+/// (a bind error, an unloadable `--image-model`) would hide why the process
+/// is exiting. The chat worker is joined next by
+/// [`join_model_worker_before_exit`], which owns the error precedence.
+async fn join_model_workers_before_exit(
+    side_workers: Vec<SideWorkerExit>,
+    model_provider: Arc<ModelProvider>,
+    served: Result<()>,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    if !side_workers.is_empty() {
+        let side_join = tokio::task::spawn_blocking(move || {
+            let mut all_exited = true;
+            for worker in side_workers {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                match (worker.shutdown)(remaining) {
+                    Ok(()) => {}
+                    Err(ref err) => {
+                        all_exited = false;
+                        tracing::warn!(
+                            worker = worker.name,
+                            "side model worker did not exit cleanly before process exit: {err:#}"
+                        );
+                    }
+                }
+            }
+            all_exited
+        })
+        .await;
+        match side_join {
+            Ok(true) => tracing::info!("side model workers exited before process exit"),
+            Ok(false) => {}
+            Err(join_err) => {
+                tracing::warn!("side model worker shutdown task failed: {join_err}");
+            }
+        }
+    }
+    let remaining = timeout.saturating_sub(started.elapsed());
+    join_model_worker_before_exit(model_provider, served, remaining).await
+}
+
+/// Join the chat model worker before `start_server` returns (#2738).
+///
+/// `serve_http` returns only once the listener is gone (a bind or TLS error,
+/// or the accept loop ending), and the side-model resolution steps can fail
+/// while the chat worker is still loading. Either way the worker may still
+/// hold the model, and returning from `main` would run the C runtime's static
+/// destructors while the worker frees MLX arrays on its own thread, which
+/// aborts with `pure virtual method called` on the CPU backend. The wait runs
+/// on the blocking pool so it does not stall the HTTP runtime's workers. The
+/// error that ended serving is logged before the wait starts, so a bind or
+/// TLS failure during a long model load reads as a failure in the log rather
+/// than a silent wait; it is still returned unchanged for `main` to print. A
+/// shutdown failure is logged and never replaces that error.
+///
+/// `timeout` is the whole budget for this join; callers pass
+/// [`super::WORKER_EXIT_TIMEOUT`]. Model load has no cancellation point, so a
+/// timeout means the worker is still running: the `warn!` and the returned
+/// error say so, and that a CPU build may abort with `pure virtual method
+/// called` at exit if the worker does not finish first.
+async fn join_model_worker_before_exit(
+    model_provider: Arc<ModelProvider>,
+    served: Result<()>,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    if let Err(ref err) = served {
+        tracing::error!("server stopped: {err:#}; waiting for the model worker to exit");
+    }
+    let shutdown = tokio::task::spawn_blocking(move || model_provider.shutdown_and_wait(timeout))
+        .await
+        .unwrap_or_else(|join_err| {
+            Err(anyhow::anyhow!(
+                "model worker shutdown task failed: {join_err}"
+            ))
+        });
+    let timed_out = shutdown
+        .as_ref()
+        .err()
+        .and_then(|err| err.downcast_ref::<super::model_provider::WorkerShutdownError>())
+        .is_some_and(|err| {
+            matches!(
+                err,
+                super::model_provider::WorkerShutdownError::Timeout { .. }
+            )
+        });
+    let shutdown = if timed_out {
+        let err = shutdown
+            .err()
+            .unwrap_or_else(|| unreachable!("checked above"));
+        Err(anyhow::anyhow!(
+            "{err:#}; the model worker is still running, and a CPU build may abort with `pure virtual method called` at exit"
+        ))
+    } else {
+        shutdown
+    };
+    match shutdown {
+        Ok(()) => tracing::info!("model worker exited before process exit"),
+        Err(ref err) => {
+            tracing::warn!("model worker did not exit cleanly before process exit: {err:#}")
+        }
+    }
+    match (served, shutdown) {
+        (Ok(()), shutdown) => shutdown,
+        (Err(err), _) => Err(err),
+    }
+}
+
 /// Refuse a `--embeddings` / `--reranking` command line that resolved no
 /// worker able to serve that mode (#1452).
 ///
@@ -4096,12 +4512,14 @@ pub(crate) fn check_serving_mode(
     config: &ServerConfig,
     has_embedding: bool,
     has_rerank: bool,
+    has_image: bool,
 ) -> Result<()> {
     use crate::server::config::EmbeddingServingMode;
     match config.embedding_serving_mode {
         EmbeddingServingMode::Any => Ok(()),
         EmbeddingServingMode::EmbeddingOnly if has_embedding => Ok(()),
         EmbeddingServingMode::RerankOnly if has_rerank => Ok(()),
+        EmbeddingServingMode::ImageOnly if has_image => Ok(()),
         EmbeddingServingMode::EmbeddingOnly => anyhow::bail!(
             "--embeddings restricts this server to embedding requests, but no embedding \
              checkpoint was loaded: pass an embedding checkpoint to -m, or name one with \
@@ -4113,6 +4531,10 @@ pub(crate) fn check_serving_mode(
              pass a sequence-classifier checkpoint to -m, or name a reranker with \
              --reranker-model <path>. The Qwen3 and Qwen3-VL generative rerankers are only \
              reachable through --reranker-model."
+        ),
+        EmbeddingServingMode::ImageOnly => anyhow::bail!(
+            "--image-model without -m restricts this server to image generation, but no image \
+             checkpoint was loaded: pass --image-model <path> (or set MLXCEL_IMAGE_MODEL)."
         ),
     }
 }
@@ -4134,8 +4556,12 @@ pub(crate) fn resolve_embedding_source(
     model_path: &Path,
     embedding_model_path: Option<&Path>,
 ) -> Result<EmbeddingSource> {
-    let primary_is_embedding = crate::models::get_model_type(model_path)
-        .is_ok_and(crate::model_metadata::is_embedding_model_type);
+    // An empty model path (image-only serving, #2825) names no primary
+    // checkpoint, and `get_model_type` would otherwise read the working
+    // directory.
+    let primary_is_embedding = !model_path.as_os_str().is_empty()
+        && crate::models::get_model_type(model_path)
+            .is_ok_and(crate::model_metadata::is_embedding_model_type);
     match (embedding_model_path, primary_is_embedding) {
         (Some(explicit), true) => anyhow::bail!(
             "two embedding models: -m {} is an embedding checkpoint and --embedding-model {} \
@@ -4173,7 +4599,18 @@ fn resolve_image_provider(
     let Some(path) = startup.image_model_path.as_deref() else {
         return Ok(None);
     };
-    let model_id = side_model_id_for_path(path);
+    // Image-only serving reports the first `--alias` entry as the served id;
+    // the two-model shape keeps the checkpoint's directory name (#2825).
+    let model_id = if startup.embedding_serving_mode
+        == crate::server::config::EmbeddingServingMode::ImageOnly
+    {
+        startup
+            .model_alias
+            .clone()
+            .unwrap_or_else(|| side_model_id_for_path(path))
+    } else {
+        side_model_id_for_path(path)
+    };
     tracing::info!(
         path = %path.display(),
         model_id = %model_id,
@@ -4288,8 +4725,12 @@ pub(crate) fn resolve_rerank_source(
     model_path: &Path,
     reranker_model_path: Option<&Path>,
 ) -> Result<RerankSource> {
-    let primary_is_reranker = crate::models::get_model_type(model_path)
-        .is_ok_and(crate::model_metadata::is_reranker_model_type);
+    // An empty model path (image-only serving, #2825) names no primary
+    // checkpoint, and `get_model_type` would otherwise read the working
+    // directory.
+    let primary_is_reranker = !model_path.as_os_str().is_empty()
+        && crate::models::get_model_type(model_path)
+            .is_ok_and(crate::model_metadata::is_reranker_model_type);
     match (reranker_model_path, primary_is_reranker) {
         // The same directory in both flags is the rerank-only shape: `-m` is
         // required, and a generative reranker is only reachable through

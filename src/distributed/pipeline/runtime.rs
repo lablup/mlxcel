@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use mlxcel_core::cache::SequenceId;
@@ -29,7 +29,9 @@ use mlxcel_core::{MlxArray, UniquePtr, copy, slice};
 
 use crate::distributed::RequestId;
 use crate::distributed::cluster_auth::ClusterAuth;
+use crate::distributed::handshake_warn::{HandshakeWarnClass, handshake_warn_allowed};
 use crate::distributed::peer_identity::PeerMatcher;
+use crate::distributed::peer_text::loggable_peer_text;
 use crate::distributed::transport_factory::bind_transport;
 use crate::distributed::{Transport, TransportBackend, TransportMessage};
 
@@ -37,6 +39,10 @@ use super::remote_service::{
     PIPELINE_STAGE_COMMAND_OPERATION, PIPELINE_STAGE_RESPONSE_OPERATION, RemoteStageCommand,
     RemoteStageRequest, RemoteStageResponse,
 };
+use super::stage_availability::{
+    GateDecision, ProbeClose, STAGE_PROBE_INTERVAL, StageAvailability, stage_label,
+};
+use super::stage_unreachable::{StageUnreachable, StageUnreachableCause, probe_failure_cause};
 use super::wire_tensor::{
     StageWireLimits, deserialize_wire_tensor_with_limits, serialize_mlx_array,
 };
@@ -133,7 +139,8 @@ fn request_id_of(
         .ok_or_else(|| anyhow!("pipeline request id missing for sequence {seq_id}"))
 }
 
-/// The sequence-derived request id every stage sees for `seq_id`.
+/// The sequence-derived request id of the in-process runtime, which has no
+/// peers; the remote runtime adds a random suffix (#2726).
 fn request_id_for_sequence(seq_id: SequenceId) -> RequestId {
     RequestId::from_string(format!("pp-seq-{}", seq_id.as_u64()))
         .expect("sequence-derived request id must be valid")
@@ -231,6 +238,14 @@ impl PipelineModelRuntime for InProcessPipelineRuntime {
         Ok(merged)
     }
 }
+
+/// Longest the coordinator waits for a stage to acknowledge a teardown
+/// command (cancel, release). Teardown carries no result anyone waits for:
+/// the frame is sent either way, a healthy but busy stage still processes
+/// it, and a late ack is dropped by the nonce matcher. Waiting the full
+/// `stage_timeout` for each of them let one silent stage cost the single
+/// model worker about four stage timeouts per failed request (#2762).
+pub(crate) const TEARDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Configuration for the remote transport-backed coordinator runtime.
 #[derive(Debug, Clone)]
@@ -354,7 +369,14 @@ pub struct RemotePipelineRuntime {
     io_runtime: Mutex<tokio::runtime::Runtime>,
     request_ids: Mutex<HashMap<SequenceId, RequestId>>,
     stage_timeout: Duration,
+    /// Per-stage wait for a teardown ack: `stage_timeout` capped at
+    /// [`TEARDOWN_ACK_TIMEOUT`].
+    teardown_ack_timeout: Duration,
     draining: AtomicBool,
+    /// The availability gate (#2782): open while a stage is known silent.
+    availability: Mutex<StageAvailability>,
+    /// Least time between two probes of an open gate.
+    probe_interval: Duration,
 }
 
 impl RemotePipelineRuntime {
@@ -426,8 +448,27 @@ impl RemotePipelineRuntime {
             io_runtime: Mutex::new(io_runtime),
             request_ids: Mutex::new(HashMap::new()),
             stage_timeout: config.stage_timeout,
+            teardown_ack_timeout: config.stage_timeout.min(TEARDOWN_ACK_TIMEOUT),
             draining: AtomicBool::new(false),
+            availability: Mutex::new(StageAvailability::default()),
+            probe_interval: STAGE_PROBE_INTERVAL,
         })
+    }
+
+    /// Lower the teardown ack timeout; tests use it to keep a silent stage's
+    /// teardown short next to a longer `stage_timeout`.
+    #[cfg(test)]
+    pub(crate) fn with_teardown_ack_timeout(mut self, timeout: Duration) -> Self {
+        self.teardown_ack_timeout = timeout;
+        self
+    }
+
+    /// Shorten the probe interval of the availability gate; tests use it
+    /// to see the gate close again within a bounded run.
+    #[cfg(test)]
+    pub(crate) fn with_probe_interval(mut self, interval: Duration) -> Self {
+        self.probe_interval = interval;
+        self
     }
 
     fn request_id_for(&self, seq_id: SequenceId) -> Result<RequestId> {
@@ -451,9 +492,198 @@ impl RemotePipelineRuntime {
         peer: &StagePeer,
         request: RemoteStageCommand,
     ) -> Result<RemoteStageResponse> {
+        let run_entry = matches!(request, RemoteStageCommand::RunEntry { .. });
+        let result = self.exchange_within(peer, request, self.stage_timeout);
+        // Only this full-`stage_timeout` path opens the availability gate
+        // (#2782), and only for a failure the stage caused (#2790): a short
+        // teardown or probe wait that runs out says nothing new about a
+        // stage already known silent, an `Error` reply is an answer, and a
+        // coordinator-local error says nothing about any stage.
+        if let Err(err) = &result
+            && let Some(unreachable) = err
+                .chain()
+                .find_map(|e| e.downcast_ref::<StageUnreachable>())
+        {
+            // A `RunEntry` reply comes from the last stage after every stage
+            // ran, so its timeout cannot tell which stage is silent: the
+            // gate opens unattributed and the next probe names the stage.
+            // A failed send is the entry stage's own.
+            let attributed = match &unreachable.cause {
+                StageUnreachableCause::Timeout(_) if run_entry => None,
+                _ => Some(peer.addr.as_str()),
+            };
+            self.mark_unavailable(attributed, &unreachable.cause);
+        }
+        result
+    }
+
+    /// Record that an exchange failed because of a stage (`peer`, or an
+    /// unidentified one for a `RunEntry` timeout) and open the availability
+    /// gate, logging the closed-to-open transition once.
+    fn mark_unavailable(&self, peer: Option<&str>, cause: &StageUnreachableCause) {
+        let transition = self
+            .availability
+            .lock()
+            .expect("stage availability poisoned")
+            .mark_unavailable(peer, Instant::now());
+        if transition {
+            self.log_gate_opened(peer, cause);
+        }
+    }
+
+    /// The availability gate's closed-to-open line, once per transition.
+    fn log_gate_opened(&self, peer: Option<&str>, cause: &StageUnreachableCause) {
+        let interval = self.probe_interval;
+        match (peer, cause) {
+            (Some(peer), StageUnreachableCause::Timeout(waited)) => tracing::warn!(
+                "remote stage {peer} did not answer within {waited:?}; refusing new pipeline \
+                 requests at once until every stage answers a probe (one probe per {interval:?} \
+                 while it stays silent)"
+            ),
+            (Some(peer), StageUnreachableCause::SendFailed(reason)) => tracing::warn!(
+                "remote stage {peer} could not be reached ({}); refusing new pipeline requests at \
+                 once until every stage answers a probe (one probe per {interval:?} while it \
+                 stays unreachable)",
+                loggable_peer_text(reason)
+            ),
+            (None, StageUnreachableCause::Timeout(waited)) => tracing::warn!(
+                "a remote pipeline run did not complete within {waited:?}; refusing new pipeline \
+                 requests at once until every stage answers a probe, which names the silent \
+                 stage (one probe per {interval:?} while one stays silent)"
+            ),
+            (None, StageUnreachableCause::SendFailed(reason)) => tracing::warn!(
+                "a remote pipeline stage could not be reached ({}); refusing new pipeline \
+                 requests at once until every stage answers a probe (one probe per \
+                 {interval:?})",
+                loggable_peer_text(reason)
+            ),
+        }
+    }
+
+    /// The availability gate (#2782 item 1), checked before a prepare and
+    /// before a forward's `RunEntry`. Closed: `Ok`. Open and not probed
+    /// within `probe_interval`: probe every stage with the short teardown
+    /// wait; when all answer `State` the gate closes and the request is
+    /// served, otherwise it is refused. Open and probed recently: refused
+    /// at once, nothing sent.
+    ///
+    /// Locking: the `availability` mutex is held only for the state
+    /// transitions, never across the probe exchanges. `decide` records the
+    /// probe time before the lock is dropped, so a concurrent request that
+    /// arrives while this one is probing sees a recent probe and is
+    /// refused instead of probing too; the exchanges themselves are
+    /// serialized by the `io_runtime` mutex like every other exchange. The
+    /// probe result is applied under the lock again with the generation
+    /// `decide` handed out, so a timeout that opened a newer outage while
+    /// the probe was in flight is not closed by this probe's success, and
+    /// two overlapping probes (one that outlasts `probe_interval`) agree:
+    /// see `StageAvailability::close_after_probe` and `probe_failed`.
+    fn ensure_stages_available(&self) -> Result<()> {
+        let decision = self
+            .availability
+            .lock()
+            .expect("stage availability poisoned")
+            .decide(Instant::now(), self.probe_interval);
+        let (generation, stage) = match decision {
+            GateDecision::Pass => return Ok(()),
+            GateDecision::Refuse(err) => return Err(err.into()),
+            GateDecision::Probe { generation, stage } => (generation, stage),
+        };
+        let mut silent: Option<String> = None;
+        // What the gate's reopen line reports: a probe that was sent but
+        // not answered is a timeout; a failed send keeps its reason.
+        let mut probe_cause = StageUnreachableCause::Timeout(self.teardown_ack_timeout);
+        for peer in &self.stage_peers {
+            match self.exchange_within(
+                peer,
+                RemoteStageCommand::ProbeState,
+                self.teardown_ack_timeout,
+            ) {
+                Ok(RemoteStageResponse::State { .. }) => {}
+                Ok(RemoteStageResponse::Error { message, .. }) => {
+                    tracing::debug!(
+                        "remote stage {} answered the availability probe with an error: {}",
+                        peer.addr,
+                        loggable_peer_text(&message)
+                    );
+                    silent = Some(peer.addr.clone());
+                    break;
+                }
+                Ok(other) => {
+                    tracing::debug!(
+                        "remote stage {} answered the availability probe with an unexpected \
+                         response: {other:?}",
+                        peer.addr
+                    );
+                    silent = Some(peer.addr.clone());
+                    break;
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        "remote stage {} did not answer the availability probe: {err:#}",
+                        peer.addr
+                    );
+                    probe_cause = probe_failure_cause(&err, self.teardown_ack_timeout);
+                    silent = Some(peer.addr.clone());
+                    break;
+                }
+            }
+        }
+        // The result is applied under the lock; the lines are logged after
+        // it is dropped.
+        let now = Instant::now();
+        match silent {
+            None => {
+                let outcome = {
+                    let mut availability = self
+                        .availability
+                        .lock()
+                        .expect("stage availability poisoned");
+                    match availability.close_after_probe(generation, now) {
+                        ProbeClose::Superseded => Err(availability.refusal(now)),
+                        other => Ok(other),
+                    }
+                };
+                match outcome {
+                    Ok(ProbeClose::Closed(outage)) => {
+                        tracing::info!(
+                            "every remote stage answered the availability probe; serving \
+                             pipeline requests again after {outage:?} without {}",
+                            stage_label(stage.as_deref())
+                        );
+                        Ok(())
+                    }
+                    // An overlapping probe for the same outage closed it.
+                    Ok(_) => Ok(()),
+                    // A newer timeout replaced the outage this probe was for.
+                    Err(refusal) => Err(refusal.into()),
+                }
+            }
+            Some(peer) => {
+                let failure = self
+                    .availability
+                    .lock()
+                    .expect("stage availability poisoned")
+                    .probe_failed(generation, &peer, now);
+                if failure.reopened {
+                    self.log_gate_opened(Some(&peer), &probe_cause);
+                }
+                Err(failure.refusal.into())
+            }
+        }
+    }
+
+    /// [`Self::exchange`] with an explicit wait for the reply. Teardown
+    /// commands pass the shorter `teardown_ack_timeout` (#2762); everything
+    /// else waits `stage_timeout`.
+    fn exchange_within(
+        &self,
+        peer: &StagePeer,
+        request: RemoteStageCommand,
+        timeout: Duration,
+    ) -> Result<RemoteStageResponse> {
         let transport = Arc::clone(&self.transport);
         let reply_addr = self.transport.local_addr()?;
-        let timeout = self.stage_timeout;
         let nonce = self.auth.random_u64();
         let run_key = match &request {
             RemoteStageCommand::RunEntry {
@@ -492,7 +722,11 @@ impl RemotePipelineRuntime {
                             payload: payload.into(),
                         },
                     )
-                    .await?;
+                    .await
+                    .map_err(|err| StageUnreachable {
+                        peer: peer.addr.clone(),
+                        cause: StageUnreachableCause::SendFailed(format!("{err:#}")),
+                    })?;
 
                 let matcher = ExchangeMatch {
                     peer,
@@ -502,17 +736,21 @@ impl RemotePipelineRuntime {
                     run: run_key.as_ref().map(|(id, mb)| (id.as_str(), *mb)),
                 };
                 let deadline = tokio::time::Instant::now() + timeout;
+                let timed_out = || StageUnreachable {
+                    peer: peer.addr.clone(),
+                    cause: StageUnreachableCause::Timeout(timeout),
+                };
                 let mut dropped: u32 = 0;
                 loop {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() {
-                        bail!("remote stage {} timed out after {:?}", peer.addr, timeout);
+                        return Err(timed_out().into());
                     }
+                    // The inner `?` is a closed receive channel: the
+                    // coordinator's own failure, not the stage's.
                     let (from, msg) = tokio::time::timeout(remaining, transport.recv())
                         .await
-                        .map_err(|_| {
-                            anyhow!("remote stage {} timed out after {:?}", peer.addr, timeout)
-                        })??;
+                        .map_err(|_| timed_out())??;
                     let TransportMessage::Control { operation, payload } = msg else {
                         continue;
                     };
@@ -522,7 +760,8 @@ impl RemotePipelineRuntime {
                     let response = match serde_json::from_slice::<RemoteStageResponse>(&payload) {
                         Ok(response) => response,
                         Err(err) => {
-                            Self::note_dropped(&mut dropped, &from, &format!("malformed: {err}"));
+                            let reason = malformed_reply_reason(&err);
+                            Self::note_dropped(&mut dropped, &from, &reason);
                             continue;
                         }
                     };
@@ -556,7 +795,11 @@ impl RemotePipelineRuntime {
             match self.exchange(peer, request.clone())? {
                 RemoteStageResponse::Ack { .. } => {}
                 RemoteStageResponse::Error { message, .. } => {
-                    bail!("remote stage {} failed request: {}", peer.addr, message);
+                    bail!(
+                        "remote stage {} failed request: {}",
+                        peer.addr,
+                        loggable_peer_text(&message)
+                    );
                 }
                 other => {
                     bail!(
@@ -576,7 +819,11 @@ impl RemotePipelineRuntime {
             match self.exchange(peer, RemoteStageCommand::ProbeState)? {
                 state @ RemoteStageResponse::State { .. } => states.push(state),
                 RemoteStageResponse::Error { message, .. } => {
-                    bail!("remote stage {} failed probe: {}", peer.addr, message);
+                    bail!(
+                        "remote stage {} failed probe: {}",
+                        peer.addr,
+                        loggable_peer_text(&message)
+                    );
                 }
                 other => bail!("unexpected remote stage probe response: {:?}", other),
             }
@@ -594,13 +841,105 @@ impl RemotePipelineRuntime {
         self.broadcast_ack(RemoteStageCommand::Shutdown)
     }
 
-    fn cleanup_request(&self, request_id: &RequestId) {
-        let _ = self.broadcast_ack(RemoteStageCommand::CancelRequest {
-            request_id: request_id.as_str().to_string(),
-        });
-        let _ = self.broadcast_ack(RemoteStageCommand::ReleaseSequence {
-            request_id: request_id.as_str().to_string(),
-        });
+    /// Send `request` to every stage, carrying on past a stage that fails
+    /// it. A teardown command (cancel, release) that stopped at the first
+    /// stage to time out would never reach the stages after it, and those
+    /// would keep the sequence, its KV caches and a slot of their
+    /// prepared-sequence cap, with nothing left to release them (#2727).
+    /// Failures are logged, never returned. Each stage gets at most
+    /// `teardown_ack_timeout` to acknowledge (#2762): nothing waits for the
+    /// result, the frame is sent either way, and a late ack is dropped by
+    /// the nonce matcher of whatever exchange is running then. While the
+    /// availability gate is open, the stage it names gets no wait at all
+    /// (#2782): the frame is still written, and a stage known silent would
+    /// only cost the model worker the wait.
+    fn broadcast_best_effort(&self, request: &RemoteStageCommand, what: &str) {
+        let silent_peer = self
+            .availability
+            .lock()
+            .expect("stage availability poisoned")
+            .failed_peer()
+            .map(str::to_string);
+        for peer in &self.stage_peers {
+            let timeout = if silent_peer.as_deref() == Some(peer.addr.as_str()) {
+                Duration::ZERO
+            } else {
+                self.teardown_ack_timeout
+            };
+            match self.exchange_within(peer, request.clone(), timeout) {
+                Ok(RemoteStageResponse::Ack { .. }) => {}
+                // A stage that never prepared the sequence, or refused it,
+                // may answer with an error; there is nothing to undo there.
+                Ok(RemoteStageResponse::Error { message, .. }) => tracing::debug!(
+                    "remote stage {} answered {what} with an error: {}",
+                    peer.addr,
+                    loggable_peer_text(&message)
+                ),
+                Ok(_) => tracing::debug!(
+                    "remote stage {} answered {what} with an unexpected response",
+                    peer.addr
+                ),
+                Err(err) if timeout.is_zero() => tracing::debug!(
+                    "remote stage {} is silent; {what} was sent without waiting for its \
+                     acknowledgement: {err:#}",
+                    peer.addr
+                ),
+                Err(err) => Self::log_teardown_miss(&peer.addr, what, timeout, &err),
+            }
+        }
+    }
+
+    /// A stage missed the teardown ack wait. A healthy stage still finishing
+    /// a long forward does this too and applies the frame when it gets to
+    /// it, so the line draws from the `teardown-ack` warning budget
+    /// (#2782 item 3) and goes to debug once the budget is spent.
+    fn log_teardown_miss(addr: &str, what: &str, timeout: Duration, err: &anyhow::Error) {
+        if handshake_warn_allowed(HandshakeWarnClass::TeardownAck) {
+            tracing::warn!(
+                "remote stage {addr} did not acknowledge {what} within {timeout:?}; the frame was \
+                 sent and a slow stage still applies it: {err:#}"
+            );
+        } else {
+            tracing::debug!(
+                "remote stage {addr} did not acknowledge {what} within {timeout:?}; the frame was \
+                 sent and a slow stage still applies it: {err:#}"
+            );
+        }
+    }
+
+    /// Discard the coordinator's state for `seq_id` after its forward
+    /// failed, then cancel and release the sequence on every stage. The
+    /// `request_ids` entry goes first so the scheduler's later close of the
+    /// failed sequence is a no-op: every stage sees one cancel and one
+    /// release, and a silent stage costs one teardown ack wait per command
+    /// instead of a full `stage_timeout` for each of three (#2762). Every
+    /// failure after the `RunEntry` exchange starts (transport error, stage
+    /// error, undecodable or mis-shaped logits, unexpected reply) ends
+    /// here, as does a refusal by the availability gate (#2782).
+    /// The two `serialize_mlx_array` exits before the exchange return `Err`
+    /// without calling this: nothing reached a stage, so the mapping stays
+    /// and the scheduler's later close releases the sequence exactly once.
+    fn fail_sequence(&self, seq_id: SequenceId, request_id: &RequestId) {
+        self.request_ids
+            .lock()
+            .expect("pipeline request map poisoned")
+            .remove(&seq_id);
+        self.broadcast_best_effort(
+            &RemoteStageCommand::CancelRequest {
+                request_id: request_id.as_str().to_string(),
+            },
+            "cancel",
+        );
+        self.release_on_every_stage(request_id);
+    }
+
+    fn release_on_every_stage(&self, request_id: &RequestId) {
+        self.broadcast_best_effort(
+            &RemoteStageCommand::ReleaseSequence {
+                request_id: request_id.as_str().to_string(),
+            },
+            "release",
+        );
     }
 }
 
@@ -616,7 +955,17 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         if self.draining.load(Ordering::Acquire) {
             bail!("remote pipeline runtime is draining; refusing to prepare new sequence state");
         }
-        let request_id = request_id_for_sequence(seq_id);
+        self.ensure_stages_available()?;
+        // A sequential `pp-seq-{N}` is predictable: another holder of the
+        // secret could prepare the next one first and make this prepare fail
+        // (#2726). A CSPRNG suffix makes the id unguessable; every later
+        // command reads it back from `request_ids`.
+        let request_id = RequestId::from_string(format!(
+            "pp-seq-{}-{:016x}",
+            seq_id.as_u64(),
+            self.auth.random_u64()
+        ))
+        .ok_or_else(|| anyhow!("invalid remote request id for sequence {seq_id}"))?;
         self.request_ids
             .lock()
             .expect("pipeline request map poisoned")
@@ -629,9 +978,7 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
                 .lock()
                 .expect("pipeline request map poisoned")
                 .remove(&seq_id);
-            let _ = self.broadcast_ack(RemoteStageCommand::ReleaseSequence {
-                request_id: request_id.as_str().to_string(),
-            });
+            self.release_on_every_stage(&request_id);
             return Err(err.context(format!(
                 "failed to prepare remote pipeline sequence state for {request_id}"
             )));
@@ -648,9 +995,7 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         else {
             return;
         };
-        let _ = self.broadcast_ack(RemoteStageCommand::ReleaseSequence {
-            request_id: request_id.as_str().to_string(),
-        });
+        self.release_on_every_stage(&request_id);
     }
 
     fn forward_sequence(
@@ -660,6 +1005,14 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         mask: Option<&MlxArray>,
     ) -> Result<UniquePtr<MlxArray>> {
         let request_id = self.request_id_for(seq_id)?;
+        // A sequence prepared before a stage went silent is failed here at
+        // once instead of waiting out the `RunEntry` (#2782); like every
+        // other post-mapping failure it goes through `fail_sequence`, so
+        // `Err` still means the coordinator's state was discarded (#2753).
+        if let Err(err) = self.ensure_stages_available() {
+            self.fail_sequence(seq_id, &request_id);
+            return Err(err);
+        }
         let input_seq_len = mlxcel_core::array_shape(input_ids)
             .get(1)
             .copied()
@@ -675,7 +1028,7 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         ) {
             Ok(response) => response,
             Err(err) => {
-                self.cleanup_request(&request_id);
+                self.fail_sequence(seq_id, &request_id);
                 return Err(err);
             }
         };
@@ -692,24 +1045,31 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
                 let logits = match deserialize_wire_tensor_with_limits(&logits, &limits) {
                     Ok(logits) => logits,
                     Err(err) => {
-                        self.cleanup_request(&request_id);
+                        self.fail_sequence(seq_id, &request_id);
                         return Err(err);
                     }
                 };
                 if let Err(err) =
                     validate_logits_shape(logits.as_ref().unwrap(), input_seq_len, self.vocab_size)
                 {
-                    self.cleanup_request(&request_id);
+                    self.fail_sequence(seq_id, &request_id);
                     return Err(err);
                 }
                 Ok(logits)
             }
-            RemoteStageResponse::Error { message, .. } => {
-                self.cleanup_request(&request_id);
-                Err(anyhow!(message))
+            RemoteStageResponse::Error {
+                stage_index,
+                message,
+                ..
+            } => {
+                self.fail_sequence(seq_id, &request_id);
+                Err(anyhow!(
+                    "remote stage {stage_index} failed the forward: {}",
+                    loggable_peer_text(&message)
+                ))
             }
             other => {
-                self.cleanup_request(&request_id);
+                self.fail_sequence(seq_id, &request_id);
                 Err(anyhow!("unexpected remote forward response: {:?}", other))
             }
         }
@@ -739,6 +1099,12 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
             .unwrap(),
             None,
         )?;
+        // Every row passed `validate_logits_shape`, which allows a sequence
+        // axis of the input length or 1 and, without a configured vocabulary
+        // size, any width. Rows that disagree cannot be concatenated, and
+        // MLX throws that at graph construction, through an FFI call that
+        // cannot report it (the process aborts). Refuse them here instead.
+        let row_shape = mlxcel_core::array_shape(&merged);
         for (idx, seq_id) in ordered {
             let logits = self.forward_sequence(
                 *seq_id,
@@ -747,23 +1113,33 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
                     .unwrap(),
                 None,
             )?;
+            let shape = mlxcel_core::array_shape(&logits);
+            if shape != row_shape {
+                bail!(
+                    "remote stage returned logits with shape {shape:?} for sequence {seq_id}; \
+                     the batch's first row has {row_shape:?}"
+                );
+            }
             merged = concatenate(&merged, &logits, 0);
         }
         Ok(merged)
     }
 }
 
+/// Why a stage reply that did not decode was dropped, made safe to log:
+/// serde_json quotes an unknown variant or field name from the payload
+/// verbatim (#2782 item 2).
+fn malformed_reply_reason(err: &serde_json::Error) -> String {
+    format!("malformed: {}", loggable_peer_text(&err.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-    use std::thread;
+    use std::sync::Arc;
 
-    use bytes::Bytes;
-    use tokio::sync::oneshot;
-
+    use super::super::stub_stage::{STUB_FORCED_ERROR, StubRunBehavior, StubStageHandle};
     use super::*;
     use crate::distributed::cluster_auth::ClusterSecret;
-    use crate::distributed::{StageHealth, TcpTransport, TcpTransportConfig};
 
     fn test_auth() -> Arc<ClusterAuth> {
         Arc::new(ClusterAuth::new(&ClusterSecret::random()))
@@ -783,237 +1159,6 @@ mod tests {
             auth,
             vocab_size: None,
         }
-    }
-
-    #[derive(Clone, Copy)]
-    enum StubRunBehavior {
-        Silent,
-        Error,
-    }
-
-    struct StubStageHandle {
-        addr: String,
-        commands: Arc<Mutex<Vec<String>>>,
-        shutdown_tx: Option<oneshot::Sender<()>>,
-        join_handle: Option<thread::JoinHandle<Result<()>>>,
-    }
-
-    impl StubStageHandle {
-        fn spawn(run_behavior: StubRunBehavior, auth: Arc<ClusterAuth>) -> Result<Self> {
-            Self::spawn_with(run_behavior, false, auth)
-        }
-
-        /// `reject_prepare` answers every `PrepareSequence` with an `Error`,
-        /// as a stage does for a sequence another identity already prepared
-        /// (#2714 items 2 and a).
-        fn spawn_with(
-            run_behavior: StubRunBehavior,
-            reject_prepare: bool,
-            auth: Arc<ClusterAuth>,
-        ) -> Result<Self> {
-            let commands = Arc::new(Mutex::new(Vec::new()));
-            let commands_for_thread = Arc::clone(&commands);
-            let (startup_tx, startup_rx) = std::sync::mpsc::channel::<Result<String>>();
-            let (shutdown_tx, shutdown_rx) = oneshot::channel();
-            let join_handle = thread::spawn(move || -> Result<()> {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|err| anyhow!("failed to build stub stage runtime: {err}"))?;
-                runtime.block_on(async move {
-                    let transport = Arc::new(
-                        TcpTransport::bind(TcpTransportConfig {
-                            bind_address: "127.0.0.1:0".to_string(),
-                            auth: Some(auth),
-                            ..Default::default()
-                        })
-                        .await?,
-                    );
-                    let local_addr = transport.local_addr()?;
-                    startup_tx
-                        .send(Ok(local_addr.clone()))
-                        .map_err(|_| anyhow!("failed to publish stub stage address"))?;
-
-                    let mut lifecycle = super::super::activation_transfer::StageLifecycleState {
-                        health: StageHealth::Healthy,
-                        ..Default::default()
-                    };
-                    let mut shutdown_rx = shutdown_rx;
-                    loop {
-                        tokio::select! {
-                            _ = &mut shutdown_rx => break,
-                            recv = transport.recv() => {
-                                let (from, msg) = recv?;
-                                let TransportMessage::Control { operation, payload } = msg else {
-                                    continue;
-                                };
-                                if operation != PIPELINE_STAGE_COMMAND_OPERATION {
-                                    continue;
-                                }
-                                let request: RemoteStageRequest = serde_json::from_slice(&payload)?;
-                                let nonce = request.nonce;
-                                let command_name = match &request.command {
-                                    RemoteStageCommand::PrepareSequence { .. } => "prepare",
-                                    RemoteStageCommand::ReleaseSequence { .. } => "release",
-                                    RemoteStageCommand::BeginDrain => "begin_drain",
-                                    RemoteStageCommand::CancelRequest { .. } => "cancel",
-                                    RemoteStageCommand::Shutdown => "shutdown",
-                                    RemoteStageCommand::RunEntry { .. } => "run_entry",
-                                    RemoteStageCommand::ProbeState => "probe_state",
-                                };
-                                commands_for_thread
-                                    .lock()
-                                    .expect("stub command log poisoned")
-                                    .push(command_name.to_string());
-
-                                let reply = match request.command {
-                                    RemoteStageCommand::PrepareSequence { request_id }
-                                        if reject_prepare =>
-                                    {
-                                        Some(RemoteStageResponse::Error {
-                                            stage_index: 0,
-                                            nonce,
-                                            request_id: Some(request_id.clone()),
-                                            message: format!(
-                                                "sequence {request_id} was prepared by another \
-                                                 coordinator identity"
-                                            ),
-                                            state: Some(lifecycle.snapshot()),
-                                        })
-                                    }
-                                    RemoteStageCommand::PrepareSequence { .. } => {
-                                        lifecycle.mark_request_started();
-                                        Some(RemoteStageResponse::Ack {
-                                            stage_index: 0,
-                                            nonce,
-                                            state: lifecycle.snapshot(),
-                                        })
-                                    }
-                                    RemoteStageCommand::ReleaseSequence { .. } => {
-                                        lifecycle.mark_request_finished();
-                                        Some(RemoteStageResponse::Ack {
-                                            stage_index: 0,
-                                            nonce,
-                                            state: lifecycle.snapshot(),
-                                        })
-                                    }
-                                    RemoteStageCommand::BeginDrain => {
-                                        lifecycle.draining = true;
-                                        Some(RemoteStageResponse::Ack {
-                                            stage_index: 0,
-                                            nonce,
-                                            state: lifecycle.snapshot(),
-                                        })
-                                    }
-                                    RemoteStageCommand::CancelRequest { request_id: _ } => {
-                                        lifecycle.mark_request_finished();
-                                        Some(RemoteStageResponse::Ack {
-                                            stage_index: 0,
-                                            nonce,
-                                            state: lifecycle.snapshot(),
-                                        })
-                                    }
-                                    RemoteStageCommand::Shutdown => {
-                                        lifecycle.draining = true;
-                                        lifecycle.shutdown = true;
-                                        lifecycle.health = StageHealth::Failed;
-                                        lifecycle.in_flight_requests = 0;
-                                        let response = RemoteStageResponse::Ack {
-                                            stage_index: 0,
-                                            nonce,
-                                            state: lifecycle.snapshot(),
-                                        };
-                                        send_stub_response(&transport, &from, response)
-                                            .await?;
-                                        break;
-                                    }
-                                    RemoteStageCommand::RunEntry {
-                                        request_id,
-                                        micro_batch_id: _,
-                                        input_ids: _,
-                                        attention_mask: _,
-                                    } => match run_behavior {
-                                        StubRunBehavior::Silent => None,
-                                        StubRunBehavior::Error => Some(RemoteStageResponse::Error {
-                                            stage_index: 0,
-                                            nonce,
-                                            request_id: Some(request_id),
-                                            message: "stub stage forced error".to_string(),
-                                            state: Some(lifecycle.snapshot()),
-                                        }),
-                                    },
-                                    RemoteStageCommand::ProbeState => {
-                                        Some(RemoteStageResponse::State {
-                                            stage_index: 0,
-                                            nonce,
-                                            state: lifecycle.snapshot(),
-                                        })
-                                    }
-                                };
-
-                                if let Some(response) = reply {
-                                    // Reply to the authenticated source, which is
-                                    // the coordinator's listener identity.
-                                    assert_eq!(request.reply_addr, from);
-                                    send_stub_response(&transport, &from, response).await?;
-                                }
-                            }
-                        }
-                    }
-                    transport.shutdown().await?;
-                    Ok(())
-                })
-            });
-            let addr = startup_rx
-                .recv()
-                .map_err(|_| anyhow!("stub stage startup channel dropped"))??;
-            Ok(Self {
-                addr,
-                commands,
-                shutdown_tx: Some(shutdown_tx),
-                join_handle: Some(join_handle),
-            })
-        }
-
-        fn addr(&self) -> &str {
-            &self.addr
-        }
-
-        fn commands(&self) -> Vec<String> {
-            self.commands
-                .lock()
-                .expect("stub command log poisoned")
-                .clone()
-        }
-
-        fn shutdown(mut self) -> Result<()> {
-            if let Some(tx) = self.shutdown_tx.take() {
-                let _ = tx.send(());
-            }
-            if let Some(handle) = self.join_handle.take() {
-                handle
-                    .join()
-                    .map_err(|_| anyhow!("stub stage thread panicked"))??;
-            }
-            Ok(())
-        }
-    }
-
-    async fn send_stub_response(
-        transport: &Arc<TcpTransport>,
-        peer: &str,
-        response: RemoteStageResponse,
-    ) -> Result<()> {
-        let payload = serde_json::to_vec(&response)?;
-        transport
-            .send(
-                peer,
-                TransportMessage::Control {
-                    operation: PIPELINE_STAGE_RESPONSE_OPERATION.to_string(),
-                    payload: Bytes::from(payload),
-                },
-            )
-            .await
     }
 
     #[test]
@@ -1051,8 +1196,13 @@ mod tests {
     #[test]
     fn remote_runtime_begin_drain_marks_stages_and_blocks_new_sequences() {
         let auth = test_auth();
-        let stage = StubStageHandle::spawn(StubRunBehavior::Error, Arc::clone(&auth))
-            .expect("spawn stub stage");
+        let stage = StubStageHandle::spawn(
+            StubRunBehavior::Error {
+                message: STUB_FORCED_ERROR,
+            },
+            Arc::clone(&auth),
+        )
+        .expect("spawn stub stage");
         let runtime = RemotePipelineRuntime::new(runtime_config(
             vec![stage.addr().to_string()],
             TransportBackend::Tcp,
@@ -1085,8 +1235,14 @@ mod tests {
     #[test]
     fn remote_runtime_prepare_failure_is_an_error_not_a_panic() {
         let auth = test_auth();
-        let stage = StubStageHandle::spawn_with(StubRunBehavior::Error, true, Arc::clone(&auth))
-            .expect("spawn stub stage");
+        let stage = StubStageHandle::spawn_with(
+            StubRunBehavior::Error {
+                message: STUB_FORCED_ERROR,
+            },
+            true,
+            Arc::clone(&auth),
+        )
+        .expect("spawn stub stage");
         let runtime = RemotePipelineRuntime::new(runtime_config(
             vec![stage.addr().to_string()],
             TransportBackend::Tcp,
@@ -1125,6 +1281,66 @@ mod tests {
         stage.shutdown().expect("shutdown stub stage");
     }
 
+    /// `pp-seq-{seq}-` followed by 16 lowercase hex digits.
+    fn is_random_sequence_id(id: &str, seq: u64) -> bool {
+        id.strip_prefix(&format!("pp-seq-{seq}-"))
+            .is_some_and(|hex| {
+                hex.len() == 16
+                    && hex
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+    }
+
+    /// #2726 item 2: the remote request id carries a CSPRNG suffix, so a
+    /// second holder of the secret cannot prepare the id the coordinator
+    /// will use next. Preparing the same `SequenceId` twice (with a release
+    /// in between) sends two different ids, both of the form
+    /// `pp-seq-21-<16 hex>`, and later commands use the recorded one.
+    #[test]
+    fn remote_runtime_request_ids_are_unpredictable() {
+        let auth = test_auth();
+        let stage = StubStageHandle::spawn(
+            StubRunBehavior::Error {
+                message: STUB_FORCED_ERROR,
+            },
+            Arc::clone(&auth),
+        )
+        .expect("spawn stub stage");
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![stage.addr().to_string()],
+            TransportBackend::Tcp,
+            Duration::from_secs(1),
+            auth,
+        ))
+        .expect("create runtime");
+        let seq_id = SequenceId::from_raw(21);
+        runtime
+            .prepare_sequence_state(seq_id)
+            .expect("first prepare");
+        let first = runtime.request_id_for(seq_id).expect("first request id");
+        runtime.release_sequence_state_by_id(seq_id);
+        runtime
+            .prepare_sequence_state(seq_id)
+            .expect("second prepare");
+        let second = runtime.request_id_for(seq_id).expect("second request id");
+
+        let prepared = stage.prepared_ids();
+        assert_eq!(prepared.len(), 2, "{prepared:?}");
+        for id in &prepared {
+            assert!(
+                is_random_sequence_id(id, 21),
+                "expected pp-seq-21-<16 hex digits>, got {id}"
+            );
+        }
+        assert_ne!(prepared[0], prepared[1], "the two ids must differ");
+        assert_eq!(prepared[0], first.as_str());
+        assert_eq!(prepared[1], second.as_str());
+        assert_eq!(stage.commands(), vec!["prepare", "release", "prepare"]);
+        runtime.shutdown().expect("shutdown runtime");
+        stage.shutdown().expect("shutdown stub stage");
+    }
+
     #[test]
     fn remote_runtime_timeout_cleans_up_sequence_state() {
         let auth = test_auth();
@@ -1147,7 +1363,10 @@ mod tests {
             .expect("silent stage must time out");
         assert!(err.to_string().contains("timed out"));
 
-        let commands = stage.commands();
+        // The gate is open after the timeout, so the teardown goes out
+        // without waiting for this stage's acknowledgement (#2782); the
+        // stub may still be reading the frames.
+        let commands = stage.wait_for_commands(4, Duration::from_secs(2));
         assert_eq!(
             commands,
             vec!["prepare", "run_entry", "cancel", "release"],
@@ -1158,10 +1377,165 @@ mod tests {
         stage.shutdown().expect("shutdown stub stage");
     }
 
+    /// #2727: a stage that does not answer the teardown (it stalled, or the
+    /// link to it drops frames) must not keep the cancel and release from
+    /// the stages after it. Before, the broadcast stopped at the first
+    /// stage that timed out, so every later stage kept the failed sequence
+    /// and its KV caches with nothing left to release them, one more per
+    /// failed request until their prepared-sequence cap refused every new
+    /// request.
+    #[test]
+    fn remote_runtime_teardown_reaches_every_stage_past_a_silent_one() {
+        let auth = test_auth();
+        // The first stage fails the forward and then ignores the teardown;
+        // the last stage is healthy.
+        let first = StubStageHandle::spawn_silent_on_teardown(
+            StubRunBehavior::Error {
+                message: STUB_FORCED_ERROR,
+            },
+            Arc::clone(&auth),
+        )
+        .expect("spawn first stub stage");
+        let last = StubStageHandle::spawn(
+            StubRunBehavior::Error {
+                message: STUB_FORCED_ERROR,
+            },
+            Arc::clone(&auth),
+        )
+        .expect("spawn last stub stage");
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![first.addr().to_string(), last.addr().to_string()],
+            TransportBackend::Tcp,
+            Duration::from_millis(300),
+            auth,
+        ))
+        .expect("create runtime");
+
+        let seq_id = SequenceId::from_raw(5);
+        runtime.prepare_sequence_state(seq_id).expect("prepare");
+        let input_ids = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+        runtime
+            .forward_sequence(seq_id, &input_ids, None)
+            .err()
+            .expect("the first stage fails the forward");
+        // The scheduler's close of the failed sequence is a no-op: the
+        // failed forward already discarded the sequence's state (#2762).
+        runtime.release_sequence_state_by_id(seq_id);
+
+        assert_eq!(
+            first.commands(),
+            vec!["prepare", "run_entry", "cancel", "release"],
+            "a failed forward releases the sequence exactly once"
+        );
+        assert_eq!(
+            last.commands(),
+            vec!["prepare", "cancel", "release"],
+            "the teardown must reach the stage after the silent one, once"
+        );
+        runtime.shutdown().expect("shutdown runtime");
+        first.shutdown().expect("shutdown first stub stage");
+        last.shutdown().expect("shutdown last stub stage");
+    }
+
+    /// #2762 item 1: one stage that stays silent on `RunEntry` and on the
+    /// teardown costs the model worker one `stage_timeout` (to detect the
+    /// failure) plus one teardown ack timeout per teardown command, not a
+    /// full `stage_timeout` for each of cancel, release, and the scheduler's
+    /// later release. With `stage_timeout` 1 s and a 100 ms teardown ack
+    /// timeout the failed forward and the close must return within 1.7 s;
+    /// before the fix they took about 4 s.
+    #[test]
+    fn silent_stage_failure_is_bounded_by_one_stage_timeout() {
+        let auth = test_auth();
+        let stage =
+            StubStageHandle::spawn_silent_on_teardown(StubRunBehavior::Silent, Arc::clone(&auth))
+                .expect("spawn stub stage");
+        let stage_timeout = Duration::from_secs(1);
+        let teardown_ack_timeout = Duration::from_millis(100);
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![stage.addr().to_string()],
+            TransportBackend::Tcp,
+            stage_timeout,
+            auth,
+        ))
+        .expect("create runtime")
+        .with_teardown_ack_timeout(teardown_ack_timeout);
+
+        let seq_id = SequenceId::from_raw(9);
+        runtime.prepare_sequence_state(seq_id).expect("prepare");
+        let input_ids = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+        let started = std::time::Instant::now();
+        let err = runtime
+            .forward_sequence(seq_id, &input_ids, None)
+            .err()
+            .expect("the silent stage must time out");
+        assert!(err.to_string().contains("timed out"), "{err:#}");
+        // The scheduler's close of the failed sequence.
+        runtime.release_sequence_state_by_id(seq_id);
+        let elapsed = started.elapsed();
+
+        let bound = stage_timeout + 2 * teardown_ack_timeout + Duration::from_millis(500);
+        assert!(
+            elapsed <= bound,
+            "a silent stage cost {elapsed:?}; the failure path must return within {bound:?}"
+        );
+        assert_eq!(
+            stage.wait_for_commands(4, Duration::from_secs(2)),
+            vec!["prepare", "run_entry", "cancel", "release"],
+            "the teardown goes out once, without waiting on the silent stage"
+        );
+        runtime.shutdown().expect("shutdown runtime");
+        stage.shutdown().expect("shutdown stub stage");
+    }
+
+    /// #2727: rows of a batched decode whose logits disagree on their shape
+    /// (possible without a configured vocabulary size) fail the step with
+    /// an error. Concatenating them made MLX throw through an FFI call that
+    /// cannot report it, which aborted the coordinator.
+    #[test]
+    fn remote_runtime_refuses_a_batch_whose_rows_disagree_on_logits_shape() {
+        let auth = test_auth();
+        let stage = StubStageHandle::spawn(
+            StubRunBehavior::MixedVocab {
+                vocabs: [8, 9],
+                token: 3,
+            },
+            Arc::clone(&auth),
+        )
+        .expect("spawn stub stage");
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![stage.addr().to_string()],
+            TransportBackend::Tcp,
+            Duration::from_secs(5),
+            auth,
+        ))
+        .expect("create runtime");
+        let seq_ids = [SequenceId::from_raw(1), SequenceId::from_raw(2)];
+        for &seq_id in &seq_ids {
+            runtime.prepare_sequence_state(seq_id).expect("prepare");
+        }
+        let input_ids = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+        let err = runtime
+            .forward_batched(&seq_ids, &input_ids)
+            .err()
+            .expect("rows with different logits widths must fail the batch");
+        assert!(format!("{err:#}").contains("logits with shape"), "{err:#}");
+        for &seq_id in &seq_ids {
+            runtime.release_sequence_state_by_id(seq_id);
+        }
+        runtime.shutdown().expect("shutdown runtime");
+        stage.shutdown().expect("shutdown stub stage");
+    }
+
     #[test]
     fn remote_runtime_refuses_to_start_against_stage_with_other_secret() {
-        let stage =
-            StubStageHandle::spawn(StubRunBehavior::Error, test_auth()).expect("spawn stub stage");
+        let stage = StubStageHandle::spawn(
+            StubRunBehavior::Error {
+                message: STUB_FORCED_ERROR,
+            },
+            test_auth(),
+        )
+        .expect("spawn stub stage");
         let err = RemotePipelineRuntime::new(runtime_config(
             vec![stage.addr().to_string()],
             TransportBackend::Tcp,
@@ -1175,8 +1549,30 @@ mod tests {
         assert!(text.contains("secret mismatch"), "{text}");
         stage.shutdown().expect("shutdown stub stage");
     }
+    #[test]
+    fn malformed_reply_reason_escapes_the_quoted_variant() {
+        let err =
+            serde_json::from_str::<RemoteStageResponse>("{\"Evil\\nINFO forged\\u001b[31m\": {}}")
+                .expect_err("unknown variant");
+        assert!(
+            err.to_string().contains('\n'),
+            "serde_json echoes it raw: {err}"
+        );
+        let reason = malformed_reply_reason(&err);
+        assert!(!reason.contains('\n'), "{reason}");
+        assert!(!reason.contains('\u{1b}'), "{reason}");
+        assert!(reason.contains("Evil\\nINFO forged"), "{reason}");
+    }
 }
 
 #[cfg(test)]
 #[path = "runtime_correlation_tests.rs"]
 mod correlation_tests;
+
+#[cfg(test)]
+#[path = "runtime_availability_tests.rs"]
+mod availability_tests;
+
+#[cfg(test)]
+#[path = "runtime_log_capture_tests.rs"]
+mod log_capture_tests;

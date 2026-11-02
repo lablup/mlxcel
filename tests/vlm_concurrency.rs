@@ -315,7 +315,7 @@ async fn gemma3n_vlm_two_concurrent_image_requests_do_not_cross_contaminate_stat
         "--no-warmup",
     ]);
 
-    let client = reqwest::Client::builder()
+    let client = mlxcel::http_tls::client_builder()
         .timeout(Duration::from_secs(180))
         .build()
         .expect("build reqwest client");

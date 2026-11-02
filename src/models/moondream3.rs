@@ -383,7 +383,9 @@ impl DenseMlp {
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let hidden = self.fc1.forward(x);
-        let hidden = mlxcel_core::gelu_approx(&hidden);
+        // Tanh GELU (mlx-vlm `TanhGELUMLP`, the Moondream remote code's
+        // `F.gelu(approximate="tanh")`), compiled f32 (erf before #2548).
+        let hidden = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&hidden);
         self.fc2.forward(&hidden)
     }
 }

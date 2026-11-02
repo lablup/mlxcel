@@ -37,7 +37,7 @@ API 변경은 생산자 스키마(`docs/webui/api.yaml`), 생성된 선언, 픽�
 
 ## 프런트엔드 빌드와 자산 재생성
 
-도구 버전은 정확히 고정되어 있습니다. Node 26.5.1, pnpm 11.18.0입니다. 저장소 루트에서 실행합니다.
+도구 버전은 정확히 고정되어 있습니다. Node 26.5.1, pnpm 12.16.1입니다. 저장소 루트에서 실행합니다.
 
 ```bash
 pnpm --dir webui install --frozen-lockfile

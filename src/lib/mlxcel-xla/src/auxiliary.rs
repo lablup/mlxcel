@@ -59,6 +59,7 @@ unsafe extern "C" {
         weight_dtypes: *const c_int,
         weight_ranks: *const c_int,
         weight_dims: *const i64,
+        local_task_workers: c_int,
     ) -> *mut XlaAuxCtx;
     fn xla_aux_invoke(
         context: *mut XlaAuxCtx,
@@ -249,6 +250,7 @@ impl IreeAuxiliaryModule {
             .iter()
             .map(|weight| weight.storage.as_ptr())
             .collect();
+        let local_task_workers = crate::local_task::local_task_workers_for(device)?;
         let device =
             CString::new(device).map_err(|_| "device URI has an interior nul byte".to_string())?;
         let vmfb = c_path(vmfb)?;
@@ -268,6 +270,7 @@ impl IreeAuxiliaryModule {
                 dtypes.as_ptr(),
                 ranks.as_ptr(),
                 dimensions.as_ptr(),
+                local_task_workers,
             )
         };
         if context.is_null() {

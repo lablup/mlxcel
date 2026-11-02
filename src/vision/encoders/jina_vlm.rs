@@ -165,7 +165,10 @@ struct JinaVlmViTMLP {
 impl JinaVlmViTMLP {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.up.forward(x);
-        let h = mlxcel_core::gelu_approx(&h);
+        // `vision_config.block_config.ffn_config.activation_type =
+        // gelu_pytorch_tanh` (mlx-vlm maps it to tanh); f32, one compiled
+        // kernel (erf before #2548).
+        let h = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&h);
         self.down.forward(&h)
     }
 

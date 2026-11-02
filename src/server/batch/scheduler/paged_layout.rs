@@ -15,12 +15,15 @@
 use super::*;
 
 impl BatchScheduler {
-    pub(super) fn allocate_sequence_state(&mut self) -> Result<SequenceId, String> {
+    /// Open a sequence on the engine and apply the configured KV cache mode
+    /// to it. The error is the engine's: [`EngineError::Prepare`] when the
+    /// model refused the sequence, otherwise a capacity failure; see
+    /// [`allocation_failure_message`] for what a request is told.
+    pub(super) fn allocate_sequence_state(&mut self) -> Result<SequenceId, EngineError> {
         let layout_override = self.sequence_state_layout_override();
         let seq_id = self
             .engine
-            .open(mlxcel_core::engine::SequenceSpec { layout_override })
-            .map_err(|err| err.to_string())?;
+            .open(mlxcel_core::engine::SequenceSpec { layout_override })?;
         // `open` runs the model's `prepare_sequence_state` before the mode
         // upgrade below (main ran it after). That hook takes only the id and
         // the model never holds the pool, so it cannot observe the pool
@@ -35,7 +38,21 @@ impl BatchScheduler {
         self.apply_kv_cache_mode_to(seq_id);
         Ok(seq_id)
     }
+}
 
+/// The text a request is answered with when its sequence could not be
+/// allocated (#2727). A model that refused to prepare the sequence already
+/// chose a client-safe message, which is passed through as is; every other
+/// cause is capacity (pool slots, the paged budget) and keeps the `Server
+/// busy` label.
+pub(super) fn allocation_failure_message(err: &EngineError) -> String {
+    match err {
+        EngineError::Prepare(msg) => msg.clone(),
+        other => format!("Server busy: {other}"),
+    }
+}
+
+impl BatchScheduler {
     /// Apply the configured `kv_cache_mode` to every per-layer cache of
     /// `seq_id` (with the Boundary-V upgrade for Turbo4 modes).
     ///
@@ -98,17 +115,34 @@ impl BatchScheduler {
     }
 
     pub(super) fn log_effective_kv_cache_application(&self) {
-        let modes = self.configured_model_kv_cache_layer_modes();
+        // A model-owned family reports the mode each cache actually stores:
+        // one that serves FP16 only (LongCat) reports FP16 rather than the
+        // request, a sliding-window layer whose `RotatingKVCache` falls back
+        // to FP16 storage is not counted as applied (issue #2783), and a
+        // layer with no KV cache (linear attention, SSM, recurrent, conv) is
+        // counted apart as stateless (issue #2790). Only a dense model, whose
+        // caches the scheduler builds from the table, reports `None`.
+        let modes = self
+            .engine
+            .model()
+            .kv_cache_storage_modes()
+            .unwrap_or_else(|| {
+                self.configured_model_kv_cache_layer_modes()
+                    .into_iter()
+                    .map(Some)
+                    .collect()
+            });
         let effective_mode = if self.batch_kv_quant.is_enabled() {
             self.batch_kv_quant.base_mode()
         } else {
             self.kv_cache_mode
         };
-        let applied = modes.iter().filter(|mode| **mode == effective_mode).count();
+        let summary = KvStorageSummary::of(&modes, effective_mode);
         tracing::info!(
             kv_cache_mode_effective = %effective_mode,
-            kv_cache_mode_applied_layers = applied,
-            kv_cache_mode_total_layers = modes.len(),
+            kv_cache_mode_applied_layers = summary.applied,
+            kv_cache_mode_total_layers = summary.total,
+            kv_cache_mode_stateless_layers = summary.stateless,
             "resolved KV cache mode applied to model caches"
         );
     }
@@ -309,5 +343,90 @@ impl BatchScheduler {
 
     pub(super) fn sync_sequence_storage(&mut self, seq_id: SequenceId) {
         self.engine.sync_sequence_storage(seq_id);
+    }
+}
+
+/// Per-layer counts of a KV storage report (issue #2790): `applied` layers
+/// store the effective mode, `total` layers hold a KV cache at all, and
+/// `stateless` layers hold none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct KvStorageSummary {
+    pub(super) applied: usize,
+    pub(super) total: usize,
+    pub(super) stateless: usize,
+}
+
+impl KvStorageSummary {
+    pub(super) fn of(modes: &[Option<KVCacheMode>], effective: KVCacheMode) -> Self {
+        let total = modes.iter().filter(|mode| mode.is_some()).count();
+        Self {
+            applied: modes
+                .iter()
+                .filter(|mode| **mode == Some(effective))
+                .count(),
+            total,
+            stateless: modes.len() - total,
+        }
+    }
+}
+
+#[cfg(test)]
+mod kv_storage_summary_tests {
+    use super::*;
+
+    #[test]
+    fn stateless_layers_count_toward_neither_applied_nor_total() {
+        let modes = [
+            None,
+            Some(KVCacheMode::Int8),
+            None,
+            Some(KVCacheMode::Fp16),
+            Some(KVCacheMode::Int8),
+        ];
+        assert_eq!(
+            KvStorageSummary::of(&modes, KVCacheMode::Int8),
+            KvStorageSummary {
+                applied: 2,
+                total: 3,
+                stateless: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn an_all_recurrent_model_applies_nothing() {
+        assert_eq!(
+            KvStorageSummary::of(&[None, None], KVCacheMode::Int8),
+            KvStorageSummary {
+                applied: 0,
+                total: 0,
+                stateless: 2,
+            }
+        );
+    }
+}
+
+#[cfg(test)]
+mod allocation_failure_message_tests {
+    use super::*;
+
+    /// A refused prepare is passed through as the model's client-safe text,
+    /// without the `Server busy` label (#2727).
+    #[test]
+    fn prepare_refusal_is_not_labelled_server_busy() {
+        let msg = allocation_failure_message(&EngineError::Prepare(
+            "model pipeline could not prepare this request; see the server log for the stage error"
+                .to_string(),
+        ));
+        assert!(msg.starts_with("model pipeline could not prepare"), "{msg}");
+        assert!(!msg.contains("Server busy"), "{msg}");
+    }
+
+    /// Pool and budget exhaustion keep the `Server busy` label.
+    #[test]
+    fn capacity_failure_keeps_server_busy_label() {
+        let msg = allocation_failure_message(&EngineError::Open("pool full".to_string()));
+        assert!(msg.starts_with("Server busy: "), "{msg}");
+        assert!(msg.contains("pool full"), "{msg}");
     }
 }

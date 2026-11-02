@@ -93,8 +93,15 @@ pub mod runtime;
 pub mod schedule;
 pub mod server_runtime;
 pub mod serving;
+pub mod stage_availability;
 pub mod stage_executor;
+/// The stage-caused exchange failures that open the availability gate.
+pub(crate) mod stage_unreachable;
 pub mod stage_worker;
+/// A scripted remote stage over a real authenticated transport, for tests
+/// of the coordinator side (#2727).
+#[cfg(test)]
+pub(crate) mod stub_stage;
 pub mod trace;
 pub mod wire_bytes;
 pub mod wire_tensor;

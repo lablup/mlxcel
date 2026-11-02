@@ -82,7 +82,7 @@ fn dense_config() -> serde_json::Value {
         "sliding_window":4,"layer_types":["full_attention","sliding_attention"],
         "max_position_embeddings":64,"rope_theta":10000.0,"tie_word_embeddings":false})
 }
-fn ministral() -> super::ministral3::Ministral3Wrapper {
+pub(super) fn ministral() -> super::ministral3::Ministral3Wrapper {
     let mut value = dense_config();
     value["rope_parameters"] = serde_json::json!({"rope_theta":10000.0,"llama_4_scaling_beta":0.2,"original_max_position_embeddings":2});
     let args = serde_json::from_value(value).unwrap();
@@ -90,7 +90,7 @@ fn ministral() -> super::ministral3::Ministral3Wrapper {
         super::ministral3::Ministral3Model::from_weights(&dense_weights(), &args).unwrap(),
     )
 }
-fn exaone() -> super::exaone4::ExaOne4Wrapper {
+pub(super) fn exaone() -> super::exaone4::ExaOne4Wrapper {
     let mut value = dense_config();
     value["sliding_window_pattern"] = serde_json::json!("LG");
     let args = serde_json::from_value(value).unwrap();
@@ -106,7 +106,7 @@ pub(crate) fn step() -> super::step3p5::Step3p5Model {
     let args = serde_json::from_value(value).unwrap();
     super::step3p5::Step3p5Model::from_weights(&dense_weights(), &args).unwrap()
 }
-fn mellum() -> super::mellum::MellumWrapper {
+pub(super) fn mellum() -> super::mellum::MellumWrapper {
     let mut args = super::mellum_tests::tiny_config(false);
     args.sliding_window = 4;
     let mut weights = super::mellum_tests::tiny_weights(&args);
@@ -125,7 +125,7 @@ fn mellum() -> super::mellum::MellumWrapper {
         super::mellum::MellumModel::from_weights(&weights, &args).unwrap(),
     )
 }
-fn laguna() -> super::laguna::LagunaWrapper {
+pub(super) fn laguna() -> super::laguna::LagunaWrapper {
     super::laguna::LagunaWrapper::new(super::laguna_tests::tiny_model().0)
 }
 fn assert_close(actual: &MlxArray, expected: &MlxArray, tolerance: f32) {

@@ -328,12 +328,12 @@ pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<Route
         // Responses API (OpenAI /v1/responses surface).
         reg("/v1/responses", Method::POST, post(routes::create_response)),
         reg(
-            "/v1/responses/:id",
+            "/v1/responses/{id}",
             Method::GET,
             get(routes::retrieve_response).delete(routes::delete_response),
         ),
         reg(
-            "/v1/responses/:id/cancel",
+            "/v1/responses/{id}/cancel",
             Method::POST,
             post(routes::cancel_response),
         ),
@@ -437,12 +437,12 @@ pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<Route
         reg("/reranking", Method::POST, post(routes::create_rerank)),
         reg("/responses", Method::POST, post(routes::create_response)),
         reg(
-            "/responses/:id",
+            "/responses/{id}",
             Method::GET,
             get(routes::retrieve_response).delete(routes::delete_response),
         ),
         reg(
-            "/responses/:id/cancel",
+            "/responses/{id}/cancel",
             Method::POST,
             post(routes::cancel_response),
         ),
@@ -531,7 +531,7 @@ pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<Route
     // unconditionally and answers its own diagnostics when a gate is off
     // (issue #1440): GET /props is ungated, --props gates POST /props,
     // --slots gates GET /slots, --metrics gates GET /metrics, and
-    // --slot-save-path gates POST /slots/:id_slot. The handlers own those
+    // --slot-save-path gates POST /slots/{id_slot}. The handlers own those
     // gates so a disabled surface answers upstream's 501 instead of a 404.
     inventory.push(reg(
         "/props",
@@ -540,7 +540,7 @@ pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<Route
     ));
     inventory.push(reg("/slots", Method::GET, get(routes::slots)));
     inventory.push(reg(
-        "/slots/:id_slot",
+        "/slots/{id_slot}",
         Method::POST,
         post(routes::slot_action),
     ));
@@ -613,12 +613,12 @@ fn single_webui_api_routes() -> Router<AppState> {
         .route("/ui-api/v1/model-actions", post(single_ui_read_only))
         .route("/ui-api/v1/downloads", post(single_ui_read_only))
         .route("/ui-api/v1/model-removals", post(single_ui_read_only))
-        .route("/ui-api/v1/catalog/:id", get(single_ui_catalog_get))
+        .route("/ui-api/v1/catalog/{id}", get(single_ui_catalog_get))
         .route("/ui-api/v1/runtime", get(single_ui_runtime))
         .route("/ui-api/v1/operations", get(single_ui_operations_list))
-        .route("/ui-api/v1/operations/:id", get(single_ui_operation_get))
+        .route("/ui-api/v1/operations/{id}", get(single_ui_operation_get))
         .route(
-            "/ui-api/v1/operations/:id/cancel",
+            "/ui-api/v1/operations/{id}/cancel",
             post(single_ui_read_only),
         )
         .route("/ui-api/v1/events", get(single_ui_events))

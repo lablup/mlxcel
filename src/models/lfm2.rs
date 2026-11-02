@@ -1593,6 +1593,15 @@ impl LanguageModel for Lfm2Model {
         self.kv_cache_layer_modes.clone_modes()
     }
 
+    /// Short-convolution layers hold no KV (issue #2790).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        self.kv_cache_layer_modes
+            .storage_modes(|layer_idx| match self.layers.get(layer_idx) {
+                Some(layer) if layer.is_attention() => crate::models::model_owned::LayerKv::Full,
+                _ => crate::models::model_owned::LayerKv::None,
+            })
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: mlxcel_core::cache::SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }

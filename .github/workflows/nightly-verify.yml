@@ -163,7 +163,7 @@ jobs:
     # holds them. A fork that enables Actions would otherwise queue forever
     # against runner labels it does not own.
     if: github.repository == 'lablup/mlxcel'
-    runs-on: self-hosted-macos-26-arm64 # Self-hosted Apple Silicon runner with macOS 26 SDK + Metal 4
+    runs-on: self-hosted-macos-27-arm64 # Self-hosted Apple Silicon runner with macOS 27 SDK + Metal 4
     # Generous because a cold run is a full MLX C++ build plus a link of every
     # integration-test binary. Note that the FIRST run after the switch to
     # `[profile.test-fast]` is cold by construction: a different profile means a
@@ -433,7 +433,7 @@ jobs:
             # asserting a genuine code failure would have pointed the reader at
             # the wrong thing. Say the job failed and let the table and the log
             # say where.
-            HEADLINE='The nightly `make verify` run on `self-hosted-macos-26-arm64` failed. Check the first failing step in the run log before reading the gate table below: a setup step that fails leaves the gates reporting `failure` for want of a toolchain rather than because the code is red.'
+            HEADLINE='The nightly `make verify` run on `self-hosted-macos-27-arm64` failed. Check the first failing step in the run log before reading the gate table below: a setup step that fails leaves the gates reporting `failure` for want of a toolchain rather than because the code is red.'
           fi
           export TITLE
 

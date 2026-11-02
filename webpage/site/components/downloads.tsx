@@ -1,7 +1,8 @@
 "use client";
 
 import { motion, useReducedMotion, useScroll, useTransform } from "framer-motion";
-import { Download, Package, Github } from "lucide-react";
+import { Download, Package } from "lucide-react";
+import { Github } from "@/components/brand-icons";
 import { MotionDiv } from "@/components/motion-wrapper";
 import { useRef } from "react";
 import type { Dictionary } from "@/dictionaries/en";

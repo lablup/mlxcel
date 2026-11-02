@@ -42,14 +42,7 @@
 //! fields into one of:
 //!
 //! - [`SpeculativeDispatch::Disabled`] — no `--draft-model`; plain decode
-//!   runs (the offline draft-model loop of `mlxcel generate` is never used by
-//!   the server, and is deprecated since #2176).
-//! - [`SpeculativeDispatch::Classic { .. }`] — `--draft-model` set,
-//!   `--draft-kind` unset, drafter's `config.json::model_type` resolves to
-//!   a kind that the server has not yet wired to its kind-specific round
-//!   loop. The server logs the auto-detected kind and falls back to plain
-//!   decode, the `Classic` dispatch, for backward compatibility with the
-//!   historical `--draft-model <path>` workflow.
+//!   runs.
 //! - [`SpeculativeDispatch::Mtp { .. }`] — `--draft-kind mtp` (or auto-
 //!   detect resolved to MTP). The scheduler constructs the kind-specific
 //!   [`mlxcel_core::speculative::mtp::MtpGenerator`] (B=1) or
@@ -63,6 +56,14 @@
 //!   eligible sequence inside the regular decode tick and keeps the
 //!   lookahead pipeline for ticks where no row proposes (see
 //!   `server::batch::scheduler::prompt_lookup`).
+//! - [`SpeculativeDispatch::FullModel { .. }`]: `--draft-kind full-model`, or
+//!   a `--draft-model` that auto-detects as an ordinary full model (#2757,
+//!   [`mlxcel_core::drafter::auto_detected_full_model_dir`]). The worker loads
+//!   the checkpoint through the model loader next to the target and each
+//!   eligible row drafts from it through
+//!   [`mlxcel_core::speculative::full_model_drafter::FullModelDrafter`] on the
+//!   same token-only tick as prompt lookup, so it is not a kind-specific
+//!   burst either.
 //! - [`SpeculativeDispatch::DFlash { .. }`] — `--draft-kind dflash` (or
 //!   auto-detect resolved to DFlash and operator explicitly opted in via
 //!   `--draft-kind`). The scheduler constructs the kind-specific
@@ -96,7 +97,10 @@
 
 use std::path::PathBuf;
 
-use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
+use mlxcel_core::drafter::{
+    DrafterKind, auto_detected_full_model_dir, drafter_config_problem, full_model_vocab_problem,
+    resolve_drafter_kind,
+};
 use mlxcel_core::speculative::prompt_lookup::{DraftPolicy, PromptLookupConfig};
 
 use crate::cli::draft_block_policy::BlockSizeSource;
@@ -113,23 +117,6 @@ pub enum SpeculativeDispatch {
     /// No drafter configured. Scheduler runs the classic per-step decode
     /// loop. This is the default and the bit-exact preserved path.
     Disabled,
-
-    /// Drafter is configured but its resolved kind is one the server has
-    /// not yet wired to a kind-specific round loop. Scheduler falls back
-    /// to plain decode (where the offline `mlxcel generate` command takes
-    /// its deprecated draft-model loop when `--draft-kind` is unset and the
-    /// auto-detect resolves to a known kind). The auto-detected kind is
-    /// logged for operator visibility.
-    Classic {
-        /// Drafter checkpoint directory.
-        draft_model_path: PathBuf,
-        /// `--num-draft-tokens` / `ServerConfig::num_draft_tokens`, kept
-        /// for the startup summary only: this arm drafts nothing.
-        num_draft_tokens: usize,
-        /// The auto-detected drafter kind. Stored for diagnostic logging
-        /// only: this arm decodes plainly, so nothing branches on it.
-        auto_detected_kind: DrafterKind,
-    },
 
     /// MTP speculative decoding (Gemma 4 assistant drafter family).
     /// Scheduler constructs a kind-specific
@@ -191,6 +178,42 @@ pub enum SpeculativeDispatch {
         /// active decode batch has at most this many rows.
         max_batch: usize,
     },
+
+    /// An ordinary full model drafting from its own KV caches (#2757):
+    /// `--draft-kind full-model`, or `--draft-model` naming a directory with
+    /// no DFlash-family marker and no MTP `model_type`. The worker loads the
+    /// checkpoint at startup and the scheduler gives each eligible sequence a
+    /// per-row drafter state at prefill completion; rows then run at most one
+    /// verify round per decode tick, exactly as prompt-lookup rows do, and
+    /// only while the active batch is at most `max_batch` rows; a wider batch
+    /// decodes plainly until it shrinks.
+    FullModel {
+        /// Draft checkpoint directory (a standalone model).
+        draft_model_path: PathBuf,
+        /// Proposals per round (the verify input has `block_size + 1`
+        /// positions).
+        block_size: u32,
+        /// Same provenance record as [`Self::Mtp::block_size_source`].
+        block_size_source: BlockSizeSource,
+        /// Whether `--draft-kind full-model` was passed (true) or the
+        /// directory auto-detected as a full model (false).
+        user_requested_explicit_kind: bool,
+        /// `--prompt-lookup-max-batch`, the one gate the token-only tick
+        /// applies: rows verify only while the active decode batch has at
+        /// most this many rows.
+        max_batch: usize,
+    },
+}
+
+/// The settings the scheduler's token-only tick reads for a dispatch whose
+/// rows run their own verify rounds inside the decode tick ([`SpeculativeDispatch::PromptLookup`]
+/// and [`SpeculativeDispatch::FullModel`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenOnlyRounds {
+    /// Largest proposal a round verifies.
+    pub max_draft: usize,
+    /// Largest active decode batch at which rows are asked for proposals.
+    pub max_batch: usize,
 }
 
 /// Default `--prompt-lookup-max-batch`: the largest active decode batch at
@@ -238,8 +261,10 @@ fn draft_policy_name(policy: DraftPolicy) -> &'static str {
 /// inner messages are stable and unit-tested.
 #[derive(Debug, thiserror::Error)]
 pub enum SpeculativeDispatchError {
-    /// `--draft-kind` was passed an unrecognized value (not one of
-    /// `KNOWN_DRAFTER_KINDS - {internal-mtp}`).
+    /// The speculative settings cannot be served: `--draft-kind` was passed an
+    /// unrecognized or non-user-selectable value (not one of
+    /// `KNOWN_DRAFTER_KINDS - {internal-mtp}`), `--draft-model` resolved to a
+    /// kind with no server round loop, or the prompt-lookup settings are invalid.
     #[error("invalid --draft-kind: {message}")]
     InvalidKind { message: String },
 
@@ -269,14 +294,8 @@ impl SpeculativeDispatch {
     ///    default is keyed on the target's quantization mode, not the
     ///    drafter's. The resolved width carries its own provenance so
     ///    [`Self::summary`] can name it.
-    /// 4. Returns the kind-specific variant.
-    ///
-    /// The classic [`Self::Classic`] arm is selected only when the
-    /// operator did **not** pass `--draft-kind` and the auto-detect
-    /// resolved to [`DrafterKind::InternalMtp`] (which is not currently
-    /// wired to a server-side round loop). This preserves the historical
-    /// `--draft-model <path>` workflow for older operator scripts that
-    /// pre-date the `--draft-kind` flag.
+    /// 4. Returns the kind-specific variant. A kind with no server round loop
+    ///    returns [`SpeculativeDispatchError::InvalidKind`].
     ///
     /// **Note**: when `--draft-kind` is explicitly passed AND the kind is
     /// supported by a server-side round loop, this method returns the
@@ -305,11 +324,13 @@ impl SpeculativeDispatch {
             None => None,
             Some("dflash") => Some(DrafterKind::Dflash),
             Some("mtp") => Some(DrafterKind::Mtp),
+            Some("full-model") => Some(DrafterKind::FullModel),
             Some("internal-mtp") => {
                 return Err(SpeculativeDispatchError::InvalidKind {
                     message: "--draft-kind=internal-mtp is not user-selectable; the \
                               InternalMtp drafter is auto-detected from the target \
-                              checkpoint. Pass --draft-kind dflash or --draft-kind mtp."
+                              checkpoint. Pass --draft-kind dflash, --draft-kind mtp or \
+                              --draft-kind full-model."
                         .to_string(),
                 });
             }
@@ -317,22 +338,57 @@ impl SpeculativeDispatch {
                 return Err(SpeculativeDispatchError::InvalidKind {
                     message: format!(
                         "--draft-kind={other:?} is not recognised; accepted values: dflash, mtp, \
-                         prompt-lookup"
+                         full-model, prompt-lookup"
                     ),
                 });
             }
         };
 
+        // A full-model drafter loads through the model loader, which refuses
+        // a DFlash-family directory as "not a standalone model"; say so here,
+        // before the worker thread starts (#2757).
+        if explicit_kind == Some(DrafterKind::FullModel)
+            && mlxcel_core::drafter::dflash::is_dflash_drafter_dir(&draft_model_path)
+        {
+            return Err(SpeculativeDispatchError::InvalidKind {
+                message: format!(
+                    "--draft-kind full-model: {} is a DFlash-family drafter checkpoint, not an \
+                     ordinary full model; pass --draft-kind dflash or omit --draft-kind.",
+                    draft_model_path.display()
+                ),
+            });
+        }
+        // With no explicit kind the resolver swallows an unreadable config and
+        // falls back to DFlash, where the real cause would only surface as a
+        // drafter load error on the first request. Report it at startup.
+        if explicit_kind.is_none()
+            && let Some(problem) = drafter_config_problem(&draft_model_path)
+        {
+            return Err(SpeculativeDispatchError::DrafterConfig {
+                path: draft_model_path,
+                message: problem,
+            });
+        }
+
         // Auto-detect (or reconcile against the explicit kind) from the
         // drafter's `config.json`. This is the same call the offline CLI
         // path makes in `src/commands/generate.rs`.
-        let resolved_kind =
+        let mut resolved_kind =
             resolve_drafter_kind(&draft_model_path, explicit_kind).map_err(|e| {
                 SpeculativeDispatchError::DrafterConfig {
                     path: draft_model_path.clone(),
                     message: e.to_string(),
                 }
             })?;
+        // The resolver's DFlash default covers an ordinary full model too
+        // (#1168); the structural rule tells the two apart (#2757).
+        if auto_detected_full_model_dir(&draft_model_path, explicit_kind, resolved_kind) {
+            tracing::info!(
+                drafter = %draft_model_path.display(),
+                "Auto-detected --draft-kind full-model: no DFlash-family marker and no MTP model_type"
+            );
+            resolved_kind = DrafterKind::FullModel;
+        }
 
         let user_requested_explicit_kind = explicit_kind.is_some();
         // The block-width policy is keyed on the TARGET's quantization, not
@@ -350,9 +406,9 @@ impl SpeculativeDispatch {
         // - explicit MTP / DFlash → kind-specific generator
         // - auto-detected MTP / DFlash → kind-specific generator
         //   (the scheduler logs the auto-detect for visibility)
-        // - InternalMtp (peer) is auto-detected only and falls
-        //   back to the Classic path until it has a server-side round
-        //   loop.
+        // - any other kind (`InternalMtp`, which no drafter `model_type` maps
+        //   to, or a future `#[non_exhaustive]` variant) has no server-side
+        //   round loop and is refused at startup.
         match resolved_kind {
             DrafterKind::Mtp => Ok(Self::Mtp {
                 draft_model_path,
@@ -366,18 +422,41 @@ impl SpeculativeDispatch {
                 block_size_source: block_size.source,
                 user_requested_explicit_kind,
             }),
-            DrafterKind::InternalMtp => Ok(Self::Classic {
-                draft_model_path,
-                num_draft_tokens: config.num_draft_tokens,
-                auto_detected_kind: resolved_kind,
-            }),
-            // `DrafterKind` is `#[non_exhaustive]`; route unknown future
-            // variants through Classic so a stale binary does not panic
-            // when an operator points at a newer drafter checkpoint.
-            _ => Ok(Self::Classic {
-                draft_model_path,
-                num_draft_tokens: config.num_draft_tokens,
-                auto_detected_kind: resolved_kind,
+            DrafterKind::FullModel => {
+                if config.prompt_lookup_max_batch == 0 {
+                    return Err(SpeculativeDispatchError::InvalidKind {
+                        message: "--prompt-lookup-max-batch must be at least 1".to_string(),
+                    });
+                }
+                if block_size.width == 0 {
+                    return Err(SpeculativeDispatchError::InvalidKind {
+                        message: "--draft-kind full-model needs --draft-block-size of at least 1"
+                            .to_string(),
+                    });
+                }
+                if let Some(problem) =
+                    full_model_vocab_problem(&draft_model_path, target_model_path)
+                {
+                    return Err(SpeculativeDispatchError::InvalidKind {
+                        message: format!("--draft-kind full-model: {problem}"),
+                    });
+                }
+                Ok(Self::FullModel {
+                    draft_model_path,
+                    block_size: block_size.width,
+                    block_size_source: block_size.source,
+                    user_requested_explicit_kind,
+                    max_batch: config.prompt_lookup_max_batch,
+                })
+            }
+            other => Err(SpeculativeDispatchError::InvalidKind {
+                message: format!(
+                    "--draft-model {} resolved to drafter kind {other}, which has no server-side \
+                     round loop; pass --draft-kind dflash, --draft-kind mtp or --draft-kind \
+                     full-model with a matching drafter, or --draft-kind prompt-lookup with no \
+                     drafter checkpoint.",
+                    draft_model_path.display()
+                ),
             }),
         }
     }
@@ -427,15 +506,6 @@ impl SpeculativeDispatch {
     pub fn summary(&self) -> String {
         match self {
             Self::Disabled => "speculative=off".to_string(),
-            Self::Classic {
-                draft_model_path,
-                num_draft_tokens,
-                auto_detected_kind,
-            } => format!(
-                "speculative=classic (drafter={}, num_draft_tokens={num_draft_tokens}, \
-                 auto_detected_kind={auto_detected_kind})",
-                draft_model_path.display()
-            ),
             Self::Mtp {
                 draft_model_path,
                 block_size,
@@ -466,6 +536,19 @@ impl SpeculativeDispatch {
                 config.shadow_confirm_tokens,
                 config.plain_rounds_before_pipeline
             ),
+            Self::FullModel {
+                draft_model_path,
+                block_size,
+                block_size_source,
+                user_requested_explicit_kind,
+                max_batch,
+            } => format!(
+                "speculative=full-model (drafter={}, block_size={block_size}, \
+                 block_size_from={}, explicit_kind={user_requested_explicit_kind}, \
+                 max_batch={max_batch})",
+                draft_model_path.display(),
+                block_size_source.reason()
+            ),
         }
     }
 
@@ -474,55 +557,86 @@ impl SpeculativeDispatch {
     pub fn draft_model_path(&self) -> Option<&std::path::Path> {
         match self {
             Self::Disabled | Self::PromptLookup { .. } => None,
-            Self::Classic {
-                draft_model_path, ..
-            }
-            | Self::Mtp {
+            Self::Mtp {
                 draft_model_path, ..
             }
             | Self::DFlash {
+                draft_model_path, ..
+            }
+            | Self::FullModel {
                 draft_model_path, ..
             } => Some(draft_model_path.as_path()),
         }
     }
 
-    /// Returns the resolved [`DrafterKind`] when the dispatch is a
-    /// kind-specific variant or carries an auto-detected kind. Returns
+    /// Returns the resolved [`DrafterKind`] of an active dispatch. Returns
     /// `None` for [`Self::Disabled`].
     pub fn drafter_kind(&self) -> Option<DrafterKind> {
         match self {
             Self::Disabled => None,
-            Self::Classic {
-                auto_detected_kind, ..
-            } => Some(*auto_detected_kind),
             Self::Mtp { .. } => Some(DrafterKind::Mtp),
             Self::DFlash { .. } => Some(DrafterKind::Dflash),
             Self::PromptLookup { .. } => Some(DrafterKind::PromptLookup),
+            Self::FullModel { .. } => Some(DrafterKind::FullModel),
         }
     }
 
-    /// Returns the resolved draft block size for [`Self::Mtp`] and
-    /// [`Self::DFlash`]. `None` for [`Self::Disabled`] and
-    /// [`Self::Classic`] (which declines to plain decode and has no block
-    /// size).
+    /// Returns the resolved draft block size for [`Self::Mtp`],
+    /// [`Self::DFlash`] and [`Self::FullModel`]. `None` otherwise.
     pub fn block_size(&self) -> Option<u32> {
         match self {
-            Self::Mtp { block_size, .. } | Self::DFlash { block_size, .. } => Some(*block_size),
+            Self::Mtp { block_size, .. }
+            | Self::DFlash { block_size, .. }
+            | Self::FullModel { block_size, .. } => Some(*block_size),
             _ => None,
         }
     }
 
     /// Whether the dispatch is one of the kind-specific server-side
     /// round-loop variants (MTP or DFlash). `false` for
-    /// [`Self::PromptLookup`], whose verify rounds run inside the regular
-    /// decode tick rather than a burst; see [`Self::prompt_lookup_config`].
+    /// [`Self::PromptLookup`] and [`Self::FullModel`], whose verify rounds
+    /// run inside the regular decode tick rather than a burst; see
+    /// [`Self::token_only_rounds`].
     pub fn is_kind_specific(&self) -> bool {
         matches!(self, Self::Mtp { .. } | Self::DFlash { .. })
     }
 
+    /// The token-only tick's settings for a [`Self::PromptLookup`] or
+    /// [`Self::FullModel`] dispatch, `None` otherwise. The scheduler checks
+    /// this, not [`Self::is_kind_specific`], to run per-row verify rounds
+    /// inside the decode tick.
+    pub fn token_only_rounds(&self) -> Option<TokenOnlyRounds> {
+        match self {
+            Self::PromptLookup { config, max_batch } => Some(TokenOnlyRounds {
+                max_draft: config.max_draft,
+                max_batch: *max_batch,
+            }),
+            Self::FullModel {
+                block_size,
+                max_batch,
+                ..
+            } => Some(TokenOnlyRounds {
+                max_draft: *block_size as usize,
+                max_batch: *max_batch,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The draft checkpoint of a [`Self::FullModel`] dispatch, `None`
+    /// otherwise; the worker loads it next to the target.
+    pub fn full_model_draft_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::FullModel {
+                draft_model_path, ..
+            } => Some(draft_model_path.as_path()),
+            _ => None,
+        }
+    }
+
     /// The drafter config and `--prompt-lookup-max-batch` of a
-    /// [`Self::PromptLookup`] dispatch, `None` otherwise. The scheduler
-    /// checks this, not [`Self::is_kind_specific`], to offer prompt lookup.
+    /// [`Self::PromptLookup`] dispatch, `None` otherwise; the scheduler
+    /// primes a row's prompt-lookup drafter from it.
     pub fn prompt_lookup_config(&self) -> Option<(&PromptLookupConfig, usize)> {
         match self {
             Self::PromptLookup { config, max_batch } => Some((config, *max_batch)),

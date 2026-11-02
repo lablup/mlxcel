@@ -3,7 +3,6 @@
 //! Objects focal recovery contracts, including the actual saved-input oracle.
 use super::*;
 use mlxcel_core as mx;
-use sha2::{Digest, Sha256};
 
 fn exact(actual: &MlxArray, expected: &MlxArray, label: &str) {
     assert_eq!(mx::array_dtype(actual), mx::dtype::FLOAT32, "{label}");
@@ -45,7 +44,7 @@ fn objects_focal_solver_authentic_backend_oracle() -> Result<()> {
             .join(name);
         let bytes = std::fs::read(&path)?;
         assert_eq!(
-            format!("{:x}", Sha256::digest(&bytes)),
+            crate::sha256_hex::sha256_hex(&bytes),
             digest,
             "authenticated {name} changed"
         );

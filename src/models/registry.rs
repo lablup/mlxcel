@@ -572,6 +572,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         kv_modes: KV_FP16,
     },
     StandaloneArchitectureFamily {
+        id: "ming_image",
+        display_name: "Ming-Image",
+        category: "image generation",
+        model_types: &["ming_image"],
+        aliases: &["ming-image", "ming-image-0.1-design"],
+        runtimes: IMAGE_GENERATE,
+        modalities_in: TEXT,
+        output: OutputKind::Image,
+        backends: BackendSupport {
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
+    StandaloneArchitectureFamily {
         id: "llada_image",
         display_name: "LLaDA-Image",
         category: "image generation",
@@ -744,6 +763,7 @@ impl ModelType {
             ModelType::HunyuanMoe => "hunyuan_moe",
             ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
             ModelType::MiMo => "mimo",
+            ModelType::MiMoV2Flash => "mimo_v2_flash",
             ModelType::BailingMoe => "bailing_moe",
             ModelType::BailingMoeLinear => "bailing_moe_linear",
             ModelType::Afmoe => "afmoe",
@@ -982,7 +1002,8 @@ impl ModelType {
             | ModelType::PhiMoe
             | ModelType::Phixtral
             | ModelType::Step3p5
-            | ModelType::MiMo => "moe",
+            | ModelType::MiMo
+            | ModelType::MiMoV2Flash => "moe",
             _ => {
                 let family = self.family();
                 if matches!(
@@ -1132,6 +1153,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::HunyuanVLM => &["hunyuan_vl"],
         ModelType::HunyuanMoe => &["hunyuan"],
         ModelType::MiMo => &["mimo"],
+        ModelType::MiMoV2Flash => &["mimo_v2_flash"],
         ModelType::BailingMoe => &["bailing_moe"],
         ModelType::BailingMoeLinear => &["bailing_moe_linear"],
         ModelType::Afmoe => &["afmoe"],
@@ -1346,6 +1368,15 @@ fn supports_turbo_kv(model_type: ModelType) -> bool {
             | ModelType::StableLM
             | ModelType::SmolLM3
             | ModelType::Ministral3
+            // Model-owned cache families whose layer tables honor the
+            // requested KV mode since #2776.
+            | ModelType::ExaOne4
+            | ModelType::GptOss
+            | ModelType::Step3p5
+            | ModelType::Step3p7
+            | ModelType::Mellum
+            | ModelType::Laguna
+            | ModelType::NemotronNAS
     )
 }
 
@@ -1633,6 +1664,20 @@ mod tests {
     }
 
     #[test]
+    fn ming_image_is_an_image_generation_family() {
+        let ming = build_architecture_registry("test")
+            .families
+            .into_iter()
+            .find(|family| family.id == "ming_image")
+            .unwrap();
+
+        assert_eq!(ming.category, "image generation");
+        assert_eq!(ming.model_types, ["ming_image"]);
+        assert_eq!(ming.runtimes, IMAGE_GENERATE);
+        assert_eq!(ming.output, OutputKind::Image);
+    }
+
+    #[test]
     fn image_generation_runtime_and_output_kind_are_stable_json_values() {
         // `mlxcel arch --json` serializes these enums verbatim; the spellings
         // are what downstream site builds key on, so pin them. A family that
@@ -1746,6 +1791,32 @@ mod tests {
                 family(model_type).kv_modes,
                 KV_FP16,
                 "{model_type:?} should not advertise quantized KV cache modes"
+            );
+        }
+    }
+
+    #[test]
+    fn model_owned_kv_families_advertise_quantized_modes() {
+        for model_type in [
+            ModelType::ExaOne4,
+            ModelType::GptOss,
+            ModelType::Step3p5,
+            ModelType::Step3p7,
+            ModelType::Mellum,
+            ModelType::Laguna,
+            ModelType::NemotronNAS,
+        ] {
+            assert_eq!(
+                family(model_type).kv_modes,
+                KV_TURBO,
+                "{model_type:?} honors --kv-cache-mode in its model-owned caches"
+            );
+        }
+        for model_type in [ModelType::LongcatFlash, ModelType::LongcatFlashNgram] {
+            assert_eq!(
+                family(model_type).kv_modes,
+                KV_FP16,
+                "{model_type:?} must stay FP16 only"
             );
         }
     }

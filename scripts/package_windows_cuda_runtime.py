@@ -65,8 +65,9 @@ from pathlib import Path
 # cuBLASLt and cuDNN), cuBLAS and cuBLASLt (by cuDNN), nvJitLink (by cuSPARSE).
 # Derived statically from the import tables and embedded DLL names of CUDA
 # 13.4.3 / cuDNN 9.27 for windows-x86_64 and the delay-load hook's preload
-# list; to be confirmed against the loaded-module list of a run on an NVIDIA
-# host (lablup/mlxcel#2640).
+# list, then checked against the loaded-module list of generate and server runs
+# on an arm64 RTX Spark N1X (lablup/mlxcel#2653): nothing was missing, and cuFFT,
+# cuSOLVER and cuSPARSE did not load in those runs.
 CUDA_DLLS = (
     "cublas64_*.dll",
     "cublasLt64_*.dll",

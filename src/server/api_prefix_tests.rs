@@ -107,6 +107,42 @@ async fn a_prefix_moves_every_route_under_it() {
     }
 }
 
+/// Path parameter routes changed syntax in axum 0.8 (`/:id` became `/{id}`).
+/// A wrong verb on a matched path is 405, while a path no route matches is
+/// 404, so the pair proves the parameter segment is matched under the prefix.
+#[tokio::test]
+async fn path_parameter_routes_match_under_a_prefix() {
+    for prefix in ["", "/llama"] {
+        for path in [
+            "/v1/responses/resp_x",
+            "/v1/responses/resp_x/cancel",
+            "/responses/resp_x",
+            "/responses/resp_x/cancel",
+        ] {
+            let full = format!("{prefix}{path}");
+            assert_eq!(
+                status(app(prefix, None), Method::PUT, &full).await,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "PUT {full} must reach the parameter route"
+            );
+        }
+        let unmatched = format!("{prefix}/v1/responses/resp_x/cancel/extra");
+        assert_eq!(
+            status(app(prefix, None), Method::GET, &unmatched).await,
+            StatusCode::NOT_FOUND,
+            "GET {unmatched} matches no route"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_bare_prefix_serves_the_root_route() {
+    assert_eq!(
+        status(app("/llama", None), Method::GET, "/llama").await,
+        StatusCode::OK
+    );
+}
+
 #[tokio::test]
 async fn a_prefix_removes_the_unprefixed_paths() {
     for (method, path) in [
