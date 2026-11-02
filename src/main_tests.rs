@@ -2108,3 +2108,27 @@ fn supported_models_output_lists_iquest_coder_under_the_llama_family() {
          answers \"is this checkpoint supported?\": {llama_section}"
     );
 }
+
+#[test]
+fn cli_tracing_filter_defaults_to_warn_and_honors_rust_log() {
+    use tracing_subscriber::filter::LevelFilter;
+
+    assert_eq!(
+        super::cli_tracing_filter(None).max_level_hint(),
+        Some(LevelFilter::WARN),
+        "an unset RUST_LOG must still surface WARN and ERROR on stderr"
+    );
+
+    let debug = OsString::from("debug");
+    assert_eq!(
+        super::cli_tracing_filter(Some(debug.as_os_str())).max_level_hint(),
+        Some(LevelFilter::DEBUG),
+        "a set RUST_LOG must keep its directive"
+    );
+
+    let error = OsString::from("error");
+    assert_eq!(
+        super::cli_tracing_filter(Some(error.as_os_str())).max_level_hint(),
+        Some(LevelFilter::ERROR)
+    );
+}

@@ -14,6 +14,7 @@
 
 use clap::{Args, Parser, Subcommand};
 use mlxcel::tokenizer::MlxcelTokenizer;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 mod commands;
@@ -3282,8 +3283,7 @@ impl Default for DiffusionServeOptions {
     }
 }
 
-/// Install a `tracing` subscriber for the offline CLI commands when `RUST_LOG`
-/// is set.
+/// Install a `tracing` subscriber for the offline CLI commands.
 ///
 /// The CLI shipped without any global subscriber, so every `tracing::*` call
 /// reached by `mlxcel generate`, `inspect`, `tune` and friends was silently
@@ -3293,24 +3293,46 @@ impl Default for DiffusionServeOptions {
 /// auto-detection line, which is what a benchmark needs to state which
 /// round loop it ran.
 ///
+/// By default the subscriber filters at `warn`, so the warnings and errors an
+/// offline command raises (environment fallbacks, deprecated flags) reach
+/// stderr without any setup. `RUST_LOG` still overrides the filter and keeps
+/// its usual `tracing` directive syntax, which is how `info!` lines such as
+/// `autotune: applied ...` stay opt-in.
+///
 /// Two deliberate constraints:
 ///
-/// * **Opt-in.** Nothing is installed unless `RUST_LOG` is set, so default
-///   command output is unchanged byte for byte.
-/// * **stderr.** Diagnostics must not contaminate the generated text on stdout,
-///   which callers pipe.
+/// * **stdout is untouched.** Every line the subscriber writes goes to stderr,
+///   so piped output stays byte-for-byte unchanged whether or not `RUST_LOG`
+///   is set.
+/// * **stderr carries a bounded default.** Only `WARN` and above are emitted
+///   when `RUST_LOG` is unset.
 ///
 /// `Serve` is skipped because `server::startup` installs its own subscriber and
 /// would panic on the double `init()`. `try_init` is used anyway so a future
 /// second initializer degrades to a no-op rather than aborting the process.
 fn init_cli_tracing(command: &Commands) {
-    if matches!(command, Commands::Serve(_)) || std::env::var_os("RUST_LOG").is_none() {
+    if matches!(command, Commands::Serve(_)) {
         return;
     }
+    let rust_log = std::env::var_os("RUST_LOG");
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(cli_tracing_filter(rust_log.as_deref()))
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+/// The filter an offline command's subscriber runs with.
+///
+/// Unset `RUST_LOG` means `warn`, so lost diagnostics are recovered without
+/// changing stdout. A set value is used verbatim, matching
+/// `EnvFilter::from_default_env()` at the call site. Kept pure and separate
+/// from installation so the selection is testable without touching the
+/// process environment or the global subscriber.
+fn cli_tracing_filter(rust_log: Option<&OsStr>) -> tracing_subscriber::EnvFilter {
+    match rust_log {
+        Some(value) => tracing_subscriber::EnvFilter::new(value.to_string_lossy()),
+        None => tracing_subscriber::EnvFilter::new("warn"),
+    }
 }
 
 /// The checkpoint a command was given, for the GB10 graph budget default
