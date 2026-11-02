@@ -763,6 +763,7 @@ impl ModelType {
             ModelType::HunyuanMoe => "hunyuan_moe",
             ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
             ModelType::MiMo => "mimo",
+            ModelType::MiMoV2Flash => "mimo_v2_flash",
             ModelType::BailingMoe => "bailing_moe",
             ModelType::BailingMoeLinear => "bailing_moe_linear",
             ModelType::Afmoe => "afmoe",
@@ -1001,7 +1002,8 @@ impl ModelType {
             | ModelType::PhiMoe
             | ModelType::Phixtral
             | ModelType::Step3p5
-            | ModelType::MiMo => "moe",
+            | ModelType::MiMo
+            | ModelType::MiMoV2Flash => "moe",
             _ => {
                 let family = self.family();
                 if matches!(
@@ -1151,6 +1153,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::HunyuanVLM => &["hunyuan_vl"],
         ModelType::HunyuanMoe => &["hunyuan"],
         ModelType::MiMo => &["mimo"],
+        ModelType::MiMoV2Flash => &["mimo_v2_flash"],
         ModelType::BailingMoe => &["bailing_moe"],
         ModelType::BailingMoeLinear => &["bailing_moe_linear"],
         ModelType::Afmoe => &["afmoe"],
