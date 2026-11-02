@@ -14,6 +14,16 @@ type BrowserPaintPredicate =
   | { kind: 'table-row-count'; testId: string; rowCount: number; textIncludes?: string }
   | { kind: 'transcript-reset'; composerSelector: string };
 type BrowserPaintResult<T> = { elapsedMs: number; state: T; instrumentation: Record<string, unknown> };
+// Headed WebKit paints the route change through a compositor path the other engines do not use.
+// Moving Playwright 1.63.0's WebKit 26.6 (v2359) to 1.64.1's WebKit 27.2 (v2370) left the
+// event-to-semantic-DOM half of this measurement at 30-34 ms but moved the two-rAF paint tail
+// from 36-57 ms across seven main runs to 74-80 ms in the failing attempts. Commit 95ea652a is
+// the control: the identical tree passed at 46 ms in one run and failed at 105-110 ms in the PR
+// run, so the excess is paint scheduling, not application work. Chromium and Firefox keep the
+// 100 ms product budget; the headed WebKit arm allows 150 ms so that tail cannot hide a real
+// navigation regression. Numbers: https://github.com/lablup/mlxcel/issues/2821
+const NAVIGATION_FEEDBACK_BUDGET_MS = 100;
+const WEBKIT_HEADED_NAVIGATION_FEEDBACK_BUDGET_MS = 150;
 const CONSOLE_NUMERIC_EVIDENCE_KEYS = new Set([
   'usable_wall_ms',
   'feedback_event_to_activity_visible_paint_ms',
@@ -313,9 +323,10 @@ test('navigation feedback and status updates stay responsive without layout shif
     return { activity_visible: true };
   });
   const feedbackMs = activityTiming.elapsedMs;
+  const feedbackBudgetMs = testInfo.project.name === 'webkit-headed-performance' ? WEBKIT_HEADED_NAVIGATION_FEEDBACK_BUDGET_MS : NAVIGATION_FEEDBACK_BUDGET_MS;
   const cls = await page.evaluate(() => (window as Window & { __mlxcelCls?: number }).__mlxcelCls ?? 0);
-  await writeEvidence(testInfo, 'feedback-status-layout-evidence.json', page, { dataset: 'slow catalog status transition plus browser event-to-semantic-DOM-to-paint Activity navigation; route fixtures only', feedback_event_to_activity_visible_paint_ms: feedbackMs, feedback_end_state: activityTiming.state, feedback_instrumentation: activityTiming.instrumentation, feedback_budget_ms: 100, cumulative_layout_shift: layoutShift ? cls : null, layout_shift_status: layoutShift ? 'measured' : 'not-run-unsupported', validated_schemas: api.validated });
-  expect(feedbackMs).toBeLessThanOrEqual(100);
+  await writeEvidence(testInfo, 'feedback-status-layout-evidence.json', page, { dataset: 'slow catalog status transition plus browser event-to-semantic-DOM-to-paint Activity navigation; route fixtures only', feedback_event_to_activity_visible_paint_ms: feedbackMs, feedback_end_state: activityTiming.state, feedback_instrumentation: activityTiming.instrumentation, feedback_budget_ms: feedbackBudgetMs, cumulative_layout_shift: layoutShift ? cls : null, layout_shift_status: layoutShift ? 'measured' : 'not-run-unsupported', validated_schemas: api.validated });
+  expect(feedbackMs).toBeLessThanOrEqual(feedbackBudgetMs);
   if (layoutShift) expect(cls).toBeLessThanOrEqual(0.001);
 });
 
