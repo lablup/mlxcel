@@ -24,10 +24,12 @@ use std::path::Path;
 pub mod pp_doclayout_v3;
 pub mod rfdetr;
 pub mod rt_detr_v2;
+pub mod yolo11;
 
 pub use pp_doclayout_v3::{PpDocLayoutV3Config, PpDocLayoutV3Model, PpDocLayoutV3Predictor};
 pub use rfdetr::{RfDetrConfig, RfDetrModel, RfDetrPredictor};
 pub use rt_detr_v2::{RtDetrV2Config, RtDetrV2Model, RtDetrV2Predictor};
+pub use yolo11::{Yolo11Config, Yolo11Predictor};
 
 const MAX_DETECTOR_METADATA_BYTES: usize = 1024 * 1024;
 
@@ -99,6 +101,18 @@ pub trait Detector {
         self.predict_path(path)
     }
 
+    /// Detect objects with per-call options. Detectors that resize to a fixed
+    /// size or have no NMS ignore the fields they do not use; the CLI warns
+    /// before reaching this point when the checkpoint cannot honor them.
+    fn predict_path_with_options(
+        &self,
+        path: &Path,
+        options: DetectorOptions,
+    ) -> Result<DetectionResult, String> {
+        let _ = options;
+        self.predict_path(path)
+    }
+
     /// Stable family name used in diagnostics.
     fn name(&self) -> &'static str;
 
@@ -106,6 +120,16 @@ pub trait Detector {
     fn supports_masks(&self) -> bool {
         false
     }
+}
+
+/// Options `mlxcel detect` can pass to a detector.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DetectorOptions {
+    /// Longest-side resize target before inference; `None` keeps the native
+    /// resolution.
+    pub size: Option<usize>,
+    /// NMS IoU threshold; `None` keeps the detector default.
+    pub iou: Option<f32>,
 }
 
 /// Lightweight detector metadata used for CLI validation before runtime setup.
@@ -150,18 +174,32 @@ pub fn detector_info(dir: &Path) -> Result<DetectorInfo, String> {
                 supports_masks: config.supports_masks(),
             })
         }
+        "yolo11" => {
+            Yolo11Config::from_json_str(&text)?;
+            Ok(DetectorInfo {
+                model_type: model_type.into(),
+                default_threshold: yolo11::DEFAULT_THRESHOLD,
+                supports_masks: false,
+            })
+        }
         other => Err(format!("unsupported detector model_type '{other}'")),
     }
 }
 
 /// Load the detector declared by `config.json`'s exact `model_type`.
-pub fn load_detector(dir: &Path, threshold: f32) -> Result<Box<dyn Detector>, String> {
-    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+///
+/// `threshold` is unset by default, in which case the family's own default is
+/// used (RT-DETRv2 0.3, PP-DocLayoutV3 0.3, RF-DETR 0.5, YOLO11 0.05).
+pub fn load_detector(dir: &Path, threshold: Option<f32>) -> Result<Box<dyn Detector>, String> {
+    if let Some(explicit) = threshold
+        && (!explicit.is_finite() || !(0.0..=1.0).contains(&explicit))
+    {
         return Err(format!(
-            "detector confidence threshold must be finite and in [0, 1], got {threshold}"
+            "detector confidence threshold must be finite and in [0, 1], got {explicit}"
         ));
     }
     let info = detector_info(dir)?;
+    let threshold = threshold.unwrap_or(info.default_threshold);
     match info.model_type.as_str() {
         "rt_detr_v2" => RtDetrV2Predictor::from_pretrained(dir, threshold)
             .map(|predictor| Box::new(predictor) as Box<dyn Detector>)
@@ -172,6 +210,9 @@ pub fn load_detector(dir: &Path, threshold: f32) -> Result<Box<dyn Detector>, St
         "rf-detr" | "rfdetr" => RfDetrPredictor::from_pretrained(dir, threshold)
             .map(|predictor| Box::new(predictor) as Box<dyn Detector>)
             .map_err(|error| format!("failed to load RF-DETR detector: {error}")),
+        "yolo11" => Yolo11Predictor::from_pretrained(dir, threshold)
+            .map(|predictor| Box::new(predictor) as Box<dyn Detector>)
+            .map_err(|error| format!("failed to load YOLO11 detector: {error}")),
         _ => unreachable!("detector_info accepted an unsupported family"),
     }
 }
@@ -183,7 +224,7 @@ mod tests {
     #[test]
     fn shared_loader_rejects_invalid_threshold_before_dispatch() {
         for threshold in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
-            let error = load_detector(Path::new("missing-detector"), threshold)
+            let error = load_detector(Path::new("missing-detector"), Some(threshold))
                 .err()
                 .expect("invalid threshold must fail before model dispatch");
             assert!(error.contains("threshold"), "{threshold}: {error}");
