@@ -703,6 +703,18 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "PATH")]
     pub(crate) layout_detections: Option<PathBuf>,
 
+    /// Write the IndicOCR page result as JSON.
+    ///
+    /// The document is `{image, width, height, blocks: [{order, label, type,
+    /// bbox_xyxy, conf, text}]}`, where `order` is zero-based reading order and
+    /// `bbox_xyxy` is in page pixels. Markdown still goes to stdout.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) output_json: Option<PathBuf>,
+
+    /// Table transcription format for IndicOCR (`html` or `markdown`).
+    #[arg(long, value_name = "FORMAT", default_value = "html")]
+    pub(crate) table_format: String,
+
     /// Audio file path for audio-language models (e.g. Gemma4 with audio).
     /// May be combined with `--video` on `gemma4_unified` checkpoints, which
     /// merge video frames and audio into one prompt; other families reject

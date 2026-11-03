@@ -68,12 +68,13 @@ impl MaskFeaturePath {
     pub fn from_weights(weights: &WeightMap, config: &PpDocLayoutV3Config) -> Result<Self, String> {
         let eps = config.batch_norm_eps;
         let base_stride = *config
-            .feat_strides
+            .resolved_feat_strides()
             .iter()
             .min()
             .ok_or_else(|| "PP-DocLayoutV3 feat_strides cannot be empty".to_string())?;
-        let mut scale_heads = Vec::with_capacity(config.feat_strides.len());
-        for (index, &stride) in config.feat_strides.iter().enumerate() {
+        let feat_strides = config.resolved_feat_strides();
+        let mut scale_heads = Vec::with_capacity(feat_strides.len());
+        for (index, &stride) in feat_strides.iter().enumerate() {
             let ratio = stride / base_stride;
             let log = usize::BITS - ratio.leading_zeros() - 1;
             let count = 1usize.max(log as usize);

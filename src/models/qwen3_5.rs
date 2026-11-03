@@ -196,6 +196,12 @@ pub struct Qwen35Config {
     /// dropping the key and generating silently wrong output.
     #[serde(default)]
     pub output_gate_type: Option<String>,
+
+    /// End-of-sequence token id(s) declared by the checkpoint. IndicOCR's
+    /// Qwen3.5 fine-tune uses 262146 rather than the stock 248046/248044, so
+    /// generation must read this instead of assuming the stock pair.
+    #[serde(default)]
+    pub eos_token_id: Option<serde_json::Value>,
 }
 
 /// Config values a Qwen3.5-family checkpoint can declare that mlxcel has no
@@ -3992,7 +3998,30 @@ impl LanguageModel for Qwen35Model {
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
-        vec![248046, 248044] // Qwen 3.5 EOS tokens
+        eos_token_ids_from_config(&self.config)
+    }
+}
+
+/// EOS ids declared by a Qwen3.5 config, falling back to the stock pair.
+pub(crate) fn eos_token_ids_from_config(config: &Qwen35Config) -> Vec<i32> {
+    match &config.eos_token_id {
+        Some(serde_json::Value::Number(value)) => value
+            .as_i64()
+            .and_then(|id| i32::try_from(id).ok())
+            .map_or_else(|| vec![248046, 248044], |id| vec![id]),
+        Some(serde_json::Value::Array(values)) => {
+            let declared: Vec<i32> = values
+                .iter()
+                .filter_map(serde_json::Value::as_i64)
+                .filter_map(|id| i32::try_from(id).ok())
+                .collect();
+            if declared.is_empty() {
+                vec![248046, 248044]
+            } else {
+                declared
+            }
+        }
+        _ => vec![248046, 248044], // stock Qwen 3.5 EOS tokens
     }
 }
 

@@ -82,7 +82,7 @@ pub(super) fn validate(config: &PpDocLayoutV3Config) -> Result<(), String> {
 
 fn pyramid_tokens(config: &PpDocLayoutV3Config) -> Result<usize, String> {
     config
-        .feat_strides
+        .resolved_feat_strides()
         .iter()
         .try_fold(0usize, |total, &stride| {
             let side = config.image_size / stride;
@@ -114,7 +114,8 @@ fn estimated_workset(
         "feature pyramid workset",
         &[pyramid_tokens, config.d_model, 4],
     )?);
-    let encoded_side = config.image_size / config.feat_strides[config.encode_proj_layers[0]];
+    let feat_strides = config.resolved_feat_strides();
+    let encoded_side = config.image_size / feat_strides[config.encode_proj_layers[0]];
     let encoded_tokens = checked_product("encoded tokens", &[encoded_side, encoded_side])?;
     parts.push(checked_product(
         "encoder attention workset",

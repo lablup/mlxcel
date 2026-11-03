@@ -344,8 +344,9 @@ fn model_schema(v: &mut Validator<'_>, c: &PpDocLayoutV3Config) -> Result<(), St
 
 fn mask_schema(v: &mut Validator<'_>, c: &PpDocLayoutV3Config) -> Result<(), String> {
     let feat = c.mask_feature_channels[0];
-    let base = *c.feat_strides.iter().min().expect("validated strides");
-    for (index, &stride) in c.feat_strides.iter().enumerate() {
+    let feat_strides = c.resolved_feat_strides();
+    let base = *feat_strides.iter().min().expect("validated strides");
+    for (index, &stride) in feat_strides.iter().enumerate() {
         let ratio = stride / base;
         let count = 1usize.max((usize::BITS - ratio.leading_zeros() - 1) as usize);
         for layer in 0..count {

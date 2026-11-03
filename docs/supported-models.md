@@ -470,6 +470,45 @@ label. The label it keeps is the highest-confidence one that maps to an OCR
 category, so a box detected as both `picture` and `text` is still read as text
 instead of being skipped on the un-OCRable label.
 
+### IndicOCR page pipeline
+
+IndicOCR (`indic_ocr`, Bodhan AI) parses a page in English and 22 Indian
+languages in two stages: IndicDocLayout, a PP-DocLayoutV3 fine-tune that finds
+regions and reading order, then IndicBlockOCR, a Qwen3.5-0.8B fine-tune that
+transcribes each region as text, LaTeX, or an HTML table. Both stages load from
+one repository and the page runs through `generate`:
+
+```bash
+mlxcel generate -m HashNuke/indic-ocr-mlx --image page.png --output-json page.json
+```
+
+Markdown goes to stdout in reading order; `--output-json PATH` writes
+`{image, width, height, blocks: [{order, label, type, bbox_xyxy, conf, text}]}`
+with zero-based `order` and pixel boxes. `-p/--prompt` is unused because every
+region's instruction comes from its class; `--table-format markdown` switches
+tables from HTML to GitHub-flavored Markdown, and `-n/--max-tokens` overrides
+the 2048-token per-block default. Greedy decoding is the only reproducible
+setting and is always used.
+
+The layout stage does not use the Hugging Face post-processing that
+`mlxcel detect` uses for PP-DocLayoutV3. It resizes the page to 1024 square,
+takes one argmax label per query, keeps `score > 0.5`, and decodes the order
+matrix over the retained sub-block only, which is what the fine-tune was
+trained against. Boxes are then clamped to the page, nested duplicates and
+all-but-large headers/footers are dropped, and the reading order is renumbered
+0..N-1. Equations nested in a paragraph (70% containment) are not transcribed
+again and keep `text: ""`, as do figures, pictures, headers, footers, and
+charts.
+
+Crops are rounded, clamped, and scaled with Lanczos so their area lands in
+[256², 1536²] pixels. Each crop is transcribed with its class instruction
+through the OCR stage's own chat template. The separate stage directories
+(`weights/layout`, `weights/ocr`) are used directly; a root `weight_mapping`
+index is not needed. `--layout-detections FILE` skips the detector and replays
+the same detection JSON `mlxcel detect --format json` prints, so a page can be
+inspected or its layout replaced without rerunning stage 1. Point `-m` at
+`weights/ocr` to transcribe a single crop, or at the root for the whole page.
+
 ### Phi-3 / Phi-4 LongRoPE position scaling
 
 `microsoft/Phi-3.5-mini-instruct`, `microsoft/Phi-4-mini-instruct` and `microsoft/Phi-4-multimodal-instruct` declare `rope_scaling.type` as `longrope` (older conversions spell it `su`) and ship two per-dimension factor lists rather than one. The trained model rotates with `short_factor` while the sequence still fits in `original_max_position_embeddings` (4096 on every shipped checkpoint) and with `long_factor` above it. The two lists are far apart: on Phi-3.5-mini the low-frequency `long_factor` entries reach 64.8 where `short_factor` stays under 2.9, so applying one list at every position mis-rotates every prompt on the other side of the threshold. mlxcel builds both tables at load time and selects per forward pass. The attention-magnitude scale follows the same table: it is `short_mscale` or `long_mscale` when the block gives them, and otherwise `sqrt(1 + ln(M / L) / ln(L))` for both. `original_max_position_embeddings` is read from the `rope_scaling` block first and then from the top level, which is where the shipped Phi configs actually put it.

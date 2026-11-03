@@ -23,8 +23,8 @@
 
 use super::qwen3_5::{
     MRopePositionSource, Qwen35Config, Qwen35Model, Qwen35UnsupportedConfig,
-    assert_uniform_batched_accepts, mrope_position_source, sanitize_weights,
-    validate_qwen35_wrapper_config,
+    assert_uniform_batched_accepts, eos_token_ids_from_config, mrope_position_source,
+    sanitize_weights, validate_qwen35_wrapper_config,
 };
 use super::qwen3_next::Qwen3NextCache;
 use mlxcel_core::cache::SequenceId;
@@ -72,6 +72,7 @@ fn make_tiny_config() -> Qwen35Config {
         quantization: None,
         mlp_only_layers: vec![],
         output_gate_type: None,
+        eos_token_id: None,
     }
 }
 
@@ -1137,4 +1138,16 @@ fn mrope_position_source_recomputes_when_nothing_is_stored() {
         mrope_position_source(None, 1, 8, 0),
         MRopePositionSource::Recompute
     );
+}
+
+#[test]
+fn eos_ids_come_from_the_config_when_declared() {
+    // IndicOCR's Qwen3.5 fine-tune declares 262146, not the stock pair.
+    let config = config_with(serde_json::json!({ "eos_token_id": 262146 }));
+    assert_eq!(eos_token_ids_from_config(&config), vec![262146]);
+    let config = config_with(serde_json::json!({ "eos_token_id": [248046, 248044] }));
+    assert_eq!(eos_token_ids_from_config(&config), vec![248046, 248044]);
+    // An absent or unusable value keeps the stock pair.
+    let config = config_with(serde_json::json!({ "eos_token_id": null }));
+    assert_eq!(eos_token_ids_from_config(&config), vec![248046, 248044]);
 }

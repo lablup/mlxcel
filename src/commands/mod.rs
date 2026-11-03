@@ -32,6 +32,7 @@ mod generate_diffusion;
 mod generate_falcon_ocr;
 mod generate_florence2;
 pub(crate) mod generate_image;
+mod generate_indic_ocr;
 mod generate_llada2;
 mod generate_nemotron_parse;
 mod generate_vlm;

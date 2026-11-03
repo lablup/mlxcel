@@ -681,6 +681,8 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             image: Vec::new(),
             image_soft_tokens: None,
             layout_detections: None,
+            output_json: None,
+            table_format: "html".to_string(),
             audio: None,
             video: Vec::new(),
             fps: 2.0,
