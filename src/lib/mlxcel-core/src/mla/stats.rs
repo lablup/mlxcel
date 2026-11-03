@@ -32,14 +32,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MlaDecodePath {
-    /// Cache holds decompressed per-head K/V; dense SDPA. The pre-#907 path and
-    /// the default.
+    /// Per-head K/V materialized from the latent; dense SDPA. The pre-#907
+    /// path and the default. The cache may still hold the latent, as in the
+    /// `deepseek_v3`-family MLA, where materializing is a per-step choice.
     Decompressed,
-    /// Cache holds `(ckv, kpe)`; prefill up-projects the cached latent and runs
-    /// dense SDPA. Absorption is a decode transform, so multi-token steps land
-    /// here even with the flag on.
+    /// A multi-token step that attended directly against the latent under the
+    /// [`super::use_absorbed_mla`] cost model (speculative verify blocks and
+    /// chunked-prefill continuations behind a long cache).
     AbsorbedPrefill,
-    /// Stage 1: absorbed single-token decode built from composed MLX ops.
+    /// Absorbed single-token decode. Stage 1 is composed from MLX ops in
+    /// `deepseek_v2`; the other MLA families run their fused latent SDPA here.
     AbsorbedComposed,
     /// Stage 2: absorbed decode split across latent chunks, merged with issue
     /// #898's `paged_attention_merge_states`.

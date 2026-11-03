@@ -262,6 +262,27 @@ impl LongcatFlashMLA {
         // Cache stores (kv_latent, k_pe)
         let (kv_latent, k_pe) = cache.update_and_fetch(kv_latent, k_pe);
 
+        // Cost-model gate (issue #2408): one query is always absorbed, and a
+        // multi-token step behind a long enough cache can be cheaper absorbed
+        // than up-projecting the whole window. A cold prefill stays on the
+        // materializing side. Computed once so nothing below gates on `l`.
+        let absorbed = mlxcel_core::mla::use_absorbed_mla(
+            l as usize,
+            cache.seq_len() as usize,
+            self.kv_lora_rank as usize,
+            self.qk_nope_head_dim as usize,
+            self.v_head_dim as usize,
+        );
+        mlxcel_core::mla::stats::record(if absorbed {
+            if l == 1 {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
+            } else {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
+            }
+        } else {
+            mlxcel_core::mla::MlaDecodePath::Decompressed
+        });
+
         // Compute PE scores: (q_pe * scale) @ k_pe^T
         let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
         let scaled_q_pe = mlxcel_core::multiply(&q_pe, &scale_arr);
@@ -273,9 +294,10 @@ impl LongcatFlashMLA {
             pe_scores = mlxcel_core::add(&pe_scores, m);
         }
 
-        // MLA attention: different paths for decode vs prefill
-        let output = if l == 1 {
-            // Decode: project Q into latent space, use kv_latent as K=V
+        // MLA attention: absorbed or materializing, chosen by the cost model
+        // above rather than by the query count alone.
+        let output = if absorbed {
+            // Absorbed: project Q into latent space, use kv_latent as K=V
             let q_projected = self.embed_q.forward(&q_nope);
             let pe_mask_ptr = &*pe_scores as *const MlxArray;
             let output = unsafe {
@@ -292,7 +314,7 @@ impl LongcatFlashMLA {
             // Project output from latent space to v_head_dim
             self.unembed_out.forward(&output)
         } else {
-            // Prefill: project kv_latent to K and V
+            // Materialize: project kv_latent to K and V
             let k = self.embed_q.forward_no_transpose(&kv_latent);
             let v = self.unembed_out.forward(&kv_latent);
             let pe_mask_ptr = &*pe_scores as *const MlxArray;

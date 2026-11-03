@@ -516,13 +516,15 @@ impl MLAAttention {
 
     /// Attention over the compressed-latent cache (issue #907).
     ///
-    /// Decode runs absorbed, directly against the latent. Prefill up-projects
-    /// the whole live latent window through the still-loaded `kv_b_proj` and
-    /// runs the same dense SDPA the decompressed path runs, which is what keeps
-    /// prefill numerically identical to the baseline. The cost of that choice
-    /// is that a chunked prefill re-up-projects the rows it already
-    /// up-projected on the previous chunk; absorption is scoped as a decode win
-    /// and this is where the scope is paid for.
+    /// A single query always runs absorbed, directly against the latent.
+    /// Multi-token steps consult the cost model in
+    /// [`mla::use_absorbed_mla`]: behind a long enough cache they run the same
+    /// absorbed attention with a causal mask, and on a cold prefill they
+    /// up-project the whole live latent window through the still-loaded
+    /// `kv_b_proj` and run the same dense SDPA the decompressed path runs,
+    /// which is what keeps a fresh prefill numerically identical to the
+    /// baseline. The cost of the materializing side is that a chunked prefill
+    /// re-up-projects the rows it already up-projected on the previous chunk.
     #[allow(clippy::too_many_arguments)]
     fn forward_absorbed(
         &self,
@@ -548,17 +550,43 @@ impl MLAAttention {
         let mut view = MlaLatentCache::wrap(cache, geometry)
             .expect("supports() was checked immediately before this wrap");
 
-        let output = if l == 1 {
+        // Cost-model gate (issue #2408): one query is always absorbed, and a
+        // multi-token step behind a long enough cache can be cheaper absorbed
+        // than up-projecting the whole window. A cold prefill stays on the
+        // materializing side. Computed once so nothing below gates on `l`.
+        let live_before = view.seq_len();
+        let absorbed = mla::use_absorbed_mla(
+            l as usize,
+            live_before as usize + l as usize,
+            self.kv_lora_rank,
+            self.qk_nope_head_dim,
+            self.v_head_dim,
+        );
+
+        let output = if absorbed {
             // The latent cache's own attention entry (#2171, ADR 0008): it
             // appends this step's rows and runs Stage 2 split-KV when asked
-            // for, Stage 1 otherwise. Decode sees the whole cache, so no mask,
-            // matching the `causal_attention` call the decompressed path makes
-            // here.
-            view.attend(q_nope, &q_pe, ckv, k_pe, proj, self.scale, None)
+            // for, Stage 1 otherwise. A single query sees the whole cache with
+            // no mask, matching the `causal_attention` call the decompressed
+            // path makes here. A multi-token step needs the same causal mask
+            // the decompressed path gets, with the caller's padded mask
+            // winning when it supplied one.
+            let causal_storage;
+            let mask = if l == 1 {
+                None
+            } else if let Some(m) = mask {
+                Some(m)
+            } else {
+                causal_storage = mlxcel_core::utils::create_causal_mask(l, live_before);
+                Some(causal_storage.as_ref().unwrap())
+            };
+            view.attend(q_nope, &q_pe, ckv, k_pe, proj, self.scale, mask)
         } else {
             let (ckv_all, kpe_all) = view.update_and_fetch(ckv, k_pe);
             let kv_len = view.seq_len();
-            mla::stats::record(MlaDecodePath::AbsorbedPrefill);
+            // The cost model declined absorption for this step, so the
+            // per-head K/V are materialized and the dense SDPA below runs.
+            mla::stats::record(MlaDecodePath::Decompressed);
             // Up-project the live latent window back into per-head K and V.
             // `kv_b_proj` wants `[B, S, kv_lora_rank]`, the shape before the
             // latent head axis was added.

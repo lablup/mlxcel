@@ -582,6 +582,8 @@ writes its own trace, which is what lets process-global switches like
 
 For native batched decode, set `MLXCEL_TRACE_BATCH_ROWS=N`. The harness assigns fresh sequence ids, prefills N independent corpus rows with distinct context lengths, advances every traced position through a width-one `forward_batched_with_ids` call, and emits only row zero. This makes `N=1` and `N=4` directly comparable while exercising the serving decode shape. Combined with `MLXCEL_TRACE_IMAGE`, row zero runs the actual image embedding prefill (including its MRoPE delta) and the remaining rows use text-only prefixes, covering the mixed Qwen-VL serving shape.
 
+Set `MLXCEL_TRACE_MLA_STATS=1` to print the `mlxcel_core::mla::stats` dispatch counters to stderr after the trace (`# mla_paths path=count ...`). A trace whose arm claims the absorbed MLA path must show a nonzero `absorbed_composed` or `absorbed_prefill`; the same rule as the benchmark harness's `paths=` field. With a nonzero `PREFILL`, `CHUNK_TOKENS` is the traced forward width, so `CHUNK_TOKENS=4 PREFILL=1024` is the speculative-verify shape and `CHUNK_TOKENS=16 PREFILL=1024` is a wider verify block. Each chunk's stderr line reports the traced forward's wall time separately from the context pass, which turns the same run into a multi-token continuation measurement.
+
 For tensor-parallel decode, also set `MLXCEL_TRACE_TP_SIZE=N`. The harness then uses the production TP loader for both the B=1 and B=4 arms, rather than tracing a single-device model with only the batch width changed. The TP selector supports the standard text arm and cannot be combined with `MLXCEL_TRACE_LORA`.
 
 ```bash

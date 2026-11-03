@@ -600,6 +600,27 @@ impl KimiMLAAttention {
         // Update KV cache (stores kv_latent as "keys" and k_pe as "values")
         let (cached_latent, cached_k_pe) = cache.update_and_fetch(kv_latent, k_pe);
 
+        // Cost-model gate (issue #2408): one query is always absorbed, and a
+        // multi-token step behind a long enough cache can be cheaper absorbed
+        // than up-projecting the whole window. A cold prefill stays on the
+        // materializing side. Computed once so nothing below gates on `l`.
+        let absorbed = mlxcel_core::mla::use_absorbed_mla(
+            l as usize,
+            cache.seq_len() as usize,
+            self.kv_lora_rank as usize,
+            self.qk_nope_head_dim as usize,
+            self._v_head_dim as usize,
+        );
+        mlxcel_core::mla::stats::record(if absorbed {
+            if l == 1 {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
+            } else {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
+            }
+        } else {
+            mlxcel_core::mla::MlaDecodePath::Decompressed
+        });
+
         // PE scoring: (q_pe * scale) @ k_pe^T -> [B, H, L, S]
         let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
         let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_arr);
@@ -611,10 +632,11 @@ impl KimiMLAAttention {
             pe_scores = apply_mla_causal_mask(&pe_scores, m);
         }
 
-        // Attention computation (different paths for generation vs prefill)
-        let output = if l == 1 {
-            // Generation: work in latent space
-            let q_nope = self.embed_q.forward(&q_nope, true); // [B, H, 1, kv_lora_rank]
+        // MLA attention: absorbed or materializing, chosen by the cost model
+        // above rather than by the query count alone.
+        let output = if absorbed {
+            // Absorbed: work in latent space
+            let q_nope = self.embed_q.forward(&q_nope, true); // [B, H, L, kv_lora_rank]
             // k = v = cached_latent: [B, 1, S, kv_lora_rank]
 
             // Manual attention: scores = (q_nope * scale) @ k^T + pe_scores
@@ -626,9 +648,9 @@ impl KimiMLAAttention {
             let attn_out = mlxcel_core::matmul(&weights, &cached_latent);
 
             // Project from latent to output space
-            self.unembed_out.forward(&attn_out, true) // [B, H, 1, v_head_dim]
+            self.unembed_out.forward(&attn_out, true) // [B, H, L, v_head_dim]
         } else {
-            // Prefill: expand KV from latent to full dimension
+            // Materialize: expand KV from latent to full dimension
             let k = self.embed_q.forward(&cached_latent, false); // [B, H, L, qk_nope_head_dim]
             let v = self.unembed_out.forward(&cached_latent, true); // [B, H, L, v_head_dim]
 

@@ -177,3 +177,80 @@ fn glm4_moe_lite_batched_decode_harness_covers_ragged_single_and_empty() {
     );
     crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }
+
+/// Full-model logits with the absorbed/materializing choice pinned.
+///
+/// Mirrors `Glm4MoeLiteModel::forward_with_hidden`'s block glue (embed, mask,
+/// residual + MLP per layer, final norm, lm_head) but calls the attention's
+/// gate-pinnable entry, so one warm cache can be replayed through both
+/// branches. Production `forward` is unchanged: it passes `None`.
+fn logits_with_gate(
+    model: &Glm4MoeLiteModel,
+    input_ids: &mlxcel_core::MlxArray,
+    caches: &mut [mlxcel_core::layers::KVCache],
+    forced_absorbed: Option<bool>,
+) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let mut h = model.embed_tokens.forward(input_ids);
+    let seq_len = mlxcel_core::array_shape(&h)[1];
+    let mask = if seq_len > 1 {
+        let offset = caches.first().map(|c| c.seq_len()).unwrap_or(0);
+        Some(mlxcel_core::utils::create_causal_mask(seq_len, offset))
+    } else {
+        None
+    };
+    for (i, layer) in model.layers.iter().enumerate() {
+        let normed = layer.input_layernorm.forward(&h);
+        let attn = layer.self_attn.forward_with_gate(
+            &normed,
+            &mut caches[i],
+            mask.as_deref(),
+            forced_absorbed,
+        );
+        let after_attn = mlxcel_core::add(&h, &attn);
+        let normed = layer.post_attention_layernorm.forward(&after_attn);
+        let mlp = layer.mlp.forward(&normed);
+        h = mlxcel_core::add(&after_attn, &mlp);
+    }
+    let normed = model.norm.forward(&h);
+    model.lm_head.forward(&normed)
+}
+
+#[test]
+fn four_token_step_on_a_warm_cache_matches_across_both_attention_paths() {
+    let _runtime = crate::initialize_runtime();
+    let model = tiny_batched_model();
+
+    // Warm both arms identically: 64 tokens on a cold cache, where the cost
+    // model picks the materializing side at every layer.
+    let warm: Vec<u32> = (0..64).map(|i| (i % 16) as u32).collect();
+    let warm_ids = mlxcel_core::from_slice_u32(&warm, &[1, 64]);
+    let step = mlxcel_core::from_slice_u32(&[3, 7, 11, 5], &[1, 4]);
+    let mut absorbed_caches = model.make_caches();
+    let mut materialized_caches = model.make_caches();
+    for caches in [&mut absorbed_caches, &mut materialized_caches] {
+        let out = logits_with_gate(&model, &warm_ids, caches, None);
+        mlxcel_core::eval(&out);
+    }
+
+    // Tiny geometry: r 4, nope 2, v 4. Behind 64 warm tokens plus this step's
+    // four, the bound is well above four, so the helper selects absorbed.
+    assert!(
+        mlxcel_core::mla::use_absorbed_mla(4, 68, 4, 2, 4),
+        "the 4-token step on a 64-token cache must select the absorbed path"
+    );
+
+    let absorbed = logits_with_gate(&model, &step, &mut absorbed_caches, None);
+    let materialized = logits_with_gate(&model, &step, &mut materialized_caches, Some(false));
+    mlxcel_core::eval(&absorbed);
+    mlxcel_core::eval(&materialized);
+    let diff = mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::subtract(
+        &absorbed,
+        &materialized,
+    )));
+    mlxcel_core::eval(&diff);
+    let diff = mlxcel_core::item_f32(&diff);
+    assert!(
+        diff < 2e-2,
+        "absorbed and materialized logits must agree, max |diff| = {diff}"
+    );
+}
