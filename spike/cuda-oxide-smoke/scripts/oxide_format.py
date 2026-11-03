@@ -34,8 +34,22 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def run(command: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(command, check=True, capture_output=True, text=True)
+def run(command: list[str], timeout: float = 300.0) -> subprocess.CompletedProcess:
+    """Run an external tool and turn its failures into clean ValueErrors."""
+    try:
+        return subprocess.run(
+            command, check=True, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(
+            f"command timed out after {timeout:g}s: {' '.join(command)}"
+        ) from error
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or "").strip().splitlines()
+        suffix = f": {detail[-1]}" if detail else ""
+        raise ValueError(
+            f"command failed with exit {error.returncode}: {' '.join(command)}{suffix}"
+        ) from error
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +72,14 @@ def parse_artifact_section(data: bytes) -> list[dict]:
         name_len, target_len, payload_count, entry_count = struct.unpack_from("<HHHH", remaining, 16)
         if header_len != HEADER_BYTES:
             raise ValueError(f"unsupported .oxart header length {header_len}")
+        # A zero or undersized length used to leave the cursor where it was:
+        # the loop re-entered with the same bytes and grew memory until killed.
+        # Reject it before slicing so a malformed blob is a clean error.
+        if total_len < HEADER_BYTES:
+            raise ValueError(
+                f"embedded artifact length {total_len} is smaller than the "
+                f"{HEADER_BYTES}-byte header"
+            )
         blob = remaining[:total_len]
         if len(blob) != total_len:
             raise ValueError("truncated .oxart blob")
@@ -121,7 +143,12 @@ def parse_artifact_section(data: bytes) -> list[dict]:
                 "entries": entries,
             }
         )
+        previous = cursor
         cursor += total_len
+        if cursor <= previous:
+            # Defensive: the length check above makes this unreachable, but a
+            # non-advancing cursor must never turn into an unbounded loop.
+            raise ValueError("artifact cursor did not advance")
 
     if not bundles:
         raise ValueError(".oxart section contains no bundle")
@@ -202,11 +229,17 @@ def parse_cubin(cubobjdump: str, cubin: Path) -> dict:
     ]
     kparams = {}
     for ordinal, offset, size, log_align, space in KPARAM_RE.findall(elf):
+        exponent = int(log_align, 16)
+        if exponent > 64:
+            raise ValueError(
+                f"kparam ordinal {int(ordinal, 16)} declares pointee "
+                f"logAlignment 0x{log_align}, above the supported bound of 64"
+            )
         kparams[int(ordinal, 16)] = {
             "ordinal": int(ordinal, 16),
             "byte_offset": int(offset, 16),
             "size_bytes": int(size, 16),
-            "pointee_align_bytes": 1 << int(log_align, 16),
+            "pointee_align_bytes": 1 << exponent,
             "space": SPACE_NAMES.get(int(space, 16), f"0x{int(space, 16):x}"),
         }
     return {

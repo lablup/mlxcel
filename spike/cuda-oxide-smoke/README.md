@@ -25,7 +25,8 @@ The application Rust pin stays at 1.97.1. `rust-toolchain.toml` in this director
 | `scripts/build.sh` | Pinned build, `.oxart` extraction, cubin assembly, manifest generation and validation |
 | `scripts/smoke.sh` | GPU execution under `gpu-lock`, then manifest launch-constraint check |
 | `scripts/sanitize.sh` | Compute Sanitizer memcheck under `gpu-lock`, then the same launch check |
-| `scripts/check-lint.sh` | `cargo fmt --check` and clippy with `-D warnings` on the pinned toolchain |
+| `scripts/check-lint.sh` | `cargo fmt --check`, clippy with `-D warnings`, and the tooling guards |
+| `scripts/check-guards.py` | Proves malformed artifacts, escaping paths, and shortened runs fail cleanly instead of crashing or hanging |
 | `scripts/check-unsupported-target.sh` | Proves a bad target fails with an actionable message |
 | `scripts/check-clean-build.sh` | Proves ordinary mlxcel builds need no oxide compiler |
 | `scripts/oxide_artifact.py` | Parses `.oxart`, assembles the cubin, writes and validates the manifest |
@@ -70,7 +71,7 @@ scripts/smoke.sh sm_121        # run 14 cases on device 0 under gpu-lock
 scripts/sanitize.sh sm_121     # the same cases under Compute Sanitizer memcheck
 scripts/check-unsupported-target.sh
 scripts/check-clean-build.sh
-scripts/check-lint.sh
+scripts/check-lint.sh         # fmt, clippy, and the malformed-input guards
 ```
 
 `smoke.sh` and `sanitize.sh` capture the harness output and run `oxide_artifact.py check-launch`, which verifies every reported block size and grid against the committed manifest. A skipped, shortened, or silently re-configured run fails the script rather than passing on exit status alone.
@@ -92,7 +93,9 @@ The manifest records:
 
 `validate` re-parses the committed PTX and runs `cuobjdump -elf` and `-sass` on the cubin. It compares the argument layout against both the hand-written schema and the manifest, checks the digests, and rejects a stale or edited manifest. A deliberately tampered manifest fails validation.
 
-The launch half is checked against execution rather than against itself: `check-launch` reads the `PASS` lines from a real run and requires each case's block size and grid to equal the manifest's block dimension and `ceil_div(n, block)`, and requires the `RESULT` counts to match the lines it parsed. `smoke.sh` and `sanitize.sh` both run it.
+The launch half is checked against execution rather than against itself: `check-launch` reads the `PASS` lines from a real run and requires each case's block size and grid to equal the manifest's block dimension and `ceil_div(n, block)`, and requires the `RESULT` counts to match the lines it parsed. It also requires the manifest's `case_count` and `elements_total` to equal the parsed set and rejects duplicate `(case, n)` lines, so a shortened run whose own totals are internally consistent still fails. `smoke.sh` and `sanitize.sh` both run it.
+
+Artifact paths in the manifest are confined under the artifact root: an absolute path or a `..` escape is rejected before any read. `scripts/check-guards.py` exercises that, the zero-length container guard, the alignment bound, the argument-ordinal guard, and the launch checks with malformed inputs, and requires a message instead of a traceback or a hang.
 
 ## Target
 

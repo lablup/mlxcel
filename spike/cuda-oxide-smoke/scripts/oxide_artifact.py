@@ -39,6 +39,60 @@ def fail(message: str) -> None:
     print(f"FAIL {message}", file=sys.stderr)
 
 
+def artifact_path(base: Path, relative: str) -> Path:
+    """Resolve a manifest artifact path and keep it inside the artifact root.
+
+    A manifest is committed data; an absolute path or a `..` escape would let a
+    validation run read an arbitrary local file (or hang on a device node), so
+    both are rejected before any read.
+    """
+    candidate = Path(relative)
+    if candidate.is_absolute():
+        raise ValueError(
+            f"artifact path {relative!r} is absolute; commit a path relative to the artifact root"
+        )
+    root = base.resolve()
+    resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as error:
+        raise ValueError(
+            f"artifact path {relative!r} escapes the artifact root {root}"
+        ) from error
+    return resolved
+
+
+def build_arguments(schema: dict, ptx_info: dict, cubin_info: dict) -> list[dict]:
+    """Join the declared ABI with the emitted PTX and cubin argument layout."""
+    arguments = []
+    for declared in schema["arguments"]:
+        ordinal = declared["ordinal"]
+        if ordinal >= len(ptx_info["parameters"]):
+            raise ValueError(
+                f"schema declares argument ordinal {ordinal} ({declared['name']}), "
+                f"but the PTX entry has {len(ptx_info['parameters'])} parameters"
+            )
+        emitted_param = ptx_info["parameters"][ordinal]
+        kparam = next((item for item in cubin_info["kparams"] if item["ordinal"] == ordinal), None)
+        if kparam is None:
+            raise ValueError(f"cubin has no kparam for ordinal {ordinal}")
+        arguments.append(
+            {
+                **declared,
+                "emitted": {
+                    "ptx_type": emitted_param["ptx_type"],
+                    "ptx_pointer": emitted_param["pointer"],
+                    "ptx_pointee_align_bytes": emitted_param["pointee_align_bytes"],
+                    "cubin_size_bytes": kparam["size_bytes"],
+                    "cubin_byte_offset": kparam["byte_offset"],
+                    "cubin_space": kparam["space"],
+                    "cubin_pointee_align_bytes": kparam["pointee_align_bytes"],
+                },
+            }
+        )
+    return arguments
+
+
 def export(args: argparse.Namespace) -> int:
     binary = Path(args.binary)
     ptx_source = Path(args.ptx)
@@ -85,27 +139,7 @@ def export(args: argparse.Namespace) -> int:
     if entry_symbol not in cubin_info["entry_symbols"]:
         raise ValueError(f"cubin entry symbol {entry_symbol} not found in {cubin_info['entry_symbols']}")
 
-    arguments = []
-    for declared in schema["arguments"]:
-        ordinal = declared["ordinal"]
-        emitted_param = ptx_info["parameters"][ordinal]
-        kparam = next((item for item in cubin_info["kparams"] if item["ordinal"] == ordinal), None)
-        if kparam is None:
-            raise ValueError(f"cubin has no kparam for ordinal {ordinal}")
-        arguments.append(
-            {
-                **declared,
-                "emitted": {
-                    "ptx_type": emitted_param["ptx_type"],
-                    "ptx_pointer": emitted_param["pointer"],
-                    "ptx_pointee_align_bytes": emitted_param["pointee_align_bytes"],
-                    "cubin_size_bytes": kparam["size_bytes"],
-                    "cubin_byte_offset": kparam["byte_offset"],
-                    "cubin_space": kparam["space"],
-                    "cubin_pointee_align_bytes": kparam["pointee_align_bytes"],
-                },
-            }
-        )
+    arguments = build_arguments(schema, ptx_info, cubin_info)
 
     manifest = {
         "manifest": "mlxcel.cuda-oxide-smoke.manifest/v1",
@@ -163,8 +197,8 @@ def validate(args: argparse.Namespace) -> int:
     manifest = json.loads(Path(args.manifest).read_text())
     schema = json.loads(Path(args.schema).read_text())
     base = Path(args.manifest).parent.parent
-    ptx_path = base / manifest["artifacts"]["ptx"]["path"]
-    cubin_path = base / manifest["artifacts"]["cubin"]["path"]
+    ptx_path = artifact_path(base, manifest["artifacts"]["ptx"]["path"])
+    cubin_path = artifact_path(base, manifest["artifacts"]["cubin"]["path"])
 
     # Source schema and manifest agree on the declared ABI.
     if manifest["abi_version"] != schema["abi_version"]:
@@ -336,9 +370,25 @@ def check_launch(args: argparse.Namespace) -> int:
         fail(f"no RESULT line found in {args.log}")
     if block[1] != 1 or block[2] != 1:
         fail(f"manifest block_dim {block} is not a 1-D block")
+    if block[0] <= 0:
+        fail(f"manifest block dimension must be positive, got {block[0]}")
+        return 1
     if launch["shared_mem_bytes"] != 0:
         fail(f"manifest requests {launch['shared_mem_bytes']} bytes of shared memory; the harness uses 0")
+    expected_rule = f"ceil_div(n, {block[0]})"
+    if launch.get("grid_dim_rule") != expected_rule:
+        fail(
+            f"manifest grid_dim_rule {launch.get('grid_dim_rule')!r} "
+            f"does not match the block dimension ({expected_rule!r})"
+        )
+
+    total_elements = 0
+    seen = set()
     for case in cases:
+        key = (case["case"], case["n"])
+        if key in seen:
+            fail(f"duplicate case ({case['case']}, n={case['n']})")
+        seen.add(key)
         if case["block"] != block[0]:
             fail(f"case {case['case']}: launched block={case['block']}, manifest block_dim={block[0]}")
         expected_grid = (case["n"] + block[0] - 1) // block[0]
@@ -351,21 +401,39 @@ def check_launch(args: argparse.Namespace) -> int:
             fail(f"case {case['case']}: verified {case['elements']} elements for n={case['n']}")
         if case["n"] <= 0:
             fail(f"case {case['case']}: non-positive case length")
+        total_elements += case["n"]
+
+    # The declared totals make a shortened run fail even when its own RESULT
+    # line is internally consistent.
+    declared_cases = launch.get("case_count")
+    if declared_cases is None:
+        fail("manifest launch has no case_count")
+    elif declared_cases != len(cases):
+        fail(f"manifest case_count={declared_cases}, log has {len(cases)} PASS lines")
+    declared_elements = launch.get("elements_total")
+    if declared_elements is None:
+        fail("manifest launch has no elements_total")
+    elif declared_elements != total_elements:
+        fail(
+            f"manifest elements_total={declared_elements}, "
+            f"PASS lines sum to {total_elements}"
+        )
+
     if result is not None and result["total"] != len(cases):
         fail(f"RESULT reports {result['total']} cases, log has {len(cases)} PASS lines")
     if result is not None and result["passed"] != len(cases):
         fail(f"RESULT reports {result['passed']} passed cases, log has {len(cases)} PASS lines")
-    if result is not None and result["elements"] != sum(case["n"] for case in cases):
+    if result is not None and result["elements"] != total_elements:
         fail(
             f"RESULT reports {result['elements']} elements, "
-            f"PASS lines sum to {sum(case['n'] for case in cases)}"
+            f"PASS lines sum to {total_elements}"
         )
 
     if ERRORS:
         return 1
     print(
         f"launch valid: cases={len(cases)} block={block[0]} "
-        f"grid_rule=ceil_div(n,{block[0]}) elements={sum(case['n'] for case in cases)}"
+        f"grid_rule={expected_rule} elements={total_elements}"
     )
     return 0
 
@@ -398,7 +466,13 @@ def main() -> int:
     launcher.set_defaults(func=check_launch)
 
     args = parser.parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (ValueError, OSError) as error:
+        # Malformed input, an escaping path, a missing file, or a failed
+        # external tool is a normal non-zero result, not a traceback.
+        print(f"FAIL {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

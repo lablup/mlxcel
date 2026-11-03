@@ -156,10 +156,11 @@ jobs:
               - 'build.rs'
               - 'scripts/iree/**'
               - 'rust-toolchain.toml'
-              # Spike packages carry an empty [workspace] table and are not
-              # members of the mlxcel workspace. They gate themselves with
-              # their own pinned toolchain, so a spike-only change cannot move
-              # a cargo-fmt, cargo-deny or clippy verdict for mlxcel.
+              # The cuda-oxide smoke spike package carries an empty [workspace]
+              # table and is not a member of the mlxcel workspace. It gates
+              # itself with its own pinned toolchain and check-lint.sh, so a
+              # change confined to it cannot move a cargo-fmt, cargo-deny or
+              # clippy verdict for mlxcel.
               - '!spike/cuda-oxide-smoke/**'
             # The dependency graph alone: the manifests, the lockfile and the
             # policy file. `cargo-deny` reads nothing else, so a source-only PR
@@ -227,6 +228,9 @@ jobs:
               - 'build.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
+              # The cuda-oxide smoke package is not a workspace member, so its
+              # manifest cannot change what the ROCm build compiles or links.
+              - '!spike/cuda-oxide-smoke/**'
             # The Windows build glue and its tests: the build scripts and
             # build_support modules that lay out the Windows CUDA and ROCm
             # builds, the overlay sources that choose the runtime and include
@@ -284,8 +288,8 @@ jobs:
               - 'src/lib/mlxcelverse/**'
               - 'src/lib/mlxcel-core/cpp/**'
               - 'src/lib/mlxcel-core/build_support/**'
-              # Spike packages are outside the mlxcel workspace, so they cannot
-              # break the CPU-only link of mlxcel-core.
+              # The cuda-oxide smoke spike package is outside the mlxcel
+              # workspace, so it cannot break the CPU-only link of mlxcel-core.
               - '!spike/cuda-oxide-smoke/**'
             # The inputs the overlay host tests read: the overlay sources, the
             # scripts that inspect them, the pin-extraction script the record

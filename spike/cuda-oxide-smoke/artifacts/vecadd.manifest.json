@@ -179,6 +179,8 @@
       1
     ],
     "grid_dim_rule": "ceil_div(n, 256)",
+    "case_count": 14,
+    "elements_total": 69913,
     "shared_mem_bytes": 0,
     "buffer_count": 3,
     "buffer_dtype": "f32",

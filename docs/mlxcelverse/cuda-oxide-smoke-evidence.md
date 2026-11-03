@@ -132,7 +132,7 @@ The manifest records ABI version 1, the entry symbol, the source revision, the c
 
 The writable pointer's PTX annotation assumes one byte of alignment; that is weaker than the four bytes an `f32` allocation provides, so it is safe. The validator rejects a compiler assumption stricter than the declared allocation alignment.
 
-Launch constraints recorded in the manifest and checked against a real run: one-dimensional index space, block `(256, 1, 1)`, grid `ceil_div(n, 256)`, zero dynamic shared memory, three contiguous `f32` buffers of exactly `n` elements, and out-of-range threads returning at the output bounds check. `scripts/smoke.sh` and `scripts/sanitize.sh` capture the harness output and run `oxide_artifact.py check-launch`; it requires every `PASS` line's `block` to equal the manifest block dimension, its `grid` to equal `ceil_div(n, block)`, and the `RESULT` case and element counts to match the parsed lines. A skipped or shortened run fails there.
+Launch constraints recorded in the manifest and checked against a real run: one-dimensional index space, block `(256, 1, 1)`, grid `ceil_div(n, 256)`, zero dynamic shared memory, three contiguous `f32` buffers of exactly `n` elements, and out-of-range threads returning at the output bounds check. The manifest also declares `case_count=14` and `elements_total=69913`. `scripts/smoke.sh` and `scripts/sanitize.sh` capture the harness output and run `oxide_artifact.py check-launch`. It requires the recorded `grid_dim_rule` to match the block dimension, every `PASS` line's `block` to equal the manifest block dimension and its `grid` to equal `ceil_div(n, block)`, the parsed case count and element sum to equal the declared totals, and the `RESULT` counts to match the parsed lines. Duplicate `(case, n)` lines are rejected. A shortened run whose own totals are internally consistent therefore still fails.
 
 Manifest validation output:
 
@@ -140,7 +140,7 @@ Manifest validation output:
 manifest valid: entry=vecadd target=sm_121 ptx_version=8.8 args=6 ptx_sha256=737559830058e1d1 cubin_sha256=4ab363a33b5b66ab
 ```
 
-The validator is not circular. The human-written file is `abi/vecadd.schema.json`; the manifest is generated; `validate` re-derives the layout from the committed PTX and cubin. It also requires the `.oxart` payload digest to equal the committed PTX digest and the recorded source revision to equal the schema's, so a swapped payload or a drifted revision fails. A self-test that changed `c_ptr`'s width to 32 bits in a copy of the manifest failed with:
+The validator is not circular. The human-written file is `abi/vecadd.schema.json`; the manifest is generated; `validate` re-derives the layout from the committed PTX and cubin. It requires the `.oxart` payload digest to equal the committed PTX digest and the recorded source revision to equal the schema's, so a swapped payload or a drifted revision fails. Artifact paths are confined under the artifact root; an absolute path or a `..` escape is rejected before any read. A self-test that changed `c_ptr`'s width to 32 bits in a copy of the manifest failed with:
 
 ```text
 FAIL arg c_ptr: manifest width_bits=32 != schema 64
@@ -168,9 +168,21 @@ PASS clean-build toolchain='rustc 1.97.1 (8bab26f4f 2026-07-14)' oxide_compiler=
 
 The spike package is absent from the mlxcel workspace, the root lockfile resolves no cuda-oxide crate, the dependency graph of the `mlxcel` package resolves no cuda-oxide crate, and a real workspace member (`mlxcel-mlx-pin`) compiled with the application toolchain.
 
-## Lint
+## Lint and tooling guards
 
-`scripts/check-lint.sh` runs `cargo fmt --check` and `RUSTC_BOOTSTRAP=1 cargo clippy --release --locked -- -D warnings` on the spike's 1.99.1 toolchain. Both pass. `RUSTC_BOOTSTRAP=1` matches the upstream workspace's own gate, because the pinned `cuda-macros` expands unstable attributes on a stable compiler.
+`scripts/check-lint.sh` runs `cargo fmt --check`, `RUSTC_BOOTSTRAP=1 cargo clippy --release --locked -- -D warnings`, and `scripts/check-guards.py` on the spike's 1.99.1 toolchain. All pass. `RUSTC_BOOTSTRAP=1` matches the upstream workspace's own gate, because the pinned `cuda-macros` expands unstable attributes on a stable compiler.
+
+`scripts/check-guards.py` feeds malformed input through the real tooling and requires a non-zero exit with a message, no traceback, and no hang. Its cases:
+
+- a zero-length `.oxart` bundle, which previously kept the parse cursor in place;
+- an absolute artifact path and a `..` path escaping the artifact root;
+- a kparam `logAlignment` exponent above the supported bound;
+- a schema argument ordinal beyond the PTX parameter count;
+- a zero block dimension;
+- a shortened 13-case run whose own `RESULT` totals are consistent against the declared 14;
+- a duplicate `(case, n)` line.
+
+All seven guards pass.
 
 ## Reproducibility
 

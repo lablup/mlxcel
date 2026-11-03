@@ -16,5 +16,6 @@ cd "$spike_dir"
 
 cargo fmt --check
 RUSTC_BOOTSTRAP=1 cargo clippy --release --locked -- -D warnings
+python3 scripts/check-guards.py
 
-echo "PASS lint fmt=clean clippy=-D warnings"
+echo "PASS lint fmt=clean clippy=-D warnings guards=clean"
