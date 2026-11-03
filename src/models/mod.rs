@@ -76,6 +76,14 @@ pub mod dynamic_ntk_rope;
 // mxfp8 at load. It is a pre-pass rather than part of `sanitize`, which is
 // already 3k lines and carries no MLX-op-heavy conversion of this size.
 pub mod fp8_block;
+// `fp8_ct` covers the compressed-tensors `float-quantized` layout (E4M3 bytes
+// plus a per-channel or per-block `.weight_scale`), the sibling of the vendor
+// block path. Split out so each layout's detection and its refusals stay in one
+// readable file.
+pub mod fp8_ct;
+// `fp8_checkpoint` picks between the two FP8 layouts above for the Qwen3.5
+// loaders, so the config merge and the weight pre-pass are one call each.
+pub mod fp8_checkpoint;
 pub mod gated_delta;
 pub(crate) mod mla_batched;
 // `rope_overrides` carries llama-server b10621's `--rope-scaling`,
@@ -431,6 +439,13 @@ pub(crate) use sanitize::{
 pub use fp8_block::{
     Fp8BlockQuantization, has_block_fp8_weights, merge_fp8_block_quantization,
     qwen_fp8_block_quantization, requantize_block_fp8_weights,
+};
+pub use fp8_checkpoint::{
+    Fp8Checkpoint, fp8_checkpoint_quantization, merge_fp8_quantization, requantize_fp8_weights,
+};
+pub use fp8_ct::{
+    Fp8CtQuantization, Fp8CtScaleLayout, compressed_tensors_fp8_quantization,
+    has_compressed_tensors_fp8_weights, requantize_compressed_tensors_fp8_weights,
 };
 /// E4M3 decoder shared with the image-generation FP8 loaders.
 ///

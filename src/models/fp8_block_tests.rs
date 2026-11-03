@@ -387,6 +387,7 @@ fn fp8_block_requantize_decodes_every_finite_e4m3_byte() {
             .as_ref()
             .expect("scale_inv"),
         SUPPORTED_FP8_BLOCK,
+        SUPPORTED_FP8_BLOCK,
         lut.as_ref().expect("lut"),
     )
     .expect("reconstruction");

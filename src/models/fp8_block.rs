@@ -55,6 +55,13 @@
 //! 0.8B checkpoint's load from under a second to about four minutes. The
 //! measurement is in `docs/benchmark_results/rocm-fp8-block-gfx1151-2026-09-30.md`.
 //!
+//! Compressed-tensors `float-quantized` FP8 checkpoints (llm-compressor's
+//! `FP8-dynamic` releases) are a second, disjoint layout: E4M3 bytes in
+//! `<name>.weight` with a per-channel or per-block `<name>.weight_scale` and no
+//! `.weight_scale_2`. They live in [`crate::models::fp8_ct`], and
+//! [`crate::models::fp8_checkpoint::fp8_checkpoint_quantization`] selects
+//! whichever route a config declares.
+//!
 //! This module deliberately lives outside `sanitize.rs`: that file is already
 //! 3k lines, and the FP8 path is a self-contained pre-pass with its own tests.
 //!
@@ -228,13 +235,24 @@ pub fn merge_fp8_block_quantization(
     config: &mut Value,
     detected: Fp8BlockQuantization,
 ) -> Result<bool, String> {
+    merge_quantization_block(config, detected.effective_config())
+}
+
+/// Insert an already-built `quantization` block, unless the config carries one.
+///
+/// Shared by the vendor block and compressed-tensors routes so the "an explicit
+/// `quantization` always wins" rule lives in one place.
+pub(crate) fn merge_quantization_block(
+    config: &mut Value,
+    quantization: Value,
+) -> Result<bool, String> {
     if config.get("quantization").is_some() {
         return Ok(false);
     }
     let object = config.as_object_mut().ok_or_else(|| {
         "Cannot merge the FP8 quantization block into a non-object config".to_string()
     })?;
-    object.insert("quantization".to_string(), detected.effective_config());
+    object.insert("quantization".to_string(), quantization);
     Ok(true)
 }
 
@@ -254,38 +272,35 @@ pub fn has_block_fp8_weights(weights: &WeightMap) -> bool {
 /// Built once per call and consumed by `take` so the decode runs on device:
 /// the alternative, a host loop over every byte, would walk 28 GB through the
 /// CPU and materialize an f32 copy four times that size.
-fn e4m3_lookup_table() -> UniquePtr<MlxArray> {
+pub(crate) fn e4m3_lookup_table() -> UniquePtr<MlxArray> {
     let table: Vec<f32> = (0..=u8::MAX).map(f8_e4m3_to_f32).collect();
     mlxcel_core::from_slice_f32(&table, &[256])
 }
 
-/// Reconstruct one block-scaled FP8 tensor into a plain f32 array.
+/// Decode a rank-2 E4M3 byte matrix to f32 through the device lookup table.
 ///
-/// `raw` holds the E4M3 bytes as `uint8`, `scale_inv` the per-block bf16
-/// multipliers. The result is `[rows, cols]` f32, matching the original weight
-/// shape. Exposed so tests can compare this route against an independently
-/// expressed reference (see `fp8_block_tests.rs`).
-pub fn reconstruct_block_fp8_tensor(
+/// Shared by the vendor block route and the compressed-tensors route: both
+/// start from the same `uint8` weight and differ only in how the scale is
+/// paired with it. Returns the decoded array and its `(rows, cols)` shape.
+pub(crate) fn decode_fp8_bytes_to_f32(
     name: &str,
     raw: &MlxArray,
-    scale_inv: &MlxArray,
-    block: usize,
     lut: &MlxArray,
-) -> Result<UniquePtr<MlxArray>, String> {
+) -> Result<(UniquePtr<MlxArray>, i32, i32), String> {
     let weight_shape = mlxcel_core::array_shape(raw);
     if weight_shape.len() != 2 {
         return Err(format!(
-            "FP8 block-scaled tensor {name} has rank {} ({weight_shape:?}); only rank-2 \
-             projections carry a weight_scale_inv sidecar",
+            "FP8 tensor {name} has rank {} ({weight_shape:?}); only rank-2 projections carry a \
+             floating-point scale sidecar",
             weight_shape.len()
         ));
     }
     let weight_dtype = mlxcel_core::array_dtype(raw);
     if weight_dtype != dtype::UINT8 {
         return Err(format!(
-            "FP8 block-scaled tensor {name} loaded as MLX dtype {weight_dtype} rather than uint8 \
-             ({}): the raw E4M3 bytes are needed to pair each element with its block scale, and a \
-             pre-decoded float tensor has already lost that pairing",
+            "FP8 tensor {name} loaded as MLX dtype {weight_dtype} rather than uint8 ({}): the raw \
+             E4M3 bytes are needed to pair each element with its scale, and a pre-decoded float \
+             tensor has already lost that pairing",
             dtype::UINT8
         ));
     }
@@ -293,41 +308,71 @@ pub fn reconstruct_block_fp8_tensor(
     let (rows, cols) = (weight_shape[0], weight_shape[1]);
     if rows <= 0 || cols <= 0 {
         return Err(format!(
-            "FP8 block-scaled tensor {name} has a degenerate shape {weight_shape:?}"
+            "FP8 tensor {name} has a degenerate shape {weight_shape:?}"
         ));
     }
     if cols % MXFP8_GROUP_SIZE != 0 {
         return Err(format!(
-            "FP8 block-scaled tensor {name} has {cols} input features, which is not a multiple of \
-             the mxfp8 group size {MXFP8_GROUP_SIZE}. MLX packs one E8M0 scale per {MXFP8_GROUP_SIZE} \
+            "FP8 tensor {name} has {cols} input features, which is not a multiple of the mxfp8 \
+             group size {MXFP8_GROUP_SIZE}. MLX packs one E8M0 scale per {MXFP8_GROUP_SIZE} \
              values along the last axis and cannot represent a partial group"
-        ));
-    }
-
-    let block_i32 = i32::try_from(block)
-        .map_err(|_| format!("FP8 block extent {block} exceeds i32 for tensor {name}"))?;
-    // `i32::div_ceil` is still unstable on the pinned toolchain; both operands
-    // are positive here, so the classic form is exact.
-    let row_blocks = (rows + block_i32 - 1) / block_i32;
-    let col_blocks = (cols + block_i32 - 1) / block_i32;
-
-    let scale_shape = mlxcel_core::array_shape(scale_inv);
-    if scale_shape != vec![row_blocks, col_blocks] {
-        return Err(format!(
-            "FP8 block-scale sidecar for {name} has shape {scale_shape:?}, expected \
-             [{row_blocks}, {col_blocks}] for a {rows}x{cols} weight at block extent {block}"
         ));
     }
 
     // Decode the E4M3 bytes through the LUT on device.
     let indices = mlxcel_core::astype(raw, dtype::UINT32);
-    let decoded = mlxcel_core::take(lut, &indices, 0);
+    Ok((mlxcel_core::take(lut, &indices, 0), rows, cols))
+}
+
+/// Reconstruct one block-scaled FP8 tensor into a plain f32 array.
+///
+/// `raw` holds the E4M3 bytes as `uint8`, `scale` the per-block multipliers,
+/// and `block_rows`/`block_cols` the tile a single multiplier covers. The
+/// result is `[rows, cols]` f32, matching the original weight shape. Exposed so
+/// tests can compare this route against an independently expressed reference
+/// (see `fp8_block_tests.rs`).
+///
+/// The vendor layout fixes the tile at `[128, 128]`; compressed-tensors carries
+/// it in `block_structure`, which is why the extents are parameters rather than
+/// [`SUPPORTED_FP8_BLOCK`] on both axes.
+pub fn reconstruct_block_fp8_tensor(
+    name: &str,
+    raw: &MlxArray,
+    scale: &MlxArray,
+    block_rows: usize,
+    block_cols: usize,
+    lut: &MlxArray,
+) -> Result<UniquePtr<MlxArray>, String> {
+    if block_rows == 0 || block_cols == 0 {
+        return Err(format!(
+            "FP8 block extent for {name} must be positive, got [{block_rows}, {block_cols}]"
+        ));
+    }
+    let (decoded, rows, cols) = decode_fp8_bytes_to_f32(name, raw, lut)?;
+
+    let block_rows_i32 = i32::try_from(block_rows)
+        .map_err(|_| format!("FP8 block rows {block_rows} exceeds i32 for tensor {name}"))?;
+    let block_cols_i32 = i32::try_from(block_cols)
+        .map_err(|_| format!("FP8 block cols {block_cols} exceeds i32 for tensor {name}"))?;
+    // `i32::div_ceil` is still unstable on the pinned toolchain; both operands
+    // are positive here, so the classic form is exact.
+    let row_blocks = (rows + block_rows_i32 - 1) / block_rows_i32;
+    let col_blocks = (cols + block_cols_i32 - 1) / block_cols_i32;
+
+    let scale_shape = mlxcel_core::array_shape(scale);
+    if scale_shape != vec![row_blocks, col_blocks] {
+        return Err(format!(
+            "FP8 block-scale sidecar for {name} has shape {scale_shape:?}, expected \
+             [{row_blocks}, {col_blocks}] for a {rows}x{cols} weight at block extent \
+             [{block_rows}, {block_cols}]"
+        ));
+    }
 
     // Pad to whole blocks so the reshape is exact. The padding is zero and is
     // sliced back off after scaling, so it can only affect the trailing block
-    // of a tensor whose extent is not a multiple of `block`.
-    let padded_rows = row_blocks * block_i32;
-    let padded_cols = col_blocks * block_i32;
+    // of a tensor whose extent is not a multiple of the block.
+    let padded_rows = row_blocks * block_rows_i32;
+    let padded_cols = col_blocks * block_cols_i32;
     let padded = if padded_rows == rows && padded_cols == cols {
         decoded
     } else {
@@ -338,8 +383,11 @@ pub fn reconstruct_block_fp8_tensor(
         )
     };
 
-    let blocked = mlxcel_core::reshape(&padded, &[row_blocks, block_i32, col_blocks, block_i32]);
-    let scales = mlxcel_core::astype(scale_inv, dtype::FLOAT32);
+    let blocked = mlxcel_core::reshape(
+        &padded,
+        &[row_blocks, block_rows_i32, col_blocks, block_cols_i32],
+    );
+    let scales = mlxcel_core::astype(scale, dtype::FLOAT32);
     let scales = mlxcel_core::reshape(&scales, &[row_blocks, 1, col_blocks, 1]);
     let scaled = mlxcel_core::multiply(&blocked, &scales);
     let flat = mlxcel_core::reshape(&scaled, &[padded_rows, padded_cols]);
@@ -413,7 +461,8 @@ pub fn requantize_block_fp8_weights(
             )
         })?;
 
-        let restored = reconstruct_block_fp8_tensor(&weight_key, &raw, &scale_inv, block, &lut)?;
+        let restored =
+            reconstruct_block_fp8_tensor(&weight_key, &raw, &scale_inv, block, block, &lut)?;
         // Drop the E4M3 bytes and the sidecar before quantizing so the peak
         // holds the reconstruction and the packed result, not all four.
         drop(raw);
