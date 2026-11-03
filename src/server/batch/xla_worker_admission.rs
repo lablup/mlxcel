@@ -453,6 +453,13 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             self.finish_zero_budget(&prompt_tokens, prompt_len, start, response_tx);
             return;
         }
+        // `--max-queue-depth`: refuse rather than grow the engine's queue without
+        // bound. Checked after the zero-budget shortcut, because that answer needs
+        // no engine work and must keep working under load.
+        if self.queue_full() {
+            Self::reject_queue_full(response_tx);
+            return;
+        }
         match self.engine.submit(&prompt_tokens, max_tokens, params) {
             Ok(req_id) => {
                 self.batch_observability.record_prefill_start(prompt_len);
@@ -518,6 +525,13 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 state.start,
                 state.response_tx,
             );
+            return;
+        }
+        // The prepared payload below is a whole static-shape embeddings buffer
+        // plus its attention bias, so it is exactly what must not accumulate
+        // without bound in the engine queue (`--max-queue-depth`).
+        if self.queue_full() {
+            Self::reject_queue_full(state.response_tx);
             return;
         }
 
@@ -591,6 +605,10 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 state.start,
                 state.response_tx,
             );
+            return;
+        }
+        if self.queue_full() {
+            Self::reject_queue_full(state.response_tx);
             return;
         }
         let submitted = match prepared {

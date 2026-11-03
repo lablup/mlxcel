@@ -50,6 +50,9 @@ struct FakeServingEngine {
     /// nothing under the plain stub tokenizer; the prefill-ordering tests set
     /// a printable id so a `Token` event is actually streamed.
     emitted_token: i32,
+    /// Queue depth this fake reports. A real engine queues only while every slot
+    /// is busy; the admission tests set it to stand in for that state.
+    pending: usize,
 }
 
 impl XlaServingEngine for FakeServingEngine {
@@ -66,7 +69,7 @@ impl XlaServingEngine for FakeServingEngine {
     }
 
     fn pending_len(&self) -> usize {
-        0
+        self.pending
     }
 
     fn active_len(&self) -> usize {
@@ -351,6 +354,7 @@ fn worker(image_preprocessor: Option<ImagePreprocessStage>) -> XlaServeWorker<Fa
         pending_audio: HashMap::new(),
         next_audio_job_id: 0,
         context_capacity: 32,
+        queue_depth_limit: usize::MAX,
         shutdown: false,
     }
 }
@@ -447,6 +451,7 @@ fn phi4mm_worker() -> XlaServeWorker<FakeServingEngine> {
         pending_audio: HashMap::new(),
         next_audio_job_id: 0,
         context_capacity: 32,
+        queue_depth_limit: usize::MAX,
         shutdown: false,
     }
 }
@@ -1339,4 +1344,60 @@ fn sampled_token_count_charges_a_withheld_eos_to_the_decode_step() {
     assert_eq!(sampled_token_count(&length_terminated), 1);
 
     assert_eq!(sampled_token_count(&[]), 0);
+}
+
+#[test]
+fn text_admission_is_refused_at_the_queue_depth_limit() {
+    let mut worker = worker(None);
+    worker.queue_depth_limit = 2;
+
+    // Below the bound a request is admitted normally, so a refusal below cannot
+    // be what makes the next assertion pass.
+    worker.engine.pending = 1;
+    let (admitted_tx, _admitted_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![10, 11]),
+        options(1),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        admitted_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    assert_eq!(worker.engine.text_submissions, vec![vec![10, 11]]);
+    assert_eq!(worker.states.len(), 1);
+
+    // At the bound the request is answered the way the MLX scheduler answers a
+    // full prefill queue, and it never reaches the engine.
+    worker.engine.pending = 2;
+    let (refused_tx, refused_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![20, 21]),
+        options(1),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        refused_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    assert_eq!(
+        worker.engine.text_submissions,
+        vec![vec![10, 11]],
+        "a refused request must not consume engine queue space"
+    );
+    assert_eq!(
+        worker.states.len(),
+        1,
+        "a refused request must not register request state"
+    );
+    match refused_rx.try_recv() {
+        Ok(GenerateEvent::Error(message)) => {
+            assert_eq!(message, "Server busy: prefill queue full");
+        }
+        _ => panic!("a refused request must be answered with a queue-full error"),
+    }
 }

@@ -896,8 +896,13 @@ impl ModelProvider {
                 );
             }
             let b_max = xla_serve_b_max(config.max_batch_size);
-            let mut provider =
-                Self::new_with_xla_worker(model_path, b_max, batch_metrics, batch_observability)?;
+            let mut provider = Self::new_with_xla_worker(
+                model_path,
+                b_max,
+                config.max_queue_depth,
+                batch_metrics,
+                batch_observability,
+            )?;
             provider.prompt_cache = prompt_cache_store;
             provider.decode_hang_timeout = decode_hang_timeout;
             return Ok(provider);
@@ -1263,10 +1268,18 @@ impl ModelProvider {
     /// count, queue depth, and per-sequence completion the `/metrics` endpoint
     /// reports (the `batch_observability` handle is held for the provider API
     /// surface; the XLA path has no prompt cache or preemption to report there).
+    ///
+    /// `max_queue_depth` is the `--max-queue-depth` admission bound, enforced by
+    /// the worker against the number of requests queued and not yet admitted,
+    /// which is what the MLX scheduler's own bound counts. It has to reach the
+    /// worker: unlike the MLX path, nothing else on the OpenXLA path refuses a
+    /// request once the batch is full, and a queued multimodal request owns its
+    /// whole static-shape embeddings payload.
     #[cfg(feature = "xla-iree")]
     pub(crate) fn new_with_xla_worker(
         model_path: PathBuf,
         b_max: usize,
+        max_queue_depth: usize,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self> {
@@ -1284,6 +1297,7 @@ impl ModelProvider {
         let worker_handle = model_worker::spawn_xla_model_worker(
             model_path,
             b_max,
+            max_queue_depth,
             request_rx,
             loaded.clone(),
             snapshot_reuse_capable.clone(),
@@ -1302,7 +1316,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability,
             chat_unavailable: Arc::new(AtomicBool::new(false)),
-            max_queue_depth: usize::MAX,
+            max_queue_depth,
             single_stream_queue_admission,
             request_memory_admission: false,
             // The OpenXLA serve worker has no idle-sleep lifecycle, so the flag
