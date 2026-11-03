@@ -116,6 +116,18 @@
 // trait default drops sequence IDs, so its nominal B=1 batched trace can read
 // the fallback state instead of the ID-keyed state established by prefill.
 //
+// `MLXCEL_TRACE_LAST_ROW=1` scores only each chunk's final position, through
+// `forward_last_logits` instead of the full-width forward. That is the prefill
+// shape whose Gemma 4 KV-shared tail can be trimmed to the sampled row (issue
+// #2410), so this arm is how the trim is judged: compare it against the
+// default arm with `scripts/compare_logit_traces.py --decided 2` and the
+// overlapping (chunk, pos) rows should be identical. Set
+// `MLXCEL_GEMMA4_NO_KV_SHARED_TAIL_TRIM=1` in this arm to run the control:
+// with the trim disabled the two traces must agree, which separates "the arm
+// itself is neutral" from "the trim moved the numbers". `RUST_LOG=mlxcel=debug`
+// reports `trimmed the KV-shared tail to the sampled row` from the model, so a
+// run that never reached the trimmed branch says so.
+//
 // `MLXCEL_TRACE_TP_SIZE=N` loads the model through the production tensor-
 // parallel loader. Combine it with `MLXCEL_TRACE_BATCH_ROWS=1` and `=4` to
 // compare the same teacher-forced row through TP native batched decode. It is
@@ -266,6 +278,22 @@ fn main() -> Result<()> {
         );
     }
     let lora_env = std::env::var("MLXCEL_TRACE_LORA").ok();
+    // `MLXCEL_TRACE_LAST_ROW=1` (issue #2410) scores each chunk's final
+    // position through `forward_last_logits` instead of the full-width forward,
+    // which is the prefill shape whose Gemma 4 KV-shared tail gets trimmed.
+    // Only the standard text arm can express it.
+    let last_row = std::env::var("MLXCEL_TRACE_LAST_ROW").as_deref() == Ok("1");
+    if last_row {
+        anyhow::ensure!(
+            gemma4_mode.is_none()
+                && audio_arm.is_none()
+                && batch_rows.is_none()
+                && tp_size.is_none()
+                && std::env::var_os("MLXCEL_TRACE_IMAGE").is_none()
+                && !contiguous,
+            "MLXCEL_TRACE_LAST_ROW supports the standard text arm only"
+        );
+    }
     if tp_size.is_some() {
         anyhow::ensure!(
             gemma4_mode.is_none()
@@ -482,6 +510,9 @@ fn main() -> Result<()> {
     if kv_arm.decode_step {
         println!("# decode_step\ttrue");
     }
+    if last_row {
+        println!("# last_row\ttrue");
+    }
     if let Some(rows) = batch_rows {
         return trace_batched_chunks(
             &model,
@@ -549,23 +580,37 @@ fn main() -> Result<()> {
                 }
             }
         }
-        let logits = if let Some(mode) = gemma4_mode {
-            mode.forward(&model, &input)?
+        if last_row {
+            // The sampled-row prefill: only `seg[l - 1]` is scored, so the
+            // caller needs one row and the model may trim its KV-shared tail
+            // to it (issue #2410). Emitted at the same `pos` the full-width
+            // arm writes for it (the last target index), so traces compare
+            // directly.
+            let pos = input_len as usize - 1;
+            let logits = model.forward_last_logits(&input, &mut caches, None, pos);
+            emit_rows_at(c, l as usize - 2, &logits, 0, &seg[l as usize - 1..], topk)?;
         } else {
-            model.forward(&input, &mut caches, None)
-        };
-        anyhow::ensure!(
-            mlxcel_core::array_shape(&logits).get(1) == Some(&input_len),
-            "model.forward returned {:?}, not per-position logits",
-            mlxcel_core::array_shape(&logits)
-        );
-        // Row j predicts input[j + 1]; the rows that score `seg[1..]` start
-        // at `target_offset`.
-        emit_rows(c, &logits, target_offset, &seg[1..], topk)?;
+            let logits = if let Some(mode) = gemma4_mode {
+                mode.forward(&model, &input)?
+            } else {
+                model.forward(&input, &mut caches, None)
+            };
+            anyhow::ensure!(
+                mlxcel_core::array_shape(&logits).get(1) == Some(&input_len),
+                "model.forward returned {:?}, not per-position logits",
+                mlxcel_core::array_shape(&logits)
+            );
+            // Row j predicts input[j + 1]; the rows that score `seg[1..]` start
+            // at `target_offset`.
+            emit_rows(c, &logits, target_offset, &seg[1..], topk)?;
+        }
 
         drop(caches);
         mlxcel_core::clear_memory_cache();
-        eprintln!("  chunk {c} traced ({} positions)", l - 1);
+        eprintln!(
+            "  chunk {c} traced ({} positions)",
+            if last_row { 1 } else { l - 1 }
+        );
     }
     Ok(())
 }

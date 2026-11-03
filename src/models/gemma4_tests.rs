@@ -1922,3 +1922,479 @@ fn linear_singleton_geometry_and_long_probe_are_limited_to_measured_backends() {
         );
     }
 }
+
+/// Issue #2410: trim the KV-shared tail to the sampled row in prefill.
+///
+/// The fixture is a 4-layer checkpoint whose last two layers borrow K/V
+/// (`num_kv_shared_layers = 2`): layer 2 reads the sliding slab layer 0
+/// stored and layer 3 reads the full-attention slab layer 1 stored. Per-layer
+/// inputs are enabled so the trim's per-layer slice is covered too.
+mod kv_shared_tail_trim {
+    use crate::models::gemma4::{ModelArgs, RopeParameters as Gemma4RopeParameters};
+    use crate::models::{Gemma4Model, Gemma4SpeculativeSinks, Gemma4Wrapper};
+    use mlxcel_core::generate::LanguageModel;
+    use mlxcel_core::weights::WeightMap;
+    use std::collections::HashMap;
+
+    const HIDDEN: i32 = 4;
+    const VOCAB: i32 = 8;
+    const PER_LAYER: i32 = 2;
+    const LAYERS: usize = 4;
+
+    fn args() -> ModelArgs {
+        let mut rope_parameters: HashMap<String, Gemma4RopeParameters> = HashMap::new();
+        rope_parameters.insert(
+            "sliding_attention".to_string(),
+            Gemma4RopeParameters {
+                rope_theta: 10_000.0,
+                partial_rotary_factor: 1.0,
+                rope_type: "default".to_string(),
+            },
+        );
+        rope_parameters.insert(
+            "full_attention".to_string(),
+            Gemma4RopeParameters {
+                rope_theta: 10_000.0,
+                partial_rotary_factor: 1.0,
+                rope_type: "default".to_string(),
+            },
+        );
+
+        ModelArgs {
+            model_type: "gemma4".to_string(),
+            text_config: serde_json::json!({
+                "model_type": "gemma4_text",
+                "hidden_size": HIDDEN,
+                "num_hidden_layers": LAYERS,
+                "intermediate_size": 8,
+                "num_attention_heads": 2,
+                "head_dim": 2,
+                "rms_norm_eps": 1e-6,
+                "vocab_size": VOCAB,
+                "vocab_size_per_layer_input": 8,
+                "num_key_value_heads": 1,
+                "num_global_key_value_heads": null,
+                "num_kv_shared_layers": 2,
+                "hidden_size_per_layer_input": PER_LAYER,
+                "rope_traditional": false,
+                "rope_parameters": rope_parameters,
+                "sliding_window": 8,
+                "sliding_window_pattern": 2,
+                "max_position_embeddings": 4096,
+                "attention_k_eq_v": false,
+                "final_logit_softcapping": null,
+                "use_double_wide_mlp": false,
+                "enable_moe_block": false,
+                "num_experts": null,
+                "top_k_experts": null,
+                "moe_intermediate_size": null,
+                "layer_types": [
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "quantization": null
+            }),
+            eos_token_id: Some(serde_json::json!([1])),
+            quantization: None,
+            quantization_config: None,
+        }
+    }
+
+    fn put(weights: &mut WeightMap, name: &str, values: &[f32], shape: &[i32]) {
+        weights.insert(name.to_string(), mlxcel_core::from_slice_f32(values, shape));
+    }
+
+    /// Deterministic pseudo-random weights (LCG). A linear ramp would make
+    /// every key vector near-parallel inside this 2-D head, and attention would
+    /// then be insensitive to RoPE positions; a broken trim could pass the
+    /// parity test unnoticed.
+    fn pseudo_random(len: usize, seed: u64, scale: f32) -> Vec<f32> {
+        let mut state = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let unit = ((state >> 33) as u32) as f32 / 4_294_967_296.0;
+                (unit - 0.5) * 2.0 * scale
+            })
+            .collect()
+    }
+
+    fn put_random(weights: &mut WeightMap, name: &str, shape: &[i32], seed: u64, scale: f32) {
+        let len: i32 = shape.iter().product();
+        put(
+            weights,
+            name,
+            &pseudo_random(len as usize, seed, scale),
+            shape,
+        );
+    }
+
+    fn weights() -> WeightMap {
+        let mut weights = HashMap::new();
+        put_random(
+            &mut weights,
+            "language_model.model.embed_tokens.weight",
+            &[VOCAB, HIDDEN],
+            1,
+            0.6,
+        );
+        put_random(
+            &mut weights,
+            "language_model.model.embed_tokens_per_layer.weight",
+            &[VOCAB, LAYERS as i32 * PER_LAYER],
+            2,
+            0.6,
+        );
+        put_random(
+            &mut weights,
+            "language_model.model.per_layer_model_projection.weight",
+            &[LAYERS as i32 * PER_LAYER, HIDDEN],
+            3,
+            0.6,
+        );
+        put(
+            &mut weights,
+            "language_model.model.per_layer_projection_norm.weight",
+            &[1.0, 1.0],
+            &[PER_LAYER],
+        );
+
+        for layer in 0..LAYERS {
+            let prefix = format!("language_model.model.layers.{layer}");
+            let seed = 10 + layer as u64 * 100;
+            put_random(
+                &mut weights,
+                &format!("{prefix}.self_attn.q_proj.weight"),
+                &[4, HIDDEN],
+                seed,
+                0.8,
+            );
+            if layer < LAYERS - 2 {
+                put_random(
+                    &mut weights,
+                    &format!("{prefix}.self_attn.k_proj.weight"),
+                    &[2, HIDDEN],
+                    seed + 1,
+                    0.8,
+                );
+                put_random(
+                    &mut weights,
+                    &format!("{prefix}.self_attn.v_proj.weight"),
+                    &[2, HIDDEN],
+                    seed + 2,
+                    0.8,
+                );
+                put(
+                    &mut weights,
+                    &format!("{prefix}.self_attn.k_norm.weight"),
+                    &[1.0, 1.0],
+                    &[2],
+                );
+            }
+            put(
+                &mut weights,
+                &format!("{prefix}.self_attn.q_norm.weight"),
+                &[1.0, 1.0],
+                &[2],
+            );
+            put_random(
+                &mut weights,
+                &format!("{prefix}.self_attn.o_proj.weight"),
+                &[HIDDEN, HIDDEN],
+                seed + 3,
+                0.8,
+            );
+            for (index, (projection, shape)) in [
+                ("gate_proj", [8, HIDDEN]),
+                ("up_proj", [8, HIDDEN]),
+                ("down_proj", [HIDDEN, 8]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                put_random(
+                    &mut weights,
+                    &format!("{prefix}.mlp.{projection}.weight"),
+                    &shape,
+                    seed + 4 + index as u64,
+                    0.5,
+                );
+            }
+            for norm in [
+                "input_layernorm",
+                "post_attention_layernorm",
+                "pre_feedforward_layernorm",
+                "post_feedforward_layernorm",
+            ] {
+                put(
+                    &mut weights,
+                    &format!("{prefix}.{norm}.weight"),
+                    &[1.0; HIDDEN as usize],
+                    &[HIDDEN],
+                );
+            }
+            put(
+                &mut weights,
+                &format!("{prefix}.layer_scalar"),
+                &[1.0],
+                &[1],
+            );
+            put_random(
+                &mut weights,
+                &format!("{prefix}.per_layer_input_gate.weight"),
+                &[PER_LAYER, HIDDEN],
+                seed + 7,
+                0.5,
+            );
+            put_random(
+                &mut weights,
+                &format!("{prefix}.per_layer_projection.weight"),
+                &[HIDDEN, PER_LAYER],
+                seed + 8,
+                0.5,
+            );
+            put(
+                &mut weights,
+                &format!("{prefix}.post_per_layer_input_norm.weight"),
+                &[1.0; HIDDEN as usize],
+                &[HIDDEN],
+            );
+        }
+        put(
+            &mut weights,
+            "language_model.model.norm.weight",
+            &[1.0; HIDDEN as usize],
+            &[HIDDEN],
+        );
+        weights
+    }
+
+    fn build_model() -> Gemma4Model {
+        Gemma4Model::from_weights(&weights(), &args()).expect("kv-shared tail fixture must load")
+    }
+
+    fn build_wrapper() -> Gemma4Wrapper {
+        Gemma4Wrapper::new(build_model())
+    }
+
+    fn array_to_vec_f32(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
+        let arr_f32 = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&arr_f32);
+        mlxcel_core::array_to_raw_bytes(&arr_f32)
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    /// Full-width reference row: prefill `prefix` (if any), forward `chunk` at
+    /// its natural width, then take row `row` of the logits.
+    fn full_row(prefix: &[i32], chunk: &[i32], row: usize) -> Vec<f32> {
+        let model = build_wrapper();
+        let mut caches = model.make_caches();
+        if !prefix.is_empty() {
+            let ids = mlxcel_core::from_slice_i32(prefix, &[1, prefix.len() as i32]);
+            mlxcel_core::eval(&model.forward(&ids, &mut caches, None));
+        }
+        let ids = mlxcel_core::from_slice_i32(chunk, &[1, chunk.len() as i32]);
+        let logits = model.forward(&ids, &mut caches, None);
+        let shape = mlxcel_core::array_shape(&logits);
+        let row_arr =
+            mlxcel_core::slice(&logits, &[0, row as i32, 0], &[1, row as i32 + 1, shape[2]]);
+        array_to_vec_f32(row_arr.as_ref().unwrap())
+    }
+
+    /// The single sampled row through `forward_last_logits`.
+    fn last_row(prefix: &[i32], chunk: &[i32], row: usize) -> Vec<f32> {
+        let model = build_wrapper();
+        let mut caches = model.make_caches();
+        if !prefix.is_empty() {
+            let ids = mlxcel_core::from_slice_i32(prefix, &[1, prefix.len() as i32]);
+            mlxcel_core::eval(&model.forward(&ids, &mut caches, None));
+        }
+        let ids = mlxcel_core::from_slice_i32(chunk, &[1, chunk.len() as i32]);
+        let logits = model.forward_last_logits(&ids, &mut caches, None, row);
+        assert_eq!(
+            mlxcel_core::array_shape(&logits),
+            vec![1, 1, VOCAB],
+            "forward_last_logits must project a single row"
+        );
+        array_to_vec_f32(logits.as_ref().unwrap())
+    }
+
+    /// Width of the hidden state the tail hands back for the same geometry.
+    /// `1` proves the trim engaged; a silent fallback would report the chunk
+    /// width and make the numeric comparison vacuous.
+    fn trimmed_hidden_width(prefix: &[i32], chunk: &[i32], row: usize) -> i32 {
+        let model = build_model();
+        let mut caches = model.make_caches();
+        if !prefix.is_empty() {
+            let ids = mlxcel_core::from_slice_i32(prefix, &[1, prefix.len() as i32]);
+            let warm = model.text_model.forward_with_speculative_sinks(
+                &ids,
+                None,
+                &mut caches,
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+            );
+            mlxcel_core::eval(&warm);
+        }
+        let ids = mlxcel_core::from_slice_i32(chunk, &[1, chunk.len() as i32]);
+        let hidden = model.text_model.forward_with_speculative_sinks(
+            &ids,
+            None,
+            &mut caches,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            Some(row),
+        );
+        mlxcel_core::array_shape(&hidden)[1]
+    }
+
+    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len(), "logit width mismatch");
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    #[test]
+    fn gemma4_kv_shared_tail_trim_matches_full_width_rows() {
+        // 12 tokens, three geometries:
+        // - a 6-token cold prefill, entirely inside the sliding window, so
+        //   both families have no plain mask and the trim rebuilds both rows;
+        // - a 12-token cold prefill, past the window, so the sliding mask is
+        //   sliced while the full-attention row is rebuilt;
+        // - a warm 4-token prefix plus an 8-token chunk (4 + 8 > 8), the same
+        //   mix with a non-zero cache offset.
+        let prompt: Vec<i32> = (0..12).map(|i| (i * 5 + 1) % VOCAB).collect();
+        for (prefix_len, chunk_len, rows) in [
+            (0usize, 6usize, [5usize, 2usize]),
+            (0, 12, [11, 5]),
+            (4, 8, [7, 2]),
+        ] {
+            let prefix = &prompt[..prefix_len];
+            let chunk = &prompt[prefix_len..prefix_len + chunk_len];
+            for row in rows {
+                assert_eq!(
+                    trimmed_hidden_width(prefix, chunk, row),
+                    1,
+                    "prefix_len={prefix_len} chunk_len={chunk_len} row={row}: the \
+                     KV-shared tail did not trim, so the comparison below is vacuous"
+                );
+                let want = full_row(prefix, chunk, row);
+                let got = last_row(prefix, chunk, row);
+                let diff = max_abs_diff(&want, &got);
+                // The issue's bound is the f16 tolerance (2e-2); this fixture
+                // is f32 and the trim reproduces the row exactly, so hold it
+                // to 1e-4. A wrong RoPE offset or mask row moves these logits
+                // by ~4e-4, which the f16 bound would not catch.
+                assert!(
+                    diff < 1e-4,
+                    "prefix_len={prefix_len} chunk_len={chunk_len} row={row}: trimmed \
+                     tail diverged from the full-width forward by {diff}; \
+                     want={want:?} got={got:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gemma4_kv_shared_tail_trim_narrows_the_hidden_state() {
+        let prompt: Vec<i32> = (0..12).map(|i| (i * 5 + 1) % VOCAB).collect();
+        let ids = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
+
+        for (keep_row, expected_width) in [(Some(5usize), 1i32), (None, 12)] {
+            let model = build_model();
+            let mut caches = model.make_caches();
+            let hidden = model.text_model.forward_with_speculative_sinks(
+                &ids,
+                None,
+                &mut caches,
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                keep_row,
+            );
+            assert_eq!(
+                mlxcel_core::array_shape(&hidden),
+                vec![1, expected_width, HIDDEN],
+                "keep_row={keep_row:?} hidden width"
+            );
+        }
+    }
+
+    #[test]
+    fn gemma4_kv_shared_tail_trim_skipped_when_capturing_layers() {
+        let prompt: Vec<i32> = (0..12).map(|i| (i * 5 + 1) % VOCAB).collect();
+        let ids = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
+        // Both the last row (which the plain one-row path could serve) and an
+        // interior row must keep full width: the capture consumers expect it.
+        for keep_row in [11usize, 5] {
+            let model = build_model();
+            let mut caches = model.make_caches();
+            let mut sinks = Gemma4SpeculativeSinks {
+                hidden_sink: Some(Vec::new()),
+                shared_kv_sink: None,
+                tree_positions: None,
+                mtp_verify: false,
+                row_verify_inexact: false,
+                capture_probe: false,
+            };
+            let hidden = model.text_model.forward_with_speculative_sinks(
+                &ids,
+                None,
+                &mut caches,
+                None,
+                None,
+                Some(&[2]),
+                Some(&mut sinks),
+                false,
+                None,
+                None,
+                None,
+                Some(keep_row),
+            );
+            assert_eq!(
+                mlxcel_core::array_shape(&hidden),
+                vec![1, 12, HIDDEN],
+                "keep_row={keep_row}: capture_layer_ids must keep the full width"
+            );
+            let captured = sinks
+                .hidden_sink
+                .as_ref()
+                .expect("hidden sink requested")
+                .first()
+                .expect("layer 2 capture requested");
+            assert_eq!(
+                mlxcel_core::array_shape(captured),
+                vec![1, 12, HIDDEN],
+                "keep_row={keep_row}: captured layer 2 hidden state must keep the full width"
+            );
+        }
+    }
+}
