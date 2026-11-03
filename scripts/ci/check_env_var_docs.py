@@ -327,6 +327,7 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_LLAMA3_MODEL",
         "MLXCEL_QWEN3_MODEL",
         "MLXCEL_TEST_GRANITE_VISION_DIR",
+        "MLXCEL_TEST_INDIC_LAYOUT_DIR",
         "MLXCEL_TEST_JAGLE_VL_DIR",
         "MLXCEL_TEST_LLMJP_4VL_9B_DIR",
         "MLXCEL_TEST_MOLMO_IMAGE",
