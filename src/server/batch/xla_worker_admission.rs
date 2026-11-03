@@ -461,12 +461,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             return;
         }
         let Some(max_tokens) = self.admitted_max_tokens(prompt_len, max_tokens) else {
-            Self::reject_no_generation_room(
-                response_tx,
-                prompt_len,
-                max_tokens,
-                self.context_capacity,
-            );
+            self.reject_no_generation_room(response_tx, prompt_len, max_tokens);
             return;
         };
         match self.engine.submit(&prompt_tokens, max_tokens, params) {
@@ -545,11 +540,10 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         }
         let Some(max_tokens) = self.admitted_max_tokens(effective_prefill_len, state.max_tokens)
         else {
-            Self::reject_no_generation_room(
+            self.reject_no_generation_room(
                 state.response_tx,
                 effective_prefill_len,
                 state.max_tokens,
-                self.context_capacity,
             );
             return;
         };
@@ -632,11 +626,10 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         }
         let Some(max_tokens) = self.admitted_max_tokens(effective_prefill_len, state.max_tokens)
         else {
-            Self::reject_no_generation_room(
+            self.reject_no_generation_room(
                 state.response_tx,
                 effective_prefill_len,
                 state.max_tokens,
-                self.context_capacity,
             );
             return;
         };

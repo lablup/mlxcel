@@ -530,23 +530,28 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
     /// The clamp uses the largest capacity, so it only ever rescues requests the
     /// engine would have refused; a budget that fits any bucket is left alone and
     /// still routes by its own size.
+    ///
+    /// The capacity comes from the engine rather than the worker's cached copy:
+    /// they are the same value in production (`new` takes it from the engine),
+    /// and asking the engine keeps the check honest in tests that build a worker
+    /// directly.
     fn admitted_max_tokens(&self, prefill_len: usize, requested: usize) -> Option<usize> {
-        let room = self.context_capacity.saturating_sub(prefill_len);
+        let room = self.engine.context_capacity().saturating_sub(prefill_len);
         let budget = requested.min(room);
         (budget > 0).then_some(budget)
     }
 
     /// Answer a request whose prompt leaves no room for even one generated token.
     fn reject_no_generation_room(
+        &self,
         response_tx: mpsc::Sender<GenerateEvent>,
         prefill_len: usize,
         requested: usize,
-        context_capacity: usize,
     ) {
         let error = ContextCapacityError {
             effective_prompt_len: prefill_len,
             max_new_tokens: requested,
-            context_capacity,
+            context_capacity: self.engine.context_capacity(),
         };
         let _ = response_tx.send(GenerateEvent::Error(error.to_string()));
     }

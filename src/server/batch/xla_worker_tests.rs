@@ -42,6 +42,9 @@ struct FakeServingEngine {
     next_id: u64,
     active: BTreeSet<u64>,
     text_submissions: Vec<Vec<i32>>,
+    /// The budget each admitted text request was submitted with, so the
+    /// admission-budget clamp is observable.
+    text_budgets: Vec<usize>,
     prepared_submissions: Vec<(Vec<i32>, usize)>,
     prepared_modes: Vec<PreparedAdapterMode>,
     gemma3n_submissions: Vec<(Vec<i32>, usize)>,
@@ -79,10 +82,11 @@ impl XlaServingEngine for FakeServingEngine {
     fn submit(
         &mut self,
         prompt: &[i32],
-        _max_new_tokens: usize,
+        max_new_tokens: usize,
         _params: SampleParams,
     ) -> Result<u64, String> {
         self.text_submissions.push(prompt.to_vec());
+        self.text_budgets.push(max_new_tokens);
         Ok(self.activate())
     }
 
@@ -1233,6 +1237,7 @@ fn pending_preprocess_poll_timeout_does_not_shutdown_worker() {
         pending_audio: HashMap::new(),
         next_audio_job_id: 0,
         context_capacity: 32,
+        queue_depth_limit: usize::MAX,
         shutdown: false,
     };
     let (response_tx, _response_rx) = mpsc::channel();
@@ -1399,5 +1404,70 @@ fn text_admission_is_refused_at_the_queue_depth_limit() {
             assert_eq!(message, "Server busy: prefill queue full");
         }
         _ => panic!("a refused request must be answered with a queue-full error"),
+    }
+}
+
+#[test]
+fn a_budget_wider_than_the_shape_is_clamped_instead_of_refused() {
+    // `--n-predict -1` resolves an omitted `max_tokens` to the checkpoint's
+    // context window, which is wider than any static OpenXLA graph. Build the
+    // options at a context size that leaves the requested budget intact, so what
+    // this exercises is the worker's clamp and not the server's own cap.
+    let mut config = ServerConfig::default();
+    config.context_size = 8_192;
+    let budget_options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            max_tokens: Some(8_192),
+            ..RequestOptionOverrides::default()
+        },
+    );
+
+    let mut worker = worker(None);
+    let (response_tx, _response_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![10, 11]),
+        budget_options,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        response_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    // FakeServingEngine::context_capacity() is 4096 and the prompt is 2 tokens.
+    assert_eq!(worker.engine.text_budgets, vec![4_094]);
+    assert_eq!(
+        worker.states.values().next().map(|state| state.max_tokens),
+        Some(4_094),
+        "the request's own budget must be the clamped one"
+    );
+}
+
+#[test]
+fn a_prompt_that_leaves_no_generation_room_is_refused() {
+    let mut worker = worker(None);
+    let (response_tx, response_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![0; 4_096]),
+        options(8),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        response_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    assert!(worker.engine.text_submissions.is_empty());
+    assert!(worker.states.is_empty());
+    match response_rx.try_recv() {
+        Ok(GenerateEvent::Error(message)) => assert!(
+            message.contains("exceeds the OpenXLA context capacity"),
+            "got: {message}"
+        ),
+        _ => panic!("a prompt with no generation room must be answered with the capacity error"),
     }
 }
