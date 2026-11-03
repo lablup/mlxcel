@@ -3612,6 +3612,7 @@ const FAMILY_ORDER: &[&str] = &[
     "MiniMax VLM",
     "Muse VLM",
     "Step VLM",
+    "Xiaomi",
     "Other VLM",
 ];
 

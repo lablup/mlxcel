@@ -92,10 +92,11 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
 ///
 /// Used by: decoders that materialize an explicit prefill mask instead of
 /// leaving `mask: None` for fused SDPA to apply causality itself. At this
-/// commit that is 49 non-test files under `src/models`, in four groups.
+/// commit that is 51 non-test files under `src/models`, in four groups.
 /// Hybrid and mixed-layer stacks that build one mask at the full-attention
 /// offset: Jamba, FalconH1, NemotronH, NemotronNas, Plamo2, Qwen3Next,
-/// KimiLinear, GraniteMoeHybrid, MiniMaxM3, Lfm2, RecurrentGemma, Laguna.
+/// KimiLinear, GraniteMoeHybrid, MiniMaxM3, Lfm2, RecurrentGemma, Laguna,
+/// MiMoV2.
 /// Sliding-window, chunked and dual-attention families that build a separate
 /// global mask per forward: Gemma3, Gemma4, Gemma3n, DiffusionGemma, Cohere2,
 /// CohereCompass, Exaone4, Olmo3, Ministral3, Mistral4, Mellum, Llama4. VLM
