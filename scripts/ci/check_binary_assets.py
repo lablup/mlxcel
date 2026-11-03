@@ -533,6 +533,17 @@ DECLARED = (
             "precedent of #2267. Same 32 KB ceiling as the tarballs above."
         ),
     ),
+    Rule(
+        pattern="spike/cuda-oxide-smoke/artifacts/vecadd.sm_121.cubin",
+        max_bytes=8 * 1024,
+        why=(
+            "Committed consumer artifact for the cuda-oxide GB10 smoke (#2831). "
+            "The manifest and evidence report pin its SHA-256 and its ABI "
+            "parameter layout, and reproducing it needs LLVM 21, CUDA 13.0 and "
+            "the pinned cuda-oxide compiler, so the verified bytes ship with "
+            "the evidence."
+        ),
+    ),
 )
 
 

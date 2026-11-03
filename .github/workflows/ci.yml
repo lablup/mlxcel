@@ -156,6 +156,11 @@ jobs:
               - 'build.rs'
               - 'scripts/iree/**'
               - 'rust-toolchain.toml'
+              # Spike packages carry an empty [workspace] table and are not
+              # members of the mlxcel workspace. They gate themselves with
+              # their own pinned toolchain, so a spike-only change cannot move
+              # a cargo-fmt, cargo-deny or clippy verdict for mlxcel.
+              - '!spike/**'
             # The dependency graph alone: the manifests, the lockfile and the
             # policy file. `cargo-deny` reads nothing else, so a source-only PR
             # cannot change its verdict and does not need the job.
@@ -163,6 +168,7 @@ jobs:
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
+              - '!spike/**'
             mlx_pin:
               - 'src/lib/mlxcelverse/CMakeLists.txt'
               - 'src/lib/mlxcel-core/build_support/mlx_pin.rs'
@@ -278,6 +284,9 @@ jobs:
               - 'src/lib/mlxcelverse/**'
               - 'src/lib/mlxcel-core/cpp/**'
               - 'src/lib/mlxcel-core/build_support/**'
+              # Spike packages are outside the mlxcel workspace, so they cannot
+              # break the CPU-only link of mlxcel-core.
+              - '!spike/**'
             # The inputs the overlay host tests read: the overlay sources, the
             # scripts that inspect them, the pin-extraction script the record
             # check resolves the MLX commit from, and the two build scripts
