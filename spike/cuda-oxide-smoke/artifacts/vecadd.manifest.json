@@ -19,7 +19,7 @@
     "target": "sm_121",
     "compile_options": 0,
     "payload_kind": "ptx",
-    "payload_name": "",
+    "payload_name": "cuda_oxide_smoke.ptx",
     "payload_bytes": 2379,
     "payload_sha256": "737559830058e1d142a80c3ce7afc668d5326a4fb1b15bf020f2f03fc71381a8",
     "entries": [

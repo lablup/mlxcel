@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -172,6 +173,10 @@ def validate(args: argparse.Namespace) -> int:
         fail("manifest entry_symbol differs from the schema")
     if manifest["launch"] != schema["launch"]:
         fail("manifest launch constraints differ from the schema")
+    if manifest["source"] != schema["source_revision"]:
+        fail("manifest source differs from the schema source_revision")
+    if manifest["container"]["payload_sha256"] != manifest["artifacts"]["ptx"]["sha256"]:
+        fail("container payload_sha256 does not match the committed PTX digest")
 
     # Artifact digests bind the manifest to the committed bytes.
     for name, path in (("ptx", ptx_path), ("cubin", cubin_path)):
@@ -281,6 +286,90 @@ def validate(args: argparse.Namespace) -> int:
     return 0
 
 
+PASS_RE = re.compile(
+    r"^PASS case=(?P<case>\S+) n=(?P<n>\d+) grid=(?P<grid>\d+) "
+    r"block=(?P<block>\d+) elements=(?P<elements>\d+)$"
+)
+RESULT_RE = re.compile(
+    r"^RESULT .*cases_passed=(?P<passed>\d+) cases_total=(?P<total>\d+) "
+    r"elements_checked=(?P<elements>\d+)"
+)
+
+
+def check_launch(args: argparse.Namespace) -> int:
+    """Verify each harness launch against the manifest's launch constraints.
+
+    This is the cross-check the manifest cannot perform on its own: the block
+    size and the ceil-div grid rule are recorded from the declared contract,
+    while the harness output reports what the host actually enqueued.
+    """
+    manifest = json.loads(Path(args.manifest).read_text())
+    launch = manifest["launch"]
+    block = launch["block_dim"]
+    cases = []
+    result = None
+    for line in Path(args.log).read_text().splitlines():
+        stripped = line.strip()
+        match = PASS_RE.match(stripped)
+        if match:
+            cases.append(
+                {
+                    "case": match.group("case"),
+                    "n": int(match.group("n")),
+                    "grid": int(match.group("grid")),
+                    "block": int(match.group("block")),
+                    "elements": int(match.group("elements")),
+                }
+            )
+            continue
+        match = RESULT_RE.search(stripped)
+        if match:
+            result = {
+                "passed": int(match.group("passed")),
+                "total": int(match.group("total")),
+                "elements": int(match.group("elements")),
+            }
+
+    if not cases:
+        fail(f"no PASS lines found in {args.log}; did the harness execute?")
+    if result is None:
+        fail(f"no RESULT line found in {args.log}")
+    if block[1] != 1 or block[2] != 1:
+        fail(f"manifest block_dim {block} is not a 1-D block")
+    if launch["shared_mem_bytes"] != 0:
+        fail(f"manifest requests {launch['shared_mem_bytes']} bytes of shared memory; the harness uses 0")
+    for case in cases:
+        if case["block"] != block[0]:
+            fail(f"case {case['case']}: launched block={case['block']}, manifest block_dim={block[0]}")
+        expected_grid = (case["n"] + block[0] - 1) // block[0]
+        if case["grid"] != expected_grid:
+            fail(
+                f"case {case['case']}: launched grid={case['grid']}, "
+                f"ceil_div({case['n']}, {block[0]})={expected_grid}"
+            )
+        if case["elements"] != case["n"]:
+            fail(f"case {case['case']}: verified {case['elements']} elements for n={case['n']}")
+        if case["n"] <= 0:
+            fail(f"case {case['case']}: non-positive case length")
+    if result is not None and result["total"] != len(cases):
+        fail(f"RESULT reports {result['total']} cases, log has {len(cases)} PASS lines")
+    if result is not None and result["passed"] != len(cases):
+        fail(f"RESULT reports {result['passed']} passed cases, log has {len(cases)} PASS lines")
+    if result is not None and result["elements"] != sum(case["n"] for case in cases):
+        fail(
+            f"RESULT reports {result['elements']} elements, "
+            f"PASS lines sum to {sum(case['n'] for case in cases)}"
+        )
+
+    if ERRORS:
+        return 1
+    print(
+        f"launch valid: cases={len(cases)} block={block[0]} "
+        f"grid_rule=ceil_div(n,{block[0]}) elements={sum(case['n'] for case in cases)}"
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -302,6 +391,11 @@ def main() -> int:
     validator.add_argument("--schema", required=True)
     validator.add_argument("--cuobjdump", default=shutil.which("cuobjdump") or "cuobjdump")
     validator.set_defaults(func=validate)
+
+    launcher = sub.add_parser("check-launch", help="check harness block and grid against the manifest")
+    launcher.add_argument("--manifest", required=True)
+    launcher.add_argument("--log", required=True)
+    launcher.set_defaults(func=check_launch)
 
     args = parser.parse_args()
     return args.func(args)

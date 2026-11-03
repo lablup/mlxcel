@@ -3,7 +3,8 @@
 #
 # Every GB10 GPU allocation goes through gpu-lock. A missing or busy lock is an
 # error, never a reason to run unguarded. Compile-only results do not satisfy
-# this gate; the harness must execute every case on the device.
+# this gate; the harness must execute every case on the device. The captured
+# output is then checked against the manifest's launch constraints.
 #
 # Usage: scripts/smoke.sh [sm_121]
 set -euo pipefail
@@ -19,4 +20,11 @@ if ! command -v gpu-lock >/dev/null 2>&1; then
     exit 2
 fi
 
-gpu-lock run --tag issue-2831 -- cargo oxide run --arch "$target_arch"
+log=$(mktemp -t cuda-oxide-smoke-log.XXXXXX)
+trap 'trash-put "$log" 2>/dev/null || true' EXIT
+
+gpu-lock run --tag issue-2831 -- cargo oxide run --arch "$target_arch" | tee "$log"
+
+python3 scripts/oxide_artifact.py check-launch \
+    --manifest artifacts/vecadd.manifest.json \
+    --log "$log"

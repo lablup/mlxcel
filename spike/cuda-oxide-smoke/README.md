@@ -10,7 +10,7 @@ The evidence from the verified run is in [docs/mlxcelverse/cuda-oxide-smoke-evid
 
 `Cargo.toml` contains an empty `[workspace]` table, so this package is its own workspace root. It never joins the mlxcel build graph: root `cargo metadata` does not list it, root `Cargo.lock` resolves no cuda-oxide crate, and an ordinary mlxcel build needs neither LLVM 21 nor the cuda-oxide compiler. `scripts/check-clean-build.sh` asserts all three, and `scripts/build.sh` fails if the package's own dependency graph ever resolves an `mlxcel` crate.
 
-`Cargo.lock` is committed deliberately. The repository ignores lockfiles for library crates, but this spike produces a binary and a device artifact, so the transitive resolution is part of what makes the artifact reproducible.
+`Cargo.lock` is committed deliberately. The repository ignores lockfiles for library crates, but this spike produces a binary and a device artifact, so the transitive resolution is part of what makes the artifact reproducible. The root `.gitignore` still lists `Cargo.lock`, so after regenerating it stage it with `git add -f spike/cuda-oxide-smoke/Cargo.lock`.
 
 The application Rust pin stays at 1.97.1. `rust-toolchain.toml` in this directory selects cuda-oxide's pinned 1.99.1 only for commands run here, because the codegen backend is a rustc plugin and must match the compiler that loads it.
 
@@ -23,7 +23,9 @@ The application Rust pin stays at 1.97.1. `rust-toolchain.toml` in this director
 | `artifacts/` | Committed PTX, cubin, and the generated, validated manifest |
 | `scripts/env.sh` | Toolchain discovery and prerequisite checks |
 | `scripts/build.sh` | Pinned build, `.oxart` extraction, cubin assembly, manifest generation and validation |
-| `scripts/smoke.sh` | GPU execution under `gpu-lock` |
+| `scripts/smoke.sh` | GPU execution under `gpu-lock`, then manifest launch-constraint check |
+| `scripts/sanitize.sh` | Compute Sanitizer memcheck under `gpu-lock`, then the same launch check |
+| `scripts/check-lint.sh` | `cargo fmt --check` and clippy with `-D warnings` on the pinned toolchain |
 | `scripts/check-unsupported-target.sh` | Proves a bad target fails with an actionable message |
 | `scripts/check-clean-build.sh` | Proves ordinary mlxcel builds need no oxide compiler |
 | `scripts/oxide_artifact.py` | Parses `.oxart`, assembles the cubin, writes and validates the manifest |
@@ -65,22 +67,19 @@ Verified host: Ubuntu on aarch64, NVIDIA GB10 (compute capability 12.1), driver 
 cd spike/cuda-oxide-smoke
 scripts/build.sh sm_121        # build, export artifacts, validate the manifest
 scripts/smoke.sh sm_121        # run 14 cases on device 0 under gpu-lock
+scripts/sanitize.sh sm_121     # the same cases under Compute Sanitizer memcheck
 scripts/check-unsupported-target.sh
 scripts/check-clean-build.sh
+scripts/check-lint.sh
 ```
 
-GPU execution also runs cleanly under Compute Sanitizer:
-
-```bash
-. scripts/env.sh
-gpu-lock run --tag issue-2831 -- cargo oxide sanitize --tool memcheck --arch sm_121
-```
+`smoke.sh` and `sanitize.sh` capture the harness output and run `oxide_artifact.py check-launch`, which verifies every reported block size and grid against the committed manifest. A skipped, shortened, or silently re-configured run fails the script rather than passing on exit status alone.
 
 Every GPU-allocating command, including the sanitizer run, goes through `gpu-lock run --tag issue-2831 -- ...`. A missing or busy lock is an error, never a reason to run unguarded. Compile-only results do not satisfy the GPU gate.
 
 ## Artifact contract
 
-cuda-oxide embeds device code in a `.oxart` container section inside the host binary. That section is not PTX: it has an `OXIDEART` magic, a format version, a target string, payload records, and entry records. `scripts/oxide_artifact.py` parses the container, takes the PTX payload, and refuses to proceed if the compiler's separate `.ptx` sidecar differs from the embedded payload. The committed `.ptx` and `.cubin` are therefore extracted payloads, never renamed containers.
+cuda-oxide embeds device code in a `.oxart` container section inside the host binary. That section is not PTX: it has an `OXIDEART` magic, a format version, a target string, payload records, and entry records. `scripts/oxide_artifact.py` parses the container, takes the PTX payload, and refuses to proceed if the compiler's separate `.ptx` sidecar differs from the embedded payload. The committed `.ptx` is that extracted payload, never a renamed container. The committed `.cubin` is assembled from the extracted PTX by CUDA `ptxas`, and the manifest records both producers.
 
 The manifest records:
 
@@ -92,6 +91,8 @@ The manifest records:
 - the launch constraints: block shape, grid rule, shared memory, buffer dtype and length rule.
 
 `validate` re-parses the committed PTX and runs `cuobjdump -elf` and `-sass` on the cubin. It compares the argument layout against both the hand-written schema and the manifest, checks the digests, and rejects a stale or edited manifest. A deliberately tampered manifest fails validation.
+
+The launch half is checked against execution rather than against itself: `check-launch` reads the `PASS` lines from a real run and requires each case's block size and grid to equal the manifest's block dimension and `ceil_div(n, block)`, and requires the `RESULT` counts to match the lines it parsed. `smoke.sh` and `sanitize.sh` both run it.
 
 ## Target
 

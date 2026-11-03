@@ -77,8 +77,10 @@ done
     _spike_env_error "llc is missing under $_llvm_prefix/bin. cuda-oxide needs LLVM 21 with the NVPTX target."
     return 1
 }
-# Fail early when the LLVM build has no NVPTX backend.
-if ! "$_llvm_prefix/bin/llc" --version | grep -q nvptx; then
+# Fail early when the LLVM build has no NVPTX backend. Capture the version text
+# before grepping so an early grep exit cannot SIGPIPE the producer.
+_llc_version=$("$_llvm_prefix/bin/llc" --version)
+if ! grep -q nvptx <<<"$_llc_version"; then
     _spike_env_error "LLVM at $_llvm_prefix has no NVPTX target; cuda-oxide cannot emit PTX."
     return 1
 fi
@@ -113,4 +115,4 @@ if ! command -v cargo-oxide >/dev/null 2>&1; then
     return 1
 fi
 
-unset _llvm_prefix header_dir _rustc_version
+unset _llvm_prefix header_dir _rustc_version _llc_version

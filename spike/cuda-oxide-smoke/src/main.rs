@@ -16,9 +16,10 @@ use std::process::ExitCode;
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, cuda_module, kernel, thread};
 
-/// Threads per block. The manifest records this as a launch constraint, and
-/// `scripts/validate_manifest.py` cross-checks the recorded value against the
-/// harness output for every case.
+/// Threads per block. The manifest records this as a launch constraint.
+/// `scripts/smoke.sh` and `scripts/sanitize.sh` capture the harness output and
+/// `scripts/oxide_artifact.py check-launch` verifies every case's block and
+/// grid against the committed manifest.
 const BLOCK_SIZE: u32 = 256;
 
 /// The kernel under test. The host-side launch ABI is generated from this

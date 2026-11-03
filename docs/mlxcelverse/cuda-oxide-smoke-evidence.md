@@ -59,13 +59,13 @@ Full run, from `spike/cuda-oxide-smoke`:
 ```bash
 scripts/build.sh sm_121
 scripts/smoke.sh sm_121
+scripts/sanitize.sh sm_121
 scripts/check-unsupported-target.sh
 scripts/check-clean-build.sh
-. scripts/env.sh
-gpu-lock run --tag issue-2831 -- cargo oxide sanitize --tool memcheck --arch sm_121
+scripts/check-lint.sh
 ```
 
-`scripts/build.sh` runs `cargo oxide build --arch sm_121`, extracts the `.oxart` section with `objcopy`, parses the container, copies out the PTX payload, assembles it with `ptxas -arch=sm_121`, writes `artifacts/vecadd.manifest.json`, and validates that manifest against the PTX and cubin.
+`scripts/build.sh` runs `cargo oxide build --arch sm_121`, extracts the `.oxart` section with `objcopy`, parses the container, copies out the PTX payload, assembles it with `ptxas -arch=sm_121`, writes `artifacts/vecadd.manifest.json`, and validates that manifest against the PTX and cubin. `scripts/smoke.sh` and `scripts/sanitize.sh` both run the harness under `gpu-lock` and then check the reported block and grid against the manifest.
 
 Every GPU run went through `gpu-lock run --tag issue-2831 -- ...`. No GPU command ran unguarded.
 
@@ -109,7 +109,7 @@ The host binary carries a `.oxart` section. `objcopy --dump-section .oxart=...` 
 | Compile options | 0 (FMA contraction allowed, no debug info) |
 | Payload kind | `ptx` (0x0100) |
 | Payload size | 2379 bytes |
-| Payload name | empty |
+| Payload name | `cuda_oxide_smoke.ptx` |
 | Entries | kernel `vecadd`, plus two internal device-function symbols |
 
 The export step refused to continue unless the compiler's `.ptx` sidecar was byte-identical to the payload inside `.oxart`. The committed PTX is that payload.
@@ -132,7 +132,7 @@ The manifest records ABI version 1, the entry symbol, the source revision, the c
 
 The writable pointer's PTX annotation assumes one byte of alignment; that is weaker than the four bytes an `f32` allocation provides, so it is safe. The validator rejects a compiler assumption stricter than the declared allocation alignment.
 
-Launch constraints recorded in the manifest and checked against the harness output: one-dimensional index space, block `(256, 1, 1)`, grid `ceil_div(n, 256)`, zero dynamic shared memory, three contiguous `f32` buffers of exactly `n` elements, and out-of-range threads returning at the output bounds check.
+Launch constraints recorded in the manifest and checked against a real run: one-dimensional index space, block `(256, 1, 1)`, grid `ceil_div(n, 256)`, zero dynamic shared memory, three contiguous `f32` buffers of exactly `n` elements, and out-of-range threads returning at the output bounds check. `scripts/smoke.sh` and `scripts/sanitize.sh` capture the harness output and run `oxide_artifact.py check-launch`; it requires every `PASS` line's `block` to equal the manifest block dimension, its `grid` to equal `ceil_div(n, block)`, and the `RESULT` case and element counts to match the parsed lines. A skipped or shortened run fails there.
 
 Manifest validation output:
 
@@ -140,7 +140,7 @@ Manifest validation output:
 manifest valid: entry=vecadd target=sm_121 ptx_version=8.8 args=6 ptx_sha256=737559830058e1d1 cubin_sha256=4ab363a33b5b66ab
 ```
 
-The validator is not circular. The human-written file is `abi/vecadd.schema.json`; the manifest is generated; `validate` re-derives the layout from the committed PTX and cubin. A self-test that changed `c_ptr`'s width to 32 bits in a copy of the manifest failed with:
+The validator is not circular. The human-written file is `abi/vecadd.schema.json`; the manifest is generated; `validate` re-derives the layout from the committed PTX and cubin. It also requires the `.oxart` payload digest to equal the committed PTX digest and the recorded source revision to equal the schema's, so a swapped payload or a drifted revision fails. A self-test that changed `c_ptr`'s width to 32 bits in a copy of the manifest failed with:
 
 ```text
 FAIL arg c_ptr: manifest width_bits=32 != schema 64
@@ -168,6 +168,10 @@ PASS clean-build toolchain='rustc 1.97.1 (8bab26f4f 2026-07-14)' oxide_compiler=
 
 The spike package is absent from the mlxcel workspace, the root lockfile resolves no cuda-oxide crate, the dependency graph of the `mlxcel` package resolves no cuda-oxide crate, and a real workspace member (`mlxcel-mlx-pin`) compiled with the application toolchain.
 
+## Lint
+
+`scripts/check-lint.sh` runs `cargo fmt --check` and `RUSTC_BOOTSTRAP=1 cargo clippy --release --locked -- -D warnings` on the spike's 1.99.1 toolchain. Both pass. `RUSTC_BOOTSTRAP=1` matches the upstream workspace's own gate, because the pinned `cuda-macros` expands unstable attributes on a stable compiler.
+
 ## Reproducibility
 
 Rebuilding produced identical PTX and cubin digests across:
@@ -185,4 +189,3 @@ The device artifact depends on the pinned cuda-oxide revision, the kernel source
 - The committed cubin is assembled by CUDA `ptxas` from the emitted PTX. cuda-oxide's `--materialize-cubin` producer was not used for the committed artifact and would need its own manifest entry if adopted.
 - No performance measurement was attempted. A launch time on one kernel would not answer the feasibility question and could be misread as an integration result.
 - No Tensor Core, `tcgen05`, or CuTe path was compiled or run. The design review already records that the CuTe preview rejects `sm_121a`.
-- The `.oxart` PTX payload has an empty payload name in the format's own record. The manifest preserves that field as emitted rather than inventing a name.

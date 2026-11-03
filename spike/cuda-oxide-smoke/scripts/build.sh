@@ -26,8 +26,10 @@ esac
 mkdir -p build artifacts
 
 # The harness must stay MLX-free. This catches a dependency added by mistake
-# before the device artifact is produced.
-if cargo tree --locked --prefix none | grep -qE '^mlxcel v'; then
+# before the device artifact is produced. Capture the tree first: `grep -q` on
+# a pipe can exit early and make the producer fail with SIGPIPE under pipefail.
+dependency_tree=$(cargo tree --locked --prefix none)
+if grep -qE '^mlxcel v' <<<"$dependency_tree"; then
     echo "cuda-oxide-smoke: the package resolves the mlxcel crate; this spike must stay standalone" >&2
     exit 1
 fi

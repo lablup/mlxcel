@@ -78,7 +78,7 @@ def parse_artifact_section(data: bytes) -> list[dict]:
         for index in range(payload_count):
             record = records + index * PAYLOAD_RECORD_BYTES
             kind, _flags, data_offset, data_len, name_offset, item_name_len = struct.unpack_from(
-                "<HHIIHH", blob, record
+                "<HHIIIH", blob, record
             )
             payload_name = blob[name_offset : name_offset + item_name_len].decode("utf-8")
             payload = blob[data_offset : data_offset + data_len]

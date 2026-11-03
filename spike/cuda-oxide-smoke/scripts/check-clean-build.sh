@@ -37,10 +37,14 @@ fi
 echo "no cuda-oxide crate in Cargo.lock"
 
 echo "==> application dependency graph"
-if env -u CUDA_OXIDE_LLC -u LLVM_CONFIG_PATH -u LIBCLANG_PATH -u LLVM21_PREFIX \
-    PATH="$clean_path" \
-    cargo tree --locked -p mlxcel --prefix none |
-    grep -qE '^(cuda-oxide|cuda-device|cuda-host|cuda-core) v'; then
+# Capture the tree before grepping: `grep -q` on a pipe can exit early and make
+# cargo fail with SIGPIPE under pipefail, which would mask a real match.
+application_tree=$(
+    env -u CUDA_OXIDE_LLC -u LLVM_CONFIG_PATH -u LIBCLANG_PATH -u LLVM21_PREFIX \
+        PATH="$clean_path" \
+        cargo tree --locked -p mlxcel --prefix none
+)
+if grep -qE '^(cuda-oxide|cuda-device|cuda-host|cuda-core) v' <<<"$application_tree"; then
     echo "FAIL the mlxcel dependency graph resolves a cuda-oxide crate" >&2
     exit 1
 fi
@@ -56,4 +60,11 @@ rustc_version=$(
     env -u CUDA_OXIDE_LLC -u LLVM_CONFIG_PATH -u LIBCLANG_PATH -u LLVM21_PREFIX \
         PATH="$clean_path" rustc --version
 )
+case "$rustc_version" in
+    "rustc 1.97.1"*) ;;
+    *)
+        echo "FAIL application build used '$rustc_version', expected the 1.97.1 pin" >&2
+        exit 1
+        ;;
+esac
 echo "PASS clean-build toolchain='$rustc_version' oxide_compiler=absent"
