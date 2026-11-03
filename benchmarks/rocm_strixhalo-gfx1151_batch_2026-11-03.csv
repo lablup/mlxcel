@@ -1,0 +1,10 @@
+model,concurrency,ok,fail,ttft_mean_ms,ttft_p95_ms,decode_tok_s_mean,aggregate_tok_s,prompt_tokens,max_tokens,parallel,max_batch_prefill,date,hardware,mlxcel_version,mlxcel_commit,mlx_commit
+qwen2.5-0.5b-4bit,1,1,0,210.0,210.0,319.4,210.6,512,128,4,4,2026-11-03,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.8.1,f4d5fc5b,7ca40033
+qwen2.5-0.5b-4bit,2,2,0,62.5,72.5,190.6,350.8,512,128,4,4,2026-11-03,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.8.1,f4d5fc5b,7ca40033
+qwen2.5-0.5b-4bit,4,4,0,64.6,98.0,128.5,485.6,512,128,4,4,2026-11-03,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.8.1,f4d5fc5b,7ca40033
+Meta-Llama-3.1-8B-Instruct-4bit,1,1,0,654.4,654.4,41.2,34.3,512,128,4,4,2026-11-03,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.8.1,f4d5fc5b,7ca40033
+Meta-Llama-3.1-8B-Instruct-4bit,2,2,0,374.0,495.4,29.4,54.5,512,128,4,4,2026-11-03,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.8.1,f4d5fc5b,7ca40033
+Meta-Llama-3.1-8B-Instruct-4bit,4,4,0,607.9,970.5,18.8,69.4,512,128,4,4,2026-11-03,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.8.1,f4d5fc5b,7ca40033
+Qwen3-30B-A3B-4bit,1,1,0,1615.4,1615.4,67.3,36.6,512,128,4,4,2026-11-03,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.8.1,f4d5fc5b,7ca40033
+Qwen3-30B-A3B-4bit,2,2,0,1474.7,1474.7,44.6,59.2,512,128,4,4,2026-11-03,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.8.1,f4d5fc5b,7ca40033
+Qwen3-30B-A3B-4bit,4,4,0,3082.2,3082.9,28.8,68.4,512,128,4,4,2026-11-03,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.8.1,f4d5fc5b,7ca40033
