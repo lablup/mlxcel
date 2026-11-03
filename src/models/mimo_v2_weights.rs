@@ -153,7 +153,7 @@ fn dequant_block_fp8(
     lut: &MlxArray,
     name: &str,
 ) -> Result<UniquePtr<MlxArray>, String> {
-    let dense = reconstruct_block_fp8_tensor(name, weight, scale, FP8_BLOCK, lut)?;
+    let dense = reconstruct_block_fp8_tensor(name, weight, scale, FP8_BLOCK, FP8_BLOCK, lut)?;
     Ok(mlxcel_core::astype(&dense, dtype::BFLOAT16))
 }
 
@@ -179,10 +179,24 @@ pub(crate) fn unfuse_qkv(weights: WeightMap, args: &ModelArgs) -> Result<WeightM
 
     let mut source = weights;
     let keys: Vec<String> = source.keys().cloned().collect();
+    // `WeightMap` is a `HashMap`, so `keys` is not in a stable order across
+    // processes. Lift every fused-QKV scale sidecar out first: otherwise the
+    // weight pass finds its sidecar only when the weight happens to be listed
+    // before the scale, and the failing order silently dequantizes nothing and
+    // passes the raw E4M3 bytes through (the original intermittently-failing
+    // `unfuse_degree_four_with_padded_grid_recovers_q_k_v`).
+    let mut fused_scales: std::collections::HashMap<String, UniquePtr<MlxArray>> = keys
+        .iter()
+        .filter(|key| is_fused_qkv_scale(key.as_str()))
+        .filter_map(|key| {
+            source
+                .remove(key.as_str())
+                .map(|value| (key.clone(), value))
+        })
+        .collect();
     let mut out = WeightMap::new();
     for key in keys {
         if is_fused_qkv_scale(&key) {
-            source.remove(&key);
             continue;
         }
         let Some(value) = source.remove(&key) else {
@@ -193,7 +207,7 @@ pub(crate) fn unfuse_qkv(weights: WeightMap, args: &ModelArgs) -> Result<WeightM
             continue;
         }
 
-        let scale = source.remove(&format!("{key}_scale_inv"));
+        let scale = fused_scales.remove(&format!("{key}_scale_inv"));
         let prefix = key
             .strip_suffix("qkv_proj.weight")
             .ok_or_else(|| format!("MiMo-V2 fused key {key:?} has no qkv_proj suffix"))?;
@@ -290,7 +304,8 @@ pub(crate) fn dequantize_fp8_weights(weights: WeightMap) -> Result<WeightMap, St
                 "MiMo-V2 {key} has no matching weight at {base}; the FP8 sidecar cannot be applied"
             )
         })?;
-        let dense = reconstruct_block_fp8_tensor(&base, &weight, &scale, FP8_BLOCK, &lut)?;
+        let dense =
+            reconstruct_block_fp8_tensor(&base, &weight, &scale, FP8_BLOCK, FP8_BLOCK, &lut)?;
         out.insert(base, mlxcel_core::astype(&dense, dtype::BFLOAT16));
     }
     for (key, value) in source {
