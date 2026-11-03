@@ -1111,6 +1111,29 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "paddleocr_vl" => Ok(ModelType::PaddleOcrVL),
         "dots_ocr" => Ok(ModelType::DotsOcrVL),
         "falcon_ocr" => Ok(ModelType::FalconOcrVL),
+        // IndicOCR ships as a two-stage repository (layout + Qwen3.5 OCR) whose
+        // root config carries `stages`, and as a flat OCR-stage config with
+        // `text_config`. Only the OCR stage is a loadable VLM; the root is
+        // driven by the page pipeline in `mlxcel generate`, so reject it here
+        // with the command to use rather than misloading it as Qwen3.5.
+        "indic_ocr" => {
+            if v.get("text_config").is_some() {
+                Ok(ModelType::Qwen35VLM)
+            } else if v.get("stages").is_some() {
+                Err(anyhow::anyhow!(
+                    "{} is a two-stage IndicOCR repository; run the page pipeline with \
+                     `mlxcel generate -m <dir> --image page.png`, or point -m at the OCR \
+                     stage (weights/ocr) for single-crop transcription",
+                    model_path.display()
+                ))
+            } else {
+                Err(anyhow::anyhow!(
+                    "{} declares model_type \"indic_ocr\" but has neither a `text_config` \
+                     (OCR stage) nor a `stages` block (two-stage repository)",
+                    model_path.display()
+                ))
+            }
+        }
         "glm4v" => Ok(ModelType::Glm4v),
         "glm4v_moe" => Ok(ModelType::Glm4vMoe),
         "glm_ocr" => Ok(ModelType::GlmOcr),

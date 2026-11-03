@@ -905,7 +905,7 @@ fn resolve_cli_prompt(
     )
 }
 
-fn load_cli_prompt(
+pub(super) fn load_cli_prompt(
     model_path: &Path,
     tokenizer: &crate::MlxcelTokenizer,
     user_prompt: &str,
@@ -1775,6 +1775,7 @@ pub(super) fn run_generation_mode(
     model: &mlxcel::LoadedModel,
     args: &GenerateArgs,
     prompt_tokens: &[i32],
+    max_tokens: usize,
     sampling_config: &SamplingConfig,
     vlm_embeddings: Option<&InputEmbeddings>,
     kv_cache_mode: KVCacheMode,
@@ -1864,7 +1865,7 @@ pub(super) fn run_generation_mode(
                     model,
                     draft_model_path,
                     prompt_tokens,
-                    args.generation.max_tokens,
+                    max_tokens,
                     sampling_config,
                     block_size as usize,
                     kv_cache_mode,
@@ -1885,7 +1886,7 @@ pub(super) fn run_generation_mode(
                     model,
                     draft_model_path,
                     prompt_tokens,
-                    args.generation.max_tokens,
+                    max_tokens,
                     sampling_config,
                     block_size as usize,
                     token_bias,
@@ -1910,7 +1911,7 @@ pub(super) fn run_generation_mode(
             model,
             prompt_tokens,
             embeddings,
-            args.generation.max_tokens,
+            max_tokens,
             sampling_config,
             args.generation.profile,
             kv_cache_mode,
@@ -1920,7 +1921,7 @@ pub(super) fn run_generation_mode(
         generate_standard(
             model,
             prompt_tokens,
-            args.generation.max_tokens,
+            max_tokens,
             sampling_config,
             args.generation.profile,
             kv_cache_mode,
@@ -2712,6 +2713,12 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
             );
             args.model.model = resolved;
             args.generation.prompt = Some(String::new());
+        } else if super::generate_indic_ocr::is_indic_ocr_root(&resolved) {
+            // The page pipeline needs no `-p`; every region's instruction comes
+            // from its layout class, so an absent prompt is a one-shot run, not
+            // the interactive REPL.
+            args.model.model = resolved;
+            args.generation.prompt = Some(String::new());
         }
     }
     if args.generation.prompt.is_none() {
@@ -2811,6 +2818,12 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // applies. Route it before any of that runs.
     if super::generate_voicechat::is_voicechat_checkpoint(&args.model.model) {
         return super::generate_voicechat::run_voicechat_generation(&args);
+    }
+    // IndicOCR is a two-stage page pipeline whose root config is not a loadable
+    // VLM. Route it before any text-generation setup, including the layout
+    // validation below (the pipeline parses `--layout-detections` itself).
+    if super::generate_indic_ocr::is_indic_ocr_root(&args.model.model) {
+        return super::generate_indic_ocr::run_indic_ocr_pipeline(&args);
     }
 
     validate_tensor_parallel_args(&args)?;
@@ -3272,6 +3285,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             &model,
             &args,
             &prompt_tokens,
+            args.generation.max_tokens,
             &sampling_config,
             vlm_embeddings.as_ref(),
             kv_cache_mode,

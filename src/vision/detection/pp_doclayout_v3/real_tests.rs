@@ -22,7 +22,10 @@ use serde::Deserialize;
 
 use super::model::PpDocLayoutV3Model;
 use super::postprocess::decode_detections;
-use super::predictor::read_output_f32;
+use super::predictor::{
+    MLX_VLM_DEFAULT_CONF, MLX_VLM_DEFAULT_IMG_SIZE, PpDocLayoutDecode, PpDocLayoutV3Predictor,
+    read_output_f32,
+};
 use super::processor::PpDocLayoutV3Processor;
 use super::sanitize::{needs_sanitize, sanitize};
 use mlxcel_core::weights::{WeightMap, load_weights_from_dir};
@@ -386,4 +389,49 @@ fn real_sanitizer_is_idempotent_and_both_layouts_have_identical_key_shapes() {
     assert!(!needs_sanitize(&hashnuke).unwrap());
     let hashnuke = sanitize(hashnuke).unwrap();
     assert_eq!(weight_signature(&hashnuke), paddle_once);
+}
+
+/// The IndicOCR layout stage is a PP-DocLayoutV3 fine-tune decoded with
+/// mlx-vlm's `detect()` semantics. This exercises that path end to end on the
+/// real checkpoint: every retained query contributes one box, reading order is
+/// dense, and boxes stay within the page.
+#[test]
+#[ignore = "requires the IndicOCR layout stage (HashNuke/indic-ocr-mlx weights/layout)"]
+fn mlx_vlm_decode_runs_on_the_indic_layout_checkpoint() {
+    let _device_lock = mlxcel_core::streams::lock_default_device();
+    let directory = checkpoint("MLXCEL_TEST_INDIC_LAYOUT_DIR");
+    let predictor = PpDocLayoutV3Predictor::from_pretrained_with_decode(
+        &directory,
+        MLX_VLM_DEFAULT_CONF,
+        PpDocLayoutDecode::MlxVlmDetect {
+            conf: MLX_VLM_DEFAULT_CONF,
+            img_size: MLX_VLM_DEFAULT_IMG_SIZE,
+        },
+    )
+    .unwrap();
+    let page =
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(1000, 600, image::Rgb([255, 255, 255])));
+    let result = predictor
+        .detect_mlx_vlm_image(&page, MLX_VLM_DEFAULT_CONF, MLX_VLM_DEFAULT_IMG_SIZE)
+        .unwrap();
+    let mut orders: Vec<u32> = result
+        .detections
+        .iter()
+        .filter_map(|detection| detection.reading_order)
+        .collect();
+    orders.sort_unstable();
+    assert_eq!(orders, (1..=orders.len() as u32).collect::<Vec<_>>());
+    for detection in &result.detections {
+        assert!(
+            detection.bbox[0] <= detection.bbox[2],
+            "{:?}",
+            detection.bbox
+        );
+        assert!(
+            detection.bbox[1] <= detection.bbox[3],
+            "{:?}",
+            detection.bbox
+        );
+        assert!(detection.score >= MLX_VLM_DEFAULT_CONF);
+    }
 }

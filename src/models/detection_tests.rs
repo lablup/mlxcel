@@ -2246,3 +2246,48 @@ fn dense_checkpoint_redirects_generate_to_predict() {
         );
     }
 }
+
+#[test]
+fn indic_ocr_ocr_stage_routes_to_the_qwen35_vlm_loader() {
+    let directory = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        directory.path().join("config.json"),
+        serde_json::to_vec(&json!({
+            "model_type": "indic_ocr",
+            "architectures": ["Qwen3_5ForConditionalGeneration"],
+            "text_config": {"model_type": "qwen3_5_text"},
+            "vision_config": {"hidden_size": 1024},
+            "vocab_size": 262157,
+            "image_token_id": 262155,
+            "video_token_id": 262156,
+            "vision_start_token_id": 262153
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        super::detection::get_model_type(directory.path()).unwrap(),
+        ModelType::Qwen35VLM
+    );
+}
+
+#[test]
+fn indic_ocr_root_points_at_the_page_pipeline() {
+    let directory = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        directory.path().join("config.json"),
+        serde_json::to_vec(&json!({
+            "model_type": "indic_ocr",
+            "stages": {
+                "layout": {"config": "weights/layout/config.json"},
+                "ocr": {"config": "weights/ocr/config.json"}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let error = super::detection::get_model_type(directory.path())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("page pipeline"), "{error}");
+}

@@ -22,20 +22,70 @@ use mlxcel_core::MlxArray;
 use crate::vision::detection::{DetectionResult, Detector};
 
 use super::model::{PpDocLayoutV3Model, PpDocLayoutV3Output};
-use super::postprocess::decode_detections;
+use super::postprocess::{decode_detections, decode_mlx_vlm_detections};
 use super::processor::{PpDocLayoutV3Processor, ProcessedImage};
 
 pub const DEFAULT_THRESHOLD: f32 = 0.3;
+/// Default confidence for [`PpDocLayoutDecode::MlxVlmDetect`].
+pub const MLX_VLM_DEFAULT_CONF: f32 = 0.5;
+/// Default square input side for [`PpDocLayoutDecode::MlxVlmDetect`].
+pub const MLX_VLM_DEFAULT_IMG_SIZE: usize = 1024;
+
+/// How to turn the detector's raw head into boxes.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum PpDocLayoutDecode {
+    /// Hugging Face post-processing: 800 px input, flat top-k over the
+    /// query-by-class grid, and the page-wide GlobalPointer order. This is
+    /// what `mlxcel detect` uses.
+    #[default]
+    HuggingFace,
+    /// mlx-vlm `detect()` semantics: resize to `img_size` square, one argmax
+    /// label per query, keep `score > conf`, and decode the order matrix over
+    /// the retained sub-block only. IndicOCR's layout stage was trained on
+    /// this path.
+    MlxVlmDetect { conf: f32, img_size: usize },
+}
+
+impl PpDocLayoutDecode {
+    fn validate(self) -> Result<(), String> {
+        match self {
+            Self::HuggingFace => Ok(()),
+            Self::MlxVlmDetect { conf, img_size } => {
+                if !conf.is_finite() || !(0.0..=1.0).contains(&conf) {
+                    return Err(format!(
+                        "PP-DocLayoutV3 mlx-vlm confidence must be finite and in [0, 1], got {conf}"
+                    ));
+                }
+                if img_size == 0 || img_size > 4096 {
+                    return Err(format!(
+                        "PP-DocLayoutV3 mlx-vlm image size must be in 1..=4096, got {img_size}"
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
 
 pub struct PpDocLayoutV3Predictor {
     model: PpDocLayoutV3Model,
     processor: PpDocLayoutV3Processor,
     threshold: f32,
     labels: Option<Vec<String>>,
+    decode: PpDocLayoutDecode,
 }
 
 impl PpDocLayoutV3Predictor {
     pub fn from_pretrained<P: AsRef<Path>>(directory: P, threshold: f32) -> Result<Self, String> {
+        Self::from_pretrained_with_decode(directory, threshold, PpDocLayoutDecode::default())
+    }
+
+    pub fn from_pretrained_with_decode<P: AsRef<Path>>(
+        directory: P,
+        threshold: f32,
+        decode: PpDocLayoutDecode,
+    ) -> Result<Self, String> {
+        decode.validate()?;
         if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
             return Err(format!(
                 "PP-DocLayoutV3 confidence threshold must be finite and in [0, 1], got {threshold}"
@@ -58,7 +108,12 @@ impl PpDocLayoutV3Predictor {
             processor,
             threshold,
             labels,
+            decode,
         })
+    }
+
+    pub fn decode(&self) -> PpDocLayoutDecode {
+        self.decode
     }
 
     pub fn model(&self) -> &PpDocLayoutV3Model {
@@ -77,6 +132,63 @@ impl PpDocLayoutV3Predictor {
     pub fn predict_image(&self, image: &DynamicImage) -> Result<DetectionResult, String> {
         let processed = self.processor.process_image(image)?;
         self.predict_processed(processed)
+    }
+
+    /// Run the detector with mlx-vlm's `detect()` preprocessing and decoding
+    /// (IndicOCR's layout stage). The image is stretched to `img_size` square,
+    /// so boxes are scaled back to the original page.
+    pub fn detect_mlx_vlm_image(
+        &self,
+        image: &DynamicImage,
+        conf: f32,
+        img_size: usize,
+    ) -> Result<DetectionResult, String> {
+        PpDocLayoutDecode::MlxVlmDetect { conf, img_size }.validate()?;
+        let (width, height) = (image.width(), image.height());
+        if width == 0 || height == 0 {
+            return Err("PP-DocLayoutV3 mlx-vlm path received an empty image".into());
+        }
+        let side = img_size as u32;
+        let rgb = image.to_rgb8();
+        // Pillow's `Image.resize` defaults to bicubic, which is what mlx-vlm's
+        // `detect()` uses.
+        let resized =
+            image::imageops::resize(&rgb, side, side, image::imageops::FilterType::CatmullRom);
+        let mut data = vec![0.0_f32; (side * side * 3) as usize];
+        for (index, pixel) in resized.pixels().enumerate() {
+            let base = index * 3;
+            data[base] = f32::from(pixel[0]) / 255.0;
+            data[base + 1] = f32::from(pixel[1]) / 255.0;
+            data[base + 2] = f32::from(pixel[2]) / 255.0;
+        }
+        let pixel_values = mlxcel_core::from_slice_f32(&data, &[1, side as i32, side as i32, 3]);
+        let output = self.model.forward(&pixel_values)?;
+        let queries = self.model.config().num_queries;
+        let labels = self.model.config().num_labels;
+        let logits_shape = output_shape("logits", &output.logits, 3)?;
+        let boxes_shape = output_shape("pred_boxes", &output.pred_boxes, 3)?;
+        let order_shape = output_shape("order_logits", &output.order_logits, 3)?;
+        if logits_shape != [1, queries as i32, labels as i32]
+            || boxes_shape != [1, queries as i32, 4]
+            || order_shape != [1, queries as i32, queries as i32]
+        {
+            return Err(format!(
+                "PP-DocLayoutV3 output shapes differ from config: logits={logits_shape:?}, \
+                 pred_boxes={boxes_shape:?}, order_logits={order_shape:?}"
+            ));
+        }
+        let detections = decode_mlx_vlm_detections(
+            &read_output_f32(&output.logits),
+            &read_output_f32(&output.pred_boxes),
+            &read_output_f32(&output.order_logits),
+            queries,
+            labels,
+            width as f32,
+            height as f32,
+            conf,
+            self.labels.as_deref(),
+        )?;
+        Ok(DetectionResult { detections })
     }
 
     fn predict_processed(&self, processed: ProcessedImage) -> Result<DetectionResult, String> {

@@ -36,8 +36,13 @@ mod weights;
 
 pub use config::{HgNetV2Config, PpDocLayoutV3Config};
 pub use model::{PpDocLayoutV3Model, PpDocLayoutV3Output};
-pub use postprocess::{decode_detections, decode_reading_order, denormalize_box};
-pub use predictor::{DEFAULT_THRESHOLD, PpDocLayoutV3Predictor};
+pub use postprocess::{
+    decode_detections, decode_mlx_vlm_detections, decode_reading_order, denormalize_box,
+};
+pub use predictor::{
+    DEFAULT_THRESHOLD, MLX_VLM_DEFAULT_CONF, MLX_VLM_DEFAULT_IMG_SIZE, PpDocLayoutDecode,
+    PpDocLayoutV3Predictor,
+};
 pub use processor::{PpDocLayoutV3Processor, ProcessedImage, ProcessorConfig};
 pub use sanitize::{needs_sanitize, sanitize};
 

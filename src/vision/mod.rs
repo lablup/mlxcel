@@ -65,6 +65,7 @@ pub mod granite4_vision;
 pub mod granite_vision;
 pub mod hunyuan_vl;
 pub mod idefics2;
+pub mod indic_ocr;
 pub mod inkling_vl;
 pub mod internvl;
 pub mod jina_vlm;

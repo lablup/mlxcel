@@ -43,9 +43,23 @@ pub struct HgNetV2Config {
     pub use_learnable_affine_block: bool,
     pub out_features: Vec<String>,
     /// Transformers calls this field `return_idx`; mlx-vlm calls it
-    /// `out_indices`. The graph always returns all four stages.
-    #[serde(alias = "return_idx")]
-    pub out_indices: Vec<usize>,
+    /// `out_indices`. IndicDocLayout carries both with different values, so
+    /// they are separate optional fields and [`Self::resolved_out_indices`]
+    /// prefers `out_indices`. The graph always returns all four stages.
+    #[serde(default)]
+    pub out_indices: Option<Vec<usize>>,
+    #[serde(default)]
+    pub return_idx: Option<Vec<usize>>,
+}
+
+impl HgNetV2Config {
+    /// Output-stage indices, preferring `out_indices` over `return_idx`.
+    pub fn resolved_out_indices(&self) -> Vec<usize> {
+        self.out_indices
+            .clone()
+            .or_else(|| self.return_idx.clone())
+            .unwrap_or_else(|| vec![1, 2, 3, 4])
+    }
 }
 
 impl Default for HgNetV2Config {
@@ -73,7 +87,8 @@ impl Default for HgNetV2Config {
             out_features: ["stage1", "stage2", "stage3", "stage4"]
                 .map(str::to_string)
                 .to_vec(),
-            out_indices: vec![1, 2, 3, 4],
+            out_indices: None,
+            return_idx: None,
         }
     }
 }
@@ -133,7 +148,10 @@ impl HgNetV2Config {
             .iter()
             .map(String::as_str)
             .ne(expected_features)
-            || (self.out_indices != [0, 1, 2, 3] && self.out_indices != [1, 2, 3, 4])
+            || {
+                let indices = self.resolved_out_indices();
+                indices != [0, 1, 2, 3] && indices != [1, 2, 3, 4]
+            }
         {
             return Err("PP-DocLayoutV3 requires all four HGNetV2 output stages in order".into());
         }
@@ -153,8 +171,12 @@ pub struct PpDocLayoutV3Config {
     pub d_model: usize,
     pub encoder_hidden_dim: usize,
     pub encoder_in_channels: Vec<usize>,
-    #[serde(alias = "feature_strides")]
-    pub feat_strides: Vec<usize>,
+    /// mlx-vlm spells this `feat_strides`; some exports carry
+    /// `feature_strides` as well. Both are accepted and `feat_strides` wins.
+    #[serde(default)]
+    pub feat_strides: Option<Vec<usize>>,
+    #[serde(default)]
+    pub feature_strides: Option<Vec<usize>>,
     pub encoder_layers: usize,
     pub encoder_ffn_dim: usize,
     pub encoder_attention_heads: usize,
@@ -195,7 +217,8 @@ impl Default for PpDocLayoutV3Config {
             d_model: 256,
             encoder_hidden_dim: 256,
             encoder_in_channels: vec![512, 1024, 2048],
-            feat_strides: vec![8, 16, 32],
+            feat_strides: None,
+            feature_strides: None,
             encoder_layers: 1,
             encoder_ffn_dim: 1024,
             encoder_attention_heads: 8,
@@ -228,6 +251,14 @@ impl Default for PpDocLayoutV3Config {
 }
 
 impl PpDocLayoutV3Config {
+    /// Feature strides, preferring `feat_strides` over `feature_strides`.
+    pub fn resolved_feat_strides(&self) -> Vec<usize> {
+        self.feat_strides
+            .clone()
+            .or_else(|| self.feature_strides.clone())
+            .unwrap_or_else(|| vec![8, 16, 32])
+    }
+
     pub fn from_json_str(json: &str) -> Result<Self, String> {
         let mut config: Self = serde_json::from_str(json)
             .map_err(|error| format!("PP-DocLayoutV3 config parse error: {error}"))?;
@@ -267,9 +298,10 @@ impl PpDocLayoutV3Config {
         if self.encoder_hidden_dim != self.d_model {
             return Err("encoder_hidden_dim must equal d_model for the feature pyramid".into());
         }
+        let feat_strides = self.resolved_feat_strides();
         if self.encoder_in_channels.len() != self.num_feature_levels
             || self.decoder_in_channels.len() != self.num_feature_levels
-            || self.feat_strides.len() != self.num_feature_levels
+            || feat_strides.len() != self.num_feature_levels
             || self.num_feature_levels == 0
         {
             return Err(
@@ -279,7 +311,7 @@ impl PpDocLayoutV3Config {
         if self.encoder_in_channels != self.backbone_config.stage_out_channels[1..] {
             return Err("encoder_in_channels must match HGNetV2 stages 2 through 4".into());
         }
-        if self.feat_strides != [8, 16, 32] {
+        if feat_strides != [8, 16, 32] {
             return Err("the mask feature path requires feature strides [8, 16, 32]".into());
         }
         if self
@@ -391,8 +423,8 @@ mod tests {
         .unwrap();
         assert_eq!(config.image_size, 800);
         assert_eq!(config.num_labels, 2);
-        assert_eq!(config.feat_strides, [8, 16, 32]);
-        assert_eq!(config.backbone_config.out_indices, [0, 1, 2, 3]);
+        assert_eq!(config.resolved_feat_strides(), [8, 16, 32]);
+        assert_eq!(config.backbone_config.resolved_out_indices(), [0, 1, 2, 3]);
         assert_eq!(config.class_names().unwrap(), ["title", "text"]);
     }
 
