@@ -3375,6 +3375,71 @@ impl Gemma4TextModel {
             .map(|layer| &layer.self_attn)
     }
 
+    /// Whether any decoder layer belongs to `layer_type`. A family with no
+    /// layer never consumes its mask, so the #2410 trim does not need one for
+    /// it.
+    fn uses_layer_family(&self, layer_type: &str) -> bool {
+        self.layers
+            .iter()
+            .any(|layer| layer.layer_type == layer_type)
+    }
+
+    /// The single-query-row masks the KV-shared tail needs once `h` is trimmed
+    /// to the sampled row (issue #2410).
+    ///
+    /// `geometry` is `(global offset, global live length, sliding offset,
+    /// sliding live length)` sampled before the layer loop. Returns `None`
+    /// when the trim cannot reproduce the full-width masks exactly, in which
+    /// case the caller leaves the tail untrimmed and the forward is unchanged.
+    ///
+    /// A family whose plain mask exists is sliced, which is exact by
+    /// construction. A family without one is fine at the last query row (a
+    /// one-row causal / windowed attention over the retained keys is the
+    /// decode shape the untrimmed path would reach anyway) and for an interior
+    /// row only when its keys are full length, so the row can be rebuilt from
+    /// its absolute position.
+    fn trimmed_tail_row_masks(
+        &self,
+        p: i32,
+        query_len: i32,
+        global_mask: Option<&MlxArray>,
+        sliding_mask: Option<&MlxArray>,
+        geometry: (i32, i32, i32, i32),
+    ) -> Option<(Option<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>)> {
+        let (global_offset, global_live, sliding_offset, sliding_live) = geometry;
+        let global = if self.uses_layer_family("full_attention") {
+            trimmed_family_row_mask(
+                global_mask,
+                global_offset + p,
+                global_live + query_len,
+                global_live == global_offset,
+                p,
+                query_len,
+            )?
+        } else {
+            None
+        };
+        let sliding = if self.uses_layer_family("sliding_attention") {
+            // A `None` sliding mask means either every retained key is inside
+            // the window (full-length keys, no band to apply) or that the
+            // native over-window route left it out. Only the first can be
+            // rebuilt for an interior row; past the window, only the last row
+            // is exact.
+            let within_window = sliding_live + query_len <= self.config.sliding_window as i32;
+            trimmed_family_row_mask(
+                sliding_mask,
+                sliding_offset + p,
+                sliding_live + query_len,
+                within_window,
+                p,
+                query_len,
+            )?
+        } else {
+            None
+        };
+        Some((global, sliding))
+    }
+
     /// Whether this forward is a B > 1 MTP verify that must run per batch
     /// row (issue #2190).
     ///
@@ -3429,6 +3494,7 @@ impl Gemma4TextModel {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -3468,6 +3534,15 @@ impl Gemma4TextModel {
     /// has no such gap); the current window's keys `[offset, offset + l)` keep
     /// base causal semantics. `None` (every non-batched-verify caller) is a
     /// byte-identical no-op, as is a uniform round where every `ve[r] == offset`.
+    ///
+    /// `keep_row` (issue #2410) is the sampled row of a prefill that only needs
+    /// one position's logits. When the checkpoint has a KV-shared tail
+    /// (`num_kv_shared_layers > 0`) and nothing is being captured, the tail
+    /// layers are fed only that row instead of the whole prompt: they write no
+    /// K/V of their own, so their other rows exist only to be discarded. The
+    /// returned hidden state then holds a single row; `None` (every caller
+    /// except the two `*_last_*` prefill entries) leaves the forward
+    /// byte-identical to before.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_with_speculative_sinks(
         &self,
@@ -3482,6 +3557,7 @@ impl Gemma4TextModel {
         bidirectional_block_ids: Option<&MlxArray>,
         left_padding: Option<&[i32]>,
         per_row_valid_end: Option<&[i32]>,
+        keep_row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         #[cfg(test)]
         if let Some(s) = sinks.as_deref() {
@@ -3505,7 +3581,7 @@ impl Gemma4TextModel {
         let b = shape[0];
         let l = shape[1];
 
-        let per_layer_inputs = if self.config.hidden_size_per_layer_input > 0 {
+        let mut per_layer_inputs = if self.config.hidden_size_per_layer_input > 0 {
             let inputs = if let Some(inputs) = per_layer_inputs {
                 mlxcel_core::copy(inputs)
             } else {
@@ -3810,7 +3886,7 @@ impl Gemma4TextModel {
         // masks. Text↔text, text↔vision and cross-block pairs keep the causal
         // (and, for sliding layers, windowed) base value. Decode (`l == 1`)
         // leaves the masks `None` and is unaffected.
-        let (global_mask, sliding_mask) = match bidirectional_block_ids {
+        let (mut global_mask, mut sliding_mask) = match bidirectional_block_ids {
             Some(block_ids) if l > 1 => (
                 global_mask
                     .as_ref()
@@ -3821,6 +3897,50 @@ impl Gemma4TextModel {
             ),
             _ => (global_mask, sliding_mask),
         };
+
+        // KV-shared tail trim (issue #2410). The last `num_kv_shared_layers`
+        // layers read K/V from an earlier layer and write nothing to the
+        // cache, so on a prefill that only needs one row's logits every other
+        // prompt row still runs through the whole tail and is thrown away.
+        // Trim the hidden state to the sampled row at the first shared layer.
+        //
+        // The decision needs only values that are available here: the trim is
+        // skipped for batched input (right-padded batch prefill is out of
+        // scope), for single-row input (nothing to drop), and for every
+        // capture path (a hidden or shared-K/V sink, or explicit
+        // `capture_layer_ids`) because those consumers expect full width. The
+        // two families' masks are derived per family at the trim point below,
+        // which is why a family whose plain masks are unavailable can still
+        // decline the trim.
+        let trim_row: Option<i32> = keep_row
+            .filter(|_| !kv_shared_tail_trim_disabled())
+            .filter(|&p| {
+                self.config.num_kv_shared_layers > 0
+                    && self.config.first_kv_shared_layer_idx() > 0
+                    && b == 1
+                    && l > 1
+                    && p < l as usize
+                    && sinks.is_none()
+                    && capture_layer_ids.is_none_or(|ids| ids.is_empty())
+                    && !has_padding
+                    && per_row_valid_end.is_none()
+                    && row_offsets.is_none()
+                    && tree_positions.is_none()
+            })
+            .map(|p| p as i32);
+        // Cache geometry the trimmed rows are masked against, sampled before
+        // the layer loop because the loop holds a mutable borrow of `caches`.
+        let trim_geometry = trim_row.map(|_| {
+            (
+                first_cache_offset(caches, "full_attention"),
+                first_cache_live_len(caches, "full_attention"),
+                first_cache_offset(caches, "sliding_attention"),
+                first_cache_live_len(caches, "sliding_attention"),
+            )
+        });
+        // Row offset the trimmed tail's shared layers rotate their queries at,
+        // 0 until the trim actually commits at the first shared layer.
+        let mut tail_row_offset = 0;
 
         let mut shared_kv_store: HashMap<usize, (UniquePtr<MlxArray>, UniquePtr<MlxArray>, i32)> =
             HashMap::new();
@@ -3848,15 +3968,58 @@ impl Gemma4TextModel {
             capture_layer_ids.map(|ids| ids.iter().copied().collect());
         let has_capture_layers = capture_set.as_ref().is_some_and(|s| !s.is_empty());
 
+        let mut cur_l = l;
+        let mut tail_trimmed = false;
+
         for (i, layer) in self.layers.iter().enumerate() {
             let cache = caches[i].as_interface();
+
+            // Commit the #2410 tail trim here, before any of the layer's
+            // inputs are derived: from this layer on every remaining layer
+            // reads its K/V from `shared_kv_store`, so the other prompt rows
+            // have no consumer. The RoPE offset of the trimmed queries is
+            // carried by `tail_row_offset` below so row `p` keeps its
+            // absolute position.
+            if !tail_trimmed
+                && i == self.config.first_kv_shared_layer_idx()
+                && layer.self_attn.is_kv_shared_layer
+                && layer
+                    .self_attn
+                    .kv_shared_layer_index
+                    .is_some_and(|ref_idx| shared_kv_store.contains_key(&ref_idx))
+                && let (Some(p), Some(geometry)) = (trim_row, trim_geometry)
+                && let Some((global_row, sliding_row)) = self.trimmed_tail_row_masks(
+                    p,
+                    l,
+                    global_mask.as_ref().map(|m| m.as_ref().unwrap()),
+                    sliding_mask.as_ref().map(|m| m.as_ref().unwrap()),
+                    geometry,
+                )
+            {
+                h = slice_axis(&h, 1, p, p + 1);
+                if let Some(inputs) = per_layer_inputs.as_mut() {
+                    *inputs = slice_axis(inputs, 1, p, p + 1);
+                }
+                global_mask = global_row;
+                sliding_mask = sliding_row;
+                cur_l = 1;
+                tail_row_offset = p;
+                tail_trimmed = true;
+                tracing::debug!(
+                    layer = i,
+                    keep_row = p,
+                    prompt_rows = l,
+                    "gemma4: trimmed the KV-shared tail to the sampled row"
+                );
+            }
+
             let mut shared_kv = None;
 
             if layer.self_attn.is_kv_shared_layer
                 && let Some(ref_idx) = layer.self_attn.kv_shared_layer_index
                 && let Some((keys, values, ref_offset)) = shared_kv_store.get(&ref_idx)
             {
-                cache.set_offset(*ref_offset);
+                cache.set_offset(*ref_offset + tail_row_offset);
                 shared_kv = Some((keys.as_ref().unwrap(), values.as_ref().unwrap()));
             }
 
@@ -3870,7 +4033,7 @@ impl Gemma4TextModel {
                     inputs,
                     i as i32,
                     b,
-                    l,
+                    cur_l,
                     self.config.hidden_size_per_layer_input as i32,
                 )
             });
@@ -3927,7 +4090,7 @@ impl Gemma4TextModel {
                     "[LAYER_BUILD {:02}] type={} seq_len={} ms={:.3}",
                     i,
                     layer.layer_type,
-                    l,
+                    cur_l,
                     start.elapsed().as_secs_f64() * 1000.0
                 );
             }
@@ -3937,7 +4100,7 @@ impl Gemma4TextModel {
                     "[LAYER {:02}] type={} seq_len={} ms={:.3}",
                     i,
                     layer.layer_type,
-                    l,
+                    cur_l,
                     start.elapsed().as_secs_f64() * 1000.0
                 );
             }
@@ -4480,6 +4643,78 @@ fn text_prefill_masks(
     (None, sliding_mask)
 }
 
+/// `MLXCEL_GEMMA4_NO_KV_SHARED_TAIL_TRIM=1` disables the issue #2410 trim,
+/// matching the `MLXCEL_*` kill switches the rest of the Gemma 4 runtime keeps
+/// for A/B traces of a branch that should be numerically neutral.
+fn kv_shared_tail_trim_disabled() -> bool {
+    std::env::var("MLXCEL_GEMMA4_NO_KV_SHARED_TAIL_TRIM").as_deref() == Ok("1")
+}
+
+/// Cut a prefill mask down to its single query row `p` (issue #2410).
+///
+/// The text model builds 2-D `[queries, keys]` masks and passes caller masks
+/// through unchanged, so the query axis is the second-to-last one in both
+/// layouts. Slicing that axis leaves the key axis untouched: row `p` of a
+/// causal or windowed mask already states exactly which keys the trimmed
+/// query may see.
+fn slice_mask_query_row(mask: &MlxArray, p: i32) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(mask);
+    let axis = (shape.len() as i32 - 2).max(0) as usize;
+    let mut starts = vec![0; shape.len()];
+    let mut stops = shape.clone();
+    starts[axis] = p;
+    stops[axis] = p + 1;
+    mlxcel_core::slice(mask, &starts, &stops)
+}
+
+/// Rebuild the additive mask of one query row at absolute position `q_pos`
+/// over `key_len` retained keys, whose column `k` is logical key position `k`.
+///
+/// Used by: [`trimmed_family_row_mask`] when a family's plain prefill mask is
+/// `None` (the dense full-attention path and the within-window sliding path).
+/// The output is the same `0 / -inf` f32 additive mask the dense builders
+/// produce, at one row instead of `[query_len, key_len]`.
+fn single_query_row_mask(q_pos: i32, key_len: i32, window: Option<i32>) -> UniquePtr<MlxArray> {
+    let keys = mlxcel_core::reshape(&mlxcel_core::arange_i32(0, key_len, 1), &[1, key_len]);
+    let query = mlxcel_core::from_slice_i32(&[q_pos], &[1, 1]);
+    let mut allowed = mlxcel_core::less_equal(&keys, &query);
+    if let Some(window) = window {
+        let lowest = mlxcel_core::from_slice_i32(&[q_pos - window + 1], &[1, 1]);
+        allowed = mlxcel_core::logical_and(&allowed, &mlxcel_core::greater_equal(&keys, &lowest));
+    }
+    let attend = mlxcel_core::from_slice_f32(&[0.0], &[1, 1]);
+    let blocked = mlxcel_core::from_slice_f32(&[f32::NEG_INFINITY], &[1, 1]);
+    mlxcel_core::where_cond(&allowed, &attend, &blocked)
+}
+
+/// Row mask of one attention family for the #2410 trimmed tail, or `None`
+/// when the trim cannot be reproduced exactly for this family.
+///
+/// `Some(None)` means the family needs no mask at all: either its plain mask
+/// does not exist and the sampled row is the last one (the retained-key causal
+/// / windowed decode path is exactly that row), or every key is full length
+/// and the one-row attention path is already correct. `None` means the caller
+/// must leave the whole tail untrimmed.
+fn trimmed_family_row_mask(
+    mask: Option<&MlxArray>,
+    q_pos: i32,
+    key_len: i32,
+    full_length_keys: bool,
+    p: i32,
+    query_len: i32,
+) -> Option<Option<UniquePtr<MlxArray>>> {
+    if let Some(mask) = mask {
+        return Some(Some(slice_mask_query_row(mask, p)));
+    }
+    if p + 1 == query_len {
+        return Some(None);
+    }
+    if !full_length_keys || key_len <= 0 {
+        return None;
+    }
+    Some(Some(single_query_row_mask(q_pos, key_len, None)))
+}
+
 /// Whether a `quantization_config` object declares NVIDIA ModelOpt NVFP4:
 /// `quant_method: "modelopt"`, `quant_algo: "NVFP4"`, and every config group's
 /// weights 4-bit float at group size 16, the `{weight, weight_scale,
@@ -4704,6 +4939,10 @@ impl Gemma4Model {
     /// copy; slicing the hidden state first bounds both to `[batch, 1, vocab]`
     /// (issue #672). The KV caches are updated by the full text forward
     /// exactly as before; only the LM-head projection width changes.
+    ///
+    /// On a KV-shared checkpoint the text forward also trims its shared tail
+    /// to `last_pos` (issue #2410), so the returned hidden state may hold that
+    /// one row instead of the whole prompt.
     fn forward_last_with_caches_and_embeddings(
         &self,
         input_ids: &MlxArray,
@@ -4713,10 +4952,26 @@ impl Gemma4Model {
         per_layer_inputs: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
-        let hidden =
-            self.text_model
-                .forward(input_ids, input_embeddings, caches, mask, per_layer_inputs);
-        self.logits_at(&hidden, last_pos)
+        let hidden = self.text_model.forward_with_speculative_sinks(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            per_layer_inputs,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            Some(last_pos),
+        );
+        let row = if mlxcel_core::array_shape(&hidden)[1] == 1 {
+            0
+        } else {
+            last_pos
+        };
+        self.logits_at(&hidden, row)
     }
 
     /// Tied LM head plus the optional final-logit softcap, applied to the
@@ -4755,8 +5010,14 @@ impl Gemma4Model {
             bidirectional_block_ids,
             None,
             None,
+            Some(last_pos),
         );
-        self.logits_at(&hidden, last_pos)
+        let row = if mlxcel_core::array_shape(&hidden)[1] == 1 {
+            0
+        } else {
+            last_pos
+        };
+        self.logits_at(&hidden, row)
     }
 
     /// Gemma 4 Unified forward with the optional blockwise bidirectional
@@ -4783,6 +5044,7 @@ impl Gemma4Model {
             None,
             false,
             bidirectional_block_ids,
+            None,
             None,
             None,
         );
@@ -4831,6 +5093,7 @@ impl Gemma4Model {
             None,
             left_padding,
             per_row_valid_end,
+            None,
         );
         // A per-batch-row verify also projects each row through the LM head
         // on its own, so the head's matmul sees the B = 1 row count.
@@ -4855,7 +5118,7 @@ impl Gemma4Model {
         sinks: Option<&mut Gemma4SpeculativeSinks>,
     ) -> UniquePtr<MlxArray> {
         let hidden = self.text_model.forward_with_speculative_sinks(
-            input_ids, None, caches, None, None, None, sinks, false, None, None, None,
+            input_ids, None, caches, None, None, None, sinks, false, None, None, None, None,
         );
         let last = mlxcel_core::array_shape(input_ids)[1] as usize - 1;
         self.logits_at(&hidden, last)
