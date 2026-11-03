@@ -156,6 +156,12 @@ jobs:
               - 'build.rs'
               - 'scripts/iree/**'
               - 'rust-toolchain.toml'
+              # The cuda-oxide smoke spike package carries an empty [workspace]
+              # table and is not a member of the mlxcel workspace. It gates
+              # itself with its own pinned toolchain and check-lint.sh, so a
+              # change confined to it cannot move a cargo-fmt, cargo-deny or
+              # clippy verdict for mlxcel.
+              - '!spike/cuda-oxide-smoke/**'
             # The dependency graph alone: the manifests, the lockfile and the
             # policy file. `cargo-deny` reads nothing else, so a source-only PR
             # cannot change its verdict and does not need the job.
@@ -163,6 +169,7 @@ jobs:
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
+              - '!spike/cuda-oxide-smoke/**'
             mlx_pin:
               - 'src/lib/mlxcelverse/CMakeLists.txt'
               - 'src/lib/mlxcel-core/build_support/mlx_pin.rs'
@@ -221,6 +228,9 @@ jobs:
               - 'build.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
+              # The cuda-oxide smoke package is not a workspace member, so its
+              # manifest cannot change what the ROCm build compiles or links.
+              - '!spike/cuda-oxide-smoke/**'
             # The Windows build glue and its tests: the build scripts and
             # build_support modules that lay out the Windows CUDA and ROCm
             # builds, the overlay sources that choose the runtime and include
@@ -278,6 +288,9 @@ jobs:
               - 'src/lib/mlxcelverse/**'
               - 'src/lib/mlxcel-core/cpp/**'
               - 'src/lib/mlxcel-core/build_support/**'
+              # The cuda-oxide smoke spike package is outside the mlxcel
+              # workspace, so it cannot break the CPU-only link of mlxcel-core.
+              - '!spike/cuda-oxide-smoke/**'
             # The inputs the overlay host tests read: the overlay sources, the
             # scripts that inspect them, the pin-extraction script the record
             # check resolves the MLX commit from, and the two build scripts
