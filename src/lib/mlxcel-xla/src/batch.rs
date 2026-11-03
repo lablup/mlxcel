@@ -213,7 +213,6 @@ struct Pending {
     input: PendingInput,
     cap: usize,
     params: SampleParams,
-    cancelled: bool,
 }
 
 /// Resolve a request's PRNG seed: the explicit seed if given, else a deterministic
@@ -290,8 +289,9 @@ impl Scheduler {
     /// to different requests. The server matches cancellations and completion
     /// events by id, so the collision would cancel or complete the wrong
     /// request rather than fail visibly. Striding by the bucket count makes ids
-    /// unique across buckets and lets `id % stride` name the owning bucket
-    /// without a side table that could drift out of step.
+    /// unique across buckets. Ownership is not encoded in the id: a bucket that
+    /// fails to compile is dropped, which would leave the residue naming a
+    /// position that no longer exists, so [`XlaBucketSet::cancel`] scans.
     fn new_with_id_stride(b_max: usize, eos: Vec<i32>, first_id: u64, stride: u64) -> Self {
         debug_assert!(stride >= 1, "id stride must be at least 1");
         let mut slots = Vec::with_capacity(b_max);
@@ -315,7 +315,6 @@ impl Scheduler {
             input,
             cap,
             params,
-            cancelled: false,
         });
         req_id
     }
@@ -325,8 +324,8 @@ impl Scheduler {
     }
 
     /// Cancel a request by id: free its slot if active, or drop it from the queue
-    /// if still pending. Returns whether the id was found (and not already
-    /// cancelled). A cancelled request emits no further events.
+    /// if still pending. Returns whether the id was found. A cancelled request
+    /// emits no further events.
     fn cancel(&mut self, req_id: u64) -> bool {
         for slot in &mut self.slots {
             if slot.as_ref().is_some_and(|s| s.req_id == req_id) {
@@ -337,7 +336,7 @@ impl Scheduler {
         if let Some(index) = self
             .queue
             .iter()
-            .position(|pending| pending.req_id == req_id && !pending.cancelled)
+            .position(|pending| pending.req_id == req_id)
         {
             self.queue.remove(index);
             return true;
@@ -347,18 +346,13 @@ impl Scheduler {
 
     /// No active slots and nothing left to admit.
     fn is_idle(&self) -> bool {
-        self.slots.iter().all(Option::is_none) && self.queue.iter().all(|p| p.cancelled)
+        self.slots.iter().all(Option::is_none) && self.queue.is_empty()
     }
 
-    /// Pop the next live queued request, discarding any cancelled-while-queued
-    /// entries it skips past.
+    /// Pop the next queued request. Cancellation removes a queued entry outright
+    /// (see [`Scheduler::cancel`]), so nothing is skipped here.
     fn pop_next_pending(&mut self) -> Option<Pending> {
-        while let Some(p) = self.queue.pop_front() {
-            if !p.cancelled {
-                return Some(p);
-            }
-        }
-        None
+        self.queue.pop_front()
     }
 
     /// Indices of the currently free slots, in order.
@@ -709,8 +703,24 @@ impl XlaBucketSet {
         }
     }
 
-    /// Queue a Gemma3n embeddings-plus-dense-PLE request into the smallest
-    /// bucket that admits its expanded length plus its whole generation budget.
+    /// Queue a Gemma3n embeddings-plus-dense-PLE request into the bucket whose
+    /// static shape its dense PLE was built for.
+    ///
+    /// Every other prepared payload is capacity-agnostic and is padded to the
+    /// routed bucket at submit time. The dense PLE is not: the audio pipeline
+    /// computes it once against one static capacity, and each bundle validates
+    /// its first axis against its own
+    /// ([`IreeRaggedLlama::validate_gemma3n_dense_ple`]). Routing on the
+    /// generation budget alone can therefore choose a smaller bucket and fail
+    /// that check, which would reject every short audio request on a
+    /// multi-bucket set. The PLE's own capacity is what names the one bucket
+    /// that can run it.
+    ///
+    /// # Errors
+    ///
+    /// Reports a request that cannot fit the PLE's bucket, or a PLE built for a
+    /// capacity no loaded bucket provides (the largest bucket dropped at load,
+    /// for instance).
     pub fn submit_gemma3n_prepared(
         &mut self,
         request: Gemma3nPreparedPrefill,
@@ -718,17 +728,19 @@ impl XlaBucketSet {
         params: SampleParams,
     ) -> Result<u64, XlaAdmissionError> {
         let sequence_len = request.prepared().sequence_len;
-        match self.route(sequence_len, max_new_tokens) {
-            Some(index) => {
-                self.buckets[index].submit_gemma3n_prepared(request, max_new_tokens, params)
-            }
-            None => Err(crate::ContextCapacityError {
-                effective_prompt_len: sequence_len,
-                max_new_tokens,
-                context_capacity: self.largest_capacity(),
-            }
-            .into()),
-        }
+        let ple_capacity = request.dense_ple().shape()[0];
+        let Some(index) = self
+            .buckets
+            .iter()
+            .position(|bucket| bucket.context_capacity() == ple_capacity)
+        else {
+            return Err(XlaAdmissionError::Gemma3nPrepared(format!(
+                "the Gemma3n dense PLE was built for context capacity {ple_capacity}, which no loaded bucket provides (loaded capacities: {:?})",
+                self.capacities()
+            )));
+        };
+        validate_request_capacity(sequence_len, max_new_tokens, ple_capacity)?;
+        self.buckets[index].submit_gemma3n_prepared(request, max_new_tokens, params)
     }
 
     /// Queue an owned prepared-embeddings + DeepStack request into the smallest
@@ -759,18 +771,14 @@ impl XlaBucketSet {
     }
 
     /// Cancel `req_id` in whichever bucket owns it.
+    ///
+    /// The id's stride residue names the bucket by its position in the
+    /// *requested* capacity list, and a bucket that failed to compile is
+    /// dropped from `buckets`, so that residue no longer indexes the surviving
+    /// list. Scan instead: a set holds a handful of buckets, and stale index
+    /// arithmetic is not something a cancel path should trust.
     pub fn cancel(&mut self, req_id: u64) -> bool {
-        let stride = self.buckets.len() as u64;
-        let owner = (req_id % stride) as usize;
-        // The id encodes its bucket, but a caller can pass anything, so fall
-        // back to a scan rather than trusting arithmetic on unvalidated input.
-        if self.buckets[owner].cancel(req_id) {
-            return true;
-        }
-        self.buckets
-            .iter_mut()
-            .enumerate()
-            .any(|(index, bucket)| index != owner && bucket.cancel(req_id))
+        self.buckets.iter_mut().any(|bucket| bucket.cancel(req_id))
     }
 
     /// Whether every bucket is idle.
@@ -911,10 +919,11 @@ impl XlaBatchEngine {
         self.sched.is_idle()
     }
 
-    /// Number of queued (not yet admitted) live requests.
+    /// Number of queued (not yet admitted) requests. Cancellation removes a
+    /// queued entry, so every entry is live.
     #[must_use]
     pub fn pending_len(&self) -> usize {
-        self.sched.queue.iter().filter(|p| !p.cancelled).count()
+        self.sched.queue.len()
     }
 
     /// Number of active slots.
@@ -1898,7 +1907,8 @@ mod tests {
             .collect();
         assert_eq!(ids_a, vec![0, 2, 4]);
         assert_eq!(ids_b, vec![1, 3, 5]);
-        // And the id names its own bucket, which is what `cancel` relies on.
+        // Uniqueness is what matters; ownership is resolved by scanning, because
+        // a bucket dropped at load no longer sits at its original position.
         for id in &ids_a {
             assert_eq!(id % 2, 0);
         }
@@ -2190,14 +2200,20 @@ mod tests {
     }
 
     #[test]
-    fn pop_next_pending_skips_cancelled() {
+    fn cancelling_a_queued_request_removes_it_from_the_queue() {
         let mut s = Scheduler::new(2, EOS.to_vec());
         let a = s.submit(vec![1], 8, g());
         let b = s.submit(vec![2], 8, g());
         assert!(s.cancel(a)); // cancel the head while queued
-        let got = s.pop_next_pending().expect("a live request remains");
+        assert_eq!(
+            s.queue.len(),
+            1,
+            "the cancelled entry is removed, not flagged"
+        );
+        let got = s.pop_next_pending().expect("the live request remains");
         assert_eq!(got.req_id, b);
         assert!(s.pop_next_pending().is_none());
+        assert!(s.is_idle(), "a cancelled head leaves nothing to admit");
     }
 
     #[test]
@@ -2450,6 +2466,6 @@ mod tests {
         let id = s.submit(vec![1], 8, g());
         assert!(!s.is_idle()); // queued
         assert!(s.cancel(id));
-        assert!(s.is_idle()); // cancelled-while-queued counts as drained
+        assert!(s.is_idle()); // cancelling a queued request removes it
     }
 }

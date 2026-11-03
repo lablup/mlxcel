@@ -42,6 +42,9 @@ struct FakeServingEngine {
     next_id: u64,
     active: BTreeSet<u64>,
     text_submissions: Vec<Vec<i32>>,
+    /// The budget each admitted text request was submitted with, so the
+    /// admission-budget clamp is observable.
+    text_budgets: Vec<usize>,
     prepared_submissions: Vec<(Vec<i32>, usize)>,
     prepared_modes: Vec<PreparedAdapterMode>,
     gemma3n_submissions: Vec<(Vec<i32>, usize)>,
@@ -50,6 +53,9 @@ struct FakeServingEngine {
     /// nothing under the plain stub tokenizer; the prefill-ordering tests set
     /// a printable id so a `Token` event is actually streamed.
     emitted_token: i32,
+    /// Queue depth this fake reports. A real engine queues only while every slot
+    /// is busy; the admission tests set it to stand in for that state.
+    pending: usize,
 }
 
 impl XlaServingEngine for FakeServingEngine {
@@ -66,7 +72,7 @@ impl XlaServingEngine for FakeServingEngine {
     }
 
     fn pending_len(&self) -> usize {
-        0
+        self.pending
     }
 
     fn active_len(&self) -> usize {
@@ -76,10 +82,11 @@ impl XlaServingEngine for FakeServingEngine {
     fn submit(
         &mut self,
         prompt: &[i32],
-        _max_new_tokens: usize,
+        max_new_tokens: usize,
         _params: SampleParams,
     ) -> Result<u64, String> {
         self.text_submissions.push(prompt.to_vec());
+        self.text_budgets.push(max_new_tokens);
         Ok(self.activate())
     }
 
@@ -351,6 +358,7 @@ fn worker(image_preprocessor: Option<ImagePreprocessStage>) -> XlaServeWorker<Fa
         pending_audio: HashMap::new(),
         next_audio_job_id: 0,
         context_capacity: 32,
+        queue_depth_limit: usize::MAX,
         shutdown: false,
     }
 }
@@ -447,6 +455,7 @@ fn phi4mm_worker() -> XlaServeWorker<FakeServingEngine> {
         pending_audio: HashMap::new(),
         next_audio_job_id: 0,
         context_capacity: 32,
+        queue_depth_limit: usize::MAX,
         shutdown: false,
     }
 }
@@ -1228,6 +1237,7 @@ fn pending_preprocess_poll_timeout_does_not_shutdown_worker() {
         pending_audio: HashMap::new(),
         next_audio_job_id: 0,
         context_capacity: 32,
+        queue_depth_limit: usize::MAX,
         shutdown: false,
     };
     let (response_tx, _response_rx) = mpsc::channel();
@@ -1339,4 +1349,125 @@ fn sampled_token_count_charges_a_withheld_eos_to_the_decode_step() {
     assert_eq!(sampled_token_count(&length_terminated), 1);
 
     assert_eq!(sampled_token_count(&[]), 0);
+}
+
+#[test]
+fn text_admission_is_refused_at_the_queue_depth_limit() {
+    let mut worker = worker(None);
+    worker.queue_depth_limit = 2;
+
+    // Below the bound a request is admitted normally, so a refusal below cannot
+    // be what makes the next assertion pass.
+    worker.engine.pending = 1;
+    let (admitted_tx, _admitted_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![10, 11]),
+        options(1),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        admitted_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    assert_eq!(worker.engine.text_submissions, vec![vec![10, 11]]);
+    assert_eq!(worker.states.len(), 1);
+
+    // At the bound the request is answered the way the MLX scheduler answers a
+    // full prefill queue, and it never reaches the engine.
+    worker.engine.pending = 2;
+    let (refused_tx, refused_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![20, 21]),
+        options(1),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        refused_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    assert_eq!(
+        worker.engine.text_submissions,
+        vec![vec![10, 11]],
+        "a refused request must not consume engine queue space"
+    );
+    assert_eq!(
+        worker.states.len(),
+        1,
+        "a refused request must not register request state"
+    );
+    match refused_rx.try_recv() {
+        Ok(GenerateEvent::Error(message)) => {
+            assert_eq!(message, "Server busy: prefill queue full");
+        }
+        _ => panic!("a refused request must be answered with a queue-full error"),
+    }
+}
+
+#[test]
+fn a_budget_wider_than_the_shape_is_clamped_instead_of_refused() {
+    // `--n-predict -1` resolves an omitted `max_tokens` to the checkpoint's
+    // context window, which is wider than any static OpenXLA graph. Build the
+    // options at a context size that leaves the requested budget intact, so what
+    // this exercises is the worker's clamp and not the server's own cap.
+    let mut config = ServerConfig::default();
+    config.context_size = 8_192;
+    let budget_options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            max_tokens: Some(8_192),
+            ..RequestOptionOverrides::default()
+        },
+    );
+
+    let mut worker = worker(None);
+    let (response_tx, _response_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![10, 11]),
+        budget_options,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        response_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    // FakeServingEngine::context_capacity() is 4096 and the prompt is 2 tokens.
+    assert_eq!(worker.engine.text_budgets, vec![4_094]);
+    assert_eq!(
+        worker.states.values().next().map(|state| state.max_tokens),
+        Some(4_094),
+        "the request's own budget must be the clamped one"
+    );
+}
+
+#[test]
+fn a_prompt_that_leaves_no_generation_room_is_refused() {
+    let mut worker = worker(None);
+    let (response_tx, response_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![0; 4_096]),
+        options(8),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        response_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    assert!(worker.engine.text_submissions.is_empty());
+    assert!(worker.states.is_empty());
+    match response_rx.try_recv() {
+        Ok(GenerateEvent::Error(message)) => assert!(
+            message.contains("exceeds the OpenXLA context capacity"),
+            "got: {message}"
+        ),
+        _ => panic!("a prompt with no generation room must be answered with the capacity error"),
+    }
 }

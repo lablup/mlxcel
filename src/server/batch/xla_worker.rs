@@ -52,8 +52,8 @@ use std::time::Instant;
 
 use mlxcel_core::session::PreparedPrefill;
 use mlxcel_xla::{
-    DeepStackPreparedPrefill, EngineEvent, FinishReason as XlaFinishReason, Gemma3nPreparedPrefill,
-    SampleParams, XlaBatchEngine,
+    ContextCapacityError, DeepStackPreparedPrefill, EngineEvent, FinishReason as XlaFinishReason,
+    Gemma3nPreparedPrefill, SampleParams, XlaBatchEngine,
 };
 
 use super::BatchEngine;
@@ -69,6 +69,11 @@ use crate::server::model_provider::model_worker::StreamingDecodeState;
 use crate::server::model_provider::{GenerateEvent, ModelRequest, PrefillStats, TokenMeta};
 use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
+
+/// The overload answer a queue-depth refusal sends. Byte-identical to the MLX
+/// scheduler's prefill-queue rejection so one client contract covers both
+/// backends.
+const QUEUE_FULL_MESSAGE: &str = "Server busy: prefill queue full";
 
 #[path = "xla_worker_admission.rs"]
 mod admission;
@@ -395,15 +400,23 @@ pub(crate) struct XlaServeWorker<E = XlaBatchEngine> {
     pending_audio: HashMap<u64, PendingAudioState>,
     next_audio_job_id: u64,
     context_capacity: usize,
+    /// `--max-queue-depth`: the most requests the engine may hold queued and not
+    /// yet admitted. The MLX `BatchScheduler` bounds its own prefill queue the
+    /// same way and answers `Server busy` past it; the OpenXLA path has no second
+    /// admission point, so without this the queue is unbounded and every queued
+    /// multimodal request keeps its whole static-shape embeddings payload alive.
+    queue_depth_limit: usize,
     shutdown: bool,
 }
 
 impl<E: XlaServingEngine> XlaServeWorker<E> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         engine: E,
         tokenizer: MlxcelTokenizer,
         model_path: std::path::PathBuf,
         device: String,
+        queue_depth_limit: usize,
         request_rx: mpsc::Receiver<ModelRequest>,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
@@ -465,6 +478,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             pending_audio: HashMap::new(),
             next_audio_job_id: 0,
             context_capacity,
+            queue_depth_limit,
             shutdown: false,
         })
     }
@@ -479,6 +493,67 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             .set_active_count(self.engine.active_len());
         self.batch_metrics
             .set_queue_depth(self.engine.pending_len());
+    }
+
+    /// Whether the engine already holds `queue_depth_limit` requests that are
+    /// queued and not yet admitted, i.e. whether `--max-queue-depth` refuses
+    /// this one.
+    ///
+    /// This is the OpenXLA path's only admission bound: the HTTP layer has no
+    /// concurrency limit, the request channel is unbounded, and the engine's
+    /// queue is a plain `VecDeque`. Counting queued-but-not-admitted (not the
+    /// active batch) is what the MLX scheduler's own bound counts, so the two
+    /// backends refuse the same request under the same setting.
+    fn queue_full(&self) -> bool {
+        self.engine.pending_len() >= self.queue_depth_limit
+    }
+
+    /// Answer a request the queue-depth bound refuses.
+    fn reject_queue_full(response_tx: mpsc::Sender<GenerateEvent>) {
+        let _ = response_tx.send(GenerateEvent::Error(QUEUE_FULL_MESSAGE.to_string()));
+    }
+
+    /// The generation budget a request may carry, clamped to the room the widest
+    /// loaded shape leaves after its prefill, or `None` when the prompt alone
+    /// already fills the capacity.
+    ///
+    /// The engine admits on `effective_prompt_len + max_new_tokens <=
+    /// context_capacity` (there is no KV migration between shapes), while the
+    /// server's budget for an omitted `max_tokens` is the checkpoint's context
+    /// window: `--n-predict -1` is the default, and `resolve_default_max_tokens`
+    /// turns it into the model's `max_position_embeddings`, which is thousands
+    /// of tokens wide and larger than any OpenXLA graph. Without this clamp the
+    /// backend rejects every request that omits the budget, which is the common
+    /// client behaviour. Clamping matches the MLX path, which silently clamps an
+    /// explicit budget to the effective per-slot window for the same reason.
+    ///
+    /// The clamp uses the largest capacity, so it only ever rescues requests the
+    /// engine would have refused; a budget that fits any bucket is left alone and
+    /// still routes by its own size.
+    ///
+    /// The capacity comes from the engine rather than the worker's cached copy:
+    /// they are the same value in production (`new` takes it from the engine),
+    /// and asking the engine keeps the check honest in tests that build a worker
+    /// directly.
+    fn admitted_max_tokens(&self, prefill_len: usize, requested: usize) -> Option<usize> {
+        let room = self.engine.context_capacity().saturating_sub(prefill_len);
+        let budget = requested.min(room);
+        (budget > 0).then_some(budget)
+    }
+
+    /// Answer a request whose prompt leaves no room for even one generated token.
+    fn reject_no_generation_room(
+        &self,
+        response_tx: mpsc::Sender<GenerateEvent>,
+        prefill_len: usize,
+        requested: usize,
+    ) {
+        let error = ContextCapacityError {
+            effective_prompt_len: prefill_len,
+            max_new_tokens: requested,
+            context_capacity: self.engine.context_capacity(),
+        };
+        let _ = response_tx.send(GenerateEvent::Error(error.to_string()));
     }
 
     /// Drop any requests whose client cancelled, freeing their engine slots. A

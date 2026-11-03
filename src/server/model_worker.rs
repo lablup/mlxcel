@@ -1477,10 +1477,13 @@ pub(crate) fn spawn_legacy_model_worker(
 /// the engine's bundled slot counts; the HAL device is read from
 /// `MLXCEL_XLA_DEVICE` (default [`mlxcel_xla::default_device`]: `metal` on Apple
 /// Silicon, `local-task` elsewhere), matching the single-sequence path.
+/// `max_queue_depth` is the `--max-queue-depth` admission bound the serve worker
+/// enforces against the engine's queued-request depth.
 #[cfg(feature = "xla-iree")]
 pub(crate) fn spawn_xla_model_worker(
     model_path: PathBuf,
     b_max: usize,
+    max_queue_depth: usize,
     request_rx: mpsc::Receiver<ModelRequest>,
     loaded: Arc<AtomicBool>,
     snapshot_reuse_capable: Arc<AtomicBool>,
@@ -1576,6 +1579,7 @@ pub(crate) fn spawn_xla_model_worker(
                 tokenizer,
                 model_path,
                 device.clone(),
+                max_queue_depth,
                 request_rx,
                 batch_metrics,
                 batch_observability,

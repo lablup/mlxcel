@@ -203,14 +203,22 @@ static iree_status_t xla_read_token(xla_ctx* c, iree_hal_buffer_view_t* out,
 // `[B*V]` for ragged decode).
 static iree_status_t xla_read_logits(xla_ctx* c, iree_hal_buffer_view_t* out,
                                      float* host, iree_host_size_t count) {
-  iree_host_size_t n = iree_hal_buffer_view_element_count(out);
-  if (n != count) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "logits element count mismatch");
+  // The transfer below is sized in f32 elements, so a bundle that returned f16
+  // (or an i32 argmax row) with a matching element count would be reinterpreted
+  // as f32. Match `xla_validate_kv_pair`'s rigor instead of trusting the count.
+  if (!out ||
+      iree_hal_buffer_view_element_count(out) != count ||
+      iree_hal_buffer_view_element_type(out) != IREE_HAL_ELEMENT_TYPE_FLOAT_32 ||
+      iree_hal_buffer_view_encoding_type(out) !=
+          IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "logits buffer is not a dense f32 buffer of the expected element count");
   }
   return iree_hal_device_transfer_d2h(
-      c->device, iree_hal_buffer_view_buffer(out), 0, host, n * sizeof(float),
-      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+      c->device, iree_hal_buffer_view_buffer(out), 0, host,
+      count * sizeof(float), IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
+      iree_infinite_timeout());
 }
 
 // Diagnostics-only readback of one compact K/V slice per decoder layer.
@@ -339,7 +347,14 @@ static iree_status_t xla_push_adapter_modes(
       c, vector ? 1 : 0, vector ? shape : NULL,
       IREE_HAL_ELEMENT_TYPE_INT_32, modes,
       (iree_host_size_t)count * sizeof(int32_t), out));
-  return iree_runtime_call_inputs_push_back_buffer_view(call, *out);
+  iree_status_t s = iree_runtime_call_inputs_push_back_buffer_view(call, *out);
+  if (!iree_status_is_ok(s)) {
+    // The call did not take a reference, so the view is ours to release; the
+    // caller releases `*out` on its cleanup path and must see NULL.
+    iree_hal_buffer_view_release(*out);
+    *out = NULL;
+  }
+  return s;
 }
 
 static int xla_validate_tensor_desc(const char* name,
@@ -1188,6 +1203,12 @@ int xla_llama_prefill_slot_logits(
     xla_ctx* c, int32_t slot, int32_t adapter_mode, const int32_t* tokens,
     int32_t lp, const int32_t* positions, int32_t real_len, int32_t vocab,
     float* out_logits) {
+  if (!c || !tokens || !positions || !out_logits || vocab <= 0) {
+    fprintf(stderr,
+            "xla_llama_prefill_slot_logits: invalid context/token/position/"
+            "output/vocab contract\n");
+    return 1;
+  }
   if (slot < 0 || slot >= c->rg_bsz) {
     fprintf(stderr, "xla_llama_prefill_slot_logits: slot %d out of range [0,%d)\n",
             slot, c->rg_bsz);
@@ -1199,74 +1220,92 @@ int xla_llama_prefill_slot_logits(
             lp, real_len, c->context_capacity);
     return 1;
   }
-  iree_runtime_call_t call;
-  XLA_CHECK(iree_runtime_call_initialize_by_name(
-      c->session, iree_make_cstring_view("prefill.main"), &call));
-  for (int32_t i = 0; i < c->n_weights; i++) {
-    XLA_CHECK(
-        iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]));
+  // The graph gathers the embedding table with these ids and clamps nothing, so
+  // an id outside [0, vocab) is an out-of-bounds device read rather than an
+  // error the graph can report. The padded tail of the token buffer reaches the
+  // same gather, which is why every position is checked, not just `real_len`.
+  for (int32_t i = 0; i < lp; ++i) {
+    if (tokens[i] < 0 || tokens[i] >= vocab) {
+      fprintf(stderr,
+              "xla_llama_prefill_slot_logits: token[%d]=%d outside [0,%d)\n", i,
+              tokens[i], vocab);
+      return 1;
+    }
   }
+
+  int rc = 0;
+  bool call_initialized = false;
+  iree_runtime_call_t call;
   iree_hal_buffer_view_t* mode_bv = NULL;
-  XLA_CHECK(
-      xla_push_adapter_modes(c, &call, &adapter_mode, 1, false, &mode_bv));
+  iree_hal_buffer_view_t* logits = NULL;
+  iree_hal_buffer_view_t* kc = NULL;
+  iree_hal_buffer_view_t* vc = NULL;
+  iree_hal_buffer_view_t* tok_bv = NULL;
+  iree_hal_buffer_view_t* pos_bv = NULL;
+  iree_hal_buffer_view_t* len_bv = NULL;
+
+  XLA_CHECK_GOTO(iree_runtime_call_initialize_by_name(
+                     c->session, iree_make_cstring_view("prefill.main"),
+                     &call),
+                 cleanup, rc);
+  call_initialized = true;
+  for (int32_t i = 0; i < c->n_weights; i++) {
+    XLA_CHECK_GOTO(
+        iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]),
+        cleanup, rc);
+  }
+  XLA_CHECK_GOTO(
+      xla_push_adapter_modes(c, &call, &adapter_mode, 1, false, &mode_bv),
+      cleanup, rc);
   iree_hal_dim_t seq_shape[1] = {(iree_hal_dim_t)lp};
   iree_hal_dim_t position_shape[2] = {3, (iree_hal_dim_t)lp};
   iree_host_size_t seq_bytes = (iree_host_size_t)lp * sizeof(int32_t);
   iree_host_size_t position_bytes =
       seq_bytes * (c->position_mode == 1 ? 3 : 1);
-  iree_hal_buffer_view_t* tok_bv = NULL;
-  iree_hal_buffer_view_t* pos_bv = NULL;
-  iree_hal_buffer_view_t* len_bv = NULL;
-  XLA_CHECK(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32, tokens,
-                         seq_bytes, &tok_bv));
-  XLA_CHECK(xla_alloc_bv(c, c->position_mode == 1 ? 2 : 1,
-                         c->position_mode == 1 ? position_shape : seq_shape,
-                         IREE_HAL_ELEMENT_TYPE_INT_32, positions,
-                         position_bytes, &pos_bv));
-  XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &real_len,
-                         sizeof(int32_t), &len_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
+  XLA_CHECK_GOTO(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32,
+                              tokens, seq_bytes, &tok_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_bv(c, c->position_mode == 1 ? 2 : 1,
+                              c->position_mode == 1 ? position_shape : seq_shape,
+                              IREE_HAL_ELEMENT_TYPE_INT_32, positions,
+                              position_bytes, &pos_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32,
+                              &real_len, sizeof(int32_t), &len_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv),
+                 cleanup, rc);
 
-  XLA_CHECK(iree_runtime_call_invoke(&call, 0));
-
-  iree_hal_buffer_view_t* logits = NULL;
-  iree_hal_buffer_view_t* kc = NULL;
-  iree_hal_buffer_view_t* vc = NULL;
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &logits));
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+  XLA_CHECK_GOTO(iree_runtime_call_invoke(&call, 0), cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &logits),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc),
+                 cleanup, rc);
   if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
-    iree_hal_buffer_view_release(logits);
-    iree_hal_buffer_view_release(kc);
-    iree_hal_buffer_view_release(vc);
-    iree_hal_buffer_view_release(tok_bv);
-    iree_hal_buffer_view_release(pos_bv);
-    iree_hal_buffer_view_release(len_bv);
-    if (mode_bv) iree_hal_buffer_view_release(mode_bv);
-    iree_runtime_call_deinitialize(&call);
-    return 1;
+    rc = 1;
+    goto cleanup;
   }
-  iree_status_t rs =
-      xla_read_logits(c, logits, out_logits, (iree_host_size_t)vocab);
-  iree_hal_buffer_view_release(logits);
-  iree_hal_buffer_view_release(tok_bv);
-  iree_hal_buffer_view_release(pos_bv);
-  iree_hal_buffer_view_release(len_bv);
+  XLA_CHECK_GOTO(
+      xla_read_logits(c, logits, out_logits, (iree_host_size_t)vocab), cleanup,
+      rc);
+  rc = xla_store_prefill_kv_slot(c, slot, kc, vc);
+
+cleanup:
   if (mode_bv) iree_hal_buffer_view_release(mode_bv);
-  iree_runtime_call_deinitialize(&call);
-  if (!iree_status_is_ok(rs)) {
-    int code = (int)iree_status_code(rs);
-    iree_status_ignore(rs);
-    iree_hal_buffer_view_release(kc);
-    iree_hal_buffer_view_release(vc);
-    return code ? code : 1;
-  }
-  int copy_rc = xla_store_prefill_kv_slot(c, slot, kc, vc);
-  iree_hal_buffer_view_release(kc);
-  iree_hal_buffer_view_release(vc);
-  return copy_rc;
+  if (logits) iree_hal_buffer_view_release(logits);
+  if (kc) iree_hal_buffer_view_release(kc);
+  if (vc) iree_hal_buffer_view_release(vc);
+  if (tok_bv) iree_hal_buffer_view_release(tok_bv);
+  if (pos_bv) iree_hal_buffer_view_release(pos_bv);
+  if (len_bv) iree_hal_buffer_view_release(len_bv);
+  if (call_initialized) iree_runtime_call_deinitialize(&call);
+  return rc;
 }
 
 // Test-only Gemma3n intermediate-oracle entry. The optional diagnostic module
@@ -1850,6 +1889,13 @@ static int xla_llama_decode_ragged_impl(
     const int32_t* tokens,
     const int32_t* positions, int32_t position_mode,
     const int32_t* cache_len, int32_t vocab, float* out_logits) {
+  if (!c || !adapter_modes || !tokens || !positions || !cache_len ||
+      !out_logits || vocab <= 0) {
+    fprintf(stderr,
+            "xla_llama_decode_ragged_logits: invalid context/mode/token/"
+            "position/length/vocab/output contract\n");
+    return 1;
+  }
   if (bsz != c->rg_bsz || !c->kcache_b || !c->vcache_b ||
       c->position_mode != position_mode) {
     fprintf(stderr,
@@ -1858,6 +1904,14 @@ static int xla_llama_decode_ragged_impl(
     return 1;
   }
   for (int32_t i = 0; i < bsz; ++i) {
+    // The graph gathers the embedding table with this id and clamps nothing, so
+    // an out-of-vocabulary row would be an out-of-bounds device read.
+    if (tokens[i] < 0 || tokens[i] >= vocab) {
+      fprintf(stderr,
+              "xla_llama_decode_ragged_logits: row=%d token=%d outside [0,%d)\n",
+              i, tokens[i], vocab);
+      return 1;
+    }
     if (cache_len[i] < 0 || cache_len[i] >= c->context_capacity) {
       fprintf(stderr,
               "xla_llama_decode_ragged_logits: row=%d cache_len=%d context_capacity=%d\n",
@@ -1876,77 +1930,103 @@ static int xla_llama_decode_ragged_impl(
       }
     }
   }
+
+  int rc = 0;
+  bool call_initialized = false;
   iree_runtime_call_t call;
-  XLA_CHECK(iree_runtime_call_initialize_by_name(
-      c->session, iree_make_cstring_view("decode_step.main"), &call));
-  for (int32_t i = 0; i < c->n_weights; i++) {
-    XLA_CHECK(
-        iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]));
-  }
   iree_hal_buffer_view_t* mode_bv = NULL;
-  XLA_CHECK(
-      xla_push_adapter_modes(c, &call, adapter_modes, bsz, true, &mode_bv));
+  iree_hal_buffer_view_t* tok_bv = NULL;
+  iree_hal_buffer_view_t* pos_bv = NULL;
+  iree_hal_buffer_view_t* len_bv = NULL;
+  iree_hal_buffer_view_t* logits_out = NULL;
+  iree_hal_buffer_view_t* kc = NULL;
+  iree_hal_buffer_view_t* vc = NULL;
+  iree_hal_buffer_view_t* old_k = NULL;
+  iree_hal_buffer_view_t* old_v = NULL;
+
+  XLA_CHECK_GOTO(iree_runtime_call_initialize_by_name(
+                     c->session, iree_make_cstring_view("decode_step.main"),
+                     &call),
+                 cleanup, rc);
+  call_initialized = true;
+  for (int32_t i = 0; i < c->n_weights; i++) {
+    XLA_CHECK_GOTO(
+        iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]),
+        cleanup, rc);
+  }
+  XLA_CHECK_GOTO(
+      xla_push_adapter_modes(c, &call, adapter_modes, bsz, true, &mode_bv),
+      cleanup, rc);
   iree_hal_dim_t vshape[1] = {(iree_hal_dim_t)bsz};
   iree_hal_dim_t position_shape[2] = {(iree_hal_dim_t)bsz, 3};
   iree_host_size_t vbytes = (iree_host_size_t)bsz * sizeof(int32_t);
   iree_host_size_t position_bytes =
       vbytes * (position_mode == 1 ? 3 : 1);
-  iree_hal_buffer_view_t* tok_bv = NULL;
-  iree_hal_buffer_view_t* pos_bv = NULL;
-  iree_hal_buffer_view_t* len_bv = NULL;
-  XLA_CHECK(xla_alloc_bv(c, 1, vshape, IREE_HAL_ELEMENT_TYPE_INT_32, tokens,
-                         vbytes, &tok_bv));
-  XLA_CHECK(xla_alloc_bv(c, position_mode == 1 ? 2 : 1,
-                         position_mode == 1 ? position_shape : vshape,
-                         IREE_HAL_ELEMENT_TYPE_INT_32, positions,
-                         position_bytes, &pos_bv));
-  XLA_CHECK(xla_alloc_bv(c, 1, vshape, IREE_HAL_ELEMENT_TYPE_INT_32, cache_len,
-                         vbytes, &len_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache_b));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache_b));
+  XLA_CHECK_GOTO(xla_alloc_bv(c, 1, vshape, IREE_HAL_ELEMENT_TYPE_INT_32,
+                              tokens, vbytes, &tok_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_bv(c, position_mode == 1 ? 2 : 1,
+                              position_mode == 1 ? position_shape : vshape,
+                              IREE_HAL_ELEMENT_TYPE_INT_32, positions,
+                              position_bytes, &pos_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_bv(c, 1, vshape, IREE_HAL_ELEMENT_TYPE_INT_32,
+                              cache_len, vbytes, &len_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(
+      iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache_b),
+      cleanup, rc);
+  XLA_CHECK_GOTO(
+      iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache_b),
+      cleanup, rc);
 
-  XLA_CHECK(iree_runtime_call_invoke(&call, 0));
-
-  iree_hal_buffer_view_t* logits_out = NULL;
-  iree_hal_buffer_view_t* kc = NULL;
-  iree_hal_buffer_view_t* vc = NULL;
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &logits_out));
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+  XLA_CHECK_GOTO(iree_runtime_call_invoke(&call, 0), cleanup, rc);
+  XLA_CHECK_GOTO(
+      iree_runtime_call_outputs_pop_front_buffer_view(&call, &logits_out),
+      cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc),
+                 cleanup, rc);
   if (xla_validate_kv_pair(c, kc, vc, 5, 2) != 0 ||
       iree_hal_buffer_view_shape_dim(kc, 0) != (iree_hal_dim_t)c->rg_bsz) {
     fprintf(stderr, "xla_llama_decode_ragged_logits: output batch shape mismatch\n");
-    iree_hal_buffer_view_release(logits_out);
-    iree_hal_buffer_view_release(kc);
-    iree_hal_buffer_view_release(vc);
-    iree_hal_buffer_view_release(tok_bv);
-    iree_hal_buffer_view_release(pos_bv);
-    iree_hal_buffer_view_release(len_bv);
-    if (mode_bv) iree_hal_buffer_view_release(mode_bv);
-    iree_runtime_call_deinitialize(&call);
-    return 1;
+    rc = 1;
+    goto cleanup;
   }
-  iree_hal_buffer_view_t* old_k = c->kcache_b;
-  iree_hal_buffer_view_t* old_v = c->vcache_b;
+  // Read back before adopting the new cache: a failed readback must leave the
+  // resident KV pair in place rather than swap in a pair the caller never saw.
+  XLA_CHECK_GOTO(
+      xla_read_logits(c, logits_out, out_logits,
+                      (iree_host_size_t)bsz * (iree_host_size_t)vocab),
+      cleanup, rc);
+  old_k = c->kcache_b;
+  old_v = c->vcache_b;
   c->kcache_b = kc;
   c->vcache_b = vc;
+  kc = NULL;
+  vc = NULL;
 
-  XLA_CHECK(xla_read_logits(c, logits_out, out_logits,
-                            (iree_host_size_t)bsz * (iree_host_size_t)vocab));
-  iree_hal_buffer_view_t* token_out = logits_out;
-
-  iree_hal_buffer_view_release(token_out);
-  iree_hal_buffer_view_release(tok_bv);
-  iree_hal_buffer_view_release(pos_bv);
-  iree_hal_buffer_view_release(len_bv);
+cleanup:
   if (mode_bv) iree_hal_buffer_view_release(mode_bv);
-  iree_runtime_call_deinitialize(&call);
-  iree_hal_buffer_view_release(old_k);
-  iree_hal_buffer_view_release(old_v);
-  return 0;
+  if (logits_out) iree_hal_buffer_view_release(logits_out);
+  if (kc) iree_hal_buffer_view_release(kc);
+  if (vc) iree_hal_buffer_view_release(vc);
+  if (tok_bv) iree_hal_buffer_view_release(tok_bv);
+  if (pos_bv) iree_hal_buffer_view_release(pos_bv);
+  if (len_bv) iree_hal_buffer_view_release(len_bv);
+  if (call_initialized) iree_runtime_call_deinitialize(&call);
+  // The call held its own references to the old pair; drop ours once it can no
+  // longer read them.
+  if (old_k) iree_hal_buffer_view_release(old_k);
+  if (old_v) iree_hal_buffer_view_release(old_v);
+  return rc;
 }
 
 int xla_llama_decode_ragged_logits(xla_ctx* c, int32_t bsz,
