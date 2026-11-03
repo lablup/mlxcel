@@ -764,6 +764,7 @@ impl ModelType {
             ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
             ModelType::MiMo => "mimo",
             ModelType::MiMoV2Flash => "mimo_v2_flash",
+            ModelType::MiMoV2VLM => "mimo_v2_vlm",
             ModelType::BailingMoe => "bailing_moe",
             ModelType::BailingMoeLinear => "bailing_moe_linear",
             ModelType::Afmoe => "afmoe",
@@ -1154,6 +1155,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::HunyuanMoe => &["hunyuan"],
         ModelType::MiMo => &["mimo"],
         ModelType::MiMoV2Flash => &["mimo_v2_flash"],
+        ModelType::MiMoV2VLM => &["mimo_v2"],
         ModelType::BailingMoe => &["bailing_moe"],
         ModelType::BailingMoeLinear => &["bailing_moe_linear"],
         ModelType::Afmoe => &["afmoe"],
@@ -1296,7 +1298,8 @@ fn modalities_for(model_type: ModelType) -> &'static [Modality] {
         | ModelType::Qwen3VLMoe
         | ModelType::Qwen35VLM
         | ModelType::Qwen35MoeVLM
-        | ModelType::Qwen4ExpVLM => TEXT_IMAGE_VIDEO,
+        | ModelType::Qwen4ExpVLM
+        | ModelType::MiMoV2VLM => TEXT_IMAGE_VIDEO,
         _ if is_vlm_registry_type(model_type) => TEXT_IMAGE,
         _ => TEXT,
     }

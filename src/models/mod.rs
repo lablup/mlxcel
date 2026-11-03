@@ -219,7 +219,9 @@ pub mod mamba;
 pub mod mamba2;
 pub mod mellum;
 pub mod mimo;
+pub mod mimo_v2;
 pub mod mimo_v2_flash;
+pub(crate) mod mimo_v2_weights;
 pub mod minicpm;
 pub mod minicpm3;
 pub mod minimax;
@@ -618,6 +620,9 @@ pub enum ModelType {
     /// MoE with a separate V head width, partial RoPE, dual RoPE bases, and
     /// learned attention sinks on the sliding layers.
     MiMoV2Flash,
+    /// Xiaomi MiMo-V2 / V2.5 / V2.6 (`mimo_v2`): the Flash decoder plus the
+    /// `mimovl` vision tower for image and video input.
+    MiMoV2VLM,
     /// Ant Group Ling / Bailing MoE (`bailing_moe`): DeepSeek-shaped sparse
     /// decoder with a fused GQA `query_key_value` and a single wide shared
     /// expert.
@@ -892,6 +897,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::HunyuanV1Dense,
     ModelType::MiMo,
     ModelType::MiMoV2Flash,
+    ModelType::MiMoV2VLM,
     ModelType::BailingMoe,
     ModelType::BailingMoeLinear,
     ModelType::Afmoe,
@@ -1311,6 +1317,10 @@ impl ModelType {
                 "Xiaomi MiMo v2 Flash (hybrid sliding/full attention MoE)",
                 "Xiaomi",
             ),
+            ModelType::MiMoV2VLM => (
+                "Xiaomi MiMo-V2 / V2.6 (Flash MoE decoder + mimovl vision)",
+                "Xiaomi",
+            ),
             ModelType::Apertus => ("Apertus (dense)", "Specialized"),
             ModelType::SeedOss => ("Seed-OSS", "Specialized"),
 
@@ -1552,6 +1562,7 @@ mod metadata_tests {
             HunyuanV1Dense,
             MiMo,
             MiMoV2Flash,
+            MiMoV2VLM,
             BailingMoe,
             BailingMoeLinear,
             Afmoe,

@@ -344,6 +344,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::MolmoVLM => Some(load_molmo_vlm(model_path)?),
         ModelType::Molmo2VLM => Some(load_molmo2_vlm(model_path)?),
         ModelType::MolmoPointVLM => Some(load_molmo_point_vlm(model_path)?),
+        ModelType::MiMoV2VLM => Some(load_mimo_v2_vlm(model_path)?),
         ModelType::NemotronHNanoOmniVLM => Some(load_nemotron_h_nano_omni_vlm(model_path)?),
         ModelType::YoutuVLM => Some(load_youtu_vl_vlm(model_path)?),
         ModelType::InternVLChatVLM => Some(load_internvl_vlm(model_path)?),

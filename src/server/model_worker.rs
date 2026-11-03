@@ -1681,6 +1681,13 @@ pub(crate) fn prepare_request_vlm_embeddings(
 
     if !audio.is_empty() && !model.supports_audio_input() {
         observability.record_audio_feature_rejection();
+        if matches!(model, LoadedModel::MiMoV2VLM(_)) {
+            return Err(anyhow!(
+                "MiMo-V2 audio input is not supported yet: the checkpoint's 20-channel codec \
+                 tokenizer (audio_tokenizer/) and AudioEncoder have no mlxcel port. Send text, \
+                 image or video input instead."
+            ));
+        }
         return Err(anyhow!("Audio input is not supported by the loaded model"));
     }
     // Images and videos used to fall through to the text-only branch below, so
