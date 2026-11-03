@@ -1205,9 +1205,21 @@ impl MiMoV2FlashModel {
         input_ids: &MlxArray,
         caches: &mut [Cache],
     ) -> UniquePtr<MlxArray> {
-        let seq_len = mlxcel_core::array_shape(input_ids)[1];
+        let embeddings = self.embed_tokens.forward(input_ids);
+        self.forward_prepared(&embeddings, caches)
+    }
 
-        let mut h = self.embed_tokens.forward(input_ids);
+    /// Run the decoder over already-embedded rows.
+    ///
+    /// Multimodal wrappers scatter vision features into the text embeddings
+    /// and hand the result here, so this must not re-embed the token ids.
+    pub(crate) fn forward_prepared(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [Cache],
+    ) -> UniquePtr<MlxArray> {
+        let seq_len = mlxcel_core::array_shape(embeddings)[1];
+        let mut h = mlxcel_core::copy(embeddings);
 
         // Masks are sized from each cache's live window rather than the
         // monotonic offset, so a trimmed cache does not produce a mask wider
@@ -1284,6 +1296,31 @@ impl MiMoV2FlashModel {
             seq_id,
             || self.make_internal_caches(),
             |caches| self.forward(input, caches),
+        )
+    }
+
+    /// Token embedding table only, for a multimodal wrapper that has to
+    /// scatter features before decoding.
+    pub fn input_embeddings(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.forward(input_ids)
+    }
+
+    /// Decode already-embedded rows, resetting the model-owned caches when a
+    /// fresh multi-token prompt arrives without a sequence id.
+    pub fn forward_prepared_embeddings_with_sequence_id(
+        &self,
+        embeddings: &MlxArray,
+        seq_id: Option<SequenceId>,
+    ) -> UniquePtr<MlxArray> {
+        let seq_len = mlxcel_core::array_shape(embeddings)[1];
+        if seq_id.is_none() && seq_len > 1 {
+            self.sequence_state
+                .replace_internal(self.make_internal_caches());
+        }
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| self.forward_prepared(embeddings, caches),
         )
     }
 

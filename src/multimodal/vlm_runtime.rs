@@ -934,6 +934,7 @@ pub fn qwen_video_runtime(model: &LoadedModel) -> Option<&dyn crate::qwen_vl::Qw
         LoadedModel::Qwen3VLMoe(model) => Some(model),
         LoadedModel::Qwen35VLM(model) | LoadedModel::Qwen35MoeVLM(model) => Some(model),
         LoadedModel::Qwen4ExpVLM(model) => Some(model),
+        LoadedModel::MiMoV2VLM(model) => Some(model),
         _ => None,
     }
 }

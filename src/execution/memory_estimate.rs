@@ -1303,6 +1303,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
         ModelType::MiMo => "mimo",
         ModelType::MiMoV2Flash => "mimo_v2_flash",
+        ModelType::MiMoV2VLM => "mimo_v2",
         ModelType::BailingMoe => "bailing_moe",
         ModelType::BailingMoeLinear => "bailing_moe_linear",
         ModelType::Afmoe => "afmoe",

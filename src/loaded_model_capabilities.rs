@@ -232,6 +232,8 @@ impl LoadedModel {
             Self::GlmOcr(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen35VLM(model) | Self::Qwen35MoeVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen4ExpVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
+            // MiMo-V2 speaks the Qwen2.5-VL image/video protocol.
+            Self::MiMoV2VLM(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::PaddleOcrVL(model) => Some(VlmRuntimeRef::PaddleOcr(model)),
             Self::Step3p7VL(model) => Some(VlmRuntimeRef::Step3p7(model)),
             Self::DotsOcrVL(model) => Some(VlmRuntimeRef::DotsOcr(model)),

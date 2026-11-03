@@ -186,6 +186,8 @@ pub enum LoadedModel {
     HunyuanV1Dense(models::HunyuanV1DenseModel),
     MiMo(models::MiMoModel),
     MiMoV2Flash(models::MiMoV2FlashModel),
+    /// Xiaomi MiMo-V2 / V2.6 (Flash decoder + `mimovl` vision tower).
+    MiMoV2VLM(vision::MimoV2VlModel),
     BailingMoe(models::BailingMoeModel),
     BailingMoeLinear(models::BailingMoeLinearModel),
     Afmoe(models::AfmoeModel),
@@ -371,6 +373,7 @@ macro_rules! delegate_language_model {
             LoadedModel::HunyuanV1Dense(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiMo(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiMoV2Flash(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::MiMoV2VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::BailingMoe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::BailingMoeLinear(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Afmoe(inner) => LanguageModel::$method(inner, $($arg),*),

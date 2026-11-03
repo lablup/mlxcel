@@ -255,6 +255,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // which the shard rules name. This arm only keeps the dispatch table
         // total; the refusal comes from `validate_supported_runtime`.
         ModelType::MiMoV2Flash => "mimo_v2_flash",
+        ModelType::MiMoV2VLM => "mimo_v2",
         // Bailing MoE is not shardable by the generic transformer plan: its
         // attention projection is the fused `attention.query_key_value` rather
         // than separate q/k/v, and its routed experts live under

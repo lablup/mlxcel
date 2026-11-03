@@ -713,6 +713,7 @@ pub fn model_type_has_native_video(model_type: ModelType) -> bool {
             | ModelType::Qwen35VLM
             | ModelType::Qwen35MoeVLM
             | ModelType::Qwen4ExpVLM
+            | ModelType::MiMoV2VLM
     )
 }
 
@@ -1014,6 +1015,10 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // sliding/full attention, a sparse MoE decoder, and its own
         // `mimo_v2_flash` model type.
         "mimo_v2_flash" => Ok(ModelType::MiMoV2Flash),
+        // MiMo-V2 / V2.5 / V2.6. Only the omni (vision + text) model exists;
+        // `skip_vision: true` is handled inside the loader, not here, because
+        // the wrapper and its Qwen-VL prompt path stay the same.
+        "mimo_v2" => Ok(ModelType::MiMoV2VLM),
         "bailing_moe" => Ok(ModelType::BailingMoe),
         "bailing_moe_linear" => Ok(ModelType::BailingMoeLinear),
         "afmoe" => Ok(ModelType::Afmoe),
