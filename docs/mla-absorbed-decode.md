@@ -71,13 +71,13 @@ Declined, with a message, falling back to the decompressed path:
 
 The decline is decided per cache, and the answer is fixed for a cache's lifetime, so a run that declines on the first step declines on every step and a cache never mixes the two layouts.
 
-## Prefill
+## Multi-token steps
 
-Prefill stays on the decompressed path and up-projects the live latent window through the still-loaded `kv_b_proj`. Absorption is a decode transform: it trades one up-projection of the whole window for a fold applied to every query, which only wins when the cached window is large relative to the number of queries.
+Absorption is not limited to single-token decode. Per head, with `r = kv_lora_rank`, `d = qk_nope_head_dim + v_head_dim`, `L` queries and `T` cached latent positions after this step's update, the absorbed path costs `L*r*d + 2*L*T*r` and materializing costs `T*r*d + L*T*d`. Absorbed wins while `L < r*d / (r*d/T + 2*r - d)`; `mlxcel_core::mla::use_absorbed_mla` evaluates that bound once per call and every MLA family branches on its result instead of on the query count.
 
-Keeping the original `kv_b_proj` for this means the absorbed prefill is the same arithmetic on the same quantized weight the decompressed path uses. The cost is that a chunked prefill re-up-projects the rows it already handled on the previous chunk, because the cache no longer holds them decompressed.
+A single query is always absorbed. As `T` grows the bound approaches `r*d / (2*r - d)` (170 queries for DeepSeek-V3, 398 for GLM-4.7-Flash), so a speculative verify block or a chunked-prefill continuation behind a long cache runs absorbed. On a cold cache (`T == L`) the bound falls below any real `L` for every shipped config, so a fresh prefill still materializes and stays numerically identical to the baseline.
 
-Speculative and MTP multi-token verify steps take this same path, so they keep working against the latent cache rather than falling back.
+Both paths write the same latent cache, so a step may switch between them without repacking anything. A multi-token absorbed step needs the causal mask that the materializing path gets from `causal_attention`: the families that build their own `pe_scores` mask fold causality before the branch, and `deepseek_v2`'s `forward_absorbed` constructs the causal mask when the caller passed none, with a caller-supplied padded mask taking precedence. The materializing side still keeps the original `kv_b_proj` loaded and re-up-projects the rows a previous chunk already handled, because the cache no longer holds them decompressed.
 
 ## Stage 2: split-KV
 

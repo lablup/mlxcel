@@ -109,6 +109,12 @@
 // compare directly. With `MLXCEL_TRACE_IMAGE`, row zero is the real image
 // prompt and the companion rows are text-only.
 //
+// `MLXCEL_TRACE_MLA_STATS=1` prints the MLA dispatch counters to stderr after
+// the trace, so an arm that claims the absorbed path can be checked against
+// the path its forward actually took. Each chunk's stderr line also reports the
+// traced forward's wall time, which with a nonzero `PREFILL` measures the
+// multi-token continuation itself rather than the context pass.
+//
 // `MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1` requires
 // `MLXCEL_TRACE_BATCH_ROWS=1` and routes each decode step through
 // `forward_with_sequence_id`. Use it to build a scalar reference trace for a
@@ -580,21 +586,27 @@ fn main() -> Result<()> {
                 }
             }
         }
+        let forward_started = std::time::Instant::now();
+        let logits = if last_row {
+            model.forward_last_logits(&input, &mut caches, None, input_len as usize - 1)
+        } else if let Some(mode) = gemma4_mode {
+            mode.forward(&model, &input)?
+        } else {
+            model.forward(&input, &mut caches, None)
+        };
+        // Force the lazy graph now so the timing covers the traced forward and
+        // nothing else; `emit_rows` would otherwise fold in its host-side
+        // top-k over the vocabulary.
+        eval(&logits);
+        let forward_ms = forward_started.elapsed().as_secs_f64() * 1e3;
         if last_row {
-            // The sampled-row prefill: only `seg[l - 1]` is scored, so the
-            // caller needs one row and the model may trim its KV-shared tail
-            // to it (issue #2410). Emitted at the same `pos` the full-width
-            // arm writes for it (the last target index), so traces compare
+            // The sampled-row prefill scores only `seg[l - 1]`, so the caller
+            // needs one row and the model may trim its KV-shared tail to it
+            // (issue #2410). Emitted at the same `pos` the full-width arm
+            // writes for it (the last target index), so traces compare
             // directly.
-            let pos = input_len as usize - 1;
-            let logits = model.forward_last_logits(&input, &mut caches, None, pos);
             emit_rows_at(c, l as usize - 2, &logits, 0, &seg[l as usize - 1..], topk)?;
         } else {
-            let logits = if let Some(mode) = gemma4_mode {
-                mode.forward(&model, &input)?
-            } else {
-                model.forward(&input, &mut caches, None)
-            };
             anyhow::ensure!(
                 mlxcel_core::array_shape(&logits).get(1) == Some(&input_len),
                 "model.forward returned {:?}, not per-position logits",
@@ -608,9 +620,15 @@ fn main() -> Result<()> {
         drop(caches);
         mlxcel_core::clear_memory_cache();
         eprintln!(
-            "  chunk {c} traced ({} positions)",
+            "  chunk {c} traced ({} positions, forward {forward_ms:.2} ms)",
             if last_row { 1 } else { l - 1 }
         );
+    }
+    // `MLXCEL_TRACE_MLA_STATS=1` prints the MLA dispatch counters to stderr so
+    // an arm that claims a path can be checked against the path it took
+    // (issue #2408's multi-token gate was accepted this way).
+    if std::env::var("MLXCEL_TRACE_MLA_STATS").as_deref() == Ok("1") {
+        eprintln!("# mla_paths\t{}", mlxcel_core::mla::stats::take().summary());
     }
     Ok(())
 }

@@ -53,11 +53,15 @@
 //!   context is exactly the shape a single-CTA-per-request decode cannot fill,
 //!   which is what the split buys.
 //!
-//! Prefill deliberately stays on the decompressed path: absorption trades a
-//! `[L, r] -> [L, H*(nope+v)]` up-projection done once for an
-//! `[H, nope, r]` fold applied to every query, which is a win only when `L` is
-//! large relative to the number of queries. Prefill also still *writes* the
-//! latent cache, so a prefill and a decode step see the same cache.
+//! Multi-token steps are not forced onto the decompressed path. Absorption
+//! trades a `[L, r] -> [L, H*(nope+v)]` up-projection done once for an
+//! `[H, nope, r]` fold applied to every query. Which side is cheaper depends on
+//! the query count, the cached length, and the head geometry, so
+//! [`use_absorbed_mla`] decides per call. On a cold cache the up-projection
+//! wins and a fresh prefill materializes, exactly as before; a verify block or
+//! a chunked-prefill continuation behind a long cache can be cheaper absorbed.
+//! Either way the step still *writes* the latent cache, so a prefill and a
+//! decode step see the same cache.
 //!
 //! ## Gate
 //!
@@ -145,6 +149,56 @@ pub fn split_kv_enabled() -> bool {
         // fallback the caller already has for a plan that declines (issue
         // #1803). The predicate reads the merge kernel's own port table.
         && crate::ffi::paged_attention_merge_available()
+}
+
+/// Whether a step with `l` queries should take the absorbed path.
+///
+/// Per head, with `r = kv_lora_rank`, `d = qk_nope_head_dim + v_head_dim`, `L`
+/// queries, and `T` cached latent positions *after* this step's update, the
+/// absorbed path costs `L*r*d + 2*L*T*r` and materializing costs
+/// `T*r*d + L*T*d`. Absorbed wins while:
+///
+/// ```text
+///   L < r*d / (r*d/T + 2*r - d)
+/// ```
+///
+/// As `T` grows the bound approaches `r*d / (2*r - d)`: 170 queries for
+/// DeepSeek-V3 geometry (512/128/128) and 398 for GLM-4.7-Flash's
+/// `glm4_moe_lite` geometry (512/192/256). On a cold cache (`T == L`) it
+/// reduces to `2*r < d`, false for every shipped config, so a fresh prefill
+/// keeps materializing. A single query is always absorbed: the decode path
+/// exists for it and the inequality is not meaningful at `L == 1`.
+/// A non-positive denominator means the model's `d` is large enough that the
+/// bound is useless, so this declines and leaves the path to materializing.
+///
+/// `t` must be the post-update cached length the attention will read, which is
+/// the live window length, not the monotonic RoPE offset.
+///
+/// Used by: `models::deepseek_v3::DeepSeekV3Attention::forward` (and therefore
+/// `models::youtu_vl_lm`), `models::deepseek_v32::MLAAttention::forward`,
+/// `models::deepseek_v2::MLAAttention::forward_absorbed`,
+/// `models::glm4_moe_lite::MlaAttention::forward`,
+/// `models::kimi_linear::KimiMLAAttention::forward`,
+/// `models::kimi_k3::KimiK3MLAAttention::forward`,
+/// `models::longcat_flash_ngram::LongcatFlashMLA::forward`.
+#[must_use]
+pub fn use_absorbed_mla(
+    l: usize,
+    t: usize,
+    kv_lora_rank: usize,
+    qk_nope_head_dim: usize,
+    v_head_dim: usize,
+) -> bool {
+    if l == 1 {
+        return true;
+    }
+    let r = kv_lora_rank as f64;
+    let d = qk_nope_head_dim as f64 + v_head_dim as f64;
+    let denom = r * d / t as f64 + 2.0 * r - d;
+    if denom <= 0.0 {
+        return false;
+    }
+    (l as f64) < r * d / denom
 }
 
 /// The per-layer MLA shape the absorbed path needs.
@@ -249,5 +303,61 @@ mod tests {
         g.kv_lora_rank = 0;
         let err = g.check().unwrap_err();
         assert!(err.contains("kv_lora_rank"), "{err}");
+    }
+
+    /// DeepSeek-V3 head geometry (r 512, nope 128, v 128). Its `T -> inf` bound
+    /// is `512 * 256 / (1024 - 256) = 170.67`, the upstream crossover.
+    const V3_DIMS: (usize, usize, usize) = (512, 128, 128);
+
+    #[test]
+    fn single_query_is_always_absorbed() {
+        for t in [1usize, 2, 68, 1024, 100_000] {
+            assert!(
+                use_absorbed_mla(1, t, V3_DIMS.0, V3_DIMS.1, V3_DIMS.2),
+                "l==1 must be absorbed at t={t}"
+            );
+        }
+    }
+
+    #[test]
+    fn warm_cache_crossover_matches_the_upstream_bound() {
+        // denom = 512*256/100000 + 1024 - 256 = 769.31, so the bound is 170.37.
+        assert!(
+            use_absorbed_mla(169, 100_000, V3_DIMS.0, V3_DIMS.1, V3_DIMS.2),
+            "L=169 is below the DeepSeek-V3 crossover and must be absorbed"
+        );
+        assert!(
+            !use_absorbed_mla(171, 100_000, V3_DIMS.0, V3_DIMS.1, V3_DIMS.2),
+            "L=171 is above the DeepSeek-V3 crossover and must materialize"
+        );
+    }
+
+    #[test]
+    fn cold_cache_is_never_absorbed_above_one_query() {
+        for l in [2usize, 3, 4, 16, 64, 169, 512] {
+            assert!(
+                !use_absorbed_mla(l, l, V3_DIMS.0, V3_DIMS.1, V3_DIMS.2),
+                "T == L must materialize at L={l}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verify_block_on_a_warm_cache_is_absorbed() {
+        // The shape this change exists for: 4 and 16 query rows behind 1024
+        // cached positions.
+        for l in [4usize, 16] {
+            assert!(
+                use_absorbed_mla(l, 1024, V3_DIMS.0, V3_DIMS.1, V3_DIMS.2),
+                "L={l} behind 1024 tokens must be absorbed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_positive_denominator_declines_instead_of_overflowing() {
+        // d > 2r: the bound formula is meaningless, so the gate declines.
+        assert!(!use_absorbed_mla(2, 8, 2, 4, 4));
+        assert!(!use_absorbed_mla(64, 100_000, 2, 4, 4));
     }
 }

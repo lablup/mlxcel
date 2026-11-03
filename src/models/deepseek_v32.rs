@@ -433,40 +433,96 @@ impl MLAAttention {
             pe_scores
         };
 
-        // MLA attention: different paths for decode vs prefill
-        let output = if l == 1 {
-            // Decode: project Q into latent space, use kv_latent as K=V
+        // Multi-token steps fold the indexer's top-k selection into the
+        // additive mask (mirrors upstream's boolean sparse_mask & causal); a
+        // single-token step gathers the selected rows instead (below).
+        let pe_scores = if l > 1 {
+            match &topk_indices {
+                Some(indices) => {
+                    let kv_len = mlxcel_core::array_shape(&kv_latent)[2];
+                    apply_sparse_prefill_mask(&pe_scores, indices, kv_len)
+                }
+                None => pe_scores,
+            }
+        } else {
+            pe_scores
+        };
+
+        // Cost-model gate (issue #2408): one query is always absorbed, and a
+        // multi-token step behind a long enough cache can be cheaper absorbed
+        // than up-projecting the whole window. A cold prefill stays on the
+        // materializing side. Computed once so nothing below gates on `l`.
+        let absorbed = mlxcel_core::mla::use_absorbed_mla(
+            l as usize,
+            cache.seq_len() as usize,
+            self.kv_lora_rank as usize,
+            self.qk_nope_head_dim as usize,
+            self.v_head_dim as usize,
+        );
+        mlxcel_core::mla::stats::record(if absorbed {
+            if l == 1 {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
+            } else {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
+            }
+        } else {
+            mlxcel_core::mla::MlaDecodePath::Decompressed
+        });
+
+        // MLA attention: absorbed or materializing, chosen by the cost model
+        // above rather than by the query count alone.
+        let output = if absorbed {
+            // Absorbed: project Q into latent space, use kv_latent as K=V
             let q_projected = self.embed_q.forward(&q_nope);
 
-            if let Some(indices) = &topk_indices {
-                // Sparse decode fast path: gather the selected KV subset with
-                // take_along_axis (no per-step sparse mask). Decode is always
-                // called with `mask == None` here, and every gathered position
-                // is causally valid, so pe_scores is recomputed maskless over
-                // the gathered k_pe.
-                let (kv_latent_g, k_pe_g) = gather_topk_kv(
-                    &kv_latent,
-                    &k_pe,
-                    indices,
-                    self.kv_lora_rank,
-                    self.qk_rope_head_dim,
-                );
-                let k_pe_g_t = mlxcel_core::transpose_axes(&k_pe_g, &[0, 1, 3, 2]);
-                let pe_scores_g = mlxcel_core::matmul(&q_pe_scaled, &k_pe_g_t);
-                let pe_mask_ptr = &*pe_scores_g as *const MlxArray;
-                let output = unsafe {
-                    mlxcel_core::layers::attention_from_ptr(
-                        &q_projected,
-                        &kv_latent_g,
-                        &kv_latent_g,
-                        self.scale,
-                        pe_mask_ptr,
-                        0.0,
-                        0,
-                    )
-                };
-                self.unembed_out.forward(&output)
+            if l == 1 {
+                if let Some(indices) = &topk_indices {
+                    // Sparse decode fast path: gather the selected KV subset
+                    // with take_along_axis (no per-step sparse mask). Decode is
+                    // always called with `mask == None` here, and every
+                    // gathered position is causally valid, so pe_scores is
+                    // recomputed maskless over the gathered k_pe.
+                    let (kv_latent_g, k_pe_g) = gather_topk_kv(
+                        &kv_latent,
+                        &k_pe,
+                        indices,
+                        self.kv_lora_rank,
+                        self.qk_rope_head_dim,
+                    );
+                    let k_pe_g_t = mlxcel_core::transpose_axes(&k_pe_g, &[0, 1, 3, 2]);
+                    let pe_scores_g = mlxcel_core::matmul(&q_pe_scaled, &k_pe_g_t);
+                    let pe_mask_ptr = &*pe_scores_g as *const MlxArray;
+                    let output = unsafe {
+                        mlxcel_core::layers::attention_from_ptr(
+                            &q_projected,
+                            &kv_latent_g,
+                            &kv_latent_g,
+                            self.scale,
+                            pe_mask_ptr,
+                            0.0,
+                            0,
+                        )
+                    };
+                    self.unembed_out.forward(&output)
+                } else {
+                    let pe_mask_ptr = &*pe_scores as *const MlxArray;
+                    let output = unsafe {
+                        mlxcel_core::layers::attention_from_ptr(
+                            &q_projected,
+                            &kv_latent,
+                            &kv_latent,
+                            self.scale,
+                            pe_mask_ptr,
+                            0.0,
+                            0,
+                        )
+                    };
+                    // Project output from latent space to v_head_dim
+                    self.unembed_out.forward(&output)
+                }
             } else {
+                // Multi-token absorbed step: the causal, top-k-restricted mask
+                // computed above is the SDPA mask, and the latent is K and V.
                 let pe_mask_ptr = &*pe_scores as *const MlxArray;
                 let output = unsafe {
                     mlxcel_core::layers::attention_from_ptr(
@@ -479,20 +535,10 @@ impl MLAAttention {
                         0,
                     )
                 };
-                // Project output from latent space to v_head_dim
                 self.unembed_out.forward(&output)
             }
         } else {
-            // Prefill: restrict pe_scores to the selected keys via a sparse
-            // additive mask (mirrors upstream's boolean sparse_mask & causal),
-            // then project kv_latent to K and V.
-            let pe_scores = match &topk_indices {
-                Some(indices) => {
-                    let kv_len = mlxcel_core::array_shape(&kv_latent)[2];
-                    apply_sparse_prefill_mask(&pe_scores, indices, kv_len)
-                }
-                None => pe_scores,
-            };
+            // Materialize: project kv_latent to K and V, then attend.
             let k = self.embed_q.forward_no_transpose(&kv_latent);
             let v = self.unembed_out.forward(&kv_latent);
             let pe_mask_ptr = &*pe_scores as *const MlxArray;

@@ -1077,6 +1077,9 @@ pub(crate) struct KimiK3MLAAttention {
     qk_rope_head_dim: i32,
     q_head_dim: i32,
     kv_lora_rank: i32,
+    /// Value width, read off the config. Only the absorption cost model needs
+    /// it; the projection shapes already carry it.
+    v_head_dim: i32,
     scale: f32,
 }
 
@@ -1179,6 +1182,27 @@ impl KimiK3MLAAttention {
 
         let (cached_latent, cached_k_pe) = cache.update_and_fetch(kv_latent, k_pe);
 
+        // Cost-model gate (issue #2408): one query is always absorbed, and a
+        // multi-token step behind a long enough cache can be cheaper absorbed
+        // than up-projecting the whole window. A cold prefill stays on the
+        // materializing side. Computed once so nothing below gates on `l`.
+        let absorbed = mlxcel_core::mla::use_absorbed_mla(
+            l as usize,
+            cache.seq_len() as usize,
+            self.kv_lora_rank as usize,
+            self.qk_nope_head_dim as usize,
+            self.v_head_dim as usize,
+        );
+        mlxcel_core::mla::stats::record(if absorbed {
+            if l == 1 {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
+            } else {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
+            }
+        } else {
+            mlxcel_core::mla::MlaDecodePath::Decompressed
+        });
+
         // pe_scores = (q_pe * scale) @ k_pe^T -> [B, H, L, S]; the mask is
         // additive (0 / -inf) and is added in the scores dtype.
         let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
@@ -1190,17 +1214,19 @@ impl KimiK3MLAAttention {
             pe_scores = mlxcel_core::add(&pe_scores, &m);
         }
 
-        let output = if l == 1 {
-            // Decode in the latent space: q_lat = embed_q(q_nope) [B, H, 1, rank].
+        // MLA attention: absorbed or materializing, chosen by the cost model
+        // above rather than by the query count alone.
+        let output = if absorbed {
+            // Absorbed: work in the latent space, q_lat = embed_q(q_nope).
             let q_lat = self.embed_q.forward(&q_nope, true);
             let q_lat = mlxcel_core::multiply(&q_lat, &scale_arr);
             let k_t = mlxcel_core::swap_axes(&cached_latent, -1, -2);
             let scores = mlxcel_core::add(&mlxcel_core::matmul(&q_lat, &k_t), &pe_scores);
             let probs = mlxcel_core::softmax(&scores, -1);
             let attn = mlxcel_core::matmul(&probs, &cached_latent);
-            self.unembed_out.forward(&attn, true) // [B, H, 1, v_head]
+            self.unembed_out.forward(&attn, true) // [B, H, L, v_head]
         } else {
-            // Prefill: expand the latent to per-head k / v.
+            // Materialize: expand the latent to per-head k / v.
             let k = self.embed_q.forward(&cached_latent, false); // [B, H, S, nope]
             let v = self.unembed_out.forward(&cached_latent, true); // [B, H, S, v_head]
             let q_nope_scaled = mlxcel_core::multiply(&q_nope, &scale_arr);
@@ -1350,6 +1376,7 @@ impl KimiK3MLAAttention {
             qk_rope_head_dim: config.qk_rope_head_dim as i32,
             q_head_dim: config.q_head_dim() as i32,
             kv_lora_rank: config.kv_lora_rank as i32,
+            v_head_dim: config.v_head_dim as i32,
             scale: (config.q_head_dim() as f32).powf(-0.5),
         })
     }
