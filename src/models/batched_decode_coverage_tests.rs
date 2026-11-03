@@ -164,6 +164,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "LlmJpVlModel@src/vision/llmjp_vl.rs",
     "LocateAnythingVLM@src/vision/locateanything.rs",
     "MageVlModel@src/vision/mage_vl.rs",
+    "MimoV2VlModel@src/vision/mimo_v2_vl.rs",
     "MiniCPMOVLModel@src/vision/minicpmo_vl.rs",
     "MiniCPMV46VLModel@src/vision/minicpmv4_6_vl.rs",
     "MiniMaxM3VlModel@src/vision/minimax_m3_vl.rs",
