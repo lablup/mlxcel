@@ -21,6 +21,8 @@ Status: the GPU acceptance gate is satisfied. The kernel was compiled and execut
 
 The application pin and the cuda-oxide pin stay separate. `spike/cuda-oxide-smoke/rust-toolchain.toml` selects 1.99.1 only inside the spike directory.
 
+The upstream devcontainer was not used. This host provides CUDA 13.0 and LLVM/Clang 21 natively (the apt.llvm.org packages above), so the build ran on the host toolchain and every byte executed on the host driver. The devcontainer remains the documented fallback for hosts that cannot install LLVM 21; the user-space LLVM 21.1.0 tarball is the second fallback and produced identical artifacts here.
+
 The pinned revision needed no change. Its `rust-toolchain.toml` names 1.99.1, and the whole pipeline built and ran on that compiler.
 
 ## Target
