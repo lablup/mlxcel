@@ -1,0 +1,191 @@
+{
+  "manifest": "mlxcel.cuda-oxide-smoke.manifest/v1",
+  "abi_version": 1,
+  "entry_symbol": "vecadd",
+  "source": {
+    "repository": "https://github.com/NVIDIA/cuda-rust",
+    "revision": "b631530700a8a4a5f165456f2d71fe9195b323b5"
+  },
+  "target": {
+    "device_arch": "sm_121",
+    "ptx_version": "8.8",
+    "cubin_target": "sm_121"
+  },
+  "container": {
+    "section": ".oxart",
+    "magic": "OXIDEART",
+    "format_version": 1,
+    "bundle_name": "cuda-oxide-smoke",
+    "target": "sm_121",
+    "compile_options": 0,
+    "payload_kind": "ptx",
+    "payload_name": "",
+    "payload_bytes": 2379,
+    "payload_sha256": "737559830058e1d142a80c3ce7afc668d5326a4fb1b15bf020f2f03fc71381a8",
+    "entries": [
+      {
+        "kind": 1,
+        "kind_name": "kernel",
+        "symbol": "vecadd",
+        "has_metadata": false
+      },
+      {
+        "kind": 2,
+        "kind_name": "device-function",
+        "symbol": "_RINvNtNtCs50ttAMCGDYB_11cuda_device6thread10___internal8index_1dNtB2_13UnknownDomainNtB2_17NativeCoordinatesECslfmYaJE4CDi_16cuda_oxide_smoke",
+        "has_metadata": false
+      },
+      {
+        "kind": 2,
+        "kind_name": "device-function",
+        "symbol": "_RINvNtNtCs50ttAMCGDYB_11cuda_device6thread10___internal22one_dimensional_launchNtB2_13UnknownDomainNtB2_17NativeCoordinatesECslfmYaJE4CDi_16cuda_oxide_smoke",
+        "has_metadata": false
+      }
+    ]
+  },
+  "artifacts": {
+    "ptx": {
+      "path": "artifacts/vecadd.sm_121.ptx",
+      "sha256": "737559830058e1d142a80c3ce7afc668d5326a4fb1b15bf020f2f03fc71381a8",
+      "bytes": 2379,
+      "format": "PTX"
+    },
+    "cubin": {
+      "path": "artifacts/vecadd.sm_121.cubin",
+      "sha256": "4ab363a33b5b66ab75ddbbf30b8891e22e34b06559f6508f9f1593d6cdb199a6",
+      "bytes": 6360,
+      "format": "cubin",
+      "producer": "Cuda compilation tools, release 13.0, V13.0.88"
+    }
+  },
+  "arguments": [
+    {
+      "ordinal": 0,
+      "name": "a_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "f32",
+      "access": "read",
+      "allocation_align_bytes": 4,
+      "length_argument": 1,
+      "emitted": {
+        "ptx_type": ".u64",
+        "ptx_pointer": true,
+        "ptx_pointee_align_bytes": 4,
+        "cubin_size_bytes": 8,
+        "cubin_byte_offset": 0,
+        "cubin_space": "global",
+        "cubin_pointee_align_bytes": 4
+      }
+    },
+    {
+      "ordinal": 1,
+      "name": "a_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements",
+      "emitted": {
+        "ptx_type": ".u64",
+        "ptx_pointer": false,
+        "ptx_pointee_align_bytes": 0,
+        "cubin_size_bytes": 8,
+        "cubin_byte_offset": 8,
+        "cubin_space": "value",
+        "cubin_pointee_align_bytes": 1
+      }
+    },
+    {
+      "ordinal": 2,
+      "name": "b_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "f32",
+      "access": "read",
+      "allocation_align_bytes": 4,
+      "length_argument": 3,
+      "emitted": {
+        "ptx_type": ".u64",
+        "ptx_pointer": true,
+        "ptx_pointee_align_bytes": 4,
+        "cubin_size_bytes": 8,
+        "cubin_byte_offset": 16,
+        "cubin_space": "global",
+        "cubin_pointee_align_bytes": 4
+      }
+    },
+    {
+      "ordinal": 3,
+      "name": "b_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements",
+      "emitted": {
+        "ptx_type": ".u64",
+        "ptx_pointer": false,
+        "ptx_pointee_align_bytes": 0,
+        "cubin_size_bytes": 8,
+        "cubin_byte_offset": 24,
+        "cubin_space": "value",
+        "cubin_pointee_align_bytes": 1
+      }
+    },
+    {
+      "ordinal": 4,
+      "name": "c_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "f32",
+      "access": "write",
+      "allocation_align_bytes": 4,
+      "length_argument": 5,
+      "emitted": {
+        "ptx_type": ".u64",
+        "ptx_pointer": true,
+        "ptx_pointee_align_bytes": 1,
+        "cubin_size_bytes": 8,
+        "cubin_byte_offset": 32,
+        "cubin_space": "global",
+        "cubin_pointee_align_bytes": 1
+      }
+    },
+    {
+      "ordinal": 5,
+      "name": "c_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements",
+      "emitted": {
+        "ptx_type": ".u64",
+        "ptx_pointer": false,
+        "ptx_pointee_align_bytes": 0,
+        "cubin_size_bytes": 8,
+        "cubin_byte_offset": 40,
+        "cubin_space": "value",
+        "cubin_pointee_align_bytes": 1
+      }
+    }
+  ],
+  "launch": {
+    "index_space": "1d",
+    "block_dim": [
+      256,
+      1,
+      1
+    ],
+    "grid_dim_rule": "ceil_div(n, 256)",
+    "shared_mem_bytes": 0,
+    "buffer_count": 3,
+    "buffer_dtype": "f32",
+    "buffer_layout": "contiguous, one element per launch index",
+    "buffer_length_rule": "all three buffers are allocated with exactly n elements",
+    "elementwise": "c[i] = a[i] + b[i] for i in [0, n)",
+    "out_of_range_threads": "return at the output bounds check before reading a or b",
+    "max_note": "n must fit the u32 grid limit; this spike never exceeds 65537"
+  }
+}

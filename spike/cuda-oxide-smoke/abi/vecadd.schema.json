@@ -1,0 +1,82 @@
+{
+  "schema": "mlxcel.cuda-oxide-smoke.abi/v1",
+  "abi_version": 1,
+  "entry_symbol": "vecadd",
+  "kernel": "spike/cuda-oxide-smoke/src/main.rs::kernels::vecadd",
+  "source_revision": {
+    "repository": "https://github.com/NVIDIA/cuda-rust",
+    "revision": "b631530700a8a4a5f165456f2d71fe9195b323b5"
+  },
+  "arguments": [
+    {
+      "ordinal": 0,
+      "name": "a_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "f32",
+      "access": "read",
+      "allocation_align_bytes": 4,
+      "length_argument": 1
+    },
+    {
+      "ordinal": 1,
+      "name": "a_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements"
+    },
+    {
+      "ordinal": 2,
+      "name": "b_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "f32",
+      "access": "read",
+      "allocation_align_bytes": 4,
+      "length_argument": 3
+    },
+    {
+      "ordinal": 3,
+      "name": "b_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements"
+    },
+    {
+      "ordinal": 4,
+      "name": "c_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "f32",
+      "access": "write",
+      "allocation_align_bytes": 4,
+      "length_argument": 5
+    },
+    {
+      "ordinal": 5,
+      "name": "c_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements"
+    }
+  ],
+  "launch": {
+    "index_space": "1d",
+    "block_dim": [256, 1, 1],
+    "grid_dim_rule": "ceil_div(n, 256)",
+    "shared_mem_bytes": 0,
+    "buffer_count": 3,
+    "buffer_dtype": "f32",
+    "buffer_layout": "contiguous, one element per launch index",
+    "buffer_length_rule": "all three buffers are allocated with exactly n elements",
+    "elementwise": "c[i] = a[i] + b[i] for i in [0, n)",
+    "out_of_range_threads": "return at the output bounds check before reading a or b",
+    "max_note": "n must fit the u32 grid limit; this spike never exceeds 65537"
+  }
+}
