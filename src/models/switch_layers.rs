@@ -118,20 +118,23 @@ pub fn fused_moe_enabled() -> bool {
 
 /// Whether [`SwitchGLU::forward`] tries the gate/up kernel for this batch.
 ///
-/// Batched decode on M1 Ultra loses about 10% to it against `gather_qmm`:
-/// Qwen3-30B-A3B 4-bit is 94.2 vs 104.1 tok/s at B=2 and 115.3 vs 124.5 at B=4,
-/// and Mixtral 8x7B 4-bit is 34.3 vs 41.1 at B=4 (#2587). The M3 Ultra numbers
-/// in `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-10-21.md` keep
-/// it on where it was measured. M2 shares M1's narrow quantized paths and is
-/// declined with it, as is an unenumerated generation, on the rule
-/// [`AppleSiliconGen::wide_quantized_projections`] documents.
+/// Single-token decode only. Multi-token decode loses to `gather_qmm` at every
+/// measured batch size: on M1 Ultra about 10% (Qwen3-30B-A3B 4-bit is 94.2 vs
+/// 104.1 tok/s at B=2 and 115.3 vs 124.5 at B=4, Mixtral 8x7B 4-bit 34.3 vs
+/// 41.1 at B=4; #2587), and on M3 Ultra 3.6% to 7.6% at B=2 to B=7 in the
+/// corrected-geometry A/B in
+/// `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-11-04.md`, whose
+/// B=8 sorted-path control sits at +0.6%. The 2026-10-21 record that kept the
+/// kernel on at B >= 2 ran the default `--parallel 4`, so its concurrency 5 to
+/// 8 levels queued behind four decoding rows and its batch-3 and batch-4 cells
+/// were inside its noise floor; a focused `--parallel 4` replication at the
+/// current head shows -4.3% at B=2 and -7.5% at B=4. M4 and M5 are unmeasured
+/// and decline with every other generation.
 ///
-/// [`AppleSiliconGen::wide_quantized_projections`]: mlxcel_core::hardware::AppleSiliconGen::wide_quantized_projections
-pub(crate) fn switch_gate_up_preferred_in_forward(
-    tokens: i32,
-    silicon_gen: mlxcel_core::hardware::AppleSiliconGen,
-) -> bool {
-    tokens == 1 || silicon_gen.wide_quantized_projections()
+/// [`SwitchGLU::forward_activated`] (Inkling's decode) is unaffected: it calls
+/// the kernel directly at its measured single-token win.
+pub(crate) fn switch_gate_up_preferred_in_forward(tokens: i32) -> bool {
+    tokens == 1
 }
 
 /// Pure decision behind [`fused_moe_enabled`], split out so it can be unit-tested
@@ -1615,12 +1618,9 @@ impl SwitchGLU {
             let activated = self.activate(&x_gate, &x_up);
             let output = self.down_proj.forward(&activated, &rhs, true);
             scatter_unsort(&output, &inv_order, &indices_shape)
-        } else if let Some(activated) = switch_gate_up_preferred_in_forward(
-            n_tokens,
-            mlxcel_core::hardware::get_hardware().silicon_gen,
-        )
-        .then(|| self.forward_switch_gate_up_kernel(x, indices))
-        .flatten()
+        } else if let Some(activated) = switch_gate_up_preferred_in_forward(n_tokens)
+            .then(|| self.forward_switch_gate_up_kernel(x, indices))
+            .flatten()
         {
             // The kernel's activated output is `[tokens, top_k, dff]`; the
             // down projection's indexed path consumes the gather layout's
@@ -1787,10 +1787,11 @@ impl SwitchGLU {
     /// never run. The reference is mlx-vlm's
     /// `short_block_affine4_switch_gate_up`, whose gate is generic (any
     /// affine 4-bit quantized switch MoE at decode shapes), so it lives here
-    /// in the shared [`SwitchGLU`] rather than a model crate. Wired into both
-    /// [`Self::forward_activated`] (inkling's decode) and [`Self::forward`]
-    /// (the other MoE families' multi-token decode), each ahead of its gather
-    /// path.
+    /// in the shared [`SwitchGLU`] rather than a model crate. Wired into
+    /// [`Self::forward_activated`] (inkling's decode) and, at one token only,
+    /// into [`Self::forward`] ahead of its gather path; the measured
+    /// multi-token batch loss keeps that second wire-in single-token, see
+    /// [`switch_gate_up_preferred_in_forward`].
     ///
     /// Returns `None` when any condition fails and the caller stays on the
     /// gather path: non-affine or block-float planes, bits other than 4,
@@ -2714,16 +2715,13 @@ mod tests {
     }
 
     #[test]
-    fn switch_gate_up_in_forward_is_batched_only_on_wide_generations() {
-        use mlxcel_core::hardware::AppleSiliconGen as Gen;
-        for silicon_gen in [Gen::M1, Gen::M2, Gen::M3, Gen::M4, Gen::M5, Gen::Unknown] {
-            assert!(switch_gate_up_preferred_in_forward(1, silicon_gen));
-        }
-        for silicon_gen in [Gen::M1, Gen::M2, Gen::Unknown] {
-            assert!(!switch_gate_up_preferred_in_forward(2, silicon_gen));
-        }
-        for silicon_gen in [Gen::M3, Gen::M4, Gen::M5] {
-            assert!(switch_gate_up_preferred_in_forward(2, silicon_gen));
+    fn switch_gate_up_in_forward_is_single_token_only() {
+        assert!(switch_gate_up_preferred_in_forward(1));
+        for tokens in 2..=8 {
+            assert!(
+                !switch_gate_up_preferred_in_forward(tokens),
+                "multi-token batch decode of {tokens} tokens loses to gather_qmm"
+            );
         }
     }
 
