@@ -151,6 +151,8 @@ fn masks_dir_rejects_detection_only_model_before_runtime_initialization() {
         model,
         image,
         threshold: None,
+        size: None,
+        iou: None,
         masks_dir: Some(masks.clone()),
         format: OutputFormat::Json,
     })

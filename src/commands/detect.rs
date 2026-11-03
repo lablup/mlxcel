@@ -23,7 +23,7 @@ use anyhow::{Result, anyhow};
 use image::ImageEncoder;
 
 use mlxcel::initialize_runtime_checked;
-use mlxcel::vision::detection::{detector_info, load_detector};
+use mlxcel::vision::detection::{DetectorOptions, detector_info, load_detector};
 
 use crate::DetectArgs;
 
@@ -47,6 +47,29 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
     if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
         return Err(anyhow!("--threshold must be in [0, 1], got {}", threshold));
     }
+    let yolo11 = info.model_type == "yolo11";
+    if let Some(size) = args.size {
+        if size == 0 {
+            return Err(anyhow!("--size must be a positive pixel count"));
+        }
+        if !yolo11 {
+            eprintln!(
+                "NOTE: --size is ignored by model_type {:?}; it resizes to a fixed input size.",
+                info.model_type
+            );
+        }
+    }
+    if let Some(iou) = args.iou
+        && (!iou.is_finite() || !(0.0..=1.0).contains(&iou))
+    {
+        return Err(anyhow!("--iou must be in [0, 1], got {iou}"));
+    }
+    if args.iou.is_some() && !yolo11 {
+        eprintln!(
+            "NOTE: --iou is YOLO11-only and is ignored by model_type {:?}.",
+            info.model_type
+        );
+    }
     if args.masks_dir.is_some() && !info.supports_masks {
         return Err(anyhow!(
             "--masks-dir requires an RF-DETR segmentation checkpoint; model_type {:?} does not emit masks",
@@ -62,7 +85,7 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
     // host GPU (#1537).
     let _runtime = initialize_runtime_checked()?;
 
-    let detector = load_detector(&args.model, threshold)
+    let detector = load_detector(&args.model, args.threshold)
         .map_err(|error| anyhow!("Failed to load detector: {error}"))?;
     if detector.supports_masks() != info.supports_masks {
         return Err(anyhow!(
@@ -70,9 +93,16 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
         ));
     }
     let detector_name = detector.name();
-    let result = detector
-        .predict_path_with_masks(&args.image, args.masks_dir.is_some())
-        .map_err(|error| anyhow!("{detector_name} detection failed: {error}"))?;
+    let options = DetectorOptions {
+        size: args.size,
+        iou: args.iou,
+    };
+    let result = if args.masks_dir.is_some() {
+        detector.predict_path_with_masks(&args.image, true)
+    } else {
+        detector.predict_path_with_options(&args.image, options)
+    }
+    .map_err(|error| anyhow!("{detector_name} detection failed: {error}"))?;
 
     let mut detections = result.detections;
     sort_reading_order(&mut detections);

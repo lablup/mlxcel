@@ -200,17 +200,20 @@ enum Commands {
 
     /// Detect objects or document regions in an image.
     ///
-    /// Loads an RT-DETRv2, PP-DocLayoutV3, or RF-DETR checkpoint and prints bounding
-    /// boxes (`l, t, r, b`), class labels, and confidences in original-image
-    /// pixel coordinates. PP-DocLayoutV3 detections also carry the model's
-    /// global reading order. RF-DETR Seg Small can also write one instance-mask
-    /// PNG per detection with `--masks-dir`. Detection models output boxes and
-    /// masks rather than a token stream, so this is separate from `generate`.
+    /// Loads an RT-DETRv2, PP-DocLayoutV3, YOLO11, or RF-DETR checkpoint and
+    /// prints bounding boxes (`l, t, r, b`), class labels, and confidences in
+    /// original-image pixel coordinates. PP-DocLayoutV3 detections also carry
+    /// the model's global reading order. RF-DETR Seg Small can also write one
+    /// instance-mask PNG per detection with `--masks-dir`. YOLO11 accepts
+    /// `--size` (longest-side resize) and `--iou` (NMS IoU). Detection models
+    /// output boxes and masks rather than a token stream, so this is separate
+    /// from `generate`.
     ///
     /// Examples:
     ///
     ///     mlxcel detect -m models/PP-DocLayoutV3 -i page.png --format json
     ///     mlxcel detect -m models/rt-detr-v2 -i img.jpg --threshold 0.5 --format json
+    ///     mlxcel detect -m axiom-of-choice/OmniParser-v2-icon-detect -i ui.png --size 1280 --format json
     ///     mlxcel detect -m models/rf-detr-seg-small -i img.jpg --masks-dir masks --format json
     #[command(verbatim_doc_comment)]
     Detect(DetectArgs),
@@ -955,7 +958,7 @@ pub(crate) struct InspectArgs {
 /// Arguments for the `mlxcel detect` subcommand.
 #[derive(Args, Debug)]
 pub(crate) struct DetectArgs {
-    /// Path to an RT-DETRv2, PP-DocLayoutV3, or RF-DETR model directory.
+    /// Path to an RT-DETRv2, PP-DocLayoutV3, YOLO11, or RF-DETR model directory.
     #[arg(short, long, value_name = "PATH")]
     pub(crate) model: std::path::PathBuf,
 
@@ -963,10 +966,20 @@ pub(crate) struct DetectArgs {
     #[arg(short, long, value_name = "PATH")]
     pub(crate) image: std::path::PathBuf,
 
-    /// Confidence threshold in [0, 1]. Defaults to 0.5 for RF-DETR and 0.3
-    /// for RT-DETRv2 and PP-DocLayoutV3.
+    /// Confidence threshold in [0, 1]. Unset uses the detector's own default
+    /// (RT-DETRv2 0.3, PP-DocLayoutV3 0.3, RF-DETR 0.5, YOLO11 0.05).
     #[arg(short, long, value_name = "FLOAT")]
     pub(crate) threshold: Option<f32>,
+
+    /// Longest side in pixels before inference. Unset keeps the native
+    /// resolution. YOLO11 only; detectors with a fixed input size ignore it
+    /// with a warning.
+    #[arg(long, value_name = "PIXELS")]
+    pub(crate) size: Option<usize>,
+
+    /// NMS IoU threshold in [0, 1] (default 0.1). YOLO11 only.
+    #[arg(long, value_name = "FLOAT")]
+    pub(crate) iou: Option<f32>,
 
     /// Save one binary instance-mask PNG per detection (RF-DETR segmentation
     /// checkpoints only). JSON output includes each saved mask path.

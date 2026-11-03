@@ -315,6 +315,7 @@ contract; only PP-DocLayoutV3 includes `reading_order`.
 | RT-DETRv2 | `rt_detr_v2` | converted MLX | geometric CLI fallback | supported on Metal and CUDA; ROCm partial |
 | PP-DocLayoutV3 | `pp_doclayout_v3` | raw Paddle/Hugging Face `model.*` and converted MLX | GlobalPointer page order | supported on Metal and CUDA; ROCm partial |
 | RF-DETR Base / Seg Small | `rf-detr` (alias `rfdetr`) | released Hugging Face `model.*` and idempotently converted MLX | geometric CLI fallback | supported on ROCm; Metal and CUDA unverified |
+| YOLO11 (OmniParser v2 icon detect) | `yolo11` | converted MLX (`axiom-of-choice/OmniParser-v2-icon-detect`) | geometric CLI fallback | supported on Metal and CUDA |
 
 RF-DETR uses a windowed DINOv2 backbone, C2f projector, two-stage deformable
 decoder, and an optional instance-segmentation head. Base and segmentation
@@ -330,6 +331,34 @@ finiteness contract before constructing HGNetV2-L, the hybrid encoder,
 mask-enhanced query initialization, and its six decoder layers. Raw checkpoint
 convolution kernels are transposed only when the global `model.` namespace
 proves their provenance; mixed layouts and rename collisions are rejected.
+
+YOLO11 implements the fixed OmniParser v2 `icon_detect` topology: three C3k2
+backbone stages, SPPF, the C2PSA attention neck, and an anchor-free DFL head at
+strides 8, 16, and 32. The converted checkpoint stores MLX NHWC kernels and
+BatchNorm running statistics, so no conversion is needed at load time. A
+checkpoint whose `ch` or `stride` differs from the OmniParser topology is
+rejected at load. `--threshold` defaults to 0.05, `--size` sets the longest side
+before the stride-32 letterbox (unset keeps the native resolution), and `--iou`
+sets the class-aware NMS threshold (default 0.1, at most 300 boxes). Detections
+use the class name from `config.json` (`icon`) and original-image pixels.
+
+### OmniParser v2 icon detection
+
+OmniParser v2 detects interactable icons with this detector and captions each
+crop with Florence-2. Both halves run natively:
+
+```bash
+mlxcel detect -m axiom-of-choice/OmniParser-v2-icon-detect \
+  -i ui.png --size 1280 --format json > icons.json
+mlxcel generate -m models/mlx/Florence-2-base \
+  --image crop.png --prompt "<CAPTION>"
+```
+
+The detector emits `icon` boxes in the screenshot's own pixel coordinates, so a
+crop for the captioner is the printed `l, t, r, b` rectangle. `--threshold`
+filters low-confidence icons and `--iou` controls overlap suppression; boxes of
+different classes are never merged. A combined pipeline command is not part of
+this family.
 
 ## Standalone vision and dense prediction
 
