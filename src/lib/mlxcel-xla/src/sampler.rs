@@ -147,16 +147,22 @@ fn next_unit(state: &mut u64) -> f32 {
 }
 
 /// Index of the maximum logit (greedy). Matches the C shim's on-device argmax.
+///
+/// NaN entries are skipped: a comparison against NaN is always false, so a
+/// leading NaN would otherwise pin the answer to index 0 no matter what the
+/// rest of the row holds. When every entry is NaN there is no maximum to find
+/// and index 0 is the same arbitrary but deterministic choice as before.
 fn argmax(logits: &[f32]) -> i32 {
-    let mut best = 0usize;
-    let mut best_v = logits[0];
-    for (i, &v) in logits.iter().enumerate().skip(1) {
-        if v > best_v {
-            best_v = v;
-            best = i;
+    let mut best: Option<(usize, f32)> = None;
+    for (i, &v) in logits.iter().enumerate() {
+        if v.is_nan() {
+            continue;
+        }
+        if best.is_none_or(|(_, best_v)| v > best_v) {
+            best = Some((i, v));
         }
     }
-    best as i32
+    best.map_or(0, |(index, _)| index as i32)
 }
 
 /// Divide the logit of each unique seen token by `penalty` when positive,
@@ -375,10 +381,12 @@ pub(crate) fn sample(logits: &[f32], params: &SampleParams, history: &[i32], rng
         cand.retain(|&(_, p)| p >= thresh);
     }
 
-    // `total` is a sum of finite non-negative exponentials, so `<= 0.0` (no draw
-    // possible) is the only degenerate case.
+    // `total` is a sum of non-negative exponentials, so `<= 0.0` (no draw
+    // possible) is the only degenerate case. A NaN total (an `+inf` logit makes
+    // its own exponential `inf - inf`) is checked explicitly so the draw below
+    // is never driven with NaN.
     let total: f32 = cand.iter().map(|x| x.1).sum();
-    if cand.is_empty() || total <= 0.0 {
+    if cand.is_empty() || total.is_nan() || total <= 0.0 {
         return argmax(logits);
     }
     let r = next_unit(rng) * total;
@@ -466,6 +474,28 @@ mod tests {
     fn empty_logits_is_safe() {
         let mut rng = 1;
         assert_eq!(sample(&[], &SampleParams::greedy(), &[], &mut rng), 0);
+    }
+
+    #[test]
+    fn argmax_skips_nan_entries() {
+        // Every comparison against a NaN is false, so a leading NaN used to pin
+        // the answer to index 0 regardless of the rest of the row.
+        let logits = [f32::NAN, 1.0, 5.0, 2.0];
+        let mut rng = 1;
+        assert_eq!(sample(&logits, &SampleParams::greedy(), &[], &mut rng), 2);
+        // An all-NaN row has no maximum; the pick stays arbitrary but defined.
+        let all_nan = [f32::NAN, f32::NAN];
+        assert_eq!(sample(&all_nan, &SampleParams::greedy(), &[], &mut rng), 0);
+    }
+
+    #[test]
+    fn non_finite_logits_fall_back_to_the_greedy_token() {
+        // `inf - inf` makes every exponential NaN, so the draw cannot run. The
+        // answer must be the maximum logit (index 1), not whichever candidate the
+        // sort happened to leave last.
+        let logits = [0.0, f32::INFINITY, 1.0, 2.0];
+        let mut rng = 5;
+        assert_eq!(sample(&logits, &params(1.0, 0, 1.0), &[], &mut rng), 1);
     }
 
     #[test]

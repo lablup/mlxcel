@@ -460,6 +460,15 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             Self::reject_queue_full(response_tx);
             return;
         }
+        let Some(max_tokens) = self.admitted_max_tokens(prompt_len, max_tokens) else {
+            Self::reject_no_generation_room(
+                response_tx,
+                prompt_len,
+                max_tokens,
+                self.context_capacity,
+            );
+            return;
+        };
         match self.engine.submit(&prompt_tokens, max_tokens, params) {
             Ok(req_id) => {
                 self.batch_observability.record_prefill_start(prompt_len);
@@ -534,15 +543,25 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             Self::reject_queue_full(state.response_tx);
             return;
         }
+        let Some(max_tokens) = self.admitted_max_tokens(effective_prefill_len, state.max_tokens)
+        else {
+            Self::reject_no_generation_room(
+                state.response_tx,
+                effective_prefill_len,
+                state.max_tokens,
+                self.context_capacity,
+            );
+            return;
+        };
 
         let submitted = match prepared {
             PreparedImagePrefill::Standard(prepared) => {
                 self.engine
-                    .submit_prepared(prepared, state.max_tokens, state.params)
+                    .submit_prepared(prepared, max_tokens, state.params)
             }
             PreparedImagePrefill::DeepStack(request) => {
                 self.engine
-                    .submit_deepstack_prepared(request, state.max_tokens, state.params)
+                    .submit_deepstack_prepared(request, max_tokens, state.params)
             }
         };
         match submitted {
@@ -561,7 +580,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                         start: state.start,
                         effective_prefill_len,
                         prefill_reported: false,
-                        max_tokens: state.max_tokens,
+                        max_tokens,
                         generated_tokens: 0,
                     },
                 );
@@ -611,14 +630,24 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             Self::reject_queue_full(state.response_tx);
             return;
         }
+        let Some(max_tokens) = self.admitted_max_tokens(effective_prefill_len, state.max_tokens)
+        else {
+            Self::reject_no_generation_room(
+                state.response_tx,
+                effective_prefill_len,
+                state.max_tokens,
+                self.context_capacity,
+            );
+            return;
+        };
         let submitted = match prepared {
             AudioPreparedRequest::Generic(prepared) => {
                 self.engine
-                    .submit_prepared(prepared, state.max_tokens, state.params)
+                    .submit_prepared(prepared, max_tokens, state.params)
             }
             AudioPreparedRequest::Gemma3n(prepared) => self.engine.submit_gemma3n_prepared(
                 prepared.into_request(),
-                state.max_tokens,
+                max_tokens,
                 state.params,
             ),
         };
@@ -636,7 +665,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                         start: state.start,
                         effective_prefill_len,
                         prefill_reported: false,
-                        max_tokens: state.max_tokens,
+                        max_tokens,
                         generated_tokens: 0,
                     },
                 );

@@ -52,8 +52,8 @@ use std::time::Instant;
 
 use mlxcel_core::session::PreparedPrefill;
 use mlxcel_xla::{
-    DeepStackPreparedPrefill, EngineEvent, FinishReason as XlaFinishReason, Gemma3nPreparedPrefill,
-    SampleParams, XlaBatchEngine,
+    ContextCapacityError, DeepStackPreparedPrefill, EngineEvent, FinishReason as XlaFinishReason,
+    Gemma3nPreparedPrefill, SampleParams, XlaBatchEngine,
 };
 
 use super::BatchEngine;
@@ -511,6 +511,44 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
     /// Answer a request the queue-depth bound refuses.
     fn reject_queue_full(response_tx: mpsc::Sender<GenerateEvent>) {
         let _ = response_tx.send(GenerateEvent::Error(QUEUE_FULL_MESSAGE.to_string()));
+    }
+
+    /// The generation budget a request may carry, clamped to the room the widest
+    /// loaded shape leaves after its prefill, or `None` when the prompt alone
+    /// already fills the capacity.
+    ///
+    /// The engine admits on `effective_prompt_len + max_new_tokens <=
+    /// context_capacity` (there is no KV migration between shapes), while the
+    /// server's budget for an omitted `max_tokens` is the checkpoint's context
+    /// window: `--n-predict -1` is the default, and `resolve_default_max_tokens`
+    /// turns it into the model's `max_position_embeddings`, which is thousands
+    /// of tokens wide and larger than any OpenXLA graph. Without this clamp the
+    /// backend rejects every request that omits the budget, which is the common
+    /// client behaviour. Clamping matches the MLX path, which silently clamps an
+    /// explicit budget to the effective per-slot window for the same reason.
+    ///
+    /// The clamp uses the largest capacity, so it only ever rescues requests the
+    /// engine would have refused; a budget that fits any bucket is left alone and
+    /// still routes by its own size.
+    fn admitted_max_tokens(&self, prefill_len: usize, requested: usize) -> Option<usize> {
+        let room = self.context_capacity.saturating_sub(prefill_len);
+        let budget = requested.min(room);
+        (budget > 0).then_some(budget)
+    }
+
+    /// Answer a request whose prompt leaves no room for even one generated token.
+    fn reject_no_generation_room(
+        response_tx: mpsc::Sender<GenerateEvent>,
+        prefill_len: usize,
+        requested: usize,
+        context_capacity: usize,
+    ) {
+        let error = ContextCapacityError {
+            effective_prompt_len: prefill_len,
+            max_new_tokens: requested,
+            context_capacity,
+        };
+        let _ = response_tx.send(GenerateEvent::Error(error.to_string()));
     }
 
     /// Drop any requests whose client cancelled, freeing their engine slots. A
