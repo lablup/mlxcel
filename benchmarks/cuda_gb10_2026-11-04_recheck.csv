@@ -1,0 +1,4 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit,decode_path
+bitnet-b1.58-2b-4t,models/bitnet-b1.58-2b-4t,512,128,605.88,845.05,913.79,140.08,2026-11-04,NVIDIA_GB10_122GB,0.8.1,release,128,"Hello, how are you today?",512,630aaeba-dirty,7ca40033,engine
+bitnet-b1.58-2b-4t-4bit,models/bitnet-b1.58-2b-4t-4bit,512,128,606.93,843.60,667.80,191.67,2026-11-04,NVIDIA_GB10_122GB,0.8.1,release,128,"Hello, how are you today?",512,630aaeba-dirty,7ca40033,engine
+diffusiongemma-26b-a4b-it-4bit,models/diffusiongemma-26b-a4b-it-4bit,512,128,641.92,797.61,18664.88,6.86,2026-11-04,NVIDIA_GB10_122GB,0.8.1,release,128,"Hello, how are you today?",512,630aaeba-dirty,7ca40033,diffusion

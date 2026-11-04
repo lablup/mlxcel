@@ -1,0 +1,4 @@
+model,model_path,prompt,size,steps,seed,images,repeats,p50_ms,mean_ms,min_ms,s_per_image,load_ms,date,hardware,mlxcel_version,build_type,mlxcel_commit,mlx_commit,notes
+mage-flow-edit,models/mage-flow-edit,make it a night scene with moonlight and falling snow,512x512,8,0,1,3,5578.68,5624.52,5573.69,5.579,1016.1,2026-11-04,NVIDIA_GB10_122GB,0.8.1,release,630aaeba-dirty,7ca40033,
+mage-flow-edit-base,models/mage-flow-edit-base,make it a night scene with moonlight and falling snow,512x512,8,0,1,3,5593.47,5596.33,5582.57,5.593,502.2,2026-11-04,NVIDIA_GB10_122GB,0.8.1,release,630aaeba-dirty,7ca40033,
+mage-flow-edit-turbo,models/mage-flow-edit-turbo,make it a night scene with moonlight and falling snow,512x512,8,0,1,3,3772.17,3921.93,3374.63,3.772,502.0,2026-11-04,NVIDIA_GB10_122GB,0.8.1,release,630aaeba-dirty,7ca40033,

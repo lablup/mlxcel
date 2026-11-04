@@ -73,6 +73,66 @@ CSV_HEADER = ["model", "model_path", "kind", "input_kind", "batch", "inputs", "p
               "mlxcel_version", "build_type", "mlxcel_commit", "mlx_commit", "notes"]
 
 
+def _host_memory_gb():
+    """Linux host memory as `NNGB`, the figure bench_decode.sh records for a
+    CUDA host and the only one these unified-memory parts report."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return f"{round(int(line.split()[1]) / 1024 ** 2)}GB"
+    except (OSError, ValueError, IndexError):
+        pass
+    return ""
+
+
+def _rocm_hardware():
+    """(gfx target, marketing name, ROCm version, VRAM bytes) or None.
+
+    Mirrors `scripts/bench_decode.sh` detection: `rocminfo` names the first GPU
+    agent (`Name: gfx1151`, then `Marketing Name:`), `/opt/rocm/.info/version`
+    carries the release, and the device VRAM comes from sysfs because a UMA
+    carve-out makes the host figure wrong by up to 3x. `ROCM_PATH` overrides
+    the install root.
+    """
+    import re
+    import shutil
+
+    root = Path(os.environ.get("ROCM_PATH", "/opt/rocm"))
+    tool = shutil.which("rocminfo") or str(root / "bin/rocminfo")
+    if not Path(tool).is_file():
+        return None
+    try:
+        out = subprocess.run([tool], capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    gfx = ""
+    name = ""
+    for line in out.splitlines():
+        match = re.match(r"\s*Name:\s+(gfx[0-9a-f]+)\s*$", line)
+        if match and not gfx:
+            gfx = match.group(1)
+            continue
+        match = re.match(r"\s*Marketing Name:\s+(.+?)\s*$", line)
+        if match and gfx and not name:
+            name = match.group(1)
+    if not gfx:
+        return None
+    version = ""
+    for candidate in (root / ".info/version", root / "share/rocm/.info/version"):
+        try:
+            version = candidate.read_text().strip().splitlines()[0]
+            break
+        except OSError:
+            pass
+    vram = 0
+    for node in Path("/sys/class/drm").glob("card*/device/mem_info_vram_total"):
+        try:
+            vram = max(vram, int(node.read_text().strip()))
+        except (OSError, ValueError):
+            pass
+    return gfx, name or "AMD_GPU", version, vram
+
+
 def detect_hardware():
     """Host string for the CSV `hardware` column, matching bench_decode.sh.
 
@@ -87,14 +147,29 @@ def detect_hardware():
                              capture_output=True, text=True).stdout.strip()
         gb = f"{round(int(mem) / 1024**3)}GB" if mem.isdigit() else ""
         return f"{chip.replace(' ', '_')}_{gb}".strip("_") or "unknown"
-    name = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
-                           "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
+    try:
+        name = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
+                               "--format=csv,noheader"], capture_output=True,
+                              text=True).stdout.strip()
+    except OSError:
+        name = ""
     if name:
         first = name.splitlines()[0]
         gpu, _, total = first.partition(",")
         mib = "".join(ch for ch in total if ch.isdigit())
-        gb = f"{round(int(mib) / 1024)}GB" if mib else ""
+        # Unified-memory parts answer [N/A] for memory.total (GB10 does), so
+        # fall back to host memory, which is what bench_decode.sh records.
+        gb = f"{round(int(mib) / 1024)}GB" if mib else _host_memory_gb()
         return f"{gpu.strip().replace(' ', '_')}_{gb}".strip("_")
+    rocm = _rocm_hardware()
+    if rocm:
+        gfx, gpu, version, vram = rocm
+        parts = [gpu.replace(" ", "_"), gfx]
+        if version:
+            parts.append(f"ROCm{version}")
+        if vram:
+            parts.append(f"{round(vram / 1024**3)}GB")
+        return "_".join(parts).replace(",", "_")
     return "unknown"
 
 

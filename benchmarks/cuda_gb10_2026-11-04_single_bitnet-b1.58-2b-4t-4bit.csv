@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit,decode_path
+bitnet-b1.58-2b-4t-4bit,models/bitnet-b1.58-2b-4t-4bit,512,128,606.93,843.60,667.80,191.67,2026-11-04,NVIDIA_GB10_122GB,0.8.1,release,128,"Hello, how are you today?",512,630aaeba-dirty,7ca40033,engine
