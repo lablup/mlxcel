@@ -23,6 +23,8 @@ M5 Max, and mlx-lm / mlx-vlm baselines, see
 
 Current source-of-truth data lives in `benchmarks/`:
 
+The 2026-11-03 and 2026-11-04 CSVs carry a `backend` column beside the hardware: `cuda-13.0` for the GB10 rows, `rocm-10.0.0` for the Strix Halo rows. It names the versioned execution stack, which the `hardware` string cannot, so a later run of the same box under CUDA 13.4, another ROCm release, or one of the cuda-rust, Vulkan or OpenXLA paths stays distinguishable. `MLXCEL_BENCH_BACKEND` overrides the probe for a build it cannot name. Files older than that have no value there.
+
 | CSV | Hardware | Date | Type |
 |-----|----------|------|------|
 | `cuda_gb10_2026-11-03.csv` | NVIDIA GB10 | 2026-11-03 (mlxcel 0.8.1 at `630aaeba`, MLX pin `7ca40033`, CUDA 13.0.88, `BENCH_MEM_OVERHEAD_FACTOR=2.0 --cooldown 15 --big-cooldown 45`; 312 directories, 169 measured on pp512/tg128 with `--ignore-eos`, 68 checkpoint aliases collapsed, 9 memory-gated) | Text (VLM checkpoints on their text decoder) |

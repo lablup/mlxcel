@@ -965,6 +965,12 @@ verify-benchmark-raw-logs: ## Assert benchmark data holds no uncited raw logs
 	@python3 scripts/ci/check_benchmark_raw_logs.py
 	@bash scripts/ci/check_benchmark_raw_logs_test.sh
 
+.PHONY: verify-benchmark-csv-schema
+verify-benchmark-csv-schema: ## Assert every benchmark CSV producer writes the same header and row width
+	@echo "$(CYAN)[verify] benchmark CSV schema...$(RESET)"
+	@python3 scripts/ci/check_benchmark_csv_schema.py
+	@bash scripts/ci/check_benchmark_csv_schema_test.sh
+
 .PHONY: verify-windows-paths
 verify-windows-paths: ## Assert no tracked path is a Windows device name such as AUX (issue #2531)
 	@echo "$(CYAN)[verify] Windows device-name paths...$(RESET)"

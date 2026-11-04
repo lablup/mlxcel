@@ -1,5 +1,10 @@
 # Column alignment in the embedding CSVs
 
+**2026-11-04:** the header gained a `backend` column between `mlx_commit` and
+`notes`, so it is now 22 columns and the writer emits LF line endings. Older
+files keep their original width and have no backend value; the history below
+describes the earlier 21-column schema.
+
 `scripts/bench_embeddings.py` declares a 21-column header but two of its three
 `writerow` calls omitted `mlx_commit`, so a measured row carried 20 fields.
 Reading such a file by column name shifts everything from `hardware` rightward:

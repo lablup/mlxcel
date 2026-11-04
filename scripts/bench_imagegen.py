@@ -10,6 +10,9 @@ Usage:
   scripts/bench_imagegen.py --bin target/release/mlxcel-server \
       --out benchmarks/<file>.csv [--only NAME ...] [--repeats 3] [--port 18092]
 
+The CSV `backend` column is cuda-<nvcc release>, rocm-<release> or metal;
+MLXCEL_BENCH_BACKEND overrides it for a build the probe cannot name.
+
 The measurement is end-to-end serving latency: HTTP, tokenization, the full
 denoising loop, VAE decode and PNG/base64 encoding. It is not a kernel number.
 Every model runs the same 512x512, 8-step, batch-1 shape so the rows compare;
@@ -56,7 +59,7 @@ CSV_HEADER = [
     "model", "model_path", "prompt", "size", "steps", "seed", "images",
     "repeats", "p50_ms", "mean_ms", "min_ms", "s_per_image", "load_ms",
     "date", "hardware", "mlxcel_version", "build_type", "mlxcel_commit",
-    "mlx_commit", "notes",
+    "mlx_commit", "backend", "notes",
 ]
 
 
@@ -150,6 +153,51 @@ def detect_hardware():
         if vram:
             parts.append(f"{round(vram / 1024**3)}GB")
         return "_".join(parts).replace(",", "_")
+    return "unknown"
+
+
+def _nvcc_release():
+    """The toolkit release behind the binary, e.g. `13.0`, or the empty string.
+
+    `nvcc` is not on PATH on every CUDA host (the GB10 box needs
+    /usr/local/cuda/bin added), so the default install root is the fallback.
+    """
+    import re
+    import shutil
+
+    nvcc = shutil.which("nvcc") or "/usr/local/cuda/bin/nvcc"
+    try:
+        out = subprocess.run([nvcc, "--version"], capture_output=True,
+                             text=True, timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    match = re.search(r"release\s+([0-9][0-9.]*)", out)
+    return match.group(1) if match else ""
+
+
+def detect_backend():
+    """Versioned label for the CSV `backend` column.
+
+    The hardware column names the box, not the stack: the same GB10 can run
+    CUDA 13.0 or 13.4, a ROCm host changes release, and the cuda-rust bridge,
+    Vulkan or OpenXLA paths are distinct stacks on that same box.
+    `MLXCEL_BENCH_BACKEND` overrides the probe for a build it cannot name.
+    """
+    override = os.environ.get("MLXCEL_BENCH_BACKEND")
+    if override:
+        return override
+    import platform
+    import shutil
+
+    if platform.system() == "Darwin":
+        return "metal"
+    if shutil.which("nvidia-smi"):
+        release = _nvcc_release()
+        return f"cuda-{release}" if release else "cuda"
+    rocm = _rocm_hardware()
+    if rocm:
+        version = rocm[2]
+        return f"rocm-{version}" if version else "rocm"
     return "unknown"
 
 
@@ -327,6 +375,7 @@ def main():
         ).decode()
     prompt = EDIT_PROMPT if args.task == "edit" else PROMPT
     hardware = detect_hardware()
+    backend = detect_backend()
     date = time.strftime("%Y-%m-%d")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -340,7 +389,7 @@ def main():
         return 1
 
     csv_file = open(out, "w", newline="")
-    writer = csv.writer(csv_file)
+    writer = csv.writer(csv_file, lineterminator="\n")
     writer.writerow(CSV_HEADER)
     csv_file.flush()
 
@@ -348,7 +397,7 @@ def main():
         name = model_dir.name
         row = [name, str(model_dir), prompt, SIZE, STEPS, SEED, 1, args.repeats,
                "", "", "", "", "", date, hardware, version, args.build_type,
-               commit, mlx_commit, ""]
+               commit, mlx_commit, backend, ""]
         print(f">>> {name}", file=sys.stderr, flush=True)
         proc, log = start_server(args.bin, model_dir, args.port, logdir / f"{name}.log")
         load_ms = wait_ready(args.port, proc)

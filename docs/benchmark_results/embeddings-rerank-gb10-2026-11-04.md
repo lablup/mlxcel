@@ -9,7 +9,7 @@ The raw rows live in `benchmarks/cuda_gb10_embeddings_2026-11-04.csv` (102 cells
 | Item | Value |
 |------|-------|
 | **Hardware** | NVIDIA GB10 (DGX Spark), 122 GB unified LPDDR5x, SM 121 |
-| **Driver / toolkit** | 580.178.04 / CUDA 13.0.88 |
+| **Driver / toolkit** | 580.178.04 / CUDA 13.0.88; CSV `backend` = `cuda-13.0` |
 | **OS** | Linux aarch64, kernel 7.0.0-1019-nvidia |
 | **mlxcel** | 0.8.1 at `630aaeba` |
 | **MLX pin** | `7ca40033` |

@@ -651,6 +651,10 @@ jobs:
         run: python3 scripts/ci/check_benchmark_raw_logs.py
       - name: Check the guard still fails on raw logs and stale entries
         run: bash scripts/ci/check_benchmark_raw_logs_test.sh
+      - name: Check benchmark CSV producers agree on one schema
+        run: python3 scripts/ci/check_benchmark_csv_schema.py
+      - name: Check the schema guard still fails on drift
+        run: bash scripts/ci/check_benchmark_csv_schema_test.sh
 
   windows-reserved-paths:
     name: Windows reserved paths

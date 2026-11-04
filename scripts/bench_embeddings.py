@@ -8,6 +8,9 @@ appends one CSV row per (model, input_kind, batch) cell. Only stdlib.
 Usage:
   scripts/bench_embeddings.py --bin target/release/mlxcel-server --out benchmarks/<file>.csv \
       [--only NAME ...] [--repeats 5] [--port 18091]
+
+The CSV `backend` column is cuda-<nvcc release>, rocm-<release> or metal;
+MLXCEL_BENCH_BACKEND overrides it for a build the probe cannot name.
 """
 import argparse, base64, csv, json, os, signal, statistics, subprocess, sys, time, urllib.request, urllib.error
 from pathlib import Path
@@ -70,7 +73,7 @@ MODELS = [
 
 CSV_HEADER = ["model", "model_path", "kind", "input_kind", "batch", "inputs", "prompt_tokens", "repeats",
               "p50_ms", "mean_ms", "min_ms", "inputs_per_s", "tokens_per_s", "load_ms", "date", "hardware",
-              "mlxcel_version", "build_type", "mlxcel_commit", "mlx_commit", "notes"]
+              "mlxcel_version", "build_type", "mlxcel_commit", "mlx_commit", "backend", "notes"]
 
 
 def _host_memory_gb():
@@ -170,6 +173,51 @@ def detect_hardware():
         if vram:
             parts.append(f"{round(vram / 1024**3)}GB")
         return "_".join(parts).replace(",", "_")
+    return "unknown"
+
+
+def _nvcc_release():
+    """The toolkit release behind the binary, e.g. `13.0`, or the empty string.
+
+    `nvcc` is not on PATH on every CUDA host (the GB10 box needs
+    /usr/local/cuda/bin added), so the default install root is the fallback.
+    """
+    import re
+    import shutil
+
+    nvcc = shutil.which("nvcc") or "/usr/local/cuda/bin/nvcc"
+    try:
+        out = subprocess.run([nvcc, "--version"], capture_output=True,
+                             text=True, timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    match = re.search(r"release\s+([0-9][0-9.]*)", out)
+    return match.group(1) if match else ""
+
+
+def detect_backend():
+    """Versioned label for the CSV `backend` column.
+
+    The hardware column names the box, not the stack: the same GB10 can run
+    CUDA 13.0 or 13.4, a ROCm host changes release, and the cuda-rust bridge,
+    Vulkan or OpenXLA paths are distinct stacks on that same box.
+    `MLXCEL_BENCH_BACKEND` overrides the probe for a build it cannot name.
+    """
+    override = os.environ.get("MLXCEL_BENCH_BACKEND")
+    if override:
+        return override
+    import platform
+    import shutil
+
+    if platform.system() == "Darwin":
+        return "metal"
+    if shutil.which("nvidia-smi"):
+        release = _nvcc_release()
+        return f"cuda-{release}" if release else "cuda"
+    rocm = _rocm_hardware()
+    if rocm:
+        version = rocm[2]
+        return f"rocm-{version}" if version else "rocm"
     return "unknown"
 
 
@@ -298,7 +346,7 @@ def run_model(name, path, kind, args, meta, writer, fh):
                 toks.append(int(data.get("usage", {}).get("prompt_tokens", 0)))
             if not times:
                 writer.writerow([name, str(path), kind, input_kind, batch, batch, "", 0, "", "", "", "", "", f"{load_ms:.1f}",
-                                 meta["date"], meta["hardware"], meta["mlxcel_version"], meta["build_type"], meta["commit"], meta["mlx_commit"], note])
+                                 meta["date"], meta["hardware"], meta["mlxcel_version"], meta["build_type"], meta["commit"], meta["mlx_commit"], meta["backend"], note])
                 fh.flush()
                 continue
             p50 = statistics.median(times)
@@ -308,12 +356,12 @@ def run_model(name, path, kind, args, meta, writer, fh):
             writer.writerow([name, str(path), kind, input_kind, batch, batch, ptoks, len(times), f"{p50:.2f}", f"{mean:.2f}",
                              f"{mn:.2f}", f"{batch / (p50 / 1000.0):.2f}", f"{ptoks / (p50 / 1000.0):.1f}" if ptoks else "",
                              f"{load_ms:.1f}", meta["date"], meta["hardware"], meta["mlxcel_version"], meta["build_type"],
-                             meta["commit"], meta["mlx_commit"], note])
+                             meta["commit"], meta["mlx_commit"], meta["backend"], note])
             fh.flush()
             print(f"  {name} {input_kind} b={batch}: p50={p50:.1f}ms tokens={ptoks}", flush=True)
     except Exception as e:
         writer.writerow([name, str(path), kind, "", "", "", "", 0, "", "", "", "", "", "", meta["date"], meta["hardware"],
-                         meta["mlxcel_version"], meta["build_type"], meta["commit"], meta["mlx_commit"], f"ERROR: {e}"])
+                         meta["mlxcel_version"], meta["build_type"], meta["commit"], meta["mlx_commit"], meta["backend"], f"ERROR: {e}"])
         fh.flush()
         print(f"[error] {name}: {e}", flush=True)
     finally:
@@ -346,11 +394,22 @@ def main():
     version = subprocess.run([args.bin.replace("mlxcel-server", "mlxcel"), "--version"], capture_output=True, text=True).stdout.strip().split()[-1]
     meta = {"date": time.strftime("%Y-%m-%d"), "hardware": detect_hardware(), "mlxcel_version": version,
             "build_type": args.build_type, "commit": commit,
-            "mlx_commit": mlx_commit}
+            "mlx_commit": mlx_commit, "backend": detect_backend()}
     out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
     new = not out.exists()
+    if not new:
+        # This ladder appends so a partial roster can be filled in later. An
+        # older file with a different header would take the new rows under
+        # shifted names without an error, so refuse instead.
+        with open(out, newline="") as existing:
+            header = next(csv.reader(existing), [])
+        if header != CSV_HEADER:
+            raise SystemExit(
+                f"{out}: existing header has {len(header)} columns, this writer "
+                f"uses {len(CSV_HEADER)}; write to a new file")
     with open(out, "a", newline="") as fh:
-        w = csv.writer(fh)
+        w = csv.writer(fh, lineterminator="\n")
         if new:
             w.writerow(CSV_HEADER)
         for name, path, kind in MODELS:

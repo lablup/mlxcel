@@ -98,6 +98,12 @@ ladder, driven by `scripts/bench_embeddings.py`:
 
 - [Embedding and rerank throughput on GB10 - 2026-08-26](benchmark_results/embeddings-rerank-gb10-2026-08-26.md)
 - [Embedding and rerank throughput on M5 Max - 2026-09-04](benchmark_results/embeddings-rerank-m5max-2026-09-04.md)
+- [Embedding and rerank throughput on GB10 - 2026-11-04](benchmark_results/embeddings-rerank-gb10-2026-11-04.md)
+
+Image generation and edit throughput (`/v1/images/generations`,
+`/v1/images/edits`) has its own ladder, driven by `scripts/bench_imagegen.py`:
+
+- [Image generation throughput on GB10 - 2026-11-04](benchmark_results/imagegen-gb10-2026-11-04.md)
 
 ### Record every version the measurement depends on
 
@@ -106,13 +112,14 @@ three depending on which script wrote it. They are now separate:
 
 | Column | Written by | Holds |
 |--------|-----------|-------|
-| `mlxcel_version` | `bench_decode.sh`, `bench_embeddings.py` | this repository's crate version, from `Cargo.toml` |
-| `mlxcel_commit` | the same two | the 8-character source revision measured, `-dirty` when tracked files were modified |
-| `mlx_commit` | the same two | the 8-character pinned MLX C++ revision the binary links |
+| `mlxcel_version` | `bench_decode.sh`, `bench_embeddings.py`, `bench_imagegen.py` | this repository's crate version, from `Cargo.toml` |
+| `mlxcel_commit` | the same three | the 8-character source revision measured, `-dirty` when tracked files were modified |
+| `mlx_commit` | the same three | the 8-character pinned MLX C++ revision the binary links |
 | `mlx_version` | historical CSVs only | the MLX library version, back when the column was hardcoded to it |
 | `baseline_version` | `bench_mlxlm.py` | the Python baseline, as `mlx-lm-<v>` or `mlx-vlm-<v>`; on a ROCm host `+mlx-<v>` follows, since MLX there is a source build whose version carries its commit |
 | `mlx_rocm_overlay_commit` | `bench_decode.sh`, ROCm rows only | the 8-character source commit of the MLX ROCm overlay (`src/lib/mlxcelverse/overlays/rocm/UPSTREAM`); `mlx_commit` stays the upstream pin |
 | `hip_version` | `bench_decode.sh`, ROCm rows only | the HIP runtime version from `hipconfig --version`; the ROCm release is in the `hardware` string |
+| `backend` | the same three | the versioned execution stack: `cuda-13.0` from `nvcc --version`, `rocm-<release>`, or `metal`. Set `MLXCEL_BENCH_BACKEND` to override it for a build the probe cannot name, such as `cuda-rust-0.1`, `vulkan-1.4` or `openxla-2026.11`. Added on 2026-11-04; earlier CSVs have no value |
 | `decode_path` | `bench_decode.sh` | the decode loop the runner timed: `engine` (the batch-native engine's raw-completion client, the loop `mlxcel generate` and the server's B=1 row run, epic #2166 Phase 6) on every row since #2176; empty on earlier rows, which timed the retired `CxxGenerator` |
 
 Do not drop these when transcribing the speculative or batched-serving tables by

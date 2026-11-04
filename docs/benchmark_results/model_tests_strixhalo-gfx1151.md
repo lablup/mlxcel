@@ -8,7 +8,7 @@ Single-stream decode and prefill for every checkpoint under `models/` on the ROC
 |------|-------|
 | **Hardware** | AMD Radeon 8060S Graphics (gfx1151, Strix Halo). The hardware string reports 96 GB of device memory; the host has 31 GiB of system RAM |
 | **OS** | Debian, Linux 6.18.12 (x86_64) |
-| **Backend** | ROCm 10.0.0, HIP 7.15.26333 |
+| **Backend** | ROCm 10.0.0, HIP 7.15.26333; CSV `backend` = `rocm-10.0.0` |
 | **mlxcel version** | 0.8.1 at `f4d5fc5b` |
 | **MLX pin** | `7ca40033`, ROCm overlay `75915908` |
 | **Build** | `cargo build --release --features rocm` |

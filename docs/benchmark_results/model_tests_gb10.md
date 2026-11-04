@@ -10,7 +10,7 @@ Three rows were re-measured on 2026-11-04 after the failures in the first pass w
 |------|-------|
 | **Hardware** | NVIDIA GB10 (DGX Spark), 122 GB unified LPDDR5x |
 | **OS** | Linux (aarch64), kernel 7.0.0-1019-nvidia |
-| **Backend** | CUDA 13.0.88 (driver 580.178.04) |
+| **Backend** | CUDA 13.0.88 (driver 580.178.04); CSV `backend` = `cuda-13.0` |
 | **mlxcel version** | 0.8.1 at `630aaeba` |
 | **MLX pin** | `7ca40033` |
 | **CUDA build** | `MLX_CUDA_ARCHITECTURES=121 cargo build --release --features cuda` |

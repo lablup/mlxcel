@@ -28,17 +28,21 @@
 #
 #   ...then mlxcel_commit, mlx_commit (the upstream MLX pin), on ROCm only
 #   mlx_rocm_overlay_commit and hip_version (issue #1810; Metal and CUDA rows
-#   carry neither), and last decode_path, the decode loop the runner timed
-#   (`engine` since epic #2166 Phase 6, #2176; empty on rows written before
-#   that column existed, which all timed the retired `CxxGenerator`).
+#   carry neither), backend, the versioned implementation label
+#   (`cuda-13.0`, `rocm-7.0.2`, `metal`; MLXCEL_BENCH_BACKEND overrides it for
+#   cuda-rust, Vulkan, OpenXLA and other paths the probe cannot name), and last
+#   decode_path, the decode loop the runner timed (`engine` since epic #2166
+#   Phase 6, #2176; empty on rows written before that column existed, which all
+#   timed the retired `CxxGenerator`).
 #
 # The first 14 columns are unchanged from the historical schema so older CSVs
 # stay comparable. Column 15 (prompt_target_len) records the --prompt-tokens
 # target for long-prompt prefill runs (epic #623 #624) and is empty for the
 # default short-prompt path. The actual prompt length used (after capping at the
-# model context) is still reported in the prompt_tokens column. Any trailing
-# result-classification token (SKIP:*/FAIL:*) follows the last named column
-# (decode_path, which such a row leaves empty).
+# model context) is still reported in the prompt_tokens column. The backend
+# column was added on 2026-11-04; CSVs written before it have no value there.
+# Any trailing result-classification token (SKIP:*/FAIL:*) follows the last
+# named column (decode_path, which such a row leaves empty).
 #
 # Result classifications (trailing CSV token):
 #   (none)               successful decode with profiling numbers
@@ -480,6 +484,39 @@ detect_backend() {
   fi
 }
 
+# Versioned label for the CSV `backend` column. The bare backend name cannot
+# tell two toolchains apart on one host: the same GB10 can run CUDA 13.0 or
+# 13.4, a ROCm host can change release, and the experimental cuda-rust bridge,
+# Vulkan or OpenXLA paths are distinct stacks on that same box. The version
+# comes from the toolkit that built the binary (nvcc for CUDA, the ROCm tree
+# for HIP). MLXCEL_BENCH_BACKEND overrides the whole label, e.g.
+# MLXCEL_BENCH_BACKEND=cuda-rust-0.1 or openxla-2026.11.
+detect_backend_label() {
+  if [[ -n "${MLXCEL_BENCH_BACKEND:-}" ]]; then
+    printf '%s\n' "$MLXCEL_BENCH_BACKEND"
+    return
+  fi
+  local nvcc_bin="" ver=""
+  case "$BACKEND" in
+    cuda)
+      nvcc_bin=$(command -v nvcc 2>/dev/null || true)
+      if [[ -z "$nvcc_bin" && -x /usr/local/cuda/bin/nvcc ]]; then
+        nvcc_bin=/usr/local/cuda/bin/nvcc
+      fi
+      if [[ -n "$nvcc_bin" ]]; then
+        ver=$("$nvcc_bin" --version 2>/dev/null \
+          | sed -n 's/.*release \([0-9][0-9.]*\).*/\1/p' | head -1)
+      fi
+      if [[ -n "$ver" ]]; then echo "cuda-${ver}"; else echo "cuda"; fi
+      ;;
+    rocm)
+      if [[ -n "$ROCM_VERSION" ]]; then echo "rocm-${ROCM_VERSION}"; else echo "rocm"; fi
+      ;;
+    metal) echo "metal" ;;
+    *) echo "${BACKEND:-unknown}" ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Memory-based model size check
 # ---------------------------------------------------------------------------
@@ -502,6 +539,7 @@ detect_memory_bytes() {
 HARDWARE_FULL=""
 HARDWARE_SHORT=""
 BACKEND=""
+BACKEND_LABEL=""
 SYSTEM_MEMORY_BYTES=0
 MEMORY_LIMIT_BYTES=0
 # The trailing commit columns of every row. ROCm rows carry two more: the
@@ -526,6 +564,7 @@ resolve_platform() {
     COMMIT_FIELDS="${COMMIT_FIELDS},${overlay:-unknown},${HIP_VERSION:-unknown}"
     CSV_HEADER_EXTRA=",mlx_rocm_overlay_commit,hip_version"
   fi
+  BACKEND_LABEL=$(detect_backend_label)
 }
 
 # Estimate model weight size from safetensors files (bytes).
@@ -806,7 +845,7 @@ emit_duplicate_row() {
   local ptl="$PROMPT_TOKENS"
   [[ "$VLM_MODE" -eq 1 ]] && ptl=""
   >&2 printf '>>> [skip]   %s duplicate of %s (SKIP:duplicate_of)\n' "$model_name" "$owner"
-  echo "${model_name},${dir},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},,SKIP:duplicate_of=${owner}"
+  echo "${model_name},${dir},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},${BACKEND_LABEL},,SKIP:duplicate_of=${owner}"
 }
 
 # ---------------------------------------------------------------------------
@@ -891,6 +930,11 @@ Environment variables:
   BENCH_PROBE_TIMEOUT        Seconds allowed for the one-token runtime probe
                              that identifies a ROCm host (default 300). Runs
                              only on Linux when nvidia-smi finds no GPU.
+  MLXCEL_BENCH_BACKEND       Value for the CSV `backend` column, overriding the
+                             probe. Use it for a stack the host cannot name,
+                             e.g. cuda-rust-0.1, vulkan-1.4 or
+                             openxla-2026.11. The default is cuda-<nvcc
+                             release>, rocm-<release> or metal.
 
 Result classifications (trailing CSV token):
   (none)               successful decode with profiling numbers
@@ -1002,7 +1046,7 @@ bench_one() {
   # dangling symlink into a pruned HuggingFace cache.
   if [[ ! -f "$model_path/config.json" ]]; then
     >&2 printf '>>> [skip]   %s (no config.json; not a checkpoint)\n' "$model_name"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},,SKIP:not_a_checkpoint"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},${BACKEND_LABEL},,SKIP:not_a_checkpoint"
     return
   fi
   local _w _have_weights=0
@@ -1013,7 +1057,7 @@ bench_one() {
   done
   if [[ "$_have_weights" -eq 0 ]]; then
     >&2 printf '>>> [skip]   %s (config.json present but no readable *.safetensors)\n' "$model_name"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},,SKIP:missing_weights"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},${BACKEND_LABEL},,SKIP:missing_weights"
     return
   fi
 
@@ -1026,7 +1070,7 @@ bench_one() {
     effective_mb=$(awk -v b="$est_bytes" -v f="$BENCH_MEM_OVERHEAD_FACTOR" 'BEGIN{printf "%.0f", b * f / 1048576}')
     limit_mb=$(( MEMORY_LIMIT_BYTES / 1048576 ))
     >&2 printf '>>> [skip]   %s (%d MB > %d MB limit)\n' "$model_name" "$effective_mb" "$limit_mb"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},,SKIP:oom_estimate"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},${BACKEND_LABEL},,SKIP:oom_estimate"
     return
   fi
 
@@ -1035,7 +1079,7 @@ bench_one() {
   if [[ "$VLM_MODE" -eq 1 ]]; then
     prompt="$VLM_PROMPT"
     if [[ ! -f "$VLM_IMAGE" ]]; then
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},,SKIP:vlm_image_not_found"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},${BACKEND_LABEL},,SKIP:vlm_image_not_found"
       return
     fi
     extra_args+=(--image "$VLM_IMAGE")
@@ -1090,10 +1134,10 @@ bench_one() {
   if [[ "$rc" -ne 0 ]]; then
     if is_oom_failure "$rc" "$raw"; then
       >&2 printf '    OOM at load/run (exit %d) — SKIP:oom\n' "$rc"
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},,SKIP:oom"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},${BACKEND_LABEL},,SKIP:oom"
     else
       >&2 printf '    benchmark failed (exit %d)\n' "$rc"
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},,FAIL:bench"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},${BACKEND_LABEL},,FAIL:bench"
     fi
     return
   fi
@@ -1105,12 +1149,12 @@ bench_one() {
 
   if [[ -z "$decode_tps" ]]; then
     >&2 echo "    no decode output"
-    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},,FAIL:no_output"
+    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},${BACKEND_LABEL},,FAIL:no_output"
   else
     >&2 printf '    decode: %s tok/s\n' "$decode_tps"
     local decode_path
     decode_path=$(parse_decode_path "$raw")
-    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},${decode_path}"
+    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},${BACKEND_LABEL},${decode_path}"
   fi
 }
 
@@ -1316,7 +1360,7 @@ fi
 # ---------------------------------------------------------------------------
 # CSV header
 # ---------------------------------------------------------------------------
-CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit${CSV_HEADER_EXTRA},decode_path"
+CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit${CSV_HEADER_EXTRA},backend,decode_path"
 
 mkdir -p "$(dirname "$OUTPUT")"
 echo "$CSV_HEADER" > "$OUTPUT"
