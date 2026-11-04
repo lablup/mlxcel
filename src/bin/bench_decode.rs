@@ -249,6 +249,18 @@ fn prepare_prompt(
         });
     }
 
+    // DiffusionGemma images do not go through the generic VLM runtime: its
+    // block-diffusion loop builds the vision prefill itself from the image
+    // paths (`prepare_image_prompt`), which also expands the placeholders in
+    // these tokens. The generic path would reject the family for having no
+    // `VlmRuntimeRef`.
+    if matches!(model, LoadedModel::DiffusionGemma(_)) {
+        return Ok(PreparedPrompt {
+            tokens,
+            embeddings: None,
+        });
+    }
+
     let images = image_paths
         .iter()
         .map(|path| {
@@ -338,10 +350,94 @@ fn sampling_config(
 }
 
 /// The decode path this binary times, printed in `[Profile Results]` and
-/// recorded by `scripts/bench_decode.sh` in the `decode_path` CSV column:
-/// the engine's raw-completion client, the loop `mlxcel generate` and the
-/// server's B=1 row run (ADR 0007, #2176).
-const DECODE_PATH: &str = "engine";
+/// recorded by `scripts/bench_decode.sh` in the `decode_path` CSV column.
+///
+/// `engine` is the engine's raw-completion client, the loop `mlxcel generate`
+/// and the server's B=1 row run (ADR 0007, #2176). `diffusion` is the
+/// model-owned block-diffusion loop the DiffusionGemma server worker runs;
+/// that family cannot join the engine because its generation is a canvas
+/// denoiser rather than an autoregressive step, so timing it on the engine
+/// path measured a pass the server never serves.
+fn decode_path(model: &LoadedModel) -> &'static str {
+    match model {
+        LoadedModel::DiffusionGemma(_) => "diffusion",
+        _ => "engine",
+    }
+}
+
+/// One prepared diffusion prompt: the token ids and, for image input, the
+/// vision prefill the model's own loop consumes.
+struct DiffusionPrompt {
+    tokens: Vec<i32>,
+    vision: Option<mlxcel::models::diffusion_gemma::PreparedDiffusionImagePrompt>,
+}
+
+/// Build the diffusion prompt from the same prepared tokens the engine path
+/// uses. Image input goes through the model's shared `prepare_image_prompt`,
+/// which expands the placeholders and builds the vision prefill exactly as the
+/// CLI and the server worker do.
+fn prepare_diffusion_prompt(
+    model: &mlxcel::models::DiffusionGemmaModel,
+    args: &Args,
+    prepared: &PreparedPrompt,
+) -> Result<DiffusionPrompt> {
+    if args.image.is_empty() {
+        return Ok(DiffusionPrompt {
+            tokens: prepared.tokens.clone(),
+            vision: None,
+        });
+    }
+    let images = args
+        .image
+        .iter()
+        .map(|path| {
+            image::open(path).with_context(|| format!("failed to load image {}", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let prepared = model
+        .prepare_image_prompt(&args.model, &images, &prepared.tokens)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    Ok(DiffusionPrompt {
+        tokens: prepared.expanded_ids.clone(),
+        vision: Some(prepared),
+    })
+}
+
+fn diffusion_stats_to_generation(
+    stats: &mlxcel::models::diffusion_gemma::DiffusionGenerationStats,
+) -> mlxcel::GenerationStats {
+    mlxcel::GenerationStats {
+        prompt_tokens: stats.prompt_tokens,
+        generated_tokens: stats.generated_tokens,
+        prefill_time_ms: stats.prompt_time_s * 1000.0,
+        decode_time_ms: stats.generation_time_s * 1000.0,
+        prefill_tok_per_sec: stats.prompt_tps,
+        decode_tok_per_sec: stats.generation_tps,
+    }
+}
+
+/// One model-owned block-diffusion pass. The checkpoint's own EOS set still
+/// applies: unlike the engine loop there is no token-bias handle to suppress
+/// it, so a diffusion row may generate fewer than `--max-tokens` tokens.
+fn run_diffusion(
+    model: &mlxcel::models::DiffusionGemmaModel,
+    args: &Args,
+    prepared: &PreparedPrompt,
+    max_tokens: usize,
+) -> Result<mlxcel::GenerationStats> {
+    let prompt = prepare_diffusion_prompt(model, args, prepared)?;
+    let options = mlxcel::models::diffusion_gemma::DiffusionGenerateOptions {
+        max_new_tokens: max_tokens.max(1),
+        temperature: args.temperature,
+        extra_eos_token_ids: mlxcel::read_eos_token_ids(&args.model),
+        ..Default::default()
+    };
+    let vision = prompt.vision.as_ref().map(|prepared| &prepared.prefill);
+    let stats = model
+        .generate_diffusion_streaming(&prompt.tokens, &options, vision, |_| true)
+        .map_err(|err| anyhow::anyhow!("diffusion generation failed: {err}"))?;
+    Ok(diffusion_stats_to_generation(&stats))
+}
 
 fn client(model: &LoadedModel, kv_cache_mode: KVCacheMode) -> DirectEngine<&LoadedModel> {
     DirectEngine::with_default_chunk(model).with_kv_cache_mode(kv_cache_mode)
@@ -370,12 +466,18 @@ fn request<'a>(
 
 fn warmup(
     model: &LoadedModel,
+    args: &Args,
     prepared: &PreparedPrompt,
     max_tokens: usize,
     sampling: &SamplingConfig,
     kv_cache_mode: KVCacheMode,
 ) -> Result<()> {
     if max_tokens == 0 {
+        return Ok(());
+    }
+    if let LoadedModel::DiffusionGemma(diffusion) = model {
+        run_diffusion(diffusion, args, prepared, max_tokens)?;
+        mlxcel_core::synchronize_default();
         return Ok(());
     }
     // The warmup's sequence is closed when the run returns, so the measured
@@ -390,11 +492,18 @@ fn warmup(
 
 fn measured(
     model: &LoadedModel,
+    args: &Args,
     prepared: &PreparedPrompt,
     max_tokens: usize,
     sampling: &SamplingConfig,
     kv_cache_mode: KVCacheMode,
 ) -> Result<(mlxcel::GenerationStats, phase_marks::Stamp)> {
+    if let LoadedModel::DiffusionGemma(diffusion) = model {
+        let stats = run_diffusion(diffusion, args, prepared, max_tokens)?;
+        let end = phase_marks::Stamp::now();
+        mlxcel_core::synchronize_default();
+        return Ok((stats, end));
+    }
     let mut client = client(model, kv_cache_mode).with_ttft_report(true);
     let request = request(prepared, max_tokens, sampling)?;
     // `MLXCEL_METAL_CAPTURE_PATH` (with `MTL_CAPTURE_ENABLED=1`) traces the
@@ -578,6 +687,7 @@ fn main() -> Result<()> {
     }
     warmup(
         &model,
+        &args,
         &prepared,
         args.warmup_tokens,
         &sampling,
@@ -598,8 +708,14 @@ fn main() -> Result<()> {
     if phase_marks {
         phase_marks::Stamp::now().print("measured_start");
     }
-    let (stats, measured_end) =
-        measured(&model, &prepared, args.max_tokens, &sampling, kv_cache_mode)?;
+    let (stats, measured_end) = measured(
+        &model,
+        &args,
+        &prepared,
+        args.max_tokens,
+        &sampling,
+        kv_cache_mode,
+    )?;
     if phase_marks {
         // The generator times its decode loop itself; its start is that long
         // before the loop returned.
@@ -612,7 +728,7 @@ fn main() -> Result<()> {
 
     println!("[Profile Results]");
     stats.print();
-    println!("  Decode path:      {DECODE_PATH}");
+    println!("  Decode path:      {}", decode_path(&model));
     // MLX allocator high-water mark for the whole run (model load + prefill +
     // decode). This is the number an OOM budget must fit, independent of how
     // much the cudaMallocAsync pool has returned to the OS (issue #672).

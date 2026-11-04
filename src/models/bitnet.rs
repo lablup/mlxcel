@@ -822,6 +822,63 @@ mod tests {
         );
     }
 
+    /// The row-group index has to stay on a grid axis that CUDA does not cap
+    /// at 65535. Before the axis swap, one block per (batch, out/4) group put
+    /// `batch * out/4` on grid.y, so a 48-token prefill of BitNet-2B
+    /// (48 * 1728 = 82944) failed with `cuLaunchKernelEx ... invalid argument`
+    /// while a 32-token prefill (55296) passed (GB10, 2026-11-03). The shape
+    /// here crosses the limit with tiny tensors so the test is cheap: 40000
+    /// rows x 2 groups = 80000 blocks.
+    #[test]
+    fn bitlinear_matmul_launches_beyond_the_cuda_grid_y_limit() {
+        if !mlxcel_core::bitlinear_kernel_available() {
+            eprintln!(
+                "skipped bitlinear_matmul_launches_beyond_the_cuda_grid_y_limit: \
+                 this backend has no BitLinear kernel port"
+            );
+            return;
+        }
+        const IN: usize = 8;
+        const OUT: usize = 8;
+        const ROWS: usize = OUT / 4;
+        const BATCH: usize = 40_000;
+        const SCALE: f32 = 1.0;
+
+        // x all ones, packed byte 0b00011011: the four 2-bit weights are
+        // +2, +1, 0, -1 over eight inputs, so each output row is
+        // [16, 16, 8, 8, 0, 0, -8, -8].
+        let xs = vec![1.0f32; BATCH * IN];
+        let packed = vec![0b0001_1011u8; ROWS * IN];
+        let mut expected = vec![0.0f32; BATCH * OUT];
+        for b in 0..BATCH {
+            expected[b * OUT..(b + 1) * OUT]
+                .copy_from_slice(&[16.0, 16.0, 8.0, 8.0, 0.0, 0.0, -8.0, -8.0]);
+        }
+
+        let x = mlxcel_core::from_slice_f32(&xs, &[BATCH as i32, IN as i32]);
+        let packed_arr = mlxcel_core::from_bytes(
+            &packed,
+            &[ROWS as i32, IN as i32],
+            mlxcel_core::dtype::UINT8,
+        );
+        let scale = mlxcel_core::from_slice_f32(&[SCALE], &[1]);
+        let y =
+            mlxcel_core::bitlinear_matmul(&x, &packed_arr, &scale, IN as i32, OUT as i32, false)
+                .expect("bitlinear_matmul must launch every block group");
+        let want = mlxcel_core::from_slice_f32(&expected, &[BATCH as i32, OUT as i32]);
+        let diff = mlxcel_core::abs(&mlxcel_core::subtract(&y, &want));
+        let max_abs = mlxcel_core::item_f32(&mlxcel_core::max_axis(
+            &mlxcel_core::reshape(&diff, &[-1]),
+            -1,
+            false,
+        ));
+        assert!(
+            max_abs < 1e-3,
+            "bitlinear_matmul disagrees with the host reference by {max_abs} at {BATCH} rows; \
+             an axis swap that loses the row group shows up here"
+        );
+    }
+
     #[test]
     fn bitlinear_matmul_known_ternary_case() {
         let x = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);

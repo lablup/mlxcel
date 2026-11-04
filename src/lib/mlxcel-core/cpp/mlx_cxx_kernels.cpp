@@ -28,8 +28,8 @@ namespace mlx_cxx {
 namespace {
     static const char* BITLINEAR_METAL_SOURCE = R"(
         constexpr int M = 4;
-        uint tid       = thread_position_in_grid.y;   // batch * out/4
-        uint in_offset = thread_position_in_grid.x;   // lane 0..31
+        uint tid       = thread_position_in_grid.x;   // batch * out/4
+        uint in_offset = thread_position_in_grid.y;   // lane 0..31
 
         uint batch_idx = tid / (out_features / 4);
         uint row_idx   = tid % (out_features / 4);
@@ -88,8 +88,8 @@ namespace {
     // Selected at runtime by metal::is_available() in bitlinear_matmul.
     static const char* BITLINEAR_CUDA_SOURCE = R"(
         constexpr int Mc = 4;
-        uint32_t tid       = blockIdx.y;     // batch * out/4
-        uint32_t in_offset = threadIdx.x;    // lane 0..31
+        uint32_t tid       = blockIdx.x;     // batch * out/4
+        uint32_t in_offset = threadIdx.y;    // lane 0..31
 
         uint32_t batch_idx = tid / (out_features / 4);
         uint32_t row_idx   = tid % (out_features / 4);
@@ -177,8 +177,8 @@ namespace {
         #error "bitlinear_matmul_hip assumes a 32-lane wavefront"
         #endif
         constexpr int Mc = 4;
-        uint32_t tid       = blockIdx.y;     // batch * out/4
-        uint32_t in_offset = threadIdx.x;    // lane 0..31
+        uint32_t tid       = blockIdx.x;     // batch * out/4
+        uint32_t in_offset = threadIdx.y;    // lane 0..31
 
         uint32_t batch_idx = tid / (out_features / 4);
         uint32_t row_idx   = tid % (out_features / 4);
@@ -299,10 +299,17 @@ std::unique_ptr<MlxArray> bitlinear_matmul(
     std::vector<array> inputs = {
         x2d, packed_weights.inner, astype(weight_scale.inner, T),
     };
+    // The row-group index goes on the x axis and the 32 lanes on y. CUDA caps
+    // grid.y at 65535, and one block per (batch, out/4) group puts
+    // `total_batch * (out_features / 4)` there: at a 48-token prefill of
+    // BitNet-2B that is 48 * 1728 = 82944 and the launch fails with
+    // "invalid argument" (seen on GB10, 2026-11-03). grid.x is capped at
+    // 2^31-1 instead, so the same sweep past 65535 is harmless. Metal and HIP
+    // read the same (x, y) split through their own thread-position names.
     auto results = kernel(
         inputs, { Shape{total_batch, out_features} }, { T },
-        std::make_tuple(32, total_batch * (out_features / 4), 1),
-        std::make_tuple(32, 1, 1),
+        std::make_tuple(total_batch * (out_features / 4), 32, 1),
+        std::make_tuple(1, 32, 1),
         ta, std::nullopt, false, {});
 
     Shape out_shape(xs.begin(), xs.end() - 1);
