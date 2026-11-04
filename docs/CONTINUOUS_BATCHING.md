@@ -701,7 +701,14 @@ head the burst would serve skips the classic batched prefill (with classic
 rows active, queued rows keep the batched prefill so a run-to-completion burst
 per tick cannot hold their decode off), so equal-length queued DFlash requests
 run as one batched DFlash window on a target that runs batched, and a head the
-burst would only decline keeps the batched prefill. On the Gemma 4
+burst would only decline keeps the batched prefill. That window is not bitwise
+identical to the same requests served one at a time on Qwen 3.5: the leading
+dimension of the verify block changes which quantized-projection and SDPA
+kernels run, so a row can pick a different token where two candidates are within
+about a quarter logit. The parity gate admits a first mismatch only inside a
+calibrated 1.0-logit near-tie margin, and a four-identical-prompts control
+shows the divergence is in the batched verify forward rather than the accept
+policy (#2851). On the Gemma 4
 geometries whose MTP verify runs row by row (the 31B everywhere, the 12B on
 CUDA) the batched burst is decode-exact since issue #2190: each row is
 prefilled and verified through the B=1 calls and only the cache write is
