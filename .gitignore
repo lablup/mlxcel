@@ -38,6 +38,9 @@ CLAUDE.md
 __pycache__/
 *.pyc
 
+# macOS Archive Utility metadata written beside a tree extracted from a zip.
+__MACOSX/
+
 # Webpage build artifacts
 webpage/site/.next/
 webpage/site/out/
