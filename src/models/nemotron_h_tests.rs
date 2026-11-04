@@ -1143,8 +1143,83 @@ fn config_without_any_layer_stack_description_is_rejected() {
 /// now load as nvfp4 (issue #2665). The routed experts must then match a
 /// dequantized reference both on the unsorted decode layout and on the sorted
 /// prefill layout, which the MoE takes from 64 (token, expert) pairs on.
+///
+/// Issue #2852 failed this assertion once inside the full serial lib binary
+/// and never in isolation. The audit ruled out every process-global candidate
+/// of the shape the report named: the private `SwitchMLP` below never calls
+/// `fused_moe_enabled()`, and no in-tree test sets `MLXCEL_FUSED_MOE`, so that
+/// `OnceLock` cannot be initialized to anything but its default here;
+/// `SSD_PREFILL_DISPATCH_LOGGED` only suppresses a log line and no Mamba layer
+/// is built; the rope override needs an attention layer and this model has
+/// one MoE block; and a per-thread MLX default stream (what a leaked
+/// `install_thread_local_default_stream` would leave) cannot reach a later
+/// test because libtest gives every test a fresh thread. The numeric failure
+/// did not reproduce in more than forty full serial runs of the failing
+/// commit's binary, including under an eight-way concurrent load, so the
+/// assertion now reports the measured error instead of a bare message and
+/// holds MLX's state locks, and a companion test pins the result against the
+/// ambient thread stream. The 1e-3 bound is unchanged.
 #[test]
 fn nemotron_h_runs_nvfp4_experts_sorted_and_unsorted() {
+    // The default device is process-global, so a concurrent
+    // `DefaultDeviceGuard::cpu()` would move this test's dispatches off the
+    // GPU mid-run (issue #1421). Hold the shared MLX state locks for the
+    // test's duration so the two arms cannot observe a device or stream an
+    // unrelated test is holding.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    assert_nvfp4_experts_sorted_and_unsorted();
+}
+
+/// Regression for #2852: the parity assertion must not depend on the calling
+/// thread's MLX default stream. A caller that runs the model on a thread with
+/// an installed per-thread generation stream (server workers do, and
+/// `models::kokoro`'s test helper does) must get the same result, because MLX
+/// keys its compiled-function cache, which the shared `relu_squared` reference
+/// uses, by the default stream. Both gather arms must agree with the
+/// dequantized reference on the installed stream as well.
+#[test]
+fn nemotron_h_nvfp4_experts_parity_is_independent_of_the_thread_stream() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let _restore = mlxcel_core::streams::DefaultStreamGuard::capture();
+    let Some(stream) = mlxcel_core::streams::new_thread_local_generation_stream() else {
+        eprintln!("no GPU backend; the per-thread stream arm needs one, skipping");
+        return;
+    };
+    mlxcel_core::streams::install_thread_local_default_stream(Some(&stream));
+    assert_nvfp4_experts_sorted_and_unsorted();
+}
+
+/// Regression for #2852: the private `SwitchMLP` must not consult the shared
+/// fused-MoE gate. The gate caches `MLXCEL_FUSED_MOE` in a process-wide
+/// `OnceLock`, so wiring it into this path would make the two arms depend on
+/// whichever test called the gate first; the issue named that as the prime
+/// candidate before the audit showed this path never reads it. Pin the
+/// independence at the source so a later change cannot reintroduce it
+/// silently.
+#[test]
+fn nemotron_h_switch_mlp_does_not_consult_the_fused_moe_gate() {
+    let source = include_str!("nemotron_h.rs");
+    let start = source
+        .find("impl SwitchMLP")
+        .expect("nemotron_h.rs must define impl SwitchMLP");
+    let end = start
+        + source[start..]
+            .find("\n}\n")
+            .expect("impl SwitchMLP must close at column zero");
+    let body = &source[start..end];
+    assert!(
+        !body.contains("fused_moe_enabled"),
+        "Nemotron's private SwitchMLP must not read the process-wide fused-MoE gate; that gate \
+         is cached in a OnceLock and its value would depend on test order"
+    );
+    assert!(
+        body.contains(">= 64"),
+        "the sorted branch threshold must stay in SwitchMLP::forward: the parity test's 5-token \
+         arm and 40-token arm depend on it"
+    );
+}
+
+fn assert_nvfp4_experts_sorted_and_unsorted() {
     use super::{BlockType, NemotronHMixer, NemotronHModel};
     use mlxcel_core::weights::WeightMap;
 
@@ -1254,11 +1329,44 @@ fn nemotron_h_runs_nvfp4_experts_sorted_and_unsorted() {
         let want = mlxcel_core::matmul(&h, &mlxcel_core::swap_axes(&w2, -1, -2));
         let want = mlxcel_core::reshape(&want, &[tokens, TOP_K, HIDDEN]);
         let close = mlxcel_core::allclose(&got, &want, 1e-3, 1e-3);
-        assert!(
-            mlxcel_core::item_bool(&close),
-            "nvfp4 routed experts differ from the dequantized reference at {tokens} tokens"
-        );
+        if !mlxcel_core::item_bool(&close) {
+            assert_expert_parity(&got, &want, tokens);
+        }
     }
+}
+
+/// Fail with the measured divergence, not only the arm that missed.
+///
+/// Issue #2852's one observed failure printed no magnitude, which is why it
+/// stayed unexplained: a near-bound precision miss and a corrupted row have
+/// very different causes. Report both the maximum absolute and relative
+/// differences and the non-finite count so the next occurrence is actionable.
+fn assert_expert_parity(
+    got: &mlxcel_core::MlxArray,
+    want: &mlxcel_core::MlxArray,
+    tokens: i32,
+) -> ! {
+    let got_values = mlxcel_core::utils::array_to_vec_f32(got);
+    let want_values = mlxcel_core::utils::array_to_vec_f32(want);
+    let mut max_abs = 0.0_f32;
+    let mut max_rel = 0.0_f32;
+    let mut non_finite = 0_usize;
+    for (got, want) in got_values.iter().zip(&want_values) {
+        if !got.is_finite() || !want.is_finite() {
+            non_finite += 1;
+            continue;
+        }
+        let abs = (got - want).abs();
+        max_abs = max_abs.max(abs);
+        max_rel = max_rel.max(abs / want.abs().max(1e-6));
+    }
+    panic!(
+        "nvfp4 routed experts differ from the dequantized reference at {tokens} tokens: \
+         max absolute {max_abs:e}, max relative {max_rel:e}, non-finite {non_finite}/{} \
+         against the 1e-3/1e-3 bound (issue #2852). A near-bound miss and a non-finite or \
+         large row have different causes; record these numbers on the issue.",
+        got_values.len()
+    );
 }
 
 pub(crate) fn batching_model() -> super::NemotronHModel {
