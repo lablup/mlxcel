@@ -3058,6 +3058,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // the unlimited sentinel would otherwise size it against the whole window
     // (issue #2855). Capture the sentinel before `resolve_cli_max_tokens`
     // rewrites it; the XLA branch uses it to pick a bounded sizing budget.
+    #[cfg(feature = "xla-backend")]
     let budget_was_unlimited =
         args.generation.max_tokens == mlxcel::cli::max_tokens::UNLIMITED_MAX_TOKENS;
 
