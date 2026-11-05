@@ -24,6 +24,8 @@ use super::{
     validate_pipeline_parallel_args, validate_prompt_lookup_args, validate_tensor_parallel_args,
     validate_xla_cli_image_cardinality, validate_xla_output_audio,
 };
+#[cfg(feature = "xla-backend")]
+use super::{xla_required_positions, xla_sizing_budget};
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor, flatten_template_text};
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
@@ -66,6 +68,28 @@ fn xla_cli_rejects_partial_multi_image_decode() {
 #[test]
 fn xla_cli_accepts_empty_image_list_for_audio_only_requests() {
     assert!(decode_xla_cli_images(&[]).unwrap().is_empty());
+}
+
+#[cfg(feature = "xla-backend")]
+#[test]
+fn xla_sizing_budget_bounds_only_the_unlimited_default() {
+    // The default -n resolves to the whole window, so it sizes on the bounded
+    // default instead; an explicit budget is kept verbatim.
+    assert_eq!(
+        xla_sizing_budget(131_066, true),
+        mlxcel_xla::DEFAULT_XLA_GENERATION_BUDGET
+    );
+    assert_eq!(xla_sizing_budget(2_000, false), 2_000);
+    assert_eq!(xla_sizing_budget(100, true), 100);
+}
+
+#[cfg(feature = "xla-backend")]
+#[test]
+fn xla_required_positions_adds_prompt_budget_and_image_expansion() {
+    assert_eq!(xla_required_positions(6, 512, 0), 518);
+    assert_eq!(xla_required_positions(6, 512, 576), 1_094);
+    assert_eq!(xla_required_positions(0, 0, 0), 0);
+    assert_eq!(xla_required_positions(usize::MAX, 1, 1), usize::MAX);
 }
 
 // issue #166 / #1165: the offline MTP loop is constructed whenever the

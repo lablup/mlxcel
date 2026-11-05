@@ -181,9 +181,10 @@ pub use batch::{
     run_gemma3n_prefix_decode_diagnostic,
 };
 pub use context::{
-    CONTEXT_BUCKETS_ENV, CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
+    CONTEXT_BUCKETS_ENV, CONTEXT_CAPACITY_ENV, CONTEXT_CAPACITY_LADDER, ContextCapacityError,
+    DEFAULT_CONTEXT_CAPACITY, DEFAULT_XLA_GENERATION_BUDGET, SERVER_TEXT_CONTEXT_CAPACITY,
     context_capacity_buckets_from_env, context_capacity_from_env, derive_context_buckets,
-    validate_request_capacity,
+    resolve_context_capacity, validate_request_capacity,
 };
 #[cfg(feature = "diagnostics")]
 pub use diagnostic_flags::{

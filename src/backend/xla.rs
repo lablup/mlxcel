@@ -67,6 +67,28 @@ fn load_unsupported<T>() -> Result<T> {
     )
 }
 
+/// Build the OpenXLA session for a resolved static capacity.
+///
+/// The engine drives generation from the session, so it loads its own weights
+/// and config from the model directory here (rather than the MLX `load_model`
+/// boundary). Under the `iree` feature this compiles the bundled prefill /
+/// decode_step graphs and uploads the weights resident; without it, the session
+/// loads but `prefill` / `decode_step` report that the `iree` feature is off.
+/// KV mode and token bias do not apply: the session owns its own KV and samples
+/// greedily on-device.
+fn build_xla_session(
+    model_path: &Path,
+    num_layers: usize,
+    context_capacity: usize,
+) -> Result<Session> {
+    let image_preprocessor = crate::load_xla_image_preprocessor(model_path)
+        .map_err(|error| anyhow::anyhow!("OpenXLA image preprocessor load failed: {error}"))?;
+    let session =
+        XlaInferenceSession::load_with_context_capacity(model_path, num_layers, context_capacity)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(Session::xla(session, image_preprocessor))
+}
+
 impl ComputeBackend for XlaBackend {
     fn name(&self) -> &'static str {
         "xla"
@@ -100,18 +122,11 @@ impl ComputeBackend for XlaBackend {
         _kv_cache_mode: KVCacheMode,
         _token_bias: TokenBiasMap,
     ) -> Result<Session> {
-        // The OpenXLA engine drives generation from the session, so it loads its
-        // own weights and config from the model directory here (rather than the
-        // MLX `load_model` boundary). Under the `iree` feature this compiles the
-        // bundled prefill / decode_step graphs and uploads the weights resident;
-        // without it, the session loads but `prefill` / `decode_step` report that
-        // the `iree` feature is off. KV mode and token bias do not apply: the
-        // session owns its own KV and samples greedily on-device.
-        let image_preprocessor = crate::load_xla_image_preprocessor(model_path)
-            .map_err(|error| anyhow::anyhow!("OpenXLA image preprocessor load failed: {error}"))?;
         // Match the server path: reject a graph that could never admit one
         // image before generation starts, instead of after the vision tower has
-        // already run on the first image request.
+        // already run on the first image request. The request-sized path below
+        // includes the image expansion in its hint, so the guard is only needed
+        // here, where the request is unknown.
         let context_capacity =
             mlxcel_xla::context_capacity_from_env().map_err(|e| anyhow::anyhow!(e))?;
         crate::ensure_xla_image_context_capacity(
@@ -119,13 +134,30 @@ impl ComputeBackend for XlaBackend {
             context_capacity,
             std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_some(),
         )?;
-        let session = XlaInferenceSession::load_with_context_capacity(
-            model_path,
-            num_layers,
-            context_capacity,
-        )
-        .map_err(|e| anyhow::anyhow!(e))?;
-        Ok(Session::xla(session, image_preprocessor))
+        build_xla_session(model_path, num_layers, context_capacity)
+    }
+
+    fn create_session_for_request(
+        &self,
+        model_path: &Path,
+        num_layers: usize,
+        kv_cache_mode: KVCacheMode,
+        token_bias: TokenBiasMap,
+        required_positions: Option<usize>,
+    ) -> Result<Session> {
+        // The static shape has to be chosen before the graph compiles, so this
+        // is the only place that can size it for the request instead of the
+        // 256-token compatibility default (issue #2855). A pinned
+        // `MLXCEL_XLA_CONTEXT_CAPACITY` still wins inside the resolver and
+        // ignores the hint. The image guard from `create_session` is omitted on
+        // purpose: the caller's hint already includes the worst-case image
+        // expansion, so a too-small shape can no longer be compiled here.
+        let model_window = crate::read_model_context_window(model_path);
+        let context_capacity =
+            mlxcel_xla::resolve_context_capacity(required_positions, model_window)
+                .map_err(|error| anyhow::anyhow!(error))?;
+        let _ = (kv_cache_mode, token_bias);
+        build_xla_session(model_path, num_layers, context_capacity)
     }
 
     fn supports_batched_serving(&self) -> bool {
