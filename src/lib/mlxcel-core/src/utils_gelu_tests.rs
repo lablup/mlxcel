@@ -512,3 +512,42 @@ fn fused_kernel_returns_the_input_dtype() {
         }
     }
 }
+
+#[test]
+fn fused_kernel_stays_correct_on_a_non_contiguous_input() {
+    // The launcher flattens with `reshape(x, {n})` before the launch. If MLX
+    // hands that a view with the original strides, the kernel would read the
+    // buffer in storage order and silently transpose the result. Transposing a
+    // 2-D f32 input makes the question observable: the fused output must equal
+    // the eager chain applied to the same non-contiguous view, lane for lane.
+    let _lock = crate::streams::lock_default_device();
+    if !ffi::fused_gelu_tanh_f32_available() {
+        eprintln!("fused_gelu_tanh_f32 unavailable (CPU-only host); skipping");
+        return;
+    }
+
+    // 4x8 in storage order, then transposed to a 8x4 non-contiguous view.
+    let (rows, cols) = (4usize, 8usize);
+    let data: Vec<f32> = (0..rows * cols).map(|i| (i as f32) * 0.125 - 2.0).collect();
+    let base = ffi::from_slice_f32(&data, &[rows as i32, cols as i32]);
+    let x = ffi::transpose(&base);
+    assert_eq!(ffi::array_shape(&x), vec![cols as i32, rows as i32]);
+
+    let eager = gelu_tanh_f32(&x);
+    let fused = fused_gelu_tanh_f32(&x);
+    assert_eq!(ffi::array_shape(&fused), ffi::array_shape(&eager));
+    assert_eq!(ffi::array_dtype(&fused), dtype::FLOAT32);
+
+    // Same 1-D lane order on both sides, so a wrong stride shows up as a
+    // permuted comparison rather than as rounding.
+    let want = array_to_vec_f32(&eager);
+    let got = array_to_vec_f32(&fused);
+    assert_eq!(got.len(), want.len());
+    for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+        assert!(
+            (g - w).abs() <= 2.0e-6,
+            "non-contiguous lane {i}: fused {g} vs eager {w}; the launcher's \
+             reshape must materialize contiguous storage, not keep the strides"
+        );
+    }
+}
