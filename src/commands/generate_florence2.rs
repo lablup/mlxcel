@@ -79,7 +79,7 @@ pub(crate) fn run_florence2_generation(
         .pop()
         .ok_or_else(|| anyhow!("Image decoding returned no image for {image_path:?}"))?;
 
-    print_generation_preamble(user_prompt)?;
+    print_generation_preamble(user_prompt, !args.generation.no_chat_template)?;
     println!();
 
     let started = Instant::now();

@@ -14,6 +14,7 @@
 
 #[cfg(feature = "xla-backend")]
 use super::decode_xla_cli_images;
+use super::generation_preamble_echo;
 use super::{
     CliPromptMedia, CliSamplingFlagState, CliVideoFrameGroup, CliVideoFrames, OfflineDraftRoute,
     apply_user_chat_template, apply_vlm_chat_template, build_cli_sampling_config_with_flags,
@@ -1706,4 +1707,27 @@ fn the_repl_uses_a_drafter_only_with_an_explicit_server_kind() {
     args.model.draft_model = None;
     args.speculative.draft_kind = Some("mtp".to_string());
     assert_eq!(repl_drafter(&args), None, "a kind without a drafter");
+}
+
+#[test]
+fn preamble_echo_ends_the_prompt_line_before_a_chat_reply() {
+    // A chat-templated reply is a new assistant turn: it must not run on from
+    // the echoed prompt ("...on a laptop.Cores ablaze").
+    assert_eq!(
+        generation_preamble_echo("Write a haiku.", true),
+        "Write a haiku.\n"
+    );
+    assert_eq!(
+        generation_preamble_echo("Already ends\n", true),
+        "Already ends\n"
+    );
+}
+
+#[test]
+fn preamble_echo_lets_a_raw_completion_continue_the_prompt() {
+    // Without a chat template the completion continues the prompt text.
+    assert_eq!(
+        generation_preamble_echo("The capital of France is", false),
+        "The capital of France is"
+    );
 }
