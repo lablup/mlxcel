@@ -196,7 +196,8 @@ Minimum:
 - Rust **1.97+** (project uses edition 2024)
 - CMake available on `PATH` on both platforms (required by the `mlxcel-core` and `sentencepiece-sys` build scripts)
 - macOS: Apple Silicon Mac on macOS Sonoma+; Xcode Command Line Tools
-- Linux: CUDA 13+ toolchain, OpenBLAS, LAPACK, `pkg-config` (see [`docs/installation.md`](docs/installation.md) for the package list); for the experimental `rocm` feature, a ROCm installation instead of CUDA (see [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental))
+- Linux: CUDA 13+ toolchain, OpenBLAS, LAPACK, `pkg-config` (see [`docs/installation.md`](docs/installation.md) for the package list); for the `rocm` feature, a ROCm installation instead of CUDA (see [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm))
+- Windows: Visual Studio 2022+ with the "Desktop development with C++" workload and the `x86_64-pc-windows-msvc` Rust target; for `cuda`, a CUDA 13 toolkit with cuDNN 9 (see [Windows with NVIDIA CUDA](docs/installation.md#windows-with-nvidia-cuda-experimental)); for `rocm`, a ROCm 10.x SDK (see [Windows with AMD ROCm](docs/installation.md#windows-with-amd-rocm))
 
 Recommended local tooling:
 
