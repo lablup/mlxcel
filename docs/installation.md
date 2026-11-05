@@ -14,10 +14,10 @@ static binaries: platform GPU/runtime libraries are still required.
 |----------|--------|-----------------------|-------|
 | macOS on Apple Silicon | primary | `metal,accelerate` | Main development and validation target. |
 | Linux with NVIDIA CUDA | secondary | `cuda` | Release builds currently target CUDA 13-era systems; other versions depend on MLX/CUDA compatibility. |
-| Linux with AMD ROCm | experimental | `rocm` | Source build only. Validated on RDNA 3.5 (`gfx1151`, Strix Halo) with ROCm 10.0 / HIP 7.15; tracked in lablup/mlxcel#1801. See [Linux with AMD ROCm](#linux-with-amd-rocm-experimental). |
+| Linux with AMD ROCm | supported (since 0.8) | `rocm` | Source build only. Validated on RDNA 3.5 (`gfx1151`, Strix Halo) with ROCm 10.0 / HIP 7.15; tracked in lablup/mlxcel#1801. See [Linux with AMD ROCm](#linux-with-amd-rocm). |
 | Linux CPU-only | not a release target | none | May compile in limited configurations, but it is not a useful or validated inference target for this project. |
 | Windows with NVIDIA CUDA | experimental | `cuda` | Source build only, single node (no tensor or pipeline parallelism). Validated natively on `aarch64-pc-windows-msvc` (NVIDIA RTX Spark N1X); the build glue also covers `x86_64-pc-windows-msvc`. See [Windows with NVIDIA CUDA](#windows-with-nvidia-cuda-experimental). |
-| Windows with AMD ROCm | experimental | `rocm` | Source build only, single node. Validated natively on `x86_64-pc-windows-msvc` with a Radeon 8060S (`gfx1151`) and ROCm 10.1.0; runs without the ROCm `bin` directory on `PATH` or `ROCM_PATH` set. See [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
+| Windows with AMD ROCm | supported (since 0.8) | `rocm` | Source build only, single node. Validated natively on `x86_64-pc-windows-msvc` with a Radeon 8060S (`gfx1151`) and ROCm 10.1.0; runs without the ROCm `bin` directory on `PATH` or `ROCM_PATH` set. See [Windows with AMD ROCm](#windows-with-amd-rocm). |
 
 ## Cargo feature flags
 
@@ -33,7 +33,7 @@ opt-in seams, diagnostics harnesses, or test scaffolding.
 | `metal` | off | Apple Silicon Metal GPU backend (delegates to `mlxcel-core/metal`). Standard on macOS. |
 | `accelerate` | off | Apple Accelerate CPU BLAS backend (delegates to `mlxcel-core/accelerate`). Standard on macOS. |
 | `cuda` | off | NVIDIA CUDA GPU backend (delegates to `mlxcel-core/cuda`). Required on NVIDIA hosts; a plain build is CPU-only (see the footgun note below). |
-| `rocm` | off | AMD GPU backend on Linux and on Windows x86_64 MSVC (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlxcelverse/overlays/rocm/`. Cannot be combined with `cuda` or `metal`. Experimental; see [Linux with AMD ROCm](#linux-with-amd-rocm-experimental) and [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
+| `rocm` | off | AMD GPU backend on Linux and on Windows x86_64 MSVC (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlxcelverse/overlays/rocm/`. Cannot be combined with `cuda` or `metal`. Supported since 0.8; see [Linux with AMD ROCm](#linux-with-amd-rocm) and [Windows with AMD ROCm](#windows-with-amd-rocm). |
 | `experimental-backend` | off | Reserves the non-MLX compute-backend seam slot (issue #338). Ships no kernels and adds no runtime dispatch; it only compiles the plug-in boundary where a future non-MLX engine (e.g. FuriosaAI RNGD) would implement `ComputeBackend`. `select_backend()` still folds to MLX. |
 | `xla-backend` | off | OpenXLA / StableHLO backend seam (issue #449, [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)). Pulls in `mlxcel-xla` and compiles the `Backend::Xla` / `Session::Xla` arms and the `MLXCEL_BACKEND=xla` selector, but no native execution engine: the crate is pure-Rust stubs plus the StableHLO graph emitter, so CI builds it unchanged. |
 | `xla-iree` | off | `xla-backend` plus real IREE execution (`mlxcel-xla/iree`). Compiles a C shim against a prebuilt IREE runtime and drives the bundled prefill / decode_step graphs. Needs `IREE_DIST` (or the source-build vars below) at build time, so it is a local / opt-in build, not a CI or release default. |
@@ -650,7 +650,7 @@ Notes:
   DLLs run in the mlxcel process, and the headers are compiled into GPU
   kernels. `C:\Program Files` has that protection; for a folder created
   directly under `C:\`, remove the inherited access as described for the
-  [ROCm SDK](#windows-with-amd-rocm-experimental).
+  [ROCm SDK](#windows-with-amd-rocm).
 - The bundle does not carry the Visual C++ runtime. `MSVCP140.dll` and
   `VCRUNTIME140.dll` loaded from System32 on the validated host, which also has
   Visual Studio, so a machine without them needs the Visual C++ Redistributable.
@@ -681,12 +681,12 @@ reports a path it cannot open, enable Win32 long paths or set a short
 | Prebuilt release archives | None yet. |
 | CI | Compile-only, no GPU. The hosted `Windows build (compile-only)` job in `ci.yml` runs on `windows-latest` when the Windows build scripts, `build_support/`, the overlays' runtime-directory sources, the bundle packagers or the MLX pin change (or the PR carries `ci:full`, a label the repository does not define yet): the `mlxcel-mlx-pin` unit tests, the `tests/` Python suites, and `cargo check -p mlxcel-core --features rocm` against the ROCm 10.1.0 `gfx1151` TheRock SDK, which builds MLX and its HIP kernels. No CI job builds the `cuda` feature on Windows. The host tests of both overlays' runtime-directory choice run on Linux in `overlay-host-tests`. |
 
-## Windows with AMD ROCm (experimental)
+## Windows with AMD ROCm
 
 A native `mlxcel.exe` / `mlxcel-server.exe` with the `rocm` feature, built with
-MSVC (lablup/mlxcel#2601). It uses the same ROCm overlay as the
-[Linux build](#linux-with-amd-rocm-experimental) and the same single-node
-limits as the [Windows CUDA build](#current-limits-on-windows).
+MSVC (lablup/mlxcel#2601) and supported since 0.8. It uses the same ROCm overlay
+as the [Linux build](#linux-with-amd-rocm) and the same single-node limits as
+the [Windows CUDA build](#current-limits-on-windows).
 
 Validated configuration: `x86_64-pc-windows-msvc` on an AMD Ryzen AI MAX+ 395
 (Radeon 8060S, `gfx1151`, with a BIOS UMA carve-out), Windows 11, Adrenalin
@@ -1019,11 +1019,9 @@ that would fail at the first matrix multiply on that GPU.
   feature on Windows without a GPU and runs nothing on AMD hardware; see the
   CI row in [Current limits on Windows](#current-limits-on-windows).
 
-## Linux with AMD ROCm (experimental)
+## Linux with AMD ROCm
 
-**Experimental.** AMD GPU support on Linux was added in lablup/mlxcel#1802 and
-is tracked by lablup/mlxcel#1801. It is a source build only: there is no
-release artifact and no ROCm CI job running yet, and the gaps listed below are open.
+**Supported since 0.8.** AMD GPU support on Linux was added in lablup/mlxcel#1802 and is tracked by lablup/mlxcel#1801. It is a source build only: there is no release artifact, and the optional ROCm CI job is disabled unless the repository sets `ROCM_CI_ENABLED`. The gaps listed below are open.
 
 The backend is not part of upstream MLX. mlxcel vendors the ROCm backend from
 the `rocm-support` branch of
@@ -1295,7 +1293,7 @@ the 1.20 headroom factor alone fell short for the dense models.
 | `mlxcel-server` chat completions | Work for dense and affine MoE checkpoints, streaming and non-streaming; verified with `scripts/server_chat_smoke.sh`. |
 | Audio (speech to text, text to speech) | Works. The FFT primitive runs on hipFFT; plans are cached up to `MLX_ROCM_FFT_CACHE_SIZE` (default 128, as on CUDA; lablup/mlxcel#1825, #1876); a value that is not a positive integer is ignored with a warning (#2051). |
 | Wave64 devices (CDNA: MI200 `gfx90a`, MI300 `gfx942`) | Not validated; the only wave64 run so far was one MI300X bring-up (`overlays/rocm/LOCAL_FIXES.md` item 52), and lablup/mlxcel#2699 tracks validation. The fused HIP kernels that reduce across lanes (BitLinear, the two fused MoE kernels and the squared-ReLU one, the Mamba2 SSM update, the Mamba1 scan, the add3 LayerNorm, the fused residual-add RMSNorm, and the paged-attention v1 decode and v2 partial) have only run on 32-lane wavefronts, and their compile-time wavefront guards do nothing with AMD clang 23. So mlxcel selects them only when the device reports a 32-lane wavefront (the hardware value, which `MLX_ROCM_FORCE_WARP_SIZE` does not change); on a 64-lane device those paths use their MLX graph fallbacks, and stderr says so once per process (lablup/mlxcel#2147). The kernels with no cross-lane operation (xIELU, RoPE + KV append, the paged-attention merge, both samplers) are selected at any width. BitLinear has no graph fallback, so BitNet checkpoints are refused at load on a wave64 device. The rocWMMA quantized GEMMs (`qmm_wmma_dense_kernel` and the grouped-prefill gather) assume 32-lane warps too and are likewise held to wave32 devices; before that, every bf16 quantized prefill on gfx942 produced garbage (`!!!!`) unless `MLX_ROCM_WMMA_QMM=0` was set (`overlays/rocm/LOCAL_FIXES.md` item 52). |
-| Windows | Experimental; see [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
+| Windows | Supported since 0.8; see [Windows with AMD ROCm](#windows-with-amd-rocm). |
 | Multiple GPUs, distributed inference | Not supported. |
 
 Decode throughput measured on the tested configuration, for orientation only:
@@ -1450,7 +1448,7 @@ make test-fast
 # Linux / CUDA
 make test-fast-cuda
 
-# Linux / ROCm (experimental): no make target yet
+# Linux / ROCm (supported since 0.8): no make target yet
 cargo test --profile test-fast --features rocm -- --test-threads=1
 
 # Narrow to a subset while iterating

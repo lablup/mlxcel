@@ -62,21 +62,22 @@ with its conclusions in plain text next to it.
 ## Current result snapshot
 
 Keep public result summaries in a single place so aggregate numbers do not drift
-between documents. The current Apple Silicon benchmark report is:
+between documents. The current benchmark reports are:
 
 - [Benchmark Report - 2026-05-19](benchmark_results/benchmark-report.md)
+- [Model compatibility and performance on GB10 at 0.8.1](benchmark_results/model_tests_gb10.md): the full text and VLM sweep at pp512/tg128 (2026-11-03 and 2026-11-04), with the modality ladders in the reports below.
 - [Native batched decode on M3 Ultra — 2026-10-27](benchmark_results/native-batched-decode-m3ultra-2026-10-27.md): 21 checkpoints, 23 configurations, with raw traces and serving evidence.
 - [CUDA quantized matmul batch fold on RTX Spark N1X, 2026-10-31](benchmark_results/cuda-qmm-fold-batch-n1x-2026-10-31.md)
 - [MoE expert overlap in batched decode on RTX Spark N1X, 2026-10-31](benchmark_results/moe-distinct-experts-n1x-2026-10-31.md)
 - [Few-row quantized matmul for batched decode on M1 Ultra, 2026-10-30](benchmark_results/few-row-qmm-batched-decode-m1ultra-2026-10-30.md): Llama 3.1 8B 4-bit 8-row decode step 56.5 ms to 39 ms, B=8/B=1 serving ratio 1.35x to 1.95x.
 
 That combined report is the cross-hardware surface, but it is older than the
-per-host tables it summarizes. The newest full sweep is M5 Max on mlxcel 0.6.0
-(2026-09-03/04), covering text, VLM, speculative and batched serving, in
-[model_tests_m5max.md](benchmark_results/model_tests_m5max.md); M1 Ultra and
-GB10 are still at 0.4.0-rc.1, so cross-host ratios currently mix versions. Take
-per-host numbers from the per-hardware tables and the combined report only for
-the comparison shape, until the other hosts are re-measured.
+per-host tables it summarizes. The newest full sweeps are M5 Max on mlxcel 0.6.0
+(text, VLM, speculative and batched serving) and GB10 on 0.8.1 (text, VLM,
+embeddings and rerank, and image generation and editing); M1 Ultra is still at
+0.4.0-rc.1, so cross-host ratios currently mix versions. Take per-host numbers
+from the per-hardware tables and the combined report only for the comparison
+shape, until the remaining host is re-measured.
 
 Use those tables for release notes, README updates, or capacity planning. This
 page should stay focused on methodology, required metadata, and caveats.
@@ -209,6 +210,11 @@ python3 scripts/bench_serving_concurrency.py --port <port> \
 # Embedding and rerank ladder. One server per checkpoint; writes its own CSV.
 python3 scripts/bench_embeddings.py --bin target/release/mlxcel-server \
     --out benchmarks/{backend}_{hw}_embeddings_{date}.csv --repeats 5 --port 18091
+
+# Image generation and edit ladder. One image-only server per checkpoint;
+# writes its own CSV. Add --task edit --image <reference> for the edit route.
+python3 scripts/bench_imagegen.py --bin target/release/mlxcel-server \
+    --out benchmarks/{backend}_{hw}_imagegen_{date}.csv --repeats 3 --port 18092
 
 # Continuous-batching sweep over every model dir. Takes ONE positional
 # argument, the output log path, and no flags.
