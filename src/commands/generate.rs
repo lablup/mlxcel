@@ -1588,7 +1588,42 @@ fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::Dyna
 /// as serving. Gemma3n audio uses the same bounded host front-end and split
 /// IREE prepared-prefill contract as serving; mixed image+audio remains
 /// fail-closed until a joint runtime is qualified.
+/// The budget an OpenXLA session should size its static shape against.
+///
+/// The unlimited `-n` default resolves to the whole checkpoint window, which no
+/// static graph can compile; [`mlxcel_xla::DEFAULT_XLA_GENERATION_BUDGET`]
+/// bounds it. An explicit `-n N` sizes with `N` (issue #2855).
 #[cfg(feature = "xla-backend")]
+fn xla_sizing_budget(max_tokens: usize, budget_was_unlimited: bool) -> usize {
+    if budget_was_unlimited && max_tokens > mlxcel_xla::DEFAULT_XLA_GENERATION_BUDGET {
+        mlxcel_xla::DEFAULT_XLA_GENERATION_BUDGET
+    } else {
+        max_tokens
+    }
+}
+
+/// The positions a request needs from an OpenXLA static shape: prompt plus
+/// generation budget plus any worst-case image expansion the checkpoint
+/// declares.
+#[cfg(feature = "xla-backend")]
+fn xla_required_positions(
+    prompt_len: usize,
+    sizing_budget: usize,
+    image_expansion: usize,
+) -> usize {
+    prompt_len
+        .saturating_add(sizing_budget)
+        .saturating_add(image_expansion)
+}
+
+/// The worst-case image expansion to include in an OpenXLA sizing hint.
+#[cfg(feature = "xla-backend")]
+fn xla_image_expansion(model_path: &Path, image_count: usize) -> usize {
+    image_count.saturating_mul(mlxcel::xla_image_context_floor(model_path).unwrap_or(0))
+}
+
+#[cfg(feature = "xla-backend")]
+#[allow(clippy::too_many_arguments)]
 fn generate_xla(
     model_path: &Path,
     num_layers: usize,
@@ -1599,6 +1634,7 @@ fn generate_xla(
     audio_path: Option<&Path>,
     has_video: bool,
     max_tokens: usize,
+    sizing_budget: usize,
     kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
@@ -1606,11 +1642,49 @@ fn generate_xla(
         !has_video,
         "the OpenXLA backend does not support video input yet"
     );
-    let mut session =
-        select_backend().create_session(model_path, num_layers, kv_cache_mode, token_bias)?;
+    let required_positions = xla_required_positions(
+        prompt_tokens.len(),
+        sizing_budget,
+        xla_image_expansion(model_path, image_paths.len()),
+    );
+    let mut session = select_backend().create_session_for_request(
+        model_path,
+        num_layers,
+        kv_cache_mode,
+        token_bias,
+        Some(required_positions),
+    )?;
     let start_time = Instant::now();
     let tokens = match &mut session {
         mlxcel::Session::Xla(s) => {
+            let capacity = s.context_capacity();
+            let requested_budget = max_tokens;
+            // The prompt the graph actually admits: image placeholders expand
+            // inside the session, so their worst case is part of the room the
+            // generation budget may use.
+            let effective_prompt_len = required_positions.saturating_sub(sizing_budget);
+            // The shape is static, so an unlimited (or over-wide) budget has to
+            // be clamped to the room it leaves after the prompt. The work the
+            // request asks for is unchanged: generation still stops at EOS.
+            let admitted = requested_budget.min(capacity.saturating_sub(effective_prompt_len));
+            if std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_none() {
+                println!(
+                    "OpenXLA context capacity: {capacity} for {effective_prompt_len} prompt + up to \
+                     {admitted} generated tokens (request-sized; MLXCEL_XLA_CONTEXT_CAPACITY pins \
+                     one shape)"
+                );
+            }
+            let max_tokens = admitted;
+            if max_tokens == 0 {
+                anyhow::bail!(
+                    "{}",
+                    mlxcel_xla::ContextCapacityError {
+                        effective_prompt_len,
+                        max_new_tokens: requested_budget,
+                        context_capacity: capacity,
+                    }
+                );
+            }
             let eos = s.eos_token_ids().to_vec();
             let phi4mm_media = mlxcel::models::get_model_type(model_path)?
                 == mlxcel::models::ModelType::Phi4MMVLM
@@ -2980,6 +3054,13 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     )?;
     let mut prompt_tokens = tokenize_prompt(&tokenizer, &prompt)?;
 
+    // The OpenXLA static shape has to be sized before the graph compiles, and
+    // the unlimited sentinel would otherwise size it against the whole window
+    // (issue #2855). Capture the sentinel before `resolve_cli_max_tokens`
+    // rewrites it; the XLA branch uses it to pick a bounded sizing budget.
+    let budget_was_unlimited =
+        args.generation.max_tokens == mlxcel::cli::max_tokens::UNLIMITED_MAX_TOKENS;
+
     // llama.cpp parity (issue #476): resolve an unlimited `-n -1` into a
     // concrete budget (model context window minus the rendered prompt) now, so
     // every downstream consumer (the memory preflight below, plus the standard /
@@ -3136,6 +3217,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             args.generation.audio.as_deref(),
             !args.generation.video.is_empty(),
             args.generation.max_tokens,
+            xla_sizing_budget(args.generation.max_tokens, budget_was_unlimited),
             kv_cache_mode,
             token_bias,
         )?;

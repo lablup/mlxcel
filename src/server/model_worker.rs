@@ -1499,16 +1499,20 @@ pub(crate) fn spawn_xla_model_worker(
                 .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
             // Capacities are static graph shapes, so the set has to be decided
             // before any engine is built and cannot be revisited per request.
-            // The worst-case image expansion is what makes a second, larger
-            // shape worth compiling, and it is derived from config alone.
+            // The worst-case image expansion is what makes an extra, larger
+            // shape worth compiling, and it is derived from config alone; the
+            // text shapes are bounded by the checkpoint window so no shape is
+            // compiled that the model itself could never fill (#2855).
             let image_floor = crate::xla_image_context_floor(&model_path);
-            let capacities = match mlxcel_xla::context_capacity_buckets_from_env(image_floor) {
-                Ok(value) => value,
-                Err(err) => crate::worker_failfast::exit_on_worker_startup_failure(
-                    "model-worker-xla",
-                    &format!("failed to configure the OpenXLA engine: {err}"),
-                ),
-            };
+            let model_window = crate::read_model_context_window(&model_path);
+            let capacities =
+                match mlxcel_xla::context_capacity_buckets_from_env(image_floor, model_window) {
+                    Ok(value) => value,
+                    Err(err) => crate::worker_failfast::exit_on_worker_startup_failure(
+                        "model-worker-xla",
+                        &format!("failed to configure the OpenXLA engine: {err}"),
+                    ),
+                };
             let operator_pinned = std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_some();
             // The guard asks whether ANY shape can admit an image, so it takes
             // the largest. With a derived set that is the image floor itself, so
