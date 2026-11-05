@@ -41,6 +41,8 @@
 //! family is not validated, an unsupported activation, yarn RoPE, MiniCPM3's MLA)
 //! are rejected rather than mis-emitted.
 
+use super::builder::ProjectionLayout;
+
 /// How the RoPE inverse-frequency table is computed. Both kinds share the
 /// `outer(pos, inv_freq)` table build (see [`rope`](super::rope)); they differ
 /// only in `inv_freq`.
@@ -457,6 +459,10 @@ pub struct Config {
     /// Per-request speech/vision adapters carried by the Phi4MM checkpoint.
     /// `None` preserves the existing dense graph signatures byte-for-byte.
     pub phi4_lora: Option<Phi4LoraConfig>,
+    /// Layout the graph declares for projection weights (issue #2859). Set by
+    /// the engine that emits the graph: the single-sequence session loads
+    /// `InOut`, the continuous-batching engine keeps the checkpoint's `OutIn`.
+    pub projection_layout: ProjectionLayout,
 }
 
 impl Config {
@@ -517,6 +523,7 @@ impl Config {
             fused_qkv: false,
             fused_gate_up: false,
             phi4_lora: None,
+            projection_layout: ProjectionLayout::OutIn,
         }
     }
 
@@ -1649,6 +1656,7 @@ impl Config {
             fused_qkv,
             fused_gate_up,
             phi4_lora,
+            projection_layout: ProjectionLayout::OutIn,
         })
     }
 

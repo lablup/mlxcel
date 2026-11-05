@@ -460,6 +460,34 @@ pub(crate) fn slice_rows(
     Ok(buf[start * in_..end * in_].to_vec())
 }
 
+/// Transpose a row-major `[out, in]` f32 projection into the `[in, out]` layout
+/// the graphs declare (issue #2859).
+///
+/// The checkpoint stores projections `[out, in]`; the graph contracts the
+/// weight's input axis so IREE never materializes a transpose per decode step.
+/// Done once at upload, in 32x32 blocks so each block fits a cache line span.
+pub(crate) fn transpose_projection(buf: &[f32], out: usize, in_: usize) -> Vec<f32> {
+    assert_eq!(
+        buf.len(),
+        out.saturating_mul(in_),
+        "projection buffer is [out, in]"
+    );
+    const BLOCK: usize = 32;
+    let mut t = vec![0.0f32; buf.len()];
+    for ob in (0..out).step_by(BLOCK) {
+        let o_end = (ob + BLOCK).min(out);
+        for ib in (0..in_).step_by(BLOCK) {
+            let i_end = (ib + BLOCK).min(in_);
+            for o in ob..o_end {
+                for i in ib..i_end {
+                    t[i * out + o] = buf[o * in_ + i];
+                }
+            }
+        }
+    }
+    t
+}
+
 /// bf16 little-endian bytes -> f32 (bf16 is the high 16 bits of f32).
 pub(crate) fn bf16_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
@@ -1390,6 +1418,26 @@ mod tests {
         assert_eq!(slice_rows(&buf, 4, 1, 3).unwrap(), vec![2.0, 3.0, 4.0, 5.0]);
         assert!(slice_rows(&buf, 4, 2, 5).is_err());
         assert!(slice_rows(&buf, 3, 0, 1).is_err());
+    }
+
+    /// The projection transpose moves `[out, in]` to `[in, out]` exactly.
+    #[test]
+    fn transpose_projection_moves_the_out_axis_last() {
+        // 2 rows (out) x 3 cols (in), row-major.
+        let buf = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        assert_eq!(
+            transpose_projection(&buf, 2, 3),
+            vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        );
+        // A larger-than-block shape keeps every element in its transposed slot.
+        let (out, in_) = (40, 70);
+        let buf: Vec<f32> = (0..out * in_).map(|x| x as f32).collect();
+        let t = transpose_projection(&buf, out, in_);
+        for o in 0..out {
+            for i in 0..in_ {
+                assert_eq!(t[i * out + o], buf[o * in_ + i]);
+            }
+        }
     }
 
     /// f16 widening is exact against `f32 as` for representative values: zero, one,

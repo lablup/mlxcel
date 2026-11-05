@@ -318,6 +318,25 @@ pub struct Builder {
     next: usize,
     precision: Precision,
     gemma3n_qmv: bool,
+    projection_layout: ProjectionLayout,
+}
+
+/// Layout a graph declares for projection weights (issue #2859).
+///
+/// The best layout depends on the graph shape, not on the model: IREE lowers a
+/// single-row contraction against `[out, in]` into a separate full-weight
+/// transpose plus a vecmat (slow), but the same contraction at the ragged
+/// decode's row count into one transposed-B matmul (fast). The converse holds
+/// for the pre-transposed layout. The single-sequence session therefore loads
+/// [`ProjectionLayout::InOut`] and the continuous-batching engine keeps
+/// [`ProjectionLayout::OutIn`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProjectionLayout {
+    /// The checkpoint's `[out, in]` layout, uploaded unchanged.
+    #[default]
+    OutIn,
+    /// `[in, out]`, transposed once by the loader at upload.
+    InOut,
 }
 
 fn dims_list(d: &[usize]) -> String {
@@ -348,7 +367,23 @@ impl Builder {
             next: 0,
             precision: Precision::F32,
             gemma3n_qmv: false,
+            projection_layout: ProjectionLayout::OutIn,
         }
+    }
+
+    /// Set the projection weight layout (builder-style). Default is
+    /// [`ProjectionLayout::OutIn`], the checkpoint layout.
+    #[must_use]
+    pub fn with_projection_layout(mut self, layout: ProjectionLayout) -> Self {
+        self.projection_layout = layout;
+        self
+    }
+
+    /// The projection layout this graph declares. Read by the weight-argument
+    /// declaration and the layout-aware linear helpers.
+    #[must_use]
+    pub fn projection_layout(&self) -> ProjectionLayout {
+        self.projection_layout
     }
 
     /// Set the contraction precision (builder-style). Default is `F32`.
@@ -1837,6 +1872,47 @@ impl Builder {
         self.dot_general(x, w, &[], &[], &[1], &[1], vec![l, n])
     }
 
+    /// y = x @ W for x:[K], W:[K,N] (weights stored [in,out], issue #2859).
+    ///
+    /// The checkpoint layout is `[out, in]`; the loader transposes it once at
+    /// upload. Contracting the shared axis instead of the weight's last axis
+    /// keeps IREE from materializing a `[out,in] -> [in,out]` transpose on every
+    /// decode step, which was 59% of the step's device time.
+    pub fn linear_t(&mut self, x: &Val, w: &Val) -> Val {
+        let k = x.ty.shape[0];
+        assert_eq!(k, w.ty.shape[0], "linear_t contracts the weight's in axis");
+        let n = w.ty.shape[1];
+        self.dot_general(x, w, &[], &[], &[0], &[0], vec![n])
+    }
+
+    /// Sequence-batched form of [`Self::linear_t`]: y[L,N] = x[L,K] @ W[K,N].
+    pub fn linear_seq_t(&mut self, x: &Val, w: &Val) -> Val {
+        let l = x.ty.shape[0];
+        let k = x.ty.shape[1];
+        assert_eq!(
+            k, w.ty.shape[0],
+            "linear_seq_t contracts the weight's in axis"
+        );
+        let n = w.ty.shape[1];
+        self.dot_general(x, w, &[], &[], &[1], &[0], vec![l, n])
+    }
+
+    /// Linear over a projection weight in the layout this graph declares.
+    pub fn linear_proj(&mut self, x: &Val, w: &Val) -> Val {
+        match self.projection_layout {
+            ProjectionLayout::OutIn => self.linear(x, w),
+            ProjectionLayout::InOut => self.linear_t(x, w),
+        }
+    }
+
+    /// Sequence-batched [`Self::linear_proj`].
+    pub fn linear_seq_proj(&mut self, x: &Val, w: &Val) -> Val {
+        match self.projection_layout {
+            ProjectionLayout::OutIn => self.linear_seq(x, w),
+            ProjectionLayout::InOut => self.linear_seq_t(x, w),
+        }
+    }
+
     /// Linear projection over the final axis of an arbitrary-rank tensor.
     pub fn linear_last(&mut self, x: &Val, w: &Val) -> Val {
         let input = *x.ty.shape.last().expect("linear input rank");
@@ -1900,6 +1976,37 @@ mod tests {
         assert_eq!(default_precision("hip"), Precision::F16);
         assert_eq!(default_precision("local-task"), Precision::F32);
         assert_eq!(default_precision("local-sync"), Precision::F32);
+    }
+
+    /// The transposed-layout helpers contract the weight's in axis and keep the
+    /// output width from its last axis (issue #2859).
+    #[test]
+    fn transposed_linear_contracts_the_in_axis() {
+        let mut b = Builder::new();
+        let x = Builder::arg(0, Ty::f32(vec![2048]));
+        let w = Builder::arg(1, Ty::f32(vec![2048, 8192]));
+        let y = b.linear_t(&x, &w);
+        assert_eq!(y.ty.shape, vec![8192]);
+        let body = b.body();
+        assert!(
+            body.contains("dot_general %arg0, %arg1, contracting_dims = [0] x [0]"),
+            "{body}"
+        );
+        assert!(body.contains("(tensor<2048xf32>, tensor<2048x8192xf32>) -> tensor<8192xf32>"));
+    }
+
+    #[test]
+    fn transposed_linear_seq_contracts_the_in_axis() {
+        let mut b = Builder::new();
+        let x = Builder::arg(0, Ty::f32(vec![64, 2048]));
+        let w = Builder::arg(1, Ty::f32(vec![2048, 8192]));
+        let y = b.linear_seq_t(&x, &w);
+        assert_eq!(y.ty.shape, vec![64, 8192]);
+        assert!(
+            b.body().contains("contracting_dims = [1] x [0]"),
+            "{}",
+            b.body()
+        );
     }
 
     /// Issue #612: only bf16-on-Metal is rejected; every other pair lowers. The

@@ -33,7 +33,9 @@
 //! `embed` matrix (see [`take_lm_head`]); a tied checkpoint emits no such arg and
 //! is byte-identical to before.
 
-use super::builder::{Builder, Precision, Ty, Val, precision_from_env, quant_in_graph};
+use super::builder::{
+    Builder, Precision, ProjectionLayout, Ty, Val, precision_from_env, quant_in_graph,
+};
 use super::config::{Config, DeepStackConfig, MropeLayout, NormStyle};
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
@@ -393,7 +395,15 @@ fn take_weight(
                 Ty::new(vec![out, n_groups], "f16"),
                 format!("{loc}.biases"),
             );
-            b.dequant_affine(&packed, &scales, &biases, qc.bits, qc.group_size)
+            // The packed dequant always reconstructs the checkpoint's `[out, in]`.
+            // The `InOut` graphs consume the transposed form, which costs one
+            // in-graph transpose per weight (the packed opt-in already trades
+            // decode throughput for upload bytes, so it keeps working).
+            let w = b.dequant_affine(&packed, &scales, &biases, qc.bits, qc.group_size);
+            match b.projection_layout() {
+                ProjectionLayout::OutIn => w,
+                ProjectionLayout::InOut => b.transpose(&w, &[1, 0]),
+            }
         }
         // issue #572: on the f16 GPU path, declare the resident projection weight as
         // an f16 arg (uploaded f16-resident by the loader) instead of an f32 arg the
@@ -407,7 +417,15 @@ fn take_weight(
             } else {
                 "f32"
             };
-            take_arg(decls, idx, Ty::new(vec![out, in_], elt), loc)
+            // issue #2859: in the `InOut` layout the loader transposes the
+            // checkpoint's `[out, in]` projection once at upload, so the dense
+            // forward can contract the shared axis instead of transposing every
+            // decode step. The `OutIn` graphs keep the checkpoint layout.
+            let shape = match b.projection_layout() {
+                ProjectionLayout::OutIn => vec![out, in_],
+                ProjectionLayout::InOut => vec![in_, out],
+            };
+            take_arg(decls, idx, Ty::new(shape, elt), loc)
         }
     }
 }
@@ -1532,8 +1550,19 @@ impl AttnLayout {
     }
 
     fn lora_branch(&self, b: &mut Builder, x: &Val, pair: &LoraPairW) -> Val {
-        let low_rank = self.linear(b, x, &pair.a);
-        let delta = self.linear(b, &low_rank, &pair.b);
+        // Phi4MM adapter tensors are declared by `modal` in the checkpoint's
+        // `[out, in]` layout (the loader does not transpose them), so this
+        // branch keeps the untransposed helpers (issue #2859).
+        let delta = match self {
+            AttnLayout::Single { .. } => {
+                let low_rank = b.linear(x, &pair.a);
+                b.linear(&low_rank, &pair.b)
+            }
+            _ => {
+                let low_rank = b.linear_seq(x, &pair.a);
+                b.linear_seq(&low_rank, &pair.b)
+            }
+        };
         let scale = b.const_f32(pair.scale);
         let scale = b.broadcast(&scale, &[], delta.ty.shape.clone());
         b.multiply(&delta, &scale)
@@ -1578,12 +1607,12 @@ impl AttnLayout {
         }
     }
 
-    /// A rank-aware linear `x @ W^T`: `[K] -> [N]` for single decode, `[L, K] ->
-    /// [L, N]` for the seq kinds. Lets the shared MLP body emit at any rank.
+    /// A rank-aware linear over a transposed projection weight (issue #2859):
+    /// `[K] -> [N]` for single decode, `[L, K] -> [L, N]` for the seq kinds.
     fn linear(&self, b: &mut Builder, x: &Val, w: &Val) -> Val {
         match self {
-            AttnLayout::Single { .. } => b.linear(x, w),
-            _ => b.linear_seq(x, w),
+            AttnLayout::Single { .. } => b.linear_proj(x, w),
+            _ => b.linear_seq_proj(x, w),
         }
     }
 
@@ -1618,7 +1647,7 @@ impl AttnLayout {
                     .phi4_lora
                     .as_ref()
                     .map(|lora| self.modal_lora_delta(b, hn, &lora.qkv));
-                let q = b.linear(hn, lw.wq.as_ref().expect("ordinary q projection"));
+                let q = b.linear_proj(hn, lw.wq.as_ref().expect("ordinary q projection"));
                 let q = match &lora {
                     Some(delta) => {
                         let delta = b.slice(delta, &[(0, nq * d)]);
@@ -1628,7 +1657,7 @@ impl AttnLayout {
                 };
                 let q = add_proj_bias(b, q, &lw.bq);
                 let q = b.reshape(&q, vec![nq, d]);
-                let kk = b.linear(hn, lw.wk.as_ref().expect("ordinary k projection"));
+                let kk = b.linear_proj(hn, lw.wk.as_ref().expect("ordinary k projection"));
                 let kk = match &lora {
                     Some(delta) => {
                         let delta = b.slice(delta, &[(nq * d, nq * d + nkv * d)]);
@@ -1638,7 +1667,7 @@ impl AttnLayout {
                 };
                 let kk = add_proj_bias(b, kk, &lw.bk);
                 let kk = b.reshape(&kk, vec![nkv, d]);
-                let vv = b.linear(hn, lw.wv.as_ref().expect("ordinary v projection"));
+                let vv = b.linear_proj(hn, lw.wv.as_ref().expect("ordinary v projection"));
                 let vv = match &lora {
                     Some(delta) => {
                         let delta = b.slice(delta, &[(nq * d + nkv * d, nq * d + 2 * nkv * d)]);
@@ -1670,7 +1699,7 @@ impl AttnLayout {
             .phi4_lora
             .as_ref()
             .map(|lora| self.modal_lora_delta(b, hn, &lora.qkv));
-        let q = b.linear_seq(hn, lw.wq.as_ref().expect("ordinary q projection"));
+        let q = b.linear_seq_proj(hn, lw.wq.as_ref().expect("ordinary q projection"));
         let q = match &lora {
             Some(delta) => {
                 let delta = b.slice(delta, &[(0, n), (0, nq * d)]);
@@ -1680,7 +1709,7 @@ impl AttnLayout {
         };
         let q = add_proj_bias_seq(b, q, &lw.bq, n, nq * d);
         let q = b.reshape(&q, vec![n, nq, d]);
-        let kk = b.linear_seq(hn, lw.wk.as_ref().expect("ordinary k projection"));
+        let kk = b.linear_seq_proj(hn, lw.wk.as_ref().expect("ordinary k projection"));
         let kk = match &lora {
             Some(delta) => {
                 let delta = b.slice(delta, &[(0, n), (nq * d, nq * d + nkv * d)]);
@@ -1690,7 +1719,7 @@ impl AttnLayout {
         };
         let kk = add_proj_bias_seq(b, kk, &lw.bk, n, nkv * d);
         let kk = b.reshape(&kk, vec![n, nkv, d]);
-        let vv = b.linear_seq(hn, lw.wv.as_ref().expect("ordinary v projection"));
+        let vv = b.linear_seq_proj(hn, lw.wv.as_ref().expect("ordinary v projection"));
         let vv = match &lora {
             Some(delta) => {
                 let delta = b.slice(delta, &[(0, n), (nq * d + nkv * d, nq * d + 2 * nkv * d)]);
@@ -1965,9 +1994,9 @@ impl AttnLayout {
     fn o_proj(&self, b: &mut Builder, o: &Val, lw: &LayerW) -> Val {
         let out = match self {
             AttnLayout::Single { .. } => {
-                b.linear(o, lw.wo.as_ref().expect("ordinary output projection"))
+                b.linear_proj(o, lw.wo.as_ref().expect("ordinary output projection"))
             }
-            _ => b.linear_seq(o, lw.wo.as_ref().expect("ordinary output projection")),
+            _ => b.linear_seq_proj(o, lw.wo.as_ref().expect("ordinary output projection")),
         };
         let out = match &lw.phi4_lora {
             Some(lora) => {
@@ -2158,13 +2187,13 @@ fn emit_mla_attention(
         AttnLayout::Prefill { lp, .. } => Some(*lp),
     };
     let q_latent = match rows {
-        None => b.linear(&hn, &mw.q_a),
-        Some(_) => b.linear_seq(&hn, &mw.q_a),
+        None => b.linear_proj(&hn, &mw.q_a),
+        Some(_) => b.linear_seq_proj(&hn, &mw.q_a),
     };
     let q_latent = mla_rms_norm(b, &q_latent, &mw.q_a_norm, &k.eps, rows, m.q_lora_rank);
     let q = match rows {
-        None => b.linear(&q_latent, &mw.q_b),
-        Some(_) => b.linear_seq(&q_latent, &mw.q_b),
+        None => b.linear_proj(&q_latent, &mw.q_b),
+        Some(_) => b.linear_seq_proj(&q_latent, &mw.q_b),
     };
     let q = match rows {
         None => b.reshape(&q, vec![c.n_q, m.q_head_dim()]),
@@ -2184,8 +2213,8 @@ fn emit_mla_attention(
         ),
     };
     let kv = match rows {
-        None => b.linear(&hn, &mw.kv_a),
-        Some(_) => b.linear_seq(&hn, &mw.kv_a),
+        None => b.linear_proj(&hn, &mw.kv_a),
+        Some(_) => b.linear_seq_proj(&hn, &mw.kv_a),
     };
     let (latent, k_pe) = match rows {
         None => (
@@ -2450,8 +2479,8 @@ fn emit_mla_attention(
         }
     };
     let output = match layout {
-        AttnLayout::Single { .. } => b.linear(&context, &mw.o),
-        _ => b.linear_seq(&context, &mw.o),
+        AttnLayout::Single { .. } => b.linear_proj(&context, &mw.o),
+        _ => b.linear_seq_proj(&context, &mw.o),
     };
     let output = post_attn_norm(b, c, k, layout, output, lw);
     (hn, output)
@@ -2604,7 +2633,9 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
 }
 
 pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> String {
-    let mut b = Builder::new().with_precision(precision);
+    let mut b = Builder::new()
+        .with_precision(precision)
+        .with_projection_layout(c.projection_layout);
     let (decls, a) = build_arg_schema(&mut b, c);
     let k = emit_consts(&mut b, c);
 
@@ -2886,7 +2917,9 @@ pub fn emit_decode_batched_with(
         c.phi4_lora.is_none(),
         "Phi4MM requires per-row ragged decode; uniform batched decode cannot carry request-scoped adapter modes"
     );
-    let mut b = Builder::new().with_precision(precision);
+    let mut b = Builder::new()
+        .with_precision(precision)
+        .with_projection_layout(c.projection_layout);
     let (decls, a) = build_batched_arg_schema(&mut b, c, bsz);
     let k = emit_consts(&mut b, c);
 
@@ -2936,13 +2969,13 @@ pub fn emit_decode_batched_with(
             .as_ref()
             .expect("uniform-B batched decode is emitted only for pre-norm archs");
         let hn = rms_norm_seq(&mut b, &x, in_ln, &k, bsz, h); // [B, H]
-        let q = b.linear_seq(&hn, lw.wq.as_ref().expect("ordinary q projection")); // [B, qd]
+        let q = b.linear_seq_proj(&hn, lw.wq.as_ref().expect("ordinary q projection")); // [B, qd]
         let q = add_proj_bias_seq(&mut b, q, &lw.bq, bsz, nq * d);
         let q = b.reshape(&q, vec![bsz, nq, d]);
-        let kk = b.linear_seq(&hn, lw.wk.as_ref().expect("ordinary k projection")); // [B, kv]
+        let kk = b.linear_seq_proj(&hn, lw.wk.as_ref().expect("ordinary k projection")); // [B, kv]
         let kk = add_proj_bias_seq(&mut b, kk, &lw.bk, bsz, nkv * d);
         let kk = b.reshape(&kk, vec![bsz, nkv, d]);
-        let vv = b.linear_seq(&hn, lw.wv.as_ref().expect("ordinary v projection")); // [B, kv]
+        let vv = b.linear_seq_proj(&hn, lw.wv.as_ref().expect("ordinary v projection")); // [B, kv]
         let vv = add_proj_bias_seq(&mut b, vv, &lw.bv, bsz, nkv * d);
         let vv = b.reshape(&vv, vec![bsz, nkv, d]);
 
@@ -3015,7 +3048,7 @@ pub fn emit_decode_batched_with(
         );
         let o = b.reshape(&o, vec![bsz, nq, d]);
         let o = b.reshape(&o, vec![bsz, nq * d]);
-        let attn_out = b.linear_seq(&o, lw.wo.as_ref().expect("ordinary output projection")); // [B, H]
+        let attn_out = b.linear_seq_proj(&o, lw.wo.as_ref().expect("ordinary output projection")); // [B, H]
         x = b.add(&x, &attn_out);
 
         // FFN: the MoE block (issue #500) on a MoE layer, else the dense SwiGLU MLP
@@ -3046,8 +3079,8 @@ pub fn emit_decode_batched_with(
                 bsz,
                 h,
             );
-            let gate = b.linear_seq(&hn2, lw.gate.as_ref().expect("batched decode: gate")); // [B, inter]
-            let up = b.linear_seq(&hn2, LayerW::dense(&lw.up)); // [B, inter]
+            let gate = b.linear_seq_proj(&hn2, lw.gate.as_ref().expect("batched decode: gate")); // [B, inter]
+            let up = b.linear_seq_proj(&hn2, LayerW::dense(&lw.up)); // [B, inter]
             let neg = b.negate(&gate);
             let ex = b.exponential(&neg);
             let one_b = b.broadcast(&k.one, &[], vec![bsz, c.inter]);
@@ -3055,7 +3088,7 @@ pub fn emit_decode_batched_with(
             let sig = b.divide(&one_b, &denom);
             let silu = b.multiply(&gate, &sig);
             let act = b.multiply(&silu, &up);
-            let down = b.linear_seq(&act, LayerW::dense(&lw.down)); // [B, H]
+            let down = b.linear_seq_proj(&act, LayerW::dense(&lw.down)); // [B, H]
             x = b.add(&x, &down);
         }
     }
@@ -3229,7 +3262,9 @@ pub fn emit_decode_ragged_with(
     sample: bool,
     precision: Precision,
 ) -> String {
-    let mut b = Builder::new().with_precision(precision);
+    let mut b = Builder::new()
+        .with_precision(precision)
+        .with_projection_layout(c.projection_layout);
     let (decls, a) = build_ragged_arg_schema(&mut b, c, bsz);
     let k = emit_consts(&mut b, c);
     // Constant row indices 0..bsz for the per-row KV-write dim-0 offsets.
@@ -3855,7 +3890,9 @@ fn emit_prefill_module(
         "post-hook state capture is only valid for DeepStack prefill"
     );
     let lp = c.context_capacity;
-    let mut b = Builder::new().with_precision(precision);
+    let mut b = Builder::new()
+        .with_precision(precision)
+        .with_projection_layout(c.projection_layout);
     let (decls, a) = build_prefill_arg_schema(&mut b, c, lp, input_kind);
     let k = emit_consts(&mut b, c);
 
@@ -4089,7 +4126,9 @@ pub(crate) fn emit_moe_probe_with(c: &Config, n: usize, precision: Precision) ->
     let mw = take_moe_weights(&mut decls, &mut idx, c, 0);
     let hn = take_arg(&mut decls, &mut idx, Ty::f32(vec![n, h]), "hn".into());
 
-    let mut b = Builder::new().with_precision(precision);
+    let mut b = Builder::new()
+        .with_precision(precision)
+        .with_projection_layout(c.projection_layout);
     let k = emit_consts(&mut b, c);
     let out = moe::moe_block(&mut b, c, m, &mw, &k, &hn, n);
 

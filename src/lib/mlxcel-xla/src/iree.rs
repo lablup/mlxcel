@@ -59,12 +59,13 @@ use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{
     Config, DeepStackConfig, Gemma3nConfig, Gemma3nWeightSpec, LlavaVisionConfig, Precision,
-    QuantConfig, VisionProjector, WeightScheme, check_packed_supported, emit_decode_ragged_with,
-    emit_decode_with, emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with_qmv,
-    emit_gemma3n_prefill_embeddings_ple_with_qmv, emit_gemma3n_prefill_with_qmv,
-    emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
-    gemma3n_qmv_artifact_identity, gemma3n_qmv_is_available, gemma3n_weight_specs,
-    precision_env_override, quant_in_graph, resolve_precision_checked,
+    ProjectionLayout, QuantConfig, VisionProjector, WeightScheme, check_packed_supported,
+    emit_decode_ragged_with, emit_decode_with, emit_gemma3n_decode_ragged_with_qmv,
+    emit_gemma3n_decode_with_qmv, emit_gemma3n_prefill_embeddings_ple_with_qmv,
+    emit_gemma3n_prefill_with_qmv, emit_prefill_embeddings_deepstack_with,
+    emit_prefill_embeddings_with, emit_prefill_with, gemma3n_qmv_artifact_identity,
+    gemma3n_qmv_is_available, gemma3n_weight_specs, precision_env_override, quant_in_graph,
+    resolve_precision_checked,
 };
 #[cfg(feature = "diagnostics")]
 use crate::emitter::{
@@ -90,7 +91,7 @@ use crate::{DeepStackFeatures, DeepStackPreparedPrefill, Gemma3nDensePle, Gemma3
 use crate::weights::{
     QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_bf16_sequential,
     dequantize_affine_f32, dequantize_affine_stacked, f16_to_f32, f32_le_to_f32, pack_f16,
-    slice_rows, weight_specs,
+    slice_rows, transpose_projection, weight_specs,
 };
 
 /// Weight-buffer element dtype passed to the C shim (issue #516 per-weight ABI):
@@ -568,6 +569,23 @@ impl RuntimeConfig {
             .with_context_capacity(context_capacity)
             .map(Box::new)
             .map(Self::Dense)
+    }
+
+    /// Select the projection weight layout this engine emits and uploads
+    /// (issue #2859). Gemma3n's own emitters keep the checkpoint layout.
+    fn with_projection_layout(mut self, layout: ProjectionLayout) -> Self {
+        if let Self::Dense(config) = &mut self {
+            config.projection_layout = layout;
+        }
+        self
+    }
+
+    /// The projection weight layout the emitted graphs declare.
+    fn projection_layout(&self) -> ProjectionLayout {
+        match self {
+            Self::Dense(config) => config.projection_layout,
+            Self::Gemma3n(_) => ProjectionLayout::OutIn,
+        }
     }
 
     fn context_capacity(&self) -> usize {
@@ -1854,10 +1872,17 @@ mod checkpoint_name_tests {
 /// canonical tensor name also ensures fused tensors (`qkv_proj`, `gate_up_proj`,
 /// `att_proj`, `ff_proj`) are dequantized once per layer instead of once per
 /// slice.
+///
+/// `projection_layout` is the layout the emitted graphs declare (issue #2859):
+/// with [`ProjectionLayout::InOut`] each `Proj` / `Rows` weight is transposed
+/// once here, from the checkpoint's `[out, in]` to `[in, out]`, so no decode
+/// step pays for it; [`ProjectionLayout::OutIn`] uploads the checkpoint layout
+/// unchanged.
 fn upload_weights_with_sink<F>(
     model_dir: &Path,
     cfg: &RuntimeConfig,
     resident_f16: bool,
+    projection_layout: ProjectionLayout,
     mut sink: F,
 ) -> Result<(), String>
 where
@@ -2130,23 +2155,42 @@ where
                         sink(i, WeightBuf::F32(data), WDT_F32, rank, dims)?;
                     }
                     WeightSpec::Proj(_) => {
-                        let rank = checked_ffi_int(shape.len(), &format!("weight {name} rank"))?;
-                        for (k, &s) in shape.iter().enumerate() {
-                            dims[k] = checked_ffi_i64(s, &format!("weight {name} dim {k}"))?;
+                        if shape.len() != 2 {
+                            return Err(format!(
+                                "projection weight {name} is rank {} (expected 2)",
+                                shape.len()
+                            ));
                         }
-                        if resident_f16 {
-                            let packed = pack_f16(data_ref);
+                        let (out, in_) = (shape[0], shape[1]);
+                        if matches!(projection_layout, ProjectionLayout::InOut) {
+                            let transposed = transpose_projection(data_ref, out, in_);
                             if remaining == 0 {
                                 drop(owned_widened.take());
                             }
-                            sink(i, WeightBuf::F16(packed), WDT_F16, rank, dims)?;
-                        } else {
-                            let data = if remaining == 0 {
-                                owned_widened.take().unwrap().0
+                            dims[0] = checked_ffi_i64(in_, &format!("weight {name} in axis"))?;
+                            dims[1] = checked_ffi_i64(out, &format!("weight {name} out axis"))?;
+                            if resident_f16 {
+                                sink(i, WeightBuf::F16(pack_f16(&transposed)), WDT_F16, 2, dims)?;
                             } else {
-                                data_ref.clone()
-                            };
-                            sink(i, WeightBuf::F32(data), WDT_F32, rank, dims)?;
+                                sink(i, WeightBuf::F32(transposed), WDT_F32, 2, dims)?;
+                            }
+                        } else {
+                            dims[0] = checked_ffi_i64(out, &format!("weight {name} dim 0"))?;
+                            dims[1] = checked_ffi_i64(in_, &format!("weight {name} dim 1"))?;
+                            if resident_f16 {
+                                let packed = pack_f16(data_ref);
+                                if remaining == 0 {
+                                    drop(owned_widened.take());
+                                }
+                                sink(i, WeightBuf::F16(packed), WDT_F16, 2, dims)?;
+                            } else {
+                                let data = if remaining == 0 {
+                                    owned_widened.take().unwrap().0
+                                } else {
+                                    data_ref.clone()
+                                };
+                                sink(i, WeightBuf::F32(data), WDT_F32, 2, dims)?;
+                            }
                         }
                     }
                     WeightSpec::Rows { start, end, .. } => {
@@ -2158,16 +2202,24 @@ where
                         }
                         let sliced = slice_rows(data_ref, shape[0], *start, *end)
                             .map_err(|e| format!("row-slice {name}: {e}"))?;
-                        dims[0] =
-                            checked_ffi_i64(*end - *start, &format!("weight {name} sliced rows"))?;
-                        dims[1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
+                        // Same layout rule as `Proj` (issue #2859).
+                        let rows = *end - *start;
+                        let in_ = shape[1];
+                        let (data, (r, c)) = match projection_layout {
+                            ProjectionLayout::OutIn => (sliced, (rows, in_)),
+                            ProjectionLayout::InOut => {
+                                (transpose_projection(&sliced, rows, in_), (in_, rows))
+                            }
+                        };
+                        dims[0] = checked_ffi_i64(r, &format!("weight {name} sliced dim 0"))?;
+                        dims[1] = checked_ffi_i64(c, &format!("weight {name} sliced dim 1"))?;
                         if remaining == 0 {
                             drop(owned_widened.take());
                         }
                         if resident_f16 {
-                            sink(i, WeightBuf::F16(pack_f16(&sliced)), WDT_F16, 2, dims)?;
+                            sink(i, WeightBuf::F16(pack_f16(&data)), WDT_F16, 2, dims)?;
                         } else {
-                            sink(i, WeightBuf::F32(sliced), WDT_F32, 2, dims)?;
+                            sink(i, WeightBuf::F32(data), WDT_F32, 2, dims)?;
                         }
                     }
                     WeightSpec::Elements { start, end, .. } => {
@@ -2410,8 +2462,12 @@ fn create_ctx_with_diagnostics(
              (IREE runtime; see stderr for the annotated status)"
         ));
     }
-    if let Err(error) =
-        upload_weights_with_sink(model_dir, cfg, resident_f16, |i, buf, dtype, rank, dims| {
+    if let Err(error) = upload_weights_with_sink(
+        model_dir,
+        cfg,
+        resident_f16,
+        cfg.projection_layout(),
+        |i, buf, dtype, rank, dims| {
             let index = checked_ffi_int(i, "weight index")?;
             let rc = unsafe {
                 xla_llama_upload_weight(
@@ -2430,8 +2486,8 @@ fn create_ctx_with_diagnostics(
                 ));
             }
             Ok(())
-        })
-    {
+        },
+    ) {
         unsafe { xla_llama_free(ctx) };
         return Err(error);
     }
@@ -2461,7 +2517,12 @@ impl IreeLlama {
     /// weights resident, and readies the prefill / decode calls.
     pub fn load(model_dir: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
         let load_started = std::time::Instant::now();
-        let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
+        // The single-sequence graphs contract one row, where IREE materializes a
+        // separate weight transpose for the checkpoint layout; the pre-transposed
+        // layout removes it (issue #2859). The batching engine keeps `OutIn`
+        // because its ragged decode lowers that layout to one fast matmul.
+        let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?
+            .with_projection_layout(ProjectionLayout::InOut);
         report_load_timing("language-config", load_started);
         runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
         let gemma3_vlm_contract = gemma3_vlm_compatibility(model_dir, &cfg)?;
