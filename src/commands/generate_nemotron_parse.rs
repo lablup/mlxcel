@@ -85,7 +85,7 @@ pub(crate) fn run_nemotron_parse_generation(
         .pop()
         .ok_or_else(|| anyhow!("Image decoding returned no image for {image_path:?}"))?;
 
-    print_generation_preamble(prompt)?;
+    print_generation_preamble(prompt, true)?;
     println!();
 
     let started = Instant::now();

@@ -1270,11 +1270,29 @@ fn build_cli_sampling_config_with_flags(
     build_sampling_config(resolved_cli_sampling_params(args, stop_token_ids, flags))
 }
 
-pub(super) fn print_generation_preamble(user_prompt: &str) -> Result<()> {
+/// Echo the prompt before the reply streams in.
+///
+/// With a chat template the reply is a new assistant turn, so the echoed prompt
+/// ends with a newline and the reply starts on its own line. Without one (raw
+/// completion, `--no-chat-template`, or a checkpoint without a template) the
+/// reply continues the prompt text, so no newline is added and the prompt and
+/// completion read as one passage.
+pub(super) fn print_generation_preamble(user_prompt: &str, reply_is_new_turn: bool) -> Result<()> {
     println!("Generating...");
-    print!("{}", user_prompt);
+    print!(
+        "{}",
+        generation_preamble_echo(user_prompt, reply_is_new_turn)
+    );
     io::stdout().flush()?;
     Ok(())
+}
+
+fn generation_preamble_echo(user_prompt: &str, reply_is_new_turn: bool) -> String {
+    if reply_is_new_turn && !user_prompt.ends_with('\n') {
+        format!("{user_prompt}\n")
+    } else {
+        user_prompt.to_string()
+    }
 }
 
 fn generated_suffix<'a>(full_text: &'a str, prompt_text: &str) -> &'a str {
@@ -3207,7 +3225,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     if select_backend().name() == "xla" {
         validate_xla_output_audio(args.generation.output_audio.as_deref())?;
         let num_layers = xla_num_layers(&args.model.model);
-        print_generation_preamble(&user_prompt)?;
+        print_generation_preamble(&user_prompt, prompt != user_prompt)?;
         let (generated_tokens, stats) = generate_xla(
             &args.model.model,
             num_layers,
@@ -3254,7 +3272,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             &[],
         );
         let num_layers = resolve_cli_pipeline_num_layers(&args.model.model)?;
-        print_generation_preamble(&user_prompt)?;
+        print_generation_preamble(&user_prompt, prompt != user_prompt)?;
         generate_pipeline_text(
             &args.model.model,
             num_layers,
@@ -3363,7 +3381,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                 no_chat_template: args.generation.no_chat_template,
             },
         )?;
-        print_generation_preamble(&user_prompt)?;
+        print_generation_preamble(&user_prompt, prompt != user_prompt)?;
         let generation = run_generation_mode(
             &model,
             &args,
