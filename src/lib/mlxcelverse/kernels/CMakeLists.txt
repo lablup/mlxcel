@@ -45,7 +45,8 @@ set(MLXCEL_TURBO_KERNEL_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/sampling_rejection.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_norm.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_rope_append.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/kv_inplace_write.h)
+    ${CMAKE_CURRENT_SOURCE_DIR}/kv_inplace_write.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/gelu_tanh_f32.h)
 
 set(MLXCEL_TURBO_KERNEL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.cpp
@@ -57,7 +58,8 @@ set(MLXCEL_TURBO_KERNEL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/sampling_rejection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_norm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_rope_append.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/kv_inplace_write.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/kv_inplace_write.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/gelu_tanh_f32.cpp)
 
 set(MLXCEL_TURBO_KERNEL_METAL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.metal
