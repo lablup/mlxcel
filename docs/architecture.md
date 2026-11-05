@@ -205,14 +205,17 @@ Release builds use `panic = "unwind"` (issue #375), so the deliberate audio work
 - CUDA kernel behavior is mostly inherited from MLX; `mlxcel` passes the CUDA
   architecture list through `MLX_CUDA_ARCHITECTURES` at build time.
 - ROCm (supported since 0.8, `--features rocm`) runs the vendored ROCm backend from
-  `src/lib/mlxcelverse/overlays/rocm/`. The build passes the HIP `gfx` targets
-  through `MLX_ROCM_ARCHITECTURES` (default: the targets `rocminfo` reports),
-  links the backend's kernel archive and the ROCm libraries, and embeds
-  `$ROCM_PATH/lib` as an rpath. The fused launchers above choose CUDA whenever
+  `src/lib/mlxcelverse/overlays/rocm/` on Linux and on Windows x86_64 MSVC. On
+  Linux the build passes the HIP `gfx` targets through `MLX_ROCM_ARCHITECTURES`
+  (default: the targets `rocminfo` reports), links the backend's kernel archive
+  and the ROCm libraries, and embeds `$ROCM_PATH/lib` as an rpath. The Windows
+  build links the SDK import libraries and delay-loads the ROCm DLLs from one
+  relocatable runtime directory. The fused launchers above choose CUDA whenever
   Metal is unavailable, so on ROCm they take their MLX graph fallbacks where one
   exists; routing them by backend kind is lablup/mlxcel#1803. See
-  [Linux with AMD ROCm](installation.md#linux-with-amd-rocm) for
-  status and known gaps.
+  [Linux with AMD ROCm](installation.md#linux-with-amd-rocm) and
+  [Windows with AMD ROCm](installation.md#windows-with-amd-rocm) for status and
+  known gaps.
 
 ## Distributed and multi-device
 
