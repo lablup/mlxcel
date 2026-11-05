@@ -17,14 +17,16 @@ model and sweeps the three shapes the tanh-switched encoders feed.
 | Backend | Metal, activations bf16 |
 | mlxcel | 0.8.1, worktree `mlxcel-2423`, base `630aaeba` |
 | Harness | `examples/fused_gelu_tanh_microbench.rs`, warmup 64, iters 512, trials 7, min per arm |
-| Load average | 10.0 to 13.1 during the sweep, from unrelated concurrent work |
+| Host load | not sampled; `caffeinate -i` held, min of 7 interleaved trials per arm |
 
 The host was **not** quiet. An earlier single non-interleaved pass on this host
 inverted the ordering (`compiled` measured `+96%` against `eager`), which is why
 the harness interleaves its trials and reports the minimum: background load and
-throttling only ever add time. The three sweeps below agree closely, but treat
-an absolute microsecond as a warm-cache op-level figure on a loaded host, not as
-a production latency.
+throttling only ever add time. The three sweeps below keep the ordering but do
+**not** agree closely on absolute microseconds: run-to-run figures moved by up
+to ~30%, and the fused/compiled ratio on large prefill ranged 0.71x-0.85x.
+Treat an absolute microsecond as a warm-cache op-level figure on a loaded host,
+not as a production latency, and read the large-prefill ratio as a range.
 
 No CUDA or ROCm measurement was taken. The port table sets `.cuda = nullptr`
 and `.rocm = nullptr` for this kernel, so those backends keep the
@@ -57,25 +59,25 @@ Per-call microseconds, minimum of 7 interleaved trials; ratios are
 
 | Shape | eager | compiled | fused | fused / compiled | fused / eager |
 |---|---|---|---|---|---|
-| tower prefill `[64, 4304]` | 659.76 | 369.55 | 303.49 | **0.82x** | **0.46x** |
-| decode row `[1, 4304]` | 340.16 | 273.32 | 251.41 | **0.92x** | **0.74x** |
-| large prefill `[1024, 4096]` | 2824.82 | 1371.06 | 856.65 | **0.62x** | **0.30x** |
+| tower prefill `[64, 4304]` | 587.29 | 342.31 | 279.96 | **0.82x** | **0.48x** |
+| decode row `[1, 4304]` | 314.52 | 252.87 | 220.77 | **0.87x** | **0.70x** |
+| large prefill `[1024, 4096]` | 2497.79 | 959.47 | 738.92 | **0.77x** | **0.30x** |
 
 Sweeps 2 and 3, same binary, same host, to show the spread:
 
 | Shape | fused / compiled (s2) | fused / compiled (s3) | fused / eager (s2) | fused / eager (s3) |
 |---|---|---|---|---|
-| tower prefill `[64, 4304]` | 0.83x | 0.82x | 0.48x | 0.45x |
-| decode row `[1, 4304]` | 0.92x | 0.92x | 0.73x | 0.71x |
-| large prefill `[1024, 4096]` | 0.74x | 0.69x | 0.34x | 0.32x |
+| tower prefill `[64, 4304]` | 0.81x | 0.76x | 0.45x | 0.48x |
+| decode row `[1, 4304]` | 0.96x | 0.97x | 0.77x | 0.73x |
+| large prefill `[1024, 4096]` | 0.71x | 0.85x | 0.32x | 0.32x |
 
 Raw CSV for the first sweep:
 
 ```csv
 shape,eager_us,compiled_us,fused_us,fused_vs_compiled,fused_vs_eager
-"tower prefill [64, 4304]",659.76,369.55,303.49,0.8212,0.4600
-"decode row [1, 4304]",340.16,273.32,251.41,0.9198,0.7391
-"large prefill [1024, 4096]",2824.82,1371.06,856.65,0.6248,0.3033
+"tower prefill [64, 4304]",587.29,342.31,279.96,0.8178,0.4767
+"decode row [1, 4304]",314.52,252.87,220.77,0.8731,0.7019
+"large prefill [1024, 4096]",2497.79,959.47,738.92,0.7701,0.2958
 ```
 
 ## What this does and does not establish
@@ -83,7 +85,8 @@ shape,eager_us,compiled_us,fused_us,fused_vs_compiled,fused_vs_eager
 The fused kernel wins on all three shapes against both baselines, in all three
 sweeps, and the margin is widest where the work is largest — which is the image
 prefill the fusion exists for. The narrowest result is the decode row against
-the compiled chain at `0.92x`, so a single token still gains, but by the least;
+the compiled chain at 0.87x-0.97x, so a single token still gains, but by the
+least and with the widest spread;
 that is expected, since a batch-1 row is launch-bound rather than
 bandwidth-bound.
 
