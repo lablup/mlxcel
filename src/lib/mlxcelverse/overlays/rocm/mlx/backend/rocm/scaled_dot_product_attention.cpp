@@ -27,6 +27,7 @@ void sdpa_vector(
     float scale,
     array& o,
     bool do_causal,
+    const std::optional<array>& mask,
     const std::optional<array>& sinks,
     Stream s);
 
@@ -277,9 +278,9 @@ void ScaledDotProductAttention::eval_gpu(
     }
   } else if (vector_supported) {
     if (has_sinks_) {
-      sdpa_vector(q, k, v, scale_, out, do_causal_, inputs.back(), s);
+      sdpa_vector(q, k, v, scale_, out, do_causal_, mask_arr, inputs.back(), s);
     } else {
-      sdpa_vector(q, k, v, scale_, out, do_causal_, std::nullopt, s);
+      sdpa_vector(q, k, v, scale_, out, do_causal_, mask_arr, std::nullopt, s);
     }
   } else if (flash_supported) {
     if (has_sinks_) {

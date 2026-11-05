@@ -34,6 +34,8 @@ struct AttnParams {
   int64_t K_strides[3];
   int64_t V_strides[3];
   int64_t O_strides[3];
+  // Additive mask strides over [B, H, qL, kL] (broadcast dims are 0).
+  int64_t M_strides[4];
 };
 
 // Tile-based reduction for 32-thread groups (works on both RDNA and CDNA)
@@ -74,6 +76,7 @@ __global__ void kernel_sdpav_1pass(
     const T* V,
     T* O,
     const T* sinks,
+    const T* mask,
     const AttnParams params) {
   // BN = number of 32-thread tiles, BD = tile size (32)
   constexpr int BN = 32; // Number of tiles processing keys in parallel
@@ -129,11 +132,29 @@ __global__ void kernel_sdpav_1pass(
     sum_exp_score = 1.f;
   }
 
+  const T* M_ptr = mask ? mask + batch_idx * params.M_strides[0] +
+          head_idx * params.M_strides[1] + q_seq_idx * params.M_strides[2]
+                        : nullptr;
+
   // Process keys
   for (int i = kv_seq_idx; i < params.kL; i += BN) {
     bool use_key = true;
     if constexpr (do_causal) {
       use_key = i <= (params.kL - params.qL + q_seq_idx);
+    }
+    // Additive mask: a -inf entry drops the key exactly as if it were absent
+    // (every lane of a tile reads the same key, so the branch stays uniform
+    // across the tile's shuffles); any other entry is added to the score.
+    // A row masked down to its own length therefore reduces the same keys in
+    // the same order as an unmasked call over just that length.
+    U mask_add = 0.f;
+    if (M_ptr) {
+      U m = static_cast<U>(M_ptr[i * params.M_strides[3]]);
+      if (m == -INFINITY) {
+        use_key = false;
+      } else {
+        mask_add = 1.44269504089f * m; // M_LOG2E: scores are base 2
+      }
     }
 
     if (use_key) {
@@ -150,6 +171,9 @@ __global__ void kernel_sdpav_1pass(
 
       // Reduce within 32-thread tile
       score = tile_reduce_sum_32(score);
+      if (M_ptr) {
+        score += mask_add;
+      }
 
       U new_max = max(max_score, score);
       U factor = exp2f(max_score - new_max);
@@ -221,6 +245,7 @@ void sdpa_vector(
     float scale,
     array& o,
     bool do_causal,
+    const std::optional<array>& mask,
     const std::optional<array>& sinks,
     Stream s);
 
@@ -252,7 +277,9 @@ bool supports_sdpa_vector(
   const bool supported_vector_config =
       sdpa_supported_head_dim && query_sequence_length < 4;
 
-  return supported_vector_config && !has_arr_mask;
+  // An array mask is read as an additive [B, H, qL, kL] mask (the frontend
+  // turns a boolean one into 0 / -inf before it gets here).
+  return supported_vector_config;
 }
 
 void sdpa_vector(
@@ -262,6 +289,7 @@ void sdpa_vector(
     float scale,
     array& o,
     bool do_causal,
+    const std::optional<array>& mask,
     const std::optional<array>& sinks,
     Stream s) {
   auto& d = rocm::device(s.device);
@@ -298,6 +326,9 @@ void sdpa_vector(
   params.O_strides[0] = o.strides(0);
   params.O_strides[1] = o.strides(1);
   params.O_strides[2] = o.strides(2);
+  for (int i = 0; i < 4; i++) {
+    params.M_strides[i] = mask ? mask->strides(i) : 0;
+  }
 
   bool has_sinks = sinks.has_value();
 
@@ -306,6 +337,9 @@ void sdpa_vector(
   encoder.set_input_array(v);
   if (sinks) {
     encoder.set_input_array(*sinks);
+  }
+  if (mask) {
+    encoder.set_input_array(*mask);
   }
   encoder.set_output_array(o);
 
@@ -328,6 +362,7 @@ void sdpa_vector(
           gpu_ptr<DataType>(v),
           gpu_ptr<DataType>(o),
           has_sinks ? gpu_ptr<DataType>(*sinks) : nullptr,
+          mask ? gpu_ptr<DataType>(*mask) : nullptr,
           params);
     };
 

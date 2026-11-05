@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use super::{
-    DEFAULT_CACHE_LIMIT_BYTES, RuntimeDevice, cache_limit_bytes, cpu_override_requested,
-    parse_memory_size, parse_runtime_device, resolve_device, resolve_runtime_device,
-    should_warn_cpu_only_on_nvidia_host,
+    DEFAULT_CACHE_LIMIT_BYTES, RuntimeDevice, cache_limit_bytes, cache_limit_default_for,
+    cpu_override_requested, default_cache_limit_bytes, parse_memory_size, parse_runtime_device,
+    resolve_device, resolve_runtime_device, should_warn_cpu_only_on_nvidia_host,
 };
 
 #[test]
@@ -319,6 +319,19 @@ fn the_default_cache_limit_is_rocm_only() {
 }
 
 #[test]
+fn a_discrete_gpu_keeps_mlx_cache_default() {
+    let bound = Some(2 * GIB);
+    assert_eq!(cache_limit_default_for(bound, 0), None);
+    assert_eq!(cache_limit_default_for(bound, 1), bound);
+    assert_eq!(
+        cache_limit_default_for(bound, -1),
+        bound,
+        "unknown keeps the bound"
+    );
+    assert_eq!(cache_limit_default_for(None, 1), None);
+}
+
+#[test]
 fn the_cache_default_leaves_the_memory_limit_the_estimator_reads() {
     // The pre-load estimate reads `memory_limit()` as the available memory
     // on ROCm (issue #1805). The ROCm cache default (issue #2062) goes through
@@ -335,7 +348,7 @@ fn the_cache_default_leaves_the_memory_limit_the_estimator_reads() {
     if std::env::var_os("MLXCEL_CACHE_LIMIT").is_none() {
         assert_eq!(
             setup.cache_limit_bytes.map(|b| b as u64),
-            DEFAULT_CACHE_LIMIT_BYTES,
+            default_cache_limit_bytes(),
             "unset MLXCEL_CACHE_LIMIT applies the backend default"
         );
     }

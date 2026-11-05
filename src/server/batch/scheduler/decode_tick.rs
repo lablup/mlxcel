@@ -380,7 +380,8 @@ impl BatchScheduler {
     /// masks, thinking-budget overrides, and per-token logprobs) and further
     /// requires a trimmable KV tail (dense or pool-backed paged; model-owned
     /// SSM / hybrid / mixed-cache backends stay synchronous), no
-    /// `--max-kv-size`, no kind-specific speculative dispatch (MTP / DFlash
+    /// `--max-kv-size` with context shift and room under the cap for the
+    /// speculative appends, no kind-specific speculative dispatch (MTP / DFlash
     /// drive their own loop; prompt lookup keeps the pipeline for ticks where
     /// no row proposes, #2255), and `MLXCEL_FORCE_SYNC` unset.
     pub(super) fn lookahead_params(&self, seq_ids: &[SequenceId]) -> Option<FusedSampleParams> {
@@ -393,9 +394,13 @@ impl BatchScheduler {
         if self.should_dispatch_speculative() {
             return None;
         }
-        // --max-kv-size trims the live window mid-decode (trim_front); keep
-        // those runs synchronous so the speculative +1 accounting stays simple.
-        if self.max_kv_size.is_some() {
+        // With context shift, --max-kv-size trims the live window mid-decode
+        // (trim_front); keep those runs synchronous so the speculative +1
+        // accounting stays simple. Without it the cap (also the per-slot
+        // share of `-c`) is only a stop bound (`ContextBound::stop_due`),
+        // which the pipelined finish step applies too; the per-row headroom
+        // check below keeps the speculative appends inside the cap.
+        if self.max_kv_size.is_some() && self.context_retention.context_shift {
             return None;
         }
         // The batched fused gate rejects every per-row feature the device
@@ -407,6 +412,18 @@ impl BatchScheduler {
             // Loop detection needs a post-commit host scan the steady path
             // skips (off by default, so no common-case cost).
             if seq.sampling.loop_detection.is_enabled() {
+                return None;
+            }
+            // The cache holds `prompt + generated - 1` positions and a
+            // pipelined step appends up to two speculative ones; near the cap
+            // the last few tokens decode synchronously.
+            if let Some(max) = self.max_kv_size
+                && seq.prompt_tokens.len()
+                    + seq.generated_tokens.len()
+                    + 1
+                    + mlxcel_core::cache::DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS
+                    >= max
+            {
                 return None;
             }
             // A trimmable KV tail (dense, or pool-backed paged), or a

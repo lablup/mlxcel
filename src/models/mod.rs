@@ -55,6 +55,7 @@ pub(crate) mod recurrent_batch;
 mod recurrent_snapshot;
 pub mod registry;
 mod sanitize;
+mod stacked_kv;
 
 // Shared modules
 // `config` holds shared serde defaults and the common `QuantizationArgs`. It

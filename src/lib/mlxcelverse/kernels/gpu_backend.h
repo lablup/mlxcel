@@ -89,6 +89,23 @@ constexpr bool rocm_port_allowed(bool any_wave_size, int warp_size) {
   return any_wave_size || warp_size == 32;
 }
 
+// Which ROCm entry of a port table runs on a device whose wavefront is
+// `warp_size` lanes wide: the CDNA entry on a 64-lane device when the table
+// has one, else the shared entry when `rocm_port_allowed` lets it run, else
+// none. Pure for the same reason as `rocm_port_allowed`; `port_for` applies it.
+enum class RocmPortChoice : int { None = 0, Shared = 1, Cdna = 2 };
+
+constexpr RocmPortChoice rocm_port_choice(
+    bool has_shared, bool any_wave_size, bool has_cdna, int warp_size) {
+  if (warp_size == 64 && has_cdna) {
+    return RocmPortChoice::Cdna;
+  }
+  if (has_shared && rocm_port_allowed(any_wave_size, warp_size)) {
+    return RocmPortChoice::Shared;
+  }
+  return RocmPortChoice::None;
+}
+
 // The wavefront width `port_for` holds a ROCm port against: the hardware value
 // of the current HIP device (`mlx::core::rocm::device_warp_size()`, which does
 // not follow `MLX_ROCM_FORCE_WARP_SIZE`), read once per process, or `0` on a

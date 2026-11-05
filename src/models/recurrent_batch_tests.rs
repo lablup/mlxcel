@@ -67,3 +67,23 @@ fn mamba_state_stacking_requires_uniform_initialization_for_both_fields() {
         vec![1, 2, 4, 3]
     );
 }
+
+#[test]
+fn state_ring_never_writes_the_last_two_states() {
+    // Steady state: each step writes a slot, which becomes the newest.
+    let mut recent: [Option<usize>; 2] = [None, None];
+    let mut written = Vec::new();
+    for _ in 0..9 {
+        let slot = super::state_ring_write_slot(&recent);
+        assert!(!recent.contains(&Some(slot)), "wrote over {recent:?}");
+        written.push(slot);
+        recent = [Some(slot), recent[0]];
+    }
+    assert_eq!(written, [0, 1, 2, 0, 1, 2, 0, 1, 2]);
+    // A step that allocated instead (no ring slot) still protects the slot
+    // before it, which a two-step rewind can return to.
+    let recent = [None, Some(1)];
+    assert_ne!(super::state_ring_write_slot(&recent), 1);
+    let recent = [Some(2), Some(0)];
+    assert_eq!(super::state_ring_write_slot(&recent), 1);
+}

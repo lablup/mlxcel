@@ -39,6 +39,29 @@ fn rocm_port_allowed_holds_wave32_only_ports_to_32_lanes() {
 }
 
 #[test]
+fn rocm_port_choice_keeps_cdna_entries_on_64_lanes() {
+    const NONE: i32 = 0;
+    const SHARED: i32 = 1;
+    const CDNA: i32 = 2;
+    // A CDNA entry wins on a 64-lane device, marked shared entry or not.
+    assert_eq!(ffi::rocm_port_choice(true, false, true, 64), CDNA);
+    assert_eq!(ffi::rocm_port_choice(true, true, true, 64), CDNA);
+    assert_eq!(ffi::rocm_port_choice(false, false, true, 64), CDNA);
+    // It never runs on a 32-lane device, which keeps the shared entry ...
+    assert_eq!(ffi::rocm_port_choice(true, false, true, 32), SHARED);
+    // ... or has no port at all when the table is CDNA-only.
+    assert_eq!(ffi::rocm_port_choice(false, false, true, 32), NONE);
+    // An unreadable width (0) is neither: only a shared any-wave entry runs.
+    assert_eq!(ffi::rocm_port_choice(false, false, true, 0), NONE);
+    assert_eq!(ffi::rocm_port_choice(true, true, true, 0), SHARED);
+    // Without a CDNA entry the wave32 rule is unchanged.
+    assert_eq!(ffi::rocm_port_choice(true, false, false, 64), NONE);
+    assert_eq!(ffi::rocm_port_choice(true, true, false, 64), SHARED);
+    assert_eq!(ffi::rocm_port_choice(true, false, false, 32), SHARED);
+    assert_eq!(ffi::rocm_port_choice(false, false, false, 64), NONE);
+}
+
+#[test]
 fn rocm_device_warp_size_is_zero_off_rocm() {
     // Off ROCm there is no HIP device to ask; the overlay call is not even
     // compiled in, and the bridge answers 0, which `rocm_port_allowed` treats
