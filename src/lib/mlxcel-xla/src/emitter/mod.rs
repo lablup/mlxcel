@@ -1456,6 +1456,46 @@ mod tests {
         assert_eq!(f32.matches("xf16> loc(").count(), 0);
     }
 
+    /// issue #2863: with the `InOut` layout the single-sequence graphs take the
+    /// LM head as one transposed `[H, V]` operand and contract the hidden axis,
+    /// so IREE never materializes the per-step weight transpose and convert. The
+    /// `OutIn` graph keeps the checkpoint `[V, H]` head and its `[0] x [1]` form
+    /// (and therefore its byte-exact goldens).
+    #[test]
+    fn inout_graphs_take_the_lm_head_transposed() {
+        use super::builder::Precision;
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::InOut;
+        let mlir = emit_decode_with(&c, false, Precision::F16);
+        assert!(
+            mlir.contains("tensor<2048x128256xf16> loc(\"params['embed']\")"),
+            "the InOut head is one transposed f16 arg"
+        );
+        let head = mlir
+            .lines()
+            .find(|line| line.contains("stablehlo.dot_general") && line.contains("128256"))
+            .expect("head dot");
+        assert!(
+            head.contains("contracting_dims = [0] x [0]"),
+            "head dot contracts the hidden axis: {head}"
+        );
+        assert!(
+            head.contains("tensor<2048xf16>, tensor<2048x128256xf16>"),
+            "head operands are the hidden vector and the transposed head: {head}"
+        );
+
+        let out = emit_decode_with(&Config::llama_3_2_1b(), false, Precision::F16);
+        assert!(!out.contains("tensor<2048x128256xf16>"));
+        let head = out
+            .lines()
+            .find(|line| line.contains("stablehlo.dot_general") && line.contains("128256"))
+            .expect("head dot");
+        assert!(
+            head.contains("contracting_dims = [0] x [1]"),
+            "the OutIn head keeps the checkpoint layout: {head}"
+        );
+    }
+
     // ======================================================================
     // dense arch pack (issue #498)
     // ======================================================================

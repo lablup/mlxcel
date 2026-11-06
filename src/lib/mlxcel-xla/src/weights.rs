@@ -23,7 +23,7 @@
 //! feature-gated `iree.rs`) so it is unit-tested without the IREE runtime and stays
 //! in lock-step with the emitter's arg order (`emitter::model::take_layer_weights`).
 
-use crate::emitter::{Config, quant_in_graph};
+use crate::emitter::{Config, ProjectionLayout, quant_in_graph};
 
 /// One checkpoint weight the loader reads, in the emitter's arg order. Most are a
 /// whole safetensors tensor; a Phi3 checkpoint fuses q/k/v into one `qkv_proj` and
@@ -197,8 +197,25 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     if cfg.norm_bias {
         out.push(WeightSpec::Whole("model.norm.bias".to_string()));
     }
-    if !cfg.tie_word_embeddings {
-        out.push(WeightSpec::Whole(s.lm_head.to_string()));
+    // The final logits operand, in the layout the graph declares (issue #2863).
+    // `OutIn` keeps the checkpoint's `[V, H]` head (the untied `lm_head`, or the
+    // tied `embed` for which no extra spec is pushed). `InOut` always uploads a
+    // transposed `[H, V]` operand: the untied `lm_head`, or a second read of the
+    // tied `embed` tensor after the gather's own `Whole` spec.
+    match cfg.projection_layout {
+        ProjectionLayout::OutIn => {
+            if !cfg.tie_word_embeddings {
+                out.push(WeightSpec::Whole(s.lm_head.to_string()));
+            }
+        }
+        ProjectionLayout::InOut => {
+            let name = if cfg.tie_word_embeddings {
+                s.embed.to_string()
+            } else {
+                s.lm_head.to_string()
+            };
+            out.push(WeightSpec::Proj(name));
+        }
     }
     for i in 0..cfg.n_layers {
         let p = format!("{}{i}.", s.layer_stem);
@@ -1063,6 +1080,59 @@ mod tests {
             }),
             ..Config::llama_3_2_1b()
         }
+    }
+
+    #[test]
+    fn inout_head_spec_is_a_transposed_projection() {
+        // Tied (llama-3.2-1b): the embed tensor is read twice, once as the
+        // gather's whole tensor and once as the transposed head operand.
+        let tied = Config::llama_3_2_1b();
+        let out_in = weight_specs_q(&tied, false);
+        assert_eq!(
+            out_in[0],
+            WeightSpec::Whole("model.embed_tokens.weight".to_string())
+        );
+        assert_eq!(
+            out_in[1],
+            WeightSpec::Whole("model.norm.weight".to_string())
+        );
+        assert!(
+            !out_in.iter().any(
+                |spec| matches!(spec, WeightSpec::Proj(name) if name == "model.embed_tokens.weight")
+            ),
+            "the tied OutIn head adds no projection spec"
+        );
+
+        let mut inout = tied.clone();
+        inout.projection_layout = ProjectionLayout::InOut;
+        let specs = weight_specs_q(&inout, false);
+        assert_eq!(
+            specs[0],
+            WeightSpec::Whole("model.embed_tokens.weight".to_string())
+        );
+        assert_eq!(
+            specs[2],
+            WeightSpec::Proj("model.embed_tokens.weight".to_string()),
+            "the InOut head follows the norm as a transposed projection"
+        );
+
+        // Untied: the existing lm_head arg becomes the transposed projection
+        // instead of a fourth whole tensor.
+        let mut untied = tied;
+        untied.tie_word_embeddings = false;
+        untied.projection_layout = ProjectionLayout::InOut;
+        let specs = weight_specs_q(&untied, true);
+        assert_eq!(
+            specs[2],
+            WeightSpec::Proj("lm_head.weight".to_string()),
+            "the untied InOut head is the lm_head as a projection"
+        );
+        assert!(
+            !specs
+                .iter()
+                .any(|spec| matches!(spec, WeightSpec::Whole(name) if name == "lm_head.weight")),
+            "the packed path never declares a whole lm_head arg"
+        );
     }
 
     #[test]
