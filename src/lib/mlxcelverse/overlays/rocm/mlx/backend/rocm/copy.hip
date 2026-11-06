@@ -176,7 +176,16 @@ void fill_gpu(const array& in, array& out, const Stream& s) {
   copy_contiguous(encoder, CopyType::Scalar, in, out, 0, 0);
 }
 
-void reshape_gpu(const array& in, array& out, Stream s) {
+// mlxcel: upstream 5ee1e8edf (ml-explore/mlx#4711) added
+// `add_out_to_temporary_on_allocation`. The shared `mlx/backend/gpu/primitives.cpp`
+// passes it as `false` at every call site, but the signature is declared in
+// `mlx/backend/gpu/copy.h`, so the ROCm definition has to match or the backend
+// fails to link.
+void reshape_gpu(
+    const array& in,
+    array& out,
+    bool add_out_to_temporary_on_allocation,
+    Stream s) {
   auto [copy_necessary, out_strides] = prepare_reshape(in, out);
   if (copy_necessary) {
     auto& encoder = rocm::get_command_encoder(s);
@@ -191,6 +200,9 @@ void reshape_gpu(const array& in, array& out, Stream s) {
         0,
         CopyType::General,
         s);
+    if (add_out_to_temporary_on_allocation) {
+      encoder.add_temporary(out);
+    }
   } else {
     shared_buffer_reshape(in, out_strides, out);
   }

@@ -265,6 +265,12 @@ CustomKernelFunction hip_kernel(
         template_args,
         shape_infos);
 
+    // mlxcel: upstream 4ca8d5d5a (ml-explore/mlx#4568) added the generated
+    // source hash to CustomKernel's constructor. The ROCm backend keys its JIT
+    // module on the source itself (LOCAL_FIXES item 33), so the hash is only
+    // carried through here rather than used for lookup.
+    size_t source_hash = std::hash<std::string>{}(kernel_source);
+
     return array::make_arrays(
         std::move(output_shapes),
         std::move(output_dtypes),
@@ -272,6 +278,7 @@ CustomKernelFunction hip_kernel(
             s,
             std::move(kernel_name),
             std::move(kernel_source),
+            source_hash,
             grid,
             threadgroup,
             shape_infos,
