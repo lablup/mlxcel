@@ -53,8 +53,18 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # matmul.cpp keeps few-row dense products on GEMV on GPU generations 13 and
   # 14 (#2587). Refresh: take the new upstream file and re-apply the marked
   # helper and the branch before the steel GEMM route.
+  # kernels/fp_quantized.h, kernels/fp_quantized_nax.h and kernels/quantized.h
+  # bound the quantized block loader's `load_safe` reads by the tile's non-row
+  # extent: without it a partial K tile dequantized the next output row's bytes
+  # and group scale and, for the last row, read past the planes; a stale NaN
+  # scale byte there reached a valid output column as `0 * NaN` (issue #2852).
+  # Refresh: take the new upstream files and re-apply the three marked
+  # `load_safe` bodies.
   set(_metal_patch_files
       "mlx/backend/metal/device.cpp"
+      "mlx/backend/metal/kernels/fp_quantized.h"
+      "mlx/backend/metal/kernels/fp_quantized_nax.h"
+      "mlx/backend/metal/kernels/quantized.h"
       "mlx/backend/metal/kernels/quantized.metal"
       "mlx/backend/metal/kernels/utils.h"
       "mlx/backend/metal/matmul.cpp"

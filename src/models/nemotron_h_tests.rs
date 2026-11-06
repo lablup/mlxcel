@@ -1396,11 +1396,15 @@ fn run_nvfp4_expert_arms(
 /// |want|`, so `out_of_bound` counts the elements that actually missed it.
 /// A near-bound precision miss leaves `max_abs` close to the bound and few
 /// offending elements; a corrupted row leaves a large `max_abs` and a cluster
-/// of them.
+/// of them. Non-finite values are counted per side as well: one side only means
+/// the gather or the reference produced them, both sides means something they
+/// share did (issue #2852).
 struct ExpertParityError {
     max_abs: f32,
     max_rel: f32,
     non_finite: usize,
+    got_non_finite: usize,
+    want_non_finite: usize,
     out_of_bound: usize,
     elements: usize,
 }
@@ -1413,10 +1417,18 @@ impl ExpertParityError {
             max_abs: 0.0,
             max_rel: 0.0,
             non_finite: 0,
+            got_non_finite: 0,
+            want_non_finite: 0,
             out_of_bound: 0,
             elements: got_values.len(),
         };
         for (got, want) in got_values.iter().zip(&want_values) {
+            if !got.is_finite() {
+                error.got_non_finite += 1;
+            }
+            if !want.is_finite() {
+                error.want_non_finite += 1;
+            }
             if !got.is_finite() || !want.is_finite() {
                 error.non_finite += 1;
                 continue;
@@ -1455,15 +1467,87 @@ fn assert_expert_parity(
     panic!(
         "nvfp4 routed experts differ from the dequantized reference at {tokens} tokens: \
          max absolute {:e}, max relative {:e}, {} of {} elements outside the 1e-3 + 1e-3*|ref| \
-         bound, non-finite {} of {}; default device {device}, backend {backend:?} (issue #2852). \
-         A near-bound miss and a non-finite or large row have different causes; record these \
-         numbers on the issue.",
+         bound, non-finite {} of {} (got {}, reference {}); default device {device}, backend \
+         {backend:?} (issue #2852). A near-bound miss and a non-finite or large row have \
+         different causes; record these numbers on the issue.",
         error.max_abs,
         error.max_rel,
         error.out_of_bound,
         error.elements,
         error.non_finite,
         error.elements,
+        error.got_non_finite,
+        error.want_non_finite,
+    );
+}
+
+/// Regression for #2852: the sorted nvfp4 gather must not dequantize bytes
+/// past an expert's weight and scale planes when K (the quantized dimension)
+/// is not a multiple of the kernel's 32-wide K tile.
+///
+/// The fixture's `FF = 48` gives fc2 a K of 48, so the Metal sorted gather's
+/// last K tile is 16 wide. The quantized block loader used to ignore the
+/// tile's K extent and dequantize the full 32-wide tile anyway, taking the
+/// next output row's packed bytes and its group scale; for the last output row
+/// of the last expert those reads land past the end of the weight and scale
+/// planes. nvfp4 scales are E4M3 bytes, and 0x7F decodes to NaN, so a stale
+/// 0x7F there turned the tile's zero-filled x into `0 * NaN` and made the last
+/// output column of the last expert's 20 pairs NaN: exactly the "non-finite 20
+/// of 2560" the full serial suite reported once in a while, depending on what
+/// earlier tests had left in the allocator's buffer pool.
+///
+/// Seed every size class the 384-byte scale plane can reuse with that byte, so
+/// the read lands on it on every run instead of once per unlucky pool. The
+/// assertion is finiteness, not a tolerance: a NaN here means the kernel read
+/// memory it never owned.
+#[test]
+fn nemotron_h_nvfp4_partial_k_tile_does_not_read_past_the_expert_planes() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+
+    // Start from an empty pool so the seeds below are the only cached
+    // candidates, then seed the reuse window of a 384-byte allocation. The
+    // Metal allocator's `reuse_from_cache(384)` accepts any cached buffer
+    // smaller than `min(2 * 384, 384 + 2 pages)`, so every 4-byte size from
+    // 388 through 768 is seeded with 0x7F bytes. Any finite byte would be
+    // harmless there, because the partial tile's x is zero; a NaN scale is
+    // not, because `0 * NaN` is NaN.
+    mlxcel_core::memory::clear_cache();
+    let seeds: Vec<_> = (97..=192u32)
+        .map(|words| {
+            mlxcel_core::from_slice_u32(&vec![0x7F7F_7F7Fu32; words as usize], &[words as i32])
+        })
+        .collect();
+    drop(seeds);
+
+    let mut tokens_seen = Vec::new();
+    run_nvfp4_expert_arms(|tokens, got, want| {
+        tokens_seen.push(tokens);
+        let got_values = mlxcel_core::utils::array_to_vec_f32(got);
+        let non_finite: Vec<usize> = got_values
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| !value.is_finite())
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            non_finite.is_empty(),
+            "the sorted nvfp4 gather produced {} non-finite elements at {tokens} tokens \
+             ({:?}): with K = FF = 48 the last K tile is partial, and it must be zero-filled \
+             rather than dequantized from the next output row's bytes and group scale; the \
+             reads past the last expert's planes landed on a seeded E4M3 NaN scale byte \
+             (issue #2852)",
+            non_finite.len(),
+            &non_finite[..non_finite.len().min(40)],
+        );
+        let close = mlxcel_core::allclose(got, want, 1e-3, 1e-3);
+        if !mlxcel_core::item_bool(&close) {
+            assert_expert_parity(got, want, tokens);
+        }
+    });
+    assert_eq!(
+        tokens_seen,
+        vec![5, 40],
+        "both arms must run; 40 tokens is the one that takes the sorted branch"
     );
 }
 
