@@ -1675,8 +1675,21 @@ pub(super) fn resolve_chat_template(
 ///
 /// - Image-only serving (#2825): there is no chat checkpoint at all, and
 ///   every route that would read the tokenizer refuses in this mode.
-fn chat_front_unused(_model_path: &Path, image_only: bool) -> bool {
+/// - Kokoro: a phoneme-input TTS model that ships no tokenizer file. It reads
+///   its phoneme vocab from `config.json` and serves `/v1/audio/speech`
+///   only, so loading the chat front would stop the server with "No tokenizer
+///   found" before the TTS wiring runs.
+///
+/// This is deliberately a list of verified cases rather than a rule such as
+/// "every non-chat model": an embedding or Whisper checkpoint without a
+/// tokenizer would then start and serve nothing instead of failing at startup.
+fn chat_front_unused(model_path: &Path, image_only: bool) -> bool {
+    // Image-only has an empty model path, so it never reaches detection.
     image_only
+        || matches!(
+            crate::models::get_model_type(model_path),
+            Ok(crate::models::ModelType::Kokoro)
+        )
 }
 
 /// Load the tokenizer and the chat template the way `start_server` does,
