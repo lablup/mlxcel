@@ -412,11 +412,7 @@ fn take_weight(
         // token-exact while halving the weight's per-step DRAM read. f32 / bf16
         // precision and the fused layouts keep the f32 arg (byte-identical goldens).
         _ => {
-            let elt = if b.precision() == Precision::F16 && c.supports_f16_resident() {
-                "f16"
-            } else {
-                "f32"
-            };
+            let elt = projection_elt(b, c);
             // issue #2859: in the `InOut` layout the loader transposes the
             // checkpoint's `[out, in]` projection once at upload, so the dense
             // forward can contract the shared axis instead of transposing every
@@ -430,29 +426,69 @@ fn take_weight(
     }
 }
 
-/// Take the untied LM head weight `params['lm_head']` (`[V, H]`), or `None` for a
-/// tied checkpoint (which reuses `embed` for the final projection). Called right
-/// after `final_norm` and before the layers, so the weight arg order is embed,
-/// final_norm, [lm_head when untied], layers..., matching `weight_names` in
-/// `iree.rs`. For a tied model nothing is emitted, so the graph stays byte-
-/// identical (the guard that keeps every tied checkpoint unchanged).
-fn take_lm_head(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config) -> Option<Val> {
-    if c.tie_word_embeddings {
-        None
+/// Element type of a projection weight argument: f16 on the f16 GPU path, whose
+/// loader uploads the weight f16-resident (issue #572), else f32. Shared by the
+/// dense projection args and the single-sequence head operand (issue #2863) so
+/// the two cannot drift from the loader's `resident_f16` decision.
+fn projection_elt(b: &Builder, c: &Config) -> &'static str {
+    if b.precision() == Precision::F16 && c.supports_f16_resident() {
+        "f16"
     } else {
-        Some(take_arg(
-            decls,
-            idx,
-            Ty::f32(vec![c.vocab, c.hidden]),
-            "params['lm_head']".into(),
-        ))
+        "f32"
+    }
+}
+
+/// Take the final logits operand for the layout this graph declares. Called
+/// right after `final_norm` and before the layers, so the weight arg order is
+/// embed, final_norm, [lm_head or head operand], layers..., matching
+/// `weight_names` in `iree.rs`.
+///
+/// In [`ProjectionLayout::OutIn`] (the ragged batch engine) this is the untied
+/// `params['lm_head']` (`[V, H]`), or `None` for a tied checkpoint that reuses
+/// `embed`; that path stays byte-identical. In [`ProjectionLayout::InOut`] (the
+/// single-sequence graphs, issue #2863) the head always gets its own `[H, V]`
+/// operand that the loader uploads transposed once, so the per-step
+/// `dot_general` contracts the hidden axis and IREE stops materializing a
+/// full-weight transpose fused with the f32 -> f16 convert on every decode step.
+/// A tied checkpoint keeps its `[V, H]` embed arg for the gather and adds this
+/// second arg, which the loader reads from the same tensor.
+fn take_lm_head(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, b: &Builder) -> Option<Val> {
+    match b.projection_layout() {
+        ProjectionLayout::InOut => {
+            let elt = projection_elt(b, c);
+            let loc = if c.tie_word_embeddings {
+                "params['embed']"
+            } else {
+                "params['lm_head']"
+            };
+            Some(take_arg(
+                decls,
+                idx,
+                Ty::new(vec![c.hidden, c.vocab], elt),
+                loc.into(),
+            ))
+        }
+        ProjectionLayout::OutIn => {
+            if c.tie_word_embeddings {
+                None
+            } else {
+                Some(take_arg(
+                    decls,
+                    idx,
+                    Ty::f32(vec![c.vocab, c.hidden]),
+                    "params['lm_head']".into(),
+                ))
+            }
+        }
     }
 }
 
 /// The weight the final logits projection multiplies by: the dedicated `lm_head`
 /// for an untied checkpoint, else the tied token-embedding matrix. Both are
 /// `[V, H]` (`linear` computes `x @ W^T`), so the tail is identical apart from
-/// which buffer it reads.
+/// which buffer it reads. In [`ProjectionLayout::InOut`] the taken head is
+/// always `Some` (the transposed `[H, V]` operand), so the `embed` fallback only
+/// serves the batch engine.
 fn head_weight<'a>(embed: &'a Val, lm_head: &'a Option<Val>) -> &'a Val {
     lm_head.as_ref().unwrap_or(embed)
 }
@@ -797,7 +833,7 @@ fn build_arg_schema(b: &mut Builder, c: &Config) -> (Vec<ArgDecl>, Args) {
         "params['final_norm']".into(),
     );
     let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
-    let lm_head = take_lm_head(&mut decls, &mut idx, c);
+    let lm_head = take_lm_head(&mut decls, &mut idx, c, b);
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
@@ -2727,7 +2763,7 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
     // Granite / MiniCPM divide), then optional on-device argmax ---
     let final_w = norm_w(&mut b, &a.final_norm, c, &k, h);
     let xf = normalize(&mut b, c, &k, &x, &final_w, a.final_norm_bias.as_ref(), h);
-    let logits = b.linear(&xf, head_weight(&a.embed, &a.lm_head)); // [V]
+    let logits = b.linear_proj(&xf, head_weight(&a.embed, &a.lm_head)); // [V]
     let logits = apply_logit_scale(&mut b, c, logits);
     let (out_val, out_ty) = if sample {
         let tok = b.argmax(&logits);
@@ -2802,7 +2838,7 @@ fn build_batched_arg_schema(
         "params['final_norm']".into(),
     );
     let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
-    let lm_head = take_lm_head(&mut decls, &mut idx, c);
+    let lm_head = take_lm_head(&mut decls, &mut idx, c, b);
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
@@ -3096,7 +3132,7 @@ pub fn emit_decode_batched_with(
     // --- tail: final norm + LM head (tied embed or untied lm_head) -> [B, V],
     // optional per-row argmax ---
     let xf = rms_norm_seq(&mut b, &x, &a.final_norm, &k, bsz, h); // [B, H]
-    let logits = b.linear_seq(&xf, head_weight(&a.embed, &a.lm_head)); // [B, V]
+    let logits = b.linear_seq_proj(&xf, head_weight(&a.embed, &a.lm_head)); // [B, V]
     let (out_val, out_ty) = if sample {
         let tok = b.argmax_batched(&logits);
         (tok.name, Ty::new(vec![bsz], "i32").render())
@@ -3166,7 +3202,7 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
         "params['final_norm']".into(),
     );
     let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
-    let lm_head = take_lm_head(&mut decls, &mut idx, c);
+    let lm_head = take_lm_head(&mut decls, &mut idx, c, b);
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
@@ -3355,7 +3391,7 @@ pub fn emit_decode_ragged_with(
         bsz,
         h,
     );
-    let logits = b.linear_seq(&xf, head_weight(&a.embed, &a.lm_head)); // [B, V]
+    let logits = b.linear_seq_proj(&xf, head_weight(&a.embed, &a.lm_head)); // [B, V]
     // Final logit scaling (Gemma soft-cap / Cohere multiply / Granite / MiniCPM
     // divide), per row; argmax-invariant but kept for exactness.
     let logits = apply_logit_scale(&mut b, c, logits);
@@ -3461,7 +3497,7 @@ fn build_prefill_arg_schema(
         "params['final_norm']".into(),
     );
     let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
-    let lm_head = take_lm_head(&mut decls, &mut idx, c);
+    let lm_head = take_lm_head(&mut decls, &mut idx, c, b);
 
     let mut layers = Vec::with_capacity(c.n_layers);
     for li in 0..c.n_layers {
@@ -4054,7 +4090,7 @@ fn emit_prefill_module(
     let last_idx = b.subtract(&a.real_len, &one_i); // real_len - 1
     let last_row = b.dynamic_slice(&xf, &[&last_idx, &k.c0], vec![1, h]); // [1, H]
     let last = b.reshape(&last_row, vec![h]); // [H]
-    let logits = b.linear(&last, head_weight(&a.embed, &a.lm_head)); // [V]
+    let logits = b.linear_proj(&last, head_weight(&a.embed, &a.lm_head)); // [V]
     let logits = apply_logit_scale(&mut b, c, logits);
     let (out_val, out_ty) = if sample {
         let tok = b.argmax(&logits);
