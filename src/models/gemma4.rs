@@ -4379,36 +4379,7 @@ pub(crate) fn build_divergent_verify_mask(
     left_padding: &[i32],
     window: Option<i32>,
 ) -> UniquePtr<MlxArray> {
-    assert_eq!(
-        per_row_valid_end.len(),
-        left_padding.len(),
-        "build_divergent_verify_mask: one left_padding entry per row"
-    );
-    let b = per_row_valid_end.len();
-    let k_len = offset + l;
-    let mut data = vec![f32::NEG_INFINITY; b * l as usize * k_len as usize];
-    for (r, (&ve, &lp)) in per_row_valid_end.iter().zip(left_padding).enumerate() {
-        for j in 0..l {
-            let q_pos = ve + j;
-            let row_base = (r * l as usize + j as usize) * k_len as usize;
-            for k in 0..k_len {
-                let visible = if k < lp {
-                    false
-                } else if k < ve {
-                    window.map(|w| k > q_pos - w).unwrap_or(true)
-                } else if k < offset {
-                    false
-                } else {
-                    let k_pos = ve + (k - offset);
-                    k_pos <= q_pos && window.map(|w| k_pos > q_pos - w).unwrap_or(true)
-                };
-                if visible {
-                    data[row_base + k as usize] = 0.0;
-                }
-            }
-        }
-    }
-    mlxcel_core::from_slice_f32(&data, &[b as i32, 1, l, k_len])
+    mlxcel_core::utils::build_divergent_row_mask(l, offset, per_row_valid_end, left_padding, window)
 }
 
 /// Offset of the first per-layer cache regardless of attention family.

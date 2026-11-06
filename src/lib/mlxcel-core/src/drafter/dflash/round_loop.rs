@@ -234,24 +234,28 @@ pub trait SpeculativeTarget {
     /// row (B > 1 path).
     ///
     /// Mirrors `rollback_partial` but takes a `&[i32]` of length `B`, one
-    /// accept count per row. **The batched round loop guarantees the slice
-    /// is uniform** (issue #2353): a batched target cache is rectangular,
-    /// so `round_loop_batched::clamp_uniform_acceptance` cuts every
-    /// round back to the shortest live row's accept before any token is
-    /// emitted. Zeroing a shorter row's rejected tail is not a substitute: a
-    /// zero key still scores `q . 0 = 0` and takes `exp(0)` weight in the
-    /// softmax. The implementation MUST:
+    /// accept count per row. **The uniform-clamp arm guarantees the slice is
+    /// uniform** (issue #2353): a rectangular batched cache can keep only one
+    /// number of verify positions per row, so
+    /// `round_loop_batched::clamp_uniform_acceptance` cuts every round back to
+    /// the shortest live row's accept before any token is emitted. Targets
+    /// that support per-row accepts (issue #2442) are driven through
+    /// [`Self::rollback_partial_batched_rows`] instead. Zeroing a shorter
+    /// row's rejected tail is not a substitute for either: a zero key still
+    /// scores `q . 0 = 0` and takes `exp(0)` weight in the softmax. The
+    /// implementation MUST:
     ///
     /// 1. Trim the attention-layer KV caches by
     ///    `block_size - (accepted[0] + 1)`.
     /// 2. Replay each linear-attention layer's GDN state over the first
     ///    `accepted[0] + 1` positions of the verify block.
     ///
-    /// and SHOULD fail loudly on a ragged slice rather than represent it.
+    /// and SHOULD fail loudly on a ragged slice rather than represent it;
+    /// the per-row arm never reaches this hook.
     ///
     /// For Qwen 3.5 this delegates directly to
     /// `Qwen35Model::rollback_speculative_cache(caches, verify_out.gdn_states, accepted, block_size)`,
-    /// which asserts the slice is uniform.
+    /// whose uniform arm handles the slice without an assertion.
     ///
     /// The default implementation delegates to [`Self::rollback_partial`]
     /// when `accepted.len() == 1` so single-row targets don't need a
@@ -275,6 +279,94 @@ pub trait SpeculativeTarget {
                 accepted.len()
             );
         }
+    }
+
+    /// Whether this target can commit a different accept count in every row
+    /// of the batched round loop (issue #2442), instead of the uniform clamp
+    /// of issue #2353.
+    ///
+    /// A target that returns `true` must also implement
+    /// [`Self::verify_forward_with_row_layout`],
+    /// [`Self::rollback_partial_batched_rows`] and
+    /// [`Self::batch_cache_offset`]. The round loop only takes the per-row
+    /// path when this is `true` and the caller has enabled it.
+    fn supports_per_row_accepts(&self) -> bool {
+        false
+    }
+
+    /// Whether this instance's caches can hold the per-row layout for the
+    /// batch (issue #2442).
+    ///
+    /// [`Self::supports_per_row_accepts`] is the family-level answer; this is
+    /// the instance-level one. A quantized or paged attention cache cannot be
+    /// compacted row by row, so such a burst falls back to the uniform clamp
+    /// instead of panicking. Defaults to `false`, matching the family gate.
+    fn row_layout_supported(&self, caches: &[Self::Cache]) -> bool {
+        let _ = caches;
+        false
+    }
+
+    /// Physical cache offset (number of positions written) shared by the
+    /// batch after prefill.
+    ///
+    /// The per-row round loop seeds every row's logical valid end from this
+    /// value before round 0; rows then diverge by their own accepts. Only
+    /// called when [`Self::supports_per_row_accepts`] is `true`.
+    fn batch_cache_offset(caches: &[Self::Cache]) -> i32 {
+        let _ = caches;
+        0
+    }
+
+    /// Run one verify forward for a batch whose rows have different logical
+    /// valid ends (issue #2442).
+    ///
+    /// `row_valid_ends[r]` is row `r`'s logical valid end before this round's
+    /// block: the number of positions in the row's contiguous valid prefix.
+    /// The shared physical cache offset is `max(row_valid_ends)`; rows below
+    /// it carry a stale gap `[row_valid_ends[r], offset)` that the forward
+    /// MUST exclude from attention and rotate around (the Gemma 4
+    /// `DivergentVerifyRows` layout). The block's own tokens sit at the
+    /// shared offset and are valid for every row.
+    ///
+    /// The default implementation ignores the layout and delegates to
+    /// [`Self::verify_forward_with_capture_layers`], which is correct only
+    /// when every row's valid end equals the physical offset.
+    fn verify_forward_with_row_layout(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+        row_valid_ends: &[i32],
+    ) -> Self::VerifyOut {
+        let _ = row_valid_ends;
+        self.verify_forward_with_capture_layers(verify_input, caches, capture_layer_ids)
+    }
+
+    /// Rewind a ragged batch: row `r` keeps its first `accepted[r] + 1`
+    /// block positions and every row's attention caches are compacted back
+    /// to a contiguous valid prefix (issue #2442).
+    ///
+    /// `row_valid_ends_pre[r]` is row `r`'s logical valid end before the
+    /// verify block, so the new end is `row_valid_ends_pre[r] + accepted[r] + 1`.
+    /// The implementation MUST move each row's accepted block from the shared
+    /// physical offset back to that row's logical end (so the next round sees
+    /// a contiguous `[0, valid_end)` prefix), zero the vacated gaps, and set
+    /// the physical cache offset to the maximum new valid end. Linear-attention
+    /// (GDN) states are replayed per row over that row's own accepted prefix.
+    ///
+    /// The default implementation delegates to
+    /// [`Self::rollback_partial_batched`], which is correct only for a
+    /// uniform accept.
+    fn rollback_partial_batched_rows(
+        &self,
+        caches: &mut [Self::Cache],
+        verify_out: &Self::VerifyOut,
+        accepted: &[i32],
+        row_valid_ends_pre: &[i32],
+        block_size: i32,
+    ) {
+        let _ = row_valid_ends_pre;
+        self.rollback_partial_batched(caches, verify_out, accepted, block_size);
     }
 
     /// Build the drafter's per-round hidden input by concatenating the

@@ -658,6 +658,66 @@ pub fn mask_stale_key_gap(
     }
 }
 
+/// Build the additive attention mask for a ragged batched verify block.
+///
+/// Row `r` has a contiguous valid key prefix `[0, per_row_valid_end[r])`, then
+/// a stale gap `[per_row_valid_end[r], offset)` left by a shorter accept, then
+/// this round's `l` new keys at the shared physical offset. The mask admits the
+/// row's history, blocks its stale gap, and applies causality inside the new
+/// block at each row's LOGICAL positions: new key `t` sits at logical position
+/// `per_row_valid_end[r] + t`, so query `j` admits new keys `t <= j`.
+///
+/// `left_padding[r]` additionally blocks the row's resident leading padding
+/// `[0, left_padding[r])` (all zero for the equal-length DFlash burst).
+/// `window` further limits every visible key to the last `window` logical
+/// positions. Returns `[B, 1, l, offset + l]` f32 with 0 (attend) and
+/// `-inf` (blocked) entries.
+///
+/// This is the mask `rollback_speculative_cache_divergent`-style compaction
+/// maintains: after each round every row's cache content is a contiguous
+/// prefix, so one `(valid_end, gap_end)` pair per row describes it exactly.
+/// Used by: Gemma 4 divergent batched MTP verify, Qwen 3.5 per-row DFlash
+/// verify (issue #2442).
+#[must_use]
+pub fn build_divergent_row_mask(
+    l: i32,
+    offset: i32,
+    per_row_valid_end: &[i32],
+    left_padding: &[i32],
+    window: Option<i32>,
+) -> UniquePtr<MlxArray> {
+    assert_eq!(
+        per_row_valid_end.len(),
+        left_padding.len(),
+        "build_divergent_row_mask: one left_padding entry per row"
+    );
+    let b = per_row_valid_end.len();
+    let k_len = offset + l;
+    let mut data = vec![f32::NEG_INFINITY; b * l as usize * k_len as usize];
+    for (r, (&ve, &lp)) in per_row_valid_end.iter().zip(left_padding).enumerate() {
+        for j in 0..l {
+            let q_pos = ve + j;
+            let row_base = (r * l as usize + j as usize) * k_len as usize;
+            for k in 0..k_len {
+                let visible = if k < lp {
+                    false
+                } else if k < ve {
+                    window.map(|w| k > q_pos - w).unwrap_or(true)
+                } else if k < offset {
+                    false
+                } else {
+                    let k_pos = ve + (k - offset);
+                    k_pos <= q_pos && window.map(|w| k_pos > q_pos - w).unwrap_or(true)
+                };
+                if visible {
+                    data[row_base + k as usize] = 0.0;
+                }
+            }
+        }
+    }
+    ffi::from_slice_f32(&data, &[b as i32, 1, l, k_len])
+}
+
 /// Create a boolean causal attention mask.
 /// Used by: same as `create_causal_mask` (experimental path)
 ///
@@ -2662,6 +2722,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- build_divergent_row_mask: ragged verify block layout (#2442) --------
+
+    /// History attends, the stale gap is −∞, and the new block is causal at
+    /// each row's own logical positions.
+    #[test]
+    fn build_divergent_row_mask_admits_history_gap_and_logical_block() {
+        // l=2, offset=4. Row 0 lags by two positions (ve=2), row 1 is current.
+        let mask = build_divergent_row_mask(2, 4, &[2, 4], &[0, 0], None);
+        assert_eq!(ffi::array_shape(&mask), vec![2, 1, 2, 6]);
+        let cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&mask, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        let attended = |b: i32, q: i32, k: i32| cell(b, q, k) == 0.0;
+        let blocked = |b: i32, q: i32, k: i32| {
+            let v = cell(b, q, k);
+            v.is_infinite() && v < 0.0
+        };
+        // Row 0: history 0,1 attends; gap 2,3 blocked; block keys 4,5 sit at
+        // logical 2,3, so query 0 sees only key 4 and query 1 sees 4 and 5.
+        assert!(attended(0, 0, 0) && attended(0, 0, 1));
+        assert!(blocked(0, 0, 2) && blocked(0, 0, 3));
+        assert!(attended(0, 0, 4) && blocked(0, 0, 5));
+        assert!(attended(0, 1, 4) && attended(0, 1, 5));
+        // Row 1 is current: its whole history attends, and the block is causal.
+        for k in 0..4 {
+            assert!(attended(1, 0, k), "row1 history k={k}");
+        }
+        assert!(attended(1, 0, 4) && blocked(1, 0, 5));
+        assert!(attended(1, 1, 4) && attended(1, 1, 5));
     }
 
     /// A 4-D base `[B,1,n,K]` is preserved cell-for-cell outside the gap, and the

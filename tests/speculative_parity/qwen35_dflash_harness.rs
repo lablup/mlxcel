@@ -97,6 +97,20 @@ pub(crate) struct BurstRun {
     pub(crate) committed_accept_lens: Vec<Vec<u32>>,
     /// Rounds whose rows disagreed and were clamped to a uniform accept.
     pub(crate) clamped_rounds: usize,
+    /// Round-loop decode wall clock in milliseconds (the prefill is excluded).
+    pub(crate) decode_ms: f64,
+}
+
+impl BurstRun {
+    /// Aggregate decode throughput over the round loop, tokens per second.
+    pub(crate) fn aggregate_tok_per_sec(&self) -> f64 {
+        let tokens: usize = self.tokens.iter().map(|row| row.len() - 1).sum();
+        if self.decode_ms > 0.0 {
+            tokens as f64 / (self.decode_ms / 1000.0)
+        } else {
+            0.0
+        }
+    }
 }
 
 /// One DFlash burst over `prompts` (all the same length), replicating the
@@ -108,6 +122,21 @@ pub(crate) fn run_burst(
     drafter: Box<dyn mlxcel_core::drafter::Drafter>,
     prompts: &[Vec<i32>],
     block_size: u32,
+) -> (BurstRun, Box<dyn mlxcel_core::drafter::Drafter>) {
+    run_burst_with_policy(model, drafter, prompts, block_size, None)
+}
+
+/// [`run_burst`] with an explicit per-row accept policy.
+///
+/// `per_row` is `None` to use the production default
+/// (`MLXCEL_DFLASH_PER_ROW_ACCEPTS`), `Some(true)` for the per-row arm and
+/// `Some(false)` for the uniform-clamp arm. Issue #2442 compares the two.
+pub(crate) fn run_burst_with_policy(
+    model: &mlxcel::models::Qwen35Model,
+    drafter: Box<dyn mlxcel_core::drafter::Drafter>,
+    prompts: &[Vec<i32>],
+    block_size: u32,
+    per_row: Option<bool>,
 ) -> (BurstRun, Box<dyn mlxcel_core::drafter::Drafter>) {
     use mlxcel_core::drafter::dflash::{DFlashBatchedGenerator, SpeculativeTarget};
     use mlxcel_core::generate::{LanguageModel, SamplingConfig};
@@ -158,6 +187,9 @@ pub(crate) fn run_burst(
         block_size,
         mlxcel_core::drafter::dflash::round_loop::DEFAULT_MASK_TOKEN_ID,
     );
+    if let Some(per_row) = per_row {
+        generator = generator.with_per_row_accepts(per_row);
+    }
     let output = generator
         .run_batched(
             model,
@@ -169,6 +201,7 @@ pub(crate) fn run_burst(
             MAX_TOKENS,
         )
         .expect("batched DFlash run must succeed");
+    let decode_ms = output.stats.decode_time_ms;
     let tokens = output
         .tokens
         .into_iter()
@@ -180,6 +213,7 @@ pub(crate) fn run_burst(
         accept_lens: output.accept_lens,
         committed_accept_lens: output.committed_accept_lens,
         clamped_rounds: output.clamped_rounds,
+        decode_ms,
     };
     (run, generator.into_drafter())
 }

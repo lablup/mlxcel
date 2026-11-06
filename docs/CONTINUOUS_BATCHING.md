@@ -708,7 +708,16 @@ kernels run, so a row can pick a different token where two candidates are within
 about a quarter logit. The parity gate admits a first mismatch only inside a
 calibrated 1.0-logit near-tie margin, and a four-identical-prompts control
 shows the divergence is in the batched verify forward rather than the accept
-policy (#2851). On the Gemma 4
+policy (#2851). The round then commits each row's own accept count (#2442):
+the attention KV caches are compacted to per-row contiguous valid prefixes,
+queries and keys rotate at each row's logical positions with the row's stale
+gap masked, and each GDN layer replays its state over that row's accepted
+prefix. `MLXCEL_DFLASH_PER_ROW_ACCEPTS=0` restores the uniform clamp, which a
+quantized or paged KV cache also selects automatically. On an M3 Ultra the
+per-row arm measured 1.397x the clamp's B = 4 aggregate throughput (committed
+accepts 1.036 against 0.323 per row-round); the drafter's context is still a
+shared rectangular prefix, so the walk itself is lower than the clamp arm's,
+and per-row drafter context is a follow-up. On the Gemma 4
 geometries whose MTP verify runs row by row (the 31B everywhere, the 12B on
 CUDA) the batched burst is decode-exact since issue #2190: each row is
 prefilled and verified through the B=1 calls and only the cache write is
