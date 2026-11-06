@@ -1313,20 +1313,38 @@ module @decode_step {
     %1310 = stablehlo.dot_general %1309, %arg0, contracting_dims = [0] x [1] : (tensor<2048xf32>, tensor<128256x2048xf32>) -> tensor<128256xf32>
     %1311 = stablehlo.constant dense<0> : tensor<i32>
     %1312 = stablehlo.constant dense<0xFF800000> : tensor<f32>
-    %1313 = stablehlo.iota dim = 0 : tensor<128256xi32>
-    %1314:2 = stablehlo.reduce(%1310 init: %1312), (%1313 init: %1311) across dimensions = [0] : (tensor<128256xf32>, tensor<128256xi32>, tensor<f32>, tensor<i32>) -> (tensor<f32>, tensor<i32>)
+    %1313 = stablehlo.reshape %1310 : (tensor<128256xf32>) -> tensor<501x256xf32>
+    %1314 = stablehlo.iota dim = 1 : tensor<501x256xi32>
+    %1315:2 = stablehlo.reduce(%1313 init: %1312), (%1314 init: %1311) across dimensions = [1] : (tensor<501x256xf32>, tensor<501x256xi32>, tensor<f32>, tensor<i32>) -> (tensor<501xf32>, tensor<501xi32>)
     reducer(%amv_l: tensor<f32>, %amv_r: tensor<f32>) (%ami_l: tensor<i32>, %ami_r: tensor<i32>) {
-      %1315 = stablehlo.compare GT, %amv_l, %amv_r, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
-      %1316 = stablehlo.compare NE, %amv_l, %amv_l, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
-      %1317 = stablehlo.or %1315, %1316 : tensor<i1>
-      %1318 = stablehlo.compare EQ, %amv_l, %amv_r, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
-      %1319 = stablehlo.compare LT, %ami_l, %ami_r, SIGNED : (tensor<i32>, tensor<i32>) -> tensor<i1>
-      %1320 = stablehlo.and %1318, %1319 : tensor<i1>
-      %1321 = stablehlo.or %1317, %1320 : tensor<i1>
-      %1322 = stablehlo.select %1317, %amv_l, %amv_r : tensor<i1>, tensor<f32>
-      %1323 = stablehlo.select %1321, %ami_l, %ami_r : tensor<i1>, tensor<i32>
-      stablehlo.return %1322, %1323 : tensor<f32>, tensor<i32>
+      %1316 = stablehlo.compare GT, %amv_l, %amv_r, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
+      %1317 = stablehlo.compare NE, %amv_l, %amv_l, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
+      %1318 = stablehlo.or %1316, %1317 : tensor<i1>
+      %1319 = stablehlo.compare EQ, %amv_l, %amv_r, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
+      %1320 = stablehlo.compare LT, %ami_l, %ami_r, SIGNED : (tensor<i32>, tensor<i32>) -> tensor<i1>
+      %1321 = stablehlo.and %1319, %1320 : tensor<i1>
+      %1322 = stablehlo.or %1318, %1321 : tensor<i1>
+      %1323 = stablehlo.select %1318, %amv_l, %amv_r : tensor<i1>, tensor<f32>
+      %1324 = stablehlo.select %1322, %ami_l, %ami_r : tensor<i1>, tensor<i32>
+      stablehlo.return %1323, %1324 : tensor<f32>, tensor<i32>
     }
-    return %1314#1, %1256, %1258 : tensor<i32>, tensor<16x256x8x64xf32>, tensor<16x256x8x64xf32>
+    %1325 = stablehlo.iota dim = 0 : tensor<501xi32>
+    %1326 = stablehlo.constant dense<256> : tensor<501xi32>
+    %1327 = stablehlo.multiply %1325, %1326 : tensor<501xi32>
+    %1328 = stablehlo.add %1327, %1315#1 : tensor<501xi32>
+    %1329:2 = stablehlo.reduce(%1315#0 init: %1312), (%1328 init: %1311) across dimensions = [0] : (tensor<501xf32>, tensor<501xi32>, tensor<f32>, tensor<i32>) -> (tensor<f32>, tensor<i32>)
+    reducer(%amv_l: tensor<f32>, %amv_r: tensor<f32>) (%ami_l: tensor<i32>, %ami_r: tensor<i32>) {
+      %1330 = stablehlo.compare GT, %amv_l, %amv_r, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
+      %1331 = stablehlo.compare NE, %amv_l, %amv_l, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
+      %1332 = stablehlo.or %1330, %1331 : tensor<i1>
+      %1333 = stablehlo.compare EQ, %amv_l, %amv_r, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
+      %1334 = stablehlo.compare LT, %ami_l, %ami_r, SIGNED : (tensor<i32>, tensor<i32>) -> tensor<i1>
+      %1335 = stablehlo.and %1333, %1334 : tensor<i1>
+      %1336 = stablehlo.or %1332, %1335 : tensor<i1>
+      %1337 = stablehlo.select %1332, %amv_l, %amv_r : tensor<i1>, tensor<f32>
+      %1338 = stablehlo.select %1336, %ami_l, %ami_r : tensor<i1>, tensor<i32>
+      stablehlo.return %1337, %1338 : tensor<f32>, tensor<i32>
+    }
+    return %1329#1, %1256, %1258 : tensor<i32>, tensor<16x256x8x64xf32>, tensor<16x256x8x64xf32>
   }
 }

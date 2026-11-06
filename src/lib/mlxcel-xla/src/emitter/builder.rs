@@ -339,6 +339,24 @@ pub enum ProjectionLayout {
     InOut,
 }
 
+/// Chunk width for the two-stage argmax (issue #2873), or `None` to keep the
+/// single rank-1 reduce.
+///
+/// The first stage reduces rowwise over `width` elements and the second over
+/// `chunks`, so the width is the largest power of two up to 512 that divides the
+/// vocabulary. Vocabularies below 4096 keep the unsplit form (the split costs
+/// more than it saves there), and an odd vocabulary has no width above one.
+fn argmax_chunk_width(vocab: usize) -> Option<usize> {
+    if vocab < 4096 {
+        return None;
+    }
+    let mut width = 1;
+    while width * 2 <= 512 && vocab % (width * 2) == 0 {
+        width *= 2;
+    }
+    (width >= 32 && vocab / width >= 2).then_some(width)
+}
+
 fn dims_list(d: &[usize]) -> String {
     let parts: Vec<String> = d.iter().map(|x| x.to_string()).collect();
     format!("[{}]", parts.join(", "))
@@ -1662,6 +1680,69 @@ impl Builder {
     /// function args or the builder's SSA counter.
     pub fn argmax(&mut self, logits: &Val) -> Val {
         let v = logits.ty.shape[0];
+        // issue #2873: IREE lowers a rank-1 reduction to one workgroup of one
+        // lane, so a straight `reduce` over the whole vocabulary is serial
+        // (3.9 ms for 128256 logits). Split it: reshape `[V]` to `[C, W]` with a
+        // power-of-two `W` that divides `V`, argmax each row (parallel over C),
+        // then argmax the C partials carrying their global vocabulary index.
+        // Each stage uses the same NaN/tie-break reducer, so the composite is
+        // the same first-max argmax as the unsplit form.
+        let Some(width) = argmax_chunk_width(v) else {
+            return self.argmax_unsplit(logits);
+        };
+        let chunks = v / width;
+        let c0 = self.fresh();
+        self.line(format!("{c0} = stablehlo.constant dense<0> : tensor<i32>"));
+        let ninf = self.fresh();
+        self.line(format!(
+            "{ninf} = stablehlo.constant dense<0xFF800000> : tensor<f32>"
+        ));
+        let rows = self.fresh();
+        self.line(format!(
+            "{rows} = stablehlo.reshape {l} : (tensor<{v}xf32>) -> tensor<{chunks}x{width}xf32>",
+            l = logits.name
+        ));
+        let iota = self.fresh();
+        self.line(format!(
+            "{iota} = stablehlo.iota dim = 1 : tensor<{chunks}x{width}xi32>"
+        ));
+        let part = self.fresh();
+        self.line(format!(
+            "{part}:2 = stablehlo.reduce({rows} init: {ninf}), ({iota} init: {c0}) across dimensions = [1] : (tensor<{chunks}x{width}xf32>, tensor<{chunks}x{width}xi32>, tensor<f32>, tensor<i32>) -> (tensor<{chunks}xf32>, tensor<{chunks}xi32>)"
+        ));
+        self.argmax_reducer_block();
+        // Map each row's in-row index back to the vocabulary.
+        let chunk = self.fresh();
+        self.line(format!(
+            "{chunk} = stablehlo.iota dim = 0 : tensor<{chunks}xi32>"
+        ));
+        let cw = self.fresh();
+        self.line(format!(
+            "{cw} = stablehlo.constant dense<{width}> : tensor<{chunks}xi32>"
+        ));
+        let base = self.fresh();
+        self.line(format!(
+            "{base} = stablehlo.multiply {chunk}, {cw} : tensor<{chunks}xi32>"
+        ));
+        let gidx = self.fresh();
+        self.line(format!(
+            "{gidx} = stablehlo.add {base}, {part}#1 : tensor<{chunks}xi32>"
+        ));
+        let res = self.fresh();
+        self.line(format!(
+            "{res}:2 = stablehlo.reduce({part}#0 init: {ninf}), ({gidx} init: {c0}) across dimensions = [0] : (tensor<{chunks}xf32>, tensor<{chunks}xi32>, tensor<f32>, tensor<i32>) -> (tensor<f32>, tensor<i32>)"
+        ));
+        self.argmax_reducer_block();
+        Val {
+            name: format!("{res}#1"),
+            ty: Ty::scalar("i32"),
+        }
+    }
+
+    /// The unsplit rank-1 argmax used when the vocabulary is too small or too
+    /// awkwardly sized to split (see [`argmax_chunk_width`]).
+    fn argmax_unsplit(&mut self, logits: &Val) -> Val {
+        let v = logits.ty.shape[0];
         let vf = Ty::f32(vec![v]).render();
         let vi = Ty::new(vec![v], "i32").render();
         let c0 = self.fresh();
@@ -2007,6 +2088,51 @@ mod tests {
             "{}",
             b.body()
         );
+    }
+
+    /// issue #2873: a large, even vocabulary argmax is split into a rowwise
+    /// stage (parallel over rows) and a small final stage that carries the
+    /// global index, instead of one rank-1 reduce that IREE lowers to one lane.
+    #[test]
+    fn argmax_splits_a_large_vocabulary() {
+        assert_eq!(argmax_chunk_width(128256), Some(256));
+        assert_eq!(argmax_chunk_width(32000), Some(256));
+        assert_eq!(argmax_chunk_width(262144), Some(512));
+        let mut b = Builder::new();
+        let logits = Builder::arg(0, Ty::f32(vec![128256]));
+        let tok = b.argmax(&logits);
+        assert_eq!(tok.ty.render(), Ty::scalar("i32").render());
+        let body = b.body();
+        assert!(
+            body.contains("tensor<501x256xf32>"),
+            "the split reshape is emitted: {body}"
+        );
+        assert_eq!(
+            body.matches("stablehlo.reduce(").count(),
+            2,
+            "one rowwise stage and one combine stage"
+        );
+        assert!(
+            body.contains("stablehlo.multiply") && body.contains("stablehlo.add"),
+            "the in-row index is mapped to the vocabulary index"
+        );
+    }
+
+    /// issue #2873: small or oddly sized vocabularies keep the single reduce.
+    #[test]
+    fn argmax_keeps_one_reduce_when_it_cannot_split() {
+        assert_eq!(argmax_chunk_width(2048), None, "below the split threshold");
+        assert_eq!(
+            argmax_chunk_width(128255),
+            None,
+            "an odd vocabulary has no width"
+        );
+        let mut b = Builder::new();
+        let logits = Builder::arg(0, Ty::f32(vec![2048]));
+        let _ = b.argmax(&logits);
+        let body = b.body();
+        assert_eq!(body.matches("stablehlo.reduce(").count(), 1, "{body}");
+        assert!(!body.contains("stablehlo.reshape"), "{body}");
     }
 
     /// Issue #612: only bf16-on-Metal is rejected; every other pair lowers. The
