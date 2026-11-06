@@ -100,6 +100,9 @@ mod phi4_audio;
 mod qwen2_vl_runtime;
 #[cfg(feature = "iree")]
 mod qwen3_vl_runtime;
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod tuning;
 #[cfg(feature = "iree")]
 mod vision_runtime;
 #[cfg(feature = "iree")]
