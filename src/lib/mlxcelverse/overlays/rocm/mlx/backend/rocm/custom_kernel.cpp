@@ -107,26 +107,14 @@ __device__ IdxT elem_to_loc(
 
 )";
 
-std::string template_arguments_hash(
-    const std::vector<std::pair<std::string, TemplateArg>>& template_args) {
-  if (template_args.empty()) {
-    return "";
-  }
-
-  std::ostringstream hash;
-
-  for (const auto& [name, arg] : template_args) {
-    if (std::holds_alternative<int>(arg)) {
-      hash << "_" << std::get<int>(arg);
-    } else if (std::holds_alternative<bool>(arg)) {
-      hash << (std::get<bool>(arg) ? "_t" : "_f");
-    } else if (std::holds_alternative<Dtype>(arg)) {
-      hash << "_" << get_type_string(std::get<Dtype>(arg));
-    }
-  }
-
-  return hash.str();
-}
+// mlxcel: the fork's private copy of `template_arguments_hash` is gone. Upstream
+// 4ca8d5d5a (ml-explore/mlx#4568) declares the same function in
+// `mlx/backend/common/custom_kernel.h`, which `mlx/fast.h` includes, so an
+// unqualified call from this file resolved to both and MSVC rejected it as
+// ambiguous when both the ROCm backend and the common library were built. The
+// upstream definition also maps `-` to `_` in integer arguments, which keeps a
+// negative template argument from producing an invalid kernel name; the fork's
+// copy did not.
 
 std::string build_kernel(
     const std::string& func_name,
