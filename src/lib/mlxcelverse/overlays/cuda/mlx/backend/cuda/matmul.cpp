@@ -1,7 +1,7 @@
 // Copyright © 2025 Apple Inc.
 // Modified by mlxcel: Added general GatherMM case using CUTLASS grouped GEMM
 // (copied at b98831ad and merged with upstream 4652b0086 at 9a795735 in #1198).
-// Modified from upstream MLX 9a795735 mlx/backend/cuda/matmul.cpp
+// Modified from upstream MLX 9f806b3606eaa9f7c807238f6bd465185cd94d6d mlx/backend/cuda/matmul.cpp
 // BlockMaskedMM::eval_gpu taken verbatim from upstream bff10220 (#58): the
 // overlay predated it, so the BlockMaskedMM vtable referenced an undefined
 // symbol. GNU ld dropped the unused vtable; MSVC's link refuses it.
@@ -43,7 +43,7 @@ check_transpose(cu::CommandEncoder& enc, const Stream& s, const array& arr) {
 std::tuple<bool, int64_t, array>
 ensure_batch_contiguous(const array& x, cu::CommandEncoder& encoder, Stream s) {
   if (x.flags().row_contiguous) {
-    return std::make_tuple(false, x.strides(-2), x);
+    return std::make_tuple(false, x.shape(-1), x);
   }
 
   bool rc = true;

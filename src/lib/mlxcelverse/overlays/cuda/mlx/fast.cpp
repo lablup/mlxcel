@@ -2,7 +2,7 @@
 //
 // CUDA patch: bf16 scalar/constant generation in normalization ops
 //
-// Modified from upstream MLX 7ca40033132dae444d45f7fc3daae57e24c13f6c mlx/fast.cpp (three-way merged at each
+// Modified from upstream MLX 9f806b3606eaa9f7c807238f6bd465185cd94d6d mlx/fast.cpp (three-way merged at each
 // pin bump; the two fallbacks below are the whole delta)
 //
 // Changes:
@@ -1217,20 +1217,19 @@ std::vector<array> gated_delta_update(
     return std::vector<array>{out, state};
   };
 
-  if (!GatedDeltaUpdate::use_fallback(Hk, Dk, Hv, Dv, has_mask, s)) {
-    auto result = array::make_arrays(
-        /* output shapes */ {{B, T, Hv, Dv}, {B, Hv, Dv, Dk}},
-        /* dtypes */ {out_dtype, float32},
-        /* primitive */
-        std::make_shared<GatedDeltaUpdate>(s, fallback),
-        /* inputs */ {q, k, v, g, beta, h0});
-
-    return result;
+  if (GatedDeltaUpdate::use_fallback(Hk, Dk, Hv, Dv, has_mask, s) ||
+      config::get("MLX_GATED_DELTA_FALLBACK", 0)) {
+    return fallback({q, k, v, g, beta, h0, mask});
   }
 
-  auto result = fallback({q, k, v, g, beta, h0, mask});
-  return result;
+  return array::make_arrays(
+      /* output shapes */ {{B, T, Hv, Dv}, {B, Hv, Dv, Dk}},
+      /* dtypes */ {out_dtype, float32},
+      /* primitive */
+      std::make_shared<GatedDeltaUpdate>(s, fallback),
+      /* inputs */ {q, k, v, g, beta, h0});
 }
+
 std::vector<array> GatedDeltaUpdate::vjp(
     const std::vector<array>& primals,
     const std::vector<array>& cotangents,
@@ -1241,7 +1240,8 @@ std::vector<array> GatedDeltaUpdate::vjp(
   const int Hv = primals[2].shape(2);
   const int Dv = primals[2].shape(3);
 
-  if (GatedDeltaUpdateVJP::use_fallback(Hk, Dk, Hv, Dv, stream())) {
+  if (GatedDeltaUpdateVJP::use_fallback(Hk, Dk, Hv, Dv, stream()) ||
+      config::get("MLX_GATED_DELTA_VJP_FALLBACK", 0)) {
     return Custom::vjp(primals, cotangents, argnums, outputs);
   }
 

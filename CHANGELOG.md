@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The MLX pin advances from `7ca40033` to `9f806b36`, a reproducible main snapshot 46 commits newer and 81 past stable v0.32.4 (which the previous pin already postdated). Every CPU, Metal and CUDA whole-file overlay is rebased onto it. Upstream now accumulates the CPU affine quantized matmul in float (#4803), so that half of the #2248 overlay is retired and only `fp_qmm` / `fp_qmm_t` stay local; the new Metal 3-16-row affine `qmv_mma` (#4787) is placed behind the existing `MLXCEL_QMV_WIDE` off-switch so the speculative exactness retry still restores byte-equality between a verify block and the single-token chain; and the ROCm core files are retargeted with the fork unchanged. See `docs/mlxcelverse/mlx-pin-2026-11-06.md`.
 - AMD ROCm is documented as an officially supported backend since 0.8, on Linux and on Windows x86_64, rather than experimental. It remains a source build, and the validated configuration and the open gaps are unchanged; see the platform matrix and the Linux and Windows ROCm sections in [Installation](docs/installation.md).
 
 ## [v0.8.1] - 2026-11-03

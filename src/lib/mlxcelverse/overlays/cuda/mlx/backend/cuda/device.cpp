@@ -1,7 +1,7 @@
 // Copyright © 2025 Apple Inc.
 // Modified by mlxcel: captured child graphs (cuBLASLt, cuDNN, and every other
 // stream capture) are barriers inside an MLX CUDA graph (issue #2462).
-// Modified from upstream MLX 7ca40033132dae444d45f7fc3daae57e24c13f6c mlx/backend/cuda/device.cpp
+// Modified from upstream MLX 9f806b3606eaa9f7c807238f6bd465185cd94d6d mlx/backend/cuda/device.cpp
 
 #include "mlx/backend/cuda/device.h"
 #include "mlx/backend/cuda/worker.h"
@@ -25,7 +25,7 @@ void* get_noop_kernel_ptr();
 namespace {
 
 bool use_cuda_graphs() {
-  static bool use_graphs = env::get_var("MLX_USE_CUDA_GRAPHS", true);
+  static bool use_graphs = config::get("MLX_USE_CUDA_GRAPHS", true);
   return use_graphs;
 }
 
@@ -43,7 +43,7 @@ const char* save_cuda_graphs_dot_file() {
 // [mlxcel #2462] Boolean environment flags with the convention
 // docs/environment-variables.md uses: trimmed, case-insensitive; `0`,
 // `false`, `off` and `no` are false, `1`, `true`, `on` and `yes` are true,
-// unset or anything else is `default_value`. MLX's `env::get_var` is `atoi`,
+// unset or anything else is `default_value`. MLX's `config::get` is `atoi`,
 // which would read `on` as 0.
 bool mlxcel_env_flag(const char* name, bool default_value) {
   const char* raw = std::getenv(name);
@@ -389,16 +389,25 @@ void CommandEncoder::set_input_array(const array& arr) {
   bytes_in_graph_ += arr.data_size();
   auto id = reinterpret_cast<std::uintptr_t>(arr.buffer().ptr());
   active_deps_.push_back(id);
+#ifndef NDEBUG
+  if (arr.data_shared_ptr()->is_owned()) {
+    registered_data_ptrs_.push_back(gpu_ptr<void>(arr));
+  }
+#endif
 }
 
 void CommandEncoder::set_output_array(const array& arr) {
   if (!use_cuda_graphs()) {
     return;
   }
-
   auto id = reinterpret_cast<std::uintptr_t>(arr.buffer().ptr());
   active_deps_.push_back(id);
   active_outputs_.push_back(id);
+#ifndef NDEBUG
+  if (arr.data_shared_ptr()->is_owned()) {
+    registered_data_ptrs_.push_back(gpu_ptr<void>(arr));
+  }
+#endif
 }
 
 void CommandEncoder::add_kernel_node_raw(
@@ -660,6 +669,19 @@ void CommandEncoder::synchronize() {
   f.wait();
 }
 
+#ifndef NDEBUG
+void CommandEncoder::verify_graph(const char* primitive_name) {
+  if (allocator::allocator().has_invalid_memory(registered_data_ptrs_)) {
+    throw std::runtime_error(
+        fmt::format(
+            "There are invalid memory registered when calling {}::eval_gpu, "
+            "which is a bug that corrupts the graph, and usually caused by "
+            "temporary arrays not registered with \"add_temporary\" method.",
+            primitive_name));
+  }
+}
+#endif
+
 void CommandEncoder::commit_impl() {
   if (!temporaries_.empty()) {
     add_completed_handler([temporaries = std::move(temporaries_)]() {});
@@ -761,6 +783,9 @@ void CommandEncoder::clear_graph_state() {
   active_outputs_.clear();
   concurrent_nodes_.clear();
   roots_.clear();
+#ifndef NDEBUG
+  registered_data_ptrs_.clear();
+#endif
   is_graph_updatable_ = true;
 }
 

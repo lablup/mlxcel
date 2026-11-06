@@ -392,6 +392,10 @@ fn main() {
         // Metal and Accelerate are always linked on macOS
         println!("cargo:rustc-link-lib=framework=Metal");
         println!("cargo:rustc-link-lib=framework=Accelerate");
+        // Upstream MLX's `gpu_core_count()` reads the AGXAccelerator IORegistry
+        // entry (ml-explore/mlx#4781), and its CMake links IOKit PRIVATE, so a
+        // static `libmlx.a` consumer has to name the framework itself.
+        println!("cargo:rustc-link-lib=framework=IOKit");
     }
 
     #[cfg(feature = "cuda")]
