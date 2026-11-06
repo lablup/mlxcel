@@ -1153,12 +1153,16 @@ fn config_without_any_layer_stack_description_is_rejected() {
 /// is built; the rope override needs an attention layer and this model has
 /// one MoE block; and a per-thread MLX default stream (what a leaked
 /// `install_thread_local_default_stream` would leave) cannot reach a later
-/// test because libtest gives every test a fresh thread. The numeric failure
-/// did not reproduce in more than forty full serial runs of the failing
-/// commit's binary, including under an eight-way concurrent load, so the
-/// assertion now reports the measured error instead of a bare message and
-/// holds MLX's state locks, and a companion test pins the result against the
-/// ambient thread stream. The 1e-3 bound is unchanged.
+/// test because libtest gives every test a fresh thread. The last remaining
+/// candidate, a process-global default device left on the CPU, is measured by
+/// `nemotron_h_nvfp4_experts_parity_is_independent_of_the_default_device`
+/// and falsified: the CPU arm stays inside the bound (5.7e-6 max absolute at
+/// 40 tokens) and returns the GPU arm unchanged. The numeric failure did not
+/// reproduce in more than forty full serial runs of the failing commit's
+/// binary, including under an eight-way concurrent load, so the assertion now
+/// reports the measured error and the device it ran on instead of a bare
+/// message and holds MLX's state locks, and a companion test pins the result
+/// against the ambient thread stream. The 1e-3 bound is unchanged.
 #[test]
 fn nemotron_h_runs_nvfp4_experts_sorted_and_unsorted() {
     // The default device is process-global, so a concurrent
@@ -1186,6 +1190,43 @@ fn nemotron_h_nvfp4_experts_parity_is_independent_of_the_thread_stream() {
         return;
     };
     mlxcel_core::streams::install_thread_local_default_stream(Some(&stream));
+    assert_nvfp4_experts_sorted_and_unsorted();
+}
+
+/// Regression for #2852: the parity does not depend on MLX's process-global
+/// default device, and a CPU span leaves nothing behind for a later GPU run.
+///
+/// The one observed failure compared a quantized `gather_qmm` result against
+/// an f32 matmul over dequantized planes. The remaining lead after the first
+/// audit was that an earlier test left the process-global default device on
+/// the CPU, moving the gather off the backend where the bound was measured.
+/// Forcing the CPU for the whole case, the nvfp4 quantize and the f32
+/// reference included, measures it: at 40 tokens the CPU arm's max absolute
+/// error is 5.7e-6 against 7.6e-6 on the GPU, and its max relative error is
+/// 2.5e-4, all inside the unchanged 1e-3 bound. The arm that runs after the
+/// CPU span reproduces the GPU baseline's measured errors exactly (3.8e-6 at
+/// 5 tokens, 7.6e-6 at 40 tokens), so the span also leaves no cached state
+/// behind. Kept as a test so a later change that makes the CPU path, or the
+/// return to the GPU, diverge fails here instead of once in a full serial run
+/// (issue #2852).
+#[test]
+fn nemotron_h_nvfp4_experts_parity_is_independent_of_the_default_device() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let device_before = mlxcel_core::default_device_is_gpu();
+    assert_nvfp4_experts_sorted_and_unsorted();
+    {
+        let _cpu = mlxcel_core::streams::DefaultDeviceGuard::cpu();
+        assert!(
+            !mlxcel_core::default_device_is_gpu(),
+            "the CPU arm must actually run on the CPU"
+        );
+        assert_nvfp4_experts_sorted_and_unsorted();
+    }
+    assert_eq!(
+        mlxcel_core::default_device_is_gpu(),
+        device_before,
+        "the CPU span must restore the previous default device"
+    );
     assert_nvfp4_experts_sorted_and_unsorted();
 }
 
@@ -1220,6 +1261,23 @@ fn nemotron_h_switch_mlp_does_not_consult_the_fused_moe_gate() {
 }
 
 fn assert_nvfp4_experts_sorted_and_unsorted() {
+    run_nvfp4_expert_arms(|tokens, got, want| {
+        let close = mlxcel_core::allclose(got, want, 1e-3, 1e-3);
+        if !mlxcel_core::item_bool(&close) {
+            assert_expert_parity(got, want, tokens);
+        }
+    });
+}
+
+/// Build the one-layer nvfp4 MoE and hand both routing arms to `check`.
+///
+/// `check` receives the evaluated gather result and the lazy dequantized
+/// reference for 5 tokens (unsorted) and 40 tokens (sorted), with the same
+/// shape. Splitting the graph construction out lets the parity assertion and
+/// the device-independence test share one definition of the case.
+fn run_nvfp4_expert_arms(
+    mut check: impl FnMut(i32, &mlxcel_core::MlxArray, &mlxcel_core::MlxArray),
+) {
     use super::{BlockType, NemotronHMixer, NemotronHModel};
     use mlxcel_core::weights::WeightMap;
 
@@ -1328,10 +1386,49 @@ fn assert_nvfp4_experts_sorted_and_unsorted() {
         let h = mlxcel_core::utils::relu_squared(&h);
         let want = mlxcel_core::matmul(&h, &mlxcel_core::swap_axes(&w2, -1, -2));
         let want = mlxcel_core::reshape(&want, &[tokens, TOP_K, HIDDEN]);
-        let close = mlxcel_core::allclose(&got, &want, 1e-3, 1e-3);
-        if !mlxcel_core::item_bool(&close) {
-            assert_expert_parity(&got, &want, tokens);
+        check(tokens, &got, &want);
+    }
+}
+
+/// Measured divergence between the gather result and the reference.
+///
+/// The bound MLX's `allclose` applies is `|got - want| <= atol + rtol *
+/// |want|`, so `out_of_bound` counts the elements that actually missed it.
+/// A near-bound precision miss leaves `max_abs` close to the bound and few
+/// offending elements; a corrupted row leaves a large `max_abs` and a cluster
+/// of them.
+struct ExpertParityError {
+    max_abs: f32,
+    max_rel: f32,
+    non_finite: usize,
+    out_of_bound: usize,
+    elements: usize,
+}
+
+impl ExpertParityError {
+    fn measure(got: &mlxcel_core::MlxArray, want: &mlxcel_core::MlxArray) -> Self {
+        let got_values = mlxcel_core::utils::array_to_vec_f32(got);
+        let want_values = mlxcel_core::utils::array_to_vec_f32(want);
+        let mut error = Self {
+            max_abs: 0.0,
+            max_rel: 0.0,
+            non_finite: 0,
+            out_of_bound: 0,
+            elements: got_values.len(),
+        };
+        for (got, want) in got_values.iter().zip(&want_values) {
+            if !got.is_finite() || !want.is_finite() {
+                error.non_finite += 1;
+                continue;
+            }
+            let abs = (got - want).abs();
+            error.max_abs = error.max_abs.max(abs);
+            error.max_rel = error.max_rel.max(abs / want.abs().max(1e-6));
+            if abs > 1e-3 + 1e-3 * want.abs() {
+                error.out_of_bound += 1;
+            }
         }
+        error
     }
 }
 
@@ -1339,33 +1436,34 @@ fn assert_nvfp4_experts_sorted_and_unsorted() {
 ///
 /// Issue #2852's one observed failure printed no magnitude, which is why it
 /// stayed unexplained: a near-bound precision miss and a corrupted row have
-/// very different causes. Report both the maximum absolute and relative
-/// differences and the non-finite count so the next occurrence is actionable.
+/// very different causes. Report the maximum absolute and relative
+/// differences, how many elements actually missed the bound, the non-finite
+/// count, and the default device and GPU backend the comparison ran on, so the
+/// next occurrence is actionable without a separate probe.
 fn assert_expert_parity(
     got: &mlxcel_core::MlxArray,
     want: &mlxcel_core::MlxArray,
     tokens: i32,
 ) -> ! {
-    let got_values = mlxcel_core::utils::array_to_vec_f32(got);
-    let want_values = mlxcel_core::utils::array_to_vec_f32(want);
-    let mut max_abs = 0.0_f32;
-    let mut max_rel = 0.0_f32;
-    let mut non_finite = 0_usize;
-    for (got, want) in got_values.iter().zip(&want_values) {
-        if !got.is_finite() || !want.is_finite() {
-            non_finite += 1;
-            continue;
-        }
-        let abs = (got - want).abs();
-        max_abs = max_abs.max(abs);
-        max_rel = max_rel.max(abs / want.abs().max(1e-6));
-    }
+    let error = ExpertParityError::measure(got, want);
+    let device = if mlxcel_core::default_device_is_gpu() {
+        "the GPU"
+    } else {
+        "the CPU"
+    };
+    let backend = mlxcel_core::hardware::gpu_backend_kind();
     panic!(
         "nvfp4 routed experts differ from the dequantized reference at {tokens} tokens: \
-         max absolute {max_abs:e}, max relative {max_rel:e}, non-finite {non_finite}/{} \
-         against the 1e-3/1e-3 bound (issue #2852). A near-bound miss and a non-finite or \
-         large row have different causes; record these numbers on the issue.",
-        got_values.len()
+         max absolute {:e}, max relative {:e}, {} of {} elements outside the 1e-3 + 1e-3*|ref| \
+         bound, non-finite {} of {}; default device {device}, backend {backend:?} (issue #2852). \
+         A near-bound miss and a non-finite or large row have different causes; record these \
+         numbers on the issue.",
+        error.max_abs,
+        error.max_rel,
+        error.out_of_bound,
+        error.elements,
+        error.non_finite,
+        error.elements,
     );
 }
 
