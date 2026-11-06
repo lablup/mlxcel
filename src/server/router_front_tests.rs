@@ -451,6 +451,23 @@ async fn router_chat_forwards_forced_tool_choice_instead_of_rejecting_it() {
 }
 
 #[tokio::test]
+async fn router_chat_forwards_text_response_format_instead_of_rejecting_it() {
+    // `{"type": "text"}` asks for no constraint, and single node serves it
+    // unconstrained, so the router can reproduce it. Reaching the raising
+    // template, not the response_format guard's 400, is the signal.
+    let state = router_test_state_with_template("{{ raise_exception('reached rendering') }}").await;
+    let mut body = chat_request();
+    body["response_format"] = json!({"type": "text"});
+
+    let response = post_router_json_with_state(state, "/v1/chat/completions", body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error_message(response).await,
+        "the model's chat template rejected this request: reached rendering"
+    );
+}
+
+#[tokio::test]
 async fn router_chat_maps_template_rejection_to_bad_request() {
     let state = router_test_state_with_template(
         "{% if reasoning_effort not in ['low', 'medium'] %}{{ raise_exception('Unexpected reasoning effort ' ~ reasoning_effort) }}{% endif %}ok",
@@ -541,6 +558,33 @@ async fn router_completion_existing_unsupported_option_guards_are_unchanged() {
             assert_eq!(error_message(response).await, expected_message);
         }
     }
+}
+
+#[tokio::test]
+async fn router_completion_forwards_text_response_format_instead_of_rejecting_it() {
+    // The thinking-budget check runs right after the response_format guard,
+    // so its 400 proves a `{"type": "text"}` request got past the guard
+    // without dispatching anything to a prefill node.
+    let state = router_test_state().await;
+    let next_id = state.next_id.load(Ordering::Relaxed);
+    let response = post_router_json_with_state(
+        state.clone(),
+        "/v1/completions",
+        json!({
+            "model": "test-model",
+            "prompt": "hello",
+            "response_format": {"type": "text"},
+            "max_tokens": 4,
+            "thinking_budget_tokens": 8
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error_message(response).await,
+        "thinking_budget_tokens (8) must be <= max_tokens (4)"
+    );
+    assert_eq!(state.next_id.load(Ordering::Relaxed), next_id, "no handoff");
 }
 
 /// The router refuses media from the request, before `prepare_chat_request_with_cache`
