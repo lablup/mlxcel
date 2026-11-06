@@ -24,6 +24,7 @@ use std::sync::{Arc, mpsc};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
+use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -204,4 +205,62 @@ async fn cancel_of_an_unknown_id_is_not_found() {
 
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["error"]["type"], "not_found", "{body}");
+}
+
+#[tokio::test]
+async fn cancelling_a_live_stream_records_the_response_as_cancelled() {
+    let h = harness();
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/responses")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({"model": "cancel-test-model", "input": "hi", "stream": true}).to_string(),
+        ))
+        .expect("request builds");
+    let mut body = h
+        .app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router responds")
+        .into_body();
+
+    // Wait for the first token so the stream is in flight.
+    h.handle.token("Hel");
+    let mut text = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !text.contains("Hel") {
+            let frame = body.frame().await.expect("stream open").expect("frame ok");
+            if let Some(data) = frame.data_ref() {
+                text.push_str(&String::from_utf8_lossy(data));
+            }
+        }
+    })
+    .await
+    .expect("first token arrives");
+    let id = text
+        .split("\"id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("response.created carries the id")
+        .to_string();
+
+    let (status, _) = h.cancel(&id).await;
+    assert_eq!(status, StatusCode::OK);
+    h.handle.finish();
+    let rest = axum::body::to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .expect("stream ends");
+    text.push_str(&String::from_utf8_lossy(&rest));
+
+    // Both the terminal event and the stored copy agree with the cancel reply.
+    let terminal: Value = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .next_back()
+        .and_then(|data| serde_json::from_str(data).ok())
+        .expect("stream ends with an event");
+    assert_eq!(terminal["response"]["status"], "cancelled", "{terminal}");
+    assert_eq!(h.retrieve(&id).await["status"], "cancelled");
 }
