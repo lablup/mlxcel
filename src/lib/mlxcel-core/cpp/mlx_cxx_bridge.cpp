@@ -194,7 +194,7 @@ bool native_env_read(rust::Str name, rust::Vec<uint8_t>& value) {
 }
 
 int32_t mlx_env_get_var_int(rust::Str name, int32_t default_value) {
-    return mlx::core::env::get_var(std::string(name).c_str(), default_value);
+    return mlx::core::config::get(std::string(name).c_str(), default_value);
 }
 
 rust::String shapeless_compile_audit_report() {

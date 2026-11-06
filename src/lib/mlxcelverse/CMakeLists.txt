@@ -35,8 +35,12 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # cherry-pick, PRs #3560/#3565) was retired when the pin moved to
   # 2026-06-11 upstream main, which carries the fix natively (issue #222).
   # quantized.cpp retains the MLXCEL_QMV_WIDE off-switch (#1187) and the
-  # broadcast gathered-row count (#1599) in GatherQMM/GatherQQMM. Refresh
-  # wholesale on a bump and re-apply only those documented local changes.
+  # broadcast gathered-row count (#1599) in GatherQMM/GatherQQMM. The switch
+  # also gates upstream's `use_qmv_mma`, which since ml-explore/mlx#4787 takes
+  # affine 3- to 16-row products on generation 15 and later; without that, the
+  # speculative exactness gate's retry could no longer restore byte-equality
+  # between a verify block and the single-token chain. Refresh wholesale on a
+  # bump and re-apply only those documented local changes.
   # Upstream #4594 supplies the Xcode 27 cooperative-tensor workaround;
   # no gated_delta_update_nax.h overlay is needed at this pin.
   # Upstream #4514 also supplies nonthrowing CUDA handle teardown, so the
@@ -127,14 +131,15 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # because every build compiles MLX's CPU backend and every one of them can
   # run a quantized matmul on the CPU stream (MLXCEL_DEVICE=cpu, or the CPU
   # stream a GPU build still has). quantized.cpp carries one delta, issue
-  # #2248: the scalar `_qmm`, `_qmm_t`, `fp_qmm` and `fp_qmm_t` loops, which
-  # every build without Accelerate's SIMD header runs (all of Linux, x86
-  # macOS), accumulate in float instead of the activation type, and read the
-  # activation row and the output accumulator from local buffers. Upstream
-  # accumulates bf16 in bf16 as of pin 81ba1c6a. Same refresh rule as the
-  # Metal files: take the new upstream file and re-apply the four bodies
-  # marked `mlxcel:`. The NripeshN/mlx fork does not change this file, so the
-  # ROCm overlay below never replaces it.
+  # #2248: the scalar `fp_qmm` and `fp_qmm_t` loops, which every build without
+  # Accelerate's SIMD header runs (all of Linux, x86 macOS), accumulate in
+  # float instead of the activation type, and read the activation row and the
+  # output accumulator from local buffers. Upstream accumulates in float for
+  # the affine `_qmm` / `_qmm_t` loops as of ml-explore/mlx#4803, so those two
+  # are upstream verbatim at this pin and the overlay keeps only the fp bodies.
+  # Same refresh rule as the Metal files: take the new upstream file and
+  # re-apply the two bodies marked `mlxcel:`. The NripeshN/mlx fork does not
+  # change this file, so the ROCm overlay below never replaces it.
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cpu/mlx/backend/cpu")
     file(GLOB_RECURSE _cpu_patch_files
          RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cpu"
@@ -272,7 +277,7 @@ else()
     #     `)` as ending the declaration, so one there would hide the tag
     #     instead of being read past.
     # Both parsers fail loudly rather than guess when the shape does not hold.
-    GIT_TAG 7ca40033132dae444d45f7fc3daae57e24c13f6c)
+    GIT_TAG 9f806b3606eaa9f7c807238f6bd465185cd94d6d)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source
   # overlays before the MLX build system processes the files.

@@ -6,7 +6,7 @@
 // their computation graphs produce mixed bf16/float intermediates in the
 // compiled DAG.
 //
-// Modified from upstream MLX 81ba1c6a mlx/backend/cuda/device/binary_ops.cuh
+// Modified from upstream MLX 9f806b3606eaa9f7c807238f6bd465185cd94d6d mlx/backend/cuda/device/binary_ops.cuh
 
 #include "mlx/backend/cuda/device/unary_ops.cuh"
 
@@ -333,14 +333,16 @@ struct BitwiseXor {
 struct LeftShift {
   template <typename T>
   __device__ T operator()(T x, T y) {
-    return x << y;
+    auto valid = y >= 0 && y < static_cast<T>(sizeof(T) * 8);
+    return valid ? x << y : T(0);
   };
 };
 
 struct RightShift {
   template <typename T>
   __device__ T operator()(T x, T y) {
-    return x >> y;
+    auto valid = y >= 0 && y < static_cast<T>(sizeof(T) * 8);
+    return valid ? x >> y : (x < 0) ? T(-1) : T(0);
   };
 };
 
