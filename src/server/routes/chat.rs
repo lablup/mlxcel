@@ -22,7 +22,7 @@ use std::sync::atomic::Ordering;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{State, rejection::JsonRejection},
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
@@ -303,8 +303,12 @@ pub(crate) fn build_single_token_chat_logprobs(
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut request): Json<ChatCompletionRequest>,
+    request: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Response {
+    let mut request = match super::parse_json_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
     }

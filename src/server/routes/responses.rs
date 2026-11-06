@@ -32,7 +32,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -85,8 +85,12 @@ use crate::server::request_options::{
 pub async fn create_response(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateResponseRequest>,
+    request: Result<Json<CreateResponseRequest>, JsonRejection>,
 ) -> Response {
+    let request = match super::parse_json_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     let live = state.live();
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
