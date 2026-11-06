@@ -622,6 +622,9 @@ async fn stream_create_response(
 
     let admission =
         crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
+    // The generation call consumes `cancelled`; keep a handle so the final
+    // status can report a stop that the token caused.
+    let cancelled_for_status = cancelled.clone();
 
     tokio::task::spawn_blocking(move || {
         let mut emitter = ResponseStreamEmitter::new();
@@ -1090,7 +1093,13 @@ async fn stream_create_response(
         // outbound assembly fills the canonical output[] for the
         // "completed" event payload.
         let completed_at_now = chrono::Utc::now().timestamp() as f64;
-        let (status, incomplete_reason) = final_status(auto.as_ref(), &result.finish_reason);
+        let (mut status, incomplete_reason) = final_status(auto.as_ref(), &result.finish_reason);
+        // A cancelled stream ends through the normal path, so `final_status`
+        // alone would record it as `completed` (and the stored copy would
+        // contradict the `cancelled` the cancel route already returned).
+        if cancelled_for_status.load(std::sync::atomic::Ordering::Relaxed) {
+            status = ResponseStatus::Cancelled;
+        }
         let mut final_response = build_response_object(OutboundContext {
             response_id: response_id_for_task.clone(),
             model_id: model_id_for_task,
