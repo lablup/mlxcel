@@ -134,7 +134,7 @@ use crate::server::ChatTemplateProcessor;
 use crate::server::config::{
     LiveSettings, ReasoningBudgetOverride, ServerConfig, ServerGenerateOptions,
 };
-use crate::server::routes::completions::parse_completion_request;
+use crate::server::routes::parse_json_request;
 use crate::server::runtime_settings::{self, KnobSpec, Rejected};
 use crate::server::streaming::{SseKeepAlive, sse_response};
 use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
@@ -773,8 +773,12 @@ async fn router_api_key_auth(
 /// POST /v1/chat/completions
 async fn router_chat_completions(
     State(state): State<Arc<RouterState>>,
-    Json(request): Json<ChatCompletionRequest>,
+    request: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Response {
+    let request = match parse_json_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     let live = state.live();
     match route_chat(state, live, request).await {
         Ok(resp) => resp,
@@ -1353,7 +1357,7 @@ async fn router_completions(
     State(state): State<Arc<RouterState>>,
     request: Result<Json<CompletionRequest>, JsonRejection>,
 ) -> Response {
-    let request = match parse_completion_request(request) {
+    let request = match parse_json_request(request) {
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
