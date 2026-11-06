@@ -1244,6 +1244,7 @@ impl Qwen35DecoderLayer {
     ///
     /// used by `Qwen35Model::forward_speculative` to drive the
     /// DFlash drafter without duplicating the prefill / decode forward path.
+    #[allow(clippy::too_many_arguments)]
     fn forward_with_capture(
         &self,
         layer_idx: usize,
@@ -1252,6 +1253,7 @@ impl Qwen35DecoderLayer {
         cache: &mut Qwen3NextCache,
         position_ids: Option<&MlxArray>,
         snapshot_sink: &mut Vec<GdnRollbackSnapshot>,
+        row_valid_ends: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         let normed = self.input_layernorm.forward(x);
 
@@ -1276,9 +1278,15 @@ impl Qwen35DecoderLayer {
             // logits stay bit-aligned with single-token decode. Mirrors
             // upstream `Qwen3_5DecoderLayer.__call__`'s `target_verify=True`
             // propagation into `Qwen3_5Attention`.
-            (Qwen35AttentionVariant::FullAttention(attn), Qwen3NextCache::Attention(c)) => {
-                attn.forward_with_position_ids_verify(&normed, c, mask, position_ids, true)
-            }
+            (Qwen35AttentionVariant::FullAttention(attn), Qwen3NextCache::Attention(c)) => attn
+                .forward_with_position_ids_verify(
+                    &normed,
+                    c,
+                    mask,
+                    position_ids,
+                    true,
+                    row_valid_ends,
+                ),
             (Qwen35AttentionVariant::FullAttention(attn), _) => {
                 let mut temp_cache = KVCache::new();
                 attn.forward_with_position_ids_verify(
@@ -1287,6 +1295,7 @@ impl Qwen35DecoderLayer {
                     mask,
                     position_ids,
                     true,
+                    row_valid_ends,
                 )
             }
         };
@@ -2497,6 +2506,33 @@ impl Qwen35Model {
         caches: &mut [Qwen3NextCache],
         capture_layer_ids: &[usize],
     ) -> VerifyOutput {
+        self.forward_speculative_inner(input_ids, caches, capture_layer_ids, None)
+    }
+
+    /// Per-row variant of [`Self::forward_speculative`] for a ragged batched
+    /// verify round (issue #2442).
+    ///
+    /// `row_valid_ends[r]` is row `r`'s contiguous valid cache prefix length;
+    /// rows below the shared physical offset rotate and attend at their own
+    /// logical positions and skip their stale gap. With every row at the
+    /// shared offset this is byte-identical to [`Self::forward_speculative`].
+    pub(crate) fn forward_speculative_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+        capture_layer_ids: &[usize],
+        row_valid_ends: &[i32],
+    ) -> VerifyOutput {
+        self.forward_speculative_inner(input_ids, caches, capture_layer_ids, Some(row_valid_ends))
+    }
+
+    fn forward_speculative_inner(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+        capture_layer_ids: &[usize],
+        row_valid_ends: Option<&[i32]>,
+    ) -> VerifyOutput {
         let h0 = self.embed_tokens.forward(input_ids);
 
         let shape = mlxcel_core::array_shape(&h0);
@@ -2530,7 +2566,15 @@ impl Qwen35Model {
             } else {
                 fa_mask.as_deref()
             };
-            h = layer.forward_with_capture(i, &h, mask, cache, None, &mut gdn_states);
+            h = layer.forward_with_capture(
+                i,
+                &h,
+                mask,
+                cache,
+                None,
+                &mut gdn_states,
+                row_valid_ends,
+            );
 
             // Capture the post-block hidden state for any requested layer index.
             // The check is O(capture_layer_ids.len()) per layer; for DFlash's
@@ -2685,30 +2729,30 @@ impl Qwen35Model {
     ///   * `gdn_states` — the `gdn_states` field of [`VerifyOutput`] from the
     ///     SAME verify pass. Ordered by linear-attention layer index.
     ///   * `accepted` — per-row accepted count `a_i` (i.e. the prefix
-    ///     `[0..a_i]` is kept). For `B == 1` this is a single-element slice;
-    ///     for `B > 1` every element must be equal (see below).
+    ///     `[0..a_i]` is kept). For `B == 1` this is a single-element slice.
+    ///     For `B > 1` the entries may be ragged (issue #2442), in which case
+    ///     [`Self::rollback_speculative_cache_rows`] also needs each row's
+    ///     pre-round valid end.
     ///   * `block_size` — the verify-block length (typically the drafter's
-    ///     `block_size` config). Used to compute the trim amount:
-    ///     `trim = block_size - (max(accepted) + 1)`.
+    ///     `block_size` config). Used to compute the trim amount.
     ///
-    /// Uniform acceptance for `B > 1` (issue #2353): the attention caches
-    /// are rectangular, with one shared offset and no per-row valid end, so
-    /// a batched rollback can only keep the same number of positions in
-    /// every row. Zeroing a shorter row's rejected tail is not a substitute:
-    /// a zero key still scores `q . 0 = 0`, takes `exp(0)` weight in the
-    /// softmax and dilutes that row's attention on every later step. The
-    /// batched DFlash round loop clamps each round to a uniform accept
-    /// before it emits anything
-    /// (`mlxcel_core::drafter::dflash::round_loop_batched::clamp_uniform_acceptance`),
-    /// and a ragged slice reaching this method panics instead of corrupting
-    /// the cache.
+    /// Uniform acceptance (issues #2353, #2442): when every row accepted the
+    /// same count and every row's prefix ended at the shared physical offset,
+    /// the rollback trims by `block_size - (accepted + 1)` and replays one
+    /// uniform GDN prefix. A ragged accept cannot be represented that way: a
+    /// zero key still scores `q . 0 = 0` and takes `exp(0)` weight in the
+    /// softmax. [`Self::rollback_speculative_cache_rows`] instead compacts
+    /// every row's accepted block back to its own logical end, so each row's
+    /// cache content is again a contiguous prefix, and replays each row's GDN
+    /// state over that row's own prefix.
     ///
     /// Apple Silicon precision (`docs/apple-silicon-precision.md`):
     /// GDN replay re-uses the captured `q/k/v/a/b` and `init_state` tensors
     /// at their original dtype (bf16/f16/float32 as captured). Do not promote
     /// to f32 — the drafter's reference forward stays in the activation dtype.
     ///
-    /// Used by: DFlash drafter round loop (sub-12).
+    /// Used by: DFlash drafter round loop (sub-12), and the B = 1 path of the
+    /// per-row round loop.
     pub fn rollback_speculative_cache(
         &self,
         caches: &mut [Qwen3NextCache],
@@ -2716,13 +2760,72 @@ impl Qwen35Model {
         accepted: &[i32],
         block_size: i32,
     ) -> i32 {
+        self.rollback_speculative_cache_rows(caches, gdn_states, accepted, None, block_size)
+    }
+
+    /// Ragged-aware rollback (issue #2442).
+    ///
+    /// `row_valid_ends_pre[r]` is row `r`'s contiguous valid prefix length
+    /// before the verify block. When it is absent every row is assumed to have
+    /// ended at the shared physical offset (the uniform and B = 1 contracts).
+    /// Returns `max(accepted)`.
+    pub(crate) fn rollback_speculative_cache_rows(
+        &self,
+        caches: &mut [Qwen3NextCache],
+        gdn_states: &[GdnRollbackSnapshot],
+        accepted: &[i32],
+        row_valid_ends_pre: Option<&[i32]>,
+        block_size: i32,
+    ) -> i32 {
         if accepted.is_empty() {
             return 0;
         }
-        assert_uniform_batched_accepts(accepted);
+        let offset = caches
+            .iter()
+            .find_map(|cache| match cache {
+                Qwen3NextCache::Attention(kv) => Some(kv.offset),
+                Qwen3NextCache::Linear(_) => None,
+            })
+            .or_else(|| caches.first().map(Qwen3NextCache::offset))
+            .unwrap_or(0);
+        let o_pre = offset - block_size;
+        let ve_pre: Vec<i32> = match row_valid_ends_pre {
+            Some(ends) => {
+                assert_eq!(
+                    ends.len(),
+                    accepted.len(),
+                    "rollback_speculative_cache_rows: one valid end per accepted row"
+                );
+                ends.to_vec()
+            }
+            None => vec![o_pre; accepted.len()],
+        };
+        let uniform =
+            accepted.iter().all(|&a| a == accepted[0]) && ve_pre.iter().all(|&ve| ve == o_pre);
+
         let max_a = accepted[0];
         let n = max_a + 1;
         let trim = block_size - n;
+
+        if !uniform {
+            let o_post = ve_pre
+                .iter()
+                .zip(accepted)
+                .map(|(&ve, &a)| ve + a + 1)
+                .max()
+                .expect("non-empty accepted");
+            for cache in caches.iter_mut() {
+                if let Qwen3NextCache::Attention(kv) = cache {
+                    compact_attention_rows(kv, &ve_pre, accepted, o_pre, o_post);
+                    let roll_back = o_pre + block_size - o_post;
+                    if roll_back > 0 {
+                        kv.trim(roll_back);
+                    }
+                }
+            }
+            self.replay_gdn_rows(caches, gdn_states, accepted, o_post);
+            return accepted.iter().copied().max().unwrap_or(0);
+        }
 
         // Attention caches: trim by `trim`, the same in every row.
         for cache in caches.iter_mut() {
@@ -2733,8 +2836,6 @@ impl Qwen35Model {
             }
         }
 
-        // GDN caches: replay the captured block over `[:, :n]` so the
-        // post-block state matches the accepted-prefix position.
         let mut snapshot_iter = gdn_states.iter();
         for (layer_idx, cache) in caches.iter_mut().enumerate() {
             let Qwen3NextCache::Linear(linear_cache) = cache else {
@@ -2825,14 +2926,16 @@ impl Qwen35Model {
 
             // Recover conv_state from the captured conv_input:
             // cache = conv_input[:, a+1 : a+K]  (K = conv_kernel_size), one
-            // window for every row because the accept is uniform.
+            // window for every row because the accept is uniform. The window
+            // length is `kernel - 1`, the same contract
+            // `forward_hidden_internal_with_capture` maintains.
             let k_kernel = layer.conv_kernel_size as i32;
             let conv_shape = mlxcel_core::array_shape(&snap.conv_input);
             let conv_dim = conv_shape[2];
             let window = mlxcel_core::slice(
                 &snap.conv_input,
-                &[0, max_a + 1, 0],
-                &[conv_shape[0], max_a + k_kernel, conv_dim],
+                &[0, n, 0],
+                &[conv_shape[0], n + k_kernel - 1, conv_dim],
             );
             linear_cache.conv_state = Some(mlxcel_core::contiguous(&window, false));
 
@@ -2844,6 +2947,107 @@ impl Qwen35Model {
         }
 
         max_a
+    }
+
+    /// Replay every linear-attention layer's GDN state over each row's own
+    /// accepted prefix (issue #2442).
+    ///
+    /// The conv and recurrent states are per-row already, but their valid
+    /// lengths are not: one batched replay over `max(accepted)` would advance
+    /// a short row through positions it rejected. Each row is therefore
+    /// sliced and replayed with the chain-parity kernel at its own length, and
+    /// the results are stacked back into the `[B, ...]` cache tensors.
+    fn replay_gdn_rows(
+        &self,
+        caches: &mut [Qwen3NextCache],
+        gdn_states: &[GdnRollbackSnapshot],
+        accepted: &[i32],
+        o_post: i32,
+    ) {
+        let mut snapshot_iter = gdn_states.iter();
+        for (layer_idx, cache) in caches.iter_mut().enumerate() {
+            let Qwen3NextCache::Linear(linear_cache) = cache else {
+                continue;
+            };
+            let snap = match snapshot_iter.next() {
+                Some(s) => s,
+                None => continue,
+            };
+            debug_assert_eq!(snap.layer_idx, layer_idx);
+            let layer = match &self.layers[layer_idx].attention {
+                Qwen35AttentionVariant::Linear(linear) => linear,
+                _ => continue,
+            };
+            let k_kernel = layer.conv_kernel_size as i32;
+            let q_shape = mlxcel_core::array_shape(&snap.q);
+            let v_shape = mlxcel_core::array_shape(&snap.v);
+            let a_shape = mlxcel_core::array_shape(&snap.a);
+            let conv_shape = mlxcel_core::array_shape(&snap.conv_input);
+            let conv_dim = conv_shape[2];
+
+            let mut state_acc: Option<UniquePtr<MlxArray>> = None;
+            let mut conv_acc: Option<UniquePtr<MlxArray>> = None;
+            for (r, &a) in accepted.iter().enumerate() {
+                let n = a + 1;
+                let bi = r as i32;
+                let q_n = mlxcel_core::slice(
+                    &snap.q,
+                    &[bi, 0, 0, 0],
+                    &[bi + 1, n, q_shape[2], q_shape[3]],
+                );
+                let k_n = mlxcel_core::slice(
+                    &snap.k,
+                    &[bi, 0, 0, 0],
+                    &[bi + 1, n, q_shape[2], q_shape[3]],
+                );
+                let v_n = mlxcel_core::slice(
+                    &snap.v,
+                    &[bi, 0, 0, 0],
+                    &[bi + 1, n, v_shape[2], v_shape[3]],
+                );
+                let a_n = mlxcel_core::slice(&snap.a, &[bi, 0, 0], &[bi + 1, n, a_shape[2]]);
+                let b_n = mlxcel_core::slice(&snap.b, &[bi, 0, 0], &[bi + 1, n, a_shape[2]]);
+                let init_row = snap.init_state.as_ref().map(|state| {
+                    let s = mlxcel_core::array_shape(state);
+                    mlxcel_core::copy(&mlxcel_core::slice(
+                        state,
+                        &[bi, 0, 0, 0],
+                        &[bi + 1, s[1], s[2], s[3]],
+                    ))
+                });
+                let (_y, state_row) = gated_delta_update_chain_parity(
+                    &q_n,
+                    &k_n,
+                    &v_n,
+                    &a_n,
+                    &b_n,
+                    &layer.a_log,
+                    &layer.dt_bias,
+                    init_row.as_deref(),
+                    None,
+                );
+                state_acc = Some(match state_acc {
+                    None => state_row,
+                    Some(prev) => mlxcel_core::concatenate(&prev, &state_row, 0),
+                });
+
+                let conv_row = mlxcel_core::contiguous(
+                    &mlxcel_core::slice(
+                        &snap.conv_input,
+                        &[bi, n, 0],
+                        &[bi + 1, n + k_kernel - 1, conv_dim],
+                    ),
+                    false,
+                );
+                conv_acc = Some(match conv_acc {
+                    None => conv_row,
+                    Some(prev) => mlxcel_core::concatenate(&prev, &conv_row, 0),
+                });
+            }
+            linear_cache.state_cache = state_acc;
+            linear_cache.conv_state = conv_acc;
+            linear_cache.offset = o_post;
+        }
     }
 
     // === Sequence-routed speculative hooks (MTP target adapter) ============
@@ -3120,16 +3324,76 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
         accepted: &[i32],
         block_size: i32,
     ) {
-        // For B > 1 the rollback path uses the same `rollback_speculative_cache`
-        // entrypoint with a multi-element `accepted` slice, which the batched
-        // round loop guarantees is uniform (issue #2353); the method asserts
-        // it.
+        // Uniform batched rollback (issue #2353). The per-row arm (issue
+        // #2442) comes through `rollback_partial_batched_rows` below instead.
         //
         // Apple Silicon precision (`docs/apple-silicon-precision.md`):
         // the GDN replay tensors keep their captured dtype (bf16/f16
         // activations + float32 init_state); no f32 promotion.
         let _ =
             self.rollback_speculative_cache(caches, &verify_out.gdn_states, accepted, block_size);
+    }
+
+    /// Qwen 3.5 can commit per-row accepts (issue #2442): its attention KV is
+    /// compacted per row and its GDN state replayed per row.
+    fn supports_per_row_accepts(&self) -> bool {
+        true
+    }
+
+    /// The per-row rollback compacts dense Fp16 attention caches. A quantized
+    /// or paged KV mode keeps its own sidecars and head trim, so such a burst
+    /// stays on the uniform clamp rather than corrupting the cache.
+    fn row_layout_supported(&self, caches: &[Self::Cache]) -> bool {
+        caches.iter().all(|cache| match cache {
+            Qwen3NextCache::Attention(kv) => {
+                kv.mode == KVCacheMode::Fp16
+                    && !kv.is_paged_backed()
+                    && kv.offset - kv.live_len() == 0
+            }
+            Qwen3NextCache::Linear(_) => true,
+        })
+    }
+
+    fn batch_cache_offset(caches: &[Self::Cache]) -> i32 {
+        caches
+            .iter()
+            .find_map(|cache| match cache {
+                Qwen3NextCache::Attention(kv) => Some(kv.offset),
+                Qwen3NextCache::Linear(_) => None,
+            })
+            .unwrap_or(0)
+    }
+
+    fn verify_forward_with_row_layout(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+        row_valid_ends: &[i32],
+    ) -> Self::VerifyOut {
+        let capture_layer_ids = if capture_layer_ids.is_empty() {
+            mlxcel_core::drafter::dflash::config::DEFAULT_TARGET_LAYER_IDS
+        } else {
+            capture_layer_ids
+        };
+        self.forward_speculative_rows(verify_input, caches, capture_layer_ids, row_valid_ends)
+    }
+
+    fn rollback_partial_batched_rows(
+        &self,
+        caches: &mut [Self::Cache],
+        verify_out: &Self::VerifyOut,
+        accepted: &[i32],
+        row_valid_ends_pre: &[i32],
+        block_size: i32,
+    ) {
+        let _ = self.rollback_speculative_cache_rows(
+            caches,
+            &verify_out.gdn_states,
+            accepted,
+            Some(row_valid_ends_pre),
+            block_size,
+        );
     }
 
     fn concat_hidden_for_drafter(&self, verify_out: &Self::VerifyOut) -> UniquePtr<MlxArray> {
@@ -3158,24 +3422,113 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
     }
 }
 
-/// Panic unless every row of a batched speculative rollback accepted the same
-/// count (issue #2353).
+/// Move each row's accepted verify block back to that row's own logical valid
+/// end, restoring a contiguous `[0, valid_end)` prefix in a shared,
+/// rectangular attention cache (issue #2442).
 ///
-/// The Qwen 3.5 attention caches are rectangular (one shared offset, no
-/// per-row valid end), so a ragged accept could only be represented by
-/// zeroing the shorter rows' rejected tails, and a zero key is still
-/// attended. The batched DFlash round loop clamps every round to a uniform
-/// accept; reaching here with a ragged slice is a round-loop bug, and failing
-/// loudly beats emitting fluent, wrong text.
+/// The block arrived at the shared physical offset `o_pre`; row `r` accepted
+/// `accepted[r] + 1` of its positions, which move to
+/// `[row_valid_ends_pre[r], row_valid_ends_pre[r] + accepted[r] + 1)`. The
+/// vacated gap up to `o_post` (the maximum new valid end) is zeroed so a
+/// maskless fallback cannot read stale keys. The caller trims the cache
+/// offset to `o_post` afterwards.
 ///
-/// Used by: [`Qwen35Model::rollback_speculative_cache`].
-pub(crate) fn assert_uniform_batched_accepts(accepted: &[i32]) {
-    assert!(
-        accepted.iter().all(|&a| a == accepted[0]),
-        "Qwen 3.5 batched speculative rollback requires uniform per-row acceptance: \
-         the attention caches are rectangular and cannot exclude a shorter row's \
-         rejected tail; got ragged accepts {accepted:?}"
+/// The DFlash batched path only ever builds plain Fp16 caches, so there are
+/// no quantization sidecars to move; a cache that is paged or head-trimmed is
+/// a caller bug on this path and panics rather than silently corrupting.
+///
+/// Used by: [`Qwen35Model::rollback_speculative_cache_rows`].
+pub(crate) fn compact_attention_rows(
+    kv: &mut KVCache,
+    row_valid_ends_pre: &[i32],
+    accepted: &[i32],
+    o_pre: i32,
+    o_post: i32,
+) {
+    assert_eq!(
+        row_valid_ends_pre.len(),
+        accepted.len(),
+        "compact_attention_rows: one valid end per accepted row"
     );
+    assert_eq!(
+        kv.mode,
+        KVCacheMode::Fp16,
+        "per-row DFlash rollback requires a plain Fp16 attention cache; got {:?}",
+        kv.mode
+    );
+    assert!(
+        !kv.is_paged_backed(),
+        "per-row DFlash rollback requires a dense attention cache, not a paged one"
+    );
+    assert_eq!(
+        kv.offset - kv.live_len(),
+        0,
+        "per-row DFlash rollback requires an uncompacted (non head-trimmed) cache"
+    );
+    let (Some(keys), Some(values)) = (kv.keys.as_ref(), kv.values.as_ref()) else {
+        return;
+    };
+    let k_shape = mlxcel_core::array_shape(keys);
+    let v_shape = mlxcel_core::array_shape(values);
+    if k_shape[0] as usize != accepted.len() {
+        return;
+    }
+    let k_dtype = mlxcel_core::array_dtype(keys);
+    let v_dtype = mlxcel_core::array_dtype(values);
+
+    let mut new_keys = mlxcel_core::copy(keys);
+    let mut new_values = mlxcel_core::copy(values);
+    for (r, (&ve, &a)) in row_valid_ends_pre.iter().zip(accepted).enumerate() {
+        let n = a + 1;
+        let bi = r as i32;
+        if ve < o_pre {
+            // Materialize the source before the update: `slice_update` may
+            // donate the buffer, and an overlapping move would then read
+            // already-overwritten rows.
+            let src_k = mlxcel_core::copy(&mlxcel_core::slice(
+                &new_keys,
+                &[bi, 0, o_pre, 0],
+                &[bi + 1, k_shape[1], o_pre + n, k_shape[3]],
+            ));
+            new_keys = mlxcel_core::slice_update(
+                &new_keys,
+                &src_k,
+                &[bi, 0, ve, 0],
+                &[bi + 1, k_shape[1], ve + n, k_shape[3]],
+            );
+            let src_v = mlxcel_core::copy(&mlxcel_core::slice(
+                &new_values,
+                &[bi, 0, o_pre, 0],
+                &[bi + 1, v_shape[1], o_pre + n, v_shape[3]],
+            ));
+            new_values = mlxcel_core::slice_update(
+                &new_values,
+                &src_v,
+                &[bi, 0, ve, 0],
+                &[bi + 1, v_shape[1], ve + n, v_shape[3]],
+            );
+        }
+        let z_start = ve + n;
+        if z_start < o_post {
+            let span = o_post - z_start;
+            let k_zero = mlxcel_core::zeros(&[1, k_shape[1], span, k_shape[3]], k_dtype);
+            let v_zero = mlxcel_core::zeros(&[1, v_shape[1], span, v_shape[3]], v_dtype);
+            new_keys = mlxcel_core::slice_update(
+                &new_keys,
+                &k_zero,
+                &[bi, 0, z_start, 0],
+                &[bi + 1, k_shape[1], o_post, k_shape[3]],
+            );
+            new_values = mlxcel_core::slice_update(
+                &new_values,
+                &v_zero,
+                &[bi, 0, z_start, 0],
+                &[bi + 1, v_shape[1], o_post, v_shape[3]],
+            );
+        }
+    }
+    kv.keys = Some(new_keys);
+    kv.values = Some(new_values);
 }
 
 pub(crate) struct Qwen35StageModel {

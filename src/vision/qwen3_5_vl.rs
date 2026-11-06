@@ -238,6 +238,62 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35VLModel {
         );
     }
 
+    fn supports_per_row_accepts(&self) -> bool {
+        <crate::models::Qwen35Model as mlxcel_core::drafter::dflash::SpeculativeTarget>::supports_per_row_accepts(
+            &self.text_model,
+        )
+    }
+
+    fn row_layout_supported(&self, caches: &[Self::Cache]) -> bool {
+        <crate::models::Qwen35Model as mlxcel_core::drafter::dflash::SpeculativeTarget>::row_layout_supported(
+            &self.text_model,
+            caches,
+        )
+    }
+
+    fn batch_cache_offset(caches: &[Self::Cache]) -> i32 {
+        <crate::models::Qwen35Model as mlxcel_core::drafter::dflash::SpeculativeTarget>::batch_cache_offset(
+            caches,
+        )
+    }
+
+    fn verify_forward_with_row_layout(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+        row_valid_ends: &[i32],
+    ) -> Self::VerifyOut {
+        let capture_layer_ids = if capture_layer_ids.is_empty() {
+            mlxcel_core::drafter::dflash::config::DEFAULT_TARGET_LAYER_IDS
+        } else {
+            capture_layer_ids
+        };
+        self.text_model.forward_speculative_rows(
+            verify_input,
+            caches,
+            capture_layer_ids,
+            row_valid_ends,
+        )
+    }
+
+    fn rollback_partial_batched_rows(
+        &self,
+        caches: &mut [Self::Cache],
+        verify_out: &Self::VerifyOut,
+        accepted: &[i32],
+        row_valid_ends_pre: &[i32],
+        block_size: i32,
+    ) {
+        let _ = self.text_model.rollback_speculative_cache_rows(
+            caches,
+            &verify_out.gdn_states,
+            accepted,
+            Some(row_valid_ends_pre),
+            block_size,
+        );
+    }
+
     fn concat_hidden_for_drafter(&self, verify_out: &Self::VerifyOut) -> UniquePtr<MlxArray> {
         debug_assert!(
             !verify_out.hidden_states.is_empty(),

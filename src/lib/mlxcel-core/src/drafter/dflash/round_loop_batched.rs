@@ -21,7 +21,7 @@
 //!
 //! ## Scope
 //!
-//! **B >= 1, with continuous batching and a uniform per-round accept.**
+//! **B >= 1, with continuous batching and per-row accept commits.**
 //! The B = 1 fast path lives in the sibling
 //! [`crate::drafter::dflash::round_loop`] module (sub-12)
 //! and must NOT regress as a result of this implementation. The two
@@ -36,18 +36,20 @@
 //!    of per-row emitted tokens. Rows in different speculative-walk
 //!    states share the same verify-forward pass but diverge on what
 //!    they accept.
-//! 2. **Uniform per-round accept (issue #2353).** The target's batched
-//!    caches are rectangular: one rollback keeps the same number of
-//!    verify positions in every row. When the live rows' walks disagree,
-//!    `clamp_uniform_acceptance` cuts every row back to the shortest
-//!    live row's accept before anything is emitted, so the
-//!    [`SpeculativeTarget::rollback_partial_batched`] hook always
-//!    receives a uniform `&[i32]` slice. Zeroing a short row's rejected
-//!    tail instead is not enough: a zero key still scores `q . 0 = 0`,
-//!    takes `exp(0)` weight in the softmax and dilutes that row's
-//!    attention on every later step. The walk's own counts stay in
-//!    [`DFlashBatchedRunOutput::accept_lens`]; the committed ones are in
-//!    [`DFlashBatchedRunOutput::committed_accept_lens`].
+//! 2. **Per-row accept commits (issue #2442), with the uniform clamp of
+//!    issue #2353 behind `MLXCEL_DFLASH_PER_ROW_ACCEPTS=0`.** A target
+//!    that reports [`SpeculativeTarget::supports_per_row_accepts`] and
+//!    allows it for the current caches commits each row's own count: the
+//!    target compacts each row's accepted block back to that row's logical
+//!    end, masks the resulting stale gap from attention, rotates the block
+//!    at per-row positions, and replays each GDN layer's state over the
+//!    row's own prefix. Zeroing a short row's rejected tail is not enough:
+//!    a zero key still scores `q . 0 = 0`, takes `exp(0)` weight in the
+//!    softmax and dilutes that row's attention on every later step. The
+//!    clamp arm remains for A/B attribution and for quantized or paged
+//!    caches that cannot be compacted row by row. The walk's own counts
+//!    stay in [`DFlashBatchedRunOutput::accept_lens`]; the committed ones
+//!    are in [`DFlashBatchedRunOutput::committed_accept_lens`].
 //! 3. **Per-row early-EOS / max-tokens stop.** When a row hits EOS or
 //!    saturates `max_new_tokens`, it is frozen in place: subsequent
 //!    verify-forwards still include that row (the batch shape stays
@@ -265,16 +267,18 @@ pub struct DFlashBatchedRunOutput {
     /// — the caller is expected to have already streamed those out).
     pub tokens: Vec<Vec<i32>>,
     /// Per-round, per-row accept counts as the speculative walk measured
-    /// them, before the uniform-accept clamp. `accept_lens[r][i]` is the
-    /// accept count for row `r` on round `i`.
+    /// them, before any accept policy. `accept_lens[r][i]` is the accept
+    /// count for row `r` on round `i`.
     pub accept_lens: Vec<Vec<u32>>,
-    /// Per-round, per-row accept counts the round committed to the
-    /// target's caches, after the uniform-accept clamp. Every row of a
-    /// round carries the same value; a live row emitted
-    /// `committed_accept_lens[r][i] + 1` tokens on round `i`.
+    /// Per-round, per-row accept counts the round committed to the target's
+    /// caches. Under the uniform clamp every row of a round carries the same
+    /// value; under per-row accepts (issue #2442) each row carries its own
+    /// walk count. A live row emitted `committed_accept_lens[r][i] + 1`
+    /// tokens on round `i`.
     pub committed_accept_lens: Vec<Vec<u32>>,
     /// Rounds whose live rows accepted different counts and were clamped to
-    /// the shortest one (see `clamp_uniform_acceptance`).
+    /// the shortest one (see `clamp_uniform_acceptance`). Always 0 under
+    /// per-row accepts.
     pub clamped_rounds: usize,
     /// Wall-clock decode statistics. Prefill is the caller's
     /// responsibility (the loop runs after prefill).
@@ -296,6 +300,32 @@ pub struct DFlashBatchedGenerator {
     /// [`super::round_loop::DEFAULT_MASK_TOKEN_ID`]).
     #[allow(dead_code)]
     mask_token_id: i32,
+    /// Commit each row's own accept count instead of clamping the round to
+    /// the shortest live row (issue #2442). Requires a target that reports
+    /// [`SpeculativeTarget::supports_per_row_accepts`].
+    per_row_accepts: bool,
+}
+
+/// Environment switch for the per-row accept port of issue #2442.
+///
+/// Per-row accepts are the default: on this host they measured 1.397x the
+/// uniform clamp's aggregate throughput at B = 4 (committed accepts 1.036
+/// against the clamp's 0.323 per row-round). Set `0` to restore the clamp.
+pub const PER_ROW_ACCEPTS_ENV: &str = "MLXCEL_DFLASH_PER_ROW_ACCEPTS";
+
+/// Default for [`DFlashBatchedGenerator::per_row_accepts`]: on unless
+/// [`PER_ROW_ACCEPTS_ENV`](constant@PER_ROW_ACCEPTS_ENV) turns it off.
+fn per_row_accepts_default() -> bool {
+    match std::env::var(PER_ROW_ACCEPTS_ENV) {
+        Ok(raw) => {
+            let value = raw.trim();
+            !(value == "0"
+                || value.eq_ignore_ascii_case("false")
+                || value.eq_ignore_ascii_case("off")
+                || value.eq_ignore_ascii_case("no"))
+        }
+        Err(_) => true,
+    }
 }
 
 impl DFlashBatchedGenerator {
@@ -312,7 +342,19 @@ impl DFlashBatchedGenerator {
             sampler,
             block_size,
             mask_token_id,
+            per_row_accepts: per_row_accepts_default(),
         }
+    }
+
+    /// Override the per-row accept policy (issue #2442).
+    ///
+    /// Measurement and tests set this explicitly so both arms run in one
+    /// process; the production default comes from
+    /// [`PER_ROW_ACCEPTS_ENV`](constant@PER_ROW_ACCEPTS_ENV).
+    #[must_use]
+    pub fn with_per_row_accepts(mut self, enabled: bool) -> Self {
+        self.per_row_accepts = enabled;
+        self
     }
 
     /// Convenience constructor that uses the default block size and
@@ -447,6 +489,21 @@ impl DFlashBatchedGenerator {
         let mut emitted: Vec<usize> = vec![1; batch_size];
         let mut finished: Vec<bool> = vec![false; batch_size];
 
+        // Per-row accept layout (issue #2442). `row_valid_ends[r]` is row
+        // `r`'s logical target position count: the length of the contiguous
+        // valid prefix in its cache. All rows start at the prefill offset and
+        // then diverge by their own accepts. The uniform-clamp arm leaves this
+        // empty and never reads it.
+        let per_row = self.per_row_accepts
+            && target.supports_per_row_accepts()
+            && target.row_layout_supported(caches);
+        let mut row_valid_ends: Vec<i32> = if per_row {
+            let offset = T::batch_cache_offset(caches);
+            vec![offset; batch_size]
+        } else {
+            Vec::new()
+        };
+
         // Hidden tensor of shape [B, T, dim]; T grows / shrinks each
         // round per the captured-hidden slice contract.
         let mut hidden: UniquePtr<MlxArray> = first_hidden;
@@ -520,11 +577,16 @@ impl DFlashBatchedGenerator {
                 verify_buf.extend_from_slice(&draft_tokens_per_row[r]);
             }
             let verify_input = ffi::from_slice_i32(&verify_buf, &[batch_size as i32, bs as i32]);
-            let verify_out = target.verify_forward_with_capture_layers(
-                &verify_input,
-                caches,
-                &capture_layer_ids,
-            );
+            let verify_out = if per_row {
+                target.verify_forward_with_row_layout(
+                    &verify_input,
+                    caches,
+                    &capture_layer_ids,
+                    &row_valid_ends,
+                )
+            } else {
+                target.verify_forward_with_capture_layers(&verify_input, caches, &capture_layer_ids)
+            };
 
             // ---- Argmax sample (greedy at temp=0) of the per-row logits ----
             let target_tokens_per_row = argmax_logits_per_row(
@@ -549,12 +611,19 @@ impl DFlashBatchedGenerator {
                 accept_lens_per_row[r].push(accepted_per_row[r] as u32);
             }
 
-            // ---- Uniform accept (issue #2353) ----
-            // The rectangular caches cannot hold ragged accepts, so every
-            // row commits the shortest live row's accept, before any token
-            // is emitted. Everything below (emit, bonus, hidden slice,
-            // rollback) reads the clamped values.
-            if clamp_uniform_acceptance(&mut accepted_per_row, &mut new_tokens_per_row, &finished) {
+            // ---- Accept (uniform clamp or per-row, issue #2442) ----
+            // The clamp arm commits the shortest live row's accept into the
+            // rectangular caches before any token is emitted. The per-row arm
+            // commits each row's own walk count; the target compacts its
+            // per-row cache prefixes and replays GDN state in the rollback
+            // below. `clamped_rounds` stays 0 on the per-row arm.
+            if !per_row
+                && clamp_uniform_acceptance(
+                    &mut accepted_per_row,
+                    &mut new_tokens_per_row,
+                    &finished,
+                )
+            {
                 clamped_rounds += 1;
             }
             for r in 0..batch_size {
@@ -611,13 +680,27 @@ impl DFlashBatchedGenerator {
             //       hidden = hidden_full[:, : max_a + 1, :]
             //   else:
             //       hidden = hidden_full
-            // After the clamp `min_accepted == max_accepted`, so the drafter
-            // context for the next round matches the committed accept.
+            //
+            // The clamp arm has `min_accepted == max_accepted`, so its drafter
+            // context matches the committed accept. The per-row arm keeps the
+            // drafter's context rectangular (and identical to what the clamp
+            // arm would have fed it) at the shortest live row's committed
+            // prefix; rows that committed more re-verify their extra tokens
+            // through the target, which is what keeps the emitted stream exact.
             let min_accepted = accepted_per_row.iter().copied().min().unwrap_or(0);
             let max_accepted = accepted_per_row.iter().copied().max().unwrap_or(0);
+            let drafter_ctx = if per_row {
+                (0..batch_size)
+                    .filter(|&r| !finished[r])
+                    .map(|r| accepted_per_row[r] + 1)
+                    .min()
+                    .unwrap_or(1)
+            } else {
+                max_accepted + 1
+            };
 
             let full_hidden = target.concat_hidden_for_drafter(&verify_out);
-            hidden = if min_accepted + 1 < bs {
+            hidden = if drafter_ctx < bs {
                 let full_shape = ffi::array_shape(&full_hidden);
                 debug_assert_eq!(
                     full_shape.len(),
@@ -627,26 +710,40 @@ impl DFlashBatchedGenerator {
                 ffi::slice(
                     &full_hidden,
                     &[0, 0, 0],
-                    &[full_shape[0], max_accepted as i32 + 1, full_shape[2]],
+                    &[full_shape[0], drafter_ctx as i32, full_shape[2]],
                 )
             } else {
                 full_hidden
             };
 
-            // ---- Rollback (only when the round accepted less than bs - 1) ----
+            // ---- Rollback ----
             //
-            // The verify forward advanced every row's caches by `bs`
-            // tokens. Every row committed the same `accepted` drafter
-            // proposals + 1 bonus (the clamp above), so the rollback keeps
-            // `accepted + 1` positions in every row and trims
-            // `bs - (accepted + 1)`.
-            debug_assert_eq!(
-                min_accepted, max_accepted,
-                "the uniform-accept clamp must leave one accept count per round"
-            );
-            if min_accepted + 1 < bs {
-                let accepted_i32: Vec<i32> = accepted_per_row.iter().map(|&a| a as i32).collect();
-                target.rollback_partial_batched(caches, &verify_out, &accepted_i32, bs as i32);
+            // The verify forward advanced every row's caches by `bs` tokens.
+            // The clamp arm committed the same `accepted` in every row, so it
+            // trims `bs - (accepted + 1)` and replays one uniform prefix. The
+            // per-row arm hands each row's own accepted prefix to the target,
+            // which compacts the attention caches back to per-row contiguous
+            // prefixes and replays each row's GDN state over its own prefix.
+            let accepted_i32: Vec<i32> = accepted_per_row.iter().map(|&a| a as i32).collect();
+            if per_row {
+                target.rollback_partial_batched_rows(
+                    caches,
+                    &verify_out,
+                    &accepted_i32,
+                    &row_valid_ends,
+                    bs as i32,
+                );
+                for r in 0..batch_size {
+                    row_valid_ends[r] += accepted_i32[r] + 1;
+                }
+            } else {
+                debug_assert_eq!(
+                    min_accepted, max_accepted,
+                    "the uniform-accept clamp must leave one accept count per round"
+                );
+                if min_accepted + 1 < bs {
+                    target.rollback_partial_batched(caches, &verify_out, &accepted_i32, bs as i32);
+                }
             }
 
             // Periodic memory cache clear, backend-aware cadence (#627): fires when

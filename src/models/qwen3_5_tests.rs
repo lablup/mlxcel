@@ -14,17 +14,18 @@
 
 //! Unit tests for the Qwen 3.5 DFlash speculative-decoding hooks.
 //!
-//! These tests cover the *standalone* helpers (the uniform-accept guard of the
-//! batched rollback, and `sanitize_weights`'s MTP-stripping path) without
-//! requiring a real model checkpoint, plus a one-layer synthetic model for the
-//! batched `rollback_speculative_cache` contract. The end-to-end real-checkpoint
-//! `forward_speculative` + `rollback_speculative_cache` round trip is exercised
-//! by integration tests gated behind hardware availability.
+//! These tests cover the *standalone* helpers (the per-row attention-cache
+//! compaction of the ragged batched rollback, and `sanitize_weights`'s
+//! MTP-stripping path) without requiring a real model checkpoint, plus a
+//! one-layer synthetic model for the batched `rollback_speculative_cache`
+//! contract. The end-to-end real-checkpoint `forward_speculative` +
+//! `rollback_speculative_cache` round trip is exercised by integration tests
+//! gated behind hardware availability.
 
 use super::qwen3_5::{
     MRopePositionSource, Qwen35Config, Qwen35Model, Qwen35UnsupportedConfig,
-    assert_uniform_batched_accepts, eos_token_ids_from_config, mrope_position_source,
-    sanitize_weights, validate_qwen35_wrapper_config,
+    compact_attention_rows, eos_token_ids_from_config, mrope_position_source, sanitize_weights,
+    validate_qwen35_wrapper_config,
 };
 use super::qwen3_next::Qwen3NextCache;
 use mlxcel_core::cache::SequenceId;
@@ -77,23 +78,87 @@ fn make_tiny_config() -> Qwen35Config {
 }
 
 // ---------------------------------------------------------------------------
-// Batched speculative rollback requires a uniform accept (issue #2353). The
-// rectangular attention caches cannot exclude a shorter row's rejected tail,
-// so the batched DFlash round loop clamps every round, and a ragged slice that
-// still reaches the rollback panics.
+// Ragged batched rollback (issue #2442). The uniform clamp of #2353 is no
+// longer the only accept policy: the per-row rollback compacts each row's
+// accepted verify block back to that row's own logical end, so the rectangular
+// attention cache again holds a contiguous prefix per row.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn uniform_batched_accepts_pass_the_guard() {
-    assert_uniform_batched_accepts(&[]);
-    assert_uniform_batched_accepts(&[5]);
-    assert_uniform_batched_accepts(&[2, 2, 2, 2]);
+/// One `[B=2, H=1, bs=4, D=2]` attention cache whose row `r` holds the value
+/// `10 * r + position`, so a moved block is identifiable per row.
+fn synthetic_attention_cache() -> mlxcel_core::cache::KVCache {
+    use mlxcel_core::cache::KVCache;
+    let mut cache = KVCache::new();
+    // Two prefill positions, then a 4-token verify block.
+    let mut data = Vec::new();
+    for r in 0..2 {
+        for pos in 0..6 {
+            for d in 0..2 {
+                data.push((10 * r + pos) as f32 * 10.0 + d as f32);
+            }
+        }
+    }
+    let all = mlxcel_core::from_slice_f32(&data, &[2, 1, 6, 2]);
+    let prefill = mlxcel_core::slice(&all, &[0, 0, 0, 0], &[2, 1, 2, 2]);
+    let block = mlxcel_core::slice(&all, &[0, 0, 2, 0], &[2, 1, 6, 2]);
+    let prefill_v = mlxcel_core::copy(&prefill);
+    let _ = cache.update_and_fetch(prefill, prefill_v);
+    let block_v = mlxcel_core::copy(&block);
+    let _ = cache.update_and_fetch(block, block_v);
+    cache
 }
 
 #[test]
-#[should_panic(expected = "requires uniform per-row acceptance")]
-fn ragged_batched_accepts_fail_the_guard() {
-    assert_uniform_batched_accepts(&[3, 1, 2]);
+fn compact_attention_rows_moves_each_row_block_to_its_own_valid_end() {
+    let mut cache = synthetic_attention_cache();
+    // Before: physical offset 6, block at [2, 6).
+    // Row 0 accepted 3 of the 4 block tokens; row 1 accepted all 4.
+    // Both rows' pre-round valid end was the prefill offset 2.
+    compact_attention_rows(&mut cache, &[2, 2], &[2, 3], 2, 6);
+    let keys = cache.keys.as_ref().expect("keys");
+    let shape = mlxcel_core::array_shape(keys);
+    // The Fp16 buffer is allocated in 256-slot steps, so read each row by its
+    // own buffer stride.
+    let stride = (shape[1] * shape[2] * shape[3]) as usize;
+    let bytes = mlxcel_core::array_to_raw_bytes(keys);
+    let vals: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    // Row 0: positions 0..5 = prefill 0,10 then block 20,30,40; the stale
+    // tail (position 5) is zeroed.
+    let row0: Vec<f32> = vals[0..12].iter().step_by(2).copied().collect();
+    assert_eq!(row0, vec![0.0, 10.0, 20.0, 30.0, 40.0, 0.0]);
+    // Row 1: positions 0..6 = prefill 100,110 then block 120,130,140,150.
+    let row1: Vec<f32> = vals[stride..stride + 12]
+        .iter()
+        .step_by(2)
+        .copied()
+        .collect();
+    assert_eq!(row1, vec![100.0, 110.0, 120.0, 130.0, 140.0, 150.0]);
+}
+
+#[test]
+fn compact_attention_rows_is_a_no_op_when_every_row_ends_at_the_offset() {
+    let mut cache = synthetic_attention_cache();
+    compact_attention_rows(&mut cache, &[2, 2], &[3, 3], 2, 6);
+    let keys = cache.keys.as_ref().expect("keys");
+    let shape = mlxcel_core::array_shape(keys);
+    let stride = (shape[1] * shape[2] * shape[3]) as usize;
+    let bytes = mlxcel_core::array_to_raw_bytes(keys);
+    let vals: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    // Every position keeps its original value: no row lagged the offset.
+    let row0: Vec<f32> = vals[0..12].iter().step_by(2).copied().collect();
+    let row1: Vec<f32> = vals[stride..stride + 12]
+        .iter()
+        .step_by(2)
+        .copied()
+        .collect();
+    assert_eq!(row0, vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0]);
+    assert_eq!(row1, vec![100.0, 110.0, 120.0, 130.0, 140.0, 150.0]);
 }
 
 /// A gated-delta layer followed by a full-attention layer, the smallest shape

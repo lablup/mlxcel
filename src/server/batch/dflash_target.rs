@@ -908,7 +908,8 @@ where
                 clamped_rounds = output.clamped_rounds,
                 accept_lens = ?output.accept_lens,
                 committed_accept_lens = ?output.committed_accept_lens,
-                "DFlash batched burst accept lengths (walk vs committed after the uniform-accept clamp)"
+                "DFlash batched burst accept lengths (walk vs committed under the active accept policy; \
+                 clamped_rounds is non-zero only on the uniform-clamp arm)"
             );
             let mut rows: BatchedBurstTokens = Vec::with_capacity(batch_size);
             for (r, row_tokens) in output.tokens.into_iter().enumerate() {

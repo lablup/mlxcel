@@ -620,7 +620,7 @@ impl Qwen3NextAttention {
         mask: Option<&MlxArray>,
         position_ids: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_with_position_ids_verify(x, cache, mask, position_ids, false)
+        self.forward_with_position_ids_verify(x, cache, mask, position_ids, false, None)
     }
 
     /// Variant of [`Self::forward_with_position_ids`] that opts into the
@@ -636,8 +636,13 @@ impl Qwen3NextAttention {
     /// the batched-SDPA-vs-decode logit drift that flips speculative
     /// accept/reject decisions away from the drafter-less greedy pass.
     ///
+    /// `row_valid_ends` carries the per-row logical valid end for a ragged
+    /// batched verify round (issue #2442): rows below the shared physical
+    /// cache offset keep only a shorter contiguous prefix, and the block's
+    /// queries rotate and attend at each row's own logical positions.
+    ///
     /// Used by: `Qwen35DecoderLayer::forward_with_capture` (the Qwen 3.5 MTP
-    /// verify pass).
+    /// verify pass), and the per-row DFlash verify round.
     pub(crate) fn forward_with_position_ids_verify(
         &self,
         x: &MlxArray,
@@ -645,6 +650,7 @@ impl Qwen3NextAttention {
         mask: Option<&MlxArray>,
         position_ids: Option<&MlxArray>,
         target_verify: bool,
+        row_valid_ends: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         let output = self.forward_hidden_with_position_ids_verify(
             x,
@@ -652,6 +658,7 @@ impl Qwen3NextAttention {
             mask,
             position_ids,
             target_verify,
+            row_valid_ends,
         );
         let out = self.o_proj.forward(&output);
         #[cfg(test)]
@@ -666,7 +673,7 @@ impl Qwen3NextAttention {
         mask: Option<&MlxArray>,
         position_ids: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_hidden_with_position_ids_verify(x, cache, mask, position_ids, false)
+        self.forward_hidden_with_position_ids_verify(x, cache, mask, position_ids, false, None)
     }
 
     /// Native multi-sequence decode for the tensor-parallel Qwen 3.5 runtime.
@@ -745,6 +752,7 @@ impl Qwen3NextAttention {
         mask: Option<&MlxArray>,
         position_ids: Option<&MlxArray>,
         target_verify: bool,
+        row_valid_ends: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
@@ -787,8 +795,23 @@ impl Qwen3NextAttention {
 
         let offset = cache.offset;
 
+        // Per-row (ragged) batched verify round (issue #2442): rows whose
+        // logical valid end lags the shared physical cache offset keep only a
+        // shorter contiguous prefix, so the block's queries and keys rotate at
+        // each row's own positions instead of the shared offset.
+        let divergent_rows: Option<&[i32]> = row_valid_ends.filter(|ends| {
+            target_verify
+                && l > 1
+                && ends.len() == b as usize
+                && ends.iter().any(|&end| end != offset)
+        });
+
         // Apply RoPE (standard or MRoPE with position_ids)
         if let (Some(mrope), Some(pos_ids)) = (&self.mrope, position_ids) {
+            assert!(
+                divergent_rows.is_none(),
+                "per-row DFlash verify is not supported with MRoPE position ids"
+            );
             // Interleaved MRoPE for VLM
             let (cos, sin) = mrope.forward(pos_ids);
             let embed_dtype = mlxcel_core::array_dtype(&queries);
@@ -814,6 +837,12 @@ impl Qwen3NextAttention {
                 super::qwen3_vl::apply_multimodal_rotary_pos_emb(&q_rot, &k_rot, &cos, &sin);
             queries = mlxcel_core::concatenate(&q_embed, &q_pass, -1);
             keys = mlxcel_core::concatenate(&k_embed, &k_pass, -1);
+        } else if let Some(ends) = divergent_rows {
+            // Each row rotates its window at its own logical positions, so the
+            // relative RoPE distance to that row's valid history stays what a
+            // B = 1 chain would see.
+            queries = self.apply_rope_per_row(&queries, ends);
+            keys = self.apply_rope_per_row(&keys, ends);
         } else if target_verify && l > 1 && b == 1 && self.verify_rope_rows {
             // Verify block on CUDA: rotate each row through the same `L = 1`
             // call classic decode makes for that token, so the block's
@@ -864,7 +893,9 @@ impl Qwen3NextAttention {
         // decode. This mirrors upstream `Qwen3_5Attention.__call__`'s
         // `target_verify and L > 1` branch and keeps the verify logits from
         // drifting away from the drafter-less greedy decode.
-        let attn_out = if target_verify && l > 1 {
+        let attn_out = if let Some(ends) = divergent_rows {
+            self.attend_per_position_rows(&queries, &cache_k, &cache_v, offset, ends)
+        } else if target_verify && l > 1 {
             self.attend_per_position(&queries, &cache_k, &cache_v)
         } else if l > 1 && mask.is_none() {
             mlxcel_core::causal_attention(&queries, &cache_k, &cache_v, self.scale, 0.0, 0)
@@ -939,6 +970,104 @@ impl Qwen3NextAttention {
             });
         }
         out.expect("attend_per_position requires l_q >= 1")
+    }
+
+    /// Rotate `[B, H, L, D]` query or key rows at per-row start offsets.
+    ///
+    /// Used by the per-row DFlash verify round (issue #2442): after a ragged
+    /// accept, row `r`'s window starts at its own logical valid end
+    /// `row_valid_ends[r]`, not at the shared physical cache offset.
+    fn apply_rope_per_row(&self, x: &MlxArray, row_valid_ends: &[i32]) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        debug_assert_eq!(shape.len(), 4, "rope input must be [B, H, L, D]");
+        let b = shape[0] as usize;
+        debug_assert_eq!(
+            b,
+            row_valid_ends.len(),
+            "apply_rope_per_row: one offset per batch row"
+        );
+        if b == 1 {
+            return mlxcel_core::fast_rope(
+                x,
+                self.rope_dims,
+                false,
+                self.rope_base,
+                1.0,
+                row_valid_ends[0],
+            );
+        }
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        for (r, &offset) in row_valid_ends.iter().enumerate() {
+            let row = mlxcel_core::slice(
+                x,
+                &[r as i32, 0, 0, 0],
+                &[r as i32 + 1, shape[1], shape[2], shape[3]],
+            );
+            let rotated =
+                mlxcel_core::fast_rope(&row, self.rope_dims, false, self.rope_base, 1.0, offset);
+            out = Some(match out {
+                None => rotated,
+                Some(prev) => mlxcel_core::concatenate(&prev, &rotated, 0),
+            });
+        }
+        out.expect("apply_rope_per_row requires b >= 1")
+    }
+
+    /// Per-query-position causal attention for a ragged batched verify block
+    /// (issue #2442).
+    ///
+    /// Row `r` keeps a contiguous valid history `[0, row_valid_ends[r])`, a
+    /// stale gap up to the shared physical `offset`, and this block's keys at
+    /// `[offset, offset + j]` for query `j`. One additive mask
+    /// (`build_divergent_row_mask`) encodes all three, and query `j` slices the
+    /// exact key width it would see in a B = 1 chain. Both blocks of
+    /// [0, offset + j + 1) that a row must not see are `-inf`.
+    fn attend_per_position_rows(
+        &self,
+        queries: &MlxArray,
+        keys: &MlxArray,
+        values: &MlxArray,
+        offset: i32,
+        row_valid_ends: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let q_shape = mlxcel_core::array_shape(queries);
+        let k_shape = mlxcel_core::array_shape(keys);
+        let v_shape = mlxcel_core::array_shape(values);
+        let b = q_shape[0];
+        let n_q_heads = q_shape[1];
+        let l_q = q_shape[2];
+        let head_dim = q_shape[3];
+        let n_kv_heads = k_shape[1];
+        debug_assert_eq!(
+            row_valid_ends.len(),
+            b as usize,
+            "attend_per_position_rows: one valid end per batch row"
+        );
+        let no_padding = vec![0_i32; b as usize];
+        let mask = mlxcel_core::utils::build_divergent_row_mask(
+            l_q,
+            offset,
+            row_valid_ends,
+            &no_padding,
+            None,
+        );
+
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        for j in 0..l_q {
+            let q_j = mlxcel_core::slice(queries, &[0, 0, j, 0], &[b, n_q_heads, j + 1, head_dim]);
+            let kv_len = offset + j + 1;
+            let k_j = mlxcel_core::slice(keys, &[0, 0, 0, 0], &[b, n_kv_heads, kv_len, head_dim]);
+            let v_j =
+                mlxcel_core::slice(values, &[0, 0, 0, 0], &[b, n_kv_heads, kv_len, v_shape[3]]);
+            let mask_j = mlxcel_core::slice(&mask, &[0, 0, j, 0], &[b, 1, j + 1, kv_len]);
+            let attn_j =
+                mlxcel_core::layers::attention(&q_j, &k_j, &v_j, self.scale, Some(&mask_j), 0.0, 0);
+            out = Some(match out {
+                None => attn_j,
+                Some(prev) => mlxcel_core::concatenate(&prev, &attn_j, 2),
+            });
+        }
+        out.expect("attend_per_position_rows requires l_q >= 1")
     }
 
     pub(crate) fn from_weights(
