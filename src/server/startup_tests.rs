@@ -2697,3 +2697,51 @@ async fn stage_shutdown_runs_when_the_signal_handler_fails() {
         "the stage shutdown must run even when the signal handler failed"
     );
 }
+
+// `chat_front_unused` decides whether `start_server` may skip
+// `load_chat_front`, whose missing-tokenizer error is the only startup check
+// that stops a checkpoint without a tokenizer. A case listed there must be
+// one that never reads the chat tokenizer.
+
+#[test]
+fn chat_front_is_unused_by_an_image_only_server() {
+    // Image-only serving has no chat checkpoint, so its model path is empty.
+    assert!(super::chat_front_unused(std::path::Path::new(""), true));
+}
+
+#[test]
+fn chat_front_is_used_by_a_chat_checkpoint() {
+    let dir = temp_path("chat-front-llama");
+    std::fs::write(dir.join("config.json"), r#"{"model_type": "llama"}"#).unwrap();
+    assert!(!super::chat_front_unused(&dir, false));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_used_by_a_whisper_checkpoint() {
+    // A side-model load failure only logs, so a Whisper checkpoint without
+    // tokenizer.json must keep failing at startup through `load_chat_front`.
+    let dir = temp_path("chat-front-whisper");
+    std::fs::write(dir.join("config.json"), r#"{"model_type": "whisper"}"#).unwrap();
+    assert!(!super::chat_front_unused(&dir, false));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_used_when_the_model_type_cannot_be_detected() {
+    let dir = temp_path("chat-front-undetected");
+    assert!(!super::chat_front_unused(&dir, false));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_unused_by_a_kokoro_checkpoint() {
+    // Kokoro checkpoints ship no tokenizer file: the model reads phonemes
+    // from its own `config.json` vocab and serves /v1/audio/speech only.
+    // Loading the chat front stopped the server with "No tokenizer found"
+    // before the Kokoro TTS wiring ran.
+    let dir = temp_path("chat-front-kokoro");
+    std::fs::write(dir.join("config.json"), r#"{"istftnet": {}}"#).unwrap();
+    assert!(super::chat_front_unused(&dir, false));
+    std::fs::remove_dir_all(dir).unwrap();
+}

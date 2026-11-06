@@ -1664,6 +1664,34 @@ pub(super) fn resolve_chat_template(
     Ok(ChatTemplateProcessor::from_model_path(model_path)?.unwrap_or_default())
 }
 
+/// Whether `start_server` serves without the chat tokenizer and chat template,
+/// so it can skip [`load_chat_front`].
+///
+/// A server only qualifies when it is known never to read them. Everything
+/// else must keep loading them, because the missing-tokenizer error in
+/// [`load_chat_front`] is the only startup check that stops a checkpoint
+/// without a tokenizer: a failed side-model load (embedding, Whisper) only
+/// logs and leaves its routes answering 501.
+///
+/// - Image-only serving (#2825): there is no chat checkpoint at all, and
+///   every route that would read the tokenizer refuses in this mode.
+/// - Kokoro: a phoneme-input TTS model that ships no tokenizer file. It reads
+///   its phoneme vocab from `config.json` and serves `/v1/audio/speech`
+///   only, so loading the chat front would stop the server with "No tokenizer
+///   found" before the TTS wiring runs.
+///
+/// This is deliberately a list of verified cases rather than a rule such as
+/// "every non-chat model": an embedding or Whisper checkpoint without a
+/// tokenizer would then start and serve nothing instead of failing at startup.
+fn chat_front_unused(model_path: &Path, image_only: bool) -> bool {
+    // Image-only has an empty model path, so it never reaches detection.
+    image_only
+        || matches!(
+            crate::models::get_model_type(model_path),
+            Ok(crate::models::ModelType::Kokoro)
+        )
+}
+
 /// Load the tokenizer and the chat template the way `start_server` does,
 /// including the `enable_thinking` default for checkpoints whose tokenizer
 /// recognizes a think marker pair. Shared with the in-process server
@@ -3846,11 +3874,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     if let Some(service_config) = distributed.remote_stage_service {
         return serve_remote_pipeline_stage(service_config).await;
     }
-    // Image-only serving has no checkpoint for a tokenizer or a chat template;
-    // every route that would read them refuses in this mode (#2825). The
-    // router branch below is unreachable here because a router selector is a
-    // startup error alongside `--image-model` without `-m`.
-    let (tokenizer, chat_template) = if image_only {
+    // The router branch below is unreachable for image-only serving because a
+    // router selector is a startup error alongside `--image-model` without `-m`.
+    let (tokenizer, chat_template) = if chat_front_unused(&startup.model_path, image_only) {
         (
             crate::tokenizer::MlxcelTokenizer::empty(),
             ChatTemplateProcessor::default(),
