@@ -180,6 +180,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - MLX pin advanced with backend overlays preserved (#2614), and minor and patch group updates (#2605).
 - Minor and patch group updates (#1941, #2003, #2308), `tokio` (#2450), `actions/upload-artifact` 4 to 7 (#1940) and `actions/setup-node` 5 to 7 (#1879).
 
+### Known limitations
+
+- A temperature 0 run that goes through a block verification path (`--prompt-lookup` or a draft model) can leave the plain-decode stream near a logit tie. A verify block builds the K/V of every row after the first with a different arithmetic path than a one-token decode step (the projections run at `M = block width`), so the logits differ at rounding scale and the argmax can flip where the reference's top two logits are tied or nearly tied; the rest of the stream then follows the flipped token. This is the temperature 0 contract, not a defect: every emitted token is the argmax of the logits the path computed, and two paths that compute slightly different logits legitimately disagree on a tie. Plain decode is unaffected, `MLXCEL_TRACE_DECODE_STEP=1` and fp16 KV storage are unaffected, and a quantized `--kv-cache-mode` changes which stream a run lands on. Investigation, measurements and repro commands: [temperature 0: plain decode versus block-built KV history](docs/temperature-0-block-history-flip.md) (#2778, does not block 0.8.0; release notes must not claim that temperature 0 speculative output matches plain decode).
+
 ## [v0.7.0] - 2026-09-09
 
 ### llama-server b10621 compatibility, complete
