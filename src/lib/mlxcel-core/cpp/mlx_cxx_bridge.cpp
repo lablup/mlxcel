@@ -3,6 +3,7 @@
 
 #include "mlx_cxx_internal.h"
 #include "../../mlxcelverse/kernels/gpu_backend.h"
+#include "../../mlxcelverse/kernels/gelu_tanh_f32.h"
 
 #include "mlx/primitives.h"
 // Backend-agnostic CUDA availability probe; non-CUDA builds link the stub.
@@ -1973,6 +1974,20 @@ std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x) {
     static auto compiled_fn = get_compiled_gelu_tanh_f32();
     auto result = compiled_fn({x.inner});
     return std::make_unique<MlxArray>(std::move(result[0]));
+}
+
+// Real Metal custom kernel for `fused_gelu_tanh_f32` (#2423, Option A): the
+// tanh-GELU as one 1-D elementwise JIT Metal kernel instead of the compiled
+// graph above. Flattens any shape to 1-D for the launch and reshapes back;
+// f32, bfloat16 and float16 are upcast inside the kernel and rounded back at
+// the store. Throws when there is no port on this backend — Rust-side callers
+// gate on `fused_gelu_tanh_f32_available()` first or route to the eager chain.
+std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x) {
+    return std::make_unique<MlxArray>(mlxcel::turbo::fused_gelu_tanh_f32(x.inner));
+}
+
+bool fused_gelu_tanh_f32_available() {
+    return mlxcel::turbo::fused_gelu_tanh_f32_available();
 }
 
 // Compiled GeGLU: gelu(gate) * x

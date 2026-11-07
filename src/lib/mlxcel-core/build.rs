@@ -155,6 +155,12 @@ fn main() {
         // The one place a fused kernel chooses its per-backend port (#1801).
         .file("../mlxcelverse/kernels/kernel_port.cpp")
         .file("../mlxcelverse/kernels/sparse_v_sdpa.cpp")
+        // Fused tanh-GELU real Metal port launcher (#2423). Lives under
+        // `src/lib/mlxcelverse/kernels/` so the MLX-upstream-commit upgrade
+        // checklist ("Bumping the MLX upstream pin" in CONTRIBUTING.md)
+        // treats this directory as in-scope. Forwards
+        // `mlxcel::turbo::fused_gelu_tanh_f32` into the cxx-bridge ABI.
+        .file("../mlxcelverse/kernels/gelu_tanh_f32.cpp")
         // Fused Turbo4Delegated cold-V weighted-sum kernel
         // launcher. Reads the packed cold V directly so the dequantised
         // FP16 cold body never materialises in global memory; the host
@@ -473,6 +479,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_rope_append_hip.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/kv_inplace_write.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/kv_inplace_write.cpp");
+    // Fused tanh-GELU real Metal port (#2423).
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/gelu_tanh_f32.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/gelu_tanh_f32.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=MLX_ROCM_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
