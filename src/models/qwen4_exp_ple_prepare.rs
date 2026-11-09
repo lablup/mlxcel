@@ -388,7 +388,10 @@ pub fn prepare_external_ple_model(
     for file in &linked {
         link(Path::new(file))?;
     }
-    if let Some(sidecar) = declared_optiq_vision_sidecar(&source) {
+    // An OptiQ index may already list its vision sidecar among the shards.
+    if let Some(sidecar) = declared_optiq_vision_sidecar(&source)
+        && !linked.iter().any(|file| Path::new(file) == sidecar)
+    {
         link(&sidecar)?;
     }
 
