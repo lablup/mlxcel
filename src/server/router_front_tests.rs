@@ -451,6 +451,23 @@ async fn router_chat_forwards_forced_tool_choice_instead_of_rejecting_it() {
 }
 
 #[tokio::test]
+async fn router_chat_forwards_text_response_format_instead_of_rejecting_it() {
+    // `{"type": "text"}` asks for no constraint, and single node serves it
+    // unconstrained, so the router can reproduce it. Reaching the raising
+    // template, not the response_format guard's 400, is the signal.
+    let state = router_test_state_with_template("{{ raise_exception('reached rendering') }}").await;
+    let mut body = chat_request();
+    body["response_format"] = json!({"type": "text"});
+
+    let response = post_router_json_with_state(state, "/v1/chat/completions", body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error_message(response).await,
+        "the model's chat template rejected this request: reached rendering"
+    );
+}
+
+#[tokio::test]
 async fn router_chat_maps_template_rejection_to_bad_request() {
     let state = router_test_state_with_template(
         "{% if reasoning_effort not in ['low', 'medium'] %}{{ raise_exception('Unexpected reasoning effort ' ~ reasoning_effort) }}{% endif %}ok",
@@ -623,6 +640,195 @@ async fn router_completion_existing_unsupported_option_guards_are_unchanged() {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             assert_eq!(error_message(response).await, expected_message);
         }
+    }
+}
+
+#[tokio::test]
+async fn router_completion_forwards_text_response_format_instead_of_rejecting_it() {
+    // The thinking-budget check runs right after the response_format guard,
+    // so its 400 proves a `{"type": "text"}` request got past the guard
+    // without dispatching anything to a prefill node.
+    let state = router_test_state().await;
+    let next_id = state.next_id.load(Ordering::Relaxed);
+    let response = post_router_json_with_state(
+        state.clone(),
+        "/v1/completions",
+        json!({
+            "model": "test-model",
+            "prompt": "hello",
+            "response_format": {"type": "text"},
+            "max_tokens": 4,
+            "thinking_budget_tokens": 8
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error_message(response).await,
+        "thinking_budget_tokens (8) must be <= max_tokens (4)"
+    );
+    assert_eq!(state.next_id.load(Ordering::Relaxed), next_id, "no handoff");
+}
+
+/// Every `response_format` the router must refuse: a schema, a type single node
+/// refuses, a case variant of `text`, a non-object, and the object shapes single
+/// node reads as text but which may be a schema request with a typo.
+fn constraining_response_formats() -> Vec<Value> {
+    vec![
+        json!({"type": "json_schema", "json_schema": {"schema": {"type": "object"}}}),
+        json!({"type": "json_schema"}),
+        json!({"type": "json_object"}),
+        json!({"type": "grammar"}),
+        json!({"type": "TEXT"}),
+        json!({"type": "Text"}),
+        json!({"type": " text"}),
+        json!("text"),
+        json!(["text"]),
+        json!(true),
+        json!(1),
+        json!({}),
+        json!({"type": null}),
+        json!({"type": 1}),
+        json!({"json_schema": {"schema": {"type": "object"}}}),
+    ]
+}
+
+#[tokio::test]
+async fn router_rejects_every_constraining_response_format() {
+    for format in constraining_response_formats() {
+        let state =
+            router_test_state_with_template("{{ raise_exception('reached rendering') }}").await;
+        let mut body = chat_request();
+        body["response_format"] = format.clone();
+        let response = post_router_json_with_state(state, "/v1/chat/completions", body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{format}");
+        assert_eq!(
+            error_message(response).await,
+            "the disaggregated router does not support response_format (structured output) on /v1/chat/completions",
+            "{format}"
+        );
+
+        let state = router_test_state().await;
+        let next_id = state.next_id.load(Ordering::Relaxed);
+        let response = post_router_json_with_state(
+            state.clone(),
+            "/v1/completions",
+            json!({"model": "test-model", "prompt": "hello", "response_format": format}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{format}");
+        assert_eq!(
+            error_message(response).await,
+            "the disaggregated router does not support response_format (structured output) on /v1/completions",
+            "{format}"
+        );
+        assert_eq!(state.next_id.load(Ordering::Relaxed), next_id, "{format}");
+    }
+}
+
+#[tokio::test]
+async fn router_accepts_null_and_text_response_format_on_both_fronts() {
+    for format in [
+        Value::Null,
+        json!({"type": "text"}),
+        json!({"type": "text", "json_schema": {"schema": {"type": "object"}}}),
+    ] {
+        let state =
+            router_test_state_with_template("{{ raise_exception('reached rendering') }}").await;
+        let mut body = chat_request();
+        body["response_format"] = format.clone();
+        let response = post_router_json_with_state(state, "/v1/chat/completions", body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{format}");
+        assert_eq!(
+            error_message(response).await,
+            "the model's chat template rejected this request: reached rendering",
+            "{format}"
+        );
+
+        let state = router_test_state().await;
+        let next_id = state.next_id.load(Ordering::Relaxed);
+        let response = post_router_json_with_state(
+            state.clone(),
+            "/v1/completions",
+            json!({
+                "model": "test-model",
+                "prompt": "hello",
+                "response_format": format,
+                "max_tokens": 4,
+                "thinking_budget_tokens": 8
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{format}");
+        assert_eq!(
+            error_message(response).await,
+            "thinking_budget_tokens (8) must be <= max_tokens (4)",
+            "{format}"
+        );
+        assert_eq!(state.next_id.load(Ordering::Relaxed), next_id, "{format}");
+    }
+}
+
+#[tokio::test]
+async fn router_chat_forced_tool_choice_follows_the_response_format_boundary() {
+    let tools = json!([{"type": "function", "function": {"name": "get_weather"}}]);
+
+    let state = router_test_state_with_template("{{ raise_exception('reached rendering') }}").await;
+    let mut body = chat_request();
+    body["tools"] = tools.clone();
+    body["tool_choice"] = json!("required");
+    body["response_format"] = json!({"type": "text"});
+    let response = post_router_json_with_state(state, "/v1/chat/completions", body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error_message(response).await,
+        "the model's chat template rejected this request: reached rendering"
+    );
+
+    let mut body = chat_request();
+    body["tools"] = tools;
+    body["tool_choice"] = json!("required");
+    body["response_format"] = json!({"type": "json_schema", "json_schema": {"schema": {}}});
+    let response = post_router_json("/v1/chat/completions", body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        error_message(response)
+            .await
+            .contains("cannot be combined with a response_format schema")
+    );
+}
+
+/// The #979 invariant: a value the router lets through must be one single node
+/// also serves without a constraint. A value only the router refuses is fine;
+/// the reverse would be a 200 with unconstrained output.
+#[test]
+fn router_accepted_response_formats_never_compile_a_constraint_on_single_node() {
+    use crate::server::routes::chat::response_format_requests_constraint;
+    use crate::server::structured::extract_json_schema_from_response_format;
+
+    let accepted = [
+        json!({"type": "text"}),
+        json!({"type": "text", "json_schema": {"schema": {"type": "object"}}}),
+    ];
+    assert!(!response_format_requests_constraint(None));
+    for format in &accepted {
+        assert!(
+            !response_format_requests_constraint(Some(format)),
+            "{format}"
+        );
+        assert!(
+            matches!(
+                extract_json_schema_from_response_format(Some(format)),
+                Ok(None)
+            ),
+            "{format}"
+        );
+    }
+    for format in constraining_response_formats() {
+        assert!(
+            response_format_requests_constraint(Some(&format)),
+            "{format}"
+        );
     }
 }
 

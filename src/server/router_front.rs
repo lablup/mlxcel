@@ -896,7 +896,7 @@ async fn route_chat(
     // PrefillRequestFrame cannot carry a compiled structured-output
     // constraint to the decode node. Reject rather than return unconstrained
     // output for a request that explicitly asked for structured output.
-    if request.response_format.is_some() {
+    if super::routes::chat::response_format_requests_constraint(request.response_format.as_ref()) {
         return Ok(ErrorResponse::new(
             "the disaggregated router does not support response_format (structured output) on /v1/chat/completions",
             "invalid_request_error",
@@ -1384,9 +1384,10 @@ async fn router_completions(
 ///
 /// # Parity notes
 ///
-/// - `logprobs` and `response_format` (structured output) are rejected with a
-///   400 because their worker-side state is not represented by the handoff.
-///   Sampling and reasoning-budget defaults are carried per request.
+/// - `logprobs` and any `response_format` other than `{"type": "text"}` are
+///   rejected with a 400 because their worker-side state is not represented by
+///   the handoff. Sampling and reasoning-budget defaults are carried per
+///   request.
 /// - `completion_tokens` uses the worker's authoritative generated-token count
 ///   carried over the wire ([`ResultFrame::generated_tokens`], issue #387),
 ///   which is exact even for byte-fallback tokenizers (e.g. Gemma `<0xXX>` byte
@@ -1429,7 +1430,7 @@ async fn route_completion(
     // path. Reject rather than emit unconstrained output that silently diverges
     // from single-node (the same reject-what-the-frame-cannot-reproduce
     // principle as the logprobs guard above).
-    if request.response_format.is_some() {
+    if super::routes::chat::response_format_requests_constraint(request.response_format.as_ref()) {
         return Ok(ErrorResponse::new(
             "the disaggregated router does not support response_format (structured output) on /v1/completions",
             "invalid_request_error",
