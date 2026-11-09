@@ -2410,6 +2410,23 @@ fn gemma4_mtp_declined(block_size: usize) -> anyhow::Error {
     )
 }
 
+/// Decline an empty prompt before any drafter IO. Every MTP target adapter
+/// prefills the whole prompt and samples the first bonus token from the last
+/// position's logits, so a prompt with no tokens has no position to read
+/// (the qwen4_exp prefill would hit its "a prefill has at least one piece"
+/// expectation, #2880). Classic decode never reaches this path.
+fn ensure_mtp_prompt_not_empty(prompt_tokens: &[i32]) -> Result<()> {
+    if prompt_tokens.is_empty() {
+        return Err(anyhow!(
+            "--draft-model (MTP speculative decoding) needs a non-empty prompt: \
+             the first token is sampled from the last prompt position, and an \
+             empty prompt has none. Pass a non-empty -p/--prompt, or omit \
+             --draft-model to run classic decode."
+        ));
+    }
+    Ok(())
+}
+
 fn run_offline_mtp(
     model: &mlxcel::LoadedModel,
     draft_model_path: &Path,
@@ -2431,6 +2448,7 @@ fn run_offline_mtp(
              proposals (need >= 2); pass --draft-block-size with a value >= 2"
         ));
     }
+    ensure_mtp_prompt_not_empty(prompt_tokens)?;
 
     // Qwen 3.5 exactness gate: the same single call the server's
     // `mtp_capable_target` makes, so the two paths cannot drift on the
