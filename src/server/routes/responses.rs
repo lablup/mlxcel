@@ -976,6 +976,9 @@ async fn stream_create_response(
                         finish_reason: "cancelled".to_string(),
                     });
                     response.completed_at = None;
+                    // The assembly adds a message item even for empty text;
+                    // no item was generated here.
+                    response.output.clear();
                     if translated_for_task.effective_store
                         && let Some(store) = state_for_task.responses_store.as_ref()
                     {
@@ -989,7 +992,7 @@ async fn stream_create_response(
                     }
                     if let Ok(mut em) = emitter_for_callback.lock() {
                         let sequence_number = em.next_seq();
-                        let _ = sender.send_event(&ResponseStreamEvent::Cancelled {
+                        let _ = sender.send_event(&ResponseStreamEvent::Completed {
                             sequence_number,
                             response,
                         });
@@ -1210,13 +1213,11 @@ async fn stream_create_response(
             &final_response,
         );
 
+        // The OpenAI event set has no cancelled terminal event: a cancelled
+        // stream ends with `response.completed` and `status: cancelled`.
         let seq = em.next_seq();
         let _ = sender.send_event(&match status {
             ResponseStatus::Incomplete => ResponseStreamEvent::Incomplete {
-                sequence_number: seq,
-                response: final_response,
-            },
-            ResponseStatus::Cancelled => ResponseStreamEvent::Cancelled {
                 sequence_number: seq,
                 response: final_response,
             },

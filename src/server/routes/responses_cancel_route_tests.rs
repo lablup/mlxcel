@@ -281,8 +281,8 @@ async fn cancelling_a_live_stream_records_the_response_as_cancelled() {
 
     // Both the terminal event and the stored copy agree with the cancel reply.
     let (name, terminal) = terminal_event(&text);
-    assert_eq!(name, "response.cancelled", "{text}");
-    assert_eq!(terminal["type"], "response.cancelled", "{terminal}");
+    assert_eq!(name, "response.completed", "{text}");
+    assert_eq!(terminal["type"], "response.completed", "{terminal}");
     assert_eq!(terminal["response"]["status"], "cancelled", "{terminal}");
     assert!(terminal["response"]["completed_at"].is_null(), "{terminal}");
     assert_eq!(h.retrieve(&id).await["status"], "cancelled");
@@ -365,6 +365,10 @@ async fn an_uncancelled_stream_still_ends_completed() {
     let (name, terminal) = terminal_event(&text);
     assert_eq!(name, "response.completed", "{text}");
     assert_eq!(terminal["response"]["status"], "completed", "{terminal}");
+    assert!(
+        terminal["response"]["completed_at"].is_number(),
+        "{terminal}"
+    );
     assert_eq!(h.retrieve(&id).await["status"], "completed");
 }
 
@@ -441,8 +445,9 @@ async fn a_cancel_that_ends_generation_with_an_error_is_recorded_cancelled() {
     text.push_str(&String::from_utf8_lossy(&rest));
 
     let (name, terminal) = terminal_event(&text);
-    assert_eq!(name, "response.cancelled", "{text}");
+    assert_eq!(name, "response.completed", "{text}");
     assert_eq!(terminal["response"]["status"], "cancelled", "{terminal}");
+    assert_eq!(terminal["response"]["output"], json!([]), "{terminal}");
     assert!(terminal["response"]["completed_at"].is_null(), "{terminal}");
     assert_eq!(h.retrieve(&id).await["status"], "cancelled");
 }
@@ -462,7 +467,7 @@ async fn an_uncancelled_generation_error_stays_an_error() {
     assert_eq!(h.store.len(), 0);
 }
 
-/// `response.cancelled` for a limit-stopped `context_management` reply must
+/// A cancelled, limit-stopped `context_management` reply must
 /// not carry `incomplete_details`; the override drops the incomplete reason.
 #[tokio::test]
 async fn a_cancelled_stream_carries_no_incomplete_details() {
