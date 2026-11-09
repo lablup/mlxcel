@@ -94,7 +94,8 @@ mod molmo2;
 mod molmo2_vision_runtime;
 #[cfg(feature = "iree")]
 mod molmo_vision_runtime;
-#[cfg(any(feature = "iree", test))]
+// Always compiled: the emitter reads its workgroup-shape constants, and the
+// module itself has no IREE dependency. Without the runtime only the tests use it.
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod native_qmv;
 #[cfg(feature = "iree")]

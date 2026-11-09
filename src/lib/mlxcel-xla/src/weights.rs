@@ -214,7 +214,18 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             } else {
                 s.lm_head.to_string()
             };
-            out.push(WeightSpec::Proj(name));
+            // issue #2891: when the checkpoint stores the head 4-bit, the decode
+            // graph declares three raw packed parts (in the checkpoint's `[V, H]`
+            // layout) and dispatches the native GEMV. Prefill keeps a
+            // loader-dequantized transposed `[H, V]` operand instead of
+            // reconstructing the whole matrix in the graph, so both are in the
+            // shared list and every graph kind gets the same argument positions.
+            if cfg.native_head {
+                push_proj(&mut out, name.clone(), true);
+                out.push(WeightSpec::Proj(name));
+            } else {
+                out.push(WeightSpec::Proj(name));
+            }
         }
     }
     for i in 0..cfg.n_layers {
@@ -1132,6 +1143,57 @@ mod tests {
                 .iter()
                 .any(|spec| matches!(spec, WeightSpec::Whole(name) if name == "lm_head.weight")),
             "the packed path never declares a whole lm_head arg"
+        );
+    }
+
+    /// issue #2891: a packed native head declares the packed triple for the
+    /// decode dispatch and keeps the loader-dequantized transposed operand for
+    /// prefill, so every graph kind shares one argument list.
+    #[test]
+    fn inout_packed_head_spec_is_the_raw_quantised_triple() {
+        let mut tied = Config::llama_3_2_1b();
+        tied.projection_layout = ProjectionLayout::InOut;
+        tied.native_head = true;
+        let specs = weight_specs_q(&tied, false);
+        assert_eq!(
+            &specs[2..5],
+            &[
+                WeightSpec::QuantRaw {
+                    name: "model.embed_tokens.weight".to_string(),
+                    part: QuantPart::Packed,
+                },
+                WeightSpec::QuantRaw {
+                    name: "model.embed_tokens.scales".to_string(),
+                    part: QuantPart::Scales,
+                },
+                WeightSpec::QuantRaw {
+                    name: "model.embed_tokens.biases".to_string(),
+                    part: QuantPart::Biases,
+                },
+            ],
+            "the tied packed head re-reads the embed tensor's raw parts"
+        );
+        assert_eq!(
+            specs[5],
+            WeightSpec::Proj("model.embed_tokens.weight".to_string()),
+            "the prefill operand follows the packed triple"
+        );
+
+        let mut untied = tied;
+        untied.tie_word_embeddings = false;
+        let specs = weight_specs_q(&untied, false);
+        assert_eq!(
+            specs[2],
+            WeightSpec::QuantRaw {
+                name: "lm_head.weight".to_string(),
+                part: QuantPart::Packed,
+            },
+            "the untied packed head reads lm_head's raw parts"
+        );
+        assert_eq!(
+            specs[5],
+            WeightSpec::Proj("lm_head.weight".to_string()),
+            "the untied prefill operand is the lm_head as a projection"
         );
     }
 

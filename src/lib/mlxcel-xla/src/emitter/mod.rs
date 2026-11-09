@@ -1501,13 +1501,16 @@ mod tests {
     // ======================================================================
 
     /// issue #2889: the native decode graph keeps the projections packed and
-    /// dispatches the HIP GEMV; the f16 path stays the default.
+    /// dispatches the HIP GEMV; the f16 path stays the default. issue #2891:
+    /// the packed LM head joins the same dispatch, with its grid rounded to the
+    /// rows one workgroup reduces.
     #[test]
     fn native_decode_emits_the_packed_projection_dispatch() {
         use super::builder::Precision;
         let mut c = Config::llama_3_2_1b();
         c.projection_layout = ProjectionLayout::InOut;
         c.packed_args = true;
+        c.native_head = true;
         c.quantization = Some(super::config::QuantConfig {
             bits: 4,
             group_size: 64,
@@ -1531,14 +1534,35 @@ mod tests {
             "scales/biases are declared per group"
         );
         assert!(
+            mlir.contains("tensor<128256x256xi32>"),
+            "the packed LM head is [vocab, hidden/8]"
+        );
+        assert!(
+            mlir.contains("tensor<128256x32xf16>"),
+            "the LM head scales/biases are per group"
+        );
+        assert!(
+            mlir.contains(&format!(
+                "arith.constant {} : index",
+                128256usize.div_ceil(crate::native_qmv::ROWS_PER_BLOCK)
+            )),
+            "the head dispatch covers one workgroup per rows-per-block"
+        );
+        assert!(
             mlir.starts_with("#mlxcel_qmv_target = alias") && mlir.contains("  source-block"),
             "the alias precedes the module and the executable source sits inside it"
         );
 
-        // Without the native module the same config keeps the packed dequant
-        // path (the prefill/fallback form), never the dispatch.
+        // Without the native module the same config keeps the packed projection
+        // dequant path and uses the loader-dequantized f16 head operand (the
+        // prefill form), never the dispatch.
         let fallback = emit_decode_with(&c, true, Precision::F16);
         assert!(!fallback.contains("@custom_qmv"));
+        assert!(
+            fallback.contains("tensor<128256x256xui32>")
+                && fallback.contains("tensor<2048x128256xf16>"),
+            "the fallback declares the packed head and reads the f16 operand"
+        );
     }
 
     /// Each dense-pack family parses to its architecture switches. Cohere/Cohere2

@@ -468,6 +468,11 @@ pub struct Config {
     /// the loader from `MLXCEL_XLA_QUANT`; off for every test config, so the
     /// committed goldens stay byte-identical.
     pub packed_args: bool,
+    /// Whether the LM head is also declared packed (issue #2891): the checkpoint
+    /// stores it 4-bit, so the native decode graph reads it through the GEMV and
+    /// prefill dequantizes the same tensors in the graph. Set by the loader after
+    /// inspecting the head tensor's dtype; off everywhere else.
+    pub native_head: bool,
 }
 
 impl Config {
@@ -530,6 +535,7 @@ impl Config {
             phi4_lora: None,
             projection_layout: ProjectionLayout::OutIn,
             packed_args: false,
+            native_head: false,
         }
     }
 
@@ -1664,6 +1670,7 @@ impl Config {
             phi4_lora,
             projection_layout: ProjectionLayout::OutIn,
             packed_args: false,
+            native_head: false,
         })
     }
 
