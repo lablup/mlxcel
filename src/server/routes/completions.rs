@@ -534,6 +534,12 @@ async fn stream_completion(
             );
         }
 
+        // The stream is already open, so a failure travels as a frame, ahead
+        // of the finish chunk (#2877).
+        if let Err(err) = &result {
+            let _ = finish_events.json(&super::generation_error_response(err));
+        }
+
         // Send finish chunk
         let finish_reason = match &result {
             Ok(r) => r.finish_reason.clone(),

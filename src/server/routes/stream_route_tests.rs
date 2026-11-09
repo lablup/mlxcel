@@ -716,3 +716,151 @@ async fn reasoning_end_on_an_unarmed_completion_reports_not_enabled() {
 /// through the same router and helpers as the lifecycle tests above.
 #[path = "stream_route_metrics_tests.rs"]
 mod metrics_tests;
+
+// -- Streaming failures (#2877) --
+
+/// The `data:` payloads of an SSE body, in order, with `[DONE]` as a string.
+fn sse_frames(body: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(body)
+        .split("\n\n")
+        .filter_map(|frame| {
+            let data = frame.lines().find_map(|l| l.strip_prefix("data:"))?.trim();
+            Some(
+                serde_json::from_str(data)
+                    .unwrap_or_else(|_| serde_json::Value::String(data.to_string())),
+            )
+        })
+        .collect()
+}
+
+/// Assert the tail every failed stream ends with: the error object, then the
+/// `finish_reason: "error"` chunk, then `[DONE]`. Returns the error object.
+fn assert_error_tail(frames: &[serde_json::Value]) -> serde_json::Value {
+    assert!(frames.len() >= 3, "too few frames: {frames:?}");
+    let tail = &frames[frames.len() - 3..];
+    assert!(
+        tail[0]["error"].is_object(),
+        "error frame first: {frames:?}"
+    );
+    assert_eq!(
+        tail[1]["choices"][0]["finish_reason"], "error",
+        "{frames:?}"
+    );
+    assert_eq!(tail[2], "[DONE]", "{frames:?}");
+    tail[0]["error"].clone()
+}
+
+#[tokio::test]
+async fn chat_stream_failure_reports_the_error_before_the_finish_chunk() {
+    let (app, handle, _options) = scripted_app(ServerConfig::default());
+    handle.token("par");
+    handle.fail("decode exploded");
+    let response = app
+        .oneshot(chat_request(None, None, None))
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let error = assert_error_tail(&sse_frames(&collect_body(response).await));
+    assert_eq!(error["message"], "Generation error: decode exploded");
+    assert_eq!(error["type"], "server_error");
+    assert!(error["code"].is_null());
+}
+
+#[tokio::test]
+async fn completions_stream_failure_reports_the_error_before_the_finish_chunk() {
+    let (app, handle, _options) = scripted_app(ServerConfig::default());
+    handle.token("par");
+    handle.fail("decode exploded");
+    let body = serde_json::json!({
+        "model": "route-test-model", "stream": true, "prompt": "hi"
+    });
+    let response = app
+        .oneshot(post_json("/v1/completions", body.to_string(), None))
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let error = assert_error_tail(&sse_frames(&collect_body(response).await));
+    assert_eq!(error["message"], "Generation error: decode exploded");
+    assert_eq!(error["type"], "server_error");
+}
+
+/// The in-stream frame goes through the non-streaming classification, so a
+/// failure the scheduler can only report after the headers keeps its type.
+#[tokio::test]
+async fn chat_stream_failure_matches_the_non_streaming_classification() {
+    let message = crate::server::model_provider::context_exceeded_message(9, 4);
+    let (app, handle, _options) = scripted_app(ServerConfig::default());
+    handle.fail(&message);
+    let response = app
+        .oneshot(chat_request(None, None, None))
+        .await
+        .expect("router responds");
+
+    let error = assert_error_tail(&sse_frames(&collect_body(response).await));
+    assert_eq!(error["message"], message.as_str());
+    assert_eq!(error["type"], "exceed_context_size_error");
+}
+
+#[tokio::test]
+async fn chat_stream_failure_with_a_partial_tool_call_still_finishes_as_error() {
+    let (app, handle, _options) = scripted_app(ServerConfig::default());
+    handle.token(
+        "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>",
+    );
+    handle.fail("decode exploded");
+    let body = serde_json::json!({
+        "model": "route-test-model",
+        "stream": true,
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {
+            "name": "get_weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+        }}],
+    });
+    let response = app
+        .oneshot(post_json("/v1/chat/completions", body.to_string(), None))
+        .await
+        .expect("router responds");
+
+    assert_error_tail(&sse_frames(&collect_body(response).await));
+}
+
+/// The reported case: a prompt over the context is known before the first
+/// token, so a streaming request gets the non-streaming 400 instead of SSE.
+#[tokio::test]
+async fn over_context_prompt_is_refused_before_sse_headers() {
+    let (options_tx, options_rx) = mpsc::channel();
+    let (provider, _handle) = ModelProvider::scripted_streaming_for_route_tests(options_tx);
+    let provider = Arc::new(
+        provider.with_prompt_tokenizer_for_route_tests(MlxcelTokenizer::stub_with_byte_fallback()),
+    );
+    let batch_metrics = provider.batch_metrics().clone();
+    batch_metrics.publish_prompt_admission_bound(Some(1));
+    let app = create_app(AppState::new(
+        provider,
+        ServerConfig::default(),
+        ChatTemplateProcessor::with_template("Hello Hello Hello".to_string()),
+        MlxcelTokenizer::stub(),
+        PathBuf::from("route-test-model"),
+        batch_metrics,
+    ));
+
+    let response = app
+        .oneshot(chat_request(None, None, None))
+        .await
+        .expect("router responds");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value =
+        serde_json::from_slice(&collect_body(response).await).expect("json error body");
+    assert_eq!(body["error"]["type"], "exceed_context_size_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("exceeds the available context size")),
+        "{body}"
+    );
+    assert!(options_rx.try_recv().is_err(), "the worker saw no request");
+}

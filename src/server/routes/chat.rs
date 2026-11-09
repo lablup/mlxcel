@@ -1891,7 +1891,9 @@ async fn stream_chat_completion(
             // Only calls that actually reached the client count: when the
             // named-function filter dropped every parsed call, the stream
             // carried no tool-call delta and must not claim `tool_calls`.
-            if emitted > 0 {
+            // A failed generation stays `error` whatever its partial output
+            // parsed as (#2877).
+            if emitted > 0 && result.is_ok() {
                 finish_reason = "tool_calls".to_string();
             }
         }
@@ -1958,6 +1960,13 @@ async fn stream_chat_completion(
                 .unwrap_or(false),
             Err(_) => false,
         };
+
+        // The stream is already open, so a failure travels as a frame, ahead
+        // of the finish chunk so a client that stops reading at
+        // `finish_reason` still receives it (#2877).
+        if let Err(err) = &result {
+            let _ = finish_events.json(&super::generation_error_response(err));
+        }
 
         // Send finish chunk. It is the frame that carries this request's
         // speculative acceptance counters (#1314): the totals are final here,
