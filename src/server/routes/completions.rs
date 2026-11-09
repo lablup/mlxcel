@@ -525,6 +525,10 @@ async fn stream_completion(
                 },
             );
 
+        let err_msg = match &result {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        };
         if let Ok(r) = &result {
             slot.finish(
                 r.prompt_tokens,
@@ -532,8 +536,14 @@ async fn stream_completion(
                 r.completion_tokens,
                 &r.text,
             );
+        } else {
+            // The stream is already open, so the failure has to travel as a
+            // frame. Upstream shapes an in-stream failure as an `error` object
+            // on the event stream, before its own terminator (issue #2877).
+            let _ = finish_events.json(&serde_json::json!({
+                "error": { "message": err_msg.to_string(), "type": "server_error", "code": null }
+            }));
         }
-
         // Send finish chunk
         let finish_reason = match &result {
             Ok(r) => r.finish_reason.clone(),

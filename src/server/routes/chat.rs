@@ -1858,6 +1858,10 @@ async fn stream_chat_completion(
         }
 
         // Check for tool calls in accumulated output
+        let err_msg = match &result {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        };
         let mut finish_reason = match &result {
             Ok(r) => r.finish_reason.clone(),
             Err(_) => "error".to_string(),
@@ -1987,6 +1991,14 @@ async fn stream_chat_completion(
                 prompt_cache_enabled,
             );
             let _ = finish_events.json(&usage_chunk);
+        }
+        // The stream is already open, so the failure has to travel as a
+        // frame. Upstream shapes an in-stream failure as an `error` object on
+        // the event stream, before its own terminator (issue #2877).
+        if !err_msg.is_empty() {
+            let _ = finish_events.json(&serde_json::json!({
+                "error": { "message": err_msg, "type": "server_error", "code": null }
+            }));
         }
 
         finish_events.done();
