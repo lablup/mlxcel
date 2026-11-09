@@ -34,7 +34,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::config::{PleStorageConfig, ResolvedQwen4ExpConfig};
 use super::ple::ShardedEmbedding;
-use super::ple_cache::{AlwaysGrow, RowCache, RowCacheGrowth};
+use super::ple_cache::{AvailabilityGrowth, RowCache, RowCacheGrowth};
 use super::ple_io::{PleIoMode, RowSource};
 use super::ple_manifest::trust::resolve_contained;
 use super::ple_manifest::{PleManifest, PleManifestError, PleQuantization};
@@ -440,7 +440,12 @@ pub fn open_external_table(
     let manifest = PleManifest::load(&path, storage.cache_rows).map_err(|e| e.to_string())?;
     let mode = PleIoMode::from_env()?;
     let budget = resolve_cache_budget(manifest.cache_rows, manifest.row_stride())?;
-    ExternalPleTable::open(&manifest, mode, budget, Arc::new(AlwaysGrow))
+    ExternalPleTable::open(
+        &manifest,
+        mode,
+        budget,
+        Arc::new(AvailabilityGrowth::default()),
+    )
 }
 
 #[cfg(test)]

@@ -1821,6 +1821,12 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
         );
     }
 
+    // Issue #2883: macOS only, informational, leaves the verdict alone.
+    if let Some(section) = super::memory_availability::format_host_availability(est) {
+        let _ = writeln!(out);
+        out.push_str(&section);
+    }
+
     out
 }
 

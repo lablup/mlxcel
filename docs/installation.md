@@ -124,6 +124,8 @@ target/release/mlxcel
 target/release/mlxcel-server
 ```
 
+For a model that takes most of unified memory, see [macOS memory guardrails](macos-memory.md) for the available-now figure, the reserve left for macOS, and `MLXCEL_WIRE_WEIGHTS`.
+
 The macOS release workflow also packages a `mlx.metallib` artifact when needed.
 If you distribute binaries manually, verify the runtime package layout against the
 release workflow rather than assuming the executable alone is always sufficient.
@@ -1318,6 +1320,7 @@ before it, 8.07 tok/s in the baseline page linked above;
 | `MLXCEL_QUIET_JIT` | Suppress the one-time "compiling CUDA kernels" notice on a cold first run | unset (notice shown) |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu`, `metal`, or `cpu`) | `gpu` |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |
+| `MLXCEL_WIRE_WEIGHTS` | macOS: `1` wires evaluated weights with `mlock`, capped to leave the [reserve](macos-memory.md) | unset (off) |
 | `MLXCEL_REQUEST_MEMORY_BUDGET` | Lower-only positive byte/size ceiling for [Nemotron-H request admission](request-memory-admission.md), e.g. `24GB`; invalid explicit values stop startup | runtime device/wired/allocator minimum |
 | `MLX_ROCM_*` and other ROCm backend variables | ROCm backend tuning, A/B and diagnostics, for example `MLX_ROCM_GATHER_QMV_EXPERT_BATCHED`, `MLX_ROCM_MAX_INFLIGHT_MB`, `MLX_NO_HIPBLASLT`; see [ROCm backend variables](environment-variables.md#rocm-backend-variables) | see that section |
 | `LLAMA_ARG_*` | Environment-backed server options accepted by clap | unset |
