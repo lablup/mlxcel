@@ -568,6 +568,29 @@ pub trait LanguageModel {
         false
     }
 
+    /// Whether [`Self::rewind_decode_appends`] can unwind the rejected tail
+    /// of a speculative verify block ([`crate::engine::Engine::verify`]
+    /// followed by `Engine::unwind_appends`) from this model's own
+    /// per-sequence state, for a family whose state the pool trim cannot reach
+    /// (a model-owned layout, or [`Self::kv_cache_captures_sequence_state`]
+    /// `false`).
+    ///
+    /// Defaults to [`Self::supports_decode_lookahead_rewind`]: a model that
+    /// rewinds the scheduler's single-token lookahead appends rewinds a verify
+    /// block the same way. A model answers `true` here while keeping the
+    /// lookahead off when it captures the rewind state only for the forwards
+    /// the engine marks speculative ([`crate::cache::speculative_append_active`])
+    /// and prefers synchronous decode otherwise: `qwen4_exp` replays its
+    /// GatedDeltaNet and PLE state over the accepted prefix, which is worth a
+    /// verify block's acceptance but not a pipelined decode step's
+    /// mispredictions (issue #2880).
+    ///
+    /// Used by: `prompt_lookup_unsupported_reason`,
+    /// `Engine::verify_rounds_unsupported`.
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        self.supports_decode_lookahead_rewind()
+    }
+
     /// Whether the scheduler's KV cache slice holds this model's whole
     /// per-token sequence state, so trimming or detaching that slice is the
     /// whole story for the sequence.

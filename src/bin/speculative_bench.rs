@@ -438,7 +438,8 @@ fn run_baseline(target_dir: &Path, prompt: &str, max_tokens: usize) -> Result<(f
 /// variants and reports every other one as `other`, so the message also names
 /// the target directory to identify the checkpoint.
 const MTP_SUPPORTED_FAMILIES: &str = "Gemma 4 (Gemma4, Gemma4VLM, Gemma4Unified), \
-     Qwen 3.5 (Qwen35, Qwen35Moe, Qwen35VLM, Qwen35MoeVLM) and GLM-4.7-Flash (Glm4MoeLite)";
+     Qwen 3.5 (Qwen35, Qwen35Moe, Qwen35VLM, Qwen35MoeVLM), Qwen3.8-Flash-Next (Qwen4ExpVLM) \
+     and GLM-4.7-Flash (Glm4MoeLite)";
 
 /// Whether [`run_mtp`] can build an `MtpTarget` adapter for this variant.
 ///
@@ -459,6 +460,7 @@ fn mtp_target_supported(model: &LoadedModel) -> bool {
             | LoadedModel::Qwen35Moe(_)
             | LoadedModel::Qwen35VLM(_)
             | LoadedModel::Qwen35MoeVLM(_)
+            | LoadedModel::Qwen4ExpVLM(_)
             | LoadedModel::Glm4MoeLite(_)
     )
 }
@@ -495,6 +497,7 @@ fn run_mtp(
     };
     use mlxcel::models::glm4_moe_lite_mtp_target::Glm4MoeLiteMtpTargetAdapter;
     use mlxcel::models::qwen3_5_mtp_target::{Qwen35MtpTargetAdapter, Qwen35VLMtpTargetAdapter};
+    use mlxcel::models::qwen4_exp_mtp_target::Qwen4ExpMtpTargetAdapter;
     use mlxcel_core::drafter::DrafterKind;
 
     let block_size = block_size.unwrap_or(4) as usize;
@@ -523,12 +526,13 @@ fn run_mtp(
             | LoadedModel::Qwen35Moe(_)
             | LoadedModel::Qwen35VLM(_)
             | LoadedModel::Qwen35MoeVLM(_)
+            | LoadedModel::Qwen4ExpVLM(_)
     ) && !mlxcel_core::metal_is_available()
     {
         anyhow::bail!(
-            "MTP bench: Qwen 3.5 MTP requires the Metal backend (its temperature-0 \
-             exactness rests on the Metal chain-parity gated-delta kernel); target \
-             loaded as {}",
+            "MTP bench: Qwen 3.5 and Qwen3.8-Flash-Next MTP require the Metal backend \
+             (their temperature-0 exactness rests on the Metal gated-delta kernels); \
+             target loaded as {}",
             mlxcel::model_variant_label(&model)
         );
     }
@@ -615,6 +619,16 @@ fn run_mtp(
         ),
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => run_mtp_timed(
             |seq| Qwen35VLMtpTargetAdapter::new(vlm, Some(seq)),
+            drafter,
+            target_lm,
+            draft_dir,
+            &prompt_tokens,
+            max_tokens,
+            block_size,
+        ),
+        // Qwen3.8-Flash-Next (#2880) paired with the native `qwen4_exp_mtp` head.
+        LoadedModel::Qwen4ExpVLM(vlm) => run_mtp_timed(
+            |seq| Qwen4ExpMtpTargetAdapter::new(&vlm.text_model, Some(seq)),
             drafter,
             target_lm,
             draft_dir,

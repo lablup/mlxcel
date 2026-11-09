@@ -149,8 +149,9 @@ pub mod deepseek_v32;
 pub mod deepseek_v4;
 pub mod diffusion_gemma;
 pub mod dots1;
-/// Binary-side drafter factory: builds the `glm4_moe_lite_mtp` drafter and
-/// delegates every other kind to `mlxcel_core::drafter::load_drafter`.
+/// Binary-side drafter factory: builds the `glm4_moe_lite_mtp` and
+/// `qwen4_exp_mtp` drafters and delegates every other kind to
+/// `mlxcel_core::drafter::load_drafter`.
 pub mod drafter_loader;
 pub mod embedding_gemma2;
 pub mod ernie4_5;
@@ -276,6 +277,9 @@ pub mod qwen3_vl;
 pub mod qwen3_vl_embedding;
 pub mod qwen3_vl_moe;
 pub mod qwen4_exp;
+pub mod qwen4_exp_mtp_config;
+pub mod qwen4_exp_mtp_drafter;
+pub mod qwen4_exp_mtp_target;
 pub mod recurrent_gemma;
 pub mod rwkv7;
 pub mod seed_oss;

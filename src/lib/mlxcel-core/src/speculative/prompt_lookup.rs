@@ -265,6 +265,12 @@ impl PromptLookupConfig {
 /// only because they opt out of padded prefill, a flag that answers a
 /// different question (the scheduler's post-pad trim, issue #1335) and may
 /// change once that is solved.
+///
+/// A model-owned family that rewinds its own state
+/// ([`LanguageModel::supports_speculative_verify_rewind`]) passes both the
+/// layout and the padded-prefill check: the engine unwinds its rejected tail
+/// through `rewind_decode_appends` instead of a cache trim, so neither hazard
+/// applies (`qwen4_exp`, issue #2880).
 pub fn prompt_lookup_unsupported_reason<M: LanguageModel + ?Sized>(
     model: &M,
 ) -> Option<&'static str> {
@@ -275,13 +281,14 @@ pub fn prompt_lookup_unsupported_reason<M: LanguageModel + ?Sized>(
              cannot be rolled back",
         );
     }
-    if model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+    let model_rewinds = model.supports_speculative_verify_rewind();
+    if model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned && !model_rewinds {
         return Some(
             "this model owns its attention caches internally rather than in the external KV \
              caches the generator trims, so a rejected draft cannot be rolled back",
         );
     }
-    if !model.supports_padded_prefill() {
+    if !model.supports_padded_prefill() && !model_rewinds {
         return Some(
             "this model's state is corrupted by trailing tokens that a cache trim cannot \
              undo (the same reason it opts out of padded prefill), so a rejected draft \

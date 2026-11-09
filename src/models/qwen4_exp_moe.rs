@@ -123,13 +123,22 @@ impl Qwen4ExpMoeBlock {
         })
     }
 
-    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    /// `decode_equivalent` (a speculative verify block, issue #2880) keeps
+    /// every row on the kernels single-row decode uses: the experts gather
+    /// row by row instead of sorting the rows by expert, and the shared
+    /// expert gate takes the plain projection rather than the prefill-only
+    /// gathered form.
+    pub(crate) fn forward(&self, x: &MlxArray, decode_equivalent: bool) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let hidden = shape[shape.len() - 1];
         let tokens: i32 = shape[..shape.len() - 1].iter().product();
         let x_flat = mlxcel_core::reshape(x, &[tokens, hidden]);
 
-        let logits = self.router.forward(&x_flat);
+        let logits = if decode_equivalent {
+            super::linear::decode_equivalent_projection(&self.router, &x_flat)
+        } else {
+            self.router.forward(&x_flat)
+        };
         let gates = mlxcel_core::softmax_precise(&logits, -1);
         let n_experts = *mlxcel_core::array_shape(&logits)
             .last()
@@ -146,16 +155,36 @@ impl Qwen4ExpMoeBlock {
         // The generic fused MoE kernel accumulates expert outputs in float32.
         // Qwen4 checkpoints require bf16 rounding before weighting and summing
         // the selected experts, including single-token decode.
-        let expert_out = self.experts.forward(&x_flat, &topk);
+        let expert_out = self
+            .experts
+            .forward_with_sort(&x_flat, &topk, !decode_equivalent);
         let scores = mlxcel_core::expand_dims(&scores, -1);
         let weighted = mlxcel_core::multiply(&expert_out, &scores);
         let routed = mlxcel_core::sum_axis_native_dtype(&weighted, -2, false);
 
-        let shared = self.shared_expert.forward(&x_flat);
-        let shared_gate = mlxcel_core::sigmoid(&super::linear::row_invariant_projection(
-            &self.shared_expert_gate,
-            x,
-        ));
+        // The shared expert is a dense SwiGLU MLP whose projections may be
+        // unquantized; a verify block runs it one row at a time so each row
+        // takes the single-row kernels decode takes.
+        let shared = if decode_equivalent && tokens > 1 {
+            let mut rows: Option<UniquePtr<MlxArray>> = None;
+            for row in 0..tokens {
+                let x_row = mlxcel_core::slice(&x_flat, &[row, 0], &[row + 1, hidden]);
+                let out = self.shared_expert.forward(&x_row);
+                rows = Some(match rows {
+                    None => out,
+                    Some(previous) => mlxcel_core::concatenate(&previous, &out, 0),
+                });
+            }
+            rows.expect("at least one row")
+        } else {
+            self.shared_expert.forward(&x_flat)
+        };
+        let shared_gate = if decode_equivalent {
+            super::linear::decode_equivalent_projection(&self.shared_expert_gate, x)
+        } else {
+            super::linear::row_invariant_projection(&self.shared_expert_gate, x)
+        };
+        let shared_gate = mlxcel_core::sigmoid(&shared_gate);
         let shared_gate = mlxcel_core::reshape(&shared_gate, &[tokens, 1]);
         let out = mlxcel_core::add(&routed, &mlxcel_core::multiply(&shared, &shared_gate));
         mlxcel_core::reshape(&out, &shape)

@@ -27,6 +27,7 @@ use crate::models::gated_delta::{GatedDeltaCache, gated_delta_update_precise};
 
 use super::config::ResolvedQwen4ExpConfig;
 use super::norm::GatedOutputNorm;
+use super::rollback::GdnBlockCapture;
 use super::shapes;
 
 /// `x * rsqrt(sum(x^2) + 1e-6)` over the last axis, rounding to the input
@@ -43,6 +44,34 @@ pub(crate) fn l2_normalize(x: &MlxArray) -> UniquePtr<MlxArray> {
     let eps = mlxcel_core::full_f32(&[1], 1e-6, x_dtype);
     let inv = mlxcel_core::rsqrt(&mlxcel_core::add(&sum, &eps));
     mlxcel_core::multiply(x, &inv)
+}
+
+/// A depthwise `conv1d` over `conv_input` (`[B, window + rows - 1, C]`, the
+/// carried window followed by `rows` new rows) evaluated one output row at a
+/// time, so each row is the bytes a single-row decode step computes
+/// (issue #2880). `window = (kernel - 1) * dilation` rows precede each output.
+///
+/// Used by: [`Qwen4ExpGatedDeltaNet`], the PLE layer (`qwen4_exp_ple`).
+pub(crate) fn conv1d_per_position(
+    conv_input: &MlxArray,
+    weight: &MlxArray,
+    kernel: i32,
+    dilation: i32,
+    rows: i32,
+) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(conv_input);
+    let (b, channels) = (shape[0], shape[2]);
+    let window = (kernel - 1) * dilation;
+    let mut out: Option<UniquePtr<MlxArray>> = None;
+    for i in 0..rows {
+        let input = mlxcel_core::slice(conv_input, &[0, i, 0], &[b, i + window + 1, channels]);
+        let row = mlxcel_core::conv1d(&input, weight, 1, 0, dilation, channels);
+        out = Some(match out {
+            None => row,
+            Some(previous) => concatenate(&previous, &row, 1),
+        });
+    }
+    out.expect("at least one row")
 }
 
 /// Returns `(l2(q) * head_dim^-0.5, l2(k))`.
@@ -156,16 +185,38 @@ impl Qwen4ExpGatedDeltaNet {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn forward(
         &self,
         inputs: &MlxArray,
         cache: Option<&mut GatedDeltaCache>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_captured(inputs, cache, None, false)
+    }
+
+    /// [`Self::forward`] that also fills `capture` with what
+    /// [`Self::rollback`] needs to unwind part of this call: the recurrent
+    /// state it started from, the normalized `q`/`k`, `v`, the gate inputs
+    /// and the convolution input. Speculative appends only (issue #2880).
+    ///
+    /// `decode_equivalent` makes a multi-row call produce, at every row,
+    /// the bytes the single-row decode step produces: the projections go
+    /// through the fused decode matrix decode uses, and the convolution is
+    /// evaluated one output row at a time. The recurrence itself needs no
+    /// change: its state is float32 end to end, so the precise kernel's
+    /// per-step arithmetic is the same for a `T = K` block and `K` steps.
+    pub(crate) fn forward_captured(
+        &self,
+        inputs: &MlxArray,
+        cache: Option<&mut GatedDeltaCache>,
+        capture: Option<&mut Option<GdnBlockCapture>>,
+        decode_equivalent: bool,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(inputs);
         let (b, s) = (shape[0], shape[1]);
 
         let fused = self.decode_projection.as_ref().filter(|linear| {
-            s == 1
+            (s == 1 || decode_equivalent)
                 && matches!(linear, UnifiedLinear::Quantized { weight, .. }
                 if mlxcel_core::array_dtype(&weight.scales) == mlxcel_core::array_dtype(inputs))
         });
@@ -188,6 +239,15 @@ impl Qwen4ExpGatedDeltaNet {
                 split(widths[1]),
                 split(widths[2]),
                 split(widths[3]),
+            )
+        } else if decode_equivalent {
+            // Decode takes the plain projections when it cannot fuse them;
+            // the prefill-only gathered form reduces in another order.
+            (
+                self.in_proj_qkv.forward(inputs),
+                self.in_proj_z.forward(inputs),
+                super::linear::decode_equivalent_projection(&self.in_proj_b, inputs),
+                super::linear::decode_equivalent_projection(&self.in_proj_a, inputs),
             )
         } else {
             (
@@ -220,9 +280,23 @@ impl Qwen4ExpGatedDeltaNet {
             c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
         }
 
-        let conv_out =
-            mlxcel_core::conv1d(&conv_input, &self.conv1d_weight, 1, 0, 1, self.conv_dim);
+        super::trace::record("gdn qkv", &qkv);
+        super::trace::record("gdn z", &z);
+        super::trace::record("gdn a", &a);
+        super::trace::record("gdn b", &b_proj);
+        let conv_out = if decode_equivalent {
+            conv1d_per_position(
+                &conv_input,
+                &self.conv1d_weight,
+                self.conv_kernel_size,
+                1,
+                s,
+            )
+        } else {
+            mlxcel_core::conv1d(&conv_input, &self.conv1d_weight, 1, 0, 1, self.conv_dim)
+        };
         let conv_out = silu(&conv_out);
+        super::trace::record("gdn conv", &conv_out);
         let split = |start: i32, stop: i32, heads: i32, dim: i32| {
             let part = mlxcel_core::slice(&conv_out, &[0, 0, start], &[b, s, stop]);
             mlxcel_core::reshape(&part, &[b, s, heads, dim])
@@ -241,12 +315,26 @@ impl Qwen4ExpGatedDeltaNet {
             self.head_v_dim,
         );
         let (q, k) = normalize_qk(&q, &k);
+        super::trace::record("gdn q", &q);
+        super::trace::record("gdn k", &k);
+        super::trace::record("gdn v", &v);
 
         let state = cache
             .as_ref()
             .and_then(|c| c.state_cache.as_ref())
             .filter(|state| mlxcel_core::array_shape(state)[0] == b)
             .map(|state| mlxcel_core::copy(state));
+        if let Some(slot) = capture {
+            *slot = Some(GdnBlockCapture {
+                q: mlxcel_core::copy(&q),
+                k: mlxcel_core::copy(&k),
+                v: mlxcel_core::copy(&v),
+                a: mlxcel_core::copy(&a),
+                b: mlxcel_core::copy(&b_proj),
+                init_state: state.as_ref().map(|state| mlxcel_core::copy(state)),
+                conv_input: mlxcel_core::copy(&conv_input),
+            });
+        }
         let (out, new_state) = gated_delta_update_precise(
             &q,
             &k,
@@ -258,13 +346,68 @@ impl Qwen4ExpGatedDeltaNet {
             state.as_deref(),
             None,
         );
+        super::trace::record("gdn y", &out);
         if let Some(c) = cache {
             c.state_cache = Some(new_state);
             c.advance(s);
         }
 
         let out = self.norm.forward(&out, &z);
+        super::trace::record("gdn normed", &out);
         self.out_proj
             .forward(&mlxcel_core::reshape(&out, &[b, s, -1]))
+    }
+
+    /// Rewind `cache` to the first `keep` positions of the block `capture`
+    /// describes, dropping `trim = appended - keep` positions (issue #2880).
+    ///
+    /// The recurrence is replayed from the captured initial state over the
+    /// accepted rows through the same `gated_delta_update_precise` the
+    /// forward ran, so the replayed state is the state a forward of exactly
+    /// those rows would have left (the float32 state makes a `T = keep` block
+    /// and `keep` single steps agree on Metal, which the MTP exactness probe
+    /// measures per checkpoint). The convolution window is the `kernel - 1`
+    /// rows of the captured input that end at the last kept position.
+    pub(crate) fn rollback(
+        &self,
+        cache: &mut GatedDeltaCache,
+        capture: &GdnBlockCapture,
+        keep: i32,
+        trim: i32,
+    ) {
+        let n_keep = self.conv_kernel_size - 1;
+        cache.state_cache = if keep == 0 {
+            capture
+                .init_state
+                .as_ref()
+                .map(|state| mlxcel_core::copy(state))
+        } else {
+            let rows = |x: &MlxArray| {
+                let shape = mlxcel_core::array_shape(x);
+                let mut stop = shape.clone();
+                stop[1] = keep;
+                mlxcel_core::slice(x, &vec![0; shape.len()], &stop)
+            };
+            let (_, state) = gated_delta_update_precise(
+                &rows(&capture.q),
+                &rows(&capture.k),
+                &rows(&capture.v),
+                &rows(&capture.a),
+                &rows(&capture.b),
+                &self.a_log,
+                &self.dt_bias,
+                capture.init_state.as_deref(),
+                None,
+            );
+            Some(state)
+        };
+        let conv_shape = mlxcel_core::array_shape(&capture.conv_input);
+        let window = mlxcel_core::slice(
+            &capture.conv_input,
+            &[0, keep, 0],
+            &[conv_shape[0], keep + n_keep, conv_shape[2]],
+        );
+        cache.conv_state = Some(mlxcel_core::contiguous(&window, false));
+        cache.offset -= trim;
     }
 }

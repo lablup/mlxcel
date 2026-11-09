@@ -78,6 +78,19 @@ impl Drop for DecodeLookaheadAppendScope {
     }
 }
 
+/// Whether the current thread is inside a [`DecodeLookaheadAppendScope`],
+/// i.e. the forward being built appends positions the engine may ask to
+/// unwind ([`crate::engine::Engine::verify`], the lookahead prime forward).
+///
+/// A model-owned family whose state cannot be trimmed reads this to decide
+/// whether a forward has to capture what a rollback over its accepted prefix
+/// needs; a plain prefill or decode step does not pay for that capture.
+///
+/// Used by: `qwen4_exp` (`forward_sequence_hidden`, issue #2880).
+pub fn speculative_append_active() -> bool {
+    SPECULATIVE_APPEND.with(Cell::get)
+}
+
 /// Rows a decode write overwrote, copied out of the pre-write buffers.
 pub(crate) struct DecodeUndoRows {
     keys: UniquePtr<MlxArray>,

@@ -89,12 +89,14 @@ pub fn sanitize_weights(
     let mut text = WeightMap::new();
     let mut vision = WeightMap::new();
     for (key, value) in weights {
-        // The MTP predictor is a separate speculative artifact.
-        if key.starts_with("mtp.") {
+        // The MTP predictor is a separate speculative artifact: the
+        // `qwen4_exp_mtp` drafter loads it from its own directory
+        // (`qwen4_exp_mtp_drafter`), so the target never reads these keys.
+        if is_mtp_key(&key) {
             continue;
         }
         let key = canonical_key(&key);
-        if key.starts_with("model.mtp.") {
+        if is_mtp_key(&key) {
             continue;
         }
         if key.starts_with("vision_tower.") {
@@ -129,12 +131,39 @@ pub fn sanitize_weights(
         })
         .collect();
     for prefix in &expert_blocks {
-        for projection in ["gate_proj", "up_proj", "down_proj"] {
-            stack_per_expert(&mut text, prefix, projection, config.raw.num_experts)?;
-        }
-        split_fused_gate_up(&mut text, prefix)?;
+        canonicalize_expert_block(&mut text, prefix, config.raw.num_experts)?;
     }
     Ok(SanitizedWeights { text, vision })
+}
+
+/// The MTP head's prefixes in every checkpoint layout: raw Hugging Face
+/// (`mtp.`), the mlx-vlm VLM wrapper (`language_model.mtp.`) and the
+/// canonical text layout (`model.mtp.`), the three upstream's drafter
+/// `sanitize` strips.
+///
+/// Used by: [`sanitize_weights`], the `qwen4_exp_mtp` drafter's sanitize.
+pub(crate) fn is_mtp_key(key: &str) -> bool {
+    key.starts_with("mtp.")
+        || key.starts_with("model.mtp.")
+        || key.starts_with("language_model.mtp.")
+}
+
+/// Bring one MoE block's expert tensors into the stacked `switch_mlp` layout
+/// the loader reads: per-expert `experts.{e}.*` tensors are stacked, and a
+/// fused `experts.gate_up_proj` is split into `gate_proj` / `up_proj` with
+/// `down_proj` moved alongside.
+///
+/// Used by: [`sanitize_weights`], the `qwen4_exp_mtp` drafter's sanitize
+/// (under its `layers.0.mlp` prefix).
+pub(crate) fn canonicalize_expert_block(
+    weights: &mut WeightMap,
+    prefix: &str,
+    num_experts: usize,
+) -> Result<(), String> {
+    for projection in ["gate_proj", "up_proj", "down_proj"] {
+        stack_per_expert(weights, prefix, projection, num_experts)?;
+    }
+    split_fused_gate_up(weights, prefix)
 }
 
 fn conv_needs_moveaxis(value: &MlxArray) -> bool {

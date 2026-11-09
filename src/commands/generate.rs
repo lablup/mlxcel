@@ -2079,6 +2079,24 @@ fn run_prompt_lookup(
     config
         .validate()
         .map_err(|err| anyhow!("--prompt-lookup: {err}"))?;
+    // Qwen3.8-Flash-Next (#2880) rewinds its own state, so a verify block
+    // has to be byte-identical to the chain for the same reason an MTP block
+    // does, and the same gate decides it (the widest block a round can run):
+    // on GPU generation 15+ the probe fails under `qmv_wide` and passes once
+    // the gate switches it off for the process.
+    if let mlxcel::LoadedModel::Qwen4ExpVLM(vlm) = model
+        && mlxcel_core::metal_is_available()
+        && !vlm.text_model.mtp_exactness_allows(config.max_draft + 1)
+    {
+        anyhow::bail!(
+            "--prompt-lookup declined on Qwen4-Exp: a {}-wide verify block is not \
+             byte-identical to the single-token decode chain on this GPU, so temperature-0 \
+             output would silently differ from classic decode. Lower \
+             --prompt-lookup-max-draft, or set MLXCEL_MTP_ALLOW_INEXACT=1 to run anyway and \
+             forfeit the byte-identity contract.",
+            config.max_draft + 1
+        );
+    }
 
     // The engine's token-only speculative loop driving the prompt-lookup
     // drafter (#2176): the same client plain `generate` runs, with the
@@ -2441,6 +2459,24 @@ fn run_offline_mtp(
         ));
     }
 
+    // Qwen3.8-Flash-Next (`qwen4_exp`, #2880): the same single call the
+    // server's `mtp_capable_target` makes. Metal is a precondition of its
+    // exactness too (the float32-state gated-delta kernel), and the measured
+    // block-vs-chain probe decides the rest.
+    if let LoadedModel::Qwen4ExpVLM(vlm) = model
+        && mlxcel_core::metal_is_available()
+        && !vlm.text_model.mtp_exactness_allows(block_size)
+    {
+        return Err(anyhow!(
+            "Qwen4-Exp MTP speculative decoding declined: at --draft-block-size \
+             {block_size} this GPU's multi-token verify block is not byte-identical \
+             to the single-token decode chain, so temperature-0 output would \
+             silently differ from `mlxcel generate` without --draft-model. Try a \
+             smaller --draft-block-size, or set MLXCEL_MTP_ALLOW_INEXACT=1 to \
+             engage anyway and forfeit the byte-identity contract."
+        ));
+    }
+
     // Gemma 4 exactness gate: same call as the server's `mtp_capable_target`,
     // for the same reason as the Qwen block above. These arms used to admit
     // MTP unconditionally, which on Apple GPU generation 15+ advertised a
@@ -2508,16 +2544,28 @@ fn run_offline_mtp(
         }
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
+        // Qwen3.8-Flash-Next (#2880): Metal-only for the same kind of reason
+        // as Qwen 3.5, the float32-state gated-delta kernel that makes a
+        // verify block agree with the single-token chain.
+        LoadedModel::Qwen4ExpVLM(_) if !mlxcel_core::metal_is_available() => {
+            return Err(anyhow!(
+                "Qwen4-Exp MTP speculative decoding requires the Metal backend: its \
+                 temperature-0 exactness rests on the Metal precise gated-delta kernel, \
+                 whose block and chain arithmetic agree; the ops fallback's does not. Omit \
+                 --draft-model to run classic decode."
+            ));
+        }
+        LoadedModel::Qwen4ExpVLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Inkling(inkling) => inkling as &dyn LanguageModel,
         LoadedModel::InklingVLM(vlm) => &vlm.text as &dyn LanguageModel,
         LoadedModel::Glm4MoeLite(glm) => glm as &dyn LanguageModel,
         _ => {
             return Err(anyhow!(
                 "--draft-kind mtp is only supported for Gemma 4 (text, VLM, or \
-                 Unified), Qwen 3.5 (text or VLM), Inkling (text or VLM), and \
-                 GLM-4.7-Flash (glm4_moe_lite) targets; the loaded target \
-                 is not MTP-capable. Use --prompt-lookup for speculation without a \
-                 drafter checkpoint, or omit --draft-model."
+                 Unified), Qwen 3.5 (text or VLM), Qwen3.8-Flash-Next (qwen4_exp), \
+                 Inkling (text or VLM), and GLM-4.7-Flash (glm4_moe_lite) targets; the \
+                 loaded target is not MTP-capable. Use --prompt-lookup for speculation \
+                 without a drafter checkpoint, or omit --draft-model."
             ));
         }
     };
@@ -2618,6 +2666,20 @@ fn run_offline_mtp(
         ),
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => drive_offline_mtp(
             mlxcel::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(vlm, None),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        // Qwen3.8-Flash-Next (#2880): the adapter runs on the text backbone's
+        // internal fallback slot, the offline / single-row CLI shape.
+        LoadedModel::Qwen4ExpVLM(vlm) => drive_offline_mtp(
+            mlxcel::models::qwen4_exp_mtp_target::Qwen4ExpMtpTargetAdapter::new(
+                &vlm.text_model,
+                None,
+            ),
             drafter,
             prompt_tokens,
             max_tokens,

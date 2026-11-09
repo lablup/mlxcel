@@ -116,6 +116,10 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).supports_decode_lookahead_rewind()
     }
 
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        (**self).supports_speculative_verify_rewind()
+    }
+
     fn kv_cache_captures_sequence_state(&self) -> bool {
         (**self).kv_cache_captures_sequence_state()
     }
