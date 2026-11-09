@@ -19,8 +19,10 @@
 #include "kernel_port.h"
 #include <mlx/ops.h>
 
+#include <limits>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -82,18 +84,18 @@ inline GeluTanhF32KernelHolder& get_gelu_tanh_f32_kernel() {
 
 // This kernel's ports, in one place (#2479). Metal only: the fused tanh-GELU
 // is a Metal JIT kernel. A backend without a port is refused through
-// `select_kernel_port`, and the Rust caller takes its eager routing chain
+// `select_kernel_port`, and the Rust caller takes `compiled_gelu_tanh_f32`
 // instead of falling into the Metal arm.
 const mlxcel::KernelPorts& gelu_tanh_f32_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_gelu_tanh_f32_kernel().get();
         },
-        // No CUDA port (#1814): CUDA takes the eager `gelu_tanh_f32` chain.
-        // Written out so that adding one is a line here rather than a
-        // restructure at the call site.
+        // No CUDA port (#1814): CUDA takes `compiled_gelu_tanh_f32`. Written
+        // out so that adding one is a line here rather than a restructure at
+        // the call site.
         .cuda = nullptr,
-        // No ROCm port. The eager chain covers ROCm the same way.
+        // No ROCm port. `compiled_gelu_tanh_f32` covers ROCm the same way.
         .rocm = nullptr,
     };
     return ports;
@@ -103,8 +105,8 @@ const mlxcel::KernelPorts& gelu_tanh_f32_ports() {
 
 // Whether the fused kernel runs on this backend rather than refusing. Read
 // from the table the launcher reads, and false off the GPU stream: custom
-// kernels run only on the GPU, so with MLXCEL_DEVICE=cpu the eager
-// `gelu_tanh_f32` chain runs on the CPU instead of the launch throwing (the
+// kernels run only on the GPU, so with MLXCEL_DEVICE=cpu
+// `compiled_gelu_tanh_f32` runs on the CPU instead of the launch throwing (the
 // same check as fused_xielu_kernel_available).
 bool fused_gelu_tanh_f32_available() {
     return mlx::core::default_device() == mlx::core::Device::gpu &&
@@ -116,12 +118,24 @@ mlx::core::array fused_gelu_tanh_f32(const mlx::core::array& x) {
     auto T = x.dtype();
     auto xs = x.shape();
 
+    auto& kernel = mlxcel::select_kernel_port(
+        "fused_gelu_tanh_f32", "compiled_gelu_tanh_f32 fallback", gelu_tanh_f32_ports());
+
     int64_t n = 1;
     for (auto d : xs) n *= d;
+    // MLX's Metal dispatch clamps the threadgroup to the grid, so an empty
+    // input would dispatch with a zero-width threadgroup. There is nothing to
+    // compute: the result is the empty input, same shape and dtype.
+    if (n == 0) {
+        return x;
+    }
+    // The flattened shape and the grid are `int`. The Rust dispatch routes a
+    // larger array to the compiled chain; refuse here rather than truncate.
+    if (n > std::numeric_limits<int>::max()) {
+        throw std::invalid_argument(
+            "[fused_gelu_tanh_f32] input has more elements than a kernel grid can address");
+    }
     auto xflat = reshape(x, {(int)n});
-
-    auto& kernel = mlxcel::select_kernel_port(
-        "fused_gelu_tanh_f32", "eager gelu_tanh_f32 fallback", gelu_tanh_f32_ports());
 
     // The dtype is the only template argument: the body reads its index from
     // `thread_position_in_grid` and needs no size constant.

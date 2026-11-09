@@ -17,11 +17,11 @@
 // Fused tanh-GELU custom Metal kernel launcher, f32 arithmetic.
 //
 // This header exposes two C++ entry points that together implement the
-// "real Metal port" of the #2423 fused path:
+// "real Metal port" of the #2857 fused path:
 //
-//   - `fused_gelu_tanh_f32_available()` — whether the fused kernel runs on
+//   - `fused_gelu_tanh_f32_available()`: whether the fused kernel runs on
 //     this backend (Metal), read the same way the launcher decides.
-//   - `fused_gelu_tanh_f32(const mlx::core::array& x)` — issue the
+//   - `fused_gelu_tanh_f32(const mlx::core::array& x)`: issue the
 //     runtime-JIT Metal kernel via `mlx::core::fast::metal_kernel` and
 //     return the activated tensor.
 //
@@ -48,7 +48,7 @@ namespace mlxcel::turbo {
 // Whether the fused kernel runs on this backend rather than refusing.
 //
 // Custom kernels run only on the GPU stream, so this is false with
-// MLXCEL_DEVICE=cpu: callers take the eager `gelu_tanh_f32` chain instead of
+// MLXCEL_DEVICE=cpu: callers take `compiled_gelu_tanh_f32` instead of
 // the launch throwing (the same check as fused_xielu_kernel_available).
 bool fused_gelu_tanh_f32_available();
 
@@ -64,9 +64,9 @@ bool fused_gelu_tanh_f32_available();
 //   `gelu_tanh_f32` chain by f32 rounding (FMA contraction inside the fused
 //   kernel).
 //
-// Panics (throws) when there is no port on this backend — no GPU default
-// device, or no Metal port in the table. Rust-side callers must gate on
-// `fused_gelu_tanh_f32_available()` first or route to the eager chain.
+// Panics (throws) when there is no port on this backend (no GPU default
+// device, or no Metal port in the table). Rust-side callers must gate on
+// `fused_gelu_tanh_f32_available()` first or route to the compiled chain.
 mlx::core::array fused_gelu_tanh_f32(const mlx::core::array& x);
 
 } // namespace mlxcel::turbo

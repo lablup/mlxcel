@@ -36,10 +36,9 @@
 //! conditions. A single non-interleaved pass proved noisy enough to invert the
 //! ordering on a loaded host, so do not read one trial.
 //!
-//! The absolute microseconds are not the claim. The op-level ratio is also a
-//! lower bound on the end-to-end effect: the fused kernel removes the whole
-//! intermediate from the graph, which shows up as allocator and
-//! dependency-tracking pressure rather than as kernel time.
+//! The absolute microseconds are not the claim, and the ratios cover this one
+//! operation: the activation is a fraction of an encoder forward pass, so they
+//! do not predict an end-to-end change.
 //!
 //! Reproduce (use `caffeinate -i` so the host does not idle-throttle the GPU
 //! mid-run, and let the machine run cool between sweeps):

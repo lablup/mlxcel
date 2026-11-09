@@ -1122,8 +1122,17 @@ pub fn fused_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::fused_gelu_tanh_f32(x).expect("fused_gelu_tanh_f32 kernel threw on this backend")
 }
 
-/// [`fused_gelu_tanh_f32`] where the kernel has a port for this backend, and
-/// [`compiled_gelu_tanh_f32`] everywhere else.
+/// Whether the fused launch handles an input of this dtype and element count:
+/// the kernel is written for f32, bf16 and f16, and its grid is an `i32`.
+fn fused_gelu_tanh_f32_accepts(input_dtype: i32, size: usize) -> bool {
+    matches!(
+        input_dtype,
+        crate::dtype::FLOAT32 | crate::dtype::BFLOAT16 | crate::dtype::FLOAT16
+    ) && size <= i32::MAX as usize
+}
+
+/// [`fused_gelu_tanh_f32`] where the kernel has a port for this backend and
+/// accepts the input, and [`compiled_gelu_tanh_f32`] everywhere else.
 ///
 /// The two paths compute the same f32 formula, so the fallback is a rounding
 /// difference, not a different function. This is the dispatch
@@ -1133,7 +1142,9 @@ pub fn fused_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// encoders take that route regardless of device.
 #[inline]
 pub fn gelu_tanh_f32_compiled_where_available(x: &MlxArray) -> UniquePtr<MlxArray> {
-    if ffi::fused_gelu_tanh_f32_available() {
+    if ffi::fused_gelu_tanh_f32_available()
+        && fused_gelu_tanh_f32_accepts(ffi::array_dtype(x), ffi::array_size(x))
+    {
         fused_gelu_tanh_f32(x)
     } else {
         compiled_gelu_tanh_f32(x)

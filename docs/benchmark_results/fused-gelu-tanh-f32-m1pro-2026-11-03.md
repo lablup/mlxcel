@@ -82,18 +82,17 @@ shape,eager_us,compiled_us,fused_us,fused_vs_compiled,fused_vs_eager
 
 ## What this does and does not establish
 
-The fused kernel wins on all three shapes against both baselines, in all three
-sweeps, and the margin is widest where the work is largest — which is the image
-prefill the fusion exists for. The narrowest result is the decode row against
-the compiled chain at 0.87x-0.97x, so a single token still gains, but by the
-least and with the widest spread;
-that is expected, since a batch-1 row is launch-bound rather than
-bandwidth-bound.
+The fused kernel was faster than both baselines on all three shapes in all three
+sweeps. Against the eager chain the ratio falls as the shape grows (0.70x-0.77x
+on the decode row, 0.45x-0.48x on the tower prefill, 0.30x-0.32x on the large
+prefill). Against the compiled chain the tower and large-prefill ranges overlap
+(0.76x-0.82x and 0.71x-0.85x), so these sweeps do not rank those two shapes. The
+smallest gain is the decode row against the compiled chain, at 0.87x-0.97x.
 
-The op-level ratio is a **lower bound** on the end-to-end effect. The fused
-kernel also removes the whole full-width intermediate from the MLX graph, which
-shows up as allocator and dependency-tracking pressure rather than as kernel
-time.
+The ratios are for this one operation. The activation is a fraction of an
+encoder forward pass, so they do not predict an end-to-end change. The fused
+kernel also removes intermediates from the MLX graph, and this harness did not
+measure what that does to allocator or graph-construction time.
 
 What this does not establish: no end-to-end prefill or decode number was taken
 on a real checkpoint, because no tanh-switched vision checkpoint was loaded for

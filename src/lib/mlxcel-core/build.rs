@@ -155,7 +155,7 @@ fn main() {
         // The one place a fused kernel chooses its per-backend port (#1801).
         .file("../mlxcelverse/kernels/kernel_port.cpp")
         .file("../mlxcelverse/kernels/sparse_v_sdpa.cpp")
-        // Fused tanh-GELU real Metal port launcher (#2423). Lives under
+        // Fused tanh-GELU real Metal port launcher (#2857). Lives under
         // `src/lib/mlxcelverse/kernels/` so the MLX-upstream-commit upgrade
         // checklist ("Bumping the MLX upstream pin" in CONTRIBUTING.md)
         // treats this directory as in-scope. Forwards
@@ -475,7 +475,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_rope_append_hip.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/kv_inplace_write.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/kv_inplace_write.cpp");
-    // Fused tanh-GELU real Metal port (#2423).
+    // Fused tanh-GELU real Metal port (#2857).
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/gelu_tanh_f32.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/gelu_tanh_f32.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");

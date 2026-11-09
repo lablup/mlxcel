@@ -809,15 +809,15 @@ mod ffi {
         fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Whether the fused tanh-GELU Metal kernel can run on this backend
-        /// (issue #2423): the default device is the GPU and the kernel has a
+        /// (issue #2857): the default device is the GPU and the kernel has a
         /// Metal port. Read from the kernel's port table, the one the dispatch
-        /// reads. False on a CPU-only host, where the eager `gelu_tanh_f32`
+        /// reads. False on the CPU device and on CUDA or ROCm, where `compiled_gelu_tanh_f32`
         /// chain runs instead.
         fn fused_gelu_tanh_f32_available() -> bool;
 
         /// tanh-approximate GELU as one 1-D elementwise Metal JIT kernel;
         /// throws when there is no port on this backend, so declare `-> Result`
-        /// so cxx catches the throw at the FFI boundary (#2423).
+        /// so cxx catches the throw at the FFI boundary (#2857).
         /// Used by: `GeluActivation::TanhF32Compiled`.
         fn fused_gelu_tanh_f32(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
 

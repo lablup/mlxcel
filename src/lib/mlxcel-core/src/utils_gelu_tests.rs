@@ -20,8 +20,8 @@
 //! behavior change for that family and needs its own measurement.
 
 use super::{
-    GeluActivation, array_to_vec_f32, compiled_gelu_tanh_f32, fused_gelu_tanh_f32, gelu_approx,
-    gelu_sigmoid, gelu_tanh, gelu_tanh_f32,
+    GeluActivation, array_to_vec_f32, compiled_gelu_tanh_f32, fused_gelu_tanh_f32,
+    fused_gelu_tanh_f32_accepts, gelu_approx, gelu_sigmoid, gelu_tanh, gelu_tanh_f32,
 };
 use crate::{dtype, ffi};
 use cxx::UniquePtr;
@@ -366,7 +366,9 @@ fn fused_tanh_f32_matches_the_eager_helper_where_the_kernel_runs() {
         if diff > 0.0 {
             differing += 1;
             max_abs = max_abs.max(diff);
-            max_rel = max_rel.max(diff / w.abs());
+            if *w != 0.0 {
+                max_rel = max_rel.max(diff / w.abs());
+            }
         }
         // Two tolerances, because the two paths round in different places.
         // Relative, for lanes where the result is a healthy fraction of `x`.
@@ -434,12 +436,11 @@ fn compiled_dispatch_falls_back_to_the_compiled_chain_on_the_cpu() {
 
 /// An empty tensor must take the same route as any other shape.
 ///
-/// The fused launcher flattens `x` to `n` elements and passes `n` itself as the
-/// grid, with no rounded-up multiple (Metal dispatches exactly `grid` threads
-/// and the body has no bounds guard). For `n == 0` that is a zero-thread
-/// dispatch, so this pins that the launch neither throws nor writes anything
-/// and that the result keeps the input shape. It is asserted on both routes so
-/// the GPU port and the compiled fallback stay interchangeable at the edge.
+/// The fused launcher returns an empty input without dispatching, because MLX
+/// clamps the threadgroup to the grid and `n == 0` would make it zero wide. This
+/// pins that the call does not throw and that the result keeps the input shape
+/// and dtype. It is asserted on both routes so the GPU port and the compiled
+/// fallback stay interchangeable at the edge.
 #[test]
 fn empty_input_takes_the_same_route_on_both_paths() {
     // The default device is process-global, and this module has a test that
@@ -476,6 +477,11 @@ fn empty_input_takes_the_same_route_on_both_paths() {
 /// the throughput is not), which is exactly why the rule is a test.
 #[test]
 fn fused_kernel_returns_the_input_dtype() {
+    let _lock = crate::streams::lock_default_device();
+    if !ffi::fused_gelu_tanh_f32_available() {
+        eprintln!("fused_gelu_tanh_f32 unavailable on this backend; skipping");
+        return;
+    }
     for (dt, name) in [
         (dtype::FLOAT16, "f16"),
         (dtype::BFLOAT16, "bf16"),
@@ -502,7 +508,11 @@ fn fused_kernel_returns_the_input_dtype() {
         let eager = gelu_tanh_f32(&x);
         let want = array_to_vec_f32(&eager);
         let got = array_to_vec_f32(&out);
-        let tol = if dt == dtype::FLOAT32 { 0.0 } else { 1.0e-2 };
+        let tol = if dt == dtype::FLOAT32 {
+            4.0 * f32::EPSILON
+        } else {
+            1.0e-2
+        };
         for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
             assert!(
                 (g - w).abs() <= tol,
@@ -510,6 +520,35 @@ fn fused_kernel_returns_the_input_dtype() {
                  kernel must apply the same formula the eager chain does"
             );
         }
+    }
+}
+
+/// CUDA has no port for this kernel, so a CUDA build must never launch it.
+#[cfg(feature = "cuda")]
+#[test]
+fn fused_kernel_is_unreachable_on_cuda() {
+    let _lock = crate::streams::lock_default_device();
+    assert!(
+        !ffi::fused_gelu_tanh_f32_available(),
+        "the fused tanh-GELU is Metal only; a CUDA build must take the compiled chain"
+    );
+}
+
+/// The launch is written for three float dtypes and an `i32` grid, so anything
+/// else has to take the compiled chain, which handles any dtype and size.
+#[test]
+fn fused_route_accepts_only_float_dtypes_within_the_grid() {
+    let max_grid = i32::MAX as usize;
+    for dt in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
+        assert!(fused_gelu_tanh_f32_accepts(dt, 0));
+        assert!(fused_gelu_tanh_f32_accepts(dt, max_grid));
+        assert!(!fused_gelu_tanh_f32_accepts(dt, max_grid + 1));
+    }
+    for dt in [dtype::FLOAT64, dtype::COMPLEX64, dtype::INT32, dtype::BOOL] {
+        assert!(
+            !fused_gelu_tanh_f32_accepts(dt, 16),
+            "dtype {dt} must take the compiled chain"
+        );
     }
 }
 

@@ -591,15 +591,15 @@ std::unique_ptr<MlxArray> compiled_gelu_approx(const MlxArray& x);
 // Used by: Rust `GeluActivation::TanhF32Compiled` (#2423)
 std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x);
 
-// Whether the real Metal tanh-GELU kernel runs on this backend (#2423, Option A):
+// Whether the real Metal tanh-GELU kernel runs on this backend (#2857):
 // a GPU default device with a Metal port in the table. False with
-// MLXCEL_DEVICE=cpu — callers take the eager chain. Read from the same
+// MLXCEL_DEVICE=cpu, where callers take the compiled chain. Read from the same
 // table the launcher dispatches through.
 bool fused_gelu_tanh_f32_available();
 
-// Real Metal custom kernel for `fused_gelu_tanh_f32` (#2423, Option A): the
+// Real Metal custom kernel for `fused_gelu_tanh_f32` (#2857): the
 // tanh-GELU as one 1-D elementwise JIT Metal kernel. Rust-side callers gate on
-// `fused_gelu_tanh_f32_available()` first or route to the eager chain.
+// `fused_gelu_tanh_f32_available()` first or route to the compiled chain.
 std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x);
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
