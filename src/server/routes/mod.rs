@@ -319,6 +319,10 @@ pub(crate) fn generation_error_response(err: &anyhow::Error) -> ErrorResponse {
     if message.contains("exceeds the available context size") {
         let mut response = ErrorResponse::new(message, "exceed_context_size_error");
         response.status = axum::http::StatusCode::BAD_REQUEST;
+        // The server's own overflow class with OpenAI's code, so either kind
+        // of client can recognize it.
+        response.error.code =
+            Some(crate::server::responses_compaction::CONTEXT_LENGTH_EXCEEDED.to_string());
         return response;
     }
 

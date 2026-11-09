@@ -188,6 +188,33 @@ async fn cancel_refuses_a_finished_stored_response_and_leaves_it_unchanged() {
 }
 
 #[tokio::test]
+async fn repeat_cancel_of_a_cancelled_response_returns_the_stored_response() {
+    let h = harness();
+    let completed = h.create_completed().await;
+
+    let cancelled = "resp_cancelled".to_string();
+    let mut copy = h.store.get(&completed).expect("response is stored");
+    copy.response.id = cancelled.clone();
+    copy.response.status = ResponseStatus::Cancelled;
+    h.store.insert(
+        cancelled.clone(),
+        StoredResponse {
+            response: copy.response,
+            input_items: copy.input_items,
+        },
+    );
+
+    let before = h.retrieve(&cancelled).await;
+    for _ in 0..2 {
+        let (status, body) = h.cancel(&cancelled).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "cancelled", "{body}");
+        assert_eq!(body, before, "cancel must return the stored Response");
+        assert_eq!(h.retrieve(&cancelled).await, before);
+    }
+}
+
+#[tokio::test]
 async fn cancel_of_a_stored_response_leaves_its_in_flight_token_alone() {
     // The stream persists its result before it unregisters the in-flight
     // token, so both can exist for the same id at once.
