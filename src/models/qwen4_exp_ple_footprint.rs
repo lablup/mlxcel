@@ -20,10 +20,12 @@ use std::path::Path;
 use mlxcel_core::weights::declared_optiq_vision_sidecar;
 use serde_json::Value;
 
+use super::config::PleStorageConfig;
 use super::ple_io::PleIoMode;
 use super::ple_manifest::PleManifest;
-use super::ple_prepare::{read_header, read_json};
-use super::ple_storage::{DEFAULT_PLE_CACHE_BYTES, resolve_cache_budget};
+use super::ple_manifest::trust::read_header;
+use super::ple_prepare::read_json;
+use super::ple_storage::{DEFAULT_PLE_CACHE_BYTES, resolve_cache_budget, resolve_manifest_path};
 
 /// What an external-table checkpoint keeps resident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,13 +49,12 @@ impl ExternalPleFootprint {
 pub fn external_ple_footprint(model_dir: &Path) -> Option<ExternalPleFootprint> {
     let config = read_json(&model_dir.join("config.json")).ok()?;
     let storage = config.get("text_config")?.get("ple_storage")?;
-    let manifest_name = storage.get("manifest")?.as_str()?;
-    let manifest_path = model_dir.join(manifest_name);
-    let manifest = PleManifest::load(
-        &manifest_path,
-        storage.get("cache_rows").and_then(Value::as_u64),
-    )
-    .ok()?;
+    let storage = PleStorageConfig {
+        manifest: storage.get("manifest")?.as_str()?.to_string(),
+        cache_rows: storage.get("cache_rows").and_then(Value::as_u64),
+    };
+    let manifest_path = resolve_manifest_path(&storage, Some(model_dir)).ok()?;
+    let manifest = PleManifest::load(&manifest_path, storage.cache_rows).ok()?;
     let weight_bytes = index_weight_bytes(model_dir)?;
     let io_mode = PleIoMode::from_env().unwrap_or_default();
     let row_memory_bytes = match io_mode {

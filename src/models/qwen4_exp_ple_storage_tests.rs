@@ -418,3 +418,162 @@ fn upstream_prepared_views_read_the_same_rows_as_the_helper() {
         assert_eq!(evaluated(table.lookup(&IDS).unwrap()), want, "{view}");
     }
 }
+
+/// Rewrite the index of a checkpoint so `key` names `file`.
+fn point_index_at(dir: &Path, key: &str, file: &str) {
+    let path = dir.join("model.safetensors.index.json");
+    let mut index: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    index["weight_map"][key] = json!(file);
+    std::fs::write(path, serde_json::to_vec(&index).unwrap()).unwrap();
+}
+
+fn prepare_error(source: &Path) -> String {
+    let view = TempDir::new().unwrap();
+    format!(
+        "{:#}",
+        prepare_external_ple_model(source, view.path(), &PrepareOptions::default())
+            .expect_err("the helper must refuse this checkpoint")
+    )
+}
+
+#[test]
+fn the_helper_refuses_a_shard_path_leaving_the_checkpoint() {
+    let root = TempDir::new().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    write_checkpoint(&source, Quant::Affine);
+    std::fs::copy(
+        source.join("model-00001.safetensors"),
+        root.path().join("outside.safetensors"),
+    )
+    .unwrap();
+    point_index_at(&source, "model.other.weight", "../outside.safetensors");
+    let error = prepare_error(&source);
+    assert!(error.contains("refusing to link"), "{error}");
+}
+
+#[test]
+fn the_helper_refuses_to_link_a_shard_over_a_file_it_rewrites() {
+    let source = TempDir::new().unwrap();
+    write_checkpoint(source.path(), Quant::Affine);
+    point_index_at(source.path(), "model.other.weight", "config.json");
+    let error = prepare_error(source.path());
+    assert!(error.contains("not a .safetensors file"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_helper_refuses_to_copy_a_symlink_leaving_the_checkpoint() {
+    let source = TempDir::new().unwrap();
+    write_checkpoint(source.path(), Quant::Affine);
+    let outside = TempDir::new().unwrap();
+    std::fs::write(outside.path().join("secret"), b"secret").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret"),
+        source.path().join("notes.txt"),
+    )
+    .unwrap();
+    let error = prepare_error(source.path());
+    assert!(error.contains("refusing to copy"), "{error}");
+}
+
+#[test]
+fn the_helper_does_not_let_a_source_file_replace_the_manifest() {
+    let source = TempDir::new().unwrap();
+    write_checkpoint(source.path(), Quant::Affine);
+    std::fs::write(source.path().join(MANIFEST_NAME), b"planted").unwrap();
+    let view = TempDir::new().unwrap();
+    prepare_external_ple_model(source.path(), view.path(), &PrepareOptions::default()).unwrap();
+    assert_ne!(
+        std::fs::read(view.path().join(MANIFEST_NAME)).unwrap(),
+        b"planted"
+    );
+}
+
+#[test]
+fn the_helper_refuses_a_header_size_past_the_end_of_the_file() {
+    let source = TempDir::new().unwrap();
+    write_checkpoint(source.path(), Quant::Affine);
+    let path = source.path().join("model-00001.safetensors");
+    let mut file = std::fs::read(&path).unwrap();
+    file[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+    std::fs::write(path, file).unwrap();
+    let error = prepare_error(source.path());
+    assert!(error.contains("header size"), "{error}");
+}
+
+#[test]
+fn the_helper_names_shards_that_disagree_on_row_width() {
+    let source = TempDir::new().unwrap();
+    let mut header = serde_json::Map::new();
+    let mut weight_map = serde_json::Map::new();
+    let mut end = 0u64;
+    for (shard, words, groups) in [(0, 4u64, 1u64), (1, 8, 2)] {
+        for (name, dtype, width, item) in [
+            ("weight", "U32", words, 4u64),
+            ("scales", "BF16", groups, 2),
+            ("biases", "BF16", groups, 2),
+        ] {
+            let key = format!("{PREFIX}.shards.{shard}.{name}");
+            let next = end + width * item;
+            header.insert(
+                key.clone(),
+                json!({"dtype": dtype, "shape": [1, width], "data_offsets": [end, next]}),
+            );
+            weight_map.insert(key, json!("model-00001.safetensors"));
+            end = next;
+        }
+    }
+    let header = serde_json::to_vec(&Value::Object(header)).unwrap();
+    let mut file = (header.len() as u64).to_le_bytes().to_vec();
+    file.extend_from_slice(&header);
+    file.resize(file.len() + end as usize, 0);
+    std::fs::write(source.path().join("model-00001.safetensors"), file).unwrap();
+    std::fs::write(
+        source.path().join("model.safetensors.index.json"),
+        serde_json::to_vec(&json!({"metadata": {}, "weight_map": weight_map})).unwrap(),
+    )
+    .unwrap();
+    let quantization = json!({"group_size": 32, "bits": 4, "mode": "affine"});
+    std::fs::write(
+        source.path().join("config.json"),
+        serde_json::to_vec(&json!({"text_config": {}, "quantization": quantization})).unwrap(),
+    )
+    .unwrap();
+    let error = prepare_error(source.path());
+    assert!(error.contains("row_width"), "{error}");
+}
+
+#[test]
+fn the_manifest_path_must_stay_in_the_model_directory() {
+    let dir = TempDir::new().unwrap();
+    let storage = |manifest: &str| PleStorageConfig {
+        manifest: manifest.to_string(),
+        cache_rows: None,
+    };
+    std::fs::write(dir.path().join("ple-store.json"), b"{}").unwrap();
+    assert!(resolve_manifest_path(&storage("ple-store.json"), Some(dir.path())).is_ok());
+    let outside = dir.path().join("ple-store.json");
+    for manifest in ["../ple-store.json", outside.to_str().unwrap()] {
+        let error = resolve_manifest_path(&storage(manifest), Some(dir.path())).unwrap_err();
+        assert_eq!(error.field, "ple_storage.manifest");
+    }
+}
+
+#[test]
+fn a_panicking_gather_ahead_clears_the_in_flight_flag() {
+    let prepared = prepared(
+        Quant::Affine,
+        PrepareLayout::Interleaved,
+        PleIoMode::Mmap,
+        1 << 20,
+    );
+    let shared = &prepared.table.shared;
+    *shared.in_flight.0.lock().unwrap() = true;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _finish = FinishGatherAhead(shared);
+        panic!("simulated gather-ahead failure");
+    }));
+    assert!(outcome.is_err());
+    assert!(!*shared.in_flight.0.lock().unwrap());
+}

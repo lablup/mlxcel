@@ -324,14 +324,11 @@ fn external_ple_storage_with_a_mismatched_table_is_refused_at_load() {
     });
     let manifest_path = dir.path().join("ple-store.json");
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
-    let overrides = json!({"ple_storage": {"manifest": manifest_path.to_str().unwrap()}});
-    let error = PleLayer::from_weights(
-        &weights(&fixture),
-        &config(&fixture, Some(&overrides)),
-        "ple",
-        0,
-    )
-    .err()
-    .expect("a table of the wrong size must be refused");
+    let overrides = json!({"ple_storage": {"manifest": "ple-store.json"}});
+    let mut resolved = config(&fixture, Some(&overrides));
+    resolved.model_dir = Some(dir.path().to_path_buf());
+    let error = PleLayer::from_weights(&weights(&fixture), &resolved, "ple", 0)
+        .err()
+        .expect("a table of the wrong size must be refused");
     assert!(error.contains("external PLE row count"), "{error}");
 }

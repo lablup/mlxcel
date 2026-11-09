@@ -20,9 +20,15 @@
 //! Every validation mirrors upstream `QuantizedMMapNGramEmbedding.__init__`
 //! and every failure names the manifest field.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
+
+use trust::{DeclaredTensor, declared_tensors, resolve_contained};
+
+#[path = "qwen4_exp_ple_trust.rs"]
+pub(crate) mod trust;
 
 pub const MANIFEST_VERSION: u64 = 2;
 
@@ -307,7 +313,9 @@ fn parse_interleaved(
     let expected = row_count
         .checked_mul(row_stride)
         .ok_or_else(|| field_error("row_count", "row_count * row_stride overflows"))?;
-    let data_path = base.join(name);
+    // A row file has no header to authenticate it, so it must be in the model.
+    let data_path = resolve_contained(base, Path::new(name))
+        .map_err(|e| field_error("data_file", e.to_string()))?;
     let size = std::fs::metadata(&data_path)
         .map_err(|e| {
             field_error(
@@ -339,6 +347,7 @@ fn parse_ranges(
     let groups = (row_width / quantization.group_size()) as u64;
     let mut shards = Vec::with_capacity(entries.len());
     let mut expected_start = 0u64;
+    let mut files: HashMap<PathBuf, (u64, HashMap<u64, DeclaredTensor>)> = HashMap::new();
     for (index, entry) in entries.iter().enumerate() {
         let field = |name: &str| format!("shards[{index}].{name}");
         let get = |name: &str| {
@@ -425,6 +434,29 @@ fn parse_ranges(
                     format!("byte range exceeds {}", path.display()),
                 ));
             }
+            // `source_root` may legitimately leave the model directory (a view
+            // reads its source checkpoint), so it cannot be confined. Every
+            // range must instead be a tensor the file's own header declares,
+            // which keeps a manifest from reading arbitrary files as rows.
+            if !files.contains_key(&path) {
+                let declared = declared_tensors(&path)
+                    .map_err(|e| field_error(tensor_field("file"), e.to_string()))?;
+                files.insert(path.clone(), (size, declared));
+            }
+            let declared = files[&path].1.get(&offset).filter(|tensor| {
+                tensor.dtype == dtype
+                    && tensor.shape == shape
+                    && offset.checked_add(bytes) == Some(tensor.end)
+            });
+            if declared.is_none() {
+                return Err(field_error(
+                    tensor_field("offset"),
+                    format!(
+                        "{} declares no {dtype} tensor of shape {shape:?} at byte {offset}",
+                        path.display()
+                    ),
+                ));
+            }
             tensors.push(PleTensorRange {
                 path,
                 offset,
@@ -439,6 +471,19 @@ fn parse_ranges(
             row_count,
             tensors,
         });
+    }
+    // Shards may not repeat or overlap their way to a table larger than its
+    // files; `ram` mode allocates this size.
+    let on_disk: u64 = files.values().map(|(size, _)| *size).sum();
+    let stride = quantization.row_stride(row_width) as u64;
+    if expected_start
+        .checked_mul(stride)
+        .is_none_or(|table| table > on_disk)
+    {
+        return Err(field_error(
+            "shards",
+            format!("{expected_start} rows are more than the named files ({on_disk} bytes) hold"),
+        ));
     }
     Ok((PleLayout::SafetensorsRanges { shards }, expected_start))
 }

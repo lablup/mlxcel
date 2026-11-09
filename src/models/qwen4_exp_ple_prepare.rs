@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -25,16 +25,24 @@ use memmap2::Mmap;
 use mlxcel_core::weights::declared_optiq_vision_sidecar;
 use serde_json::{Map, Value, json};
 
+use super::ple_manifest::trust::{read_header, resolve_contained};
 use super::ple_manifest::{MANIFEST_VERSION, PleQuantization};
 
 const PLE_MARKER: &str = ".ple.ple_embedding.ngram_embedding.shards.";
 pub const MANIFEST_NAME: &str = "ple-store.json";
 pub const DEFAULT_ROW_FILE: &str = "ple-q4.rows";
-/// Files `prepare_external_ple_model` never copies into the view.
-const EXCLUDED_FILES: [&str; 3] = [
+const PROVENANCE_NAME: &str = "EXTERNAL_PLE.json";
+/// Files `prepare_external_ple_model` never copies into the view: upstream's
+/// list, plus the names the view writes itself, so that a source file cannot
+/// replace them.
+const EXCLUDED_FILES: [&str; 7] = [
     "model.safetensors.index.json",
     "MANIFEST.sha256",
     "MEMORY_CONTEXT_SWEEP.jsonl",
+    MANIFEST_NAME,
+    DEFAULT_ROW_FILE,
+    PROVENANCE_NAME,
+    "ple-q4.partial",
 ];
 
 /// Row-table layout written by the helper.
@@ -75,18 +83,6 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
         .with_context(|| format!("cannot write {}", path.display()))
 }
 
-/// `(payload offset, header)` of a safetensors file.
-pub(super) fn read_header(path: &Path) -> Result<(u64, Value)> {
-    let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let mut size = [0u8; 8];
-    file.read_exact(&mut size)?;
-    let size = u64::from_le_bytes(size);
-    let mut header = vec![0u8; usize::try_from(size)?];
-    file.seek(SeekFrom::Start(8))?;
-    file.read_exact(&mut header)?;
-    Ok((8 + size, serde_json::from_slice(&header)?))
-}
-
 struct HeaderCache<'a> {
     dir: &'a Path,
     weight_map: &'a Map<String, Value>,
@@ -102,7 +98,9 @@ impl HeaderCache<'_> {
             .ok_or_else(|| anyhow!("the safetensors index has no entry for {key}"))?
             .to_string();
         if !self.headers.contains_key(&file) {
-            let header = read_header(&self.dir.join(&file))?;
+            let path = resolve_contained(self.dir, Path::new(&file))
+                .with_context(|| format!("the safetensors index names {file:?} for {key}"))?;
+            let header = read_header(&path)?;
             self.headers.insert(file.clone(), header);
         }
         let (payload, header) = &self.headers[&file];
@@ -110,9 +108,10 @@ impl HeaderCache<'_> {
         let start = info["data_offsets"][0]
             .as_u64()
             .ok_or_else(|| anyhow!("{key}: missing data_offsets in {file}"))?;
-        Ok(
-            json!({"file": file, "offset": payload + start, "dtype": info["dtype"], "shape": info["shape"]}),
-        )
+        let offset = payload
+            .checked_add(start)
+            .ok_or_else(|| anyhow!("{key}: data_offsets overflow in {file}"))?;
+        Ok(json!({"file": file, "offset": offset, "dtype": info["dtype"], "shape": info["shape"]}))
     }
 }
 
@@ -207,10 +206,19 @@ fn build_ranges(
         let [row_count, words] = shape[..] else {
             bail!("PLE tensor {prefix}.weight has an invalid Q4 shape layout: {shape:?}");
         };
-        if words % 4 != 0 {
-            bail!("PLE tensor {prefix}.weight has an invalid Q4 shape layout: {shape:?}");
+        let width = words
+            .checked_mul(8)
+            .and_then(|width| usize::try_from(width).ok())
+            .filter(|&width| width > 0 && words % 4 == 0)
+            .ok_or_else(|| {
+                anyhow!("PLE tensor {prefix}.weight has an invalid Q4 shape layout: {shape:?}")
+            })?;
+        if row_width != 0 && width != row_width {
+            bail!(
+                "PLE shards disagree on row_width: {prefix} has {width}, earlier shards have {row_width}"
+            );
         }
-        row_width = (words * 8) as usize;
+        row_width = width;
         let groups = (row_width / current.group_size()) as u64;
         for &(name, ..) in current.tensors().iter().skip(1) {
             if entry[name]["shape"] != json!([row_count, groups]) {
@@ -220,13 +228,28 @@ fn build_ranges(
         entry.insert("row_start".to_string(), json!(row_start));
         entry.insert("row_count".to_string(), json!(row_count));
         shards.push(Value::Object(entry));
-        row_start += row_count;
+        row_start = row_start
+            .checked_add(row_count)
+            .ok_or_else(|| anyhow!("PLE row count overflows at {prefix}"))?;
+    }
+    let quantization = quantization.ok_or_else(|| anyhow!("checkpoint has no PLE shards"))?;
+    // Overlapping tensors must not expand into a row file larger than the
+    // checkpoint they come from.
+    let mut on_disk = 0u64;
+    for file in headers.headers.keys() {
+        on_disk = on_disk.saturating_add(fs::metadata(source.join(file))?.len());
+    }
+    if row_start
+        .checked_mul(quantization.row_stride(row_width) as u64)
+        .is_none_or(|table| table > on_disk)
+    {
+        bail!("{row_start} PLE rows are more than the shards ({on_disk} bytes) hold");
     }
     Ok(RangeManifest {
         shards,
         row_width,
         row_count: row_start,
-        quantization: quantization.expect("at least one shard"),
+        quantization,
     })
 }
 
@@ -285,6 +308,14 @@ fn materialize_rows(source: &Path, ranges: &RangeManifest, data_path: &Path) -> 
                     .as_u64()
                     .ok_or_else(|| anyhow!("{name} without offset"))?
                     as usize;
+                let map_len = maps[&file_name].len();
+                if row_count
+                    .checked_mul(row_bytes)
+                    .and_then(|bytes| bytes.checked_add(offset))
+                    .is_none_or(|end| end > map_len)
+                {
+                    bail!("PLE tensor range exceeds {file_name}");
+                }
                 columns.push((file_name, offset, row_bytes));
             }
             for row in 0..row_count {
@@ -372,13 +403,23 @@ pub fn prepare_external_ple_model(
     linked.sort_unstable();
     linked.dedup();
     let link = |relative: &Path| -> Result<()> {
+        // Only weight files are linked: the view writes over its JSON files,
+        // which would write through a link into the source checkpoint.
+        if relative.extension().is_none_or(|ext| ext != "safetensors") {
+            bail!(
+                "refusing to link {}: not a .safetensors file",
+                relative.display()
+            );
+        }
+        let original = resolve_contained(&source, relative)
+            .with_context(|| format!("refusing to link {}", relative.display()))?;
         if let Some(parent) = relative
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
             fs::create_dir_all(target.join(parent))?;
         }
-        fs::hard_link(source.join(relative), target.join(relative)).with_context(|| {
+        fs::hard_link(original, target.join(relative)).with_context(|| {
             format!(
                 "cannot hard-link {} (source and target must share a filesystem)",
                 relative.display()
@@ -411,7 +452,11 @@ pub fn prepare_external_ple_model(
             || path.extension().is_some_and(|ext| ext == "safetensors")
             || EXCLUDED_FILES.iter().any(|excluded| name == *excluded);
         if !skip {
-            fs::copy(&path, target.join(&name))?;
+            // `is_file` follows symlinks; one leading out of the model would
+            // copy that file's contents into a directory meant for sharing.
+            let original = resolve_contained(&source, Path::new(&name))
+                .with_context(|| format!("refusing to copy {}", path.display()))?;
+            fs::copy(original, target.join(&name))?;
         }
     }
 
@@ -431,7 +476,7 @@ pub fn prepare_external_ple_model(
     }
     write_json(&target.join("config.json"), &config)?;
     write_json(
-        &target.join("EXTERNAL_PLE.json"),
+        &target.join(PROVENANCE_NAME),
         &json!({
             "format": "qwen4_exp_external_ple_v1",
             "source_model": source.to_string_lossy(),

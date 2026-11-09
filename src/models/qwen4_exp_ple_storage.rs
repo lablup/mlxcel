@@ -36,6 +36,7 @@ use super::config::{PleStorageConfig, ResolvedQwen4ExpConfig};
 use super::ple::ShardedEmbedding;
 use super::ple_cache::{AlwaysGrow, RowCache, RowCacheGrowth};
 use super::ple_io::{PleIoMode, RowSource};
+use super::ple_manifest::trust::resolve_contained;
 use super::ple_manifest::{PleManifest, PleManifestError, PleQuantization};
 use super::ple_stats::{LAST_TABLE, PleStats, PleStatsSnapshot};
 
@@ -171,6 +172,16 @@ impl Shared {
     }
 }
 
+/// Clears the in-flight flag when a gather-ahead ends, also by panic, so that
+/// lookups do not each sit out [`GATHER_AHEAD_WAIT`] behind a dead worker.
+struct FinishGatherAhead<'a>(&'a Shared);
+
+impl Drop for FinishGatherAhead<'_> {
+    fn drop(&mut self) {
+        self.0.finish_gather_ahead();
+    }
+}
+
 /// A row file table opened from a validated manifest.
 pub struct ExternalPleTable {
     shared: Arc<Shared>,
@@ -215,6 +226,7 @@ impl ExternalPleTable {
             .name("mlxcel-ple-gather".to_string())
             .spawn(move || {
                 while let Ok(ids) = receiver.recv() {
+                    let _finish = FinishGatherAhead(&worker_shared);
                     // Read errors are not surfaced here: the lookup repeats
                     // the read and reports them with its own context.
                     let _ = worker_shared.fetch(&ids, None);
@@ -222,7 +234,6 @@ impl ExternalPleTable {
                         .stats
                         .prefetched_rows
                         .fetch_add(ids.len() as u64, Ordering::Relaxed);
-                    worker_shared.finish_gather_ahead();
                 }
             })
             .map_err(|e| format!("cannot start the PLE gather-ahead thread: {e}"))?;
@@ -399,24 +410,23 @@ impl PleRowStore for ExternalPleTable {
     }
 }
 
-/// Resolve `ple_storage.manifest` against the model directory.
+/// Resolve `ple_storage.manifest`, which must name a file in the model
+/// directory; both conversion tools write a bare file name.
 pub fn resolve_manifest_path(
     storage: &PleStorageConfig,
     model_dir: Option<&Path>,
 ) -> Result<PathBuf, PleManifestError> {
-    let path = Path::new(&storage.manifest);
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    model_dir
-        .map(|dir| dir.join(path))
-        .ok_or_else(|| PleManifestError {
-            field: "ple_storage.manifest".to_string(),
-            reason: format!(
-                "relative path {:?} needs the model directory",
-                storage.manifest
-            ),
-        })
+    let error = |reason: String| PleManifestError {
+        field: "ple_storage.manifest".to_string(),
+        reason,
+    };
+    let dir = model_dir.ok_or_else(|| {
+        error(format!(
+            "relative path {:?} needs the model directory",
+            storage.manifest
+        ))
+    })?;
+    resolve_contained(dir, Path::new(&storage.manifest)).map_err(|e| error(e.to_string()))
 }
 
 /// Open the external table a config declares, from the environment's I/O and

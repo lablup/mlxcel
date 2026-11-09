@@ -25,9 +25,25 @@ use super::*;
 /// Row width 32: an interleaved affine record is 16 + 2 + 2 = 20 bytes.
 const AFFINE_STRIDE: u64 = 20;
 
+/// A 2-row, width-32 affine shard; returns its payload offset.
+fn write_shard(path: &Path) -> u64 {
+    let tensor = |dtype: &str, shape: Value, start: u64, end: u64| json!({"dtype": dtype, "shape": shape, "data_offsets": [start, end]});
+    let header = json!({
+        "weight": tensor("U32", json!([2, 4]), 0, 32),
+        "scales": tensor("BF16", json!([2, 1]), 32, 36),
+        "biases": tensor("BF16", json!([2, 1]), 36, 40),
+    })
+    .to_string();
+    let mut file = (header.len() as u64).to_le_bytes().to_vec();
+    file.extend_from_slice(header.as_bytes());
+    file.extend_from_slice(&[0u8; 40]);
+    std::fs::write(path, file).unwrap();
+    8 + header.len() as u64
+}
+
 fn ranges_manifest(dir: &Path) -> Value {
-    std::fs::write(dir.join("shard.safetensors"), vec![0u8; 64]).unwrap();
-    let tensor = |dtype: &str, offset: u64, shape: Value| json!({"file": "shard.safetensors", "offset": offset, "dtype": dtype, "shape": shape});
+    let payload = write_shard(&dir.join("shard.safetensors"));
+    let tensor = |dtype: &str, offset: u64, shape: Value| json!({"file": "shard.safetensors", "offset": payload + offset, "dtype": dtype, "shape": shape});
     json!({
         "version": 2,
         "source_root": ".",
@@ -242,4 +258,75 @@ fn ranges_refuse_an_auxiliary_shape_off_the_group_layout() {
     let (_dir, mut value, path) = fixture(ranges_manifest);
     value["shards"][0]["scales"]["shape"] = json!([2, 2]);
     assert_field(&value, &path, "shards[0].scales.shape");
+}
+
+#[test]
+fn ranges_accept_a_source_root_outside_the_manifest_directory() {
+    let (dir, mut value, path) = fixture(ranges_manifest);
+    let view = dir.path().join("view");
+    std::fs::create_dir(&view).unwrap();
+    value["source_root"] = json!("..");
+    PleManifest::from_value(&value, &view.join("ple-store.json"), None).unwrap();
+    drop(path);
+}
+
+#[test]
+fn ranges_refuse_a_file_without_a_safetensors_header() {
+    let (dir, mut value, path) = fixture(ranges_manifest);
+    let size = std::fs::metadata(dir.path().join("shard.safetensors"))
+        .unwrap()
+        .len();
+    std::fs::write(dir.path().join("secret"), vec![b'x'; size as usize]).unwrap();
+    value["shards"][0]["weight"]["file"] = json!("secret");
+    assert_field(&value, &path, "shards[0].weight.file");
+}
+
+#[test]
+fn ranges_refuse_a_range_the_header_does_not_declare() {
+    let (_dir, mut value, path) = fixture(ranges_manifest);
+    let offset = value["shards"][0]["weight"]["offset"].as_u64().unwrap();
+    value["shards"][0]["weight"]["offset"] = json!(offset - 1);
+    assert_field(&value, &path, "shards[0].weight.offset");
+}
+
+#[test]
+fn ranges_refuse_shards_repeated_past_the_size_of_their_files() {
+    let (_dir, mut value, path) = fixture(ranges_manifest);
+    let shard = value["shards"][0].clone();
+    let shards: Vec<Value> = (0..16u64)
+        .map(|index| {
+            let mut shard = shard.clone();
+            shard["row_start"] = json!(index * 2);
+            shard
+        })
+        .collect();
+    value["shards"] = json!(shards);
+    assert_field(&value, &path, "shards");
+}
+
+#[cfg(unix)]
+#[test]
+fn interleaved_refuses_a_symlink_leaving_the_model() {
+    let (_dir, value, path) = fixture(interleaved_manifest);
+    let outside = TempDir::new().unwrap();
+    let target = outside.path().join("secret");
+    std::fs::write(&target, vec![0u8; (3 * AFFINE_STRIDE) as usize]).unwrap();
+    let rows = path.with_file_name("rows");
+    std::fs::remove_file(&rows).unwrap();
+    std::os::unix::fs::symlink(&target, &rows).unwrap();
+    assert_field(&value, &path, "data_file");
+}
+
+#[cfg(unix)]
+#[test]
+fn interleaved_follows_a_hugging_face_snapshot_symlink() {
+    let repo = TempDir::new().unwrap();
+    let snapshot = repo.path().join("snapshots/rev");
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::create_dir(repo.path().join("blobs")).unwrap();
+    let value = interleaved_manifest(&snapshot);
+    let blob = repo.path().join("blobs/abc");
+    std::fs::rename(snapshot.join("rows"), &blob).unwrap();
+    std::os::unix::fs::symlink("../../blobs/abc", snapshot.join("rows")).unwrap();
+    PleManifest::from_value(&value, &snapshot.join("ple-store.json"), None).unwrap();
 }
