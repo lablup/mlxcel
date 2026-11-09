@@ -575,6 +575,30 @@ async fn router_chat_json_body_rejection_precedes_handoff() {
 }
 
 #[tokio::test]
+async fn router_chat_json_body_rejection_message_is_bounded() {
+    let body = format!(
+        r#"{{"model":"test-model","messages":[],"temperature":"{}"}}"#,
+        "x".repeat(64 * 1024)
+    );
+    let response = create_router_app(router_test_state().await)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("build request"),
+        )
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = error_body(response).await;
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(message.contains("invalid type"), "{message}");
+    assert!(message.len() <= 1024 + "...".len(), "{}", message.len());
+}
+
+#[tokio::test]
 async fn router_completion_existing_unsupported_option_guards_are_unchanged() {
     let cases = [
         (

@@ -77,7 +77,8 @@ separate follow-up work.
 `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, and
 `/v1/messages/count_tokens`, together with their aliases without `/v1`,
 answer a request body they cannot parse the same way `/v1/completions` does:
-with an `invalid_request_error` JSON body carrying the parser's message, before
+with an `invalid_request_error` JSON body carrying the parser's message,
+truncated to 1 KiB, before
 the availability check, dispatch, or streaming setup. Malformed or empty JSON,
 and a missing or wrongly typed field such as `model`, return HTTP 400; a
 missing or non-JSON `Content-Type` returns HTTP 415. The Anthropic routes use

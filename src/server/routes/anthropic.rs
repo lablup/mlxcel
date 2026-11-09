@@ -147,8 +147,8 @@ fn chat_unavailable_response(state: &AppState) -> Option<Response> {
 }
 
 /// Unwrap a Messages API request body, or answer its rejection in the
-/// Anthropic envelope, with axum's description of the problem as the message
-/// and the status the OpenAI routes use ([`super::json_rejection_status`]).
+/// Anthropic envelope, with the message and status the OpenAI routes use
+/// ([`super::json_rejection_message`], [`super::json_rejection_status`]).
 /// `/v1/messages` and `/v1/messages/count_tokens` both run it first, so one
 /// body gets one answer from either (issue #2337).
 fn parse_anthropic_request(
@@ -157,7 +157,7 @@ fn parse_anthropic_request(
     request.map(|Json(request)| request).map_err(|rejection| {
         AnthropicErrorResponse::new(
             super::json_rejection_status(&rejection),
-            rejection.body_text(),
+            super::json_rejection_message(&rejection),
             "invalid_request_error",
         )
     })

@@ -230,9 +230,32 @@ pub(crate) fn json_rejection_status(rejection: &JsonRejection) -> StatusCode {
     }
 }
 
+/// Longest [`json_rejection_message`], in bytes, before the truncation marker.
+const MAX_JSON_REJECTION_MESSAGE_BYTES: usize = 1024;
+
+/// The client-facing description of a rejected `Json` request body.
+///
+/// axum's text quotes serde's error, and serde quotes the offending value, so
+/// a long unknown enum tag or map key would otherwise come back whole, up to
+/// the request body limit (which multimodal configurations raise to GiB) and
+/// larger still once escaped as JSON. The error kind comes before the quoted
+/// value, so the bound keeps it.
+///
+/// Used by: [`parse_json_request`] (OpenAI envelope) and
+/// `anthropic::parse_anthropic_request` (Anthropic envelope).
+pub(crate) fn json_rejection_message(rejection: &JsonRejection) -> String {
+    let mut message = rejection.body_text();
+    if message.len() > MAX_JSON_REJECTION_MESSAGE_BYTES {
+        message.truncate(message.floor_char_boundary(MAX_JSON_REJECTION_MESSAGE_BYTES));
+        message.push_str("...");
+    }
+    message
+}
+
 /// Unwrap a typed JSON request body, or answer its rejection as an
-/// OpenAI-envelope `invalid_request_error` whose message is axum's description
-/// of the problem and whose status comes from [`json_rejection_status`].
+/// OpenAI-envelope `invalid_request_error` whose message is
+/// [`json_rejection_message`] and whose status comes from
+/// [`json_rejection_status`].
 ///
 /// Used by: the single-node `/v1/chat/completions`, `/v1/completions`, and
 /// `/v1/responses` handlers (which also serve the `/chat/completions` and
@@ -242,7 +265,8 @@ pub(crate) fn parse_json_request<T>(
     request: Result<Json<T>, JsonRejection>,
 ) -> Result<T, ErrorResponse> {
     request.map(|Json(request)| request).map_err(|rejection| {
-        let mut error = ErrorResponse::new(rejection.body_text(), "invalid_request_error");
+        let mut error =
+            ErrorResponse::new(json_rejection_message(&rejection), "invalid_request_error");
         error.status = json_rejection_status(&rejection);
         error
     })

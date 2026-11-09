@@ -320,6 +320,57 @@ async fn json_body_rejection_count_tokens_answers_like_messages() {
 }
 
 #[tokio::test]
+async fn json_body_rejection_message_is_bounded() {
+    // serde quotes a wrongly typed value in full. The multi-byte padding also
+    // puts the bound inside a character whichever byte it lands on.
+    let long = "é".repeat(64 * 1024);
+    let body = format!(
+        r#"{{"model":"{MODEL}","max_tokens":4,"messages":[],"input":"hi","temperature":"{long}"}}"#
+    );
+    let h = harness();
+    for (path, route) in ROUTES {
+        let answer = post_raw(&h.app, path, body.clone(), JSON).await;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{path}");
+        let message = assert_error_envelope(route, &answer.json(), path);
+        assert!(message.contains("invalid type"), "{path}: {message}");
+        assert!(
+            message.len() <= 1024 + "...".len(),
+            "{path}: {}",
+            message.len()
+        );
+        assert!(message.ends_with("..."), "{path}: {message}");
+    }
+    assert_eq!(h.dispatch_count(), 0);
+
+    let completion = format!(r#"{{"model":"{MODEL}","prompt":"hi","temperature":"{long}"}}"#);
+    let answer = post_raw(&h.app, "/v1/completions", completion, JSON).await;
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+    let message = answer.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(message.len() <= 1024 + "...".len(), "{}", message.len());
+}
+
+#[tokio::test]
+async fn json_body_rejection_keeps_short_messages_whole() {
+    let h = harness();
+    let answer = post_raw(
+        &h.app,
+        "/v1/chat/completions",
+        r#"{"model":5}"#.to_string(),
+        JSON,
+    )
+    .await;
+    let message = answer.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(message.contains("model"), "{message}");
+    assert!(!message.ends_with("..."), "{message}");
+}
+
+#[tokio::test]
 async fn json_body_rejection_keeps_413_for_oversized_bodies() {
     // The handler's own answer. `create_app` also wraps every route in
     // `openai_payload_too_large` (app.rs), which rewrites any 413 to the
