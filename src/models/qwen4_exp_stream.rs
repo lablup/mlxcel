@@ -181,6 +181,8 @@ pub struct ExpertStream {
 /// The most recently loaded streaming model. Weak, so a model that is dropped
 /// stops being reported and releases its checkpoint files.
 static ACTIVE: Mutex<Weak<ExpertStream>> = Mutex::new(Weak::new());
+/// Final counters of the last stream dropped in this process.
+static LAST_SNAPSHOT: Mutex<Option<StreamStatsSnapshot>> = Mutex::new(None);
 
 impl ExpertStream {
     /// Decide whether this checkpoint streams and, if it does, size the arena.
@@ -320,9 +322,19 @@ pub fn active_stream_stats() -> Option<StreamStatsSnapshot> {
     ACTIVE.lock().ok()?.upgrade().map(|s| s.snapshot())
 }
 
-/// One stats line for the CLI, or `None` when nothing is streaming.
+impl Drop for ExpertStream {
+    fn drop(&mut self) {
+        if let Ok(mut last) = LAST_SNAPSHOT.lock() {
+            *last = Some(self.snapshot());
+        }
+    }
+}
+
+/// One stats line for the CLI, or `None` when nothing streamed in this
+/// process. The CLI prints it after the model is gone, so a dropped stream's
+/// final counters are used when no stream is live.
 pub fn expert_stream_stats_line() -> Option<String> {
-    let s = active_stream_stats()?;
+    let s = active_stream_stats().or_else(|| *LAST_SNAPSHOT.lock().ok()?)?;
     Some(format!(
         "[Expert arena: {:.2} GB, {} slots, {:.1}% hit, {} misses, {:.1} MiB read, {:.1} ms I/O, {:.1} ms router sync, {} windows]",
         s.arena_bytes as f64 / (1u64 << 30) as f64,
