@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **External n-gram table for Qwen3.8-Flash-Next** (#2881). Checkpoints declaring `text_config.ple_storage` load the mlx-vlm `ple-store.json` manifest as-is (both layouts, both quantizations) and read rows from disk through a bounded LRU cache; `MLXCEL_PLE_IO=direct|mmap|ram` and `MLXCEL_PLE_CACHE_BYTES` select the path and budget, prefill gathers the next piece's rows ahead, `mlxcel prepare-external-ple` builds the view without Python, and `mlxcel inspect` / `--estimate-memory` count the cache instead of the table.
 - **Native HIP GEMV for packed 4-bit decode projections and the LM head on ROCm** (#2890, #2891). `MLXCEL_XLA_QUANT=native` keeps the checkpoint's 4-bit projections and head resident and dispatches `csrc/qmv4.hip` as an external HSACO embedded in the decode graph (`hal.executable.source @custom_qmv`) instead of streaming f16-expanded weights; long-K rows use a block-per-row second export, and prefill keeps a loader-dequantized f16 head operand. On `gfx1151` with llama-3.2-1b-instruct-4bit, greedy decode rises from 31.5 to 113 tok/s (`n=128`, capacity 256, warm vmfb) with byte-identical output on tied and untied checkpoints; the switch covers the single-sequence decode graph only, so the ragged batch engine keeps the f16 path, and a missing `hipcc` logs a warning and falls back to it.
 
 ### Changed

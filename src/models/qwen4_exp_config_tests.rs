@@ -209,9 +209,12 @@ rejects! {
     rejects_a_malformed_mrope_section:
         json!({ "rope_parameters": { "type": "default", "mrope_section": "11,11,10", "rope_theta": 10000000, "partial_rotary_factor": 0.25 } })
         => Qwen4ExpConfigError::RopeParameterType { field: "mrope_section", value: "\"11,11,10\"".to_string() };
-    rejects_external_ple_storage:
-        json!({ "ple_storage": { "manifest": "ple/manifest.json" } })
-        => Qwen4ExpConfigError::PleStorage;
+    rejects_ple_storage_without_a_manifest:
+        json!({ "ple_storage": { "cache_rows": 16 } })
+        => Qwen4ExpConfigError::PleStorage { field: "manifest", reason: "ple_storage requires a manifest path".to_string() };
+    rejects_a_negative_ple_storage_cache_rows:
+        json!({ "ple_storage": { "manifest": "ple.json", "cache_rows": -1 } })
+        => Qwen4ExpConfigError::PleStorage { field: "cache_rows", reason: "must be a non-negative integer, got -1".to_string() };
     rejects_a_zero_hidden_size:
         json!({ "hidden_size": 0 })
         => Qwen4ExpConfigError::Zero { field: "hidden_size" };

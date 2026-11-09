@@ -360,6 +360,15 @@ enum Commands {
     #[cfg(feature = "surgery")]
     #[command(name = "split-mtp", verbatim_doc_comment)]
     SplitMtp(commands::SplitMtpArgs),
+
+    /// Build a Qwen3.8-Flash-Next model view whose n-gram table is read from
+    /// disk instead of kept resident: hard links for the non-table shards plus
+    /// a `ple-store.json` manifest and, by default, a `ple-q4.rows` file.
+    ///
+    ///     mlxcel prepare-external-ple -m models/qwen3.8-flash -o models/qwen3.8-flash-external-ple
+    ///     MLXCEL_PLE_IO=direct mlxcel generate -m models/qwen3.8-flash-external-ple -p "Hi"
+    #[command(name = "prepare-external-ple", verbatim_doc_comment)]
+    PrepareExternalPle(commands::PrepareExternalPleArgs),
 }
 
 /// Arguments for `mlxcel list`.
@@ -3381,7 +3390,11 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         Commands::Detect(args) => Some(args.model.as_path()),
         Commands::Predict(args) => Some(args.model.as_path()),
         Commands::GenerateImage(args) => Some(args.model.as_path()),
-        Commands::List(_) | Commands::Arch(_) | Commands::Download(_) | Commands::Rm(_) => None,
+        Commands::List(_)
+        | Commands::Arch(_)
+        | Commands::Download(_)
+        | Commands::Rm(_)
+        | Commands::PrepareExternalPle(_) => None,
         // Gated exactly like the variant itself and its dispatch arm below;
         // without the gate this arm does not compile in feature sets that
         // exclude `surgery`.
@@ -3551,6 +3564,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Tune(args) => commands::run_tune(args),
         #[cfg(feature = "surgery")]
         Commands::SplitMtp(args) => commands::run_split_mtp(args),
+        Commands::PrepareExternalPle(args) => commands::run_prepare_external_ple(args),
     }
 }
 

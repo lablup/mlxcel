@@ -99,8 +99,9 @@ pub(crate) fn load_qwen4_exp_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
-    let text_config = models::qwen4_exp::text_config_from_full(&full_config)
+    let mut text_config = models::qwen4_exp::text_config_from_full(&full_config)
         .map_err(|error| anyhow::anyhow!(error))?;
+    text_config.model_dir = Some(model_path.to_path_buf());
     reject_deepstack(&full_config)?;
     let mut vision_config: Qwen3VLVisionConfig =
         parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen4-Exp vision config")?;

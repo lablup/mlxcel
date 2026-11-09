@@ -17,11 +17,11 @@
 //! [`Qwen4ExpConfig::resolve`] mirrors upstream `TextConfig.__post_init__`
 //! (`mlx_vlm/models/qwen4_exp/config.py`): it fills the derived defaults and
 //! rejects every combination upstream rejects, each with an error naming the
-//! field. It also rejects the two config features this port leaves out of
-//! scope, external PLE storage and the FP8 checkpoint layout, rather than
-//! loading them wrong.
+//! field. It also rejects the config feature this port leaves out of scope,
+//! the FP8 checkpoint layout, rather than loading it wrong.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -219,10 +219,8 @@ pub enum Qwen4ExpConfigError {
     RopeParameters(Vec<String>),
     #[error("Qwen4-Exp rope_parameters.{field} has the wrong type: {value}")]
     RopeParameterType { field: &'static str, value: String },
-    #[error(
-        "Qwen4-Exp ple_storage (external PLE n-gram storage) is not supported by mlxcel; load a checkpoint whose n-gram table is in the safetensors shards"
-    )]
-    PleStorage,
+    #[error("Qwen4-Exp ple_storage.{field}: {reason}")]
+    PleStorage { field: &'static str, reason: String },
     #[error("Qwen4-Exp {field} must be positive")]
     Zero { field: &'static str },
     #[error("Qwen4-Exp {field} ({value}) exceeds the MLX i32 dimension limit")]
@@ -259,6 +257,13 @@ pub struct Qwen4ExpRope {
     pub partial_rotary_factor: f32,
 }
 
+/// `text_config.ple_storage`: where the external n-gram table's manifest is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PleStorageConfig {
+    pub manifest: String,
+    pub cache_rows: Option<u64>,
+}
+
 /// [`Qwen4ExpConfig`] after [`Qwen4ExpConfig::resolve`]: every derived
 /// default filled in and every invariant the model relies on checked.
 #[derive(Debug, Clone)]
@@ -276,6 +281,11 @@ pub struct ResolvedQwen4ExpConfig {
     /// First entry when the config gives a list, as upstream's n-gram hash reads it.
     pub eos_token_id: Option<i64>,
     pub quantization: QuantizationTable,
+    /// Set when the n-gram table is read from disk instead of the shards.
+    pub ple_storage: Option<PleStorageConfig>,
+    /// Directory a relative `ple_storage.manifest` resolves against; the
+    /// loader fills it.
+    pub model_dir: Option<PathBuf>,
 }
 
 impl Qwen4ExpConfig {
@@ -303,13 +313,7 @@ impl Qwen4ExpConfig {
                 return Err(Qwen4ExpConfigError::Zero { field });
             }
         }
-        if self
-            .ple_storage
-            .as_ref()
-            .is_some_and(|value| !value.is_null())
-        {
-            return Err(Qwen4ExpConfigError::PleStorage);
-        }
+        let ple_storage = self.parse_ple_storage()?;
 
         let head_dim = self
             .head_dim
@@ -463,7 +467,55 @@ impl Qwen4ExpConfig {
             rope,
             eos_token_id,
             quantization,
+            ple_storage,
+            model_dir: None,
         })
+    }
+
+    fn parse_ple_storage(&self) -> Result<Option<PleStorageConfig>, Qwen4ExpConfigError> {
+        let invalid =
+            |field: &'static str, reason: String| Qwen4ExpConfigError::PleStorage { field, reason };
+        let Some(value) = self.ple_storage.as_ref().filter(|value| !value.is_null()) else {
+            return Ok(None);
+        };
+        let object = value.as_object().ok_or_else(|| {
+            invalid(
+                "manifest",
+                format!("ple_storage must be an object, got {value}"),
+            )
+        })?;
+        let manifest = object
+            .get("manifest")
+            .and_then(Value::as_str)
+            .filter(|manifest| !manifest.is_empty())
+            .ok_or_else(|| {
+                invalid(
+                    "manifest",
+                    "ple_storage requires a manifest path".to_string(),
+                )
+            })?;
+        let cache_rows = match object.get("cache_rows") {
+            None | Some(Value::Null) => None,
+            Some(rows) => Some(rows.as_u64().ok_or_else(|| {
+                invalid(
+                    "cache_rows",
+                    format!("must be a non-negative integer, got {rows}"),
+                )
+            })?),
+        };
+        if self.ple_layer_ids.len() > 1 {
+            return Err(invalid(
+                "manifest",
+                format!(
+                    "one manifest describes one table, but ple_layer_ids has {} layers",
+                    self.ple_layer_ids.len()
+                ),
+            ));
+        }
+        Ok(Some(PleStorageConfig {
+            manifest: manifest.to_string(),
+            cache_rows,
+        }))
     }
 }
 

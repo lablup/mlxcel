@@ -881,6 +881,13 @@ fn compute_activation_bytes(dims: &ActivationDims, ctx_len: u64, batch: u64, mul
 
 /// Pick the weight-bytes figure and label its source.
 fn resolve_weight_bytes(model_dir: &Path) -> (u64, WeightsSource) {
+    // A `ple_storage` checkpoint's weight index still names the hard-linked
+    // shards holding the table. Count what actually becomes resident.
+    if let Some(external) =
+        crate::models::qwen4_exp::ple_footprint::external_ple_footprint(model_dir)
+    {
+        return (external.resident_bytes(), WeightsSource::ExactSafetensors);
+    }
     if let Some(b) = weight_footprint_bytes(model_dir) {
         return (b, WeightsSource::ExactSafetensors);
     }

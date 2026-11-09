@@ -4465,6 +4465,7 @@ pub mod rope_parameters;
 // How many positions the sequence currently being prefilled will span, so a
 // model whose RoPE table is chosen from the whole prompt length can still make
 // that choice from inside a chunked prefill (Phi-3 / Phi-4 LongRoPE, #1358).
+pub mod prefill_lookahead;
 pub mod prefill_span;
 
 // One description of how a prompt is prefilled: adopted prefix, history

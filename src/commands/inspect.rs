@@ -114,6 +114,15 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
 
     let banner = format_estimate(&args.model, &estimate);
     println!("{banner}");
+    if let Some(external) =
+        mlxcel::models::qwen4_exp::ple_footprint::external_ple_footprint(&args.model)
+    {
+        println!(
+            "External PLE table ({}): counted {:.2} GiB of row memory (included in Weights), table stays on disk",
+            external.io_mode.label(),
+            external.row_memory_bytes as f64 / (1u64 << 30) as f64
+        );
+    }
 
     if !estimate.fits {
         // Exit successfully: `inspect` is read-only and informational.
