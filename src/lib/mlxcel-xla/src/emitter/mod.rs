@@ -180,11 +180,11 @@ pub(crate) use builder::{
 pub(crate) use model::{
     PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
     PrefillEmbeddingsInputMetadata, emit_decode, emit_decode_batched, emit_decode_ragged,
-    emit_decode_ragged_with, emit_decode_with, emit_moe_probe, emit_moe_probe_with, emit_prefill,
-    emit_prefill_embeddings, emit_prefill_embeddings_deepstack_diagnostics_with,
-    emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
-    mrope_axis_selector, validate_prefill_embeddings_attention_bias,
-    validate_prefill_embeddings_metadata,
+    emit_decode_ragged_with, emit_decode_with, emit_decode_with_native, emit_moe_probe,
+    emit_moe_probe_with, emit_prefill, emit_prefill_embeddings,
+    emit_prefill_embeddings_deepstack_diagnostics_with, emit_prefill_embeddings_deepstack_with,
+    emit_prefill_embeddings_with, emit_prefill_with, mrope_axis_selector,
+    validate_prefill_embeddings_attention_bias, validate_prefill_embeddings_metadata,
 };
 #[allow(unused_imports)]
 pub(crate) use molmo_vision::emit_molmo_vision;
@@ -1499,6 +1499,47 @@ mod tests {
     // ======================================================================
     // dense arch pack (issue #498)
     // ======================================================================
+
+    /// issue #2889: the native decode graph keeps the projections packed and
+    /// dispatches the HIP GEMV; the f16 path stays the default.
+    #[test]
+    fn native_decode_emits_the_packed_projection_dispatch() {
+        use super::builder::Precision;
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::InOut;
+        c.packed_args = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let mlir = emit_decode_with_native(
+            &c,
+            true,
+            Precision::F16,
+            Some(("#mlxcel_qmv_target = alias", "  source-block\n")),
+        );
+        assert!(
+            mlir.contains("flow.dispatch @custom_qmv::@qmv4_kernel"),
+            "the native dispatch is emitted"
+        );
+        assert!(
+            mlir.contains("tensor<8192x256xi32>"),
+            "the gate projection stays packed [out, in/8] as a signless i32 operand"
+        );
+        assert!(
+            mlir.contains("tensor<8192x32xf16>"),
+            "scales/biases are declared per group"
+        );
+        assert!(
+            mlir.starts_with("#mlxcel_qmv_target = alias") && mlir.contains("  source-block"),
+            "the alias precedes the module and the executable source sits inside it"
+        );
+
+        // Without the native module the same config keeps the packed dequant
+        // path (the prefill/fallback form), never the dispatch.
+        let fallback = emit_decode_with(&c, true, Precision::F16);
+        assert!(!fallback.contains("@custom_qmv"));
+    }
 
     /// Each dense-pack family parses to its architecture switches. Cohere/Cohere2
     /// are LayerNorm + parallel-block + interleaved-RoPE with a logit multiply

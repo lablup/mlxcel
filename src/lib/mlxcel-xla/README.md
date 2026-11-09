@@ -109,6 +109,13 @@ HIP 7.15, Debian 13, kernel 6.18.12; full report in
   `/v1/completions` verified on `device=hip`; 20-iteration stability smoke loop
   completed `20/20` identical runs with steady `147.8 MiB` post-exit VRAM.
 
+#### Native 4-bit projection GEMV (`MLXCEL_XLA_QUANT=native`)
+
+`MLXCEL_XLA_QUANT=native` keeps the checkpoint's packed 4-bit projections resident in the decode graph and runs each one through a native HIP GEMV, instead of uploading f16-expanded weights. The kernel is `csrc/qmv4.hip` in the MLX affine layout (8 nibbles per `ui32`, `group_size` 64, f16 activations and scales/biases, f32 accumulate; one workgroup of 256 threads per output row). At model load it compiles with `hipcc --genco -O3 --offload-arch=$MLXCEL_XLA_ROCM_TARGET`, caches the HSACO under the temp directory by kernel-content hash plus architecture, and embeds it in the decode graph as a `hal.executable.source @custom_qmv` external object, so every projection is a single `flow.dispatch`. The packed weight operand is declared signless `i32` in the graph because the StableHLO input pipeline legalizes unsigned integers away and a `flow.dispatch` carrying a `ui32` operand has no legalization; the kernel reads the buffer as `uint32_t`, so the bits are unchanged.
+
+Measured on the same `gfx1151` host (Llama-3.2-1B-Instruct-4bit, greedy, `n=128`, `MLXCEL_XLA_CONTEXT_CAPACITY=256`, warm vmfb): **80.3 tok/s** against **30.0 tok/s** for the default f16-resident path, about 2.7x, with byte-identical greedy output on two prompts. Token identity also holds on the untied `Qwen2.5-Coder-7B-Instruct-4bit`, whose separate `lm_head` keeps the f16 head operand. The switch covers the single-sequence decode graph only: prefill and the ragged batch engine keep the f16 path, so batch exactness is unchanged, and it is a no-op on an unquantized checkpoint. When `hipcc` is missing or the architecture is unsupported, model load logs a warning and falls back to the f16 path.
+
+
 ### macOS (Apple Silicon, Metal) build
 
 On Apple Silicon, **MLX is the default and primary backend**; this OpenXLA path

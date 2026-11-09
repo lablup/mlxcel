@@ -60,7 +60,7 @@ use safetensors::{Dtype, SafeTensors};
 use crate::emitter::{
     Config, DeepStackConfig, Gemma3nConfig, Gemma3nWeightSpec, LlavaVisionConfig, Precision,
     ProjectionLayout, QuantConfig, VisionProjector, WeightScheme, check_packed_supported,
-    emit_decode_ragged_with, emit_decode_with, emit_gemma3n_decode_ragged_with_qmv,
+    emit_decode_ragged_with, emit_decode_with_native, emit_gemma3n_decode_ragged_with_qmv,
     emit_gemma3n_decode_with_qmv, emit_gemma3n_prefill_embeddings_ple_with_qmv,
     emit_gemma3n_prefill_with_qmv, emit_prefill_embeddings_deepstack_with,
     emit_prefill_embeddings_with, emit_prefill_with, gemma3n_qmv_artifact_identity,
@@ -483,6 +483,16 @@ enum RuntimeConfig {
     Gemma3n(Box<Gemma3nConfig>),
 }
 
+/// Whether the checkpoint's packing matches the native GEMV kernel (issue
+/// #2889); the kernel serves the Dense graphs only. The packing rule itself is
+/// [`Config::native_qmv_supported`].
+fn native_quant_supported(cfg: &RuntimeConfig) -> bool {
+    match cfg {
+        RuntimeConfig::Dense(config) => config.native_qmv_supported(),
+        RuntimeConfig::Gemma3n(_) => false,
+    }
+}
+
 fn checked_ffi_int(value: usize, name: &str) -> Result<c_int, String> {
     c_int::try_from(value).map_err(|_| format!("{name}={value} does not fit the IREE C ABI c_int"))
 }
@@ -579,6 +589,14 @@ impl RuntimeConfig {
             config.projection_layout = layout;
         }
         self
+    }
+
+    /// Declare the checkpoint's packed 4-bit projection tensors (issues #516 /
+    /// #2889). Gemma3n has its own weight list and is unaffected.
+    fn set_packed_args(&mut self, packed: bool) {
+        if let Self::Dense(config) = self {
+            config.packed_args = packed;
+        }
     }
 
     /// The projection weight layout the emitted graphs declare.
@@ -1040,6 +1058,14 @@ pub(crate) fn target_flags(device: &str) -> Result<Vec<String>, String> {
     crate::emitter::target_flags_with_rocm_target(device, rocm_target.as_deref())
 }
 
+/// The active `gfx` architecture, from the same validated flag the compiler uses.
+fn rocm_arch() -> Result<String, String> {
+    target_flags("hip")?
+        .into_iter()
+        .find_map(|flag| flag.strip_prefix("--iree-rocm-target=").map(str::to_string))
+        .ok_or_else(|| "hip target flags carry no --iree-rocm-target".to_string())
+}
+
 fn compiled_graph_paths<S: AsRef<str>>(
     iree_compile: &Path,
     mlir: &str,
@@ -1250,6 +1276,7 @@ fn compile_vmfbs(
     device: &str,
     cfg: &RuntimeConfig,
     gemma3_vlm_contract: Option<&Gemma3VlmCompatibilityContract>,
+    packed_native: Option<(&str, &str)>,
 ) -> Result<CompiledBundle, String> {
     let precision = effective_precision(device, cfg)?;
     let native_qmv = match cfg {
@@ -1258,7 +1285,7 @@ fn compile_vmfbs(
     };
     let (prefill, prefill_embeddings, prefill_embeddings_deepstack, decode) = match cfg {
         RuntimeConfig::Dense(config) => {
-            check_packed_supported(device, quant_in_graph() && config.supports_packed_quant())?;
+            check_packed_supported(device, config.packed_args && config.supports_packed_quant())?;
             (
                 emit_prefill_with(config, true, precision),
                 emit_prefill_embeddings_with(config, true, precision),
@@ -1266,7 +1293,7 @@ fn compile_vmfbs(
                     .deepstack
                     .as_ref()
                     .map(|_| emit_prefill_embeddings_deepstack_with(config, true, precision)),
-                emit_decode_with(config, true, precision),
+                emit_decode_with_native(config, true, precision, packed_native),
             )
         }
         RuntimeConfig::Gemma3n(config) => (
@@ -2528,13 +2555,55 @@ impl IreeLlama {
         // separate weight transpose for the checkpoint layout; the pre-transposed
         // layout removes it (issue #2859). The batching engine keeps `OutIn`
         // because its ragged decode lowers that layout to one fast matmul.
-        let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?
+        let mut cfg = RuntimeConfig::from_json(model_dir, context_capacity)?
             .with_projection_layout(ProjectionLayout::InOut);
+        // issue #2889: run the decode projections from the checkpoint's packed
+        // 4-bit weights through the native HIP GEMV. The HSACO is compiled for
+        // the active gfx target at load; any failure falls back to the f16
+        // path rather than failing the model.
+        let mut native_module: Option<(String, String)> = None;
+        if crate::native_qmv::requested() && device == "hip" {
+            // The kernel is MLX affine 4-bit with a group of 64; any other
+            // packing (8-bit, another group size) keeps the f16 path rather than
+            // computing the wrong dequant.
+            if !native_quant_supported(&cfg) {
+                eprintln!(
+                    "mlxcel: MLXCEL_XLA_QUANT=native needs a 4-bit group-64 checkpoint; \
+                     using the f16 weight path"
+                );
+            } else {
+                let arch = rocm_arch()?;
+                match crate::native_qmv::hsaco(&arch) {
+                    Ok(bytes) => {
+                        cfg.set_packed_args(true);
+                        native_module = Some((
+                            crate::native_qmv::alias_text().to_string(),
+                            crate::native_qmv::executable_source(&bytes, &arch),
+                        ));
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "mlxcel: native 4-bit decode projections unavailable ({error}); \
+                             falling back to the f16 weight path"
+                        );
+                    }
+                }
+            }
+        } else if quant_in_graph() {
+            cfg.set_packed_args(true);
+        }
         report_load_timing("language-config", load_started);
         runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
         let gemma3_vlm_contract = gemma3_vlm_compatibility(model_dir, &cfg)?;
         let compile_started = std::time::Instant::now();
-        let bundle = compile_vmfbs(device, &cfg, gemma3_vlm_contract.as_ref())?;
+        let bundle = compile_vmfbs(
+            device,
+            &cfg,
+            gemma3_vlm_contract.as_ref(),
+            native_module
+                .as_ref()
+                .map(|(alias, source)| (alias.as_str(), source.as_str())),
+        )?;
         report_load_timing("language-emit-and-compile", compile_started);
         let context_started = std::time::Instant::now();
         let ctx = create_ctx(model_dir, &cfg, device, &bundle)?;
