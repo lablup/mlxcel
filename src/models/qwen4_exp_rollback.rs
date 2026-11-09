@@ -27,20 +27,24 @@
 //! a capture describes one forward, a cache describes a sequence, and the
 //! prompt-cache snapshots of #2885 add a third kind of state to the cache
 //! without touching this module. The per-sequence [`RollbackLog`] keeps the
-//! most recent captures so `LanguageModel::rewind_decode_appends` can unwind
-//! across several speculative forwards (the engine's verify widths warm-up
-//! issues one forward per width before any round).
+//! most recent capture so `LanguageModel::rewind_decode_appends` can unwind
+//! into the verify forward that just ran.
 
 use std::collections::VecDeque;
 
 use mlxcel_core::{MlxArray, UniquePtr};
 
-/// Most captured speculative forwards kept per sequence. The engine unwinds
-/// the appends of its most recent verify forward (one entry), and the
-/// scheduler's lookahead never exceeds
-/// `DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS` (two single-token forwards);
-/// four leaves room for both without holding block-sized tensors for long.
-pub(crate) const ROLLBACK_LOG_DEPTH: usize = 4;
+/// Most captured speculative forwards kept per sequence.
+///
+/// One is what the callers need. Each `Engine::unwind_appends` of a verify
+/// round or of the widths warm-up stays inside the verify forward just before
+/// it, and the MTP adapter's finalize pops the forward it just ran. The
+/// scheduler's decode lookahead is the only caller that unwinds across
+/// forwards, and this family does not opt into it
+/// (`supports_decode_lookahead_rewind` stays `false`). An entry holds about
+/// 110 MB of recurrent state on the released checkpoint, so a rewind past the
+/// newest forward is refused rather than paid for on every sequence.
+pub(crate) const ROLLBACK_LOG_DEPTH: usize = 1;
 
 /// What one GatedDeltaNet layer needs to replay a verify block over its
 /// accepted prefix: the normalized `q`/`k`, `v`, the raw gate inputs `a`/`b`

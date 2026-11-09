@@ -86,6 +86,7 @@ fn drafter_config(fixture: &Value) -> Qwen4ExpMtpConfig {
 struct MockTarget {
     embed: UnifiedEmbedding,
     lm_head: UnifiedLinear,
+    residual_streams: Option<usize>,
 }
 
 impl MockTarget {
@@ -94,6 +95,7 @@ impl MockTarget {
             embed: UnifiedEmbedding::from_weights(weights, "target.embed_tokens", 64, 4)
                 .expect("embedding"),
             lm_head: UnifiedLinear::from_weights(weights, "target.lm_head", 64, 4).expect("head"),
+            residual_streams: None,
         }
     }
 }
@@ -130,6 +132,10 @@ impl LanguageModel for MockTarget {
 
     fn lm_head_module(&self) -> Option<UnifiedLinear> {
         Some(self.lm_head.clone_shared())
+    }
+
+    fn residual_stream_count(&self) -> Option<usize> {
+        self.residual_streams
     }
 }
 
@@ -457,4 +463,22 @@ fn hidden_of_the_wrong_width_is_refused_at_prefill() {
         .prefill_from_target_hidden(&[3, 7], &hidden_block(2, 32, 0.0), 1, &greedy())
         .expect_err("post-mixer width");
     assert!(err.to_string().contains("hc_count * hidden_size"), "{err}");
+}
+
+/// A target with another stream count is refused at bind, by name: past the
+/// bind the mismatch is a draft error that ends the generation at the seed.
+#[test]
+fn validate_target_compat_refuses_a_different_hc_count() {
+    let fixture = fixture("mtp");
+    let (drafter, mut target) = bound_drafter(&fixture);
+    target.residual_streams = Some(drafter.config().hc_count());
+    drafter.validate_target_compat(&target).expect("same count");
+    target.residual_streams = Some(drafter.config().hc_count() + 1);
+    let err = drafter
+        .validate_target_compat(&target)
+        .expect_err("different count");
+    assert!(
+        matches!(err, DrafterError::BindFailed { ref reason } if reason.contains("hc_count")),
+        "{err}"
+    );
 }

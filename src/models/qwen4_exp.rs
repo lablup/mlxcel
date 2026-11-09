@@ -920,31 +920,20 @@ impl Qwen4ExpModel {
     // engine's prompt-lookup rewind uses, so the two paths share one
     // rollback.
 
-    /// Prefill `input_ids` on the sequence's slot: the last position's
-    /// logits (`[B, 1, vocab]`, the LM head applied to that row alone, as
-    /// the classic engine prefill applies it, so the first bonus token is the
-    /// token classic decode samples) and the pre-mixer streams of every
-    /// position. Not speculative; clears the log.
+    /// Prefill `input_ids` on the sequence's slot under `chunk`: the last
+    /// position's logits (`[B, 1, vocab]`, the LM head applied to that row
+    /// alone, as the classic engine prefill applies it, so the first bonus
+    /// token is the token classic decode samples) and the pre-mixer streams
+    /// of every position. Not speculative; clears the log.
+    ///
+    /// The prompt is forwarded in the pieces of the plan classic prefill
+    /// builds for the same `chunk`, because a one-call prefill of a prompt
+    /// longer than the chunk reaches different KV and recurrent bytes than
+    /// the chunked one and its temperature-0 output drifts from classic
+    /// decode. The server passes its configured `prefill_chunk_size`.
     ///
     /// Used by: `Qwen4ExpMtpTargetAdapter::prefill_and_seed`.
     pub(crate) fn forward_prefill_with_streams_for_sequence(
-        &self,
-        input_ids: &MlxArray,
-        seq_id: Option<SequenceId>,
-    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        self.prefill_with_streams_in_chunks(
-            input_ids,
-            seq_id,
-            mlxcel_core::generate::prefill_chunk_len(),
-        )
-    }
-
-    /// [`Self::forward_prefill_with_streams_for_sequence`] under an explicit
-    /// chunk size. A prompt is forwarded in the pieces of the plan classic
-    /// prefill builds, because a one-call prefill of a prompt longer than the
-    /// chunk reaches different KV and recurrent bytes than the chunked one and
-    /// its temperature-0 output drifts from classic decode.
-    fn prefill_with_streams_in_chunks(
         &self,
         input_ids: &MlxArray,
         seq_id: Option<SequenceId>,
@@ -964,6 +953,7 @@ impl Qwen4ExpModel {
                 for (index, piece) in pieces.iter().enumerate() {
                     let (start, stop) = (piece.range.start as i32, piece.range.end as i32);
                     let ids = mlxcel_core::slice(input_ids, &[0, start], &[ids_shape[0], stop]);
+                    trace::record("prefill piece", &ids);
                     let positions = self.resolve_positions(
                         seq_id,
                         ids_shape[0],
@@ -1263,6 +1253,10 @@ impl LanguageModel for Qwen4ExpModel {
 
     fn lm_head_module(&self) -> Option<UnifiedLinear> {
         self.lm_head.as_ref().map(UnifiedLinear::clone_shared)
+    }
+
+    fn residual_stream_count(&self) -> Option<usize> {
+        Some(self.config.raw.hc_count)
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

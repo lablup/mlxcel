@@ -29,6 +29,8 @@
 use mlxcel_core::cache::{DecodeLookaheadAppendScope, SequenceId};
 use mlxcel_core::engine::{Engine, SequenceSpec};
 use mlxcel_core::generate::{LanguageModel, SamplingConfig};
+use mlxcel_core::sampling::LogprobsConfig;
+use mlxcel_core::speculative::mtp::target::MtpTarget;
 use mlxcel_core::speculative::prompt_lookup::{
     PromptLookupConfig, prompt_lookup_unsupported_reason,
 };
@@ -38,6 +40,7 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 use super::parity_tests::{fixture, quantized_tiny_model, tiny_model};
 use super::rollback::RollbackParts;
 use super::{Qwen4ExpCache, Qwen4ExpModel};
+use crate::models::qwen4_exp_mtp_target::Qwen4ExpMtpTargetAdapter;
 
 /// The fixture's `eos_token_id`, where the PLE n-gram context resets.
 const EOS: i32 = 1;
@@ -546,17 +549,21 @@ fn block_vs_chain_stages_agree_byte_for_byte_on_the_quantized_fixture() {
     );
 }
 
-/// The engine path: speculative forwards inside the lookahead scope are
-/// captured on the sequence's log and `rewind_decode_appends` unwinds them
-/// newest first, across forward boundaries; a plain forward commits and
-/// clears the log, and a rewind the log cannot cover is refused.
+/// The engine path: a speculative forward inside the lookahead scope is
+/// captured on the sequence's log and `rewind_decode_appends` unwinds into it,
+/// repeatedly; only the newest forward is kept, a rewind past it is refused
+/// and leaves the state alone, and a plain forward commits and clears the log.
 #[test]
-fn rewind_decode_appends_unwinds_across_speculative_forwards_and_refuses_beyond_them() {
+fn rewind_decode_appends_unwinds_the_newest_forward_and_refuses_beyond_it() {
     let model = tiny_model(&fixture("model"));
+    // Nothing unwinds across forwards as long as lookahead stays off; turning
+    // it on needs `ROLLBACK_LOG_DEPTH` to cover its speculative appends.
+    assert!(!model.supports_decode_lookahead_rewind());
     let prompt = prompt_tokens(12);
-    let (block_a, block_b) = ([5, 9, 21], [33, 40]);
+    let (block_a, block_b) = ([5, 9, 21], [33, 40, 50]);
     let probes = [12, 7];
-    let (ref_logits, _) = reference(&model, &prompt, &block_a[..1], &probes);
+    let kept = [5, 9, 21, 33];
+    let (ref_logits, _) = reference(&model, &prompt, &kept, &probes);
 
     let seq = SequenceId::from_raw(7);
     model.prepare_sequence_state(seq);
@@ -567,13 +574,14 @@ fn rewind_decode_appends_unwinds_across_speculative_forwards_and_refuses_beyond_
         let _ = model.forward_with_sequence_id(&ids(&block_a), Some(seq), &mut none, None);
         let _ = model.forward_with_sequence_id(&ids(&block_b), Some(seq), &mut none, None);
     }
-    // More than the two logged forwards appended.
+    // Block A was evicted: only block B's three positions can be unwound.
     let err = model
-        .rewind_decode_appends(seq, 6)
-        .expect_err("beyond the log");
-    assert!(err.contains("appended 5"), "{err}");
-    // All of block B and two of block A.
-    model.rewind_decode_appends(seq, 4).expect("rewind");
+        .rewind_decode_appends(seq, 4)
+        .expect_err("beyond the newest forward");
+    assert!(err.contains("appended 3"), "{err}");
+    // Two separate rewinds: the second reaches into the truncated capture.
+    model.rewind_decode_appends(seq, 1).expect("first rewind");
+    model.rewind_decode_appends(seq, 1).expect("second rewind");
     for (i, probe) in probes.iter().enumerate() {
         let logits = model.forward_with_sequence_id(&ids(&[*probe]), Some(seq), &mut none, None);
         assert_close(&format!("probe {i} logits"), &logits, &ref_logits[i]);
@@ -631,7 +639,8 @@ fn mtp_prefill_follows_the_classic_chunk_plan() {
     let prompt = prompt_tokens(39);
     let seq = SequenceId::from_raw(11);
     model.prepare_sequence_state(seq);
-    let (logits, streams) = model.prefill_with_streams_in_chunks(&ids(&prompt), Some(seq), 16);
+    let (logits, streams) =
+        model.forward_prefill_with_streams_for_sequence(&ids(&prompt), Some(seq), 16);
     assert_eq!(mlxcel_core::array_shape(&streams)[1], prompt.len() as i32);
 
     let mut caches = model.make_internal_caches();
@@ -653,4 +662,33 @@ fn mtp_prefill_follows_the_classic_chunk_plan() {
     };
     assert_eq!(bytes(&logits), bytes(&chunked_last));
     model.release_sequence_state_by_id(seq);
+}
+
+/// The adapter prefills in the chunk the server configures, not the process
+/// default: the classic decode it must match byte for byte follows the
+/// server's `prefill_chunk_size`, and `0` is a single call.
+#[test]
+fn mtp_adapter_prefill_runs_in_the_configured_chunk_size() {
+    let model = tiny_model(&fixture("model"));
+    let prompt = prompt_tokens(39);
+    for (seq, chunk, expected_pieces) in [(21, 16, 3), (22, 39, 1), (23, 0, 1)] {
+        let seq = SequenceId::from_raw(seq);
+        model.prepare_sequence_state(seq);
+        let adapter =
+            Qwen4ExpMtpTargetAdapter::new(&model, Some(seq)).with_prefill_chunk_size(chunk);
+        super::trace::start();
+        let (_, output, _) = adapter.prefill_and_seed(
+            &prompt,
+            &SamplingConfig::greedy(),
+            &[],
+            &LogprobsConfig::default(),
+        );
+        let pieces = super::trace::take()
+            .iter()
+            .filter(|(label, _)| label == "prefill piece")
+            .count();
+        assert_eq!(pieces, expected_pieces, "chunk {chunk}");
+        assert_eq!(output.kv_offset, prompt.len(), "chunk {chunk}");
+        model.release_sequence_state_by_id(seq);
+    }
 }

@@ -446,11 +446,24 @@ impl Drafter for Qwen4ExpMtpDraftModel {
         Ok(())
     }
 
-    /// The target's text hidden size and vocabulary must match the head's
-    /// (upstream `validate_target_compatibility` also checks `hc_count`,
-    /// which a `LanguageModel` does not expose; the stream width check in
-    /// [`Self::fuse_inputs`] catches that at the first hidden handoff).
+    /// The target's stream count, text hidden size and vocabulary must match
+    /// the head's, as upstream `validate_target_compatibility` requires. A
+    /// wrong `hc_count` has to fail here: past the bind it is a draft error,
+    /// which the MTP loop treats as the end of the generation and which
+    /// would cut every reply to the seed token.
     fn validate_target_compat(&self, target: &dyn LanguageModel) -> Result<(), DrafterError> {
+        if let Some(target_hc) = target.residual_stream_count()
+            && target_hc != self.config.hc_count()
+        {
+            return Err(DrafterError::BindFailed {
+                reason: format!(
+                    "qwen4_exp_mtp drafter is incompatible with this target: drafter \
+                     text_config.hc_count = {} but the target carries {target_hc} residual \
+                     streams; pair the head split from the same checkpoint",
+                    self.config.hc_count()
+                ),
+            });
+        }
         let expected_hidden = self.config.hidden_size() as i32;
         let sentinel = mlxcel_core::from_slice_i32(&[0_i32], &[1, 1]);
         let embedded =

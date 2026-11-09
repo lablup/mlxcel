@@ -1477,7 +1477,8 @@ fn run_mtp_burst(
                 &vlm.text_model,
                 Some(seq.seq_id),
             )
-            .with_prefill_start_offset(prefill_start_offset);
+            .with_prefill_start_offset(prefill_start_offset)
+            .with_prefill_chunk_size(ctx.prefill_chunk_size);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,

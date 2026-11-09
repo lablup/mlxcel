@@ -376,7 +376,8 @@ impl BatchScheduler {
                     &vlm.text_model,
                     Some(seq.seq_id),
                 )
-                .with_prefill_start_offset(prefill_start_offset);
+                .with_prefill_start_offset(prefill_start_offset)
+                .with_prefill_chunk_size(self.prefill_chunk_policy.alone);
                 Ok(
                     crate::server::batch::speculative_slice::begin_slice_session(
                         adapter,

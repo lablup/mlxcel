@@ -66,6 +66,10 @@ pub struct Qwen4ExpMtpTargetAdapter<'a> {
     /// forwarded, and the seed advertises no full prompt hidden, so the
     /// drafter builds its history from accepted tokens only.
     prefill_start_offset: usize,
+    /// Chunk the prompt prefill runs in. The server sets its configured
+    /// `prefill_chunk_size`, which the classic decode it must match byte for
+    /// byte also uses; the offline CLI keeps the process default.
+    prefill_chunk_size: usize,
 }
 
 impl<'a> Qwen4ExpMtpTargetAdapter<'a> {
@@ -76,12 +80,20 @@ impl<'a> Qwen4ExpMtpTargetAdapter<'a> {
             model,
             seq_id,
             prefill_start_offset: 0,
+            prefill_chunk_size: mlxcel_core::generate::prefill_chunk_len(),
         }
     }
 
     #[must_use]
     pub fn with_prefill_start_offset(mut self, prefill_start_offset: usize) -> Self {
         self.prefill_start_offset = prefill_start_offset;
+        self
+    }
+
+    /// Run the prompt prefill in `chunk_size` pieces (`0` is one call).
+    #[must_use]
+    pub fn with_prefill_chunk_size(mut self, chunk_size: usize) -> Self {
+        self.prefill_chunk_size = chunk_size;
         self
     }
 
@@ -125,9 +137,11 @@ impl<'a> MtpTarget for Qwen4ExpMtpTargetAdapter<'a> {
         let forward_tokens = &prompt_tokens[offset..];
         let prompt_arr =
             mlxcel_core::from_slice_i32(forward_tokens, &[1, forward_tokens.len() as i32]);
-        let (logits, streams) = self
-            .model
-            .forward_prefill_with_streams_for_sequence(&prompt_arr, self.seq_id);
+        let (logits, streams) = self.model.forward_prefill_with_streams_for_sequence(
+            &prompt_arr,
+            self.seq_id,
+            self.prefill_chunk_size,
+        );
 
         let logits_shape = mlxcel_core::array_shape(&logits);
         let last_pos = logits_shape[1] - 1;

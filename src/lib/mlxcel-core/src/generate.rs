@@ -477,6 +477,14 @@ pub trait LanguageModel {
         None // default: not supported
     }
 
+    /// Number of residual streams this model carries before its final mixer
+    /// (`hc_count` on `qwen4_exp`); `None` for a family without them.
+    ///
+    /// Used by: the `qwen4_exp_mtp` drafter's `validate_target_compat`.
+    fn residual_stream_count(&self) -> Option<usize> {
+        None
+    }
+
     /// Hand out a shared-buffer handle to this model's output projection
     /// when the projection is untied from the input embedding table.
     ///

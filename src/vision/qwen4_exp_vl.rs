@@ -205,6 +205,10 @@ impl LanguageModel for Qwen4ExpVLModel {
         self.text_model.lm_head_module()
     }
 
+    fn residual_stream_count(&self) -> Option<usize> {
+        self.text_model.residual_stream_count()
+    }
+
     // Prompt lookup admits the family on this capability and unwinds a
     // rejected verify tail through the rewind (issue #2880).
     fn supports_speculative_verify_rewind(&self) -> bool {
