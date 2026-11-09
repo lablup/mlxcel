@@ -25,7 +25,9 @@
 //! [`ChatCompletionRequest`] shape consumed by
 //! [`crate::server::chat_request::prepare_chat_request_with_cache`]:
 //!
-//! 1. Render `system` (string or text-block array) as a leading system turn.
+//! 1. Render `system` (string or text-block array) as a leading system turn,
+//!    pinning Claude Code's volatile billing stamp so the prompt prefix stays
+//!    cacheable (see [`crate::server::anthropic_billing_stamp`]).
 //! 2. Walk each message's content blocks:
 //!    - `text` → message text
 //!    - `image` (user role) → an `image_url` content part (media plumbing)
@@ -44,6 +46,9 @@
 //! response `content[]`. [`anthropic_stop_reason`] and
 //! [`apply_stop_sequences`] mirror the upstream stop-reason mapping.
 
+use std::borrow::Cow;
+
+use crate::server::anthropic_billing_stamp::{billing_stamp_pinning_enabled, pin_billing_stamp};
 use crate::server::tool_calls::types::ParsedToolCall;
 use crate::server::types::anthropic_request::{
     AnthropicContentBlock, AnthropicMessage, AnthropicMessageContent, AnthropicRequest,
@@ -69,6 +74,17 @@ pub struct AnthropicTranslated {
     pub chat_request: ChatCompletionRequest,
 }
 
+/// Apply billing-stamp pinning to the flattened top-level `system` text.
+fn pinned_system_text(text: String, enabled: bool) -> String {
+    if !enabled {
+        return text;
+    }
+    match pin_billing_stamp(&text) {
+        Cow::Borrowed(_) => text,
+        Cow::Owned(pinned) => pinned,
+    }
+}
+
 /// Flatten an [`AnthropicRequest`] into a [`ChatCompletionRequest`].
 ///
 /// The route layer applies `state.config.default_max_tokens` when the request
@@ -80,6 +96,7 @@ pub fn anthropic_request_to_chat(request: &AnthropicRequest) -> AnthropicTransla
     if let Some(system) = request.system.as_ref()
         && let Some(text) = system.to_text()
     {
+        let text = pinned_system_text(text, billing_stamp_pinning_enabled());
         messages.push(Message {
             role: Role::System,
             content: MessageContent::Text(text),
@@ -769,6 +786,76 @@ mod tests {
         assert!(matches!(t.chat_request.messages[1].role, Role::User));
         assert_eq!(t.chat_request.messages[1].content.text(), "hi");
         assert_eq!(t.chat_request.params.max_tokens, Some(8));
+    }
+
+    const BILLING_STAMP: &str =
+        "x-anthropic-billing-header: cc_version=2.1.170.bf4; cc_entrypoint=sdk-cli; cch=b145e;";
+    const PINNED_BILLING_STAMP: &str =
+        "x-anthropic-billing-header: cc_version=2.1.170.fff; cc_entrypoint=sdk-cli; cch=fffff;";
+
+    fn request_with_system(system: serde_json::Value) -> AnthropicRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "system": system,
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn string_system_billing_stamp_is_pinned() {
+        let req = request_with_system(serde_json::json!(format!("{BILLING_STAMP}\nbe terse")));
+        let t = anthropic_request_to_chat(&req);
+        assert_eq!(
+            t.chat_request.messages[0].content.text(),
+            format!("{PINNED_BILLING_STAMP}\nbe terse")
+        );
+    }
+
+    #[test]
+    fn block_array_system_billing_stamp_is_pinned() {
+        let req = request_with_system(serde_json::json!([
+            {"type": "text", "text": BILLING_STAMP},
+            {"type": "text", "text": "be terse"},
+        ]));
+        let t = anthropic_request_to_chat(&req);
+        assert_eq!(
+            t.chat_request.messages[0].content.text(),
+            format!("{PINNED_BILLING_STAMP}\nbe terse")
+        );
+    }
+
+    #[test]
+    fn system_role_turn_inside_messages_is_not_pinned() {
+        let req: AnthropicRequest = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "system": "be terse",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": BILLING_STAMP},
+                {"role": "user", "content": "next"},
+            ],
+        }))
+        .unwrap();
+        let t = anthropic_request_to_chat(&req);
+        let rendered: Vec<String> = t
+            .chat_request
+            .messages
+            .iter()
+            .map(|m| m.content.text())
+            .collect();
+        assert!(rendered.iter().any(|text| text.contains(BILLING_STAMP)));
+        assert!(!rendered.iter().any(|text| text.contains("cch=fffff")));
+    }
+
+    #[test]
+    fn disabled_pinning_passes_the_stamp_through() {
+        let text = format!("{BILLING_STAMP}\nbe terse");
+        assert_eq!(pinned_system_text(text.clone(), false), text);
+        assert_eq!(
+            pinned_system_text(text, true),
+            format!("{PINNED_BILLING_STAMP}\nbe terse")
+        );
     }
 
     #[test]

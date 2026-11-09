@@ -14,6 +14,7 @@
 
 //! OpenAI/llama-server compatible HTTP server for mlxcel
 
+pub mod anthropic_billing_stamp;
 pub mod anthropic_translator;
 pub mod app;
 pub(crate) mod assistant_prefill;
