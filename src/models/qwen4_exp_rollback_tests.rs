@@ -621,3 +621,36 @@ fn engine_verify_rounds_admit_the_family_and_rewind_through_the_model() {
         assert_close(&format!("probe {i} logits"), &logits, &ref_logits[i]);
     }
 }
+
+/// An MTP prefill longer than the prefill chunk runs the same pieces classic
+/// prefill runs: the last logits match a chunked forward byte for byte and
+/// the streams still cover every prompt position for the drafter.
+#[test]
+fn mtp_prefill_follows_the_classic_chunk_plan() {
+    let model = tiny_model(&fixture("model"));
+    let prompt = prompt_tokens(39);
+    let seq = SequenceId::from_raw(11);
+    model.prepare_sequence_state(seq);
+    let (logits, streams) = model.prefill_with_streams_in_chunks(&ids(&prompt), Some(seq), 16);
+    assert_eq!(mlxcel_core::array_shape(&streams)[1], prompt.len() as i32);
+
+    let mut caches = model.make_internal_caches();
+    let mut hidden = None;
+    for piece in prompt.chunks(16) {
+        hidden = Some(model.forward_hidden(&ids(piece), None, &mut caches, None));
+    }
+    let hidden = hidden.expect("a prompt");
+    let shape = mlxcel_core::array_shape(&hidden);
+    let last = shape[1] - 1;
+    let chunked_last = model.logits(&mlxcel_core::slice(
+        &hidden,
+        &[0, last, 0],
+        &[1, last + 1, shape[2]],
+    ));
+    let bytes = |array: &MlxArray| {
+        mlxcel_core::eval(array);
+        mlxcel_core::array_to_raw_bytes(array)
+    };
+    assert_eq!(bytes(&logits), bytes(&chunked_last));
+    model.release_sequence_state_by_id(seq);
+}

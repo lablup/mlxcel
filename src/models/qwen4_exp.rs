@@ -932,25 +932,70 @@ impl Qwen4ExpModel {
         input_ids: &MlxArray,
         seq_id: Option<SequenceId>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        self.prefill_with_streams_in_chunks(
+            input_ids,
+            seq_id,
+            mlxcel_core::generate::prefill_chunk_len(),
+        )
+    }
+
+    /// [`Self::forward_prefill_with_streams_for_sequence`] under an explicit
+    /// chunk size. A prompt is forwarded in the pieces of the plan classic
+    /// prefill builds, because a one-call prefill of a prompt longer than the
+    /// chunk reaches different KV and recurrent bytes than the chunked one and
+    /// its temperature-0 output drifts from classic decode.
+    fn prefill_with_streams_in_chunks(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        chunk: usize,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let ids_shape = mlxcel_core::array_shape(input_ids);
         self.with_rollback_log(seq_id, RollbackLog::clear);
+        let caps = mlxcel_core::prefill_plan::PrefillCaps::for_model(self, false);
+        let plan = mlxcel_core::prefill_plan::PrefillPlan::new(ids_shape[1] as usize, chunk, caps);
+        let pieces = plan.pieces();
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
             |caches| {
-                let positions = self.resolve_positions(
-                    seq_id,
-                    ids_shape[0],
-                    ids_shape[1],
-                    Qwen4ExpCache::offset(caches),
-                );
-                let streams = self.forward_hidden_streams(input_ids, None, caches, positions, None);
-                let hidden = self.collapse_streams(&streams, false);
-                let shape = mlxcel_core::array_shape(&hidden);
-                let last = shape[1] - 1;
-                let last_hidden =
-                    mlxcel_core::slice(&hidden, &[0, last, 0], &[shape[0], last + 1, shape[2]]);
-                (self.logits(&last_hidden), streams)
+                let mut logits = None;
+                let mut all_streams: Option<UniquePtr<MlxArray>> = None;
+                for (index, piece) in pieces.iter().enumerate() {
+                    let (start, stop) = (piece.range.start as i32, piece.range.end as i32);
+                    let ids = mlxcel_core::slice(input_ids, &[0, start], &[ids_shape[0], stop]);
+                    let positions = self.resolve_positions(
+                        seq_id,
+                        ids_shape[0],
+                        stop - start,
+                        Qwen4ExpCache::offset(caches),
+                    );
+                    let streams = self.forward_hidden_streams(&ids, None, caches, positions, None);
+                    if index + 1 == pieces.len() {
+                        let hidden = self.collapse_streams(&streams, false);
+                        let shape = mlxcel_core::array_shape(&hidden);
+                        let last = shape[1] - 1;
+                        let last_hidden = mlxcel_core::slice(
+                            &hidden,
+                            &[0, last, 0],
+                            &[shape[0], last + 1, shape[2]],
+                        );
+                        logits = Some(self.logits(&last_hidden));
+                    } else {
+                        // As classic prefill: one piece's transients are
+                        // released before the next piece's graph is built.
+                        mlxcel_core::eval(&streams);
+                        mlxcel_core::clear_memory_cache();
+                    }
+                    all_streams = Some(match all_streams {
+                        None => streams,
+                        Some(previous) => mlxcel_core::concatenate(&previous, &streams, 1),
+                    });
+                }
+                (
+                    logits.expect("a prefill has at least one piece"),
+                    all_streams.expect("a prefill has at least one piece"),
+                )
             },
         )
     }
