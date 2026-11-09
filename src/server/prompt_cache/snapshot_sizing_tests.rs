@@ -543,3 +543,60 @@ fn per_token_estimates_match_real_checkpoint_boundary_snapshots() {
         );
     }
 }
+
+/// `qwen4_exp` (issue #2885): the recommendation counts the KV on the 12
+/// attention layers plus the state that does not live in the KV cache, per
+/// the layout in `src/models/qwen4_exp_snapshot.rs`.
+#[test]
+fn qwen4_exp_counts_recurrent_state_and_qsa_index() {
+    let cfg = json!({
+        "model_type": "qwen4_exp",
+        "text_config": {
+            "model_type": "qwen4_exp_text",
+            "num_hidden_layers": 48,
+            "num_attention_heads": 24,
+            "num_key_value_heads": 2,
+            "head_dim": 256,
+            "hidden_size": 2560,
+            "full_attention_interval": 4,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 48,
+            "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128,
+            "linear_conv_kernel_dim": 4,
+            "ple_layer_ids": [2],
+            "ple_conv_kernel_size": 4,
+            "ngram_size": 3,
+            "indexer_head_dim": 128,
+            "indexer_compress_ratio": 4,
+            "layer_types": ["linear_attention"]
+        }
+    });
+    let rec = recommend_model_snapshot_capacity_from_config(
+        &cfg,
+        8192,
+        PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+        Some(256 * 1024 * 1024 * 1024),
+    )
+    .expect("qwen4_exp gets a model-aware default");
+
+    assert_eq!(
+        rec.kv_bytes_at_representative_tokens,
+        12 * 2 * 2 * 256 * 2 * 8192
+    );
+    let linear = 36;
+    let state = 48 * 128 * 128 * 4;
+    let window = 3 * (2 * 16 * 128 + 48 * 128) * 2;
+    let ple = 9 * 2560 * 2;
+    let per_token = 128 * 2 + (128 * 2usize).div_ceil(4) + 12;
+    let expected = linear * (state + window) + ple + 12 * per_token * 8192;
+    assert_eq!(rec.fixed_state_bytes, expected);
+    assert_eq!(
+        rec.entry_bytes,
+        rec.kv_bytes_at_representative_tokens + expected
+    );
+    assert!(
+        rec.capacity_bytes >= 6 * rec.entry_bytes,
+        "six representative snapshots fit on a roomy host"
+    );
+}
