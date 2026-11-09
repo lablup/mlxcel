@@ -46,9 +46,15 @@
 //! Rollback restores per-sequence state and never touches the n-gram table,
 //! so it holds for resident and external (`ple_storage`) row stores alike.
 //!
-//! Out of scope: FP8 checkpoints, the fused QSA Metal kernel, prompt-cache
-//! snapshots (#2885), batched prefill, MTP windows with `B > 1` or with
-//! image and video requests, DFlash.
+//! ## Prompt-cache snapshots (issue #2885)
+//!
+//! [`snapshot`] captures a sequence's whole per-sequence state for the
+//! exact-prefix snapshot store, and restores it into a fresh sequence. Reuse
+//! is exact-prefix only and is declined for image and video requests.
+//!
+//! Out of scope: FP8 checkpoints, the fused QSA Metal kernel, batched
+//! prefill, MTP windows with `B > 1` or with image and video requests,
+//! DFlash.
 
 #[path = "qwen4_exp_config.rs"]
 pub mod config;
@@ -88,6 +94,8 @@ pub(crate) mod rollback;
 pub mod sanitize;
 #[path = "qwen4_exp_shapes.rs"]
 pub(crate) mod shapes;
+#[path = "qwen4_exp_snapshot.rs"]
+pub(crate) mod snapshot;
 
 pub use config::{
     Qwen4ExpConfig, Qwen4ExpConfigError, ResolvedQwen4ExpConfig, text_config_from_full,
@@ -1355,6 +1363,26 @@ impl LanguageModel for Qwen4ExpModel {
         self.mrope_state.release_sequence(seq_id);
     }
 
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.sequence_snapshot(seq_id, token_len)
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        self.restore_sequence_snapshot(seq_id, snapshot)
+    }
+
     fn forward_with_sequence_id(
         &self,
         input_ids: &MlxArray,
@@ -1432,3 +1460,7 @@ mod load_tests;
 #[cfg(test)]
 #[path = "qwen4_exp_rollback_tests.rs"]
 mod rollback_tests;
+
+#[cfg(test)]
+#[path = "qwen4_exp_snapshot_tests.rs"]
+mod snapshot_tests;

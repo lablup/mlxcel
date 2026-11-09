@@ -822,6 +822,29 @@ impl BatchScheduler {
                 return;
             }
         };
+        let snapshot_family = snapshot.family().to_string();
+        // Stepped growth under the macOS memory guardrail (#2883 step 4): the
+        // store's byte budget is a static ceiling sized at startup, so a host
+        // that has since run short still must not grow it. A store at its
+        // budget only replaces entries and passes.
+        let growth = store.snapshot_growth_bytes(snapshot.nbytes()) as u64;
+        if !snapshot_growth_allowed(snapshot_growth_gate(), growth) {
+            static GUARD_WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !GUARD_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    entry_bytes = snapshot.nbytes(),
+                    growth_bytes = growth,
+                    "prompt-cache snapshot skipped: storing it would take the host below the memory reserve; later skips stay at debug"
+                );
+            } else {
+                tracing::debug!(
+                    growth_bytes = growth,
+                    "prompt-cache snapshot skipped by the memory guardrail"
+                );
+            }
+            return;
+        }
         let entry = ModelSnapshotEntry::new(tokens, snapshot).with_origin(origin);
         let entry_bytes = entry.size_bytes;
         let key_tokens = entry.tokens.clone();
@@ -829,6 +852,19 @@ impl BatchScheduler {
             Self::compose_prompt_cache_key(ctx, &key_tokens, self.rope_regime_for(encoded_span));
         match store.insert_snapshot(&key, entry) {
             Ok(()) => {
+                // One INFO line per process with the per-entry size and the
+                // budget it counts against, so a snapshot-only family's
+                // footprint is visible without debug logging (#2885).
+                static FIRST_INSERT: std::sync::Once = std::sync::Once::new();
+                FIRST_INSERT.call_once(|| {
+                    tracing::info!(
+                        token_len = key_tokens.len(),
+                        entry_bytes,
+                        snapshot_capacity_bytes = store.snapshot_capacity_bytes(),
+                        family = snapshot_family.as_str(),
+                        "prompt-cache first snapshot inserted"
+                    );
+                });
                 tracing::debug!(
                     seq_id = %seq_id,
                     token_len = key_tokens.len(),
@@ -1441,6 +1477,55 @@ impl BatchScheduler {
 /// stops one token short, and the prefill's forward over that last token lands
 /// on the position it belongs to. Adopting all `prompt_len` tokens and then
 /// re-running the last one would leave it in the cache twice.
+/// Process-wide availability gate for snapshot-store growth.
+fn snapshot_growth_gate() -> &'static mlxcel_core::host_memory::AvailabilityGate {
+    static GATE: std::sync::OnceLock<mlxcel_core::host_memory::AvailabilityGate> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(mlxcel_core::host_memory::AvailabilityGate::new)
+}
+
+/// Whether the snapshot store may grow by `growth_bytes` now; growth of zero
+/// (a store replacing entries at its budget) always passes.
+fn snapshot_growth_allowed(
+    gate: &mlxcel_core::host_memory::AvailabilityGate,
+    growth_bytes: u64,
+) -> bool {
+    growth_bytes == 0 || gate.allows_step(growth_bytes)
+}
+
 pub(super) fn whole_prompt_reuse_cap(matched_len: usize, prompt_len: usize) -> usize {
     matched_len.min(prompt_len.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod snapshot_growth_tests {
+    use super::snapshot_growth_allowed;
+    use mlxcel_core::host_memory::{AvailabilityGate, HostMemoryStatus};
+    use std::time::Duration;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn gate(available: u64) -> AvailabilityGate {
+        AvailabilityGate::with_probe(Duration::from_secs(60), move || {
+            Some(HostMemoryStatus {
+                total_bytes: 128 * GIB,
+                available_now_bytes: available,
+                reserve_bytes: 8 * GIB,
+                wired_bytes: 0,
+            })
+        })
+    }
+
+    /// A growing insert is refused once the host is below the reserve, and a
+    /// store that only replaces entries (growth 0) always passes (#2883
+    /// step 4).
+    #[test]
+    fn snapshot_growth_stops_at_the_reserve_and_replacement_passes() {
+        let roomy = gate(64 * GIB);
+        assert!(snapshot_growth_allowed(&roomy, GIB));
+
+        let tight = gate(8 * GIB + GIB / 2);
+        assert!(!snapshot_growth_allowed(&tight, GIB));
+        assert!(snapshot_growth_allowed(&tight, 0));
+    }
 }

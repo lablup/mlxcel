@@ -1213,3 +1213,23 @@ fn paged_set_without_handles_is_empty() {
     assert!(paged_set_is_empty(0, 4, 2));
     assert!(paged_set_is_empty(64, 0, 2));
 }
+
+/// The growth an insert would add is the room left under the budget, and a
+/// store at its budget replaces entries without growing (issue #2885, #2883
+/// step 4).
+#[test]
+fn snapshot_growth_bytes_counts_only_what_the_budget_has_left() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(10_000));
+    assert_eq!(store.snapshot_growth_bytes(4_096), 4_096);
+    let tokens: Vec<i32> = (0..40).collect();
+    let key = key_for("model", &tokens);
+    store
+        .insert_snapshot(
+            &key,
+            ModelSnapshotEntry::new_for_test(tokens.clone(), "mamba", 8_192),
+        )
+        .expect("insert");
+    assert_eq!(store.snapshot_growth_bytes(4_096), 10_000 - 8_192);
+    assert_eq!(store.snapshot_growth_bytes(100), 100);
+    assert_eq!(store.snapshot_capacity_bytes(), 10_000);
+}
