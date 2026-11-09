@@ -2103,6 +2103,105 @@ impl Builder {
         }
     }
 
+    /// The packed operands behind each weight, or `None` when any of them is not
+    /// registered (not native mode, or a projection the graph keeps dense).
+    pub fn packed_group(&self, weights: &[&Val]) -> Option<Vec<PackedOperand>> {
+        weights
+            .iter()
+            .map(|w| self.packed_operands.get(&w.name).cloned())
+            .collect()
+    }
+
+    /// Project the MLP gate and up in one native dispatch when both are packed
+    /// (issue #2895); otherwise the two per-projection calls.
+    pub fn gate_up_proj(&mut self, x: &Val, gate: &Val, up: &Val) -> (Val, Val) {
+        if let Some(operands) = self.packed_group(&[gate, up]) {
+            let mut outs = self.native_qmv_multi(x, &operands);
+            let u = outs.pop().expect("gate/up dispatch results");
+            let g = outs.pop().expect("gate/up dispatch results");
+            return (g, u);
+        }
+        (self.linear_proj(x, gate), self.linear_proj(x, up))
+    }
+
+    /// Emit one native GEMV dispatch over two or three packed weight sets that
+    /// share the activation row (issue #2895). The exports differ by binding
+    /// count, so the entry point follows the group size.
+    pub fn native_qmv_multi(&mut self, x: &Val, operands: &[PackedOperand]) -> Vec<Val> {
+        assert!(
+            matches!(self.projection_layout, ProjectionLayout::InOut),
+            "the native packed projections are a single-sequence (InOut) path"
+        );
+        assert_eq!(
+            x.ty.shape.len(),
+            1,
+            "the native GEMV consumes one activation row"
+        );
+        assert!(
+            operands.len() == 2 || operands.len() == 3,
+            "the fused native GEMV covers two or three weight sets"
+        );
+        let k = x.ty.shape[0];
+        for operand in operands {
+            assert_eq!(k, operand.input, "fused native GEMV contraction mismatch");
+        }
+        let total: usize = operands.iter().map(|operand| operand.out).sum();
+        let (entry, groups) = if operands.len() == 3 {
+            crate::native_qmv::qkv_dispatch(k, total)
+        } else {
+            crate::native_qmv::gateup_dispatch(k, total)
+        };
+        let xf16 = if x.ty.elt == "f16" {
+            x.clone()
+        } else {
+            self.convert(x, "f16")
+        };
+        let grid = self.fresh();
+        self.line(format!("{grid} = arith.constant {groups} : index"));
+        let mut args = Vec::with_capacity(2 + operands.len() * 4);
+        let mut types = Vec::with_capacity(2 + operands.len() * 4);
+        let k_i32 = self.fresh();
+        self.line(format!("{k_i32} = arith.constant {k} : i32"));
+        args.push(k_i32);
+        types.push("i32".to_string());
+        for operand in operands {
+            let n_i32 = self.fresh();
+            self.line(format!("{n_i32} = arith.constant {} : i32", operand.out));
+            args.push(n_i32);
+            types.push("i32".to_string());
+        }
+        args.push(xf16.name);
+        types.push(xf16.ty.render());
+        for operand in operands {
+            args.push(operand.packed.name.clone());
+            types.push(operand.packed.ty.render());
+            args.push(operand.scales.name.clone());
+            types.push(operand.scales.ty.render());
+            args.push(operand.biases.name.clone());
+            types.push(operand.biases.ty.render());
+        }
+        let results: Vec<String> = (0..operands.len()).map(|_| self.fresh()).collect();
+        let vals: Vec<Val> = operands
+            .iter()
+            .zip(&results)
+            .map(|(operand, name)| Val {
+                name: name.clone(),
+                ty: Ty::f32(vec![operand.out]),
+            })
+            .collect();
+        let result_tys: Vec<String> = vals.iter().map(|val| val.ty.render()).collect();
+        self.line(format!(
+            "{} = flow.dispatch {}[{}]({}) : ({}) -> ({})",
+            results.join(", "),
+            entry,
+            grid,
+            args.join(", "),
+            types.join(", "),
+            result_tys.join(", "),
+        ));
+        vals
+    }
+
     /// Linear projection over the final axis of an arbitrary-rank tensor.
     pub fn linear_last(&mut self, x: &Val, w: &Val) -> Val {
         let input = *x.ty.shape.last().expect("linear input rank");

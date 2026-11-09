@@ -1386,6 +1386,45 @@ fn scale_embedding(b: &mut Builder, c: &Config, x: Val, shape: Vec<usize>) -> Va
 /// (issue #498). `layout` supplies the rank (single vs seq). For the Llama family
 /// this emits the exact `gate, up, silu, mul, down` op sequence the paths inlined,
 /// byte-identical.
+/// The fused gate/up LoRA delta, if this layer has one.
+fn gate_up_lora(b: &mut Builder, layout: &AttnLayout, lw: &LayerW, hn: &Val) -> Option<Val> {
+    lw.phi4_lora
+        .as_ref()
+        .map(|lora| layout.modal_lora_delta(b, hn, &lora.gate_up))
+}
+
+/// Add the gate half of a fused gate/up LoRA delta.
+fn up_down_delta_gate(b: &mut Builder, gate: Val, delta: &Option<Val>, inter: usize) -> Val {
+    match delta {
+        Some(delta) if delta.ty.shape.len() == 1 => {
+            let delta = b.slice(delta, &[(0, inter)]);
+            b.add(&gate, &delta)
+        }
+        Some(delta) => {
+            let rows = delta.ty.shape[0];
+            let delta = b.slice(delta, &[(0, rows), (0, inter)]);
+            b.add(&gate, &delta)
+        }
+        None => gate,
+    }
+}
+
+/// Add the up half of a fused gate/up LoRA delta.
+fn up_down_delta_up(b: &mut Builder, up: Val, delta: &Option<Val>, inter: usize) -> Val {
+    match delta {
+        Some(delta) if delta.ty.shape.len() == 1 => {
+            let delta = b.slice(delta, &[(inter, 2 * inter)]);
+            b.add(&up, &delta)
+        }
+        Some(delta) => {
+            let rows = delta.ty.shape[0];
+            let delta = b.slice(delta, &[(0, rows), (inter, 2 * inter)]);
+            b.add(&up, &delta)
+        }
+        None => up,
+    }
+}
+
 fn emit_mlp_body(
     b: &mut Builder,
     c: &Config,
@@ -1402,38 +1441,35 @@ fn emit_mlp_body(
         let down = layout.linear(b, &act, LayerW::dense(&lw.down));
         return layout.add_bias(b, down, lw.down_bias.as_ref());
     }
-    let gate = layout.linear(b, hn, lw.gate.as_ref().expect("gated MLP has a gate"));
-    let gate_up_lora = lw
-        .phi4_lora
-        .as_ref()
-        .map(|lora| layout.modal_lora_delta(b, hn, &lora.gate_up));
-    let gate = match &gate_up_lora {
-        Some(delta) if delta.ty.shape.len() == 1 => {
-            let delta = b.slice(delta, &[(0, c.inter)]);
-            b.add(&gate, &delta)
+    let (gate, up) = match layout {
+        // issue #2895: single decode fuses gate and up into one native dispatch
+        // when both weights are packed. The seq kinds keep the original op order
+        // (gate projection, delta, bias, then up) so their goldens stay
+        // byte-identical.
+        AttnLayout::Single { .. } => {
+            let (gate, up) = b.gate_up_proj(
+                hn,
+                lw.gate.as_ref().expect("gated MLP has a gate"),
+                LayerW::dense(&lw.up),
+            );
+            let delta = gate_up_lora(b, layout, lw, hn);
+            let gate = up_down_delta_gate(b, gate, &delta, c.inter);
+            let gate = layout.add_bias(b, gate, lw.gate_bias.as_ref());
+            let up = up_down_delta_up(b, up, &delta, c.inter);
+            let up = layout.add_bias(b, up, lw.up_bias.as_ref());
+            (gate, up)
         }
-        Some(delta) => {
-            let rows = delta.ty.shape[0];
-            let delta = b.slice(delta, &[(0, rows), (0, c.inter)]);
-            b.add(&gate, &delta)
+        _ => {
+            let gate = b.linear_seq_proj(hn, lw.gate.as_ref().expect("gated MLP has a gate"));
+            let delta = gate_up_lora(b, layout, lw, hn);
+            let gate = up_down_delta_gate(b, gate, &delta, c.inter);
+            let gate = layout.add_bias(b, gate, lw.gate_bias.as_ref());
+            let up = b.linear_seq_proj(hn, LayerW::dense(&lw.up));
+            let up = up_down_delta_up(b, up, &delta, c.inter);
+            let up = layout.add_bias(b, up, lw.up_bias.as_ref());
+            (gate, up)
         }
-        None => gate,
     };
-    let gate = layout.add_bias(b, gate, lw.gate_bias.as_ref());
-    let up = layout.linear(b, hn, LayerW::dense(&lw.up));
-    let up = match &gate_up_lora {
-        Some(delta) if delta.ty.shape.len() == 1 => {
-            let delta = b.slice(delta, &[(c.inter, 2 * c.inter)]);
-            b.add(&up, &delta)
-        }
-        Some(delta) => {
-            let rows = delta.ty.shape[0];
-            let delta = b.slice(delta, &[(0, rows), (c.inter, 2 * c.inter)]);
-            b.add(&up, &delta)
-        }
-        None => up,
-    };
-    let up = layout.add_bias(b, up, lw.up_bias.as_ref());
     let act = if c.mlp_geglu {
         gelu_tanh(b, &gate)
     } else {
@@ -1663,6 +1699,26 @@ enum AttnLayout {
     },
 }
 
+fn qkv_post(
+    b: &mut Builder,
+    val: Val,
+    lora: &Option<Val>,
+    delta_range: (usize, usize),
+    bias: &Option<Val>,
+    heads: usize,
+    d: usize,
+) -> Val {
+    let val = match lora {
+        Some(delta) => {
+            let delta = b.slice(delta, &[delta_range]);
+            b.add(&val, &delta)
+        }
+        None => val,
+    };
+    let val = add_proj_bias(b, val, bias);
+    b.reshape(&val, vec![heads, d])
+}
+
 impl AttnLayout {
     fn adapter_mode(&self) -> Option<&Val> {
         match self {
@@ -1776,6 +1832,9 @@ impl AttnLayout {
         }
     }
 
+    /// Add the q/k/v LoRA delta and bias, then reshape to `[heads, d]` (issue #2895
+    /// moved the shared post-processing here so both the fused and per-projection
+    /// forms emit it identically).
     /// Project q/k/v, add the optional q/k/v bias, and reshape to head layout
     /// (`[heads, d]` single; `[N, heads, d]` seq). RoPE is applied separately so
     /// a future per-head q/k norm can slot in between (see [`emit_attention`]).
@@ -1788,37 +1847,31 @@ impl AttnLayout {
                     .phi4_lora
                     .as_ref()
                     .map(|lora| self.modal_lora_delta(b, hn, &lora.qkv));
-                let q = b.linear_proj(hn, lw.wq.as_ref().expect("ordinary q projection"));
-                let q = match &lora {
-                    Some(delta) => {
-                        let delta = b.slice(delta, &[(0, nq * d)]);
-                        b.add(&q, &delta)
-                    }
-                    None => q,
-                };
-                let q = add_proj_bias(b, q, &lw.bq);
-                let q = b.reshape(&q, vec![nq, d]);
-                let kk = b.linear_proj(hn, lw.wk.as_ref().expect("ordinary k projection"));
-                let kk = match &lora {
-                    Some(delta) => {
-                        let delta = b.slice(delta, &[(nq * d, nq * d + nkv * d)]);
-                        b.add(&kk, &delta)
-                    }
-                    None => kk,
-                };
-                let kk = add_proj_bias(b, kk, &lw.bk);
-                let kk = b.reshape(&kk, vec![nkv, d]);
-                let vv = b.linear_proj(hn, lw.wv.as_ref().expect("ordinary v projection"));
-                let vv = match &lora {
-                    Some(delta) => {
-                        let delta = b.slice(delta, &[(nq * d + nkv * d, nq * d + 2 * nkv * d)]);
-                        b.add(&vv, &delta)
-                    }
-                    None => vv,
-                };
-                let vv = add_proj_bias(b, vv, &lw.bv);
-                let vv = b.reshape(&vv, vec![nkv, d]);
-                (q, kk, vv)
+                let wq = lw.wq.as_ref().expect("ordinary q projection");
+                let wk = lw.wk.as_ref().expect("ordinary k projection");
+                let wv = lw.wv.as_ref().expect("ordinary v projection");
+                let q_range = (0, nq * d);
+                let k_range = (nq * d, nq * d + nkv * d);
+                let v_range = (nq * d + nkv * d, nq * d + 2 * nkv * d);
+                // issue #2895: one dispatch for all three when the weights are
+                // packed. The unfused path keeps the original per-projection op
+                // order so the committed decode golden stays byte-identical.
+                if let Some(operands) = b.packed_group(&[wq, wk, wv]) {
+                    let outs = b.native_qmv_multi(hn, &operands);
+                    (
+                        qkv_post(b, outs[0].clone(), &lora, q_range, &lw.bq, nq, d),
+                        qkv_post(b, outs[1].clone(), &lora, k_range, &lw.bk, nkv, d),
+                        qkv_post(b, outs[2].clone(), &lora, v_range, &lw.bv, nkv, d),
+                    )
+                } else {
+                    let q = b.linear_proj(hn, wq);
+                    let q = qkv_post(b, q, &lora, q_range, &lw.bq, nq, d);
+                    let kk = b.linear_proj(hn, wk);
+                    let kk = qkv_post(b, kk, &lora, k_range, &lw.bk, nkv, d);
+                    let vv = b.linear_proj(hn, wv);
+                    let vv = qkv_post(b, vv, &lora, v_range, &lw.bv, nkv, d);
+                    (q, kk, vv)
+                }
             }
             AttnLayout::Ragged { bsz, .. } => self.project_qkv_seq(b, c, hn, lw, *bsz),
             AttnLayout::Prefill { lp, .. } => self.project_qkv_seq(b, c, hn, lw, *lp),
