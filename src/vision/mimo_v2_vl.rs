@@ -384,6 +384,7 @@ fn slice_last_logits(logits: &MlxArray, last_pos: usize) -> UniquePtr<MlxArray> 
 impl QwenVlRuntime for MimoV2VlModel {
     fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
         QwenVlmPromptInfo {
+            video_timestamps: false,
             processor: &self.processor,
             spatial_merge_size: self.spatial_merge_size,
             vision_start_token_id: self.vision_start_token_id,

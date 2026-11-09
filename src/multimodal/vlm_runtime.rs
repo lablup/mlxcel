@@ -45,7 +45,8 @@ use crate::phi4mm_prompt::{expand_phi4mm_placeholders, prepare_phi4mm_prompt_tok
 use crate::pixtral_prompt::insert_pixtral_image_tokens;
 use crate::qwen_vl::{
     InsertedQwenVlmTokens, QwenVisualGrid, QwenVisualKind, insert_qwen_vl_image_tokens,
-    insert_qwen_vl_media_tokens, insert_qwen3_omni_image_tokens,
+    insert_qwen_vl_media_tokens, insert_qwen_vl_media_tokens_timestamped,
+    insert_qwen3_omni_image_tokens,
 };
 use crate::smolvlm_prompt::{insert_idefics2_image_tokens, insert_smolvlm_image_tokens};
 use crate::vision::InklingVlModel;
@@ -939,16 +940,34 @@ pub fn qwen_video_runtime(model: &LoadedModel) -> Option<&dyn crate::qwen_vl::Qw
     }
 }
 
+/// Timing and tokenizer access for rendering per-group video timestamps (#2402).
+///
+/// Only the Qwen3-VL family renders timestamps; see
+/// [`crate::qwen_vl::QwenVlmPromptInfo::video_timestamps`].
+pub struct QwenVideoTimestamps<'a> {
+    /// `group_seconds[v][g]` is the timestamp, in seconds, of temporal group
+    /// `g` of the `v`-th decoded video.
+    pub group_seconds: &'a [Vec<f64>],
+    /// Encodes marker text such as `<1.5 seconds>` without special tokens.
+    pub encode_text: &'a dyn Fn(&str) -> Result<Vec<i32>>,
+}
+
 /// Compute Qwen-VL embeddings for a mixed image/video request.
 ///
 /// The media order is taken from the rendered prompt when it already contains
 /// image/video placeholders; otherwise it falls back to the CLI's historical
 /// images-then-videos order for text-only or no-template prompts.
+///
+/// A family whose reference processor renders per-group video timestamps
+/// (`video_timestamps`) requires `video_timestamps` whenever the request has
+/// videos; passing `None` there is an error rather than a silent fall back to
+/// the timeless flat layout. Families without timestamps ignore it.
 pub fn compute_qwen_vl_media_embeddings(
     qwen: &dyn crate::qwen_vl::QwenVlRuntime,
     prompt_tokens: &mut Vec<i32>,
     images: &[DynamicImage],
     videos: &[Vec<DynamicImage>],
+    video_timestamps: Option<&QwenVideoTimestamps<'_>>,
     image_cache_keys: Option<&[Option<CacheKey>]>,
     caches: Option<&ModelVisionCaches>,
 ) -> Result<(InputEmbeddings, InsertedQwenVlmTokens)> {
@@ -988,15 +1007,63 @@ pub fn compute_qwen_vl_media_embeddings(
             grid_thw: grid,
         })
         .collect::<Vec<_>>();
-    let stats = insert_qwen_vl_media_tokens(
-        prompt_tokens,
-        &visual_grids,
-        info.spatial_merge_size,
-        info.vision_start_token_id,
-        info.image_token_id,
-        info.video_token_id,
-    )?
-    .ok_or_else(|| anyhow::anyhow!("Qwen-VL failed to prepare visual placeholder tokens"))?;
+    let inserted = if info.video_timestamps && !videos.is_empty() {
+        let timestamps = video_timestamps.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Qwen-VL video request needs per-group timestamps for this model family, but no \
+                 video timing was provided"
+            )
+        })?;
+        if timestamps.group_seconds.len() != videos.len() {
+            anyhow::bail!(
+                "Qwen-VL video timing covers {} video(s), but request has {}",
+                timestamps.group_seconds.len(),
+                videos.len()
+            );
+        }
+        let mut group_prefixes = Vec::with_capacity(videos.len());
+        for (ordinal, item) in media_order.iter().zip(&visual_grids) {
+            let QwenMediaOrdinal::Video(idx) = *ordinal else {
+                continue;
+            };
+            let seconds = &timestamps.group_seconds[idx];
+            if seconds.len() != item.grid_thw.0 as usize {
+                anyhow::bail!(
+                    "Qwen-VL video {idx} has {} temporal group(s), but {} timestamp(s) were \
+                     provided",
+                    item.grid_thw.0,
+                    seconds.len()
+                );
+            }
+            let prefixes = seconds
+                .iter()
+                .map(|&secs| {
+                    (timestamps.encode_text)(&crate::qwen_vl::qwen_video_timestamp_text(secs))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            group_prefixes.push(prefixes);
+        }
+        insert_qwen_vl_media_tokens_timestamped(
+            prompt_tokens,
+            &visual_grids,
+            info.spatial_merge_size,
+            info.vision_start_token_id,
+            info.image_token_id,
+            info.video_token_id,
+            &group_prefixes,
+        )?
+    } else {
+        insert_qwen_vl_media_tokens(
+            prompt_tokens,
+            &visual_grids,
+            info.spatial_merge_size,
+            info.vision_start_token_id,
+            info.image_token_id,
+            info.video_token_id,
+        )?
+    };
+    let stats = inserted
+        .ok_or_else(|| anyhow::anyhow!("Qwen-VL failed to prepare visual placeholder tokens"))?;
 
     let active_caches = if videos.is_empty() {
         caches.filter(|c| c.enabled())
@@ -1217,6 +1284,7 @@ where
                 prompt_tokens,
                 images,
                 &[],
+                None,
                 image_cache_keys,
                 active_caches,
             )?;

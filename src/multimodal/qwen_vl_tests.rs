@@ -14,7 +14,9 @@
 
 use super::{
     InsertedQwenVlmTokens, QwenVisualGrid, QwenVisualKind, forward_batched_with_seq_ids_dispatch,
-    insert_qwen_vl_image_tokens, insert_qwen_vl_media_tokens, qwen_vl_mrope_positions_from_tokens,
+    insert_qwen_vl_image_tokens, insert_qwen_vl_media_tokens,
+    insert_qwen_vl_media_tokens_timestamped, qwen_video_group_timestamps,
+    qwen_video_timestamp_text, qwen_vl_mrope_positions_from_tokens,
 };
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::LanguageModel;
@@ -266,6 +268,257 @@ fn qwen_vl_mrope_positions_keep_video_temporal_axis() {
         "width positions must use w / spatial_merge_size"
     );
     assert_eq!(positions[0].len(), tokens.len());
+}
+
+// -- per-group video timestamps (#2402) ---------------------
+
+/// Two-group `(2, 4, 4)` video with spatial merge 2: each group is
+/// `(4 / 2) * (4 / 2) = 4` video tokens.
+fn two_group_video() -> [QwenVisualGrid; 1] {
+    [QwenVisualGrid {
+        kind: QwenVisualKind::Video,
+        grid_thw: (2, 4, 4),
+    }]
+}
+
+/// Timestamp text tokens: group 0 is one token, group 1 is two.
+fn two_group_prefixes() -> Vec<Vec<Vec<i32>>> {
+    vec![vec![vec![50], vec![51, 52]]]
+}
+
+/// The prompt a two-group video expands to, with ids start=100, end=101,
+/// video=104, trailing text 42.
+fn two_group_expanded() -> Vec<i32> {
+    vec![
+        1, 50, 100, 104, 104, 104, 104, 101, 51, 52, 100, 104, 104, 104, 104, 101, 42,
+    ]
+}
+
+#[test]
+fn timestamped_media_tokens_render_one_framed_run_per_group() {
+    let mut prompt_tokens = vec![1, 100, 104, 101, 42];
+    let stats = insert_qwen_vl_media_tokens_timestamped(
+        &mut prompt_tokens,
+        &two_group_video(),
+        2,
+        100,
+        103,
+        104,
+        &two_group_prefixes(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        stats,
+        Some(InsertedQwenVlmTokens {
+            image_blocks: 0,
+            video_blocks: 1,
+            total_image_tokens: 0,
+            total_video_tokens: 8,
+        }),
+        "timestamp text is not a visual token and must not change the feature count"
+    );
+    assert_eq!(
+        prompt_tokens,
+        two_group_expanded(),
+        "the template's own framing pair is folded into the per-group framing"
+    );
+}
+
+#[test]
+fn timestamped_media_tokens_insert_after_bos_without_placeholders() {
+    let mut prompt_tokens = vec![1, 42];
+    insert_qwen_vl_media_tokens_timestamped(
+        &mut prompt_tokens,
+        &two_group_video(),
+        2,
+        100,
+        103,
+        104,
+        &two_group_prefixes(),
+    )
+    .unwrap();
+
+    assert_eq!(prompt_tokens, two_group_expanded());
+}
+
+#[test]
+fn timestamped_media_tokens_keep_images_flat_and_order_mixed_media() {
+    // image (2x2 merged -> 4 tokens at grid (1, 4, 4) / merge 2), then video.
+    let media = [
+        QwenVisualGrid {
+            kind: QwenVisualKind::Image,
+            grid_thw: (1, 4, 4),
+        },
+        QwenVisualGrid {
+            kind: QwenVisualKind::Video,
+            grid_thw: (2, 4, 4),
+        },
+    ];
+    let mut prompt_tokens = vec![1, 100, 103, 101, 9, 100, 104, 101, 42];
+    insert_qwen_vl_media_tokens_timestamped(
+        &mut prompt_tokens,
+        &media,
+        2,
+        100,
+        103,
+        104,
+        &two_group_prefixes(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        prompt_tokens,
+        vec![
+            1, 100, 103, 103, 103, 103, 101, 9, 50, 100, 104, 104, 104, 104, 101, 51, 52, 100, 104,
+            104, 104, 104, 101, 42,
+        ]
+    );
+}
+
+#[test]
+fn timestamped_media_tokens_accept_already_expanded_prompts() {
+    // Per-group layout is left untouched.
+    let mut grouped = two_group_expanded();
+    insert_qwen_vl_media_tokens_timestamped(
+        &mut grouped,
+        &two_group_video(),
+        2,
+        100,
+        103,
+        104,
+        &two_group_prefixes(),
+    )
+    .unwrap();
+    assert_eq!(grouped, two_group_expanded());
+
+    // A flat run holding every group's features is also accepted.
+    let mut flat = vec![1, 100, 104, 104, 104, 104, 104, 104, 104, 104, 101, 42];
+    let flat_before = flat.clone();
+    insert_qwen_vl_media_tokens_timestamped(
+        &mut flat,
+        &two_group_video(),
+        2,
+        100,
+        103,
+        104,
+        &two_group_prefixes(),
+    )
+    .unwrap();
+    assert_eq!(flat, flat_before);
+}
+
+#[test]
+fn timestamped_media_tokens_reject_malformed_group_layouts() {
+    // Second group is truncated to 3 tokens.
+    let mut truncated = two_group_expanded();
+    truncated.remove(12);
+    let error = insert_qwen_vl_media_tokens_timestamped(
+        &mut truncated,
+        &two_group_video(),
+        2,
+        100,
+        103,
+        104,
+        &two_group_prefixes(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("cardinality mismatch"),
+        "truncated group must be rejected, got: {error}"
+    );
+
+    // One timestamp for a two-group video.
+    let mut prompt_tokens = vec![1, 100, 104, 101, 42];
+    let error = insert_qwen_vl_media_tokens_timestamped(
+        &mut prompt_tokens,
+        &two_group_video(),
+        2,
+        100,
+        103,
+        104,
+        &[vec![vec![50]]],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("temporal group(s)"),
+        "timestamp/group count mismatch must be rejected, got: {error}"
+    );
+    assert_eq!(prompt_tokens, vec![1, 100, 104, 101, 42]);
+}
+
+#[test]
+fn qwen_vl_mrope_positions_restart_temporal_axis_per_timestamped_group() {
+    let tokens = two_group_expanded();
+    let positions =
+        qwen_vl_mrope_positions_from_tokens(&tokens, &[(2, 4, 4)], 2, 103, 104).unwrap();
+
+    // Each group is positioned as its own `(1, 4, 4)` grid; the timestamp
+    // text and framing tokens between groups advance as plain text.
+    assert_eq!(
+        positions[0],
+        vec![0, 1, 2, 3, 3, 3, 3, 5, 6, 7, 8, 9, 9, 9, 9, 11, 12],
+        "temporal axis is constant within a group and jumps past the timestamp text"
+    );
+    assert_eq!(
+        positions[1],
+        vec![0, 1, 2, 3, 3, 4, 4, 5, 6, 7, 8, 9, 9, 10, 10, 11, 12]
+    );
+    assert_eq!(
+        positions[2],
+        vec![0, 1, 2, 3, 4, 3, 4, 5, 6, 7, 8, 9, 10, 9, 10, 11, 12]
+    );
+    assert_eq!(positions[0].len(), tokens.len());
+    assert_eq!(positions[1].len(), tokens.len());
+    assert_eq!(positions[2].len(), tokens.len());
+}
+
+#[test]
+fn qwen_vl_mrope_positions_reject_timestamped_groups_missing_a_run() {
+    // Only one of the two groups is present.
+    let tokens = vec![1, 50, 100, 104, 104, 104, 104, 101, 42];
+    let error = qwen_vl_mrope_positions_from_tokens(&tokens, &[(2, 4, 4)], 2, 103, 104)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("temporal group") || error.contains("expected"),
+        "a missing group run must not silently pass, got: {error}"
+    );
+}
+
+#[test]
+fn video_group_timestamps_use_mean_of_first_and_last_frame_time() {
+    // 4 frames at 30 fps, temporal patch 2 -> groups (0, 15) and (30, 45).
+    let seconds = qwen_video_group_timestamps(&[0, 15, 30, 45], 30.0, 2, 2).unwrap();
+    assert_eq!(seconds, vec![0.25, 1.25]);
+
+    // An odd frame count pads by repeating the last frame: (0, 10), (20, 20).
+    let seconds = qwen_video_group_timestamps(&[0, 10, 20], 10.0, 2, 2).unwrap();
+    assert_eq!(seconds, vec![0.5, 2.0]);
+
+    // Resampled clips keep real time: indices come from the sampler, not an
+    // assumed 2 fps.
+    let seconds = qwen_video_group_timestamps(&[0, 60, 120, 180], 60.0, 2, 2).unwrap();
+    assert_eq!(seconds, vec![0.5, 2.5]);
+}
+
+#[test]
+fn video_group_timestamps_reject_inconsistent_inputs() {
+    assert!(qwen_video_group_timestamps(&[0, 1, 2, 3], 30.0, 2, 3).is_err());
+    assert!(qwen_video_group_timestamps(&[0, 1], 0.0, 2, 1).is_err());
+    assert!(qwen_video_group_timestamps(&[0, 1], f64::NAN, 2, 1).is_err());
+    assert!(qwen_video_group_timestamps(&[0, 1], f64::INFINITY, 2, 1).is_err());
+    assert!(qwen_video_group_timestamps(&[], 30.0, 2, 1).is_err());
+    assert!(qwen_video_group_timestamps(&[0, 1], 30.0, 0, 1).is_err());
+}
+
+#[test]
+fn video_timestamp_text_has_one_decimal() {
+    assert_eq!(qwen_video_timestamp_text(0.5), "<0.5 seconds>");
+    assert_eq!(qwen_video_timestamp_text(12.0), "<12.0 seconds>");
+    assert_eq!(qwen_video_timestamp_text(2.04), "<2.0 seconds>");
 }
 
 // -- dispatch helper integration tests ----------------------
