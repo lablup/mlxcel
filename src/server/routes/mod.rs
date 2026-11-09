@@ -189,15 +189,21 @@ pub(crate) fn chat_not_available(state: &AppState) -> Option<ErrorResponse> {
     chat_unavailable_message(state).map(ErrorResponse::not_implemented)
 }
 
-/// The same refusal, but only on an image-only server (#2825).
+/// The same refusal, but only on a server started without a chat tokenizer:
+/// image-only serving (#2825) and a primary Kokoro TTS checkpoint.
 ///
 /// `/tokenize`, `/detokenize` and `/apply-template` are not generation routes,
 /// so they stay available in every other mode, including `-m --image-model`.
-/// In image-only mode there is no tokenizer or chat template behind them, and
+/// In these two modes there is no tokenizer or chat template behind them, and
 /// running on the empty tokenizer would return wrong answers rather than an
-/// error.
-pub(crate) fn chat_not_available_image_only(state: &AppState) -> Option<ErrorResponse> {
+/// error. A TTS provider exists only for a primary Kokoro checkpoint.
+pub(crate) fn chat_not_available_without_tokenizer(state: &AppState) -> Option<ErrorResponse> {
+    let tts_only = state
+        .audio_model
+        .as_ref()
+        .is_some_and(|audio| audio.supports(AudioModelKind::Tts));
     if state.config.embedding_serving_mode == crate::server::config::EmbeddingServingMode::ImageOnly
+        || tts_only
     {
         chat_not_available(state)
     } else {

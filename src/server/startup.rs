@@ -1678,18 +1678,72 @@ pub(super) fn resolve_chat_template(
 /// - Kokoro: a phoneme-input TTS model that ships no tokenizer file. It reads
 ///   its phoneme vocab from `config.json` and serves `/v1/audio/speech`
 ///   only, so loading the chat front would stop the server with "No tokenizer
-///   found" before the TTS wiring runs.
+///   found" before the TTS wiring runs. Only a plain single-node server
+///   qualifies: the disaggregated roles front a chat model and have no TTS
+///   wiring at all. A config that names another architecture does not qualify
+///   either, because Kokoro detection is a heuristic (see
+///   [`is_genuine_kokoro_checkpoint`]).
 ///
 /// This is deliberately a list of verified cases rather than a rule such as
 /// "every non-chat model": an embedding or Whisper checkpoint without a
 /// tokenizer would then start and serve nothing instead of failing at startup.
-fn chat_front_unused(model_path: &Path, image_only: bool) -> bool {
+fn chat_front_unused(
+    model_path: &Path,
+    image_only: bool,
+    serving_mode: crate::distributed::disaggregated::ServingMode,
+) -> bool {
     // Image-only has an empty model path, so it never reaches detection.
     image_only
-        || matches!(
-            crate::models::get_model_type(model_path),
-            Ok(crate::models::ModelType::Kokoro)
-        )
+        || (serving_mode == crate::distributed::disaggregated::ServingMode::Hybrid
+            && is_genuine_kokoro_checkpoint(model_path))
+}
+
+/// Whether `model_path` is a Kokoro checkpoint and not merely detected as one.
+///
+/// Detection accepts an `istftnet` config block or a `kokoro-v1_0.safetensors`
+/// file, and runs before the `model_type` dispatch, so a chat checkpoint with
+/// a stray file of that name also detects as Kokoro. Published Kokoro configs
+/// carry no `model_type`, so one naming another architecture is not Kokoro and
+/// must keep the missing-tokenizer failure.
+fn is_genuine_kokoro_checkpoint(model_path: &Path) -> bool {
+    if !matches!(
+        crate::models::get_model_type(model_path),
+        Ok(crate::models::ModelType::Kokoro)
+    ) {
+        return false;
+    }
+    let Ok(config) = std::fs::read_to_string(model_path.join("config.json")) else {
+        return false;
+    };
+    let Ok(config) =
+        serde_json::from_str::<serde_json::Value>(&crate::models::sanitize_config_json(&config))
+    else {
+        return false;
+    };
+    match config.get("model_type").and_then(serde_json::Value::as_str) {
+        None => true,
+        Some(model_type) => model_type.eq_ignore_ascii_case("kokoro"),
+    }
+}
+
+/// Load the Kokoro TTS provider for a primary `-m` Kokoro checkpoint.
+///
+/// A failure is fatal, like a failed realtime engine load. The audio slot is
+/// the only thing this checkpoint can serve, and [`chat_front_unused`] has
+/// already skipped the tokenizer check that used to stop such a server, so
+/// logging and continuing would leave a process that answers 501 forever.
+fn load_primary_kokoro_tts(
+    model_path: &Path,
+    queue_depth: usize,
+    request_timeout: std::time::Duration,
+) -> Result<Arc<dyn crate::server::audio_model::AudioModelProvider>> {
+    let provider = crate::server::kokoro_tts::KokoroTtsProvider::load(
+        model_path,
+        queue_depth,
+        request_timeout,
+    )
+    .with_context(|| format!("Failed to load Kokoro text-to-speech model from {model_path:?}"))?;
+    Ok(Arc::new(provider))
 }
 
 /// Load the tokenizer and the chat template the way `start_server` does,
@@ -3876,14 +3930,15 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     }
     // The router branch below is unreachable for image-only serving because a
     // router selector is a startup error alongside `--image-model` without `-m`.
-    let (tokenizer, chat_template) = if chat_front_unused(&startup.model_path, image_only) {
-        (
-            crate::tokenizer::MlxcelTokenizer::empty(),
-            ChatTemplateProcessor::default(),
-        )
-    } else {
-        load_chat_front(&startup)?
-    };
+    let (tokenizer, chat_template) =
+        if chat_front_unused(&startup.model_path, image_only, config.serving_mode) {
+            (
+                crate::tokenizer::MlxcelTokenizer::empty(),
+                ChatTemplateProcessor::default(),
+            )
+        } else {
+            load_chat_front(&startup)?
+        };
 
     // `--dry-sequence-breaker` carries b10621's string value domain since
     // #1485; the effective set (default set, replacement values, or the
@@ -4264,17 +4319,11 @@ async fn serve_with_side_model_workers(
                     "Detected Kokoro text-to-speech checkpoint; loading audio model for \
                      /v1/audio/speech"
                 );
-                match crate::server::kokoro_tts::KokoroTtsProvider::load(
+                Some(load_primary_kokoro_tts(
                     &startup.model_path,
                     audio_queue_depth,
                     audio_request_timeout,
-                ) {
-                    Ok(provider) => Some(Arc::new(provider)),
-                    Err(err) => {
-                        tracing::error!("Failed to load Kokoro text-to-speech model: {err}");
-                        None
-                    }
-                }
+                )?)
             }
             _ => None,
         }
