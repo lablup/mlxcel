@@ -22,6 +22,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use mlxcel_core::host_memory::AvailabilityGate;
+
 /// Bytes of memory each growth step adds.
 pub const GROWTH_STEP_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -33,8 +35,9 @@ const ENTRY_OVERHEAD_BYTES: u64 = 56;
 
 const NONE: u32 = u32::MAX;
 
-/// Decides whether the cache may take another growth step. The default always
-/// agrees; #2883 plugs in its availability check here.
+/// Decides whether the cache may take another growth step. `next_step_bytes`
+/// counts the step's records and their bookkeeping. Polled on every insert
+/// once it has refused at a slab boundary, so it must be cheap.
 pub trait RowCacheGrowth: Send + Sync {
     fn can_grow(&self, next_step_bytes: u64) -> bool {
         let _ = next_step_bytes;
@@ -46,6 +49,17 @@ pub trait RowCacheGrowth: Send + Sync {
 #[derive(Debug, Default)]
 pub struct AlwaysGrow;
 impl RowCacheGrowth for AlwaysGrow {}
+
+/// [`RowCacheGrowth`] that stops growing rather than push macOS below its
+/// reserve (#2883). Off macOS availability is unknown and every step is taken.
+#[derive(Debug, Default)]
+pub struct AvailabilityGrowth(AvailabilityGate);
+
+impl RowCacheGrowth for AvailabilityGrowth {
+    fn can_grow(&self, next_step_bytes: u64) -> bool {
+        self.0.allows_step(next_step_bytes)
+    }
+}
 
 pub(crate) struct RowCache {
     stride: usize,
@@ -150,7 +164,8 @@ impl RowCache {
             // The last step stops at the capacity instead of overshooting it.
             let step_rows = self.slab_rows.min(self.capacity_rows - used) as usize;
             let step = step_rows as u64 * self.stride as u64;
-            if !self.growth.can_grow(step) {
+            let step_with_bookkeeping = step + step_rows as u64 * ENTRY_OVERHEAD_BYTES;
+            if !self.growth.can_grow(step_with_bookkeeping) {
                 return None;
             }
             self.slabs.push(vec![0u8; step as usize].into_boxed_slice());
@@ -239,6 +254,25 @@ mod tests {
         cache.insert(1, &record(1));
         assert_eq!(cache.allocated_bytes(), 0);
         assert_eq!(cache.len(), 0);
+    }
+
+    struct RecordStep(std::sync::Mutex<Vec<u64>>);
+    impl RowCacheGrowth for RecordStep {
+        fn can_grow(&self, next_step_bytes: u64) -> bool {
+            self.0.lock().unwrap().push(next_step_bytes);
+            true
+        }
+    }
+
+    #[test]
+    fn a_growth_step_is_charged_with_its_bookkeeping() {
+        let policy = Arc::new(RecordStep(std::sync::Mutex::default()));
+        let mut cache = RowCache::new(10 * (4 + ENTRY_OVERHEAD_BYTES), 4, policy.clone());
+        cache.insert(1, &record(1));
+        assert_eq!(
+            *policy.0.lock().unwrap(),
+            vec![10 * (4 + ENTRY_OVERHEAD_BYTES)]
+        );
     }
 
     #[test]

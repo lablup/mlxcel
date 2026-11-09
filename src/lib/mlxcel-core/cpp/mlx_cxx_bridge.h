@@ -222,6 +222,7 @@ size_t array_size(const MlxArray& arr);
 size_t array_ndim(const MlxArray& arr);
 size_t array_itemsize(const MlxArray& arr);
 size_t array_nbytes(const MlxArray& arr);
+size_t array_data_address(const MlxArray& arr);
 
 // Array data access (scalar extraction).
 float item_f32(const MlxArray& arr);

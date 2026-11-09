@@ -39,6 +39,8 @@ use crate::server::batch::observability::HistogramSnapshot;
 
 #[path = "metrics_audio.rs"]
 mod metrics_audio;
+#[path = "metrics_process_memory.rs"]
+mod metrics_process_memory;
 use metrics_audio::append_audio_preprocess_metrics;
 
 /// GET /metrics -- Prometheus text format
@@ -360,6 +362,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     );
 
     append_pipeline_metrics(&mut body, &pp_snapshot);
+    body.push_str(&metrics_process_memory::render_current());
 
     let mut full = String::new();
     append_llamacpp_metrics(&mut full, &state);

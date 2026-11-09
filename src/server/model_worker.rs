@@ -368,6 +368,17 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                             load_elapsed.as_secs_f64(),
                             snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                         );
+                        // Issue #2883: `None` off macOS.
+                        if let Some(footprint) = mlxcel_core::host_memory::process_footprint() {
+                            tracing::info!(
+                                worker_model_id = %worker_model_id,
+                                phys_footprint_bytes = footprint.phys_footprint_bytes,
+                                compressed_bytes = footprint.compressed_bytes,
+                                "Process footprint after load: {:.2} GB ({:.2} GB compressed)",
+                                footprint.phys_footprint_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                                footprint.compressed_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                            );
+                        }
                         // A `--rope-scaling` / `--rope-scale` / `--rope-freq-base`
                         // request that reached no RoPE code path is fatal to
                         // serving, not a warning: the server would answer every

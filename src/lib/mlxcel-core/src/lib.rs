@@ -199,6 +199,12 @@ mod ffi {
         /// Get the total size in bytes
         fn array_nbytes(arr: &MlxArray) -> usize;
 
+        /// Host address of an evaluated array's bytes, or 0 before evaluation
+        /// and for a strided view, whose bytes the address and `array_nbytes`
+        /// do not describe. For address-only uses such as `mlock`; never read
+        /// through it.
+        fn array_data_address(arr: &MlxArray) -> usize;
+
         // Scalar extraction.
         /// Extract f32 scalar value
         fn item_f32(arr: &MlxArray) -> f32;
@@ -4453,6 +4459,13 @@ pub use command_buffer_budget::DecodeCommandBufferBudget;
 // Public so that the CLI generate path can surface post-load resident
 // memory and the preflight (#56) can call `set_memory_limit` to fail fast.
 pub mod memory;
+
+// What macOS can give right now, the reserve left for it, and the process
+// footprint (issue #2883).
+pub mod host_memory;
+
+// Optional mlock of evaluated weight buffers (issue #2883).
+pub mod weight_wiring;
 
 // RoPE variants that are not exposed directly by `mlx::core::fast::rope`.
 // Currently: proportional RoPE used by Gemma 4 full-attention layers.
