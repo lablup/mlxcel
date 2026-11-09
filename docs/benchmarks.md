@@ -444,6 +444,26 @@ end-to-end decode sweep (one dense model and one MoE model, batch 1 and 4, with
 each kill switch flipped for the A/B) is the deciding measurement. Record both
 in `docs/benchmark_results/fused-norm-rope-<hw>-<date>.md`.
 
+## Fused tanh-GELU f32: the same measure-then-keep gate
+
+The fused `gelu_tanh_f32` Metal kernel from issue #2780's family lands under the
+same policy: it keeps its wiring only if it beats the graph it replaced at op
+level. `examples/fused_gelu_tanh_microbench.rs` produces that evidence. It loads
+no model and times the eager chain, the `compile_shapeless` chain and the fused
+kernel on the three shapes the tanh-switched encoders feed.
+
+```bash
+caffeinate -i cargo run --release --features metal,accelerate \
+    --example fused_gelu_tanh_microbench
+```
+
+The harness interleaves its trials and reports the per-arm minimum, because
+background load only ever adds time and a single non-interleaved pass on a
+loaded host inverted the ordering. It prints why and exits when
+`fused_gelu_tanh_f32_available()` is false, which is the case with
+`MLXCEL_DEVICE=cpu`. Record the result in
+`docs/benchmark_results/fused-gelu-tanh-f32-<hw>-<date>.md`.
+
 ## Warm vs cold last-level cache (issue #906)
 
 An op-level microbenchmark that allocates its inputs once and reuses them on

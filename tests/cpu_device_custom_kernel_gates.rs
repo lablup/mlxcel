@@ -56,6 +56,10 @@ fn custom_kernel_gates_decline_on_the_cpu_device() {
         "fused xIELU must take its elementwise fallback on the CPU device"
     );
     assert!(
+        !mlxcel_core::fused_gelu_tanh_f32_available(),
+        "the fused tanh-GELU must take compiled_gelu_tanh_f32 on the CPU device"
+    );
+    assert!(
         !mlxcel_core::fused_add3_layer_norm_available(),
         "residual_add3_layer_norm must run the unfused pair on the CPU device"
     );

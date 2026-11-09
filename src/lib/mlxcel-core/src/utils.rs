@@ -1161,10 +1161,55 @@ pub fn gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// FMA, so a lane can differ from [`gelu_tanh_f32`] by f32 rounding before the
 /// cast back.
 ///
-/// Used by: [`GeluActivation::TanhF32Compiled`].
+/// Used by: [`gelu_tanh_f32_compiled_where_available`] whenever
+/// [`fused_gelu_tanh_f32`] has no port for this backend, and the GELU tests.
 #[inline]
 pub fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::compiled_gelu_tanh_f32(x)
+}
+
+/// [`gelu_tanh_f32`] evaluated in f32 by one fused custom kernel.
+///
+/// Used by: [`GeluActivation::TanhF32Compiled`].
+///
+/// # Panics
+///
+/// Panics if the fused kernel throws on a backend where
+/// [`fused_gelu_tanh_f32_available`] reported it could run. Callers that cannot
+/// guarantee the port use [`gelu_tanh_f32_compiled_where_available`], which
+/// takes the graph-composed path elsewhere.
+#[inline]
+pub fn fused_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
+    ffi::fused_gelu_tanh_f32(x).expect("fused_gelu_tanh_f32 kernel threw on this backend")
+}
+
+/// Whether the fused launch handles an input of this dtype and element count:
+/// the kernel is written for f32, bf16 and f16, and its grid is an `i32`.
+fn fused_gelu_tanh_f32_accepts(input_dtype: i32, size: usize) -> bool {
+    matches!(
+        input_dtype,
+        crate::dtype::FLOAT32 | crate::dtype::BFLOAT16 | crate::dtype::FLOAT16
+    ) && size <= i32::MAX as usize
+}
+
+/// [`fused_gelu_tanh_f32`] where the kernel has a port for this backend and
+/// accepts the input, and [`compiled_gelu_tanh_f32`] everywhere else.
+///
+/// The two paths compute the same f32 formula, so the fallback is a rounding
+/// difference, not a different function. This is the dispatch
+/// [`GeluActivation::TanhF32Compiled`] takes: the CPU-only case has to keep
+/// working because [`GeluActivation::in_f32_compiled`] maps the plain
+/// [`Tanh`](GeluActivation::Tanh) variant here, and the SigLIP and MiniCPM-V
+/// encoders take that route regardless of device.
+#[inline]
+pub fn gelu_tanh_f32_compiled_where_available(x: &MlxArray) -> UniquePtr<MlxArray> {
+    if ffi::fused_gelu_tanh_f32_available()
+        && fused_gelu_tanh_f32_accepts(ffi::array_dtype(x), ffi::array_size(x))
+    {
+        fused_gelu_tanh_f32(x)
+    } else {
+        compiled_gelu_tanh_f32(x)
+    }
 }
 
 /// Which GELU formula a call site computes.
@@ -1257,7 +1302,7 @@ impl GeluActivation {
             Self::Erf => gelu_approx(x),
             Self::Tanh => gelu_tanh(x),
             Self::TanhF32 => gelu_tanh_f32(x),
-            Self::TanhF32Compiled => compiled_gelu_tanh_f32(x),
+            Self::TanhF32Compiled => gelu_tanh_f32_compiled_where_available(x),
             Self::Fast => gelu_sigmoid(x),
         }
     }
