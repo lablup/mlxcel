@@ -1363,6 +1363,25 @@ impl SwitchGLU {
         }
     }
 
+    /// The sorted branch of [`Self::forward_with_sort`] for rows already in
+    /// expert order: `sorted_x` is `[B, 1, hidden]`, `sorted_indices` `[B]`.
+    /// `sorted` is the flag the matmuls receive; the expert arena (issue
+    /// #2882) clears it when the resident path would not take the sorted
+    /// kernel at this batch size.
+    ///
+    /// Used by: Qwen4-Exp expert streaming
+    pub(crate) fn forward_presorted(
+        &self,
+        sorted_x: &MlxArray,
+        sorted_indices: &MlxArray,
+        sorted: bool,
+    ) -> UniquePtr<MlxArray> {
+        let x_gate = self.gate_proj.forward(sorted_x, sorted_indices, sorted);
+        let x_up = self.up_proj.forward(sorted_x, sorted_indices, sorted);
+        let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
+        self.down_proj.forward(&activated, sorted_indices, sorted)
+    }
+
     /// Single-token decode via the fused MoE expert Metal kernel (#268).
     /// gate/up are 4/8-bit, down also handles 6-bit. Returns `None` (caller
     /// falls back to `forward` + `moe_weighted_sum`) for any unsupported config:

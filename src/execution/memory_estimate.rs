@@ -881,6 +881,10 @@ fn compute_activation_bytes(dims: &ActivationDims, ctx_len: u64, batch: u64, mul
 
 /// Pick the weight-bytes figure and label its source.
 fn resolve_weight_bytes(model_dir: &Path) -> (u64, WeightsSource) {
+    // A streaming `qwen4_exp` load keeps only the arena of its routed experts.
+    if let Some(bytes) = crate::models::qwen4_exp::stream::preflight_resident_bytes(model_dir) {
+        return (bytes, WeightsSource::ExactSafetensors);
+    }
     // A `ple_storage` checkpoint's weight index still names the hard-linked
     // shards holding the table. Count what actually becomes resident.
     if let Some(external) =

@@ -1398,6 +1398,9 @@ fn print_generation_result(
     if let Some(line) = mlxcel::models::qwen4_exp::ple_stats::ple_stats_line() {
         println!("{line}");
     }
+    if let Some(line) = mlxcel::models::qwen4_exp::stream::expert_stream_stats_line() {
+        println!("{line}");
+    }
 
     Ok(())
 }

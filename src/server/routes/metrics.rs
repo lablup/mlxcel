@@ -362,6 +362,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     );
 
     append_pipeline_metrics(&mut body, &pp_snapshot);
+    append_expert_stream_metrics(&mut body);
     body.push_str(&metrics_process_memory::render_current());
 
     let mut full = String::new();
@@ -391,6 +392,69 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 /// (https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server-task.cpp),
 /// so a Prometheus scrape config written for llama-server matches mlxcel
 /// unchanged.
+/// SSD expert arena counters (issue #2882); nothing when experts are resident.
+fn append_expert_stream_metrics(body: &mut String) {
+    let Some(s) = crate::models::qwen4_exp::stream::active_stream_stats() else {
+        return;
+    };
+    let metrics: [(&str, &str, &str, u64); 8] = [
+        (
+            "mlxcel_expert_arena_bytes",
+            "gauge",
+            "Resident bytes of the SSD expert arena",
+            s.arena_bytes,
+        ),
+        (
+            "mlxcel_expert_arena_slots",
+            "gauge",
+            "Slots of the SSD expert arena across layers",
+            s.slots,
+        ),
+        (
+            "mlxcel_expert_arena_windows_total",
+            "counter",
+            "Routing windows served by the expert arena",
+            s.windows,
+        ),
+        (
+            "mlxcel_expert_arena_hits_total",
+            "counter",
+            "Routed experts found resident",
+            s.hits,
+        ),
+        (
+            "mlxcel_expert_arena_misses_total",
+            "counter",
+            "Routed experts read from disk",
+            s.misses,
+        ),
+        (
+            "mlxcel_expert_arena_read_bytes_total",
+            "counter",
+            "Bytes read from disk for the expert arena",
+            s.bytes_read,
+        ),
+        (
+            "mlxcel_expert_arena_io_nanoseconds_total",
+            "counter",
+            "Time spent reading experts from disk",
+            s.io_ns,
+        ),
+        (
+            "mlxcel_expert_arena_sync_nanoseconds_total",
+            "counter",
+            "Time spent waiting for per-layer router results",
+            s.sync_ns,
+        ),
+    ];
+    for (name, kind, help, value) in metrics {
+        let _ = writeln!(
+            body,
+            "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}"
+        );
+    }
+}
+
 fn append_llamacpp_metrics(body: &mut String, state: &AppState) {
     let obs = &state.batch_observability;
     let load = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);

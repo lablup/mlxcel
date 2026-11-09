@@ -31,10 +31,14 @@ use crate::models::qwen3_next::{MLP, Quantization, Qwen3NextConfig, SwitchGLU};
 
 use super::config::ResolvedQwen4ExpConfig;
 use super::shapes;
+use super::stream::arena::LayerStream;
 
 pub(crate) struct Qwen4ExpMoeBlock {
     router: UnifiedLinear,
     experts: SwitchGLU,
+    /// The layer's slot arena when experts stream from disk; `experts` then
+    /// reads slot tensors. Declared after `experts`, which borrows its memory.
+    stream: Option<LayerStream>,
     shared_expert: MLP,
     shared_expert_gate: UnifiedLinear,
     num_experts_per_tok: i32,
@@ -105,13 +109,25 @@ impl Qwen4ExpMoeBlock {
             shapes::expect_matrix(weights, &module, (group_size, bits), &[rows, hidden])?;
             UnifiedLinear::from_weights(weights, &module, group_size, bits)
         };
+        // Streaming swaps the checkpoint's stacked planes for slot tensors of
+        // the same layout; the shape checks above still ran on the real ones.
+        let (stream, slot_weights) = match &config.expert_stream {
+            Some(plan) => {
+                let (stream, slots) =
+                    LayerStream::new(std::sync::Arc::clone(plan), layer_index(prefix)?, prefix)?;
+                (Some(stream), Some(slots))
+            }
+            None => (None, None),
+        };
+        let expert_weights = slot_weights.as_ref().unwrap_or(weights);
         Ok(Self {
             router: linear("gate", experts)?,
             experts: SwitchGLU::from_weights(
-                weights,
+                expert_weights,
                 &loader_config(config, experts_pair),
                 &format!("{prefix}.switch_mlp"),
             )?,
+            stream,
             shared_expert: MLP::from_weights(
                 weights,
                 &loader_config(config, shared_pair),
@@ -155,9 +171,12 @@ impl Qwen4ExpMoeBlock {
         // The generic fused MoE kernel accumulates expert outputs in float32.
         // Qwen4 checkpoints require bf16 rounding before weighting and summing
         // the selected experts, including single-token decode.
-        let expert_out = self
-            .experts
-            .forward_with_sort(&x_flat, &topk, !decode_equivalent);
+        let expert_out = match &self.stream {
+            Some(stream) => stream.forward(&self.experts, &x_flat, &topk, !decode_equivalent),
+            None => self
+                .experts
+                .forward_with_sort(&x_flat, &topk, !decode_equivalent),
+        };
         let scores = mlxcel_core::expand_dims(&scores, -1);
         let weighted = mlxcel_core::multiply(&expert_out, &scores);
         let routed = mlxcel_core::sum_axis_native_dtype(&weighted, -2, false);
@@ -189,6 +208,14 @@ impl Qwen4ExpMoeBlock {
         let out = mlxcel_core::add(&routed, &mlxcel_core::multiply(&shared, &shared_gate));
         mlxcel_core::reshape(&out, &shape)
     }
+}
+
+/// The layer number in a `model.layers.{n}.mlp` prefix.
+fn layer_index(prefix: &str) -> Result<usize, String> {
+    prefix
+        .rsplit('.')
+        .find_map(|part| part.parse().ok())
+        .ok_or_else(|| format!("{prefix} names no layer"))
 }
 
 /// A packed expert plane whose width disagrees with its declared bits would

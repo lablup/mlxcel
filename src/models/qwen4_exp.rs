@@ -88,6 +88,8 @@ pub(crate) mod rollback;
 pub mod sanitize;
 #[path = "qwen4_exp_shapes.rs"]
 pub(crate) mod shapes;
+#[path = "qwen4_exp_stream.rs"]
+pub mod stream;
 
 pub use config::{
     Qwen4ExpConfig, Qwen4ExpConfigError, ResolvedQwen4ExpConfig, text_config_from_full,
