@@ -747,6 +747,16 @@ fn load_model_unscoped(model_path: &Path) -> Result<(LoadedModel, MlxcelTokenize
         );
     }
 
+    // Kokoro is a speech synthesizer with no text-generation path; the server
+    // wires it to `/v1/audio/speech` at startup.
+    if model_type == ModelType::Kokoro {
+        anyhow::bail!(
+            "Kokoro is a text-to-speech model served through /v1/audio/speech, not a \
+             text-generation model. The mlxcel-server populates its text-to-speech slot from \
+             this checkpoint automatically."
+        );
+    }
+
     // Embedding checkpoints have no `lm_head` and no causal decode path; they
     // are served by the embedding worker (`/v1/embeddings`, `mlxcel embed`),
     // so fail here with the route instead of a missing-tensor symptom.
