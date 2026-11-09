@@ -111,6 +111,7 @@ pub(crate) fn load_qwen4_exp_vlm(model_path: &Path) -> Result<LoadedModel> {
         model_path,
         text_config.raw.num_hidden_layers,
         text_config.raw.num_experts,
+        text_config.raw.num_experts_per_tok,
         models::qwen4_exp::stream::resident_weight_bytes(model_path),
     )
     .map_err(|error| anyhow::anyhow!(error))?;

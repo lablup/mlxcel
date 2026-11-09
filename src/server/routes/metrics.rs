@@ -387,11 +387,6 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// The b10621 `llamacpp:` metric families (#1440), name-for-name what
-/// `server_task_result_metrics::to_metrics` exports at the pinned commit
-/// (https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server-task.cpp),
-/// so a Prometheus scrape config written for llama-server matches mlxcel
-/// unchanged.
 /// SSD expert arena counters (issue #2882); nothing when experts are resident.
 fn append_expert_stream_metrics(body: &mut String) {
     let Some(s) = crate::models::qwen4_exp::stream::active_stream_stats() else {
@@ -455,6 +450,11 @@ fn append_expert_stream_metrics(body: &mut String) {
     }
 }
 
+/// The b10621 `llamacpp:` metric families (#1440), name-for-name what
+/// `server_task_result_metrics::to_metrics` exports at the pinned commit
+/// (https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server-task.cpp),
+/// so a Prometheus scrape config written for llama-server matches mlxcel
+/// unchanged.
 fn append_llamacpp_metrics(body: &mut String, state: &AppState) {
     let obs = &state.batch_observability;
     let load = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);

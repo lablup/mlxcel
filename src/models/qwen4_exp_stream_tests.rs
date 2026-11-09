@@ -19,7 +19,8 @@ use std::path::Path;
 use super::slots::{LayerSlots, split_rows};
 use super::source::{ExpertSource, PLANE_SUFFIXES, write_contiguous_file};
 use super::{
-    MIN_SLOTS, StreamRequest, arena_bytes_for, mtp_discouraged, should_stream, slots_per_layer,
+    MIN_SLOTS, StreamRequest, arena_bytes_for, check_streamable, mtp_discouraged, should_stream,
+    slots_per_layer,
 };
 
 #[test]
@@ -231,7 +232,8 @@ fn byte_of(layer: usize, plane: usize, expert: usize, index: usize) -> u8 {
     (layer * 97 + plane * 31 + expert * 13 + index * 7) as u8
 }
 
-fn write_checkpoint(dir: &Path) {
+/// The header and payload of the synthetic checkpoint, for tests to alter.
+fn checkpoint_parts() -> (serde_json::Map<String, serde_json::Value>, Vec<u8>) {
     let mut header = serde_json::Map::new();
     let mut data = Vec::new();
     for layer in 0..LAYERS {
@@ -252,11 +254,20 @@ fn write_checkpoint(dir: &Path) {
             );
         }
     }
-    let header = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+    (header, data)
+}
+
+fn write_shard(path: &Path, header: &serde_json::Map<String, serde_json::Value>, data: &[u8]) {
+    let header = serde_json::to_vec(header).unwrap();
     let mut file = (header.len() as u64).to_le_bytes().to_vec();
     file.extend_from_slice(&header);
-    file.extend_from_slice(&data);
-    std::fs::write(dir.join("model.safetensors"), file).unwrap();
+    file.extend_from_slice(data);
+    std::fs::write(path, file).unwrap();
+}
+
+fn write_checkpoint(dir: &Path) {
+    let (header, data) = checkpoint_parts();
+    write_shard(&dir.join("model.safetensors"), &header, &data);
 }
 
 fn expected_record(layer: usize, expert: usize) -> Vec<u8> {
@@ -386,4 +397,196 @@ fn a_checkpoint_without_stacked_planes_is_refused_by_name() {
     .unwrap();
     let error = ExpertSource::open(dir.path(), 1, 4).unwrap_err();
     assert!(error.contains("stacked switch_mlp"), "{error}");
+}
+
+/// The first plane of the first layer: 16 bytes per expert, at offset zero.
+const FIRST_KEY: &str = "model.layers.0.mlp.switch_mlp.gate_proj.weight";
+
+/// `open` on a checkpoint whose first plane has `field` set to `value`.
+fn open_with(field: &str, value: serde_json::Value) -> Result<ExpertSource, String> {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut header, data) = checkpoint_parts();
+    header[FIRST_KEY][field] = value;
+    write_shard(&dir.path().join("model.safetensors"), &header, &data);
+    ExpertSource::open(dir.path(), LAYERS, EXPERTS)
+}
+
+#[test]
+fn a_shape_that_disagrees_with_the_stored_bytes_is_refused() {
+    use serde_json::json;
+    for (shape, expected) in [
+        (json!([EXPERTS, 2, 16]), "does not match shape"),
+        (json!([EXPERTS, 1, 1 << 20]), "does not match shape"),
+        (json!([EXPERTS, 1, 0]), "out of range"),
+        (json!([EXPERTS, -1, -16]), "out of range"),
+        (json!([EXPERTS, 1u64 << 33, 1]), "out of range"),
+        (json!([EXPERTS, "1", 16]), "non-integer"),
+        (json!([EXPERTS, 1.5, 16]), "non-integer"),
+        (json!([EXPERTS, "1", 1, 16]), "non-integer"),
+    ] {
+        let error = open_with("shape", shape).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+    // Two bytes per element: 16 bytes are 8 elements, not 16.
+    let error = open_with("dtype", json!("U16")).unwrap_err();
+    assert!(error.contains("does not match shape"), "{error}");
+}
+
+#[test]
+fn offsets_past_the_end_of_the_file_are_refused() {
+    use serde_json::json;
+    let row = (ROW_BYTES[0] * EXPERTS) as u64;
+    let (_, data) = checkpoint_parts();
+    let past = data.len() as u64;
+    let error = open_with("data_offsets", json!([past, past + row])).unwrap_err();
+    assert!(error.contains("past the end"), "{error}");
+    let top = u64::MAX;
+    let error = open_with("data_offsets", json!([top - row, top])).unwrap_err();
+    assert!(error.contains("past the end"), "{error}");
+}
+
+#[test]
+fn a_duplicate_alias_of_a_plane_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut header, data) = checkpoint_parts();
+    let plane = header[FIRST_KEY].clone();
+    header.insert(format!("language_model.{FIRST_KEY}"), plane);
+    write_shard(&dir.path().join("model.safetensors"), &header, &data);
+    let error = ExpertSource::open(dir.path(), LAYERS, EXPERTS).unwrap_err();
+    assert!(error.contains("duplicate"), "{error}");
+}
+
+#[test]
+fn a_header_length_beyond_the_file_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut file = u64::MAX.to_le_bytes().to_vec();
+    file.extend_from_slice(b"{}");
+    std::fs::write(dir.path().join("model.safetensors"), file).unwrap();
+    let error = ExpertSource::open(dir.path(), LAYERS, EXPERTS).unwrap_err();
+    assert!(error.contains("header size"), "{error}");
+}
+
+#[test]
+fn an_index_naming_a_shard_outside_the_model_is_refused() {
+    let outer = tempfile::tempdir().unwrap();
+    let model = outer.path().join("model");
+    std::fs::create_dir(&model).unwrap();
+    // A well-formed shard waits at the escaping path, so only containment can
+    // refuse it.
+    write_checkpoint(outer.path());
+    let absolute = outer.path().join("model.safetensors");
+    for name in ["../model.safetensors", absolute.to_str().unwrap()] {
+        let index = serde_json::json!({ "weight_map": { "a": name } });
+        std::fs::write(
+            model.join("model.safetensors.index.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let error = ExpertSource::open(&model, LAYERS, EXPERTS).unwrap_err();
+        assert!(error.contains("relative path inside"), "{error}");
+    }
+}
+
+#[test]
+fn impossible_counts_are_errors_rather_than_panics() {
+    let dir = tempfile::tempdir().unwrap();
+    write_checkpoint(dir.path());
+    assert!(ExpertSource::open(dir.path(), LAYERS, 0).is_err());
+    assert!(ExpertSource::open(dir.path(), 0, EXPERTS).is_err());
+    assert!(ExpertSource::open(dir.path(), 4097, EXPERTS).is_err());
+    assert!(ExpertSource::open(dir.path(), usize::MAX, EXPERTS).is_err());
+}
+
+#[test]
+fn fewer_experts_than_the_slot_floor_do_not_panic() {
+    assert_eq!(slots_per_layer(1, 4, 1024, 32), 32);
+    assert_eq!(slots_per_layer(u64::MAX, 4, 1024, 32), 32);
+    assert_eq!(slots_per_layer(1, 4, 1024, 0), 0);
+    assert_eq!(slots_per_layer(1, 4, 1024, 64), MIN_SLOTS);
+}
+
+#[test]
+fn a_manifest_with_an_inconsistent_layer_entry_is_ignored() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    write_checkpoint(dir.path());
+    write_contiguous_file(dir.path(), LAYERS, EXPERTS).unwrap();
+    let manifest = dir.path().join(super::source::CONTIGUOUS_MANIFEST);
+    let good: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    let record: u64 = ROW_BYTES.iter().sum::<usize>() as u64;
+    for (field, layer, value) in [
+        ("offset", 1, json!(record * EXPERTS as u64 - 1)),
+        ("offset", 0, json!(1)),
+        ("record_bytes", 0, json!(record + 1)),
+        ("record_bytes", 1, json!(u64::MAX)),
+    ] {
+        let mut altered = good.clone();
+        altered["layers"][layer][field] = value;
+        std::fs::write(&manifest, serde_json::to_vec(&altered).unwrap()).unwrap();
+        let source = ExpertSource::open(dir.path(), LAYERS, EXPERTS).unwrap();
+        assert!(!source.uses_contiguous_file(), "{field} of layer {layer}");
+    }
+    let mut altered = good.clone();
+    altered["num_experts"] = json!(EXPERTS + 1);
+    std::fs::write(&manifest, serde_json::to_vec(&altered).unwrap()).unwrap();
+    let source = ExpertSource::open(dir.path(), LAYERS, EXPERTS).unwrap();
+    assert!(!source.uses_contiguous_file(), "num_experts");
+    std::fs::write(&manifest, serde_json::to_vec(&good).unwrap()).unwrap();
+    let source = ExpertSource::open(dir.path(), LAYERS, EXPERTS).unwrap();
+    assert!(source.uses_contiguous_file(), "the unaltered manifest");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_contiguous_file_linked_outside_the_model_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    write_checkpoint(dir.path());
+    let report = write_contiguous_file(dir.path(), LAYERS, EXPERTS).unwrap();
+    let moved = elsewhere.path().join("records");
+    std::fs::rename(&report.path, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &report.path).unwrap();
+    let source = ExpertSource::open(dir.path(), LAYERS, EXPERTS).unwrap();
+    assert!(!source.uses_contiguous_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn writing_the_contiguous_file_replaces_planted_symlinks() {
+    use super::source::{CONTIGUOUS_FILE, CONTIGUOUS_MANIFEST};
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    write_checkpoint(dir.path());
+    for (name, victim) in [(CONTIGUOUS_FILE, "data"), (CONTIGUOUS_MANIFEST, "manifest")] {
+        let victim = elsewhere.path().join(victim);
+        std::fs::write(&victim, b"precious").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join(name)).unwrap();
+    }
+    write_contiguous_file(dir.path(), LAYERS, EXPERTS).unwrap();
+    for name in ["data", "manifest"] {
+        assert_eq!(
+            std::fs::read(elsewhere.path().join(name)).unwrap(),
+            b"precious"
+        );
+    }
+    for name in [CONTIGUOUS_FILE, CONTIGUOUS_MANIFEST] {
+        let meta = std::fs::symlink_metadata(dir.path().join(name)).unwrap();
+        assert!(meta.file_type().is_file(), "{name} must be a regular file");
+    }
+    let source = ExpertSource::open(dir.path(), LAYERS, EXPERTS).unwrap();
+    assert!(source.uses_contiguous_file());
+}
+
+#[test]
+fn only_a_whole_page_arena_of_at_least_top_k_slots_can_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    write_checkpoint(dir.path());
+    let source = ExpertSource::open(dir.path(), LAYERS, EXPERTS).unwrap();
+    // The smallest plane is 8 bytes a row, so 2048 slots are one 16 KiB page.
+    assert!(check_streamable(&source, &[2048, 2048], 4).is_ok());
+    let error = check_streamable(&source, &[2048, 2], 4).unwrap_err();
+    assert!(error.contains("layer 1"), "{error}");
+    let error = check_streamable(&source, &[64, 2048], 4).unwrap_err();
+    assert!(error.contains("whole number"), "{error}");
 }

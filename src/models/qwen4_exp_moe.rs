@@ -127,7 +127,6 @@ impl Qwen4ExpMoeBlock {
                 &loader_config(config, experts_pair),
                 &format!("{prefix}.switch_mlp"),
             )?,
-            stream,
             shared_expert: MLP::from_weights(
                 weights,
                 &loader_config(config, shared_pair),
@@ -136,6 +135,8 @@ impl Qwen4ExpMoeBlock {
             shared_expert_gate: linear("shared_expert_gate", 1)?,
             num_experts_per_tok: config.raw.num_experts_per_tok as i32,
             norm_topk_prob: config.raw.norm_topk_prob,
+            // Moved last: a failed initializer above must drop the slot arrays before the buffers.
+            stream,
         })
     }
 

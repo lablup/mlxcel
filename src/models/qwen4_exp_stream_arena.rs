@@ -35,7 +35,7 @@ use crate::models::qwen3_next::SwitchGLU;
 
 /// Metal wraps memory without copying only on page boundaries; 16 KiB is the
 /// Apple Silicon page, and a multiple of the 4 KiB page elsewhere.
-const ARENA_PAGE: usize = 16 * 1024;
+pub(super) const ARENA_PAGE: usize = 16 * 1024;
 /// `SwitchGLU::forward_with_sort`'s sorted-path threshold, in routed experts.
 const SORTED_MIN_ROWS: usize = 64;
 /// MLX's `B / E >= 4` condition for its sorted gathered matmul.
@@ -60,7 +60,9 @@ unsafe impl Sync for PlaneBuffer {}
 
 impl PlaneBuffer {
     fn new(slots: usize, row_bytes: usize) -> Result<Self, String> {
-        let bytes = slots * row_bytes;
+        let bytes = slots.checked_mul(row_bytes).ok_or_else(|| {
+            format!("expert arena plane of {slots} x {row_bytes} bytes overflows")
+        })?;
         if bytes == 0 || !bytes.is_multiple_of(ARENA_PAGE) {
             return Err(format!(
                 "expert arena plane of {bytes} bytes is not a whole number of pages"
@@ -90,7 +92,7 @@ impl PlaneBuffer {
     #[allow(clippy::mut_from_ref)]
     fn slot(&self, slot: u32) -> &mut [u8] {
         let start = slot as usize * self.row_bytes;
-        debug_assert!(start + self.row_bytes <= self.layout.size());
+        assert!(start + self.row_bytes <= self.layout.size());
         // SAFETY: in bounds; distinct slots are disjoint rows, and the window
         // being filled is the only writer under the layer lock.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.add(start), self.row_bytes) }

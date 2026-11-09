@@ -39,6 +39,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use mlxcel_core::host_memory::{AvailabilityGate, HostMemoryStatus, host_memory_status};
 
+use arena::ARENA_PAGE;
 use source::ExpertSource;
 
 /// `1` / `on`, `0` / `off`, or `auto` (the default).
@@ -96,7 +97,7 @@ pub fn should_stream(request: StreamRequest, expert_bytes: u64, working_set_byte
 
 /// Slots per layer for an arena of `arena_bytes` over `layers` layers of
 /// `layer_expert_bytes` per expert: rounded down to the granularity, and
-/// clamped to `[MIN_SLOTS, num_experts]`.
+/// clamped to `[min(MIN_SLOTS, num_experts), num_experts]`.
 pub fn slots_per_layer(
     arena_bytes: u64,
     layers: usize,
@@ -106,7 +107,7 @@ pub fn slots_per_layer(
     let per_layer = arena_bytes / (layers.max(1) as u64);
     let slots = (per_layer / layer_expert_bytes.max(1)) as usize;
     let rounded = slots / SLOT_GRANULARITY * SLOT_GRANULARITY;
-    rounded.clamp(MIN_SLOTS, num_experts)
+    rounded.clamp(MIN_SLOTS.min(num_experts), num_experts)
 }
 
 /// Arena size from memory macOS can give now, not installed RAM: what is
@@ -191,6 +192,7 @@ impl ExpertStream {
         model_dir: &Path,
         layers: usize,
         num_experts: usize,
+        top_k: usize,
         resident_bytes: u64,
     ) -> Result<Option<Arc<Self>>, String> {
         let request = StreamRequest::parse(std::env::var(EXPERT_STREAM_ENV).ok().as_deref())?;
@@ -237,6 +239,13 @@ impl ExpertStream {
             Err(_) => arena_bytes_for(status.as_ref(), non_expert, expert_bytes),
         };
         let slots = Self::size_layers(&source, arena)?;
+        if let Err(reason) = check_streamable(&source, &slots, top_k) {
+            return match request {
+                StreamRequest::On => Err(format!("{EXPERT_STREAM_ENV}=1: {reason}")),
+                // A layout auto cannot stream is simply loaded the resident way.
+                _ => Ok(None),
+            };
+        }
         let stream = Arc::new(Self {
             source,
             slots,
@@ -263,20 +272,19 @@ impl ExpertStream {
     fn size_layers(source: &ExpertSource, arena_bytes: u64) -> Result<Vec<usize>, String> {
         let layers = source.layers.len();
         let gate = AvailabilityGate::new();
+        let floor = MIN_SLOTS.min(source.num_experts);
         let mut slots = Vec::with_capacity(layers);
         for layer in 0..layers {
             let expert = source.expert_bytes(layer);
             let wanted = slots_per_layer(arena_bytes, layers, expert, source.num_experts);
             let granted = if gate.allows_step(wanted as u64 * expert) {
                 wanted
-            } else if gate.allows_step(MIN_SLOTS as u64 * expert) {
-                eprintln!(
-                    "Expert arena: layer {layer} reduced to {MIN_SLOTS} slots, memory is short."
-                );
-                MIN_SLOTS
+            } else if gate.allows_step(floor as u64 * expert) {
+                eprintln!("Expert arena: layer {layer} reduced to {floor} slots, memory is short.");
+                floor
             } else {
                 return Err(format!(
-                    "expert streaming: macOS cannot back even {MIN_SLOTS} slots of layer {layer}; \
+                    "expert streaming: macOS cannot back even {floor} slots of layer {layer}; \
                      free memory or set {EXPERT_ARENA_ENV} and retry"
                 ));
             };
@@ -303,6 +311,34 @@ impl ExpertStream {
             sync_ns: load(&self.stats.sync_ns),
         }
     }
+}
+
+/// Whether the arena sized for this checkpoint can run: a window of one token
+/// needs `top_k` slots, and Metal wraps only a whole number of pages.
+pub(crate) fn check_streamable(
+    source: &ExpertSource,
+    slots: &[usize],
+    top_k: usize,
+) -> Result<(), String> {
+    for (layer, (&slots, planes)) in slots.iter().zip(&source.layers).enumerate() {
+        if slots < top_k {
+            return Err(format!(
+                "layer {layer} has {slots} slots, fewer than the {top_k} experts one token routes to"
+            ));
+        }
+        for plane in planes {
+            let whole_pages = (plane.row_bytes as usize)
+                .checked_mul(slots)
+                .is_some_and(|bytes| bytes.is_multiple_of(ARENA_PAGE));
+            if !whole_pages {
+                return Err(format!(
+                    "layer {layer}: {slots} slots of {} bytes are not a whole number of {ARENA_PAGE}-byte pages",
+                    plane.row_bytes
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether a `--surgery` pipeline will rewrite this load's weights.

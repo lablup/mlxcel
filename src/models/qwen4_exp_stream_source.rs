@@ -23,11 +23,16 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::models::qwen4_exp::ple_manifest::trust::{read_header, resolve_contained};
+
 /// Contiguous expert records, next to the checkpoint.
 pub const CONTIGUOUS_FILE: &str = "expert-stream.bin";
 /// Its manifest; the records are ignored unless it matches the checkpoint.
 pub const CONTIGUOUS_MANIFEST: &str = "expert-stream.json";
 const CONTIGUOUS_VERSION: u64 = 1;
+/// Most layers a checkpoint may declare; the plane table is allocated from it
+/// before anything else about the checkpoint is known.
+const MAX_LAYERS: usize = 4096;
 
 /// The nine stacked planes of a layer's routed experts, in record order.
 pub(crate) const PLANE_SUFFIXES: [&str; 9] = [
@@ -71,15 +76,16 @@ struct Contiguous {
     layers: Vec<(u64, u64)>,
 }
 
-fn dtype_of(name: &str) -> Option<i32> {
+/// MLX dtype and element size in bytes.
+fn dtype_of(name: &str) -> Option<(i32, u64)> {
     use mlxcel_core::dtype::{BFLOAT16, FLOAT16, FLOAT32, UINT8, UINT16, UINT32};
     Some(match name {
-        "U8" => UINT8,
-        "U16" => UINT16,
-        "U32" => UINT32,
-        "F16" => FLOAT16,
-        "BF16" => BFLOAT16,
-        "F32" => FLOAT32,
+        "U8" => (UINT8, 1),
+        "U16" => (UINT16, 2),
+        "U32" => (UINT32, 4),
+        "F16" => (FLOAT16, 2),
+        "BF16" => (BFLOAT16, 2),
+        "F32" => (FLOAT32, 4),
         _ => return None,
     })
 }
@@ -117,16 +123,18 @@ fn shard_names(model_dir: &Path) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn read_header(path: &Path) -> Result<(u64, Value), String> {
-    let context = |e: std::io::Error| format!("{}: {e}", path.display());
-    let mut file = File::open(path).map_err(context)?;
-    let mut length = [0u8; 8];
-    file.read_exact(&mut length).map_err(context)?;
-    let length = u64::from_le_bytes(length);
-    let mut header = vec![0u8; length as usize];
-    file.read_exact(&mut header).map_err(context)?;
-    let value = serde_json::from_slice(&header).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok((8 + length, value))
+/// Prove the sums in `expert_bytes` and `total_expert_bytes` cannot overflow.
+fn check_total_bytes(layers: &[Vec<Plane>], num_experts: usize) -> Result<(), String> {
+    layers
+        .iter()
+        .try_fold(0u64, |total, planes| {
+            let record = planes
+                .iter()
+                .try_fold(0u64, |sum, plane| sum.checked_add(plane.row_bytes))?;
+            total.checked_add(record.checked_mul(num_experts as u64)?)
+        })
+        .map(|_| ())
+        .ok_or_else(|| "expert streaming: total expert bytes overflow".to_string())
 }
 
 /// `model.layers.{layer}.mlp.switch_mlp.{suffix}`, with or without a wrapper
@@ -142,12 +150,26 @@ impl ExpertSource {
     /// Read the plane table of `model_dir`. Fails when any layer's experts are
     /// not stored as stacked `switch_mlp` planes, the only layout streamed.
     pub fn open(model_dir: &Path, layers: usize, num_experts: usize) -> Result<Self, String> {
+        if layers == 0 || layers > MAX_LAYERS {
+            return Err(format!(
+                "expert streaming: layer count {layers} is outside 1..={MAX_LAYERS}"
+            ));
+        }
+        if num_experts == 0 {
+            return Err("expert streaming: num_experts is 0".to_string());
+        }
         let names = shard_names(model_dir)?;
         let mut planes: Vec<Vec<Option<Plane>>> = vec![vec![None; PLANE_SUFFIXES.len()]; layers];
         let mut files = Vec::with_capacity(names.len());
         for (file_index, name) in names.iter().enumerate() {
-            let path = model_dir.join(name);
-            let (data_start, header) = read_header(&path)?;
+            let path = resolve_contained(model_dir, Path::new(name))
+                .map_err(|e| format!("{name}: {e}"))?;
+            let file = open_uncached(&path)?;
+            let file_len = file
+                .metadata()
+                .map_err(|e| format!("{}: {e}", path.display()))?
+                .len();
+            let (data_start, header) = read_header(&path).map_err(|e| e.to_string())?;
             let object = header
                 .as_object()
                 .ok_or_else(|| format!("{}: header is not an object", path.display()))?;
@@ -161,10 +183,17 @@ impl ExpertSource {
                 if layer >= layers {
                     return Err(format!("{key}: layer index out of range"));
                 }
-                let plane = parse_plane(key, info, file_index, data_start, num_experts)?;
+                // A wrapper-prefixed alias must not replace the plane the
+                // loader's shape checks validated.
+                if planes[layer][position].is_some() {
+                    return Err(format!(
+                        "{key}: duplicate tensor for layer {layer} {suffix}"
+                    ));
+                }
+                let plane = parse_plane(key, info, file_index, data_start, file_len, num_experts)?;
                 planes[layer][position] = Some(plane);
             }
-            files.push(open_uncached(&path)?);
+            files.push(file);
         }
         let layers = planes
             .into_iter()
@@ -183,6 +212,7 @@ impl ExpertSource {
                     .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<Vec<_>, _>>()?;
+        check_total_bytes(&layers, num_experts)?;
         let mut source = Self {
             files,
             layers,
@@ -265,13 +295,21 @@ impl ExpertSource {
     }
 
     fn open_contiguous(&self, model_dir: &Path) -> Option<Contiguous> {
-        let manifest: Value =
-            serde_json::from_slice(&std::fs::read(model_dir.join(CONTIGUOUS_MANIFEST)).ok()?)
-                .ok()?;
+        let ignore = |why: String| eprintln!("Ignoring {CONTIGUOUS_FILE}: {why}.");
+        let manifest_path = match resolve_contained(model_dir, Path::new(CONTIGUOUS_MANIFEST)) {
+            Ok(path) => path,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                ignore(e.to_string());
+                return None;
+            }
+        };
+        let manifest: Value = serde_json::from_slice(&std::fs::read(manifest_path).ok()?).ok()?;
         if manifest["version"].as_u64() != Some(CONTIGUOUS_VERSION)
+            || manifest["num_experts"].as_u64() != Some(self.num_experts as u64)
             || manifest["fingerprint"].as_str() != Some(&self.fingerprint())
         {
-            eprintln!("Ignoring {CONTIGUOUS_FILE}: it does not match this checkpoint.");
+            ignore("it does not match this checkpoint".to_string());
             return None;
         }
         let layers = manifest["layers"]
@@ -279,18 +317,41 @@ impl ExpertSource {
             .iter()
             .map(|entry| Some((entry["offset"].as_u64()?, entry["record_bytes"].as_u64()?)))
             .collect::<Option<Vec<_>>>()?;
-        if layers.len() != self.layers.len() {
-            return None;
-        }
-        let file = open_uncached(&model_dir.join(CONTIGUOUS_FILE)).ok()?;
-        let expected = layers
-            .last()
-            .map(|(offset, record)| offset + record * self.num_experts as u64)?;
-        if file.metadata().ok()?.len() != expected {
-            eprintln!("Ignoring {CONTIGUOUS_FILE}: it is not the size its manifest records.");
+        let file = match resolve_contained(model_dir, Path::new(CONTIGUOUS_FILE))
+            .map_err(|e| e.to_string())
+            .and_then(|path| open_uncached(&path))
+        {
+            Ok(file) => file,
+            Err(why) => {
+                ignore(why);
+                return None;
+            }
+        };
+        if !self.layout_matches(&layers, file.metadata().ok()?.len()) {
+            ignore("its manifest does not describe this checkpoint's records".to_string());
             return None;
         }
         Some(Contiguous { file, layers })
+    }
+
+    /// Whether `layers` are this checkpoint's records, packed end to end and
+    /// filling a file of `file_len` bytes.
+    fn layout_matches(&self, layers: &[(u64, u64)], file_len: u64) -> bool {
+        if layers.len() != self.layers.len() {
+            return false;
+        }
+        let mut cursor = 0u64;
+        for (layer, &(offset, record)) in layers.iter().enumerate() {
+            if offset != cursor || record != self.expert_bytes(layer) {
+                return false;
+            }
+            let span = record.checked_mul(self.num_experts as u64);
+            match span.and_then(|span| cursor.checked_add(span)) {
+                Some(next) => cursor = next,
+                None => return false,
+            }
+        }
+        cursor == file_len
     }
 }
 
@@ -299,18 +360,22 @@ fn parse_plane(
     info: &Value,
     file: usize,
     data_start: u64,
+    file_len: u64,
     num_experts: usize,
 ) -> Result<Plane, String> {
-    let dtype = info["dtype"]
+    let (dtype, element_size) = info["dtype"]
         .as_str()
         .and_then(dtype_of)
         .ok_or_else(|| format!("{key}: unsupported dtype {}", info["dtype"]))?;
-    let shape: Vec<i64> = info["shape"]
+    let shape = info["shape"]
         .as_array()
         .ok_or_else(|| format!("{key}: missing shape"))?
         .iter()
-        .filter_map(Value::as_i64)
-        .collect();
+        .map(|dim| {
+            dim.as_i64()
+                .ok_or_else(|| format!("{key}: non-integer shape entry {dim}"))
+        })
+        .collect::<Result<Vec<i64>, _>>()?;
     let (start, end) = match (
         info["data_offsets"][0].as_u64(),
         info["data_offsets"][1].as_u64(),
@@ -318,20 +383,46 @@ fn parse_plane(
         (Some(start), Some(end)) if end >= start => (start, end),
         _ => return Err(format!("{key}: bad data_offsets")),
     };
-    if shape.len() != 3 || shape[0] != num_experts as i64 {
+    if shape.len() != 3 || usize::try_from(shape[0]).ok() != Some(num_experts) {
         return Err(format!(
             "{key}: expected [{num_experts}, out, in], got {shape:?}"
         ));
     }
+    let dimension = |value: i64| {
+        i32::try_from(value)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| format!("{key}: dimension {value} is out of range"))
+    };
+    let (out, input) = (dimension(shape[1])?, dimension(shape[2])?);
     let row_bytes = (end - start) / num_experts as u64;
     if row_bytes * num_experts as u64 != end - start {
         return Err(format!("{key}: size is not a multiple of {num_experts}"));
     }
+    // MLX wraps the arena with this shape and does no length check of its own.
+    let expected = (out as u64)
+        .checked_mul(input as u64)
+        .and_then(|cells| cells.checked_mul(element_size));
+    if row_bytes == 0 || expected != Some(row_bytes) {
+        return Err(format!(
+            "{key}: {row_bytes} bytes per expert does not match shape {shape:?} and dtype {}",
+            info["dtype"]
+        ));
+    }
+    if data_start
+        .checked_add(end)
+        .is_none_or(|last| last > file_len)
+    {
+        return Err(format!("{key}: data_offsets run past the end of the file"));
+    }
+    let offset = data_start
+        .checked_add(start)
+        .ok_or_else(|| format!("{key}: bad data_offsets"))?;
     Ok(Plane {
         file,
-        offset: data_start + start,
+        offset,
         row_bytes,
-        shape: vec![shape[1] as i32, shape[2] as i32],
+        shape: vec![out, input],
         dtype,
     })
 }
@@ -383,13 +474,42 @@ pub fn write_contiguous_file(
     let source = ExpertSource::open(model_dir, layers, num_experts)?;
     let path = model_dir.join(CONTIGUOUS_FILE);
     let manifest_path = model_dir.join(CONTIGUOUS_MANIFEST);
-    match std::fs::remove_file(&manifest_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("{}: {e}", manifest_path.display())),
+    // Unlinked rather than truncated: a planted symlink is not written through,
+    // and a running process keeps reading the inode it has open.
+    remove_if_present(&manifest_path)?;
+    remove_if_present(&path)?;
+    let written = write_records(&source, &path, &manifest_path);
+    if written.is_err() {
+        // The partial data file can be tens of GB on a disk that may be full.
+        for leftover in [&manifest_path, &path] {
+            let _ = std::fs::remove_file(leftover);
+        }
     }
+    Ok(ContiguousReport {
+        bytes: written?,
+        path,
+        layers,
+    })
+}
+
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Never follows a symlink: the path must not exist.
+fn create_new(path: &Path) -> std::io::Result<File> {
+    File::options().write(true).create_new(true).open(path)
+}
+
+/// Write the records and the manifest; returns the bytes of records written.
+fn write_records(source: &ExpertSource, path: &Path, manifest_path: &Path) -> Result<u64, String> {
+    let (layers, num_experts) = (source.layers.len(), source.num_experts);
     let context = |e: std::io::Error| format!("{}: {e}", path.display());
-    let mut out = BufWriter::with_capacity(1 << 24, File::create(&path).map_err(context)?);
+    let mut out = BufWriter::with_capacity(1 << 24, create_new(path).map_err(context)?);
 
     let mut layer_entries = Vec::with_capacity(layers);
     let mut digests = Vec::with_capacity(layers);
@@ -410,7 +530,7 @@ pub fn write_contiguous_file(
     out.flush().map_err(context)?;
     drop(out);
 
-    let mut check = File::open(&path).map_err(context)?;
+    let mut check = File::open(path).map_err(context)?;
     for (layer, digest) in digests.iter().enumerate() {
         let record = source.expert_bytes(layer);
         let mut hasher = Sha256::new();
@@ -439,13 +559,10 @@ pub fn write_contiguous_file(
         "layers": layer_entries,
     });
     let text = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
-    std::fs::write(&manifest_path, text)
+    create_new(manifest_path)
+        .and_then(|mut file| file.write_all(&text))
         .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
-    Ok(ContiguousReport {
-        path,
-        bytes: offset,
-        layers,
-    })
+    Ok(offset)
 }
 
 impl ExpertSource {
