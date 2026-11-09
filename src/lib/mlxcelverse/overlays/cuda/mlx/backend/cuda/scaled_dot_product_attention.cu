@@ -28,7 +28,7 @@
 #include "mlx/backend/cuda/kernel_utils.cuh"
 #include "mlx/backend/gpu/copy.h"
 #include "mlx/dtype_utils.h"
-#include "mlx/utils.h" // mlxcel: env::get_var for the MLXCEL_SDPA_VECTOR_LARGE_D kill switch
+#include "mlx/utils.h" // mlxcel: config::get for the MLXCEL_SDPA_VECTOR_LARGE_D kill switch
 
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
@@ -717,7 +717,7 @@ bool supports_sdpa_vector(
   // against the old materializing fallback, and a rollback, run without a
   // rebuild. cudnn rejects head_dim > 128, so this widened gate alone routes
   // their decode to the vector kernels; the .cpp needs no change.
-  static bool large_d_enabled = env::get_var("MLXCEL_SDPA_VECTOR_LARGE_D", 1);
+  static bool large_d_enabled = config::get("MLXCEL_SDPA_VECTOR_LARGE_D", 1);
   const bool sdpa_supported_head_dim = query_head_dim == value_head_dim &&
       (query_head_dim == 64 || query_head_dim == 96 || query_head_dim == 128 ||
        (large_d_enabled &&

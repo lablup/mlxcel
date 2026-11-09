@@ -2697,3 +2697,142 @@ async fn stage_shutdown_runs_when_the_signal_handler_fails() {
         "the stage shutdown must run even when the signal handler failed"
     );
 }
+
+// `chat_front_unused` decides whether `start_server` may skip
+// `load_chat_front`, whose missing-tokenizer error is the only startup check
+// that stops a checkpoint without a tokenizer. A case listed there must be
+// one that never reads the chat tokenizer.
+
+fn single_node() -> crate::distributed::disaggregated::ServingMode {
+    crate::distributed::disaggregated::ServingMode::Hybrid
+}
+
+#[test]
+fn chat_front_is_unused_by_an_image_only_server() {
+    // Image-only serving has no chat checkpoint, so its model path is empty.
+    assert!(super::chat_front_unused(
+        std::path::Path::new(""),
+        true,
+        single_node()
+    ));
+}
+
+#[test]
+fn chat_front_is_used_by_a_chat_checkpoint() {
+    let dir = temp_path("chat-front-llama");
+    std::fs::write(dir.join("config.json"), r#"{"model_type": "llama"}"#).unwrap();
+    assert!(!super::chat_front_unused(&dir, false, single_node()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_used_by_a_whisper_checkpoint() {
+    // A side-model load failure only logs, so a Whisper checkpoint without
+    // tokenizer.json must keep failing at startup through `load_chat_front`.
+    let dir = temp_path("chat-front-whisper");
+    std::fs::write(dir.join("config.json"), r#"{"model_type": "whisper"}"#).unwrap();
+    assert!(!super::chat_front_unused(&dir, false, single_node()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_used_when_the_model_type_cannot_be_detected() {
+    let dir = temp_path("chat-front-undetected");
+    assert!(!super::chat_front_unused(&dir, false, single_node()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_unused_by_a_kokoro_checkpoint() {
+    // Kokoro checkpoints ship no tokenizer file: the model reads phonemes
+    // from its own `config.json` vocab and serves /v1/audio/speech only.
+    // Loading the chat front stopped the server with "No tokenizer found"
+    // before the Kokoro TTS wiring ran.
+    let dir = temp_path("chat-front-kokoro");
+    std::fs::write(dir.join("config.json"), r#"{"istftnet": {}}"#).unwrap();
+    assert!(super::chat_front_unused(&dir, false, single_node()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_used_by_a_kokoro_checkpoint_in_a_disaggregated_role() {
+    // The disaggregated roles front a chat model and have no TTS wiring, so
+    // an empty tokenizer would start a router that serves nothing.
+    use crate::distributed::disaggregated::ServingMode;
+    let dir = temp_path("chat-front-kokoro-role");
+    std::fs::write(dir.join("config.json"), r#"{"istftnet": {}}"#).unwrap();
+    for mode in [
+        ServingMode::Router,
+        ServingMode::PrefillOnly,
+        ServingMode::DecodeOnly,
+    ] {
+        assert!(!super::chat_front_unused(&dir, false, mode), "{mode}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_used_by_a_chat_checkpoint_detected_as_kokoro() {
+    // Kokoro detection runs before the `model_type` dispatch, so both of its
+    // signals can claim a chat checkpoint. That checkpoint must still stop at
+    // the missing-tokenizer error.
+    let stray_weight = temp_path("chat-front-stray-weight");
+    std::fs::write(
+        stray_weight.join("config.json"),
+        r#"{"model_type": "llama"}"#,
+    )
+    .unwrap();
+    std::fs::write(stray_weight.join("kokoro-v1_0.safetensors"), b"").unwrap();
+    assert_eq!(
+        crate::models::get_model_type(&stray_weight).unwrap(),
+        crate::models::ModelType::Kokoro,
+        "the fixture must exercise the misdetection"
+    );
+    assert!(!super::chat_front_unused(
+        &stray_weight,
+        false,
+        single_node()
+    ));
+    std::fs::remove_dir_all(stray_weight).unwrap();
+
+    let stray_block = temp_path("chat-front-stray-block");
+    std::fs::write(
+        stray_block.join("config.json"),
+        r#"{"model_type": "llama", "istftnet": {}}"#,
+    )
+    .unwrap();
+    assert!(!super::chat_front_unused(
+        &stray_block,
+        false,
+        single_node()
+    ));
+    std::fs::remove_dir_all(stray_block).unwrap();
+}
+
+#[test]
+fn a_kokoro_checkpoint_that_cannot_load_is_a_startup_error() {
+    // The chat front is skipped for this checkpoint, so a swallowed TTS load
+    // failure would leave a server that answers 501 forever. The config has
+    // no `vocab`, which the Kokoro loader requires.
+    let dir = temp_path("kokoro-load-failure");
+    std::fs::write(dir.join("config.json"), r#"{"istftnet": {}}"#).unwrap();
+    let error = match super::load_primary_kokoro_tts(&dir, 1, std::time::Duration::from_secs(1)) {
+        Ok(_) => panic!("an incomplete Kokoro checkpoint must not load"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("Kokoro text-to-speech"), "{error}");
+    assert!(error.contains("vocab"), "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_text_loader_points_a_kokoro_checkpoint_at_the_speech_route() {
+    let dir = temp_path("kokoro-text-loader");
+    std::fs::write(dir.join("config.json"), r#"{"istftnet": {}}"#).unwrap();
+    let error = match crate::loading::load_model(&dir) {
+        Ok(_) => panic!("Kokoro has no text-generation loader"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("/v1/audio/speech"), "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}

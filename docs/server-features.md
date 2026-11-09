@@ -74,6 +74,20 @@ direct Rust calls. Validation happens before dispatch or streaming setup.
 Prompt batching, token-ID input, and multiple choices (`n > 1`) remain
 separate follow-up work.
 
+`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, and
+`/v1/messages/count_tokens`, together with their aliases without `/v1`,
+answer a request body they cannot parse the same way `/v1/completions` does:
+with an `invalid_request_error` JSON body carrying the parser's message,
+truncated to 1 KiB, before
+the availability check, dispatch, or streaming setup. Malformed or empty JSON,
+and a missing or wrongly typed field such as `model`, return HTTP 400; a
+missing or non-JSON `Content-Type` returns HTTP 415. The Anthropic routes use
+their own error envelope, `{"type": "error", "error": {...}}`, and
+`count_tokens` answers exactly as `/v1/messages` does. The disaggregated HTTP
+router's `/v1/chat/completions` behaves the same way, including HTTP 413 for a
+body over its size limit. On the single-node server, one server-wide layer
+answers every HTTP 413 in the OpenAI envelope, on the Anthropic routes too.
+
 The checked-in b10621 manifest under `compat/llama-server/b10621/` is the
 authoritative compatibility inventory. It classifies every pinned option,
 route, and native completion field as supported, aliased, not applicable, or

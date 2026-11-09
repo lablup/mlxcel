@@ -8,7 +8,7 @@
 // fixed floor of that round), and the LRU's lifetime miss counter then aborted
 // the process after 2 * MLX_CUDA_SDPA_CACHE_SIZE misses (lablup/mlxcel#1799).
 //
-// Modified from upstream MLX 7ca40033132dae444d45f7fc3daae57e24c13f6c mlx/backend/cuda/scaled_dot_product_attention.cpp
+// Modified from upstream MLX 9f806b3606eaa9f7c807238f6bd465185cd94d6d mlx/backend/cuda/scaled_dot_product_attention.cpp
 //
 // Three mlxcel changes sit on top of upstream 243bdf09:
 //
@@ -188,7 +188,7 @@ inline bool is_kv_cache_slice(const array& kv) {
 // other forward cuDNN SDPA graph bars stream-K engines where a stream-K-off
 // one builds (a precaution: those graphs were not separately measured).
 inline bool sdpa_deterministic() {
-  static bool on = env::get_var("MLXCEL_SDPA_DETERMINISTIC", 0) != 0;
+  static bool on = config::get("MLXCEL_SDPA_DETERMINISTIC", 0) != 0;
   return on;
 }
 
@@ -263,13 +263,13 @@ constexpr int QKV_NDIM = 4;
 // See docs/benchmark_results/sdpa-plan-cache-bucket-gb10-2026-09-17.md.
 inline int sdpa_plan_bucket_max_queries() {
   static int max_queries =
-      env::get_var("MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES", 0);
+      config::get("MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES", 0);
   return max_queries;
 }
 
 // Per-call key/dispatch tracing for the #1820 record; 0 disables it.
 inline bool sdpa_plan_debug() {
-  static bool on = env::get_var("MLXCEL_SDPA_PLAN_DEBUG", 0) != 0;
+  static bool on = config::get("MLXCEL_SDPA_PLAN_DEBUG", 0) != 0;
   return on;
 }
 
@@ -293,7 +293,7 @@ inline bool sdpa_plan_bucket_shape_eligible(
 // MLXCEL_SDPA_PLAN_BUCKET_MAX_MB. Above it the call keeps its exact shape and
 // pays the plan build, rather than moving hundreds of MB per round per layer.
 inline int64_t sdpa_plan_bucket_max_bytes() {
-  static int64_t mb = env::get_var("MLXCEL_SDPA_PLAN_BUCKET_MAX_MB", 64);
+  static int64_t mb = config::get("MLXCEL_SDPA_PLAN_BUCKET_MAX_MB", 64);
   return mb * 1024 * 1024;
 }
 
@@ -732,7 +732,14 @@ DnnGraph build_sdpa_backward_graph(
                      .set_name("sdpa_backward_cudnn")
                      .set_attn_scale(graph.scalar("Scale", SCALE, float32));
   if (do_causal) {
-    options.set_causal_mask_bottom_right(do_causal);
+    // For pretraining, set_causal_mask (top-left mask) is ~1.8x faster than
+    // the bottom-right mask for a ~4B model (it depends on the model size: for
+    // bigger models the difference is smaller since the FFNs take more FLOPs)
+    if (q.shape(2) == k.shape(2)) {
+      options.set_causal_mask(do_causal);
+    } else {
+      options.set_causal_mask_bottom_right(do_causal);
+    }
   }
   if (mask_arr) {
     options.set_bias(graph.tensor("BIAS", BIAS, *mask_arr));
@@ -768,10 +775,7 @@ bool supports_sdpa_cudnn(
     bool has_arr_mask,
     bool do_causal,
     Stream s) {
-  static bool enabled = env::get_var("MLX_CUDA_USE_CUDNN_SDPA", 1);
-  if (!enabled) {
-    return false;
-  }
+  bool enabled = config::get("MLX_CUDA_USE_CUDNN_SDPA", 1);
 
   // cuDNN SDPA requires Ampere and later.
   if (cu::device(s.device).compute_capability_major() < 8) {
@@ -788,7 +792,7 @@ bool supports_sdpa_cudnn(
   // read only shapes, so this answers the same during graph building, where
   // strides are not available, as it does at eval time.
   static int fallback_max_queries =
-      env::get_var("MLXCEL_SDPA_FALLBACK_MAX_QUERIES", 32);
+      config::get("MLXCEL_SDPA_FALLBACK_MAX_QUERIES", 32);
   if ((has_arr_mask || do_causal) && q.shape(2) > 1 &&
       q.shape(2) <= fallback_max_queries && k.shape(2) > q.shape(2) &&
       !sdpa_plan_bucket_shape_eligible(q, k, has_arr_mask, do_causal)) {

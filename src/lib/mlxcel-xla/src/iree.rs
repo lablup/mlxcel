@@ -88,6 +88,7 @@ use crate::{DeepStackFeatures, DeepStackPreparedPrefill, Gemma3nDensePle, Gemma3
 // MLP biases, the dense StarCoder2 MLP, and the row-sliced fused Phi3 projections)
 // and the #500 MoE expert bank (the stacked `switch_mlp` weights, dequantized with
 // `dequantize_affine_stacked`). Both are pure-Rust and unit-tested without `iree`.
+use crate::tuning::rocm_tuning_spec_flag;
 use crate::weights::{
     QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_bf16_sequential,
     dequantize_affine_f32, dequantize_affine_stacked, f16_to_f32, f32_le_to_f32, pack_f16,
@@ -1177,6 +1178,12 @@ fn compile_bundle(
     }
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
+    // issue #2873: the ROCm lowering tuning spec for long-K single-row
+    // contractions. Gemma3n has its own emitters (some with native qmv) and was
+    // not measured with it, so it stays on the compiler defaults.
+    if device == "hip" && matches!(cfg, RuntimeConfig::Dense(_)) {
+        flags.push(rocm_tuning_spec_flag()?);
+    }
     let pre = compile_one(
         &iree_compile,
         prefill_mlir,

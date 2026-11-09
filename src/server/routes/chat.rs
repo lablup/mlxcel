@@ -22,7 +22,7 @@ use std::sync::atomic::Ordering;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{State, rejection::JsonRejection},
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
@@ -303,8 +303,12 @@ pub(crate) fn build_single_token_chat_logprobs(
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut request): Json<ChatCompletionRequest>,
+    request: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Response {
+    let mut request = match super::parse_json_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
     }
@@ -1891,7 +1895,9 @@ async fn stream_chat_completion(
             // Only calls that actually reached the client count: when the
             // named-function filter dropped every parsed call, the stream
             // carried no tool-call delta and must not claim `tool_calls`.
-            if emitted > 0 {
+            // A failed generation stays `error` whatever its partial output
+            // parsed as (#2877).
+            if emitted > 0 && result.is_ok() {
                 finish_reason = "tool_calls".to_string();
             }
         }
@@ -1958,6 +1964,13 @@ async fn stream_chat_completion(
                 .unwrap_or(false),
             Err(_) => false,
         };
+
+        // The stream is already open, so a failure travels as a frame, ahead
+        // of the finish chunk so a client that stops reading at
+        // `finish_reason` still receives it (#2877).
+        if let Err(err) = &result {
+            let _ = finish_events.json(&super::generation_error_response(err));
+        }
 
         // Send finish chunk. It is the frame that carries this request's
         // speculative acceptance counters (#1314): the totals are final here,
@@ -2111,9 +2124,14 @@ pub(crate) fn validate_chat_tool_inputs(request: &ChatCompletionRequest) -> Resu
 }
 
 /// Whether `response_format` asks for constrained decoding. Absent and
-/// `{"type": "text"}` both mean no; every other shape is either a schema or a
-/// malformed value that the structured-output builder reports on its own.
-fn response_format_requests_constraint(response_format: Option<&serde_json::Value>) -> bool {
+/// `{"type": "text"}` both mean no. Every other shape counts as yes, including
+/// an object with a missing or non-string `type`, which the structured-output
+/// builder reads as text: such a value may be a schema request with a typo, so
+/// callers fail closed on it. The disaggregated router front rejects every
+/// value that counts, since its handoff cannot carry a constraint.
+pub(crate) fn response_format_requests_constraint(
+    response_format: Option<&serde_json::Value>,
+) -> bool {
     response_format
         .is_some_and(|value| value.get("type").and_then(serde_json::Value::as_str) != Some("text"))
 }

@@ -251,6 +251,16 @@ fn uses_request_memory_admission(
     )
 }
 
+/// The refusal for a prompt longer than the context, in upstream's wording
+/// (b10621 `ERROR_TYPE_EXCEED_CONTEXT_SIZE`, #1472). The route layer classifies
+/// the failure by this text.
+pub(crate) fn context_exceeded_message(request_tokens: usize, max: usize) -> String {
+    format!(
+        "request ({request_tokens} tokens) exceeds the available context size ({max} tokens), \
+         try increasing it"
+    )
+}
+
 /// One-shot HTTP admission signal. Clones share a single sender, not multiple
 /// acknowledgements. Providers remove this from generation options before enqueue.
 #[derive(Debug, Clone)]
@@ -2631,13 +2641,13 @@ impl ModelProvider {
     ) -> Result<mpsc::Receiver<GenerateEvent>> {
         let mut options = options;
         let mut notification = options.admission_notification.take();
-        // Unsupported paths keep their existing streaming semantics: this
+        // Media requests keep their existing streaming semantics: this
         // handshake must not wait for their worker's first event or reclassify
-        // asynchronous errors that previously followed SSE headers.
-        if (!self.request_memory_admission
-            || !images.is_empty()
-            || !audio.is_empty()
-            || !videos.is_empty())
+        // asynchronous errors that previously followed SSE headers. A text
+        // request answers it from the dispatch below, which waits for the
+        // worker only under request-memory admission, so a prompt the
+        // dispatch can already refuse gets a real status code (#2877).
+        if (!images.is_empty() || !audio.is_empty() || !videos.is_empty())
             && let Some(notification) = notification.take()
         {
             notification.complete(&Ok(()));
@@ -2712,6 +2722,22 @@ impl ModelProvider {
                     .ok()
             })
         });
+
+        // A text prompt that cannot fit the per-slot KV bound is refused here,
+        // before SSE headers, with the wording the scheduler's own guard uses
+        // (#2877, #1472). `None` ids or an unpublished bound leave it to that
+        // guard.
+        if images.is_empty()
+            && audio.is_empty()
+            && videos.is_empty()
+            && let (Some(ids), Some(max)) = (
+                prompt_token_ids.as_ref(),
+                self.batch_metrics.prompt_admission_bound(),
+            )
+            && ids.len() >= max
+        {
+            return Err(anyhow::anyhow!(context_exceeded_message(ids.len(), max)));
+        }
 
         // Same treatment for the history-boundary render (issue #1143): it is
         // rendered by the route but must be tokenized with the exact

@@ -32,7 +32,7 @@
 
 use axum::{
     Json,
-    extract::State,
+    extract::{State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -146,12 +146,33 @@ fn chat_unavailable_response(state: &AppState) -> Option<Response> {
     })
 }
 
+/// Unwrap a Messages API request body, or answer its rejection in the
+/// Anthropic envelope, with the message and status the OpenAI routes use
+/// ([`super::json_rejection_message`], [`super::json_rejection_status`]).
+/// `/v1/messages` and `/v1/messages/count_tokens` both run it first, so one
+/// body gets one answer from either (issue #2337).
+fn parse_anthropic_request(
+    request: Result<Json<AnthropicRequest>, JsonRejection>,
+) -> Result<AnthropicRequest, AnthropicErrorResponse> {
+    request.map(|Json(request)| request).map_err(|rejection| {
+        AnthropicErrorResponse::new(
+            super::json_rejection_status(&rejection),
+            super::json_rejection_message(&rejection),
+            "invalid_request_error",
+        )
+    })
+}
+
 /// POST /v1/messages
 pub async fn anthropic_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<AnthropicRequest>,
+    request: Result<Json<AnthropicRequest>, JsonRejection>,
 ) -> Response {
+    let request = match parse_anthropic_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     let live = state.live();
     if let Some(response) = chat_unavailable_response(&state) {
         return response;
@@ -900,8 +921,12 @@ async fn stream_messages(
 /// same body. Mirrors the upstream `anthropic_count_tokens_endpoint`.
 pub async fn anthropic_count_tokens(
     State(state): State<AppState>,
-    Json(request): Json<AnthropicRequest>,
+    request: Result<Json<AnthropicRequest>, JsonRejection>,
 ) -> Response {
+    let request = match parse_anthropic_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     if let Some(response) = chat_unavailable_response(&state) {
         return response;
     }

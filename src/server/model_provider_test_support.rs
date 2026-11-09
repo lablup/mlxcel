@@ -218,6 +218,16 @@ impl ModelProvider {
         }
     }
 
+    /// Tokenize on the dispatch thread, as a served model's provider does, so
+    /// a route test can exercise the pre-header prompt refusal (#2877).
+    pub(crate) fn with_prompt_tokenizer_for_route_tests(
+        mut self,
+        tokenizer: crate::tokenizer::MlxcelTokenizer,
+    ) -> Self {
+        self.prompt_tokenizer = Some(Arc::new(tokenizer));
+        self
+    }
+
     pub(crate) fn chat_unavailable_for_route_tests() -> Self {
         Self::closed_worker_for_route_tests(true, false)
     }
@@ -377,11 +387,11 @@ impl ModelProvider {
                                     let _ = response_tx
                                         .send(GenerateEvent::Token(token, TokenMeta::default()));
                                 }
-                                ScriptedStreamStep::Finish => break,
                                 ScriptedStreamStep::Fail(message) => {
                                     failure = Some(message);
                                     break;
                                 }
+                                ScriptedStreamStep::Finish => break,
                                 ScriptedStreamStep::FinishLength => {
                                     finish_reason = "length";
                                     break;
@@ -454,7 +464,8 @@ pub(crate) enum ScriptedStreamStep {
     Finish,
     /// End it as a generation that hit its output limit (`length`).
     FinishLength,
-    /// End it with a generation error.
+    /// End it as a failed generation (`GenerateEvent::Error`), as a scheduler
+    /// does alongside `FinishReason::Error` (#2877).
     Fail(String),
 }
 

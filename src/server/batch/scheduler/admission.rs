@@ -181,11 +181,9 @@ impl BatchScheduler {
             && videos.is_empty()
             && prompt_tokens.len() >= max
         {
-            let _ = response_tx.send(GenerateEvent::Error(format!(
-                "request ({} tokens) exceeds the available context size ({max} tokens), try \
-                 increasing it",
-                prompt_tokens.len()
-            )));
+            let _ = response_tx.send(GenerateEvent::Error(
+                crate::server::model_provider::context_exceeded_message(prompt_tokens.len(), max),
+            ));
             return;
         }
         if images.is_empty()

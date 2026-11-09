@@ -294,7 +294,7 @@ pub async fn apply_template(
 ) -> Response {
     // Image-only serving has no chat template or tokenizer (#2825); every
     // other mode keeps this route.
-    if let Some(response) = super::chat_not_available_image_only(&state) {
+    if let Some(response) = super::chat_not_available_without_tokenizer(&state) {
         return response.into_response();
     }
     let live = state.live();

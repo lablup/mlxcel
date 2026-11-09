@@ -17,6 +17,10 @@
 //! These files should stay focused on request/response translation. Shared
 //! policy belongs in `server/request_options.rs`, `server/chat_request.rs`,
 //! `server/media.rs`, `server/streaming.rs`, and `server/model_worker.rs`.
+use axum::Json;
+use axum::extract::rejection::JsonRejection;
+use axum::http::StatusCode;
+
 use crate::server::AppState;
 use crate::server::audio_model::AudioModelKind;
 use crate::server::model_provider::{ChatWorkerGoneError, QueueFullError};
@@ -74,6 +78,10 @@ mod feature_disabled_tests;
 #[cfg(test)]
 #[path = "settings_tests.rs"]
 mod settings_tests;
+
+#[cfg(test)]
+#[path = "json_body_rejection_tests.rs"]
+mod json_body_rejection_tests;
 
 pub use anthropic::{anthropic_count_tokens, anthropic_messages};
 pub use audio::{audio_speech, audio_transcriptions, audio_translations};
@@ -189,15 +197,21 @@ pub(crate) fn chat_not_available(state: &AppState) -> Option<ErrorResponse> {
     chat_unavailable_message(state).map(ErrorResponse::not_implemented)
 }
 
-/// The same refusal, but only on an image-only server (#2825).
+/// The same refusal, but only on a server started without a chat tokenizer:
+/// image-only serving (#2825) and a primary Kokoro TTS checkpoint.
 ///
 /// `/tokenize`, `/detokenize` and `/apply-template` are not generation routes,
 /// so they stay available in every other mode, including `-m --image-model`.
-/// In image-only mode there is no tokenizer or chat template behind them, and
+/// In these two modes there is no tokenizer or chat template behind them, and
 /// running on the empty tokenizer would return wrong answers rather than an
-/// error.
-pub(crate) fn chat_not_available_image_only(state: &AppState) -> Option<ErrorResponse> {
+/// error. A TTS provider exists only for a primary Kokoro checkpoint.
+pub(crate) fn chat_not_available_without_tokenizer(state: &AppState) -> Option<ErrorResponse> {
+    let tts_only = state
+        .audio_model
+        .as_ref()
+        .is_some_and(|audio| audio.supports(AudioModelKind::Tts));
     if state.config.embedding_serving_mode == crate::server::config::EmbeddingServingMode::ImageOnly
+        || tts_only
     {
         chat_not_available(state)
     } else {
@@ -205,10 +219,76 @@ pub(crate) fn chat_not_available_image_only(state: &AppState) -> Option<ErrorRes
     }
 }
 
+/// The status an API error carries for a rejected `Json` request body.
+///
+/// A body that is valid JSON but does not match the request type is a 400,
+/// like every other invalid request, instead of axum's 422. The other statuses
+/// are kept: 400 for malformed or empty JSON, 413 for a body over the size
+/// limit, and 415 for a missing or non-JSON `Content-Type`.
+///
+/// Used by: [`parse_json_request`] (OpenAI envelope) and
+/// `anthropic::parse_anthropic_request` (Anthropic envelope), so both
+/// envelopes answer one rejection with one status.
+pub(crate) fn json_rejection_status(rejection: &JsonRejection) -> StatusCode {
+    match rejection.status() {
+        StatusCode::UNPROCESSABLE_ENTITY => StatusCode::BAD_REQUEST,
+        status => status,
+    }
+}
+
+/// Longest [`json_rejection_message`], in bytes, before the truncation marker.
+const MAX_JSON_REJECTION_MESSAGE_BYTES: usize = 1024;
+
+/// The client-facing description of a rejected `Json` request body.
+///
+/// axum's text quotes serde's error, and serde quotes the offending value, so
+/// a long unknown enum tag or map key would otherwise come back whole, up to
+/// the request body limit (which multimodal configurations raise to GiB) and
+/// larger still once escaped as JSON. The error kind comes before the quoted
+/// value, so the bound keeps it.
+///
+/// Used by: [`parse_json_request`] (OpenAI envelope) and
+/// `anthropic::parse_anthropic_request` (Anthropic envelope).
+pub(crate) fn json_rejection_message(rejection: &JsonRejection) -> String {
+    let mut message = rejection.body_text();
+    if message.len() > MAX_JSON_REJECTION_MESSAGE_BYTES {
+        message.truncate(message.floor_char_boundary(MAX_JSON_REJECTION_MESSAGE_BYTES));
+        message.push_str("...");
+    }
+    message
+}
+
+/// Unwrap a typed JSON request body, or answer its rejection as an
+/// OpenAI-envelope `invalid_request_error` whose message is
+/// [`json_rejection_message`] and whose status comes from
+/// [`json_rejection_status`].
+///
+/// Used by: the single-node `/v1/chat/completions`, `/v1/completions`, and
+/// `/v1/responses` handlers (which also serve the `/chat/completions` and
+/// `/responses` aliases), and the disaggregated router's
+/// `/v1/chat/completions` and `/v1/completions`.
+pub(crate) fn parse_json_request<T>(
+    request: Result<Json<T>, JsonRejection>,
+) -> Result<T, ErrorResponse> {
+    request.map(|Json(request)| request).map_err(|rejection| {
+        let mut error =
+            ErrorResponse::new(json_rejection_message(&rejection), "invalid_request_error");
+        error.status = json_rejection_status(&rejection);
+        error
+    })
+}
+
 /// Map generation dispatch failures consistently across OpenAI-compatible
 /// routes.
 // Used by: all serving models, all OpenAI-compatible generation routes.
 pub(crate) fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
+    generation_error_response(&err)
+}
+
+/// [`generation_error_to_response`] for a caller that keeps the error, such as
+/// a streaming route reporting a failure as an in-stream frame (#2877), so
+/// both surfaces classify and word the same failure identically.
+pub(crate) fn generation_error_response(err: &anyhow::Error) -> ErrorResponse {
     if let Some(rejection) =
         err.downcast_ref::<crate::execution::request_memory::RequestMemoryRejection>()
     {
