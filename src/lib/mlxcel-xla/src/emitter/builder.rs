@@ -2049,6 +2049,13 @@ impl Builder {
     /// computed by the HIP kernel embedded in the module as an external
     /// executable. Activations are narrowed to f16 (matching the `dot_general`
     /// operand demotion this replaces) and the kernel accumulates in f32.
+    ///
+    /// The kernel gives each output row one warp and each workgroup
+    /// [`crate::native_qmv::ROWS_PER_BLOCK`] rows (issue #2891), so the
+    /// dispatch's workgroup count is `ceil(N / ROWS_PER_BLOCK)` and `N` itself
+    /// travels as a constant the kernel uses to bound its rows. Rows wider than
+    /// [`crate::native_qmv::ROW_KERNEL_MIN_K`] use the block-per-row export
+    /// instead, whose count is one workgroup per row.
     fn native_qmv(&mut self, x: &Val, operand: &PackedOperand) -> Val {
         assert!(
             matches!(self.projection_layout, ProjectionLayout::InOut),
@@ -2067,8 +2074,9 @@ impl Builder {
         } else {
             self.convert(x, "f16")
         };
-        let n_index = self.fresh();
-        self.line(format!("{n_index} = arith.constant {n} : index"));
+        let (entry, groups) = crate::native_qmv::dispatch(k, n);
+        let grid = self.fresh();
+        self.line(format!("{grid} = arith.constant {groups} : index"));
         let k_i32 = self.fresh();
         self.line(format!("{k_i32} = arith.constant {k} : i32"));
         let n_i32 = self.fresh();
@@ -2076,7 +2084,7 @@ impl Builder {
         let result = self.fresh();
         let result_ty = Ty::f32(vec![n]);
         self.line(format!(
-            "{result} = flow.dispatch @custom_qmv::@qmv4_kernel[{n_index}]\
+            "{result} = flow.dispatch {entry}[{grid}]\
              ({k_i32}, {n_i32}, {x}, {packed}, {scales}, {biases}) : \
              (i32, i32, {x_ty}, {packed_ty}, {scales_ty}, {biases_ty}) -> {result_ty}",
             x = xf16.name,

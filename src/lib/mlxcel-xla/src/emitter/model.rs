@@ -485,21 +485,93 @@ fn projection_elt(b: &Builder, c: &Config) -> &'static str {
 /// full-weight transpose fused with the f32 -> f16 convert on every decode step.
 /// A tied checkpoint keeps its `[V, H]` embed arg for the gather and adds this
 /// second arg, which the loader reads from the same tensor.
-fn take_lm_head(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, b: &Builder) -> Option<Val> {
+///
+/// When the checkpoint stores the head 4-bit and native mode is on (issue
+/// #2891), the `InOut` head instead takes the packed `[V, H/8]` weight plus its
+/// f16 scales/biases, exactly like a projection: the decode graph leaves them to
+/// the native GEMV, and prefill (which does not run the dispatch) dequantizes
+/// and transposes them in the graph so both still share one weight list.
+fn take_lm_head(
+    decls: &mut Vec<ArgDecl>,
+    idx: &mut usize,
+    c: &Config,
+    b: &mut Builder,
+) -> Option<Val> {
     match b.projection_layout() {
         ProjectionLayout::InOut => {
-            let elt = projection_elt(b, c);
             let loc = if c.tie_word_embeddings {
                 "params['embed']"
             } else {
                 "params['lm_head']"
             };
-            Some(take_arg(
-                decls,
-                idx,
-                Ty::new(vec![c.hidden, c.vocab], elt),
-                loc.into(),
-            ))
+            if c.native_head {
+                let qc = c
+                    .quantization
+                    .expect("a packed LM head needs the checkpoint quantization");
+                let in_packed = c.hidden * qc.bits / 32;
+                let n_groups = c.hidden / qc.group_size;
+                let packed_elt = if b.native_proj_enabled() {
+                    "i32"
+                } else {
+                    "ui32"
+                };
+                let packed = take_arg(
+                    decls,
+                    idx,
+                    Ty::new(vec![c.vocab, in_packed], packed_elt),
+                    loc.into(),
+                );
+                let scales = take_arg(
+                    decls,
+                    idx,
+                    Ty::new(vec![c.vocab, n_groups], "f16"),
+                    format!("{loc}.scales"),
+                );
+                let biases = take_arg(
+                    decls,
+                    idx,
+                    Ty::new(vec![c.vocab, n_groups], "f16"),
+                    format!("{loc}.biases"),
+                );
+                // Prefill keeps a loader-dequantized `[H, V]` operand: the head
+                // is a sequence contraction there, and reconstructing it in the
+                // graph would materialize the whole vocabulary matrix on every
+                // request. Both forms are in the shared weight list so every
+                // graph kind keeps the same argument positions.
+                let head = take_arg(
+                    decls,
+                    idx,
+                    Ty::new(vec![c.hidden, c.vocab], projection_elt(b, c)),
+                    format!("{loc}.f16"),
+                );
+                if b.native_proj_enabled() {
+                    let logical = Val {
+                        name: packed.name.clone(),
+                        ty: Ty::f32(vec![c.hidden, c.vocab]),
+                    };
+                    b.register_packed_operand(
+                        &logical,
+                        super::builder::PackedOperand {
+                            packed: packed.clone(),
+                            scales: scales.clone(),
+                            biases: biases.clone(),
+                            out: c.vocab,
+                            input: c.hidden,
+                        },
+                    );
+                    Some(logical)
+                } else {
+                    Some(head)
+                }
+            } else {
+                let elt = projection_elt(b, c);
+                Some(take_arg(
+                    decls,
+                    idx,
+                    Ty::new(vec![c.hidden, c.vocab], elt),
+                    loc.into(),
+                ))
+            }
         }
         ProjectionLayout::OutIn => {
             if c.tie_word_embeddings {

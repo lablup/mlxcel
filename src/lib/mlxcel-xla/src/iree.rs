@@ -493,6 +493,52 @@ fn native_quant_supported(cfg: &RuntimeConfig) -> bool {
     }
 }
 
+/// The dtype of one checkpoint tensor, from the safetensors header only.
+fn checkpoint_tensor_dtype(model_dir: &Path, tensor: &str) -> Result<Option<Dtype>, String> {
+    let single = model_dir.join("model.safetensors");
+    let shards = if single.exists() {
+        vec![single]
+    } else {
+        checkpoint_candidate_shards(model_dir)?
+    };
+    let wrapped = language_model_tensor_name(tensor);
+    for shard in shards {
+        let file =
+            File::open(&shard).map_err(|error| format!("open {}: {error}", shard.display()))?;
+        // Safety: the header is read-only for the lifetime of this scan.
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|error| format!("mmap {}: {error}", shard.display()))?;
+        let tensors = SafeTensors::deserialize(&mmap)
+            .map_err(|error| format!("parse {}: {error}", shard.display()))?;
+        for name in [tensor, wrapped.as_str()] {
+            if let Ok(t) = tensors.tensor(name) {
+                return Ok(Some(t.dtype()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the checkpoint's LM head tensor is MLX-quantized, so the native
+/// GEMV can read it packed (issue #2891). The emitter must agree with the
+/// loader here, and `config.json` alone does not prove it: a checkpoint can
+/// quantize its projections but keep the head in a narrow float.
+fn native_head_supported(model_dir: &Path, cfg: &RuntimeConfig) -> Result<bool, String> {
+    let RuntimeConfig::Dense(config) = cfg else {
+        return Ok(false);
+    };
+    let names = crate::weight_names::scheme_names(config.weight_scheme);
+    let tensor = if config.tie_word_embeddings {
+        names.embed
+    } else {
+        names.lm_head
+    };
+    Ok(matches!(
+        checkpoint_tensor_dtype(model_dir, tensor)?,
+        Some(Dtype::U32)
+    ))
+}
+
 fn checked_ffi_int(value: usize, name: &str) -> Result<c_int, String> {
     c_int::try_from(value).map_err(|_| format!("{name}={value} does not fit the IREE C ABI c_int"))
 }
@@ -596,6 +642,15 @@ impl RuntimeConfig {
     fn set_packed_args(&mut self, packed: bool) {
         if let Self::Dense(config) = self {
             config.packed_args = packed;
+        }
+    }
+
+    /// Declare the LM head packed as well (issue #2891). Only set together with
+    /// [`Self::set_packed_args`], and only when the checkpoint stores the head
+    /// tensor 4-bit.
+    fn set_native_head(&mut self, packed: bool) {
+        if let Self::Dense(config) = self {
+            config.native_head = packed;
         }
     }
 
@@ -2576,6 +2631,19 @@ impl IreeLlama {
                 match crate::native_qmv::hsaco(&arch) {
                     Ok(bytes) => {
                         cfg.set_packed_args(true);
+                        // issue #2891: the head joins the native path only when
+                        // the checkpoint stores it 4-bit; the dtype decides, not
+                        // config.json.
+                        match native_head_supported(model_dir, &cfg) {
+                            Ok(true) => cfg.set_native_head(true),
+                            Ok(false) => eprintln!(
+                                "mlxcel: the LM head is not 4-bit packed; keeping the f16 head path"
+                            ),
+                            Err(error) => eprintln!(
+                                "mlxcel: could not inspect the LM head packing ({error}); \
+                                 keeping the f16 head path"
+                            ),
+                        }
                         native_module = Some((
                             crate::native_qmv::alias_text().to_string(),
                             crate::native_qmv::executable_source(&bytes, &arch),

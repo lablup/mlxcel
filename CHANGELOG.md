@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **Native HIP GEMV for packed 4-bit decode projections on ROCm** (#2890). `MLXCEL_XLA_QUANT=native` keeps the checkpoint's 4-bit projections resident and dispatches `csrc/qmv4.hip` as an external HSACO embedded in the decode graph (`hal.executable.source @custom_qmv`) instead of streaming f16-expanded weights. On `gfx1151` with llama-3.2-1b-instruct-4bit, greedy decode rises from 30.0 to 80.3 tok/s (`n=128`, capacity 256, warm vmfb) with byte-identical output on tied and untied checkpoints; the switch covers the single-sequence decode graph only, so prefill and the ragged batch engine keep the f16 path, and a missing `hipcc` logs a warning and falls back to it.
+- **Native HIP GEMV for packed 4-bit decode projections and the LM head on ROCm** (#2890, #2891). `MLXCEL_XLA_QUANT=native` keeps the checkpoint's 4-bit projections and head resident and dispatches `csrc/qmv4.hip` as an external HSACO embedded in the decode graph (`hal.executable.source @custom_qmv`) instead of streaming f16-expanded weights; long-K rows use a block-per-row second export, and prefill keeps a loader-dequantized f16 head operand. On `gfx1151` with llama-3.2-1b-instruct-4bit, greedy decode rises from 31.5 to 113 tok/s (`n=128`, capacity 256, warm vmfb) with byte-identical output on tied and untied checkpoints; the switch covers the single-sequence decode graph only, so the ragged batch engine keeps the f16 path, and a missing `hipcc` logs a warning and falls back to it.
 
 ### Changed
 
