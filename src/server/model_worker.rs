@@ -669,6 +669,9 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                         "Model does not support batched decode; restored the per-request KV cap from the original context budget after clamping max_batch_size to 1"
                     );
                 }
+                // The dispatch thread refuses an over-long text prompt before
+                // SSE headers against the bound this scheduler enforces (#2877).
+                batch_metrics.publish_prompt_admission_bound(effective_max_kv_size);
                 if effective_max_batch_size == 1
                     && sched_config.max_batch_size > 1
                     && !sched_config.kv_unified

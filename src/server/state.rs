@@ -103,6 +103,9 @@ pub struct BatchMetrics {
     /// stores this first and then release-publishes the context size, allowing
     /// route readers to acquire a coherent geometry pair.
     runtime_max_kv_size: AtomicUsize,
+    /// The per-slot KV bound the live scheduler refuses prompts against; `0`
+    /// until a scheduler publishes one, or when the bound is unset (#2877).
+    prompt_admission_bound: AtomicUsize,
 
     // -- prompt-prefix cache Prometheus counters --
     /// Cumulative successful prompt-cache adoptions (hits). Incremented by the
@@ -152,6 +155,7 @@ impl BatchMetrics {
             preemptions_total: AtomicU64::new(0),
             runtime_context_size: AtomicUsize::new(0),
             runtime_max_kv_size: AtomicUsize::new(0),
+            prompt_admission_bound: AtomicUsize::new(0),
             prompt_cache_hits_total: AtomicU64::new(0),
             prompt_cache_misses_total: AtomicU64::new(0),
             prompt_cache_prefix_tokens_reused_total: AtomicU64::new(0),
@@ -242,6 +246,18 @@ impl BatchMetrics {
             .store(max_kv_size.unwrap_or(0), Ordering::Relaxed);
         self.runtime_context_size
             .store(context_size, Ordering::Release);
+    }
+
+    /// Publish the per-slot KV bound the scheduler enforces at admission.
+    pub fn publish_prompt_admission_bound(&self, max_kv_size: Option<usize>) {
+        self.prompt_admission_bound
+            .store(max_kv_size.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// The per-slot KV bound a text prompt must fit, when one is in force.
+    pub fn prompt_admission_bound(&self) -> Option<usize> {
+        let value = self.prompt_admission_bound.load(Ordering::Relaxed);
+        (value > 0).then_some(value)
     }
 
     /// Return the post-load context override, when the worker published one.

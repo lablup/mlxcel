@@ -121,10 +121,9 @@ impl BatchScheduler {
         budget: Option<usize>,
     ) {
         let max = budget.unwrap_or(request_tokens);
-        let _ = response_tx.send(GenerateEvent::Error(format!(
-            "request ({request_tokens} tokens) exceeds the available context size ({max} tokens), \
-             try increasing it"
-        )));
+        let _ = response_tx.send(GenerateEvent::Error(
+            crate::server::model_provider::context_exceeded_message(request_tokens, max),
+        ));
     }
 
     /// Deterministic exhaustion policy for unified budget growth: once a decode

@@ -209,6 +209,13 @@ pub(crate) fn chat_not_available_image_only(state: &AppState) -> Option<ErrorRes
 /// routes.
 // Used by: all serving models, all OpenAI-compatible generation routes.
 pub(crate) fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
+    generation_error_response(&err)
+}
+
+/// [`generation_error_to_response`] for a caller that keeps the error, such as
+/// a streaming route reporting a failure as an in-stream frame (#2877), so
+/// both surfaces classify and word the same failure identically.
+pub(crate) fn generation_error_response(err: &anyhow::Error) -> ErrorResponse {
     if let Some(rejection) =
         err.downcast_ref::<crate::execution::request_memory::RequestMemoryRejection>()
     {

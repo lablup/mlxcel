@@ -1858,10 +1858,6 @@ async fn stream_chat_completion(
         }
 
         // Check for tool calls in accumulated output
-        let err_msg = match &result {
-            Ok(_) => String::new(),
-            Err(e) => e.to_string(),
-        };
         let mut finish_reason = match &result {
             Ok(r) => r.finish_reason.clone(),
             Err(_) => "error".to_string(),
@@ -1895,7 +1891,9 @@ async fn stream_chat_completion(
             // Only calls that actually reached the client count: when the
             // named-function filter dropped every parsed call, the stream
             // carried no tool-call delta and must not claim `tool_calls`.
-            if emitted > 0 {
+            // A failed generation stays `error` whatever its partial output
+            // parsed as (#2877).
+            if emitted > 0 && result.is_ok() {
                 finish_reason = "tool_calls".to_string();
             }
         }
@@ -1963,6 +1961,13 @@ async fn stream_chat_completion(
             Err(_) => false,
         };
 
+        // The stream is already open, so a failure travels as a frame, ahead
+        // of the finish chunk so a client that stops reading at
+        // `finish_reason` still receives it (#2877).
+        if let Err(err) = &result {
+            let _ = finish_events.json(&super::generation_error_response(err));
+        }
+
         // Send finish chunk. It is the frame that carries this request's
         // speculative acceptance counters (#1314): the totals are final here,
         // and this is the chunk a client already reads for `finish_reason`.
@@ -1991,14 +1996,6 @@ async fn stream_chat_completion(
                 prompt_cache_enabled,
             );
             let _ = finish_events.json(&usage_chunk);
-        }
-        // The stream is already open, so the failure has to travel as a
-        // frame. Upstream shapes an in-stream failure as an `error` object on
-        // the event stream, before its own terminator (issue #2877).
-        if !err_msg.is_empty() {
-            let _ = finish_events.json(&serde_json::json!({
-                "error": { "message": err_msg, "type": "server_error", "code": null }
-            }));
         }
 
         finish_events.done();
