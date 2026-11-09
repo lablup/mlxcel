@@ -156,6 +156,19 @@ fn a_real_evaluated_buffer_can_be_wired() {
     macos::munlock(start, span);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn only_a_contiguous_view_has_an_address() {
+    let data: Vec<f32> = (0..12).map(|v| v as f32).collect();
+    let matrix = crate::from_slice_f32(&data, &[3, 4]);
+    let columns = crate::ffi::slice(&matrix, &[0, 1], &[3, 3]);
+    let row = crate::ffi::slice(&matrix, &[1, 0], &[2, 4]);
+    crate::eval(&columns);
+    crate::eval(&row);
+    assert_eq!(crate::ffi::array_data_address(&columns), 0);
+    assert_ne!(crate::ffi::array_data_address(&row), 0);
+}
+
 #[test]
 fn an_unevaluated_array_has_no_address() {
     let data = vec![1.0_f32; 16];

@@ -25,7 +25,8 @@
 //! rather than predicting it, because pages Metal has wired for the GPU are
 //! already in that count and `mlock` adds nothing for them.
 //!
-//! Scope limits: multimodal towers stay lazy and are not wired, and a repack
+//! Scope limits: multimodal towers stay lazy and are not wired, a strided view
+//! has no single range to wire and is skipped, and a repack
 //! that runs at the first token (expert stacking, dtype conversion) replaces
 //! wired sources with unwired results.
 

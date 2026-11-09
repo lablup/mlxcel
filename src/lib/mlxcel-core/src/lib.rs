@@ -199,8 +199,10 @@ mod ffi {
         /// Get the total size in bytes
         fn array_nbytes(arr: &MlxArray) -> usize;
 
-        /// Host address of an evaluated array's bytes, or 0 before evaluation.
-        /// For address-only uses such as `mlock`; never read through it.
+        /// Host address of an evaluated array's bytes, or 0 before evaluation
+        /// and for a strided view, whose bytes the address and `array_nbytes`
+        /// do not describe. For address-only uses such as `mlock`; never read
+        /// through it.
         fn array_data_address(arr: &MlxArray) -> usize;
 
         // Scalar extraction.
