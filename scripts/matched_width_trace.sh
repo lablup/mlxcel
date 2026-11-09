@@ -30,19 +30,37 @@
 #   WIDTH    block width, the verify block size under test (default 8)
 #   PREFILL  tokens of history before the first row (default 128)
 #   BLOCKS   width-W chunks to trace (default 48)
+#   LOGIT_TRACE  path to the logit_trace binary (default
+#            ./target/release/examples/logit_trace)
 #   MLXCEL_TRACE_KV_CACHE_MODE  stores KV like `--kv-cache-mode` (model-owned
 #            caches only: Gemma 3 and Gemma 4 among the shipped families)
 #
 # Compare with: scripts/compare_matched_width.py OUT_DIR
 set -euo pipefail
-M=${1:?usage: matched_width_trace.sh MODEL_DIR CORPUS_TXT OUT_DIR}
-C=${2:?corpus}
-O=${3:?out dir}
+usage="usage: matched_width_trace.sh MODEL_DIR CORPUS_TXT OUT_DIR"
+if [ "$#" -ne 3 ]; then
+  echo "$usage" >&2
+  exit 2
+fi
+M=$1
+C=$2
+O=$3
 W=${WIDTH:-8}
 P=${PREFILL:-128}
 N=${BLOCKS:-48}
 T=${LOGIT_TRACE:-./target/release/examples/logit_trace}
-mkdir -p "$O"
+for pair in "WIDTH=$W" "BLOCKS=$N"; do
+  case "${pair#*=}" in
+    '' | *[!0-9]* | 0) echo "matched_width_trace: ${pair%%=*} must be a positive integer, got '${pair#*=}'" >&2; exit 2 ;;
+  esac
+done
+case "$P" in
+  '' | *[!0-9]*) echo "matched_width_trace: PREFILL must be a non-negative integer, got '$P'" >&2; exit 2 ;;
+esac
+[ -d "$M" ] || { echo "matched_width_trace: model directory not found: $M" >&2; exit 2; }
+[ -r "$C" ] || { echo "matched_width_trace: corpus not readable: $C" >&2; exit 2; }
+[ -x "$T" ] || { echo "matched_width_trace: trace binary not executable: $T (set LOGIT_TRACE or build --example logit_trace)" >&2; exit 2; }
+mkdir -p -- "$O"
 MLXCEL_TRACE_START_TOKEN=$P "$T" "$M" "$C" "$W" "$N" 8 "$P" > "$O/w${W}.tsv"
 for ((j = 0; j < W; j++)); do
   MLXCEL_TRACE_START_TOKEN=$((P + j)) \

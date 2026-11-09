@@ -8,26 +8,34 @@ commands that let a maintainer redo every number. It follows the method in
 only yes or no, so the comparisons below are teacher-forced and gated on how decided
 the reference was.
 
-**Status: known limitation, not a bug, no code change.** Issue #2778 recorded the
-decision that this does not block 0.8.0. Release notes must not claim that
-temperature 0 speculative output matches plain decode. Plain decode is unaffected.
-The conclusion is scoped: it holds for the flips reproduced below, and it does not
-explain the issue's original 35-logit swing (see "Limits").
+**Status: known limitation, root cause open, no code change here.** Issue #2778
+recorded the decision that this does not block 0.8.0 and left the root cause open.
+Release notes must not claim that temperature 0 speculative output matches plain
+decode. Plain decode is unaffected. The analysis is scoped: it describes the flips
+reproduced below and does not explain the issue's original Qwen3 position 197 swing
+(plain prefers its token by 2.0, most block histories prefer the other by about 35),
+which may still be a real KV history difference (see "Limits").
 
-## Cause
+## Cause of the reproduced flips
 
-The flip is an **argmax decidedness flip** driven by a small numerical difference in
-the KV history. A block verification path builds the K/V of every row after the
-first with a different arithmetic path than a one-token decode step builds it (the
-quantized projections run at `M = block width`, and MLX picks a kernel per `M`).
-That difference is rounding-class. It changes the emitted token only where the
-reference's top two logits are tied or nearly tied, and the rest of the stream
-follows from that one token. When the KV cache is stored quantized
-(`--kv-cache-mode int8`, `fp16+turbo3`, `fp16+turbo4`) end-to-end streams leave the
-plain stream in 4 of 6 checkpoint/mode cells measured, against 0 of 2 with fp16 KV.
-Nothing below shows corrupted KV contents: the temperature 0 contract is "the argmax
-of the logits the path computed", and two paths that compute slightly different
-logits legitimately disagree on a tie.
+The flips reproduced here are **argmax ties**. At equal context, a width-8 verify
+block moved the reference's own top-1 logit by at most 0.75 on Qwen3-0.6B-4bit with
+fp16 KV, and the single top-1 disagreement was at a reference top-two gap of 0.0. In
+a free-running stream the rest of the output follows from the flipped token.
+
+The proposed mechanism is that a block computes the rows after the first through a
+different arithmetic path (the quantized projections run at `M = block width`, and
+MLX picks a kernel per `M`). For these runs that is a hypothesis: the matched
+reference history is one prefill forward rather than eight decode steps, and the
+commands here compare logits, not K/V tensors ("Limits" records the separate KV dump
+reported on #2778). When the KV cache is stored quantized (`--kv-cache-mode int8`,
+`fp16+turbo3`, `fp16+turbo4`) end-to-end streams leave the plain stream in 4 of 6
+checkpoint/mode cells measured, against 0 of 2 with fp16 KV; those divergences were
+not measured at the logit level.
+
+Nothing below shows corrupted KV contents, and nothing below rules them out for the
+position 197 report. Where two paths compute different logits on a tie, each token is
+the argmax of the logits its own path computed.
 
 What each statement rests on:
 
@@ -36,6 +44,7 @@ What each statement rests on:
 | At equal context, a verify block moves logits at rounding scale and flips only an exact tie | Measured (Qwen3-0.6B-4bit, fp16 KV) | 1 |
 | Row 0 of a block, which sees only the sequentially built context, matches a decode step on the top-1 logit | Measured (Qwen3-0.6B-4bit, 48 positions) | 1 |
 | Comparing a block against a width-1 run at a different context length overstates the disagreement | Measured | 1 |
+| The block's own K/V arithmetic causes the rows 1 to 7 logit deltas | **Hypothesis**; no K/V comparison here, and the reference history is one prefill forward | 1, Limits |
 | The one-token decode split itself is harmless | Measured | 2 |
 | Repeating a width-8 trace is bit-equal | Measured | 1 |
 | With fp16 KV, plain and `--prompt-lookup` emit the same stream | Measured: 2 checkpoints, 1 prompt, 160 tokens | 3 |
@@ -48,11 +57,16 @@ Hardware: Apple M1 Pro, Metal. Build with
 `cargo build --release --features metal,accelerate --example logit_trace` and
 `cargo build --release --features metal,accelerate`. Traces are teacher-forced on one
 520-token corpus (Qwen3 tokenizer; the Gemma 3 tokenizer gives 536 plus a BOS anchor)
-with `PREFILL=128`, top 8.
+with `PREFILL=128`, top 8. The source revision of these runs is not recorded. They
+predate the MLX pin advance to `9f806b36` (#2876), which adds a Metal 3-16-row affine
+`qmv_mma` in the width range traced here, so rerun them before treating the numbers
+as current.
 
 ### Fixtures
 
 ```bash
+# Run from the repository root; later blocks use $REPO and this scratch directory.
+REPO=$PWD
 mkdir -p /tmp/mlxcel_2778 && cd /tmp/mlxcel_2778
 cat > passage.txt <<'EOF'
 The transformer architecture processes sequences through stacked attention layers. Each layer attends over every preceding token, building contextual representations that the feed-forward network refines. Positional encodings let the model distinguish order, and residual connections carry information forward across depth. Training adjusts billions of parameters so that the final projection predicts the next token from context.
@@ -76,10 +90,10 @@ First pass, context lengths unmatched:
 
 ```bash
 M=~/.cache/mlxcel/models/mlx-community/Qwen3-0.6B-4bit
-T=./target/release/examples/logit_trace
+T=$REPO/target/release/examples/logit_trace
 $T $M corpus_long.txt 1 384 8 128 > w1.tsv
 $T $M corpus_long.txt 8  48 8 128 > w8.tsv
-python3 scripts/compare_logit_traces.py w1.tsv w8.tsv --decided 2
+python3 "$REPO/scripts/compare_logit_traces.py" w1.tsv w8.tsv --decided 2
 ```
 
 | Measure | Result |
@@ -99,15 +113,9 @@ at `PREFILL = 128 + j`, so both see the same token history and the same input to
 width-8 trace and eight width-1 traces):
 
 ```bash
-scripts/matched_width_trace.sh $M corpus_long.txt out_q3     # WIDTH=8 PREFILL=128 BLOCKS=48
-python3 scripts/compare_matched_width.py out_q3
+LOGIT_TRACE=$T "$REPO/scripts/matched_width_trace.sh" $M corpus_long.txt out_q3     # WIDTH=8 PREFILL=128 BLOCKS=48
+python3 "$REPO/scripts/compare_matched_width.py" out_q3
 ```
-Control arm, fresh cache versus real history: a separate trace with `PREFILL=0`
-and 64-token chunks on the same corpus —
-`$T $M corpus_long.txt 64 8 8 0 > armA.tsv` — disagrees with the matched cache on
-324 of 512 decided-eligible positions (63.28%, largest gap 3.875). That is context
-length sensitivity, not the block arithmetic: B and C (identical histories, with and
-without the single-token decode split) agree on 0 of 512.
 
 | Row | positions | top-1 disagreements | decided (gap >= 2) | disagreements on decided | max logit delta |
 |---|---|---|---|---|---|
@@ -128,32 +136,34 @@ without the single-token decode split) agree on 0 of 512.
 - Rows 1 to 7: 336 positions, 195 with a nonzero logit delta on the reference's own
   choice; p50 0.125, p90 0.25, p99 0.375, max 0.75.
 - Perplexity: 1.0771 (width 1) versus 1.0773 (width 8), +0.023%.
-- Repeating the width-8 trace is bit-equal: `cmp` of two independent `w8.tsv`
-  runs reports no difference (`cmp w/o8_0.tsv w/o8_0_rep.tsv` agrees).
+- Repeating the width-8 trace is bit-equal: `cmp` of the `w8.tsv` files from two
+  independent runs reports no difference.
 
-The unmatched first pass and the matched pass are computed over the same 384 positions,
-so their difference isolates context length. Unmatched rows 1 to 7 (336 positions) have
-309 positions with a nonzero logit delta on the reference's own choice (p50 0.375,
-p90 1.0, max 2.375) and 5 top-1 disagreements, all at gap 0.0; the matched pass has
-195 of 336 (p50 0.125, p90 0.25, max 0.75) and 1 disagreement. Row 0 is identical in
-both passes (48 of 48 zero deltas on the top-1 logit), as it should be: its context and
-input token are the same in every arm. Most of the unmatched movement was context
-length, not block width. What remains is concentrated in the rows the block itself
-built, and it flips only an exact tie. The width-1 history here is one prefill forward,
-not eight sequential decode steps; the j=0 control (every row compared at its identical
-context and input) shows zero disagreement and zero nonzero delta across all 384 rows.
+The unmatched first pass sets no `MLXCEL_TRACE_START_TOKEN`, so it traces positions 0
+to 383, while the matched pass traces 128 to 511. The two cover the same number of
+positions but not the same positions, and the first 128 positions of the unmatched
+pass have shorter context windows. Unmatched rows 1 to 7 (336 positions) have 309
+positions with a nonzero logit delta on the reference's own choice (p50 0.375, p90
+1.0, max 2.375) and 5 top-1 disagreements, all at gap 0.0; the matched pass has 195 of
+336 (p50 0.125, p90 0.25, max 0.75) and 1 disagreement. Row 0 has zero deltas in both
+passes (48 of 48 on the top-1 logit), since its context and input token are the same
+in both arms of each pass. The smaller matched deltas are consistent with context
+length accounting for most of the unmatched movement. What remains is in rows 1 to 7,
+and in this run it flips only an exact tie. The width-1 history here is one prefill
+forward, not eight sequential decode steps.
 
 ### Evidence 2: the decode-step split
 
 `MLXCEL_TRACE_DECODE_STEP=1` feeds the last context token through its own
 single-token forward before the traced block (the state a speculative verify block
-runs in, #1793). Compare it against the same context pass without the split:
+runs in, #1793). Compare it against the same context pass without the split, at block
+width 64:
 
 ```bash
 C=corpus_long.txt
 MLXCEL_TRACE_DECODE_STEP=1 $T $M $C 64 8 8 256 > armB.tsv   # split
 $T $M $C 64 8 8 256 > armC.tsv                                            # no split
-python3 scripts/compare_logit_traces.py armB.tsv armC.tsv --decided 2
+python3 "$REPO/scripts/compare_logit_traces.py" armB.tsv armC.tsv --decided 2
 ```
 
 Result: 0 / 512 top-1 disagreements, 0 / 444 on decided positions. The split
@@ -164,10 +174,12 @@ a fresh cache for each 64-token chunk, a different context from arms B and C)
 
 ```bash
 $T $M $C 64 8 8 0 > armA.tsv
-python3 scripts/compare_logit_traces.py armA.tsv armB.tsv --decided 2
+python3 "$REPO/scripts/compare_logit_traces.py" armA.tsv armB.tsv --decided 2
 ```
 
-disagrees on 324 / 512 positions (38 / 114 decided), and the same against arm C.
+disagrees on 324 / 512 positions (63.28%; 38 / 114 decided, largest gap at a
+disagreement 3.875), and the same against arm C. That is context length sensitivity,
+not block arithmetic.
 
 ### Evidence 3: end to end, plain versus `--prompt-lookup`
 
@@ -176,7 +188,7 @@ PROMPT=$(cat copy_prompt.txt)
 for kv in fp16 int8 fp16+turbo3 fp16+turbo4; do
   for arm in plain pl; do
     extra=""; [ "$arm" = pl ] && extra="--prompt-lookup"
-    ./target/release/mlxcel generate -m "$MODEL" -p "$PROMPT" -n 160 --temp 0 --seed 42 \
+    "$REPO/target/release/mlxcel" generate -m "$MODEL" -p "$PROMPT" -n 160 --temp 0 --seed 42 \
       --kv-cache-mode $kv --show-reasoning $extra > ${kv}_${arm}.raw 2>&1
     grep -v -e '^Runtime device' -e '^Wired memory' -e '^KV cache mode' -e '^Loading model' \
       -e '^Detected' -e '^GPU:' -e '^Converting' -e '^Note:' -e '^Model loaded' \
@@ -239,8 +251,8 @@ bits 4); its hub id was not recorded, so the run is not tied to a public snapsho
 
 ```bash
 for kv in fp16 int8; do
-  MLXCEL_TRACE_KV_CACHE_MODE=$kv scripts/matched_width_trace.sh $GEMMA corpus_long.txt out_gm_$kv
-  python3 scripts/compare_matched_width.py out_gm_$kv
+  LOGIT_TRACE=$T MLXCEL_TRACE_KV_CACHE_MODE=$kv "$REPO/scripts/matched_width_trace.sh" $GEMMA corpus_long.txt out_gm_$kv
+  python3 "$REPO/scripts/compare_matched_width.py" out_gm_$kv
 done
 ```
 
@@ -249,29 +261,35 @@ done
 | fp16 | 0 / 384 | 0 / 364 | 6 of 48 | 0.125 / 1.0 / 2.0 | 1.0433 versus 1.0439 (+0.056%) |
 | int8 | 0 / 384 | 0 / 365 | 44 of 48 | 0.048 / 0.303 / 2.20 | 1.0503 versus 1.0500 (-0.034%) |
 
-No flip appears at either mode on this checkpoint, and the int8 deltas are not larger
-than the fp16 ones. This probe therefore does **not** support the amplification
+No flip appears at either mode on this checkpoint. Under int8 the p50 and p99 deltas
+are smaller than under fp16, and the max is slightly larger (2.20 against 2.0). This
+probe therefore does **not** support the amplification
 hypothesis at the logit level; it shows only that the arm runs and what its output
 looks like. Unlike Qwen3, Gemma 3's row 0 is not bit-identical under either mode, so
 the "row 0 matches" statement above is a Qwen3-0.6B-4bit observation, not a general
 one.
 
-## Why there is no code fix
+## Why there is no code change here
 
-A fix would have to make a block verify row bit-equal to the decode step that would
-have produced the same position. The matched-width trace shows the arithmetic is not
-bit-equal by construction (different `M`, different kernel; 195 of 336 rows 1 to 7
-differ on the top-1 logit), and bit-equality across `M` is not a property any
-quantized kernel set provides. Chasing it would give up verify throughput for a
-guarantee that `docs/benchmarks.md` already says is spent once the arithmetic path
-differs. The behaviour that is guaranteed, and kept, is that every emitted token is
-the argmax of logits the target computed (`docs/speculative-acceptance.md`, "Greedy
-argmax"). In the trace evidence the divergence is confined to positions where the
-reference's top two logits were equal, so there is no regression to revert and no
-reverted arm that could fail. The quantized end-to-end divergences of Evidence 3 were
-not measured at the logit level. Quantized KV storage is a user-selected trade of
-exactness for memory; a quantized stream differing from the fp16 stream is the same
-kind of difference as the one measured here.
+Making a verify row bit-equal to the decode step needs an arithmetic path that is
+bit-equal at that width. Whether one exists depends on the kernel MLX dispatches for
+`M` and on the hardware: `docs/benchmarks.md` records an affine 4-bit target as
+byte-identical for block widths below 12 on Apple GPU generation 13/14 and divergent
+from width 2 on generation 15 and newer until `qmv_wide` is disabled, and the MTP and
+DFlash paths gate on a runtime block-versus-chain exactness probe for that reason. The
+token-only loop behind `--prompt-lookup` and a full-model drafter has no such gate;
+`docs/speculative-acceptance.md` ("Offline routing") documents that its stream is the
+target's own argmax at every position and is not guaranteed byte-identical to plain
+decode. Adding a gate there is a throughput trade this document does not decide. In
+the matched-width trace the two arms are not bit-equal (195 of 336 rows 1 to 7 differ
+on the top-1 logit).
+
+In the trace evidence the divergence is confined to positions where the reference's
+top two logits were equal. That does not establish that no regression exists: #2778
+records that whether the behaviour predates #2768 was not measured, and the same is
+true here. The quantized end-to-end divergences of Evidence 3 were not measured at the
+logit level. Quantized KV storage is a user-selected trade of exactness for memory,
+and Evidence 3 shows the plain stream itself changes with the KV mode.
 
 ## Limits of this evidence
 
@@ -283,9 +301,15 @@ kind of difference as the one measured here.
   delta 2.375 unmatched, 0.75 matched). If it was measured under the default fp16 KV,
   this document does not explain it. The issue's own trigger for reopening stays: a
   reproducer that shows corrupted KV contents.
-- No KV contents were compared tensor by tensor, so the target-only reproducer in the
-  issue's first acceptance criterion is still open. The statement that the histories
-  differ at rounding scale rests on logits, not on a K/V dump.
+- The commands in this document compare no K/V tensors, so the issue's first
+  acceptance criterion is still open. A separate harness posted on #2778
+  (`examples/kv_history_divergence.rs`, not in this tree) reports, on
+  Qwen3-0.6B-4bit, M1 Pro and a 64-token context, zero differing KV bytes between
+  one-token appends and block appends at widths 1, 2, 4 and 8, differing bytes from
+  width 16 up, and no argmax flip in those spans. If that holds, the rows 1 to 7
+  deltas in Evidence 1 are not explained by block width 8 alone and include the
+  difference between the reference's one-prefill history and the block's history.
+  The statement that the histories differ at rounding scale rests on logits here.
 - The quantization-amplification step (a rounding-level K difference crossing a
   quantization step becomes a full step) was not measured at the logit level. The
   Qwen3 end-to-end evidence is consistent with it (4 of 6 quantized cells flip, 0 of 2
