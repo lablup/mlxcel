@@ -76,6 +76,7 @@ impl<'a> Qwen4ExpMtpTargetAdapter<'a> {
     /// Route every call through the per-sequence slot at `seq_id` (`None` is
     /// the model's internal fallback slot, the offline CLI shape).
     pub fn new(model: &'a Qwen4ExpModel, seq_id: Option<SequenceId>) -> Self {
+        warn_if_streaming_makes_mtp_slower();
         Self {
             model,
             seq_id,
@@ -268,5 +269,23 @@ impl<'a> MtpTarget for Qwen4ExpMtpTargetAdapter<'a> {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         mlxcel_core::generate::LanguageModel::eos_token_ids(self.model)
+    }
+}
+
+/// With experts streaming on a machine under 96 GB, the drafter's memory does
+/// more as expert cache, so a configured drafter is called out once.
+fn warn_if_streaming_makes_mtp_slower() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let streaming = crate::models::qwen4_exp::stream::active_stream_stats().is_some();
+    let total = mlxcel_core::host_memory::host_memory_status().map(|s| s.total_bytes);
+    if total
+        .is_some_and(|total| crate::models::qwen4_exp::stream::mtp_discouraged(total, streaming))
+    {
+        WARNED.call_once(|| {
+            eprintln!(
+                "Warning: expert streaming is on below 96 GB of memory; the MTP drafter's memory \
+                 usually does more as expert cache. Drop the drafter if decode is slower with it."
+            );
+        });
     }
 }

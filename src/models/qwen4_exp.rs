@@ -96,6 +96,8 @@ pub mod sanitize;
 pub(crate) mod shapes;
 #[path = "qwen4_exp_snapshot.rs"]
 pub(crate) mod snapshot;
+#[path = "qwen4_exp_stream.rs"]
+pub mod stream;
 
 pub use config::{
     Qwen4ExpConfig, Qwen4ExpConfigError, ResolvedQwen4ExpConfig, text_config_from_full,

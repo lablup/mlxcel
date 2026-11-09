@@ -107,6 +107,15 @@ pub(crate) fn load_qwen4_exp_vlm(model_path: &Path) -> Result<LoadedModel> {
         parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen4-Exp vision config")?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
+    text_config.expert_stream = models::qwen4_exp::stream::ExpertStream::resolve(
+        model_path,
+        text_config.raw.num_hidden_layers,
+        text_config.raw.num_experts,
+        text_config.raw.num_experts_per_tok,
+        models::qwen4_exp::stream::resident_weight_bytes(model_path),
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+
     let weights = load_vlm_weights_common(model_path, None)?;
     let models::qwen4_exp::SanitizedWeights {
         mut text,

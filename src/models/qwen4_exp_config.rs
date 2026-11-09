@@ -286,6 +286,8 @@ pub struct ResolvedQwen4ExpConfig {
     /// Directory a relative `ple_storage.manifest` resolves against; the
     /// loader fills it.
     pub model_dir: Option<PathBuf>,
+    /// The SSD expert arena plan when this load streams experts (issue #2882).
+    pub expert_stream: Option<std::sync::Arc<super::stream::ExpertStream>>,
 }
 
 impl Qwen4ExpConfig {
@@ -469,6 +471,7 @@ impl Qwen4ExpConfig {
             quantization,
             ple_storage,
             model_dir: None,
+            expert_stream: None,
         })
     }
 

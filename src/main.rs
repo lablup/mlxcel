@@ -369,6 +369,13 @@ enum Commands {
     ///     MLXCEL_PLE_IO=direct mlxcel generate -m models/qwen3.8-flash-external-ple -p "Hi"
     #[command(name = "prepare-external-ple", verbatim_doc_comment)]
     PrepareExternalPle(commands::PrepareExternalPleArgs),
+
+    /// Write a contiguous copy of a Qwen3.8-Flash-Next checkpoint's routed
+    /// experts for SSD expert streaming, so one read fetches a whole expert.
+    ///
+    ///     mlxcel prepare-expert-stream -m models/qwen3.8-flash
+    #[command(name = "prepare-expert-stream", verbatim_doc_comment)]
+    PrepareExpertStream(commands::PrepareExpertStreamArgs),
 }
 
 /// Arguments for `mlxcel list`.
@@ -3394,7 +3401,8 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         | Commands::Arch(_)
         | Commands::Download(_)
         | Commands::Rm(_)
-        | Commands::PrepareExternalPle(_) => None,
+        | Commands::PrepareExternalPle(_)
+        | Commands::PrepareExpertStream(_) => None,
         // Gated exactly like the variant itself and its dispatch arm below;
         // without the gate this arm does not compile in feature sets that
         // exclude `surgery`.
@@ -3565,6 +3573,7 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "surgery")]
         Commands::SplitMtp(args) => commands::run_split_mtp(args),
         Commands::PrepareExternalPle(args) => commands::run_prepare_external_ple(args),
+        Commands::PrepareExpertStream(args) => commands::run_prepare_expert_stream(args),
     }
 }
 
