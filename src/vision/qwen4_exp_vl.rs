@@ -191,6 +191,28 @@ impl LanguageModel for Qwen4ExpVLModel {
             .forward_batched(input_ids, batch_caches, mask)
     }
 
+    // Prompt-cache snapshots (issue #2885): the text backbone owns all the
+    // per-sequence state; the vision wrapper holds none.
+    fn supports_snapshot_reuse(&self) -> bool {
+        self.text_model.supports_snapshot_reuse()
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.text_model.snapshot_sequence_state(seq_id, token_len)
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        self.text_model.restore_sequence_state(seq_id, snapshot)
+    }
+
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.text_model.get_embed_tokens(input_ids))
     }

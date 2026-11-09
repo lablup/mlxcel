@@ -116,7 +116,7 @@ pub fn recommend_model_kv_store_capacity_from_config(
 ) -> Option<SnapshotCapacityRecommendation> {
     let representative_tokens = representative_tokens(context_size);
     let arch = estimate_kv_arch_from_config(config, representative_tokens, false, 1)?;
-    let fixed_state_bytes = qwen3_next_fixed_state_bytes(config);
+    let fixed_state_bytes = recurrent_fixed_state_bytes(config, representative_tokens);
     if matches!(arch.kind, KvArchKind::PureSsm)
         || snapshot_family_is_model_aware(config, arch.kind, fixed_state_bytes)
     {
@@ -219,7 +219,7 @@ pub fn recommend_model_snapshot_capacity_from_config(
     // predicts about a third of that). Sizing from the capped figure left the
     // store unable to hold a single entry.
     let arch = estimate_kv_arch_unwindowed_from_config(config, representative_tokens, false, 1)?;
-    let fixed_state_bytes = qwen3_next_fixed_state_bytes(config);
+    let fixed_state_bytes = recurrent_fixed_state_bytes(config, representative_tokens);
     if !snapshot_family_is_model_aware(config, arch.kind, fixed_state_bytes) {
         return None;
     }
@@ -322,6 +322,87 @@ fn snapshot_family_is_model_aware(
                 | "plamo2"
         )
     })
+}
+
+/// The per-entry state a family carries besides its attention KV.
+fn recurrent_fixed_state_bytes(config: &Value, representative_tokens: u64) -> usize {
+    qwen3_next_fixed_state_bytes(config)
+        .saturating_add(qwen4_exp_state_bytes(config, representative_tokens))
+}
+
+/// Bytes of a `qwen4_exp` snapshot other than the attention KV: the fixed
+/// GatedDeltaNet state and convolution windows on the linear layers, the PLE
+/// window, and the QSA index that grows with the token count.
+///
+/// Layout is the state table in `src/models/qwen4_exp_snapshot.rs`. The
+/// recurrent state is float32; the windows and the QSA keys keep the dtype of
+/// the stream they came from, bf16 on every released checkpoint, and the
+/// positions are int32.
+fn qwen4_exp_state_bytes(config: &Value, representative_tokens: u64) -> usize {
+    const FLOAT32: u64 = 4;
+    const STREAM: u64 = 2;
+    let text = text_config(config);
+    if !model_types(config).iter().any(|mt| mt == "qwen4_exp") {
+        return 0;
+    }
+    let Some(num_layers) = get_u64(text, LAYER_COUNT_KEYS) else {
+        return 0;
+    };
+    let Some(interval) = get_u64(text, &["full_attention_interval"]).filter(|v| *v > 0) else {
+        return 0;
+    };
+    let attention_layers = num_layers.checked_div(interval).unwrap_or(0);
+    let linear_layers = num_layers.saturating_sub(attention_layers);
+
+    let key_heads = get_u64(text, &["linear_num_key_heads"]).unwrap_or(16);
+    let value_heads = get_u64(text, &["linear_num_value_heads"]).unwrap_or(48);
+    let key_dim = get_u64(text, &["linear_key_head_dim"]).unwrap_or(128);
+    let value_dim = get_u64(text, &["linear_value_head_dim"]).unwrap_or(128);
+    let kernel = get_u64(text, &["linear_conv_kernel_dim"]).unwrap_or(4);
+    let state_bytes = value_heads
+        .saturating_mul(value_dim)
+        .saturating_mul(key_dim)
+        .saturating_mul(FLOAT32);
+    let window_bytes = kernel
+        .saturating_sub(1)
+        .saturating_mul(
+            key_heads
+                .saturating_mul(key_dim)
+                .saturating_mul(2)
+                .saturating_add(value_heads.saturating_mul(value_dim)),
+        )
+        .saturating_mul(STREAM);
+
+    let ple_layers = text
+        .get("ple_layer_ids")
+        .and_then(Value::as_array)
+        .map_or(0, |ids| ids.len() as u64);
+    let ple_rows = get_u64(text, &["ple_conv_kernel_size"])
+        .unwrap_or(4)
+        .saturating_sub(1)
+        .saturating_mul(get_u64(text, &["ngram_size"]).unwrap_or(3));
+    let hidden = get_u64(text, HIDDEN_SIZE_KEYS).unwrap_or(0);
+    let ple_bytes = ple_layers
+        .saturating_mul(ple_rows)
+        .saturating_mul(hidden)
+        .saturating_mul(STREAM);
+
+    let index_key_dim = get_u64(text, &["indexer_head_dim"]).unwrap_or(128);
+    let ratio = get_u64(text, &["indexer_compress_ratio"])
+        .unwrap_or(4)
+        .max(1);
+    let per_token = index_key_dim
+        .saturating_mul(STREAM)
+        .saturating_add(index_key_dim.saturating_mul(STREAM).div_ceil(ratio))
+        .saturating_add(3 * 4);
+    let index_bytes = attention_layers
+        .saturating_mul(per_token)
+        .saturating_mul(representative_tokens);
+
+    let fixed = linear_layers
+        .saturating_mul(state_bytes.saturating_add(window_bytes))
+        .saturating_add(ple_bytes);
+    usize::try_from(fixed.saturating_add(index_bytes)).unwrap_or(usize::MAX)
 }
 
 fn qwen3_next_fixed_state_bytes(config: &Value) -> usize {

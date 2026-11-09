@@ -353,6 +353,20 @@ pub(crate) struct PleCache {
     pub(crate) contexts: Vec<Vec<i64>>,
 }
 
+/// Placeholder while a test swaps the row table.
+#[cfg(test)]
+struct NoTable;
+
+#[cfg(test)]
+impl PleRowStore for NoTable {
+    fn lookup(
+        &self,
+        _ids: &[i64],
+    ) -> Result<UniquePtr<MlxArray>, super::ple_storage::PleStoreError> {
+        unreachable!("the table is replaced immediately")
+    }
+}
+
 pub(crate) struct PleLayer {
     hasher: NgramHasher,
     table: Box<dyn PleRowStore>,
@@ -369,6 +383,17 @@ pub(crate) struct PleLayer {
 }
 
 impl PleLayer {
+    /// Replace the row table, so the snapshot tests can run the same model
+    /// over a different store.
+    #[cfg(test)]
+    pub(crate) fn wrap_table_for_test(
+        &mut self,
+        wrap: impl FnOnce(Box<dyn PleRowStore>) -> Box<dyn PleRowStore>,
+    ) {
+        let table = std::mem::replace(&mut self.table, Box::new(NoTable));
+        self.table = wrap(table);
+    }
+
     pub(crate) fn from_weights(
         weights: &WeightMap,
         config: &ResolvedQwen4ExpConfig,
