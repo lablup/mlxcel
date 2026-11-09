@@ -371,7 +371,7 @@ fn argmax_chunk_width(vocab: usize) -> Option<usize> {
         return None;
     }
     let mut width = 1;
-    while width * 2 <= 512 && vocab % (width * 2) == 0 {
+    while width * 2 <= 512 && vocab.is_multiple_of(width * 2) {
         width *= 2;
     }
     (width >= 32 && vocab / width >= 2).then_some(width)
