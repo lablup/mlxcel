@@ -14,12 +14,14 @@
 
 use super::{
     InklingAudioPromptLayout, InklingAudioTokenIds, InklingPromptTokenIds,
-    InklingVideoPromptLayout, QwenMediaOrdinal, VlmPreparationSummary, expand_gemma3n_audio_tokens,
+    InklingVideoPromptLayout, QwenMediaOrdinal, QwenVideoTimestamps, QwenVisualGrid,
+    QwenVisualKind, VlmPreparationSummary, expand_gemma3n_audio_tokens,
     expand_gemma4_audio_tokens_for_server, expand_gemma4_unified_video_tokens,
     expand_gemma4_video_tokens, expand_inkling_audio_prompt,
     expand_nemotron_h_nano_omni_audio_tokens_for_server, format_molmo_v1_prompt_for_processor,
     insert_inkling_video_prompt, prepared_embedding_refs, qwen_media_order_from_prompt,
-    shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings, split_jina_vlm_prompt,
+    qwen_video_group_prefixes, shift_molmo_v1_image_input_idx_for_bos,
+    should_prepare_vlm_embeddings, split_jina_vlm_prompt,
 };
 use crate::vlm_prompt::{ImageTokenBlockInfo, apply_image_token_blocks};
 
@@ -362,6 +364,149 @@ fn qwen_media_order_from_prompt_rejects_missing_video_placeholder() {
     let err = qwen_media_order_from_prompt(&prompt, IMAGE, VIDEO, 1, 1).unwrap_err();
 
     assert!(err.to_string().contains("prompt/media mismatch"));
+}
+
+/// Mixed request: one image followed by one two-group video.
+fn mixed_image_then_video() -> (Vec<QwenMediaOrdinal>, Vec<QwenVisualGrid>) {
+    (
+        vec![QwenMediaOrdinal::Image(0), QwenMediaOrdinal::Video(0)],
+        vec![
+            QwenVisualGrid {
+                kind: QwenVisualKind::Image,
+                grid_thw: (1, 4, 4),
+            },
+            QwenVisualGrid {
+                kind: QwenVisualKind::Video,
+                grid_thw: (2, 4, 4),
+            },
+        ],
+    )
+}
+
+/// Encoder that maps each marker to its byte values, so the tests can see
+/// exactly which text reached the tokenizer.
+fn byte_encoder(text: &str) -> anyhow::Result<Vec<i32>> {
+    Ok(text.bytes().map(i32::from).collect())
+}
+
+#[test]
+fn qwen_video_group_prefixes_encode_one_marker_per_group() {
+    let (order, grids) = mixed_image_then_video();
+    let seconds = vec![vec![0.26_f64, 1.5]];
+    let timing = QwenVideoTimestamps {
+        group_seconds: &seconds,
+        encode_text: &byte_encoder,
+    };
+
+    let prefixes = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing))
+        .unwrap()
+        .expect("a timestamp family with a video renders markers");
+
+    assert_eq!(prefixes.len(), 1);
+    assert_eq!(prefixes[0].len(), 2);
+    assert_eq!(
+        prefixes[0][0],
+        byte_encoder("<0.3 seconds>").unwrap(),
+        "markers use one decimal place"
+    );
+    assert_eq!(prefixes[0][1], byte_encoder("<1.5 seconds>").unwrap());
+}
+
+#[test]
+fn qwen_video_group_prefixes_keep_flat_layout_for_non_timestamp_families() {
+    let (order, grids) = mixed_image_then_video();
+    // Timing is supplied but a family without timestamps must ignore it, and
+    // must not even require it.
+    let seconds = vec![vec![0.0_f64, 1.0]];
+    let timing = QwenVideoTimestamps {
+        group_seconds: &seconds,
+        encode_text: &byte_encoder,
+    };
+
+    assert!(
+        qwen_video_group_prefixes(false, &order, &grids, 1, Some(&timing))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        qwen_video_group_prefixes(false, &order, &grids, 1, None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn qwen_video_group_prefixes_ignore_image_only_requests() {
+    let order = vec![QwenMediaOrdinal::Image(0)];
+    let grids = vec![QwenVisualGrid {
+        kind: QwenVisualKind::Image,
+        grid_thw: (1, 4, 4),
+    }];
+
+    assert!(
+        qwen_video_group_prefixes(true, &order, &grids, 0, None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn qwen_video_group_prefixes_reject_missing_timing_for_timestamp_family() {
+    let (order, grids) = mixed_image_then_video();
+
+    let err = qwen_video_group_prefixes(true, &order, &grids, 1, None).unwrap_err();
+
+    assert!(err.to_string().contains("no video timing was provided"));
+}
+
+#[test]
+fn qwen_video_group_prefixes_reject_video_count_mismatch() {
+    let (order, grids) = mixed_image_then_video();
+    let seconds = vec![vec![0.0_f64, 1.0], vec![0.0_f64, 1.0]];
+    let timing = QwenVideoTimestamps {
+        group_seconds: &seconds,
+        encode_text: &byte_encoder,
+    };
+
+    let err = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing)).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("covers 2 video(s), but request has 1")
+    );
+}
+
+#[test]
+fn qwen_video_group_prefixes_reject_group_count_mismatch() {
+    let (order, grids) = mixed_image_then_video();
+    // The processor derived two temporal groups, but timing has three.
+    let seconds = vec![vec![0.0_f64, 1.0, 2.0]];
+    let timing = QwenVideoTimestamps {
+        group_seconds: &seconds,
+        encode_text: &byte_encoder,
+    };
+
+    let err = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing)).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("has 2 temporal group(s), but 3 timestamp(s)")
+    );
+}
+
+#[test]
+fn qwen_video_group_prefixes_propagate_tokenizer_errors() {
+    let (order, grids) = mixed_image_then_video();
+    let seconds = vec![vec![0.0_f64, 1.0]];
+    let failing = |_: &str| -> anyhow::Result<Vec<i32>> { anyhow::bail!("tokenizer exploded") };
+    let timing = QwenVideoTimestamps {
+        group_seconds: &seconds,
+        encode_text: &failing,
+    };
+
+    let err = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing)).unwrap_err();
+
+    assert!(err.to_string().contains("tokenizer exploded"));
 }
 
 #[test]

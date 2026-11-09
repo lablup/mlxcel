@@ -952,6 +952,59 @@ pub struct QwenVideoTimestamps<'a> {
     pub encode_text: &'a dyn Fn(&str) -> Result<Vec<i32>>,
 }
 
+/// Resolve the per-group timestamp marker tokens for each video (#2402).
+///
+/// Returns `None` for a family (or request) that renders the flat, timeless
+/// video layout. Otherwise returns one `Vec<Vec<i32>>` per video, in video
+/// order, holding the encoded marker of every temporal group. A timestamp
+/// family with videos but no timing is an error, as is any disagreement
+/// between the timing and the processor-derived video grids; the caller never
+/// falls back to the flat layout.
+fn qwen_video_group_prefixes(
+    family_renders_timestamps: bool,
+    media_order: &[QwenMediaOrdinal],
+    visual_grids: &[QwenVisualGrid],
+    video_count: usize,
+    video_timestamps: Option<&QwenVideoTimestamps<'_>>,
+) -> Result<Option<Vec<Vec<Vec<i32>>>>> {
+    if !family_renders_timestamps || video_count == 0 {
+        return Ok(None);
+    }
+    let timestamps = video_timestamps.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Qwen-VL video request needs per-group timestamps for this model family, but no \
+             video timing was provided"
+        )
+    })?;
+    if timestamps.group_seconds.len() != video_count {
+        anyhow::bail!(
+            "Qwen-VL video timing covers {} video(s), but request has {}",
+            timestamps.group_seconds.len(),
+            video_count
+        );
+    }
+    let mut group_prefixes = Vec::with_capacity(video_count);
+    for (ordinal, item) in media_order.iter().zip(visual_grids) {
+        let QwenMediaOrdinal::Video(idx) = *ordinal else {
+            continue;
+        };
+        let seconds = &timestamps.group_seconds[idx];
+        if seconds.len() != item.grid_thw.0 as usize {
+            anyhow::bail!(
+                "Qwen-VL video {idx} has {} temporal group(s), but {} timestamp(s) were provided",
+                item.grid_thw.0,
+                seconds.len()
+            );
+        }
+        let prefixes = seconds
+            .iter()
+            .map(|&secs| (timestamps.encode_text)(&crate::qwen_vl::qwen_video_timestamp_text(secs)))
+            .collect::<Result<Vec<_>>>()?;
+        group_prefixes.push(prefixes);
+    }
+    Ok(Some(group_prefixes))
+}
+
 /// Compute Qwen-VL embeddings for a mixed image/video request.
 ///
 /// The media order is taken from the rendered prompt when it already contains
@@ -1007,42 +1060,13 @@ pub fn compute_qwen_vl_media_embeddings(
             grid_thw: grid,
         })
         .collect::<Vec<_>>();
-    let inserted = if info.video_timestamps && !videos.is_empty() {
-        let timestamps = video_timestamps.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Qwen-VL video request needs per-group timestamps for this model family, but no \
-                 video timing was provided"
-            )
-        })?;
-        if timestamps.group_seconds.len() != videos.len() {
-            anyhow::bail!(
-                "Qwen-VL video timing covers {} video(s), but request has {}",
-                timestamps.group_seconds.len(),
-                videos.len()
-            );
-        }
-        let mut group_prefixes = Vec::with_capacity(videos.len());
-        for (ordinal, item) in media_order.iter().zip(&visual_grids) {
-            let QwenMediaOrdinal::Video(idx) = *ordinal else {
-                continue;
-            };
-            let seconds = &timestamps.group_seconds[idx];
-            if seconds.len() != item.grid_thw.0 as usize {
-                anyhow::bail!(
-                    "Qwen-VL video {idx} has {} temporal group(s), but {} timestamp(s) were \
-                     provided",
-                    item.grid_thw.0,
-                    seconds.len()
-                );
-            }
-            let prefixes = seconds
-                .iter()
-                .map(|&secs| {
-                    (timestamps.encode_text)(&crate::qwen_vl::qwen_video_timestamp_text(secs))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            group_prefixes.push(prefixes);
-        }
+    let inserted = if let Some(group_prefixes) = qwen_video_group_prefixes(
+        info.video_timestamps,
+        &media_order,
+        &visual_grids,
+        videos.len(),
+        video_timestamps,
+    )? {
         insert_qwen_vl_media_tokens_timestamped(
             prompt_tokens,
             &visual_grids,
