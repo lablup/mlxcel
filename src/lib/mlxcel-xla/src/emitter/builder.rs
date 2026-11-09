@@ -319,6 +319,26 @@ pub struct Builder {
     precision: Precision,
     gemma3n_qmv: bool,
     projection_layout: ProjectionLayout,
+    native_proj: bool,
+    packed_operands: std::collections::HashMap<String, PackedOperand>,
+}
+
+/// The packed tensors behind a projection weight that the graph leaves packed
+/// (issue #2889).
+///
+/// [`take_weight`] registers one of these in native-decode mode and returns a
+/// placeholder `Val` standing for the logical projection; the layout-aware
+/// linear helpers see the registration and emit the native GEMV dispatch
+/// instead of a `dot_general`. The placeholder must never reach any other op.
+#[derive(Clone, Debug)]
+pub struct PackedOperand {
+    pub packed: Val,
+    pub scales: Val,
+    pub biases: Val,
+    /// Output width (the checkpoint's `out` axis).
+    pub out: usize,
+    /// Contraction width (`in`).
+    pub input: usize,
 }
 
 /// Layout a graph declares for projection weights (issue #2859).
@@ -386,7 +406,30 @@ impl Builder {
             precision: Precision::F32,
             gemma3n_qmv: false,
             projection_layout: ProjectionLayout::OutIn,
+            native_proj: false,
+            packed_operands: std::collections::HashMap::new(),
         }
+    }
+
+    /// Run projections from packed 4-bit weights through the native GEMV
+    /// dispatch instead of dequantizing them in the graph (issue #2889).
+    /// Only the single-sequence decode graph sets this.
+    #[must_use]
+    pub fn with_native_proj(mut self, native: bool) -> Self {
+        self.native_proj = native;
+        self
+    }
+
+    /// Whether this graph uses the native packed-weight projections.
+    #[must_use]
+    pub fn native_proj_enabled(&self) -> bool {
+        self.native_proj
+    }
+
+    /// Register the packed tensors behind a projection the graph keeps packed,
+    /// keyed by the placeholder handle `logical`.
+    pub fn register_packed_operand(&mut self, logical: &Val, operand: PackedOperand) {
+        self.packed_operands.insert(logical.name.clone(), operand);
     }
 
     /// Set the projection weight layout (builder-style). Default is
@@ -1980,6 +2023,9 @@ impl Builder {
 
     /// Linear over a projection weight in the layout this graph declares.
     pub fn linear_proj(&mut self, x: &Val, w: &Val) -> Val {
+        if let Some(operand) = self.packed_operands.get(&w.name).cloned() {
+            return self.native_qmv(x, &operand);
+        }
         match self.projection_layout {
             ProjectionLayout::OutIn => self.linear(x, w),
             ProjectionLayout::InOut => self.linear_t(x, w),
@@ -1988,9 +2034,64 @@ impl Builder {
 
     /// Sequence-batched [`Self::linear_proj`].
     pub fn linear_seq_proj(&mut self, x: &Val, w: &Val) -> Val {
+        if let Some(operand) = self.packed_operands.get(&w.name).cloned() {
+            return self.native_qmv(x, &operand);
+        }
         match self.projection_layout {
             ProjectionLayout::OutIn => self.linear_seq(x, w),
             ProjectionLayout::InOut => self.linear_seq_t(x, w),
+        }
+    }
+
+    /// Emit the native packed-weight GEMV (issue #2889).
+    ///
+    /// `y[n] = sum_k x[k] * (q[n,k] * scale[n,k/group] + bias[n,k/group])`,
+    /// computed by the HIP kernel embedded in the module as an external
+    /// executable. Activations are narrowed to f16 (matching the `dot_general`
+    /// operand demotion this replaces) and the kernel accumulates in f32.
+    fn native_qmv(&mut self, x: &Val, operand: &PackedOperand) -> Val {
+        assert!(
+            matches!(self.projection_layout, ProjectionLayout::InOut),
+            "the native packed projection is a single-sequence (InOut) path"
+        );
+        assert_eq!(
+            x.ty.shape.len(),
+            1,
+            "the native GEMV consumes one activation row"
+        );
+        let k = x.ty.shape[0];
+        let n = operand.out;
+        assert_eq!(k, operand.input, "native GEMV contraction width mismatch");
+        let xf16 = if x.ty.elt == "f16" {
+            x.clone()
+        } else {
+            self.convert(x, "f16")
+        };
+        let n_index = self.fresh();
+        self.line(format!("{n_index} = arith.constant {n} : index"));
+        let k_i32 = self.fresh();
+        self.line(format!("{k_i32} = arith.constant {k} : i32"));
+        let n_i32 = self.fresh();
+        self.line(format!("{n_i32} = arith.constant {n} : i32"));
+        let result = self.fresh();
+        let result_ty = Ty::f32(vec![n]);
+        self.line(format!(
+            "{result} = flow.dispatch @custom_qmv::@qmv4_kernel[{n_index}]\
+             ({k_i32}, {n_i32}, {x}, {packed}, {scales}, {biases}) : \
+             (i32, i32, {x_ty}, {packed_ty}, {scales_ty}, {biases_ty}) -> {result_ty}",
+            x = xf16.name,
+            x_ty = xf16.ty.render(),
+            packed = operand.packed.name,
+            packed_ty = operand.packed.ty.render(),
+            scales = operand.scales.name,
+            scales_ty = operand.scales.ty.render(),
+            biases = operand.biases.name,
+            biases_ty = operand.biases.ty.render(),
+            result_ty = result_ty.render(),
+        ));
+        Val {
+            name: result,
+            ty: result_ty,
         }
     }
 

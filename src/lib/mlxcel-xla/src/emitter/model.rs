@@ -33,9 +33,7 @@
 //! `embed` matrix (see [`take_lm_head`]); a tied checkpoint emits no such arg and
 //! is byte-identical to before.
 
-use super::builder::{
-    Builder, Precision, ProjectionLayout, Ty, Val, precision_from_env, quant_in_graph,
-};
+use super::builder::{Builder, Precision, ProjectionLayout, Ty, Val, precision_from_env};
 use super::config::{Config, DeepStackConfig, MropeLayout, NormStyle};
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
@@ -374,13 +372,24 @@ fn take_weight(
     loc: String,
 ) -> Val {
     match c.quantization {
-        Some(qc) if quant_in_graph() && c.supports_packed_quant() => {
+        Some(qc) if c.packed_args && c.supports_packed_quant() => {
             let in_packed = in_ * qc.bits / 32;
             let n_groups = in_ / qc.group_size;
+            // issue #2889: the native GEMV dispatch carries the packed weight as a
+            // signless `i32` operand. The StableHLO input pipeline legalizes
+            // unsigned integers away, and a `flow.dispatch` operand with a `ui32`
+            // type has no legalization (the pass rejects it outright), so the
+            // native path uses the same-width signless type. The HIP kernel reads
+            // the buffer as `uint32_t`, so the bits are unchanged.
+            let packed_elt = if b.native_proj_enabled() {
+                "i32"
+            } else {
+                "ui32"
+            };
             let packed = take_arg(
                 decls,
                 idx,
-                Ty::new(vec![out, in_packed], "ui32"),
+                Ty::new(vec![out, in_packed], packed_elt),
                 loc.clone(),
             );
             let scales = take_arg(
@@ -395,6 +404,30 @@ fn take_weight(
                 Ty::new(vec![out, n_groups], "f16"),
                 format!("{loc}.biases"),
             );
+            if b.native_proj_enabled() {
+                // issue #2889: leave the weight packed and let the native HIP
+                // GEMV consume the three tensors; the returned handle only
+                // names the packed argument for the linear helpers to find.
+                assert!(
+                    matches!(b.projection_layout(), ProjectionLayout::InOut),
+                    "the native packed projection is a single-sequence (InOut) path"
+                );
+                let logical = Val {
+                    name: packed.name.clone(),
+                    ty: Ty::f32(vec![in_, out]),
+                };
+                b.register_packed_operand(
+                    &logical,
+                    super::builder::PackedOperand {
+                        packed: packed.clone(),
+                        scales: scales.clone(),
+                        biases: biases.clone(),
+                        out,
+                        input: in_,
+                    },
+                );
+                return logical;
+            }
             // The packed dequant always reconstructs the checkpoint's `[out, in]`.
             // The `InOut` graphs consume the transposed form, which costs one
             // in-graph transpose per weight (the packed opt-in already trades
@@ -2669,9 +2702,25 @@ pub fn emit_decode(c: &Config, sample: bool) -> String {
 }
 
 pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> String {
+    emit_decode_with_native(c, sample, precision, None)
+}
+
+/// Emit the single-sequence decode graph, optionally with the native packed
+/// projection dispatch (issue #2889).
+///
+/// `native` carries the target alias and the `hal.executable.source` block that
+/// embeds the compiled HIP kernel; the projections then stay packed and the
+/// graph calls `@custom_qmv::@qmv4_kernel` instead of dequantizing weights.
+pub fn emit_decode_with_native(
+    c: &Config,
+    sample: bool,
+    precision: Precision,
+    native: Option<(&str, &str)>,
+) -> String {
     let mut b = Builder::new()
         .with_precision(precision)
-        .with_projection_layout(c.projection_layout);
+        .with_projection_layout(c.projection_layout)
+        .with_native_proj(native.is_some());
     let (decls, a) = build_arg_schema(&mut b, c);
     let k = emit_consts(&mut b, c);
 
@@ -2775,7 +2824,9 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
     let sig = render_signature(&decls);
     let cache_ty = Ty::f32(vec![c.n_layers, seq, c.cache_heads(), c.cache_dim()]).render();
     format!(
-        "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        "{alias}module @decode_step {{\n{native}  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        alias = native.map(|(alias, _)| alias).unwrap_or(""),
+        native = native.map(|(_, source)| source).unwrap_or(""),
         sig = sig,
         out_ty = out_ty,
         cache_ty = cache_ty,

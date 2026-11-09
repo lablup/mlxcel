@@ -23,7 +23,7 @@
 //! feature-gated `iree.rs`) so it is unit-tested without the IREE runtime and stays
 //! in lock-step with the emitter's arg order (`emitter::model::take_layer_weights`).
 
-use crate::emitter::{Config, ProjectionLayout, quant_in_graph};
+use crate::emitter::{Config, ProjectionLayout};
 
 /// One checkpoint weight the loader reads, in the emitter's arg order. Most are a
 /// whole safetensors tensor; a Phi3 checkpoint fuses q/k/v into one `qkv_proj` and
@@ -104,7 +104,7 @@ impl WeightSpec {
 /// family, and it mirrors `take_layer_weights` so the loaded buffers line up with
 /// the emitted graph's args exactly.
 pub(crate) fn weight_specs(cfg: &Config) -> Vec<WeightSpec> {
-    weight_specs_q(cfg, quant_in_graph() && cfg.supports_packed_quant())
+    weight_specs_q(cfg, cfg.packed_args && cfg.supports_packed_quant())
 }
 
 /// Push a projection weight `name` (`X.weight`) in the emitter's arg order: three

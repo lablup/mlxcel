@@ -463,6 +463,11 @@ pub struct Config {
     /// the engine that emits the graph: the single-sequence session loads
     /// `InOut`, the continuous-batching engine keeps the checkpoint's `OutIn`.
     pub projection_layout: ProjectionLayout,
+    /// Whether the graph declares the checkpoint's packed 4-bit projection
+    /// tensors instead of f16-resident weights (issues #516 / #2889). Set by
+    /// the loader from `MLXCEL_XLA_QUANT`; off for every test config, so the
+    /// committed goldens stay byte-identical.
+    pub packed_args: bool,
 }
 
 impl Config {
@@ -524,6 +529,7 @@ impl Config {
             fused_gate_up: false,
             phi4_lora: None,
             projection_layout: ProjectionLayout::OutIn,
+            packed_args: false,
         }
     }
 
@@ -1657,6 +1663,7 @@ impl Config {
             fused_gate_up,
             phi4_lora,
             projection_layout: ProjectionLayout::OutIn,
+            packed_args: false,
         })
     }
 
@@ -1693,6 +1700,20 @@ impl Config {
             && !self.dense_mlp
             && self.moe.is_none()
             && self.mla.is_none()
+    }
+
+    /// Whether the checkpoint's packing matches the native ROCm GEMV kernel
+    /// (issue #2889): MLX affine 4-bit with one scale and bias per group of 64
+    /// inputs. Any other quantization keeps the f16 weight path, because the
+    /// kernel hardcodes both the 8-lane nibble layout and the group width.
+    pub(crate) fn native_qmv_supported(&self) -> bool {
+        matches!(
+            self.quantization,
+            Some(QuantConfig {
+                bits: 4,
+                group_size: 64,
+            })
+        )
     }
 
     /// Whether the issue #572 f16-resident-weight path can apply: the standard
@@ -1824,6 +1845,30 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// issue #2889: the native ROCm GEMV kernel hardcodes the 4-bit /
+    /// group-64 packing, so any other quantization keeps the f16 path.
+    #[test]
+    fn native_qmv_requires_q4_group64() {
+        let with = |quantization| {
+            let mut config = Config::llama_3_2_1b();
+            config.quantization = quantization;
+            config.native_qmv_supported()
+        };
+        assert!(with(Some(QuantConfig {
+            bits: 4,
+            group_size: 64,
+        })));
+        assert!(!with(Some(QuantConfig {
+            bits: 8,
+            group_size: 64,
+        })));
+        assert!(!with(Some(QuantConfig {
+            bits: 4,
+            group_size: 32,
+        })));
+        assert!(!with(None));
+    }
 
     #[test]
     fn gemma3_embeddings_prefill_owns_the_complete_external_mask() {

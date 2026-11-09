@@ -94,6 +94,9 @@ mod molmo2;
 mod molmo2_vision_runtime;
 #[cfg(feature = "iree")]
 mod molmo_vision_runtime;
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod native_qmv;
 #[cfg(feature = "iree")]
 mod phi4_audio;
 #[cfg(feature = "iree")]

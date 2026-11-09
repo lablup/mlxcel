@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Native HIP GEMV for packed 4-bit decode projections on ROCm** (#2890). `MLXCEL_XLA_QUANT=native` keeps the checkpoint's 4-bit projections resident and dispatches `csrc/qmv4.hip` as an external HSACO embedded in the decode graph (`hal.executable.source @custom_qmv`) instead of streaming f16-expanded weights. On `gfx1151` with llama-3.2-1b-instruct-4bit, greedy decode rises from 30.0 to 80.3 tok/s (`n=128`, capacity 256, warm vmfb) with byte-identical output on tied and untied checkpoints; the switch covers the single-sequence decode graph only, so prefill and the ragged batch engine keep the f16 path, and a missing `hipcc` logs a warning and falls back to it.
+
 ### Changed
 
 - The MLX pin advances from `7ca40033` to `9f806b36`, a reproducible main snapshot 46 commits newer and 81 past stable v0.32.4 (which the previous pin already postdated). Every CPU, Metal and CUDA whole-file overlay is rebased onto it. Upstream now accumulates the CPU affine quantized matmul in float (#4803), so that half of the #2248 overlay is retired and only `fp_qmm` / `fp_qmm_t` stay local; the new Metal 3-16-row affine `qmv_mma` (#4787) is placed behind the existing `MLXCEL_QMV_WIDE` off-switch so the speculative exactness retry still restores byte-equality between a verify block and the single-token chain; and the ROCm core files are retargeted with the fork unchanged. See `docs/mlxcelverse/mlx-pin-2026-11-06.md`.
