@@ -1380,9 +1380,10 @@ async fn router_completions(
 ///
 /// # Parity notes
 ///
-/// - `logprobs` and `response_format` (structured output) are rejected with a
-///   400 because their worker-side state is not represented by the handoff.
-///   Sampling and reasoning-budget defaults are carried per request.
+/// - `logprobs` and any `response_format` other than `{"type": "text"}` are
+///   rejected with a 400 because their worker-side state is not represented by
+///   the handoff. Sampling and reasoning-budget defaults are carried per
+///   request.
 /// - `completion_tokens` uses the worker's authoritative generated-token count
 ///   carried over the wire ([`ResultFrame::generated_tokens`], issue #387),
 ///   which is exact even for byte-fallback tokenizers (e.g. Gemma `<0xXX>` byte

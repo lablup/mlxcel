@@ -2111,10 +2111,11 @@ pub(crate) fn validate_chat_tool_inputs(request: &ChatCompletionRequest) -> Resu
 }
 
 /// Whether `response_format` asks for constrained decoding. Absent and
-/// `{"type": "text"}` both mean no; every other shape is either a schema or a
-/// malformed value that the structured-output builder reports on its own.
-/// The disaggregated router front rejects every value that counts, since its
-/// handoff cannot carry a constraint.
+/// `{"type": "text"}` both mean no. Every other shape counts as yes, including
+/// an object with a missing or non-string `type`, which the structured-output
+/// builder reads as text: such a value may be a schema request with a typo, so
+/// callers fail closed on it. The disaggregated router front rejects every
+/// value that counts, since its handoff cannot carry a constraint.
 pub(crate) fn response_format_requests_constraint(
     response_format: Option<&serde_json::Value>,
 ) -> bool {
