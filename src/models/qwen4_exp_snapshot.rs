@@ -317,6 +317,14 @@ impl Qwen4ExpModel {
                             ],
                         )?;
                     }
+                    if token_len > 0
+                        && (snapshot.tensor(&format!("{prefix}.state_cache")).is_none()
+                            || snapshot.tensor(&format!("{prefix}.conv_state")).is_none())
+                    {
+                        return Err(format!(
+                            "Qwen4-Exp snapshot restore, {prefix}: missing GatedDeltaNet state for {token_len} tokens"
+                        ));
+                    }
                     *delta = GatedDeltaCache::new();
                     delta.restore_from(snapshot, &prefix);
                     if let Some(ple) = ple {
@@ -329,6 +337,15 @@ impl Qwen4ExpModel {
                                 window,
                                 &[Some(1), Some(window_rows), None],
                             )?;
+                        }
+                        if token_len > 0
+                            && snapshot
+                                .tensor(&format!("{prefix}.ple.conv_state"))
+                                .is_none()
+                        {
+                            return Err(format!(
+                                "Qwen4-Exp snapshot restore, {prefix}: missing PLE window for {token_len} tokens"
+                            ));
                         }
                         ple.conv_state =
                             restore_optional(snapshot, format!("{prefix}.ple.conv_state"));

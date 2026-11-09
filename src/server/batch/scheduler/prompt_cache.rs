@@ -1468,15 +1468,6 @@ impl BatchScheduler {
     }
 }
 
-/// Longest prefix a request of `prompt_len` tokens may adopt from a cache hit
-/// that matched `matched_len` of them (#1760).
-///
-/// Prefill must forward at least the last prompt token so the sampler has a
-/// logit row to draw the first generated token from. When a hit covers the
-/// whole prompt (a client replaying an identical prompt), the adopt therefore
-/// stops one token short, and the prefill's forward over that last token lands
-/// on the position it belongs to. Adopting all `prompt_len` tokens and then
-/// re-running the last one would leave it in the cache twice.
 /// Process-wide availability gate for snapshot-store growth.
 fn snapshot_growth_gate() -> &'static mlxcel_core::host_memory::AvailabilityGate {
     static GATE: std::sync::OnceLock<mlxcel_core::host_memory::AvailabilityGate> =
@@ -1493,6 +1484,15 @@ fn snapshot_growth_allowed(
     growth_bytes == 0 || gate.allows_step(growth_bytes)
 }
 
+/// Longest prefix a request of `prompt_len` tokens may adopt from a cache hit
+/// that matched `matched_len` of them (#1760).
+///
+/// Prefill must forward at least the last prompt token so the sampler has a
+/// logit row to draw the first generated token from. When a hit covers the
+/// whole prompt (a client replaying an identical prompt), the adopt therefore
+/// stops one token short, and the prefill's forward over that last token lands
+/// on the position it belongs to. Adopting all `prompt_len` tokens and then
+/// re-running the last one would leave it in the cache twice.
 pub(super) fn whole_prompt_reuse_cap(matched_len: usize, prompt_len: usize) -> usize {
     matched_len.min(prompt_len.saturating_sub(1))
 }
