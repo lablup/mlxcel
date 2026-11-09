@@ -28,8 +28,8 @@
 //! PLE layer a convolution window and token context besides its
 //! GatedDeltaNet state, so the model owns its per-sequence state.
 //!
-//! Out of scope: MTP drafting (`mtp.*` tensors are dropped), external
-//! `ple_storage`, FP8 checkpoints, the fused QSA Metal kernel, prompt-cache
+//! Out of scope: MTP drafting (`mtp.*` tensors are dropped), FP8 checkpoints,
+//! the fused QSA Metal kernel, prompt-cache
 //! snapshots and batched prefill.
 
 #[path = "qwen4_exp_config.rs"]
@@ -46,6 +46,22 @@ mod moe;
 mod norm;
 #[path = "qwen4_exp_ple.rs"]
 mod ple;
+#[path = "qwen4_exp_ple_cache.rs"]
+pub mod ple_cache;
+#[path = "qwen4_exp_ple_direct.rs"]
+mod ple_direct;
+#[path = "qwen4_exp_ple_footprint.rs"]
+pub mod ple_footprint;
+#[path = "qwen4_exp_ple_io.rs"]
+pub mod ple_io;
+#[path = "qwen4_exp_ple_manifest.rs"]
+pub mod ple_manifest;
+#[path = "qwen4_exp_ple_prepare.rs"]
+pub mod ple_prepare;
+#[path = "qwen4_exp_ple_stats.rs"]
+pub mod ple_stats;
+#[path = "qwen4_exp_ple_storage.rs"]
+pub mod ple_storage;
 #[path = "qwen4_exp_qsa.rs"]
 mod qsa;
 #[path = "qwen4_exp_sanitize.rs"]

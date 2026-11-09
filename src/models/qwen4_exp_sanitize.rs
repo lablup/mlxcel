@@ -101,6 +101,11 @@ pub fn sanitize_weights(
             vision.insert(key, value);
             continue;
         }
+        // An external table is read from its manifest, whatever the shards
+        // still hold.
+        if config.ple_storage.is_some() && key.contains(".ple.ple_embedding.ngram_embedding.") {
+            continue;
+        }
         if config.raw.tie_word_embeddings && key.starts_with("lm_head.") {
             continue;
         }

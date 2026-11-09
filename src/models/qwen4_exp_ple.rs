@@ -29,6 +29,7 @@ use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 
 use super::config::ResolvedQwen4ExpConfig;
 use super::norm::ZeroCenteredRmsNorm;
+use super::ple_storage::{PleRowStore, open_external_table};
 use super::shapes;
 
 const SPLITMIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -219,6 +220,7 @@ pub(crate) struct ShardedEmbedding {
     shards: Vec<UnifiedEmbedding>,
     /// Row offset of each shard, plus the total row count.
     offsets: Vec<i64>,
+    row_width: i32,
 }
 
 impl ShardedEmbedding {
@@ -299,7 +301,19 @@ impl ShardedEmbedding {
             )?);
             offsets.push(offsets[index as usize] + expected_rows as i64);
         }
-        Ok(Self { shards, offsets })
+        Ok(Self {
+            shards,
+            offsets,
+            row_width: row_width as i32,
+        })
+    }
+
+    pub(crate) fn row_count(&self) -> u64 {
+        self.offsets.last().copied().unwrap_or(0) as u64
+    }
+
+    pub(crate) fn row_width(&self) -> i32 {
+        self.row_width
     }
 
     /// Gather `ids` (all in `[0, rows)`) into `[ids.len(), row_width]`.
@@ -340,7 +354,7 @@ pub(crate) struct PleCache {
 
 pub(crate) struct PleLayer {
     hasher: NgramHasher,
-    table: ShardedEmbedding,
+    table: Box<dyn PleRowStore>,
     key_proj: UnifiedLinear,
     value_proj: UnifiedLinear,
     norm_key: ZeroCenteredRmsNorm,
@@ -361,18 +375,42 @@ impl PleLayer {
         ple_layer_index: usize,
     ) -> Result<Self, String> {
         let raw = &config.raw;
-        let table_prefix = format!("{prefix}.ple_embedding.ngram_embedding");
-        let table_rows =
-            ShardedEmbedding::stored_rows(weights, &table_prefix, raw.split_ngram_parts)?;
-        let hasher = NgramHasher::new(config, ple_layer_index, table_rows)?;
-        let row_width = config.ple_embed_dim / hasher.ngram_heads();
-        let table = ShardedEmbedding::from_weights(
-            weights,
-            config,
-            &table_prefix,
-            hasher.padded_vocab_size,
-            row_width,
-        )?;
+        let (hasher, table): (NgramHasher, Box<dyn PleRowStore>) = match &config.ple_storage {
+            Some(storage) => {
+                let table = open_external_table(storage, config)?;
+                let hasher = NgramHasher::new(config, ple_layer_index, table.row_count())?;
+                if table.row_count() != hasher.padded_vocab_size {
+                    return Err(format!(
+                        "external PLE row count does not match model configuration: {} != {}",
+                        table.row_count(),
+                        hasher.padded_vocab_size
+                    ));
+                }
+                let row_width = config.ple_embed_dim / hasher.ngram_heads();
+                if table.row_width() != row_width {
+                    return Err(format!(
+                        "external PLE row width does not match model configuration: {} != {row_width}",
+                        table.row_width()
+                    ));
+                }
+                (hasher, Box::new(table))
+            }
+            None => {
+                let table_prefix = format!("{prefix}.ple_embedding.ngram_embedding");
+                let table_rows =
+                    ShardedEmbedding::stored_rows(weights, &table_prefix, raw.split_ngram_parts)?;
+                let hasher = NgramHasher::new(config, ple_layer_index, table_rows)?;
+                let row_width = config.ple_embed_dim / hasher.ngram_heads();
+                let table = ShardedEmbedding::from_weights(
+                    weights,
+                    config,
+                    &table_prefix,
+                    hasher.padded_vocab_size,
+                    row_width,
+                )?;
+                (hasher, Box::new(table))
+            }
+        };
         verify_stored_hash_state(weights, prefix, &hasher)?;
 
         let streams = raw.hc_count * raw.hidden_size;
@@ -440,10 +478,30 @@ impl PleLayer {
             ids.extend(row_ids);
             *context = next;
         }
-        let rows = self.table.lookup(&ids);
+        // A forward has no error channel; a failed disk read is unrecoverable.
+        let rows = self
+            .table
+            .lookup(&ids)
+            .unwrap_or_else(|error| panic!("Qwen4-Exp PLE lookup failed: {error}"));
+        self.gather_ahead(tokens.len(), cache);
         let batch = tokens.len() as i32;
         let length = tokens.first().map_or(0, Vec::len) as i32;
         mlxcel_core::reshape(&rows, &[batch, length, -1])
+    }
+
+    /// Hash the next prefill piece's ids and start reading them while the GPU
+    /// runs this one. Single-row prefill only: batched rows have no shared
+    /// next piece.
+    fn gather_ahead(&self, batch: usize, cache: &PleCache) {
+        if batch != 1 || !self.table.wants_prefetch() {
+            return;
+        }
+        let Some(upcoming) = mlxcel_core::prefill_lookahead::take() else {
+            return;
+        };
+        let tokens: Vec<i64> = upcoming.iter().copied().map(i64::from).collect();
+        let (ids, _) = self.hasher.ids(&cache.contexts[0], &tokens);
+        self.table.prefetch(&ids);
     }
 
     fn short_conv(&self, x: &MlxArray, cache: &mut PleCache) -> UniquePtr<MlxArray> {

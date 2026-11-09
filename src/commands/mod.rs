@@ -40,10 +40,11 @@ mod generate_voicechat;
 pub(crate) mod inspect;
 pub(crate) mod models;
 pub(crate) mod predict;
+#[cfg(feature = "surgery")]
+pub(crate) mod prepare_external_ple;
 pub(crate) mod rerank;
 pub(crate) mod run;
 mod serve;
-#[cfg(feature = "surgery")]
 pub(crate) mod split_mtp;
 pub(crate) mod tag;
 pub(crate) mod tune;
@@ -58,10 +59,11 @@ pub(crate) use generate_image::run_generate_image;
 pub(crate) use inspect::run_inspect;
 pub(crate) use models::{run_list_local, run_remove};
 pub(crate) use predict::run_predict;
+#[cfg(feature = "surgery")]
+pub(crate) use prepare_external_ple::{PrepareExternalPleArgs, run_prepare_external_ple};
 pub(crate) use rerank::{RerankArgs, run_rerank};
 pub(crate) use run::{RunArgs, run_run};
 pub(crate) use serve::run_serve;
-#[cfg(feature = "surgery")]
 pub(crate) use split_mtp::{SplitMtpArgs, run_split_mtp};
 pub(crate) use tag::{TagArgs, run_tag};
 pub(crate) use tune::{TuneArgs, run_tune};

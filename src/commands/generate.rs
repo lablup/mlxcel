@@ -1395,6 +1395,9 @@ fn print_generation_result(
             stats.generated_tokens, total_time_sec, stats.decode_tok_per_sec
         );
     }
+    if let Some(line) = mlxcel::models::qwen4_exp::ple_stats::ple_stats_line() {
+        println!("{line}");
+    }
 
     Ok(())
 }

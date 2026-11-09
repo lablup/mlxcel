@@ -163,6 +163,11 @@ impl BatchScheduler {
     ) -> Result<UniquePtr<mlxcel_core::MlxArray>, PieceFailure> {
         let _span = self.announce_prefill_span(seq);
         let tokens = &seq.prompt_tokens[piece.range.clone()];
+        let upcoming = plan
+            .piece_starting_at(piece.range.end)
+            .and_then(|next| seq.prompt_tokens.get(next.range.clone()))
+            .unwrap_or(&[]);
+        let _lookahead = mlxcel_core::prefill_lookahead::announce(upcoming);
         // The mask anchors to the positions already in the KV cache. For a
         // model-owned family the pool entry holds no `KVCache` to read; its
         // own offset equals the cursor, since every earlier padded piece was

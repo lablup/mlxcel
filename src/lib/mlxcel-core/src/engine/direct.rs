@@ -570,8 +570,13 @@ impl<M: LanguageModel> DirectEngine<M> {
         // makes that choice once for the prompt, not once per piece.
         let _span = crate::prefill_span::announce(prompt_tokens.len() as i32);
         let mut last_logits = None;
-        for piece in plan.pieces() {
+        for (index, piece) in plan.pieces().iter().enumerate() {
             let tokens = &prompt_tokens[piece.range.clone()];
+            let upcoming = plan
+                .pieces()
+                .get(index + 1)
+                .map_or(&[][..], |next| &prompt_tokens[next.range.clone()]);
+            let _lookahead = crate::prefill_lookahead::announce(upcoming);
             // A fresh sequence's KV state holds exactly the earlier pieces.
             let (input, pad_mask) =
                 super::piece_input(&plan, piece, tokens, piece.range.start as i32);
