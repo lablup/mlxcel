@@ -595,6 +595,26 @@ impl BatchScheduler {
                 );
             }
         }
+        // Prompt lookup on Qwen3.8-Flash-Next (#2880) rewinds the model's
+        // own state, so its verify block must be byte-identical to the chain
+        // for the same reason an MTP block must, and the same gate decides it
+        // at the widest block a round can run: on GPU generation 15+ the
+        // probe fails under `qmv_wide` and passes once the gate switches it
+        // off for the process. A decline turns prompt lookup off for this
+        // worker rather than serving rows whose temperature-0 output could
+        // differ from classic decode.
+        if let crate::server::SpeculativeDispatch::PromptLookup { config, .. } =
+            &self.speculative_dispatch
+            && let crate::LoadedModel::Qwen4ExpVLM(vlm) = self.engine.model()
+            && !vlm.text_model.mtp_exactness_allows(config.max_draft + 1)
+        {
+            tracing::warn!(
+                block_size = config.max_draft + 1,
+                "prompt lookup declined on Qwen4-Exp: the verify block is not byte-identical \
+                 to the single-token chain on this GPU; serving classic decode"
+            );
+            self.speculative_dispatch = crate::server::SpeculativeDispatch::Disabled;
+        }
         self
     }
 

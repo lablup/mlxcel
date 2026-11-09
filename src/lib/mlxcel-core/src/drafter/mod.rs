@@ -363,6 +363,11 @@ pub fn drafter_kind_by_model_type() -> &'static HashMap<&'static str, DrafterKin
         // builds it. The kind still has to resolve here so `--draft-model`
         // auto-detects MTP without a `--draft-kind` flag.
         m.insert(GLM4_MOE_LITE_MTP_MODEL_TYPE, DrafterKind::Mtp);
+        // The Qwen3.8-Flash-Next native MTP head (`qwen4_exp_mtp`, issue
+        // #2880): built in the binary crate for the same reason as the GLM
+        // drafter (it reuses the `qwen4_exp` QSA layer, MoE block and
+        // hyper-connection mixer), refused by name in [`load_drafter`].
+        m.insert(QWEN4_EXP_MTP_MODEL_TYPE, DrafterKind::Mtp);
         // The Muse Glimmer assistant (issue #1343) is a DFlash-family block
         // drafter with its own `model_type`. It would resolve to the DFlash
         // default anyway; the explicit entry is what lets an explicit
@@ -555,6 +560,12 @@ const QWEN35_MTP_MODEL_TYPE: &str = "qwen3_5_mtp";
 /// produced by `mlxcel split-mtp` (issue #1326). Public so the binary-side
 /// drafter loader dispatches on the same spelling the kind map registers.
 pub const GLM4_MOE_LITE_MTP_MODEL_TYPE: &str = "glm4_moe_lite_mtp";
+
+/// `model_type` value that identifies a Qwen3.8-Flash-Next (`qwen4_exp`)
+/// native MTP drafter directory (upstream `Qwen4ExpMTPConfig`, issue #2880).
+/// Public for the same reason as [`GLM4_MOE_LITE_MTP_MODEL_TYPE`]: the drafter
+/// is built by the binary crate's `mlxcel::models::drafter_loader`.
+pub const QWEN4_EXP_MTP_MODEL_TYPE: &str = "qwen4_exp_mtp";
 
 fn read_drafter_config_peek(model_path: &Path) -> Option<DrafterConfigPeek> {
     let cfg_path = model_path.join("config.json");
@@ -1463,6 +1474,12 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
                 Some(GLM4_MOE_LITE_MTP_MODEL_TYPE) => Err(DrafterError::BinaryCrateDrafter {
                     model_type: GLM4_MOE_LITE_MTP_MODEL_TYPE.to_string(),
                 }),
+                // Same arrangement for the Qwen3.8-Flash-Next head (#2880):
+                // its decoder layer is the binary crate's `qwen4_exp` QSA
+                // layer, so core refuses by name and the binary loader builds it.
+                Some(QWEN4_EXP_MTP_MODEL_TYPE) => Err(DrafterError::BinaryCrateDrafter {
+                    model_type: QWEN4_EXP_MTP_MODEL_TYPE.to_string(),
+                }),
                 _ => {
                     let model = gemma4_assistant::Gemma4AssistantDraftModel::from_path(path)?;
                     Ok((Box::new(model), resolved))
@@ -1640,8 +1657,25 @@ mod tests {
             map.get("muse_glimmer_assistant"),
             Some(&DrafterKind::Dflash)
         );
-        // The four MTP spellings plus the Muse assistant, nothing else.
-        assert_eq!(map.len(), 5);
+        // The Qwen3.8-Flash-Next native MTP head (issue #2880).
+        assert_eq!(map.get("qwen4_exp_mtp"), Some(&DrafterKind::Mtp));
+        // The five MTP spellings plus the Muse assistant, nothing else.
+        assert_eq!(map.len(), 6);
+    }
+
+    #[test]
+    fn qwen4_exp_mtp_resolves_to_mtp_kind_and_is_refused_by_name_here() {
+        // `--draft-model <qwen4_exp_mtp dir>` auto-detects MTP without a
+        // `--draft-kind` flag, and the core loader names the binary-side
+        // builder instead of falling into the Gemma 4 assistant loader.
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("qwen4_exp_mtp"));
+        assert_eq!(resolve(dir.path(), None).unwrap(), DrafterKind::Mtp);
+        let err = load(dir.path(), None).expect_err("must refuse");
+        assert!(
+            matches!(err, DrafterError::BinaryCrateDrafter { ref model_type } if model_type == "qwen4_exp_mtp"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

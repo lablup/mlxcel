@@ -1319,11 +1319,28 @@ pub(crate) struct SwitchGLU {
 
 impl SwitchGLU {
     pub(crate) fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
+        self.forward_with_sort(x, indices, true)
+    }
+
+    /// [`Self::forward`] with the expert-sorted gather under the caller's
+    /// control. Sorting groups the rows of one expert into one gathered
+    /// matmul, which reduces in a different order than the row-by-row gather
+    /// a single token takes; a speculative verify block that must match
+    /// single-token decode byte for byte passes `allow_sort = false`
+    /// (`qwen4_exp`, issue #2880).
+    ///
+    /// Used by: Qwen3Next, Qwen3.5, Qwen4-Exp
+    pub(crate) fn forward_with_sort(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+        allow_sort: bool,
+    ) -> UniquePtr<MlxArray> {
         let indices_shape = mlxcel_core::array_shape(indices);
         let n_tokens = indices_shape[0];
         let top_k = indices_shape[1];
         let total = n_tokens * top_k;
-        let do_sort = total >= 64;
+        let do_sort = allow_sort && total >= 64;
 
         // Expand x: [n_tokens, hidden] -> [n_tokens, 1, 1, hidden]
         let x_exp = mlxcel_core::expand_dims(x, -2);

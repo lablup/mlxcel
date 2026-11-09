@@ -18,12 +18,13 @@ use super::generation_preamble_echo;
 use super::{
     CliPromptMedia, CliSamplingFlagState, CliVideoFrameGroup, CliVideoFrames, OfflineDraftRoute,
     apply_user_chat_template, apply_vlm_chat_template, build_cli_sampling_config_with_flags,
-    cli_pipeline_requested, cli_video_content_part_count, estimate_delta_label_and_bytes,
-    generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len, repl_drafter,
-    resolve_cli_pipeline_assignments, resolve_cli_prompt, resolve_offline_draft_route,
-    should_route_offline_mtp, strip_trailing_eos, validate_muse_glimmer_cli_unsupported_options,
-    validate_pipeline_parallel_args, validate_prompt_lookup_args, validate_tensor_parallel_args,
-    validate_xla_cli_image_cardinality, validate_xla_output_audio,
+    cli_pipeline_requested, cli_video_content_part_count, ensure_mtp_prompt_not_empty,
+    estimate_delta_label_and_bytes, generated_suffix, generation_stats_from_duration,
+    memory_preflight_ctx_len, repl_drafter, resolve_cli_pipeline_assignments, resolve_cli_prompt,
+    resolve_offline_draft_route, should_route_offline_mtp, strip_trailing_eos,
+    validate_muse_glimmer_cli_unsupported_options, validate_pipeline_parallel_args,
+    validate_prompt_lookup_args, validate_tensor_parallel_args, validate_xla_cli_image_cardinality,
+    validate_xla_output_audio,
 };
 #[cfg(feature = "xla-backend")]
 use super::{xla_required_positions, xla_sizing_budget};
@@ -1730,4 +1731,16 @@ fn preamble_echo_lets_a_raw_completion_continue_the_prompt() {
         generation_preamble_echo("The capital of France is", false),
         "The capital of France is"
     );
+}
+
+// #2880: an empty prompt has no last position to sample the first bonus token
+// from; the offline MTP path declines it by name instead of panicking in the
+// target prefill.
+#[test]
+fn offline_mtp_declines_an_empty_prompt_by_name() {
+    let err = ensure_mtp_prompt_not_empty(&[]).expect_err("empty prompt must decline");
+    let msg = err.to_string();
+    assert!(msg.contains("non-empty prompt"), "{msg}");
+    assert!(msg.contains("--draft-model"), "{msg}");
+    assert!(ensure_mtp_prompt_not_empty(&[1]).is_ok());
 }

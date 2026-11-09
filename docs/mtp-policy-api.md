@@ -159,7 +159,7 @@ On a server with no drafter:
 }
 ```
 
-The pairings the policy can report on are the singleton MTP families: Gemma 4 with its assistant drafter, Qwen 3.5 / 3.6 / 3.8 with the `qwen3_5_mtp` head, Inkling with its in-checkpoint `mtp.safetensors`, and GLM-4.7-Flash (`glm4_moe_lite`) with the `glm4_moe_lite_mtp` block that `mlxcel split-mtp` extracts (issue #1326). Every one of them passes through the same exactness probe before the policy sees a sample, so `exactness_declined` can appear for any of them.
+The pairings the policy can report on are the singleton MTP families: Gemma 4 with its assistant drafter, Qwen 3.5 / 3.6 / 3.8 with the `qwen3_5_mtp` head, Qwen3.8-Flash-Next (`qwen4_exp`) with the split-out `qwen4_exp_mtp` native head (issue #2880; obtain it with mlx-vlm's `split_qwen4_exp_mtp` or as `sh0wie/Qwen3.8-Flash-Next-MTP-Drafter-MLX-bf16` at revision `be6e2bc325d41ac7858b99269a96c495349b494d`, the drafter this port was validated against; it keeps one pending rollback block and refuses a target with a different `hc_count` before bind), Inkling with its in-checkpoint `mtp.safetensors`, and GLM-4.7-Flash (`glm4_moe_lite`) with the `glm4_moe_lite_mtp` block that `mlxcel split-mtp` extracts (issue #1326). Every one of them passes through the same exactness probe before the policy sees a sample, so `exactness_declined` can appear for any of them.
 
 On a generation 15+ host whose pairing fails the exactness probe under both kernel selections (measured on the Gemma 4 31B + bf16 assistant pairing on M3 Ultra and M5 Max, issue #1279):
 

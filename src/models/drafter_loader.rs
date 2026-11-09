@@ -15,22 +15,26 @@
 //! Binary-side drafter factory.
 //!
 //! [`mlxcel_core::drafter::load_drafter`] builds every drafter whose model
-//! lives in `mlxcel-core`. The GLM-4.7-Flash MTP drafter
-//! ([`crate::models::glm4_moe_lite_mtp_drafter::Glm4MoeLiteMtpDraftModel`])
-//! reuses the `glm4_moe_lite` decoder block, which lives in this crate, so
-//! core cannot construct it and refuses it by name. This wrapper is the one
-//! entry point the binary's callers (the offline CLI, the server's drafter
-//! slot, the speculative bench) go through: it builds the GLM drafter itself
-//! and delegates everything else to core unchanged (issue #1326).
+//! lives in `mlxcel-core`. Two MTP drafters reuse decoder blocks that live in
+//! this crate, so core cannot construct them and refuses them by name: the
+//! GLM-4.7-Flash head
+//! ([`crate::models::glm4_moe_lite_mtp_drafter::Glm4MoeLiteMtpDraftModel`],
+//! issue #1326) and the Qwen3.8-Flash-Next head
+//! ([`crate::models::qwen4_exp_mtp_drafter::Qwen4ExpMtpDraftModel`], issue
+//! #2880). This wrapper is the one entry point the binary's callers (the
+//! offline CLI, the server's drafter slot, the speculative bench) go through:
+//! it builds those two itself and delegates everything else to core
+//! unchanged.
 
 use std::path::Path;
 
 use mlxcel_core::drafter::{
     DrafterError, DrafterKind, GLM4_MOE_LITE_MTP_MODEL_TYPE, LoadedDrafter,
-    peek_drafter_model_type, resolve_drafter_kind,
+    QWEN4_EXP_MTP_MODEL_TYPE, peek_drafter_model_type, resolve_drafter_kind,
 };
 
 use crate::models::glm4_moe_lite_mtp_drafter::Glm4MoeLiteMtpDraftModel;
+use crate::models::qwen4_exp_mtp_drafter::Qwen4ExpMtpDraftModel;
 
 /// Load a drafter from `path`, reconciling `kind` with the directory's
 /// `config.json` exactly as [`mlxcel_core::drafter::load_drafter`] does.
@@ -40,11 +44,18 @@ use crate::models::glm4_moe_lite_mtp_drafter::Glm4MoeLiteMtpDraftModel;
 /// `speculative_bench`.
 pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDrafter, DrafterError> {
     let resolved = resolve_drafter_kind(path, kind)?;
-    if resolved == DrafterKind::Mtp
-        && peek_drafter_model_type(path)?.as_deref() == Some(GLM4_MOE_LITE_MTP_MODEL_TYPE)
-    {
-        let model = Glm4MoeLiteMtpDraftModel::from_path(path)?;
-        return Ok((Box::new(model), resolved));
+    if resolved == DrafterKind::Mtp {
+        match peek_drafter_model_type(path)?.as_deref() {
+            Some(GLM4_MOE_LITE_MTP_MODEL_TYPE) => {
+                let model = Glm4MoeLiteMtpDraftModel::from_path(path)?;
+                return Ok((Box::new(model), resolved));
+            }
+            Some(QWEN4_EXP_MTP_MODEL_TYPE) => {
+                let model = Qwen4ExpMtpDraftModel::from_path(path)?;
+                return Ok((Box::new(model), resolved));
+            }
+            _ => {}
+        }
     }
     mlxcel_core::drafter::load_drafter(path, kind)
 }
@@ -68,6 +79,25 @@ mod tests {
         assert!(
             !matches!(err, DrafterError::BinaryCrateDrafter { .. }),
             "the wrapper must build the GLM drafter itself: {err}"
+        );
+        assert!(err.to_string().contains("text_config"), "{err}");
+    }
+
+    #[test]
+    fn qwen4_exp_mtp_drafter_routes_to_the_binary_loader_not_the_core_refusal() {
+        // Auto-detected from `model_type` with no `--draft-kind`, and built
+        // here: the failure on an empty directory is the Qwen4-Exp config
+        // error, not core's refusal and not the Gemma 4 assistant's inventory.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "qwen4_exp_mtp"}"#,
+        )
+        .unwrap();
+        let err = load_drafter(dir.path(), None).expect_err("no text_config");
+        assert!(
+            !matches!(err, DrafterError::BinaryCrateDrafter { .. }),
+            "the wrapper must build the Qwen4-Exp drafter itself: {err}"
         );
         assert!(err.to_string().contains("text_config"), "{err}");
     }

@@ -114,10 +114,64 @@ impl QsaIndexCache {
             .map_or(0, |keys| mlxcel_core::array_shape(keys)[1])
     }
 
-    fn cached_blocks(&self) -> i32 {
+    pub(crate) fn cached_blocks(&self) -> i32 {
         self.block_keys
             .as_ref()
             .map_or(0, |keys| mlxcel_core::array_shape(keys)[2])
+    }
+
+    /// Drop the last `n` positions (issue #2880): the raw keys and positions
+    /// are per token and are cut; the pooled block keys are kept only for the
+    /// blocks that are still complete after the cut, since a block summary
+    /// covers `compress_ratio` tokens and a partial one is recomputed from the
+    /// raw keys the next time the indexer runs.
+    ///
+    /// `trim_blocks == false` leaves the block keys alone, which is the
+    /// failure the rollback tests demonstrate; production always trims them.
+    pub(crate) fn trim(&mut self, n: i32, compress_ratio: i32, trim_blocks: bool) {
+        let len = self.len();
+        let n = n.min(len);
+        if n <= 0 {
+            return;
+        }
+        let new_len = len - n;
+        if new_len == 0 {
+            self.raw_keys = None;
+            self.positions = None;
+            if trim_blocks {
+                self.block_keys = None;
+            }
+            return;
+        }
+        if let Some(raw_keys) = self.raw_keys.take() {
+            let shape = mlxcel_core::array_shape(&raw_keys);
+            let cut = mlxcel_core::slice(&raw_keys, &[0, 0, 0], &[shape[0], new_len, shape[2]]);
+            self.raw_keys = Some(mlxcel_core::contiguous(&cut, false));
+        }
+        if let Some(positions) = self.positions.take() {
+            let shape = mlxcel_core::array_shape(&positions);
+            let cut = mlxcel_core::slice(&positions, &[0, 0, 0], &[shape[0], shape[1], new_len]);
+            self.positions = Some(mlxcel_core::contiguous(&cut, false));
+        }
+        if !trim_blocks {
+            return;
+        }
+        let keep_blocks = self.cached_blocks().min(new_len / compress_ratio);
+        if let Some(block_keys) = self.block_keys.take()
+            && keep_blocks > 0
+        {
+            let shape = mlxcel_core::array_shape(&block_keys);
+            if keep_blocks == shape[2] {
+                self.block_keys = Some(block_keys);
+            } else {
+                let cut = mlxcel_core::slice(
+                    &block_keys,
+                    &[0, 0, 0, 0],
+                    &[shape[0], shape[1], keep_blocks, shape[3]],
+                );
+                self.block_keys = Some(mlxcel_core::contiguous(&cut, false));
+            }
+        }
     }
 }
 
@@ -452,6 +506,54 @@ impl QsaAttention {
             head_dim: config.head_dim as i32,
             scale: (config.head_dim as f32).powf(-0.5),
         })
+    }
+
+    /// [`Self::forward`] one query position at a time (issue #2880).
+    ///
+    /// A verify block has to produce, at every position, the bytes the
+    /// single-token decode step would have produced there: the dense regime
+    /// decodes through the SDPA kernel while a multi-row block takes the
+    /// indexed kernel, and the indexer selects for one query at a time
+    /// during decode. Running the block's rows as `L` single-row calls over
+    /// the growing caches reproduces that path by construction, as the
+    /// Qwen 3.5 verify does with `attend_per_position`.
+    pub(crate) fn forward_per_position(
+        &self,
+        x: &MlxArray,
+        rope: &RopeContext<'_>,
+        kv: &mut KVCache,
+        index: &mut QsaIndexCache,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let (b, l) = (shape[0], shape[1]);
+        if l <= 1 {
+            return self.forward(x, rope, kv, index);
+        }
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        for i in 0..l {
+            let x_i = mlxcel_core::slice(x, &[0, i, 0], &[b, i + 1, shape[2]]);
+            let positions = mlxcel_core::slice(&rope.positions, &[0, 0, i], &[3, b, i + 1]);
+            let rope_i = RopeContext::new(rope.mrope, positions);
+            let out_i = self.forward(&x_i, &rope_i, kv, index);
+            out = Some(match out {
+                None => out_i,
+                Some(previous) => concatenate(&previous, &out_i, 1),
+            });
+        }
+        out.expect("at least one position")
+    }
+
+    /// Drop the last `n` positions from this layer's KV cache and index
+    /// (issue #2880). See [`QsaIndexCache::trim`] for `trim_blocks`.
+    pub(crate) fn rollback(
+        &self,
+        kv: &mut KVCache,
+        index: &mut QsaIndexCache,
+        n: i32,
+        trim_blocks: bool,
+    ) {
+        kv.trim(n);
+        index.trim(n, self.indexer.compress_ratio, trim_blocks);
     }
 
     pub(crate) fn forward(

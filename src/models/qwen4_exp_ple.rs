@@ -30,6 +30,7 @@ use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use super::config::ResolvedQwen4ExpConfig;
 use super::norm::ZeroCenteredRmsNorm;
 use super::ple_storage::{PleRowStore, open_external_table};
+use super::rollback::{PleBlockCapture, RollbackParts};
 use super::shapes;
 
 const SPLITMIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -504,7 +505,16 @@ impl PleLayer {
         self.table.prefetch(&ids);
     }
 
-    fn short_conv(&self, x: &MlxArray, cache: &mut PleCache) -> UniquePtr<MlxArray> {
+    /// Returns the activation and the convolution input (the carried window
+    /// followed by `x`), which a rollback re-slices its window from.
+    /// `decode_equivalent` evaluates the convolution one output row at a
+    /// time, the bytes a single-row decode step computes.
+    fn short_conv(
+        &self,
+        x: &MlxArray,
+        cache: &mut PleCache,
+        decode_equivalent: bool,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let shape = mlxcel_core::array_shape(x);
         let state = cache
             .conv_state
@@ -525,28 +535,63 @@ impl PleLayer {
             &[shape[0], total, shape[2]],
         );
         cache.conv_state = Some(mlxcel_core::contiguous(&tail, false));
-        let out = mlxcel_core::conv1d(
-            &conv_input,
-            &self.conv1d_weight,
-            1,
-            0,
-            self.conv_dilation,
-            shape[2],
-        );
-        silu(&out)
+        let out = if decode_equivalent {
+            super::gated_delta::conv1d_per_position(
+                &conv_input,
+                &self.conv1d_weight,
+                self.conv_state_len / self.conv_dilation + 1,
+                self.conv_dilation,
+                shape[1],
+            )
+        } else {
+            mlxcel_core::conv1d(
+                &conv_input,
+                &self.conv1d_weight,
+                1,
+                0,
+                self.conv_dilation,
+                shape[2],
+            )
+        };
+        (silu(&out), conv_input)
     }
 
     /// The residual update for the `[B, L, hc_count * hidden]` stream.
+    #[cfg(test)]
     pub(crate) fn forward(
         &self,
         hidden: &MlxArray,
         tokens: &[Vec<i64>],
         cache: &mut PleCache,
     ) -> UniquePtr<MlxArray> {
+        self.forward_captured(hidden, tokens, cache, None, false)
+    }
+
+    /// The residual update for the `[B, L, hc_count * hidden]` stream, also
+    /// filling `capture` with what [`Self::rollback`] needs to unwind part of
+    /// this call (issue #2880). `decode_equivalent` is the verify-block
+    /// contract of `Qwen4ExpGatedDeltaNet::forward_captured`.
+    pub(crate) fn forward_captured(
+        &self,
+        hidden: &MlxArray,
+        tokens: &[Vec<i64>],
+        cache: &mut PleCache,
+        capture: Option<&mut Option<PleBlockCapture>>,
+        decode_equivalent: bool,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(hidden);
         let mut streams = shape[..shape.len() - 1].to_vec();
         streams.extend([self.hc_count, self.hidden_size]);
 
+        // `embed` resets a context whose row count disagrees with `tokens`,
+        // so the contexts this block starts from are what it sees after that.
+        let contexts_before = capture.is_some().then(|| {
+            if cache.contexts.len() == tokens.len() {
+                cache.contexts.clone()
+            } else {
+                vec![self.hasher.initial_context(); tokens.len()]
+            }
+        });
         let embeddings = self.embed(tokens, cache);
         let keys = mlxcel_core::reshape(
             &self.norm_key.forward(&self.key_proj.forward(&embeddings)),
@@ -567,7 +612,57 @@ impl PleLayer {
         );
         let gated = mlxcel_core::reshape(&gated, &shape);
         let normed = self.norm_conv.forward(&gated);
-        mlxcel_core::add(&gated, &self.short_conv(&normed, cache))
+        let (conv, conv_input) = self.short_conv(&normed, cache, decode_equivalent);
+        if let Some(slot) = capture {
+            *slot = Some(PleBlockCapture {
+                conv_input,
+                contexts_before: contexts_before.expect("captured alongside the slot"),
+                tokens: tokens.to_vec(),
+            });
+        }
+        mlxcel_core::add(&gated, &conv)
+    }
+
+    /// Rewind `cache` to the first `keep` positions of the block `capture`
+    /// describes (issue #2880).
+    ///
+    /// The convolution window is the `(kernel - 1) * dilation` rows of the
+    /// captured input that end at the last kept position. The n-gram context
+    /// is the last `ngram_size - 1` tokens of the history that ends there,
+    /// recomputed from the contexts the block started with and the kept
+    /// tokens only, so a drafted and rejected EOS never reaches it.
+    pub(crate) fn rollback(
+        &self,
+        cache: &mut PleCache,
+        capture: &PleBlockCapture,
+        keep: usize,
+        parts: RollbackParts,
+    ) {
+        if parts.ple_conv {
+            let shape = mlxcel_core::array_shape(&capture.conv_input);
+            let window = mlxcel_core::slice(
+                &capture.conv_input,
+                &[0, keep as i32, 0],
+                &[shape[0], keep as i32 + self.conv_state_len, shape[2]],
+            );
+            cache.conv_state = Some(mlxcel_core::contiguous(&window, false));
+        }
+        if parts.ple_context {
+            let context_len = self.hasher.context_len();
+            cache.contexts = capture
+                .contexts_before
+                .iter()
+                .zip(&capture.tokens)
+                .map(|(context, row)| {
+                    let history: Vec<i64> = context
+                        .iter()
+                        .chain(&row[..keep.min(row.len())])
+                        .copied()
+                        .collect();
+                    history[history.len() - context_len..].to_vec()
+                })
+                .collect();
+        }
     }
 }
 

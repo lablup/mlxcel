@@ -112,6 +112,7 @@ mod paged_pool_tests;
 mod paged_turbo_tests;
 pub use decode_undo::{
     DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, DecodeLookaheadAppendScope, flush_decode_undo_rows,
+    speculative_append_active,
 };
 mod prefill_rewind;
 #[cfg(test)]
