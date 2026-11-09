@@ -489,16 +489,16 @@ impl ScriptedStreamHandle {
         let _ = self.step_tx.send(ScriptedStreamStep::Finish);
     }
 
-    /// End the current request with `finish_reason: "length"`.
-    pub(crate) fn finish_length(&self) {
-        let _ = self.step_tx.send(ScriptedStreamStep::FinishLength);
-    }
-
-    /// End the current request with a generation failure.
+    /// End the current request with a generation error.
     pub(crate) fn fail(&self, message: &str) {
         let _ = self
             .step_tx
             .send(ScriptedStreamStep::Fail(message.to_string()));
+    }
+
+    /// End the current request with `finish_reason: "length"`.
+    pub(crate) fn finish_length(&self) {
+        let _ = self.step_tx.send(ScriptedStreamStep::FinishLength);
     }
 
     /// The cancellation token of the `index`-th dispatched generation.

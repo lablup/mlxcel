@@ -626,6 +626,10 @@ async fn stream_create_response(
 
     let admission =
         crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
+    // The generation call consumes `cancelled`; keep a handle so the final
+    // status can report a stop the token caused (a cancel call, a client
+    // disconnect, or `DELETE /v1/stream`).
+    let cancelled_for_status = cancelled.clone();
 
     tokio::task::spawn_blocking(move || {
         let mut emitter = ResponseStreamEmitter::new();
@@ -856,6 +860,8 @@ async fn stream_create_response(
                     );
                 },
             );
+        // Generation is over: from here a client disconnect is not a cancel.
+        let sender = sender.after_generation();
 
         // Flush any buffered content out of the stream filter.
         let trailing = stream_filter
@@ -945,6 +951,58 @@ async fn stream_create_response(
         let result = match result {
             Ok(r) => r,
             Err(err) => {
+                let cancel_acknowledged = state_for_task
+                    .responses_store
+                    .as_ref()
+                    .is_some_and(|store| store.finish_in_flight(&response_id_for_task));
+                // A cancel that lands before the first token ends generation
+                // with an error. The client was told `cancelled`, so report
+                // and keep exactly that. The conversation gets nothing: this
+                // turn produced no output.
+                if cancel_acknowledged {
+                    let mut response = build_response_object(OutboundContext {
+                        response_id: response_id_for_task.clone(),
+                        model_id: model_id_for_task,
+                        created_at,
+                        completed_at: created_at,
+                        status: ResponseStatus::Cancelled,
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        cached_tokens: 0,
+                        reasoning_tokens: 0,
+                        text: String::new(),
+                        reasoning_text: None,
+                        parsed_tool_calls: None,
+                        max_tool_calls: request_for_task.max_tool_calls,
+                        request: &request_for_task,
+                        error: None,
+                        incomplete_reason: None,
+                        finish_reason: "cancelled".to_string(),
+                    });
+                    response.completed_at = None;
+                    // The assembly adds a message item even for empty text;
+                    // no item was generated here.
+                    response.output.clear();
+                    if translated_for_task.effective_store
+                        && let Some(store) = state_for_task.responses_store.as_ref()
+                    {
+                        store.insert(
+                            response.id.clone(),
+                            StoredResponse {
+                                response: response.clone(),
+                                input_items: translated_for_task.canonical_input_items.clone(),
+                            },
+                        );
+                    }
+                    if let Ok(mut em) = emitter_for_callback.lock() {
+                        let sequence_number = em.next_seq();
+                        let _ = sender.send_event(&ResponseStreamEvent::Completed {
+                            sequence_number,
+                            response,
+                        });
+                    }
+                    return;
+                }
                 let queue_full = err.downcast_ref::<QueueFullError>().is_some();
                 if let Ok(mut em) = emitter_for_callback.lock() {
                     let seq = em.next_seq();
@@ -961,9 +1019,6 @@ async fn stream_create_response(
                             err.to_string()
                         },
                     });
-                }
-                if let Some(store) = state_for_task.responses_store.as_ref() {
-                    store.unregister_in_flight(&response_id_for_task);
                 }
                 return;
             }
@@ -1094,7 +1149,23 @@ async fn stream_create_response(
         // outbound assembly fills the canonical output[] for the
         // "completed" event payload.
         let completed_at_now = chrono::Utc::now().timestamp() as f64;
-        let (status, incomplete_reason) = final_status(auto.as_ref(), &result.finish_reason);
+        // Retiring the registry entry first closes the window where a cancel
+        // would be answered `cancelled` after this status was decided.
+        let cancel_acknowledged = state_for_task
+            .responses_store
+            .as_ref()
+            .is_some_and(|store| store.finish_in_flight(&response_id_for_task));
+        // A cancelled stream ends through the normal path, so `final_status`
+        // alone would record it as `completed` and contradict the cancel
+        // reply. An acknowledged cancel wins even over a natural finish: the
+        // client was already told `cancelled`.
+        let (status, incomplete_reason) = if cancel_acknowledged
+            || cancelled_for_status.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            (ResponseStatus::Cancelled, None)
+        } else {
+            final_status(auto.as_ref(), &result.finish_reason)
+        };
         let mut final_response = build_response_object(OutboundContext {
             response_id: response_id_for_task.clone(),
             model_id: model_id_for_task,
@@ -1133,20 +1204,12 @@ async fn stream_create_response(
 
         prepend_compaction_item(auto.as_ref(), &mut final_response);
         mark_incomplete_output(&mut final_response);
+        if status == ResponseStatus::Cancelled {
+            final_response.completed_at = None;
+        }
 
-        let seq = em.next_seq();
-        let _ = sender.send_event(&if status == ResponseStatus::Incomplete {
-            ResponseStreamEvent::Incomplete {
-                sequence_number: seq,
-                response: final_response.clone(),
-            }
-        } else {
-            ResponseStreamEvent::Completed {
-                sequence_number: seq,
-                response: final_response.clone(),
-            }
-        });
-
+        // Stored before the terminal event: a slow client must not delay the
+        // record, and whoever reads the event can already retrieve it.
         persist_response(
             &state_for_task,
             &request_for_persist,
@@ -1154,12 +1217,19 @@ async fn stream_create_response(
             &final_response,
         );
 
-        // Review H2: drop the in-flight registry entry now that the
-        // streaming task is done. Subsequent cancel calls for this id
-        // will fall through to the persisted-response path.
-        if let Some(store) = state_for_task.responses_store.as_ref() {
-            store.unregister_in_flight(&response_id_for_task);
-        }
+        // The OpenAI event set has no cancelled terminal event: a cancelled
+        // stream ends with `response.completed` and `status: cancelled`.
+        let seq = em.next_seq();
+        let _ = sender.send_event(&match status {
+            ResponseStatus::Incomplete => ResponseStreamEvent::Incomplete {
+                sequence_number: seq,
+                response: final_response,
+            },
+            _ => ResponseStreamEvent::Completed {
+                sequence_number: seq,
+                response: final_response,
+            },
+        });
     });
 
     if let Err(error) = admission.wait().await {

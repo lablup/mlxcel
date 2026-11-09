@@ -24,6 +24,7 @@ use std::sync::{Arc, mpsc};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
+use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -45,6 +46,10 @@ struct Harness {
 }
 
 fn harness() -> Harness {
+    harness_with(ServerConfig::default(), MlxcelTokenizer::stub())
+}
+
+fn harness_with(config: ServerConfig, tokenizer: MlxcelTokenizer) -> Harness {
     let (options_tx, options_rx) = mpsc::channel();
     let (prompt_tx, prompt_rx) = mpsc::channel();
     let (provider, handle) =
@@ -54,9 +59,9 @@ fn harness() -> Harness {
     let store = Arc::new(ResponsesStore::new(ResponsesStoreConfig::default()));
     let state = AppState::new(
         provider,
-        ServerConfig::default(),
+        config,
         ChatTemplateProcessor::with_template(TEMPLATE.to_string()),
-        MlxcelTokenizer::stub(),
+        tokenizer,
         PathBuf::from("cancel-test-model"),
         batch_metrics,
     )
@@ -92,6 +97,27 @@ impl Harness {
             status,
             serde_json::from_slice(&bytes).expect("response is JSON"),
         )
+    }
+
+    /// Post one streaming request and collect its whole SSE body.
+    async fn send_raw_stream(&self, body: Value) -> (StatusCode, String) {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/responses")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request builds");
+        let response = self
+            .app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("router responds");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("body collects");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// Run one non-streaming generation and return the stored response id.
@@ -204,4 +230,276 @@ async fn cancel_of_an_unknown_id_is_not_found() {
 
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["error"]["type"], "not_found", "{body}");
+}
+
+#[tokio::test]
+async fn cancelling_a_live_stream_records_the_response_as_cancelled() {
+    let h = harness();
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/responses")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({"model": "cancel-test-model", "input": "hi", "stream": true}).to_string(),
+        ))
+        .expect("request builds");
+    let mut body = h
+        .app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router responds")
+        .into_body();
+
+    // Wait for the first token so the stream is in flight.
+    h.handle.token("Hel");
+    let mut text = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !text.contains("Hel") {
+            let frame = body.frame().await.expect("stream open").expect("frame ok");
+            if let Some(data) = frame.data_ref() {
+                text.push_str(&String::from_utf8_lossy(data));
+            }
+        }
+    })
+    .await
+    .expect("first token arrives");
+    let id = text
+        .split("\"id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("response.created carries the id")
+        .to_string();
+
+    let (status, _) = h.cancel(&id).await;
+    assert_eq!(status, StatusCode::OK);
+    h.handle.finish();
+    let rest = axum::body::to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .expect("stream ends");
+    text.push_str(&String::from_utf8_lossy(&rest));
+
+    // Both the terminal event and the stored copy agree with the cancel reply.
+    let (name, terminal) = terminal_event(&text);
+    assert_eq!(name, "response.completed", "{text}");
+    assert_eq!(terminal["type"], "response.completed", "{terminal}");
+    assert_eq!(terminal["response"]["status"], "cancelled", "{terminal}");
+    assert!(terminal["response"]["completed_at"].is_null(), "{terminal}");
+    assert_eq!(h.retrieve(&id).await["status"], "cancelled");
+}
+
+/// The last SSE frame of `text`, as its `event:` name and parsed `data:`.
+fn terminal_event(text: &str) -> (String, Value) {
+    let frame = text
+        .split("\n\n")
+        .filter(|frame| frame.contains("data: "))
+        .last()
+        .expect("stream carries an event");
+    let field = |prefix: &str| {
+        frame
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("frame has `{prefix}`: {frame}"))
+    };
+    (
+        field("event: ").to_string(),
+        serde_json::from_str(field("data: ")).expect("event data is JSON"),
+    )
+}
+
+/// Open a stream and read until the first token has arrived; returns the
+/// response id, the body still open, and the text read so far.
+async fn open_stream(h: &Harness) -> (String, Body, String) {
+    open_stream_with(
+        h,
+        json!({"model": "cancel-test-model", "input": "hi", "stream": true}),
+    )
+    .await
+}
+
+async fn open_stream_with(h: &Harness, request: Value) -> (String, Body, String) {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/responses")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(request.to_string()))
+        .expect("request builds");
+    let mut body = h
+        .app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router responds")
+        .into_body();
+    h.handle.token("Hel");
+    let mut text = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !text.contains("Hel") {
+            let frame = body.frame().await.expect("stream open").expect("frame ok");
+            if let Some(data) = frame.data_ref() {
+                text.push_str(&String::from_utf8_lossy(data));
+            }
+        }
+    })
+    .await
+    .expect("first token arrives");
+    let id = text
+        .split("\"id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("response.created carries the id")
+        .to_string();
+    (id, body, text)
+}
+
+#[tokio::test]
+async fn an_uncancelled_stream_still_ends_completed() {
+    let h = harness();
+    let (id, body, mut text) = open_stream(&h).await;
+    h.handle.finish();
+    let rest = axum::body::to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .expect("stream ends");
+    text.push_str(&String::from_utf8_lossy(&rest));
+
+    let (name, terminal) = terminal_event(&text);
+    assert_eq!(name, "response.completed", "{text}");
+    assert_eq!(terminal["response"]["status"], "completed", "{terminal}");
+    assert!(
+        terminal["response"]["completed_at"].is_number(),
+        "{terminal}"
+    );
+    assert_eq!(h.retrieve(&id).await["status"], "completed");
+}
+
+/// A client that hangs up once generation has finished cancelled nothing.
+/// Only the post-generation sends can observe the closed channel here, so the
+/// sender must not flip the token for them.
+#[tokio::test]
+async fn a_disconnect_after_generation_finished_stays_completed() {
+    let h = harness();
+    let (id, body, _text) = open_stream(&h).await;
+    // Drop the client while generation is live but idle, then finish without
+    // any further token: no send fails until generation has already ended.
+    drop(body);
+    h.handle.finish();
+
+    let stored = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(stored) = h.store.get(&id) {
+                return stored;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("response is stored");
+    assert_eq!(stored.response.status, ResponseStatus::Completed);
+}
+
+/// A cancel during queueing or prefill ends generation with an error before
+/// the first token. The client was told `cancelled`, so the stream and the
+/// stored copy must say so, not `server_error` and 404.
+#[tokio::test]
+async fn a_cancel_that_ends_generation_with_an_error_is_recorded_cancelled() {
+    let h = harness();
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/responses")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({"model": "cancel-test-model", "input": "hi", "stream": true}).to_string(),
+        ))
+        .expect("request builds");
+    let mut body = h
+        .app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router responds")
+        .into_body();
+    let mut text = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !text.contains("response.in_progress") {
+            let frame = body.frame().await.expect("stream open").expect("frame ok");
+            if let Some(data) = frame.data_ref() {
+                text.push_str(&String::from_utf8_lossy(data));
+            }
+        }
+    })
+    .await
+    .expect("stream opens");
+    let id = text
+        .split("\"id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("response.created carries the id")
+        .to_string();
+
+    let (status, _) = h.cancel(&id).await;
+    assert_eq!(status, StatusCode::OK);
+    h.handle.fail("Request cancelled: client disconnected");
+    let rest = axum::body::to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .expect("stream ends");
+    text.push_str(&String::from_utf8_lossy(&rest));
+
+    let (name, terminal) = terminal_event(&text);
+    assert_eq!(name, "response.completed", "{text}");
+    assert_eq!(terminal["response"]["status"], "cancelled", "{terminal}");
+    assert_eq!(terminal["response"]["output"], json!([]), "{terminal}");
+    assert!(terminal["response"]["completed_at"].is_null(), "{terminal}");
+    assert_eq!(h.retrieve(&id).await["status"], "cancelled");
+}
+
+/// A generation error nobody cancelled stays an error and stores nothing.
+#[tokio::test]
+async fn an_uncancelled_generation_error_stays_an_error() {
+    let h = harness();
+    h.handle.fail("boom");
+    let (status, body) = h
+        .send_raw_stream(json!({"model": "cancel-test-model", "input": "hi", "stream": true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (name, terminal) = terminal_event(&body);
+    assert_eq!(name, "response.error", "{body}");
+    assert_eq!(terminal["code"], "server_error", "{terminal}");
+    assert_eq!(h.store.len(), 0);
+}
+
+/// A cancelled, limit-stopped `context_management` reply must
+/// not carry `incomplete_details`; the override drops the incomplete reason.
+#[tokio::test]
+async fn a_cancelled_stream_carries_no_incomplete_details() {
+    let h = harness_with(
+        ServerConfig {
+            context_size: 512,
+            ..ServerConfig::default()
+        },
+        MlxcelTokenizer::stub_all_byte_fallback(),
+    );
+    let (id, body, mut text) = open_stream_with(
+        &h,
+        json!({
+            "model": "cancel-test-model",
+            "input": "hi",
+            "stream": true,
+            "context_management": [{"type": "compaction", "compact_threshold": 10_000}],
+        }),
+    )
+    .await;
+    let (status, _) = h.cancel(&id).await;
+    assert_eq!(status, StatusCode::OK);
+    h.handle.finish_length();
+    let rest = axum::body::to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .expect("stream ends");
+    text.push_str(&String::from_utf8_lossy(&rest));
+
+    let (_, terminal) = terminal_event(&text);
+    assert_eq!(terminal["response"]["status"], "cancelled", "{terminal}");
+    assert!(
+        terminal["response"]["incomplete_details"].is_null(),
+        "{terminal}"
+    );
 }
