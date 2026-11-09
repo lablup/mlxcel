@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     response::{IntoResponse, Response},
 };
 
@@ -121,31 +121,13 @@ fn build_single_token_completion_logprobs(
     }
 }
 
-/// Used by: single-node and disaggregated `/v1/completions` HTTP handlers.
-/// Return JSON errors for invalid requests, including unsupported prompt arrays.
-pub(crate) fn parse_completion_request(
-    request: Result<Json<CompletionRequest>, JsonRejection>,
-) -> Result<CompletionRequest, ErrorResponse> {
-    request.map(|Json(request)| request).map_err(|rejection| {
-        let mut error = ErrorResponse::new(rejection.body_text(), "invalid_request_error");
-        // Schema errors are bad requests. Preserve transport-level statuses
-        // such as 413 (body too large) and 415 (unsupported content type).
-        error.status = if rejection.status() == StatusCode::UNPROCESSABLE_ENTITY {
-            StatusCode::BAD_REQUEST
-        } else {
-            rejection.status()
-        };
-        error
-    })
-}
-
 /// POST /v1/completions
 pub async fn completions(
     State(state): State<AppState>,
     headers: HeaderMap,
     request: Result<Json<CompletionRequest>, JsonRejection>,
 ) -> Response {
-    let request = match parse_completion_request(request) {
+    let request = match super::parse_json_request(request) {
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };

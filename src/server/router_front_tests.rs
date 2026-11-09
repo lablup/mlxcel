@@ -516,6 +516,89 @@ async fn router_completion_prompt_rejection_precedes_handoff() {
 }
 
 #[tokio::test]
+async fn router_chat_json_body_rejection_precedes_handoff() {
+    let valid = r#"{"model":"test-model","messages":[{"role":"user","content":"hi"}]}"#;
+    // Over axum's default 2 MiB body limit; the router app sets none of its own.
+    let oversized = format!(
+        r#"{{"model":"test-model","messages":[],"pad":"{}"}}"#,
+        "x".repeat(2 * 1024 * 1024)
+    );
+    let json = Some("application/json");
+    for (body, content_type, expected_status) in [
+        ("{".to_string(), json, StatusCode::BAD_REQUEST),
+        (String::new(), json, StatusCode::BAD_REQUEST),
+        (r#"{"model":5}"#.to_string(), json, StatusCode::BAD_REQUEST),
+        (
+            r#"{"model":5,"stream":true}"#.to_string(),
+            json,
+            StatusCode::BAD_REQUEST,
+        ),
+        ("{}".to_string(), json, StatusCode::BAD_REQUEST),
+        (valid.to_string(), None, StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        (
+            valid.to_string(),
+            Some("text/plain"),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (oversized, json, StatusCode::PAYLOAD_TOO_LARGE),
+    ] {
+        let state = router_test_state().await;
+        let next_id = state.next_id.load(Ordering::Relaxed);
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions");
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        let response = create_router_app(state.clone())
+            .oneshot(request.body(Body::from(body)).expect("build request"))
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), expected_status);
+        let content_type = response.headers()["content-type"].to_str().unwrap();
+        assert!(
+            content_type.starts_with("application/json"),
+            "{expected_status}: {content_type}"
+        );
+        let body = error_body(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error", "{body}");
+        assert_eq!(state.next_id.load(Ordering::Relaxed), next_id, "no handoff");
+        assert!(
+            state.pending.lock().unwrap().is_empty(),
+            "no pending request"
+        );
+        assert!(
+            state.prefill_hits.lock().unwrap().is_empty(),
+            "no prefill dispatch"
+        );
+    }
+}
+
+#[tokio::test]
+async fn router_chat_json_body_rejection_message_is_bounded() {
+    let body = format!(
+        r#"{{"model":"test-model","messages":[],"temperature":"{}"}}"#,
+        "x".repeat(64 * 1024)
+    );
+    let response = create_router_app(router_test_state().await)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("build request"),
+        )
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = error_body(response).await;
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(message.contains("invalid type"), "{message}");
+    assert!(message.len() <= 1024 + "...".len(), "{}", message.len());
+}
+
+#[tokio::test]
 async fn router_completion_existing_unsupported_option_guards_are_unchanged() {
     let cases = [
         (
