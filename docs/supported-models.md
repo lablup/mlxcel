@@ -242,7 +242,10 @@ adjacent-frame temporal planes, or per-frame scatter into video placeholders.
 Gemma 4 VL, Gemma 4 Unified, Inkling, Kimi-VL / Kimi-VL 2.5 and the Qwen-VL
 families (Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3-VL MoE, Qwen3.5/3.6/3.8-VL) all
 do this, each through its own processor, and none of them is affected by the
-paragraph below.
+paragraph below. The Qwen3-VL, Qwen3-VL MoE and Qwen3.5/3.6/3.8-VL processors
+also render each temporal patch group as its own vision block preceded by a
+`<t seconds>` marker, with `t` taken from the frames actually sampled (issue
+#2402); Qwen2-VL and Qwen2.5-VL keep their single timeless block.
 
 **The frames fallback** is what every other checkpoint with a vision tower does
 (issue #1322). The clip is decoded at the requested fps, evenly subsampled to at
