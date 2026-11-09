@@ -35,7 +35,7 @@ mod tests;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use mlxcel_core::host_memory::{AvailabilityGate, HostMemoryStatus, host_memory_status};
 
@@ -178,7 +178,9 @@ pub struct ExpertStream {
     pub(crate) stats: StreamStats,
 }
 
-static ACTIVE: Mutex<Option<Arc<ExpertStream>>> = Mutex::new(None);
+/// The most recently loaded streaming model. Weak, so a model that is dropped
+/// stops being reported and releases its checkpoint files.
+static ACTIVE: Mutex<Weak<ExpertStream>> = Mutex::new(Weak::new());
 
 impl ExpertStream {
     /// Decide whether this checkpoint streams and, if it does, size the arena.
@@ -197,6 +199,17 @@ impl ExpertStream {
             return match request {
                 StreamRequest::On => Err(format!(
                     "{EXPERT_STREAM_ENV}=1: expert streaming is implemented for Metal only"
+                )),
+                _ => Ok(None),
+            };
+        }
+        if load_surgery_active() {
+            // A slot is filled from the checkpoint file, so a transform of the
+            // experts would apply to everything but them.
+            return match request {
+                StreamRequest::On => Err(format!(
+                    "{EXPERT_STREAM_ENV}=1: expert streaming reads the checkpoint bytes and \
+                     cannot be combined with --surgery"
                 )),
                 _ => Ok(None),
             };
@@ -239,7 +252,7 @@ impl ExpertStream {
                 ""
             },
         );
-        *ACTIVE.lock().map_err(|_| "expert stream state poisoned")? = Some(Arc::clone(&stream));
+        *ACTIVE.lock().map_err(|_| "expert stream state poisoned")? = Arc::downgrade(&stream);
         Ok(Some(stream))
     }
 
@@ -290,9 +303,21 @@ impl ExpertStream {
     }
 }
 
+/// Whether a `--surgery` pipeline will rewrite this load's weights.
+fn load_surgery_active() -> bool {
+    #[cfg(feature = "surgery")]
+    {
+        crate::surgery::snapshot_active_pipeline().is_some()
+    }
+    #[cfg(not(feature = "surgery"))]
+    {
+        false
+    }
+}
+
 /// The streaming counters of the model loaded in this process, if it streams.
 pub fn active_stream_stats() -> Option<StreamStatsSnapshot> {
-    ACTIVE.lock().ok()?.as_ref().map(|s| s.snapshot())
+    ACTIVE.lock().ok()?.upgrade().map(|s| s.snapshot())
 }
 
 /// One stats line for the CLI, or `None` when nothing is streaming.
@@ -342,6 +367,9 @@ pub fn preflight_resident_bytes(model_dir: &Path) -> Option<u64> {
     let layers = text["num_hidden_layers"].as_u64()? as usize;
     let num_experts = text["num_experts"].as_u64()? as usize;
     let request = StreamRequest::parse(std::env::var(EXPERT_STREAM_ENV).ok().as_deref()).ok()?;
+    if load_surgery_active() {
+        return None;
+    }
     let source = ExpertSource::open(model_dir, layers, num_experts).ok()?;
     let expert_bytes = source.total_expert_bytes();
     if !should_stream(request, expert_bytes, mlxcel_core::get_wired_limit() as u64) {
@@ -353,5 +381,13 @@ pub fn preflight_resident_bytes(model_dir: &Path) -> Option<u64> {
         Ok(raw) => raw.trim().parse().ok()?,
         Err(_) => arena_bytes_for(host_memory_status().as_ref(), non_expert, expert_bytes),
     };
-    Some(non_expert.saturating_add(arena.min(expert_bytes)))
+    // The same clamped slot counts the loader allocates: at least 64 per layer
+    // however small the requested arena is.
+    let allocated: u64 = (0..layers)
+        .map(|layer| {
+            let expert = source.expert_bytes(layer);
+            slots_per_layer(arena, layers, expert, num_experts) as u64 * expert
+        })
+        .sum();
+    Some(non_expert.saturating_add(allocated))
 }

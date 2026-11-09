@@ -241,9 +241,20 @@ impl ExpertSource {
         Ok(total)
     }
 
-    /// Identity of the expert planes a contiguous file was written from.
+    /// Identity of the expert planes a contiguous file was written from: their
+    /// layout, and each shard's size and modification time, so a shard replaced
+    /// by one of the same layout (a re-quantization) invalidates the copy.
     fn fingerprint(&self) -> String {
         let mut hasher = Sha256::new();
+        for file in &self.files {
+            let meta = file.metadata().ok();
+            hasher.update(meta.as_ref().map_or(0, |m| m.len()).to_le_bytes());
+            let modified = meta
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            hasher.update(modified.to_le_bytes());
+        }
         hasher.update((self.num_experts as u64).to_le_bytes());
         for plane in self.layers.iter().flatten() {
             hasher.update(plane.row_bytes.to_le_bytes());
@@ -272,6 +283,13 @@ impl ExpertSource {
             return None;
         }
         let file = open_uncached(&model_dir.join(CONTIGUOUS_FILE)).ok()?;
+        let expected = layers
+            .last()
+            .map(|(offset, record)| offset + record * self.num_experts as u64)?;
+        if file.metadata().ok()?.len() != expected {
+            eprintln!("Ignoring {CONTIGUOUS_FILE}: it is not the size its manifest records.");
+            return None;
+        }
         Some(Contiguous { file, layers })
     }
 }

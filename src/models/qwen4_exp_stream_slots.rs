@@ -152,31 +152,73 @@ pub(crate) fn split_rows(
     ranges
 }
 
-/// Split `sorted` (expert ids in ascending order) into contiguous ranges of
-/// at most `capacity` distinct experts, cutting only between experts and
-/// spreading the experts evenly over the fewest ranges.
+/// Divide `sorted` (expert ids in ascending order) into batches of positions
+/// holding at most `capacity` distinct experts, keeping each expert's rows in
+/// one batch.
 ///
-/// Used for a sorted prefill window larger than the arena: each expert's rows
-/// stay together, so every expert's matmul sees the rows the resident path
-/// gives it.
-pub(crate) fn split_expert_groups(sorted: &[u32], capacity: usize) -> Vec<std::ops::Range<usize>> {
+/// Used for a sorted prefill window. MLX picks the sorted matmul and its tile
+/// height from `rows / tensor experts`, so a batch run on a `capacity`-slot
+/// tensor only gets the resident kernel when its own ratio falls in the same
+/// band. `ratio`, when given, is that band: the fewest batches that respect
+/// the capacity and the band's upper end are filled largest expert first into
+/// the lightest batch, because batches of neighbouring rare experts would
+/// otherwise fall below the band's lower end. Use [`batches_within_ratio`] to
+/// learn whether the result met it.
+pub(crate) fn plan_expert_batches(
+    sorted: &[u32],
+    capacity: usize,
+    ratio: Option<std::ops::Range<usize>>,
+) -> Vec<Vec<usize>> {
     let mut starts = Vec::new();
     for (index, expert) in sorted.iter().enumerate() {
         if index == 0 || sorted[index - 1] != *expert {
             starts.push(index);
         }
     }
-    let groups = starts.len();
-    if groups == 0 {
+    if starts.is_empty() {
         return Vec::new();
     }
-    let batches = groups.div_ceil(capacity.max(1));
-    let mut ranges = Vec::with_capacity(batches);
-    for batch in 0..batches {
-        let first = batch * groups / batches;
-        let last = (batch + 1) * groups / batches;
-        let end = starts.get(last).copied().unwrap_or(sorted.len());
-        ranges.push(starts[first]..end);
+    let capacity = capacity.max(1);
+    let group_end = |group: usize| starts.get(group + 1).copied().unwrap_or(sorted.len());
+    let mut count = starts.len().div_ceil(capacity);
+    if let Some(ratio) = ratio
+        && ratio.end != usize::MAX
+    {
+        let most_rows = (ratio.end.saturating_mul(capacity) - 1).max(1);
+        count = count.max(sorted.len().div_ceil(most_rows));
     }
-    ranges
+
+    let mut by_size: Vec<usize> = (0..starts.len()).collect();
+    by_size.sort_by_key(|&group| std::cmp::Reverse(group_end(group) - starts[group]));
+    let mut groups: Vec<Vec<usize>> = vec![Vec::new(); count];
+    let mut rows = vec![0usize; count];
+    for group in by_size {
+        let lightest = (0..count)
+            .filter(|&batch| groups[batch].len() < capacity)
+            .min_by_key(|&batch| rows[batch])
+            .expect("count batches of capacity groups hold every group");
+        groups[lightest].push(group);
+        rows[lightest] += group_end(group) - starts[group];
+    }
+    groups
+        .into_iter()
+        .map(|mut batch| {
+            batch.sort_unstable();
+            batch
+                .into_iter()
+                .flat_map(|group| starts[group]..group_end(group))
+                .collect()
+        })
+        .collect()
+}
+
+/// Whether every batch's `rows / capacity` lies inside `ratio`.
+pub(crate) fn batches_within_ratio(
+    batches: &[Vec<usize>],
+    capacity: usize,
+    ratio: &std::ops::Range<usize>,
+) -> bool {
+    batches
+        .iter()
+        .all(|batch| ratio.contains(&(batch.len() / capacity.max(1))))
 }

@@ -29,7 +29,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::ExpertStream;
-use super::slots::{LayerSlots, split_expert_groups, split_rows};
+use super::slots::{LayerSlots, batches_within_ratio, plan_expert_batches, split_rows};
 use super::source::{ExpertSource, PLANE_SUFFIXES};
 use crate::models::qwen3_next::SwitchGLU;
 
@@ -40,6 +40,8 @@ const ARENA_PAGE: usize = 16 * 1024;
 const SORTED_MIN_ROWS: usize = 64;
 /// MLX's `B / E >= 4` condition for its sorted gathered matmul.
 const SORTED_KERNEL_RATIO: usize = 4;
+/// MLX's `B / E` at which that matmul switches to its taller tile.
+const SORTED_TALL_TILE_RATIO: usize = 64;
 /// Concurrent expert reads while filling one window.
 const READ_THREADS: usize = 4;
 
@@ -105,7 +107,21 @@ impl Drop for PlaneBuffer {
 struct LayerState {
     slots: LayerSlots,
     /// The last output that read this layer's slots and may still be queued.
+    /// Replaced only through [`LayerState::remember`], so an output is never
+    /// forgotten while its command can still read a slot.
     pending: Option<UniquePtr<MlxArray>>,
+}
+
+impl LayerState {
+    /// Record `output` as the newest reader of the slots, first finishing the
+    /// previous one: a hit-only window has no reason to wait for it, but the
+    /// next window that evicts could only wait for the newest reader.
+    fn remember(&mut self, output: &MlxArray) {
+        if let Some(previous) = self.pending.take() {
+            mlxcel_core::eval(&previous);
+        }
+        self.pending = Some(mlxcel_core::array_handle_clone(output));
+    }
 }
 
 /// One layer's arena.
@@ -236,22 +252,24 @@ impl LayerStream {
             });
         }
         let output = output.expect("a forward has at least one row");
-        state.pending = Some(mlxcel_core::array_handle_clone(&output));
+        state.remember(&output);
         output
     }
 
     /// The sorted prefill path, reproducing the resident sort.
     ///
     /// Rows are ordered by expert exactly as the resident path orders them. A
-    /// window with more distinct experts than slots is cut between experts,
-    /// never inside one: cutting by token rows would split an expert's rows
-    /// over several matmuls and change the kernel batching, which alters the
-    /// low bits of the result.
+    /// window with more distinct experts than slots is divided between
+    /// experts, never inside one: cutting by token rows would split an
+    /// expert's rows over several matmuls and change the kernel batching,
+    /// which alters the low bits of the result.
     ///
     /// The kernel choice also follows the resident path. MLX takes its sorted
-    /// matmul when `rows / num_experts >= 4` over the tensor it is given, and
-    /// a slot tensor has fewer experts than the checkpoint, so the arena
-    /// asks for the sorted kernel only when the resident tensor would get it.
+    /// matmul when `rows / num_experts >= 4` over the tensor it is given and
+    /// picks its tile height from the same ratio, and a slot tensor has fewer
+    /// experts than the checkpoint. The arena asks for the sorted kernel only
+    /// when the resident tensor would get it, and sizes each batch so the
+    /// ratio over the slot tensor lands in the resident's band.
     fn forward_sorted(
         &self,
         state: &mut LayerState,
@@ -269,18 +287,39 @@ impl LayerStream {
             .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("4-byte chunk")))
             .collect();
 
-        let resident_sorted = rows * k / self.stream.source.num_experts >= SORTED_KERNEL_RATIO;
-        let batches = split_expert_groups(&ids, state.slots.capacity());
+        let resident_ratio = rows * k / self.stream.source.num_experts;
+        let resident_sorted = resident_ratio >= SORTED_KERNEL_RATIO;
+        let ratio = resident_sorted.then_some({
+            if resident_ratio >= SORTED_TALL_TILE_RATIO {
+                SORTED_TALL_TILE_RATIO..usize::MAX
+            } else {
+                SORTED_KERNEL_RATIO..SORTED_TALL_TILE_RATIO
+            }
+        });
+        let capacity = state.slots.capacity();
+        let batches = plan_expert_batches(&ids, capacity, ratio.clone());
+        if let Some(ratio) = &ratio
+            && !batches_within_ratio(&batches, capacity, ratio)
+        {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "Warning: a prefill window could not be divided to keep the resident sorted \
+                     kernel on the expert arena; its low bits may differ from a resident run. \
+                     A larger arena or a different prefill chunk avoids this."
+                );
+            });
+        }
         let segmented = batches.len() > 1;
         let stats = &self.stream.stats;
         let mut output: Option<UniquePtr<MlxArray>> = None;
         let mut positions: Vec<i32> = Vec::with_capacity(ids.len());
         for batch in batches {
-            let window = &ids[batch.clone()];
+            let window: Vec<u32> = batch.iter().map(|&position| ids[position]).collect();
             let mapping = state
                 .slots
-                .map_window(window)
-                .expect("split_expert_groups keeps every batch within capacity");
+                .map_window(&window)
+                .expect("plan_expert_batches keeps every batch within capacity");
             stats.windows.fetch_add(1, Ordering::Relaxed);
             stats.hits.fetch_add(mapping.hits as u64, Ordering::Relaxed);
             stats
@@ -298,10 +337,8 @@ impl LayerStream {
             // keeping each group's rows in place and in order.
             let mut order: Vec<usize> = (0..window.len()).collect();
             order.sort_by_key(|&index| mapping.slots[index]);
-            let batch_positions: Vec<i32> = order
-                .iter()
-                .map(|&index| (batch.start + index) as i32)
-                .collect();
+            let batch_positions: Vec<i32> =
+                order.iter().map(|&index| batch[index] as i32).collect();
             let slot_bytes: Vec<u8> = order
                 .iter()
                 .flat_map(|&index| mapping.slots[index].to_le_bytes())
@@ -324,7 +361,7 @@ impl LayerStream {
             });
         }
         let output = output.expect("a forward has at least one row");
-        state.pending = Some(mlxcel_core::array_handle_clone(&output));
+        state.remember(&output);
 
         // Back to the resident's sorted order, then the resident's unsort.
         let mut back = vec![0i32; positions.len()];
@@ -356,6 +393,17 @@ impl LayerStream {
         stats
             .io_ns
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+}
+
+impl Drop for LayerStream {
+    fn drop(&mut self) {
+        // The buffers are freed right after this; a queued command must not
+        // still be reading them.
+        let state = self.state.get_mut().unwrap_or_else(|p| p.into_inner());
+        if let Some(pending) = state.pending.take() {
+            mlxcel_core::eval(&pending);
+        }
     }
 }
 

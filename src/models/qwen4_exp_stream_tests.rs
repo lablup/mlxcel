@@ -99,21 +99,80 @@ fn split_rows_keeps_each_range_within_capacity_and_covers_every_row() {
     }
 }
 
+/// Expand `(expert, rows)` into the ascending ids a sorted window holds.
+fn sorted_window(groups: &[(u32, usize)]) -> Vec<u32> {
+    groups
+        .iter()
+        .flat_map(|&(expert, rows)| std::iter::repeat_n(expert, rows))
+        .collect()
+}
+
+/// Every position once, no expert split, at most `capacity` experts per batch.
+fn assert_batches_valid(sorted: &[u32], batches: &[Vec<usize>], capacity: usize) {
+    let mut seen: Vec<usize> = batches.iter().flatten().copied().collect();
+    seen.sort_unstable();
+    assert_eq!(seen, (0..sorted.len()).collect::<Vec<_>>());
+    let mut owner = std::collections::HashMap::new();
+    for (index, batch) in batches.iter().enumerate() {
+        let mut experts: Vec<u32> = batch.iter().map(|&p| sorted[p]).collect();
+        experts.dedup();
+        assert!(experts.len() <= capacity);
+        for expert in experts {
+            assert_eq!(*owner.entry(expert).or_insert(index), index, "expert split");
+        }
+    }
+}
+
 #[test]
 fn expert_groups_stay_whole_and_within_capacity() {
-    use super::slots::split_expert_groups;
+    use super::slots::plan_expert_batches;
     let sorted = [0, 0, 1, 2, 2, 2, 3, 5, 5, 8];
-    let ranges = split_expert_groups(&sorted, 3);
-    // Six experts at capacity three is two batches of three experts.
-    assert_eq!(ranges, vec![0..6, 6..10]);
-    for range in &ranges {
-        let mut distinct = sorted[range.clone()].to_vec();
-        distinct.dedup();
-        assert!(distinct.len() <= 3);
-    }
-    // An expert's rows are never split across two batches.
-    assert_eq!(split_expert_groups(&sorted, 10), vec![0..10]);
-    assert!(split_expert_groups(&[], 3).is_empty());
+    let batches = plan_expert_batches(&sorted, 3, None);
+    assert_eq!(batches.len(), 2);
+    assert_batches_valid(&sorted, &batches, 3);
+    assert_eq!(
+        plan_expert_batches(&sorted, 10, None),
+        vec![(0..10).collect::<Vec<_>>()]
+    );
+    assert!(plan_expert_batches(&[], 3, None).is_empty());
+}
+
+#[test]
+fn batches_of_rare_experts_are_balanced_into_the_sorted_kernel_band() {
+    use super::slots::{batches_within_ratio, plan_expert_batches};
+    // Popular experts first, so cutting in expert order would leave whole
+    // batches of rare experts below the four rows per slot the kernel needs.
+    let groups: Vec<(u32, usize)> = (0..256u32)
+        .map(|expert| (expert, if expert < 32 { 64 } else { 2 }))
+        .collect();
+    let sorted = sorted_window(&groups);
+    let batches = plan_expert_batches(&sorted, 64, Some(4..64));
+    assert_eq!(batches.len(), 4);
+    assert_batches_valid(&sorted, &batches, 64);
+    assert!(batches_within_ratio(&batches, 64, &(4..64)));
+}
+
+#[test]
+fn a_batch_never_reaches_the_tall_tile_the_resident_tensor_would_not_use() {
+    use super::slots::{batches_within_ratio, plan_expert_batches};
+    let groups: Vec<(u32, usize)> = (0..64u32).map(|expert| (expert, 320)).collect();
+    let sorted = sorted_window(&groups);
+    let unbounded = plan_expert_batches(&sorted, 64, None);
+    assert_eq!(unbounded.len(), 1, "one batch fits the slots");
+    assert!(!batches_within_ratio(&unbounded, 64, &(4..64)));
+    let batches = plan_expert_batches(&sorted, 64, Some(4..64));
+    assert_batches_valid(&sorted, &batches, 64);
+    assert!(batches_within_ratio(&batches, 64, &(4..64)));
+}
+
+#[test]
+fn a_band_out_of_reach_is_reported_rather_than_met() {
+    use super::slots::{batches_within_ratio, plan_expert_batches};
+    let groups: Vec<(u32, usize)> = (0..128u32).map(|expert| (expert, 1)).collect();
+    let sorted = sorted_window(&groups);
+    let batches = plan_expert_batches(&sorted, 64, Some(4..64));
+    assert_batches_valid(&sorted, &batches, 64);
+    assert!(!batches_within_ratio(&batches, 64, &(4..64)));
 }
 
 #[test]
@@ -269,6 +328,50 @@ fn a_contiguous_file_for_another_checkpoint_is_ignored() {
     std::fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
     let source = ExpertSource::open(dir.path(), LAYERS, EXPERTS).unwrap();
     assert!(!source.uses_contiguous_file());
+}
+
+#[test]
+fn a_contiguous_file_is_ignored_once_its_shard_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    write_checkpoint(dir.path());
+    write_contiguous_file(dir.path(), LAYERS, EXPERTS).unwrap();
+    assert!(
+        ExpertSource::open(dir.path(), LAYERS, EXPERTS)
+            .unwrap()
+            .uses_contiguous_file()
+    );
+    // Same layout and size, as a re-quantized checkpoint would have.
+    let shard = std::fs::File::options()
+        .write(true)
+        .open(dir.path().join("model.safetensors"))
+        .unwrap();
+    shard
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+        .unwrap();
+    drop(shard);
+    assert!(
+        !ExpertSource::open(dir.path(), LAYERS, EXPERTS)
+            .unwrap()
+            .uses_contiguous_file()
+    );
+}
+
+#[test]
+fn a_truncated_contiguous_file_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    write_checkpoint(dir.path());
+    let report = write_contiguous_file(dir.path(), LAYERS, EXPERTS).unwrap();
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&report.path)
+        .unwrap();
+    file.set_len(report.bytes - 1).unwrap();
+    drop(file);
+    assert!(
+        !ExpertSource::open(dir.path(), LAYERS, EXPERTS)
+            .unwrap()
+            .uses_contiguous_file()
+    );
 }
 
 #[test]
