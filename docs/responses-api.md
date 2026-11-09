@@ -26,7 +26,7 @@ Implementation source map:
 | POST | `/v1/responses` | Create a response, either non-streaming or streaming. |
 | GET | `/v1/responses/{id}` | Retrieve a stored response. |
 | DELETE | `/v1/responses/{id}` | Delete a stored response. |
-| POST | `/v1/responses/{id}/cancel` | Best-effort cancellation of an in-flight streaming response. Stored (finished) responses return `400 invalid_request_error` without changing the saved result. |
+| POST | `/v1/responses/{id}/cancel` | Best-effort cancellation of an in-flight streaming response. The stream ends with `response.cancelled` and the stored copy has `status: "cancelled"`. Stored (finished) responses return `400 invalid_request_error` without changing the saved result. |
 | POST | `/v1/responses/compact` | Summarize older turns into a `compaction` item; see [Conversation compaction](#conversation-compaction). |
 | POST | `/v1/responses/input_tokens` | Count the prompt tokens a body would prefill; see `docs/llama-server-compat.md`. |
 
@@ -205,6 +205,7 @@ Phase 1 emits events such as:
 - `response.reasoning_text.delta`
 - `response.reasoning_text.done`
 - `response.completed`
+- `response.cancelled` (mlxcel extension: the terminal event of a stream stopped by a cancel call or a client disconnect, in place of `response.completed`; `response.status` is `cancelled` and `completed_at` is null)
 - `mlx.compaction.started`, `mlx.compaction.completed` (MLX extension, only after an automatic compaction; see [Automatic compaction](#automatic-compaction))
 - failure/incomplete/error events on error paths
 

@@ -93,6 +93,19 @@ impl ResponseStreamSender {
         done.into_iter().map(|(_, item)| item).collect()
     }
 
+    /// A sender for the events that follow the end of generation. A client
+    /// hanging up at that point has no generation left to abort, so it must
+    /// not flip the request's cancellation token and turn a finished response
+    /// into a cancelled one.
+    ///
+    /// Used by: the streaming Responses task.
+    pub(crate) fn after_generation(&self) -> Self {
+        Self {
+            cancelled: Arc::default(),
+            ..self.clone()
+        }
+    }
+
     /// Send a typed Responses-API event. Silently drops the event when
     /// the receiver has been dropped (client disconnected), in which
     /// case the cancellation token is also flipped so the scheduler

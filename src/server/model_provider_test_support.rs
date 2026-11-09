@@ -362,6 +362,7 @@ impl ModelProvider {
                         let mut tokens_emitted = 0usize;
                         let mut aborted = false;
                         let mut finish_reason = "stop";
+                        let mut failure = None;
                         while let Ok(step) = step_rx.recv() {
                             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                                 aborted = true;
@@ -377,11 +378,19 @@ impl ModelProvider {
                                         .send(GenerateEvent::Token(token, TokenMeta::default()));
                                 }
                                 ScriptedStreamStep::Finish => break,
+                                ScriptedStreamStep::Fail(message) => {
+                                    failure = Some(message);
+                                    break;
+                                }
                                 ScriptedStreamStep::FinishLength => {
                                     finish_reason = "length";
                                     break;
                                 }
                             }
+                        }
+                        if let Some(message) = failure {
+                            let _ = response_tx.send(GenerateEvent::Error(message));
+                            continue;
                         }
                         let _ = response_tx.send(GenerateEvent::Done(GenerationResult {
                             text,
@@ -445,6 +454,8 @@ pub(crate) enum ScriptedStreamStep {
     Finish,
     /// End it as a generation that hit its output limit (`length`).
     FinishLength,
+    /// End it with a generation error.
+    Fail(String),
 }
 
 /// Test-side driver for [`ModelProvider::scripted_streaming_for_route_tests`].
@@ -465,6 +476,13 @@ impl ScriptedStreamHandle {
 
     pub(crate) fn finish(&self) {
         let _ = self.step_tx.send(ScriptedStreamStep::Finish);
+    }
+
+    /// End the current request with a generation error.
+    pub(crate) fn fail(&self, message: &str) {
+        let _ = self
+            .step_tx
+            .send(ScriptedStreamStep::Fail(message.to_string()));
     }
 
     /// End the current request with `finish_reason: "length"`.

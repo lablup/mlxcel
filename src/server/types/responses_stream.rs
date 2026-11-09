@@ -28,7 +28,8 @@
 //!
 //! Phase 1 emits the following events:
 //! - `response.created`, `response.in_progress`, `response.completed`,
-//!   `response.failed`, `response.incomplete`, `response.error`
+//!   `response.failed`, `response.incomplete`, `response.cancelled`,
+//!   `response.error`
 //! - `response.output_item.added`, `response.output_item.done`
 //! - `response.content_part.added`, `response.content_part.done`
 //! - `response.output_text.delta`, `response.output_text.done`
@@ -71,6 +72,12 @@ pub enum ResponseStreamEvent {
     },
     #[serde(rename = "response.incomplete")]
     Incomplete {
+        sequence_number: u64,
+        response: ResponseObject,
+    },
+    /// A cancelled stream's terminal event. `status` is `cancelled`.
+    #[serde(rename = "response.cancelled")]
+    Cancelled {
         sequence_number: u64,
         response: ResponseObject,
     },
@@ -183,6 +190,7 @@ impl ResponseStreamEvent {
             ResponseStreamEvent::Completed { .. } => "response.completed",
             ResponseStreamEvent::Failed { .. } => "response.failed",
             ResponseStreamEvent::Incomplete { .. } => "response.incomplete",
+            ResponseStreamEvent::Cancelled { .. } => "response.cancelled",
             ResponseStreamEvent::Error { .. } => "response.error",
             ResponseStreamEvent::CompactionStarted { .. } => "mlx.compaction.started",
             ResponseStreamEvent::CompactionCompleted { .. } => "mlx.compaction.completed",
@@ -219,6 +227,9 @@ impl ResponseStreamEvent {
                 sequence_number, ..
             }
             | ResponseStreamEvent::Incomplete {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Cancelled {
                 sequence_number, ..
             }
             | ResponseStreamEvent::Error {

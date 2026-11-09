@@ -27,10 +27,10 @@
 //!   reference `previous_response_id`.
 //! - Delete on `DELETE /v1/responses/:id` and by the LRU/TTL sweep.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::server::store_budget::{
@@ -122,6 +122,10 @@ pub struct ResponsesStore {
     /// stream start and removes on stream completion; the cancel route
     /// looks up and flips the token.
     in_flight: RwLock<HashMap<String, InFlightToken>>,
+    /// Ids whose cancel call was answered `cancelled`. Written under the
+    /// `in_flight` read guard and drained under its write guard, so the
+    /// streaming task learns exactly which cancels the client was told about.
+    cancel_acknowledged: Mutex<HashSet<String>>,
 }
 
 impl ResponsesStore {
@@ -130,6 +134,7 @@ impl ResponsesStore {
             inner: RwLock::new(StoreState::with_capacity(config.max_entries)),
             config,
             in_flight: RwLock::new(HashMap::new()),
+            cancel_acknowledged: Mutex::new(HashSet::new()),
         }
     }
 
@@ -154,11 +159,26 @@ impl ResponsesStore {
     /// Remove a streaming response from the in-flight registry. Called
     /// by the streaming task after the final event has been emitted.
     pub fn unregister_in_flight(&self, id: &str) {
+        self.finish_in_flight(id);
+    }
+
+    /// Retire a streaming response from the in-flight registry and report
+    /// whether a cancel call was acknowledged for it. A cancel cannot be
+    /// answered `cancelled` after this returns, so a stream that decides its
+    /// final status from the result never contradicts the cancel reply.
+    ///
+    /// Used by: the streaming Responses task.
+    pub fn finish_in_flight(&self, id: &str) -> bool {
         let mut g = match self.in_flight.write() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
         g.remove(id);
+        drop(g);
+        match self.cancel_acknowledged.lock() {
+            Ok(mut acknowledged) => acknowledged.remove(id),
+            Err(poisoned) => poisoned.into_inner().remove(id),
+        }
     }
 
     /// Flip the cancellation token for an in-flight streaming response.
@@ -171,6 +191,10 @@ impl ResponsesStore {
         };
         if let Some(token) = g.get(id) {
             token.store(true, Ordering::Relaxed);
+            match self.cancel_acknowledged.lock() {
+                Ok(mut acknowledged) => acknowledged.insert(id.to_string()),
+                Err(poisoned) => poisoned.into_inner().insert(id.to_string()),
+            };
             true
         } else {
             false
