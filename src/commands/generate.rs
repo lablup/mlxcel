@@ -2084,8 +2084,14 @@ fn run_prompt_lookup(
     // does, and the same gate decides it (the widest block a round can run):
     // on GPU generation 15+ the probe fails under `qmv_wide` and passes once
     // the gate switches it off for the process.
+    if matches!(model, mlxcel::LoadedModel::Qwen4ExpVLM(_)) && !mlxcel_core::metal_is_available() {
+        anyhow::bail!(
+            "--prompt-lookup requires the Metal backend on Qwen4-Exp: its temperature-0 \
+             exactness rests on the Metal precise gated-delta kernel, whose block and chain \
+             arithmetic agree; the ops fallback's does not."
+        );
+    }
     if let mlxcel::LoadedModel::Qwen4ExpVLM(vlm) = model
-        && mlxcel_core::metal_is_available()
         && !vlm.text_model.mtp_exactness_allows(config.max_draft + 1)
     {
         anyhow::bail!(

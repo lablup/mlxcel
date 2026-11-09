@@ -575,20 +575,21 @@ pub trait LanguageModel {
     /// (a model-owned layout, or [`Self::kv_cache_captures_sequence_state`]
     /// `false`).
     ///
-    /// Defaults to [`Self::supports_decode_lookahead_rewind`]: a model that
-    /// rewinds the scheduler's single-token lookahead appends rewinds a verify
-    /// block the same way. A model answers `true` here while keeping the
-    /// lookahead off when it captures the rewind state only for the forwards
-    /// the engine marks speculative ([`crate::cache::speculative_append_active`])
-    /// and prefers synchronous decode otherwise: `qwen4_exp` replays its
-    /// GatedDeltaNet and PLE state over the accepted prefix, which is worth a
-    /// verify block's acceptance but not a pipelined decode step's
-    /// mispredictions (issue #2880).
+    /// Defaults to `false`, and is deliberately independent of
+    /// [`Self::supports_decode_lookahead_rewind`]: the lookahead rewinds whole
+    /// single-token forwards, while a verify block rejects positions inside
+    /// one multi-token forward, so a family that logs one entry per forward
+    /// (Baichuan) or per overwritten row (Gemma 3) cannot unwind a block
+    /// through the same hook. A model answers `true` only when its rewind
+    /// can stop anywhere inside a block: `qwen4_exp` captures the rewind state
+    /// for the forwards the engine marks speculative
+    /// ([`crate::cache::speculative_append_active`]) and replays its
+    /// GatedDeltaNet and PLE state over the accepted prefix (issue #2880).
     ///
     /// Used by: `prompt_lookup_unsupported_reason`,
     /// `Engine::verify_rounds_unsupported`.
     fn supports_speculative_verify_rewind(&self) -> bool {
-        self.supports_decode_lookahead_rewind()
+        false
     }
 
     /// Whether the scheduler's KV cache slice holds this model's whole
