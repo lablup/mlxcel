@@ -172,6 +172,20 @@ fn gate_approves_everything_when_availability_is_unknown() {
     assert!(gate.allows_step_at(u64::MAX, Instant::now()));
 }
 
+#[test]
+fn speculative_pages_in_the_kernel_free_count_are_counted_once() {
+    let counts = VmPageCounts {
+        free: free_pages_excluding_speculative(1000, 300),
+        inactive: 200,
+        speculative: 300,
+        file_backed: 10_000,
+        ..VmPageCounts::default()
+    };
+    assert_eq!(counts.free, 700);
+    assert_eq!(available_now_pages(&counts), 1200);
+    assert_eq!(free_pages_excluding_speculative(100, 300), 0);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_queries_return_plausible_figures() {

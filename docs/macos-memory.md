@@ -14,7 +14,7 @@ GPU wiring of a buffer ends a few seconds after its last command buffer. While a
 |------|---------|
 | Total RAM | `hw.memsize` |
 | Metal working set | Metal's recommended working set |
-| Available now | `free + purgeable + min(inactive + speculative, file-backed)` pages from `host_statistics64`. Inactive anonymous memory of other programs is excluded, because macOS frees it only by compressing or swapping. |
+| Available now | `free + purgeable + min(inactive + speculative, file-backed)` pages from `host_statistics64`, with `free` excluding speculative pages (the kernel's `free_count` includes them). Inactive anonymous memory of other programs is excluded, because macOS frees it only by compressing or swapping. |
 | macOS reserve | `max(7 GiB, 15% of RAM)` |
 | This load | weights + KV cache + activations |
 

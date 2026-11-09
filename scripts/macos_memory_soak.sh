@@ -130,16 +130,33 @@ SERVER_PID=""
 SAMPLER_PID=""
 ALLOC_PID=""
 WRITE_FILE=""
+DD_PID=""
 
+# Remove the write file first, so a server slow to stop cannot delay it. Only
+# children this script started are signalled.
 cleanup() {
+    local tries=0
+    if [ -n "$DD_PID" ]; then
+        kill "$DD_PID" 2>/dev/null
+        wait "$DD_PID" 2>/dev/null
+    fi
+    [ -n "$WRITE_FILE" ] && rm -f "$WRITE_FILE"
     for pid in "$SAMPLER_PID" "$ALLOC_PID" "$SERVER_PID"; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null
     done
+    while [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 60 ]; then
+            kill -9 "$SERVER_PID" 2>/dev/null
+            break
+        fi
+        sleep 1
+    done
     wait 2>/dev/null
-    [ -n "$WRITE_FILE" ] && rm -f "$WRITE_FILE"
-    SERVER_PID=""; SAMPLER_PID=""; ALLOC_PID=""; WRITE_FILE=""
+    SERVER_PID=""; SAMPLER_PID=""; ALLOC_PID=""; WRITE_FILE=""; DD_PID=""
 }
-trap 'cleanup; exit 130' INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM HUP
 
 # Stream one short completion and print the seconds to the first content delta.
 measure_ttft() {
@@ -168,7 +185,8 @@ with urllib.request.urlopen(request, timeout=1800) as response:
         if not line.startswith("data: ") or line == "data: [DONE]":
             continue
         choices = json.loads(line[6:]).get("choices") or []
-        if choices and (choices[0].get("delta") or {}).get("content"):
+        delta = (choices[0].get("delta") or {}) if choices else {}
+        if delta.get("content") or delta.get("reasoning_content"):
             print(f"{time.monotonic() - start:.3f}")
             break
 PY
@@ -223,7 +241,14 @@ run_one() {
     phase_file="$OUT/.phase"
     echo loading >"$phase_file"
 
+    # Without this check a foreign server would answer /health and be measured.
+    if curl -s --max-time 2 -o /dev/null "$BASE/health"; then
+        echo "port $PORT already answers; choose another with --port" >&2
+        return 1
+    fi
+
     (
+        unset MLXCEL_WIRED_LIMIT MLXCEL_WIRE_WEIGHTS
         [ "$limit" = "default" ] || export MLXCEL_WIRED_LIMIT="$limit"
         [ "$WIRE_WEIGHTS" -eq 1 ] && export MLXCEL_WIRE_WEIGHTS=1
         exec "$SERVER" -m "$MODEL" --port "$PORT" --metrics
@@ -242,6 +267,11 @@ run_one() {
 
     echo first_request >"$phase_file"
     ttft_before=$(measure_ttft)
+    if [ -z "$ttft_before" ]; then
+        echo "[$limit] no first token, skipping the write; see $log" >&2
+        cleanup
+        return 1
+    fi
     echo "[$limit] TTFT before write: ${ttft_before}s"
     echo idle_before >"$phase_file"
     sleep "$IDLE_SECONDS"
@@ -253,7 +283,16 @@ run_one() {
     for gib in $WRITES; do
         echo "write_${gib}G" >"$phase_file"
         WRITE_FILE="$WRITE_DIR/mlxcel-soak-$$-$gib.bin"
-        dd if=/dev/urandom of="$WRITE_FILE" bs=1048576 count=$((gib * 1024)) 2>>"$log"
+        # In the background so that a signal interrupts the wait at once.
+        dd if=/dev/urandom of="$WRITE_FILE" bs=1048576 count=$((gib * 1024)) 2>>"$log" &
+        DD_PID=$!
+        if ! wait "$DD_PID"; then
+            DD_PID=""
+            echo "[$limit] write of ${gib}G failed, see $log" >&2
+            cleanup
+            return 1
+        fi
+        DD_PID=""
         rm -f "$WRITE_FILE"
         WRITE_FILE=""
     done

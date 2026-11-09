@@ -51,7 +51,8 @@ pub const AVAILABILITY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 /// The page counts [`available_now_pages`] reads, from `vm_statistics64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct VmPageCounts {
-    /// `free_count`: pages on the free list.
+    /// Pages on the free list, without the speculative ones. The kernel's
+    /// `free_count` includes those, see [`free_pages_excluding_speculative`].
     pub free: u64,
     /// `purgeable_count`: pages the owner marked as discardable.
     pub purgeable: u64,
@@ -63,6 +64,15 @@ pub struct VmPageCounts {
     pub file_backed: u64,
     /// `wire_count`: pages that cannot be paged out or compressed.
     pub wired: u64,
+}
+
+/// The free-list size from `vm_statistics64`, whose `free_count` also counts
+/// speculative pages (`vm_stat` subtracts them the same way for "Pages free").
+/// [`available_now_pages`] adds speculative pages itself, so passing the raw
+/// `free_count` would count them twice.
+#[must_use]
+pub fn free_pages_excluding_speculative(free_count: u32, speculative_count: u32) -> u64 {
+    u64::from(free_count.saturating_sub(speculative_count))
 }
 
 /// Pages macOS can give up without compressing or swapping anything.
@@ -339,7 +349,10 @@ mod platform {
         // SAFETY: zero is valid for every integer field and the call succeeded.
         let stats = unsafe { stats.assume_init() };
         let counts = VmPageCounts {
-            free: u64::from(stats.free_count),
+            free: super::free_pages_excluding_speculative(
+                stats.free_count,
+                stats.speculative_count,
+            ),
             purgeable: u64::from(stats.purgeable_count),
             inactive: u64::from(stats.inactive_count),
             speculative: u64::from(stats.speculative_count),
