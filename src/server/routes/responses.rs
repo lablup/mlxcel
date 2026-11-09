@@ -1308,7 +1308,12 @@ pub async fn cancel_response(State(state): State<AppState>, Path(id): Path<Strin
 
     // Responses are persisted only after generation finishes. Check before
     // signalling a stream whose in-flight token may not yet be unregistered.
-    if store.get(&id).is_some() {
+    if let Some(stored) = store.get(&id) {
+        // Cancelling twice is idempotent in OpenAI's API: a repeat call
+        // returns the final Response object.
+        if stored.response.status == ResponseStatus::Cancelled {
+            return Json(stored.response).into_response();
+        }
         return ErrorResponse::new(
             format!("response '{id}' has already finished and cannot be cancelled"),
             "invalid_request_error",

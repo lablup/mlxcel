@@ -801,6 +801,7 @@ async fn chat_stream_failure_matches_the_non_streaming_classification() {
     let error = assert_error_tail(&sse_frames(&collect_body(response).await));
     assert_eq!(error["message"], message.as_str());
     assert_eq!(error["type"], "exceed_context_size_error");
+    assert_eq!(error["code"], "context_length_exceeded");
 }
 
 #[tokio::test]
@@ -856,6 +857,7 @@ async fn over_context_prompt_is_refused_before_sse_headers() {
     let body: serde_json::Value =
         serde_json::from_slice(&collect_body(response).await).expect("json error body");
     assert_eq!(body["error"]["type"], "exceed_context_size_error");
+    assert_eq!(body["error"]["code"], "context_length_exceeded");
     assert!(
         body["error"]["message"]
             .as_str()

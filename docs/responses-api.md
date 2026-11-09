@@ -26,7 +26,7 @@ Implementation source map:
 | POST | `/v1/responses` | Create a response, either non-streaming or streaming. |
 | GET | `/v1/responses/{id}` | Retrieve a stored response. |
 | DELETE | `/v1/responses/{id}` | Delete a stored response. |
-| POST | `/v1/responses/{id}/cancel` | Best-effort cancellation of an in-flight streaming response. The stream ends with `response.completed` whose `response.status` is `cancelled`, and the stored copy has the same status. Stored (finished) responses return `400 invalid_request_error` without changing the saved result. |
+| POST | `/v1/responses/{id}/cancel` | Best-effort cancellation of an in-flight streaming response. The stream ends with `response.completed` whose `response.status` is `cancelled`, and the stored copy has the same status. Cancelling a response already stored as `cancelled` is idempotent and returns the stored Response object. Other finished responses return `400 invalid_request_error` without changing the saved result. |
 | POST | `/v1/responses/compact` | Summarize older turns into a `compaction` item; see [Conversation compaction](#conversation-compaction). |
 | POST | `/v1/responses/input_tokens` | Count the prompt tokens a body would prefill; see `docs/llama-server-compat.md`. |
 
