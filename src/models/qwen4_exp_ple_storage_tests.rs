@@ -311,7 +311,7 @@ fn a_cache_smaller_than_a_lookup_still_returns_every_row() {
         quant,
         PrepareLayout::Interleaved,
         PleIoMode::Mmap,
-        stride + 32,
+        stride + 56,
     );
     assert_same(&resident, &fixture.table, &IDS);
     assert_same(&resident, &fixture.table, &IDS);

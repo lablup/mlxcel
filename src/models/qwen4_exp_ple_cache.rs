@@ -25,9 +25,11 @@ use std::sync::Arc;
 /// Bytes of memory each growth step adds.
 pub const GROWTH_STEP_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Bookkeeping charged per record against the byte budget: the key map entry
-/// and the two list links.
-const ENTRY_OVERHEAD_BYTES: u64 = 32;
+/// Bookkeeping charged per record against the byte budget, so slabs plus
+/// bookkeeping never exceed it: 16 bytes for the key and the two list links
+/// (reserved a step at a time) and 39 for a hash map entry at worst, 17 bytes
+/// per bucket with up to `2 * 8 / 7` buckets per record.
+const ENTRY_OVERHEAD_BYTES: u64 = 56;
 
 const NONE: u32 = u32::MAX;
 
@@ -92,7 +94,7 @@ impl RowCache {
     /// Bytes of record storage currently allocated.
     #[cfg(test)]
     pub(crate) fn allocated_bytes(&self) -> u64 {
-        self.slabs.len() as u64 * u64::from(self.slab_rows) * self.stride as u64
+        self.slabs.iter().map(|slab| slab.len() as u64).sum()
     }
 
     fn slot_range(&self, slot: u32) -> (usize, std::ops::Range<usize>) {
@@ -145,11 +147,16 @@ impl RowCache {
             return None;
         }
         if used as usize / self.slab_rows as usize >= self.slabs.len() {
-            let step = u64::from(self.slab_rows) * self.stride as u64;
+            // The last step stops at the capacity instead of overshooting it.
+            let step_rows = self.slab_rows.min(self.capacity_rows - used) as usize;
+            let step = step_rows as u64 * self.stride as u64;
             if !self.growth.can_grow(step) {
                 return None;
             }
             self.slabs.push(vec![0u8; step as usize].into_boxed_slice());
+            self.keys.reserve_exact(step_rows);
+            self.prev.reserve_exact(step_rows);
+            self.next.reserve_exact(step_rows);
         }
         self.keys.push(0);
         self.prev.push(NONE);
@@ -237,12 +244,30 @@ mod tests {
     #[test]
     fn budget_counts_the_entry_overhead() {
         assert_eq!(
-            RowCache::new(36, 4, Arc::new(AlwaysGrow)).capacity_rows(),
+            RowCache::new(60, 4, Arc::new(AlwaysGrow)).capacity_rows(),
             1
         );
         assert_eq!(
-            RowCache::new(35, 4, Arc::new(AlwaysGrow)).capacity_rows(),
+            RowCache::new(59, 4, Arc::new(AlwaysGrow)).capacity_rows(),
             0
         );
+    }
+
+    #[test]
+    fn slabs_stop_at_the_capacity_between_growth_steps() {
+        // A capacity of one and a half growth steps.
+        let stride = 1 << 20;
+        let rows = GROWTH_STEP_BYTES / stride as u64 * 3 / 2;
+        let budget = rows * (stride as u64 + ENTRY_OVERHEAD_BYTES);
+        let mut cache = RowCache::new(budget, stride, Arc::new(AlwaysGrow));
+        let record = vec![7u8; stride];
+        for id in 0..rows + 5 {
+            cache.insert(id, &record);
+        }
+        assert_eq!(cache.len() as u64, rows);
+        assert_eq!(cache.allocated_bytes(), rows * stride as u64);
+        let mut out = vec![0u8; stride];
+        assert!(cache.get(rows + 4, &mut out));
+        assert_eq!(out, record);
     }
 }

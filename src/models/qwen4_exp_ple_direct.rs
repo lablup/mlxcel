@@ -118,9 +118,10 @@ pub(super) fn read_span(
     let file = files
         .get(span.file as usize)
         .ok_or("PLE span names an unknown file")?;
-    let got = read_full(file, chunk, start)
+    let needed = (span.end - start) as usize;
+    let got = read_full(file, chunk, start, needed)
         .map_err(|e| format!("PLE row read failed at byte {start}: {e}"))?;
-    if got < (span.end - start) as usize {
+    if got < needed {
         return Err(format!(
             "PLE row read came up short at byte {start}: got {got} bytes"
         ));
@@ -135,9 +136,12 @@ pub(super) fn read_span(
     Ok(got)
 }
 
-fn read_full(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+/// Read until `needed` bytes have arrived. The buffer is rounded up to the
+/// direct-read alignment, so a span ending at the end of a file gets a short
+/// read; retrying its unaligned remainder under O_DIRECT would fail with EINVAL.
+fn read_full(file: &File, buffer: &mut [u8], offset: u64, needed: usize) -> std::io::Result<usize> {
     let mut filled = 0;
-    while filled < buffer.len() {
+    while filled < needed {
         let read = read_at(file, &mut buffer[filled..], offset + filled as u64)?;
         if read == 0 {
             break;
