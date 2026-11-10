@@ -219,6 +219,16 @@ impl DownloadOperationProgressState {
     }
 }
 
+/// What an unload does with the entry's running background Responses jobs
+/// (issue #2901).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundJobsOnUnload {
+    /// End them as `failed`: the caller asked for this model to go away.
+    Fail,
+    /// Back out of the unload: an eviction only ever takes an idle model.
+    Refuse,
+}
+
 #[derive(Clone)]
 struct LoadedApp {
     state: AppState,
@@ -322,6 +332,41 @@ impl RouterModelEntry {
 
     pub fn lifecycle_snapshot(&self) -> LifecycleSnapshot {
         self.lifecycle.snapshot()
+    }
+
+    /// The loaded sub-app's Responses store; `None` while unloaded or when
+    /// the store is disabled (`--responses-store-max-entries 0`).
+    fn responses_store(&self) -> Option<Arc<super::responses_store::ResponsesStore>> {
+        self.state
+            .lock()
+            .ok()?
+            .app
+            .as_ref()
+            .and_then(|app| app.state.responses_store.clone())
+    }
+
+    /// Background Responses jobs (`background: true`) this entry is still
+    /// running. A job holds no request lease once its create call returned,
+    /// so `active_requests` does not see it (issue #2901).
+    pub fn active_background_jobs(&self) -> usize {
+        self.responses_store()
+            .map_or(0, |store| store.active_background_jobs())
+    }
+
+    /// Whether eviction must leave this entry loaded: a request is in flight
+    /// or a background Responses job is still running.
+    ///
+    /// Used by: both eviction sites in the load path (explicit target and
+    /// LRU) and the post-drain recheck of an eviction unload.
+    pub fn is_busy_for_eviction(&self) -> bool {
+        self.lifecycle_snapshot().active_requests > 0 || self.active_background_jobs() > 0
+    }
+
+    /// Whether this entry's Responses store knows `id`. Read-only: no LRU
+    /// stamp, no admission, no autoload.
+    fn holds_response(&self, id: &str) -> bool {
+        self.responses_store()
+            .is_some_and(|store| store.contains_response(id))
     }
 
     pub fn lifecycle_revision(&self) -> u64 {
@@ -631,7 +676,7 @@ impl RouterPool {
             .expect("load after-reservation hook mutex poisoned") = hook;
     }
 
-    #[cfg(all(test, feature = "webui"))]
+    #[cfg(test)]
     pub(super) fn set_model_app_factory_for_tests(&self, factory: Option<ModelAppFactory>) {
         *self
             .model_app_factory
@@ -894,6 +939,23 @@ impl RouterPool {
     /// Exact-name lookup (load/unload/delete address models by name only).
     pub fn get(&self, name: &str) -> Option<Arc<RouterModelEntry>> {
         self.entries.read().ok()?.get(name).cloned()
+    }
+
+    /// The loaded entry whose Responses store knows `id`, for a retrieve,
+    /// delete or cancel request that names no model (issue #2901).
+    ///
+    /// The probe is in-process and read-only, and it touches only entries
+    /// with a loaded sub-app, so `--models-max` bounds it. Ids are random
+    /// (`resp_` plus a UUID), so two entries holding the same id is not
+    /// expected; if it happens the first entry in name order wins, which
+    /// keeps the choice stable across requests.
+    pub fn entry_holding_response(&self, id: &str) -> Option<Arc<RouterModelEntry>> {
+        self.entries
+            .read()
+            .ok()?
+            .values()
+            .find(|entry| entry.holds_response(id))
+            .cloned()
     }
 
     pub fn get_by_model_id(&self, model_id: &str) -> Option<Arc<RouterModelEntry>> {
@@ -1397,7 +1459,7 @@ impl RouterPool {
                             "eviction target cannot be the model being loaded".to_string(),
                         ));
                     }
-                    if victim.lifecycle_snapshot().active_requests > 0
+                    if victim.is_busy_for_eviction()
                         || victim.lifecycle.state() != ModelLifecycleState::Ready
                     {
                         return Err(RouterPoolError::Capacity(format!(
@@ -1416,7 +1478,7 @@ impl RouterPool {
                                     .values()
                                     .filter(|e| {
                                         e.status() == RouterModelStatus::Loaded
-                                            && e.lifecycle_snapshot().active_requests == 0
+                                            && !e.is_busy_for_eviction()
                                             && e.lifecycle.state() == ModelLifecycleState::Ready
                                     })
                                     .min_by_key(|e| e.last_used.load(Ordering::Relaxed))
@@ -1442,8 +1504,14 @@ impl RouterPool {
                     name,
                     self.models_max
                 );
+                // An eviction never ends a background job: one admitted after
+                // the busy check above makes the unload back out.
                 let unload_result = self
-                    .unload_entry_arc_with_expected(victim.clone(), victim_expectation.as_ref())
+                    .unload_entry_with_policy(
+                        victim.clone(),
+                        victim_expectation.as_ref(),
+                        BackgroundJobsOnUnload::Refuse,
+                    )
                     .await;
                 if unloading_explicit_victim {
                     unload_result.map_err(|err| {
@@ -1481,6 +1549,9 @@ impl RouterPool {
             entry.path.clone(),
             load_config.unwrap_or_else(|| entry.config.clone()),
         );
+        // Each load gets its own store, built from the router's flags: stored
+        // responses and background jobs belong to one loaded instance.
+        let responses_store = super::startup::build_responses_store(&self.base_startup);
         #[cfg(test)]
         let factory = self
             .model_app_factory
@@ -1492,7 +1563,7 @@ impl RouterPool {
             if let Some(factory) = factory {
                 return factory(&path, config);
             }
-            build_model_app(&path, config)
+            build_model_app(&path, config, responses_store)
         })
         .await
         .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
@@ -2166,10 +2237,23 @@ impl RouterPool {
             .await
     }
 
+    /// Unload on an explicit request (`POST /models/unload`, the WebUI
+    /// unload action, model removal, shutdown): background Responses jobs
+    /// still running end `failed`.
     async fn unload_entry_arc_with_expected(
         &self,
         entry: Arc<RouterModelEntry>,
         expectation: Option<&LoadEntryExpectation>,
+    ) -> Result<(), RouterPoolError> {
+        self.unload_entry_with_policy(entry, expectation, BackgroundJobsOnUnload::Fail)
+            .await
+    }
+
+    async fn unload_entry_with_policy(
+        &self,
+        entry: Arc<RouterModelEntry>,
+        expectation: Option<&LoadEntryExpectation>,
+        background_jobs: BackgroundJobsOnUnload,
     ) -> Result<(), RouterPoolError> {
         let _entry_permit = entry.lifecycle.operation_guard().await;
         self.ensure_entry_is_current(&entry, expectation)?;
@@ -2186,6 +2270,14 @@ impl RouterPool {
         });
         self.notify_lifecycle(&entry);
         self.notify_status(&entry);
+        // An explicit unload ends the background Responses jobs now, not
+        // after the drain: a client streaming a job's events holds a request
+        // lease for as long as the job runs, so the drain would otherwise
+        // wait for the job (and time out on a long one). The terminal event
+        // closes those streams and releases their leases.
+        if background_jobs == BackgroundJobsOnUnload::Fail {
+            Self::fail_background_jobs_for_unload(&entry, &app);
+        }
         if !entry
             .lifecycle
             .wait_for_zero_active(ROUTER_DRAIN_TIMEOUT)
@@ -2209,8 +2301,27 @@ impl RouterPool {
         // Legacy/shutdown callers supplied no revision precondition: preserve
         // their identity-only cleanup semantics for failed workers.
         self.ensure_entry_is_current(&entry, drain_expectation.as_ref())?;
+        // The drain stopped admission and every create call has returned, so
+        // the set of background Responses jobs can no longer grow.
+        if background_jobs == BackgroundJobsOnUnload::Refuse && entry.active_background_jobs() > 0 {
+            // A job was admitted between the eviction's busy check and the
+            // drain. Put the entry back in service instead of ending it.
+            entry.lifecycle.mark_ready();
+            self.notify_lifecycle(&entry);
+            self.notify_status(&entry);
+            return Err(RouterPoolError::Capacity(format!(
+                "model '{}' is busy with background responses",
+                entry.name
+            )));
+        }
         entry.lifecycle.mark_unloading();
         self.notify_lifecycle(&entry);
+        // Again before the worker stops, for a job whose create call was
+        // still in flight when the drain began. Past this point no job is
+        // active, whatever it was doing (queued behind the worker,
+        // compacting, generating); the worker exit alone only fails a job
+        // that is already generating.
+        Self::fail_background_jobs_for_unload(&entry, &app);
         let observer = app.state.model_provider.worker_exit_observer();
         let _ = app.state.model_provider.shutdown_worker();
         let observed =
@@ -2249,6 +2360,25 @@ impl RouterPool {
         self.notify_lifecycle(&entry);
         self.notify_status(&entry);
         Ok(())
+    }
+
+    /// End the entry's active background Responses jobs as `failed` and set
+    /// their cancellation tokens, so a running generation stops.
+    fn fail_background_jobs_for_unload(entry: &RouterModelEntry, app: &LoadedApp) {
+        let Some(store) = app.state.responses_store.as_ref() else {
+            return;
+        };
+        let failed = store.fail_active_background(
+            "server_error",
+            "The model was unloaded before the response finished.",
+        );
+        if failed > 0 {
+            tracing::warn!(
+                model = %entry.name,
+                jobs = failed,
+                "router: unload ended background responses as failed"
+            );
+        }
     }
 
     /// Unload `name` (b10621 `server_models::unload` through
@@ -3279,6 +3409,7 @@ impl RouterPool {
 fn build_model_app(
     model_path: &Path,
     config: super::config::ServerConfig,
+    responses_store: Option<Arc<super::responses_store::ResponsesStore>>,
 ) -> anyhow::Result<(AppState, axum::Router)> {
     let tokenizer = crate::tokenizer::load_tokenizer(model_path)?;
     let chat_template = ChatTemplateProcessor::from_model_path(model_path)?.unwrap_or_default();
@@ -3307,7 +3438,8 @@ fn build_model_app(
         batch_observability,
     )
     .with_media_support(media_support)
-    .with_video_dir_allowlist(video_dir_allowlist);
+    .with_video_dir_allowlist(video_dir_allowlist)
+    .with_responses_store(responses_store);
     let router = super::app::create_app_without_cors(state.clone());
     Ok((state, router))
 }

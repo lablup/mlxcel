@@ -1,6 +1,6 @@
 # FP8 block checkpoint logit traces for lablup/mlxcel#1807
 
-Teacher-forced logit traces from `examples/logit_trace` on a Radeon 8060S (`gfx1151`), built with `--features rocm`, for a vendor FP8 block checkpoint (`Lazarus-Ai/ReAligned-Qwen3.5-0.8B-FP8`) that mlxcel requantizes to mxfp8 at load. The write-up is `docs/benchmark_results/rocm-fp8-block-gfx1151-2026-09-30.md`. `METADATA.txt` records the host, revisions and how each arm was produced; `RUNS.txt` has the exit status and row count of every run; `SHA256SUMS` covers every trace.
+Teacher-forced logit traces from `examples/logit_trace` on a Radeon 8060S (`gfx1151`), built with `--features rocm`, for a vendor FP8 block checkpoint (`Lazarus-Ai/ReAligned-Qwen3.5-0.8B-FP8`) that mlxcel requantizes to mxfp8 at load. The write-up is `docs/benchmark_results/versions/v0.8.0.md#rocm-fp8-block-gfx1151-2026-09-30`. `METADATA.txt` records the host, revisions and how each arm was produced; `RUNS.txt` has the exit status and row count of every run; `SHA256SUMS` covers every trace.
 
 ## Arms
 

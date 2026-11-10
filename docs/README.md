@@ -42,6 +42,7 @@ Current GitHub-facing docs:
 26. `model-triage.md` - dispositions for reported model-coverage gaps, each with the evidence it rests on, and what a port of the remaining candidates would add.
 27. `vision-model-scope.md` - the scope record for detection, segmentation, 3D body, grounding, and image or video generation families: which are supported, which moved to the image-generation and dense-prediction epics with their port issues, which remain out of scope, and the criteria for re-scoping one.
 28. `dense-prediction.md` - the `mlxcel predict` image/video CLI, tensor and preview file contract, shared interpolation/preprocessing APIs, and family-registration guide.
+29. `macos-memory.md` - macOS memory guardrails: the available-now figure and reserve, footprint metrics, optional weight wiring, stepped growth, and the soak procedure.
 
 ## mlxcelverse maintenance
 

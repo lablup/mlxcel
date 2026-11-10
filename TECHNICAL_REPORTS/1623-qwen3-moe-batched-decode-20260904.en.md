@@ -105,7 +105,7 @@ An earlier after-pass read 103.7 tok/s at B=4. A `cargo build --release` on the 
 
 ### Landed separately
 
-`benchmarks/metal_m1ultra_batch_2026-09-04.csv` and `docs/benchmark_results/moe-batched-decode-m1ultra-2026-09-04.md`, plus the M1 Ultra batched-serving section and a pointer on the M5 Max one, are on `bench/0.7.0-refresh` (PR #1617) as commit `e75fa0e44`. The CSV's `mlxcel_commit` column separates the two passes. This split means the code PR can merge and close the issue while the documentation half is still unmerged.
+`benchmarks/metal_m1ultra_batch_2026-09-04.csv` and `docs/benchmark_results/versions/v0.7.0.md#moe-batched-decode-m1ultra-2026-09-04`, plus the M1 Ultra batched-serving section and a pointer on the M5 Max one, are on `bench/0.7.0-refresh` (PR #1617) as commit `e75fa0e44`. The CSV's `mlxcel_commit` column separates the two passes. This split means the code PR can merge and close the issue while the documentation half is still unmerged.
 
 ### Related issues
 

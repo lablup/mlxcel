@@ -17,11 +17,13 @@
 //!
 //! ## Scope today
 //!
-//! Captures **no-drafter baseline** throughput numbers for the two reachable
-//! target models (`models/qwen3.5-4b-4bit`, `models/gemma-4-31b-it-4bit`).
-//! These numbers are the denominator of every "speedup vs no-drafter" cell
-//! in `docs/benchmark_results/model_tests.md::Speculative drafters` and can
-//! be captured today against real on-disk checkpoints.
+//! Captures **no-drafter baseline** throughput numbers for the four reachable
+//! target models in `REACHABLE_PAIRINGS` (`models/qwen3.5-4b-4bit`,
+//! `models/gemma-4-31b-it-4bit`, `models/gemma-4-12b-it-4bit`,
+//! `models/qwen3.8-27b-4bit`). These numbers are the denominator of every
+//! "speedup vs no-drafter" cell in
+//! `docs/benchmark_results/model_tests.md::Speculative drafters` and can be
+//! captured today against real on-disk checkpoints.
 //!
 //! ## MTP speculative path (Gemma 4 and Qwen 3.5 families)
 //!
@@ -58,7 +60,8 @@
 //!     --max-tokens 96 \
 //!     --prompt "Explain Apple Silicon's unified memory in one short paragraph."
 //!
-//! # Full sweep across pairings (B = 1, 2, 4):
+//! # Full sweep across every pairing in `REACHABLE_PAIRINGS`. Every row runs
+//! # at B=1 today; `--batch` is only recorded into the table:
 //! ./target/release/speculative_bench --sweep
 //! ```
 //!
@@ -120,8 +123,10 @@ impl std::fmt::Display for BenchKind {
     name = "speculative_bench",
     about = "Speculative drafter perf benchmark.",
     long_about = "Captures no-drafter baseline tok/s for the speculative \
-                  target models. Speculative paths are scaffolded but \
-                  deferred to follow-up — see the module docs."
+                  target models and, with `--kind mtp`, the real MTP \
+                  decode tok/s and speedup vs that baseline. Only the \
+                  DFlash path (`--kind dflash`) is deferred to \
+                  follow-up — see the module docs."
 )]
 struct Args {
     /// Path to the target model directory.
@@ -247,7 +252,9 @@ struct Pairing {
 }
 
 const REACHABLE_PAIRINGS: &[Pairing] = &[
-    // Qwen 3.5 4B family — baseline + DFlash drafter.
+    // Qwen 3.5 4B family — baseline + DFlash drafter. The DFlash row is
+    // reported as DEFERRED today (see `BenchKind::Dflash`); only the baseline
+    // row records a number.
     Pairing {
         name: "Qwen 3.5 4B (no drafter)",
         target_subdir: "qwen3.5-4b-4bit",
@@ -438,7 +445,8 @@ fn run_baseline(target_dir: &Path, prompt: &str, max_tokens: usize) -> Result<(f
 /// variants and reports every other one as `other`, so the message also names
 /// the target directory to identify the checkpoint.
 const MTP_SUPPORTED_FAMILIES: &str = "Gemma 4 (Gemma4, Gemma4VLM, Gemma4Unified), \
-     Qwen 3.5 (Qwen35, Qwen35Moe, Qwen35VLM, Qwen35MoeVLM) and GLM-4.7-Flash (Glm4MoeLite)";
+     Qwen 3.5 (Qwen35, Qwen35Moe, Qwen35VLM, Qwen35MoeVLM), Qwen3.8-Flash-Next (Qwen4ExpVLM) \
+     and GLM-4.7-Flash (Glm4MoeLite)";
 
 /// Whether [`run_mtp`] can build an `MtpTarget` adapter for this variant.
 ///
@@ -459,6 +467,7 @@ fn mtp_target_supported(model: &LoadedModel) -> bool {
             | LoadedModel::Qwen35Moe(_)
             | LoadedModel::Qwen35VLM(_)
             | LoadedModel::Qwen35MoeVLM(_)
+            | LoadedModel::Qwen4ExpVLM(_)
             | LoadedModel::Glm4MoeLite(_)
     )
 }
@@ -495,6 +504,7 @@ fn run_mtp(
     };
     use mlxcel::models::glm4_moe_lite_mtp_target::Glm4MoeLiteMtpTargetAdapter;
     use mlxcel::models::qwen3_5_mtp_target::{Qwen35MtpTargetAdapter, Qwen35VLMtpTargetAdapter};
+    use mlxcel::models::qwen4_exp_mtp_target::Qwen4ExpMtpTargetAdapter;
     use mlxcel_core::drafter::DrafterKind;
 
     let block_size = block_size.unwrap_or(4) as usize;
@@ -523,12 +533,13 @@ fn run_mtp(
             | LoadedModel::Qwen35Moe(_)
             | LoadedModel::Qwen35VLM(_)
             | LoadedModel::Qwen35MoeVLM(_)
+            | LoadedModel::Qwen4ExpVLM(_)
     ) && !mlxcel_core::metal_is_available()
     {
         anyhow::bail!(
-            "MTP bench: Qwen 3.5 MTP requires the Metal backend (its temperature-0 \
-             exactness rests on the Metal chain-parity gated-delta kernel); target \
-             loaded as {}",
+            "MTP bench: Qwen 3.5 and Qwen3.8-Flash-Next MTP require the Metal backend \
+             (their temperature-0 exactness rests on the Metal gated-delta kernels); \
+             target loaded as {}",
             mlxcel::model_variant_label(&model)
         );
     }
@@ -615,6 +626,16 @@ fn run_mtp(
         ),
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => run_mtp_timed(
             |seq| Qwen35VLMtpTargetAdapter::new(vlm, Some(seq)),
+            drafter,
+            target_lm,
+            draft_dir,
+            &prompt_tokens,
+            max_tokens,
+            block_size,
+        ),
+        // Qwen3.8-Flash-Next (#2880) paired with the native `qwen4_exp_mtp` head.
+        LoadedModel::Qwen4ExpVLM(vlm) => run_mtp_timed(
+            |seq| Qwen4ExpMtpTargetAdapter::new(&vlm.text_model, Some(seq)),
             drafter,
             target_lm,
             draft_dir,

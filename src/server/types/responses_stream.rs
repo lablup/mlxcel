@@ -29,6 +29,7 @@
 //! Phase 1 emits the following events:
 //! - `response.created`, `response.in_progress`, `response.completed`,
 //!   `response.failed`, `response.incomplete`, `response.error`
+//! - `response.queued`, only on a streamed background response (issue #2900)
 //! - `response.output_item.added`, `response.output_item.done`
 //! - `response.content_part.added`, `response.content_part.done`
 //! - `response.output_text.delta`, `response.output_text.done`
@@ -51,6 +52,13 @@ use super::responses_response::{ResponseObject, ResponseOutputContent, ResponseO
 pub enum ResponseStreamEvent {
     #[serde(rename = "response.created")]
     Created {
+        sequence_number: u64,
+        response: ResponseObject,
+    },
+    /// A streamed background response was accepted and waits for a slot
+    /// (issue #2900). Follows `response.created`; the foreground never sends it.
+    #[serde(rename = "response.queued")]
+    Queued {
         sequence_number: u64,
         response: ResponseObject,
     },
@@ -179,6 +187,7 @@ impl ResponseStreamEvent {
     pub fn event_name(&self) -> &'static str {
         match self {
             ResponseStreamEvent::Created { .. } => "response.created",
+            ResponseStreamEvent::Queued { .. } => "response.queued",
             ResponseStreamEvent::InProgress { .. } => "response.in_progress",
             ResponseStreamEvent::Completed { .. } => "response.completed",
             ResponseStreamEvent::Failed { .. } => "response.failed",
@@ -207,6 +216,9 @@ impl ResponseStreamEvent {
     pub fn sequence_number(&self) -> u64 {
         match self {
             ResponseStreamEvent::Created {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Queued {
                 sequence_number, ..
             }
             | ResponseStreamEvent::InProgress {
@@ -262,6 +274,70 @@ impl ResponseStreamEvent {
             } => *sequence_number,
         }
     }
+
+    /// The event's `sequence_number`, writable: a log that numbers events
+    /// itself restamps an event whose number disagrees (issue #2900).
+    pub(crate) fn sequence_number_mut(&mut self) -> &mut u64 {
+        match self {
+            ResponseStreamEvent::Created {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Queued {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::InProgress {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Completed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Failed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Incomplete {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Error {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::CompactionStarted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::CompactionCompleted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::OutputItemAdded {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::OutputItemDone {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::ContentPartAdded {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::ContentPartDone {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::OutputTextDelta {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::OutputTextDone {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::FunctionCallArgumentsDone {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::ReasoningTextDelta {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::ReasoningTextDone {
+                sequence_number, ..
+            } => sequence_number,
+        }
+    }
 }
 
 /// Monotonic counter helper for emitting events. Holds the next
@@ -274,6 +350,11 @@ pub struct SequenceCounter {
 impl SequenceCounter {
     pub fn new() -> Self {
         Self { next: 0 }
+    }
+
+    /// A counter whose first value is `first`.
+    pub fn starting_at(first: u64) -> Self {
+        Self { next: first }
     }
 
     pub fn next(&mut self) -> u64 {
@@ -330,6 +411,7 @@ mod tests {
             service_tier: None,
             user: None,
             store: None,
+            background: None,
         }
     }
 

@@ -58,7 +58,7 @@ const CACHE_LIMIT_ENV: &str = "MLXCEL_CACHE_LIMIT";
 /// Llama-3.1-8B-4bit (its f16 weight copies no longer survive in the cache)
 /// and nothing measurable from 512 MiB up; 2 GiB is four times that smallest
 /// free value, for the larger weight copies of bigger models. See
-/// `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`. Metal and CUDA
+/// `docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30`. Metal and CUDA
 /// keep MLX's own default (`None`).
 #[cfg(feature = "rocm")]
 const DEFAULT_CACHE_LIMIT_BYTES: Option<u64> = Some(2 * 1024 * 1024 * 1024);

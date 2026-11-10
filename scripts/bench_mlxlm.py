@@ -11,7 +11,10 @@ Output CSV: benchmarks/pylm_<hw>_YYYY-MM-DD[ _vlm].csv
 Each model runs in a fresh Python subprocess for memory isolation and
 to survive crashes. Numbers come from mlx-lm / mlx-vlm's own
 `prompt_tps` / `generation_tps` fields on the final stream_generate
-response after a warmup pass.
+response after a warmup pass. `decode_tok_s` is converted from
+`generation_tps` to mlxcel's decode-window convention (see
+`decode_window`), so the column compares like with like against
+`scripts/bench_decode.sh`.
 """
 import argparse
 import csv
@@ -519,6 +522,28 @@ print('RESULT', json.dumps(result))
 """
 
 
+def decode_window(gen_tokens, generation_tps):
+    """Return (decode_ms, decode_tok_s) in mlxcel's decode-window convention.
+
+    mlx-lm's and mlx-vlm's `generation_tps` restart their clock after the
+    first token but count all N tokens, `(n + 1) / (time - tic)`
+    (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py,
+    stream_generate). mlxcel counts only the tokens produced inside the
+    window, so the same run reads N/(N-1) lower there. The window length is
+    `N / generation_tps`; the rate becomes `(N - 1)` over it. Either value is
+    None when the inputs cannot give one.
+    """
+    try:
+        n = int(gen_tokens)
+        tps = float(generation_tps)
+    except (TypeError, ValueError):
+        return None, None
+    if n <= 0 or tps <= 0:
+        return None, None
+    window_s = n / tps
+    return window_s * 1000, (n - 1) / window_s
+
+
 def resolve_python() -> list[str]:
     """Interpreter that has mlx-lm / mlx-vlm importable.
 
@@ -814,21 +839,16 @@ def main():
             pt = f.get("prompt_tokens") or ""
             gt = f.get("gen_tokens") or ""
             pre_tps = f.get("prefill_tps")
-            dec_tps = f.get("decode_tps")
             pre_ms = ""
-            dec_ms = ""
             if pre_tps and pt:
                 try:
                     pre_ms = f"{(int(pt) / float(pre_tps)) * 1000:.2f}"
                 except Exception:
                     pass
-            if dec_tps and gt:
-                try:
-                    dec_ms = f"{(int(gt) / float(dec_tps)) * 1000:.2f}"
-                except Exception:
-                    pass
+            dec_ms, dec_tps = decode_window(gt, f.get("decode_tps"))
             pre_tps_s = f"{pre_tps:.2f}" if pre_tps else ""
-            dec_tps_s = f"{dec_tps:.2f}" if dec_tps else ""
+            dec_ms = f"{dec_ms:.2f}" if dec_ms is not None else ""
+            dec_tps_s = f"{dec_tps:.2f}" if dec_tps is not None else ""
             print(f"    decode: {dec_tps_s} tok/s ({elapsed:.1f}s)", file=sys.stderr)
             append_row(
                 f'{name},./{mdir}/,{pt},{gt},{pre_ms},{pre_tps_s},{dec_ms},{dec_tps_s},'

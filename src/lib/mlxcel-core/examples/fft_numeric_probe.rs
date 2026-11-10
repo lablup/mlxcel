@@ -46,7 +46,7 @@
 //! The reference is the CPU stream rather than another host. Two accelerators
 //! are not expected to agree bit for bit, and the CPU arm is available wherever
 //! this runs, so a difference here is this backend's and not a portability
-//! question. See `docs/benchmark_results/rocm-correctness-gfx1151-2026-09-12.md`
+//! question. See `docs/benchmark_results/versions/v0.8.0.md#rocm-correctness-gfx1151-2026-09-12`
 //! for why byte-identity is not the cross-backend criterion.
 
 use std::process::ExitCode;

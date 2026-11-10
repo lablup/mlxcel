@@ -1,6 +1,6 @@
 # Where the fixed cost of a multi-row speculative verify goes on GB10, and the two fixes
 
-Issue #1782. Host GB10 (sm_121), MLX pin `81ba1c6a`, CUDA release build. Full measurement record: `docs/benchmark_results/dflash-verify-fixed-cost-gb10-2026-09-11.md`.
+Issue #1782. Host GB10 (sm_121), MLX pin `81ba1c6a`, CUDA release build. Full measurement record: `docs/benchmark_results/versions/v0.8.0.md#dflash-verify-fixed-cost-gb10-2026-09-11`.
 
 ## Background
 

@@ -477,6 +477,14 @@ pub trait LanguageModel {
         None // default: not supported
     }
 
+    /// Number of residual streams this model carries before its final mixer
+    /// (`hc_count` on `qwen4_exp`); `None` for a family without them.
+    ///
+    /// Used by: the `qwen4_exp_mtp` drafter's `validate_target_compat`.
+    fn residual_stream_count(&self) -> Option<usize> {
+        None
+    }
+
     /// Hand out a shared-buffer handle to this model's output projection
     /// when the projection is untied from the input embedding table.
     ///
@@ -565,6 +573,30 @@ pub trait LanguageModel {
     ///
     /// Used by: server batch scheduler `lookahead_params`.
     fn supports_decode_lookahead_rewind(&self) -> bool {
+        false
+    }
+
+    /// Whether [`Self::rewind_decode_appends`] can unwind the rejected tail
+    /// of a speculative verify block ([`crate::engine::Engine::verify`]
+    /// followed by `Engine::unwind_appends`) from this model's own
+    /// per-sequence state, for a family whose state the pool trim cannot reach
+    /// (a model-owned layout, or [`Self::kv_cache_captures_sequence_state`]
+    /// `false`).
+    ///
+    /// Defaults to `false`, and is deliberately independent of
+    /// [`Self::supports_decode_lookahead_rewind`]: the lookahead rewinds whole
+    /// single-token forwards, while a verify block rejects positions inside
+    /// one multi-token forward, so a family that logs one entry per forward
+    /// (Baichuan) or per overwritten row (Gemma 3) cannot unwind a block
+    /// through the same hook. A model answers `true` only when its rewind
+    /// can stop anywhere inside a block: `qwen4_exp` captures the rewind state
+    /// for the forwards the engine marks speculative
+    /// ([`crate::cache::speculative_append_active`]) and replays its
+    /// GatedDeltaNet and PLE state over the accepted prefix (issue #2880).
+    ///
+    /// Used by: `prompt_lookup_unsupported_reason`,
+    /// `Engine::verify_rounds_unsupported`.
+    fn supports_speculative_verify_rewind(&self) -> bool {
         false
     }
 
@@ -1469,8 +1501,36 @@ pub struct GenerationStats {
     pub decode_time_ms: f64,
     /// Prefill throughput: prompt tokens per second
     pub prefill_tok_per_sec: f64,
-    /// Decode throughput: generated tokens per second
+    /// Decode throughput: tokens produced inside the decode window per
+    /// second of that window. See [`decode_tok_per_sec`] for why a path
+    /// whose first token comes out of prefill counts `generated_tokens - 1`.
     pub decode_tok_per_sec: f64,
+}
+
+/// Decode throughput over a timed decode window, in tokens per second.
+///
+/// `window_tokens` counts only the tokens produced inside the window that
+/// `decode_ms` measures. A path whose first token comes out of prefill (it is
+/// sampled and evaluated before the decode timer starts) passes
+/// `generated_tokens - 1`: its window holds N-1 forward steps, and putting
+/// the prefill token in the numerator as well overstates the rate by
+/// N/(N-1), 0.79% at N = 128. A path that produces every token inside the
+/// window passes N.
+///
+/// This is the rule llama-server's `predicted_per_second` follows (see
+/// `src/server/types/native_completion.rs`). mlx-lm's and mlx-vlm's
+/// `generation_tps` start their clock after the first token but count all N
+/// tokens ([mlx-lm](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py)
+/// `stream_generate`), so they read N/(N-1) higher than this for the same run;
+/// `scripts/bench_mlxlm.py` converts them before comparing.
+///
+/// Returns 0.0 for an empty or zero-length window instead of dividing by zero.
+pub fn decode_tok_per_sec(window_tokens: usize, decode_ms: f64) -> f64 {
+    if window_tokens > 0 && decode_ms > 0.0 {
+        window_tokens as f64 / (decode_ms / 1000.0)
+    } else {
+        0.0
+    }
 }
 
 impl GenerationStats {
@@ -1507,7 +1567,7 @@ impl GenerationStats {
 /// modules, the graphs and the kernels all land. A large `build` points at
 /// host-side op-recording overhead; a large `eval` points at the device, the
 /// PCIe link, or the CUDA graph machinery, and separating those two is what
-/// `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md` needed.
+/// `docs/benchmark_results/versions/v0.7.0.md#volta-ttft-fixed-cost-2026-09-01` needed.
 ///
 /// `setup_ns` sits *outside* the reported prefill time, because the generator
 /// resets its caches before the prefill clock starts. Every other field sits
@@ -2195,3 +2255,7 @@ mod history_tests;
 #[cfg(test)]
 #[path = "generate_finish_tests.rs"]
 mod finish_tests;
+
+#[cfg(test)]
+#[path = "generate_rate_tests.rs"]
+mod rate_tests;

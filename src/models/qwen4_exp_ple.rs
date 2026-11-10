@@ -29,6 +29,8 @@ use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 
 use super::config::ResolvedQwen4ExpConfig;
 use super::norm::ZeroCenteredRmsNorm;
+use super::ple_storage::{PleRowStore, open_external_table};
+use super::rollback::{PleBlockCapture, RollbackParts};
 use super::shapes;
 
 const SPLITMIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -219,6 +221,7 @@ pub(crate) struct ShardedEmbedding {
     shards: Vec<UnifiedEmbedding>,
     /// Row offset of each shard, plus the total row count.
     offsets: Vec<i64>,
+    row_width: i32,
 }
 
 impl ShardedEmbedding {
@@ -299,7 +302,19 @@ impl ShardedEmbedding {
             )?);
             offsets.push(offsets[index as usize] + expected_rows as i64);
         }
-        Ok(Self { shards, offsets })
+        Ok(Self {
+            shards,
+            offsets,
+            row_width: row_width as i32,
+        })
+    }
+
+    pub(crate) fn row_count(&self) -> u64 {
+        self.offsets.last().copied().unwrap_or(0) as u64
+    }
+
+    pub(crate) fn row_width(&self) -> i32 {
+        self.row_width
     }
 
     /// Gather `ids` (all in `[0, rows)`) into `[ids.len(), row_width]`.
@@ -338,9 +353,23 @@ pub(crate) struct PleCache {
     pub(crate) contexts: Vec<Vec<i64>>,
 }
 
+/// Placeholder while a test swaps the row table.
+#[cfg(test)]
+struct NoTable;
+
+#[cfg(test)]
+impl PleRowStore for NoTable {
+    fn lookup(
+        &self,
+        _ids: &[i64],
+    ) -> Result<UniquePtr<MlxArray>, super::ple_storage::PleStoreError> {
+        unreachable!("the table is replaced immediately")
+    }
+}
+
 pub(crate) struct PleLayer {
     hasher: NgramHasher,
-    table: ShardedEmbedding,
+    table: Box<dyn PleRowStore>,
     key_proj: UnifiedLinear,
     value_proj: UnifiedLinear,
     norm_key: ZeroCenteredRmsNorm,
@@ -354,6 +383,17 @@ pub(crate) struct PleLayer {
 }
 
 impl PleLayer {
+    /// Replace the row table, so the snapshot tests can run the same model
+    /// over a different store.
+    #[cfg(test)]
+    pub(crate) fn wrap_table_for_test(
+        &mut self,
+        wrap: impl FnOnce(Box<dyn PleRowStore>) -> Box<dyn PleRowStore>,
+    ) {
+        let table = std::mem::replace(&mut self.table, Box::new(NoTable));
+        self.table = wrap(table);
+    }
+
     pub(crate) fn from_weights(
         weights: &WeightMap,
         config: &ResolvedQwen4ExpConfig,
@@ -361,18 +401,42 @@ impl PleLayer {
         ple_layer_index: usize,
     ) -> Result<Self, String> {
         let raw = &config.raw;
-        let table_prefix = format!("{prefix}.ple_embedding.ngram_embedding");
-        let table_rows =
-            ShardedEmbedding::stored_rows(weights, &table_prefix, raw.split_ngram_parts)?;
-        let hasher = NgramHasher::new(config, ple_layer_index, table_rows)?;
-        let row_width = config.ple_embed_dim / hasher.ngram_heads();
-        let table = ShardedEmbedding::from_weights(
-            weights,
-            config,
-            &table_prefix,
-            hasher.padded_vocab_size,
-            row_width,
-        )?;
+        let (hasher, table): (NgramHasher, Box<dyn PleRowStore>) = match &config.ple_storage {
+            Some(storage) => {
+                let table = open_external_table(storage, config)?;
+                let hasher = NgramHasher::new(config, ple_layer_index, table.row_count())?;
+                if table.row_count() != hasher.padded_vocab_size {
+                    return Err(format!(
+                        "external PLE row count does not match model configuration: {} != {}",
+                        table.row_count(),
+                        hasher.padded_vocab_size
+                    ));
+                }
+                let row_width = config.ple_embed_dim / hasher.ngram_heads();
+                if table.row_width() != row_width {
+                    return Err(format!(
+                        "external PLE row width does not match model configuration: {} != {row_width}",
+                        table.row_width()
+                    ));
+                }
+                (hasher, Box::new(table))
+            }
+            None => {
+                let table_prefix = format!("{prefix}.ple_embedding.ngram_embedding");
+                let table_rows =
+                    ShardedEmbedding::stored_rows(weights, &table_prefix, raw.split_ngram_parts)?;
+                let hasher = NgramHasher::new(config, ple_layer_index, table_rows)?;
+                let row_width = config.ple_embed_dim / hasher.ngram_heads();
+                let table = ShardedEmbedding::from_weights(
+                    weights,
+                    config,
+                    &table_prefix,
+                    hasher.padded_vocab_size,
+                    row_width,
+                )?;
+                (hasher, Box::new(table))
+            }
+        };
         verify_stored_hash_state(weights, prefix, &hasher)?;
 
         let streams = raw.hc_count * raw.hidden_size;
@@ -440,13 +504,42 @@ impl PleLayer {
             ids.extend(row_ids);
             *context = next;
         }
-        let rows = self.table.lookup(&ids);
+        // A forward has no error channel; a failed disk read is unrecoverable.
+        let rows = self
+            .table
+            .lookup(&ids)
+            .unwrap_or_else(|error| panic!("Qwen4-Exp PLE lookup failed: {error}"));
+        self.gather_ahead(tokens.len(), cache);
         let batch = tokens.len() as i32;
         let length = tokens.first().map_or(0, Vec::len) as i32;
         mlxcel_core::reshape(&rows, &[batch, length, -1])
     }
 
-    fn short_conv(&self, x: &MlxArray, cache: &mut PleCache) -> UniquePtr<MlxArray> {
+    /// Hash the next prefill piece's ids and start reading them while the GPU
+    /// runs this one. Single-row prefill only: batched rows have no shared
+    /// next piece.
+    fn gather_ahead(&self, batch: usize, cache: &PleCache) {
+        if batch != 1 || !self.table.wants_prefetch() {
+            return;
+        }
+        let Some(upcoming) = mlxcel_core::prefill_lookahead::take() else {
+            return;
+        };
+        let tokens: Vec<i64> = upcoming.iter().copied().map(i64::from).collect();
+        let (ids, _) = self.hasher.ids(&cache.contexts[0], &tokens);
+        self.table.prefetch(&ids);
+    }
+
+    /// Returns the activation and the convolution input (the carried window
+    /// followed by `x`), which a rollback re-slices its window from.
+    /// `decode_equivalent` evaluates the convolution one output row at a
+    /// time, the bytes a single-row decode step computes.
+    fn short_conv(
+        &self,
+        x: &MlxArray,
+        cache: &mut PleCache,
+        decode_equivalent: bool,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let shape = mlxcel_core::array_shape(x);
         let state = cache
             .conv_state
@@ -467,28 +560,63 @@ impl PleLayer {
             &[shape[0], total, shape[2]],
         );
         cache.conv_state = Some(mlxcel_core::contiguous(&tail, false));
-        let out = mlxcel_core::conv1d(
-            &conv_input,
-            &self.conv1d_weight,
-            1,
-            0,
-            self.conv_dilation,
-            shape[2],
-        );
-        silu(&out)
+        let out = if decode_equivalent {
+            super::gated_delta::conv1d_per_position(
+                &conv_input,
+                &self.conv1d_weight,
+                self.conv_state_len / self.conv_dilation + 1,
+                self.conv_dilation,
+                shape[1],
+            )
+        } else {
+            mlxcel_core::conv1d(
+                &conv_input,
+                &self.conv1d_weight,
+                1,
+                0,
+                self.conv_dilation,
+                shape[2],
+            )
+        };
+        (silu(&out), conv_input)
     }
 
     /// The residual update for the `[B, L, hc_count * hidden]` stream.
+    #[cfg(test)]
     pub(crate) fn forward(
         &self,
         hidden: &MlxArray,
         tokens: &[Vec<i64>],
         cache: &mut PleCache,
     ) -> UniquePtr<MlxArray> {
+        self.forward_captured(hidden, tokens, cache, None, false)
+    }
+
+    /// The residual update for the `[B, L, hc_count * hidden]` stream, also
+    /// filling `capture` with what [`Self::rollback`] needs to unwind part of
+    /// this call (issue #2880). `decode_equivalent` is the verify-block
+    /// contract of `Qwen4ExpGatedDeltaNet::forward_captured`.
+    pub(crate) fn forward_captured(
+        &self,
+        hidden: &MlxArray,
+        tokens: &[Vec<i64>],
+        cache: &mut PleCache,
+        capture: Option<&mut Option<PleBlockCapture>>,
+        decode_equivalent: bool,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(hidden);
         let mut streams = shape[..shape.len() - 1].to_vec();
         streams.extend([self.hc_count, self.hidden_size]);
 
+        // `embed` resets a context whose row count disagrees with `tokens`,
+        // so the contexts this block starts from are what it sees after that.
+        let contexts_before = capture.is_some().then(|| {
+            if cache.contexts.len() == tokens.len() {
+                cache.contexts.clone()
+            } else {
+                vec![self.hasher.initial_context(); tokens.len()]
+            }
+        });
         let embeddings = self.embed(tokens, cache);
         let keys = mlxcel_core::reshape(
             &self.norm_key.forward(&self.key_proj.forward(&embeddings)),
@@ -509,7 +637,57 @@ impl PleLayer {
         );
         let gated = mlxcel_core::reshape(&gated, &shape);
         let normed = self.norm_conv.forward(&gated);
-        mlxcel_core::add(&gated, &self.short_conv(&normed, cache))
+        let (conv, conv_input) = self.short_conv(&normed, cache, decode_equivalent);
+        if let Some(slot) = capture {
+            *slot = Some(PleBlockCapture {
+                conv_input,
+                contexts_before: contexts_before.expect("captured alongside the slot"),
+                tokens: tokens.to_vec(),
+            });
+        }
+        mlxcel_core::add(&gated, &conv)
+    }
+
+    /// Rewind `cache` to the first `keep` positions of the block `capture`
+    /// describes (issue #2880).
+    ///
+    /// The convolution window is the `(kernel - 1) * dilation` rows of the
+    /// captured input that end at the last kept position. The n-gram context
+    /// is the last `ngram_size - 1` tokens of the history that ends there,
+    /// recomputed from the contexts the block started with and the kept
+    /// tokens only, so a drafted and rejected EOS never reaches it.
+    pub(crate) fn rollback(
+        &self,
+        cache: &mut PleCache,
+        capture: &PleBlockCapture,
+        keep: usize,
+        parts: RollbackParts,
+    ) {
+        if parts.ple_conv {
+            let shape = mlxcel_core::array_shape(&capture.conv_input);
+            let window = mlxcel_core::slice(
+                &capture.conv_input,
+                &[0, keep as i32, 0],
+                &[shape[0], keep as i32 + self.conv_state_len, shape[2]],
+            );
+            cache.conv_state = Some(mlxcel_core::contiguous(&window, false));
+        }
+        if parts.ple_context {
+            let context_len = self.hasher.context_len();
+            cache.contexts = capture
+                .contexts_before
+                .iter()
+                .zip(&capture.tokens)
+                .map(|(context, row)| {
+                    let history: Vec<i64> = context
+                        .iter()
+                        .chain(&row[..keep.min(row.len())])
+                        .copied()
+                        .collect();
+                    history[history.len() - context_len..].to_vec()
+                })
+                .collect();
+        }
     }
 }
 

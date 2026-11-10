@@ -46,6 +46,6 @@ Dense is the single-sequence KV storage, as ADR 0007 measured. It applies wherev
 
 ## References
 
-- Epic #2166, issue #2171, and the Phase 0 baseline in `docs/benchmark_results/unified-engine-baseline-gb10-2026-10-07.md`.
+- Epic #2166, issue #2171, and the Phase 0 baseline in `docs/benchmark_results/versions/v0.8.0.md#unified-engine-baseline-gb10-2026-10-07`.
 - [ADR 0001](0001-paged-attention-gather-vs-fused-kernel.md) (gather fallback), [ADR 0002](0002-turbo-kv-split-dequant-vs-fused.md) (Turbo dequant-first), [ADR 0004](0004-compute-backend-session-seam-and-stablehlo-family.md) (no per-op dynamic dispatch), [ADR 0007](0007-unified-batch-native-engine.md) (the engine this phase serves).
 - `src/lib/mlxcel-core/src/cache/attend.rs`, `src/lib/mlxcel-core/src/cache/paged_batch_decode.rs` (#899), `src/lib/mlxcel-core/src/cache.rs` (`CachePool::allocate_with_layout`).

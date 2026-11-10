@@ -1,5 +1,7 @@
 # Model Compatibility & Performance Tests (AMD Strix Halo gfx1151)
 
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
 Single-stream decode and prefill for every checkpoint under `models/` on the ROCm backend, plus the batched-serving ladder. All 44 checkpoints measured cleanly in one pass; eight were re-measured once because their first-pass value fell outside the 2026-10-30 range, and those rows are marked †.
 
 ## Test Environment

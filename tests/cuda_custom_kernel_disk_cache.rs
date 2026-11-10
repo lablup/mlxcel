@@ -21,7 +21,7 @@
 //! GB10 the fused MoE pair alone cost about 1.2 s per `mlxcel generate`, which
 //! read as a 20% granite-4.0-h decode regression at `-n 256` although the
 //! kernel is faster per token
-//! (`docs/benchmark_results/fused-moe-jit-cache-gb10-2026-10-22.md`). The
+//! (`docs/benchmark_results/versions/v0.8.0.md#fused-moe-jit-cache-gb10-2026-10-22`). The
 //! `jit_module.cpp` overlay now writes custom kernels to the disk cache too,
 //! publishing every file by rename.
 //!

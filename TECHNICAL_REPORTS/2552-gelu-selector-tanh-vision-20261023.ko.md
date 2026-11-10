@@ -20,7 +20,7 @@
 | `src/lib/mlxcel-xla/src/emitter/vision_config.rs` | XLA Gemma 3 비전 emitter도 누락된 키를 같은 방식으로 tanh로 해석 |
 | `src/vision/encoders/internvl.rs`, `src/models/gemma3n.rs`, `deepseek_vl2.rs` | erf 유지, 명시화 또는 주석 |
 | `src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/jit_module.cpp`, `tests/cuda_custom_kernel_disk_cache.rs` | PTX 캐시 임시 파일 이름을 suffix와 확장자로만 구성; 컴파일된 tanh 커널로 두 번째 프로세스 테스트 |
-| `docs/gelu-call-sites.md`, `docs/benchmark_results/gelu-erf-vs-tanh-2026-10-23.md` (신규) | 약 110개 호출 지점과 고정된 업스트림 링크 목록; 측정 기록 |
+| `docs/gelu-call-sites.md`, `docs/benchmark_results/versions/v0.8.0.md#gelu-erf-vs-tanh-2026-10-23` (신규) | 약 110개 호출 지점과 고정된 업스트림 링크 목록; 측정 기록 |
 
 ## 2. 기술적 선택과 그 이유
 

@@ -251,3 +251,37 @@ fn finish_reason_reports_length_only_on_an_exhausted_budget() {
     // which is by construction short of the budget.
     assert_eq!(florence2_finish_reason(3, 1024), "stop");
 }
+
+/// The encoder pass and the decode run in one model-owned call, so the
+/// result reports whole wall time with no decode window (issue #2938), and
+/// the `/metrics` decode-rate histogram skips it rather than recording a
+/// wall-time rate.
+#[test]
+fn result_reports_wall_time_without_a_decode_window() {
+    let result = florence2_generation_result(
+        "a cat".to_string(),
+        590,
+        12,
+        1024,
+        450,
+        serde_json::json!({"<CAPTION>": "a cat"}),
+    );
+    assert_eq!(result.completion_tokens, 12);
+    assert_eq!(result.generation_time_ms, 450);
+    assert_eq!(result.prompt_eval_ms, 0);
+    assert_eq!(result.generation_only_ms, 450);
+    assert_eq!(result.decode_window_tokens, None);
+    assert_eq!(result.finish_reason, "stop");
+    assert!(result.structured_output.is_some());
+
+    let obs = crate::server::batch::observability::BatchObservability::new();
+    obs.record_request_completion(
+        result.prompt_tokens,
+        result.cached_tokens,
+        result.prompt_eval_ms,
+        result.generation_only_ms,
+        result.completion_tokens,
+        result.decode_window_tokens,
+    );
+    assert_eq!(obs.decode_tok_s_snapshot().count, 0);
+}

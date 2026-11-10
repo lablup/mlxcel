@@ -16,7 +16,7 @@
 //!
 //! Issue #898 landed v2 as a library capability and measured it against the
 //! production gather-then-SDPA path on an Apple M1 Ultra
-//! (`docs/benchmark_results/paged-decode-v2-m1ultra-2026-07-31.md`, medians of
+//! (`docs/benchmark_results/versions/v0.5.0.md#paged-decode-v2-m1ultra-2026-07-31`, medians of
 //! three repetitions, head_dim 128 / 32 q heads / 8 kv heads / block 32):
 //!
 //! | batch | ctx 1024 | ctx 4096 | ctx 16384 | ctx 32768 |

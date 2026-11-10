@@ -1,5 +1,7 @@
 # OpenXLA / IREE ROCm (`hip`) Backend Qualification Report (`gfx1151`)
 
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
 - **Issue**: `#851` (`test(xla): qualify the OpenXLA/IREE engine on ROCm/HIP`)
 - **Date**: 2026-10-14
 - **Status**: Qualified (`local-task`, `local-sync`, and `hip` HAL drivers verified end-to-end)

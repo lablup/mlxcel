@@ -51,7 +51,7 @@ Ten files. The functional change is about forty lines across two of them; the re
 
 `cpp/grouped_gemm_arch_probe.cpp` (new) plus a line in `build.rs` expose the shipped function to Rust through a C shim, compiled unconditionally rather than behind the `cuda` feature, following the pattern #1541 established. `grouped_gemm_arch_tests.rs` (new) enumerates the mapping over every architecture; `grouped_gemm_numeric_tests.rs` (new) compares `gather_mm` against an `f64` dense per-expert reference on the device.
 
-`docs/benchmark_results/grouped-gemm-arch-v100-2026-08-31.md` (new) is the full record. The #1538 baseline gains its reserved post-program row and an annotation on its MoE section explaining why no grouped GEMM appears in its kernel table.
+`docs/benchmark_results/versions/v0.7.0.md#grouped-gemm-arch-v100-2026-08-31` (new) is the full record. The #1538 baseline gains its reserved post-program row and an annotation on its MoE section explaining why no grouped GEMM appears in its kernel table.
 
 ## 3. Technical Decisions
 
@@ -155,9 +155,9 @@ The `CUDA sm_70 compile` CI check is not evidence for any of this. CUDA 13 remov
 ## References
 
 - Issue #1544, and epic #1536, the Volta decode program.
-- Full measurement record: `docs/benchmark_results/grouped-gemm-arch-v100-2026-08-31.md`.
-- Baseline this is a delta against: `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` (#1538).
-- The sorted-MoE prefill fast path that makes this branch reachable on a quantized checkpoint: #629, and `docs/benchmark_results/moe-prefill-grouped-gemm-gb10-2026-07-10.md`.
-- The `cuFuncSetAttribute` gap inherited from #1541, and its `gather_gemm.cu` reachability finding: `docs/benchmark_results/qmm-naive-tile-v100-2026-08-31.md`.
+- Full measurement record: `docs/benchmark_results/versions/v0.7.0.md#grouped-gemm-arch-v100-2026-08-31`.
+- Baseline this is a delta against: `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31` (#1538).
+- The sorted-MoE prefill fast path that makes this branch reachable on a quantized checkpoint: #629, and `docs/benchmark_results/versions/v0.4.0.md#moe-prefill-grouped-gemm-gb10-2026-07-10`.
+- The `cuFuncSetAttribute` gap inherited from #1541, and its `gather_gemm.cu` reachability finding: `docs/benchmark_results/versions/v0.7.0.md#qmm-naive-tile-v100-2026-08-31`.
 - The SASS-diff technique: #1539 for the case where it transfers, #1541 for the case where it does not.
 - The pre-existing sm_70 bit-exactness class: #1557, on `tests/cuda_qmm_determinism.rs`.

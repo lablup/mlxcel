@@ -299,7 +299,9 @@ pub struct BatchObservability {
     /// Recorded once per completed request in `finalize_completed`.
     pub request_ttft_ms: RequestHistogram,
     /// Per-request decode throughput, in tokens/second. Recorded once per
-    /// completed request from `completion_tokens / generation_only_ms`.
+    /// completed request as `decode_window_tokens / generation_only_ms`
+    /// through `mlxcel_core::generate::decode_tok_per_sec`, so it counts only
+    /// tokens produced inside the decode window (issue #2938).
     pub request_decode_tok_s: RequestHistogram,
 
     // -- host audio preprocessing (issue #873) --
@@ -599,11 +601,26 @@ impl BatchObservability {
     /// observed decode rate. Called exactly once per finished sequence from the
     /// scheduler thread (never per token), so the cost is negligible.
     ///
+    /// `generation_only_ms` and `decode_window_tokens` follow the
+    /// [`GenerationResult`](crate::server::model_provider::GenerationResult)
+    /// contract: the window duration and the tokens produced inside it. The
+    /// decode rate is `decode_window_tokens / generation_only_ms`, computed by
+    /// `mlxcel_core::generate::decode_tok_per_sec`, the rule `docs/benchmarks.md`
+    /// "How decode tok/s is counted" sets for every decode tok/s figure. For
+    /// the batch scheduler the first token comes out of prefill, so a request
+    /// of N tokens contributes N-1 window tokens (issue #2938).
+    ///
     /// Requests that produced no completion tokens are ignored: TTFT is
     /// undefined without a first token and a zero-length generation has no
-    /// decode rate. The decode-rate observation is likewise skipped when the
-    /// decode phase rounded to 0ms (single-token completions), where a rate is
-    /// not measurable.
+    /// decode rate. The decode-rate observation is also skipped when the
+    /// producer has no isolated decode window (`decode_window_tokens: None`,
+    /// the encoder-decoder workers whose timing is whole wall time), when the
+    /// window holds no tokens (a single-token completion), and when the
+    /// window rounded to 0ms, where a rate is not measurable.
+    ///
+    /// The llama-server counters keep upstream's inputs: every completion
+    /// token over `generation_only_ms`, as b10621's `n_decoded` and
+    /// `t_token_generation` accumulate them.
     pub fn record_request_completion(
         &self,
         prompt_tokens: usize,
@@ -611,6 +628,7 @@ impl BatchObservability {
         prompt_eval_ms: u64,
         generation_only_ms: u64,
         completion_tokens: usize,
+        decode_window_tokens: Option<usize>,
     ) {
         // llama-server b10621 metric families (#1440): per-request
         // accumulation matching upstream's `metrics.on_prompt_eval` /
@@ -636,8 +654,12 @@ impl BatchObservability {
             return;
         }
         self.request_ttft_ms.observe(prompt_eval_ms as f64);
-        if generation_only_ms > 0 {
-            let decode_tok_s = completion_tokens as f64 * 1000.0 / generation_only_ms as f64;
+        if let Some(window_tokens) = decode_window_tokens
+            && window_tokens > 0
+            && generation_only_ms > 0
+        {
+            let decode_tok_s =
+                mlxcel_core::generate::decode_tok_per_sec(window_tokens, generation_only_ms as f64);
             self.request_decode_tok_s.observe(decode_tok_s);
         }
     }
@@ -1152,10 +1174,11 @@ mod tests {
     #[test]
     fn record_request_completion_populates_histograms() {
         let obs = BatchObservability::new();
-        // 200ms TTFT, 100 decode tokens over 1000ms decode -> 100 tok/s.
-        obs.record_request_completion(108, 0, 200, 1000, 100);
-        // 40ms TTFT, 20 tokens over 500ms -> 40 tok/s.
-        obs.record_request_completion(28, 0, 40, 500, 20);
+        // 200ms TTFT, 101 tokens: the first came out of prefill, so the
+        // 1000ms window holds 100 -> 100 tok/s.
+        obs.record_request_completion(108, 0, 200, 1000, 101, Some(100));
+        // 40ms TTFT, 21 tokens, 20 of them in the 500ms window -> 40 tok/s.
+        obs.record_request_completion(28, 0, 40, 500, 21, Some(20));
 
         let ttft = obs.ttft_ms_snapshot();
         assert_eq!(ttft.count, 2);
@@ -1182,21 +1205,64 @@ mod tests {
     fn record_request_completion_skips_zero_token_requests() {
         let obs = BatchObservability::new();
         // Zero completion tokens: neither histogram should record anything.
-        obs.record_request_completion(8, 0, 500, 0, 0);
+        obs.record_request_completion(8, 0, 500, 0, 0, Some(0));
         assert_eq!(obs.ttft_ms_snapshot().count, 0);
         assert_eq!(obs.decode_tok_s_snapshot().count, 0);
 
         // One token with a 0ms decode phase: TTFT records, decode rate skips.
-        obs.record_request_completion(9, 0, 120, 0, 1);
+        obs.record_request_completion(9, 0, 120, 0, 1, Some(0));
         assert_eq!(obs.ttft_ms_snapshot().count, 1);
         assert_eq!(obs.decode_tok_s_snapshot().count, 0);
+
+        // One token with a nonzero tail (the EOS step after the prefill
+        // token): the window holds no tokens, so no 0 tok/s observation.
+        obs.record_request_completion(9, 0, 120, 15, 1, Some(0));
+        assert_eq!(obs.ttft_ms_snapshot().count, 2);
+        assert_eq!(obs.decode_tok_s_snapshot().count, 0);
+    }
+
+    /// A prefill-seeded request of N tokens is rated over its N-1 window
+    /// tokens (issue #2938), the rule `decode_tok_per_sec` encodes, not over
+    /// all N as the histogram did before.
+    #[test]
+    fn decode_rate_counts_only_window_tokens_for_a_prefill_seeded_request() {
+        let obs = BatchObservability::new();
+        // 128 tokens, 127 decoded inside a 1270ms window -> exactly 100 tok/s.
+        obs.record_request_completion(16, 0, 50, 1270, 128, Some(127));
+        let decode = obs.decode_tok_s_snapshot();
+        assert_eq!(decode.count, 1);
+        assert!(
+            (decode.sum - 100.0).abs() < 1e-9,
+            "expected 100 tok/s, got {}",
+            decode.sum
+        );
+        assert!(
+            (decode.sum - mlxcel_core::generate::decode_tok_per_sec(127, 1270.0)).abs() < 1e-12
+        );
+    }
+
+    /// A producer with no isolated decode window (Florence-2,
+    /// Nemotron-Parse: whole wall time, encoder included) is skipped by the
+    /// decode histogram, while TTFT and the llama-server counters still see
+    /// the request.
+    #[test]
+    fn decode_rate_skips_a_request_without_a_decode_window() {
+        let obs = BatchObservability::new();
+        obs.record_request_completion(600, 0, 0, 900, 30, None);
+        assert_eq!(obs.decode_tok_s_snapshot().count, 0);
+        assert_eq!(obs.ttft_ms_snapshot().count, 1);
+        assert_eq!(obs.llama_predicted_tokens.load(Ordering::Relaxed), 30);
+        assert_eq!(
+            obs.llama_predicted_us_total.load(Ordering::Relaxed),
+            900_000
+        );
     }
 
     #[test]
     fn histogram_counts_plus_inf_observations() {
         let obs = BatchObservability::new();
         // 40000ms exceeds the largest finite TTFT bound (30000ms).
-        obs.record_request_completion(18, 0, 40_000, 1000, 10);
+        obs.record_request_completion(18, 0, 40_000, 1000, 10, Some(9));
         let ttft = obs.ttft_ms_snapshot();
         assert_eq!(ttft.count, 1);
         // No finite bucket captured the observation; the +Inf bucket (== count)

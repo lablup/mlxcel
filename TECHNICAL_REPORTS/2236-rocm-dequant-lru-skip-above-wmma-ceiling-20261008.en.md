@@ -4,7 +4,7 @@
 
 **Status**: Implemented and verified on the gfx1151 host (ROCm/HIP); branch commits `8964f610` (code) and `79a8c9bb` (docs), rebased onto origin/main `6dbfe7d7`, merged after the full `make verify-rocm` gate. Closes #2151. Follow-up: #2232.
 
-**Languages**: HIP/C++ (ROCm overlay `qmm.hip`, `rocm.h`, `no_rocm.cpp`; mlxcel-core bridge `mlx_cxx_bridge.cpp`, `mlx_cxx_bridge.h`), Rust (mlxcel-core `lib.rs`, new `rocm_qmm_cache.rs`; new `tests/rocm_qmm_dequant_cache.rs`), Markdown (`LOCAL_FIXES.md`, `docs/environment-variables.md`, `docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md`)
+**Languages**: HIP/C++ (ROCm overlay `qmm.hip`, `rocm.h`, `no_rocm.cpp`; mlxcel-core bridge `mlx_cxx_bridge.cpp`, `mlx_cxx_bridge.h`), Rust (mlxcel-core `lib.rs`, new `rocm_qmm_cache.rs`; new `tests/rocm_qmm_dequant_cache.rs`), Markdown (`LOCAL_FIXES.md`, `docs/environment-variables.md`, `docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-qmm-route-gfx1151-2026-09-30`)
 
 **Risk Level**: Low. The ceiling-routed GEMM runs the same dequantize kernel and the same hipBLASLt GEMM as before; only the cache lookup and insert are skipped, and the logit traces are byte-identical. The f16 and non-WMMA callers of the cached route keep the cache unchanged. The new counters are relaxed atomics bumped once per GEMM on the dequantize route, and the cache refactor moves the existing statics into one struct without changing the eviction rule.
 
@@ -43,7 +43,7 @@ With counters added (a counters-only build that routes and caches as `87538835` 
 | `mlxcel-core/cpp/mlx_cxx_bridge.{cpp,h}` | `rocm_dequant_cache_stats()` returns the seven values as a `rust::Vec<uint64_t>`, seven zeros without `MLXCEL_BRIDGE_ROCM_BACKEND` |
 | `mlxcel-core/src/lib.rs`, `rocm_qmm_cache.rs` (new) | FFI declaration and `pub mod rocm_qmm_cache` with `DequantCacheStats` and `dequant_cache_stats()`; unit test `stats_are_zero_off_rocm` |
 | `tests/rocm_qmm_dequant_cache.rs` (new) | Four cases, one child process each, on ROCm |
-| `LOCAL_FIXES.md` item 29, `docs/environment-variables.md`, `docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md` | New behavior, the stats variable, and the dated measurement section |
+| `LOCAL_FIXES.md` item 29, `docs/environment-variables.md`, `docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-qmm-route-gfx1151-2026-09-30` | New behavior, the stats variable, and the dated measurement section |
 
 Two commits: the code change (`8964f610`) and the measurements (`79a8c9bb`). 11 files, 812 insertions and 53 deletions.
 
@@ -119,7 +119,7 @@ Metal and CUDA are unaffected: the change is in the ROCm overlay, and the bridge
 
 - **`LOCAL_FIXES.md` item 29.** The sentence that said the LRU gets no hits in prefill but keeps its last entries alive now describes `QmmRoute::DequantGemmAboveWmmaCeiling`, the Gemma 3 4B numbers (0 hits in 340 lookups and 230 MiB cached before; 340 bypasses, an empty cache, 2.80 to 2.56 GB active after prefill, peak unchanged after), the counters, `dequant_cache_stats()`, `MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1`, and the new test.
 - **`docs/environment-variables.md`.** The `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` text now says bf16 GEMMs sent above `MLX_ROCM_WMMA_QMM_MAX_M` never use the cache, and `MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1` is documented.
-- **`docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md`.** A new section, "2026-10-07: the dequantized-weight cache above the WMMA ceiling (issue #2151)", with the method, both tables, the logit check and the confirmation run. It notes that the third Gemma before run was taken on 2026-10-08 after the first failed in the harness, and that Gemma's end-of-run active memory on the rebased head (2.56 GB against 2.73 GB on `87538835`) moved with main and was not isolated.
+- **`docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-qmm-route-gfx1151-2026-09-30`.** A new section, "2026-10-07: the dequantized-weight cache above the WMMA ceiling (issue #2151)", with the method, both tables, the logit check and the confirmation run. It notes that the third Gemma before run was taken on 2026-10-08 after the first failed in the harness, and that Gemma's end-of-run active memory on the rebased head (2.56 GB against 2.73 GB on `87538835`) moved with main and was not isolated.
 
 ## 6. Verification
 

@@ -47,8 +47,8 @@ inline auto make_cta_tiler(int itemsize, int m, int group_size, bool sm80) {
 | `mlxcel-core/cpp/qmm_naive_tile_probe.cpp`, `build.rs` | 선택기를 감싸는 C 심. `cuda` 피처 뒤가 아니라 무조건 컴파일한다. |
 | `mlxcel-core/src/qmm_naive_tile_tests.rs` | 신규. 전수 검사와 옵트인 임계, 거부, 예비량 경계, 오버라이드. 테스트 9개, GPU 불필요. |
 | `mlxcel-core/src/ffi_tests.rs` | `qmm_naive_output_is_identical_across_cta_tile_widths`. bits 4/8 x group_size 32/64/128 전부에 대해 한 프로세스 안에서 두 폭을 비트 단위 비교. |
-| `docs/benchmark_results/qmm-naive-tile-v100-2026-08-31.md` | 신규. 전체 측정 기록. |
-| `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` | 사후 비교 표의 `#1541` 행. |
+| `docs/benchmark_results/versions/v0.7.0.md#qmm-naive-tile-v100-2026-08-31` | 신규. 전체 측정 기록. |
+| `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31` | 사후 비교 표의 `#1541` 행. |
 | `CHANGELOG.md` | `### Changed` 항목. |
 
 ## 3. 기술적 선택과 이유
@@ -159,9 +159,9 @@ dense 쌍에서 `qmm_naive`는 동일한 329 인스턴스, 동일한 대조율�
 ## 참고
 
 - 이슈 #1541과 볼타 디코드 프로그램 에픽 #1536.
-- 이 문서가 델타로 삼는 베이스라인: `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md`.
-- 이 변경의 전체 기록: `docs/benchmark_results/qmm-naive-tile-v100-2026-08-31.md`.
-- 선행 서브이슈와 그 기록: #1539, `docs/benchmark_results/qmv-float-accum-v100-2026-08-31.md`.
+- 이 문서가 델타로 삼는 베이스라인: `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31`.
+- 이 변경의 전체 기록: `docs/benchmark_results/versions/v0.7.0.md#qmm-naive-tile-v100-2026-08-31`.
+- 선행 서브이슈와 그 기록: #1539, `docs/benchmark_results/versions/v0.7.0.md#qmv-float-accum-v100-2026-08-31`.
 - `sm80`이 실제로 제어하는 MMA 아톰 선택: MLX의 `mlx/backend/cuda/device/gemm_sm70.cuh`의 `make_tiled_mma`.
 - 여기서 되풀이되는 모듈 이름 캐시 위험: `qmm_sm80.cu`의 #910.
 - `m`을 2,048에서 막는 프리필 청킹: `src/lib/mlxcel-core/src/generate.rs`의 `DEFAULT_PREFILL_CHUNK`와 `effective_prefill_chunk`.

@@ -50,7 +50,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::server::streaming::IntoKeepAlive;
 #[cfg(test)]
 use crate::server::streaming::SSE_KEEPALIVE_INTERVAL_SECS;
-use crate::server::types::responses_response::ResponseOutputItem;
 use crate::server::types::responses_stream::{ResponseStreamEvent, SequenceCounter};
 
 /// Cancellation token shared with the scheduler for client-disconnect detection.
@@ -74,31 +73,15 @@ pub struct ResponseStreamSender {
     /// disconnect does not flip the cancellation token; only
     /// `DELETE /v1/stream` or session replacement does.
     tee: Option<Arc<crate::server::stream_session::ResumeTee>>,
-    /// Every `response.output_item.done` item sent, with its `output_index`
-    /// (#2396), so the final response object can be built from exactly the
-    /// items the stream delivered.
-    done_items: Arc<std::sync::Mutex<Vec<(usize, ResponseOutputItem)>>>,
 }
 
 impl ResponseStreamSender {
-    /// The completed output items this stream sent, in `output_index`
-    /// order (#2396). Empty when no item was completed.
-    pub fn streamed_output(&self) -> Vec<ResponseOutputItem> {
-        let mut done = self
-            .done_items
-            .lock()
-            .map(|done| done.clone())
-            .unwrap_or_default();
-        done.sort_by_key(|(index, _)| *index);
-        done.into_iter().map(|(_, item)| item).collect()
-    }
-
     /// A sender for the events that follow the end of generation. A client
     /// hanging up at that point has no generation left to abort, so it must
     /// not flip the request's cancellation token and turn a finished response
     /// into a cancelled one.
     ///
-    /// Used by: the streaming Responses task.
+    /// Used by: [`crate::server::routes::responses_run::SseResponseSink`].
     pub(crate) fn after_generation(&self) -> Self {
         Self {
             cancelled: Arc::default(),
@@ -116,13 +99,6 @@ impl ResponseStreamSender {
             name: event.event_name(),
             data: payload,
         };
-        if let ResponseStreamEvent::OutputItemDone {
-            output_index, item, ..
-        } = event
-            && let Ok(mut done) = self.done_items.lock()
-        {
-            done.push((*output_index, item.clone()));
-        }
         if let Some(ref tee) = self.tee {
             tee.write_event(frame.name, &frame.data);
         }
@@ -139,7 +115,7 @@ pub struct ResponseSseKeepAlive(Option<KeepAlive>);
 
 impl ResponseSseKeepAlive {
     /// `None` disables the pings (`--sse-ping-interval -1`, #1432).
-    fn from_interval(interval: Option<Duration>) -> Self {
+    pub(crate) fn from_interval(interval: Option<Duration>) -> Self {
         Self(interval.map(|d| KeepAlive::new().interval(d)))
     }
 }
@@ -207,7 +183,6 @@ pub(crate) fn responses_sse_channel_resumable(
         tx,
         cancelled: cancelled.clone(),
         tee,
-        done_items: Arc::default(),
     };
     (
         sender,
@@ -243,8 +218,14 @@ impl Default for ResponseStreamEmitter {
 
 impl ResponseStreamEmitter {
     pub fn new() -> Self {
+        Self::starting_at(0)
+    }
+
+    /// An emitter whose first sequence number is `first`: a streamed
+    /// background response already delivered the events before it (#2900).
+    pub(crate) fn starting_at(first: u64) -> Self {
         Self {
-            seq: SequenceCounter::new(),
+            seq: SequenceCounter::starting_at(first),
             output_index: 0,
             active_message_id: None,
             active_reasoning_id: None,

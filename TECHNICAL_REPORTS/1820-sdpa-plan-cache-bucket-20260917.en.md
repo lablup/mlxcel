@@ -1,6 +1,6 @@
 # Bucketing the cuDNN SDPA plan-cache key, and why it should not ship
 
-Issue #1820. Host GB10 (sm_121), MLX pin `81ba1c6a`, CUDA release build, toolchain 1.97.1, base tree `0ef0a1a4` (main, carrying PR #1817). Full measurement record: `docs/benchmark_results/sdpa-plan-cache-bucket-gb10-2026-09-17.md`.
+Issue #1820. Host GB10 (sm_121), MLX pin `81ba1c6a`, CUDA release build, toolchain 1.97.1, base tree `0ef0a1a4` (main, carrying PR #1817). Full measurement record: `docs/benchmark_results/versions/v0.8.0.md#sdpa-plan-cache-bucket-gb10-2026-09-17`.
 
 ## Background
 

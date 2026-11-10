@@ -39,7 +39,7 @@ gfx1151에서 `rocprofv3`는 새 인스턴스를 호출당 108.3 us로 504회 �
 | `tests/rocm_mxfp4_quant.rs` | 신규 `mxfp4_warp_shared_gather_qmv_matches_per_row_and_reference`(5.1절). |
 | `tests/rocm_gather_qmm_expert_batched.rs` | 행별 디스패치 검사가 `MLX_ROCM_GATHER_QMV_USE_WARP=0`을 설정한다(5.2절). |
 | `patches-rocm/LOCAL_FIXES.md` | 항목 41 신설, 항목 10 갱신. 이슈는 새 항목을 32로 불렀지만 이미 쓰였고, 40은 #2220에 갔다. |
-| `docs/benchmark_results/rocm-moe-decode-mxfp4-gfx1151-2026-10-08.md` | 새 결과 페이지. |
+| `docs/benchmark_results/versions/v0.8.0.md#rocm-moe-decode-mxfp4-gfx1151-2026-10-08` | 새 결과 페이지. |
 
 커밋 1개, 파일 5개, 428줄 추가, 6줄 삭제.
 

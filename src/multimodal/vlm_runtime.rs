@@ -960,6 +960,8 @@ pub struct QwenVideoTimestamps<'a> {
 /// family with videos but no timing is an error, as is any disagreement
 /// between the timing and the processor-derived video grids; the caller never
 /// falls back to the flat layout.
+///
+/// Used by: Qwen3VLModel, Qwen3VLMoeModel, Qwen35VLModel (dense and MoE).
 fn qwen_video_group_prefixes(
     family_renders_timestamps: bool,
     media_order: &[QwenMediaOrdinal],
@@ -995,6 +997,9 @@ fn qwen_video_group_prefixes(
                 item.grid_thw.0,
                 seconds.len()
             );
+        }
+        if seconds.iter().any(|secs| !secs.is_finite() || *secs < 0.0) {
+            anyhow::bail!("Qwen-VL video timestamps must be finite non-negative seconds");
         }
         let prefixes = seconds
             .iter()

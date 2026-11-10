@@ -105,7 +105,7 @@ B=4에서 MoE 요청당 디코드가 29.8에서 33.9 tok/s로 올랐다. 밀집 
 
 ### 따로 반영한 부분
 
-`benchmarks/metal_m1ultra_batch_2026-09-04.csv`와 `docs/benchmark_results/moe-batched-decode-m1ultra-2026-09-04.md`, 그리고 M1 Ultra 배치 서빙 절과 M5 Max 쪽 포인터는 `bench/0.7.0-refresh`(PR #1617)에 커밋 `e75fa0e44`로 올렸다. CSV의 `mlxcel_commit` 열이 두 측정을 구분한다. 이 분리 때문에 코드 PR이 머지되어 이슈가 닫혀도 문서 절반은 아직 미머지로 남는다.
+`benchmarks/metal_m1ultra_batch_2026-09-04.csv`와 `docs/benchmark_results/versions/v0.7.0.md#moe-batched-decode-m1ultra-2026-09-04`, 그리고 M1 Ultra 배치 서빙 절과 M5 Max 쪽 포인터는 `bench/0.7.0-refresh`(PR #1617)에 커밋 `e75fa0e44`로 올렸다. CSV의 `mlxcel_commit` 열이 두 측정을 구분한다. 이 분리 때문에 코드 PR이 머지되어 이슈가 닫혀도 문서 절반은 아직 미머지로 남는다.
 
 ### 관련 이슈
 

@@ -51,7 +51,7 @@ Gemma 4와 gpt-oss의 가중치는 대부분 작고(Gemma 4의 `gate`는 2112 x 
 
 ## 4. 결과
 
-RTX Spark N1X(sm_121), 3라운드, 단일 바이너리, 클럭 게이트 적용, 합산 tok/s 중앙값이다. 전체 표는 `docs/benchmark_results/cuda-qmm-fold-batch-n1x-2026-10-31.md`에 있다.
+RTX Spark N1X(sm_121), 3라운드, 단일 바이너리, 클럭 게이트 적용, 합산 tok/s 중앙값이다. 전체 표는 `docs/benchmark_results/versions/v0.8.0.md#cuda-qmm-fold-batch-n1x-2026-10-31`에 있다.
 
 | 모델 | 5클라이언트, 적용 / 폴드 끔 | 8클라이언트, 적용 / 폴드 끔 |
 |---|---:|---:|

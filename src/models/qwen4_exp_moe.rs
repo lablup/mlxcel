@@ -31,10 +31,14 @@ use crate::models::qwen3_next::{MLP, Quantization, Qwen3NextConfig, SwitchGLU};
 
 use super::config::ResolvedQwen4ExpConfig;
 use super::shapes;
+use super::stream::arena::LayerStream;
 
 pub(crate) struct Qwen4ExpMoeBlock {
     router: UnifiedLinear,
     experts: SwitchGLU,
+    /// The layer's slot arena when experts stream from disk; `experts` then
+    /// reads slot tensors. Declared after `experts`, which borrows its memory.
+    stream: Option<LayerStream>,
     shared_expert: MLP,
     shared_expert_gate: UnifiedLinear,
     num_experts_per_tok: i32,
@@ -105,10 +109,21 @@ impl Qwen4ExpMoeBlock {
             shapes::expect_matrix(weights, &module, (group_size, bits), &[rows, hidden])?;
             UnifiedLinear::from_weights(weights, &module, group_size, bits)
         };
+        // Streaming swaps the checkpoint's stacked planes for slot tensors of
+        // the same layout; the shape checks above still ran on the real ones.
+        let (stream, slot_weights) = match &config.expert_stream {
+            Some(plan) => {
+                let (stream, slots) =
+                    LayerStream::new(std::sync::Arc::clone(plan), layer_index(prefix)?, prefix)?;
+                (Some(stream), Some(slots))
+            }
+            None => (None, None),
+        };
+        let expert_weights = slot_weights.as_ref().unwrap_or(weights);
         Ok(Self {
             router: linear("gate", experts)?,
             experts: SwitchGLU::from_weights(
-                weights,
+                expert_weights,
                 &loader_config(config, experts_pair),
                 &format!("{prefix}.switch_mlp"),
             )?,
@@ -120,16 +135,27 @@ impl Qwen4ExpMoeBlock {
             shared_expert_gate: linear("shared_expert_gate", 1)?,
             num_experts_per_tok: config.raw.num_experts_per_tok as i32,
             norm_topk_prob: config.raw.norm_topk_prob,
+            // Moved last: a failed initializer above must drop the slot arrays before the buffers.
+            stream,
         })
     }
 
-    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    /// `decode_equivalent` (a speculative verify block, issue #2880) keeps
+    /// every row on the kernels single-row decode uses: the experts gather
+    /// row by row instead of sorting the rows by expert, and the shared
+    /// expert gate takes the plain projection rather than the prefill-only
+    /// gathered form.
+    pub(crate) fn forward(&self, x: &MlxArray, decode_equivalent: bool) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let hidden = shape[shape.len() - 1];
         let tokens: i32 = shape[..shape.len() - 1].iter().product();
         let x_flat = mlxcel_core::reshape(x, &[tokens, hidden]);
 
-        let logits = self.router.forward(&x_flat);
+        let logits = if decode_equivalent {
+            super::linear::decode_equivalent_projection(&self.router, &x_flat)
+        } else {
+            self.router.forward(&x_flat)
+        };
         let gates = mlxcel_core::softmax_precise(&logits, -1);
         let n_experts = *mlxcel_core::array_shape(&logits)
             .last()
@@ -146,20 +172,51 @@ impl Qwen4ExpMoeBlock {
         // The generic fused MoE kernel accumulates expert outputs in float32.
         // Qwen4 checkpoints require bf16 rounding before weighting and summing
         // the selected experts, including single-token decode.
-        let expert_out = self.experts.forward(&x_flat, &topk);
+        let expert_out = match &self.stream {
+            Some(stream) => stream.forward(&self.experts, &x_flat, &topk, !decode_equivalent),
+            None => self
+                .experts
+                .forward_with_sort(&x_flat, &topk, !decode_equivalent),
+        };
         let scores = mlxcel_core::expand_dims(&scores, -1);
         let weighted = mlxcel_core::multiply(&expert_out, &scores);
         let routed = mlxcel_core::sum_axis_native_dtype(&weighted, -2, false);
 
-        let shared = self.shared_expert.forward(&x_flat);
-        let shared_gate = mlxcel_core::sigmoid(&super::linear::row_invariant_projection(
-            &self.shared_expert_gate,
-            x,
-        ));
+        // The shared expert is a dense SwiGLU MLP whose projections may be
+        // unquantized; a verify block runs it one row at a time so each row
+        // takes the single-row kernels decode takes.
+        let shared = if decode_equivalent && tokens > 1 {
+            let mut rows: Option<UniquePtr<MlxArray>> = None;
+            for row in 0..tokens {
+                let x_row = mlxcel_core::slice(&x_flat, &[row, 0], &[row + 1, hidden]);
+                let out = self.shared_expert.forward(&x_row);
+                rows = Some(match rows {
+                    None => out,
+                    Some(previous) => mlxcel_core::concatenate(&previous, &out, 0),
+                });
+            }
+            rows.expect("at least one row")
+        } else {
+            self.shared_expert.forward(&x_flat)
+        };
+        let shared_gate = if decode_equivalent {
+            super::linear::decode_equivalent_projection(&self.shared_expert_gate, x)
+        } else {
+            super::linear::row_invariant_projection(&self.shared_expert_gate, x)
+        };
+        let shared_gate = mlxcel_core::sigmoid(&shared_gate);
         let shared_gate = mlxcel_core::reshape(&shared_gate, &[tokens, 1]);
         let out = mlxcel_core::add(&routed, &mlxcel_core::multiply(&shared, &shared_gate));
         mlxcel_core::reshape(&out, &shape)
     }
+}
+
+/// The layer number in a `model.layers.{n}.mlp` prefix.
+fn layer_index(prefix: &str) -> Result<usize, String> {
+    prefix
+        .rsplit('.')
+        .find_map(|part| part.parse().ok())
+        .ok_or_else(|| format!("{prefix} names no layer"))
 }
 
 /// A packed expert plane whose width disagrees with its declared bits would

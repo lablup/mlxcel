@@ -30,7 +30,7 @@ PR #1557(이슈 #1539)은 pre-Ampere 하드웨어에서 bf16 체크포인트에 
 
 `qmv.cu`의 `qmv_accumulator<bits, T>` 트레이트가 `#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800` 아래에서 `bits >= 8` **또는** `T`가 `cutlass::bfloat16_t`일 때 `float`을 고르고, 그 밖에는 상류 규칙을 유지한다. `qmv_kernel_impl`과 `qmv_multirow_kernel_impl`이 이를 쓰고 `gather_qmv`가 물려받는다. `dequant_fma`와 `fma_tile`의 float 특수화는 이미 존재했고 `bits >= 8` 경로가 이미 사용하고 있었으므로 새로 인스턴스화되는 것은 없다.
 
-그 밖에 `ffi_tests.rs`의 테스트 80줄, `docs/benchmark_results/qmv-float-accum-v100-2026-08-31.md` 기록, #1538 베이스라인 문서의 사후 비교 행, 체인지로그 항목.
+그 밖에 `ffi_tests.rs`의 테스트 80줄, `docs/benchmark_results/versions/v0.7.0.md#qmv-float-accum-v100-2026-08-31` 기록, #1538 베이스라인 문서의 사후 비교 행, 체인지로그 항목.
 
 ## 3. 기술적 선택과 이유
 
@@ -102,8 +102,8 @@ sm_121에서 `qmm_sm80`을 고친 #910과 같은 부류다. 여기서는 범위 
 ## 참고
 
 - 이슈 #1539, 에픽 #1536(GB10 이월 절 포함)
-- 이 변경의 근거가 된 통제 측정: #1538, `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md`
-- 이 변경의 기록: `docs/benchmark_results/qmv-float-accum-v100-2026-08-31.md`
+- 이 변경의 근거가 된 통제 측정: #1538, `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31`
+- 이 변경의 기록: `docs/benchmark_results/versions/v0.7.0.md#qmv-float-accum-v100-2026-08-31`
 - multirow 비트 동일성 불변식: #725
 - 같은 부류의 기존 결정성 결함: #910
 - 실행 구성 오토튜너: #906

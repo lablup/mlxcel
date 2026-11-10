@@ -1,6 +1,6 @@
 # Where the Laguna DFlash verify round's fixed cost goes on GB10, and the fix
 
-Issue #1799. Host GB10 (sm_121), MLX pin `81ba1c6a`, CUDA release build, toolchain 1.97.1, source tree `2deae307` (the squash of PR #1771; byte-identical to the PR head `dab18fdf` that the earlier sweep measured). Full measurement record: `docs/benchmark_results/laguna-dflash-verify-cost-gb10-2026-09-11.md`.
+Issue #1799. Host GB10 (sm_121), MLX pin `81ba1c6a`, CUDA release build, toolchain 1.97.1, source tree `2deae307` (the squash of PR #1771; byte-identical to the PR head `dab18fdf` that the earlier sweep measured). Full measurement record: `docs/benchmark_results/versions/v0.8.0.md#laguna-dflash-verify-cost-gb10-2026-09-11`.
 
 ## Background
 

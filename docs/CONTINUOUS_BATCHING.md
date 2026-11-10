@@ -132,7 +132,7 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   row and evaluates the B graphs together, so its aggregate scaling comes only
   from overlapping independent single-token graphs. The 2026-09-04 M1 Ultra
   profile
-  in `docs/benchmark_results/moe-batched-decode-m1ultra-2026-09-04.md` measured
+  in `docs/benchmark_results/versions/v0.7.0.md#moe-batched-decode-m1ultra-2026-09-04` measured
   that fallback on `qwen3-30b-a3b-4bit` before the override landed.
   MiniMax-M3 sparse attention keeps its extra index-key head in the cache, but
   passes only the model's value heads to attention. This also corrects the
@@ -193,7 +193,7 @@ reproduce the single-request path on the server, use `--max-batch-size 1`
 (dense storage) or `--decode-storage-backend dense` while keeping the default
 admission width, and `--no-prompt-cache`.
 
-On ROCm the invariant holds without `MLXCEL_SDPA_DETERMINISTIC` (the variable is read only by the CUDA overlay), and the dense-vs-paged pair is a recorded divergence index rather than a gate ([ADR 0007](adr/0007-unified-batch-native-engine.md), "What parity means on ROCm and Metal"). Measured on gfx1151 after the epic (#2192, [results](benchmark_results/rocm-unified-engine-gfx1151-2026-10-08.md)): on Qwen3-0.6B 4-bit and Llama-3.1-8B 4-bit every pair the harness compares is identical for the greedy and the seeded case, the paged arm included (it ran the HIP paged v2 kernel, 1764 to 2080 launches per run), except the documented seeded prompt-cache miss-vs-hit row; a 128-token teacher-forced decode-step trace of a dense server against a paged server disagrees at TODO_PAGED positions and at TODO_PAGED_DECIDED decided positions. On the Mamba hybrid granite-4.0-h-tiny 4-bit the CLI, `run` and the dense server are identical; paged storage is `n/a` (the worker falls back to dense), and the prompt cache's history-boundary split (`prefill[0..45)+prefill[45..48)` against the cache-off `prefill[0..48)`) is a different partition, so the cache-off and cache-miss arms diverge there, at token 47 greedy and token 0 seeded.
+On ROCm the invariant holds without `MLXCEL_SDPA_DETERMINISTIC` (the variable is read only by the CUDA overlay), and the dense-vs-paged pair is a recorded divergence index rather than a gate ([ADR 0007](adr/0007-unified-batch-native-engine.md), "What parity means on ROCm and Metal"). Measured on gfx1151 after the epic (#2192, [results](benchmark_results/versions/v0.8.0.md#rocm-unified-engine-gfx1151-2026-10-08)): on Qwen3-0.6B 4-bit and Llama-3.1-8B 4-bit every pair the harness compares is identical for the greedy and the seeded case, the paged arm included (it ran the HIP paged v2 kernel, 1764 to 2080 launches per run), except the documented seeded prompt-cache miss-vs-hit row; a 128-token teacher-forced decode-step trace of a dense server against a paged server disagrees at TODO_PAGED positions and at TODO_PAGED_DECIDED decided positions. On the Mamba hybrid granite-4.0-h-tiny 4-bit the CLI, `run` and the dense server are identical; paged storage is `n/a` (the worker falls back to dense), and the prompt cache's history-boundary split (`prefill[0..45)+prefill[45..48)` against the cache-off `prefill[0..48)`) is a different partition, so the cache-off and cache-miss arms diverge there, at token 47 greedy and token 0 seeded.
 
 > Backend note (CUDA / Blackwell, e.g. GB10): batched decode used to be a
 > throughput wash on CUDA because the `M*B < 8` quantized matmul fell back to
@@ -208,11 +208,11 @@ On ROCm the invariant holds without `MLXCEL_SDPA_DETERMINISTIC` (the variable is
 > and on compute capability 12.1 from 5 rows of a weight of at least 2^24
 > elements, it runs one GEMM that reads the weight once. On an RTX Spark N1X that
 > lifts 8-client aggregate decode 1.2x to 3.2x across four models
-> (`docs/benchmark_results/cuda-qmm-fold-batch-n1x-2026-10-31.md`). The older
+> (`docs/benchmark_results/versions/v0.8.0.md#cuda-qmm-fold-batch-n1x-2026-10-31`). The older
 > advice to keep `--parallel` at 7 or below predates the fold, and GB10 has not
 > been re-measured with it. See
-> `docs/benchmark_results/qmv-multirow-gb10-2026-07-11.md`. `--max-batch-prefill`
-> (large-M, tile-tuned, `docs/benchmark_results/qmm-sm121-tile-tuning-gb10-2026-07-10.md`)
+> `docs/benchmark_results/versions/v0.4.0.md#qmv-multirow-gb10-2026-07-11`. `--max-batch-prefill`
+> (large-M, tile-tuned, `docs/benchmark_results/versions/v0.4.0.md#qmm-sm121-tile-tuning-gb10-2026-07-10`)
 > and the prompt cache remain independent wins on CUDA.
 
 Memory sizing: the KV footprint grows with the active batch, so budget for up to
@@ -276,6 +276,18 @@ So a prompt-cache hit reproduces the cold (miss) run of the same prompt exactly 
 
 The dense-KV rows diverge because their cold plan has no split point at 45 or 71: the hit's 7-row and 4-row suffix forwards run through `qmv`, the cold run's 52-row and 75-row forwards through `qmm`. Giving every family the history-boundary split would make those two rows identical, but it would cost every cold chat prefill a second forward launch and make the prompt cache change the output of a single-turn request (off vs miss, today identical for dense-KV families), which the Phase 5 `mlxcel run` versus `mlxcel generate` comparison relies on; it was rejected for #2170. The invariant to rely on is therefore: cache off and a cold prefill with the cache on are identical for every family without a history-boundary split, a hit from a split point is identical to the miss, and a hit from inside a piece is a partition change of the #203 / #325 / #326 near-tie class, pinned by the `mlxcel_core::prefill_plan` tests and `scheduler_prompt_cache_plan_tests::cache_hit_reproduces_miss_exactly_from_a_plan_split_point` (the divergence of an inside-a-piece hit is measured in the table above, not asserted numerically by a test).
 
+The same partition rule decides whether a cold server request matches `mlxcel generate` on a snapshot family (Gemma 4, Qwen 3.5, `qwen4_exp`, and the SSM hybrids). `mlxcel generate -p` has a single prompt and no history boundary, so it prefills a short prompt as one forward. The batch scheduler renders the chat twice, finds the boundary, and prefills the history segment and the generation-prompt suffix as two forwards, so the two greedy streams can part at the first near-tie token even though neither is wrong. #2920 measured it on M3 Ultra with `MLXCEL_QMV_WIDE=0` and the 70-token "why the sky is blue" chat prompt (256 tokens, temperature 0) on `Qwen3.8-Flash-Next-4bit-mtp`:
+
+| server run | prefill partition | vs `mlxcel generate` |
+|---|---|---|
+| defaults (`--parallel 1` gives the same) | `prefill[0..65)+prefill[65..70)` | diverges at completion token 98: " when" (-0.875) over " as" (-1.0), where the one-forward prefill ties them at -0.875 |
+| `--no-cache-prompt --prefill-chunk-size 65` | `prefill[0..65)+prefill[65..70)` | byte-identical to the defaults run, so the split alone is the cause |
+| `--no-cache-prompt` | `prefill[0..70)` | byte-identical |
+| `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1` | `prefill[0..70)` | byte-identical, prompt cache still on |
+| `--no-batch` | `prefill[0..70)` | byte-identical |
+
+`MLXCEL_PREFILL_CHUNK=65 mlxcel generate` takes the server's partition and produces the server's answer. On `Qwen3.8-Flash-Next-OptiQ-2bit` the defaults run diverges at answer character 205 with the same boundary (65), and `--no-cache-prompt` matches. A speculative server (`--model-draft`) matched `mlxcel generate` in that run because its prefill logged no boundary split. To compare the server with `mlxcel generate` byte for byte on a snapshot family, set `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1`, which keeps the prompt cache but gives up the multi-turn hit the boundary snapshot buys, or compare against `MLXCEL_PREFILL_CHUNK=<boundary> mlxcel generate`.
+
 Known limitations of the plan, recorded for the epic's end-of-run measurement:
 
 - The history segment of a snapshot family's prefill (the span before the history boundary, #1143) is always one unchunked forward, whatever `--prefill-chunk-size` says. This predates the plan (it has been the case since #1143), and the plan keeps it because the segment is where the prompt cache snapshots the model state. A long chat history on a snapshot family therefore prefills as one forward that does not interleave with concurrent decode ticks; only the pieces after the boundary do.
@@ -286,7 +298,7 @@ quiet-host admission rounds measured 54.1, 54.8, and 55.2 ms live-stream ITL
 p95, below the 62.0 ms limit. Five-round idle-server TTFT comparisons placed
 the policy median inside the explicit-2048 null range on both Qwen3-1.7B and
 Llama-3.2-1B. See the
-[raw results and protocol](benchmark_results/adaptive-prefill-chunk-gb10-2026-10-11.md).
+[raw results and protocol](benchmark_results/versions/v0.8.0.md#adaptive-prefill-chunk-gb10-2026-10-11).
 
 ### Decode headroom under a tight budget (`--kv-admission-watermark`)
 
@@ -364,7 +376,7 @@ chunk and resets the count. So:
 each hiccup smaller, a smaller interval makes them more frequent and the
 admitted request faster. `--prefill-grant-interval 0` disables the grant and
 restores the pre-#1011 arbitration, unbounded wait included. Measured frontier:
-[`docs/benchmark_results/prefill-fairness-m1ultra-2026-08-03.md`](benchmark_results/prefill-fairness-m1ultra-2026-08-03.md).
+[`docs/benchmark_results/versions/v0.5.0.md#prefill-fairness-m1ultra-2026-08-03`](benchmark_results/versions/v0.5.0.md#prefill-fairness-m1ultra-2026-08-03).
 
 Two further things worth knowing when reading latency numbers:
 
@@ -483,7 +495,7 @@ the KV range across thread blocks, so its parallelism grows with context
 instead of saturating. Measured against the previous path on an Apple M1 Ultra:
 1.4x to 3.1x at batch 4 across 1K to 32K of context, and 1.3x to 1.5x for a
 single sequence at 16K and 32K
-(`docs/benchmark_results/paged-decode-v2-m1ultra-2026-07-31.md`).
+(`docs/benchmark_results/versions/v0.5.0.md#paged-decode-v2-m1ultra-2026-07-31`).
 
 What it does *not* serve falls back to the previous gather-then-SDPA path, per
 launch, under the same parity limits described above:
@@ -551,7 +563,7 @@ sequence was opened.
   (`scheduler_real_batch_parity_tests`, gemma-3-1b-it-4bit under
   `MLXCEL_SDPA_DETERMINISTIC=1`) gives two concurrent greedy requests the
   same token streams as each request alone, on both backends.
-- The [2026-10-11 GB10 paired/null storage sweep](benchmark_results/model-owned-storage-gb10-2026-10-11.md)
+- The [2026-10-11 GB10 paired/null storage sweep](benchmark_results/versions/v0.8.0.md#model-owned-storage-gb10-2026-10-11)
   kept `supports_paged_decode_backend()` true for both model-owned families.
   None of the six prompt/concurrency cells per family cleared its rotating
   paged-repeat null spread in either direction. Therefore `auto` on a
@@ -724,7 +736,7 @@ prefilled and verified through the B=1 calls and only the cache write is
 batched. It runs on CUDA for windows of up to 4 rows short enough that the
 sliding cache never compacts under a lagging row, and declines to classic
 decode otherwise; see
-[the GB10 record](benchmark_results/gemma4-mtp-batched-gb10-2026-10-07.md).
+[the GB10 record](benchmark_results/versions/v0.8.0.md#gemma4-mtp-batched-gb10-2026-10-07).
 
 A tick-cooperative slice spans the request's whole generation, so the single
 speculative slot would otherwise be held for that entire time. Since issue
@@ -799,7 +811,7 @@ tokens must come true before verification resumes with fresh evidence.
 Ordinary proposal-free asks re-prime after the first ask instead of the CLI's
 three. Each row keeps its own evidence even at concurrency two; a proposing
 peer still makes the shared tick synchronous. The CLI defaults and the graded
-policy remain unchanged. The [GB10 break-even report](benchmark_results/server-prompt-lookup-break-even-gb10-2026-10-11.md) records the final passing matrix: chat −0.275%, short-copy +149–159%, and long-copy 1.52–2.82×. These measurements cover Qwen3-1.7B 4-bit on GB10; the boundary-miss heuristic is not a guarantee for other workloads.
+policy remain unchanged. The [GB10 break-even report](benchmark_results/versions/v0.8.0.md#server-prompt-lookup-break-even-gb10-2026-10-11) records the final passing matrix: chat −0.275%, short-copy +149–159%, and long-copy 1.52–2.82×. These measurements cover Qwen3-1.7B 4-bit on GB10; the boundary-miss heuristic is not a guarantee for other workloads.
 
 Each decode tick asks the eligible rows for a proposal. A row that proposes
 runs one verify round on its own (the round `mlxcel generate --prompt-lookup`
@@ -824,7 +836,7 @@ The 4608 cap is the smallest 512-token boundary covering that envelope; it
 keeps 8192-token contexts excluded, where gathered verification previously
 lost performance (0.62x on a 59% acceptance prompt). This boundary rationale
 does not establish the new configuration's performance; the full same-build
-acceptance run is required. See the [context diagnostic](benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/context-diagnostic.md).
+acceptance run is required. See the [context diagnostic](https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/context-diagnostic.md).
 Dense storage has no such limit.
 
 Before the break-even governor, the flag gained on output that copied its
@@ -833,7 +845,7 @@ for a repeat-the-paragraph prompt, up to 2.8x with a long document in front)
 but cost 3.5 % on chat whose reply copied little (25 to 45 % of proposed
 tokens accepted), because each proposal also ends the lookahead for a tick.
 Turn it on for workloads that quote or edit their input. Measurements:
-[`docs/benchmark_results/server-prompt-lookup-gb10-2026-10-11.md`](benchmark_results/server-prompt-lookup-gb10-2026-10-11.md);
+[`docs/benchmark_results/versions/v0.8.0.md#server-prompt-lookup-gb10-2026-10-11`](benchmark_results/versions/v0.8.0.md#server-prompt-lookup-gb10-2026-10-11);
 the server break-even governor addresses these low-yield rounds (#2264). Verify rounds also stay off under a unified KV
 budget (`--kv-unified`). Requests with images, audio or video, structured
 output, per-token logprobs, mirostat, adaptive-p or the extended sampler chain

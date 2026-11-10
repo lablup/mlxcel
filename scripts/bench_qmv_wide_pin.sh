@@ -32,7 +32,7 @@
 #
 # (the default Gemma 31B + bf16 pairing probes non-identical under BOTH
 # kernels there and declines MTP; see
-# docs/benchmark_results/qmv-wide-pin-tax-m3ultra-2026-08-22.md).
+# docs/benchmark_results/versions/v0.6.0.md#qmv-wide-pin-tax-m3ultra-2026-08-22).
 # Every boot also runs with
 # MLXCEL_MTP_SLICE_GRANT_ROUNDS=0 so the first stream holds the speculative
 # slot for its whole generation and the N concurrent streams fall back to

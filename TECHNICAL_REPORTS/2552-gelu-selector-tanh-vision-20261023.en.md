@@ -20,7 +20,7 @@ Issue #2423 found that `mlxcel_core::gelu_approx` computes the exact erf GELU wh
 | `src/lib/mlxcel-xla/src/emitter/vision_config.rs` | XLA Gemma 3 vision emitter resolves the missing key to tanh the same way |
 | `src/vision/encoders/internvl.rs`, `src/models/gemma3n.rs`, `deepseek_vl2.rs` | Erf kept, made explicit or commented |
 | `src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/jit_module.cpp`, `tests/cuda_custom_kernel_disk_cache.rs` | PTX cache temporary named from suffix and extension; second-process test on the compiled tanh kernel |
-| `docs/gelu-call-sites.md`, `docs/benchmark_results/gelu-erf-vs-tanh-2026-10-23.md` (new) | Inventory of about 110 call sites with pinned upstream links; measurement record |
+| `docs/gelu-call-sites.md`, `docs/benchmark_results/versions/v0.8.0.md#gelu-erf-vs-tanh-2026-10-23` (new) | Inventory of about 110 call sites with pinned upstream links; measurement record |
 
 ## 2. Technical Decisions
 

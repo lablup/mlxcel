@@ -85,5 +85,5 @@ The automaton is rebuilt each step, so total work includes configured pattern to
 
 - Issue #2259: implementation requirements
 - Issues #2229 and #2256: security-review context
-- `docs/benchmark_results/dry-penalty-step-cost-gb10-2026-10-11.md`: dated timing record
+- `docs/benchmark_results/versions/v0.8.0.md#dry-penalty-step-cost-gb10-2026-10-11`: dated timing record
 - `docs/benchmark_results/data/dry-penalty-step-cost-gb10-2026-10-11/`: raw evidence package

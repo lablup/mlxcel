@@ -19,7 +19,7 @@ Generations 13 and 14 are excluded from `gemv_wide`, so dense products with 2 or
 |---|---|
 | Metal | New matmul overlay, `MLXCEL_DENSE_GEMV_ROWS` |
 | MoE | `switch_gate_up_preferred_in_forward` |
-| Evidence | `docs/benchmark_results/few-row-dense-matmul-m1ultra-2026-11-01.md` |
+| Evidence | `docs/benchmark_results/versions/v0.8.0.md#few-row-dense-matmul-m1ultra-2026-11-01` |
 
 ## 8. Follow-up Actions
 

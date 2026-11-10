@@ -130,7 +130,7 @@ Issue #2228의 구현, 성능 승인, 통합 검증에 남은 작업은 없다.
 ## 참고 자료
 
 - Issue #2228: 다른 시퀀스의 디코딩 여부에 따른 프리필 청크 선택.
-- PR #2226 및 docs/benchmark_results/unified-engine-final-gb10-2026-10-08.md: 정책 근거가 된 admission 측정.
+- PR #2226 및 docs/benchmark_results/versions/v0.8.0.md#unified-engine-final-gb10-2026-10-08: 정책 근거가 된 admission 측정.
 - ADR 0007: unified batch/native engine 결정과 개정된 프리필 청크 정책.
 - docs/CONTINUOUS_BATCHING.md: 서버 정책, 계획 invariant, 운영 제어.
-- docs/benchmark_results/adaptive-prefill-chunk-gb10-2026-10-11.md: 통과한 승인 결과, raw data, 재현 protocol.
+- docs/benchmark_results/versions/v0.8.0.md#adaptive-prefill-chunk-gb10-2026-10-11: 통과한 승인 결과, raw data, 재현 protocol.

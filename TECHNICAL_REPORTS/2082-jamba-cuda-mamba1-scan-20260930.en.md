@@ -32,7 +32,7 @@ The checkpoint named `jamba-v0.1-4bit` is a reduced variant: 28 layers (26 Mamba
 - **`jamba.rs`**: `JambaMambaMixer::ssm_step` calls the kernel when `mamba1_scan_kernel_accepts` is true, for prefill and decode. A test-only thread-local counts timesteps walked by the graph loop.
 - **`mamba.rs`**: the fused path stays Metal-only. Mamba's graph path runs `x_proj` one timestep at a time, while the kernel path projects the whole sequence, so switching on CUDA would change output.
 - **Tests**: `cuda_kernel_is_bit_identical_to_the_graph_scan`, `cuda_kernel_declines_mixed_dtype_inputs`, and `jamba_mamba_prefill_takes_the_fused_scan_where_a_port_exists`. The Metal-specific accuracy test now runs on Metal only.
-- **Docs**: `docs/environment-variables.md` (`MLXCEL_MAMBA1_SCAN_KERNEL`) and `docs/benchmark_results/jamba-mamba1-scan-kernel-gb10-2026-09-30.md`.
+- **Docs**: `docs/environment-variables.md` (`MLXCEL_MAMBA1_SCAN_KERNEL`) and `docs/benchmark_results/versions/v0.8.0.md#jamba-mamba1-scan-kernel-gb10-2026-09-30`.
 
 ## 3. Technical Decisions
 

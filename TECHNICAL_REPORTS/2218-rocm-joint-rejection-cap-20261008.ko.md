@@ -39,7 +39,7 @@ ROCm 값은 이제 152064이고, 양쪽 모두 측정한 가장 큰 어휘 크�
 | `sampling_rejection_tests.rs` | 상한을 빌드별로 고정. 라우팅 행렬이 빌드별로 65536, 128256, 151936, 152064를 다룬다. 큰 어휘 거절 테스트는 빌드의 상한보다 큰 어휘를 고른다. |
 | `examples/rejection_sampling_microbench.rs` | 어휘 128256, 151936 추가. `--dtype f32\|bf16\|f16`, `--config <label>` 옵션. 빌드의 상한을 출력. 포트 게이트 수정. |
 | `src/bin/bench_decode.rs`, `scripts/bench_decode.sh` | 새 `--top-k` 옵션(파일 이름 태그 `_k<K>`, 값 검증). |
-| 문서 | 새 결과 페이지 `docs/benchmark_results/rocm-rejection-joint-cap-gfx1151-2026-10-07.md`, `rocm-samplers-gfx1151-2026-10-05.md`에서 링크. `installation.md`의 ROCm 샘플링 디코드 행이 Llama 3와 Qwen 어휘에서 어떤 필터 조합이 커널로 가는지 나열. `environment-variables.md`의 `MLXCEL_SAMPLING_REJECTION` 행 갱신. |
+| 문서 | 새 결과 페이지 `docs/benchmark_results/versions/v0.8.0.md#rocm-rejection-joint-cap-gfx1151-2026-10-07`, `rocm-samplers-gfx1151-2026-10-05.md`에서 링크. `installation.md`의 ROCm 샘플링 디코드 행이 Llama 3와 Qwen 어휘에서 어떤 필터 조합이 커널로 가는지 나열. `environment-variables.md`의 `MLXCEL_SAMPLING_REJECTION` 행 갱신. |
 | `benchmarks/` | 원시 CSV: f32 마이크로벤치마크 3회, bf16 3회, 측정 빌드의 종단간 쌍, 최종 빌드의 전후 쌍. |
 
 ## 3. 설계

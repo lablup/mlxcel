@@ -231,6 +231,12 @@ fn sample_input() -> ServerStartupInput {
         responses_store_max_bytes:
             crate::server::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
         responses_store_ttl_secs: 3600,
+        responses_background_max_jobs:
+            crate::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+        responses_background_ephemeral_ttl_secs:
+            crate::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+        responses_background_event_log_bytes:
+            crate::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
         conversation_store_max_entries: 256,
         conversation_store_max_bytes:
             crate::server::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,

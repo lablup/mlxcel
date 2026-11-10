@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Portions of this file are derived from mlx-vlm
+// (https://github.com/Blaizzy/mlx-vlm), Copyright 2025 Prince Canuma,
+// licensed under the MIT License. See the top-level NOTICE.
+
 //! Qwen-VL prompt token insertion rules.
 //!
 //! Qwen2/2.5/3/3.5-VL families reserve image-token blocks based on the image
@@ -907,6 +911,8 @@ pub fn insert_qwen_vl_media_tokens(
 /// first and last frame time. Using the indices that were actually sampled
 /// keeps the markers right when the sampler resampled the clip at a rate other
 /// than the one requested.
+///
+/// Used by: Qwen3VLModel, Qwen3VLMoeModel, Qwen35VLModel (dense and MoE).
 pub fn qwen_video_group_timestamps(
     frame_indices: &[usize],
     source_fps: f64,
@@ -921,30 +927,35 @@ pub fn qwen_video_group_timestamps(
     if temporal_patch_size == 0 {
         anyhow::bail!("Qwen-VL temporal_patch_size must be positive");
     }
-    let Some(&last) = frame_indices.last() else {
+    if frame_indices.is_empty() {
         anyhow::bail!("Qwen-VL video timestamps need at least one sampled frame");
-    };
-    let padded_len = frame_indices.len().div_ceil(temporal_patch_size) * temporal_patch_size;
-    if padded_len != grid_t * temporal_patch_size {
+    }
+    let groups = frame_indices.len().div_ceil(temporal_patch_size);
+    if groups != grid_t {
         anyhow::bail!(
-            "Qwen-VL video has {} sampled frame(s) ({} after temporal padding), which does not \
-             match {} temporal group(s) of {} frame(s)",
-            frame_indices.len(),
-            padded_len,
-            grid_t,
-            temporal_patch_size
+            "Qwen-VL video has {} sampled frame(s), which require {groups} temporal group(s), \
+             not {grid_t}",
+            frame_indices.len()
         );
     }
-    let mut padded = frame_indices.to_vec();
-    padded.resize(padded_len, last);
-    Ok(padded
-        .chunks_exact(temporal_patch_size)
+    if frame_indices.windows(2).any(|pair| pair[0] > pair[1]) {
+        anyhow::bail!("Qwen-VL sampled frame indices must be in source order");
+    }
+    // A short final chunk repeats its last frame implicitly. Avoid multiplying
+    // untrusted dimensions or allocating a padded copy of the frame indices.
+    frame_indices
+        .chunks(temporal_patch_size)
         .map(|group| {
             let first = group[0] as f64 / source_fps;
-            let last = group[temporal_patch_size - 1] as f64 / source_fps;
-            (first + last) / 2.0
+            let last = group[group.len() - 1] as f64 / source_fps;
+            // Halve before adding so finite endpoints cannot overflow the sum.
+            let seconds = first * 0.5 + last * 0.5;
+            if !seconds.is_finite() {
+                anyhow::bail!("Qwen-VL video timestamp exceeds finite seconds");
+            }
+            Ok(seconds)
         })
-        .collect())
+        .collect()
 }
 
 /// Text of the marker placed before one temporal group, e.g. `<1.5 seconds>`.

@@ -26,7 +26,7 @@ Separately, there was no build coverage below sm_80 anywhere. `ci.yml` pinned `M
 
 4 files, +547 / -6.
 
-- `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` (new, ~400 lines): environment, build provenance, the six methodology rules, decode and prefill throughput, the cold PTX cache measurement, kernel profiles, the 4-bit/8-bit analysis, a harness comparison, a full reproduce-vs-audit table, the CI decision, known traps, and an empty post-program comparison table for #1539 through #1545 to fill.
+- `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31` (new, ~400 lines): environment, build provenance, the six methodology rules, decode and prefill throughput, the cold PTX cache measurement, kernel profiles, the 4-bit/8-bit analysis, a harness comparison, a full reproduce-vs-audit table, the CI decision, known traps, and an empty post-program comparison table for #1539 through #1545 to fill.
 - `benchmarks/cuda_v100_2026-08-31.csv` (new): the same CSV shape the GB10 sweeps in `benchmarks/` use, so the two are directly comparable.
 - `.github/workflows/ci.yml`: adds the `cuda-sm70-compile` job and a `cuda_arch` path filter.
 - `scripts/bench_decode.sh`: slope-aware changes.
@@ -85,7 +85,7 @@ These belong to the `## GB10 (sm_121) continuation` section of epic #1536.
 ## References
 
 - Issue #1538, epic #1536 (including its GB10 continuation section)
-- The record: `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md`
+- The record: `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31`
 - CSV artifact: `benchmarks/cuda_v100_2026-08-31.csv`
 - Accumulator selection the 4-bit/8-bit analysis isolates: `src/lib/mlx-cpp/patches/mlx/backend/cuda/quantized/qmm/qmv.cu`
 - The scalar-FMA control that moves the other way: `mlx/backend/cuda/device/gemm_sm70.cuh`

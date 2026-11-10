@@ -575,6 +575,13 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, supports_decode_lookahead_rewind())
     }
 
+    // #2880: prompt lookup admits a model-owned family on this capability; a
+    // dropped delegation would read the trait default (the lookahead flag,
+    // `false` for qwen4_exp) and silently decline every prompt-lookup request.
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        delegate_language_model!(self, supports_speculative_verify_rewind())
+    }
+
     // #2567: the engine's lookahead gate and the scheduler's prompt-cache and
     // handoff gates all read this; a dropped delegation would pipeline and
     // donate Baichuan-M1's conv state as if its KV cache were the whole state.

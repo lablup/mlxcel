@@ -94,7 +94,7 @@ qwen3.8-27b-4bit + qwen3.8-27b-mtp-4bit
 
 모든 비율이 1.00x 아래다. 같은 Unified 12B 페어링이 M5 Max에서는 K=4에 1.57x를 낸다. 수용률이 설명은 아니다. 같은 페어링이 같은 K에서 M1 Ultra 쪽이 오히려 더 많이 수용하는데도(39.6%에 평균 수용 길이 1.19, M5 Max는 35.0%에 1.05) 0.74x에 머문다.
 
-차이는 verify 라운드다. `docs/benchmark_results/speculative-decoding-m1ultra-2026-08-19.md`는 block-4 verify 라운드 비용을 M1 Ultra 2.70 classic decode step, M3 Ultra 1.50, M5 Max 1.27로 측정했고, M1 Ultra를 Apple GPU 13세대의 첫 호스트로 지목한다. 평균 수용 길이가 1.2 언저리면 2.70 step짜리 verify를 상대로 손익분기를 넘을 수 없다. 이 세대에서 B=1 MTP를 거절하는 정적 게이트도 같은 이유로 존재한다. 즉 이 행들은 회귀 보고가 아니라 호스트의 알려진 성질을 재확인한 것이다.
+차이는 verify 라운드다. `docs/benchmark_results/versions/v0.6.0.md#speculative-decoding-m1ultra-2026-08-19`는 block-4 verify 라운드 비용을 M1 Ultra 2.70 classic decode step, M3 Ultra 1.50, M5 Max 1.27로 측정했고, M1 Ultra를 Apple GPU 13세대의 첫 호스트로 지목한다. 평균 수용 길이가 1.2 언저리면 2.70 step짜리 verify를 상대로 손익분기를 넘을 수 없다. 이 세대에서 B=1 MTP를 거절하는 정적 게이트도 같은 이유로 존재한다. 즉 이 행들은 회귀 보고가 아니라 호스트의 알려진 성질을 재확인한 것이다.
 
 ### 3.2 게이트
 

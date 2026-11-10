@@ -92,5 +92,5 @@ Decode width 1의 teacher-forced B=4 대 B=1 trace에서 12B는 top-1 disagreeme
 
 - 이슈 #2546: Gemma 4 decode가 행마다 하나의 forward를 실행하는 문제
 - PR #2611: 활성 행 전체에서 Gemma 4 decode batching
-- `docs/benchmark_results/gemma4-native-batched-decode-2026-10-26.md`: 전체 protocol, trace 해석, raw comparison 맥락
+- `docs/benchmark_results/versions/v0.8.0.md#gemma4-native-batched-decode-2026-10-26`: 전체 protocol, trace 해석, raw comparison 맥락
 - `docs/CONTINUOUS_BATCHING.md`: 서버 decode 분류와 운영 동작

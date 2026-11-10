@@ -46,7 +46,7 @@ ROCm `quantize`는 CPU와 같은 E8M0 scale을 만들지만 tie를 다르게 반
 - **`examples/logit_trace.rs`** (+10): `mlxcel::initialize_runtime_checked()`를 호출해 `MLXCEL_DEVICE`를 따르고, 잘못된 override에는 경고를 내며, 모든 trace에 `# device` 헤더 줄을 씁니다.
 - **`src/models/fp8_block.rs`** (문서만): 재양자화를 기본 device에 두는 이유와 측정값을 설명합니다.
 - **`src/lib/mlxcel-core/src/hardware.rs`** (문서만): `quant_mode_support`의 근거 목록이 mxfp8 테스트와 체크포인트 실행을 인용합니다. 표에는 이미 ROCm mxfp8이 `Native`로 되어 있었고, 표 자체는 바뀌지 않습니다.
-- **`docs/benchmark_results/rocm-fp8-block-gfx1151-2026-09-30.md`** (신규)와 **`benchmarks/logit_traces/fp8_block_gfx1151/`** (신규): 결과 문서, trace 파일 8개, `METADATA.txt`, `RUNS.txt`, `SHA256SUMS`.
+- **`docs/benchmark_results/versions/v0.8.0.md#rocm-fp8-block-gfx1151-2026-09-30`** (신규)와 **`benchmarks/logit_traces/fp8_block_gfx1151/`** (신규): 결과 문서, trace 파일 8개, `METADATA.txt`, `RUNS.txt`, `SHA256SUMS`.
 - **`docs/installation.md`**: ROCm 상태 표의 mxfp8 행에 FP8 block 체크포인트를 추가하고, ROCm 빌드의 CPU device 행("동작하지만 느림")을 새로 넣었습니다. **`rocm-correctness-gfx1151-2026-09-12.md`**: 낡은 mxfp8 공백 문구가 새 실행 결과를 가리키게 했습니다.
 
 커밋: `a9a05ac5`는 테스트, SDPA guard, `logit_trace` 수정을 추가합니다. `35375780`은 벤치마크 결과와 trace를 추가합니다. `c26086b2`는 sorted shared-activation 케이스가 실제로 stride-0 schedule에 도달하게 하고 TF32를 고려해 f32 범위를 넓힙니다. `9d1f570e`는 CPU arm을 38초에서 2.5초로 줄이고 SAFETY 주석을 추가합니다.

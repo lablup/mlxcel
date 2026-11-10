@@ -84,8 +84,10 @@ pub enum ResponsesTranslateError {
     ConversationStoreDisabled(String),
     #[error("tool type '{0}' is not supported by mlxcel; Phase 1 supports only 'function' tools")]
     UnsupportedToolType(String),
-    #[error("background=true is not supported in Phase 1; omit the field or set background=false")]
-    BackgroundUnsupported,
+    /// `previous_response_id` names a background response that is still
+    /// `queued` or `in_progress`.
+    #[error("previous response '{id}' has not finished (status: {status})")]
+    PreviousNotFinished { id: String, status: &'static str },
     #[error("metadata is limited to 16 entries; received {0}")]
     MetadataTooLarge(usize),
     #[error("truncation='{0}' is not supported in Phase 1; only 'disabled' is accepted")]
@@ -128,9 +130,6 @@ pub fn responses_request_to_chat(
     if request.previous_response_id.is_some() && request.conversation.is_some() {
         return Err(ResponsesTranslateError::PreviousAndConversation);
     }
-    if request.background == Some(true) {
-        return Err(ResponsesTranslateError::BackgroundUnsupported);
-    }
     if let Some(meta) = request.metadata.as_ref()
         && meta.len() > 16
     {
@@ -156,6 +155,14 @@ pub fn responses_request_to_chat(
     if let Some(prev_id) = request.previous_response_id.as_deref() {
         let store = responses_store
             .ok_or_else(|| ResponsesTranslateError::PreviousNotFound(prev_id.to_string()))?;
+        // An active background job has no output to chain from yet. Checked
+        // before the lookup: a job that finishes in between is then found.
+        if let Some(status) = store.background_status(prev_id) {
+            return Err(ResponsesTranslateError::PreviousNotFinished {
+                id: prev_id.to_string(),
+                status: status.as_str(),
+            });
+        }
         let stored = store
             .get(prev_id)
             .ok_or_else(|| ResponsesTranslateError::PreviousNotFound(prev_id.to_string()))?;
@@ -781,6 +788,7 @@ pub fn build_response_object(ctx: OutboundContext<'_>) -> ResponseObject {
             .clone()
             .or_else(|| ctx.request.safety_identifier.clone()),
         store: ctx.request.store,
+        background: ctx.request.background.filter(|background| *background),
     }
 }
 
@@ -860,11 +868,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_background_true() {
+    fn background_true_translates_like_a_foreground_request() {
         let mut req = make_request(ResponseInput::Text("hi".to_string()));
         req.background = Some(true);
-        let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::BackgroundUnsupported);
+        let translated = responses_request_to_chat(&req, None, None).expect("translates");
+        assert_eq!(translated.chat_request.messages.len(), 1);
     }
 
     #[test]

@@ -191,8 +191,54 @@ impl LanguageModel for Qwen4ExpVLModel {
             .forward_batched(input_ids, batch_caches, mask)
     }
 
+    // Prompt-cache snapshots (issue #2885): the text backbone owns all the
+    // per-sequence state; the vision wrapper holds none.
+    fn supports_snapshot_reuse(&self) -> bool {
+        self.text_model.supports_snapshot_reuse()
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.text_model.snapshot_sequence_state(seq_id, token_len)
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        self.text_model.restore_sequence_state(seq_id, snapshot)
+    }
+
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.text_model.get_embed_tokens(input_ids))
+    }
+
+    // The `qwen4_exp_mtp` drafter borrows the target's embedding table and LM
+    // head through these (issue #2880); the text backbone owns both.
+    fn embed_tokens_module(&self) -> Option<mlxcel_core::layers::UnifiedEmbedding> {
+        self.text_model.embed_tokens_module()
+    }
+
+    fn lm_head_module(&self) -> Option<mlxcel_core::layers::UnifiedLinear> {
+        self.text_model.lm_head_module()
+    }
+
+    fn residual_stream_count(&self) -> Option<usize> {
+        self.text_model.residual_stream_count()
+    }
+
+    // Prompt lookup admits the family on this capability and unwinds a
+    // rejected verify tail through the rewind (issue #2880).
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        self.text_model.supports_speculative_verify_rewind()
+    }
+
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        self.text_model.rewind_decode_appends(seq_id, n)
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

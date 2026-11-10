@@ -76,7 +76,7 @@ Bootstrap capability의 가용성은 시작 경로 힌트가 아닌 실제 pool 
 
 ## 4. 검증
 
-전체 수용 검증은 `c2400a3e2ec36cd89954ee7544edb420b7a14d76`에서 실행했습니다. `3d8fd7b4` 위로 충돌 없이 rebase한 결과는 `4cb81177844126aab673dd08354d731952ee5058`입니다. 패치 8개 모두 동등하며, 측정한 리비전과의 tree 차이는 `docs/benchmark_results/kernel-backend-kind-metal-m1ultra-2026-09-13.md`와 `scripts/paged_decode_counter_ab.sh`뿐입니다. Runtime, build, frontend, contract 내용은 동일합니다. 아래 대규모 검증은 `c2400a3e`의 결과이며 `4cb81177`에서 다시 실행했다고 주장하지 않습니다.
+전체 수용 검증은 `c2400a3e2ec36cd89954ee7544edb420b7a14d76`에서 실행했습니다. `3d8fd7b4` 위로 충돌 없이 rebase한 결과는 `4cb81177844126aab673dd08354d731952ee5058`입니다. 패치 8개 모두 동등하며, 측정한 리비전과의 tree 차이는 `docs/benchmark_results/versions/v0.8.0.md#kernel-backend-kind-metal-m1ultra-2026-09-13`와 `scripts/paged_decode_counter_ab.sh`뿐입니다. Runtime, build, frontend, contract 내용은 동일합니다. 아래 대규모 검증은 `c2400a3e`의 결과이며 `4cb81177`에서 다시 실행했다고 주장하지 않습니다.
 
 | 범위 | 결과 |
 |------|------|

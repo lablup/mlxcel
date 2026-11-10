@@ -60,7 +60,7 @@ Guarded request는 cold prefill하며 admission 전에 prompt snapshot을 restor
 
 ## 5. 벤치마크 근거
 
-추적되는 benchmark record는 `docs/benchmark_results/nemotron-h-request-memory-m1ultra-2026-10-13.md`이고 machine-readable artifact는 같은 이름의 `data/` directory에 있다. M1 Ultra 128 GB의 초기 calibration에서 32 GiB budget 아래 6,001-token 요청이 admit되었고 estimate는 27.34 GiB, 측정된 process peak는 17.8 GiB였다. Harness는 이 실행을 rejection evidence로 잘못 보고하지 않았다. 낮은 cap을 사용한 중간 실행은 calibration으로 보존하지만 final routing 및 cache review fix 전 결과이다.
+추적되는 benchmark record는 `docs/benchmark_results/versions/v0.8.0.md#nemotron-h-request-memory-m1ultra-2026-10-13`이고 machine-readable artifact는 같은 이름의 `data/` directory에 있다. M1 Ultra 128 GB의 초기 calibration에서 32 GiB budget 아래 6,001-token 요청이 admit되었고 estimate는 27.34 GiB, 측정된 process peak는 17.8 GiB였다. Harness는 이 실행을 rejection evidence로 잘못 보고하지 않았다. 낮은 cap을 사용한 중간 실행은 calibration으로 보존하지만 final routing 및 cache review fix 전 결과이다.
 
 최종 reviewed binary(`1c4673addeb123b8d3ef2758f69dc0c54811d1d061911dbcb86aa486cc6065c5`)로 normal fresh-server 3회 반복을 실행했다. Long streaming 및 non-streaming request 12건은 모두 SSE 전에 typed 503을 반환했고, 바로 뒤의 short request 12건과 medium request 3건은 모두 200을 반환했다. Beyond-context request 3건은 400 우선순위를 유지했고 health는 계속 200이었다. Medium estimate는 세 번 모두 22.328 GiB이고 process physical peak는 17.6 GiB였다. Long estimate는 27.337–27.351 GiB, short estimate는 17.813–17.865 GiB였으며 long-rejection process peak는 16.9 GiB였다. 1분 host load가 6.44, 6.90, 11.01이었으므로 이는 latency 주장이 아니라 lifecycle 및 safety 근거이다.
 

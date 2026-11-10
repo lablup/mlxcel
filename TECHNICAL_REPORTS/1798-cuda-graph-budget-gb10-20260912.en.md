@@ -1,6 +1,6 @@
 # Raising MLX's CUDA graph budgets on GB10: measured per family, shipped for one
 
-Issue #1798. Host GB10 (sm_121, DGX Spark), MLX pin `81ba1c6a`, CUDA release build, toolchain 1.97.1, source tree `d2b60c8e` for the measurement binary. Full measurement record, with raw per-run data and the harness under `data/`: `docs/benchmark_results/cuda-graph-budget-gb10-2026-09-12.md`.
+Issue #1798. Host GB10 (sm_121, DGX Spark), MLX pin `81ba1c6a`, CUDA release build, toolchain 1.97.1, source tree `d2b60c8e` for the measurement binary. Full measurement record, with raw per-run data and the harness under `data/`: `docs/benchmark_results/versions/v0.8.0.md#cuda-graph-budget-gb10-2026-09-12`.
 
 ## Background
 

@@ -21,8 +21,8 @@
 # way `mixed_steps` is for the #908 prototype: it can only move when the grant
 # fired, so a flat column means the arm did not engage.
 #
-# Results: docs/benchmark_results/mixed-step-prototype-m1ultra-2026-08-03.md
-#          docs/benchmark_results/prefill-fairness-m1ultra-2026-08-03.md
+# Results: docs/benchmark_results/versions/v0.5.0.md#mixed-step-prototype-m1ultra-2026-08-03
+#          docs/benchmark_results/versions/v0.5.0.md#prefill-fairness-m1ultra-2026-08-03
 #
 # Every exit path kills the server. Do not add `wait` on the background curls:
 # an earlier version did and hung for eight hours after a stream stalled.

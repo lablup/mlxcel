@@ -307,3 +307,28 @@ fn ple_shards_refuse_malformed_quantization_sidecars() {
         weights.insert(key, original);
     }
 }
+
+/// A checkpoint declaring `ple_storage` goes through the external table, and a
+/// manifest whose row count disagrees with the config is refused at load.
+#[test]
+fn external_ple_storage_with_a_mismatched_table_is_refused_at_load() {
+    let fixture = fixture("ple");
+    let rows = 1u64 << 24;
+    let dir = tempfile::TempDir::new().unwrap();
+    let data = std::fs::File::create(dir.path().join("rows")).unwrap();
+    data.set_len(rows * 20).unwrap();
+    let manifest = json!({
+        "version": 2, "source_root": ".", "layout": "interleaved_q4", "data_file": "rows",
+        "row_width": 32, "row_count": rows, "row_stride": 20,
+        "quantization": {"bits": 4, "group_size": 32, "mode": "affine"},
+    });
+    let manifest_path = dir.path().join("ple-store.json");
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    let overrides = json!({"ple_storage": {"manifest": "ple-store.json"}});
+    let mut resolved = config(&fixture, Some(&overrides));
+    resolved.model_dir = Some(dir.path().to_path_buf());
+    let error = PleLayer::from_weights(&weights(&fixture), &resolved, "ple", 0)
+        .err()
+        .expect("a table of the wrong size must be refused");
+    assert!(error.contains("external PLE row count"), "{error}");
+}

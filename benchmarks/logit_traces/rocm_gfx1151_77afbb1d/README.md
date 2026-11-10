@@ -1,6 +1,6 @@
 # ROCm logit traces with the HIP fused MoE decode kernels (lablup/mlxcel#2065)
 
-Teacher-forced traces from `examples/logit_trace` on the Radeon 8060S (`gfx1151`) after `moe_gateup` and `moe_down` gained HIP ports. The fused MoE path runs only on a single-token forward, so the `w1` rows are the ones that reach the kernels on Qwen3-30B-A3B; the `w8` rows check that the multi-token path is unchanged. `METADATA.txt` records the host, versions, commit and binary hash; `RUNS.txt` the exit status and row count of every run; `SHA256SUMS` covers every trace. The comparisons are in `docs/benchmark_results/rocm-fused-moe-gfx1151-2026-10-05.md`.
+Teacher-forced traces from `examples/logit_trace` on the Radeon 8060S (`gfx1151`) after `moe_gateup` and `moe_down` gained HIP ports. The fused MoE path runs only on a single-token forward, so the `w1` rows are the ones that reach the kernels on Qwen3-30B-A3B; the `w8` rows check that the multi-token path is unchanged. `METADATA.txt` records the host, versions, commit and binary hash; `RUNS.txt` the exit status and row count of every run; `SHA256SUMS` covers every trace. The comparisons are in `docs/benchmark_results/versions/v0.8.0.md#rocm-fused-moe-gfx1151-2026-10-05`.
 
 ```bash
 cargo build --release --features rocm --example logit_trace

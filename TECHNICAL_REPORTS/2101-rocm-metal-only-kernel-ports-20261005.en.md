@@ -48,7 +48,7 @@ Eight commits:
 - **`9186b075`** `docs(rocm): list the newly ported kernels in the README`
 - **`eb72b359`** `fix(rocm): gate #2069 kernel ports on the GPU device`: the review fixes (section 4).
 - **`800e23dc`** `fix(rocm): gate the fused MoE predicates on the GPU device too`: the same fix for #2065's predicates.
-- **`3833998b`** `docs(rocm): publish the #2069 kernel port results on gfx1151`: `docs/benchmark_results/rocm-metal-only-ports-gfx1151-2026-10-05.md`, bench CSVs, traces under `benchmarks/logit_traces/rocm_gfx1151_9186b075/`, `docs/installation.md` and `docs/environment-variables.md` rows.
+- **`3833998b`** `docs(rocm): publish the #2069 kernel port results on gfx1151`: `docs/benchmark_results/versions/v0.8.0.md#rocm-metal-only-ports-gfx1151-2026-10-05`, bench CSVs, traces under `benchmarks/logit_traces/rocm_gfx1151_9186b075/`, `docs/installation.md` and `docs/environment-variables.md` rows.
 
 27 files, +1584 / -124. All HIP sources live in `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp`.
 

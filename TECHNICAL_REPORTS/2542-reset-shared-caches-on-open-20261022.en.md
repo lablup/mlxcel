@@ -14,7 +14,7 @@ Issue #2494 reported that `mlxcel generate` on exaone-4.0-1.2b-4bit lost decode 
 | `src/lib/mlxcel-core/src/engine/direct.rs` | `open_sequence` calls `self.model().make_caches()` after a successful `engine.open` when the model cannot batch, before `apply_pool_kv_cache_mode`; doc comment names the families and the scheduler rule it mirrors |
 | `src/lib/mlxcel-core/src/engine/mod.rs` | Registers the new test module |
 | `src/lib/mlxcel-core/src/engine/shared_cache_tests.rs` (new) | Two tests on a stub model whose offset lives in a `Cell` that only `make_caches` resets |
-| `docs/benchmark_results/exaone4-engine-decode-gb10-2026-10-22.md` (new) | Measurement record: mechanism, intercept/slope fit, interleaved arms with a null arm, controls |
+| `docs/benchmark_results/versions/v0.8.0.md#exaone4-engine-decode-gb10-2026-10-22` (new) | Measurement record: mechanism, intercept/slope fit, interleaved arms with a null arm, controls |
 
 The families covered are those that cannot batch and hold one set of caches in a `RefCell`: ExaOne 4, GPT-OSS, Ministral 3, Step 3.5, Mellum and Laguna. The server path is unchanged.
 

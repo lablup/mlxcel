@@ -574,6 +574,28 @@ impl PromptCacheStore {
             .unwrap_or(0)
     }
 
+    /// Snapshot byte budget as configured.
+    pub fn snapshot_capacity_bytes(&self) -> usize {
+        self.inner
+            .read()
+            .map(|g| g.config.snapshot_capacity_bytes)
+            .unwrap_or(0)
+    }
+
+    /// How many bytes inserting a snapshot of `entry_bytes` would add to the
+    /// store's resident total: the part LRU eviction cannot pay for because
+    /// the store has room to grow into. A store at its budget replaces
+    /// entries and does not grow.
+    pub fn snapshot_growth_bytes(&self, entry_bytes: usize) -> usize {
+        self.inner.read().map_or(0, |g| {
+            entry_bytes.min(
+                g.config
+                    .snapshot_capacity_bytes
+                    .saturating_sub(g.snapshot_bytes),
+            )
+        })
+    }
+
     /// Maximum entry count as configured.
     pub fn max_entries(&self) -> usize {
         self.inner.read().map(|g| g.config.max_entries).unwrap_or(0)

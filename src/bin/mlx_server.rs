@@ -676,6 +676,9 @@ struct ServerArgs {
     /// Accepts the llama-server-style `--model-draft` spelling (primary) and
     /// the mlx-lm-style `--draft-model` spelling (alias, matches `mlxcel
     /// serve`) so commands copied between the two binaries work unchanged.
+    /// A target checkpoint that keeps its own MTP head (Inkling, or a
+    /// Qwen3.8-Flash-Next `qwen4_exp` conversion with `mtp.*` tensors) is
+    /// passed again here, as the same directory as `--model`.
     ///
     /// Whether the singleton (B=1) speculative burst runs is decided by an
     /// adaptive policy: the first few requests per (target, drafter,
@@ -1075,6 +1078,42 @@ struct ServerArgs {
         value_name = "SECS"
     )]
     responses_store_ttl_secs: u64,
+
+    /// Maximum number of concurrently active `background: true` Responses
+    /// API jobs. Each active job holds one generation thread. `0` disables
+    /// background mode. Also reads `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS`.
+    #[arg(
+        long = "responses-background-max-jobs",
+        env = "MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+        value_name = "N"
+    )]
+    responses_background_max_jobs: usize,
+
+    /// Seconds a finished `background: true` response created with
+    /// `store: false` stays readable by polling. It is never readable through
+    /// `previous_response_id`. Must be at least 1. Also reads
+    /// `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS`.
+    #[arg(
+        long = "responses-background-ephemeral-ttl-secs",
+        env = "MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "SECS"
+    )]
+    responses_background_ephemeral_ttl_secs: u64,
+
+    /// Byte budget of the replayable event log of one `background: true`
+    /// Responses API response created with `stream: true`. The oldest events
+    /// are dropped when it is full. `0` refuses `stream: true` on background
+    /// responses. Also reads `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES`.
+    #[arg(
+        long = "responses-background-event-log-bytes",
+        env = "MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
+        value_name = "BYTES"
+    )]
+    responses_background_event_log_bytes: usize,
 
     /// Maximum number of conversation transcripts persisted
     /// for the OpenAI Responses API `conversation` field. `0` disables.
@@ -3037,6 +3076,9 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         responses_store_max_entries: args.responses_store_max_entries,
         responses_store_max_bytes: args.responses_store_max_bytes,
         responses_store_ttl_secs: args.responses_store_ttl_secs,
+        responses_background_max_jobs: args.responses_background_max_jobs,
+        responses_background_ephemeral_ttl_secs: args.responses_background_ephemeral_ttl_secs,
+        responses_background_event_log_bytes: args.responses_background_event_log_bytes,
         conversation_store_max_entries: args.conversation_store_max_entries,
         conversation_store_max_bytes: args.conversation_store_max_bytes,
         conversation_store_ttl_secs: args.conversation_store_ttl_secs,
@@ -3062,35 +3104,106 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
+    /// Serializes every test in this module that touches process env.
+    ///
+    /// clap reads each `env = "..."` binding when it builds the command
+    /// (`Arg::env` calls `env::var_os`), so building `Cli` or parsing argv
+    /// reads `LLAMA_ARG_*` and the `MLXCEL_*` store variables, and so does
+    /// `build_startup_input` through its env fallbacks. A test that does any
+    /// of that while a sibling holds a `ScopedEnv` sees the sibling's values
+    /// and fails at random when this binary runs threaded (#2937). Take the
+    /// lock through [`cli_env_lock`], which the parse helpers below check.
     static CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    thread_local! {
+        static CLI_ENV_LOCK_HELD: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Holds `CLI_ENV_LOCK` for the rest of a test. Bind it as
+    /// `let _lock = cli_env_lock();` before any `ScopedEnv`, so the env is
+    /// restored before the lock is released.
+    struct CliEnvGuard {
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for CliEnvGuard {
+        fn drop(&mut self) {
+            CLI_ENV_LOCK_HELD.with(|held| held.set(false));
+        }
+    }
+
+    /// Takes `CLI_ENV_LOCK`, tolerating poison: a test that panics while
+    /// holding it has already restored the env through its `ScopedEnv` drop,
+    /// so one failing test must not fail every later one with `PoisonError`.
+    fn cli_env_lock() -> CliEnvGuard {
+        assert!(
+            !CLI_ENV_LOCK_HELD.with(Cell::get),
+            "CLI_ENV_LOCK is already held on this thread; taking it again would deadlock"
+        );
+        let guard = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        CLI_ENV_LOCK_HELD.with(|held| held.set(true));
+        CliEnvGuard { _guard: guard }
+    }
+
+    fn assert_cli_env_lock_held() {
+        assert!(
+            CLI_ENV_LOCK_HELD.with(Cell::get),
+            "take `let _lock = cli_env_lock();` first: building or parsing `Cli` reads \
+             process env, which sibling tests change under CLI_ENV_LOCK"
+        );
+    }
+
+    /// `Cli::command()` behind the env-lock check.
+    fn cli_command() -> clap::Command {
+        use clap::CommandFactory;
+
+        assert_cli_env_lock_held();
+        Cli::command()
+    }
+
+    /// `Cli::try_parse_from` behind the env-lock check.
+    fn try_parse_cli<I, T>(argv: I) -> Result<Cli, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        assert_cli_env_lock_held();
+        Cli::try_parse_from(argv)
+    }
 
     struct ScopedEnv(Vec<(&'static str, Option<OsString>)>);
 
     impl ScopedEnv {
         fn set(values: &[(&'static str, &str)]) -> Self {
+            assert_cli_env_lock_held();
             let saved = values
                 .iter()
                 .map(|(key, _)| (*key, std::env::var_os(key)))
                 .collect();
             for (key, value) in values {
-                // SAFETY: every env-mutating test in this binary holds CLI_ENV_LOCK.
+                // SAFETY: asserted above; every env reader in this module holds CLI_ENV_LOCK.
                 unsafe { std::env::set_var(key, value) };
             }
             Self(saved)
         }
 
         fn unset(keys: &[&'static str]) -> Self {
+            assert_cli_env_lock_held();
             let saved = keys
                 .iter()
                 .map(|key| (*key, std::env::var_os(key)))
                 .collect();
             for key in keys {
-                // SAFETY: every env-mutating test in this binary holds CLI_ENV_LOCK.
+                // SAFETY: asserted above; every env reader in this module holds CLI_ENV_LOCK.
                 unsafe { std::env::remove_var(key) };
             }
             Self(saved)
@@ -3113,9 +3226,8 @@ mod tests {
 
     #[test]
     fn help_explains_embedding_and_reranking_server_modes() {
-        use clap::CommandFactory;
-
-        let mut command = Cli::command();
+        let _lock = cli_env_lock();
+        let mut command = cli_command();
         let help = command.render_long_help().to_string();
         for expected in [
             "POST /v1/embeddings",
@@ -3147,9 +3259,8 @@ mod tests {
     /// argument may combine an `env` binding with either (#2618).
     #[test]
     fn no_arg_combines_clap_env_with_overrides_with() {
-        use clap::CommandFactory;
-
-        let offenders = mlxcel::cli::env_bound_override_args(&Cli::command());
+        let _lock = cli_env_lock();
+        let offenders = mlxcel::cli::env_bound_override_args(&cli_command());
         assert!(
             offenders.is_empty(),
             "these args bind an env var through clap while overriding, being overridden by, \
@@ -3159,7 +3270,7 @@ mod tests {
     }
 
     fn parse_server_args(argv: &[&str]) -> ServerArgs {
-        let cli = Cli::try_parse_from(argv).expect("mlxcel-server args should parse");
+        let cli = try_parse_cli(argv).expect("mlxcel-server args should parse");
         assert!(
             cli.command.is_none(),
             "test argv should exercise legacy server-start mode"
@@ -3169,9 +3280,8 @@ mod tests {
 
     #[test]
     fn settings_cli_mlxcel_server_help_exposes_flag() {
-        use clap::CommandFactory;
-
-        let mut command = Cli::command();
+        let _lock = cli_env_lock();
+        let mut command = cli_command();
         let help = command.render_long_help().to_string();
         assert!(
             help.contains("--settings"),
@@ -3181,10 +3291,7 @@ mod tests {
 
     #[test]
     fn settings_cli_mlxcel_server_defaults_off_and_propagates_explicit_flag() {
-        let _lock = CLI_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("CLI env lock");
+        let _lock = cli_env_lock();
         let _settings_env = ScopedEnv::unset(&["MLXCEL_ENABLE_SETTINGS_ENDPOINT"]);
 
         let models_dir = tempfile::tempdir().expect("models directory");
@@ -3203,10 +3310,7 @@ mod tests {
 
     #[test]
     fn no_models_autoload_disables_router_autoload() {
-        let _lock = CLI_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("CLI env lock");
+        let _lock = cli_env_lock();
         let _autoload_env = ScopedEnv::unset(&["LLAMA_ARG_MODELS_AUTOLOAD"]);
 
         let models_dir = tempfile::tempdir().expect("models directory");
@@ -3247,10 +3351,7 @@ mod tests {
     /// value conflict with `--no-models-autoload` at parse time.
     #[test]
     fn models_autoload_env_does_not_conflict_with_either_flag() {
-        let _lock = CLI_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("CLI env lock");
+        let _lock = cli_env_lock();
         let models_dir = tempfile::tempdir().expect("models directory");
         let models_dir = models_dir.path().to_string_lossy();
 
@@ -3293,10 +3394,7 @@ mod tests {
     /// exists, so the warning has to travel as a startup notice.
     #[test]
     fn spec_type_none_warning_is_a_startup_notice() {
-        let _lock = CLI_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("CLI env lock");
+        let _lock = cli_env_lock();
         let models_dir = tempfile::tempdir().expect("models directory");
         let models_dir = models_dir.path().to_string_lossy();
         let args = parse_server_args(&[
@@ -3352,10 +3450,7 @@ mod tests {
     /// variable.
     #[test]
     fn cors_origin_env_does_not_conflict_with_the_other_flag() {
-        let _lock = CLI_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("CLI env lock");
+        let _lock = cli_env_lock();
 
         {
             let _env = ScopedEnv::set(&[("LLAMA_ARG_CORS_ORIGINS", "http://a.example")]);
@@ -3410,10 +3505,7 @@ mod tests {
     /// `argv.contains("--cors-origins")` check misses this form.
     #[test]
     fn cors_origin_equals_form_wins_over_the_other_variable() {
-        let _lock = CLI_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("CLI env lock");
+        let _lock = cli_env_lock();
 
         {
             let _env = ScopedEnv::set(&[("MLXCEL_ALLOWED_ORIGINS", "http://b.example")]);
@@ -3464,10 +3556,7 @@ mod tests {
     /// `MLXCEL_ALLOWED_ORIGINS` split on `,` as clap's delimiter did.
     #[test]
     fn cors_origin_env_applies_without_a_flag() {
-        let _lock = CLI_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("CLI env lock");
+        let _lock = cli_env_lock();
         let argv = ["mlxcel-server", "-m", "models/foo"];
 
         {
@@ -3501,7 +3590,8 @@ mod tests {
     /// Two explicit flags are still refused by clap.
     #[test]
     fn cors_origins_and_allowed_origins_flags_still_conflict() {
-        let err = Cli::try_parse_from([
+        let _lock = cli_env_lock();
+        let err = try_parse_cli([
             "mlxcel-server",
             "-m",
             "models/foo",
@@ -3516,12 +3606,14 @@ mod tests {
 
     /// Both variables without either flag is a startup error naming both.
     ///
-    /// Other tests in this binary call `build_startup_input` without holding
-    /// `CLI_ENV_LOCK`, so setting both variables in this process would fail
-    /// them at random. The check runs in a child copy of this test binary
-    /// whose environment alone carries the two variables.
+    /// The check runs in a child copy of this test binary whose environment
+    /// alone carries the two variables, so no test in this process ever sees
+    /// them. The parent holds `CLI_ENV_LOCK` while it spawns the child,
+    /// because the child inherits whatever a sibling's `ScopedEnv` has set at
+    /// that moment.
     #[test]
     fn both_cors_origin_envs_without_a_flag_fail_startup() {
+        let _lock = cli_env_lock();
         let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args([
                 "--exact",
@@ -3546,6 +3638,7 @@ mod tests {
     #[test]
     #[ignore = "run by both_cors_origin_envs_without_a_flag_fail_startup"]
     fn both_cors_origin_envs_child() {
+        let _lock = cli_env_lock();
         assert!(
             std::env::var_os("LLAMA_ARG_CORS_ORIGINS").is_some()
                 && std::env::var_os("MLXCEL_ALLOWED_ORIGINS").is_some(),
@@ -3566,6 +3659,7 @@ mod tests {
 
     #[test]
     fn store_byte_budget_flags_parse() {
+        let _lock = cli_env_lock();
         let args = parse_server_args(&[
             "mlxcel-server",
             "-m",
@@ -3582,10 +3676,7 @@ mod tests {
 
     #[test]
     fn store_byte_budget_envs_parse_when_flags_are_absent() {
-        let _lock = CLI_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _lock = cli_env_lock();
         let _env = ScopedEnv::set(&[
             ("MLXCEL_RESPONSES_STORE_MAX_BYTES", "11111"),
             ("MLXCEL_CONVERSATION_STORE_MAX_BYTES", "22222"),
@@ -3598,7 +3689,78 @@ mod tests {
     }
 
     #[test]
+    fn responses_background_flags_parse_with_defaults() {
+        let _lock = cli_env_lock();
+
+        let defaults = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
+        assert_eq!(
+            defaults.responses_background_max_jobs,
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS
+        );
+        assert_eq!(
+            defaults.responses_background_ephemeral_ttl_secs,
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS
+        );
+        assert_eq!(
+            defaults.responses_background_event_log_bytes,
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES
+        );
+
+        let args = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--responses-background-max-jobs",
+            "7",
+            "--responses-background-ephemeral-ttl-secs",
+            "30",
+            "--responses-background-event-log-bytes",
+            "65536",
+        ]);
+        assert_eq!(args.responses_background_max_jobs, 7);
+        assert_eq!(args.responses_background_ephemeral_ttl_secs, 30);
+        assert_eq!(args.responses_background_event_log_bytes, 65536);
+    }
+
+    #[test]
+    fn responses_background_envs_parse_when_flags_are_absent() {
+        let _lock = cli_env_lock();
+        let _env = ScopedEnv::set(&[
+            ("MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS", "3"),
+            ("MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS", "45"),
+            ("MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES", "1024"),
+        ]);
+
+        let args = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
+
+        assert_eq!(args.responses_background_max_jobs, 3);
+        assert_eq!(args.responses_background_ephemeral_ttl_secs, 45);
+        assert_eq!(args.responses_background_event_log_bytes, 1024);
+    }
+
+    #[test]
+    fn responses_background_ephemeral_ttl_zero_is_refused() {
+        let _lock = cli_env_lock();
+
+        let err = try_parse_cli([
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--responses-background-ephemeral-ttl-secs",
+            "0",
+        ])
+        .expect_err("an ephemeral TTL of 0 must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+
+        let _env = ScopedEnv::set(&[("MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS", "0")]);
+        let err = try_parse_cli(["mlxcel-server", "-m", "models/foo"])
+            .expect_err("an ephemeral TTL of 0 from the env must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
     fn reasoning_alias_field_defaults_parses_and_rejects_unknown_values() {
+        let _lock = cli_env_lock();
         assert_eq!(
             parse_server_args(&["mlxcel-server", "-m", "models/foo"]).reasoning_alias_field,
             mlxcel::server::ReasoningAliasField::Reasoning
@@ -3621,7 +3783,7 @@ mod tests {
             );
         }
 
-        let error = Cli::try_parse_from([
+        let error = try_parse_cli([
             "mlxcel-server",
             "-m",
             "models/foo",
@@ -3638,6 +3800,7 @@ mod tests {
 
     #[test]
     fn warmup_defaults_to_enabled_and_no_warmup_disables_it() {
+        let _lock = cli_env_lock();
         // b10621: "whether to perform warmup with an empty run (default:
         // enabled)". Both spellings must parse and `--no-warmup` must win,
         // because it is the only thing that makes `--no-warmup` more than an
@@ -3667,6 +3830,7 @@ mod tests {
 
     #[test]
     fn model_source_compatibility_flags_parse_into_their_own_fields() {
+        let _lock = cli_env_lock();
         let args = parse_server_args(&[
             "mlxcel-server",
             "--hf-repo",
@@ -3696,6 +3860,7 @@ mod tests {
 
     #[test]
     fn temp_and_temperature_aliases_resolve_identically() {
+        let _lock = cli_env_lock();
         let primary = parse_server_args(&["mlxcel-server", "-m", "models/foo", "--temp", "0.37"]);
         let alias =
             parse_server_args(&["mlxcel-server", "-m", "models/foo", "--temperature", "0.37"]);
@@ -3704,10 +3869,7 @@ mod tests {
 
     #[test]
     fn canonical_llama_envs_and_endpoint_precedence_parse_together() {
-        let _lock = CLI_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _lock = cli_env_lock();
         // `LLAMA_ARG_LOG_FILE` is set process-wide for the length of this
         // test, and `--log-file` is bound to it through clap on both binaries.
         // Any other test in this binary that builds a logging configuration
@@ -3777,6 +3939,7 @@ mod tests {
 
     #[test]
     fn slots_flags_use_last_occurrence() {
+        let _lock = cli_env_lock();
         let disabled =
             parse_server_args(&["mlxcel-server", "-m", "models/foo", "--slots", "--no-slots"]);
         assert!(!(disabled.slots && !disabled._no_slots));
@@ -3803,6 +3966,7 @@ mod tests {
 
     #[test]
     fn legacy_server_mode_resolves_repo_id_from_models_dir_override() {
+        let _lock = cli_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let models_root = tmp.path().join("custom-model-store");
         let repo_id = "zz-mlxcel-test-owner/zz-mlxcel-test-model";
@@ -3825,6 +3989,7 @@ mod tests {
 
     #[test]
     fn models_dir_with_a_model_argument_fails_with_the_migration_diagnostic() {
+        let _lock = cli_env_lock();
         // #1438: the old `--models-dir <store>` + `-m` combination must fail
         // loudly with the replacement named, never silently pick a meaning.
         let tmp = tempfile::tempdir().unwrap();
@@ -3843,6 +4008,7 @@ mod tests {
 
     #[test]
     fn serving_throughput_defaults_are_on_out_of_the_box() {
+        let _lock = cli_env_lock();
         // #628: shipped defaults enable multi-client batching machinery.
         let args = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
         assert_eq!(
@@ -3870,6 +4036,7 @@ mod tests {
 
     #[test]
     fn parallel_one_escape_hatch_still_parses() {
+        let _lock = cli_env_lock();
         // #628: `--parallel 1` remains a full single-slot escape hatch.
         let args = parse_server_args(&["mlxcel-server", "-m", "models/foo", "--parallel", "1"]);
         assert_eq!(args.parallel, 1);
@@ -3877,6 +4044,7 @@ mod tests {
 
     #[test]
     fn no_prompt_cache_flag_disables_prompt_cache() {
+        let _lock = cli_env_lock();
         // #628: `--no-prompt-cache` overrides the default-on prompt cache.
         let tmp = tempfile::tempdir().unwrap();
         let local_model = tmp.path().join("local-model");
@@ -3906,6 +4074,7 @@ mod tests {
 
     #[test]
     fn kv_cache_budget_defaults_to_auto() {
+        let _lock = cli_env_lock();
         // #628: the batched-decode default pairs with an `auto` paged KV budget
         // guard so admission sheds load instead of OOMing.
         use mlxcel::memory_estimate::PagedBudgetDirective;
@@ -3915,6 +4084,7 @@ mod tests {
 
     #[test]
     fn kv_cache_budget_explicit_disable_and_bytes_parse() {
+        let _lock = cli_env_lock();
         // #628: escape hatches. `none` and `0` disable the guard (unbounded);
         // an explicit byte count sets a hard cap.
         use mlxcel::memory_estimate::PagedBudgetDirective;
@@ -3951,6 +4121,7 @@ mod tests {
 
     #[test]
     fn legacy_server_mode_keeps_existing_model_path_verbatim() {
+        let _lock = cli_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let local_model = tmp.path().join("local-model");
         fs::create_dir_all(&local_model).unwrap();
@@ -3985,6 +4156,7 @@ mod tests {
 
     #[test]
     fn model_draft_and_draft_model_aliases_resolve_identically() {
+        let _lock = cli_env_lock();
         let primary = parse_server_args(&["mlxcel-server", "--model-draft", "models/draft"]);
         let aliased = parse_server_args(&["mlxcel-server", "--draft-model", "models/draft"]);
 
@@ -3997,6 +4169,7 @@ mod tests {
 
     #[test]
     fn spec_draft_spellings_resolve_to_the_draft_controls() {
+        let _lock = cli_env_lock();
         // b10621's canonical spellings (#1433): --spec-draft-model is the
         // real model flag and --spec-draft-n-max the real token cap; the
         // removed --draft / --draft-n / --draft-max spellings stay accepted
@@ -4011,6 +4184,7 @@ mod tests {
 
     #[test]
     fn draft_and_draft_max_aliases_resolve_identically() {
+        let _lock = cli_env_lock();
         let primary = parse_server_args(&["mlxcel-server", "--draft", "24"]);
         let aliased = parse_server_args(&["mlxcel-server", "--draft-max", "24"]);
 
@@ -4043,9 +4217,8 @@ mod tests {
     /// issue #1109 added two of them here.
     #[test]
     fn server_flag_names_and_aliases_are_unique() {
-        use clap::CommandFactory;
-
-        let command = Cli::command();
+        let _lock = cli_env_lock();
+        let command = cli_command();
 
         let mut longs: Vec<String> = Vec::new();
         let mut shorts: Vec<char> = Vec::new();
@@ -4094,6 +4267,7 @@ mod tests {
 
     #[test]
     fn parallel_and_n_parallel_aliases_resolve_identically() {
+        let _lock = cli_env_lock();
         let primary = parse_server_args(&["mlxcel-server", "--parallel", "2"]);
         let aliased = parse_server_args(&["mlxcel-server", "--n-parallel", "2"]);
 
@@ -4106,6 +4280,7 @@ mod tests {
 
     #[test]
     fn lora_and_adapter_aliases_resolve_identically() {
+        let _lock = cli_env_lock();
         let primary = parse_server_args(&["mlxcel-server", "--lora", "adapters/foo"]);
         let aliased = parse_server_args(&["mlxcel-server", "--adapter", "adapters/foo"]);
 
@@ -4118,6 +4293,7 @@ mod tests {
 
     #[test]
     fn dry_sequence_breaker_singular_and_plural_aliases_resolve_identically() {
+        let _lock = cli_env_lock();
         let primary = parse_server_args(&["mlxcel-server", "--dry-sequence-breaker", "a,b"]);
         let aliased = parse_server_args(&["mlxcel-server", "--dry-sequence-breakers", "a,b"]);
 
@@ -4152,7 +4328,7 @@ mod tests {
     /// every value-taking option produced for a space-separated `-1` before
     /// #1459.
     fn rejected_as_unexpected_argument(argv: &[&str]) -> bool {
-        match Cli::try_parse_from(argv) {
+        match try_parse_cli(argv) {
             Ok(_) => false,
             Err(err) => err.kind() == clap::error::ErrorKind::UnknownArgument,
         }
@@ -4160,9 +4336,8 @@ mod tests {
 
     #[test]
     fn every_value_taking_long_option_accepts_a_space_separated_negative_number() {
-        use clap::CommandFactory;
-
-        let mut command = Cli::command();
+        let _lock = cli_env_lock();
+        let mut command = cli_command();
         command.build();
         let options: Vec<(String, bool)> = command
             .get_arguments()
@@ -4183,7 +4358,7 @@ mod tests {
                 // too, otherwise it is a real negative-number rejection
                 // hiding behind this branch.
                 assert!(
-                    Cli::try_parse_from(["mlxcel-server", long, "1"]).is_err(),
+                    try_parse_cli(["mlxcel-server", long, "1"]).is_err(),
                     "{long} declares require_equals but bound a space-separated positive \
                      value; the #1459 sweep exemption no longer describes it"
                 );
@@ -4219,6 +4394,7 @@ mod tests {
 
     #[test]
     fn negative_seed_predict_and_reasoning_budget_parse_in_space_form() {
+        let _lock = cli_env_lock();
         for argv in [
             &["mlxcel-server", "--seed", "-1"][..],
             &["mlxcel-server", "-s", "-1"][..],
@@ -4263,6 +4439,7 @@ mod tests {
 
     #[test]
     fn a_negative_float_parses_in_space_form() {
+        let _lock = cli_env_lock();
         let args = parse_server_args(&["mlxcel-server", "--presence-penalty", "-1.5"]);
         assert!(
             (args.presence_penalty - (-1.5)).abs() < f32::EPSILON,
@@ -4273,6 +4450,7 @@ mod tests {
 
     #[test]
     fn equals_form_negative_values_still_parse() {
+        let _lock = cli_env_lock();
         assert_eq!(parse_server_args(&["mlxcel-server", "--seed=-7"]).seed, -7);
         assert_eq!(
             parse_server_args(&["mlxcel-server", "--predict=-7"]).predict,
@@ -4290,6 +4468,7 @@ mod tests {
 
     #[test]
     fn a_negative_value_for_a_non_negative_option_fails_in_the_value_parser() {
+        let _lock = cli_env_lock();
         for (long, argv) in [
             ("--port", &["mlxcel-server", "--port", "-1"][..]),
             ("--ctx-size", &["mlxcel-server", "--ctx-size", "-1"][..]),
@@ -4300,7 +4479,7 @@ mod tests {
                 &["mlxcel-server", "--diffusion-threshold", "-1"][..],
             ),
         ] {
-            let err = Cli::try_parse_from(argv)
+            let err = try_parse_cli(argv)
                 .expect_err("a negative value outside the option's domain must be rejected");
             assert_eq!(
                 err.kind(),
@@ -4321,6 +4500,7 @@ mod tests {
 
     #[test]
     fn a_negative_parallel_resolves_to_the_automatic_slot_count() {
+        let _lock = cli_env_lock();
         // Since #1472 `--parallel` carries b10621's whole value domain: `-1`
         // (the default) is auto and resolves to 4 slots, matching upstream's
         // own auto; other negatives and zero are refused at resolution with a
@@ -4344,13 +4524,14 @@ mod tests {
 
     #[test]
     fn a_negative_number_with_no_option_awaiting_a_value_is_still_an_error() {
+        let _lock = cli_env_lock();
         for argv in [
             &["mlxcel-server", "-1"][..],
             // The seed consumes the first negative; the second has nothing
             // pending and must not be silently absorbed.
             &["mlxcel-server", "--seed", "-1", "-2"][..],
         ] {
-            let err = Cli::try_parse_from(argv)
+            let err = try_parse_cli(argv)
                 .expect_err("a stray negative number must not be silently consumed");
             assert_eq!(
                 err.kind(),
@@ -4362,11 +4543,12 @@ mod tests {
 
     #[test]
     fn a_mistyped_flag_after_an_option_is_reported_not_swallowed() {
+        let _lock = cli_env_lock();
         // This is the whole reason the fix is `allow_negative_numbers` and not
         // `allow_hyphen_values`: the latter takes any `-`-leading token as the
         // pending option's value, so this typo would bind `--moldel` to the
         // seed and never be reported.
-        let err = Cli::try_parse_from(["mlxcel-server", "--seed", "--moldel", "foo"])
+        let err = try_parse_cli(["mlxcel-server", "--seed", "--moldel", "foo"])
             .expect_err("a mistyped flag must not be swallowed as the seed value");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
         assert!(
@@ -4377,24 +4559,26 @@ mod tests {
 
     #[test]
     fn the_download_subcommand_does_not_take_negative_numbers() {
+        let _lock = cli_env_lock();
         // `allow_negative_numbers` is a per-command setting that does not
         // propagate into subcommands, and `download` deliberately keeps the
         // default: it has one positional repo-id and no numeric option, so a
         // leading `-1` there is a typo rather than a value (#1459).
-        let err = Cli::try_parse_from(["mlxcel-server", "download", "-1"])
+        let err = try_parse_cli(["mlxcel-server", "download", "-1"])
             .expect_err("`download -1` has no numeric option to bind to");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
     fn the_download_subcommand_accepts_all_three_help_spellings() {
+        let _lock = cli_env_lock();
         // The hand-declared `-h`/`--help`/`--usage` arg on `Cli` (b10621's
         // spelling, #1448) did not carry `global = true`, so
         // `disable_help_flag` left `download` with no help flag of its own:
         // `mlxcel-server download --help` failed with `UnknownArgument`
         // instead of printing help (#2025).
         for flag in ["--help", "-h", "--usage"] {
-            let err = Cli::try_parse_from(["mlxcel-server", "download", flag])
+            let err = try_parse_cli(["mlxcel-server", "download", flag])
                 .expect_err("a help flag must short-circuit parsing, not succeed");
             assert_eq!(
                 err.kind(),
@@ -4409,6 +4593,7 @@ mod tests {
 
     #[test]
     fn image_model_without_model_leaves_the_chat_path_empty() {
+        let _lock = cli_env_lock();
         let image_model = std::env::temp_dir().to_string_lossy().into_owned();
         let args = parse_server_args(&["mlxcel-server", "--image-model", image_model.as_str()]);
         let input = build_startup_input(args).expect("image-only input resolves");
@@ -4421,6 +4606,7 @@ mod tests {
 
     #[test]
     fn neither_model_nor_image_model_names_both_ways_to_start() {
+        let _lock = cli_env_lock();
         let args = parse_server_args(&["mlxcel-server"]);
         let err = build_startup_input(args).expect_err("no model source at all");
         let message = err.to_string();
@@ -4430,6 +4616,7 @@ mod tests {
 
     #[test]
     fn image_only_refuses_a_router_selector_naming_both_flags() {
+        let _lock = cli_env_lock();
         let image_model = std::env::temp_dir().to_string_lossy().into_owned();
         let models_dir = std::env::temp_dir().to_string_lossy().into_owned();
         let args = parse_server_args(&[

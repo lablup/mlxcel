@@ -4,7 +4,7 @@
 
 **상태**: gfx1151 호스트(ROCm/HIP)에서 구현 및 검증 완료. 헤드 `9374ae72`(origin/main `87538835` 위), PR 열림, 머지 대기. #2155를 닫음(#1801의 일부).
 
-**언어**: Rust(`src/execution/memory_estimate.rs`, 신규 `src/execution/memory_estimate_inflight_tests.rs`, `src/commands/generate.rs`), Markdown(README, `docs/environment-variables.md`, `docs/installation.md`, `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`), 텍스트(원시 피크 데이터 파일)
+**언어**: Rust(`src/execution/memory_estimate.rs`, 신규 `src/execution/memory_estimate_inflight_tests.rs`, `src/commands/generate.rs`), Markdown(README, `docs/environment-variables.md`, `docs/installation.md`, `docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30`), 텍스트(원시 피크 데이터 파일)
 
 **위험도**: 낮음. 이 변경은 추정치의 예약분만 늘리며, 그것도 ROCm 빌드에서만 그렇습니다. GPU에서 실행되는 내용은 건드리지 않습니다. Metal과 CUDA 빌드는 0을 반환하는 스텁을 컴파일하므로 합계가 바뀌지 않습니다. ROCm에서 보이는 효과는 기본 예산에서 추정치가 1 GiB 커지는 것, 그만큼 paged KV `auto` 예산이 줄어드는 것, 그리고 prompt-cache 용량 상한이 낮아지는 것인데, 이 호스트에서는 선택된 용량이 하나도 바뀌지 않았습니다.
 
@@ -24,7 +24,7 @@ PR #2084가 `MLX_ROCM_MAX_INFLIGHT_MB`(기본 1024)로 in-flight 커맨드 배�
 
 `estimate_total_memory`는 가중치, 아키텍처 인식 KV, `(DEFAULT_HEADROOM_FACTOR - 1) * (weights + kv)`(계수 1.20, Apple Silicon에서만 보정), 그리고 워크로드 activation 항을 더합니다. ROCm에서는 백엔드가 커밋됐지만 끝나지 않은 배치에 정상 상태 위로 최대 `MLX_ROCM_MAX_INFLIGHT_MB` MiB의 새 할당을 허용합니다(ROCm 오버레이의 `device.cpp`, `LOCAL_FIXES.md` 항목 28). 추정치에는 이에 대한 항이 없었습니다.
 
-`docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`는 기본 예산에서의 결과를 기록했습니다. 8B 모델은 추정 5.58에 피크 6.14 GB, Qwen3-30B-A3B-4bit은 추정 20.72에 피크 18.58 GB입니다. ROCm용 1.20 계수 재보정은 범위 밖으로 남겨 두었습니다. 예약이 부족한 사전 점검은 로드를 통과시킨 뒤 예산을 넘길 수 있습니다.
+`docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30`는 기본 예산에서의 결과를 기록했습니다. 8B 모델은 추정 5.58에 피크 6.14 GB, Qwen3-30B-A3B-4bit은 추정 20.72에 피크 18.58 GB입니다. ROCm용 1.20 계수 재보정은 범위 밖으로 남겨 두었습니다. 예약이 부족한 사전 점검은 로드를 통과시킨 뒤 예산을 넘길 수 있습니다.
 
 ### 1.2 이슈에 대한 정정: 단위
 
@@ -46,7 +46,7 @@ PR #2084가 `MLX_ROCM_MAX_INFLIGHT_MB`(기본 1024)로 in-flight 커맨드 배�
 | `src/execution/memory_estimate_inflight_tests.rs`(신규) | 파서 테스트, 오버레이 소스 드리프트 테스트, `auto` 예산 역산 테스트, 두 빌드 종류의 컴파일 시점 게이트 테스트, 포화 테스트, 그리고 18행 gfx1151 표를 고정하는 `measured` 모듈 |
 | `src/commands/generate.rs` | `log_estimate_vs_actual_delta`가 `backend_inflight_bytes`를 기록 |
 | 문서 | README의 `inspect --json` 필드 목록; `docs/environment-variables.md`(`MLXCEL_HEADROOM_FACTOR` 행, `inspect --json` 문단, `MLX_ROCM_MAX_INFLIGHT_MB` 문단); `docs/installation.md` ROCm 메모리 문단; 결과 페이지의 새 "Estimate against peak" 절 |
-| 데이터 | `docs/benchmark_results/data/rocm-memory-gfx1151-2026-09-30/estimate-vs-peak-2026-10-07.txt`, 18회 실행 전부의 가드 `[Memory]` 줄과 피크 줄 원본 |
+| 데이터 | `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/rocm-memory-gfx1151-2026-09-30/estimate-vs-peak-2026-10-07.txt`, 18회 실행 전부의 가드 `[Memory]` 줄과 피크 줄 원본 |
 
 커밋 세 개: 테스트와 문서를 포함한 추정기 변경(`e387531f`), 어떤 추정치 소비자가 예약분을 보는지에 대한 문서 정정(`160f7e02`), in-flight 테스트의 가드가 UTF-8이 아닌 환경 변수 값을 복원하도록 한 테스트 수정(`9374ae72`). 파일 8개, 추가 661줄, 삭제 13줄.
 

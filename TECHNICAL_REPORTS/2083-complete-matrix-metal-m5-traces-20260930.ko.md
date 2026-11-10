@@ -10,7 +10,7 @@
 
 ## 요약
 
-PR #2059는 이슈 #1809를 위해 ROCm gfx1151에서 체크포인트 다섯 개(두 번째 dense 모델, sliding-window 모델, SSM hybrid 두 개, VLM)를 trace했지만, ROCm 호스트에서 접근할 수 있는 Metal 호스트가 없어 `docs/benchmark_results/rocm-correctness-gfx1151-2026-09-30.md`의 모든 행이 기준(reference) 없이 남았습니다. 이 PR은 Apple M5 Max(Apple GPU generation 17, NAX 경로 사용 가능)에서 trace한 Metal 쪽을 가져와, 첫 실행(2026-09-12)의 기준으로 비교를 완성합니다. 기준은 reference의 decided position(top-2 gap이 2.0 이상인 위치)에서 불일치가 하나도 없으면 통과입니다.
+PR #2059는 이슈 #1809를 위해 ROCm gfx1151에서 체크포인트 다섯 개(두 번째 dense 모델, sliding-window 모델, SSM hybrid 두 개, VLM)를 trace했지만, ROCm 호스트에서 접근할 수 있는 Metal 호스트가 없어 `docs/benchmark_results/versions/v0.8.0.md#rocm-correctness-gfx1151-2026-09-30`의 모든 행이 기준(reference) 없이 남았습니다. 이 PR은 Apple M5 Max(Apple GPU generation 17, NAX 경로 사용 가능)에서 trace한 Metal 쪽을 가져와, 첫 실행(2026-09-12)의 기준으로 비교를 완성합니다. 기준은 reference의 decided position(top-2 gap이 2.0 이상인 위치)에서 불일치가 하나도 없으면 통과입니다.
 
 - **원래의 16쌍**: 모든 행에서 decided mismatch 0. 15쌍은 통과이고, `nemotron-3-nano-30b-a3b` `w1`은 Metal reference에 decided position이 없어(`0 / 0`) 판정 불가(inconclusive)입니다. 16쌍 전체에서 top-1은 6720개 위치 중 155곳에서 다르고, decided position 2696곳에서는 0곳입니다. 불일치 지점의 reference gap 최댓값은 1.250 logit입니다(Nemotron-H `w256`, Metal 토큰이 ROCm의 2위).
 - **정정된 caveat**: hybrid `w1` 행은 Metal의 fused SSM update 커널과 ROCm의 SSD graph를 비교할 것으로 예상했지만 그렇지 않았습니다. `logit_trace`는 chunk마다 새 cache를 만들고, fused 단계는 이미 존재하는 `ssm_state`가 필요하므로, `w1`은 양쪽 모두 graph 대 graph입니다. ROCm 오케스트레이터와 M5 세션이 이 사실을 각자 독립적으로 발견했습니다.

@@ -360,6 +360,22 @@ enum Commands {
     #[cfg(feature = "surgery")]
     #[command(name = "split-mtp", verbatim_doc_comment)]
     SplitMtp(commands::SplitMtpArgs),
+
+    /// Build a Qwen3.8-Flash-Next model view whose n-gram table is read from
+    /// disk instead of kept resident: hard links for the non-table shards plus
+    /// a `ple-store.json` manifest and, by default, a `ple-q4.rows` file.
+    ///
+    ///     mlxcel prepare-external-ple -m models/qwen3.8-flash -o models/qwen3.8-flash-external-ple
+    ///     MLXCEL_PLE_IO=direct mlxcel generate -m models/qwen3.8-flash-external-ple -p "Hi"
+    #[command(name = "prepare-external-ple", verbatim_doc_comment)]
+    PrepareExternalPle(commands::PrepareExternalPleArgs),
+
+    /// Write a contiguous copy of a Qwen3.8-Flash-Next checkpoint's routed
+    /// experts for SSD expert streaming, so one read fetches a whole expert.
+    ///
+    ///     mlxcel prepare-expert-stream -m models/qwen3.8-flash
+    #[command(name = "prepare-expert-stream", verbatim_doc_comment)]
+    PrepareExpertStream(commands::PrepareExpertStreamArgs),
 }
 
 /// Arguments for `mlxcel list`.
@@ -649,6 +665,9 @@ pub(crate) struct ModelOptions {
     /// ordinary smaller checkpoint that shares the target's tokenizer
     /// (`--draft-kind full-model`, auto-detected for any other model directory),
     /// which drafts from its own KV caches on the engine's token-only loop.
+    /// A target checkpoint that keeps its own MTP head (Inkling, or a
+    /// Qwen3.8-Flash-Next `qwen4_exp` conversion with `mtp.*` tensors) is
+    /// passed again here, as the same directory as `-m`.
     /// `--prompt-lookup` needs no checkpoint.
     #[arg(long, value_name = "PATH")]
     pub(crate) draft_model: Option<PathBuf>,
@@ -2117,6 +2136,42 @@ pub(crate) struct ServeArgs {
     )]
     responses_store_ttl_secs: u64,
 
+    /// Maximum number of concurrently active `background: true` Responses
+    /// API jobs. Each active job holds one generation thread. `0` disables
+    /// background mode. Also reads `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS`.
+    #[arg(
+        long = "responses-background-max-jobs",
+        env = "MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+        value_name = "N"
+    )]
+    responses_background_max_jobs: usize,
+
+    /// Seconds a finished `background: true` response created with
+    /// `store: false` stays readable by polling. It is never readable through
+    /// `previous_response_id`. Must be at least 1. Also reads
+    /// `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS`.
+    #[arg(
+        long = "responses-background-ephemeral-ttl-secs",
+        env = "MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "SECS"
+    )]
+    responses_background_ephemeral_ttl_secs: u64,
+
+    /// Byte budget of the replayable event log of one `background: true`
+    /// Responses API response created with `stream: true`. The oldest events
+    /// are dropped when it is full. `0` refuses `stream: true` on background
+    /// responses. Also reads `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES`.
+    #[arg(
+        long = "responses-background-event-log-bytes",
+        env = "MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
+        value_name = "BYTES"
+    )]
+    responses_background_event_log_bytes: usize,
+
     /// Maximum number of conversation transcripts persisted
     /// for the OpenAI Responses API `conversation` field. `0` disables
     /// the conversation store; requests referencing `conversation` are
@@ -3381,7 +3436,12 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         Commands::Detect(args) => Some(args.model.as_path()),
         Commands::Predict(args) => Some(args.model.as_path()),
         Commands::GenerateImage(args) => Some(args.model.as_path()),
-        Commands::List(_) | Commands::Arch(_) | Commands::Download(_) | Commands::Rm(_) => None,
+        Commands::List(_)
+        | Commands::Arch(_)
+        | Commands::Download(_)
+        | Commands::Rm(_)
+        | Commands::PrepareExternalPle(_)
+        | Commands::PrepareExpertStream(_) => None,
         // Gated exactly like the variant itself and its dispatch arm below;
         // without the gate this arm does not compile in feature sets that
         // exclude `surgery`.
@@ -3551,6 +3611,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Tune(args) => commands::run_tune(args),
         #[cfg(feature = "surgery")]
         Commands::SplitMtp(args) => commands::run_split_mtp(args),
+        Commands::PrepareExternalPle(args) => commands::run_prepare_external_ple(args),
+        Commands::PrepareExpertStream(args) => commands::run_prepare_expert_stream(args),
     }
 }
 

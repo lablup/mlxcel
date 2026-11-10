@@ -180,11 +180,12 @@ pub(crate) use builder::{
 pub(crate) use model::{
     PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
     PrefillEmbeddingsInputMetadata, emit_decode, emit_decode_batched, emit_decode_ragged,
-    emit_decode_ragged_with, emit_decode_with, emit_decode_with_native, emit_moe_probe,
-    emit_moe_probe_with, emit_prefill, emit_prefill_embeddings,
-    emit_prefill_embeddings_deepstack_diagnostics_with, emit_prefill_embeddings_deepstack_with,
-    emit_prefill_embeddings_with, emit_prefill_with, mrope_axis_selector,
-    validate_prefill_embeddings_attention_bias, validate_prefill_embeddings_metadata,
+    emit_decode_ragged_with, emit_decode_ragged_with_native, emit_decode_with,
+    emit_decode_with_native, emit_moe_probe, emit_moe_probe_with, emit_prefill,
+    emit_prefill_embeddings, emit_prefill_embeddings_deepstack_diagnostics_with,
+    emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
+    mrope_axis_selector, validate_prefill_embeddings_attention_bias,
+    validate_prefill_embeddings_metadata,
 };
 #[allow(unused_imports)]
 pub(crate) use molmo_vision::emit_molmo_vision;
@@ -1436,6 +1437,65 @@ mod tests {
         assert!(!emit_decode_with(&c, true, Precision::F32).contains("f16"));
     }
 
+    /// issue #2921: the ROCm tuning spec (`match_gqa_score` in
+    /// `assets/rocm/bigk_vecmat_tuning.mlir`) selects the single-sequence score
+    /// dispatch by contraction shape: a batched f16 by f16 into f32 dot of
+    /// `[nkv, group, d]` against `[seq, nkv, d]` with group 4 and head_dim 64.
+    /// That config is what drops the dispatch from about 74 us to about 1.5 us
+    /// on gfx1151, so the emitter must keep producing that exact shape. A
+    /// non-batched dot, other operand dtypes, or another rank would silently
+    /// stop matching and put the attention cost back. The softmax order after
+    /// the dot (add mask, reduce max, subtract, exp) is asserted alongside it
+    /// because that sequence is what the same dispatch chain feeds.
+    #[test]
+    fn single_decode_score_contraction_keeps_the_tuning_spec_shape() {
+        use super::builder::Precision;
+        let c = Config::llama_3_2_1b();
+        let (nq, nkv, g, d, seq) = (c.n_q, c.n_kv, c.group(), c.head_dim, c.context_capacity);
+        assert_eq!((nq, nkv, g, d, seq), (32, 8, 4, 64, 256));
+        let mlir = emit_decode_with(&c, false, Precision::F16);
+
+        let score_dot = format!(
+            "batching_dims = [0] x [1], contracting_dims = [2] x [2] : (tensor<{nkv}x{g}x{d}xf16>, tensor<{seq}x{nkv}x{d}xf16>) -> tensor<{nkv}x{g}x{seq}xf32>"
+        );
+        let score_dots = mlir.lines().filter(|l| l.contains(&score_dot)).count();
+        assert_eq!(
+            score_dots, 16,
+            "one tuned score contraction per layer, got {score_dots}"
+        );
+
+        let after_dot = &mlir[mlir.find(&score_dot).expect("score dot")..];
+        let scale_at = after_dot
+            .find(&format!(
+                "dims = [] : (tensor<f32>) -> tensor<{nq}x{seq}xf32>"
+            ))
+            .expect("attention scale broadcast");
+        let mask_at = after_dot
+            .find(&format!(
+                "dims = [1] : (tensor<{seq}xf32>) -> tensor<{nq}x{seq}xf32>"
+            ))
+            .expect("mask broadcast");
+        let max_at = after_dot
+            .find("applies stablehlo.maximum across dimensions = [1]")
+            .expect("key-axis max");
+        let sub_at = after_dot.find("stablehlo.subtract").expect("max subtract");
+        let exp_at = after_dot.find("stablehlo.exponential").expect("exp");
+        assert!(
+            scale_at < mask_at && mask_at < max_at && max_at < sub_at && sub_at < exp_at,
+            "scale, then mask, then max-subtract, then exp"
+        );
+
+        // The context contraction reuses the same batched layout in the other
+        // direction, which is why its dispatch is already fast; assert it stays
+        // that shape so the two dots are not silently re-associated.
+        assert!(
+            mlir.contains(&format!(
+                "batching_dims = [0] x [1], contracting_dims = [2] x [0] : (tensor<{nkv}x{g}x{seq}xf16>, tensor<{seq}x{nkv}x{d}xf16>) -> tensor<{nkv}x{g}x{d}xf32>"
+            )),
+            "the context dot keeps its tuned shape"
+        );
+    }
+
     /// issue #572: under f16 precision exactly the 7 per-layer linear projections
     /// (down/gate/up/wk/wo/wq/wv) are declared f16 weight args (uploaded f16-resident);
     /// embed / lm_head / norms / caches stay f32. Each signature arg renders as
@@ -1553,6 +1613,38 @@ mod tests {
             "the alias precedes the module and the executable source sits inside it"
         );
 
+        // issue #2895: q/k/v and gate/up are each one launch. llama-3.2-1b has
+        // q 2048 + k 512 + v 512 and gate 8192 + up 8192, all at K = 2048, so both
+        // groups use the warp export with `ceil(total / rows-per-block)` groups.
+        assert!(mlir.contains("flow.dispatch @custom_qmv_qkv::@qmv4_qkv_kernel["));
+        assert!(mlir.contains("flow.dispatch @custom_qmv_gateup::@qmv4_gateup_kernel["));
+        assert!(mlir.contains("arith.constant 384 : index"), "q/k/v grid");
+        assert!(mlir.contains("arith.constant 2048 : index"), "gate/up grid");
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_qkv::@qmv4_qkv_kernel[")
+                .count(),
+            16,
+            "one q/k/v launch per layer"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_gateup::@qmv4_gateup_kernel[")
+                .count(),
+            16,
+            "one gate/up launch per layer"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv::@qmv4_kernel[")
+                .count(),
+            17,
+            "o_proj per layer plus the LM head"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv::@qmv4_row_kernel[")
+                .count(),
+            16,
+            "down_proj per layer, on the long-row export"
+        );
+
         // Without the native module the same config keeps the packed projection
         // dequant path and uses the loader-dequantized f16 head operand (the
         // prefill form), never the dispatch.
@@ -1563,6 +1655,125 @@ mod tests {
                 && fallback.contains("tensor<2048x128256xf16>"),
             "the fallback declares the packed head and reads the f16 operand"
         );
+    }
+
+    /// issue #2922: the ragged batch engine keeps the projections packed and
+    /// dispatches the multi-row HIP GEMV. q/k/v and gate/up stay one launch per
+    /// layer instead of one per row, and the f16 graph is emitted unchanged when
+    /// the native module is absent.
+    #[test]
+    fn native_ragged_decode_emits_multi_row_dispatches() {
+        use super::builder::Precision;
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::OutIn;
+        c.packed_args = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let mlir = emit_decode_ragged_with_native(
+            &c,
+            8,
+            true,
+            Precision::F16,
+            Some((
+                "#mlxcel_qmv_target = #hal.executable.target<\"rocm\", \"rocm-hsaco-fb\">\n",
+                "  source-block\n",
+            )),
+        );
+        assert!(
+            mlir.starts_with("#mlxcel_qmv_target = #hal.executable.target")
+                && mlir.contains("  source-block")
+                && mlir.contains("\nmodule @decode_step {"),
+            "the alias precedes the module and the executable source sits inside it"
+        );
+        // llama-3.2-1b: o_proj and down_proj per layer through the single-output
+        // multi-row export (down has K = 8192, so it takes the block-per-row
+        // export); q/k/v and gate/up through the fused multi-row exports.
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_multi::@qmv4_multi_kernel[")
+                .count(),
+            16,
+            "o_proj per layer"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_multi::@qmv4_multi_row_kernel[")
+                .count(),
+            16,
+            "down_proj per layer on the long-row export"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_qkv_multi::@qmv4_qkv_multi_kernel[")
+                .count(),
+            16,
+            "one q/k/v launch per layer, not one per row"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_gateup_multi::@qmv4_gateup_multi_kernel[")
+                .count(),
+            16,
+            "one gate/up launch per layer, not one per row"
+        );
+        assert!(
+            !mlir.contains("@custom_qmv::@qmv4_kernel")
+                && !mlir.contains("@custom_qmv::@qmv4_row_kernel"),
+            "the rank-1 exports are not used by the ragged graph"
+        );
+        assert!(
+            mlir.contains("arith.constant 8 : i32"),
+            "the batch size travels as the kernel's B constant"
+        );
+        assert!(mlir.contains("arith.constant 384 : index"), "q/k/v grid");
+        assert!(mlir.contains("arith.constant 2048 : index"), "gate/up grid");
+        assert!(
+            mlir.contains("tensor<8x8192xf32>"),
+            "fused multi-row outputs keep the [B, N] shape"
+        );
+
+        // The other bundled graph (B=4) keeps the same launch structure: one
+        // dispatch per projection group, so the count does not grow with the
+        // batch, and only the B constant and output rows change. A regression
+        // that multiplies launches by B or hardcodes the B=8 constant fails here.
+        let b4 = emit_decode_ragged_with_native(
+            &c,
+            4,
+            true,
+            Precision::F16,
+            Some((
+                "#mlxcel_qmv_target = #hal.executable.target<\"rocm\", \"rocm-hsaco-fb\">\n",
+                "  source-block\n",
+            )),
+        );
+        for dispatch in [
+            "flow.dispatch @custom_qmv_multi::@qmv4_multi_kernel[",
+            "flow.dispatch @custom_qmv_multi::@qmv4_multi_row_kernel[",
+            "flow.dispatch @custom_qmv_qkv_multi::@qmv4_qkv_multi_kernel[",
+            "flow.dispatch @custom_qmv_gateup_multi::@qmv4_gateup_multi_kernel[",
+        ] {
+            assert_eq!(
+                b4.matches(dispatch).count(),
+                mlir.matches(dispatch).count(),
+                "the ragged launch count is independent of B: {dispatch}"
+            );
+        }
+        assert!(
+            b4.contains("arith.constant 4 : i32"),
+            "the B=4 graph carries its batch size as the kernel's B constant"
+        );
+        assert!(
+            b4.contains("tensor<4x8192xf32>"),
+            "the B=4 graph writes [4, N] outputs"
+        );
+
+        // Without the native module the graph is the same f16 one emitted before
+        // this issue: the packed operands are never registered and no dispatch is
+        // emitted.
+        let mut fallback_cfg = Config::llama_3_2_1b();
+        fallback_cfg.projection_layout = ProjectionLayout::OutIn;
+        let fallback = emit_decode_ragged_with(&fallback_cfg, 8, true, Precision::F16);
+        assert!(!fallback.contains("@custom_qmv"));
+        assert!(fallback.contains("stablehlo.dot_general"));
+        assert!(fallback.contains("tensor<8192x2048xf16>"));
     }
 
     /// Each dense-pack family parses to its architecture switches. Cohere/Cohere2

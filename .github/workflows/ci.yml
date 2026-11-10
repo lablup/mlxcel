@@ -1142,6 +1142,9 @@ jobs:
       # moved the score by more than the 2 percent budget), and then fails closed, naming each
       # process, if any GPU compute process remains. The step timeout covers both 600-second lock
       # waits and the 600-second quiet wait on top of the 45 minutes the gate itself was given.
+      # The precheck also refuses, as an infrastructure failure (#2940), when $RUNNER_TEMP has less
+      # than 5 GB free, and a verifier failure whose log shows ENOSPC/EDQUOT/EIO is reported as
+      # `activity gate infrastructure failure` instead of a performance verification failure.
       - name: Run Activity performance gate with the hidden acceptance deferred
         timeout-minutes: 75
         env:
@@ -1160,6 +1163,7 @@ jobs:
             --installed-dir "$RUNNER_TEMP/mlxcel-webui-installed" \
             --run-root "$RUNNER_TEMP" \
             --host-state "$RUNNER_TEMP/webui-activity-host-state.json" \
+            --min-free-gb 5 \
             --quiet-timeout 600
           full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
           summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"
@@ -1626,7 +1630,7 @@ jobs:
   # no sm_70 implementation. Catching those needs nvcc pointed at sm_70, not a
   # Volta card, and no GPU runner is involved here. The runtime half stays
   # uncovered, and the decision to leave it uncovered is recorded in
-  # `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` (issue #1538)
+  # `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31` (issue #1538)
   # together with what a GPU-backed Volta job would and would not add: there is
   # no Volta runner, no release artifact targets sm_70, and #1537 already turns
   # an architecture mismatch into a named startup error instead of an opaque

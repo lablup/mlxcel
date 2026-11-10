@@ -116,5 +116,5 @@ CUDA는 측정하지 못했다. Throughput 샘플은 변동하는 thermal 조건
 - Issue #1983: Gemma 4 31B MTP exactness
 - Issue #1279: 31B exactness policy 및 benchmark qualification
 - Issue #1986: Unified 12B long-context exactness 후속
-- `docs/benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md`
+- `docs/benchmark_results/versions/v0.8.0.md#gemma4-31b-mtp-exactness-2026-09-26`
 - `docs/benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.json`

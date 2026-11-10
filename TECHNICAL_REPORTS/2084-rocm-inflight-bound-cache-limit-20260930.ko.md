@@ -53,7 +53,7 @@ f16 체크포인트인 8B에서 초과분(weight 대비 15.85 GB)의 대부분�
 
 ### 2.4 기존 knob으로는 해결되지 않았습니다
 
-이슈가 나열한 모든 knob을 변경 전에 측정했습니다(각 1회, 전체 표는 `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`). `MLXCEL_CACHE_LIMIT=1GB`, `MLXCEL_MEMORY_LIMIT`, `MLX_ROCM_NO_ASYNC_POOL`, 두 managed-fallback 스위치, `MLX_ROCM_FINEGRAINED=0`, `MLX_GRAPH_NODEFER=1`, `MLX_MAX_OPS_PER_BUFFER=50`, `MLXCEL_CACHE_CLEAR_INTERVAL=0`(8B만)은 모두 peak을 20.60 GB와 23.56 GB로 남겼습니다. `MLX_ROCM_QMM_DEQUANT_GEMM=0`만 위의 비용을 치르고 8B를 움직였고, `MLX_ROCM_USE_ASYNC_POOL=1`은 두 모델 모두를 죽였습니다. 주기적 cache clear는 이 실행에서 의미가 없습니다. 주기가 256 토큰인데 실행은 128 토큰만 decode합니다.
+이슈가 나열한 모든 knob을 변경 전에 측정했습니다(각 1회, 전체 표는 `docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30`). `MLXCEL_CACHE_LIMIT=1GB`, `MLXCEL_MEMORY_LIMIT`, `MLX_ROCM_NO_ASYNC_POOL`, 두 managed-fallback 스위치, `MLX_ROCM_FINEGRAINED=0`, `MLX_GRAPH_NODEFER=1`, `MLX_MAX_OPS_PER_BUFFER=50`, `MLXCEL_CACHE_CLEAR_INTERVAL=0`(8B만)은 모두 peak을 20.60 GB와 23.56 GB로 남겼습니다. `MLX_ROCM_QMM_DEQUANT_GEMM=0`만 위의 비용을 치르고 8B를 움직였고, `MLX_ROCM_USE_ASYNC_POOL=1`은 두 모델 모두를 죽였습니다. 주기적 cache clear는 이 실행에서 의미가 없습니다. 주기가 256 토큰인데 실행은 128 토큰만 decode합니다.
 
 ## 3. 발견된 죽은 기능
 
@@ -79,7 +79,7 @@ f16 체크포인트인 8B에서 초과분(weight 대비 15.85 GB)의 대부분�
 - Overlay: `mlx/backend/rocm/device.cpp`와 `device.h`(예산 파싱, `commit_and_throttle`, `throttle_inflight`, `release_inflight`), `eval.cpp`(primitive별 바이트 집계, finalize), `allocator.cpp`와 `allocator.h`(`thread_allocated_bytes()`, miss 경로 trim), `LOCAL_FIXES.md` 항목 28.
 - mlxcel: `src/execution/runtime.rs`(`DEFAULT_CACHE_LIMIT_BYTES`, 순수 함수 `cache_limit_bytes`), `src/execution/runtime_tests.rs`, `src/lib/mlxcel-core/src/memory.rs`(cache-limit 테스트), `tests/rocm_inflight_bound.rs`.
 - 측정: `src/bin/bench_decode.rs`(phase 카운터, 적용된 cache limit), `scripts/bench_decode.sh`(`BENCH_RAW_DIR`로 runner 로그 보관).
-- 문서: `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`와 `data/rocm-memory-gfx1151-2026-09-30/` 아래 원시 행, `docs/installation.md`(새 "Memory footprint" 소절), `docs/environment-variables.md`.
+- 문서: `docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30`와 `data/rocm-memory-gfx1151-2026-09-30/` 아래 원시 행, `docs/installation.md`(새 "Memory footprint" 소절), `docs/environment-variables.md`.
 
 ## 5. 수정 내용
 

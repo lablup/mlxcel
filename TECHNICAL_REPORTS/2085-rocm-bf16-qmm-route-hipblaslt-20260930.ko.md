@@ -85,7 +85,7 @@ unit은 선택하기 전에 두 kernel을 측정했습니다. bf16, 4-bit g64, `
 - Overlay: `patches-rocm/mlx/backend/rocm/quantized/qmm.hip` (`QmmRoute`, `QmmRouteInputs`, `wmma_qmm_env`, `wmma_qmm_max_m`, `select_qmm_route`, `quantized_matmul_runs_dequant_gemm`, dispatch 재배선), `rocm.h` (선언), `no_rocm.cpp` (false를 반환하는 stub), `LOCAL_FIXES.md` 항목 29.
 - Bridge: `src/lib/mlxcel-core/cpp/mlx_cxx_bridge.{h,cpp}` (`quantized_matmul_matches_dense_gemm`), `src/lib/mlxcel-core/src/lib.rs` (ffi 선언).
 - Rust: `src/lib/mlxcel-core/src/layers.rs` (적격성, doc comment, 테스트), `src/lib/mlxcel-core/src/hardware.rs` (doc comment만).
-- 문서: `docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md`, `docs/environment-variables.md`, `docs/mlxcelverse/upstream/README.md` (항목 29는 아직 패키징하지 않음).
+- 문서: `docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-qmm-route-gfx1151-2026-09-30`, `docs/environment-variables.md`, `docs/mlxcelverse/upstream/README.md` (항목 29는 아직 패키징하지 않음).
 
 ### 3.1 하나의 경로 결정
 

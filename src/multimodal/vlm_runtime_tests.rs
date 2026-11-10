@@ -1031,3 +1031,17 @@ fn a_surplus_marker_with_no_image_behind_it_is_spliced_out() {
     assert_eq!(segments, [" User: ", "ab Assistant:"]);
     assert!(segments.iter().all(|s| !s.contains("<|image|>")));
 }
+
+#[test]
+fn qwen_video_group_prefixes_reject_non_finite_and_negative_seconds() {
+    let (order, grids) = mixed_image_then_video();
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1] {
+        let seconds = vec![vec![0.0, invalid]];
+        let timing = QwenVideoTimestamps {
+            group_seconds: &seconds,
+            encode_text: &byte_encoder,
+        };
+        let err = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing)).unwrap_err();
+        assert!(err.to_string().contains("finite non-negative seconds"));
+    }
+}

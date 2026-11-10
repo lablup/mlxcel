@@ -280,7 +280,7 @@ Each query position slices the exact key width a B = 1 chain would see, with the
 
 **Reason for change:** the VLM wrapper should not silently lose the capability or the fallback.
 
-**Files: `docs/CONTINUOUS_BATCHING.md`, `docs/environment-variables.md`, `docs/benchmark_results/dflash-per-row-accepts-m3ultra-2026-11-06.md`**
+**Files: `docs/CONTINUOUS_BATCHING.md`, `docs/environment-variables.md`, `docs/benchmark_results/versions/unreleased.md#dflash-per-row-accepts-m3ultra-2026-11-06`**
 
 The batching guide and the environment variable table record the default, the fallback, and the measured numbers; the benchmark document records the method, the per-run values, the caveat, and the correctness gate.
 
@@ -474,5 +474,5 @@ Accepts and rounds:
 - `src/vision/qwen3_5_vl.rs`
 - `tests/speculative_parity/qwen35_dflash_harness.rs`
 - `tests/speculative_parity/qwen35_dflash_throughput.rs`
-- `docs/benchmark_results/dflash-per-row-accepts-m3ultra-2026-11-06.md`
+- `docs/benchmark_results/versions/unreleased.md#dflash-per-row-accepts-m3ultra-2026-11-06`
 - Issue #2442, issue #2353, PR #2853, issue #2851, issue #2190, issue #2440

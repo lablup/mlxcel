@@ -673,6 +673,20 @@ size_t array_nbytes(const MlxArray& arr) {
     return arr.inner.nbytes();
 }
 
+// Host address of an evaluated array's bytes. For address-only uses such as
+// mlock; nothing may read through it. 0 before evaluation and for a strided
+// view, where the address plus nbytes() does not cover the array's bytes.
+size_t array_data_address(const MlxArray& arr) {
+    if (!arr.inner.is_available()) {
+        return 0;
+    }
+    const auto& flags = arr.inner.flags();
+    if (!flags.row_contiguous && !flags.col_contiguous) {
+        return 0;
+    }
+    return reinterpret_cast<size_t>(arr.inner.data<uint8_t>());
+}
+
 // Array data access (scalar extraction).
 //
 // `array::item<T>()` is `eval(); return *data<T>();`, a raw reinterpret with

@@ -30,8 +30,8 @@ The kernel would need a variable row count per expert in `GatherQMM`, used only 
 ## 3. Change Summary
 
 - `src/models/gemma4.rs`: `MLXCEL_PROFILE_MOE_INNER=1` also prints the distinct-expert count.
-- `docs/benchmark_results/moe-distinct-experts-n1x-2026-10-31.md`: the measurement and the decision.
-- `docs/benchmark_results/cuda-qmm-fold-batch-n1x-2026-10-31.md`: the corrected attention figure and a note on the harness's single prompt.
+- `docs/benchmark_results/versions/v0.8.0.md#moe-distinct-experts-n1x-2026-10-31`: the measurement and the decision.
+- `docs/benchmark_results/versions/v0.8.0.md#cuda-qmm-fold-batch-n1x-2026-10-31`: the corrected attention figure and a note on the harness's single prompt.
 - `docs/benchmarks.md`: index entries for both records.
 
 ## 4. Results

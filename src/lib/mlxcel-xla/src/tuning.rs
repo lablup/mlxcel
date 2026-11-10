@@ -20,16 +20,28 @@
 
 use std::path::Path;
 
-/// ROCm lowering-tuning spec for single-row contractions with a long K
-/// (issue #2873).
+/// ROCm lowering-tuning spec for the contraction shapes the compiler defaults
+/// lower poorly on gfx1151 (issues #2873, #2921).
 ///
 /// The compiler's default tile for a `vecmat` is `reduction = [0, 4]`. For the
 /// down projection the contraction runs over the intermediate size (8192 on
 /// llama-3.2-1b), and that tile leaves the kernel at about 50 GB/s, roughly
 /// three times slower than the same shape reaches at `reduction = [0, 32]`.
 /// The wider tile is slower on short-K vecmats, so the spec matches only
-/// contractions whose reduction axis is at least 4096 elements; every other
-/// shape keeps the compiler's default.
+/// contractions whose reduction axis is at least 4096 elements.
+///
+/// The second match is the grouped-query decode score contraction, a batched
+/// `[n_kv, group, head_dim]` by `[n_kv, head_dim, keys]` f16 matmul with an f32
+/// result. The default config for that shape runs it at about 74 us per
+/// dispatch on llama-3.2-1b, where the same MAC count in the context matmul
+/// takes about 6.5 us; the spec's tile drops it to about 1.5 us (issue #2921).
+/// It matches only `batch = n_kv = 8`, `group = 4` and `head_dim = 64` with at
+/// least 128 keys, the measured shape of the single-sequence decode graph. The
+/// batch predicate is load-bearing: the ragged and uniform-B `dot_general`s
+/// collapse to the same rank-3 contraction with the same maps, but with
+/// `bsz * n_kv` as the batch, so without it a multi-row ragged graph would
+/// silently pick up a config that was measured only for one row. Every other
+/// shape keeps the compiler default.
 pub(crate) const ROCM_BIGK_VECMAT_TUNING: &str =
     include_str!("../assets/rocm/bigk_vecmat_tuning.mlir");
 
@@ -91,5 +103,50 @@ mod tests {
             "the same contents keep the same cache name"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// issue #2921: the spec must keep both contraction matches wired into the
+    /// entrypoint. The grouped-query score match is intentionally narrow (batch
+    /// 8, group 4, head_dim 64, at least 128 keys) because only that shape was
+    /// measured; widening it would apply an unmeasured config to other models,
+    /// and dropping the batch predicate would apply it to the ragged and
+    /// uniform-B score matmuls, whose collapsed batch is `bsz * n_kv`.
+    #[test]
+    fn tuning_spec_matches_the_gqa_decode_score_shape() {
+        assert!(ROCM_BIGK_VECMAT_TUNING.contains("@match_bigk_vecmat"));
+        assert!(ROCM_BIGK_VECMAT_TUNING.contains("@match_gqa_score"));
+        let entrypoint = ROCM_BIGK_VECMAT_TUNING
+            .split("@__kernel_config")
+            .nth(1)
+            .expect("the tuning-spec entrypoint");
+        assert!(
+            entrypoint.contains("@match_bigk_vecmat -> @apply_op_config")
+                && entrypoint.contains("@match_gqa_score -> @apply_op_config"),
+            "both matchers must run from the tuning-spec entrypoint"
+        );
+        let score = ROCM_BIGK_VECMAT_TUNING
+            .split("@match_gqa_score")
+            .nth(1)
+            .expect("the score matcher");
+        assert!(
+            score.contains("transform.iree.match.dims_equal %batch_dims, [8]"),
+            "the score matcher targets the single-sequence batch of 8 KV heads"
+        );
+        assert!(
+            score.contains("transform.iree.match.dims_equal %m_dims, [4]"),
+            "the score matcher targets group = 4"
+        );
+        assert!(
+            score.contains("transform.iree.match.dims_equal %k_dims, [64]"),
+            "the score matcher targets head_dim = 64"
+        );
+        assert!(
+            score.contains("transform.iree.match.dim_bounds %rhs[2], umin = 128, none"),
+            "the score matcher targets at least 128 keys"
+        );
+        assert!(
+            score.contains("workgroup_size = [32, 4, 1]"),
+            "the score matcher sets the 128-thread workgroup measured in #2921"
+        );
     }
 }

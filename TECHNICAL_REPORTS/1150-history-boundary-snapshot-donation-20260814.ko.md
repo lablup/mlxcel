@@ -101,7 +101,7 @@ snapshot-only 계열에서 `PromptCacheStore::lookup_snapshot_prefix`가 유일�
 | 새 환경변수 | 1 (`MLXCEL_DISABLE_BOUNDARY_SNAPSHOT`) |
 | 새 스토어 개념 | `SnapshotOrigin` (생산자별 supersede 체인) |
 | prefill당 forward 총 토큰 | 불변 |
-| 벤치마크 기록 | `docs/benchmark_results/history-boundary-snapshot-m1ultra-2026-08-14.md` |
+| 벤치마크 기록 | `docs/benchmark_results/versions/v0.5.1.md#history-boundary-snapshot-m1ultra-2026-08-14` |
 
 ### 영역별 변경
 

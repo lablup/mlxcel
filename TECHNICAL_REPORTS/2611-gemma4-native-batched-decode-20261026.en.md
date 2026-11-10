@@ -92,5 +92,5 @@ The old 12B Unified trace is not a valid identified-state baseline because its t
 
 - Issue #2546: Gemma 4 decode runs one forward per row
 - PR #2611: batch Gemma 4 decode across active rows
-- `docs/benchmark_results/gemma4-native-batched-decode-2026-10-26.md`: full protocol, trace interpretation, and raw comparison context
+- `docs/benchmark_results/versions/v0.8.0.md#gemma4-native-batched-decode-2026-10-26`: full protocol, trace interpretation, and raw comparison context
 - `docs/CONTINUOUS_BATCHING.md`: serving decode classification and operational behavior

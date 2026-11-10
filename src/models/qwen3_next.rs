@@ -1319,11 +1319,28 @@ pub(crate) struct SwitchGLU {
 
 impl SwitchGLU {
     pub(crate) fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
+        self.forward_with_sort(x, indices, true)
+    }
+
+    /// [`Self::forward`] with the expert-sorted gather under the caller's
+    /// control. Sorting groups the rows of one expert into one gathered
+    /// matmul, which reduces in a different order than the row-by-row gather
+    /// a single token takes; a speculative verify block that must match
+    /// single-token decode byte for byte passes `allow_sort = false`
+    /// (`qwen4_exp`, issue #2880).
+    ///
+    /// Used by: Qwen3Next, Qwen3.5, Qwen4-Exp
+    pub(crate) fn forward_with_sort(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+        allow_sort: bool,
+    ) -> UniquePtr<MlxArray> {
         let indices_shape = mlxcel_core::array_shape(indices);
         let n_tokens = indices_shape[0];
         let top_k = indices_shape[1];
         let total = n_tokens * top_k;
-        let do_sort = total >= 64;
+        let do_sort = allow_sort && total >= 64;
 
         // Expand x: [n_tokens, hidden] -> [n_tokens, 1, 1, hidden]
         let x_exp = mlxcel_core::expand_dims(x, -2);
@@ -1344,6 +1361,25 @@ impl SwitchGLU {
             let output = self.down_proj.forward(&activated, indices, false);
             mlxcel_core::squeeze_axis(&output, -2)
         }
+    }
+
+    /// The sorted branch of [`Self::forward_with_sort`] for rows already in
+    /// expert order: `sorted_x` is `[B, 1, hidden]`, `sorted_indices` `[B]`.
+    /// `sorted` is the flag the matmuls receive; the expert arena (issue
+    /// #2882) clears it when the resident path would not take the sorted
+    /// kernel at this batch size.
+    ///
+    /// Used by: Qwen4-Exp expert streaming
+    pub(crate) fn forward_presorted(
+        &self,
+        sorted_x: &MlxArray,
+        sorted_indices: &MlxArray,
+        sorted: bool,
+    ) -> UniquePtr<MlxArray> {
+        let x_gate = self.gate_proj.forward(sorted_x, sorted_indices, sorted);
+        let x_up = self.up_proj.forward(sorted_x, sorted_indices, sorted);
+        let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
+        self.down_proj.forward(&activated, sorted_indices, sorted)
     }
 
     /// Single-token decode via the fused MoE expert Metal kernel (#268).

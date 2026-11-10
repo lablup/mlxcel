@@ -33,7 +33,7 @@ PR #2074의 거버너(이제 `DraftPolicy::Graded`)는 블록 크기를 최근 �
 - `PromptLookupStats::shadow_confirmations`를 `[Prompt lookup]` 줄과 디코드 종료 trace에 찍는다.
 - CLI: `--prompt-lookup-policy auto|graded|gated`(`--prompt-lookup` 필요), `PromptLookupPolicyArg::resolve`, `mlxcel::DraftPolicy` 재수출.
 - 테스트: Gated의 시작 상태, probation, 타이머 없는 정지, 블록 폭, 좁은 블록보다 작은 max-draft, 탐침 판정, 정책 기본값, CLI 파싱. 롤백 패리티 매트릭스는 정책별로 따로 돌고, 스크립트 모델로 탐침 정렬을 정확히 고정하는 테스트를 더했다.
-- `docs/benchmark_results/prompt-lookup-governor-gb10-2026-10-02.md`에 하니스, 프롬프트, 매트릭스 세 벌, 부하 로그, 폭별 비용을 담았고 `docs/benchmarks.md`에서 링크한다.
+- `docs/benchmark_results/versions/v0.8.0.md#prompt-lookup-governor-gb10-2026-10-02`에 하니스, 프롬프트, 매트릭스 세 벌, 부하 로그, 폭별 비용을 담았고 `docs/benchmarks.md`에서 링크한다.
 
 ## 3. Gated가 결정하는 방식
 

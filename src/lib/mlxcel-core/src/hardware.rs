@@ -317,7 +317,7 @@ impl GpuBackendKind {
     ///   `quantized_matmul` against a host-decoded reference, the gather cases
     ///   seen to fail with item 10 reverted, plus a vendor FP8 block
     ///   checkpoint requantized to mxfp8 at load and traced against the CPU
-    ///   device (`docs/benchmark_results/rocm-fp8-block-gfx1151-2026-09-30.md`).
+    ///   device (`docs/benchmark_results/versions/v0.8.0.md#rocm-fp8-block-gfx1151-2026-09-30`).
     ///   NVFP4 converts to affine: the ROCm qmv dispatch implements group
     ///   sizes 32, 64 and 128 only and throws for NVFP4's 16, and there is no
     ///   E4M3 block-scale path.
@@ -463,14 +463,14 @@ pub fn is_m5_neural_accelerator() -> bool {
 /// 4-plane, LAUREL, per-layer input gating, dual norms) stalls the GPU at
 /// command-buffer boundaries; raising the cap to 1000 closes that dispatch-gap
 /// idle and recovers +11 to 13% decode throughput on M1 Ultra (see
-/// docs/benchmark_results/gemma3n-decode-profile.md, #329/#345).
+/// docs/benchmark_results/versions/v0.3.2.md#gemma3n-decode-profile, #329/#345).
 ///
 /// The lever is hardware-specific, so it is gated:
 /// - M1 through M4 (no Neural Accelerator, Metal family 3): apply 1000.
 /// - M5+ (has Neural Accelerator): leave MLX's default. The same sweep is flat
 ///   on M5 Max (within run-to-run noise, no plateau) and an earlier M5 study
 ///   recorded larger buffers as slower, so raising it offers no gain and risks a
-///   regression (docs/benchmark_results/gemma3n-decode-profile-m5max.md, #358).
+///   regression (docs/benchmark_results/versions/v0.3.2.md#gemma3n-decode-profile-m5max, #358).
 /// - Unknown (non-Apple, e.g. CUDA): leave untouched; this is a Metal command
 ///   buffer scheduling knob, irrelevant off Apple GPUs.
 ///
@@ -537,7 +537,7 @@ pub fn apply_metal_ops_per_buffer_default() {
 /// 4-bit +7%, Llama 3.1 8B 4-bit +5.6%, Qwen2.5 7B 4-bit +8%, Gemma 3n E4B +3%,
 /// Granite 4.0 H Tiny +10%, Qwen3-30B-A3B +20%, Mixtral 8x7B +21%, Llama 3.1
 /// 8B bf16 +17%, Gemma 3 4B flat. See
-/// docs/benchmark_results/metal-mb-per-buffer-m1ultra-2026-09-21.md.
+/// docs/benchmark_results/versions/v0.8.0.md#metal-mb-per-buffer-m1ultra-2026-09-21.
 ///
 /// The value applies to decode only. The same budget during prefill keeps a
 /// whole prompt's activations alive until the buffer completes: at 1000 the
@@ -628,7 +628,7 @@ pub fn decode_mb_per_buffer() -> Option<u32> {
 /// Qwen2.5 loses 3.1% and Gemma 2 1.3%, and at 384 rows Qwen2.5 loses 11%. 1024
 /// is the lowest row count with no measured regression; a per-shape threshold
 /// could recover the 512 to 768 gains later. Prefill peak memory grows 0.1 to
-/// 0.6 GB. See docs/benchmark_results/prefill-dense-gemm-m1ultra-2026-09-27.md.
+/// 0.6 GB. See docs/benchmark_results/versions/v0.8.0.md#prefill-dense-gemm-m1ultra-2026-09-27.
 pub const PREFILL_DENSE_GEMM_MIN_ROWS: i64 = 1024;
 
 /// Environment variable that sets the dense-GEMM prefill row threshold on any

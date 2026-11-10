@@ -881,6 +881,17 @@ fn compute_activation_bytes(dims: &ActivationDims, ctx_len: u64, batch: u64, mul
 
 /// Pick the weight-bytes figure and label its source.
 fn resolve_weight_bytes(model_dir: &Path) -> (u64, WeightsSource) {
+    // A streaming `qwen4_exp` load keeps only the arena of its routed experts.
+    if let Some(bytes) = crate::models::qwen4_exp::stream::preflight_resident_bytes(model_dir) {
+        return (bytes, WeightsSource::ExactSafetensors);
+    }
+    // A `ple_storage` checkpoint's weight index still names the hard-linked
+    // shards holding the table. Count what actually becomes resident.
+    if let Some(external) =
+        crate::models::qwen4_exp::ple_footprint::external_ple_footprint(model_dir)
+    {
+        return (external.resident_bytes(), WeightsSource::ExactSafetensors);
+    }
     if let Some(b) = weight_footprint_bytes(model_dir) {
         return (b, WeightsSource::ExactSafetensors);
     }
@@ -1812,6 +1823,12 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
             "  DOES NOT FIT: host shadows {} over the host RAM",
             format_bytes(est.host_shadow_overflow_bytes()),
         );
+    }
+
+    // Issue #2883: macOS only, informational, leaves the verdict alone.
+    if let Some(section) = super::memory_availability::format_host_availability(est) {
+        let _ = writeln!(out);
+        out.push_str(&section);
     }
 
     out

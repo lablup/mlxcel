@@ -10,7 +10,7 @@
 
 ## 요약
 
-Issue #2061 (#1814의 일부, epic #1801)은 #1814가 가설로 남겨 둔 측정을 요구했습니다. ROCm decode 시간이 kernel별로 어디에 쓰이는지, 그리고 #1814에서 분리된 다섯 개 port issue를 어떤 순서로 진행해야 하는지입니다. 이 PR은 profiling harness를 추가하고, Radeon 8060S (gfx1151)에서 checkpoint 네 개로 실행한 결과를 `docs/benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md`와 `benchmarks/rocm_profiles/gfx1151_929c80ab/`의 원자료로 공개합니다. 같은 세션에서 두 번째 미해결 질문도 정리했습니다. MLX의 ROCm `gather_mm`은 동작하므로, 그 numeric test가 이제 ROCm에서도 실행됩니다.
+Issue #2061 (#1814의 일부, epic #1801)은 #1814가 가설로 남겨 둔 측정을 요구했습니다. ROCm decode 시간이 kernel별로 어디에 쓰이는지, 그리고 #1814에서 분리된 다섯 개 port issue를 어떤 순서로 진행해야 하는지입니다. 이 PR은 profiling harness를 추가하고, Radeon 8060S (gfx1151)에서 checkpoint 네 개로 실행한 결과를 `docs/benchmark_results/versions/v0.8.0.md#rocm-decode-profile-gfx1151-2026-09-30`와 `benchmarks/rocm_profiles/gfx1151_929c80ab/`의 원자료로 공개합니다. 같은 세션에서 두 번째 미해결 질문도 정리했습니다. MLX의 ROCm `gather_mm`은 동작하므로, 그 numeric test가 이제 ROCm에서도 실행됩니다.
 
 측정된 순서는 **#2067 > #2065 > #2064 > #2068 > #2063** (#1814 항목 7, 5, 4, 8, 3)입니다. #1814의 가설은 호출 빈도를 근거로 항목 3 (모든 모델에서 layer마다 token마다 실행되는 fused add-RMSNorm과 RoPE-append)을 맨 앞에, 항목 7 (한 모델 계열에서만 쓰이는 SSM update)을 뒤쪽에 두었습니다. Profile은 이 둘을 뒤집습니다. #2067은 granite-4.0-h-tiny decode GPU 시간의 29.8%, Nemotron-3-Nano의 20.0%와 두 모델 dispatch의 절반 이상에 닿는 반면, #2063은 두 fusion 모두 모든 backend에서 꺼진 채로 배포되기 때문에 모든 모델에서 0%입니다.
 

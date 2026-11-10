@@ -4,7 +4,7 @@
 
 **Status**: Implemented and verified on the gfx1151 host (ROCm/HIP); head `9374ae72` on origin/main `87538835`, PR open, pending merge. Closes #2155 (part of #1801).
 
-**Languages**: Rust (`src/execution/memory_estimate.rs`, new `src/execution/memory_estimate_inflight_tests.rs`, `src/commands/generate.rs`), Markdown (README, `docs/environment-variables.md`, `docs/installation.md`, `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`), text (raw peak data file)
+**Languages**: Rust (`src/execution/memory_estimate.rs`, new `src/execution/memory_estimate_inflight_tests.rs`, `src/commands/generate.rs`), Markdown (README, `docs/environment-variables.md`, `docs/installation.md`, `docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30`), text (raw peak data file)
 
 **Risk Level**: Low. The change only raises a reserve in the estimate, and only on ROCm builds; it does not touch what runs on the GPU. Metal and CUDA builds compile a stub that returns 0, so their totals are unchanged. The visible effects on ROCm are a 1 GiB larger estimate at the default budget, a correspondingly smaller paged KV `auto` budget, and a lower prompt-cache capacity ceiling that did not change any chosen capacity on this host.
 
@@ -24,7 +24,7 @@ Across 18 guarded measurements (three models, two contexts, three budgets), the 
 
 `estimate_total_memory` sums weights, architecture-aware KV, `(DEFAULT_HEADROOM_FACTOR - 1) * (weights + kv)` with the factor at 1.20 (calibrated on Apple Silicon only), and a workload activation term. On ROCm, the backend lets committed but unfinished batches hold up to `MLX_ROCM_MAX_INFLIGHT_MB` MiB of newly allocated memory on top of the steady state (`device.cpp` in the ROCm overlay, `LOCAL_FIXES.md` item 28). The estimate had no term for it.
 
-`docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md` recorded the consequence at the default budget: an estimate of 5.58 for the 8B model against a 6.14 GB peak, and 20.72 against an 18.58 GB peak for Qwen3-30B-A3B-4bit. It left recalibrating the 1.20 factor for ROCm out of scope. A preflight that under-reserves can pass a load that then exceeds the budget.
+`docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30` recorded the consequence at the default budget: an estimate of 5.58 for the 8B model against a 6.14 GB peak, and 20.72 against an 18.58 GB peak for Qwen3-30B-A3B-4bit. It left recalibrating the 1.20 factor for ROCm out of scope. A preflight that under-reserves can pass a load that then exceeds the budget.
 
 ### 1.2 Correction to the issue: the units
 
@@ -46,7 +46,7 @@ The issue rejected raising the factor on ROCm, and the PR keeps that. The factor
 | `src/execution/memory_estimate_inflight_tests.rs` (new) | Parser tests, an overlay-source drift test, the `auto` budget inversion test, compile-time gate tests for both build kinds, a saturation test, and the `measured` module that pins the 18-row gfx1151 table |
 | `src/commands/generate.rs` | `log_estimate_vs_actual_delta` logs `backend_inflight_bytes` |
 | Docs | README `inspect --json` field list; `docs/environment-variables.md` (`MLXCEL_HEADROOM_FACTOR` row, the `inspect --json` paragraph, and the `MLX_ROCM_MAX_INFLIGHT_MB` paragraph); `docs/installation.md` ROCm memory paragraph; new "Estimate against peak" section on the results page |
-| Data | `docs/benchmark_results/data/rocm-memory-gfx1151-2026-09-30/estimate-vs-peak-2026-10-07.txt`, the raw guarded `[Memory]` and peak lines for all 18 runs |
+| Data | `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/rocm-memory-gfx1151-2026-09-30/estimate-vs-peak-2026-10-07.txt`, the raw guarded `[Memory]` and peak lines for all 18 runs |
 
 Three commits: the estimator change with tests and docs (`e387531f`), a docs correction of which estimate consumers see the reserve (`160f7e02`), and a test fix that restores non-UTF-8 environment values in the in-flight tests' guard (`9374ae72`). 8 files, 661 insertions and 13 deletions.
 

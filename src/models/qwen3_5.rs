@@ -69,7 +69,7 @@ use std::path::Path;
 /// Since #2191 the CUDA probe prefills [`CUDA_PROBE_PROMPT_LEN`] tokens and adds
 /// a long draw ([`PROBE_LONG_WALK`] tokens past the prompt) that does catch it.
 ///
-/// See `docs/benchmark_results/dflash-width-2-4-residual-qwen35-gb10-2026-09-21.md`.
+/// See `docs/benchmark_results/versions/v0.8.0.md#dflash-width-2-4-residual-qwen35-gb10-2026-09-21`.
 const DEFAULT_PROBE_PROMPT_LEN: usize = 8;
 
 /// The probe's prompt length for this process.

@@ -19,4 +19,4 @@ python3 scripts/compare_logit_traces.py \
     benchmarks/logit_traces/rocm_gfx1151_bec64748/rocm_gfx1151_bec64748_<model>_<variant>_<tag>.tsv
 ```
 
-The results and how to read them are in `docs/benchmark_results/rocm-correctness-gfx1151-2026-09-12.md`.
+The results and how to read them are in `docs/benchmark_results/versions/v0.8.0.md#rocm-correctness-gfx1151-2026-09-12`.

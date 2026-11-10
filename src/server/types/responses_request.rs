@@ -151,8 +151,8 @@ pub struct CreateResponseRequest {
     #[serde(default)]
     pub safety_identifier: Option<String>,
 
-    /// Background mode. Phase 1 rejects `background=true` with 400 since
-    /// async response polling is deferred to Phase 3.
+    /// Background mode: `true` returns a `queued` response at once and runs
+    /// the generation as a detached job that `GET /v1/responses/{id}` polls.
     #[serde(default)]
     pub background: Option<bool>,
 

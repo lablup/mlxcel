@@ -56,6 +56,9 @@ impl BatchScheduler {
             LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
                 compat_and_bind(drafter, vlm)
             }
+            // Qwen3.8-Flash-Next (#2880): the wrapper exposes the text
+            // backbone's embed_tokens and lm_head the drafter borrows.
+            LoadedModel::Qwen4ExpVLM(vlm) => compat_and_bind(drafter, vlm),
             LoadedModel::Inkling(inkling) => compat_and_bind(drafter, inkling),
             LoadedModel::InklingVLM(vlm) => compat_and_bind(drafter, &vlm.text),
             // GLM-4.7-Flash (#1326): the drafter borrows nothing, bind only
@@ -366,6 +369,30 @@ impl BatchScheduler {
                     ),
                 )
             }
+            // Qwen3.8-Flash-Next (#2880): same slice-0 shape on the text
+            // backbone's sequence slot.
+            LoadedModel::Qwen4ExpVLM(vlm) => {
+                let adapter = crate::models::qwen4_exp_mtp_target::Qwen4ExpMtpTargetAdapter::new(
+                    &vlm.text_model,
+                    Some(seq.seq_id),
+                )
+                .with_prefill_start_offset(prefill_start_offset)
+                .with_prefill_chunk_size(self.prefill_chunk_policy.alone);
+                Ok(
+                    crate::server::batch::speculative_slice::begin_slice_session(
+                        adapter,
+                        drafter,
+                        seq,
+                        &self.tokenizer,
+                        model_eos,
+                        block_size,
+                        probe_rounds,
+                        prefill_start_offset,
+                        &token_history,
+                        context_bound,
+                    ),
+                )
+            }
             // GLM-4.7-Flash (#1326): stateless per-tick view over the model's
             // MTP-only sequence slot; the adopted-prefix decline above keeps
             // `prefill_start_offset` at 0 for this family.
@@ -593,6 +620,19 @@ impl BatchScheduler {
                 );
                 true
             }
+            LoadedModel::Qwen4ExpVLM(vlm) => {
+                let adapter = crate::models::qwen4_exp_mtp_target::Qwen4ExpMtpTargetAdapter::new(
+                    &vlm.text_model,
+                    Some(job.seq.seq_id),
+                )
+                .with_prefill_start_offset(job.prefill_start_offset);
+                crate::server::batch::speculative_slice::step_slice_session(
+                    adapter,
+                    &mut job,
+                    &self.tokenizer,
+                );
+                true
+            }
             LoadedModel::Glm4MoeLite(glm) => {
                 let adapter =
                     crate::models::glm4_moe_lite_mtp_target::Glm4MoeLiteMtpTargetAdapter::new(
@@ -695,6 +735,7 @@ impl BatchScheduler {
                 LoadedModel::Gemma4Unified(unified) => Some(unified),
                 LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => Some(qwen),
                 LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => Some(vlm),
+                LoadedModel::Qwen4ExpVLM(vlm) => Some(vlm),
                 LoadedModel::Inkling(inkling) => Some(inkling),
                 LoadedModel::InklingVLM(vlm) => Some(&vlm.text),
                 // GLM-4.7-Flash (#1326): the slice path admits this family,
@@ -749,6 +790,7 @@ impl BatchScheduler {
                 LoadedModel::Gemma4Unified(unified) => Some(unified),
                 LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => Some(qwen),
                 LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => Some(vlm),
+                LoadedModel::Qwen4ExpVLM(vlm) => Some(vlm),
                 LoadedModel::Inkling(inkling) => Some(inkling),
                 LoadedModel::InklingVLM(vlm) => Some(&vlm.text),
                 // GLM-4.7-Flash (#1326): the slice path admits this family,

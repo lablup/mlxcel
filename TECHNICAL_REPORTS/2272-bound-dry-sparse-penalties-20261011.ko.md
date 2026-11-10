@@ -85,5 +85,5 @@ Automaton은 단계마다 다시 구성하므로 전체 작업은 history 길이
 
 - Issue #2259: 구현 요구 사항
 - Issue #2229 및 #2256: security review 배경
-- `docs/benchmark_results/dry-penalty-step-cost-gb10-2026-10-11.md`: 날짜가 기록된 timing 결과
+- `docs/benchmark_results/versions/v0.8.0.md#dry-penalty-step-cost-gb10-2026-10-11`: 날짜가 기록된 timing 결과
 - `docs/benchmark_results/data/dry-penalty-step-cost-gb10-2026-10-11/`: raw evidence package

@@ -368,6 +368,17 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                             load_elapsed.as_secs_f64(),
                             snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                         );
+                        // Issue #2883: `None` off macOS.
+                        if let Some(footprint) = mlxcel_core::host_memory::process_footprint() {
+                            tracing::info!(
+                                worker_model_id = %worker_model_id,
+                                phys_footprint_bytes = footprint.phys_footprint_bytes,
+                                compressed_bytes = footprint.compressed_bytes,
+                                "Process footprint after load: {:.2} GB ({:.2} GB compressed)",
+                                footprint.phys_footprint_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                                footprint.compressed_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                            );
+                        }
                         // A `--rope-scaling` / `--rope-scale` / `--rope-freq-base`
                         // request that reached no RoPE code path is fatal to
                         // serving, not a warning: the server would answer every
@@ -3901,7 +3912,20 @@ pub(crate) fn build_generation_result_with_cache(
         completion_tokens,
         generation_time_ms: elapsed_ms,
         prompt_eval_ms,
+        // The decode window: from the first-token instant (`prompt_eval_ms`,
+        // stamped when the prefill-sampled token reaches the decode state, or
+        // the target prefill's end on a drafted request) to the finish.
         generation_only_ms: elapsed_ms.saturating_sub(prompt_eval_ms),
+        // The window opens at the first emitted token, so the remaining N-1
+        // tokens are the ones emitted inside it (issue #2938). Every producer
+        // of this builder stamps that instant through `StreamingDecodeState`:
+        // the batch scheduler (whose first token comes out of prefill, the
+        // only producer the `/metrics` histogram records) and the XLA worker
+        // decode one token per step after it. The diffusion worker commits a
+        // whole block at once, so the rest of its first block was computed
+        // before the window opened; its count is a bound on the window's
+        // work, not an exact one, and it does not reach the histogram.
+        decode_window_tokens: Some(completion_tokens.saturating_sub(1)),
         finish_reason: finish_reason.to_string(),
         // The EOS-or-length split this function has always made. A string
         // stop-sequence match cannot be seen from the token counts, so the

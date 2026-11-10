@@ -39,7 +39,7 @@ The #1814 port requirements ask for parity with the graph fallback on gfx1151 wi
 | `tests/cpu_device_custom_kernel_gates.rs` | Both predicates must decline on the CPU device |
 | Bridge and FFI docs | `mlx_cxx_bridge.h`, `lib.rs` describe the device term and the ROCm port |
 | Build | `mlxcel-core/build.rs` tracks the two headers |
-| Docs and data | New `docs/benchmark_results/rocm-fused-norm-rope-gfx1151-2026-10-05.md`, four benchmark CSVs, 12 trace TSVs with metadata under `benchmarks/logit_traces/rocm_gfx1151_3f0e51af/`, updates to `environment-variables.md`, `installation.md`, README and the correctness page |
+| Docs and data | New `docs/benchmark_results/versions/v0.8.0.md#rocm-fused-norm-rope-gfx1151-2026-10-05`, four benchmark CSVs, 12 trace TSVs with metadata under `benchmarks/logit_traces/rocm_gfx1151_3f0e51af/`, updates to `environment-variables.md`, `installation.md`, README and the correctness page |
 
 The branch has six commits plus one merge of origin/main: the ports (`ef3831d9`), the bit-for-bit fixes (`8ebf809f`), the sign-of-zero fix (`3f0e51af`), the results page (`756d03d8`), review fixes (`bea7d1ab`), the merge (`9e6f095d`), and the empty-input refusals (`c6592780`). The diff against origin/main is 38 files, 4748 insertions and 99 deletions; most of the insertions are trace TSVs. `.rocm = nullptr` lines in `src/**/*.cpp` drop by two, from 7 on origin/main `33c45053` to 5 on the head (10 to 8 on the branch's original base).
 

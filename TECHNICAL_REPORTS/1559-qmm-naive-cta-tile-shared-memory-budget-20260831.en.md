@@ -47,8 +47,8 @@ Three problems, only one of which the issue named.
 | `mlxcel-core/cpp/qmm_naive_tile_probe.cpp`, `build.rs` | New C shim over the selector, compiled unconditionally rather than behind the `cuda` feature. |
 | `mlxcel-core/src/qmm_naive_tile_tests.rs` | New. The enumeration, plus the opt-in ceiling, the refusal, the reserve boundary and the override. Nine tests, no GPU. |
 | `mlxcel-core/src/ffi_tests.rs` | `qmm_naive_output_is_identical_across_cta_tile_widths`, bitwise across bits 4 and 8 crossed with group sizes 32, 64 and 128, both widths inside one process. |
-| `docs/benchmark_results/qmm-naive-tile-v100-2026-08-31.md` | New. The full record. |
-| `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` | The `#1541` row of the post-program comparison table. |
+| `docs/benchmark_results/versions/v0.7.0.md#qmm-naive-tile-v100-2026-08-31` | New. The full record. |
+| `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31` | The `#1541` row of the post-program comparison table. |
 | `CHANGELOG.md` | Entry under `### Changed`. |
 
 ## 3. Technical Decisions
@@ -159,9 +159,9 @@ The register pressure that decided this result is a property of the `UniversalFM
 ## References
 
 - Issue #1541 and epic #1536, the Volta decode program.
-- Baseline this is a delta against: `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md`.
-- Full record for this change: `docs/benchmark_results/qmm-naive-tile-v100-2026-08-31.md`.
-- Predecessor sub-issue and its record: #1539, `docs/benchmark_results/qmv-float-accum-v100-2026-08-31.md`.
+- Baseline this is a delta against: `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31`.
+- Full record for this change: `docs/benchmark_results/versions/v0.7.0.md#qmm-naive-tile-v100-2026-08-31`.
+- Predecessor sub-issue and its record: #1539, `docs/benchmark_results/versions/v0.7.0.md#qmv-float-accum-v100-2026-08-31`.
 - MMA atom selection, which is what `sm80` actually controls: `make_tiled_mma` in MLX's `mlx/backend/cuda/device/gemm_sm70.cuh`.
 - The module-name cache hazard this repeats: #910, in `qmm_sm80.cu`.
 - Prefill chunking, which caps `m` at 2,048: `DEFAULT_PREFILL_CHUNK` and `effective_prefill_chunk` in `src/lib/mlxcel-core/src/generate.rs`.

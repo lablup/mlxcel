@@ -51,7 +51,7 @@ void dispatch_cutlass_arch(cu::Device& device, F&& f) {
 
 `cpp/grouped_gemm_arch_probe.cpp`(신규)와 `build.rs` 한 줄이 출하되는 그 함수를 C 심을 통해 Rust에 노출한다. #1541이 세운 패턴을 따라 `cuda` 피처 뒤가 아니라 무조건 컴파일된다. `grouped_gemm_arch_tests.rs`(신규)는 매핑을 모든 아키텍처에 대해 열거하고, `grouped_gemm_numeric_tests.rs`(신규)는 디바이스에서 `gather_mm`을 `f64` 조밀 전문가별 기준과 비교한다.
 
-`docs/benchmark_results/grouped-gemm-arch-v100-2026-08-31.md`(신규)가 전체 기록이다. #1538 베이스라인은 예약돼 있던 사후 비교 행과, 그 커널 표에 그룹 GEMM이 없는 이유를 설명하는 MoE 절 주석을 얻는다.
+`docs/benchmark_results/versions/v0.7.0.md#grouped-gemm-arch-v100-2026-08-31`(신규)가 전체 기록이다. #1538 베이스라인은 예약돼 있던 사후 비교 행과, 그 커널 표에 그룹 GEMM이 없는 이유를 설명하는 MoE 절 주석을 얻는다.
 
 ## 3. 기술적 선택과 이유
 
@@ -155,9 +155,9 @@ static_assert(
 ## 참고
 
 - 이슈 #1544, 그리고 Volta 디코드 프로그램인 에픽 #1536.
-- 전체 측정 기록: `docs/benchmark_results/grouped-gemm-arch-v100-2026-08-31.md`.
-- 이 문서가 델타로 삼는 베이스라인: `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` (#1538).
-- 양자화 체크포인트에서 이 분기를 도달 가능하게 만드는 정렬 MoE 프리필 빠른 경로: #629, `docs/benchmark_results/moe-prefill-grouped-gemm-gb10-2026-07-10.md`.
-- #1541에서 넘겨받은 `cuFuncSetAttribute` 공백과 그 `gather_gemm.cu` 도달 가능성 결론: `docs/benchmark_results/qmm-naive-tile-v100-2026-08-31.md`.
+- 전체 측정 기록: `docs/benchmark_results/versions/v0.7.0.md#grouped-gemm-arch-v100-2026-08-31`.
+- 이 문서가 델타로 삼는 베이스라인: `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31` (#1538).
+- 양자화 체크포인트에서 이 분기를 도달 가능하게 만드는 정렬 MoE 프리필 빠른 경로: #629, `docs/benchmark_results/versions/v0.4.0.md#moe-prefill-grouped-gemm-gb10-2026-07-10`.
+- #1541에서 넘겨받은 `cuFuncSetAttribute` 공백과 그 `gather_gemm.cu` 도달 가능성 결론: `docs/benchmark_results/versions/v0.7.0.md#qmm-naive-tile-v100-2026-08-31`.
 - SASS 디프 기법: 통하는 경우는 #1539, 통하지 않는 경우는 #1541.
 - 기존 sm_70 비트 일치 부류: `tests/cuda_qmm_determinism.rs`에 대한 #1557.

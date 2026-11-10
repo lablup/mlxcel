@@ -13,7 +13,7 @@ Refs #2442 (items 2 and 3 only). Under the default `--max-batch-prefill 4`, a qu
 
 `execute_prefill_action` sent any queue of 2+ to `execute_batched_prefill` under the default `--max-batch-prefill 4`. Only `execute_prefill` calls `try_speculative_burst`, so queued requests got no speculative decoding at all, B = 1 or batched. `--max-batch-prefill 1` was needed to reach the burst.
 
-The history says this was not intended: the batched prefill (`60e50b0c`) predates the burst (`6a816947`), the burst's window collector drains exactly these queued rows, and `docs/benchmark_results/gemma4-mtp-batched-gb10-2026-10-07.md` lists the skip as a pre-existing gap it worked around.
+The history says this was not intended: the batched prefill (`60e50b0c`) predates the burst (`6a816947`), the burst's window collector drains exactly these queued rows, and `docs/benchmark_results/versions/v0.8.0.md#gemma4-mtp-batched-gb10-2026-10-07` lists the skip as a pre-existing gap it worked around.
 
 ### 1.2 Exactness probe (item 3)
 

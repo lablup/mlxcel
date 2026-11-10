@@ -498,6 +498,9 @@ fn video_group_timestamps_use_mean_of_first_and_last_frame_time() {
     let seconds = qwen_video_group_timestamps(&[0, 10, 20], 10.0, 2, 2).unwrap();
     assert_eq!(seconds, vec![0.5, 2.0]);
 
+    let seconds = qwen_video_group_timestamps(&[0, 15, 30, 45, 60], 30.0, 2, 3).unwrap();
+    assert_eq!(seconds, vec![0.25, 1.25, 2.0]);
+
     // Resampled clips keep real time: indices come from the sampler, not an
     // assumed 2 fps.
     let seconds = qwen_video_group_timestamps(&[0, 60, 120, 180], 60.0, 2, 2).unwrap();
@@ -717,5 +720,22 @@ fn forward_batched_with_seq_ids_dispatch_no_seq_ids_falls_through_to_batched() {
         vec![(-1, 7), (-1, 8)],
         "no seq_ids → forward (without id) per row; got {:?}",
         calls
+    );
+}
+
+#[test]
+fn video_timestamps_reject_overflow_and_unordered_indices() {
+    assert!(qwen_video_group_timestamps(&[0, 1], 30.0, 2, usize::MAX).is_err());
+    assert!(qwen_video_group_timestamps(&[1], f64::from_bits(1), 1, 1).is_err());
+    assert!(qwen_video_group_timestamps(&[3, 1], 30.0, 2, 1).is_err());
+    assert_eq!(
+        qwen_video_group_timestamps(&[30], 30.0, usize::MAX, 1).unwrap(),
+        vec![1.0],
+        "temporal padding must not allocate a patch-sized copy"
+    );
+    assert_eq!(
+        qwen_video_group_timestamps(&[0, 0, 30], 30.0, 2, 2).unwrap(),
+        vec![0.0, 1.0],
+        "duplicate frames and a short final group remain valid"
     );
 }

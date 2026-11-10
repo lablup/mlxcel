@@ -145,8 +145,150 @@ pub(crate) fn dispatch(k: usize, n: usize) -> (&'static str, usize) {
     }
 }
 
-/// The module-level additions for a native decode graph: the target alias, then
-/// the `hal.executable.source` block carrying the HSACO and its two exports.
+/// The export that multiplies three weight sets (q, k, v) in one launch.
+pub(crate) const QKV_WARP_ENTRY: &str = "@custom_qmv_qkv::@qmv4_qkv_kernel";
+pub(crate) const QKV_ROW_ENTRY: &str = "@custom_qmv_qkv::@qmv4_qkv_row_kernel";
+
+/// The export that multiplies two weight sets (gate, up) in one launch.
+pub(crate) const GATEUP_WARP_ENTRY: &str = "@custom_qmv_gateup::@qmv4_gateup_kernel";
+pub(crate) const GATEUP_ROW_ENTRY: &str = "@custom_qmv_gateup::@qmv4_gateup_row_kernel";
+
+/// The entry point and workgroup count for a fused multi-output GEMV that
+/// reduces `total` output rows with contraction width `K` (issue #2895).
+#[must_use]
+pub(crate) fn fused_dispatch(
+    k: usize,
+    total: usize,
+    warp: &'static str,
+    row: &'static str,
+) -> (&'static str, usize) {
+    if k >= ROW_KERNEL_MIN_K {
+        (row, total)
+    } else {
+        (warp, total.div_ceil(ROWS_PER_BLOCK))
+    }
+}
+
+/// The dispatch entry point and workgroup count for fused q/k/v.
+#[must_use]
+pub(crate) fn qkv_dispatch(k: usize, total: usize) -> (&'static str, usize) {
+    fused_dispatch(k, total, QKV_WARP_ENTRY, QKV_ROW_ENTRY)
+}
+
+/// The dispatch entry point and workgroup count for fused gate/up.
+#[must_use]
+pub(crate) fn gateup_dispatch(k: usize, total: usize) -> (&'static str, usize) {
+    fused_dispatch(k, total, GATEUP_WARP_ENTRY, GATEUP_ROW_ENTRY)
+}
+
+/// Largest batch the multi-row exports accept (issue #2922), matching
+/// `QMV4_MAX_B` in `csrc/qmv4.hip`. The ragged engine only emits the bundled
+/// `RAGGED_B_VALUES` graphs (4 and 8), so this bound is never approached.
+pub(crate) const MAX_BATCH: usize = 8;
+
+/// The exports that reduce `B` activation rows at once (issue #2922).
+pub(crate) const MULTI_WARP_ENTRY: &str = "@custom_qmv_multi::@qmv4_multi_kernel";
+pub(crate) const MULTI_ROW_ENTRY: &str = "@custom_qmv_multi::@qmv4_multi_row_kernel";
+pub(crate) const QKV_MULTI_WARP_ENTRY: &str = "@custom_qmv_qkv_multi::@qmv4_qkv_multi_kernel";
+pub(crate) const QKV_MULTI_ROW_ENTRY: &str = "@custom_qmv_qkv_multi::@qmv4_qkv_multi_row_kernel";
+pub(crate) const GATEUP_MULTI_WARP_ENTRY: &str =
+    "@custom_qmv_gateup_multi::@qmv4_gateup_multi_kernel";
+pub(crate) const GATEUP_MULTI_ROW_ENTRY: &str =
+    "@custom_qmv_gateup_multi::@qmv4_gateup_multi_row_kernel";
+
+/// The entry point and workgroup count for the multi-row GEMV: `[B, K] x
+/// [N, K/8] -> [B, N]`.
+///
+/// The export follows the same width rule as the single-row form: rows with
+/// `K >= ROW_KERNEL_MIN_K` take the block-per-row export (`N` workgroups), and
+/// the rest the warp export (`ceil(N / ROWS_PER_BLOCK)` workgroups). Supported
+/// shapes are `B <= MAX_BATCH`, `K % 64 == 0` (8 nibbles per u32 and one
+/// scale/bias per 64 inputs), and any `N` (the grid rounds up and the kernel
+/// bounds its rows by `N`).
+#[must_use]
+pub(crate) fn multi_dispatch(k: usize, n: usize) -> (&'static str, usize) {
+    fused_dispatch(k, n, MULTI_WARP_ENTRY, MULTI_ROW_ENTRY)
+}
+
+/// The entry point and workgroup count for the fused multi-row q/k/v dispatch
+/// over `total` output rows.
+#[must_use]
+pub(crate) fn qkv_multi_dispatch(k: usize, total: usize) -> (&'static str, usize) {
+    fused_dispatch(k, total, QKV_MULTI_WARP_ENTRY, QKV_MULTI_ROW_ENTRY)
+}
+
+/// The entry point and workgroup count for the fused multi-row gate/up dispatch
+/// over `total` output rows.
+#[must_use]
+pub(crate) fn gateup_multi_dispatch(k: usize, total: usize) -> (&'static str, usize) {
+    fused_dispatch(k, total, GATEUP_MULTI_WARP_ENTRY, GATEUP_MULTI_ROW_ENTRY)
+}
+
+/// A pipeline layout with `readonly` input buffers followed by `writable`
+/// output buffers and `constants` push constants.
+fn pipeline_layout(constants: usize, readonly: usize, writable: usize) -> String {
+    let mut layout = format!("#hal.pipeline.layout<constants = {constants}, bindings = [\n");
+    for _ in 0..readonly {
+        layout.push_str("          #hal.pipeline.binding<storage_buffer, ReadOnly>,\n");
+    }
+    for index in 0..writable {
+        layout.push_str("          #hal.pipeline.binding<storage_buffer>");
+        layout.push_str(if index + 1 < writable { ",\n" } else { "\n" });
+    }
+    layout.push_str("        ]>");
+    layout
+}
+
+fn export_block(
+    name: &str,
+    ordinal: usize,
+    constants: usize,
+    readonly: usize,
+    writable: usize,
+) -> String {
+    format!(
+        "    hal.executable.export public @{name} ordinal({ordinal})\n\
+         \x20       layout({layout}) count(%device: !hal.device, %n: index) -> (index, index, index) {{\n\
+         \x20     %c1 = arith.constant 1 : index\n\
+         \x20     hal.return %n, %c1, %c1 : index, index, index\n\
+         \x20   }} attributes {{ workgroup_size = [{threads} : index, 1 : index, 1 : index] }}\n",
+        layout = pipeline_layout(constants, readonly, writable),
+        threads = THREADS_PER_BLOCK,
+    )
+}
+
+/// One `hal.executable.source` block: the embedded HSACO plus one export per
+/// entry point, each with its own pipeline layout.
+fn executable_source_named(
+    hsaco: &[u8],
+    arch: &str,
+    symbol: &str,
+    exports: &[(&str, usize, usize, usize, usize)],
+) -> String {
+    let mut dense = String::with_capacity(hsaco.len() * 2);
+    hex(hsaco, &mut dense);
+    let mut out = format!(
+        "  hal.executable.source private @{symbol} attributes {{\n\
+         \x20   objects = #hal.executable.objects<{{\n\
+         \x20     #mlxcel_qmv_target = [#hal.executable.object<{{\n\
+         \x20       path = \"qmv4-{arch}.hsaco\",\n\
+         \x20       data = dense<\"0x{dense}\"> : vector<{len}xi8>\n\
+         \x20     }}>]\n\
+         \x20   }}>\n\
+         \x20 }} {{\n",
+        len = hsaco.len(),
+    );
+    for (name, ordinal, constants, readonly, writable) in exports {
+        out.push_str(&export_block(
+            name, *ordinal, *constants, *readonly, *writable,
+        ));
+    }
+    out.push_str("  }\n");
+    out
+}
+
+/// The `hal.executable.source` block carrying the HSACO and the two
+/// single-output exports.
 ///
 /// The ABI mirrors `Builder::native_qmv`: two `i32` constants (K, N), four
 /// read-only bindings (activations, packed weights, scales, biases) and the
@@ -155,57 +297,136 @@ pub(crate) fn dispatch(k: usize, n: usize) -> (&'static str, usize) {
 /// `ceil(N / ROWS_PER_BLOCK)` workgroups; `@qmv4_row_kernel` puts a whole
 /// workgroup on one row and takes `N` workgroups.
 pub(crate) fn executable_source(hsaco: &[u8], arch: &str) -> String {
-    let mut dense = String::with_capacity(hsaco.len() * 2);
-    hex(hsaco, &mut dense);
-    format!(
-        "  hal.executable.source private @custom_qmv attributes {{\n\
-         \x20   objects = #hal.executable.objects<{{\n\
-         \x20     #mlxcel_qmv_target = [#hal.executable.object<{{\n\
-         \x20       path = \"qmv4-{arch}.hsaco\",\n\
-         \x20       data = dense<\"0x{dense}\"> : vector<{len}xi8>\n\
-         \x20     }}>]\n\
-         \x20   }}>\n\
-         \x20 }} {{\n\
-         \x20   hal.executable.export public @qmv4_kernel ordinal(0)\n\
-         \x20       layout(#hal.pipeline.layout<constants = 2, bindings = [\n\
-         \x20         #hal.pipeline.binding<storage_buffer, ReadOnly>,\n\
-         \x20         #hal.pipeline.binding<storage_buffer, ReadOnly>,\n\
-         \x20         #hal.pipeline.binding<storage_buffer, ReadOnly>,\n\
-         \x20         #hal.pipeline.binding<storage_buffer, ReadOnly>,\n\
-         \x20         #hal.pipeline.binding<storage_buffer>\n\
-         \x20       ]>) count(%device: !hal.device, %n: index) -> (index, index, index) {{\n\
-         \x20     %c1 = arith.constant 1 : index\n\
-         \x20     hal.return %n, %c1, %c1 : index, index, index\n\
-         \x20   }} attributes {{ workgroup_size = [{threads} : index, 1 : index, 1 : index] }}\n\
-         \x20   hal.executable.export public @qmv4_row_kernel ordinal(1)\n\
-         \x20       layout(#hal.pipeline.layout<constants = 2, bindings = [\n\
-         \x20         #hal.pipeline.binding<storage_buffer, ReadOnly>,\n\
-         \x20         #hal.pipeline.binding<storage_buffer, ReadOnly>,\n\
-         \x20         #hal.pipeline.binding<storage_buffer, ReadOnly>,\n\
-         \x20         #hal.pipeline.binding<storage_buffer, ReadOnly>,\n\
-         \x20         #hal.pipeline.binding<storage_buffer>\n\
-         \x20       ]>) count(%device: !hal.device, %n: index) -> (index, index, index) {{\n\
-         \x20     %c1 = arith.constant 1 : index\n\
-         \x20     hal.return %n, %c1, %c1 : index, index, index\n\
-         \x20   }} attributes {{ workgroup_size = [{threads} : index, 1 : index, 1 : index] }}\n\
-         \x20 }}\n",
-        len = hsaco.len(),
-        threads = THREADS_PER_BLOCK,
+    executable_source_named(
+        hsaco,
+        arch,
+        "custom_qmv",
+        &[("qmv4_kernel", 0, 2, 4, 1), ("qmv4_row_kernel", 1, 2, 4, 1)],
     )
 }
 
-/// The alias and the source block together, for tests that assemble a whole
-/// module in one string.
+/// The `hal.executable.source` block for the fused q/k/v export (issue #2895):
+/// four constants (K, N0, N1, N2), the activation row, three packed/scales/biases
+/// sets and three outputs.
+pub(crate) fn qkv_source(hsaco: &[u8], arch: &str) -> String {
+    executable_source_named(
+        hsaco,
+        arch,
+        "custom_qmv_qkv",
+        &[
+            ("qmv4_qkv_kernel", 0, 4, 10, 3),
+            ("qmv4_qkv_row_kernel", 1, 4, 10, 3),
+        ],
+    )
+}
+
+/// The `hal.executable.source` block for the fused gate/up export (issue #2895):
+/// three constants (K, N0, N1), the activation row, two packed/scales/biases
+/// sets and two outputs.
+pub(crate) fn gateup_source(hsaco: &[u8], arch: &str) -> String {
+    executable_source_named(
+        hsaco,
+        arch,
+        "custom_qmv_gateup",
+        &[
+            ("qmv4_gateup_kernel", 0, 3, 7, 2),
+            ("qmv4_gateup_row_kernel", 1, 3, 7, 2),
+        ],
+    )
+}
+
+/// The `hal.executable.source` block for the multi-row export (issue #2922):
+/// three constants (K, N, B), the `[B, K]` activations, the packed/scales/biases
+/// set and the `[B, N]` output.
+pub(crate) fn multi_source(hsaco: &[u8], arch: &str) -> String {
+    executable_source_named(
+        hsaco,
+        arch,
+        "custom_qmv_multi",
+        &[
+            ("qmv4_multi_kernel", 0, 3, 4, 1),
+            ("qmv4_multi_row_kernel", 1, 3, 4, 1),
+        ],
+    )
+}
+
+/// The `hal.executable.source` block for the fused multi-row q/k/v export:
+/// five constants (K, N0, N1, N2, B), the `[B, K]` activations, three
+/// packed/scales/biases sets and three `[B, Ni]` outputs.
+pub(crate) fn qkv_multi_source(hsaco: &[u8], arch: &str) -> String {
+    executable_source_named(
+        hsaco,
+        arch,
+        "custom_qmv_qkv_multi",
+        &[
+            ("qmv4_qkv_multi_kernel", 0, 5, 10, 3),
+            ("qmv4_qkv_multi_row_kernel", 1, 5, 10, 3),
+        ],
+    )
+}
+
+/// The `hal.executable.source` block for the fused multi-row gate/up export:
+/// four constants (K, N0, N1, B), the `[B, K]` activations, two
+/// packed/scales/biases sets and two `[B, Ni]` outputs.
+pub(crate) fn gateup_multi_source(hsaco: &[u8], arch: &str) -> String {
+    executable_source_named(
+        hsaco,
+        arch,
+        "custom_qmv_gateup_multi",
+        &[
+            ("qmv4_gateup_multi_kernel", 0, 4, 7, 2),
+            ("qmv4_gateup_multi_row_kernel", 1, 4, 7, 2),
+        ],
+    )
+}
+
+/// The target alias and the executable source blocks the single-sequence decode
+/// graph dispatches, in module order.
+///
+/// Only the three rank-1 export groups are embedded: that graph never
+/// dispatches a multi-row export, and every embedded source carries a full copy
+/// of the HSACO, so including the ragged blocks here would grow the
+/// single-sequence module and vmfb for nothing (issue #2922).
+#[must_use]
+pub(crate) fn module_parts(hsaco: &[u8], arch: &str) -> (String, String) {
+    (
+        target_alias().to_string(),
+        format!(
+            "{}{}{}",
+            executable_source(hsaco, arch),
+            qkv_source(hsaco, arch),
+            gateup_source(hsaco, arch),
+        ),
+    )
+}
+
+/// The target alias and the executable source blocks the ragged decode graph
+/// dispatches (issue #2922), in module order.
+///
+/// The ragged graph routes every projection through the multi-row exports, so
+/// it embeds only those three groups; the rank-1 blocks would be dead weight in
+/// the module and artifact.
+#[must_use]
+pub(crate) fn ragged_module_parts(hsaco: &[u8], arch: &str) -> (String, String) {
+    (
+        target_alias().to_string(),
+        format!(
+            "{}{}{}",
+            multi_source(hsaco, arch),
+            qkv_multi_source(hsaco, arch),
+            gateup_multi_source(hsaco, arch),
+        ),
+    )
+}
+
+/// The alias and both kinds' source blocks together, for tests that assemble
+/// a whole module in one string.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn module_prefix(hsaco: &[u8], arch: &str) -> String {
-    format!("{}{}", target_alias(), executable_source(hsaco, arch))
-}
-
-/// The target alias alone, for assembling the module around the source block.
-#[must_use]
-pub(crate) fn alias_text() -> &'static str {
-    target_alias()
+    let (alias, single) = module_parts(hsaco, arch);
+    let (_, ragged) = ragged_module_parts(hsaco, arch);
+    format!("{alias}{single}{ragged}")
 }
 
 #[cfg(test)]
@@ -215,8 +436,25 @@ mod tests {
     /// The compiled-in kernel is the one described by the module ABI.
     #[test]
     fn kernel_source_matches_the_dispatch_contract() {
-        assert!(QMV_KERNEL.contains("extern \"C\" __global__ void qmv4_kernel"));
-        assert!(QMV_KERNEL.contains("extern \"C\" __global__ void qmv4_row_kernel"));
+        for kernel in [
+            "qmv4_kernel",
+            "qmv4_row_kernel",
+            "qmv4_qkv_kernel",
+            "qmv4_qkv_row_kernel",
+            "qmv4_gateup_kernel",
+            "qmv4_gateup_row_kernel",
+            "qmv4_multi_kernel",
+            "qmv4_multi_row_kernel",
+            "qmv4_qkv_multi_kernel",
+            "qmv4_qkv_multi_row_kernel",
+            "qmv4_gateup_multi_kernel",
+            "qmv4_gateup_multi_row_kernel",
+        ] {
+            assert!(
+                QMV_KERNEL.contains(&format!("extern \"C\" __global__ void {kernel}")),
+                "missing {kernel}"
+            );
+        }
         assert!(QMV_KERNEL.contains("const uint32_t*"), "packed weights");
         assert!(
             QMV_KERNEL.contains("__half2float(srow[g])"),
@@ -224,8 +462,33 @@ mod tests {
         );
         assert!(QMV_KERNEL.contains("uint4"), "16-byte packed loads");
         assert!(
-            QMV_KERNEL.contains("blockIdx.x * warps + warp"),
+            QMV_KERNEL.contains("blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5)"),
             "one warp per output row"
+        );
+        assert!(
+            QMV_KERNEL.contains("QmvSet"),
+            "the fused kernels select a weight set per output row"
+        );
+        assert!(
+            QMV_KERNEL.contains("float acc[QMV4_MAX_B]"),
+            "the multi-row kernels keep one accumulator per activation row"
+        );
+        assert!(
+            QMV_KERNEL.contains("x[(size_t)bb * K"),
+            "multi-row activations are indexed per row by K"
+        );
+        assert!(
+            QMV_KERNEL.contains("y[(size_t)bb * N + row]"),
+            "multi-row outputs are written at b * N + row"
+        );
+        assert!(
+            QMV_KERNEL.contains("set.y[(size_t)bb * set.n + r]"),
+            "fused multi-row outputs are written per set at b * Ni + local row"
+        );
+        assert_eq!(MAX_BATCH, 8, "QMV4_MAX_B and MAX_BATCH must agree");
+        assert!(
+            QMV_KERNEL.contains(&format!("#define QMV4_MAX_B {MAX_BATCH}")),
+            "the kernel's batch bound matches MAX_BATCH"
         );
         assert_eq!(
             ROWS_PER_BLOCK * 32,
@@ -246,19 +509,137 @@ mod tests {
         assert_eq!(dispatch(8192, 2048), (ROW_KERNEL_ENTRY, 2048));
     }
 
-    /// The module prefix names both exports and the five-binding ABI the
+    /// The fused groups follow the same width rule and grid rounding.
+    #[test]
+    fn fused_groups_pick_the_same_row_layout() {
+        assert_eq!(qkv_dispatch(2048, 3072), (QKV_WARP_ENTRY, 384));
+        assert_eq!(gateup_dispatch(2048, 16384), (GATEUP_WARP_ENTRY, 2048));
+        assert_eq!(qkv_dispatch(8192, 3072), (QKV_ROW_ENTRY, 3072));
+        assert_eq!(gateup_dispatch(8192, 16384), (GATEUP_ROW_ENTRY, 16384));
+    }
+
+    /// The multi-row exports reuse the single-row width rule and grid rounding
+    /// (issue #2922); the batch size never changes the workgroup count because
+    /// one weight read serves every row.
+    #[test]
+    fn multi_row_dispatch_matches_the_single_row_grid() {
+        assert_eq!(multi_dispatch(2048, 8192), (MULTI_WARP_ENTRY, 1024));
+        assert_eq!(multi_dispatch(4096, 2048), (MULTI_ROW_ENTRY, 2048));
+        assert_eq!(qkv_multi_dispatch(2048, 3072), (QKV_MULTI_WARP_ENTRY, 384));
+        assert_eq!(
+            gateup_multi_dispatch(2048, 16384),
+            (GATEUP_MULTI_WARP_ENTRY, 2048)
+        );
+        assert_eq!(qkv_multi_dispatch(8192, 3072), (QKV_MULTI_ROW_ENTRY, 3072));
+        assert_eq!(
+            gateup_multi_dispatch(8192, 16384),
+            (GATEUP_MULTI_ROW_ENTRY, 16384)
+        );
+        // N need not be a multiple of ROWS_PER_BLOCK: the warp grid rounds up and
+        // the kernel bounds its rows, so the extra workgroups exit early.
+        assert_eq!(multi_dispatch(2048, 100), (MULTI_WARP_ENTRY, 13));
+        assert_eq!(qkv_multi_dispatch(2048, 100), (QKV_MULTI_WARP_ENTRY, 13));
+        assert_eq!(multi_dispatch(2048, 8), (MULTI_WARP_ENTRY, 1));
+    }
+
+    /// The module prefix names every export and the per-group binding counts the
     /// builder emits, and embeds the bytes it was given.
     #[test]
     fn module_prefix_embeds_the_object_and_the_abi() {
         let prefix = module_prefix(&[0x00, 0xFF], "gfx1151");
         assert!(prefix.contains("#mlxcel_qmv_target"));
-        assert!(prefix.contains("hal.executable.export public @qmv4_kernel ordinal(0)"));
-        assert!(prefix.contains("hal.executable.export public @qmv4_row_kernel ordinal(1)"));
+        for source in [
+            "@custom_qmv ",
+            "@custom_qmv_qkv ",
+            "@custom_qmv_gateup ",
+            "@custom_qmv_multi ",
+            "@custom_qmv_qkv_multi ",
+            "@custom_qmv_gateup_multi ",
+        ] {
+            assert!(
+                prefix.contains(&format!("hal.executable.source private {source}")),
+                "missing source {source}"
+            );
+        }
+        for export in [
+            "hal.executable.export public @qmv4_kernel ordinal(0)",
+            "hal.executable.export public @qmv4_row_kernel ordinal(1)",
+            "hal.executable.export public @qmv4_qkv_kernel ordinal(0)",
+            "hal.executable.export public @qmv4_qkv_row_kernel ordinal(1)",
+            "hal.executable.export public @qmv4_gateup_kernel ordinal(0)",
+            "hal.executable.export public @qmv4_gateup_row_kernel ordinal(1)",
+            "hal.executable.export public @qmv4_multi_kernel ordinal(0)",
+            "hal.executable.export public @qmv4_multi_row_kernel ordinal(1)",
+            "hal.executable.export public @qmv4_qkv_multi_kernel ordinal(0)",
+            "hal.executable.export public @qmv4_qkv_multi_row_kernel ordinal(1)",
+            "hal.executable.export public @qmv4_gateup_multi_kernel ordinal(0)",
+            "hal.executable.export public @qmv4_gateup_multi_row_kernel ordinal(1)",
+        ] {
+            assert!(prefix.contains(export), "missing {export}");
+        }
         assert!(prefix.contains("constants = 2"));
+        assert!(
+            prefix.contains("constants = 3"),
+            "gate/up: K, N0, N1; multi: K, N, B"
+        );
+        assert!(
+            prefix.contains("constants = 4"),
+            "q/k/v: K, N0, N1, N2; multi gate/up: K, N0, N1, B"
+        );
+        assert!(
+            prefix.contains("constants = 5"),
+            "multi q/k/v: K, N0, N1, N2, B"
+        );
         assert!(prefix.contains("dense<\"0x00FF\"> : vector<2xi8>"));
         assert!(prefix.contains(&format!(
             "workgroup_size = [{THREADS_PER_BLOCK} : index, 1 : index, 1 : index]"
         )));
         assert!(prefix.contains("hal.return %n, %c1, %c1"));
+    }
+
+    /// Each decode graph embeds only the exports it dispatches (issue #2922).
+    /// Every source block carries a full HSACO copy, so embedding the other
+    /// kind's blocks would grow that graph's module and vmfb without a dispatch
+    /// ever reaching them.
+    #[test]
+    fn decode_kinds_embed_only_their_own_exports() {
+        let (single_alias, single) = module_parts(&[0x00, 0xFF], "gfx1151");
+        let (ragged_alias, ragged) = ragged_module_parts(&[0x00, 0xFF], "gfx1151");
+        assert!(single_alias.contains("#mlxcel_qmv_target"));
+        assert_eq!(single_alias, ragged_alias);
+        for source in ["@custom_qmv ", "@custom_qmv_qkv ", "@custom_qmv_gateup "] {
+            assert!(single.contains(source), "single decode missing {source}");
+            assert!(
+                !ragged.contains(source),
+                "ragged decode embeds unused {source}"
+            );
+        }
+        for source in [
+            "@custom_qmv_multi ",
+            "@custom_qmv_qkv_multi ",
+            "@custom_qmv_gateup_multi ",
+        ] {
+            assert!(ragged.contains(source), "ragged decode missing {source}");
+            assert!(
+                !single.contains(source),
+                "single decode embeds unused {source}"
+            );
+        }
+        for (export, in_single) in [
+            ("@qmv4_kernel ", true),
+            ("@qmv4_qkv_kernel ", true),
+            ("@qmv4_gateup_kernel ", true),
+            ("@qmv4_multi_kernel ", false),
+            ("@qmv4_qkv_multi_kernel ", false),
+            ("@qmv4_gateup_multi_kernel ", false),
+        ] {
+            let (own, other) = if in_single {
+                (&single, &ragged)
+            } else {
+                (&ragged, &single)
+            };
+            assert!(own.contains(export), "missing export {export}");
+            assert!(!other.contains(export), "export {export} embedded twice");
+        }
     }
 }

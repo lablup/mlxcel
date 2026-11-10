@@ -21,6 +21,7 @@
 pub(crate) mod config_fields;
 pub mod kv_arch;
 pub mod kv_cache_advisor;
+pub mod memory_availability;
 pub mod memory_estimate;
 pub mod quant_advisor;
 pub mod request_memory;

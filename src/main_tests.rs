@@ -1853,6 +1853,77 @@ fn serve_store_byte_budget_envs_parse_when_flags_are_absent() {
     assert_eq!(args.conversation_store_max_bytes, 22_222);
 }
 
+#[test]
+fn serve_responses_background_flags_parse_with_defaults() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let defaults = parse_serve_args(&[]);
+    assert_eq!(
+        defaults.responses_background_max_jobs,
+        mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS
+    );
+    assert_eq!(
+        defaults.responses_background_ephemeral_ttl_secs,
+        mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS
+    );
+    assert_eq!(
+        defaults.responses_background_event_log_bytes,
+        mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES
+    );
+
+    let args = parse_serve_args(&[
+        "--responses-background-max-jobs",
+        "7",
+        "--responses-background-ephemeral-ttl-secs",
+        "30",
+        "--responses-background-event-log-bytes",
+        "65536",
+    ]);
+    assert_eq!(args.responses_background_max_jobs, 7);
+    assert_eq!(args.responses_background_ephemeral_ttl_secs, 30);
+    assert_eq!(args.responses_background_event_log_bytes, 65536);
+}
+
+#[test]
+fn serve_responses_background_envs_parse_when_flags_are_absent() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = ScopedEnv::set(&[
+        ("MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS", "3"),
+        ("MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS", "45"),
+        ("MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES", "1024"),
+    ]);
+
+    let args = parse_serve_args(&[]);
+
+    assert_eq!(args.responses_background_max_jobs, 3);
+    assert_eq!(args.responses_background_ephemeral_ttl_secs, 45);
+    assert_eq!(args.responses_background_event_log_bytes, 1024);
+}
+
+#[test]
+fn serve_responses_background_ephemeral_ttl_zero_is_refused() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let err = serve_parse_error(
+        &["--responses-background-ephemeral-ttl-secs", "0"],
+        "an ephemeral TTL of 0 must be refused",
+    );
+    assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+
+    let _env = ScopedEnv::set(&[("MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS", "0")]);
+    let err = serve_parse_error(&[], "an ephemeral TTL of 0 from the env must be refused");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+}
+
 /// The clap error from `mlxcel serve -m models/foo <rest...>`, which must fail.
 fn serve_parse_error(rest: &[&str], expectation: &str) -> clap::Error {
     Cli::try_parse_from(serve_argv(rest)).expect_err(expectation)

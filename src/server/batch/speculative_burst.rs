@@ -529,7 +529,7 @@ pub(crate) fn mtp_prefill_suffix_start(
 /// The batch-capable half keyed on `has_neural_accelerator` (M5 only) until
 /// #1217 measured M3 Ultra on this pairing for the first time and found 1.95x
 /// to 2.65x on a host the old predicate declined. The rows are in
-/// `docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md`.
+/// `docs/benchmark_results/versions/v0.6.0.md#mtp-b1-gate-m3ultra-2026-08-20`.
 ///
 /// The discriminator is the `use_qmv_wide` split documented in
 /// `crate::models::speculative_exactness`, not the Neural Accelerator: from
@@ -583,7 +583,7 @@ pub(crate) fn mtp_b1_burst_enabled(target_supports_batching: bool) -> bool {
 /// profitability. Issue #1983 restores 31B QAT/non-QAT singleton exactness by
 /// matching classic attention geometry; that correction has a measured cost,
 /// so the pre-probe #1217 speedups are not promises for the corrected path.
-/// See docs/benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md.
+/// See docs/benchmark_results/versions/v0.8.0.md#gemma4-31b-mtp-exactness-2026-09-26.
 /// Used by: Gemma 4 and Qwen 3.5 MTP policy fallback.
 ///
 /// `wide_quantized_projections` is the host's Apple GPU generation reduced to
@@ -747,6 +747,9 @@ pub(crate) fn mtp_capable_target(model: &LoadedModel, block_size: usize) -> bool
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
             vlm.text_model.mtp_exactness_allows(block_size)
         }
+        // Qwen3.8-Flash-Next (`qwen4_exp`, #2880) paired with the native
+        // `qwen4_exp_mtp` head: Metal plus the measured block-vs-chain probe.
+        LoadedModel::Qwen4ExpVLM(vlm) => vlm.text_model.mtp_exactness_allows(block_size),
         LoadedModel::Inkling(_) | LoadedModel::InklingVLM(_) => true,
         // GLM-4.7-Flash (`glm4_moe_lite`, issue #1326) paired with the
         // `glm4_moe_lite_mtp` drafter `mlxcel split-mtp` produces. Plain MLA
@@ -775,6 +778,7 @@ pub(crate) fn mtp_target_family_supported(model: &LoadedModel) -> bool {
             | LoadedModel::Qwen35Moe(_)
             | LoadedModel::Qwen35VLM(_)
             | LoadedModel::Qwen35MoeVLM(_)
+            | LoadedModel::Qwen4ExpVLM(_)
             | LoadedModel::Inkling(_)
             | LoadedModel::InklingVLM(_)
             | LoadedModel::Glm4MoeLite(_)
@@ -1217,6 +1221,18 @@ fn run_mtp_burst(
         }
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
+        // Qwen3.8-Flash-Next (#2880) pairs with the native `qwen4_exp_mtp`
+        // head; the wrapper exposes the text backbone's embed_tokens and
+        // lm_head. Metal-only for the same kind of reason as Qwen 3.5.
+        LoadedModel::Qwen4ExpVLM(_) if !mlxcel_core::metal_is_available() => {
+            tracing::warn!(
+                "MTP speculative dispatch declined: Qwen4-Exp MTP requires the Metal \
+                 backend (its temperature-0 exactness rests on the Metal precise \
+                 gated-delta kernel); falling back to classic decode"
+            );
+            return Err(BurstOutcome::DeclineToClassic);
+        }
+        LoadedModel::Qwen4ExpVLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Inkling(inkling) => inkling as &dyn LanguageModel,
         LoadedModel::InklingVLM(vlm) => &vlm.text as &dyn LanguageModel,
         // GLM-4.7-Flash (#1326): the drafter borrows nothing; bind only
@@ -1225,9 +1241,9 @@ fn run_mtp_burst(
         _ => {
             tracing::warn!(
                 "MTP speculative dispatch declined: target is {:?}, expected \
-                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), Inkling \
-                 (text or VLM), or GLM-4.7-Flash (glm4_moe_lite); \
-                 falling back to classic decode",
+                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), \
+                 Qwen3.8-Flash-Next (qwen4_exp), Inkling (text or VLM), or \
+                 GLM-4.7-Flash (glm4_moe_lite); falling back to classic decode",
                 model_variant_label(ctx.model),
             );
             return Err(BurstOutcome::DeclineToClassic);
@@ -1440,6 +1456,29 @@ fn run_mtp_burst(
                 Some(seq.seq_id),
             )
             .with_prefill_start_offset(prefill_start_offset);
+            drive_mtp_generator(
+                adapter,
+                owned_drafter,
+                &prompt,
+                max_tokens,
+                &sampling,
+                &token_history,
+                block_size,
+                cancel,
+                &logprobs_config,
+                profile_probe_rounds,
+            )
+        }
+        // Qwen3.8-Flash-Next (#2880): the adapter routes through the text
+        // backbone's per-sequence slot; its caches are plain growing
+        // KVCaches, so no block-size-derived constructor parameter.
+        LoadedModel::Qwen4ExpVLM(vlm) => {
+            let adapter = crate::models::qwen4_exp_mtp_target::Qwen4ExpMtpTargetAdapter::new(
+                &vlm.text_model,
+                Some(seq.seq_id),
+            )
+            .with_prefill_start_offset(prefill_start_offset)
+            .with_prefill_chunk_size(ctx.prefill_chunk_size);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -3063,6 +3102,7 @@ pub fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Qwen35VLM(_) => "Qwen35VLM",
         LoadedModel::Qwen35Moe(_) => "Qwen35Moe",
         LoadedModel::Qwen35MoeVLM(_) => "Qwen35MoeVLM",
+        LoadedModel::Qwen4ExpVLM(_) => "Qwen4ExpVLM",
         LoadedModel::Inkling(_) => "Inkling",
         LoadedModel::InklingVLM(_) => "InklingVLM",
         LoadedModel::Lfm2(_) => "Lfm2",
@@ -3110,7 +3150,7 @@ mod tests {
     /// M3 is the row this issue moved, and it moved on measurement: the
     /// 31B + bf16 assistant pairing runs 1.95x to 2.65x on an M3 Ultra that
     /// the previous `has_neural_accelerator` predicate declined
-    /// (`docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md`).
+    /// (`docs/benchmark_results/versions/v0.6.0.md#mtp-b1-gate-m3ultra-2026-08-20`).
     #[test]
     fn mtp_b1_default_batch_capable_follows_gpu_generation() {
         use mlxcel_core::hardware::AppleSiliconGen;

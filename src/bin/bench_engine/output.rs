@@ -136,7 +136,8 @@ impl Measurement {
             self.path,
             self.prompt_tokens,
             self.ttft_ms,
-            self.generated_tokens,
+            // Both paths produce the first token before the decode window.
+            self.generated_tokens.saturating_sub(1),
             self.decode_ms,
             self.decode_tok_s,
             self.prefill_chunk,
@@ -310,7 +311,8 @@ mod tests {
 
     #[test]
     fn server_measurement_derives_decode_rate_from_its_own_timing() {
-        let m = server(256, 12.0, 100, 1000.0);
+        // 101 tokens: the first at TTFT, 100 inside the 1000 ms window.
+        let m = server(256, 12.0, 101, 1000.0);
         assert!((m.decode_tok_s - 100.0).abs() < 1e-9);
         assert_eq!(m.decode_storage, "paged");
         assert_eq!(m.prefill_chunk, 512);
@@ -335,7 +337,7 @@ mod tests {
         let lines = side_by_side_lines(&[
             cli(8192, 900.0, 100.0),
             cli(256, 20.0, 120.0),
-            server(256, 25.0, 100, 1000.0),
+            server(256, 25.0, 101, 1000.0),
         ]);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("server vs cli"));

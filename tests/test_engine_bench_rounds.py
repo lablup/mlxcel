@@ -145,6 +145,18 @@ class TimeoutTests(unittest.TestCase):
 
 @unittest.skipIf(sys.platform == "win32", "needs bash and POSIX tools (a bash stand-in benchmark); the Linux python-tooling CI job runs it")
 class EndToEndTests(unittest.TestCase):
+    def test_hostgate_import_does_not_depend_on_archived_results(self):
+        # Zero rounds exercises the real CLI import without waiting for a Linux host
+        # or invoking the GPU. The module must live with the maintained tools.
+        self.assertEqual(pathlib.Path(rounds.HOSTGATE_DIR), ROOT / "scripts")
+        self.assertTrue((ROOT / "scripts" / "bench_hostgate.py").is_file())
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = _run_script(
+                "--model", "m", "--out", str(pathlib.Path(tmp) / "out.jsonl"),
+                "--arm", "a=--path cli", "--rounds", "0", "--hostgate",
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def test_rotating_schedule_runs_every_arm_and_a_null_repeat(self):
         body = (
             "import json, sys\n"

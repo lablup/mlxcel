@@ -48,7 +48,7 @@ route discovery depend on the checkpoint.
 | Surface | Main routes | Notes |
 | --- | --- | --- |
 | OpenAI | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/responses/compact`, `/v1/embeddings`, `/v1/models` | Responses also supports retrieve, delete, and cancel by id, and conversation compaction (explicit, or automatic through `context_management`). |
-| Anthropic | `/v1/messages`, `/v1/messages/count_tokens` | Uses the loaded chat template and the shared token accounting path. |
+| Anthropic | `/v1/messages`, `/v1/messages/count_tokens` | Uses the loaded chat template and the shared token accounting path. Claude Code's per-request billing stamp is pinned so its prompts keep their cached prefix; see [Context, batching, and caching](#context-batching-and-caching). |
 | Retrieval | `/v1/rerank`, `/v1/reranking` | Cohere/Jina-compatible reranking surface. |
 | Audio | `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations` | Kokoro TTS, audio-capable chat models, and Whisper are described in [`audio-api.md`](audio-api.md). |
 | Native llama-server | `/completion`, `/completions`, `/embedding`, `/embeddings`, `/tokenize`, `/detokenize`, `/infill`, `/apply-template` | Native response schemas are intentionally distinct from the OpenAI `/v1/...` schemas. |
@@ -122,6 +122,15 @@ cache state, since a cache hit prefills in two parts and can round differently
 match b10621; enable `--context-shift` and configure `--keep` when an
 application intentionally wants to retain part of an overlong conversation.
 
+Claude Code starts its system prompt with an `x-anthropic-billing-header` stamp
+whose `cch` value changes on every request and whose fourth `cc_version` part
+changes on every session. On the Anthropic Messages routes the server replaces
+those two values with `f` characters of the same length before rendering, so a
+turn can reuse the whole previous prompt rather than stopping at the stamp.
+Only top-level `system` text starting with the exact header is touched. Set
+`MLXCEL_ANTHROPIC_PIN_BILLING_STAMP=0` to pass the client's text through
+unchanged.
+
 See [`CONTINUOUS_BATCHING.md`](CONTINUOUS_BATCHING.md) for scheduler and
 disaggregated-serving details and [`turbo-kv-cache.md`](turbo-kv-cache.md) for
 KV-cache modes.
@@ -146,6 +155,12 @@ Requests select an entry with the JSON `model` field, or the `model` query
 parameter on GET routes. `--models-max` bounds the resident set with LRU
 eviction. Autoload is on by default and can be disabled globally with
 `--no-models-autoload` or controlled on a management request with `autoload`.
+
+Responses API calls that address a response by id (`GET` and `DELETE
+/v1/responses/{id}`, `POST /v1/responses/{id}/cancel`) need no `model`: the
+router finds the loaded model that holds the id. A model with a running
+background response is not evicted. See
+[`responses-api.md`](responses-api.md#serving-roles).
 
 Router management uses `GET /models` or `/v1/models` for inventory and reload,
 `POST /models` for a background download, `DELETE /models?model=...` for a

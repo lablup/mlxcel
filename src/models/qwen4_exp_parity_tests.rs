@@ -34,7 +34,7 @@ use crate::models::gated_delta::GatedDeltaCache;
 use crate::models::qwen3_vl::InterleavedMRoPE;
 use mlxcel_core::generate::LanguageModel;
 
-pub(super) fn fixture(name: &str) -> Value {
+pub(crate) fn fixture(name: &str) -> Value {
     let path = format!(
         "{}/tests/fixtures/qwen4_exp/{name}.json",
         env!("CARGO_MANIFEST_DIR")
@@ -50,7 +50,7 @@ fn fnv1a64(name: &str) -> u64 {
 }
 
 /// `generate_fixtures.hashed_tensor`, element for element.
-pub(super) fn hashed(name: &str, shape: &[i32], scale: f64, offset: f64) -> UniquePtr<MlxArray> {
+pub(crate) fn hashed(name: &str, shape: &[i32], scale: f64, offset: f64) -> UniquePtr<MlxArray> {
     let count: i64 = shape.iter().map(|&d| i64::from(d)).product();
     let seed = fnv1a64(name);
     let (scale, offset) = (scale as f32, offset as f32);
@@ -67,7 +67,7 @@ pub(super) fn hashed(name: &str, shape: &[i32], scale: f64, offset: f64) -> Uniq
     mlxcel_core::from_slice_f32(&values, shape)
 }
 
-pub(super) fn shape_of(value: &Value) -> Vec<i32> {
+pub(crate) fn shape_of(value: &Value) -> Vec<i32> {
     value
         .as_array()
         .expect("shape")
@@ -85,7 +85,7 @@ fn hashed_input(spec: &Value) -> UniquePtr<MlxArray> {
     )
 }
 
-pub(super) fn weights(fixture: &Value) -> WeightMap {
+pub(crate) fn weights(fixture: &Value) -> WeightMap {
     let mut map = WeightMap::new();
     for spec in fixture["tensors"].as_array().expect("tensors") {
         let name = spec["name"].as_str().expect("name");
@@ -100,7 +100,7 @@ pub(super) fn weights(fixture: &Value) -> WeightMap {
     map
 }
 
-pub(super) fn config(fixture: &Value, overrides: Option<&Value>) -> ResolvedQwen4ExpConfig {
+pub(crate) fn config(fixture: &Value, overrides: Option<&Value>) -> ResolvedQwen4ExpConfig {
     let mut raw = fixture["tiny_config"].clone();
     if let Some(overrides) = overrides.and_then(Value::as_object) {
         for (key, value) in overrides {
@@ -258,12 +258,16 @@ fn gated_residual_matches_upstream_for_one_layer() {
     let h = hashed_input(&fixture["input"]);
     let branch = hashed_input(&fixture["branch"]);
 
-    let (mixed, inject) = residual.split(&h);
+    let (mixed, inject) = residual.split(&h, false);
     assert_close("mixed", &mixed, &expected(&fixture["mixed"]));
     assert_close("inject", &inject, &expected(&fixture["inject"]));
     let out = residual.inject(&branch, &h, &inject);
     assert_close("injected stream", &out, &expected(&fixture["output"]));
-    assert_close("mixer", &mixer.collapse(&h), &expected(&fixture["mixer"]));
+    assert_close(
+        "mixer",
+        &mixer.collapse(&h, false),
+        &expected(&fixture["mixer"]),
+    );
 }
 
 #[test]
@@ -470,12 +474,12 @@ fn tiny_model_matches_upstream_logits_for_prefill_and_eight_decode_steps() {
     }
 }
 
-pub(super) fn tiny_model(fixture: &Value) -> Qwen4ExpModel {
+pub(crate) fn tiny_model(fixture: &Value) -> Qwen4ExpModel {
     let config: Qwen4ExpConfig = serde_json::from_value(fixture["config"].clone()).unwrap();
     Qwen4ExpModel::from_weights(&weights(fixture), &config.resolve().unwrap()).unwrap()
 }
 
-pub(super) fn prompt_ids(fixture: &Value) -> UniquePtr<MlxArray> {
+pub(crate) fn prompt_ids(fixture: &Value) -> UniquePtr<MlxArray> {
     let prompt: Vec<i32> = ints(&fixture["prompt"])
         .into_iter()
         .map(|t| t as i32)
@@ -594,13 +598,14 @@ fn mixed_width(name: &str, shape: &[i32]) -> Option<i32> {
     Some(4)
 }
 
-#[test]
-fn mixed_width_quantization_loads_each_module_at_its_declared_width() {
-    let fixture = fixture("model");
+/// The tiny fixture quantized module by module at the released checkpoint's
+/// mixed widths (group 32): the packed weights with their `quantization`
+/// block, and the dequantized float32 weights the packed ones stand for.
+pub(crate) fn mixed_width_quantized_weights(fixture: &Value) -> (WeightMap, WeightMap, Value) {
     let mut quantized = WeightMap::new();
     let mut dequantized = WeightMap::new();
     let mut overrides = serde_json::Map::new();
-    for (name, tensor) in weights(&fixture) {
+    for (name, tensor) in weights(fixture) {
         let shape = mlxcel_core::array_shape(&tensor);
         let Some(bits) = mixed_width(&name, &shape) else {
             dequantized.insert(name.clone(), mlxcel_core::copy(&tensor));
@@ -635,6 +640,30 @@ fn mixed_width_quantization_loads_each_module_at_its_declared_width() {
     }
     let mut quantization = serde_json::json!({"group_size": 32, "bits": 4, "mode": "affine"});
     quantization.as_object_mut().unwrap().extend(overrides);
+    (quantized, dequantized, quantization)
+}
+
+/// The tiny model on [`mixed_width_quantized_weights`]: every projection runs
+/// through the quantized kernels the released checkpoint runs through, which
+/// is what a block-versus-chain exactness probe has to see.
+pub(crate) fn quantized_tiny_model(fixture: &Value) -> Qwen4ExpModel {
+    let (quantized, _, quantization) = mixed_width_quantized_weights(fixture);
+    let mut raw = fixture["config"].clone();
+    raw["quantization"] = quantization;
+    Qwen4ExpModel::from_weights(
+        &quantized,
+        &serde_json::from_value::<Qwen4ExpConfig>(raw)
+            .unwrap()
+            .resolve()
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn mixed_width_quantization_loads_each_module_at_its_declared_width() {
+    let fixture = fixture("model");
+    let (quantized, dequantized, quantization) = mixed_width_quantized_weights(&fixture);
 
     let mut raw = fixture["config"].clone();
     let reference = Qwen4ExpModel::from_weights(
@@ -974,7 +1003,10 @@ fn bf16_moe_decode_matches_reference_expert_rounding() {
     }
     let moe = super::moe::Qwen4ExpMoeBlock::from_weights(&quantized, &config, "moe").unwrap();
     let input = mlxcel_core::astype(&hashed_input(&fixture["input"]), dtype::BFLOAT16);
-    assert_eq!(values(&moe.forward(&input)), expected(&fixture["output"]));
+    assert_eq!(
+        values(&moe.forward(&input, false)),
+        expected(&fixture["output"])
+    );
 }
 
 #[test]

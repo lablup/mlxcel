@@ -430,6 +430,10 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.supports_decode_lookahead_rewind()
     }
 
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        self.text_model.supports_speculative_verify_rewind()
+    }
+
     fn kv_cache_captures_sequence_state(&self) -> bool {
         self.text_model.kv_cache_captures_sequence_state()
     }

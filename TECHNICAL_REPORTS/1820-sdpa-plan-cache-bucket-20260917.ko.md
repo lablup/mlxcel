@@ -1,6 +1,6 @@
 # cuDNN SDPA 플랜 캐시 키 버킷화, 그리고 적용하지 않기로 한 이유
 
-이슈 #1820. 호스트 GB10 (sm_121), MLX 핀 `81ba1c6a`, CUDA 릴리스 빌드, 툴체인 1.97.1, 기준 트리 `0ef0a1a4` (PR #1817을 포함한 main). 전체 측정 기록: `docs/benchmark_results/sdpa-plan-cache-bucket-gb10-2026-09-17.md`.
+이슈 #1820. 호스트 GB10 (sm_121), MLX 핀 `81ba1c6a`, CUDA 릴리스 빌드, 툴체인 1.97.1, 기준 트리 `0ef0a1a4` (PR #1817을 포함한 main). 전체 측정 기록: `docs/benchmark_results/versions/v0.8.0.md#sdpa-plan-cache-bucket-gb10-2026-09-17`.
 
 ## 배경
 
