@@ -1437,6 +1437,65 @@ mod tests {
         assert!(!emit_decode_with(&c, true, Precision::F32).contains("f16"));
     }
 
+    /// issue #2921: the ROCm tuning spec (`match_gqa_score` in
+    /// `assets/rocm/bigk_vecmat_tuning.mlir`) selects the single-sequence score
+    /// dispatch by contraction shape: a batched f16 by f16 into f32 dot of
+    /// `[nkv, group, d]` against `[seq, nkv, d]` with group 4 and head_dim 64.
+    /// That config is what drops the dispatch from about 74 us to about 1.5 us
+    /// on gfx1151, so the emitter must keep producing that exact shape. A
+    /// non-batched dot, other operand dtypes, or another rank would silently
+    /// stop matching and put the attention cost back. The softmax order after
+    /// the dot (add mask, reduce max, subtract, exp) is asserted alongside it
+    /// because that sequence is what the same dispatch chain feeds.
+    #[test]
+    fn single_decode_score_contraction_keeps_the_tuning_spec_shape() {
+        use super::builder::Precision;
+        let c = Config::llama_3_2_1b();
+        let (nq, nkv, g, d, seq) = (c.n_q, c.n_kv, c.group(), c.head_dim, c.context_capacity);
+        assert_eq!((nq, nkv, g, d, seq), (32, 8, 4, 64, 256));
+        let mlir = emit_decode_with(&c, false, Precision::F16);
+
+        let score_dot = format!(
+            "batching_dims = [0] x [1], contracting_dims = [2] x [2] : (tensor<{nkv}x{g}x{d}xf16>, tensor<{seq}x{nkv}x{d}xf16>) -> tensor<{nkv}x{g}x{seq}xf32>"
+        );
+        let score_dots = mlir.lines().filter(|l| l.contains(&score_dot)).count();
+        assert_eq!(
+            score_dots, 16,
+            "one tuned score contraction per layer, got {score_dots}"
+        );
+
+        let after_dot = &mlir[mlir.find(&score_dot).expect("score dot")..];
+        let scale_at = after_dot
+            .find(&format!(
+                "dims = [] : (tensor<f32>) -> tensor<{nq}x{seq}xf32>"
+            ))
+            .expect("attention scale broadcast");
+        let mask_at = after_dot
+            .find(&format!(
+                "dims = [1] : (tensor<{seq}xf32>) -> tensor<{nq}x{seq}xf32>"
+            ))
+            .expect("mask broadcast");
+        let max_at = after_dot
+            .find("applies stablehlo.maximum across dimensions = [1]")
+            .expect("key-axis max");
+        let sub_at = after_dot.find("stablehlo.subtract").expect("max subtract");
+        let exp_at = after_dot.find("stablehlo.exponential").expect("exp");
+        assert!(
+            scale_at < mask_at && mask_at < max_at && max_at < sub_at && sub_at < exp_at,
+            "scale, then mask, then max-subtract, then exp"
+        );
+
+        // The context contraction reuses the same batched layout in the other
+        // direction, which is why its dispatch is already fast; assert it stays
+        // that shape so the two dots are not silently re-associated.
+        assert!(
+            mlir.contains(&format!(
+                "batching_dims = [0] x [1], contracting_dims = [2] x [0] : (tensor<{nkv}x{g}x{seq}xf16>, tensor<{seq}x{nkv}x{d}xf16>) -> tensor<{nkv}x{g}x{d}xf32>"
+            )),
+            "the context dot keeps its tuned shape"
+        );
+    }
+
     /// issue #572: under f16 precision exactly the 7 per-layer linear projections
     /// (down/gate/up/wk/wo/wq/wv) are declared f16 weight args (uploaded f16-resident);
     /// embed / lm_head / norms / caches stay f32. Each signature arg renders as
