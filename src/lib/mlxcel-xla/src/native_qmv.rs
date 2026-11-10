@@ -380,17 +380,38 @@ pub(crate) fn gateup_multi_source(hsaco: &[u8], arch: &str) -> String {
     )
 }
 
-/// The target alias and every executable source block a native decode graph
-/// needs, in module order.
+/// The target alias and the executable source blocks the single-sequence decode
+/// graph dispatches, in module order.
+///
+/// Only the three rank-1 export groups are embedded: that graph never
+/// dispatches a multi-row export, and every embedded source carries a full copy
+/// of the HSACO, so including the ragged blocks here would grow the
+/// single-sequence module and vmfb for nothing (issue #2922).
 #[must_use]
 pub(crate) fn module_parts(hsaco: &[u8], arch: &str) -> (String, String) {
     (
         target_alias().to_string(),
         format!(
-            "{}{}{}{}{}{}",
+            "{}{}{}",
             executable_source(hsaco, arch),
             qkv_source(hsaco, arch),
             gateup_source(hsaco, arch),
+        ),
+    )
+}
+
+/// The target alias and the executable source blocks the ragged decode graph
+/// dispatches (issue #2922), in module order.
+///
+/// The ragged graph routes every projection through the multi-row exports, so
+/// it embeds only those three groups; the rank-1 blocks would be dead weight in
+/// the module and artifact.
+#[must_use]
+pub(crate) fn ragged_module_parts(hsaco: &[u8], arch: &str) -> (String, String) {
+    (
+        target_alias().to_string(),
+        format!(
+            "{}{}{}",
             multi_source(hsaco, arch),
             qkv_multi_source(hsaco, arch),
             gateup_multi_source(hsaco, arch),
@@ -398,13 +419,14 @@ pub(crate) fn module_parts(hsaco: &[u8], arch: &str) -> (String, String) {
     )
 }
 
-/// The alias and the source blocks together, for tests that assemble a whole
-/// module in one string.
+/// The alias and both kinds' source blocks together, for tests that assemble
+/// a whole module in one string.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn module_prefix(hsaco: &[u8], arch: &str) -> String {
-    let (alias, sources) = module_parts(hsaco, arch);
-    format!("{alias}{sources}")
+    let (alias, single) = module_parts(hsaco, arch);
+    let (_, ragged) = ragged_module_parts(hsaco, arch);
+    format!("{alias}{single}{ragged}")
 }
 
 #[cfg(test)]
@@ -573,5 +595,51 @@ mod tests {
             "workgroup_size = [{THREADS_PER_BLOCK} : index, 1 : index, 1 : index]"
         )));
         assert!(prefix.contains("hal.return %n, %c1, %c1"));
+    }
+
+    /// Each decode graph embeds only the exports it dispatches (issue #2922).
+    /// Every source block carries a full HSACO copy, so embedding the other
+    /// kind's blocks would grow that graph's module and vmfb without a dispatch
+    /// ever reaching them.
+    #[test]
+    fn decode_kinds_embed_only_their_own_exports() {
+        let (single_alias, single) = module_parts(&[0x00, 0xFF], "gfx1151");
+        let (ragged_alias, ragged) = ragged_module_parts(&[0x00, 0xFF], "gfx1151");
+        assert!(single_alias.contains("#mlxcel_qmv_target"));
+        assert_eq!(single_alias, ragged_alias);
+        for source in ["@custom_qmv ", "@custom_qmv_qkv ", "@custom_qmv_gateup "] {
+            assert!(single.contains(source), "single decode missing {source}");
+            assert!(
+                !ragged.contains(source),
+                "ragged decode embeds unused {source}"
+            );
+        }
+        for source in [
+            "@custom_qmv_multi ",
+            "@custom_qmv_qkv_multi ",
+            "@custom_qmv_gateup_multi ",
+        ] {
+            assert!(ragged.contains(source), "ragged decode missing {source}");
+            assert!(
+                !single.contains(source),
+                "single decode embeds unused {source}"
+            );
+        }
+        for (export, in_single) in [
+            ("@qmv4_kernel ", true),
+            ("@qmv4_qkv_kernel ", true),
+            ("@qmv4_gateup_kernel ", true),
+            ("@qmv4_multi_kernel ", false),
+            ("@qmv4_qkv_multi_kernel ", false),
+            ("@qmv4_gateup_multi_kernel ", false),
+        ] {
+            let (own, other) = if in_single {
+                (&single, &ragged)
+            } else {
+                (&ragged, &single)
+            };
+            assert!(own.contains(export), "missing export {export}");
+            assert!(!other.contains(export), "export {export} embedded twice");
+        }
     }
 }

@@ -3167,7 +3167,8 @@ impl IreeRaggedLlama {
                     Ok(arch) => match crate::native_qmv::hsaco(&arch) {
                         Ok(bytes) => {
                             cfg.set_packed_args(true);
-                            native_module = Some(crate::native_qmv::module_parts(&bytes, &arch));
+                            native_module =
+                                Some(crate::native_qmv::ragged_module_parts(&bytes, &arch));
                         }
                         Err(error) => eprintln!(
                             "mlxcel: native 4-bit batch projections unavailable ({error}); \
