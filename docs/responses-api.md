@@ -247,7 +247,7 @@ What create answers:
 
 Cancelling a job: `POST /v1/responses/{id}/cancel` returns the job's final Response object with `status: "cancelled"`, byte for byte what a following `GET` returns, so `client.responses.cancel()` gets a full object.
 
-- A `queued` job is recorded `cancelled` at once with `output: []` and `completed_at: null`, and never starts generating. An automatic compaction pass that is already running finishes, and its result is discarded.
+- A `queued` job is recorded `cancelled` at once with `output: []` and `completed_at: null`, and never starts generating. Work the job had started before generation (automatic compaction, video frame extraction, request preparation) is abandoned, as for a foreground client that disconnects; a compaction summary or video decode that is already running finishes that one step.
 - An `in_progress` job stops at its next token. The reply waits up to 5 seconds for it and carries the output generated so far. A job that does not stop in time is recorded `cancelled` with `output: []`; whatever it produces later is discarded.
 - A repeated cancel returns the same object.
 - A job that finished as `completed`, `incomplete` or `failed` before the cancel took effect returns `400 invalid_request_error` (`response '<id>' has already finished and cannot be cancelled`) and keeps its result. The reply never says `cancelled` for a response that `GET` reports otherwise.

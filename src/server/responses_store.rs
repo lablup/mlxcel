@@ -634,7 +634,7 @@ impl ResponsesStore {
         let mut jobs = self.lock_jobs();
         if let Some(job) = jobs.jobs.get_mut(id) {
             job.cancel_requested = true;
-            job.token.store(true, Ordering::Relaxed);
+            job.token.store(true, Ordering::Release);
             return BackgroundCancel::Requested;
         }
         let mut state = self.write_inner();

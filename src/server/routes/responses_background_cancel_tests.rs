@@ -438,3 +438,67 @@ async fn a_cancel_that_ends_generation_with_an_error_is_recorded_cancelled() {
     h.handle.fail("boom");
     assert_eq!(h.terminal(&id).await["status"], "failed");
 }
+
+/// A cancel of a `queued` job frees its slot at once, so the job's
+/// pre-generation work (video decode, compaction, media fetch) must not run
+/// on detached from any slot: it is dropped when the cancel records the
+/// terminal object, and the cancel registration is retired.
+#[tokio::test]
+async fn a_queued_cancel_drops_the_pre_generation_work() {
+    use super::super::{JobRecorder, queued_response, unless_cancelled};
+
+    let h = harness();
+    let job = h.job(background_body());
+    let id = job.response_id.clone();
+    let queued = queued_response(&job);
+    let token = h
+        .store
+        .admit_background(queued.clone(), vec![], true)
+        .expect("admit background job");
+    h.store
+        .in_flight_write()
+        .expect("in-flight registry")
+        .insert(id.clone(), token);
+    let recorder = JobRecorder::new(Arc::clone(&h.store), id.clone(), queued.clone());
+
+    // Work that finishes first is returned.
+    assert_eq!(unless_cancelled(&recorder, async { 7 }).await, Some(7));
+    assert_eq!(h.store.active_background_jobs(), 1);
+
+    // Work that never finishes is dropped once the cancel lands.
+    let dropped = Arc::new(AtomicUsize::new(0));
+    struct OnDrop(Arc<AtomicUsize>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let guard = OnDrop(Arc::clone(&dropped));
+    let work = async move {
+        let _guard = guard;
+        std::future::pending::<()>().await
+    };
+    let cancel = async {
+        tokio::task::yield_now().await;
+        h.store.cancel_background(&id)
+    };
+    let (outcome, cancel) = tokio::time::timeout(WAIT, async {
+        tokio::join!(unless_cancelled(&recorder, work), cancel)
+    })
+    .await
+    .expect("the cancel ends the pending work");
+    assert_eq!(outcome, None);
+    assert!(matches!(
+        cancel,
+        crate::server::responses_store::BackgroundCancel::Terminal(ref response)
+            if response.status == ResponseStatus::Cancelled
+    ));
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(h.store.active_background_jobs(), 0);
+    let registered = h
+        .store
+        .in_flight_write()
+        .expect("in-flight registry")
+        .contains_key(&id);
+    assert!(!registered, "the cancel registration is retired");
+}

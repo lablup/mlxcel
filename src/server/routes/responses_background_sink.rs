@@ -93,6 +93,23 @@ impl JobRecorder {
         self.store.background_status(&self.response_id).is_some()
     }
 
+    /// Resolve once a terminal object is recorded, whoever recorded it. While
+    /// the job is `queued` that can only be the cancel route, so the job task
+    /// races its pre-generation work against this and drops that work when
+    /// the job was cancelled.
+    ///
+    /// Used by: `run_background_job`.
+    pub(super) async fn terminal_recorded(&self) {
+        // The wait wakes on the terminal write; the bound only re-checks.
+        const RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
+        while self.is_active() {
+            let _ = self
+                .store
+                .wait_background_terminal(&self.response_id, RECHECK)
+                .await;
+        }
+    }
+
     /// Replace the input items the terminal object is stored with, after
     /// automatic compaction rewrote them.
     pub(super) fn set_input_items(
@@ -119,6 +136,13 @@ impl JobRecorder {
         let cancel_requested = self.store.background_cancel_requested(&self.response_id);
         let mut terminal = self.template.clone();
         if cancel_acknowledged || cancel_requested {
+            // Usually the error the cancel itself caused, but it can be an
+            // unrelated failure (a driver panic) that the cancel hides.
+            tracing::debug!(
+                response_id = %self.response_id,
+                code,
+                "background response failure superseded by its cancel: {message}"
+            );
             terminal.status = ResponseStatus::Cancelled;
         } else {
             tracing::warn!(

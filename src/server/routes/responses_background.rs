@@ -50,8 +50,10 @@
 //! ([`cancel_background_response`], issue #2899):
 //!
 //! - `queued`: the route records `cancelled` with no output at once. The job
-//!   task then skips generation, or stops at its next token check. A running
-//!   compaction pass is not interrupted, but its result is discarded.
+//!   task drops its pre-generation work (video decode, compaction, request
+//!   preparation) as a foreground client disconnect does (a summary pass or
+//!   clip decode already running finishes that step), and skips generation
+//!   or stops at its next token check.
 //! - `in_progress`: the route flips the token and waits up to
 //!   [`BACKGROUND_CANCEL_WAIT`] for the driver to record its terminal
 //!   object, which keeps the partial output. A job that does not answer in
@@ -360,28 +362,28 @@ async fn run_background_job<D>(
         compact_threshold,
     } = job;
 
-    let auto = match run_prelude(
+    let prelude = run_prelude(
         &state,
         &live,
         &request,
         &mut translated,
         compact_threshold,
         &recorder,
-    )
-    .await
-    {
-        Ok(auto) => auto,
-        Err(err) => {
+    );
+    let auto = match unless_cancelled(&recorder, prelude).await {
+        Some(Ok(auto)) => auto,
+        Some(Err(err)) => {
             recorder.fail_with(&err);
             return;
         }
+        None => return,
     };
     // A cancel that arrived while the job was still queued: skip generation.
     if cancelled.load(Ordering::Acquire) {
         recorder.cancel_before_start();
         return;
     }
-    let mut run = match prepare_response_run(
+    let prepare = prepare_response_run(
         state,
         live,
         request,
@@ -392,14 +394,14 @@ async fn run_background_job<D>(
         budget_override,
         structured,
         auto,
-    )
-    .await
-    {
-        Ok(run) => run,
-        Err(err) => {
+    );
+    let mut run = match unless_cancelled(&recorder, prepare).await {
+        Some(Ok(run)) => run,
+        Some(Err(err)) => {
             recorder.fail_with(&err);
             return;
         }
+        None => return,
     };
 
     let sink: Arc<dyn ResponseEventSink> =
@@ -430,6 +432,25 @@ async fn run_background_job<D>(
             Ok(()) => recorder.fail_server_error(
                 "The background response ended without a result; check the server log.",
             ),
+        }
+    }
+}
+
+/// Run `work`, the job's pre-generation work, unless the job is cancelled
+/// first: a cancel of a `queued` job records its terminal object and frees
+/// its slot at once, so the work is dropped (stopping a queued video decode,
+/// a compaction pass, or a media fetch, as a foreground client disconnect
+/// does) instead of running on with no slot bounding it. `None` when the job
+/// was cancelled; its cancel registration is retired.
+async fn unless_cancelled<F: std::future::Future>(
+    recorder: &JobRecorder,
+    work: F,
+) -> Option<F::Output> {
+    tokio::select! {
+        output = work => Some(output),
+        () = recorder.terminal_recorded() => {
+            recorder.cancel_before_start();
+            None
         }
     }
 }
