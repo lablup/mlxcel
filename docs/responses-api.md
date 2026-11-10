@@ -322,7 +322,9 @@ Because the limits are per loaded model, the router can retain up to `--models-m
 ## Response and conversation stores
 
 The stores are in memory and are bounded by entry count, approximate retained
-JSON bytes, and TTL.
+JSON bytes, and TTL. In router mode (`--models-dir`, `--models-preset`, the model
+cache) the `--responses-*` flags apply to each loaded model's own store; see
+[Serving roles](#serving-roles).
 
 | Flag | Default | Env var | Notes |
 |------|---------|---------|-------|

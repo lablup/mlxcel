@@ -7,7 +7,7 @@
 
 ## 요약
 
-PR #2928은 멀티 모델 라우터(`--models-dir`, `--models-preset`, 모델 캐시)에서 background Responses를 쓸 수 있게 하고, disaggregated front에는 명확한 거절 응답을 추가합니다. 라우터가 response id를 가진 로드된 모델을 찾아 주므로 `client.responses.retrieve(id)`, `.cancel(id)`, `.delete(id)`가 모델 이름 없이 동작합니다. eviction은 실행 중인 작업이 있는 모델을 건드리지 않고, 명시적 unload는 그 작업을 `failed`로 끝냅니다. disaggregated front는 `POST /v1/responses`에 serving node로 보내라는 400을 돌려줍니다. 단일 모델과 pipeline head 동작은 바뀌지 않습니다. 14개 파일, +1152/-50이며 약 750줄이 테스트입니다. 구현 리뷰에서 CRITICAL이나 HIGH 문제는 나오지 않았습니다.
+PR #2928은 멀티 모델 라우터(`--models-dir`, `--models-preset`, 모델 캐시)에서 background Responses를 쓸 수 있게 하고, disaggregated front에는 명확한 거절 응답을 추가합니다. 라우터가 response id를 가진 로드된 모델을 찾아 주므로 `client.responses.retrieve(id)`, `.cancel(id)`, `.delete(id)`가 모델 이름 없이 동작합니다. eviction은 실행 중인 작업이 있는 모델을 건드리지 않고, 명시적 unload는 그 작업을 `failed`로 끝냅니다. disaggregated front는 `POST /v1/responses`에 serving node로 보내라는 400을 돌려줍니다. 단일 모델과 pipeline head 동작은 바뀌지 않습니다. 14개 파일, +1203/-50이며 약 810줄이 테스트입니다. 구현 리뷰에서 CRITICAL이나 HIGH 문제는 나오지 않았습니다.
 
 ## 1. 문제 정의
 
@@ -39,11 +39,11 @@ PR #2928은 멀티 모델 라우터(`--models-dir`, `--models-preset`, 모델 �
 
 ### 3.3 eviction은 거절하고 unload는 실패시킨다
 
-두 eviction 지점(명시적 대상과 LRU 필터)이 모두 `is_busy_for_eviction`을 쓰고, eviction unload는 `BackgroundJobsOnUnload::Refuse`로 실행됩니다. busy 검사와 drain 사이에 작업이 수용되었다면 작업을 죽이지 않고 `mark_ready`와 capacity 오류로 unload를 되돌립니다. 명시적 unload(`POST /models/unload`, WebUI, 제거, 종료)는 `Fail`을 씁니다. 작업은 drain 시작 시 `server_error` / `The model was unloaded before the response finished.`로 `failed`가 됩니다. 작업을 스트리밍하는 클라이언트가 request lease를 쥐고 있어서, 그렇게 하지 않으면 drain이 작업을 기다리기 때문입니다. drain 시작 시점에 진행 중이던 create를 잡기 위해 `shutdown_worker` 직전에 한 번 더 실패 처리합니다. 라우터에는 idle 또는 TTL 자동 unload가 없고, `entry_idle_for_webui_removal`은 이미 unload된 엔트리를 요구하므로 다른 idle 검사에는 새 helper가 필요하지 않았습니다.
+두 eviction 지점(명시적 대상과 LRU 필터)이 모두 `is_busy_for_eviction`을 쓰고, eviction unload는 `BackgroundJobsOnUnload::Refuse`로 실행됩니다. busy 검사와 drain 사이에 작업이 수용되었다면 작업을 죽이지 않고 `mark_ready`와 capacity 오류로 unload를 되돌립니다. 명시적 unload(`POST /models/unload`, WebUI, 제거, 종료)는 `Fail`을 씁니다. 작업은 drain 시작 시 `server_error` / `The model was unloaded before the response finished.`로 `failed`가 됩니다. 작업을 스트리밍하는 클라이언트가 request lease를 쥐고 있어서, 그렇게 하지 않으면 drain이 작업을 기다리기 때문입니다. drain 시작 시점에 진행 중이던 create를 잡기 위해 `shutdown_worker` 직전에 한 번 더 실패 처리합니다. cancel이 이미 요청되었지만 아직 기록되지 않은 작업은 `JobRecorder::fail`과 같이 `cancelled`로 끝나므로, cancel과 겹친 unload도 작업 자체 경로와 같은 상태를 냅니다. 라우터에는 idle 또는 TTL 자동 unload가 없고, `entry_idle_for_webui_removal`은 이미 unload된 엔트리를 요구하므로 다른 idle 검사에는 새 helper가 필요하지 않았습니다.
 
 ### 3.4 기존 라우터 사용자에게 보이는 동작 변화
 
-로드된 모델마다 라우터의 `--responses-store-*`, `--responses-background-*` 플래그로 자기 store를 갖습니다. 기본값 `store: true`인 포그라운드 `/v1/responses`가 이제 라우터 모드에서도 저장되고, 메모리 상한은 로드된 모델 단위입니다. 최악의 경우는 `--models-max` 곱하기 `--responses-store-max-bytes`(기본 256 MiB)입니다. store는 unload 시 모델과 함께 버려지므로 그 뒤에는 모든 id가 404를 돌려주며, 실제 체크포인트에서 확인했습니다. 문서는 모델 단위라는 점은 적었지만 곱해진 최악값은 적지 않았습니다(아래 후속 조치).
+로드된 모델마다 라우터의 `--responses-store-*`, `--responses-background-*` 플래그로 자기 store를 갖습니다. 기본값 `store: true`인 포그라운드 `/v1/responses`가 이제 라우터 모드에서도 저장되고, 메모리 상한은 로드된 모델 단위입니다. 최악의 경우는 `--models-max` 곱하기 `--responses-store-max-bytes`(기본 256 MiB)입니다. store는 unload 시 모델과 함께 버려지므로 그 뒤에는 모든 id가 404를 돌려주며, 실제 체크포인트에서 확인했습니다. 문서에는 모델 단위라는 점과 곱해진 최악값이 적혀 있습니다: `--models-max` x (`--responses-store-max-bytes` + `--responses-background-max-jobs` x `--responses-background-event-log-bytes`), 기본값에서 2 GiB.
 
 ## 4. 검증
 
@@ -53,7 +53,6 @@ PR #2928은 멀티 모델 라우터(`--models-dir`, `--models-preset`, 모델 �
 
 ## 5. 후속 조치
 
-- MEDIUM: `docs/responses-api.md`의 "the limits apply per loaded model" 옆에 최악 메모리(`--models-max` x `--responses-store-max-bytes`)를 명시.
-- LOW: 명시적 unload가 drain 시작 시 작업을 실패시키므로, 이후 drain 타임아웃이나 stale revision으로 unload가 실패하면 모델은 로드된 채 작업만 끝나 있습니다.
+- 해결됨: 최악 메모리 공식은 `docs/responses-api.md`에 있고, `fail_active_background`는 cancel이 요청된 작업을 `cancelled`로 기록합니다(커밋 a8fc8cae).
+- LOW: 명시적 unload가 drain 시작 시 작업을 실패시키므로, 이후 drain 타임아웃이나 stale revision으로 unload가 실패하면 모델은 로드된 채 작업만 끝나 있습니다. 이 내용은 이제 `docs/responses-api.md`에 문서화되어 있습니다.
 - LOW: 테스트는 test factory로 store를 주입하므로 실제 `build_model_app(..., build_responses_store(...))` 연결은 수동 실행으로만 확인되었습니다.
-- LOW: `fail_active_background`는 cancel이 요청되었지만 아직 기록되지 않은 작업도 `failed`로 기록합니다.
