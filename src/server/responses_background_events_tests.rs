@@ -80,6 +80,14 @@ fn retained(log: &BackgroundEventLog, next: u64) -> Vec<(&'static str, u64)> {
     }
 }
 
+/// The oldest retained sequence number a cursor that lost events reports.
+fn evicted_oldest(log: &BackgroundEventLog, starting_after: Option<u64>) -> u64 {
+    match log.resolve_cursor(starting_after) {
+        Err(CursorError::Evicted { oldest }) => oldest,
+        other => panic!("expected an evicted cursor, got {other:?}"),
+    }
+}
+
 /// Drain a reader to its end, as `(name, payload)`.
 async fn drain(log: &Arc<BackgroundEventLog>, next: u64) -> Vec<(&'static str, Value)> {
     let frames = tail_frames(Arc::clone(log), "resp_log".to_string(), next);
@@ -155,10 +163,13 @@ fn a_tiny_budget_bounds_the_bytes_and_keeps_the_terminal_event() {
     }
     assert!(largest < budget, "a delta fits the budget");
     // The oldest events were dropped, and the cursor says which is oldest.
-    let oldest = log.resolve_cursor(None).expect_err("events were dropped");
+    let oldest = evicted_oldest(&log, None);
     assert!(oldest > 0 && oldest < 200, "oldest retained: {oldest}");
     assert_eq!(log.resolve_cursor(Some(oldest - 1)), Ok(oldest));
-    assert_eq!(log.resolve_cursor(Some(oldest - 2)), Err(oldest));
+    assert_eq!(
+        log.resolve_cursor(Some(oldest - 2)),
+        Err(CursorError::Evicted { oldest })
+    );
     assert!(matches!(
         log.read_from(oldest - 1, 1),
         LogRead::Evicted { oldest: reported } if reported == oldest
@@ -173,7 +184,10 @@ fn a_tiny_budget_bounds_the_bytes_and_keeps_the_terminal_event() {
     );
     log.append_terminal(&terminal);
     assert_eq!(retained(&log, 200), vec![("response.completed", 200)]);
-    assert_eq!(log.resolve_cursor(None), Err(200));
+    assert_eq!(
+        log.resolve_cursor(None),
+        Err(CursorError::Evicted { oldest: 200 })
+    );
     // Bounded by the budget plus the one event that is never dropped.
     assert!(log.retained_bytes() <= budget + terminal_len + 256);
     assert!(matches!(log.read_from(201, 1), LogRead::Closed));
@@ -217,6 +231,112 @@ async fn readers_replay_then_tail_and_end_after_the_terminal_event() {
     assert!(drain(&log, 99).await.is_empty());
 }
 
+#[test]
+fn a_cursor_past_the_newest_event_is_refused() {
+    let log = BackgroundEventLog::new(1 << 20);
+    assert_eq!(
+        log.resolve_cursor(Some(0)),
+        Err(CursorError::Ahead { newest: None })
+    );
+    log.append(&delta(0, "a"));
+    log.append(&delta(1, "b"));
+    // The newest event is a valid cursor (a live tail); one past it is not.
+    assert_eq!(log.resolve_cursor(Some(1)), Ok(2));
+    for after in [2, 3, u64::MAX] {
+        assert_eq!(
+            log.resolve_cursor(Some(after)),
+            Err(CursorError::Ahead { newest: Some(1) }),
+            "{after}"
+        );
+    }
+    log.append_terminal(&response(ResponseStatus::Completed));
+    assert_eq!(log.resolve_cursor(Some(2)), Ok(3));
+    assert_eq!(
+        log.resolve_cursor(Some(3)),
+        Err(CursorError::Ahead { newest: Some(2) })
+    );
+}
+
+#[test]
+fn a_prepared_terminal_event_is_used_only_under_its_own_number() {
+    let terminal = response(ResponseStatus::Completed);
+    let log = BackgroundEventLog::new(1 << 20);
+    log.append(&delta(0, "a"));
+    let prepared = log.prepare_terminal(&terminal).expect("serializes");
+    assert!(log.append_terminal_prepared(&terminal, Some(prepared)));
+    assert_eq!(
+        retained(&log, 0),
+        vec![("response.output_text.delta", 0), ("response.completed", 1)]
+    );
+
+    // An event appended after the terminal one was prepared moves it on.
+    let log = BackgroundEventLog::new(1 << 20);
+    let prepared = log.prepare_terminal(&terminal).expect("serializes");
+    log.append(&delta(0, "a"));
+    let failed = response(ResponseStatus::Failed);
+    assert!(log.append_terminal_prepared(&failed, Some(prepared)));
+    assert_eq!(
+        retained(&log, 0),
+        vec![("response.output_text.delta", 0), ("response.failed", 1)]
+    );
+}
+
+#[tokio::test]
+async fn a_reader_does_not_keep_a_dropped_log_alive() {
+    let log = Arc::new(BackgroundEventLog::new(1 << 20));
+    for i in 0..3 {
+        log.append(&delta(i, "x"));
+    }
+    log.append_terminal(&response(ResponseStatus::Completed));
+    let weak = Arc::downgrade(&log);
+    let mut frames = Box::pin(tail_frames(Arc::clone(&log), "resp_log".to_string(), 0));
+    let (name, _) = frames.next().await.expect("the first event");
+    assert_eq!(name, "response.output_text.delta");
+
+    // The store drops the log while the reader is mid-replay: the reader's
+    // buffered batch is all it still holds.
+    drop(log);
+    assert!(weak.upgrade().is_none(), "the reader holds the log weakly");
+    let rest: Vec<_> = frames.collect().await;
+    let names: Vec<_> = rest.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        names,
+        vec![
+            "response.output_text.delta",
+            "response.output_text.delta",
+            "response.completed"
+        ]
+    );
+
+    // A reader that had not read the batch yet gets the not-retained error.
+    let log = Arc::new(BackgroundEventLog::new(1 << 20));
+    log.append(&delta(0, "x"));
+    let frames = tail_frames(Arc::clone(&log), "resp_log".to_string(), 0);
+    drop(log);
+    let frames: Vec<_> = frames.collect().await;
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    assert_eq!(frames[0].0, "response.error");
+    let error: Value = serde_json::from_str(&frames[0].1).expect("error is JSON");
+    assert_eq!(error["code"], CODE_EVENTS_EVICTED, "{error}");
+    assert_eq!(error["message"], log_not_retained_message("resp_log"));
+}
+
+#[test]
+fn a_read_batch_is_capped_by_bytes_but_always_carries_one_event() {
+    let log = BackgroundEventLog::new(1 << 20);
+    for i in 0..10 {
+        log.append(&delta(i, &"y".repeat(1000)));
+    }
+    let LogRead::Events(events) = log.read_bounded(0, usize::MAX, 2500) else {
+        panic!("events are retained");
+    };
+    assert_eq!(events.len(), 2);
+    let LogRead::Events(events) = log.read_bounded(0, usize::MAX, 1) else {
+        panic!("events are retained");
+    };
+    assert_eq!(events.len(), 1);
+}
+
 #[tokio::test]
 async fn a_reader_that_falls_behind_gets_the_error_event_and_ends() {
     let log = Arc::new(BackgroundEventLog::new(600));
@@ -229,9 +349,7 @@ async fn a_reader_that_falls_behind_gets_the_error_event_and_ends() {
     for i in 1..200 {
         log.append(&delta(i, &format!("token number {i}")));
     }
-    let oldest = log
-        .resolve_cursor(Some(0))
-        .expect_err("event 1 was dropped");
+    let oldest = evicted_oldest(&log, Some(0));
 
     let (name, json) = frames.next().await.expect("the error event");
     assert_eq!(name, "response.error");

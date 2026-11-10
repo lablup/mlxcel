@@ -31,7 +31,7 @@ use serde::Deserialize;
 
 use crate::server::AppState;
 use crate::server::responses_background_events::{
-    BackgroundEventLog, evicted_cursor_message, tail_events,
+    BackgroundEventLog, CursorError, evicted_cursor_message, log_not_retained_message, tail_events,
 };
 use crate::server::responses_store::ResponsesStore;
 use crate::server::streaming::sse_response;
@@ -104,7 +104,9 @@ pub(super) fn resume_stream(
         }
     }
     let Some(log) = store.background_event_log(id) else {
-        return Some(if store.background_snapshot(id).is_some() {
+        return Some(if store.background_event_log_dropped(id) {
+            invalid_request(log_not_retained_message(id)).into_response()
+        } else if store.background_snapshot(id).is_some() {
             invalid_request(format!(
                 "response '{id}' has no event stream: it was not created with background: true \
                  and stream: true. Retrieve it with GET /v1/responses/{id} instead"
@@ -138,7 +140,20 @@ pub(super) fn resume_stream(
     };
     Some(match log.resolve_cursor(starting_after) {
         Ok(next) => stream_response(state, log, id, next),
-        Err(oldest) => invalid_request(evicted_cursor_message(id, oldest)).into_response(),
+        Err(CursorError::Evicted { oldest }) => {
+            invalid_request(evicted_cursor_message(id, oldest)).into_response()
+        }
+        Err(CursorError::Ahead { newest }) => {
+            let newest = newest.map_or_else(
+                || "no event was sent yet".to_string(),
+                |newest| format!("the newest event has sequence_number {newest}"),
+            );
+            invalid_request(format!(
+                "starting_after {} is beyond the events of response '{id}': {newest}",
+                starting_after.unwrap_or_default()
+            ))
+            .into_response()
+        }
     })
 }
 

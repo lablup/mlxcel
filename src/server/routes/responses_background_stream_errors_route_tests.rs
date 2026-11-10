@@ -18,7 +18,7 @@
 
 use super::super::*;
 use super::{SseReader, assert_contiguous_from, harness_with_log_bytes, names, streamed_body};
-use crate::server::responses_background_events::CODE_EVENTS_EVICTED;
+use crate::server::responses_background_events::{CODE_EVENTS_EVICTED, CursorError};
 
 #[tokio::test]
 async fn an_evicted_cursor_returns_400_naming_the_oldest_sequence_number() {
@@ -35,7 +35,9 @@ async fn an_evicted_cursor_returns_400_naming_the_oldest_sequence_number() {
         .store
         .background_event_log(&id)
         .expect("the log is retained");
-    let oldest = log.resolve_cursor(None).expect_err("events were dropped");
+    let Err(CursorError::Evicted { oldest }) = log.resolve_cursor(None) else {
+        panic!("events were dropped");
+    };
     assert!(oldest > 1, "oldest retained: {oldest}");
     // With no cursor, and with one below the retained window.
     for cursor in [None, Some(0), Some(oldest - 2)] {
@@ -56,6 +58,76 @@ async fn an_evicted_cursor_returns_400_naming_the_oldest_sequence_number() {
     let resumed = h.replay(&id, Some(oldest - 1)).await;
     assert_contiguous_from(&resumed, oldest);
     assert_eq!(names(&resumed).last(), Some(&"response.completed"));
+}
+
+#[tokio::test]
+async fn a_cursor_past_the_newest_event_returns_400() {
+    let h = harness();
+    let (reader, id, _) = h.create_streamed(streamed_body()).await;
+    drop(reader);
+    // Live: `response.created` (0) and `response.queued` (1) were assigned.
+    let (status, error) = h.error_of(h.resume(&id, Some(2)).await).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["error"]["type"], "invalid_request_error", "{error}");
+    let message = error["error"]["message"].as_str().expect("message");
+    assert!(message.contains("sequence_number 1"), "{message}");
+    let path = format!("/v1/responses/{id}?stream=true&starting_after={}", u64::MAX);
+    let (status, error) = h.error_of(h.raw(Method::GET, &path, None).await).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+
+    h.handle.token("Hello.");
+    h.handle.finish();
+    h.terminal(&id).await;
+    let events = h.replay(&id, None).await;
+    let last = events.len() as u64 - 1;
+    assert_eq!(names(&events).last(), Some(&"response.completed"));
+    // Finished: the terminal event's number ends an empty replay, one past
+    // it is refused instead of answering an empty stream.
+    assert!(h.replay(&id, Some(last)).await.is_empty());
+    let (status, error) = h.error_of(h.resume(&id, Some(last + 1)).await).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    let message = error["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains(&format!("sequence_number {last}")),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn a_log_dropped_for_the_store_budget_says_so_on_resume() {
+    // Measure one streamed job's entry and log under the default budget.
+    let probe = harness();
+    let (reader, id, _) = probe.create_streamed(streamed_body()).await;
+    drop(reader);
+    probe.handle.token("Hello.");
+    probe.handle.finish();
+    probe.terminal(&id).await;
+    let log_bytes = probe
+        .store
+        .background_event_log(&id)
+        .expect("retained under the default budget")
+        .retained_bytes();
+    let entry_bytes = probe.store.approximate_total_bytes() - log_bytes;
+    assert!(!probe.store.background_event_log_dropped(&id));
+
+    // A store budget that fits the response but not its log beside it.
+    let h = harness_with(ResponsesStoreConfig {
+        max_bytes: entry_bytes + log_bytes / 2,
+        ..ResponsesStoreConfig::default()
+    });
+    let (reader, id, _) = h.create_streamed(streamed_body()).await;
+    drop(reader);
+    h.handle.token("Hello.");
+    h.handle.finish();
+    assert_eq!(h.terminal(&id).await["status"], "completed");
+    assert!(h.store.background_event_log(&id).is_none());
+    assert!(h.store.background_event_log_dropped(&id));
+    let (status, error) = h.error_of(h.resume(&id, None).await).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["error"]["type"], "invalid_request_error", "{error}");
+    let message = error["error"]["message"].as_str().expect("message");
+    assert!(message.contains("no longer retained"), "{message}");
+    assert!(!message.contains("not created with"), "{message}");
 }
 
 #[tokio::test]

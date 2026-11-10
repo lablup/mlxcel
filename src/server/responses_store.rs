@@ -118,6 +118,9 @@ struct Entry {
     /// The event log of a streamed background response (issue #2900). Its
     /// bytes at the time the job finished are part of `size_bytes`.
     event_log: Option<Arc<BackgroundEventLog>>,
+    /// The job had an event log that was not retained because it did not
+    /// fit the store budget beside the response.
+    event_log_dropped: bool,
 }
 
 /// What a background job's terminal entry carries beyond its payload.
@@ -125,6 +128,7 @@ struct Entry {
 struct BackgroundRetention {
     ephemeral_ttl: Option<Duration>,
     event_log: Option<Arc<BackgroundEventLog>>,
+    event_log_dropped: bool,
 }
 
 impl Entry {
@@ -403,6 +407,7 @@ impl ResponsesStore {
                 lru_key,
                 ephemeral_ttl: retention.ephemeral_ttl,
                 event_log: retention.event_log,
+                event_log_dropped: retention.event_log_dropped,
             },
         );
         Self::evict_to_limits(state, config);
@@ -584,6 +589,21 @@ impl ResponsesStore {
             .and_then(|entry| entry.event_log.clone())
     }
 
+    /// Whether `id` is a retained streamed background response whose event
+    /// log was not kept because it did not fit the store budget beside the
+    /// response. Lets a resume tell that apart from a response that never
+    /// had a log.
+    pub fn background_event_log_dropped(&self, id: &str) -> bool {
+        let state = match self.inner.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state
+            .entries
+            .get(id)
+            .is_some_and(|entry| entry.event_log_dropped)
+    }
+
     /// Replace the input items an active job will be stored with. Automatic
     /// compaction rewrites them after admission: the stored response then
     /// carries the capsule in its output, so a chained request must not also
@@ -626,8 +646,11 @@ impl ResponsesStore {
     /// A streamed job's event log gets its terminal event here, built from
     /// the recorded object (`response.failed`, `response.incomplete`, or
     /// `response.completed`), and moves onto the stored entry with its bytes.
-    /// A log that does not fit `max_bytes` beside the object is not retained;
-    /// readers already attached still receive the terminal event.
+    /// The event is serialized before the job lock is taken. A log that does
+    /// not fit `max_bytes` beside the object is not retained: readers waiting
+    /// on the live tail still receive the terminal event, a reader that is
+    /// still replaying gets the not-retained error, and a resume gets a 400
+    /// saying so.
     ///
     /// Later calls (or a call for an unknown id) return the recorded object
     /// when it is still retained, otherwise the `terminal` argument.
@@ -635,6 +658,17 @@ impl ResponsesStore {
         // Serialize the (possibly large) terminal object once, before taking
         // any lock, so admits and polls are not blocked behind it.
         let terminal_bytes = serialized_json_len_saturating(&terminal);
+        // Likewise the terminal event of a streamed job (issue #2900); it is
+        // used when the object is recorded as given.
+        let streamed = self
+            .lock_jobs()
+            .jobs
+            .get(id)
+            .and_then(|job| job.event_log.clone());
+        let prepared = streamed.as_ref().and_then(|log| {
+            log.prepare_terminal(&terminal)
+                .map(|p| (Arc::clone(log), p))
+        });
         let now = Instant::now();
         let mut jobs = self.lock_jobs();
         let Some(job) = jobs.jobs.remove(id) else {
@@ -644,7 +678,7 @@ impl ResponsesStore {
         };
         jobs.active_bytes = jobs.active_bytes.saturating_sub(job.size_bytes);
 
-        let (payload, size_bytes) = self.fit_terminal(
+        let (payload, size_bytes, as_given) = self.fit_terminal(
             id,
             terminal,
             terminal_bytes,
@@ -657,12 +691,18 @@ impl ResponsesStore {
         // entry accounts for the whole log.
         let mut size_bytes = size_bytes;
         let mut event_log = None;
+        let mut event_log_dropped = false;
         if let Some(log) = job.event_log {
-            log.append_terminal(&recorded);
+            let prepared = prepared
+                .filter(|(prepared_for, _)| as_given && Arc::ptr_eq(prepared_for, &log))
+                .map(|(_, prepared)| prepared);
+            log.append_terminal_prepared(&recorded, prepared);
             let total = size_bytes.saturating_add(log.retained_bytes());
             if total <= self.config.max_bytes {
                 size_bytes = total;
                 event_log = Some(log);
+            } else {
+                event_log_dropped = true;
             }
         }
         {
@@ -676,6 +716,7 @@ impl ResponsesStore {
                 BackgroundRetention {
                     ephemeral_ttl,
                     event_log,
+                    event_log_dropped,
                 },
                 now,
             );
@@ -762,7 +803,8 @@ impl ResponsesStore {
     /// `max_bytes` it is replaced by a small `failed` object so a poll
     /// gets an explanation instead of a surprise 404.
     /// `terminal_bytes` and `input_bytes` are the precomputed sizes of the
-    /// two parts; the returned size is the stored entry's accounted bytes.
+    /// two parts; the returned size is the stored entry's accounted bytes,
+    /// and the flag says whether the object was stored as given.
     fn fit_terminal(
         &self,
         id: &str,
@@ -770,7 +812,7 @@ impl ResponsesStore {
         terminal_bytes: usize,
         input_items: Vec<ResponseInputItem>,
         input_bytes: usize,
-    ) -> (StoredResponse, usize) {
+    ) -> (StoredResponse, usize, bool) {
         let max_bytes = self.config.max_bytes;
         let size_bytes = id
             .len()
@@ -781,7 +823,7 @@ impl ResponsesStore {
             input_items,
         };
         if size_bytes <= max_bytes {
-            return (payload, size_bytes);
+            return (payload, size_bytes, true);
         }
         let mut failed = payload.response;
         failed.status = ResponseStatus::Failed;
@@ -807,7 +849,7 @@ impl ResponsesStore {
             payload.response.metadata = None;
             size_bytes = Self::entry_size_bytes(id, &payload);
         }
-        (payload, size_bytes)
+        (payload, size_bytes, false)
     }
 
     /// Retained (non-expired) stored object for `id`, ephemeral entries
