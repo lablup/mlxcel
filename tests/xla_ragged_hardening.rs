@@ -18,6 +18,12 @@
 //! whole-archive IREE runtime link recipe; they are ignored in ordinary CI and
 //! need the pinned ROCm distribution and compiler plus the `test-utils` feature.
 
+// The fixture types this gate drives (`IreeRaggedLlama` and the batch-KV
+// counters) exist only under `test-support`, which the root `test-utils`
+// feature enables. Without the gate, the plain `xla-iree` feature compile that
+// CI runs with `--all-targets` fails to resolve those imports.
+#![cfg(all(feature = "xla-iree", feature = "test-utils"))]
+
 use std::collections::HashMap;
 
 use mlxcel_xla::{
