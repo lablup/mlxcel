@@ -2329,9 +2329,8 @@ mod tests {
         let mut scheduler = Scheduler::new(1, EOS.to_vec());
         // The fixture's first decode coordinate is sequence_len + delta = 4 + 4.
         let (prepared, features) = public_deepstack_input(4);
-        let req =
-            queue_deepstack_prepared_request(&mut scheduler, prepared, features, 4, g(), 16)
-                .unwrap();
+        let req = queue_deepstack_prepared_request(&mut scheduler, prepared, features, 4, g(), 16)
+            .unwrap();
         assert_eq!(admit_next(&mut scheduler, 0), req);
         assert_eq!(
             mrope_slot_coordinates(&scheduler.slots, 8),

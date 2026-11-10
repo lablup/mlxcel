@@ -224,8 +224,14 @@ impl std::error::Error for PreparedInputError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MropeCoordinateError {
-    Overflow { cache_len: i32, rope_delta: i32 },
-    Negative { cache_len: i32, rope_delta: i32 },
+    Overflow {
+        cache_len: i32,
+        rope_delta: i32,
+    },
+    Negative {
+        cache_len: i32,
+        rope_delta: i32,
+    },
     /// The coordinate is at or past the compiled RoPE table's `context_capacity`.
     /// The graph indexes that table by this coordinate, so exceeding it is an
     /// out-of-bounds device read rather than an error the graph can report.

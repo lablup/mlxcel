@@ -169,13 +169,6 @@ mod validation;
 
 #[cfg(feature = "iree")]
 pub use aux_smoke::{AuxiliaryAbiSmokeReport, run_auxiliary_abi_smoke};
-/// Test support only (issue #2923): batch-KV allocation instrumentation.
-#[cfg(feature = "test-support")]
-pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters};
-/// Test support only (issue #2923): the ragged engine's raw bind/reset hooks
-/// live behind `test-support`.
-#[cfg(feature = "test-support")]
-pub use iree::IreeRaggedLlama;
 #[cfg(feature = "iree")]
 pub use batch::XlaBucketSet;
 /// Test support only (issue #2790): production builds do not compile it.
@@ -216,8 +209,15 @@ pub use emitter::{
     run_gemma3n_qmv_diagnostic_probe, run_gemma3n_rms_diagnostic_probe,
     run_gemma3n_sdpa_vector_context_diagnostic_probe,
 };
+/// Test support only (issue #2923): the ragged engine's raw bind/reset hooks
+/// live behind `test-support`.
+#[cfg(feature = "test-support")]
+pub use iree::IreeRaggedLlama;
 #[cfg(feature = "diagnostics")]
 pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
+/// Test support only (issue #2923): batch-KV allocation instrumentation.
+#[cfg(feature = "test-support")]
+pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters};
 pub use local_task::{
     LOCAL_TASK_WORKERS_ENV, is_local_task_device, local_task_workers_for, parse_local_task_workers,
 };

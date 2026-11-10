@@ -510,7 +510,12 @@ pub fn reset_batch_kv_allocation_counters() {
 #[must_use]
 pub fn batch_kv_allocation_counters() -> (u64, u64) {
     // Safety: the counters are process-global scalars with no aliasing rules.
-    unsafe { (xla_test_batch_kv_host_bytes(), xla_test_batch_kv_h2d_bytes()) }
+    unsafe {
+        (
+            xla_test_batch_kv_host_bytes(),
+            xla_test_batch_kv_h2d_bytes(),
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
