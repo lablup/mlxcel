@@ -21,7 +21,9 @@
 //! ([`crate::models::glm4_moe_lite_mtp_drafter::Glm4MoeLiteMtpDraftModel`],
 //! issue #1326) and the Qwen3.8-Flash-Next head
 //! ([`crate::models::qwen4_exp_mtp_drafter::Qwen4ExpMtpDraftModel`], issue
-//! #2880). This wrapper is the one entry point the binary's callers (the
+//! #2880), which loads from a split `qwen4_exp_mtp` directory or from a
+//! `qwen4_exp` target checkpoint that keeps its `mtp.*` head (issue #2917).
+//! This wrapper is the one entry point the binary's callers (the
 //! offline CLI, the server's drafter slot, the speculative bench) go through:
 //! it builds those two itself and delegates everything else to core
 //! unchanged.
@@ -29,7 +31,7 @@
 use std::path::Path;
 
 use mlxcel_core::drafter::{
-    DrafterError, DrafterKind, GLM4_MOE_LITE_MTP_MODEL_TYPE, LoadedDrafter,
+    DrafterError, DrafterKind, GLM4_MOE_LITE_MTP_MODEL_TYPE, LoadedDrafter, QWEN4_EXP_MODEL_TYPE,
     QWEN4_EXP_MTP_MODEL_TYPE, peek_drafter_model_type, resolve_drafter_kind,
 };
 
@@ -52,6 +54,14 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
             }
             Some(QWEN4_EXP_MTP_MODEL_TYPE) => {
                 let model = Qwen4ExpMtpDraftModel::from_path(path)?;
+                return Ok((Box::new(model), resolved));
+            }
+            // The target checkpoint passed again as its own drafter: its
+            // embedded `mtp.*` head (issue #2917). `resolve_drafter_kind`
+            // only resolves `Mtp` here when the tensors exist or the user
+            // asked for it explicitly.
+            Some(QWEN4_EXP_MODEL_TYPE) => {
+                let model = Qwen4ExpMtpDraftModel::from_target_checkpoint(path)?;
                 return Ok((Box::new(model), resolved));
             }
             _ => {}

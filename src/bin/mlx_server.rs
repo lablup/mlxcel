@@ -676,6 +676,9 @@ struct ServerArgs {
     /// Accepts the llama-server-style `--model-draft` spelling (primary) and
     /// the mlx-lm-style `--draft-model` spelling (alias, matches `mlxcel
     /// serve`) so commands copied between the two binaries work unchanged.
+    /// A target checkpoint that keeps its own MTP head (Inkling, or a
+    /// Qwen3.8-Flash-Next `qwen4_exp` conversion with `mtp.*` tensors) is
+    /// passed again here, as the same directory as `--model`.
     ///
     /// Whether the singleton (B=1) speculative burst runs is decided by an
     /// adaptive policy: the first few requests per (target, drafter,

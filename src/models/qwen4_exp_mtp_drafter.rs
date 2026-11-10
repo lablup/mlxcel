@@ -63,6 +63,16 @@
 //! port keeps both knobs where they are: nothing here hard-codes 4, and
 //! `--draft-block-size 2|3|4` sets the ceiling the policy measures against.
 //!
+//! ## Sources
+//!
+//! The head loads from a split `qwen4_exp_mtp` directory
+//! ([`Qwen4ExpMtpDraftModel::from_path`]) or from a `qwen4_exp` target
+//! checkpoint that keeps its `mtp.*` tensors
+//! ([`Qwen4ExpMtpDraftModel::from_target_checkpoint`], issue #2917), which
+//! the user passes again as `--draft-model` / `--model-draft`. The second
+//! source derives its config from the target's and starts at block size 4,
+//! the depth the split directory declares.
+//!
 //! The drafter keeps the checkpoint's own precision (no load-time
 //! quantization): the target runs in its checkpoint dtype too, and the
 //! acceptance-against-cost comparison of the bf16, 8-bit and 4-bit splits
@@ -145,6 +155,40 @@ impl Qwen4ExpMtpDraftModel {
         Self::from_weights(&weights, config)
     }
 
+    /// Load the head a `qwen4_exp` **target** checkpoint keeps under
+    /// `mtp.*` (issue #2917), the directory passed again as the drafter.
+    ///
+    /// The config comes from [`Qwen4ExpMtpConfig::from_target_dir`]. The
+    /// weights come from the index-filtered loader: only shards the index
+    /// maps a head tensor to are opened, and only head tensors are kept, so
+    /// the target's shards are never loaded a second time and the drafter's
+    /// resident size is the head's. A checkpoint without the head is
+    /// [`DrafterError::NoEmbeddedMtpHead`].
+    pub fn from_target_checkpoint(path: &Path) -> Result<Self, DrafterError> {
+        let config = Qwen4ExpMtpConfig::from_target_dir(path)?;
+        let mut weights =
+            mlxcel_core::weights::load_weights_from_dir_index_filtered(path, is_mtp_key)
+                .map_err(|reason| DrafterError::WeightLoad { reason })?;
+        if weights.is_empty() {
+            return Err(DrafterError::NoEmbeddedMtpHead {
+                path: path.display().to_string(),
+            });
+        }
+        let resident_bytes: usize = weights.values().map(|w| mlxcel_core::array_nbytes(w)).sum();
+        let tensors = weights.len();
+        Self::sanitize_weights(&mut weights, config.layer.raw.num_experts)
+            .map_err(|reason| DrafterError::WeightLoad { reason })?;
+        let model = Self::from_weights(&weights, config)?;
+        tracing::info!(
+            drafter = %path.display(),
+            tensors,
+            resident_bytes,
+            resident_gib = format!("{:.2}", resident_bytes as f64 / f64::from(1u32 << 30)),
+            "qwen4_exp_mtp drafter: loaded the target checkpoint's embedded mtp.* head"
+        );
+        Ok(model)
+    }
+
     /// Upstream `Qwen4ExpMTPDraftModel.sanitize`: strip the
     /// `language_model.mtp.` / `model.mtp.` / `mtp.` prefix, split a fused
     /// `layers.0.mlp.experts.gate_up_proj` (with its `.scales` / `.biases`)
@@ -159,9 +203,7 @@ impl Qwen4ExpMtpDraftModel {
             if !is_mtp_key(&key) {
                 continue;
             }
-            let stripped = ["language_model.mtp.", "model.mtp.", "mtp."]
-                .iter()
-                .find_map(|prefix| key.strip_prefix(prefix))
+            let stripped = mlxcel_core::drafter::strip_qwen4_exp_mtp_prefix(&key)
                 .expect("is_mtp_key matched one of the prefixes")
                 .to_string();
             let value = weights.remove(&key).expect("key just enumerated");

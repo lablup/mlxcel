@@ -665,6 +665,9 @@ pub(crate) struct ModelOptions {
     /// ordinary smaller checkpoint that shares the target's tokenizer
     /// (`--draft-kind full-model`, auto-detected for any other model directory),
     /// which drafts from its own KV caches on the engine's token-only loop.
+    /// A target checkpoint that keeps its own MTP head (Inkling, or a
+    /// Qwen3.8-Flash-Next `qwen4_exp` conversion with `mtp.*` tensors) is
+    /// passed again here, as the same directory as `-m`.
     /// `--prompt-lookup` needs no checkpoint.
     #[arg(long, value_name = "PATH")]
     pub(crate) draft_model: Option<PathBuf>,
