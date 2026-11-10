@@ -16,6 +16,9 @@ Implementation source map:
 | `src/server/responses_store.rs` | In-memory response store. |
 | `src/server/conversation_store.rs` | In-memory conversation transcript store. |
 | `src/server/routes/responses.rs` | Route handlers. |
+| `src/server/routes/responses_run.rs` | One streamed generation, driven into an event sink. |
+| `src/server/routes/responses_background.rs` | Background job admission and lifecycle. |
+| `src/server/routes/responses_background_sink.rs` | Background event sink and terminal recording. |
 | `src/server/responses_compaction.rs` | Compaction capsule, replay, selection and summarization core. |
 | `src/server/routes/responses_compact.rs` | `POST /v1/responses/compact` handler. |
 
@@ -23,9 +26,9 @@ Implementation source map:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/v1/responses` | Create a response, either non-streaming or streaming. |
-| GET | `/v1/responses/{id}` | Retrieve a stored response. |
-| DELETE | `/v1/responses/{id}` | Delete a stored response. |
+| POST | `/v1/responses` | Create a response: non-streaming, streaming, or as a background job (`background: true`, see [Background mode](#background-mode)). |
+| GET | `/v1/responses/{id}` | Retrieve a stored response, or poll a background response. |
+| DELETE | `/v1/responses/{id}` | Delete a stored response. A background response that has not finished returns `400`; cancel it first. |
 | POST | `/v1/responses/{id}/cancel` | Best-effort cancellation of an in-flight streaming response. The stream ends with `response.completed` whose `response.status` is `cancelled`, and the stored copy has the same status. Cancelling a response already stored as `cancelled` is idempotent and returns the stored Response object. Other finished responses return `400 invalid_request_error` without changing the saved result. |
 | POST | `/v1/responses/compact` | Summarize older turns into a `compaction` item; see [Conversation compaction](#conversation-compaction). |
 | POST | `/v1/responses/input_tokens` | Count the prompt tokens a body would prefill; see `docs/llama-server-compat.md`. |
@@ -86,7 +89,7 @@ with client.responses.stream(
 | `metadata` | supported | Maximum 16 entries. |
 | `prompt_cache_key` | accepted | Forwarded to prompt-cache plumbing. |
 | `user`, `safety_identifier` | accepted | `user` is used when both are present; `safety_identifier` is used as a fallback. |
-| `background` | rejected when `true` | Async polling is not implemented. |
+| `background` | supported | `true` returns a `queued` response at once and runs the generation as a job; see [Background mode](#background-mode). Combining it with `stream: true` returns 400. |
 | `truncation` | only `disabled` | Other values, including `auto`, return 400. |
 | `service_tier` | accepted | Echoed/ignored; no scheduling tier is implemented. |
 | `context_management` | supported subset | `[{"type":"compaction","compact_threshold":N}]` enables automatic compaction; see [Automatic compaction](#automatic-compaction). `[]` or `null` disables it. |
@@ -213,6 +216,45 @@ Reasoning streams as `response.reasoning_text.delta` events inside a `reasoning`
 Harmony (GPT-OSS) replies surface their `analysis` channel as the same `reasoning` output item, with or without tool calls, and `usage.output_tokens_details.reasoning_tokens` is the token count of that reasoning text, identical for streaming and non-streaming requests. Multiple analysis or `<think>` segments are accumulated through the same streaming filter in both response modes, without parser-added separators or dropped later segments. It is 0 when the reply has no reasoning.
 
 Function calls stream while they are generated for the formats `/v1/chat/completions` streams incrementally (Hermes / Qwen JSON, Mistral `[ARGS]` and JSON list, Llama 3 JSON, Qwen3-Coder XML; see `docs/server-features.md`). Once a call's name is complete, any open reasoning or message item is closed and a `function_call` item is added with `status: "in_progress"` and empty `arguments`; `response.function_call_arguments.delta` events then carry the argument fragments. After generation, `response.function_call_arguments.done` and `response.output_item.done` carry the authoritative parsed arguments, and the call keeps its streamed `call_id` in the completed response. For a streamed request that parses tool calls, `response.completed` (and the copy stored for `previous_response_id`) is built from the items the stream sent: same item ids and `output_index` order, each message segment as its own `message` item (prose before and after a call are two items), function calls with their streamed `fc_` id, `call_id` and parsed arguments, and `output_text` as the concatenation of the message segments. If the streamer panics on a fragment, it is contained and the remaining arguments arrive from the final parse. Non-streaming responses are unchanged. For Hermes, Granite, Mistral and Llama 3, object `arguments` are the model's raw JSON text, not a re-serialization. A streamed call that the final parse does not confirm is logged at `warn` with the response id and closed as `incomplete`; the parsed calls are then emitted as separate items. Other formats emit each call as one `output_item.added`, one argument delta, `.done`, and `output_item.done` after generation, as before.
+
+## Background mode
+
+`POST /v1/responses` with `"background": true` returns HTTP 200 at once with a `queued` response and runs the generation as a job on the server. Poll `GET /v1/responses/{id}` until `status` is terminal.
+
+```bash
+curl -s http://127.0.0.1:8080/v1/responses -H 'Content-Type: application/json' \
+  -d '{"model":"local","input":"Write a haiku about rain.","background":true}'
+# {"id":"resp_...","status":"queued","background":true,"output":[],...}
+curl -s http://127.0.0.1:8080/v1/responses/resp_...
+# status: queued -> in_progress -> completed
+```
+
+| Status | Meaning |
+|--------|---------|
+| `queued` | Admitted; generation has not started. Media decoding, automatic compaction and the wait for a generation slot happen here. |
+| `in_progress` | The model started prefilling or generating. |
+| `completed`, `incomplete` | Finished, with the same `output`, `usage` and `incomplete_details` a foreground response carries. |
+| `failed` | `error` holds `{code, message}`. `code` is `server_error`, `server_overloaded` (the queue was full when the job tried to start), or `invalid_prompt` (a media read, the prompt render or automatic compaction refused the request). |
+| `cancelled` | `POST /v1/responses/{id}/cancel` stopped the job. |
+
+Every object of a background response carries `"background": true`; a foreground response has no `background` key. Until the job is terminal, `output` is `[]` and `usage` is all zeros: polling does not expose partial output.
+
+What create answers:
+
+- `400 invalid_request_error` for everything a foreground request is refused for before generation (malformed fields, unsupported media, invalid sampling or tool parameters, an invalid schema, an unknown `previous_response_id`), and also when `stream` is `true`, when the response store is disabled, or when `--responses-background-max-jobs` is `0`. No job is created.
+- `429` with `error.code: "rate_limit_exceeded"` when `--responses-background-max-jobs` jobs are already active, or when the active jobs fill `--responses-store-max-bytes`. Retry after a job finishes.
+- `503` when the generation queue is full, as for a foreground request.
+
+Interactions:
+
+- Dropping the create connection or a poll cancels nothing. Only the cancel endpoint stops a job.
+- `store: false` is allowed. The final object is then readable by polling for `--responses-background-ephemeral-ttl-secs` and cannot be used as `previous_response_id`.
+- `previous_response_id` that names a job that has not finished returns `400` with `previous response '<id>' has not finished (status: <status>)`. Once the job is terminal it chains like any stored response.
+- `conversation` history is read when the job is created, and the turn is appended when the job finishes with output. A `failed` job appends nothing.
+- `context_management` runs inside the job, so a compaction failure ends the job as `failed` instead of failing the create call.
+- Media inputs are allowed. Whether the model supports a media kind is checked at create; reading and decoding happen inside the job.
+
+Jobs are held in memory. The single-model server does not drain them on exit: stopping or restarting the process loses queued and running jobs, and their ids return `404` afterwards. If the model worker exits while the process keeps running, its jobs end as `failed`.
 
 ## Response and conversation stores
 
@@ -476,7 +518,7 @@ Only function tools are accepted. Built-in/external tool types such as
 
 Notable gaps:
 
-- no background job mode;
+- background responses cannot be streamed or resumed, and are lost on restart;
 - no input-items pagination endpoint;
 - no built-in tools or MCP connector execution;
 - no disk-persisted response store;

@@ -371,3 +371,28 @@ async fn wait_background_terminal_wakes_on_finish_and_times_out() {
             .is_none()
     );
 }
+
+#[test]
+fn set_background_input_items_replaces_what_the_terminal_entry_stores() {
+    let store = ResponsesStore::new(background_config(2));
+    let original = make_response_with_input("job", &"x".repeat(256)).input_items;
+    store
+        .admit_background(snapshot("job"), original, true)
+        .expect("admit background job");
+    let before = store.approximate_total_bytes();
+
+    let replacement = make_response_with_input("job", "short").input_items;
+    assert!(store.set_background_input_items("job", replacement));
+    assert!(store.approximate_total_bytes() < before);
+    assert_background_accounting(&store);
+    assert!(!store.set_background_input_items("missing", vec![]));
+
+    store.finish_background("job", terminal("job", "done"));
+    let stored = store.get("job").expect("terminal object is stored");
+    assert_eq!(stored.input_items.len(), 1);
+    assert_eq!(
+        response_input_item_size_bytes(&stored.input_items[0]),
+        response_input_item_size_bytes(&make_response_with_input("job", "short").input_items[0])
+    );
+    assert_background_accounting(&store);
+}

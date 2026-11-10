@@ -16,7 +16,8 @@
 //!
 //! Phase 1 endpoints:
 //!
-//! - `POST /v1/responses`        — create a response (sync or streaming)
+//! - `POST /v1/responses`        — create a response (sync, streaming, or
+//!   `background: true`, see [`super::responses_background`])
 //! - `GET /v1/responses/:id`     — retrieve a stored response
 //! - `DELETE /v1/responses/:id`  — delete a stored response
 //! - `POST /v1/responses/:id/cancel` — best-effort cancellation
@@ -103,6 +104,15 @@ pub async fn create_response(
         Ok(threshold) => threshold,
         Err(err) => return err.into_response(),
     };
+    // Background mode (issue #2898): the create call answers `queued` and the
+    // generation runs as a detached job. Everything validated below still
+    // returns a synchronous 400; the slow steps move into the job.
+    let background = request.background == Some(true);
+    if background
+        && let Err(err) = super::responses_background::validate_background_request(&state, &request)
+    {
+        return err.into_response();
+    }
 
     // -- Translate Responses request → ChatCompletionRequest ---------------
     let mut translated = match responses_request_to_chat(
@@ -129,12 +139,14 @@ pub async fn create_response(
     // native video path (issue #1322), on the same seam the chat route uses:
     // after the capability gate, before any render. Both `create_response`
     // handlers below read `translated`, so rewriting once here covers the
-    // streaming and non-streaming paths alike.
-    if let Err(err) = crate::server::chat_request::expand_request_video_parts(
-        &state,
-        &mut translated.chat_request,
-    )
-    .await
+    // streaming and non-streaming paths alike. A background job decodes
+    // inside the job: the create call must not wait for it.
+    if !background
+        && let Err(err) = crate::server::chat_request::expand_request_video_parts(
+            &state,
+            &mut translated.chat_request,
+        )
+        .await
     {
         return err.into_error_response().into_response();
     }
@@ -177,15 +189,16 @@ pub async fn create_response(
 
     // Automatic compaction (issue #2397): count, and compact at the
     // threshold, once the request is known to be valid. A rebuilt request
-    // repeats the video substitution its original went through above.
+    // repeats the video substitution its original went through above. It is
+    // a full generation pass, so a background job runs it inside the job.
     let auto = match compact_threshold {
-        None => None,
-        Some(threshold) => {
+        Some(threshold) if !background => {
             match apply_auto_compaction(&state, &live, &request, &mut translated, threshold).await {
                 Ok(auto) => Some(auto),
                 Err(err) => return err.into_response(),
             }
         }
+        _ => None,
     };
     if auto.as_ref().is_some_and(AutoCompaction::compacted)
         && let Err(err) = crate::server::chat_request::expand_request_video_parts(
@@ -228,6 +241,23 @@ pub async fn create_response(
     let priority = parse_priority_header(&headers);
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
     let created_at = chrono::Utc::now().timestamp() as f64;
+
+    if background {
+        return super::responses_background::create_background_response(
+            super::responses_background::BackgroundJob {
+                state,
+                live,
+                request,
+                translated,
+                response_id,
+                created_at,
+                priority,
+                budget_override,
+                structured,
+                compact_threshold,
+            },
+        );
+    }
 
     if request.stream {
         // b10621 resumable streams (#1444): `X-Conversation-Id` attaches a
@@ -542,8 +572,14 @@ pub async fn retrieve_response(State(state): State<AppState>, Path(id): Path<Str
         )
         .into_response();
     };
-    match store.get(&id) {
-        Some(stored) => Json(stored.response).into_response(),
+    // A background response is readable before it is stored (`queued`,
+    // `in_progress`), and a `store: false` one only through its snapshot.
+    let response = store
+        .get(&id)
+        .map(|stored| stored.response)
+        .or_else(|| store.background_snapshot(&id));
+    match response {
+        Some(response) => Json(response).into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new(
@@ -564,6 +600,19 @@ pub async fn delete_response(State(state): State<AppState>, Path(id): Path<Strin
         )
         .into_response();
     };
+    // An active background job has no stored record to delete, and removing
+    // it would leave its generation running unobserved.
+    if let Some(status) = store.background_status(&id) {
+        return ErrorResponse::new(
+            format!(
+                "response '{id}' has not finished (status: {}); cancel it with \
+                 POST /v1/responses/{id}/cancel before deleting it",
+                status.as_str()
+            ),
+            "invalid_request_error",
+        )
+        .into_response();
+    }
     let deleted = store.remove(&id).is_some();
     Json(serde_json::json!({
         "id": id,
@@ -789,6 +838,20 @@ pub(crate) fn persist_response(
             },
         );
     }
+    append_conversation_turn(state, request, translated, response);
+}
+
+/// Append this turn (the request's input, then the response's output) to the
+/// request's conversation, when it names one.
+///
+/// Used by: [`persist_response`] and the background job sink, whose response
+/// is stored by `ResponsesStore::finish_background` instead.
+pub(crate) fn append_conversation_turn(
+    state: &AppState,
+    request: &CreateResponseRequest,
+    translated: &crate::server::responses_translator::TranslatedRequest,
+    response: &ResponseObject,
+) {
     if let Some(conv_id) = translated.conversation_id.as_ref()
         && let Some(conv_store) = state.conversation_store.as_ref()
     {

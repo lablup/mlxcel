@@ -90,6 +90,11 @@ pub struct ResponseObject {
     pub user: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
+    /// `Some(true)` for a response created with `background: true`, and
+    /// absent otherwise, so a foreground response serializes exactly as it
+    /// did before background mode existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
 }
 
 /// `status` enum.
@@ -405,6 +410,7 @@ mod tests {
             service_tier: None,
             user: None,
             store: None,
+            background: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["output_text"], "hello");

@@ -499,6 +499,38 @@ impl ResponsesStore {
         }
     }
 
+    /// Replace the input items an active job will be stored with. Automatic
+    /// compaction rewrites them after admission: the stored response then
+    /// carries the capsule in its output, so a chained request must not also
+    /// replay the pre-compaction input. Returns `false` when no active job
+    /// has this id.
+    ///
+    /// The byte budget is not re-checked: compaction only shrinks the items,
+    /// and [`Self::finish_background`] fits the terminal object anyway.
+    pub fn set_background_input_items(
+        &self,
+        id: &str,
+        input_items: Vec<ResponseInputItem>,
+    ) -> bool {
+        let input_bytes = input_items_size_bytes(&input_items);
+        let mut jobs = self.lock_jobs();
+        let Some(job) = jobs.jobs.get_mut(id) else {
+            return false;
+        };
+        let old_size = job.size_bytes;
+        let new_size = old_size
+            .saturating_sub(job.input_bytes)
+            .saturating_add(input_bytes);
+        job.input_items = input_items;
+        job.input_bytes = input_bytes;
+        job.size_bytes = new_size;
+        jobs.active_bytes = jobs
+            .active_bytes
+            .saturating_sub(old_size)
+            .saturating_add(new_size);
+        true
+    }
+
     /// Record a job's terminal object. The first call for an active job
     /// removes the job and inserts the terminal object as a stored entry in
     /// one critical section (ephemeral when the job was admitted with
@@ -902,6 +934,7 @@ mod tests {
                 service_tier: None,
                 user: None,
                 store: Some(true),
+                background: None,
             },
             input_items: vec![],
         }
