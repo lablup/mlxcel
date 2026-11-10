@@ -676,7 +676,7 @@ impl RouterPool {
             .expect("load after-reservation hook mutex poisoned") = hook;
     }
 
-    #[cfg(all(test, feature = "webui"))]
+    #[cfg(test)]
     pub(super) fn set_model_app_factory_for_tests(&self, factory: Option<ModelAppFactory>) {
         *self
             .model_app_factory
