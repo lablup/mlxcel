@@ -2644,10 +2644,7 @@ impl IreeLlama {
                                  keeping the f16 head path"
                             ),
                         }
-                        native_module = Some((
-                            crate::native_qmv::alias_text().to_string(),
-                            crate::native_qmv::executable_source(&bytes, &arch),
-                        ));
+                        native_module = Some(crate::native_qmv::module_parts(&bytes, &arch));
                     }
                     Err(error) => {
                         eprintln!(

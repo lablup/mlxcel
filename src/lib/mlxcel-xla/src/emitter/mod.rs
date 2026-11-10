@@ -1553,6 +1553,38 @@ mod tests {
             "the alias precedes the module and the executable source sits inside it"
         );
 
+        // issue #2895: q/k/v and gate/up are each one launch. llama-3.2-1b has
+        // q 2048 + k 512 + v 512 and gate 8192 + up 8192, all at K = 2048, so both
+        // groups use the warp export with `ceil(total / rows-per-block)` groups.
+        assert!(mlir.contains("flow.dispatch @custom_qmv_qkv::@qmv4_qkv_kernel["));
+        assert!(mlir.contains("flow.dispatch @custom_qmv_gateup::@qmv4_gateup_kernel["));
+        assert!(mlir.contains("arith.constant 384 : index"), "q/k/v grid");
+        assert!(mlir.contains("arith.constant 2048 : index"), "gate/up grid");
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_qkv::@qmv4_qkv_kernel[")
+                .count(),
+            16,
+            "one q/k/v launch per layer"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_gateup::@qmv4_gateup_kernel[")
+                .count(),
+            16,
+            "one gate/up launch per layer"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv::@qmv4_kernel[")
+                .count(),
+            17,
+            "o_proj per layer plus the LM head"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv::@qmv4_row_kernel[")
+                .count(),
+            16,
+            "down_proj per layer, on the long-row export"
+        );
+
         // Without the native module the same config keeps the packed projection
         // dequant path and uses the loader-dequantized f16 head operand (the
         // prefill form), never the dispatch.
