@@ -3879,11 +3879,15 @@ pub(crate) fn build_generation_result_with_cache(
         // stamped when the prefill-sampled token reaches the decode state, or
         // the target prefill's end on a drafted request) to the finish.
         generation_only_ms: elapsed_ms.saturating_sub(prompt_eval_ms),
-        // The window opens at the first emitted token, so it holds the
-        // remaining N-1 tokens (issue #2938). That holds for every producer
-        // of this builder: the batch scheduler (whose first token comes out
-        // of prefill), the diffusion worker and the XLA worker all stamp the
-        // first-token instant through `StreamingDecodeState`.
+        // The window opens at the first emitted token, so the remaining N-1
+        // tokens are the ones emitted inside it (issue #2938). Every producer
+        // of this builder stamps that instant through `StreamingDecodeState`:
+        // the batch scheduler (whose first token comes out of prefill, the
+        // only producer the `/metrics` histogram records) and the XLA worker
+        // decode one token per step after it. The diffusion worker commits a
+        // whole block at once, so the rest of its first block was computed
+        // before the window opened; its count is a bound on the window's
+        // work, not an exact one, and it does not reach the histogram.
         decode_window_tokens: Some(completion_tokens.saturating_sub(1)),
         finish_reason: finish_reason.to_string(),
         // The EOS-or-length split this function has always made. A string
