@@ -30,6 +30,7 @@ use tempfile::TempDir;
 const CAPACITY: usize = 8;
 const HIDDEN: usize = 8;
 const VOCAB: usize = 32;
+const MROPE_HIDDEN: usize = 12;
 
 struct TinyModel {
     dir: TempDir,
@@ -134,6 +135,88 @@ fn device() -> String {
     std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string())
 }
 
+/// A tiny Qwen2 checkpoint with M-RoPE sections, copied from the shape used by
+/// `tests/xla_prepared_prefill.rs`. The ragged engine only takes the M-RoPE
+/// decode path when the config declares `rope_scaling.mrope_section`.
+fn create_tiny_mrope_model() -> TinyModel {
+    let dir = tempfile::tempdir().expect("temporary M-RoPE model directory");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"qwen2","hidden_size":12,"intermediate_size":24,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"head_dim":6,"vocab_size":32,"rms_norm_eps":1e-6,"rope_theta":10000.0,"tie_word_embeddings":true,"attention_bias":true,"hidden_act":"silu","rope_scaling":{"rope_type":"mrope","mrope_section":[1,1,1]}}"#,
+    )
+    .expect("M-RoPE model config");
+
+    let embeddings = deterministic_values(VOCAB * MROPE_HIDDEN, 31);
+    let mut tensors = Vec::new();
+    add_tensor(
+        &mut tensors,
+        "model.embed_tokens.weight",
+        &[VOCAB, MROPE_HIDDEN],
+        embeddings,
+    );
+    add_tensor(
+        &mut tensors,
+        "model.norm.weight",
+        &[MROPE_HIDDEN],
+        vec![1.0; MROPE_HIDDEN],
+    );
+    for layer in 0..2 {
+        let prefix = format!("model.layers.{layer}");
+        add_tensor(
+            &mut tensors,
+            format!("{prefix}.input_layernorm.weight"),
+            &[MROPE_HIDDEN],
+            vec![1.0; MROPE_HIDDEN],
+        );
+        add_tensor(
+            &mut tensors,
+            format!("{prefix}.post_attention_layernorm.weight"),
+            &[MROPE_HIDDEN],
+            vec![1.0; MROPE_HIDDEN],
+        );
+        for (offset, suffix, shape) in [
+            (2, "self_attn.q_proj.weight", vec![12, 12]),
+            (3, "self_attn.k_proj.weight", vec![6, 12]),
+            (4, "self_attn.v_proj.weight", vec![6, 12]),
+            (5, "self_attn.o_proj.weight", vec![12, 12]),
+            (6, "mlp.gate_proj.weight", vec![24, 12]),
+            (7, "mlp.up_proj.weight", vec![24, 12]),
+            (8, "mlp.down_proj.weight", vec![12, 24]),
+        ] {
+            add_tensor(
+                &mut tensors,
+                format!("{prefix}.{suffix}"),
+                &shape,
+                deterministic_values(shape.iter().product(), layer * 20 + offset),
+            );
+        }
+        for (offset, suffix, width) in [
+            (11, "self_attn.q_proj.bias", 12),
+            (12, "self_attn.k_proj.bias", 6),
+            (13, "self_attn.v_proj.bias", 6),
+        ] {
+            add_tensor(
+                &mut tensors,
+                format!("{prefix}.{suffix}"),
+                &[width],
+                deterministic_values(width, layer * 20 + offset),
+            );
+        }
+    }
+    let views = tensors
+        .iter()
+        .map(|(name, shape, bytes)| {
+            (
+                name.as_str(),
+                TensorView::new(Dtype::F32, shape.clone(), bytes).expect("valid tensor view"),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    safetensors::serialize_to_file(&views, None, &dir.path().join("model.safetensors"))
+        .expect("M-RoPE model weights");
+    TinyModel { dir }
+}
+
 fn argmax(values: &[f32]) -> i32 {
     let mut best = 0usize;
     for (index, &value) in values.iter().enumerate() {
@@ -210,6 +293,44 @@ fn failed_slot_store_leaves_the_slot_invalid_and_decode_rejects_it() {
         argmax(&logits[..VOCAB]),
         expected[1],
         "a valid slot's ragged decode must match the single-sequence reference"
+    );
+}
+
+/// Item 2: an M-RoPE coordinate at the compiled capacity is rejected by the
+/// Rust guard before the ragged graph can gather past the RoPE table, and a
+/// coordinate one below it reaches the graph instead of being over-rejected.
+#[test]
+#[ignore = "requires the pinned IREE runtime and compiler"]
+fn ragged_mrope_decode_rejects_a_coordinate_at_the_context_capacity() {
+    let fixture = create_tiny_mrope_model();
+    let mut engine = IreeRaggedLlama::load(fixture.path(), &device(), 4, CAPACITY)
+        .expect("M-RoPE ragged engine at B=4");
+    let modes = [0i32; 4];
+    let mut tokens = [0i32; 4];
+    let mut cache_len = [0i32; 4];
+    let mut positions = [[0i32; 3]; 4];
+    tokens[0] = 1;
+    cache_len[0] = (CAPACITY - 1) as i32;
+    positions[0] = [CAPACITY as i32; 3];
+    let error = engine
+        .decode_ragged_mrope_logits_with_modes(&modes, &tokens, &positions, &cache_len)
+        .expect_err("a coordinate at context_capacity is an out-of-bounds gather");
+    assert!(
+        error.contains("outside context_capacity"),
+        "the rejection must name the bound, got: {error}"
+    );
+    assert!(
+        error.contains(&CAPACITY.to_string()),
+        "the rejection must name the capacity, got: {error}"
+    );
+
+    positions[0] = [(CAPACITY - 1) as i32; 3];
+    let error = engine
+        .decode_ragged_mrope_logits_with_modes(&modes, &tokens, &positions, &cache_len)
+        .expect_err("an in-range coordinate with no stored KV must fail inside the graph call");
+    assert!(
+        !error.contains("outside context_capacity"),
+        "one row below the bound must not be rejected by the coordinate guard, got: {error}"
     );
 }
 
