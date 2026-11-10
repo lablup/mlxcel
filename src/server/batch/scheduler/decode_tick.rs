@@ -1189,6 +1189,7 @@ impl BatchScheduler {
                     result.prompt_eval_ms,
                     result.generation_only_ms,
                     result.completion_tokens,
+                    result.decode_window_tokens,
                 );
                 tracing::info!(
                     prompt_tokens = seq.prompt_tokens.len(),

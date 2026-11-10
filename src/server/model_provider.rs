@@ -557,7 +557,26 @@ pub struct GenerationResult {
     pub completion_tokens: usize,
     pub generation_time_ms: u64,
     pub prompt_eval_ms: u64,
+    /// Duration of the timed decode window, in milliseconds.
+    ///
+    /// When [`decode_window_tokens`](Self::decode_window_tokens) is `Some`,
+    /// this is the interval from the first token to the finish
+    /// (`generation_time_ms - prompt_eval_ms`), the window that count
+    /// describes. When it is `None`, the producer could not separate its
+    /// prompt or encoder pass from the decode loop, and this is the request's
+    /// whole wall time instead (Florence-2, Nemotron-Parse). The llama-server
+    /// `predicted_ms` field and counters read this value either way.
     pub generation_only_ms: u64,
+    /// Tokens produced inside the [`generation_only_ms`](Self::generation_only_ms)
+    /// window, or `None` when the producer has no isolated decode window.
+    ///
+    /// This is the numerator of the per-request decode rate (issue #2938),
+    /// following the rule in `docs/benchmarks.md` "How decode tok/s is
+    /// counted": a producer whose first token comes out of prefill reports
+    /// `completion_tokens - 1`, one that produces every token inside the
+    /// window reports `completion_tokens`. `None` makes the `/metrics` decode
+    /// histogram skip the request rather than record a wall-time rate.
+    pub decode_window_tokens: Option<usize>,
     pub finish_reason: String,
     /// Why generation ended, distinguishing a string stop-sequence match from
     /// an EOS token and from the length limit (issue #1466). `finish_reason`

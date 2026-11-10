@@ -357,7 +357,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     append_request_histogram(
         &mut body,
         "mlxcel_request_decode_tok_s",
-        "Per-request decode throughput in tokens per second",
+        "Per-request decode throughput in tokens per second, counting only tokens produced inside the decode window",
         &decode_rate,
     );
 
