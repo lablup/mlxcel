@@ -237,8 +237,8 @@ fn failed_slot_store_leaves_the_slot_invalid_and_decode_rejects_it() {
     let model = fixture.path();
     let device = device();
     let prompt = [1, 2, 3];
-    let mut engine = IreeRaggedLlama::load(model, &device, 4, CAPACITY)
-        .expect("ragged engine at B=4");
+    let mut engine =
+        IreeRaggedLlama::load(model, &device, 4, CAPACITY).expect("ragged engine at B=4");
 
     engine.test_set_slot_store_failure(true);
     engine
@@ -262,8 +262,8 @@ fn failed_slot_store_leaves_the_slot_invalid_and_decode_rejects_it() {
         .decode_ragged_logits_with_modes(&modes, &tokens, &positions, &cache_len)
         .expect_err("an active row with an invalid KV slot must be rejected");
     assert!(
-        error.contains("not valid"),
-        "the rejection must name the invalid slot, got: {error}"
+        error.contains("xla_llama_decode_ragged_logits failed"),
+        "the C validator must fail the call, got: {error}"
     );
 
     let logits = engine
@@ -274,16 +274,23 @@ fn failed_slot_store_leaves_the_slot_invalid_and_decode_rejects_it() {
         Some(true),
         "both transfers succeeding must mark the slot valid"
     );
+    // The identical row that was just rejected must now reach the graph, which
+    // proves the rejection was the slot validity check and not a shape error.
+    engine
+        .decode_ragged_logits_with_modes(&modes, &tokens, &positions, &cache_len)
+        .expect("the same row decodes once its KV store completed");
     let first = argmax(&logits);
 
-    let mut reference =
-        XlaReferenceEngine::load_with_context_capacity(model, &device, CAPACITY)
-            .expect("reference engine");
+    let mut reference = XlaReferenceEngine::load_with_context_capacity(model, &device, CAPACITY)
+        .expect("reference engine");
     let expected = reference
         .generate(&prompt, 2, &[])
         .expect("two-token reference stream");
     assert_eq!(expected.len(), 2);
-    assert_eq!(first, expected[0], "prefill logits must match the reference");
+    assert_eq!(
+        first, expected[0],
+        "prefill logits must match the reference"
+    );
 
     tokens[0] = first;
     let logits = engine
