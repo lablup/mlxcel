@@ -64,6 +64,34 @@ def valid_activity_output() -> dict[str, object]:
 def visible_only_activity_output() -> dict[str, object]:
     return activity_output(("one-visible", "two-visible"))
 
+# Tail of the activity-performance.log from CI run 42753658537 (disk filled mid-run): the last, truncated
+# sample line followed by Node's unhandled ENOSPC stream error. The runner checkout path is neutralized.
+ENOSPC_LOG_TAIL = r'''{"mode":"off","pair":3,"tokens_per_second":165.58441558441558,"predicted_tokens":256,"predicted_ms":1540,"diagnostics":{"before":{"observed_at":"2026-11-10T04:43:02.288Z","host":{"status":"captured","load_one":2.44,"load_five":3.28,"load_fifteen":3.4,"running":6,"total":1466},"gpu":{"status":"captured","index":"0","pstate":"P0","gpu_utilization_percent":"85","memory_clock_mhz":"[N/A]"}},"after":{"observed_at":"2026-11-10T04:43:03.913Z","host":{"status":"captured","load_one":2.57,"load_five":3.29,"load_fifteen":3.4node:events:487
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: ENOSPC: no space left on device, write
+    at writeSync (node:fs:1128:3)
+    at SyncWriteStream._write (node:internal/fs/sync_write_stream:27:5)
+    at writeOrBuffer (node:internal/streams/writable:572:12)
+    at _write (node:internal/streams/writable:501:10)
+    at Writable.write (node:internal/streams/writable:510:10)
+    at request (file:///runner/_work/mlxcel/mlxcel/webui/scripts/activity-performance.mjs:121:40)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async file:///runner/_work/mlxcel/mlxcel/webui/scripts/activity-performance.mjs:137:126
+Emitted 'error' event on SyncWriteStream instance at:
+    at emitErrorNT (node:internal/streams/destroy:170:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:129:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  errno: -28,
+  syscall: 'write',
+  code: 'ENOSPC'
+}
+
+Node.js v26.5.1
+'''
+BUDGET_LOG_TAIL = '{"mode":"off","pair":3,"tokens_per_second":165.5}\nError: budget exceeded: hidden slowdown 6.1% over the 2% target\n    at verdict (file:///runner/_work/mlxcel/mlxcel/webui/scripts/activity-performance.mjs:300:11)\n'
+
 
 class ActivityPerformanceHelperTests(unittest.TestCase):
     def test_visible_only_mode_accepts_its_own_shape_and_no_other(self) -> None:
@@ -429,6 +457,68 @@ class ActivityPerformanceHelperTests(unittest.TestCase):
             path.write_text(json.dumps(data))
             with self.assertRaisesRegex(AssertionError, "sample counts"):
                 verify.validate_activity_output(path, "visible-only-headed")
+
+class ActivityEnvironmentFailureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def log(self, text: str) -> Path:
+        path = self.root / "activity-performance.log"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def harness(self, node_log_text: str) -> object:
+        """A harness whose node_bin is a shell script that prints the log text and exits 1."""
+        (self.root / "payload.txt").write_text(node_log_text, encoding="utf-8")
+        node = self.root / "fake-node"
+        node.write_text(f'#!/bin/sh\ncat "{self.root}/payload.txt"\nexit 1\n')
+        node.chmod(0o700)
+        args = Namespace(node_bin=str(node), repo_root=self.root, activity_timeout=30, perf_mode="hidden", prompt_file=None, nvidia_smi=None, pid_file=None)
+        return verify.Harness(args=args, work=self.root, model_for_server=self.root, key_file=self.root / "key", base_root="http://x", base_prefixed="http://x/p", env={}, secrets=[])
+
+    def test_classifies_the_real_enospc_tail_and_other_host_errors(self) -> None:
+        self.assertEqual(verify.classify_environment_failure(self.log(ENOSPC_LOG_TAIL)), "ENOSPC (no space left on device)")
+        self.assertEqual(verify.classify_environment_failure(self.log("x\nError: EDQUOT: quota\n")), "EDQUOT (disk quota exceeded)")
+        self.assertEqual(verify.classify_environment_failure(self.log("x\nError: EIO: i/o error, write\n")), "EIO (input/output error)")
+        self.assertEqual(verify.classify_environment_failure(self.log("Emitted 'error' event on Socket instance at:\n")), "unhandled stream error event")
+
+    def test_does_not_classify_a_performance_failure_or_a_missing_log(self) -> None:
+        self.assertIsNone(verify.classify_environment_failure(self.log(BUDGET_LOG_TAIL)))
+        self.assertIsNone(verify.classify_environment_failure(self.log("MEIOSIS ENOSPCX preENOSPC\n")))
+        self.assertIsNone(verify.classify_environment_failure(self.root / "missing.log"))
+
+    def test_only_the_bounded_tail_is_scanned(self) -> None:
+        old = "Error: ENOSPC: no space left on device\n" + "x" * (verify.ENVIRONMENT_LOG_TAIL_BYTES + 10)
+        self.assertIsNone(verify.classify_environment_failure(self.log(old)))
+
+    def test_run_activity_script_raises_infrastructure_error_for_a_full_disk(self) -> None:
+        with self.assertRaises(verify.ActivityInfrastructureError) as ctx:
+            verify.run_activity_script(self.harness(ENOSPC_LOG_TAIL), "m", "i")
+        message = str(ctx.exception)
+        self.assertIn("ENOSPC (no space left on device)", message)
+        self.assertIn("exited 1", message)
+        self.assertIn("activity-performance.log", message)
+
+    def test_run_activity_script_keeps_the_plain_error_for_a_budget_failure(self) -> None:
+        with self.assertRaises(AssertionError) as ctx:
+            verify.run_activity_script(self.harness(BUDGET_LOG_TAIL), "m", "i")
+        self.assertNotIsInstance(ctx.exception, verify.ActivityInfrastructureError)
+        self.assertTrue(str(ctx.exception).startswith("activity-performance.mjs exited 1; log="))
+
+    def test_main_labels_infrastructure_failures_and_keeps_the_old_message_otherwise(self) -> None:
+        argv = ["unused"]
+        with mock.patch.object(verify, "parse_args", return_value=Namespace(evidence=self.root / "e.json")):
+            for error, label in (
+                (verify.ActivityInfrastructureError("ENOSPC (no space left on device); activity-performance.mjs exited 1; log=/l"), "activity gate infrastructure failure: ENOSPC"),
+                (AssertionError("activity-performance.mjs exited 1; log=/l"), "activity performance verification failed: activity-performance.mjs exited 1"),
+            ):
+                with mock.patch.object(verify, "run", side_effect=error), redirect_stderr(StringIO()) as err:
+                    self.assertEqual(verify.main(argv), 1)
+                self.assertIn(label, err.getvalue())
+                if label.startswith("activity gate"):
+                    self.assertNotIn("verification failed", err.getvalue())
 
 
 if __name__ == "__main__":

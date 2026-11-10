@@ -40,6 +40,33 @@ SECRET_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+")
 REQUIRED_MODES = {"one-visible", "two-visible", "hidden"}
 VISIBLE_ONLY_MODES = {"one-visible", "two-visible"}
 
+class ActivityInfrastructureError(AssertionError):
+    """The activity script died of a host problem (full disk, I/O error), not a performance verdict."""
+
+
+ENVIRONMENT_ERRNO_RE = re.compile(r"\b(ENOSPC|EDQUOT|EIO)\b")
+ENVIRONMENT_ERRNO_TEXT = {"ENOSPC": "no space left on device", "EDQUOT": "disk quota exceeded", "EIO": "input/output error"}
+ENVIRONMENT_LOG_TAIL_BYTES = 64 * 1024
+
+
+def classify_environment_failure(log_path: Path) -> str | None:
+    """Reason when the tail of the activity log shows a host-level write failure, else None."""
+    try:
+        with open(log_path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - ENVIRONMENT_LOG_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    # The last match wins: the terminal error is at the end, earlier lines are sample JSON or warnings.
+    codes = ENVIRONMENT_ERRNO_RE.findall(tail)
+    if codes:
+        return f"{codes[-1]} ({ENVIRONMENT_ERRNO_TEXT[codes[-1]]})"
+    if "Unhandled 'error' event" in tail or "Emitted 'error' event on" in tail:
+        return "unhandled stream error event"
+    return None
+
+
 @dataclass
 class OwnedProcess:
     label: str
@@ -639,6 +666,9 @@ def run_activity_script(h: Harness, model_id: str, inference_id: str) -> tuple[d
             raise AssertionError(f"activity-performance.mjs timed out after {h.args.activity_timeout}s; log={log_path}") from exc
         if returncode != 0:
             stop_process_group(proc)
+            reason = classify_environment_failure(log_path)
+            if reason:
+                raise ActivityInfrastructureError(f"{reason}; activity-performance.mjs exited {returncode}; log={log_path}")
             raise AssertionError(f"activity-performance.mjs exited {returncode}; log={log_path}")
         if not process_group_empty(proc.pid, 5.0):
             stop_process_group(proc)
@@ -765,7 +795,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return h.evidence
     except Exception as exc:
         if h is not None:
-            h.evidence.update({"status": "failed", "failed_at": now(), "error": str(redact(str(exc), [key]))})
+            h.evidence.update({"status": "failed", **({"failure_class": "infrastructure"} if isinstance(exc, ActivityInfrastructureError) else {}), "failed_at": now(), "error": str(redact(str(exc), [key]))})
             h.flush()
         raise
     finally:
@@ -783,6 +813,9 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
         run(args)
+    except ActivityInfrastructureError as exc:
+        print(f"activity gate infrastructure failure: {redact(str(exc), [])}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"activity performance verification failed: {redact(str(exc), [])}", file=sys.stderr)
         return 1
