@@ -592,15 +592,24 @@ pub async fn retrieve_response(
         .or_else(|| store.background_snapshot(&id));
     match response {
         Some(response) => Json(response).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new(
-                format!("response '{id}' not found"),
-                "not_found",
-            )),
-        )
-            .into_response(),
+        None => response_not_found(&id),
     }
+}
+
+/// The 404 for a response id nothing knows: OpenAI's error envelope with
+/// type `not_found`.
+///
+/// Used by: [`retrieve_response`], [`cancel_response`], and the router pool's
+/// dispatcher when no loaded model owns the id (issue #2901).
+pub(crate) fn response_not_found(id: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::new(
+            format!("response '{id}' not found"),
+            "not_found",
+        )),
+    )
+        .into_response()
 }
 
 /// DELETE /v1/responses/:id
@@ -685,14 +694,7 @@ pub async fn cancel_response(State(state): State<AppState>, Path(id): Path<Strin
         .into_response();
     }
 
-    (
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::new(
-            format!("response '{id}' not found"),
-            "not_found",
-        )),
-    )
-        .into_response()
+    response_not_found(&id)
 }
 
 // -- Helpers ------------------------------------------------------------------

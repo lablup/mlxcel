@@ -1390,6 +1390,40 @@ fn dispatch_model_name(method: &Method, query: &HashMap<String, String>, body: &
     }
 }
 
+/// The response id of a request that addresses one stored or running
+/// response and normally names no model: `GET` or `DELETE
+/// /v1/responses/{id}` and `POST /v1/responses/{id}/cancel`, with or without
+/// the `/v1` prefix. A `GET` covers every retrieve form, `?stream=true` and
+/// `starting_after` included, since the query is not part of the path.
+///
+/// `compact` and `input_tokens` are routes of their own, not ids.
+fn response_affinity_id(method: &Method, path: &str) -> Option<String> {
+    let rest = path
+        .strip_prefix("/v1/responses/")
+        .or_else(|| path.strip_prefix("/responses/"))?;
+    let segment = if method == Method::POST {
+        rest.strip_suffix("/cancel")?
+    } else if method == Method::GET || method == Method::DELETE {
+        rest
+    } else {
+        return None;
+    };
+    if segment.is_empty()
+        || segment.contains('/')
+        || segment == "compact"
+        || segment == "input_tokens"
+    {
+        return None;
+    }
+    // The sub-app's `Path` extractor percent-decodes the segment; probe with
+    // the same string it will look up.
+    Some(
+        percent_encoding::percent_decode_str(segment)
+            .decode_utf8_lossy()
+            .into_owned(),
+    )
+}
+
 async fn dispatch(state: RouterServerState, request: Request<Body>) -> Response {
     let (parts, body) = request.into_parts();
     let query = parse_query(parts.uri.query());
@@ -1400,7 +1434,28 @@ async fn dispatch(state: RouterServerState, request: Request<Body>) -> Response 
         Ok(bytes) => bytes,
         Err(response) => return response,
     };
-    let name = dispatch_model_name(&parts.method, &query, &body_bytes);
+    let mut name = dispatch_model_name(&parts.method, &query, &body_bytes);
+
+    // Response affinity (issue #2901): a retrieve, delete or cancel names a
+    // response, not a model, so an OpenAI SDK sends neither a body `model`
+    // nor `?model=`. Find the loaded model whose store knows the id. An
+    // explicit model still wins and takes the ordinary path below.
+    if name.is_empty()
+        && let Some(id) = response_affinity_id(&parts.method, parts.uri.path())
+    {
+        match query.get("model").filter(|model| !model.is_empty()) {
+            // A cancel is a POST, whose model is read from the body only;
+            // accept `?model=` here as retrieve and delete always did.
+            Some(model) => name = model.clone(),
+            None => {
+                let Some(entry) = state.pool.entry_holding_response(&id) else {
+                    return super::routes::responses::response_not_found(&id);
+                };
+                let rebuilt = Request::from_parts(parts, Body::from(body_bytes));
+                return state.pool.dispatch(&entry, rebuilt, forwards_body).await;
+            }
+        }
+    }
 
     let entry = match state.pool.resolve(&name, autoload) {
         Ok(entry) => entry,
@@ -1588,6 +1643,10 @@ pub(crate) fn create_router_app_with_secured_ui(
 #[cfg(test)]
 #[path = "router_server_tests.rs"]
 mod router_server_tests;
+
+#[cfg(test)]
+#[path = "router_responses_background_tests.rs"]
+mod router_responses_background_tests;
 
 #[cfg(all(test, feature = "webui"))]
 #[path = "router_server_security_support_tests.rs"]
