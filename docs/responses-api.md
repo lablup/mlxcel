@@ -241,7 +241,7 @@ Every object of a background response carries `"background": true`; a foreground
 
 What create answers:
 
-- `400 invalid_request_error` for everything a foreground request is refused for before generation (malformed fields, unsupported media, invalid sampling or tool parameters, an invalid schema, an unknown `previous_response_id`), and also when `stream` is `true`, when the response store is disabled, or when `--responses-background-max-jobs` is `0`. No job is created.
+- `400 invalid_request_error` for everything a foreground request is refused for before generation (malformed fields, unsupported media, invalid sampling or tool parameters, an invalid schema, an unknown `previous_response_id`), and also when `stream` is `true`, when the response store is disabled, or when `--responses-background-max-jobs`, the response store entry limit, or `--responses-store-max-bytes` is `0`. No job is created.
 - `429` with `error.code: "rate_limit_exceeded"` when `--responses-background-max-jobs` jobs are already active, or when the active jobs fill `--responses-store-max-bytes`. Retry after a job finishes.
 - `503` when the generation queue is full, as for a foreground request.
 

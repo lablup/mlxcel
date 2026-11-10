@@ -36,6 +36,7 @@ use crate::server::request_options::resolve_server_max_tokens_with_live;
 use crate::server::responses_store::{ResponsesStore, ResponsesStoreConfig};
 use crate::server::responses_translator::responses_request_to_chat;
 use crate::server::thinking_budget::resolve_request_budget;
+use crate::server::types::ResponseStatus;
 use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig, create_app};
 use crate::tokenizer::MlxcelTokenizer;
 
@@ -324,8 +325,20 @@ async fn validation_errors_return_400_and_create_no_job() {
         background_max_jobs: 0,
         ..ResponsesStoreConfig::default()
     });
-    for h in [&no_store, &no_jobs] {
-        assert_eq!(h.create(background_body()).await.0, StatusCode::BAD_REQUEST);
+    // A zero entry or byte budget disables background mode too, and answers
+    // 400 before the queue probe could turn it into a 503.
+    let no_entries = harness_with(ResponsesStoreConfig {
+        max_entries: 0,
+        ..ResponsesStoreConfig::default()
+    });
+    let no_bytes = harness_with(ResponsesStoreConfig {
+        max_bytes: 0,
+        ..ResponsesStoreConfig::default()
+    });
+    for h in [&no_store, &no_jobs, &no_entries, &no_bytes] {
+        let (status, reply) = h.create(background_body()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{reply}");
+        assert_eq!(reply["error"]["type"], "invalid_request_error", "{reply}");
         assert_eq!(h.store.active_background_jobs(), 0);
     }
 }
@@ -402,6 +415,30 @@ async fn a_driver_panic_ends_the_job_failed() {
     let done = h.terminal(&queued.id).await;
     assert_eq!(done["error"]["code"], "server_error", "{done}");
     assert_eq!(h.store.active_background_jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_driver_panic_after_the_terminal_keeps_the_recorded_result() {
+    let h = harness();
+    let store = Arc::clone(&h.store);
+    let job = h.job(background_body());
+    let id = job.response_id.clone();
+    let queued_id = id.clone();
+    let queued = spawn_background_job_with(job, move |_run, _c, _sink| {
+        // The terminal is recorded, then the driver panics.
+        let mut terminal = store
+            .background_snapshot(&queued_id)
+            .expect("the queued object is readable");
+        terminal.status = ResponseStatus::Completed;
+        store.finish_background(&queued_id, terminal);
+        panic!("driver panic after the terminal")
+    })
+    .expect("job is admitted");
+    assert_eq!(queued.id, id);
+
+    let done = h.terminal(&queued.id).await;
+    assert_eq!(done["status"], "completed", "{done}");
+    assert!(done["error"].is_null(), "{done}");
 }
 
 #[tokio::test]

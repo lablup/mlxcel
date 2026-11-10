@@ -116,7 +116,10 @@ pub(crate) fn validate_background_request(
             "invalid_request_error",
         ));
     };
-    if store.config().background_max_jobs == 0 {
+    // The same three conditions `admit_background` refuses with `Disabled`,
+    // checked here so a full queue cannot turn a 400 into a 503.
+    let config = store.config();
+    if config.background_max_jobs == 0 || config.max_entries == 0 || config.max_bytes == 0 {
         return Err(background_disabled());
     }
     Ok(())
@@ -326,9 +329,12 @@ async fn run_background_job<D>(
             response_id = %recorder.response_id(),
             "background response generation task failed: {join_error}"
         );
-        recorder.fail_server_error(
-            "The background response generation ended unexpectedly; check the server log.",
-        );
+        // A panic after the terminal was recorded must not log a failure.
+        if recorder.is_active() {
+            recorder.fail_server_error(
+                "The background response generation ended unexpectedly; check the server log.",
+            );
+        }
         return;
     }
     if recorder.is_active() {
