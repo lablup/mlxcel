@@ -19,7 +19,7 @@
 |---|---|
 | Metal | 새 matmul 오버레이, `MLXCEL_DENSE_GEMV_ROWS` |
 | MoE | `switch_gate_up_preferred_in_forward` |
-| 근거 | `docs/benchmark_results/few-row-dense-matmul-m1ultra-2026-11-01.md` |
+| 근거 | `docs/benchmark_results/versions/v0.8.0.md#few-row-dense-matmul-m1ultra-2026-11-01` |
 
 ## 8. 후속 조치
 

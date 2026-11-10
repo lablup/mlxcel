@@ -72,7 +72,7 @@ Native regression은 prompt 길이가 서로 다른 세 행을 사용해 4-token
 - 두 checkpoint startup log가 `decode path: native batched forward`를 보고한다.
 - E2B C=1/2/4 총 tok/s: main 87.6/124.3/128.6, native 88.3/146.0/221.5. E4B: main 68.5/97.9/100.2, native 68.4/110.8/162.8. 단일 측정에서 C=1 성능은 사실상 유지됐다(+0.8%/-0.15%).
 
-조건, perplexity 차이, 실패 분류와 측정 한계는 [벤치마크 기록](../docs/benchmark_results/gemma3n-native-batched-decode-2026-10-27.md)에 정리했다. CUDA/ROCm 성능은 측정하지 않았고 선택적 server metrics도 사용할 수 없었다.
+조건, perplexity 차이, 실패 분류와 측정 한계는 [벤치마크 기록](../docs/benchmark_results/versions/v0.8.0.md#gemma3n-native-batched-decode-2026-10-27)에 정리했다. CUDA/ROCm 성능은 측정하지 않았고 선택적 server metrics도 사용할 수 없었다.
 
 ## 5. 학습 포인트
 

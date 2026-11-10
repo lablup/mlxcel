@@ -82,9 +82,9 @@ Attempt 4's analyzer exited zero with no failures. The binary SHA-256 was `2388e
 
 ## Evidence Locations
 
-- `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/STATUS.md`
-- `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-1.md`
+- `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/STATUS.md`
+- `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-1.md`
 - `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-2/`
-- `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-3/summary-corrected.txt`
-- `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-4/summary.txt`
-- `docs/benchmark_results/server-prompt-lookup-break-even-gb10-2026-10-11.md`
+- `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-3/summary-corrected.txt`
+- `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-4/summary.txt`
+- `docs/benchmark_results/versions/v0.8.0.md#server-prompt-lookup-break-even-gb10-2026-10-11`

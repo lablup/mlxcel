@@ -42,7 +42,7 @@ PR #2029 added `&& custom_kernels_available()` to Nemotron-H's `use_fused` witho
 - **Checker.** The two `ffi_tests` gates spelled `!metal_is_available() && !cuda_is_available()` now use the macro plus a no-GPU-backend return, and `ffi_tests.rs` leaves `BACKEND_ENUMERATION_TODO`.
 - **Scan grid fix.** `get_2d_grid_dims(shape, strides, divisor)` in `patches-rocm/mlx/backend/rocm/kernel_utils.hpp` delegates to `get_2d_grid_dims_common` from `mlx/backend/common/utils.cpp`, as the CUDA backend does. `LOCAL_FIXES.md` item 22; `tests/rocm_strided_scan.rs`.
 - **Traces.** `benchmarks/logit_traces/rocm_gfx1151_c5fe9a16/`: sixteen traces (five checkpoints at w1, w8, w256, plus `gemma-3-4b-it` at `w8ctx1536`), METADATA, RUNS, SHA256SUMS and a README with the Metal commands.
-- **Docs.** `docs/benchmark_results/rocm-correctness-gfx1151-2026-09-30.md`, pointers from the 2026-09-12 run and `docs/installation.md`, and the Makefile note on the `verify-rocm` order.
+- **Docs.** `docs/benchmark_results/versions/v0.8.0.md#rocm-correctness-gfx1151-2026-09-30`, pointers from the 2026-09-12 run and `docs/installation.md`, and the Makefile note on the `verify-rocm` order.
 
 ## 3. Technical Decisions
 

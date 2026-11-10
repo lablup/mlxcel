@@ -30,8 +30,8 @@ gather가 웨이트 읽기만으로 이뤄지지 않으므로 비율만으로는
 ## 3. 변경 요약
 
 - `src/models/gemma4.rs`: `MLXCEL_PROFILE_MOE_INNER=1`에서 고유 전문가 수도 출력한다.
-- `docs/benchmark_results/moe-distinct-experts-n1x-2026-10-31.md`: 측정과 결정.
-- `docs/benchmark_results/cuda-qmm-fold-batch-n1x-2026-10-31.md`: 어텐션 수치 정정, 벤치가 프롬프트 하나를 쓴다는 설명.
+- `docs/benchmark_results/versions/v0.8.0.md#moe-distinct-experts-n1x-2026-10-31`: 측정과 결정.
+- `docs/benchmark_results/versions/v0.8.0.md#cuda-qmm-fold-batch-n1x-2026-10-31`: 어텐션 수치 정정, 벤치가 프롬프트 하나를 쓴다는 설명.
 - `docs/benchmarks.md`: 두 기록의 목차 항목.
 
 ## 4. 결과

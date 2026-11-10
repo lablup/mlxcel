@@ -116,5 +116,5 @@ CUDA was not measured. Throughput samples are diagnostic single runs under drift
 - Issue #1983: Gemma 4 31B MTP exactness
 - Issue #1279: 31B exactness policy and benchmark qualification
 - Issue #1986: Unified 12B long-context exactness follow-up
-- `docs/benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md`
+- `docs/benchmark_results/versions/v0.8.0.md#gemma4-31b-mtp-exactness-2026-09-26`
 - `docs/benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.json`

@@ -30,7 +30,7 @@ The controlled evidence, from #1538's record: on the `gemma-4-12B-it-{4bit,8bit}
 
 A `qmv_accumulator<bits, T>` trait in `qmv.cu` selects `float` under `#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800` when `bits >= 8` **or** `T` is `cutlass::bfloat16_t`, and otherwise keeps upstream's rule. Both `qmv_kernel_impl` and `qmv_multirow_kernel_impl` use it; `gather_qmv` inherits it. The float specializations of `dequant_fma` and `fma_tile` already existed and were already exercised by the `bits >= 8` path, so this instantiates nothing new.
 
-Also: 80 lines of tests in `ffi_tests.rs`, a benchmark record at `docs/benchmark_results/qmv-float-accum-v100-2026-08-31.md`, the post-program row in #1538's baseline doc, and a changelog entry.
+Also: 80 lines of tests in `ffi_tests.rs`, a benchmark record at `docs/benchmark_results/versions/v0.7.0.md#qmv-float-accum-v100-2026-08-31`, the post-program row in #1538's baseline doc, and a changelog entry.
 
 ## 3. Technical Decisions
 
@@ -102,8 +102,8 @@ This is the same class as #910, which fixed `qmm_sm80` on sm_121. It is out of s
 ## References
 
 - Issue #1539, epic #1536 (including its GB10 continuation section)
-- The controlled measurement this change was derived from: #1538 and `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md`
-- This change's record: `docs/benchmark_results/qmv-float-accum-v100-2026-08-31.md`
+- The controlled measurement this change was derived from: #1538 and `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31`
+- This change's record: `docs/benchmark_results/versions/v0.7.0.md#qmv-float-accum-v100-2026-08-31`
 - Multirow bitwise-equality invariant: #725
 - Prior determinism defect of the same class: #910
 - Autotuner for launch configurations: #906

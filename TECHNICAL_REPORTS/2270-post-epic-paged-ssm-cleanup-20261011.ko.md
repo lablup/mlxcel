@@ -125,6 +125,6 @@ Committed release log는 release build가 19분 43초에 완료되었음을 증�
 
 - 이슈 #2230: 에픽 이후 정리 요구 사항
 - PR #2270: 구현과 evidence
-- `docs/benchmark_results/model-owned-storage-gb10-2026-10-11.md`: 날짜가 기록된 storage 결정
+- `docs/benchmark_results/versions/v0.8.0.md#model-owned-storage-gb10-2026-10-11`: 날짜가 기록된 storage 결정
 - `docs/benchmark_results/data/model-owned-storage-gb10-2026-10-11/`: 완전한 storage protocol 및 raw output
 - `docs/benchmark_results/data/ssm-bf16-parity-gb10-2026-10-11/`: 원래 stage 편차 및 Granite parity artifact

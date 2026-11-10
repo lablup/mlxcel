@@ -94,7 +94,7 @@ The full `--sweep --batch 1 --max-tokens 128` completes 16 rows: 4 baselines, 9 
 
 Every ratio is below 1.00x, where M5 Max reads 1.57x at K=4 for the Unified 12B pairing. Acceptance is not the explanation: the same pairing accepts *more* on M1 Ultra than on M5 Max at the same K (39.6% and mean accepted length 1.19, against 35.0% and 1.05) and still lands at 0.74x.
 
-The verify round is the difference. `docs/benchmark_results/speculative-decoding-m1ultra-2026-08-19.md` measures a block-4 verify round at 2.70 classic decode steps on M1 Ultra against 1.50 on M3 Ultra and 1.27 on M5 Max, and identifies M1 Ultra as the first host on Apple GPU generation 13. A mean accepted length near 1.2 cannot clear break-even against a 2.70-step verify. The static gate that declines B=1 MTP on this generation exists for the same reason, so these rows confirm a known property of the host rather than reporting a regression.
+The verify round is the difference. `docs/benchmark_results/versions/v0.6.0.md#speculative-decoding-m1ultra-2026-08-19` measures a block-4 verify round at 2.70 classic decode steps on M1 Ultra against 1.50 on M3 Ultra and 1.27 on M5 Max, and identifies M1 Ultra as the first host on Apple GPU generation 13. A mean accepted length near 1.2 cannot clear break-even against a 2.70-step verify. The static gate that declines B=1 MTP on this generation exists for the same reason, so these rows confirm a known property of the host rather than reporting a regression.
 
 ### 3.2 Gates
 

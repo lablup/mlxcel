@@ -76,7 +76,7 @@ The read-only fix at `534563fb704619f407e4ea699482fda9c22fac98` mounts stateless
 
 ## 4. Validation
 
-The complete acceptance run executed at `c2400a3e2ec36cd89954ee7544edb420b7a14d76`. The conflict-free rebase onto `3d8fd7b4` produced `4cb81177844126aab673dd08354d731952ee5058`: all eight patches are equivalent, and the tree differs from the measured revision only in `docs/benchmark_results/kernel-backend-kind-metal-m1ultra-2026-09-13.md` and `scripts/paged_decode_counter_ab.sh`. Runtime, build, frontend, and contract contents are identical. Heavy validation below belongs to `c2400a3e`, not a claimed rerun at `4cb81177`.
+The complete acceptance run executed at `c2400a3e2ec36cd89954ee7544edb420b7a14d76`. The conflict-free rebase onto `3d8fd7b4` produced `4cb81177844126aab673dd08354d731952ee5058`: all eight patches are equivalent, and the tree differs from the measured revision only in `docs/benchmark_results/versions/v0.8.0.md#kernel-backend-kind-metal-m1ultra-2026-09-13` and `scripts/paged_decode_counter_ab.sh`. Runtime, build, frontend, and contract contents are identical. Heavy validation below belongs to `c2400a3e`, not a claimed rerun at `4cb81177`.
 
 | Scope | Result |
 |-------|--------|

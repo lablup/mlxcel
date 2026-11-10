@@ -43,7 +43,7 @@ Seven commits:
 - **`359f67ed`** `update(rocm): default the fused MoE SGY to 2 on ROCm`.
 - **`826dfa8c`** `fix(rocm): pick the fused MoE SGY default from the build flag`: replaces a runtime backend comparison that `make verify-kernel-port-dispatch` rejected.
 - **`77afbb1d`** `docs(rocm): list the SSM update step among the HIP-ported kernels`: README wording after the rebase onto #2099.
-- **`eade24a1`** `docs(rocm): publish the fused MoE decode and logit results on gfx1151`: `docs/benchmark_results/rocm-fused-moe-gfx1151-2026-10-05.md`, the bench CSVs and the traces under `benchmarks/logit_traces/rocm_gfx1151_77afbb1d/`.
+- **`eade24a1`** `docs(rocm): publish the fused MoE decode and logit results on gfx1151`: `docs/benchmark_results/versions/v0.8.0.md#rocm-fused-moe-gfx1151-2026-10-05`, the bench CSVs and the traces under `benchmarks/logit_traces/rocm_gfx1151_77afbb1d/`.
 
 ### 2.1 The kernels
 

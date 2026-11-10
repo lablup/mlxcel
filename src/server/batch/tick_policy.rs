@@ -33,7 +33,7 @@
 //! `Decode` is unchanged by running a decode. A long prompt admitted next to a
 //! live decode batch therefore ran chunk 0 and then made no further progress
 //! until every decoding sequence had finished. Measured on an M1 Ultra
-//! (`docs/benchmark_results/mixed-step-prototype-m1ultra-2026-08-03.md`), the
+//! (`docs/benchmark_results/versions/v0.5.0.md#mixed-step-prototype-m1ultra-2026-08-03`), the
 //! prefill held at chunk 1 of 19 for 20 s while decode advanced 138 to 394
 //! steps. With streams arriving continuously that wait has no ceiling, so the
 //! admitted request's time to first token has none either.
@@ -147,7 +147,7 @@ pub(crate) const PREFILL_GRANT_INTERVAL_ENV: &str = "MLXCEL_PREFILL_GRANT_INTERV
 /// first token sooner lowers it; one who wants the decoding streams undisturbed
 /// raises it, or sets `0` to opt back into the unbounded wait entirely. Full
 /// table, dispersion, and the reason the p95 column must not be used to pick
-/// this number: `docs/benchmark_results/prefill-fairness-m1ultra-2026-08-03.md`.
+/// this number: `docs/benchmark_results/versions/v0.5.0.md#prefill-fairness-m1ultra-2026-08-03`.
 pub(crate) const PREFILL_GRANT_INTERVAL_DEFAULT: u32 = 16;
 
 /// Resolve the prefill grant interval: explicit CLI value, else

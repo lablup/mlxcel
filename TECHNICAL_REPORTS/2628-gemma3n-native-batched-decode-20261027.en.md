@@ -72,7 +72,7 @@ The native regression runs three rows with distinct prompt lengths below, at, an
 - Both checkpoint startup logs report `decode path: native batched forward`.
 - E2B C=1/2/4 aggregate tok/s: main 87.6/124.3/128.6, native 88.3/146.0/221.5. E4B: main 68.5/97.9/100.2, native 68.4/110.8/162.8. C=1 is effectively unchanged in this single-run sample (+0.8%/-0.15%).
 
-See [the benchmark record](../docs/benchmark_results/gemma3n-native-batched-decode-2026-10-27.md) for conditions, perplexity differences, failure classification and measurement limits. CUDA/ROCm performance was not measured; optional server metrics were unavailable.
+See [the benchmark record](../docs/benchmark_results/versions/v0.8.0.md#gemma3n-native-batched-decode-2026-10-27) for conditions, perplexity differences, failure classification and measurement limits. CUDA/ROCm performance was not measured; optional server metrics were unavailable.
 
 ## 5. Learning Points
 

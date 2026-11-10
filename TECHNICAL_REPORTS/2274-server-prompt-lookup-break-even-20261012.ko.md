@@ -82,9 +82,9 @@ Attempt 4 분석기는 실패 없이 종료 코드 0을 반환했다. Binary SHA
 
 ## 근거 위치
 
-- `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/STATUS.md`
-- `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-1.md`
+- `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/STATUS.md`
+- `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-1.md`
 - `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-2/`
-- `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-3/summary-corrected.txt`
-- `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-4/summary.txt`
-- `docs/benchmark_results/server-prompt-lookup-break-even-gb10-2026-10-11.md`
+- `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-3/summary-corrected.txt`
+- `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-4/summary.txt`
+- `docs/benchmark_results/versions/v0.8.0.md#server-prompt-lookup-break-even-gb10-2026-10-11`

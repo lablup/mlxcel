@@ -807,7 +807,7 @@ impl DecoderLayer {
     /// method existed the `LanguageModel` default ran `forward` once per
     /// sequence, so a B=4 tick was four serialized single-token graphs; the
     /// op-level profile in
-    /// `docs/benchmark_results/moe-batched-decode-m1ultra-2026-09-04.md` is
+    /// `docs/benchmark_results/versions/v0.7.0.md#moe-batched-decode-m1ultra-2026-09-04` is
     /// what justified replacing it.
     ///
     /// Used by: Qwen3MoeModel::forward_batched_impl

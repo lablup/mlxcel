@@ -42,7 +42,7 @@ Issue #2066 (#1814의 일부, epic #1801)은 ROCm overlay의 expert-batched `gat
 | `tests/rocm_gather_qmm_expert_batched.rs` (신규) | Unsorted 경로와 dequantize한 f32 reference에 대한 48개 case, ROCm 전용 |
 | `patches-rocm/LOCAL_FIXES.md` | Item 9를 원인, 재작성, 측정, 기본값으로 다시 작성하고 #1813 upstream 후보로 표시 |
 | `docs/mlxcelverse/upstream/README.md` | Item 9를 "Held"에서 "Not packaged yet"으로 옮기고 fork package에 필요한 것 기록 |
-| `docs/benchmark_results/rocm-moe-prefill-gfx1151-2026-10-05.md` (신규) | Profile, 원인, 정확성, prefill과 decode 수치, 짧은 prompt sweep, 결정 |
+| `docs/benchmark_results/versions/v0.8.0.md#rocm-moe-prefill-gfx1151-2026-10-05` (신규) | Profile, 원인, 정확성, prefill과 decode 수치, 짧은 prompt sweep, 결정 |
 | `src/models/switch_layers_mxfp_tests.rs` | Doc comment: kernel이 기본으로 켜져 있고 전용 test가 있음 |
 
 Commit은 세 개입니다. 수정과 활성화 (`fc868bdf`), test bound와 문서 표현을 다듬은 review 후속 (`87d5f6d3`), 짧은 prompt sweep (`c587178e`). origin/main 대비 diff는 6개 파일, 762줄 추가, 246줄 삭제입니다.

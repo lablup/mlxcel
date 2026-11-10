@@ -122,7 +122,7 @@ if !canonical.starts_with(root) { return Err(Escape); }
 
 ### 따로 반영한 부분
 
-`docs/benchmark_results/embeddings-rerank-m5max-2026-09-04.md`는 `bench/0.7.0-refresh`(PR #1617)에 커밋 `c3a999b1e`로 갱신했다. 벤치마크 결과는 코드 PR이 아니라 그 브랜치에 속하기 때문이다. 해당 문서의 발견 사항은 그 패스가 측정한 시점 기준의 과거형으로 고쳐 쓰고, 그 뒤에 무엇이 달라졌는지를 이어 적었다.
+`docs/benchmark_results/versions/v0.7.0.md#embeddings-rerank-m5max-2026-09-04`는 `bench/0.7.0-refresh`(PR #1617)에 커밋 `c3a999b1e`로 갱신했다. 벤치마크 결과는 코드 PR이 아니라 그 브랜치에 속하기 때문이다. 해당 문서의 발견 사항은 그 패스가 측정한 시점 기준의 과거형으로 고쳐 쓰고, 그 뒤에 무엇이 달라졌는지를 이어 적었다.
 
 ### 관련 이슈
 

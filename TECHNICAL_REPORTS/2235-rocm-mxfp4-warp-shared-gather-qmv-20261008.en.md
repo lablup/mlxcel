@@ -39,7 +39,7 @@ The per-row kernel assigns one thread to each output column and loops over all o
 | `tests/rocm_mxfp4_quant.rs` | New `mxfp4_warp_shared_gather_qmv_matches_per_row_and_reference` (section 5.1). |
 | `tests/rocm_gather_qmm_expert_batched.rs` | Per-row dispatch check now sets `MLX_ROCM_GATHER_QMV_USE_WARP=0` (section 5.2). |
 | `patches-rocm/LOCAL_FIXES.md` | Item 41 (new), item 10 (updated). The issue called the new entry item 32, which was taken; 40 went to #2220. |
-| `docs/benchmark_results/rocm-moe-decode-mxfp4-gfx1151-2026-10-08.md` | New results page. |
+| `docs/benchmark_results/versions/v0.8.0.md#rocm-moe-decode-mxfp4-gfx1151-2026-10-08` | New results page. |
 
 One commit, 5 files, 428 insertions, 6 deletions.
 

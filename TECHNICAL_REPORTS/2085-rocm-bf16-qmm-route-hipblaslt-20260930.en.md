@@ -85,7 +85,7 @@ Files by area:
 - Overlay: `patches-rocm/mlx/backend/rocm/quantized/qmm.hip` (`QmmRoute`, `QmmRouteInputs`, `wmma_qmm_env`, `wmma_qmm_max_m`, `select_qmm_route`, `quantized_matmul_runs_dequant_gemm`, dispatch rewired), `rocm.h` (declaration), `no_rocm.cpp` (stub returning false), `LOCAL_FIXES.md` item 29.
 - Bridge: `src/lib/mlxcel-core/cpp/mlx_cxx_bridge.{h,cpp}` (`quantized_matmul_matches_dense_gemm`), `src/lib/mlxcel-core/src/lib.rs` (ffi declaration).
 - Rust: `src/lib/mlxcel-core/src/layers.rs` (eligibility, doc comment, test), `src/lib/mlxcel-core/src/hardware.rs` (doc comment only).
-- Docs: `docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md`, `docs/environment-variables.md`, `docs/mlxcelverse/upstream/README.md` (item 29 not packaged yet).
+- Docs: `docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-qmm-route-gfx1151-2026-09-30`, `docs/environment-variables.md`, `docs/mlxcelverse/upstream/README.md` (item 29 not packaged yet).
 
 ### 3.1 One route decision
 

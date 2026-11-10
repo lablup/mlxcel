@@ -87,7 +87,7 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 /// `mlxcel generate -n 256` with the kernel than without it although the
 /// kernel is faster per token. The `jit_module.cpp` overlay caches custom
 /// kernels since issue #2492; see
-/// `docs/benchmark_results/fused-moe-jit-cache-gb10-2026-10-22.md` before
+/// `docs/benchmark_results/versions/v0.8.0.md#fused-moe-jit-cache-gb10-2026-10-22` before
 /// reading a short-run CUDA A/B of this gate as a per-token result.
 ///
 /// This only chooses whether to *attempt* the kernel. Callers still fall back to
@@ -123,7 +123,7 @@ pub fn fused_moe_enabled() -> bool {
 /// 104.1 tok/s at B=2 and 115.3 vs 124.5 at B=4, Mixtral 8x7B 4-bit 34.3 vs
 /// 41.1 at B=4; #2587), and on M3 Ultra 3.6% to 7.6% at B=2 to B=7 in the
 /// corrected-geometry A/B in
-/// `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-11-04.md`, whose
+/// `docs/benchmark_results/versions/unreleased.md#switch-gate-up-batch-m3ultra-2026-11-04`, whose
 /// B=8 sorted-path control sits at +0.6%. The 2026-10-21 record that kept the
 /// kernel on at B >= 2 ran the default `--parallel 4`, so its concurrency 5 to
 /// 8 levels queued behind four decoding rows and its batch-3 and batch-4 cells
@@ -156,7 +156,7 @@ pub(crate) fn fused_moe_enabled_from(value: Option<&str>) -> bool {
 /// The fused two-kernel path wins only while `gather_qmm` underutilizes the GPU
 /// (small experts); above this bound the caller falls back to `gather_qmm`.
 /// Tuned on M1 Ultra, where phi-3.5-moe (Dff 6400) already regresses. See
-/// `docs/benchmark_results/fused-moe-decode-kernel-design.md`.
+/// `docs/benchmark_results/versions/v0.3.0.md#fused-moe-decode-kernel-design`.
 const FUSED_MOE_MAX_DFF_METAL: i32 = 4096;
 
 /// CUDA default for the same bound. At batch=1 `gather_qmm` leaves far more of
@@ -177,7 +177,7 @@ const FUSED_MOE_MAX_DFF_METAL: i32 = 4096;
 /// crossover (the 8192 break-even, not the 14336 regression edge), so MLX pin
 /// drift cannot flip the default into a regression. A GB10 re-validation on the
 /// 0.32.1 pin is pending; see the pending re-validation note in
-/// `docs/benchmark_results/fused-moe-decode-kernel-design.md`.
+/// `docs/benchmark_results/versions/v0.3.0.md#fused-moe-decode-kernel-design`.
 const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 
 /// ROCm default for the same bound. On gfx1151, Mixtral-8x7B (Dff 14336) decodes

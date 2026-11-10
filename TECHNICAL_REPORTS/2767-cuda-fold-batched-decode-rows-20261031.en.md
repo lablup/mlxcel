@@ -53,7 +53,7 @@ Speculative verify relies on multirow qmv being bit-identical to per-row decode,
 
 ## 4. Results
 
-RTX Spark N1X (sm_121), n=3, one binary, clock-gated, median aggregate tok/s. Full tables are in `docs/benchmark_results/cuda-qmm-fold-batch-n1x-2026-10-31.md`.
+RTX Spark N1X (sm_121), n=3, one binary, clock-gated, median aggregate tok/s. Full tables are in `docs/benchmark_results/versions/v0.8.0.md#cuda-qmm-fold-batch-n1x-2026-10-31`.
 
 | Model | 5 clients, shipped / no fold | 8 clients, shipped / no fold |
 |---|---:|---:|

@@ -26,7 +26,7 @@ PR #1556(이슈 #1538)은 일회성 Volta 감사를 재현 가능한 기록으�
 
 파일 4개, +547 / -6.
 
-- `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md`(신규, 약 400줄): 환경, 빌드 provenance, 방법론 규칙 여섯 개, 디코드와 프리필 처리량, 콜드 PTX 캐시 측정, 커널 프로파일, 4-bit/8-bit 분석, 하네스 비교, 감사 대비 재현 표 전체, CI 결정, 이 호스트의 함정들, 그리고 #1539부터 #1545가 채울 빈 사후 비교 표.
+- `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31`(신규, 약 400줄): 환경, 빌드 provenance, 방법론 규칙 여섯 개, 디코드와 프리필 처리량, 콜드 PTX 캐시 측정, 커널 프로파일, 4-bit/8-bit 분석, 하네스 비교, 감사 대비 재현 표 전체, CI 결정, 이 호스트의 함정들, 그리고 #1539부터 #1545가 채울 빈 사후 비교 표.
 - `benchmarks/cuda_v100_2026-08-31.csv`(신규): `benchmarks/`의 GB10 스윕과 같은 CSV 형식이라 직접 비교가 된다.
 - `.github/workflows/ci.yml`: `cuda-sm70-compile` 잡과 `cuda_arch` 경로 필터 추가.
 - `scripts/bench_decode.sh`: 기울기 방식에 맞춘 변경.
@@ -85,7 +85,7 @@ PR #1556(이슈 #1538)은 일회성 Volta 감사를 재현 가능한 기록으�
 ## 참고
 
 - 이슈 #1538, 에픽 #1536(GB10 이월 절 포함)
-- 기록: `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md`
+- 기록: `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31`
 - CSV 산출물: `benchmarks/cuda_v100_2026-08-31.csv`
 - 4-bit/8-bit 분석이 분리해 낸 누산기 선택: `src/lib/mlx-cpp/patches/mlx/backend/cuda/quantized/qmm/qmv.cu`
 - 반대 방향으로 움직이는 대조군, 스칼라 FMA 경로: `mlx/backend/cuda/device/gemm_sm70.cuh`

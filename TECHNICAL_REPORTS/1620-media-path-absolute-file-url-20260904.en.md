@@ -122,7 +122,7 @@ Gates: `cargo test --workspace --profile test-fast --features metal,accelerate` 
 
 ### Landed separately
 
-`docs/benchmark_results/embeddings-rerank-m5max-2026-09-04.md` is updated on `bench/0.7.0-refresh` (PR #1617) as commit `c3a999b1e`, because benchmark results belong to that branch rather than to a code PR. Its finding is rewritten to past tense for what the pass measured, with what changed since stated after it.
+`docs/benchmark_results/versions/v0.7.0.md#embeddings-rerank-m5max-2026-09-04` is updated on `bench/0.7.0-refresh` (PR #1617) as commit `c3a999b1e`, because benchmark results belong to that branch rather than to a code PR. Its finding is rewritten to past tense for what the pass measured, with what changed since stated after it.
 
 ### Related issues
 

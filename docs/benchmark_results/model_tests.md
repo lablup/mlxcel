@@ -1,5 +1,7 @@
 # Model Compatibility & Performance Tests
 
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
 Per-hardware benchmark results and cross-hardware comparison for mlxcel.
 
 For a public, data-driven Apple Silicon summary that combines M1 Ultra,
@@ -8,7 +10,7 @@ M5 Max, and mlx-lm / mlx-vlm baselines, see
 
 ## Focused correctness measurements
 
-- [Gemma 4 31B MTP exactness, 2026-09-26](gemma4-31b-mtp-exactness-2026-09-26.md): QAT and non-QAT localization, long-context teacher-forced traces, greedy parity and corrected throughput on M5 Max; test-fast profile, CUDA unavailable.
+- [Gemma 4 31B MTP exactness, 2026-09-26](versions/v0.8.0.md#gemma4-31b-mtp-exactness-2026-09-26): QAT and non-QAT localization, long-context teacher-forced traces, greedy parity and corrected throughput on M5 Max; test-fast profile, CUDA unavailable.
 
 ## Per-Hardware Results
 
@@ -59,7 +61,7 @@ The 2026-11-03 and 2026-11-04 CSVs carry a `backend` column beside the hardware:
 | `metal_m5max_vlm_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0, MLX pin `9a795735`, same cooldowns and budget; version-change full VLM re-benchmark, 77 measured rows; Pixtral/Mistral3 image-token counts drop by design after #792) | VLM |
 | `metal_m5max_spec_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `speculative_bench --sweep --max-tokens 128`, 12 rows: 3 baselines, 3 measured Gemma 4 Unified 12B MTP rows at K=2/4/8, 3 DFlash deferred, 3 Gemma 4 31B MTP rows that the harness could not drive. That harness restriction was lifted by #1613; an M5 Max re-run against a binary carrying it has not been made) | Speculative |
 | `metal_m5max_batch_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `bench_serving_concurrency.py` at `--parallel 4 --max-batch-prefill 4`, `--prompt-tokens 512 --max-tokens 128`; 3 models x B=1/2/4, 0 failed requests) | Batch |
-| `metal_m5max_embeddings_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `bench_embeddings.py`, 18 of the 20-model roster present on disk, 90 cells, 0 failures; report in [`embeddings-rerank-m5max-2026-09-04.md`](embeddings-rerank-m5max-2026-09-04.md)) | Embeddings/Rerank |
+| `metal_m5max_embeddings_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `bench_embeddings.py`, 18 of the 20-model roster present on disk, 90 cells, 0 failures; report in [`versions/v0.7.0.md#embeddings-rerank-m5max-2026-09-04`](versions/v0.7.0.md#embeddings-rerank-m5max-2026-09-04)) | Embeddings/Rerank |
 | `metal_m5max_2026-07-12.csv` | M5 Max | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30 --big-cooldown 30`; version-change full text re-benchmark, 175 dirs, 160 measured; no code regressions) | Text |
 | `metal_m5max_vlm_2026-07-12.csv` | M5 Max | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30 --big-cooldown 30`; version-change full VLM re-benchmark, 75 measured rows) | VLM |
 | `metal_m5max_2026-06-15.csv` | M5 Max | 2026-06-15 (mlxcel 0.2.1, MLX pin a6ec7123; full text re-benchmark, 151 rows, 135 measured) | Text |
@@ -427,7 +429,7 @@ entirely, are both measured here.
 reason.** Gemma 4 Unified 12B accepts *more* here than on M5 Max at the same K
 (39.6% and mean accepted length 1.19 at K=4, against 35.0% and 1.05), and still
 lands at 0.74x where M5 Max reads 1.57x. The difference is the verify round:
-`speculative-decoding-m1ultra-2026-08-19.md` measures a block-4 round at 2.70
+`versions/v0.6.0.md#speculative-decoding-m1ultra-2026-08-19` measures a block-4 round at 2.70
 classic decode steps on M1 Ultra against 1.27 on M5 Max, so break-even needs
 about 2.7 emitted tokens per verify here and roughly 1.3 there. A mean accepted
 length near 1.2 emits about 2.2 per verify, which clears the M5 Max bar and not
@@ -453,7 +455,7 @@ Measured on the NVIDIA GB10 (Grace-Blackwell) CUDA host with
 `speculative_bench --sweep --k-values 2,4,8`. Greedy, decode-only tok/s, the
 14-token `DEFAULT_PROMPT`, `--max-tokens 128`. Full analysis and the policy
 tuning derivation are in
-[`speculative-pairing-gb10-2026-07-10.md`](speculative-pairing-gb10-2026-07-10.md).
+[`versions/v0.4.0.md#speculative-pairing-gb10-2026-07-10`](versions/v0.4.0.md#speculative-pairing-gb10-2026-07-10).
 
 | Pairing (GB10 CUDA)                     | Kind | K | tok/s | speedup vs no-drafter | acceptance | mean accepted len | status |
 |-----------------------------------------|------|---|------:|----------------------:|-----------:|------------------:|--------|
@@ -477,7 +479,7 @@ classic forwards instead of amortizing to one the way it does on Apple Silicon
 (the same pairing measured ~1.87× on M5 Max at the time; the 2026-09-04 0.6.0 re-measurement reads 1.57× at K=4, at unchanged acceptance, so the two hosts have converged somewhat since). The multirow qmv path (#725,
 `MLXCEL_QMV_MULTIROW`) removes that fallback's weight re-reads, and B=1 MTP on
 GB10 now clears the 1.4× target from issue #638 at K=4/K=8 at unchanged
-acceptance (see `qmv-multirow-gb10-2026-07-11.md`). K=8 collapses onto K=4
+acceptance (see `versions/v0.4.0.md#qmv-multirow-gb10-2026-07-11`). K=8 collapses onto K=4
 because the drafter's configured block size is 4 and the acceptance never
 clears the adaptive block-expansion gate. Serving note (#736, resolved): the
 adaptive policy no longer relies on the `sqrt(K)` shape heuristic (issue

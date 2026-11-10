@@ -70,7 +70,7 @@ The registry now holds weak references through `array_weak_ref` / `array_weak_up
 
 ## 4. Measured Results (GB10)
 
-`qwen3.8-27B-4bit`, 2-token prompt, warm page and JIT caches, medians of 6 (two interleaved rounds). Full record: `docs/benchmark_results/weight-materialization-gb10-2026-10-20.md`.
+`qwen3.8-27B-4bit`, 2-token prompt, warm page and JIT caches, medians of 6 (two interleaved rounds). Full record: `docs/benchmark_results/versions/v0.8.0.md#weight-materialization-gb10-2026-10-20`.
 
 | Metric | Before | After |
 |---|---|---|
@@ -136,5 +136,5 @@ Greedy output (`-n 16 --temp 0 --seed 0`) is byte-identical between `eager` and 
 
 ## 7. Related
 
-- Issue #1564 (closed by this PR); `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md` (#1545) measured the V100 baseline and named the three candidates.
+- Issue #1564 (closed by this PR); `docs/benchmark_results/versions/v0.7.0.md#volta-ttft-fixed-cost-2026-09-01` (#1545) measured the V100 baseline and named the three candidates.
 - New environment variables: `MLXCEL_WEIGHT_MATERIALIZATION` (`eager` default, `lazy`), `MLXCEL_CUDA_PINNED_LOAD` (`0` disables), `MLXCEL_ROCM_PINNED_LOAD` (`0` disables). `MLXCEL_PROFILE_TTFT` gains a `[TTFT] load` line and upload counters on both CUDA and ROCm.

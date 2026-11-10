@@ -738,7 +738,7 @@ impl FusedQkNorm for GemmaRMSNorm {
 /// SLOWER than the graph path (qwen3-0.6b 275 vs 284, qwen3-8b 82.3 vs 83.2
 /// tok/s). CUDA was the open per-backend question; on GB10 (SM 12.1) it is also
 /// slower (qwen3-0.6b 0.96x, qwen3-8b ~1.0x, qwen3-30b-a3b 0.92x fused/graph;
-/// see docs/benchmark_results/fused-qk-norm-decode-gb10.md). It ships as a
+/// see docs/benchmark_results/versions/v0.3.2.md#fused-qk-norm-decode-gb10). It ships as a
 /// reusable shared primitive for the deferred QK-norm families and stays gated
 /// off, mirroring the opt-in treatment of the neutral fused-relu2 MoE path
 /// (`MLXCEL_FUSED_MOE_RELU2`).
@@ -811,7 +811,7 @@ fn fused_qk_norm_enabled_from(value: Option<&str>) -> bool {
 /// still take the WMMA kernel, the fp8 path or qmv (fewer rows, other devices,
 /// the `MLX_ROCM_*` overrides, a batch axis above 1) fail the backend check and
 /// stay on `quantized_matmul`. See
-/// `docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md`.
+/// `docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-qmm-route-gfx1151-2026-09-30`.
 pub(crate) fn prefill_dense_gemm_eligible(
     x: &MlxArray,
     weight: &QuantizedWeight,
@@ -930,8 +930,8 @@ fn dense_gemm(
 /// and one RMSNorm per serial block join do not move decode; the Cohere2
 /// fusion that gained (+1.1 to 2.7%) merged two adds and a LayerNorm in a
 /// parallel block. Flip this constant only on a backend that measures a win.
-/// See `docs/benchmark_results/fused-norm-rope-m1ultra-2026-07-31.md` and
-/// `docs/benchmark_results/fused-add-rmsnorm-decode-m1ultra-2026-09-27.md`.
+/// See `docs/benchmark_results/versions/v0.5.0.md#fused-norm-rope-m1ultra-2026-07-31` and
+/// `docs/benchmark_results/versions/v0.8.0.md#fused-add-rmsnorm-decode-m1ultra-2026-09-27`.
 ///
 /// ROCm: default-ON (#2145). The HIP port (#2063, PR #2107) is byte-identical
 /// to the ROCm graph it replaces (every on/off logit-trace pair identical), and
@@ -939,7 +939,7 @@ fn dense_gemm(
 /// off and 37.95 on (medians of five), Qwen2.5 7B +1.5% alone and +1.7% with
 /// the RoPE fusion. The gains sit inside run-to-run drift, but the change costs
 /// no accuracy, so the maintainer turned both fusions on for ROCm. See
-/// `docs/benchmark_results/rocm-fused-norm-rope-gfx1151-2026-10-05.md`, which
+/// `docs/benchmark_results/versions/v0.8.0.md#rocm-fused-norm-rope-gfx1151-2026-10-05`, which
 /// also has the re-measurement of the default-on build.
 pub(crate) const FUSED_ADD_RMSNORM_DEFAULT: bool = cfg!(feature = "rocm");
 

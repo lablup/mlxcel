@@ -1,5 +1,7 @@
 # Model Compatibility & Performance Tests (NVIDIA GB10)
 
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
 Compatibility and single-stream decode/prefill performance for mlxcel models on **NVIDIA GB10 (DGX Spark)** running the CUDA backend. This is the **0.8.1** benchmark: a full sweep of all 312 model directories on 2026-11-03 (text) and 2026-11-04 (VLM), 286 of them checkpoints, with the memory gate excluding nine oversized text checkpoints and four oversized VLM checkpoints up front.
 
 Three rows were re-measured on 2026-11-04 after the failures in the first pass were fixed: the BitNet pair (a CUDA grid-axis limit in `bitlinear_matmul`) and DiffusionGemma (the bench harness now drives the model-owned block-diffusion loop the server serves). Those rows come from `benchmarks/cuda_gb10_2026-11-04_recheck.csv` and `benchmarks/cuda_gb10_vlm_2026-11-04_recheck.csv`, at `630aaeba` plus the two uncommitted fixes, recorded as `630aaeba-dirty`.

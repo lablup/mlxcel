@@ -1,6 +1,6 @@
 # GB10에서 다중 행 speculative verify의 고정 비용은 어디에 있었나, 그리고 두 가지 수정
 
-이슈 #1782. 호스트 GB10(sm_121), MLX 핀 `81ba1c6a`, CUDA release 빌드. 전체 측정 기록: `docs/benchmark_results/dflash-verify-fixed-cost-gb10-2026-09-11.md`.
+이슈 #1782. 호스트 GB10(sm_121), MLX 핀 `81ba1c6a`, CUDA release 빌드. 전체 측정 기록: `docs/benchmark_results/versions/v0.8.0.md#dflash-verify-fixed-cost-gb10-2026-09-11`.
 
 ## 배경
 

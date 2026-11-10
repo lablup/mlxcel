@@ -23,7 +23,7 @@
 //! needs, so shared memory was never what excluded pre-Ampere parts. It
 //! selects the MMA atom, and it appears here as `tensor_core_mma`.
 //!
-//! The measurement in `docs/benchmark_results/qmm-naive-tile-v100-2026-08-31.md`
+//! The measurement in `docs/benchmark_results/versions/v0.7.0.md#qmm-naive-tile-v100-2026-08-31`
 //! found upstream's exclusion correct and its stated reason wrong, so the
 //! selected tile is the same tile upstream selects on every architecture. That
 //! is what these tests pin, and it is a stronger claim than the acceptance

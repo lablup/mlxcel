@@ -277,7 +277,7 @@ impl TextConfig {
     /// chronological keys and batched full attention do not reproduce
     /// classic decode's physical-ring reduction and maskless M=1 dispatch.
     /// The 12B Metal localization and staged correction are recorded in
-    /// `docs/benchmark_results/gemma4-12b-mtp-exactness-m1-ultra-2026-10-15.md`.
+    /// `docs/benchmark_results/versions/v0.8.0.md#gemma4-12b-mtp-exactness-m1-ultra-2026-10-15`.
     pub(crate) fn mtp_requires_linear_singleton(&self) -> bool {
         self.mtp_requires_linear_singleton_on(
             mlxcel_core::cuda_is_available(),

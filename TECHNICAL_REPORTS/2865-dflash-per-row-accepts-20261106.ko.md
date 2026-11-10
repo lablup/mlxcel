@@ -280,7 +280,7 @@ let divergent_rows: Option<&[i32]> = row_valid_ends.filter(|ends| {
 
 **변경 이유:** VLM 래퍼가 capability나 fallback을 조용히 잃지 않아야 한다.
 
-**파일: `docs/CONTINUOUS_BATCHING.md`, `docs/environment-variables.md`, `docs/benchmark_results/dflash-per-row-accepts-m3ultra-2026-11-06.md`**
+**파일: `docs/CONTINUOUS_BATCHING.md`, `docs/environment-variables.md`, `docs/benchmark_results/versions/unreleased.md#dflash-per-row-accepts-m3ultra-2026-11-06`**
 
 배칭 가이드와 환경 변수 표가 기본값, fallback, 측정값을 기록하고, benchmark 문서가 방법, 실행별 값, caveat, 정확성 gate를 기록한다.
 
@@ -474,5 +474,5 @@ accept와 라운드:
 - `src/vision/qwen3_5_vl.rs`
 - `tests/speculative_parity/qwen35_dflash_harness.rs`
 - `tests/speculative_parity/qwen35_dflash_throughput.rs`
-- `docs/benchmark_results/dflash-per-row-accepts-m3ultra-2026-11-06.md`
+- `docs/benchmark_results/versions/unreleased.md#dflash-per-row-accepts-m3ultra-2026-11-06`
 - 이슈 #2442, 이슈 #2353, PR #2853, 이슈 #2851, 이슈 #2190, 이슈 #2440

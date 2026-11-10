@@ -95,7 +95,7 @@ qwen3.5-0.8b with `enable_thinking = false` is divergence class (a) and therefor
 | New env vars | 1 (`MLXCEL_DISABLE_CACHE_WARMUP`) |
 | New stats fields | 2 (`snapshot_warmups_run`, `snapshot_warmups_skipped`) |
 | Foreground behavior changes | 0 (dispatch requires a fully idle scheduler) |
-| Benchmark record | `docs/benchmark_results/warmup-snapshot-m1ultra-2026-08-14.md` |
+| Benchmark record | `docs/benchmark_results/versions/v0.5.1.md#warmup-snapshot-m1ultra-2026-08-14` |
 
 ### Changes by Area
 

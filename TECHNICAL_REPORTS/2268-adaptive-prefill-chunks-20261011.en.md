@@ -130,7 +130,7 @@ No implementation, acceptance, or integration-validation work remains for issue 
 ## References
 
 - Issue #2228: choose the prefill chunk by whether other sequences are decoding.
-- PR #2226 and docs/benchmark_results/unified-engine-final-gb10-2026-10-08.md: motivating admission measurements.
+- PR #2226 and docs/benchmark_results/versions/v0.8.0.md#unified-engine-final-gb10-2026-10-08: motivating admission measurements.
 - ADR 0007: unified batch/native engine decisions and the amended prefill-chunk policy.
 - docs/CONTINUOUS_BATCHING.md: server policy, planning invariants, and operational controls.
-- docs/benchmark_results/adaptive-prefill-chunk-gb10-2026-10-11.md: passing acceptance results, raw data, and reproduction protocol.
+- docs/benchmark_results/versions/v0.8.0.md#adaptive-prefill-chunk-gb10-2026-10-11: passing acceptance results, raw data, and reproduction protocol.

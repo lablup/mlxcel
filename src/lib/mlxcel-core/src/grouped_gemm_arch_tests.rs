@@ -34,7 +34,7 @@
 //!    such host, so the alternative was deferring it to GB10.
 //!
 //! 2. **The path produces correct numbers on the device.** The retag is device
-//!    codegen neutral (`docs/benchmark_results/grouped-gemm-arch-v100-2026-08-31.md`
+//!    codegen neutral (`docs/benchmark_results/versions/v0.7.0.md#grouped-gemm-arch-v100-2026-08-31`
 //!    records 51 device symbols with byte-identical bodies either way), so this
 //!    is not really a test of the retag. It is the check the issue asked for and
 //!    nobody had made: the grouped GEMM is what every non-quantized MoE

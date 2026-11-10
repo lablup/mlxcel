@@ -72,5 +72,5 @@ Acceptance run은 pre-epic `4c44e317` 기준, quiet host에서 5회 interleaved 
 
 - 이슈 #2227
 - PR #2271
-- `docs/benchmark_results/b1-decode-overhead-gb10-2026-10-11.md`
+- `docs/benchmark_results/versions/v0.8.0.md#b1-decode-overhead-gb10-2026-10-11`
 - `docs/benchmark_results/data/b1-decode-overhead-gb10-2026-10-11/`

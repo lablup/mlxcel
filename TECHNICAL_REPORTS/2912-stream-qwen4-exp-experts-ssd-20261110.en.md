@@ -61,7 +61,7 @@ Measured with a sibling job on the host (load 9 to 13), OptiQ 2-bit, 128 tokens,
 |------|----------|----------------|--------|
 | Decode | 42.0 tok/s (23.8 ms per token) | 25.6 tok/s (39.1 ms per token) | About +15.3 ms per token, 1.64x |
 
-About 0.32 ms per layer. The numbers come from a loaded host and are not a benchmark; see `docs/benchmark_results/expert-streaming-sync-cost-m3ultra-2026-11-10.md`. Streamed throughput with real misses has no paired measurement.
+About 0.32 ms per layer. The numbers come from a loaded host and are not a benchmark; see `docs/benchmark_results/versions/unreleased.md#expert-streaming-sync-cost-m3ultra-2026-11-10`. Streamed throughput with real misses has no paired measurement.
 
 ### 2.3 Compatibility & Dependencies
 

@@ -1,5 +1,7 @@
 # Embedding and rerank throughput on GB10 (2026-11-04)
 
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
 Embedding and reranking throughput for the mlxcel server on **NVIDIA GB10 (DGX Spark)** at mlxcel 0.8.1. This pass repeats the 2026-08-26 epic #1348 measurement on the current tree, with the same 20-checkpoint roster, workloads and five-repetition ladder, so the two are directly comparable cell by cell.
 
 The raw rows live in `benchmarks/cuda_gb10_embeddings_2026-11-04.csv` (102 cells, one per model, input kind and batch size, no failures). The harness is `scripts/bench_embeddings.py`.

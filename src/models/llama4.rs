@@ -1828,7 +1828,7 @@ impl LanguageModel for Llama4Wrapper {
     }
 
     /// Retained after the 2026-10-11 GB10 paired/null storage sweep in
-    /// `docs/benchmark_results/model-owned-storage-gb10-2026-10-11.md`.
+    /// `docs/benchmark_results/versions/v0.8.0.md#model-owned-storage-gb10-2026-10-11`.
     /// Across 512/4096-token prompts at concurrency 1/4/8, neither backend
     /// cleared the paged-repeat null spread in any Llama 4 cell.
     fn supports_paged_decode_backend(&self) -> bool {

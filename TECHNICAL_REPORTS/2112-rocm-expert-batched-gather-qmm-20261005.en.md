@@ -42,7 +42,7 @@ All three are per-row gather kernels. granite was the only checkpoint on the hos
 | `tests/rocm_gather_qmm_expert_batched.rs` (new) | 48 cases against the unsorted path and a dequantized f32 reference, gated to ROCm |
 | `patches-rocm/LOCAL_FIXES.md` | Item 9 rewritten with the root cause, the rewrite, the measurements and the default; marked an upstreaming candidate for #1813 |
 | `docs/mlxcelverse/upstream/README.md` | Item 9 moves from "Held" to "Not packaged yet", with what a fork package needs |
-| `docs/benchmark_results/rocm-moe-prefill-gfx1151-2026-10-05.md` (new) | Profile, root cause, correctness, prefill and decode numbers, short-prompt sweep, decision |
+| `docs/benchmark_results/versions/v0.8.0.md#rocm-moe-prefill-gfx1151-2026-10-05` (new) | Profile, root cause, correctness, prefill and decode numbers, short-prompt sweep, decision |
 | `src/models/switch_layers_mxfp_tests.rs` | Doc comment: the kernel is on by default and has its own test |
 
 Three commits: the fix and enablement (`fc868bdf`), a review follow-up that tightened the test bound and doc wording (`87d5f6d3`), and the short-prompt sweep (`c587178e`). The diff against origin/main is 6 files, 762 insertions and 246 deletions.

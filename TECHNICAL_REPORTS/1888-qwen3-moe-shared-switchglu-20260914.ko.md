@@ -81,7 +81,7 @@ loader 동작은 두 가지가 바뀐다.
 - `src/models/qwen3_moe.rs`: 로컬 타입과 그 loader, `validate_expert_quantization_params` import를 제거했다. `SparseMoeBlock::experts`는 공유 `SwitchGLU`이며 `SwitchGLU::from_weights(weights, "{prefix}.switch_mlp", group_size, bits)`로 만든다. `forward`, `forward_profiled`, batched 호출부는 바뀌지 않았다.
 - `src/models/qwen3_vl_moe.rs`: `load_switch_glu`, `load_switch_linear`, 더는 쓰이지 않는 `get_weight_copy`를 제거하고 block loader가 공유 생성자를 호출한다.
 - `src/models/switch_layers.rs`: 실제 affine 4-bit SwiGLU plane을 양자화하는 테스트 helper `insert_honest_affine_swiglu_experts`와 mxfp4 decline 테스트를 추가했다. 문서는 공유 fused kernel 호출 계열과 아직 상한을 우회하는 경로를 명시하고, 계열 수를 바로잡고, greedy 일치 주장에 조건을 달았다.
-- 문서: `docs/environment-variables.md`와 `docs/benchmark_results/fused-moe-decode-kernel-design.md`에 두 계열이 상한을 읽게 되었음을 기록했다.
+- 문서: `docs/environment-variables.md`와 `docs/benchmark_results/versions/v0.3.0.md#fused-moe-decode-kernel-design`에 두 계열이 상한을 읽게 되었음을 기록했다.
 
 ## 5. 학습 포인트
 
@@ -138,7 +138,7 @@ loader 동작은 두 가지가 바뀐다.
 - 공유 상한은 호출마다 환경 변수를 읽고 backend를 질의한다. `fused_moe_enabled`처럼 `OnceLock`에 캐시하면 이 작업이 없어진다.
 - `deepseek_v4_moe`는 `validate_expert_quantization_params`를 호출하지만 Used-by 목록에 빠져 있다.
 - 보안 검토에서 나온, 공유 loader에 원래 있던 문제: 세 expert plane끼리의 shape과 router 행 수 대 stack된 expert 수를 비교하지 않아, plane이 서로 맞지 않는 checkpoint는 경계 검사 없는 kernel 인덱스에 도달할 수 있다. stack되지 않은 `experts.{idx}` fallback도 선언된 expert 수 없이 쌓고, shape을 먼저 비교하지 않은 채 `stack`을 호출한다. 두 가지 모두 공유 `SwitchGLU` loader에 넣어야 모든 계열이 혜택을 받는다.
-- `docs/benchmark_results/fused-moe-decode-kernel-design.md`의 계열 목록("eleven model paths")은 오래되었다.
+- `docs/benchmark_results/versions/v0.3.0.md#fused-moe-decode-kernel-design`의 계열 목록("eleven model paths")은 오래되었다.
 - CI의 `OpenXLA feature compile` job은 `main`의 `b8d10fb1`에서 이미 `--no-default-features` 조건의 `src/models/mod.rs`와 server 모듈 unused import 오류로 실패하며, 이 PR에서도 같은 이유로 실패한다. 이 PR과는 무관하다.
 
 ## 부록

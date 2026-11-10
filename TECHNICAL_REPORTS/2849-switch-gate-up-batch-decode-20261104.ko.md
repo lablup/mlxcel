@@ -296,8 +296,8 @@ fn switch_gate_up_in_forward_is_single_token_only() {
 - 이슈 #2587: M1과 M2를 이미 거절하게 만든 M1 Ultra 다중 토큰 약 10% 손실을 측정했다.
 - 이슈 #268: fused single-token MoE 커널로, B >= 2에서는 실행될 수 없다.
 - 이슈 #2479: 이 커널 옆에 있는 fused decode-MoE down-projection 작업.
-- `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-10-21.md`: 대체된 기록.
-- `docs/benchmark_results/switch-gate-up-baseline-m3ultra-2026-10-21.md`: 이 PR이 다시 측정하지 않은 단일 토큰 기준선.
+- `docs/benchmark_results/versions/v0.8.0.md#switch-gate-up-batch-m3ultra-2026-10-21`: 대체된 기록.
+- `docs/benchmark_results/versions/v0.8.0.md#switch-gate-up-baseline-m3ultra-2026-10-21`: 이 PR이 다시 측정하지 않은 단일 토큰 기준선.
 
 ---
 
@@ -380,9 +380,9 @@ fn switch_gate_up_in_forward_is_single_token_only() {
 
 ### C. 참고 자료
 
-- `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-11-04.md`
+- `docs/benchmark_results/versions/unreleased.md#switch-gate-up-batch-m3ultra-2026-11-04`
 - `docs/benchmark_results/data/switch-gate-up-batch-m3ultra-2026-11-04/decode.csv`
 - `docs/benchmark_results/data/switch-gate-up-batch-m3ultra-2026-11-04/focus-parallel4.csv`
-- `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-10-21.md`
-- `docs/benchmark_results/switch-gate-up-baseline-m3ultra-2026-10-21.md`
+- `docs/benchmark_results/versions/v0.8.0.md#switch-gate-up-batch-m3ultra-2026-10-21`
+- `docs/benchmark_results/versions/v0.8.0.md#switch-gate-up-baseline-m3ultra-2026-10-21`
 - `src/models/switch_layers.rs`

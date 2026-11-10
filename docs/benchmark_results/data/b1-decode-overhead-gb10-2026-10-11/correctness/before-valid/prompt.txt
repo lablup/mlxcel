@@ -1,1 +1,0 @@
-Reply with exactly one short sentence naming the capital of France.
