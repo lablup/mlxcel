@@ -35,6 +35,8 @@ impl GenerationResult {
             generation_time_ms: 0,
             prompt_eval_ms: 0,
             generation_only_ms: 0,
+            // Nothing was decoded, so there is no window to rate.
+            decode_window_tokens: None,
             finish_reason: "stop".to_string(),
             stop_kind: StopKind::Eos,
             logprobs: None,

@@ -524,6 +524,9 @@ fn build_generation_result_computes_finish_reason_and_generation_split() {
     let stop = build_generation_result("ok".to_string(), 10, 3, 120, 40, 8);
     assert_eq!(stop.finish_reason, "stop");
     assert_eq!(stop.generation_only_ms, 80);
+    // The first of the 3 tokens came out of prefill, before the 80ms window
+    // opened, so the window holds 2 (issue #2938).
+    assert_eq!(stop.decode_window_tokens, Some(2));
     // The EOS-or-length split this function makes carries into `stop_kind`
     // (issue #1466); only the scheduler can know about a stop-word match, and it
     // overrides the value through `finish_stopped_by_word`.
@@ -532,6 +535,11 @@ fn build_generation_result_computes_finish_reason_and_generation_split() {
     let length = build_generation_result("ok".to_string(), 10, 8, 50, 60, 8);
     assert_eq!(length.finish_reason, "length");
     assert_eq!(length.generation_only_ms, 0);
+    assert_eq!(length.decode_window_tokens, Some(7));
+
+    // Nothing generated (EOS at prefill): an empty window, not a negative one.
+    let empty = build_generation_result(String::new(), 10, 0, 30, 30, 8);
+    assert_eq!(empty.decode_window_tokens, Some(0));
     assert_eq!(
         length.stop_kind,
         crate::server::model_provider::StopKind::Limit

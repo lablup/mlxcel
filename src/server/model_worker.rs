@@ -3875,7 +3875,13 @@ pub(crate) fn build_generation_result_with_cache(
         completion_tokens,
         generation_time_ms: elapsed_ms,
         prompt_eval_ms,
+        // The decode window: from the first-token instant (`prompt_eval_ms`,
+        // stamped when the prefill-sampled token reaches the decode state, or
+        // the target prefill's end on a drafted request) to the finish.
         generation_only_ms: elapsed_ms.saturating_sub(prompt_eval_ms),
+        // The first token came out of prefill, before the window opened, so
+        // the window holds the remaining N-1 tokens (issue #2938).
+        decode_window_tokens: Some(completion_tokens.saturating_sub(1)),
         finish_reason: finish_reason.to_string(),
         // The EOS-or-length split this function has always made. A string
         // stop-sequence match cannot be seen from the token counts, so the

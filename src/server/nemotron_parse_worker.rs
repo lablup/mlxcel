@@ -106,6 +106,47 @@ pub(crate) fn nemotron_parse_finish_reason(
     }
 }
 
+/// The `Done` result of one Nemotron-Parse request.
+///
+/// As with Florence-2, the encoder pass and the decode loop run inside one
+/// model-owned call, so `elapsed_ms` is the whole wall time, encoder
+/// included. It is reported as `generation_only_ms` (which the llama-server
+/// `predicted_ms` timings read, as before), and `decode_window_tokens` is
+/// `None` so the `/metrics` decode-rate histogram skips the request instead
+/// of recording a wall-time rate (issue #2938).
+pub(crate) fn nemotron_parse_generation_result(
+    text: String,
+    prompt_tokens: usize,
+    generated_tokens: usize,
+    hit_eos: bool,
+    max_new_tokens: usize,
+    elapsed_ms: u64,
+) -> GenerationResult {
+    let finish_reason = nemotron_parse_finish_reason(hit_eos, generated_tokens, max_new_tokens);
+    GenerationResult {
+        text,
+        prompt_tokens,
+        completion_tokens: generated_tokens,
+        generation_time_ms: elapsed_ms,
+        prompt_eval_ms: 0,
+        // Whole wall time (encoder pass plus decode), not a decode window.
+        generation_only_ms: elapsed_ms,
+        // No isolated decode window to count tokens in.
+        decode_window_tokens: None,
+        finish_reason: finish_reason.to_string(),
+        stop_kind: if finish_reason == "length" {
+            StopKind::Limit
+        } else {
+            StopKind::Eos
+        },
+        generated_token_ids: Vec::new(),
+        logprobs: None,
+        cached_tokens: 0,
+        structured_output: None,
+        speculative: None,
+    }
+}
+
 /// Serve Nemotron-Parse requests one at a time until shutdown.
 pub(crate) fn run_nemotron_parse_worker_loop(
     model: &NemotronParseVlmModel,
@@ -234,27 +275,14 @@ fn handle_request(
     if !cancelled.load(Ordering::Relaxed) {
         let _ = response_tx.send(GenerateEvent::Token(run.text.clone(), TokenMeta::default()));
     }
-    let finish_reason =
-        nemotron_parse_finish_reason(run.hit_eos, run.generated_tokens, max_new_tokens);
-    let _ = response_tx.send(GenerateEvent::Done(GenerationResult {
-        text: run.text,
-        prompt_tokens: run.prompt_tokens,
-        completion_tokens: run.generated_tokens,
-        generation_time_ms: elapsed_ms,
-        prompt_eval_ms: 0,
-        generation_only_ms: elapsed_ms,
-        finish_reason: finish_reason.to_string(),
-        stop_kind: if finish_reason == "length" {
-            StopKind::Limit
-        } else {
-            StopKind::Eos
-        },
-        generated_token_ids: Vec::new(),
-        logprobs: None,
-        cached_tokens: 0,
-        structured_output: None,
-        speculative: None,
-    }));
+    let _ = response_tx.send(GenerateEvent::Done(nemotron_parse_generation_result(
+        run.text,
+        run.prompt_tokens,
+        run.generated_tokens,
+        run.hit_eos,
+        max_new_tokens,
+        elapsed_ms,
+    )));
     mlxcel_core::clear_memory_cache();
 }
 
