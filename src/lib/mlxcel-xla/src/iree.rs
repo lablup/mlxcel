@@ -310,6 +310,12 @@ unsafe extern "C" {
     fn xla_test_batch_kv_h2d_bytes() -> u64;
     #[cfg(feature = "test-support")]
     fn xla_test_batch_kv_reset_counters();
+    /// Test support (issue #2923): force the V transfer of the next prefill
+    /// slot store to fail, and read one slot's KV validity flag.
+    #[cfg(feature = "test-support")]
+    fn xla_test_set_slot_store_failure(c: *mut XlaCtx, fail: c_int);
+    #[cfg(feature = "test-support")]
+    fn xla_test_slot_valid(c: *const XlaCtx, slot: c_int) -> c_int;
     fn xla_llama_prefill_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
@@ -3436,6 +3442,30 @@ impl IreeRaggedLlama {
         // Safety: as above; the reset only releases and re-sizes this ctx's
         // batch state.
         unsafe { xla_llama_ragged_reset(self.ctx, bsz) }
+    }
+
+    /// Test support (issue #2923): make the next prefill slot store fail after
+    /// its K transfer, so the caller can observe the slot's validity state. A
+    /// `false` call restores the normal path.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_slot_store_failure(&mut self, fail: bool) {
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        unsafe { xla_test_set_slot_store_failure(self.ctx, i32::from(fail)) };
+    }
+
+    /// Test support (issue #2923): whether `slot` currently holds a KV store
+    /// that completed both transfers. `None` means the slot index is out of
+    /// range or no reset has allocated the flags.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_slot_valid(&self, slot: usize) -> Option<bool> {
+        let slot = checked_ffi_int(slot, "slot").ok()?;
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        match unsafe { xla_test_slot_valid(self.ctx, slot) } {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
     }
 
     /// The vocabulary size (logits per row). The engine slices the ragged decode's

@@ -134,6 +134,12 @@ typedef struct xla_ctx {
   // `xla_llama_ragged_bind` before the first reset (issue #2923). Zero means
   // "not bound"; a reset never guesses it.
   int32_t rg_compiled_b;
+  // One validity byte per slot: set only after BOTH K and V transfers of a
+  // prefill slot store succeed, cleared before the first transfer so a torn
+  // store can never be observed as valid (issue #2923).
+  uint8_t* rg_valid;
+  // Test-only hook: fail the V transfer of the next slot store.
+  int32_t rg_fail_slot_store;
   iree_host_size_t rg_per;
   iree_hal_dim_t rg_dims[4];
 } xla_ctx;
@@ -171,6 +177,17 @@ uint64_t xla_test_batch_kv_h2d_bytes(void) { return xla_test_bk_h2d_bytes; }
 void xla_test_batch_kv_reset_counters(void) {
   xla_test_bk_host_bytes = 0;
   xla_test_bk_h2d_bytes = 0;
+}
+
+// Force the V half of the next prefill slot store to fail, and expose the
+// per-slot validity state so a device test can prove a torn store is rejected.
+void xla_test_set_slot_store_failure(xla_ctx* c, int32_t fail) {
+  if (c) c->rg_fail_slot_store = fail ? 1 : 0;
+}
+
+int32_t xla_test_slot_valid(const xla_ctx* c, int32_t slot) {
+  if (!c || !c->rg_valid || slot < 0 || slot >= c->rg_bsz) return -1;
+  return c->rg_valid[slot] ? 1 : 0;
 }
 #endif
 
@@ -1250,14 +1267,28 @@ static int xla_store_prefill_kv_slot(xla_ctx* c, int32_t slot,
     return 1;
   }
   iree_device_size_t off = (iree_device_size_t)slot * len;
+  // The store becomes visible only once both transfers have completed. Clear
+  // the slot's flag first so a failure part-way through leaves it invalid
+  // rather than half-written; the K bytes are not rolled back, because the
+  // engine re-prefills a slot before it is admitted again (issue #2923).
+  if (c->rg_valid) c->rg_valid[slot] = 0;
   XLA_CHECK(iree_hal_device_transfer_d2d(
       c->device, iree_hal_buffer_view_buffer(kc), 0,
       iree_hal_buffer_view_buffer(c->kcache_b), off, len,
       IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+  if (c->rg_fail_slot_store) {
+    fprintf(stderr,
+            "xla_iree: test hook: simulated V slot store failure at slot=%d\n",
+            slot);
+    return 1;
+  }
+#endif
   XLA_CHECK(iree_hal_device_transfer_d2d(
       c->device, iree_hal_buffer_view_buffer(vc), 0,
       iree_hal_buffer_view_buffer(c->vcache_b), off, len,
       IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+  if (c->rg_valid) c->rg_valid[slot] = 1;
   return 0;
 }
 
@@ -1303,6 +1334,17 @@ int xla_llama_ragged_reset(xla_ctx* c, int32_t bsz) {
             bsz, c->rg_compiled_b);
     return 1;
   }
+  // Fresh per-slot validity: a reset must not inherit any slot state from the
+  // previous batch (issue #2923).
+  uint8_t* valid = (uint8_t*)calloc((size_t)bsz, sizeof(uint8_t));
+  if (!valid) {
+    fprintf(stderr,
+            "xla_llama_ragged_reset: failed to allocate %d slot validity flags\n",
+            bsz);
+    return 1;
+  }
+  free(c->rg_valid);
+  c->rg_valid = valid;
   c->rg_bsz = bsz;
   c->rg_per = 0;
   if (c->kcache_b) {
@@ -2042,8 +2084,12 @@ static int xla_llama_decode_ragged_impl(
       return 1;
     }
     int32_t position_count = position_mode == 1 ? 3 : 1;
+    // The engine sends an inactive row as all zeros (token, positions and
+    // cache_len); anything else is a row it expects to advance.
+    bool active = tokens[i] != 0 || cache_len[i] != 0;
     for (int32_t axis = 0; axis < position_count; ++axis) {
       int32_t coordinate = positions[i * position_count + axis];
+      if (coordinate != 0) active = true;
       if (coordinate < 0 ||
           (position_mode == 0 && coordinate != cache_len[i])) {
         fprintf(stderr,
@@ -2062,6 +2108,17 @@ static int xla_llama_decode_ragged_impl(
                 i, axis, coordinate, c->context_capacity);
         return 1;
       }
+    }
+    // A row whose KV was only half-written (or never stored) must not reach
+    // the graph: decoding it would read a torn prompt. Inactive rows are
+    // exempt because they are exactly the all-zero rows the engine uses for
+    // free slots (issue #2923).
+    if (active && (!c->rg_valid || !c->rg_valid[i])) {
+      fprintf(stderr,
+              "xla_llama_decode_ragged_logits: row=%d slot=%d token=%d "
+              "cache_len=%d is active but its KV slot is not valid\n",
+              i, i, tokens[i], cache_len[i]);
+      return 1;
     }
   }
 
@@ -2194,6 +2251,7 @@ void xla_llama_free(xla_ctx* c) {
   if (c->vcache) iree_hal_buffer_view_release(c->vcache);
   if (c->kcache_b) iree_hal_buffer_view_release(c->kcache_b);
   if (c->vcache_b) iree_hal_buffer_view_release(c->vcache_b);
+  free(c->rg_valid);
   free(c->deepstack_target_layers);
   if (c->session) iree_runtime_session_release(c->session);
   if (c->device) iree_hal_device_release(c->device);

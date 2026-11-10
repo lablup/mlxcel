@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 
 use mlxcel_xla::{
-    IreeRaggedLlama, SampleParams, XlaBatchEngine, batch_kv_allocation_counters,
-    reset_batch_kv_allocation_counters,
+    IreeRaggedLlama, SampleParams, XlaBatchEngine, XlaReferenceEngine,
+    batch_kv_allocation_counters, reset_batch_kv_allocation_counters,
 };
 use safetensors::{Dtype, tensor::TensorView};
 use tempfile::TempDir;
@@ -132,6 +132,85 @@ fn create_tiny_model() -> TinyModel {
 
 fn device() -> String {
     std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string())
+}
+
+fn argmax(values: &[f32]) -> i32 {
+    let mut best = 0usize;
+    for (index, &value) in values.iter().enumerate() {
+        if value > values[best] {
+            best = index;
+        }
+    }
+    best as i32
+}
+
+/// Item 4: a store that dies after its K transfer leaves the slot invalid, an
+/// active row on an invalid slot is rejected before IREE runs, and a successful
+/// re-store makes the slot valid and reference-exact.
+#[test]
+#[ignore = "requires the pinned IREE runtime and compiler"]
+fn failed_slot_store_leaves_the_slot_invalid_and_decode_rejects_it() {
+    let fixture = create_tiny_model();
+    let model = fixture.path();
+    let device = device();
+    let prompt = [1, 2, 3];
+    let mut engine = IreeRaggedLlama::load(model, &device, 4, CAPACITY)
+        .expect("ragged engine at B=4");
+
+    engine.test_set_slot_store_failure(true);
+    engine
+        .prefill_slot_logits(0, &prompt)
+        .expect_err("the simulated V transfer failure must fail the slot prefill");
+    engine.test_set_slot_store_failure(false);
+    assert_eq!(
+        engine.test_slot_valid(0),
+        Some(false),
+        "a store that failed after its K transfer must leave the slot invalid"
+    );
+
+    let modes = [0i32; 4];
+    let mut tokens = [0i32; 4];
+    let mut positions = [0i32; 4];
+    let mut cache_len = [0i32; 4];
+    tokens[0] = 7;
+    positions[0] = prompt.len() as i32;
+    cache_len[0] = prompt.len() as i32;
+    let error = engine
+        .decode_ragged_logits_with_modes(&modes, &tokens, &positions, &cache_len)
+        .expect_err("an active row with an invalid KV slot must be rejected");
+    assert!(
+        error.contains("not valid"),
+        "the rejection must name the invalid slot, got: {error}"
+    );
+
+    let logits = engine
+        .prefill_slot_logits(0, &prompt)
+        .expect("a later successful store must revalidate the slot");
+    assert_eq!(
+        engine.test_slot_valid(0),
+        Some(true),
+        "both transfers succeeding must mark the slot valid"
+    );
+    let first = argmax(&logits);
+
+    let mut reference =
+        XlaReferenceEngine::load_with_context_capacity(model, &device, CAPACITY)
+            .expect("reference engine");
+    let expected = reference
+        .generate(&prompt, 2, &[])
+        .expect("two-token reference stream");
+    assert_eq!(expected.len(), 2);
+    assert_eq!(first, expected[0], "prefill logits must match the reference");
+
+    tokens[0] = first;
+    let logits = engine
+        .decode_ragged_logits_with_modes(&modes, &tokens, &positions, &cache_len)
+        .expect("decode an active, valid row");
+    assert_eq!(
+        argmax(&logits[..VOCAB]),
+        expected[1],
+        "a valid slot's ragged decode must match the single-sequence reference"
+    );
 }
 
 /// Item 3: a reset at a batch size other than the compiled one is rejected
