@@ -34,6 +34,21 @@ rebuilding after a pull or a rebase records provenance its binary does not have.
 The harness now refuses to run in that state, and `BENCH_ALLOW_STALE_BINARY=1`
 opts out for a bisect.
 
+## How decode tok/s is counted
+
+`decode_tok_s` is the number of tokens produced inside the timed decode window divided by the length of that window (issue #2929). Most paths sample and evaluate the first token as part of prefill, so it lands in `prefill_ms`, and the decode window that follows holds the remaining N-1 forward steps. Those paths divide N-1 tokens by `decode_ms`. A path that produces every token inside its window divides N. The shared helper is `mlxcel_core::generate::decode_tok_per_sec`, and every generation path's stats go through it.
+
+| Path | First token | Numerator |
+|------|-------------|-----------|
+| Engine direct completion (`mlxcel-bench-decode`, `bench_decode.sh`, plain `generate`), speculative engine, MTP (single and batched, counted per row), DFlash, the `mlxcel-bench-engine` server probe | produced in prefill, outside the window | N-1 |
+| Pipeline-parallel `generate`, diffusion generators (`diffusion_gemma`, `llada2_moe`) | produced inside the window | N |
+
+`decode_ms` and `generated_tokens` do not depend on this rule. Only the rate does. At N = 128 the two conventions differ by 128/127, 0.79%.
+
+The server's `predicted_per_second` follows the same rule, as llama-server does (see `src/server/types/native_completion.rs`). mlx-lm and mlx-vlm do not: their `generation_tps` restarts the clock after the first token but counts all N tokens ([mlx-lm `stream_generate`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py), [mlx-vlm `stream_generate`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/generate/dispatch.py)), so for the same run they read N/(N-1) higher. `scripts/bench_mlxlm.py` converts their value to `(N - 1) / window` before writing the CSV, which keeps the "vs mlx-lm" columns comparing like with like. Convert a number taken straight from `mlx_lm.generate --verbose` or `mlx_lm.benchmark` the same way before setting it next to an mlxcel row.
+
+Rows recorded before 2026-11-10 used N for every path except the speculative engine, which already used N-1. Their `decode_ms` is unaffected, so an old rate can be restated as `(generated_tokens - 1) / decode_ms`. The CSVs under `benchmarks/` and `docs/benchmark_results/` are kept as recorded.
+
 ## What to keep under `benchmark_results/data/`
 
 Keep what a reader needs to check or repeat a report: the Markdown record, the

@@ -2765,11 +2765,11 @@ fn run_offline_mtp(
     // "[Generated N tokens ...]" line and tok/s match the non-speculative path,
     // which counts EOS-excluded tokens.
     stats.generated_tokens = tokens.len();
-    stats.decode_tok_per_sec = if stats.decode_time_ms > 0.0 {
-        tokens.len() as f64 / (stats.decode_time_ms / 1000.0)
-    } else {
-        0.0
-    };
+    // The first bonus came out of prefill, outside the decode window.
+    stats.decode_tok_per_sec = mlxcel_core::generate::decode_tok_per_sec(
+        tokens.len().saturating_sub(1),
+        stats.decode_time_ms,
+    );
 
     Ok((tokens, stats))
 }

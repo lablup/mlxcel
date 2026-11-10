@@ -514,11 +514,13 @@ fn zero_stats() -> GenerationStats {
 fn build_stats(tokens_per_row: &[Vec<i32>], decode_elapsed: Duration) -> GenerationStats {
     let total_emitted: usize = tokens_per_row.iter().map(|v| v.len()).sum();
     let decode_ms = decode_elapsed.as_secs_f64() * 1000.0;
-    let decode_tok_per_sec = if decode_ms > 0.0 {
-        total_emitted as f64 / (decode_ms / 1000.0)
-    } else {
-        0.0
-    };
+    // Each row's first bonus came out of `prefill_and_seed_batched`, before
+    // `decode_start`; only the rest were produced inside the window.
+    let window_tokens: usize = tokens_per_row
+        .iter()
+        .map(|v| v.len().saturating_sub(1))
+        .sum();
+    let decode_tok_per_sec = crate::generate::decode_tok_per_sec(window_tokens, decode_ms);
     GenerationStats {
         prompt_tokens: 0,
         generated_tokens: total_emitted,
@@ -1532,5 +1534,16 @@ mod tests {
     fn rebind_count_smoke() {
         let d = BatchedMockDrafter::new(|_b: &[i32], _bs: usize| Vec::new());
         assert_eq!(d.rebind_count(), 0);
+    }
+
+    #[test]
+    fn batched_stats_rate_excludes_each_rows_prefill_bonus() {
+        // Row 0: bonus + 3 window tokens, row 1: bonus + 1, row 2: bonus only.
+        let rows = vec![vec![1, 2, 3, 4], vec![5, 6], vec![7]];
+        let stats = build_stats(&rows, Duration::from_millis(500));
+        assert_eq!(stats.generated_tokens, 7);
+        assert!((stats.decode_tok_per_sec - 8.0).abs() < 1e-9);
+        let bonus_only = build_stats(&[vec![1], vec![2]], Duration::from_millis(500));
+        assert_eq!(bonus_only.decode_tok_per_sec, 0.0);
     }
 }

@@ -390,11 +390,7 @@ impl<M: LanguageModel> DirectEngine<M> {
             } else {
                 0.0
             },
-            decode_tok_per_sec: if decode_ms > 0.0 {
-                decode_count as f64 / (decode_ms / 1000.0)
-            } else {
-                0.0
-            },
+            decode_tok_per_sec: crate::generate::decode_tok_per_sec(decode_count, decode_ms),
         };
         Ok(SpeculativeRun {
             run: DirectRun {
