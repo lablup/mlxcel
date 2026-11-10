@@ -125,6 +125,11 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_BRIDGE_METAL_BACKEND",
         "MLXCEL_BRIDGE_ROCM_BACKEND",
     )),
+    ("build-internal: a C preprocessor macro the mlxcel-xla build script "
+     "defines for the IREE shim (build.define) when the crate's test-support "
+     "feature is on, not an environment variable", (
+        "MLXCEL_XLA_TEST_SUPPORT",
+    )),
     (_RUSTC_ENV, (
         "MLXCEL_CUDA_ARCHITECTURES",
         "MLXCEL_MLX_COMMIT",

@@ -299,6 +299,23 @@ unsafe extern "C" {
     // copy the per-row `[vocab]` logits to host so the engine samples there (Stage
     // 2d). `prefill_slot_logits` also does the device-side KV slot write.
     fn xla_llama_ragged_reset(c: *mut XlaCtx, bsz: c_int) -> c_int;
+    /// Record the ragged batch size baked into this context's decode graph.
+    /// Must be called before the first `xla_llama_ragged_reset`.
+    fn xla_llama_ragged_bind(c: *mut XlaCtx, compiled_b: c_int) -> c_int;
+    /// Test support (issue #2923): host-mirror and host-to-device byte counters
+    /// for the lazy rank-5 batch-KV allocation path.
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_kv_host_bytes() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_kv_h2d_bytes() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_kv_reset_counters();
+    /// Test support (issue #2923): force the V transfer of the next prefill
+    /// slot store to fail, and read one slot's KV validity flag.
+    #[cfg(feature = "test-support")]
+    fn xla_test_set_slot_store_failure(c: *mut XlaCtx, fail: c_int);
+    #[cfg(feature = "test-support")]
+    fn xla_test_slot_valid(c: *const XlaCtx, slot: c_int) -> c_int;
     fn xla_llama_prefill_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
@@ -476,6 +493,30 @@ unsafe extern "C" {
 /// ragged decode graph for the chosen `b_max` is emitted from the model config at
 /// load (any `b_max` is emittable; the worker selects from this set).
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
+
+/// Test support (issue #2923): reset the shim's counters for host-resident and
+/// host-to-device bytes spent by the lazy rank-5 batch-KV allocation. A first
+/// admit must leave both at zero now that the caches are zeroed with a device
+/// fill instead of a host mirror.
+#[cfg(feature = "test-support")]
+pub fn reset_batch_kv_allocation_counters() {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { xla_test_batch_kv_reset_counters() };
+}
+
+/// Test support (issue #2923): bytes the rank-5 batch-KV path has allocated or
+/// uploaded from host memory since the last reset.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn batch_kv_allocation_counters() -> (u64, u64) {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe {
+        (
+            xla_test_batch_kv_host_bytes(),
+            xla_test_batch_kv_h2d_bytes(),
+        )
+    }
+}
 
 #[derive(Clone, Debug)]
 enum RuntimeConfig {
@@ -2700,7 +2741,7 @@ impl IreeLlama {
             adapter_mode: 0,
             dense_ple_shape: cfg.dense_ple_shape(),
             position_mode: cfg.position_mode(),
-            decode_position: DecodePositionState::default(),
+            decode_position: DecodePositionState::new(cfg.context_capacity()),
             deepstack_schema: cfg.deepstack().cloned(),
         })
     }
@@ -3294,6 +3335,15 @@ impl IreeRaggedLlama {
         };
         // Safety: ctx is a fresh valid context from create_ctx; free it on error.
         let b_max_ffi = checked_ffi_int(b_max, "b_max")?;
+        // Record the compiled B before any reset. The ragged decode graph's
+        // static [B,...] shapes were fixed when it was emitted, so a reset at
+        // any other size can only fail inside IREE with an opaque shape error;
+        // binding first turns that into a clear rejection naming both values.
+        let rc = unsafe { xla_llama_ragged_bind(ctx, b_max_ffi) };
+        if rc != 0 {
+            unsafe { xla_llama_free(ctx) };
+            return Err(format!("xla_llama_ragged_bind failed (status {rc})"));
+        }
         let rc = unsafe { xla_llama_ragged_reset(ctx, b_max_ffi) };
         if rc != 0 {
             unsafe { xla_llama_free(ctx) };
@@ -3382,6 +3432,45 @@ impl IreeRaggedLlama {
             return Err(format!("xla_llama_ragged_reset failed (status {rc})"));
         }
         Ok(())
+    }
+
+    /// Test support (issue #2923): record `compiled_b` as this context's
+    /// compiled ragged batch size and then reset to `bsz`, returning the shim's
+    /// status code. The engine's own `b_max` is rebound by the caller.
+    #[cfg(feature = "test-support")]
+    pub fn test_bind_and_reset(&mut self, compiled_b: i32, bsz: i32) -> i32 {
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        let rc = unsafe { xla_llama_ragged_bind(self.ctx, compiled_b) };
+        if rc != 0 {
+            return rc;
+        }
+        // Safety: as above; the reset only releases and re-sizes this ctx's
+        // batch state.
+        unsafe { xla_llama_ragged_reset(self.ctx, bsz) }
+    }
+
+    /// Test support (issue #2923): make the next prefill slot store fail after
+    /// its K transfer, so the caller can observe the slot's validity state. A
+    /// `false` call restores the normal path.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_slot_store_failure(&mut self, fail: bool) {
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        unsafe { xla_test_set_slot_store_failure(self.ctx, i32::from(fail)) };
+    }
+
+    /// Test support (issue #2923): whether `slot` currently holds a KV store
+    /// that completed both transfers. `None` means the slot index is out of
+    /// range or no reset has allocated the flags.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_slot_valid(&self, slot: usize) -> Option<bool> {
+        let slot = checked_ffi_int(slot, "slot").ok()?;
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        match unsafe { xla_test_slot_valid(self.ctx, slot) } {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
     }
 
     /// The vocabulary size (logits per row). The engine slices the ragged decode's
@@ -4005,6 +4094,18 @@ impl IreeRaggedLlama {
             if coordinates.iter().any(|&coordinate| coordinate < 0) {
                 return Err(format!(
                     "decode row {row} has negative M-RoPE coordinates {coordinates:?}"
+                ));
+            }
+            // The compiled RoPE table has exactly `context_capacity` rows, so a
+            // coordinate at or past it is an out-of-bounds device gather. Reject
+            // here, before any IREE call (issue #2923).
+            if let Some(&coordinate) = coordinates
+                .iter()
+                .find(|&&coordinate| coordinate as usize >= self.context_capacity)
+            {
+                return Err(format!(
+                    "decode row {row} has M-RoPE coordinate {coordinate} outside context_capacity={}",
+                    self.context_capacity
                 ));
             }
         }

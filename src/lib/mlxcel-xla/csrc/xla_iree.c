@@ -130,6 +130,16 @@ typedef struct xla_ctx {
   iree_hal_buffer_view_t* kcache_b;
   iree_hal_buffer_view_t* vcache_b;
   int32_t rg_bsz;
+  // Batch size baked into the resident ragged decode graph, recorded by
+  // `xla_llama_ragged_bind` before the first reset (issue #2923). Zero means
+  // "not bound"; a reset never guesses it.
+  int32_t rg_compiled_b;
+  // One validity byte per slot: set only after BOTH K and V transfers of a
+  // prefill slot store succeed, cleared before the first transfer so a torn
+  // store can never be observed as valid (issue #2923).
+  uint8_t* rg_valid;
+  // Test-only hook: fail the V transfer of the next slot store.
+  int32_t rg_fail_slot_store;
   iree_host_size_t rg_per;
   iree_hal_dim_t rg_dims[4];
 } xla_ctx;
@@ -153,6 +163,33 @@ static const iree_hal_buffer_params_t kDeviceLocalParams = {
     .access = IREE_HAL_MEMORY_ACCESS_ALL,
     .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
 };
+
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+// Instrumentation for the lazy batch-KV allocation path (issue #2923). The
+// shim records any host mirror and host-to-device upload performed while that
+// path is active, so a device test can assert both stay at zero on first admit.
+static uint64_t xla_test_bk_host_bytes = 0;
+static uint64_t xla_test_bk_h2d_bytes = 0;
+static bool xla_test_bk_window = false;
+
+uint64_t xla_test_batch_kv_host_bytes(void) { return xla_test_bk_host_bytes; }
+uint64_t xla_test_batch_kv_h2d_bytes(void) { return xla_test_bk_h2d_bytes; }
+void xla_test_batch_kv_reset_counters(void) {
+  xla_test_bk_host_bytes = 0;
+  xla_test_bk_h2d_bytes = 0;
+}
+
+// Force the V half of the next prefill slot store to fail, and expose the
+// per-slot validity state so a device test can prove a torn store is rejected.
+void xla_test_set_slot_store_failure(xla_ctx* c, int32_t fail) {
+  if (c) c->rg_fail_slot_store = fail ? 1 : 0;
+}
+
+int32_t xla_test_slot_valid(const xla_ctx* c, int32_t slot) {
+  if (!c || !c->rg_valid || slot < 0 || slot >= c->rg_bsz) return -1;
+  return c->rg_valid[slot] ? 1 : 0;
+}
+#endif
 
 static int32_t xla_argmax_f32(const float* v, int32_t n) {
   int32_t best = 0;
@@ -313,10 +350,65 @@ static iree_status_t xla_alloc_bv(xla_ctx* c, iree_host_size_t rank,
                                   iree_hal_element_type_t elt, const void* data,
                                   iree_host_size_t nbytes,
                                   iree_hal_buffer_view_t** out) {
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+  if (xla_test_bk_window && data && nbytes > 0) {
+    // Every byte here is one host-resident copy plus one host-to-device
+    // upload; the batch-KV path must report neither (issue #2923).
+    xla_test_bk_host_bytes += (uint64_t)nbytes;
+    xla_test_bk_h2d_bytes += (uint64_t)nbytes;
+  }
+#endif
   return iree_hal_buffer_view_allocate_buffer_copy(
       c->device, c->allocator, rank, shape, elt,
       IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, kDeviceLocalParams,
       iree_make_const_byte_span(data, nbytes), out);
+}
+
+// Zero a device-local buffer with a queue-ordered device fill and wait for it,
+// so the caller never needs a host mirror of the buffer.
+static iree_status_t xla_zero_fill_device(xla_ctx* c, iree_hal_buffer_t* buffer,
+                                          iree_device_size_t bytes) {
+  iree_hal_semaphore_t* fence = NULL;
+  IREE_RETURN_IF_ERROR(iree_hal_semaphore_create(
+      c->device, IREE_HAL_QUEUE_AFFINITY_ANY, 0ull,
+      IREE_HAL_SEMAPHORE_FLAG_DEFAULT, &fence));
+  uint64_t signal_value = 1ull;
+  iree_hal_semaphore_list_t signal_list = {
+      .count = 1, .semaphores = &fence, .payload_values = &signal_value};
+  // A 4-byte zero pattern is the natural f32 fill and a legal HAL pattern
+  // length (1, 2, 4 or 8 bytes).
+  uint32_t zero = 0;
+  iree_status_t status = iree_hal_device_queue_fill(
+      c->device, IREE_HAL_QUEUE_AFFINITY_ANY,
+      iree_hal_semaphore_list_empty(), signal_list, buffer, 0, bytes, &zero,
+      sizeof(zero), IREE_HAL_FILL_FLAG_NONE);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_semaphore_wait(fence, signal_value,
+                                     iree_infinite_timeout(),
+                                     IREE_ASYNC_WAIT_FLAG_NONE);
+  }
+  iree_hal_semaphore_release(fence);
+  return status;
+}
+
+// Allocate a zeroed device-local buffer view without a host mirror. The fill is
+// awaited before the view is published, so no un-awaited fill can escape.
+static iree_status_t xla_alloc_zeroed_bv(xla_ctx* c, iree_host_size_t rank,
+                                         const iree_hal_dim_t* shape,
+                                         iree_hal_element_type_t elt,
+                                         iree_device_size_t nbytes,
+                                         iree_hal_buffer_view_t** out) {
+  iree_hal_buffer_t* buffer = NULL;
+  IREE_RETURN_IF_ERROR(iree_hal_allocator_allocate_buffer(
+      c->allocator, kDeviceLocalParams, nbytes, &buffer));
+  iree_status_t status = xla_zero_fill_device(c, buffer, nbytes);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_buffer_view_create(
+        buffer, rank, shape, elt, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+        iree_runtime_instance_host_allocator(c->instance), out);
+  }
+  iree_hal_buffer_release(buffer);
+  return status;
 }
 
 // Push the request-scoped Phi4MM adapter mode immediately after resident
@@ -974,6 +1066,11 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
                                  const int32_t* positions,
                                  int32_t position_mode, int32_t cache_len,
                                  int32_t* out_token) {
+  if (!c || !positions || !out_token) {
+    fprintf(stderr,
+            "xla_llama_decode: invalid context/position/output contract\n");
+    return 1;
+  }
   if (!c->kcache || !c->vcache || c->position_mode != position_mode ||
       cache_len < 0 || cache_len >= c->context_capacity) {
     fprintf(stderr,
@@ -986,6 +1083,18 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
     if (positions[axis] < 0) {
       fprintf(stderr, "xla_llama_decode: position axis %d is negative (%d)\n",
               axis, positions[axis]);
+      return 1;
+    }
+    // The graph indexes the [context_capacity, rot] RoPE table by this
+    // coordinate (the 1-D path directly, M-RoPE through the same bound), so a
+    // value at or past the capacity is an out-of-bounds device read. The Rust
+    // callers reject first; this keeps a direct C caller from bypassing that
+    // bound on the single-sequence entry points too (issue #2923).
+    if (positions[axis] >= c->context_capacity) {
+      fprintf(stderr,
+              "xla_llama_decode: position axis %d coordinate=%d "
+              "context_capacity=%d\n",
+              axis, positions[axis], c->context_capacity);
       return 1;
     }
   }
@@ -1085,7 +1194,12 @@ int xla_llama_decode_mrope(xla_ctx* c, int32_t adapter_mode, int32_t token,
 // the rank-4 dims the first prefill_slot captured. Inactive slots stay zeroed
 // until a prefill_slot overwrites their region; the ragged decode's per-row mask
 // makes a zeroed (cache_len 0) slot a harmless no-op whose output is discarded.
-static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
+//
+// The zeroing is a device fill on each cache, not a host mirror: the rank-5
+// cache is hundreds of MiB at B=4 and capacity 2048, so a calloc plus two full
+// host-to-device uploads doubled the first admit's cost for no benefit
+// (issue #2923).
+static iree_status_t xla_ensure_batch_kv_inner(xla_ctx* c) {
   if (c->kcache_b && c->vcache_b) return iree_ok_status();
   if (c->rg_bsz <= 0 || c->rg_per == 0 ||
       (iree_host_size_t)c->rg_bsz > SIZE_MAX / c->rg_per) {
@@ -1098,17 +1212,15 @@ static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
                             "batch KV byte count overflowed");
   }
   iree_host_size_t bytes = count * sizeof(float);
-  float* zeros = (float*)calloc((size_t)count, sizeof(float));
-  if (!zeros) return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
   iree_hal_dim_t shape5[5] = {(iree_hal_dim_t)c->rg_bsz, c->rg_dims[0],
                               c->rg_dims[1], c->rg_dims[2], c->rg_dims[3]};
-  iree_status_t s = xla_alloc_bv(c, 5, shape5, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
-                                 zeros, bytes, &c->kcache_b);
+  iree_status_t s = xla_alloc_zeroed_bv(c, 5, shape5,
+                                        IREE_HAL_ELEMENT_TYPE_FLOAT_32, bytes,
+                                        &c->kcache_b);
   if (iree_status_is_ok(s)) {
-    s = xla_alloc_bv(c, 5, shape5, IREE_HAL_ELEMENT_TYPE_FLOAT_32, zeros, bytes,
-                     &c->vcache_b);
+    s = xla_alloc_zeroed_bv(c, 5, shape5, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
+                            bytes, &c->vcache_b);
   }
-  free(zeros);
   if (!iree_status_is_ok(s)) {
     if (c->kcache_b) {
       iree_hal_buffer_view_release(c->kcache_b);
@@ -1120,6 +1232,17 @@ static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
     }
   }
   return s;
+}
+
+static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+  xla_test_bk_window = true;
+#endif
+  iree_status_t status = xla_ensure_batch_kv_inner(c);
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+  xla_test_bk_window = false;
+#endif
+  return status;
 }
 
 // Copy one rank-4 prefill KV pair directly into the selected region of the
@@ -1161,25 +1284,84 @@ static int xla_store_prefill_kv_slot(xla_ctx* c, int32_t slot,
     return 1;
   }
   iree_device_size_t off = (iree_device_size_t)slot * len;
+  // The store becomes visible only once both transfers have completed. Clear
+  // the slot's flag first so a failure part-way through leaves it invalid
+  // rather than half-written; the K bytes are not rolled back, because the
+  // engine re-prefills a slot before it is admitted again (issue #2923).
+  if (c->rg_valid) c->rg_valid[slot] = 0;
   XLA_CHECK(iree_hal_device_transfer_d2d(
       c->device, iree_hal_buffer_view_buffer(kc), 0,
       iree_hal_buffer_view_buffer(c->kcache_b), off, len,
       IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+  if (c->rg_fail_slot_store) {
+    fprintf(stderr,
+            "xla_iree: test hook: simulated V slot store failure at slot=%d\n",
+            slot);
+    return 1;
+  }
+#endif
   XLA_CHECK(iree_hal_device_transfer_d2d(
       c->device, iree_hal_buffer_view_buffer(vc), 0,
       iree_hal_buffer_view_buffer(c->vcache_b), off, len,
       IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+  if (c->rg_valid) c->rg_valid[slot] = 1;
+  return 0;
+}
+
+// Record the batch size compiled into this context's ragged decode graph.
+// Must be called once after the context is created and before the first reset;
+// the graph's static [B,...] shapes cannot be renegotiated at runtime.
+int xla_llama_ragged_bind(xla_ctx* c, int32_t compiled_b) {
+  if (!c || compiled_b <= 0) {
+    fprintf(stderr,
+            "xla_llama_ragged_bind: invalid context or compiled_b=%d\n",
+            compiled_b);
+    return 1;
+  }
+  c->rg_compiled_b = compiled_b;
   return 0;
 }
 
 // Reset the batched state for `bsz` slots: drop any rank-5 KV and forget the
 // per-slot dims (re-captured by the next prefill_slot, which lazily reallocates
 // the rank-5 KV once the dims are known). Call once before seeding slots.
+//
+// `bsz` must equal the batch size baked into this context's ragged decode
+// graph. The graph's [B,...] shapes are static, so any other value used to fail
+// deep inside IREE as an opaque shape mismatch; reject it here with both values
+// instead. `xla_llama_ragged_bind` must have recorded that size first.
 int xla_llama_ragged_reset(xla_ctx* c, int32_t bsz) {
-  if (bsz <= 0) {
-    fprintf(stderr, "xla_llama_ragged_reset: bsz must be positive\n");
+  if (!c || bsz <= 0) {
+    fprintf(stderr, "xla_llama_ragged_reset: bsz must be positive, got %d\n",
+            bsz);
     return 1;
   }
+  if (c->rg_compiled_b <= 0) {
+    fprintf(stderr,
+            "xla_llama_ragged_reset: no compiled ragged batch size is bound "
+            "(bsz=%d); call xla_llama_ragged_bind first\n",
+            bsz);
+    return 1;
+  }
+  if (bsz != c->rg_compiled_b) {
+    fprintf(stderr,
+            "xla_llama_ragged_reset: bsz=%d does not match the compiled ragged "
+            "batch size compiled_b=%d\n",
+            bsz, c->rg_compiled_b);
+    return 1;
+  }
+  // Fresh per-slot validity: a reset must not inherit any slot state from the
+  // previous batch (issue #2923).
+  uint8_t* valid = (uint8_t*)calloc((size_t)bsz, sizeof(uint8_t));
+  if (!valid) {
+    fprintf(stderr,
+            "xla_llama_ragged_reset: failed to allocate %d slot validity flags\n",
+            bsz);
+    return 1;
+  }
+  free(c->rg_valid);
+  c->rg_valid = valid;
   c->rg_bsz = bsz;
   c->rg_per = 0;
   if (c->kcache_b) {
@@ -1919,8 +2101,12 @@ static int xla_llama_decode_ragged_impl(
       return 1;
     }
     int32_t position_count = position_mode == 1 ? 3 : 1;
+    // The engine sends an inactive row as all zeros (token, positions and
+    // cache_len); anything else is a row it expects to advance.
+    bool active = tokens[i] != 0 || cache_len[i] != 0;
     for (int32_t axis = 0; axis < position_count; ++axis) {
       int32_t coordinate = positions[i * position_count + axis];
+      if (coordinate != 0) active = true;
       if (coordinate < 0 ||
           (position_mode == 0 && coordinate != cache_len[i])) {
         fprintf(stderr,
@@ -1928,6 +2114,28 @@ static int xla_llama_decode_ragged_impl(
                 i, axis, coordinate, cache_len[i]);
         return 1;
       }
+      // The ragged graph indexes the [context_capacity, rot] RoPE table by this
+      // coordinate, so a value at or past the capacity is an out-of-bounds
+      // device read. The Rust caller rejects first; this keeps a direct C
+      // caller from bypassing that bound (issue #2923).
+      if (coordinate >= c->context_capacity) {
+        fprintf(stderr,
+                "xla_llama_decode_ragged_logits: row=%d axis=%d coordinate=%d "
+                "context_capacity=%d\n",
+                i, axis, coordinate, c->context_capacity);
+        return 1;
+      }
+    }
+    // A row whose KV was only half-written (or never stored) must not reach
+    // the graph: decoding it would read a torn prompt. Inactive rows are
+    // exempt because they are exactly the all-zero rows the engine uses for
+    // free slots (issue #2923).
+    if (active && (!c->rg_valid || !c->rg_valid[i])) {
+      fprintf(stderr,
+              "xla_llama_decode_ragged_logits: row=%d slot=%d token=%d "
+              "cache_len=%d is active but its KV slot is not valid\n",
+              i, i, tokens[i], cache_len[i]);
+      return 1;
     }
   }
 
@@ -2060,6 +2268,7 @@ void xla_llama_free(xla_ctx* c) {
   if (c->vcache) iree_hal_buffer_view_release(c->vcache);
   if (c->kcache_b) iree_hal_buffer_view_release(c->kcache_b);
   if (c->vcache_b) iree_hal_buffer_view_release(c->vcache_b);
+  free(c->rg_valid);
   free(c->deepstack_target_layers);
   if (c->session) iree_runtime_session_release(c->session);
   if (c->device) iree_hal_device_release(c->device);
