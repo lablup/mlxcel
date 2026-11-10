@@ -1066,6 +1066,11 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
                                  const int32_t* positions,
                                  int32_t position_mode, int32_t cache_len,
                                  int32_t* out_token) {
+  if (!c || !positions || !out_token) {
+    fprintf(stderr,
+            "xla_llama_decode: invalid context/position/output contract\n");
+    return 1;
+  }
   if (!c->kcache || !c->vcache || c->position_mode != position_mode ||
       cache_len < 0 || cache_len >= c->context_capacity) {
     fprintf(stderr,
@@ -1078,6 +1083,18 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
     if (positions[axis] < 0) {
       fprintf(stderr, "xla_llama_decode: position axis %d is negative (%d)\n",
               axis, positions[axis]);
+      return 1;
+    }
+    // The graph indexes the [context_capacity, rot] RoPE table by this
+    // coordinate (the 1-D path directly, M-RoPE through the same bound), so a
+    // value at or past the capacity is an out-of-bounds device read. The Rust
+    // callers reject first; this keeps a direct C caller from bypassing that
+    // bound on the single-sequence entry points too (issue #2923).
+    if (positions[axis] >= c->context_capacity) {
+      fprintf(stderr,
+              "xla_llama_decode: position axis %d coordinate=%d "
+              "context_capacity=%d\n",
+              axis, positions[axis], c->context_capacity);
       return 1;
     }
   }
