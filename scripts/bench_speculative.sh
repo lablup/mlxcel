@@ -217,3 +217,34 @@ if [ -z "$ONLY" ] || [ "$ONLY" = "qwen" ]; then
     models/qwen3.8-27b-4bit models/qwen3.8-27b-mtp-4bit 3 \
     "source code" "$PROMPT_CODE" 300
 fi
+
+# Qwen3.8-Flash-Next (`qwen4_exp`) with its native MTP head (issue #2880). The
+# drafter is a separate directory because target conversions drop `mtp.*`.
+# On Apple GPU generation 15 and later the exactness probe turns `qmv_wide`
+# off for the MTP process, so the classic arm runs with the default and the
+# ratio includes that pin, which is what a user of `--draft-model` gets.
+if [ -z "$ONLY" ] || [ "$ONLY" = "flashnext" ]; then
+  measure_pairing "Qwen3.8-Flash-Next OptiQ 2-bit + bf16 MTP head" \
+    models/Qwen3.8-Flash-Next-OptiQ-2bit models/Qwen3.8-Flash-Next-MTP 4 \
+    "source code" "$PROMPT_CODE" 300
+  measure_pairing "Qwen3.8-Flash-Next OptiQ 2-bit + bf16 MTP head" \
+    models/Qwen3.8-Flash-Next-OptiQ-2bit models/Qwen3.8-Flash-Next-MTP 4 \
+    "prose" "$PROMPT_PROSE" 400
+  measure_pairing "Qwen3.8-Flash-Next OptiQ 2-bit + bf16 MTP head" \
+    models/Qwen3.8-Flash-Next-OptiQ-2bit models/Qwen3.8-Flash-Next-MTP 4 \
+    "enumeration" "$PROMPT_LIST" 400
+fi
+
+# The mlx-community 4-bit conversion keeps the head in the target checkpoint,
+# so the target directory is also the drafter (issue #2917).
+if [ -z "$ONLY" ] || [ "$ONLY" = "flashnext4" ]; then
+  measure_pairing "Qwen3.8-Flash-Next 4-bit + its embedded MTP head" \
+    models/Qwen3.8-Flash-Next-4bit-mtp models/Qwen3.8-Flash-Next-4bit-mtp 4 \
+    "source code" "$PROMPT_CODE" 300
+  measure_pairing "Qwen3.8-Flash-Next 4-bit + its embedded MTP head" \
+    models/Qwen3.8-Flash-Next-4bit-mtp models/Qwen3.8-Flash-Next-4bit-mtp 4 \
+    "prose" "$PROMPT_PROSE" 400
+  measure_pairing "Qwen3.8-Flash-Next 4-bit + its embedded MTP head" \
+    models/Qwen3.8-Flash-Next-4bit-mtp models/Qwen3.8-Flash-Next-4bit-mtp 4 \
+    "enumeration" "$PROMPT_LIST" 400
+fi

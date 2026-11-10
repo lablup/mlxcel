@@ -35,7 +35,8 @@ Options:
   --port N             Server port (default: 18083)
   --write-dir DIR      Directory for the files written (default: $TMPDIR)
   --out DIR            Results directory
-                       (default: docs/benchmark_results/macos-memory-soak-<host>-<date>)
+                       (default: docs/benchmark_results/macos-memory-soak-<host>-<date>,
+                       with a -wire-weights suffix under --wire-weights)
   --idle-seconds N     Idle time before and after the writes (default: 30)
   --dry-run            Print the plan and exit: no server, no write
   -h, --help           Show this help
@@ -94,7 +95,11 @@ WRITES=""
 WRITES="${WRITES}${SIZE_GIB}"
 
 if [ -z "$OUT" ]; then
-    OUT="docs/benchmark_results/macos-memory-soak-$(hostname -s)-$(date +%Y-%m-%d)"
+    # A wired-weights run gets its own directory so it does not overwrite the
+    # summary and samples of a plain run from the same day.
+    SUFFIX=""
+    [ "$WIRE_WEIGHTS" = 1 ] && SUFFIX="-wire-weights"
+    OUT="docs/benchmark_results/macos-memory-soak-$(hostname -s)-$(date +%Y-%m-%d)${SUFFIX}"
 fi
 
 IFS=',' read -r -a LIMITS <<<"$WIRED_LIMITS"
@@ -168,6 +173,7 @@ import urllib.request
 
 body = json.dumps(
     {
+        "model": "default",
         "messages": [{"role": "user", "content": "Count from one to five."}],
         "max_tokens": 16,
         "stream": True,
