@@ -1671,6 +1671,41 @@ mod tests {
             "fused multi-row outputs keep the [B, N] shape"
         );
 
+        // The other bundled graph (B=4) keeps the same launch structure: one
+        // dispatch per projection group, so the count does not grow with the
+        // batch, and only the B constant and output rows change. A regression
+        // that multiplies launches by B or hardcodes the B=8 constant fails here.
+        let b4 = emit_decode_ragged_with_native(
+            &c,
+            4,
+            true,
+            Precision::F16,
+            Some((
+                "#mlxcel_qmv_target = #hal.executable.target<\"rocm\", \"rocm-hsaco-fb\">\n",
+                "  source-block\n",
+            )),
+        );
+        for dispatch in [
+            "flow.dispatch @custom_qmv_multi::@qmv4_multi_kernel[",
+            "flow.dispatch @custom_qmv_multi::@qmv4_multi_row_kernel[",
+            "flow.dispatch @custom_qmv_qkv_multi::@qmv4_qkv_multi_kernel[",
+            "flow.dispatch @custom_qmv_gateup_multi::@qmv4_gateup_multi_kernel[",
+        ] {
+            assert_eq!(
+                b4.matches(dispatch).count(),
+                mlir.matches(dispatch).count(),
+                "the ragged launch count is independent of B: {dispatch}"
+            );
+        }
+        assert!(
+            b4.contains("arith.constant 4 : i32"),
+            "the B=4 graph carries its batch size as the kernel's B constant"
+        );
+        assert!(
+            b4.contains("tensor<4x8192xf32>"),
+            "the B=4 graph writes [4, N] outputs"
+        );
+
         // Without the native module the graph is the same f16 one emitted before
         // this issue: the packed operands are never registered and no dispatch is
         // emitted.
