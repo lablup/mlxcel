@@ -541,3 +541,7 @@ async fn previous_response_id_waits_for_the_job_and_delete_refuses_an_active_job
 
 #[path = "responses_background_stream_route_tests.rs"]
 mod stream;
+
+/// Many jobs of every kind leave nothing behind (issue #2902).
+#[path = "responses_background_leak_tests.rs"]
+mod leak;

@@ -802,6 +802,10 @@ itself. `GET /router/stats` reports the per-node load spread and node health.
 See [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#multi-node-routing-load-balancing-and-failover)
 for the flags and behavior.
 
+The front serves chat and text completions only. `POST /v1/responses` returns
+a 400 that says to send Responses API requests, background mode included, to a
+serving node; see [`responses-api.md`](responses-api.md#serving-roles).
+
 ### Security and trust model
 
 The disaggregated role-transport connections (router to prefill, prefill to decode, and every result frame back to the router) authenticate with the same [cluster secret](#cluster-authentication) as the pipeline roles (issue #2655): every `--node-role prefill`, `decode` and `router` process must be given the secret and refuses to start without one, a peer holding a different secret is rejected at connect time, and a raw TCP client that skips the handshake never gets a frame to a role's receive loop. Every frame on those connections is then encrypted and authenticated with keys derived from the handshake (issue #2656, see [Threat model and per-frame protection](#threat-model-and-per-frame-protection)); there is no TLS. The entire disaggregated cluster, including the router's client-facing HTTP port and all internal role-transport ports, should still run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports; the secret keeps outsiders off the role ports, it does not replace the isolation.

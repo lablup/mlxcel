@@ -2259,6 +2259,23 @@ fn chat_completion_json(
     })
 }
 
+/// `POST /v1/responses` on the disaggregated front (issue #2901).
+///
+/// The front dispatches chat and text completions to a prefill node and a
+/// decode node; it has no response store, so it can neither run a background
+/// response nor answer a later retrieve or cancel. It refuses every Responses
+/// request, foreground and background alike, with a 400 that says where to
+/// send it, instead of the bare 404 an unregistered route gives. The body is
+/// not read and no job or affinity state is created.
+async fn router_responses_unsupported() -> axum::response::Response {
+    ErrorResponse::new(
+        "the disaggregated router does not serve /v1/responses; send Responses API requests, \
+         including background mode, to a serving node",
+        "invalid_request_error",
+    )
+    .into_response()
+}
+
 // ── Router app factory ───────────────────────────────────────────────────
 
 /// Build the axum `Router` for the disaggregated front-end.
@@ -2271,12 +2288,16 @@ fn chat_completion_json(
 ///   (issue #389)
 /// - `POST /v1/chat/completions` - chat completions (streaming and non-streaming)
 /// - `POST /v1/completions` - text completions (streaming and non-streaming)
+/// - `POST /v1/responses`, `POST /responses` - refused with a 400: the front
+///   does not serve the Responses API ([`router_responses_unsupported`])
 pub fn create_router_app(state: Arc<RouterState>) -> Router {
     let mut app = Router::new()
         .route("/health", get(router_health))
         .route("/router/stats", get(router_stats))
         .route("/v1/chat/completions", post(router_chat_completions))
-        .route("/v1/completions", post(router_completions));
+        .route("/v1/completions", post(router_completions))
+        .route("/v1/responses", post(router_responses_unsupported))
+        .route("/responses", post(router_responses_unsupported));
     if state.config.enable_settings_endpoint {
         app = app
             .route(

@@ -215,8 +215,9 @@ pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
 }
 
 /// Whether a packed int8 in-graph-dequant build can execute on `device`.
-/// `packed_active` is whether the packed path is actually taken (the caller's
-/// `quant_in_graph() && cfg.supports_packed_quant()`). The metal HAL driver faults
+/// `packed_active` is whether the packed path is actually taken (the config's
+/// resolved `packed_args && supports_packed_quant()`, set by
+/// `MLXCEL_XLA_QUANT=packed` or by the native GEMV). The metal HAL driver faults
 /// at runtime on the packed prefill: the ui32-unpack + dequant command buffer fails
 /// to execute (issue #613, `metal_device.m`, "Metal command buffer failed"), where
 /// the same graph runs token-exact on CUDA. So packed does not run on `metal`; it
@@ -226,8 +227,8 @@ fn packed_runs_on(device: &str, packed_active: bool) -> bool {
 }
 
 /// Reject a packed int8 build the target cannot execute, before iree-compile and the
-/// weight upload (issue #613). `packed_active` is the caller's `quant_in_graph() &&
-/// cfg.supports_packed_quant()`. On Metal the packed prefill faults with an opaque
+/// weight upload (issue #613). `packed_active` is the config's resolved
+/// `packed_args && supports_packed_quant()`. On Metal the packed prefill faults with an opaque
 /// Metal command-buffer error, and its memory-bandwidth win is un-demonstrable on the
 /// compute-bound Metal decode anyway (ADR 0004), so fail fast with an actionable
 /// message instead. Unaffected on CUDA / CPU, and a no-op when packed is not active.
@@ -412,8 +413,9 @@ impl Builder {
     }
 
     /// Run projections from packed 4-bit weights through the native GEMV
-    /// dispatch instead of dequantizing them in the graph (issue #2889).
-    /// Only the single-sequence decode graph sets this.
+    /// dispatch instead of dequantizing them in the graph (issues #2889, #2922).
+    /// The single-sequence and ragged decode graphs set this; the prefill graphs
+    /// leave it off, so their packed operands dequantize in the graph.
     #[must_use]
     pub fn with_native_proj(mut self, native: bool) -> Self {
         self.native_proj = native;
@@ -2033,9 +2035,16 @@ impl Builder {
     }
 
     /// Sequence-batched [`Self::linear_proj`].
+    ///
+    /// With a packed operand this takes the multi-row native GEMV (issue #2922),
+    /// which reduces every activation row against one weight read; otherwise
+    /// the dense sequence contraction.
     pub fn linear_seq_proj(&mut self, x: &Val, w: &Val) -> Val {
         if let Some(operand) = self.packed_operands.get(&w.name).cloned() {
-            return self.native_qmv(x, &operand);
+            return self
+                .native_qmv_rows(x, std::slice::from_ref(&operand))
+                .pop()
+                .expect("one result per packed operand");
         }
         match self.projection_layout {
             ProjectionLayout::OutIn => self.linear_seq(x, w),
@@ -2101,6 +2110,208 @@ impl Builder {
             name: result,
             ty: result_ty,
         }
+    }
+
+    /// Emit one native packed-weight GEMV over `B` activation rows (issue
+    /// #2922): `[B, K] x [N, K/8] -> [B, N]` for one operand, or one `[B, Ni]`
+    /// result per operand when two or three packed weights share the rows.
+    ///
+    /// The single-output and fused exports differ by binding count, so the entry
+    /// point follows the group size, exactly like [`Self::native_qmv_multi`] for
+    /// the single-row graphs. The kernel keeps one accumulator per row and reads
+    /// each weight word once, so a fused q/k/v or gate/up launch stays one launch
+    /// per layer rather than one per row. Supported batches are
+    /// `1..=MAX_BATCH`; the ragged engine only emits its bundled `B` values.
+    pub fn native_qmv_rows(&mut self, x: &Val, operands: &[PackedOperand]) -> Vec<Val> {
+        assert!(
+            matches!(self.projection_layout, ProjectionLayout::OutIn),
+            "the multi-row native projection is a ragged (OutIn) path"
+        );
+        assert_eq!(
+            x.ty.shape.len(),
+            2,
+            "the multi-row GEMV consumes [B, K] activations"
+        );
+        assert!(
+            (1..=3).contains(&operands.len()),
+            "the multi-row GEMV covers one to three weight sets"
+        );
+        let b = x.ty.shape[0];
+        let k = x.ty.shape[1];
+        assert!(
+            (1..=crate::native_qmv::MAX_BATCH).contains(&b),
+            "the multi-row GEMV supports B in 1..=MAX_BATCH"
+        );
+        for operand in operands {
+            assert_eq!(k, operand.input, "multi-row GEMV contraction mismatch");
+        }
+        let total: usize = operands.iter().map(|operand| operand.out).sum();
+        let (entry, groups) = match operands.len() {
+            1 => crate::native_qmv::multi_dispatch(k, total),
+            3 => crate::native_qmv::qkv_multi_dispatch(k, total),
+            _ => crate::native_qmv::gateup_multi_dispatch(k, total),
+        };
+        let xf16 = if x.ty.elt == "f16" {
+            x.clone()
+        } else {
+            self.convert(x, "f16")
+        };
+        let grid = self.fresh();
+        self.line(format!("{grid} = arith.constant {groups} : index"));
+        let mut args = Vec::with_capacity(2 + operands.len() * 4);
+        let mut types = Vec::with_capacity(2 + operands.len() * 4);
+        let k_i32 = self.fresh();
+        self.line(format!("{k_i32} = arith.constant {k} : i32"));
+        args.push(k_i32);
+        types.push("i32".to_string());
+        for operand in operands {
+            let n_i32 = self.fresh();
+            self.line(format!("{n_i32} = arith.constant {} : i32", operand.out));
+            args.push(n_i32);
+            types.push("i32".to_string());
+        }
+        // The kernel's last constant is the batch size, after the N values.
+        let b_i32 = self.fresh();
+        self.line(format!("{b_i32} = arith.constant {b} : i32"));
+        args.push(b_i32);
+        types.push("i32".to_string());
+        args.push(xf16.name);
+        types.push(xf16.ty.render());
+        for operand in operands {
+            args.push(operand.packed.name.clone());
+            types.push(operand.packed.ty.render());
+            args.push(operand.scales.name.clone());
+            types.push(operand.scales.ty.render());
+            args.push(operand.biases.name.clone());
+            types.push(operand.biases.ty.render());
+        }
+        let results: Vec<String> = (0..operands.len()).map(|_| self.fresh()).collect();
+        let vals: Vec<Val> = operands
+            .iter()
+            .zip(&results)
+            .map(|(operand, name)| Val {
+                name: name.clone(),
+                ty: Ty::f32(vec![b, operand.out]),
+            })
+            .collect();
+        let result_tys: Vec<String> = vals.iter().map(|val| val.ty.render()).collect();
+        self.line(format!(
+            "{} = flow.dispatch {}[{}]({}) : ({}) -> ({})",
+            results.join(", "),
+            entry,
+            grid,
+            args.join(", "),
+            types.join(", "),
+            result_tys.join(", "),
+        ));
+        vals
+    }
+
+    /// The packed operands behind each weight, or `None` when any of them is not
+    /// registered (not native mode, or a projection the graph keeps dense).
+    pub fn packed_group(&self, weights: &[&Val]) -> Option<Vec<PackedOperand>> {
+        weights
+            .iter()
+            .map(|w| self.packed_operands.get(&w.name).cloned())
+            .collect()
+    }
+
+    /// Project the MLP gate and up in one native dispatch when both are packed
+    /// (issues #2895, #2922); otherwise the two per-projection calls at this
+    /// graph's rank.
+    pub fn gate_up_proj(&mut self, x: &Val, gate: &Val, up: &Val) -> (Val, Val) {
+        if let Some(operands) = self.packed_group(&[gate, up]) {
+            let mut outs = if x.ty.shape.len() == 2 {
+                self.native_qmv_rows(x, &operands)
+            } else {
+                self.native_qmv_multi(x, &operands)
+            };
+            let u = outs.pop().expect("gate/up dispatch results");
+            let g = outs.pop().expect("gate/up dispatch results");
+            return (g, u);
+        }
+        if x.ty.shape.len() == 2 {
+            return (self.linear_seq_proj(x, gate), self.linear_seq_proj(x, up));
+        }
+        (self.linear_proj(x, gate), self.linear_proj(x, up))
+    }
+
+    /// Emit one native GEMV dispatch over two or three packed weight sets that
+    /// share the activation row (issue #2895). The exports differ by binding
+    /// count, so the entry point follows the group size.
+    pub fn native_qmv_multi(&mut self, x: &Val, operands: &[PackedOperand]) -> Vec<Val> {
+        assert!(
+            matches!(self.projection_layout, ProjectionLayout::InOut),
+            "the native packed projections are a single-sequence (InOut) path"
+        );
+        assert_eq!(
+            x.ty.shape.len(),
+            1,
+            "the native GEMV consumes one activation row"
+        );
+        assert!(
+            operands.len() == 2 || operands.len() == 3,
+            "the fused native GEMV covers two or three weight sets"
+        );
+        let k = x.ty.shape[0];
+        for operand in operands {
+            assert_eq!(k, operand.input, "fused native GEMV contraction mismatch");
+        }
+        let total: usize = operands.iter().map(|operand| operand.out).sum();
+        let (entry, groups) = if operands.len() == 3 {
+            crate::native_qmv::qkv_dispatch(k, total)
+        } else {
+            crate::native_qmv::gateup_dispatch(k, total)
+        };
+        let xf16 = if x.ty.elt == "f16" {
+            x.clone()
+        } else {
+            self.convert(x, "f16")
+        };
+        let grid = self.fresh();
+        self.line(format!("{grid} = arith.constant {groups} : index"));
+        let mut args = Vec::with_capacity(2 + operands.len() * 4);
+        let mut types = Vec::with_capacity(2 + operands.len() * 4);
+        let k_i32 = self.fresh();
+        self.line(format!("{k_i32} = arith.constant {k} : i32"));
+        args.push(k_i32);
+        types.push("i32".to_string());
+        for operand in operands {
+            let n_i32 = self.fresh();
+            self.line(format!("{n_i32} = arith.constant {} : i32", operand.out));
+            args.push(n_i32);
+            types.push("i32".to_string());
+        }
+        args.push(xf16.name);
+        types.push(xf16.ty.render());
+        for operand in operands {
+            args.push(operand.packed.name.clone());
+            types.push(operand.packed.ty.render());
+            args.push(operand.scales.name.clone());
+            types.push(operand.scales.ty.render());
+            args.push(operand.biases.name.clone());
+            types.push(operand.biases.ty.render());
+        }
+        let results: Vec<String> = (0..operands.len()).map(|_| self.fresh()).collect();
+        let vals: Vec<Val> = operands
+            .iter()
+            .zip(&results)
+            .map(|(operand, name)| Val {
+                name: name.clone(),
+                ty: Ty::f32(vec![operand.out]),
+            })
+            .collect();
+        let result_tys: Vec<String> = vals.iter().map(|val| val.ty.render()).collect();
+        self.line(format!(
+            "{} = flow.dispatch {}[{}]({}) : ({}) -> ({})",
+            results.join(", "),
+            entry,
+            grid,
+            args.join(", "),
+            types.join(", "),
+            result_tys.join(", "),
+        ));
+        vals
     }
 
     /// Linear projection over the final axis of an arbitrary-rank tensor.
