@@ -2700,7 +2700,7 @@ impl IreeLlama {
             adapter_mode: 0,
             dense_ple_shape: cfg.dense_ple_shape(),
             position_mode: cfg.position_mode(),
-            decode_position: DecodePositionState::default(),
+            decode_position: DecodePositionState::new(cfg.context_capacity()),
             deepstack_schema: cfg.deepstack().cloned(),
         })
     }
@@ -4005,6 +4005,18 @@ impl IreeRaggedLlama {
             if coordinates.iter().any(|&coordinate| coordinate < 0) {
                 return Err(format!(
                     "decode row {row} has negative M-RoPE coordinates {coordinates:?}"
+                ));
+            }
+            // The compiled RoPE table has exactly `context_capacity` rows, so a
+            // coordinate at or past it is an out-of-bounds device gather. Reject
+            // here, before any IREE call (issue #2923).
+            if let Some(&coordinate) = coordinates
+                .iter()
+                .find(|&&coordinate| coordinate as usize >= self.context_capacity)
+            {
+                return Err(format!(
+                    "decode row {row} has M-RoPE coordinate {coordinate} outside context_capacity={}",
+                    self.context_capacity
                 ));
             }
         }

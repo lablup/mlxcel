@@ -423,14 +423,18 @@ fn queue_gemma3n_prepared_request(
     ))
 }
 
-fn mrope_slot_coordinates(slots: &[Option<Slot>]) -> Result<Vec<[i32; 3]>, MropeCoordinateError> {
+fn mrope_slot_coordinates(
+    slots: &[Option<Slot>],
+    context_capacity: usize,
+) -> Result<Vec<[i32; 3]>, MropeCoordinateError> {
     slots
         .iter()
         .map(|slot| {
             let Some(slot) = slot else {
                 return Ok([0; 3]);
             };
-            let coordinate = mrope_decode_coordinate(slot.cache_len, slot.rope_delta)?;
+            let coordinate =
+                mrope_decode_coordinate(slot.cache_len, slot.rope_delta, context_capacity)?;
             Ok([coordinate; 3])
         })
         .collect()
@@ -1157,7 +1161,8 @@ impl XlaBatchEngine {
             }
             PreparedPositionMode::Mrope3D => {
                 let mrope_positions =
-                    mrope_slot_coordinates(&self.sched.slots).map_err(|error| error.to_string())?;
+                    mrope_slot_coordinates(&self.sched.slots, self.engine.context_capacity())
+                        .map_err(|error| error.to_string())?;
                 self.engine.decode_ragged_mrope_logits_with_modes(
                     &adapter_modes,
                     &tok,
@@ -2303,7 +2308,7 @@ mod tests {
         assert_eq!(admit_next(&mut scheduler, 1), positive);
         assert_eq!(admit_next(&mut scheduler, 2), zero);
         assert_eq!(
-            mrope_slot_coordinates(&scheduler.slots).unwrap(),
+            mrope_slot_coordinates(&scheduler.slots, 8).unwrap(),
             [[3, 3, 3], [6, 6, 6], [4, 4, 4]],
             "the first decode coordinate for each row is sequence_len + its own delta"
         );
@@ -2313,9 +2318,33 @@ mod tests {
         let replacement = scheduler.submit(vec![9, 10, 11, 12], 4, g());
         assert_eq!(admit_next(&mut scheduler, 1), replacement);
         assert_eq!(
-            mrope_slot_coordinates(&scheduler.slots).unwrap(),
+            mrope_slot_coordinates(&scheduler.slots, 8).unwrap(),
             [[3, 3, 3], [4, 4, 4], [4, 4, 4]],
             "reusing the cancelled positive-delta slot must restore text delta zero"
+        );
+    }
+
+    #[test]
+    fn mrope_slot_coordinates_reject_at_and_past_context_capacity() {
+        let mut scheduler = Scheduler::new(1, EOS.to_vec());
+        // The fixture's first decode coordinate is sequence_len + delta = 4 + 4.
+        let (prepared, features) = public_deepstack_input(4);
+        let req =
+            queue_deepstack_prepared_request(&mut scheduler, prepared, features, 4, g(), 16)
+                .unwrap();
+        assert_eq!(admit_next(&mut scheduler, 0), req);
+        assert_eq!(
+            mrope_slot_coordinates(&scheduler.slots, 8),
+            Err(MropeCoordinateError::OutOfRange {
+                coordinate: 8,
+                context_capacity: 8,
+            }),
+            "a coordinate equal to the capacity is already past the RoPE table"
+        );
+        assert_eq!(
+            mrope_slot_coordinates(&scheduler.slots, 9).unwrap(),
+            [[8, 8, 8]],
+            "one row below the capacity is still valid"
         );
     }
 

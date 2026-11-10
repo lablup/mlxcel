@@ -128,7 +128,7 @@ fn public_deepstack_delta_commits_single_decode_coordinate_only_on_success() {
         PreparedPositionMode::Mrope3D,
     )
     .unwrap();
-    let mut state = DecodePositionState::default();
+    let mut state = DecodePositionState::new(8);
     assert_eq!(
         state
             .complete_prefill(successful.positions.rope_delta(), Ok(17))

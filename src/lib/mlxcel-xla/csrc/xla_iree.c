@@ -1928,6 +1928,17 @@ static int xla_llama_decode_ragged_impl(
                 i, axis, coordinate, cache_len[i]);
         return 1;
       }
+      // The ragged graph indexes the [context_capacity, rot] RoPE table by this
+      // coordinate, so a value at or past the capacity is an out-of-bounds
+      // device read. The Rust caller rejects first; this keeps a direct C
+      // caller from bypassing that bound (issue #2923).
+      if (coordinate >= c->context_capacity) {
+        fprintf(stderr,
+                "xla_llama_decode_ragged_logits: row=%d axis=%d coordinate=%d "
+                "context_capacity=%d\n",
+                i, axis, coordinate, c->context_capacity);
+        return 1;
+      }
     }
   }
 

@@ -226,6 +226,13 @@ impl std::error::Error for PreparedInputError {}
 pub enum MropeCoordinateError {
     Overflow { cache_len: i32, rope_delta: i32 },
     Negative { cache_len: i32, rope_delta: i32 },
+    /// The coordinate is at or past the compiled RoPE table's `context_capacity`.
+    /// The graph indexes that table by this coordinate, so exceeding it is an
+    /// out-of-bounds device read rather than an error the graph can report.
+    OutOfRange {
+        coordinate: i32,
+        context_capacity: usize,
+    },
 }
 
 impl fmt::Display for MropeCoordinateError {
@@ -244,6 +251,13 @@ impl fmt::Display for MropeCoordinateError {
             } => write!(
                 f,
                 "M-RoPE decode coordinate is negative: cache_len={cache_len}, rope_delta={rope_delta}"
+            ),
+            Self::OutOfRange {
+                coordinate,
+                context_capacity,
+            } => write!(
+                f,
+                "M-RoPE decode coordinate {coordinate} is outside the compiled context_capacity={context_capacity}"
             ),
         }
     }
@@ -285,6 +299,7 @@ pub(crate) fn canonical_text_positions(
 pub(crate) fn mrope_decode_coordinate(
     cache_len: i32,
     rope_delta: i32,
+    context_capacity: usize,
 ) -> Result<i32, MropeCoordinateError> {
     let coordinate = cache_len
         .checked_add(rope_delta)
@@ -298,15 +313,33 @@ pub(crate) fn mrope_decode_coordinate(
             rope_delta,
         });
     }
+    // The compiled RoPE table has exactly `context_capacity` rows and the graph
+    // indexes it by this coordinate, so `coordinate == context_capacity` is
+    // already one past the end. Rejecting here keeps a library caller from
+    // turning the gather into an out-of-bounds device read (issue #2923).
+    if coordinate as u64 >= context_capacity as u64 {
+        return Err(MropeCoordinateError::OutOfRange {
+            coordinate,
+            context_capacity,
+        });
+    }
     Ok(coordinate)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct DecodePositionState {
     rope_delta: i32,
+    context_capacity: usize,
 }
 
 impl DecodePositionState {
+    pub(crate) fn new(context_capacity: usize) -> Self {
+        Self {
+            rope_delta: 0,
+            context_capacity,
+        }
+    }
+
     pub(crate) fn complete_prefill<T>(
         &mut self,
         next_rope_delta: i32,
@@ -318,7 +351,7 @@ impl DecodePositionState {
     }
 
     pub(crate) fn mrope_coordinate(&self, cache_len: i32) -> Result<i32, MropeCoordinateError> {
-        mrope_decode_coordinate(cache_len, self.rope_delta)
+        mrope_decode_coordinate(cache_len, self.rope_delta, self.context_capacity)
     }
 }
 
@@ -951,20 +984,58 @@ mod tests {
 
     #[test]
     fn decode_coordinate_supports_signed_deltas_and_typed_failures() {
-        assert_eq!(mrope_decode_coordinate(12, -5), Ok(7));
-        assert_eq!(mrope_decode_coordinate(12, 5), Ok(17));
+        assert_eq!(mrope_decode_coordinate(12, -5, 64), Ok(7));
+        assert_eq!(mrope_decode_coordinate(12, 5, 64), Ok(17));
         assert_eq!(
-            mrope_decode_coordinate(2, -3),
+            mrope_decode_coordinate(2, -3, 64),
             Err(MropeCoordinateError::Negative {
                 cache_len: 2,
                 rope_delta: -3,
             })
         );
         assert_eq!(
-            mrope_decode_coordinate(i32::MAX, 1),
+            mrope_decode_coordinate(i32::MAX, 1, 64),
             Err(MropeCoordinateError::Overflow {
                 cache_len: i32::MAX,
                 rope_delta: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_coordinate_rejects_at_the_context_capacity_boundary() {
+        // The compiled RoPE table has `context_capacity` rows: the last valid
+        // index is capacity - 1 and the first invalid one is capacity itself.
+        assert_eq!(mrope_decode_coordinate(60, 3, 64), Ok(63));
+        assert_eq!(
+            mrope_decode_coordinate(60, 4, 64),
+            Err(MropeCoordinateError::OutOfRange {
+                coordinate: 64,
+                context_capacity: 64,
+            })
+        );
+        assert_eq!(
+            mrope_decode_coordinate(64, 0, 64),
+            Err(MropeCoordinateError::OutOfRange {
+                coordinate: 64,
+                context_capacity: 64,
+            })
+        );
+        assert_eq!(
+            mrope_decode_coordinate(63, 2, 64),
+            Err(MropeCoordinateError::OutOfRange {
+                coordinate: 65,
+                context_capacity: 64,
+            })
+        );
+        // A signed delta that lands exactly on the boundary is rejected, and one
+        // that lands just below it is accepted.
+        assert_eq!(mrope_decode_coordinate(66, -3, 64), Ok(63));
+        assert_eq!(
+            mrope_decode_coordinate(66, -2, 64),
+            Err(MropeCoordinateError::OutOfRange {
+                coordinate: 64,
+                context_capacity: 64,
             })
         );
     }
