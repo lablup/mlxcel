@@ -27,7 +27,9 @@ use super::*;
 const JOBS: usize = 2_000;
 const MAX_BYTES: usize = 256 * 1024;
 const TTL: Duration = Duration::from_millis(500);
-const EPHEMERAL_TTL: Duration = Duration::from_millis(250);
+// Generous so a scheduling stall between a job leaving the jobs map and the
+// test reading its stored copy cannot expire a `store: false` entry first.
+const EPHEMERAL_TTL: Duration = Duration::from_secs(2);
 
 /// The kinds of job the test cycles through, one generation each.
 #[derive(Debug, Clone, Copy)]
@@ -214,8 +216,18 @@ async fn background_jobs_do_not_leak() {
         "one generation per job"
     );
 
-    // Past the TTL a sweep leaves nothing behind, event logs included.
-    tokio::time::sleep(TTL + Duration::from_millis(50)).await;
+    // Past the TTLs a sweep leaves nothing behind, event logs included. Poll
+    // instead of sleeping the worst case: each `get` sweeps the store.
+    tokio::time::timeout(EPHEMERAL_TTL + TTL + WAIT, async {
+        while h.store.get("resp_sweep").is_some()
+            || !h.store.is_empty()
+            || h.store.approximate_total_bytes() != 0
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the store empties once the TTLs pass");
     assert!(h.store.get("resp_sweep").is_none());
     assert_eq!(h.store.len(), 0);
     assert_eq!(h.store.approximate_total_bytes(), 0);

@@ -107,7 +107,7 @@ def wait_status(client: OpenAI, response_id: str, wanted: str, timeout: float) -
 class Checks:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.client = OpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
+        self.client = OpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0, timeout=args.timeout)
         self.first_id: str | None = None
 
     def create(self, **kwargs: object) -> openai.types.responses.Response:
@@ -148,26 +148,39 @@ class Checks:
 
     def check_3_cancel(self) -> str:
         created = self.create(input=LONG_PROMPT, max_output_tokens=8192)
-        wait_status(self.client, created.id, "in_progress", self.args.timeout)
-        time.sleep(1.0)  # let it generate, so the cancel carries partial output
-        raw = self.client.responses.with_raw_response
-        first = raw.cancel(created.id)
-        cancelled = first.parse()
-        expect(cancelled.status == "cancelled", f"cancel answered {cancelled.status}")
-        expect(cancelled.id == created.id, "cancel answered another id")
-        second = raw.cancel(created.id)
-        expect(second.http_response.content == first.http_response.content, "repeat cancel differs")
-        fetched = raw.retrieve(created.id)
-        expect(fetched.http_response.content == first.http_response.content, "retrieve differs from cancel")
-        return f"cancelled with {len(cancelled.output_text)} chars generated; repeat and retrieve identical"
+        try:
+            wait_status(self.client, created.id, "in_progress", self.args.timeout)
+            time.sleep(1.0)  # let it generate, so the cancel carries partial output
+            raw = self.client.responses.with_raw_response
+            first = raw.cancel(created.id)
+            cancelled = first.parse()
+            expect(cancelled.status == "cancelled", f"cancel answered {cancelled.status}")
+            expect(cancelled.id == created.id, "cancel answered another id")
+            second = raw.cancel(created.id)
+            expect(second.http_response.content == first.http_response.content, "repeat cancel differs")
+            fetched = raw.retrieve(created.id)
+            expect(fetched.http_response.content == first.http_response.content, "retrieve differs from cancel")
+            return f"cancelled with {len(cancelled.output_text)} chars generated; repeat and retrieve identical"
+        finally:
+            try:
+                self.client.responses.cancel(created.id)
+            except openai.APIError:
+                pass
 
     def check_4_stream(self) -> str:
-        stream = self.create(stream=True)
+        deadline = time.monotonic() + self.args.timeout
         sequence: list[int] = []
         names: list[str] = []
-        for event in stream:
-            sequence.append(event.sequence_number)
-            names.append(event.type)
+        with self.create(stream=True) as stream:
+            for event in stream:
+                if not names:
+                    expect(
+                        event.type == "response.created" and event.response.background is True,
+                        "the created event lacks background: true",
+                    )
+                sequence.append(event.sequence_number)
+                names.append(event.type)
+                expect(time.monotonic() < deadline, "the stream ran past the timeout")
         expect(bool(names), "the stream sent no event")
         expect(names[0] == "response.created", f"first event is {names[0]}")
         expect(
@@ -182,20 +195,21 @@ class Checks:
         return f"{len(names)} events, sequence {sequence[0]}..{sequence[-1]}, ends {names[-1]}"
 
     def check_5_resume(self) -> str:
-        stream = self.create(stream=True, input=LONG_PROMPT, max_output_tokens=200)
+        deadline = time.monotonic() + self.args.timeout
         response_id: str | None = None
         cursor = -1
         before: list[str] = []
-        for event in stream:
-            if event.type == "response.created":
-                response_id = event.response.id
-            cursor = event.sequence_number
-            if event.type == "response.output_text.delta":
-                before.append(event.delta)
-                if len(before) >= 5:
-                    break
-            expect(event.type not in TERMINAL_EVENTS, "the job ended before the drop")
-        stream.close()
+        with self.create(stream=True, input=LONG_PROMPT, max_output_tokens=200) as stream:
+            for event in stream:
+                if event.type == "response.created":
+                    response_id = event.response.id
+                cursor = event.sequence_number
+                if event.type == "response.output_text.delta":
+                    before.append(event.delta)
+                    if len(before) >= 5:
+                        break
+                expect(event.type not in TERMINAL_EVENTS, "the job ended before the drop")
+                expect(time.monotonic() < deadline, "the stream ran past the timeout")
         expect(response_id is not None, "no response.created event")
         assert response_id is not None
         resumed = self.client.responses.retrieve(response_id, stream=True, starting_after=cursor)
@@ -203,6 +217,7 @@ class Checks:
         last = cursor
         final = None
         for event in resumed:
+            expect(time.monotonic() < deadline, "the resumed stream ran past the timeout")
             expect(
                 event.sequence_number == last + 1,
                 f"resume gap or duplicate: {last} then {event.sequence_number}",
@@ -258,7 +273,6 @@ class Checks:
 
     def rss_leak_bound(self) -> str:
         jobs = self.args.jobs
-        expect(self.args.pid is not None, "--jobs needs --pid")
         samples: list[int] = []
         for index in range(jobs):
             created = self.create(max_output_tokens=32)
@@ -284,7 +298,10 @@ def rss_kib(pid: int) -> int:
     value = out.stdout.strip()
     if not value:
         raise CheckFailed(f"process {pid} is gone")
-    return int(value)
+    try:
+        return int(value)
+    except ValueError:
+        raise CheckFailed(f"unexpected ps output for pid {pid}: {value!r}") from None
 
 
 def main() -> int:
@@ -302,6 +319,8 @@ def main() -> int:
     )
     parser.add_argument("--timeout", type=float, default=180.0, help="seconds to wait for one job")
     args = parser.parse_args()
+    if args.jobs > 0 and args.pid is None:
+        parser.error("--jobs needs --pid")
 
     checks = Checks(args)
     table: dict[str, tuple[str, Callable[[], str]]] = {
