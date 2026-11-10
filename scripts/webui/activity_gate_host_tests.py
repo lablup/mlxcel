@@ -278,6 +278,8 @@ class ActivityGateHostTests(unittest.TestCase):
         for bad in ("-1", "nan", "inf", "-inf"):
             with redirect_stderr(StringIO()), self.assertRaises(SystemExit, msg=bad):
                 host.parse_args([*base, "--min-free-gb", bad])
+        # The option belongs to precheck only; reap must still parse without it.
+        self.assertEqual(host.parse_args(["reap", "--installed-dir", "/i", "--run-root", "/r", "--pid-file", "/p"]).command, "reap")
 
     def test_precheck_keeps_the_refusal_when_the_host_state_write_fails(self) -> None:
         clock = Clock()

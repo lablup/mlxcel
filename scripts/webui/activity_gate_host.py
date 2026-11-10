@@ -573,7 +573,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.command == "precheck" and (args.quiet_window < 1 or args.quiet_timeout < 0):
         parser.error("--quiet-window must be positive and --quiet-timeout non-negative")
-    if args.command == "precheck" and not math.isfinite(args.min_free_gb) or args.min_free_gb < 0:
+    if args.command == "precheck" and (not math.isfinite(args.min_free_gb) or args.min_free_gb < 0):
         parser.error("--min-free-gb must be a finite non-negative number")
     return args
 
