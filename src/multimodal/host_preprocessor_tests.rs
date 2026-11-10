@@ -24,7 +24,7 @@ use super::{
     HostPreprocessorError, XlaVisionBackend, XlaVisionBackendPolicy,
     ensure_xla_image_context_capacity, export_llava_prefill, export_mlx_tensor,
     export_qwen2_vl_prefill, load_xla_image_preprocessor, validate_processor_shape,
-    xla_image_context_floor,
+    xla_image_context_floor, xla_image_surviving_bucket_warning,
 };
 #[cfg(feature = "xla-iree")]
 use super::{prepare_youtu_vl_prompt, reject_qwen3_standard_prefill};
@@ -565,6 +565,57 @@ fn molmo2_checkpoint_dir() -> tempfile::TempDir {
     )
     .unwrap();
     dir
+}
+
+#[test]
+fn surviving_buckets_without_an_image_shape_warn_about_the_dropped_capacity() {
+    let warning = xla_image_surviving_bucket_warning(&[256], &[256, 2048], Some(1834))
+        .expect("dropping the only image-capable bucket must warn");
+    assert!(warning.contains("refused at admission"), "{warning}");
+    assert!(
+        warning.contains("2048"),
+        "the warning must name the dropped capacity: {warning}"
+    );
+    assert!(
+        warning.contains("1834"),
+        "the warning must name the image floor: {warning}"
+    );
+    assert!(
+        warning.contains("256"),
+        "the warning must name the largest surviving shape: {warning}"
+    );
+}
+
+#[test]
+fn a_surviving_image_bucket_produces_no_warning() {
+    assert_eq!(
+        xla_image_surviving_bucket_warning(&[256, 2048], &[256, 2048], Some(1834)),
+        None,
+        "an image-capable surviving bucket needs no warning"
+    );
+}
+
+#[test]
+fn dropping_a_smaller_bucket_while_an_image_bucket_survives_produces_no_warning() {
+    assert_eq!(
+        xla_image_surviving_bucket_warning(&[2048], &[256, 2048], Some(1834)),
+        None,
+        "text can lose a shape without losing image capability"
+    );
+}
+
+#[test]
+fn no_floor_or_no_image_capable_request_produces_no_warning() {
+    assert_eq!(
+        xla_image_surviving_bucket_warning(&[256], &[256, 2048], None),
+        None,
+        "a checkpoint with no derived floor is never warned about"
+    );
+    assert_eq!(
+        xla_image_surviving_bucket_warning(&[256], &[256], Some(1834)),
+        None,
+        "the pre-load guard owns the case where nothing was requested above the floor"
+    );
 }
 
 #[test]

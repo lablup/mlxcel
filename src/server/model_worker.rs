@@ -1581,6 +1581,18 @@ pub(crate) fn spawn_xla_model_worker(
                         for reason in &dropped {
                             tracing::warn!("{reason}");
                         }
+                        // The pre-load guard above judged the REQUESTED set.
+                        // Re-check the surviving set, because the shape that
+                        // made the guard pass may be the one that was dropped;
+                        // in that case image requests now fail at admission and
+                        // the operator should hear about it at startup.
+                        if let Some(warning) = crate::xla_image_surviving_bucket_warning(
+                            &engine.capacities(),
+                            &capacities,
+                            image_floor,
+                        ) {
+                            tracing::warn!("{warning}");
+                        }
                         tracing::info!(
                             capacities = ?engine.capacities(),
                             "OpenXLA capacity buckets compiled"

@@ -92,6 +92,7 @@ pub use multimodal::host_preprocessor::{
     CONTEXT_CAPACITY_ENV, FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor,
     HostPreprocessorError, LlavaHostPreprocessor, XlaVisionBackend,
     ensure_xla_image_context_capacity, load_xla_image_preprocessor, xla_image_context_floor,
+    xla_image_surviving_bucket_warning,
 };
 #[cfg(feature = "xla-iree")]
 pub use multimodal::host_preprocessor::{LlavaIreeHostPreprocessor, YoutuVlIreeHostPreprocessor};
