@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import signal
@@ -483,7 +484,11 @@ def precheck(args: argparse.Namespace, *, root: Path = PROC, gpu_query: Callable
         if "refused" in state and "quiet" in state and "host did not become quiet" in state["refused"]:
             print(f"host at refusal: {json.dumps(state['at_end'])}", flush=True)
         if args.host_state:
-            write_atomic(args.host_state, json.dumps(state, indent=2, sort_keys=True) + "\n")
+            # Best effort: after a disk refusal this write can fail too, and must not mask the refusal or its exit code.
+            try:
+                write_atomic(args.host_state, json.dumps(state, indent=2, sort_keys=True) + "\n")
+            except OSError as exc:
+                annotate("warning", f"could not write the host state file {args.host_state}: {exc}")
 
 
 def pid_file_targets(path: Path, root: Path = PROC) -> tuple[list[tuple[str, ProcInfo]], list[dict[str, Any]], bool]:
@@ -568,8 +573,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.command == "precheck" and (args.quiet_window < 1 or args.quiet_timeout < 0):
         parser.error("--quiet-window must be positive and --quiet-timeout non-negative")
-    if args.command == "precheck" and args.min_free_gb < 0:
-        parser.error("--min-free-gb must be non-negative")
+    if args.command == "precheck" and not math.isfinite(args.min_free_gb) or args.min_free_gb < 0:
+        parser.error("--min-free-gb must be a finite non-negative number")
     return args
 
 

@@ -9,6 +9,7 @@ there is no synthetic visibility, auto-install, or exit-code-only green path.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -39,6 +40,7 @@ HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 SECRET_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+")
 REQUIRED_MODES = {"one-visible", "two-visible", "hidden"}
 VISIBLE_ONLY_MODES = {"one-visible", "two-visible"}
+
 
 class ActivityInfrastructureError(AssertionError):
     """The activity script died of a host problem (full disk, I/O error), not a performance verdict."""
@@ -88,6 +90,13 @@ class Harness:
 
     def flush(self) -> None:
         self.args.evidence.write_text(json.dumps(redact(self.evidence, self.secrets), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def flush_best_effort(self) -> None:
+        """Flush from a failure or cleanup path: a full disk must not replace the error being reported."""
+        try:
+            self.flush()
+        except OSError as exc:
+            print(f"warning: could not write the evidence file {self.args.evidence}: {exc}", file=sys.stderr)
 
     def record(self, section: str, value: Any) -> None:
         self.evidence.setdefault(section, []).append(redact(value, self.secrets))
@@ -796,7 +805,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     except Exception as exc:
         if h is not None:
             h.evidence.update({"status": "failed", **({"failure_class": "infrastructure"} if isinstance(exc, ActivityInfrastructureError) else {}), "failed_at": now(), "error": str(redact(str(exc), [key]))})
-            h.flush()
+            h.flush_best_effort()
         raise
     finally:
         if server is not None:
@@ -805,18 +814,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         cleanup = terminate_owned(remaining)
         if cleanup and h is not None:
             h.evidence.setdefault("cleanup", []).append(cleanup)
-            h.flush()
+            h.flush_best_effort()
         key_file.unlink(missing_ok=True)
+
+
+def is_environment_error(exc: BaseException | None) -> bool:
+    """True when the exception or anything in its cause/context chain is a disk-level OSError."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ActivityInfrastructureError):
+            return True
+        if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT, errno.EIO):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
         run(args)
-    except ActivityInfrastructureError as exc:
-        print(f"activity gate infrastructure failure: {redact(str(exc), [])}", file=sys.stderr)
-        return 1
     except Exception as exc:
+        if is_environment_error(exc):
+            print(f"activity gate infrastructure failure: {redact(str(exc), [])}", file=sys.stderr)
+            return 1
         print(f"activity performance verification failed: {redact(str(exc), [])}", file=sys.stderr)
         return 1
     print(f"validated Activity native-hidden performance evidence: {args.evidence}")

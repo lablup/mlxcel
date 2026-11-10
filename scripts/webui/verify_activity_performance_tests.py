@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import errno
 import json
 import os
 import stat
@@ -458,6 +459,7 @@ class ActivityPerformanceHelperTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "sample counts"):
                 verify.validate_activity_output(path, "visible-only-headed")
 
+
 class ActivityEnvironmentFailureTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -519,6 +521,39 @@ class ActivityEnvironmentFailureTests(unittest.TestCase):
                 self.assertIn(label, err.getvalue())
                 if label.startswith("activity gate"):
                     self.assertNotIn("verification failed", err.getvalue())
+
+    def test_main_labels_an_enospc_oserror_in_the_chain_and_still_returns_one(self) -> None:
+        direct = OSError(errno.ENOSPC, "No space left on device")
+        try:
+            try:
+                raise OSError(errno.EIO, "input/output error")
+            except OSError as inner:
+                raise RuntimeError("could not write evidence") from inner
+        except RuntimeError as caught:
+            chained = caught
+        with mock.patch.object(verify, "parse_args", return_value=Namespace(evidence=self.root / "e.json")):
+            for error in (direct, chained):
+                with mock.patch.object(verify, "run", side_effect=error), redirect_stderr(StringIO()) as err:
+                    self.assertEqual(verify.main(["unused"]), 1)
+                self.assertIn("activity gate infrastructure failure", err.getvalue())
+            with mock.patch.object(verify, "run", side_effect=OSError(errno.EACCES, "denied")), redirect_stderr(StringIO()) as err:
+                self.assertEqual(verify.main(["unused"]), 1)
+            self.assertIn("activity performance verification failed", err.getvalue())
+
+    def test_failure_handler_keeps_the_original_error_when_the_evidence_flush_hits_enospc(self) -> None:
+        evidence = self.root / "evidence.json"
+        args = Namespace(evidence=evidence, work_dir=self.root, pid_file=None, virtual_display=False, port=1, source_sha="x", server_bin=Path("/nonexistent"), features="", model=self.root, checkpoint_revision="r", model_id=None, host_state=None)
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with mock.patch.object(verify, "check_require_models"), \
+                mock.patch.object(verify, "start_virtual_display"), \
+                mock.patch.object(verify, "summarize_checkpoint", side_effect=verify.ActivityInfrastructureError("ENOSPC (no space left on device); log=/l")), \
+                mock.patch.object(verify, "sha256", return_value="0"), \
+                mock.patch.dict(os.environ, {"DISPLAY": ":0"}), \
+                mock.patch.object(verify.Harness, "flush", side_effect=[None, full, full]), \
+                redirect_stderr(StringIO()) as err:
+            with self.assertRaises(verify.ActivityInfrastructureError):
+                verify.run(args)
+        self.assertIn("could not write the evidence file", err.getvalue())
 
 
 if __name__ == "__main__":

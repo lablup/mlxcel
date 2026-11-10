@@ -275,8 +275,19 @@ class ActivityGateHostTests(unittest.TestCase):
         base = ["precheck", "--installed-dir", "/i", "--run-root", "/r"]
         self.assertEqual(host.parse_args(base).min_free_gb, 5.0)
         self.assertEqual(host.parse_args([*base, "--min-free-gb", "0"]).min_free_gb, 0.0)
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
-            host.parse_args([*base, "--min-free-gb", "-1"])
+        for bad in ("-1", "nan", "inf", "-inf"):
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit, msg=bad):
+                host.parse_args([*base, "--min-free-gb", bad])
+
+    def test_precheck_keeps_the_refusal_when_the_host_state_write_fails(self) -> None:
+        clock = Clock()
+        low = mock.Mock(return_value=shutil._ntuple_diskusage(100 * 10**9, 99 * 10**9 + 600 * 10**6, 400 * 10**6))
+        full = OSError(28, "No space left on device")
+        with mock.patch.object(host, "write_atomic", side_effect=full), redirect_stdout(StringIO()) as out:
+            rc = host.precheck(self.args(min_free_gb=5.0), gpu_query=lambda: [], read_runnable=lambda: 0, sleep=clock.sleep, clock=clock, disk_usage=low)
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::infrastructure: only 0.4 GB free", out.getvalue())
+        self.assertIn("::warning::could not write the host state file", out.getvalue())
 
     def test_reap_without_a_pid_file_or_survivors_is_a_clean_no_op(self) -> None:
         with redirect_stdout(StringIO()) as out:
