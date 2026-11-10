@@ -17,11 +17,13 @@
 //!
 //! ## Scope today
 //!
-//! Captures **no-drafter baseline** throughput numbers for the two reachable
-//! target models (`models/qwen3.5-4b-4bit`, `models/gemma-4-31b-it-4bit`).
-//! These numbers are the denominator of every "speedup vs no-drafter" cell
-//! in `docs/benchmark_results/model_tests.md::Speculative drafters` and can
-//! be captured today against real on-disk checkpoints.
+//! Captures **no-drafter baseline** throughput numbers for the four reachable
+//! target models in `REACHABLE_PAIRINGS` (`models/qwen3.5-4b-4bit`,
+//! `models/gemma-4-31b-it-4bit`, `models/gemma-4-12b-it-4bit`,
+//! `models/qwen3.8-27b-4bit`). These numbers are the denominator of every
+//! "speedup vs no-drafter" cell in
+//! `docs/benchmark_results/model_tests.md::Speculative drafters` and can be
+//! captured today against real on-disk checkpoints.
 //!
 //! ## MTP speculative path (Gemma 4 and Qwen 3.5 families)
 //!
@@ -58,7 +60,8 @@
 //!     --max-tokens 96 \
 //!     --prompt "Explain Apple Silicon's unified memory in one short paragraph."
 //!
-//! # Full sweep across pairings (B = 1, 2, 4):
+//! # Full sweep across every pairing in `REACHABLE_PAIRINGS`. Every row runs
+//! # at B=1 today; `--batch` is only recorded into the table:
 //! ./target/release/speculative_bench --sweep
 //! ```
 //!
@@ -120,8 +123,10 @@ impl std::fmt::Display for BenchKind {
     name = "speculative_bench",
     about = "Speculative drafter perf benchmark.",
     long_about = "Captures no-drafter baseline tok/s for the speculative \
-                  target models. Speculative paths are scaffolded but \
-                  deferred to follow-up — see the module docs."
+                  target models and, with `--kind mtp`, the real MTP \
+                  decode tok/s and speedup vs that baseline. Only the \
+                  DFlash path (`--kind dflash`) is deferred to \
+                  follow-up — see the module docs."
 )]
 struct Args {
     /// Path to the target model directory.
@@ -247,7 +252,9 @@ struct Pairing {
 }
 
 const REACHABLE_PAIRINGS: &[Pairing] = &[
-    // Qwen 3.5 4B family — baseline + DFlash drafter.
+    // Qwen 3.5 4B family — baseline + DFlash drafter. The DFlash row is
+    // reported as DEFERRED today (see `BenchKind::Dflash`); only the baseline
+    // row records a number.
     Pairing {
         name: "Qwen 3.5 4B (no drafter)",
         target_subdir: "qwen3.5-4b-4bit",
