@@ -2133,6 +2133,30 @@ pub(crate) struct ServeArgs {
     )]
     responses_store_ttl_secs: u64,
 
+    /// Maximum number of concurrently active `background: true` Responses
+    /// API jobs. Each active job holds one generation thread. `0` disables
+    /// background mode. Also reads `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS`.
+    #[arg(
+        long = "responses-background-max-jobs",
+        env = "MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+        value_name = "N"
+    )]
+    responses_background_max_jobs: usize,
+
+    /// Seconds a finished `background: true` response created with
+    /// `store: false` stays readable by polling. It is never readable through
+    /// `previous_response_id`. Must be at least 1. Also reads
+    /// `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS`.
+    #[arg(
+        long = "responses-background-ephemeral-ttl-secs",
+        env = "MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "SECS"
+    )]
+    responses_background_ephemeral_ttl_secs: u64,
+
     /// Maximum number of conversation transcripts persisted
     /// for the OpenAI Responses API `conversation` field. `0` disables
     /// the conversation store; requests referencing `conversation` are

@@ -1076,6 +1076,30 @@ struct ServerArgs {
     )]
     responses_store_ttl_secs: u64,
 
+    /// Maximum number of concurrently active `background: true` Responses
+    /// API jobs. Each active job holds one generation thread. `0` disables
+    /// background mode. Also reads `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS`.
+    #[arg(
+        long = "responses-background-max-jobs",
+        env = "MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+        value_name = "N"
+    )]
+    responses_background_max_jobs: usize,
+
+    /// Seconds a finished `background: true` response created with
+    /// `store: false` stays readable by polling. It is never readable through
+    /// `previous_response_id`. Must be at least 1. Also reads
+    /// `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS`.
+    #[arg(
+        long = "responses-background-ephemeral-ttl-secs",
+        env = "MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "SECS"
+    )]
+    responses_background_ephemeral_ttl_secs: u64,
+
     /// Maximum number of conversation transcripts persisted
     /// for the OpenAI Responses API `conversation` field. `0` disables.
     /// Also reads `LLAMA_ARG_CONVERSATION_STORE_MAX_ENTRIES`.
@@ -3037,6 +3061,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         responses_store_max_entries: args.responses_store_max_entries,
         responses_store_max_bytes: args.responses_store_max_bytes,
         responses_store_ttl_secs: args.responses_store_ttl_secs,
+        responses_background_max_jobs: args.responses_background_max_jobs,
+        responses_background_ephemeral_ttl_secs: args.responses_background_ephemeral_ttl_secs,
         conversation_store_max_entries: args.conversation_store_max_entries,
         conversation_store_max_bytes: args.conversation_store_max_bytes,
         conversation_store_ttl_secs: args.conversation_store_ttl_secs,
@@ -3595,6 +3621,76 @@ mod tests {
 
         assert_eq!(args.responses_store_max_bytes, 11_111);
         assert_eq!(args.conversation_store_max_bytes, 22_222);
+    }
+
+    #[test]
+    fn responses_background_flags_parse_with_defaults() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let defaults = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
+        assert_eq!(
+            defaults.responses_background_max_jobs,
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS
+        );
+        assert_eq!(
+            defaults.responses_background_ephemeral_ttl_secs,
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS
+        );
+
+        let args = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--responses-background-max-jobs",
+            "7",
+            "--responses-background-ephemeral-ttl-secs",
+            "30",
+        ]);
+        assert_eq!(args.responses_background_max_jobs, 7);
+        assert_eq!(args.responses_background_ephemeral_ttl_secs, 30);
+    }
+
+    #[test]
+    fn responses_background_envs_parse_when_flags_are_absent() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = ScopedEnv::set(&[
+            ("MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS", "3"),
+            ("MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS", "45"),
+        ]);
+
+        let args = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
+
+        assert_eq!(args.responses_background_max_jobs, 3);
+        assert_eq!(args.responses_background_ephemeral_ttl_secs, 45);
+    }
+
+    #[test]
+    fn responses_background_ephemeral_ttl_zero_is_refused() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let err = Cli::try_parse_from([
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--responses-background-ephemeral-ttl-secs",
+            "0",
+        ])
+        .expect_err("an ephemeral TTL of 0 must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+
+        let _env = ScopedEnv::set(&[("MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS", "0")]);
+        let err = Cli::try_parse_from(["mlxcel-server", "-m", "models/foo"])
+            .expect_err("an ephemeral TTL of 0 from the env must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

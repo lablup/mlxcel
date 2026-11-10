@@ -608,6 +608,16 @@ pub struct ServerStartupConfig {
     /// `0` disables TTL (entries are evicted only by capacity pressure).
     /// Resolved from `--responses-store-ttl-secs` / `LLAMA_ARG_RESPONSES_STORE_TTL_SECS`.
     pub responses_store_ttl_secs: u64,
+    /// Cap on concurrently active `background: true` responses. `0`
+    /// disables background mode. Resolved from
+    /// `--responses-background-max-jobs` / `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS`.
+    pub responses_background_max_jobs: usize,
+    /// Retention (seconds) of the terminal object of a `store: false`
+    /// background response. Resolved from
+    /// `--responses-background-ephemeral-ttl-secs` /
+    /// `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS`; the CLI rejects `0`
+    /// and the store build clamps a programmatic `0` to 1.
+    pub responses_background_ephemeral_ttl_secs: u64,
     /// capacity cap for the conversation transcript store.
     /// `0` disables the store; requests referencing `conversation` still
     /// succeed but operate as if the transcript is empty.
@@ -853,6 +863,10 @@ impl Default for ServerStartupConfig {
             responses_store_max_entries: 1024,
             responses_store_max_bytes: super::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
             responses_store_ttl_secs: 3600,
+            responses_background_max_jobs:
+                super::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+            responses_background_ephemeral_ttl_secs:
+                super::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
             conversation_store_max_entries: 256,
             conversation_store_max_bytes:
                 super::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
@@ -4250,6 +4264,10 @@ async fn serve_with_side_model_workers(
                 max_entries: startup.responses_store_max_entries,
                 max_bytes: startup.responses_store_max_bytes,
                 ttl,
+                background_max_jobs: startup.responses_background_max_jobs,
+                background_ephemeral_ttl: std::time::Duration::from_secs(
+                    startup.responses_background_ephemeral_ttl_secs.max(1),
+                ),
             },
         )))
     };

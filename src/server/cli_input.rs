@@ -589,6 +589,12 @@ pub struct ServerStartupInput {
     pub responses_store_max_bytes: usize,
     /// `--responses-store-ttl-secs` value (`0` disables TTL).
     pub responses_store_ttl_secs: u64,
+    /// `--responses-background-max-jobs` value (`0` disables background
+    /// mode).
+    pub responses_background_max_jobs: usize,
+    /// `--responses-background-ephemeral-ttl-secs` value (at least 1; clap
+    /// rejects `0`).
+    pub responses_background_ephemeral_ttl_secs: u64,
     /// `--conversation-store-max-entries` value (`0` disables
     /// the OpenAI Responses API conversation transcript store entirely).
     pub conversation_store_max_entries: usize,
@@ -1266,6 +1272,8 @@ impl ServerStartupInput {
             responses_store_max_entries: self.responses_store_max_entries,
             responses_store_max_bytes: self.responses_store_max_bytes,
             responses_store_ttl_secs: self.responses_store_ttl_secs,
+            responses_background_max_jobs: self.responses_background_max_jobs,
+            responses_background_ephemeral_ttl_secs: self.responses_background_ephemeral_ttl_secs,
             conversation_store_max_entries: self.conversation_store_max_entries,
             conversation_store_max_bytes: self.conversation_store_max_bytes,
             conversation_store_ttl_secs: self.conversation_store_ttl_secs,
