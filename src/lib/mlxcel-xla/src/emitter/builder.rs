@@ -413,8 +413,9 @@ impl Builder {
     }
 
     /// Run projections from packed 4-bit weights through the native GEMV
-    /// dispatch instead of dequantizing them in the graph (issue #2889).
-    /// Only the single-sequence decode graph sets this.
+    /// dispatch instead of dequantizing them in the graph (issues #2889, #2922).
+    /// The single-sequence and ragged decode graphs set this; the prefill graphs
+    /// leave it off, so their packed operands dequantize in the graph.
     #[must_use]
     pub fn with_native_proj(mut self, native: bool) -> Self {
         self.native_proj = native;
