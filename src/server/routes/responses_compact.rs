@@ -333,7 +333,7 @@ async fn generate_summary(
         &chat,
         &prepared.image_data,
         &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
+        prepared.boundary_renders(),
     );
     let slot = state.slots.begin(
         &prepared.prompt,

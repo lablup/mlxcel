@@ -2785,6 +2785,21 @@ impl ModelProvider {
                 }
             }
         }
+        // The system-prompt root render (#2885 Part B) takes the same path.
+        if let Some(tok) = self.prompt_tokenizer.as_ref()
+            && let Some(ctx) = options.prompt_cache_ctx.as_mut()
+            && let Some(root_prompt) = ctx.root_prompt.take()
+        {
+            match tokenize_prompt_for_generation(tok, &root_prompt) {
+                Ok(ids) => ctx.root_prefix_tokens = Some(ids),
+                Err(err) => {
+                    tracing::debug!(
+                        "HTTP-side system-root tokenization failed ({err}); deferring to the scheduler"
+                    );
+                    ctx.root_prompt = Some(root_prompt);
+                }
+            }
+        }
 
         let queue_reservation = match queue_reservation_mode {
             QueueReservationMode::Auto => self.reserve_single_stream_queue_slot()?,

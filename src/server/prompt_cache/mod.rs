@@ -76,8 +76,8 @@ pub use metrics::{
     PromptCacheRejectCounters, PromptCacheRejectReason,
 };
 pub use policy::{
-    ApcConfig, PromptCacheConfig, PromptCacheStats, boundary_snapshot_disabled,
-    cache_warmup_disabled,
+    ApcConfig, PromptCacheConfig, PromptCacheStats, SYSTEM_ROOT_DEFAULT_MIN_PROMPT_TOKENS,
+    boundary_snapshot_disabled, cache_warmup_disabled, system_root_min_prompt_tokens,
 };
 pub use snapshot_sizing::{
     MODEL_AWARE_SNAPSHOT_CONTEXT_TOKENS, MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES,

@@ -187,7 +187,7 @@ fn gemma31b_batched_mtp_declines_before_drafter_io_and_preserves_requests() {
         dispatch: &dispatch,
         profile_probe_rounds: 0,
         prefill_chunk_size: 512,
-        prefill_boundary: None,
+        prefill_boundary: mlxcel_core::prefill_plan::PrefillSplits::NONE,
         context_bound: Default::default(),
         prefill_boundaries: Vec::new(),
     };
@@ -266,7 +266,7 @@ fn qwen35_batched_dflash_declines_a_failing_exactness_verdict_before_drafter_io(
         dispatch: &dispatch,
         profile_probe_rounds: 0,
         prefill_chunk_size: 512,
-        prefill_boundary: None,
+        prefill_boundary: mlxcel_core::prefill_plan::PrefillSplits::NONE,
         context_bound: Default::default(),
         prefill_boundaries: Vec::new(),
     };

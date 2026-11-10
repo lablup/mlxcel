@@ -402,6 +402,11 @@ pub enum SnapshotOrigin {
     /// Captured mid-prefill at the history boundary: the tokenization of the
     /// conversation re-rendered with `add_generation_prompt = false`.
     Boundary,
+    /// Captured mid-prefill at the end of the system prompt and tool list
+    /// (#2885 Part B, `MLXCEL_PROMPT_CACHE_SYSTEM_ROOT`). Shared by every chat
+    /// that opens with the same system block, so LRU eviction passes over it
+    /// while roots hold at most half of the snapshot budget.
+    SystemRoot,
 }
 
 /// A single exact-prefix recurrent/model-owned state snapshot.

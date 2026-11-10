@@ -232,7 +232,7 @@ pub(crate) async fn prepare_response_run(
         &translated.chat_request,
         &prepared.image_data,
         &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
+        prepared.boundary_renders(),
     );
 
     let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {

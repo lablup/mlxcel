@@ -102,18 +102,19 @@ fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
 /// the pre-#124 path. Callers must therefore build the context **after**
 /// preparing the request so the resolved bytes are available.
 ///
-/// `history_prompt` is the request re-rendered with `add_generation_prompt =
-/// false` (see [`crate::server::chat_request::PreparedChatRequest::history_prompt`]).
-/// It travels with the context so the scheduler can capture a history-boundary
-/// snapshot during prefill for snapshot-only families (issue #1143). Pass
-/// `None` to opt this request out.
+/// `renders` carries the request re-rendered with `add_generation_prompt =
+/// false` (see [`crate::server::chat_request::PreparedChatRequest::history_prompt`])
+/// and, when enabled, its system-prompt root render (#2885 Part B). They travel
+/// with the context so the scheduler can capture boundary snapshots during
+/// prefill for snapshot-only families (issue #1143). Pass
+/// `BoundaryRenders::default()` to opt this request out.
 pub(crate) fn build_prompt_cache_request_context(
     state: &AppState,
     live: &LiveSettings,
     request: &ChatCompletionRequest,
     image_data: &[Vec<u8>],
     audio_data: &[Vec<u8>],
-    history_prompt: Option<&str>,
+    renders: crate::server::chat_request::BoundaryRenders<'_>,
 ) -> Option<PromptCacheRequestContext> {
     state.prompt_cache.as_ref()?;
     // b10621 `cache_prompt: false` opts this one request out. Returning `None`
@@ -147,8 +148,10 @@ pub(crate) fn build_prompt_cache_request_context(
         template_sig: template_signature,
         session_key,
         mm_digest,
-        history_prompt: history_prompt.map(str::to_string),
+        history_prompt: renders.history.map(str::to_string),
         history_prefix_tokens: None,
+        root_prompt: renders.root.map(str::to_string),
+        root_prefix_tokens: None,
     })
 }
 
@@ -228,6 +231,8 @@ pub(crate) fn build_raw_prompt_cache_context(
         mm_digest: MultimodalDigest::empty(),
         history_prompt: None,
         history_prefix_tokens: None,
+        root_prompt: None,
+        root_prefix_tokens: None,
     })
 }
 
@@ -930,6 +935,8 @@ pub(crate) fn submit_next_turn_warmup(
     // identity from here on.
     warm_ctx.history_prompt = None;
     warm_ctx.history_prefix_tokens = None;
+    warm_ctx.root_prompt = None;
+    warm_ctx.root_prefix_tokens = None;
     state
         .model_provider
         .submit_prompt_cache_warmup(tokens, warm_ctx);
@@ -1148,7 +1155,7 @@ pub(crate) async fn stream_asr_completion(
         &request,
         &prepared.image_data,
         &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
+        prepared.boundary_renders(),
     );
     let primed_open_thinking =
         is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);

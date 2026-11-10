@@ -375,9 +375,28 @@ impl Inner {
         // in `HashMap` order, which `RandomState` randomizes per instance,
         // and without this tie-break component two entries sharing
         // `last_used` would resolve to whichever one hash order placed first.
+        //
+        // System-prompt roots (#2885 Part B) are passed over while they hold
+        // at most half of the snapshot budget and anything else is left to
+        // evict: a root is shared by every chat that opens with that system
+        // block, so it is worth more than any one conversation's entry. Past
+        // half the budget they compete under plain LRU, which bounds how much
+        // of the store a churn of distinct system prompts can pin.
+        let root_bytes: usize = self
+            .snapshots
+            .values()
+            .filter(|slot| slot.entry.origin == SnapshotOrigin::SystemRoot)
+            .map(|slot| slot.entry.size_bytes)
+            .sum();
+        let protect_roots = root_bytes.saturating_mul(2) <= self.config.snapshot_capacity_bytes
+            && self
+                .snapshots
+                .values()
+                .any(|slot| slot.entry.origin != SnapshotOrigin::SystemRoot);
         let oldest = self
             .snapshots
             .iter()
+            .filter(|(_, slot)| !protect_roots || slot.entry.origin != SnapshotOrigin::SystemRoot)
             .min_by_key(|(digest, slot)| (slot.entry.last_used(), *digest.as_bytes()))
             .map(|(d, _)| *d);
         match oldest {
