@@ -39,7 +39,7 @@ gfx1151에서 decode는 분명하게 개선되지 않았습니다. Llama 3.1 8B�
 | `tests/cpu_device_custom_kernel_gates.rs` | 두 predicate 모두 CPU device에서 거절해야 함 |
 | Bridge와 FFI 문서 | `mlx_cxx_bridge.h`, `lib.rs`에 device 조건과 ROCm port 설명 |
 | Build | `mlxcel-core/build.rs`가 두 header를 추적 |
-| 문서와 데이터 | 신규 `docs/benchmark_results/rocm-fused-norm-rope-gfx1151-2026-10-05.md`, benchmark CSV 네 개, `benchmarks/logit_traces/rocm_gfx1151_3f0e51af/` 아래 trace TSV 12개와 metadata, `environment-variables.md`, `installation.md`, README, 정확성 문서 갱신 |
+| 문서와 데이터 | 신규 `docs/benchmark_results/versions/v0.8.0.md#rocm-fused-norm-rope-gfx1151-2026-10-05`, benchmark CSV 네 개, `benchmarks/logit_traces/rocm_gfx1151_3f0e51af/` 아래 trace TSV 12개와 metadata, `environment-variables.md`, `installation.md`, README, 정확성 문서 갱신 |
 
 Branch에는 commit 여섯 개와 origin/main merge 하나가 있습니다. Port (`ef3831d9`), bit 단위 일치 수정 (`8ebf809f`), 0 부호 수정 (`3f0e51af`), 결과 문서 (`756d03d8`), review 수정 (`bea7d1ab`), merge (`9e6f095d`), 빈 입력 거부 (`c6592780`)입니다. origin/main 대비 diff는 38개 파일, 4748줄 추가와 99줄 삭제이며, 추가분 대부분은 trace TSV입니다. `src/**/*.cpp`의 `.rocm = nullptr` 줄은 두 개 줄어 origin/main `33c45053`의 7개에서 head의 5개가 됩니다 (branch의 원래 base 기준으로는 10개에서 8개).
 

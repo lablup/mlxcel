@@ -53,7 +53,7 @@ For the 8B, an f16 checkpoint, most of the excess (15.85 GB over the weights) is
 
 ### 2.4 No existing knob fixed it
 
-Every knob named in the issue was measured before the change (one run each, full table in `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`). `MLXCEL_CACHE_LIMIT=1GB`, `MLXCEL_MEMORY_LIMIT`, `MLX_ROCM_NO_ASYNC_POOL`, both managed-fallback switches, `MLX_ROCM_FINEGRAINED=0`, `MLX_GRAPH_NODEFER=1`, `MLX_MAX_OPS_PER_BUFFER=50` and `MLXCEL_CACHE_CLEAR_INTERVAL=0` (8B only) all left the peaks at 20.60 GB and 23.56 GB. Only `MLX_ROCM_QMM_DEQUANT_GEMM=0` moved the 8B, at the cost above, and `MLX_ROCM_USE_ASYNC_POOL=1` crashed both models. The periodic cache clear cannot matter in this run: its cadence is 256 tokens and the run decodes 128.
+Every knob named in the issue was measured before the change (one run each, full table in `docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30`). `MLXCEL_CACHE_LIMIT=1GB`, `MLXCEL_MEMORY_LIMIT`, `MLX_ROCM_NO_ASYNC_POOL`, both managed-fallback switches, `MLX_ROCM_FINEGRAINED=0`, `MLX_GRAPH_NODEFER=1`, `MLX_MAX_OPS_PER_BUFFER=50` and `MLXCEL_CACHE_CLEAR_INTERVAL=0` (8B only) all left the peaks at 20.60 GB and 23.56 GB. Only `MLX_ROCM_QMM_DEQUANT_GEMM=0` moved the 8B, at the cost above, and `MLX_ROCM_USE_ASYNC_POOL=1` crashed both models. The periodic cache clear cannot matter in this run: its cadence is 256 tokens and the run decodes 128.
 
 ## 3. Dead Features Found
 
@@ -79,7 +79,7 @@ Files by area:
 - Overlay: `mlx/backend/rocm/device.cpp` and `device.h` (budget parsing, `commit_and_throttle`, `throttle_inflight`, `release_inflight`), `eval.cpp` (per-primitive byte count, finalize), `allocator.cpp` and `allocator.h` (`thread_allocated_bytes()`, miss-path trim), `LOCAL_FIXES.md` item 28.
 - mlxcel: `src/execution/runtime.rs` (`DEFAULT_CACHE_LIMIT_BYTES`, pure `cache_limit_bytes`), `src/execution/runtime_tests.rs`, `src/lib/mlxcel-core/src/memory.rs` (cache-limit test), `tests/rocm_inflight_bound.rs`.
 - Measurement: `src/bin/bench_decode.rs` (phase counters, applied cache limit), `scripts/bench_decode.sh` (`BENCH_RAW_DIR` keeps runner logs).
-- Docs: `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md` with raw rows under `data/rocm-memory-gfx1151-2026-09-30/`, `docs/installation.md` (new "Memory footprint" subsection), `docs/environment-variables.md`.
+- Docs: `docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30` with raw rows under `data/rocm-memory-gfx1151-2026-09-30/`, `docs/installation.md` (new "Memory footprint" subsection), `docs/environment-variables.md`.
 
 ## 5. The Fix
 

@@ -14,7 +14,7 @@
 | `src/lib/mlxcel-core/src/engine/direct.rs` | `open_sequence`가 `engine.open` 성공 후, 모델이 배칭을 지원하지 않으면 `apply_pool_kv_cache_mode` 전에 `self.model().make_caches()`를 호출; doc comment에 해당 계열과 따르는 스케줄러 규칙을 명시 |
 | `src/lib/mlxcel-core/src/engine/mod.rs` | 새 테스트 모듈 등록 |
 | `src/lib/mlxcel-core/src/engine/shared_cache_tests.rs` (신규) | `make_caches`만 초기화하는 `Cell`에 오프셋을 둔 stub 모델로 테스트 2개 |
-| `docs/benchmark_results/exaone4-engine-decode-gb10-2026-10-22.md` (신규) | 측정 기록: 메커니즘, 절편/기울기 fit, null arm을 포함한 교차 측정, 대조군 |
+| `docs/benchmark_results/versions/v0.8.0.md#exaone4-engine-decode-gb10-2026-10-22` (신규) | 측정 기록: 메커니즘, 절편/기울기 fit, null arm을 포함한 교차 측정, 대조군 |
 
 대상 계열은 배칭을 지원하지 않고 캐시 한 벌을 `RefCell`에 보관하는 ExaOne 4, GPT-OSS, Ministral 3, Step 3.5, Mellum, Laguna다. 서버 경로는 바뀌지 않았다.
 

@@ -1567,7 +1567,7 @@ impl GenerationStats {
 /// modules, the graphs and the kernels all land. A large `build` points at
 /// host-side op-recording overhead; a large `eval` points at the device, the
 /// PCIe link, or the CUDA graph machinery, and separating those two is what
-/// `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md` needed.
+/// `docs/benchmark_results/versions/v0.7.0.md#volta-ttft-fixed-cost-2026-09-01` needed.
 ///
 /// `setup_ns` sits *outside* the reported prefill time, because the generator
 /// resets its caches before the prefill clock starts. Every other field sits

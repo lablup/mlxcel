@@ -264,7 +264,7 @@ pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
 /// than the checkpoint's own declared block size. Issue #1165 measured the
 /// published checkpoint's configured block size (3) faster than the flat
 /// constant (4): 16.48 against 13.81 tok/s, 0.591 against 0.465 acceptance
-/// (`docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`).
+/// (`docs/benchmark_results/versions/v0.5.2.md#qwen38-mtp-m1ultra-2026-08-16`).
 pub fn resolve_draft_block_size_detailed(
     override_value: Option<u32>,
     kind: DrafterKind,

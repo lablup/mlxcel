@@ -56,7 +56,7 @@
 //! so its source is materialized here and the repack runs at the first token,
 //! where MLX frees each source as its repacked result is produced. The peak
 //! therefore stays near one copy of the weights; the measurements are in
-//! `docs/benchmark_results/weight-materialization-gb10-2026-10-20.md`.
+//! `docs/benchmark_results/versions/v0.8.0.md#weight-materialization-gb10-2026-10-20`.
 //!
 //! `MLXCEL_WEIGHT_MATERIALIZATION=lazy` restores the previous behaviour.
 

@@ -46,7 +46,7 @@ ROCm `quantize` produces the same E8M0 scales as the CPU but rounds ties differe
 - **`examples/logit_trace.rs`** (+10): calls `mlxcel::initialize_runtime_checked()` so `MLXCEL_DEVICE` is honoured, warns on an invalid override, and writes a `# device` header line into every trace.
 - **`src/models/fp8_block.rs`** (doc only): explains why requantization stays on the default device, with the measurements.
 - **`src/lib/mlxcel-core/src/hardware.rs`** (doc only): the `quant_mode_support` evidence list cites the mxfp8 tests and the checkpoint run. The table already had ROCm mxfp8 as `Native`; nothing in it changes.
-- **`docs/benchmark_results/rocm-fp8-block-gfx1151-2026-09-30.md`** (new) and **`benchmarks/logit_traces/fp8_block_gfx1151/`** (new): the write-up, eight trace files, `METADATA.txt`, `RUNS.txt` and `SHA256SUMS`.
+- **`docs/benchmark_results/versions/v0.8.0.md#rocm-fp8-block-gfx1151-2026-09-30`** (new) and **`benchmarks/logit_traces/fp8_block_gfx1151/`** (new): the write-up, eight trace files, `METADATA.txt`, `RUNS.txt` and `SHA256SUMS`.
 - **`docs/installation.md`**: the ROCm status table adds FP8 block checkpoints to the mxfp8 row and a new row for the CPU device on a ROCm build ("runs, but slowly"). **`rocm-correctness-gfx1151-2026-09-12.md`**: its stale mxfp8 gap line points to the new run.
 
 Commits: `a9a05ac5` adds the tests, the SDPA guard and the `logit_trace` fix; `35375780` adds the benchmark results and traces; `c26086b2` makes the sorted shared-activation case actually reach the stride-0 schedule and widens the f32 bound for TF32; `9d1f570e` shrinks the CPU arm from 38 s to 2.5 s and adds SAFETY comments.

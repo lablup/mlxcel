@@ -53,7 +53,7 @@
 //! (`--decided 2.0`), and every disagreement sat at a reference top-two gap
 //! of 0.375 or less. Quantizing on the CPU stream instead would stretch the
 //! 0.8B checkpoint's load from under a second to about four minutes. The
-//! measurement is in `docs/benchmark_results/rocm-fp8-block-gfx1151-2026-09-30.md`.
+//! measurement is in `docs/benchmark_results/versions/v0.8.0.md#rocm-fp8-block-gfx1151-2026-09-30`.
 //!
 //! Compressed-tensors `float-quantized` FP8 checkpoints (llm-compressor's
 //! `FP8-dynamic` releases) are a second, disjoint layout: E4M3 bytes in

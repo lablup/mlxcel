@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Capture a Metal GPU trace of one warm MoE decode token, for the fused
 # decode-MoE kernel work (#268). See
-# docs/benchmark_results/fused-moe-decode-kernel-design.md.
+# docs/benchmark_results/versions/v0.3.0.md#fused-moe-decode-kernel-design.
 #
 # Two modes:
 #   gputrace  (default) the bench's measured pass after a warmup, captured

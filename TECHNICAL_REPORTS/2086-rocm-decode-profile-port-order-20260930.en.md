@@ -10,7 +10,7 @@
 
 ## Executive Summary
 
-Issue #2061 (part of #1814, epic #1801) asked for the measurement that #1814 left as a hypothesis: where ROCm decode time goes per kernel, and in which order the five port issues split from #1814 should land. The PR adds a profiling harness, runs it on four checkpoints on a Radeon 8060S (gfx1151), publishes the result as `docs/benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md` with its raw data under `benchmarks/rocm_profiles/gfx1151_929c80ab/`, and settles a second open question from the same session: MLX's ROCm `gather_mm` works, so its numeric tests now run on ROCm.
+Issue #2061 (part of #1814, epic #1801) asked for the measurement that #1814 left as a hypothesis: where ROCm decode time goes per kernel, and in which order the five port issues split from #1814 should land. The PR adds a profiling harness, runs it on four checkpoints on a Radeon 8060S (gfx1151), publishes the result as `docs/benchmark_results/versions/v0.8.0.md#rocm-decode-profile-gfx1151-2026-09-30` with its raw data under `benchmarks/rocm_profiles/gfx1151_929c80ab/`, and settles a second open question from the same session: MLX's ROCm `gather_mm` works, so its numeric tests now run on ROCm.
 
 The measured order is **#2067 > #2065 > #2064 > #2068 > #2063** (#1814 items 7, 5, 4, 8, 3). #1814's hypothesis, based on call frequency, put item 3 (fused add-RMSNorm and RoPE-append, which run per layer per token on every model) first and item 7 (SSM update, one model family) near the end. The profile reverses those two: #2067 reaches 29.8% of granite-4.0-h-tiny and 20.0% of Nemotron-3-Nano decode GPU time and more than half of their dispatches, while #2063 reaches 0% on every model because both of its fusions ship disabled on every backend.
 

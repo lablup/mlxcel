@@ -77,10 +77,10 @@ Verified and found accurate: the `MLXCEL_QMV_WIDE` documentation row against the
 | `scripts/bench_qmv_wide_pin.sh` | New. ABBA boot driver for both arms. `sweep` alternates pinned-wide and pinned-narrow boots without a drafter; `mixed` alternates gate recipes and greps each boot's exactness-gate line so arm identity is evidenced. |
 | `scripts/bench_qmv_pin_mixed.py` | New. Mixed-workload client. Classic decode rates are the reported quantity, and a window is invalid unless the MTP stream decoded through at least 95% of it. |
 | `scripts/bench_serving_concurrency.py` | Count `reasoning_content` deltas alongside `content`. |
-| `docs/benchmark_results/qmv-wide-pin-tax-m3ultra-2026-08-22.md` | New. The measurement record, including the excluded contaminated cell and the gate-recipe verification. |
+| `docs/benchmark_results/versions/v0.6.0.md#qmv-wide-pin-tax-m3ultra-2026-08-22` | New. The measurement record, including the excluded contaminated cell and the gate-recipe verification. |
 | `docs/benchmarks.md` | Link the record; correct the fast-row reproduction recipe and the declining-probe sentence for the post-#1199 retry ordering. |
 | `docs/environment-variables.md` | Correct the `MLXCEL_MTP_ALLOW_INEXACT` row; add the missing `MLXCEL_QMV_WIDE` row. |
-| `docs/benchmark_results/mtp-drafter-step-profile-m5max-2026-08-17.md` | Dated note that its reproduction recipe predates the #1199 retry. |
+| `docs/benchmark_results/versions/v0.5.2.md#mtp-drafter-step-profile-m5max-2026-08-17` | Dated note that its reproduction recipe predates the #1199 retry. |
 | `.gitignore` | Ignore the raw `bench-results/` run directories the driver writes. |
 
 No Rust source changed, so there is no runtime behaviour change to regress. Validation was `python3 -m py_compile` on both Python harnesses and `bash -n` on the driver, plus the measurement runs themselves.

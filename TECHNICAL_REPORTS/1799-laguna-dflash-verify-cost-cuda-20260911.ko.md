@@ -1,6 +1,6 @@
 # GB10에서 Laguna DFlash 검증 라운드의 고정 비용이 어디에 있는지, 그리고 수정
 
-이슈 #1799. 호스트 GB10 (sm_121), MLX 핀 `81ba1c6a`, CUDA 릴리스 빌드, 툴체인 1.97.1, 소스 트리 `2deae307` (PR #1771의 스쿼시 머지. 이전 스윕이 측정한 PR 헤드 `dab18fdf`와 바이트 단위로 동일). 전체 측정 기록: `docs/benchmark_results/laguna-dflash-verify-cost-gb10-2026-09-11.md`.
+이슈 #1799. 호스트 GB10 (sm_121), MLX 핀 `81ba1c6a`, CUDA 릴리스 빌드, 툴체인 1.97.1, 소스 트리 `2deae307` (PR #1771의 스쿼시 머지. 이전 스윕이 측정한 PR 헤드 `dab18fdf`와 바이트 단위로 동일). 전체 측정 기록: `docs/benchmark_results/versions/v0.8.0.md#laguna-dflash-verify-cost-gb10-2026-09-11`.
 
 ## 배경
 

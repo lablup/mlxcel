@@ -360,7 +360,7 @@ mod measured {
     /// `scripts/rocm_gpu_guard.sh`. `peak` is the printed `MLX peak memory`
     /// (bytes / 1e9, two decimals) in hundredths of a GB; [`peak_upper_bound`]
     /// adds the 0.005 GB its rounding can hide. The table is "Estimate against
-    /// peak" in `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`.
+    /// peak" in `docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30`.
     #[rustfmt::skip]
     const MEASURED_PEAKS: &[(Model, u64, Option<&str>, u64)] = &[
         (LLAMA, 640, None, 614), (LLAMA, 640, Some("256"), 518), (LLAMA, 640, Some("4096"), 923),

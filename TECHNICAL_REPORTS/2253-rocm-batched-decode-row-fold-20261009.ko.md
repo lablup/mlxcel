@@ -22,7 +22,7 @@ Meta-Llama-3.1-8B-Instruct-4bit에서 batch-4 ~1K 서버 decode 스텝은 166.7 
 
 ### 1.1 증상
 
-PR #2103 결과(`docs/benchmark_results/rocm-paged-attention-gfx1151-2026-10-05.md`, `mlxcel-server --parallel 4 --ctx-size 131072`, 요청당 decode 토큰 128개, 3회 중앙값)는 paged-attention 두 방식 모두에서 요청당 decode를 batch 4 ~1K에서 5.6~6.1 tok/s, ~4K에서 10.2~10.5, ~16K에서 10.9~13.9로 보고했습니다. 같은 모델의 단일 스트림 `bench_decode`는 약 35~37 tok/s입니다.
+PR #2103 결과(`docs/benchmark_results/versions/v0.8.0.md#rocm-paged-attention-gfx1151-2026-10-05`, `mlxcel-server --parallel 4 --ctx-size 131072`, 요청당 decode 토큰 128개, 3회 중앙값)는 paged-attention 두 방식 모두에서 요청당 decode를 batch 4 ~1K에서 5.6~6.1 tok/s, ~4K에서 10.2~10.5, ~16K에서 10.9~13.9로 보고했습니다. 같은 모델의 단일 스트림 `bench_decode`는 약 35~37 tok/s입니다.
 
 그 페이지는 차이를 다른 요청이 prefill하는 동안 기다리는 시간 탓으로 돌렸지만 측정하지는 않았습니다. 이슈는 약 1000 tok/s로 1K prefill 세 번을 해도 약 21초의 decode 구간 중 약 3초에 불과하므로 그 설명이 불완전하다고 지적했습니다. 또한 문맥이 길어질수록 속도가 오르는 것은 스텝당 연산 비용으로는 나올 수 없는 모양이라고 적었습니다.
 
@@ -63,7 +63,7 @@ PR #2103 결과(`docs/benchmark_results/rocm-paged-attention-gfx1151-2026-10-05.
 | `scripts/benchmark_paged_decode_production.sh` | `--metrics` 전달 |
 | `tests/test_bench_serving_concurrency.py`(신규) | 미리 만든 `/metrics` 텍스트로 파싱과 증분 계산을 검사하는 테스트 12개 |
 | `docs/environment-variables.md`, `docs/benchmarks.md` | `MLX_ROCM_WMMA_QMM`의 소수 행 예외, `--metrics` 출력 |
-| `docs/benchmark_results/rocm-batched-decode-gfx1151-2026-10-08.md`와 데이터 디렉터리(신규) | 결과 페이지, 원시 출력, guard 로그, 트레이스, 하네스 스크립트 |
+| `docs/benchmark_results/versions/v0.8.0.md#rocm-batched-decode-gfx1151-2026-10-08`와 데이터 디렉터리(신규) | 결과 페이지, 원시 출력, guard 로그, 트레이스, 하네스 스크립트 |
 
 커밋은 세 개입니다. 하네스 확장(`3fd1654d`, 파일 5개, 374줄 추가, 19줄 삭제), 수정(`895592d3`, 파일 5개, 436줄 추가, 3줄 삭제), 데이터를 포함한 결과 페이지(`474163e3`, 파일 159개, 12,575줄 추가)입니다. 합계 파일 169개, 13,385줄 추가, 22줄 삭제.
 
@@ -150,7 +150,7 @@ Metal과 CUDA는 영향을 받지 않습니다. 변경은 ROCm 오버레이, ROC
 - **`docs/environment-variables.md`.** `MLX_ROCM_WMMA_QMM` 문단과 표 항목에, 설정하지 않으면 bias가 있는 8행 이하의 4비트와 8비트 GEMM이 WMMA 커널을 건너뛰고 qmv / dequantize 교차점을 따른다는 점, 그 이유(모든 행에 대해 가중치를 한 번 읽음, gfx1151에서 WMMA가 한 행 GEMV의 7~8배), 배치 decode 스텝의 `[B, 1, K]`가 그런 GEMM이라는 점, `MLX_ROCM_WMMA_QMM=1`은 여전히 커널을 강제한다는 점을 적었습니다.
 - **`docs/benchmarks.md`.** 배치 서빙 래더 명령이 이제 `--metrics`를 넘기며, 레벨마다 출력되는 decode 스텝, 점유율, prefill 청크, mixed 스텝, decode 스텝 ms에 대한 설명을 붙였습니다.
 - **`LOCAL_FIXES.md` 항목 43.** 폴드, 라우트 변경, 측정값, 테스트, fork 정책(mlxcelverse에 유지, upstream에 제안하지 않음)을 기록했습니다.
-- **결과 페이지** `docs/benchmark_results/rocm-batched-decode-gfx1151-2026-10-08.md`: 환경, decode 스텝 표, GPU busy 대 호스트 갭 분리, 모델 수준 수정 전후 커널, 프로브 표, bf16 절, 후보 판정, ~16K 분석, 재현 명령. 데이터 디렉터리에는 세션별 guard 로그, 원시 출력, 커널 통계, 하네스 스크립트가 있습니다.
+- **결과 페이지** `docs/benchmark_results/versions/v0.8.0.md#rocm-batched-decode-gfx1151-2026-10-08`: 환경, decode 스텝 표, GPU busy 대 호스트 갭 분리, 모델 수준 수정 전후 커널, 프로브 표, bf16 절, 후보 판정, ~16K 분석, 재현 명령. 데이터 디렉터리에는 세션별 guard 로그, 원시 출력, 커널 통계, 하네스 스크립트가 있습니다.
 
 ## 6. 검증
 

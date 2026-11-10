@@ -1,5 +1,7 @@
 # Qwen3.8-Flash-Next measurements deferred from #2880, #2881, #2882, #2883, #2885 and #2917
 
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
 These are the timing and memory measurements that the implementing PRs (#2908, #2906, #2912, #2909, #2911, #2918) left for a quiet host. Every phase ran one process at a time on an otherwise idle machine, in the order below, on one release binary.
 
 ## Environment

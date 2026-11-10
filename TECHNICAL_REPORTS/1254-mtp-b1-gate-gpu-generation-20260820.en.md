@@ -39,7 +39,7 @@ The new predicate is strictly more permissive than the one it replaced, so no ho
 | `src/server/batch/scheduler.rs` | Decline-path comment updated to the new policy. |
 | `scripts/bench_speculative.sh`, `scripts/bench_block_width.sh` | New `gemma31b` case in both, so the protocol can reach the pairing the gate governs. |
 | `docs/benchmarks.md`, `docs/environment-variables.md` | 31B section rewritten with the measured rows; the claim that the pairing's speedup comes from B>1 windows and that its single-stream acceptance is too low is removed as falsified. |
-| `docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md` | New dated record: environment, three-prompt table, width sweep, round-cost fits, dispatch-path verification, and an explicit list of what was not measured. |
+| `docs/benchmark_results/versions/v0.6.0.md#mtp-b1-gate-m3ultra-2026-08-20` | New dated record: environment, three-prompt table, width sweep, round-cost fits, dispatch-path verification, and an explicit list of what was not measured. |
 
 ## 4. Review Findings
 

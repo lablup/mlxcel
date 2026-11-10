@@ -48,7 +48,7 @@ Commit 여덟 개:
 - **`9186b075`** `docs(rocm): list the newly ported kernels in the README`
 - **`eb72b359`** `fix(rocm): gate #2069 kernel ports on the GPU device`: review 수정 (4절).
 - **`800e23dc`** `fix(rocm): gate the fused MoE predicates on the GPU device too`: #2065 predicate에 대한 같은 수정.
-- **`3833998b`** `docs(rocm): publish the #2069 kernel port results on gfx1151`: `docs/benchmark_results/rocm-metal-only-ports-gfx1151-2026-10-05.md`, bench CSV, `benchmarks/logit_traces/rocm_gfx1151_9186b075/` 아래 trace, `docs/installation.md`와 `docs/environment-variables.md`의 행.
+- **`3833998b`** `docs(rocm): publish the #2069 kernel port results on gfx1151`: `docs/benchmark_results/versions/v0.8.0.md#rocm-metal-only-ports-gfx1151-2026-10-05`, bench CSV, `benchmarks/logit_traces/rocm_gfx1151_9186b075/` 아래 trace, `docs/installation.md`와 `docs/environment-variables.md`의 행.
 
 파일 27개, +1584 / -124. HIP source는 모두 `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp`에 있습니다.
 

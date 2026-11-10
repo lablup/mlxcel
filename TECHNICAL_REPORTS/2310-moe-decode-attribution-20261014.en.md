@@ -6,7 +6,7 @@
 
 ## Summary
 
-PR #2310 resolves issue #1859 by recording a kernel- and graph-level attribution of the MoE single-token decode gap (`M = 1, B = top_k = 6, E = 256`) for `deepseek-v4-flash-4bit`, `inkling-small-mlx-4bit`, and `inkling-small-nvfp4` in `docs/benchmark_results/moe-m1-gather-attribution-2026-10-14.md`, and then landing the two targeted improvements justified by that evidence: routing `InklingSparseMoe::forward` through `SwitchGLU::forward_fused_kernel` on unscaled affine checkpoints (`inkling-small-mlx-4bit`) and sharing gather indices across `gate_proj`, `up_proj`, and `down_proj` inside `LimitedSwitchGlu::forward` in `src/models/deepseek_v4_moe.rs`.
+PR #2310 resolves issue #1859 by recording a kernel- and graph-level attribution of the MoE single-token decode gap (`M = 1, B = top_k = 6, E = 256`) for `deepseek-v4-flash-4bit`, `inkling-small-mlx-4bit`, and `inkling-small-nvfp4` in `docs/benchmark_results/versions/v0.8.0.md#moe-m1-gather-attribution-2026-10-14`, and then landing the two targeted improvements justified by that evidence: routing `InklingSparseMoe::forward` through `SwitchGLU::forward_fused_kernel` on unscaled affine checkpoints (`inkling-small-mlx-4bit`) and sharing gather indices across `gate_proj`, `up_proj`, and `down_proj` inside `LimitedSwitchGlu::forward` in `src/models/deepseek_v4_moe.rs`.
 
 ## Problem
 
@@ -14,7 +14,7 @@ An Apple Silicon benchmark on `b8fdddfa` reported single-token decode on `deepse
 
 ## Design and Implementation
 
-- **Kernel & Graph Attribution (`docs/benchmark_results/moe-m1-gather-attribution-2026-10-14.md`)**:
+- **Kernel & Graph Attribution (`docs/benchmark_results/versions/v0.8.0.md#moe-m1-gather-attribution-2026-10-14`)**:
   - Traced `GatherQMM::eval_gpu` across Metal (`src/lib/mlxcelverse/overlays/metal/mlx/backend/metal/quantized.cpp`), CUDA (`src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/quantized/qmm.cu`), and ROCm (`src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/quantized/qmm.hip`). At `M = 1, B = 6`, all three backends dispatch specialized vector-matrix kernels (`qmv_quad` / `qmv_fast` / `fp_qmv_quad` on Metal since `M = 1 < get_qmv_batch_limit >= 6`; `qmv` / `fp_qmv` on CUDA since `M * B = 6 < 8` and `!supports_qmm_sm80(nvfp4)`; `qmv_gather` on ROCm since `M = 1 < 4`). Neither Metal's `bm = 32` tiled `gather_qmm` nor CUDA's `tile_m = 16` `qmm_sm80` is ever entered at single-token decode.
   - Reconciled the `forward_fused_kernel` family count across baseline and current `main` (`17` at `b8fdddfa`, `18` after `#1739` added `laguna_layers.rs`, `19` after `#2283` added `granitemoehybrid.rs`, and `20` after wiring `inkling/mlp.rs` in this PR).
   - Identified the actual per-family bottlenecks:

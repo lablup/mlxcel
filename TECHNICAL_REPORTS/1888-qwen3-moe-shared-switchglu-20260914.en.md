@@ -81,7 +81,7 @@ The #958 guard tests previously drove the copy's loader. With no family loader l
 - `src/models/qwen3_moe.rs`: the local types, their loaders and the `validate_expert_quantization_params` import are removed; `SparseMoeBlock::experts` is the shared `SwitchGLU`, built by `SwitchGLU::from_weights(weights, "{prefix}.switch_mlp", group_size, bits)`. The `forward`, `forward_profiled` and batched call sites are unchanged.
 - `src/models/qwen3_vl_moe.rs`: `load_switch_glu`, `load_switch_linear` and the now-unused `get_weight_copy` are removed; the block loader calls the shared constructor.
 - `src/models/switch_layers.rs`: a test helper `insert_honest_affine_swiglu_experts` quantizes real affine 4-bit SwiGLU planes; a new test pins the mxfp4 decline; the docs name the shared fused-kernel callers and the paths that still bypass the bound, correct the family counts, and qualify the greedy-parity claim.
-- Docs: `docs/environment-variables.md` and `docs/benchmark_results/fused-moe-decode-kernel-design.md` record that the two families read the bound.
+- Docs: `docs/environment-variables.md` and `docs/benchmark_results/versions/v0.3.0.md#fused-moe-decode-kernel-design` record that the two families read the bound.
 
 ## 5. Learning Points
 
@@ -138,7 +138,7 @@ Related: #268, #275, #311, #643, #958, #1045, #1803, #1859.
 - The shared bound reads the environment and queries the backend on every call; caching it in a `OnceLock`, as `fused_moe_enabled` does, would remove that work.
 - `deepseek_v4_moe` calls `validate_expert_quantization_params` but is missing from its Used-by list.
 - Security review, pre-existing in the shared loader: the three expert planes are never cross-checked against each other, and the router's row count is never compared with the stacked expert count, so a checkpoint whose planes disagree can reach an unchecked kernel index. The unstacked `experts.{idx}` fallback also stacks without a declared expert count and calls `stack` on tensors whose shapes are not compared first. Both belong in the shared `SwitchGLU` loader so every family gains them.
-- The `MLXCEL_FUSED_MOE` family list in `docs/benchmark_results/fused-moe-decode-kernel-design.md` ("eleven model paths") is stale.
+- The `MLXCEL_FUSED_MOE` family list in `docs/benchmark_results/versions/v0.3.0.md#fused-moe-decode-kernel-design` ("eleven model paths") is stale.
 - The `OpenXLA feature compile` CI job fails on `main` at `b8d10fb1` with unused-import errors in `src/models/mod.rs` and the server modules under `--no-default-features`; it fails the same way on this PR and is unrelated to it.
 
 ## Appendix

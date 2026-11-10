@@ -6,7 +6,7 @@
 
 ## Summary
 
-PR #2310은 이슈 #1859에서 제기된 `deepseek-v4-flash-4bit`, `inkling-small-mlx-4bit`, `inkling-small-nvfp4`의 단일 토큰 디코드(`M = 1, B = top_k = 6, E = 256`) 성능 격차 원인을 커널 디스패치 및 그래프 수준에서 규명하여 `docs/benchmark_results/moe-m1-gather-attribution-2026-10-14.md`에 기록하고, 분석 결과에 근거한 두 가지 코드 최적화(`InklingSparseMoe::forward`의 비스케일 affine 체크포인트 단일 토큰 퓨즈드 MoE 커널 연결 및 `src/models/deepseek_v4_moe.rs` 내 `LimitedSwitchGlu::forward`의 gather 인덱스 공유)를 구현합니다.
+PR #2310은 이슈 #1859에서 제기된 `deepseek-v4-flash-4bit`, `inkling-small-mlx-4bit`, `inkling-small-nvfp4`의 단일 토큰 디코드(`M = 1, B = top_k = 6, E = 256`) 성능 격차 원인을 커널 디스패치 및 그래프 수준에서 규명하여 `docs/benchmark_results/versions/v0.8.0.md#moe-m1-gather-attribution-2026-10-14`에 기록하고, 분석 결과에 근거한 두 가지 코드 최적화(`InklingSparseMoe::forward`의 비스케일 affine 체크포인트 단일 토큰 퓨즈드 MoE 커널 연결 및 `src/models/deepseek_v4_moe.rs` 내 `LimitedSwitchGlu::forward`의 gather 인덱스 공유)를 구현합니다.
 
 ## Problem
 
@@ -14,7 +14,7 @@ PR #2310은 이슈 #1859에서 제기된 `deepseek-v4-flash-4bit`, `inkling-smal
 
 ## Design and Implementation
 
-- **커널 및 연산 그래프 원인 규명 (`docs/benchmark_results/moe-m1-gather-attribution-2026-10-14.md`)**:
+- **커널 및 연산 그래프 원인 규명 (`docs/benchmark_results/versions/v0.8.0.md#moe-m1-gather-attribution-2026-10-14`)**:
   - Metal(`src/lib/mlxcelverse/overlays/metal/mlx/backend/metal/quantized.cpp`), CUDA(`src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/quantized/qmm.cu`), ROCm(`src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/quantized/qmm.hip`)의 `GatherQMM::eval_gpu` 디스패치 분기를 추적한 결과, `M = 1, B = 6` 조건에서 세 백엔드 모두 타일 행렬 커널이 아닌 전용 벡터-행렬(QMV) 커널(Metal은 `M = 1 < get_qmv_batch_limit >= 6`으로 `qmv_quad` / `qmv_fast` / `fp_qmv_quad`, CUDA는 `M * B = 6 < 8` 및 `!supports_qmm_sm80(nvfp4)`로 `qmv` / `fp_qmv`, ROCm은 `M = 1 < 4`로 `qmv_gather`)로 분기함을 확인했습니다. 즉 Metal `bm = 32` `gather_qmm`이나 CUDA `tile_m = 16` `qmm_sm80`은 단일 토큰 디코드에서 호출되지 않습니다.
   - `forward_fused_kernel` 연결 모델 패밀리 수를 기준 커밋부터 현재 `main`까지 대조하여 정리했습니다(`b8fdddfa` 시점 17개, `#1739` `laguna_layers.rs` 추가 후 18개, `#2283` `granitemoehybrid.rs` 추가 후 19개, 본 PR의 `inkling/mlp.rs` 연결 후 20개).
   - 모델 패밀리별 실제 디코드 병목을 규명했습니다:

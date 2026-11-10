@@ -32,7 +32,7 @@ main에서 스캔이 차지하는 몫은 스캔을 `delta`, `B`, `C`를 소비�
 - **`jamba.rs`**: `JambaMambaMixer::ssm_step`은 `mamba1_scan_kernel_accepts`가 참이면 프리필과 디코드 모두 커널을 호출한다. 테스트 전용 thread-local 카운터가 그래프 루프를 돈 타임스텝 수를 센다.
 - **`mamba.rs`**: 융합 경로는 계속 Metal 전용이다. Mamba의 그래프 경로는 `x_proj`를 타임스텝 하나씩 계산하고 커널 경로는 시퀀스 전체를 한 번에 투영하므로, CUDA에서 바꾸면 출력이 달라진다.
 - **테스트**: `cuda_kernel_is_bit_identical_to_the_graph_scan`, `cuda_kernel_declines_mixed_dtype_inputs`, `jamba_mamba_prefill_takes_the_fused_scan_where_a_port_exists`를 추가했다. Metal 커널의 정확도 테스트는 Metal에서만 돌게 했다.
-- **문서**: `docs/environment-variables.md`의 `MLXCEL_MAMBA1_SCAN_KERNEL` 항목과 `docs/benchmark_results/jamba-mamba1-scan-kernel-gb10-2026-09-30.md`.
+- **문서**: `docs/environment-variables.md`의 `MLXCEL_MAMBA1_SCAN_KERNEL` 항목과 `docs/benchmark_results/versions/v0.8.0.md#jamba-mamba1-scan-kernel-gb10-2026-09-30`.
 
 ## 3. 기술적 결정
 

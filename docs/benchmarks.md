@@ -51,30 +51,15 @@ The server's `predicted_per_second` follows the same rule, as llama-server does 
 
 Rows recorded before 2026-11-10 used N for every path except the speculative engine, which already used N-1. Their `decode_ms` is unaffected, so an old rate can be restated as `(generated_tokens - 1) / decode_ms`. The CSVs under `benchmarks/` and `docs/benchmark_results/` are kept as recorded.
 
-## What to keep under `benchmark_results/data/`
+## Result retention and release consolidation
 
-Keep what a reader needs to check or repeat a report: the Markdown record, the
-measurement result as **CSV**, drivers, instrumentation patches and provenance.
-The CSV is the machine-readable evidence: one row per measurement, carrying the
-columns the record's tables are built from.
+Start at the [benchmark result index](benchmark_results/README.md). Keep final public/hardware reports and their minimal machine-readable measurement rows. Completed investigations belong in **one decision archive per release**, not a permanent directory of attempts. A measured rejection, a default-off decision and an inconclusive comparison are results too.
 
-Do not commit raw per-run records or captures:
+During development, write a focused `<feature>-<hw>-<date>.md` record with the measured commit, environment, checkpoint, command, arm-attribution evidence, repetitions/dispersion, conclusion and unmeasured cells. Keep a report standalone while its evidence is needed for unfinished validation. At release time, condense completed investigations into `benchmark_results/versions/v<version>.md`, retain final CSVs and necessary correctness/provenance evidence, and delete superseded reports and run captures. Do not concatenate whole reports or create opaque archive bundles.
 
-- JSONL/NDJSON record streams from a driver, or any other raw dump of per-run
-  measurements. Convert the rows to CSV and commit that.
-- per-run server logs, build, format or lint logs, and empty captures.
-  `make verify-benchmark-raw-logs` fails on these.
-- driver stdout/stderr captures. A derived summary belongs in the Markdown
-  record, not in a committed text dump.
+Use stable section anchors; update code, ADR and documentation references before deleting a report. Link the detailed original through an immutable commit permalink so historical issue/PR readers can recover its reproduction commands and instrumentation. Do not rewrite Git history. Legacy archive placement is by the first stable tag containing the report, not a guess at the measured binary version; preserve actual measured provenance separately and never combine incompatible hardware, workloads or metric definitions.
 
-A log a report cites by name or indexes in its manifest goes in
-`scripts/ci/benchmark_raw_logs_allowlist.txt`. Raw record streams cannot be
-allowlisted; `scripts/ci/benchmark_raw_data_baseline.txt` lists the files that
-predate this rule and can only shrink. Files under a campaign's `harness/`
-directory are drivers and their inputs, not results, so they are exempt. The
-check enforces the log and record stream parts; captured driver output is up to
-review. Evidence from a failed attempt can be stored as a `.7z` of at most 32 KB,
-with its conclusions in plain text next to it.
+Raw server/build/lint logs, stdout/stderr captures, empty files and JSONL/NDJSON record streams do not belong anywhere under `benchmark_results/`. Convert final measurement rows to CSV; keep transient output in ignored `bench-results/` or outside the checkout. Reusable drivers and inputs belong in `scripts/` and `tests/fixtures/`, not a campaign's `data/` directory. `make verify-benchmark-raw-logs` checks the whole result tree; the legacy exception lists are empty and must not be repopulated for new captures.
 
 ## Current result snapshot
 
@@ -84,9 +69,9 @@ between documents. The current benchmark reports are:
 - [Benchmark Report - 2026-05-19](benchmark_results/benchmark-report.md)
 - [Model compatibility and performance on GB10 at 0.8.1](benchmark_results/model_tests_gb10.md): the full text and VLM sweep at pp512/tg128 (2026-11-03 and 2026-11-04), with the modality ladders in the reports below.
 - [Native batched decode on M3 Ultra — 2026-10-27](benchmark_results/native-batched-decode-m3ultra-2026-10-27.md): 21 checkpoints, 23 configurations, with raw traces and serving evidence.
-- [CUDA quantized matmul batch fold on RTX Spark N1X, 2026-10-31](benchmark_results/cuda-qmm-fold-batch-n1x-2026-10-31.md)
-- [MoE expert overlap in batched decode on RTX Spark N1X, 2026-10-31](benchmark_results/moe-distinct-experts-n1x-2026-10-31.md)
-- [Few-row quantized matmul for batched decode on M1 Ultra, 2026-10-30](benchmark_results/few-row-qmm-batched-decode-m1ultra-2026-10-30.md): Llama 3.1 8B 4-bit 8-row decode step 56.5 ms to 39 ms, B=8/B=1 serving ratio 1.35x to 1.95x.
+- [CUDA quantized matmul batch fold on RTX Spark N1X, 2026-10-31](benchmark_results/versions/v0.8.0.md#cuda-qmm-fold-batch-n1x-2026-10-31)
+- [MoE expert overlap in batched decode on RTX Spark N1X, 2026-10-31](benchmark_results/versions/v0.8.0.md#moe-distinct-experts-n1x-2026-10-31)
+- [Few-row quantized matmul for batched decode on M1 Ultra, 2026-10-30](benchmark_results/versions/v0.8.0.md#few-row-qmm-batched-decode-m1ultra-2026-10-30): Llama 3.1 8B 4-bit 8-row decode step 56.5 ms to 39 ms, B=8/B=1 serving ratio 1.35x to 1.95x.
 
 That combined report is the cross-hardware surface, but it is older than the
 per-host tables it summarizes. The newest full sweeps are M5 Max on mlxcel 0.6.0
@@ -102,20 +87,20 @@ page should stay focused on methodology, required metadata, and caveats.
 Decode-gap investigations (root-cause analyses of where mlxcel trails the
 reference runtime) live alongside the snapshot:
 
-- [MoE decode gap investigation](benchmark_results/moe-decode-gap-investigation.md)
-- [Fused decode-MoE kernel: design and roadmap](benchmark_results/fused-moe-decode-kernel-design.md)
-- [Gemma3n decode profile: is a compiled fusion justified?](benchmark_results/gemma3n-decode-profile.md)
-- [Gemma3n decode profile on M5 Max](benchmark_results/gemma3n-decode-profile-m5max.md)
-- [Gemma 4 31B QAT/non-QAT MTP exactness on M5 Max](benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md)
-- [Unified engine baseline: CLI vs server B=1 decode, prefill chunk and KV storage (GB10)](benchmark_results/unified-engine-baseline-gb10-2026-10-07.md)
-- [Unified engine final measurement: pre-epic CxxGenerator vs the engine, batched serving, prefill chunk under live decode (GB10)](benchmark_results/unified-engine-final-gb10-2026-10-08.md)
-- [Penalty pipelining and server prompt lookup: penalty requests across three builds, prompt lookup at B=1, under concurrency and on long paged prompts (GB10)](benchmark_results/server-prompt-lookup-gb10-2026-10-11.md)
+- [MoE decode gap investigation](benchmark_results/versions/v0.3.0.md#moe-decode-gap-investigation)
+- [Fused decode-MoE kernel: design and roadmap](benchmark_results/versions/v0.3.0.md#fused-moe-decode-kernel-design)
+- [Gemma3n decode profile: is a compiled fusion justified?](benchmark_results/versions/v0.3.2.md#gemma3n-decode-profile)
+- [Gemma3n decode profile on M5 Max](benchmark_results/versions/v0.3.2.md#gemma3n-decode-profile-m5max)
+- [Gemma 4 31B QAT/non-QAT MTP exactness on M5 Max](benchmark_results/versions/v0.8.0.md#gemma4-31b-mtp-exactness-2026-09-26)
+- [Unified engine baseline: CLI vs server B=1 decode, prefill chunk and KV storage (GB10)](benchmark_results/versions/v0.8.0.md#unified-engine-baseline-gb10-2026-10-07)
+- [Unified engine final measurement: pre-epic CxxGenerator vs the engine, batched serving, prefill chunk under live decode (GB10)](benchmark_results/versions/v0.8.0.md#unified-engine-final-gb10-2026-10-08)
+- [Penalty pipelining and server prompt lookup: penalty requests across three builds, prompt lookup at B=1, under concurrency and on long paged prompts (GB10)](benchmark_results/versions/v0.8.0.md#server-prompt-lookup-gb10-2026-10-11)
 
 Embedding and rerank throughput (`/v1/embeddings`, `/v1/rerank`) has its own
 ladder, driven by `scripts/bench_embeddings.py`:
 
-- [Embedding and rerank throughput on GB10 - 2026-08-26](benchmark_results/embeddings-rerank-gb10-2026-08-26.md)
-- [Embedding and rerank throughput on M5 Max - 2026-09-04](benchmark_results/embeddings-rerank-m5max-2026-09-04.md)
+- [Embedding and rerank throughput on GB10 - 2026-08-26](benchmark_results/versions/v0.7.0.md#embeddings-rerank-gb10-2026-08-26)
+- [Embedding and rerank throughput on M5 Max - 2026-09-04](benchmark_results/versions/v0.7.0.md#embeddings-rerank-m5max-2026-09-04)
 - [Embedding and rerank throughput on GB10 - 2026-11-04](benchmark_results/embeddings-rerank-gb10-2026-11-04.md)
 
 Image generation and edit throughput (`/v1/images/generations`,
@@ -210,9 +195,15 @@ BENCH_MEM_OVERHEAD_FACTOR=1.209 ./scripts/bench_decode.sh all --cooldown 30 --bi
 # Prompt lookup (`generate --prompt-lookup`): plain decoding against both
 # drafting policies, arms interleaved per repetition, plus the verify-width
 # cost the policies are built on. Method and GB10 results:
-# docs/benchmark_results/prompt-lookup-governor-gb10-2026-10-02.md.
-CASES=qwen3-8b-4bit:edit_json:400,qwen3-8b-4bit:story:800 REPS=3 BENCH_OUT=out-ab \
-    python3 docs/benchmark_results/data/prompt-lookup-governor-gb10-2026-10-02/harness/ab.py
+# docs/benchmark_results/versions/v0.8.0.md#prompt-lookup-governor-gb10-2026-10-02.
+# Restore the historical driver and its prompt fixtures into a temporary tree.
+REPRO=$(mktemp -d)
+git archive 2dc8ed47b30dc204d892328098e8cc34ec02ddc1 \
+    docs/benchmark_results/data/prompt-lookup-governor-gb10-2026-10-02/harness \
+    | tar -x -C "$REPRO"
+mkdir -p bench-results
+CASES=qwen3-8b-4bit:edit_json:400,qwen3-8b-4bit:story:800 REPS=3 BENCH_OUT=bench-results/prompt-lookup \
+    python3 "$REPRO/docs/benchmark_results/data/prompt-lookup-governor-gb10-2026-10-02/harness/ab.py"
 cargo run --release --features cuda --example verify_width_cost -- models/mlx/qwen3-8b-4bit
 
 # Batched serving ladder, against a server started with
@@ -282,7 +273,7 @@ compares with `compare_bench_csv.py --reference`. MLX has no ROCm wheel, so the
 Python baseline needs a source build of MLX with the ROCm backend: point
 `MLXLM_PYTHON` at its interpreter. Stop other GPU tenants first; the published
 gfx1151 baseline records how it checked
-([rocm-baseline-gfx1151-2026-09-30.md](benchmark_results/rocm-baseline-gfx1151-2026-09-30.md)).
+([rocm-baseline-gfx1151-2026-09-30.md](benchmark_results/versions/v0.8.0.md#rocm-baseline-gfx1151-2026-09-30)).
 
 ```bash
 MODELS_DIR=models/mlx ./scripts/bench_decode.sh all --cooldown 30 --big-cooldown 30
@@ -359,7 +350,7 @@ a port's measured speedup against; `report` prints it beside the GPU-share
 ceiling. The same fields exist for the roles reached with shipped defaults
 (`reached_default_*`). The published profile and how each kernel
 name was attributed to a port unit are in
-[rocm-decode-profile-gfx1151-2026-09-30.md](benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md).
+[rocm-decode-profile-gfx1151-2026-09-30.md](benchmark_results/versions/v0.8.0.md#rocm-decode-profile-gfx1151-2026-09-30).
 
 ### An op-level number is not a decode number (issue #901)
 
@@ -544,7 +535,7 @@ motivates the technique. Do not carry that conclusion to CUDA: a discrete GPU wi
 a private L2 behind PCIe has a much sharper cliff, and the same rotation there
 should be expected to move the median considerably more. Full numbers and the
 load conditions they were taken under are in
-[autotuner-m1ultra-2026-07-30](benchmark_results/autotuner-m1ultra-2026-07-30.md).
+[autotuner-m1ultra-2026-07-30](benchmark_results/versions/v0.5.0.md#autotuner-m1ultra-2026-07-30).
 
 ### Running and recording
 
@@ -1171,7 +1162,7 @@ the retry runs before the override is consulted, pins the process narrow, and
 produces output byte-identical to the default env, measured at the
 byte-identical rows' own throughput (verified live on M3 Ultra 2026-08-22,
 117 vs 139 tok/s on the 12B pairing; see
-[qmv-wide-pin-tax-m3ultra-2026-08-22](benchmark_results/qmv-wide-pin-tax-m3ultra-2026-08-22.md)).
+[qmv-wide-pin-tax-m3ultra-2026-08-22](benchmark_results/versions/v0.6.0.md#qmv-wide-pin-tax-m3ultra-2026-08-22)).
 Keeping byte-identity on the code row, by dropping `qmv_wide`, measures 93.2
 tok/s instead of 121.0 on M5 Max, or 2.14x instead of 2.79x, and 117.5 tok/s
 instead of 138.5 on M3 Ultra, 1.83x instead of 2.16x.
@@ -1291,7 +1282,7 @@ per arm reproduces any of this, and the M3 Ultra source-code row parts 22
 bytes in.
 
 What the rest of a process pinned narrow pays is measured in
-[qmv-wide-pin-tax-m3ultra-2026-08-22](benchmark_results/qmv-wide-pin-tax-m3ultra-2026-08-22.md)
+[qmv-wide-pin-tax-m3ultra-2026-08-22](benchmark_results/versions/v0.6.0.md#qmv-wide-pin-tax-m3ultra-2026-08-22)
 (issue #1261): batched decode loses at most 1% at B = 2 to 8, because both
 MTP families decode batches as per-row `M = 1` forwards that never reach
 `qmv_wide`; the one real collateral cost is about 15 ms per prompt-cache-hit
@@ -1414,11 +1405,11 @@ enabling this pairing on generation 13.
 
 ### Gemma 4 12B long-context exactness
 
-The [M1 Ultra 12B investigation](benchmark_results/gemma4-12b-mtp-exactness-m1-ultra-2026-10-15.md) reproduces a long buffered verify mismatch despite passing short startup draws. Matching sliding-ring order, maskless single-query full attention and classic prefill chunking restores the measured width-4 path: zero disagreements on 256 teacher-forced positions (155 decided), and three byte-identical 256-token completions behind 1,238–1,638-token prompts. The active-Metal 12B startup guard now includes the long buffered draw; unsupported layouts still decline rather than bypassing exactness, and existing CUDA/31B policies are preserved. Three counterbalanced release repetitions retain all 27 output hashes, but forced-width MTP is slower on M1 Ultra (paired median ratios 0.837x/0.903x/0.815x). The scheduler-setup-to-probe-pass interval increases from 1.245 s to 7.041 s. Eligibility/profitability defaults are unchanged. This is M1 Ultra evidence, not M5 or CUDA validation. See the record for pinned validation switches, artifact provenance, dispersion and measurement limitations.
+The [M1 Ultra 12B investigation](benchmark_results/versions/v0.8.0.md#gemma4-12b-mtp-exactness-m1-ultra-2026-10-15) reproduces a long buffered verify mismatch despite passing short startup draws. Matching sliding-ring order, maskless single-query full attention and classic prefill chunking restores the measured width-4 path: zero disagreements on 256 teacher-forced positions (155 decided), and three byte-identical 256-token completions behind 1,238–1,638-token prompts. The active-Metal 12B startup guard now includes the long buffered draw; unsupported layouts still decline rather than bypassing exactness, and existing CUDA/31B policies are preserved. Three counterbalanced release repetitions retain all 27 output hashes, but forced-width MTP is slower on M1 Ultra (paired median ratios 0.837x/0.903x/0.815x). The scheduler-setup-to-probe-pass interval increases from 1.245 s to 7.041 s. Eligibility/profitability defaults are unchanged. This is M1 Ultra evidence, not M5 or CUDA validation. See the record for pinned validation switches, artifact provenance, dispersion and measurement limitations.
 
 ### Gemma 4 31B + bf16 assistant
 
-**Current exactness (2026-09-26, #1983/#1279):** both QAT and non-QAT 31B now pass the startup probe after the automatic narrow-kernel retry on M5 Max, without `MLXCEL_MTP_ALLOW_INEXACT`. Non-QAT widths 2, 3 and 4 all pass. The fix matches full-attention query/mask geometry, sliding-cache physical ring order, and classic prefill chunking. It is limited to singleton linear verification; batched MTP falls back to classic; nonlinear tree rounds are disabled, so dispatch uses the supported linear path. See the [matched QAT/non-QAT measurements](benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md) for long-context logit metrics, greedy parity and current test-fast throughput. The static hardware preference remains subordinate to measured exactness and adaptive profitability.
+**Current exactness (2026-09-26, #1983/#1279):** both QAT and non-QAT 31B now pass the startup probe after the automatic narrow-kernel retry on M5 Max, without `MLXCEL_MTP_ALLOW_INEXACT`. Non-QAT widths 2, 3 and 4 all pass. The fix matches full-attention query/mask geometry, sliding-cache physical ring order, and classic prefill chunking. It is limited to singleton linear verification; batched MTP falls back to classic; nonlinear tree rounds are disabled, so dispatch uses the supported linear path. See the [matched QAT/non-QAT measurements](benchmark_results/versions/v0.8.0.md#gemma4-31b-mtp-exactness-2026-09-26) for long-context logit metrics, greedy parity and current test-fast throughput. The static hardware preference remains subordinate to measured exactness and adaptive profitability.
 
 Current M5 Max / 128 GiB, test-fast profile, width 4, three 256-token outputs (one observation per scenario and arm):
 

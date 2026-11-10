@@ -35,7 +35,7 @@ Options:
   --port N             Server port (default: 18083)
   --write-dir DIR      Directory for the files written (default: $TMPDIR)
   --out DIR            Results directory
-                       (default: docs/benchmark_results/macos-memory-soak-<host>-<date>,
+                       (default: bench-results/macos-memory-soak-<host>-<date>,
                        with a -wire-weights suffix under --wire-weights)
   --idle-seconds N     Idle time before and after the writes (default: 30)
   --dry-run            Print the plan and exit: no server, no write
@@ -99,7 +99,7 @@ if [ -z "$OUT" ]; then
     # summary and samples of a plain run from the same day.
     SUFFIX=""
     [ "$WIRE_WEIGHTS" = 1 ] && SUFFIX="-wire-weights"
-    OUT="docs/benchmark_results/macos-memory-soak-$(hostname -s)-$(date +%Y-%m-%d)${SUFFIX}"
+    OUT="bench-results/macos-memory-soak-$(hostname -s)-$(date +%Y-%m-%d)${SUFFIX}"
 fi
 
 IFS=',' read -r -a LIMITS <<<"$WIRED_LIMITS"

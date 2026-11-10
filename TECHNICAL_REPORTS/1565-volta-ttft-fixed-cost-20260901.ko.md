@@ -43,8 +43,8 @@
 | `src/lib/mlxcel-core/src/generate.rs` | `TtftPhases`, `ttft_profile_enabled()`, 두 `--profile` 경로의 `MLXCEL_PROFILE_TTFT` 계측 |
 | `src/lib/mlxcel-core/src/ttft_profile_tests.rs` | 구간 산술에 대한 호스트 전용 단위 테스트 6개 |
 | `src/lib/mlxcel-core/src/lib.rs` | 테스트 모듈 연결 |
-| `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md` | 측정 기록 |
-| `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` | #1545 사후 비교 행, 새 방법 규칙 7, 확인 시험 결과 행 |
+| `docs/benchmark_results/versions/v0.7.0.md#volta-ttft-fixed-cost-2026-09-01` | 측정 기록 |
+| `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31` | #1545 사후 비교 행, 새 방법 규칙 7, 확인 시험 결과 행 |
 | `docs/environment-variables.md` | `MLXCEL_PROFILE_TTFT` |
 
 디바이스 코드도 디스패치도 건드리지 않는다. 트리 어디의 cubin도 바뀌지 않는다.
@@ -187,8 +187,8 @@ CUDA 그래프를 통째로 끄는 것이 첫 토큰을 측정 가능한 만큼 
 ## 참고
 
 - 이슈 #1545, 그리고 이 작업이 Phase 4인 에픽 #1536.
-- `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md`, 전체 기록.
-- `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md`(#1538), 이 작업이 대조하는 베이스라인.
+- `docs/benchmark_results/versions/v0.7.0.md#volta-ttft-fixed-cost-2026-09-01`, 전체 기록.
+- `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31`(#1538), 이 작업이 대조하는 베이스라인.
 - #1539, 여기서 재현한 디코드 속도를 만든 `qmv` 부동소수점 누산기.
 - #1564, 이 작업의 판정이 요구한 후속 이슈.
 - #818, CUDA 그래프 캐시 용량 기본값.

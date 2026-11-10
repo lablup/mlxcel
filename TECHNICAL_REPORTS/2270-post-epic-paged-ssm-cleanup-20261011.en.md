@@ -125,6 +125,6 @@ Both model-owned flags remain enabled, so serving behavior is stable. The benchm
 
 - Issue #2230: post-epic cleanup requirements
 - PR #2270: implementation and evidence
-- `docs/benchmark_results/model-owned-storage-gb10-2026-10-11.md`: dated storage decision
+- `docs/benchmark_results/versions/v0.8.0.md#model-owned-storage-gb10-2026-10-11`: dated storage decision
 - `docs/benchmark_results/data/model-owned-storage-gb10-2026-10-11/`: complete storage protocol and raw output
 - `docs/benchmark_results/data/ssm-bf16-parity-gb10-2026-10-11/`: original stage deviations and Granite parity artifacts

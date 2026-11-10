@@ -222,7 +222,7 @@ pub struct TokenOnlyRounds {
 /// Each proposing row costs one verify forward on top of the batched step,
 /// so the gain shrinks as the batch grows. Measured on GB10 (Qwen3-1.7B
 /// 4-bit, `--parallel 8`;
-/// `docs/benchmark_results/server-prompt-lookup-gb10-2026-10-11.md`): with
+/// `docs/benchmark_results/versions/v0.8.0.md#server-prompt-lookup-gb10-2026-10-11`): with
 /// this default, concurrency 4 and 8 match the flag-off server in every
 /// workload, while a gate of 8 gains 15 to 63 % on raw-completion workloads
 /// but loses 13 % on the chat-template copy workload at concurrency 4.
@@ -239,7 +239,7 @@ pub const DEFAULT_PROMPT_LOOKUP_MAX_BATCH: usize = 2;
 /// accepted-token EMA was already at least four, so an abrupt field boundary
 /// does not discard an established profitable copy run. Consecutive misses
 /// still pause. A round meeting the floor repays startup EMA debt.
-/// See `docs/benchmark_results/server-prompt-lookup-break-even-gb10-2026-10-11.md`.
+/// See `docs/benchmark_results/versions/v0.8.0.md#server-prompt-lookup-break-even-gb10-2026-10-11`.
 pub(crate) const PROMPT_LOOKUP_MIN_TOKENS_PER_ROUND: usize = 4;
 /// Require a whole default proposal's worth of shadow evidence to avoid
 /// resuming on the incidental two-token matches common in chat prose.

@@ -529,7 +529,7 @@ pub(crate) fn mtp_prefill_suffix_start(
 /// The batch-capable half keyed on `has_neural_accelerator` (M5 only) until
 /// #1217 measured M3 Ultra on this pairing for the first time and found 1.95x
 /// to 2.65x on a host the old predicate declined. The rows are in
-/// `docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md`.
+/// `docs/benchmark_results/versions/v0.6.0.md#mtp-b1-gate-m3ultra-2026-08-20`.
 ///
 /// The discriminator is the `use_qmv_wide` split documented in
 /// `crate::models::speculative_exactness`, not the Neural Accelerator: from
@@ -583,7 +583,7 @@ pub(crate) fn mtp_b1_burst_enabled(target_supports_batching: bool) -> bool {
 /// profitability. Issue #1983 restores 31B QAT/non-QAT singleton exactness by
 /// matching classic attention geometry; that correction has a measured cost,
 /// so the pre-probe #1217 speedups are not promises for the corrected path.
-/// See docs/benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md.
+/// See docs/benchmark_results/versions/v0.8.0.md#gemma4-31b-mtp-exactness-2026-09-26.
 /// Used by: Gemma 4 and Qwen 3.5 MTP policy fallback.
 ///
 /// `wide_quantized_projections` is the host's Apple GPU generation reduced to
@@ -3150,7 +3150,7 @@ mod tests {
     /// M3 is the row this issue moved, and it moved on measurement: the
     /// 31B + bf16 assistant pairing runs 1.95x to 2.65x on an M3 Ultra that
     /// the previous `has_neural_accelerator` predicate declined
-    /// (`docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md`).
+    /// (`docs/benchmark_results/versions/v0.6.0.md#mtp-b1-gate-m3ultra-2026-08-20`).
     #[test]
     fn mtp_b1_default_batch_capable_follows_gpu_generation() {
         use mlxcel_core::hardware::AppleSiliconGen;

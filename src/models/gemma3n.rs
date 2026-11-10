@@ -765,7 +765,7 @@ impl MlpInputProjection {
 /// regressed M5 by ~-6.3%, since closed by MLX/code evolution), so the gate
 /// stays off NA hardware: no upside there, and the per-op split path is the
 /// validated default. Full numbers:
-/// docs/benchmark_results/gemma3n-decode-profile-m5max.md.
+/// docs/benchmark_results/versions/v0.3.2.md#gemma3n-decode-profile-m5max.
 #[inline]
 fn use_fused_decode_path() -> bool {
     let hw = mlxcel_core::hardware::get_hardware();

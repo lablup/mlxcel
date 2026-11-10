@@ -296,8 +296,8 @@ None. The PR adds two committed result files, `decode.csv` (42 rows, three runs 
 - Issue #2587: measured the ~10% M1 Ultra multi-token loss that already declined M1 and M2.
 - Issue #268: the fused single-token MoE kernel, which cannot fire at B >= 2.
 - Issue #2479: the fused decode-MoE down-projection work this kernel sits beside.
-- `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-10-21.md`: the superseded record.
-- `docs/benchmark_results/switch-gate-up-baseline-m3ultra-2026-10-21.md`: the single-token baseline this PR does not re-measure.
+- `docs/benchmark_results/versions/v0.8.0.md#switch-gate-up-batch-m3ultra-2026-10-21`: the superseded record.
+- `docs/benchmark_results/versions/v0.8.0.md#switch-gate-up-baseline-m3ultra-2026-10-21`: the single-token baseline this PR does not re-measure.
 
 ---
 
@@ -380,9 +380,9 @@ None. The PR adds two committed result files, `decode.csv` (42 rows, three runs 
 
 ### C. References
 
-- `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-11-04.md`
+- `docs/benchmark_results/versions/unreleased.md#switch-gate-up-batch-m3ultra-2026-11-04`
 - `docs/benchmark_results/data/switch-gate-up-batch-m3ultra-2026-11-04/decode.csv`
 - `docs/benchmark_results/data/switch-gate-up-batch-m3ultra-2026-11-04/focus-parallel4.csv`
-- `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-10-21.md`
-- `docs/benchmark_results/switch-gate-up-baseline-m3ultra-2026-10-21.md`
+- `docs/benchmark_results/versions/v0.8.0.md#switch-gate-up-batch-m3ultra-2026-10-21`
+- `docs/benchmark_results/versions/v0.8.0.md#switch-gate-up-baseline-m3ultra-2026-10-21`
 - `src/models/switch_layers.rs`

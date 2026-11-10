@@ -95,7 +95,7 @@ warm-up은 대화가 이미 가진 가장 긴 스냅샷을 복원하고, 델타�
 | 새 환경변수 | 1 (`MLXCEL_DISABLE_CACHE_WARMUP`) |
 | 새 통계 필드 | 2 (`snapshot_warmups_run`, `snapshot_warmups_skipped`) |
 | 포그라운드 동작 변화 | 0 (디스패치가 완전 유휴 스케줄러를 요구) |
-| 벤치마크 기록 | `docs/benchmark_results/warmup-snapshot-m1ultra-2026-08-14.md` |
+| 벤치마크 기록 | `docs/benchmark_results/versions/v0.5.1.md#warmup-snapshot-m1ultra-2026-08-14` |
 
 ### 영역별 변경
 

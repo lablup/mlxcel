@@ -32,7 +32,7 @@ The CLI and the server decode through separate loops. They share the model forwa
   - Prints `identical`, or the first divergent index and both token ids. With `--expect-identical` it exits 1 on divergence.
 - **`mlxcel-bench-engine` (`make bench-engine`) and `scripts/engine_bench_rounds.py`:** single-stream TTFT and decode tok/s on both paths, at 256 and 8192-token prompts, with prefill-chunk and storage parameters. Rounds are interleaved with a rotating order and null arms.
 - **`src/server/engine_probe`:** builds the real server stack the way `start_server` does, minus HTTP.
-- **Baseline results:** `docs/benchmark_results/unified-engine-baseline-gb10-2026-10-07.md`, with the raw records.
+- **Baseline results:** `docs/benchmark_results/versions/v0.8.0.md#unified-engine-baseline-gb10-2026-10-07`, with the raw records.
 
 ## 3. Technical Decisions
 

@@ -33,7 +33,7 @@ Below 8 rows the affine path runs `qmv`'s multirow kernel, which `dispatch_multi
 - `PromptLookupStats::shadow_confirmations`, printed on the `[Prompt lookup]` line and in the end-of-decode trace.
 - CLI: `--prompt-lookup-policy auto|graded|gated` (requires `--prompt-lookup`), `PromptLookupPolicyArg::resolve`, `mlxcel::DraftPolicy` re-export.
 - Tests: Gated start, probation, timer-free pause, widths, max-draft below the narrow block, shadow settling, policy defaults, CLI parsing; the rollback parity matrix runs per policy; an exact script-model test pins probe alignment.
-- `docs/benchmark_results/prompt-lookup-governor-gb10-2026-10-02.md` with the harness, prompts, three matrices, the load log and the width costs; `docs/benchmarks.md` links it.
+- `docs/benchmark_results/versions/v0.8.0.md#prompt-lookup-governor-gb10-2026-10-02` with the harness, prompts, three matrices, the load log and the width costs; `docs/benchmarks.md` links it.
 
 ## 3. How Gated Decides
 

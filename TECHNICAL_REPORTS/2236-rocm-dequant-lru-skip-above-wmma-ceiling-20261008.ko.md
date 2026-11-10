@@ -4,7 +4,7 @@
 
 **상태**: gfx1151 호스트(ROCm/HIP)에서 구현 및 검증 완료. 브랜치 커밋 `8964f610`(코드)와 `79a8c9bb`(문서), origin/main `6dbfe7d7` 위로 리베이스, 전체 `make verify-rocm` 게이트 통과 후 머지. #2151을 닫음. 후속: #2232.
 
-**언어**: HIP/C++(ROCm 오버레이 `qmm.hip`, `rocm.h`, `no_rocm.cpp`; mlxcel-core 브리지 `mlx_cxx_bridge.cpp`, `mlx_cxx_bridge.h`), Rust(mlxcel-core `lib.rs`, 신규 `rocm_qmm_cache.rs`; 신규 `tests/rocm_qmm_dequant_cache.rs`), Markdown(`LOCAL_FIXES.md`, `docs/environment-variables.md`, `docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md`)
+**언어**: HIP/C++(ROCm 오버레이 `qmm.hip`, `rocm.h`, `no_rocm.cpp`; mlxcel-core 브리지 `mlx_cxx_bridge.cpp`, `mlx_cxx_bridge.h`), Rust(mlxcel-core `lib.rs`, 신규 `rocm_qmm_cache.rs`; 신규 `tests/rocm_qmm_dequant_cache.rs`), Markdown(`LOCAL_FIXES.md`, `docs/environment-variables.md`, `docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-qmm-route-gfx1151-2026-09-30`)
 
 **위험도**: 낮음. 상한으로 라우팅된 GEMM은 이전과 같은 dequantize 커널과 같은 hipBLASLt GEMM을 실행합니다. 캐시 조회와 삽입만 건너뛰며, logit trace는 바이트 단위로 동일합니다. 캐시 경로를 쓰는 f16과 비 WMMA 호출자는 캐시를 그대로 씁니다. 새 카운터는 dequantize 경로의 GEMM마다 한 번 올리는 relaxed atomic이고, 캐시 리팩터링은 기존 static들을 구조체 하나로 옮길 뿐 축출 규칙은 바꾸지 않습니다.
 
@@ -43,7 +43,7 @@ prefill은 forward pass마다 각 projection을 한 번씩 건드리고, 모델�
 | `mlxcel-core/cpp/mlx_cxx_bridge.{cpp,h}` | `rocm_dequant_cache_stats()`가 일곱 값을 `rust::Vec<uint64_t>`로 반환. `MLXCEL_BRIDGE_ROCM_BACKEND`가 없으면 0 일곱 개 |
 | `mlxcel-core/src/lib.rs`, `rocm_qmm_cache.rs`(신규) | FFI 선언과 `DequantCacheStats`, `dequant_cache_stats()`를 담은 `pub mod rocm_qmm_cache`. 단위 테스트 `stats_are_zero_off_rocm` |
 | `tests/rocm_qmm_dequant_cache.rs`(신규) | ROCm에서 케이스 4개를 각각 자식 프로세스 하나로 실행 |
-| `LOCAL_FIXES.md` 항목 29, `docs/environment-variables.md`, `docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md` | 새 동작, stats 변수, 날짜가 붙은 측정 섹션 |
+| `LOCAL_FIXES.md` 항목 29, `docs/environment-variables.md`, `docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-qmm-route-gfx1151-2026-09-30` | 새 동작, stats 변수, 날짜가 붙은 측정 섹션 |
 
 커밋은 두 개입니다. 코드 변경(`8964f610`)과 측정 기록(`79a8c9bb`)입니다. 파일 11개, 812줄 추가, 53줄 삭제.
 
@@ -119,7 +119,7 @@ Metal과 CUDA는 영향이 없습니다. 변경은 ROCm 오버레이에 있고, 
 
 - **`LOCAL_FIXES.md` 항목 29.** LRU가 prefill에서 hit하지 않으면서 마지막 항목을 살려 둔다고 적은 문장이 이제 `QmmRoute::DequantGemmAboveWmmaCeiling`, Gemma 3 4B 수치(변경 전 조회 340번에 hit 0번, 230 MiB 캐시됨; 변경 후 bypass 340번, 빈 캐시, prefill 후 active 2.80에서 2.56 GB, peak 변화 없음), 카운터, `dequant_cache_stats()`, `MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1`, 새 테스트를 설명합니다.
 - **`docs/environment-variables.md`.** `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` 설명에 `MLX_ROCM_WMMA_QMM_MAX_M` 위로 보내진 bf16 GEMM은 캐시를 쓰지 않는다는 내용이 추가되었고, `MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1`이 문서화되었습니다.
-- **`docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md`.** "2026-10-07: the dequantized-weight cache above the WMMA ceiling (issue #2151)" 섹션이 추가되어 방법, 두 표, logit 확인, 확인 실행을 담습니다. 세 번째 Gemma 변경 전 실행은 첫 실행이 하네스에서 실패해 2026-10-08에 했다는 점, 그리고 리베이스된 헤드에서 Gemma의 종료 시 active memory(2.56 GB, `87538835`에서는 2.73 GB)가 main의 변화와 함께 움직였고 그 차이를 분리하지 않았다는 점도 적혀 있습니다.
+- **`docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-qmm-route-gfx1151-2026-09-30`.** "2026-10-07: the dequantized-weight cache above the WMMA ceiling (issue #2151)" 섹션이 추가되어 방법, 두 표, logit 확인, 확인 실행을 담습니다. 세 번째 Gemma 변경 전 실행은 첫 실행이 하네스에서 실패해 2026-10-08에 했다는 점, 그리고 리베이스된 헤드에서 Gemma의 종료 시 active memory(2.56 GB, `87538835`에서는 2.73 GB)가 main의 변화와 함께 움직였고 그 차이를 분리하지 않았다는 점도 적혀 있습니다.
 
 ## 6. 검증
 

@@ -37,11 +37,16 @@ run_case manifest-json-passes 0 "OK" manifest.json '{}' "" ""
 run_case server-log-fails 1 "server log under benchmark data" server-a-r1.log "line" "" ""
 run_case build-log-fails 1 "build log under benchmark data" final-clippy.log "line" "" ""
 run_case empty-file-fails 1 "empty file under benchmark data" greedy.err "" "" ""
-run_case cited-log-passes 0 "OK" server.log "line" "$data/server.log"$'\n' ""
+run_case cited-log-cannot-return 1 "exception lists must stay empty" server.log "line" "$data/server.log"$'\n' ""
 run_case stale-entry-fails 1 "stale allowlist entry" results.csv $'arm,decode\n' "$data/server.log"$'\n' ""
 run_case raw-jsonl-fails 1 "raw record stream" run.jsonl '{}' "" ""
-run_case harness-jsonl-passes 0 "OK" harness/prompts.jsonl '{}' "" ""
-run_case raw-jsonl-baselined-passes 0 "OK" run.jsonl '{}' "" "$data/run.jsonl"$'\n'
+run_case harness-jsonl-fails 1 "raw record stream" harness/prompts.jsonl '{}' "" ""
+run_case stdout-capture-fails 1 "raw output capture" driver.out 'output' "" ""
+run_case stderr-capture-fails 1 "raw output capture" driver.stderr 'error' "" ""
+# The result root and sibling campaign directories must not bypass the data/ gate.
+run_case root-jsonl-fails 1 "raw record stream" ../../root.jsonl '{}' "" ""
+run_case sibling-log-fails 1 "raw output capture" ../../campaign/trace.log 'trace' "" ""
+run_case raw-jsonl-baseline-cannot-grow 1 "exception lists must stay empty" run.jsonl '{}' "" "$data/run.jsonl"$'\n'
 run_case raw-jsonl-cannot-be-allowlisted 1 "raw record stream" run.jsonl '{}' "$data/run.jsonl"$'\n' ""
 run_case stale-baseline-fails 1 "stale baseline entry" results.csv $'arm,decode\n' "" "$data/run.jsonl"$'\n'
 

@@ -39,7 +39,7 @@ PR #1254는 배치 가능 타깃의 단일 요청 MTP 페어링을 M3 Ultra에�
 | `src/server/batch/scheduler.rs` | 거부 경로 주석을 새 정책에 맞게 갱신. |
 | `scripts/bench_speculative.sh`, `scripts/bench_block_width.sh` | 두 스크립트에 `gemma31b` 항목 추가. 게이트가 관장하는 페어링에 프로토콜이 닿을 수 있게 되었다. |
 | `docs/benchmarks.md`, `docs/environment-variables.md` | 31B 절을 측정값으로 재작성. 이 페어링의 속도 향상이 B>1 윈도에서 나오며 단일 스트림 수용률이 너무 낮다는 서술은 사실과 달라 삭제. |
-| `docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md` | 날짜가 붙은 새 기록. 환경, 세 프롬프트 표, 폭 스윕, 라운드 비용 적합, 실제 디스패치 경로 검증, 측정하지 못한 항목의 명시. |
+| `docs/benchmark_results/versions/v0.6.0.md#mtp-b1-gate-m3ultra-2026-08-20` | 날짜가 붙은 새 기록. 환경, 세 프롬프트 표, 폭 스윕, 라운드 비용 적합, 실제 디스패치 경로 검증, 측정하지 못한 항목의 명시. |
 
 ## 4. 리뷰 발견 사항
 

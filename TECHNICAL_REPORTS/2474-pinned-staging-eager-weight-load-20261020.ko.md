@@ -70,7 +70,7 @@ registry는 이제 `array_weak_ref` / `array_weak_upgrade`로 weak reference를 
 
 ## 4. 측정 결과 (GB10)
 
-`qwen3.8-27B-4bit`, 2토큰 프롬프트, page cache와 JIT cache 모두 warm, 6회 중앙값(교차 2라운드). 전체 기록은 `docs/benchmark_results/weight-materialization-gb10-2026-10-20.md`.
+`qwen3.8-27B-4bit`, 2토큰 프롬프트, page cache와 JIT cache 모두 warm, 6회 중앙값(교차 2라운드). 전체 기록은 `docs/benchmark_results/versions/v0.8.0.md#weight-materialization-gb10-2026-10-20`.
 
 | 지표 | 변경 전 | 변경 후 |
 |---|---|---|
@@ -136,5 +136,5 @@ OLMoE-1B-7B(raw bf16, expert 텐서 3,072개 전부를 loader가 재적층): pea
 
 ## 7. 관련 항목
 
-- 이슈 #1564(이 PR이 종결). `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md`(#1545)가 V100 기준선을 측정하고 세 후보를 제시했다.
+- 이슈 #1564(이 PR이 종결). `docs/benchmark_results/versions/v0.7.0.md#volta-ttft-fixed-cost-2026-09-01`(#1545)가 V100 기준선을 측정하고 세 후보를 제시했다.
 - 새 환경 변수: `MLXCEL_WEIGHT_MATERIALIZATION`(기본 `eager`, `lazy`), `MLXCEL_CUDA_PINNED_LOAD`(`0`이면 비활성), `MLXCEL_ROCM_PINNED_LOAD`(`0`이면 비활성). `MLXCEL_PROFILE_TTFT`에 `[TTFT] load` 줄과 업로드 카운터가 CUDA/ROCm 모두에 추가됐다.

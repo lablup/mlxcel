@@ -1,6 +1,6 @@
 # GB10에서 MLX의 CUDA 그래프 예산을 올리는 문제: 패밀리별로 측정하고, 하나만 기본값으로
 
-이슈 #1798. 호스트 GB10 (sm_121, DGX Spark), MLX 핀 `81ba1c6a`, CUDA 릴리스 빌드, 툴체인 1.97.1, 측정 바이너리의 소스 트리 `d2b60c8e`. 실행별 원시 데이터와 하네스를 포함한 전체 측정 기록은 `docs/benchmark_results/cuda-graph-budget-gb10-2026-09-12.md`와 그 `data/` 디렉터리에 있다.
+이슈 #1798. 호스트 GB10 (sm_121, DGX Spark), MLX 핀 `81ba1c6a`, CUDA 릴리스 빌드, 툴체인 1.97.1, 측정 바이너리의 소스 트리 `d2b60c8e`. 실행별 원시 데이터와 하네스를 포함한 전체 측정 기록은 `docs/benchmark_results/versions/v0.8.0.md#cuda-graph-budget-gb10-2026-09-12`와 그 `data/` 디렉터리에 있다.
 
 ## 배경
 

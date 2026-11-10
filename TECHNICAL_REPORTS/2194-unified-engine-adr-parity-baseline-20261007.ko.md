@@ -32,7 +32,7 @@ CLI와 서버는 서로 다른 루프로 decode한다. 모델 forward와 토큰 
   - 결과로 `identical`을 출력하거나, 처음 갈라진 위치와 양쪽 토큰 id를 출력한다. `--expect-identical`을 주면 갈라졌을 때 종료 코드 1로 끝난다.
 - **`mlxcel-bench-engine`(`make bench-engine`)과 `scripts/engine_bench_rounds.py`**: 두 경로의 단일 스트림 TTFT와 decode 속도를 256토큰과 8192토큰 프롬프트에서 잰다. 청크 크기와 저장소를 인자로 받고, 측정은 라운드마다 순서를 바꾸며 번갈아 돌리고 null arm을 둔다.
 - **`src/server/engine_probe`**: `start_server`와 같은 방식으로 실제 서버 구성을 HTTP만 빼고 띄운다.
-- **기준선 결과**: `docs/benchmark_results/unified-engine-baseline-gb10-2026-10-07.md`와 원시 기록.
+- **기준선 결과**: `docs/benchmark_results/versions/v0.8.0.md#unified-engine-baseline-gb10-2026-10-07`와 원시 기록.
 
 ## 3. 기술적 선택과 그 이유
 

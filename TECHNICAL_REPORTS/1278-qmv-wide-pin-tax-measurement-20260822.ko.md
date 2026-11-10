@@ -77,10 +77,10 @@ Qwen 쪽 주장은 손댈 데가 없었다. `src/models/qwen3_5.rs:3388`은 `sha
 | `scripts/bench_qmv_wide_pin.sh` | 신규. 두 arm을 모두 구동하는 ABBA boot 드라이버. `sweep`은 drafter 없이 wide 고정과 narrow 고정 boot를 번갈아 띄우고, `mixed`는 gate 레시피를 번갈아 쓰면서 boot마다 exactness-gate 로그 줄을 grep해 arm 정체를 증거로 남긴다. |
 | `scripts/bench_qmv_pin_mixed.py` | 신규. 혼합 워크로드 클라이언트. 보고 대상은 classic decode rate이고, MTP 스트림이 window의 95% 이상을 디코드하며 지나가지 않은 window는 무효 처리한다. |
 | `scripts/bench_serving_concurrency.py` | `content`와 나란히 `reasoning_content` delta를 센다. |
-| `docs/benchmark_results/qmv-wide-pin-tax-m3ultra-2026-08-22.md` | 신규. 제외된 오염 cell과 gate 레시피 검증을 포함한 측정 기록. |
+| `docs/benchmark_results/versions/v0.6.0.md#qmv-wide-pin-tax-m3ultra-2026-08-22` | 신규. 제외된 오염 cell과 gate 레시피 검증을 포함한 측정 기록. |
 | `docs/benchmarks.md` | 기록을 링크하고, fast row 재현 레시피와 declining probe 문장을 #1199 이후 retry 순서에 맞게 고친다. |
 | `docs/environment-variables.md` | `MLXCEL_MTP_ALLOW_INEXACT` 행을 정정하고 빠져 있던 `MLXCEL_QMV_WIDE` 행을 추가한다. |
-| `docs/benchmark_results/mtp-drafter-step-profile-m5max-2026-08-17.md` | 재현 레시피가 #1199 retry보다 앞선다는 날짜 표기 주석. |
+| `docs/benchmark_results/versions/v0.5.2.md#mtp-drafter-step-profile-m5max-2026-08-17` | 재현 레시피가 #1199 retry보다 앞선다는 날짜 표기 주석. |
 | `.gitignore` | 드라이버가 쓰는 원시 `bench-results/` 실행 디렉터리를 무시한다. |
 
 Rust 소스가 바뀌지 않았으므로 되돌아갈 런타임 동작 변화도 없다. 검증은 두 Python 하네스에 대한 `python3 -m py_compile`, 드라이버에 대한 `bash -n`, 그리고 측정 실행 자체였다.

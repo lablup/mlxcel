@@ -22,7 +22,7 @@ On Meta-Llama-3.1-8B-Instruct-4bit, the batch-4 ~1K server decode step went from
 
 ### 1.1 The symptom
 
-The PR #2103 results (`docs/benchmark_results/rocm-paged-attention-gfx1151-2026-10-05.md`, `mlxcel-server --parallel 4 --ctx-size 131072`, 128 decode tokens per request, medians of 3) gave per-request decode of 5.6 to 6.1 tok/s at batch 4 ~1K, 10.2 to 10.5 at ~4K and 10.9 to 13.9 at ~16K, with either paged-attention arm. Single-stream `bench_decode` on the same model is about 35 to 37 tok/s.
+The PR #2103 results (`docs/benchmark_results/versions/v0.8.0.md#rocm-paged-attention-gfx1151-2026-10-05`, `mlxcel-server --parallel 4 --ctx-size 131072`, 128 decode tokens per request, medians of 3) gave per-request decode of 5.6 to 6.1 tok/s at batch 4 ~1K, 10.2 to 10.5 at ~4K and 10.9 to 13.9 at ~16K, with either paged-attention arm. Single-stream `bench_decode` on the same model is about 35 to 37 tok/s.
 
 The page attributed the gap to waiting while the other requests prefill, without measuring it. The issue pointed out that three 1K prefills at about 1000 tok/s account for about 3 s of a roughly 21 s decode window, so that explanation was incomplete. It also noted that the rate rising with context is not what a per-step compute cost would produce.
 
@@ -63,7 +63,7 @@ The same rows passed as `[B, K]` already ran as one product. Only the 3-D layout
 | `scripts/benchmark_paged_decode_production.sh` | Passes `--metrics` |
 | `tests/test_bench_serving_concurrency.py` (new) | 12 tests of the parsing and delta arithmetic with canned `/metrics` text |
 | `docs/environment-variables.md`, `docs/benchmarks.md` | The small-row exception for `MLX_ROCM_WMMA_QMM`; the `--metrics` output |
-| `docs/benchmark_results/rocm-batched-decode-gfx1151-2026-10-08.md` and its data directory (new) | Results page, raw outputs, guard logs, traces and harness scripts |
+| `docs/benchmark_results/versions/v0.8.0.md#rocm-batched-decode-gfx1151-2026-10-08` and its data directory (new) | Results page, raw outputs, guard logs, traces and harness scripts |
 
 Three commits: the harness extension (`3fd1654d`, 5 files, 374 insertions and 19 deletions), the fix (`895592d3`, 5 files, 436 insertions and 3 deletions) and the results page with data (`474163e3`, 159 files, 12,575 insertions). In total 169 files, 13,385 insertions and 22 deletions.
 
@@ -150,7 +150,7 @@ Metal and CUDA are not affected: the change is in the ROCm overlay, ROCm-gated t
 - **`docs/environment-variables.md`.** The `MLX_ROCM_WMMA_QMM` paragraph and table row now say that, unset, 4- and 8-bit GEMMs of at most 8 rows with biases skip the WMMA kernel and take the qmv / dequantize crossover, why (one weight pass for all rows; WMMA 7 to 8 times the one-row GEMV on gfx1151), that a batched decode step's `[B, 1, K]` is such a GEMM, and that `MLX_ROCM_WMMA_QMM=1` still forces the kernel.
 - **`docs/benchmarks.md`.** The batched serving ladder command now passes `--metrics`, with a note on the per-level decode steps, occupancy, prefill chunks, mixed steps and decode step ms it prints.
 - **`LOCAL_FIXES.md` item 43.** The fold, the route change, the measurements, the test, and the fork policy: kept in mlxcelverse, not proposed upstream.
-- **Results page** `docs/benchmark_results/rocm-batched-decode-gfx1151-2026-10-08.md`: environment, decode step table, GPU-busy versus host-gap split, model-level before and after kernels, the probe tables, the bf16 section, the candidate verdicts, the ~16K analysis and the reproduce commands. The data directory holds guard logs for each session, raw outputs, kernel stats and the harness scripts.
+- **Results page** `docs/benchmark_results/versions/v0.8.0.md#rocm-batched-decode-gfx1151-2026-10-08`: environment, decode step table, GPU-busy versus host-gap split, model-level before and after kernels, the probe tables, the bf16 section, the candidate verdicts, the ~16K analysis and the reproduce commands. The data directory holds guard logs for each session, raw outputs, kernel stats and the harness scripts.
 
 ## 6. Verification
 

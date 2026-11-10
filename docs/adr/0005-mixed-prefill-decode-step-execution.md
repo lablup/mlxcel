@@ -58,7 +58,7 @@ saving  =  D_lin / (C/P + D)
 
 where `C` is the chunk size, `P` the prefill throughput at that chunk, `D` a decode step's wall time, and `D_lin` the part of `D` that is not attention. The denominator is one co-scheduled tick under (a) with the starvation fixed; the numerator is what (b) removes from it.
 
-Grounding the terms in already-published in-tree measurements, not in a run made for this ADR: `docs/benchmark_results/longprompt-prefill-gb10.md` puts llama-3.1-8b-4bit at 3286 tok/s prefill at 512 tokens and 1666 tok/s averaged over 8192, so a 512-token chunk costs roughly 160 ms early in a prompt and 310 ms or more late in one, since the average hides an attention term that grows with position. A batched decode step on the same class of model is tens of milliseconds. Across those ranges `saving` spans roughly 3% at the pessimistic end to about 20% at the optimistic one, and the optimistic end pairs the fastest chunk with the slowest decode step, which is not a combination one machine produces. At the shipped 512-token chunk it sits toward the low end, and it falls further as the chunk grows, because `C/P` grows with `C` while `D_lin` does not.
+Grounding the terms in already-published in-tree measurements, not in a run made for this ADR: `docs/benchmark_results/versions/v0.4.0.md#longprompt-prefill-gb10` puts llama-3.1-8b-4bit at 3286 tok/s prefill at 512 tokens and 1666 tok/s averaged over 8192, so a 512-token chunk costs roughly 160 ms early in a prompt and 310 ms or more late in one, since the average hides an attention term that grows with position. A batched decode step on the same class of model is tens of milliseconds. Across those ranges `saving` spans roughly 3% at the pessimistic end to about 20% at the optimistic one, and the optimistic end pairs the fastest chunk with the slowest decode step, which is not a combination one machine produces. At the shipped 512-token chunk it sits toward the low end, and it falls further as the chunk grows, because `C/P` grows with `C` while `D_lin` does not.
 
 That upper bound is worth taking seriously rather than rounding away, and it still does not carry the decision. A 20% saving would apply only to admission windows, which are a small fraction of serving wall time; `--prefill-chunk-size` reaches the same frontier from the other direction for free; and this epic has now watched op-level wins shrink on contact with their call sites more than once (#899 measured 2.78x fused and 1.15x end to end). A bound of that size does not justify a per-family ragged execution path. It does justify measuring both terms rather than asserting them, which is what the harness below does.
 
@@ -152,13 +152,13 @@ Run under `caffeinate -i` and let the machine cool between arms; Apple Silicon d
 
 ### Results
 
-M1 Ultra, `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit`, `--parallel 8 --prefill-chunk-size 512`. Full table: `docs/benchmark_results/mixed-step-prototype-m1ultra-2026-08-03.md`.
+M1 Ultra, `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit`, `--parallel 8 --prefill-chunk-size 512`. Full table: `docs/benchmark_results/versions/v0.5.0.md#mixed-step-prototype-m1ultra-2026-08-03`.
 
 **Cell 1, the starvation, is confirmed on hardware.** The machine was carrying load from unrelated work during the window available for this run, so the ITL harness above would have produced numbers that say more about the load than about the scheduler. The claim in cell 1 is about *progress*, not latency, so it was measured as a counter comparison instead, via `scripts/bench/starvation_probe.sh`: sample `mlxcel_batch_prefill_chunks_total` every 5 s while four decode streams run and one ~10k-token prompt is admitted. Whether a counter is pinned or advancing does not care how busy the machine is.
 
 Baseline: the prefill sits at chunk 1 of 19 for 20 s while decode advances 138 → 394 steps, resumes only once decode drains to its ceiling, and completes at t=40 s. Prototype: chunks advance concurrently from the first sample and all 19 are done at t=20 s, with decode reaching the same 399 steps. `mlxcel_batch_mixed_steps_total` is 0 in the baseline arm and 18 in the prototype arm, so both arms are what they claim to be. The follow-up issue is therefore justified on measurement, not on code reading.
 
-**Cell 2, the ITL price of interleaving, is now measured (issue #1011).** It was left open here because it is the fairness policy's tuning input and belongs to whichever policy ships; that policy shipped as `--prefill-grant-interval N`, which grants the parked prefill one tick after every `N` contended decode ticks. Full table, five intervals times three interleaved repeats: `docs/benchmark_results/prefill-fairness-m1ultra-2026-08-03.md`.
+**Cell 2, the ITL price of interleaving, is now measured (issue #1011).** It was left open here because it is the fairness policy's tuning input and belongs to whichever policy ships; that policy shipped as `--prefill-grant-interval N`, which grants the parked prefill one tick after every `N` contended decode ticks. Full table, five intervals times three interleaved repeats: `docs/benchmark_results/versions/v0.5.0.md#prefill-fairness-m1ultra-2026-08-03`.
 
 The result is a clean frontier rather than a single number, and it is predictable rather than empirical. One grant cycle is `N` decode ticks plus one chunk, so a `C`-chunk prompt takes `C * (N * D + P)` and the decoding streams' mean inter-token latency over the window is `D + P / N`. On a quiet M1 Ultra, `D` = 58 ms and `P` = 775 ms for a 512-token chunk, and the fit is within 4% at every interval measured. At the shipped default of 16 the admitted request's TTFT falls from 51 s (and unbounded, since the disabled arm's figure is just however long the batch takes to drain) to 23.8 s with a spread of 0.3 s across a 4x range of machine load, and the decoding streams pay 1.6 to 1.8x mean inter-token latency for the duration of the admission window only. Their p50 does not move at all.
 
@@ -186,11 +186,11 @@ The #1011 quiet-machine run settles that last point: `C/P` is 775 ms per 512-tok
 ## References
 
 - Issue #908, this spike. Epic #909. Issue #1011, the fairness policy that fills cell 2 and fixes the starvation.
-- `docs/benchmark_results/prefill-fairness-m1ultra-2026-08-03.md`, the interval sweep behind cell 2.
+- `docs/benchmark_results/versions/v0.5.0.md#prefill-fairness-m1ultra-2026-08-03`, the interval sweep behind cell 2.
 - `src/server/batch/tick_policy.rs`, the extracted policy and the `MLXCEL_MIXED_STEP` gate.
 - `src/server/batch/tick_policy_tests.rs`, the starvation pin and the exhaustive default-off parity proof.
 - `scripts/bench_mixed_step_admission.py`, the admission-during-decode harness.
 - `docs/CONTINUOUS_BATCHING.md`, scheduler flags and the chunked-prefill contract.
-- `docs/benchmark_results/longprompt-prefill-gb10.md`, the compute-bound prefill throughput the `saving` formula is grounded in.
+- `docs/benchmark_results/versions/v0.4.0.md#longprompt-prefill-gb10`, the compute-bound prefill throughput the `saving` formula is grounded in.
 - ADR 0001, the precedent for a measured adopt/defer decision on an execution-path change, and the Apple-Silicon unified-memory reasoning that its Phase 6 outcome confirmed.
 - `examples/sparse_paged_decode_bench.rs`, the `NOT COMPARABLE` guard pattern the harness follows.

@@ -17,7 +17,7 @@
 | `tests/cuda_custom_kernel_disk_cache.rs` (신규) | 세 프로세스 캐시 테스트 (채우기, 웜 히트, 손상된 캐시) |
 | `src/models/switch_layers.rs`, `src/lib/mlxcel-core/src/lib.rs` | 게이트와 캐시 키에 대한 doc 주석 |
 | `docs/environment-variables.md`, `docs/installation.md` | `MLXCEL_FUSED_MOE` 계열 목록에 `granitemoehybrid` 추가; 캐시 기본 경로와 커스텀 커널 포함 여부 문서화 |
-| `docs/benchmark_results/fused-moe-jit-cache-gb10-2026-10-22.md` (신규) | 측정 기록 |
+| `docs/benchmark_results/versions/v0.8.0.md#fused-moe-jit-cache-gb10-2026-10-22` (신규) | 측정 기록 |
 
 ## 2. 기술적 선택과 그 이유
 

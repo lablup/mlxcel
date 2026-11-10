@@ -39,7 +39,7 @@ The tool that measures the matrix, `examples/rejection_sampling_microbench.rs`, 
 | `sampling_rejection_tests.rs` | The cap is pinned per build; the routing matrix covers 65536, 128256, 151936 and 152064 per build; the large-vocabulary decline test picks a vocabulary above the build's cap. |
 | `examples/rejection_sampling_microbench.rs` | Vocabularies 128256 and 151936 added; `--dtype f32\|bf16\|f16` and `--config <label>` options; prints the build's cap; port gate fixed. |
 | `src/bin/bench_decode.rs`, `scripts/bench_decode.sh` | New `--top-k` option (filename tag `_k<K>`, validated). |
-| Docs | New results page `docs/benchmark_results/rocm-rejection-joint-cap-gfx1151-2026-10-07.md`, linked from `rocm-samplers-gfx1151-2026-10-05.md`. The ROCm sampled-decode row in `installation.md` lists which filter combinations route at the Llama 3 and Qwen vocabularies. The `MLXCEL_SAMPLING_REJECTION` row in `environment-variables.md` is updated. |
+| Docs | New results page `docs/benchmark_results/versions/v0.8.0.md#rocm-rejection-joint-cap-gfx1151-2026-10-07`, linked from `rocm-samplers-gfx1151-2026-10-05.md`. The ROCm sampled-decode row in `installation.md` lists which filter combinations route at the Llama 3 and Qwen vocabularies. The `MLXCEL_SAMPLING_REJECTION` row in `environment-variables.md` is updated. |
 | `benchmarks/` | Raw CSVs: three f32 microbenchmark runs, three bf16 runs, the end-to-end pairs of the measurement build, and the before/after pairs of the final build. |
 
 ## 3. Design

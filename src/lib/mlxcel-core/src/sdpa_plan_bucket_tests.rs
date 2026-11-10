@@ -31,7 +31,7 @@
 //! Which dispatch a given call took is not observable from Rust, so these tests
 //! do not assert it. That evidence is the per-call trace behind
 //! `MLXCEL_SDPA_PLAN_DEBUG=1`, recorded in
-//! `docs/benchmark_results/sdpa-plan-cache-bucket-gb10-2026-09-12.md` beside
+//! `docs/benchmark_results/versions/v0.8.0.md#sdpa-plan-cache-bucket-gb10-2026-09-12` beside
 //! the end-to-end token-id identity, which is the real gate.
 //!
 //! Run:

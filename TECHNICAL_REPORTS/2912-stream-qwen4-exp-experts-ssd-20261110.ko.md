@@ -61,7 +61,7 @@ Qwen3.8-Flash-Next 체크포인트는 대부분의 용량을 MoE 레이어당 51
 |------|------|----------------|------|
 | Decode | 42.0 tok/s (토큰당 23.8 ms) | 25.6 tok/s (토큰당 39.1 ms) | 토큰당 약 +15.3 ms, 1.64배 |
 
-레이어당 약 0.32 ms다. 부하가 있는 호스트의 수치이므로 벤치마크는 아니다. `docs/benchmark_results/expert-streaming-sync-cost-m3ultra-2026-11-10.md` 참고. 실제 miss가 있는 스트리밍 처리량은 짝지은 측정이 없다.
+레이어당 약 0.32 ms다. 부하가 있는 호스트의 수치이므로 벤치마크는 아니다. `docs/benchmark_results/versions/unreleased.md#expert-streaming-sync-cost-m3ultra-2026-11-10` 참고. 실제 miss가 있는 스트리밍 처리량은 짝지은 측정이 없다.
 
 ### 2.3 호환성/의존성 관점
 

@@ -43,8 +43,8 @@ Six files, 579 insertions, 2 deletions.
 | `src/lib/mlxcel-core/src/generate.rs` | `TtftPhases`, `ttft_profile_enabled()`, and `MLXCEL_PROFILE_TTFT` instrumentation on both `--profile` paths |
 | `src/lib/mlxcel-core/src/ttft_profile_tests.rs` | Six host-only unit tests over the phase arithmetic |
 | `src/lib/mlxcel-core/src/lib.rs` | Wires the test module |
-| `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md` | The measurement record |
-| `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` | #1545 post-program row, new method rule 7, confirming-test outcome row |
+| `docs/benchmark_results/versions/v0.7.0.md#volta-ttft-fixed-cost-2026-09-01` | The measurement record |
+| `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31` | #1545 post-program row, new method rule 7, confirming-test outcome row |
 | `docs/environment-variables.md` | `MLXCEL_PROFILE_TTFT` |
 
 No device code and no dispatch. No cubin anywhere in the tree changes.
@@ -187,8 +187,8 @@ Two failures on this host are unrelated to this change and match already-filed i
 ## References
 
 - Issue #1545, and epic #1536 whose Phase 4 this is.
-- `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md`, the full record.
-- `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` (#1538), the baseline this measures against.
+- `docs/benchmark_results/versions/v0.7.0.md#volta-ttft-fixed-cost-2026-09-01`, the full record.
+- `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31` (#1538), the baseline this measures against.
 - #1539, whose `qmv` float accumulators set the decode rate reproduced here.
 - #1564, the follow-up this work's verdict required.
 - #818, the CUDA graph cache capacity default.

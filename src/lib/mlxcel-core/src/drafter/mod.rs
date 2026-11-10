@@ -665,7 +665,7 @@ fn peek_configured_block_size_for(model_path: &Path, expected_model_type: &str) 
 /// the PR's own measurement showed block 3 (drafter-configured)
 /// outperforming block 4 (the flat constant) on the published pairing
 /// (16.48 vs 13.81 tok/s, 0.591 vs 0.465 acceptance, see
-/// `docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`), so shipping
+/// `docs/benchmark_results/versions/v0.5.2.md#qwen38-mtp-m1ultra-2026-08-16`), so shipping
 /// the flat constant as the silent default was shipping the slower
 /// measured configuration.
 ///

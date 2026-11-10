@@ -101,7 +101,7 @@ Beyond the logits materialization and kill-switch scope fixes: a failed HTTP-sid
 | New env vars | 1 (`MLXCEL_DISABLE_BOUNDARY_SNAPSHOT`) |
 | New store concept | `SnapshotOrigin` (per-producer supersede chains) |
 | Total tokens forwarded per prefill | Unchanged |
-| Benchmark record | `docs/benchmark_results/history-boundary-snapshot-m1ultra-2026-08-14.md` |
+| Benchmark record | `docs/benchmark_results/versions/v0.5.1.md#history-boundary-snapshot-m1ultra-2026-08-14` |
 
 ### Changes by Area
 

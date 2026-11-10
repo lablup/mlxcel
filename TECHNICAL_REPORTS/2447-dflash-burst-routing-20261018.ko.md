@@ -13,7 +13,7 @@
 
 `execute_prefill_action`은 기본값 `--max-batch-prefill 4`에서 큐에 2개 이상이 있으면 `execute_batched_prefill`로 보냈다. `try_speculative_burst`를 호출하는 곳은 `execute_prefill`뿐이므로, 큐에 쌓인 요청은 B = 1이든 배치든 speculative decoding을 전혀 받지 못했다. burst에 도달하려면 `--max-batch-prefill 1`이 필요했다.
 
-이력을 보면 의도된 동작이 아니다. 배치 prefill(`60e50b0c`)이 burst(`6a816947`)보다 먼저 존재했고, burst의 윈도우 수집기는 바로 이런 큐 행을 가져가며, `docs/benchmark_results/gemma4-mtp-batched-gb10-2026-10-07.md`가 이 누락을 기존 공백으로 적고 우회했다.
+이력을 보면 의도된 동작이 아니다. 배치 prefill(`60e50b0c`)이 burst(`6a816947`)보다 먼저 존재했고, burst의 윈도우 수집기는 바로 이런 큐 행을 가져가며, `docs/benchmark_results/versions/v0.8.0.md#gemma4-mtp-batched-gb10-2026-10-07`가 이 누락을 기존 공백으로 적고 우회했다.
 
 ### 1.2 Exactness probe (항목 3)
 

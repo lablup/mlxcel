@@ -42,7 +42,7 @@ PR #2029는 ROCm에서 Nemotron-H 체크포인트를 돌려보지 않은 채 Nem
 - **검사기.** `!metal_is_available() && !cuda_is_available()`로 쓰인 `ffi_tests` 게이트 두 개는 매크로와 GPU 백엔드가 없을 때의 반환으로 바뀌었고, `ffi_tests.rs`는 `BACKEND_ENUMERATION_TODO`에서 빠졌습니다.
 - **scan 그리드 수정.** `patches-rocm/mlx/backend/rocm/kernel_utils.hpp`의 `get_2d_grid_dims(shape, strides, divisor)`는 CUDA 백엔드처럼 `mlx/backend/common/utils.cpp`의 `get_2d_grid_dims_common`에 위임합니다. `LOCAL_FIXES.md` 22항, `tests/rocm_strided_scan.rs`.
 - **트레이스.** `benchmarks/logit_traces/rocm_gfx1151_c5fe9a16/`: 트레이스 16개(체크포인트 다섯 개의 w1, w8, w256, 그리고 `gemma-3-4b-it`의 `w8ctx1536`), METADATA, RUNS, SHA256SUMS, Metal 명령을 담은 README.
-- **문서.** `docs/benchmark_results/rocm-correctness-gfx1151-2026-09-30.md`, 2026-09-12 실행 문서와 `docs/installation.md`의 링크, `verify-rocm` 순서에 대한 Makefile 주석.
+- **문서.** `docs/benchmark_results/versions/v0.8.0.md#rocm-correctness-gfx1151-2026-09-30`, 2026-09-12 실행 문서와 `docs/installation.md`의 링크, `verify-rocm` 순서에 대한 Makefile 주석.
 
 ## 3. 기술적 결정
 

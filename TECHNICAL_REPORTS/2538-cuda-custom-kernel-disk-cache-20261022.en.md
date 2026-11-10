@@ -17,7 +17,7 @@ Issue #2492 reported granite-4.0-h-tiny-4bit decode on GB10 (sm_121) at about 57
 | `tests/cuda_custom_kernel_disk_cache.rs` (new) | Three-process cache test (populate, warm hit, damaged cache) |
 | `src/models/switch_layers.rs`, `src/lib/mlxcel-core/src/lib.rs` | Doc comments on the gate and on the cache key |
 | `docs/environment-variables.md`, `docs/installation.md` | `granitemoehybrid` added to the `MLXCEL_FUSED_MOE` family list; cache default and custom-kernel coverage documented |
-| `docs/benchmark_results/fused-moe-jit-cache-gb10-2026-10-22.md` (new) | Measurement record |
+| `docs/benchmark_results/versions/v0.8.0.md#fused-moe-jit-cache-gb10-2026-10-22` (new) | Measurement record |
 
 ## 2. Technical Decisions
 
