@@ -1,7 +1,7 @@
 # PR #2947: Count only decode-window tokens in the /metrics decode histogram
 
 **Date**: 2026-11-11
-**Status**: Completed (PR open as a draft; closes #2938; the full `make verify-test` and clippy run was still pending when this report was written)
+**Status**: Completed (closes #2938; `make verify-test` and workspace clippy pass)
 
 ## Executive Summary
 
@@ -40,13 +40,13 @@ A one-token completion has its only token come out of prefill, so its window hol
 
 ### 2.4 `mlxcel run` (`src/commands/run.rs`, commit `a04b39db`)
 
-The rate in the `[Generated N tokens in S s = R tok/s]` line now uses `decode_tok_per_sec(window_tokens, generation_only_ms)` when the result carries `Some`, and keeps the old `completion_tokens / seconds` for `None`. A grep of non-test sources found no other consumer that still divides `completion_tokens` by `generation_only_ms` to get a decode rate. The native timings already use N-1 since #2931, and the engine probe only forwards the milliseconds.
+When the result carries `Some(window_tokens)`, the summary line now reads `[Generated N tokens; decoded W in S s = R tok/s]` with R from `decode_tok_per_sec(W, generation_only_ms)`, so the printed numbers divide out. A `None` result keeps the old `[Generated N tokens in S s = R tok/s]` line and `completion_tokens / seconds`. Diffusion, Florence-2 and Nemotron-Parse one-shots stay on the `generate` flow (`one_shot_stays_on_generate`) and never reach this line. A grep of non-test sources found no other consumer that still divides `completion_tokens` by `generation_only_ms` to get a decode rate. The native timings already use N-1 since #2931, and the engine probe only forwards the milliseconds.
 
 ### 2.5 Docs
 
 - `docs/benchmarks.md` gains a paragraph under "How decode tok/s is counted" describing the histogram's inputs, the N-1 count, the skip cases and the unchanged llama counters.
 - The `/metrics` HELP text for `mlxcel_request_decode_tok_s` says it counts only tokens produced inside the decode window.
-- `CHANGELOG.md` has an Unreleased entry for the histogram change.
+- `CHANGELOG.md` has an Unreleased entry for the histogram change and the `mlxcel run` summary line.
 - `docs/llama-server-compat.md` is unchanged, because neither the `llamacpp:tokens_predicted_*` counters nor `timings.predicted_*` change.
 
 ## 3. Validation
@@ -63,7 +63,8 @@ Tests added or changed:
 | `florence2_worker_tests`, `nemotron_parse_worker_tests` (`result_reports_wall_time_without_a_decode_window`) | wall time, `None`, and an empty decode histogram after feeding the result to the recorder |
 | `metrics_llama_tests` | llama counter values unchanged with the new argument |
 
-- **Gate result: pending.** The full `make verify-test` and `cargo clippy --workspace --all-targets -- -D warnings` run was in progress in the worktree when this report was written. This report records no pass or fail for it.
+- **Gate result.** `make verify-test` (serial, CI-faithful) passed with 15405 tests and no failures, and `cargo clippy --workspace --all-targets --features metal,accelerate -- -D warnings` is clean.
+- **Real checkpoint.** `mlxcel run` on `mlx-community/Llama-3.2-1B-Instruct-4bit` with `-p` and `-n 64` printed `[Generated 64 tokens; decoded 63 in 0.26s = 240.46 tok/s]`, the 63 window tokens over the decode window. No `/metrics` scrape was recorded; the histogram path is covered by unit tests.
 - **No real-checkpoint measurement is recorded.** The PR body gives a procedure (one native `/completion` with `n_predict: 128` under `mlxcel-server --metrics`, then compare the change in `mlxcel_request_decode_tok_s_sum` with the response's `timings.predicted_per_second`), but no result from running it appears in the PR.
 - The `mlxcel run` change in `a04b39db` touches only `src/commands/run.rs` and adds no test.
 
@@ -95,12 +96,11 @@ Computing the rate through `decode_tok_per_sec` instead of a local expression me
 
 ## 5. Limits and Open Items
 
-- **The `mlxcel run` change is not in the PR body or CHANGELOG.** Both describe only the histogram. A user who compares a `run` rate before and after this PR sees it drop by 1/N without an entry explaining it.
-- **The `run` line no longer divides out.** It still prints `completion_tokens` and the window seconds next to a rate computed from N-1 tokens, so N / S no longer equals the printed rate. A single-token turn now prints 0.00 tok/s, where it used to print 1 / S whenever the window was nonzero.
-- **Size of the change in the histogram.** Each observation becomes (N-1)/N of its old value: 0.78% lower at N = 128 (the old value was 128/127, 0.79%, higher), 50% lower at N = 2. The PR body and CHANGELOG write "drops by (N-1)/N" next to those figures. (N-1)/N is the ratio of new to old. The drop itself is 1/N.
-- **Diffusion's count is a bound.** It does not reach the histogram, but `mlxcel run` on a diffusion model would print a rate based on it.
+- **A single-token `run` turn prints 0.00 tok/s.** Its decode window holds no tokens, which is the rule, but it used to print 1 / S whenever the window was nonzero.
+- **Size of the change in the histogram.** Each observation becomes (N-1)/N of its old value: 0.78% lower at N = 128 (the old value was 128/127, 0.79%, higher), 50% lower at N = 2.
+- **Diffusion's count is a bound.** Diffusion commits whole blocks, so its N-1 is a bound. It reaches neither the histogram nor the `mlxcel run` line today, so this matters only if either path starts consuming it.
 - **The producer claims in the builder comment are untested.** No test checks that the XLA or diffusion worker stamps the first-token instant the way the comment says.
-- **Gate pending and no real-checkpoint scrape**, see section 3.
+- **No real-checkpoint `/metrics` scrape**, see section 3.
 
 ## 6. Learning Points
 

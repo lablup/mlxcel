@@ -370,18 +370,31 @@ fn run_once(args: RunArgs) -> Result<()> {
     // Count only the tokens produced inside the timed window, the rule in
     // docs/benchmarks.md "How decode tok/s is counted". A producer without an
     // isolated decode window reports None and keeps the whole-call rate.
-    let rate = match turn.result.decode_window_tokens {
-        Some(window_tokens) => mlxcel_core::generate::decode_tok_per_sec(
-            window_tokens,
-            turn.result.generation_only_ms as f64,
-        ),
-        None if seconds > 0.0 => turn.result.completion_tokens as f64 / seconds,
-        None => 0.0,
-    };
-    println!(
-        "[Generated {} tokens in {seconds:.2}s = {rate:.2} tok/s]",
-        turn.result.completion_tokens
-    );
+    // The line names the window's token count so the printed numbers divide
+    // out.
+    match turn.result.decode_window_tokens {
+        Some(window_tokens) => {
+            let rate = mlxcel_core::generate::decode_tok_per_sec(
+                window_tokens,
+                turn.result.generation_only_ms as f64,
+            );
+            println!(
+                "[Generated {} tokens; decoded {window_tokens} in {seconds:.2}s = {rate:.2} tok/s]",
+                turn.result.completion_tokens
+            );
+        }
+        None => {
+            let rate = if seconds > 0.0 {
+                turn.result.completion_tokens as f64 / seconds
+            } else {
+                0.0
+            };
+            println!(
+                "[Generated {} tokens in {seconds:.2}s = {rate:.2} tok/s]",
+                turn.result.completion_tokens
+            );
+        }
+    }
     if let Some(spec) = turn.result.speculative.as_ref() {
         println!(
             "[Speculative {:?}: {} rounds, {}/{} drafted tokens accepted]",

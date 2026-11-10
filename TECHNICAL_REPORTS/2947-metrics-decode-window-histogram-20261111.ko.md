@@ -1,7 +1,7 @@
 # PR #2947: /metrics decode 히스토그램에서 decode window 안의 토큰만 계산
 
 **작성일**: 2026-11-11
-**상태**: 완료 (PR은 draft로 열려 있고 #2938을 닫음. 이 보고서를 작성할 때 전체 `make verify-test`와 clippy 실행은 아직 진행 중이었음)
+**상태**: 완료 (#2938을 닫음. `make verify-test`와 workspace clippy 통과)
 
 ## 요약
 
@@ -40,13 +40,13 @@ completion이 토큰 하나뿐이면 그 토큰은 prefill에서 나오므로 wi
 
 ### 2.4 `mlxcel run` (`src/commands/run.rs`, 커밋 `a04b39db`)
 
-`[Generated N tokens in S s = R tok/s]` 줄의 속도는 결과가 `Some`을 가지면 `decode_tok_per_sec(window_tokens, generation_only_ms)`를 쓰고, `None`이면 기존의 `completion_tokens / seconds`를 유지한다. 테스트가 아닌 소스를 grep한 결과, decode 속도를 얻으려고 `completion_tokens`를 `generation_only_ms`로 나누는 소비자는 더 없었다. native timings는 #2931부터 이미 N-1을 쓰고, engine probe는 밀리초 값만 전달한다.
+결과가 `Some(window_tokens)`를 가지면 요약 줄은 이제 `[Generated N tokens; decoded W in S s = R tok/s]`이고, R은 `decode_tok_per_sec(W, generation_only_ms)`이므로 출력된 수치가 맞아떨어진다. `None`이면 기존 `[Generated N tokens in S s = R tok/s]` 줄과 `completion_tokens / seconds`를 유지한다. diffusion, Florence-2, Nemotron-Parse의 one-shot은 `generate` 흐름에 남으므로(`one_shot_stays_on_generate`) 이 줄에 도달하지 않는다. 테스트가 아닌 소스를 grep한 결과, decode 속도를 얻으려고 `completion_tokens`를 `generation_only_ms`로 나누는 소비자는 더 없었다. native timings는 #2931부터 이미 N-1을 쓰고, engine probe는 밀리초 값만 전달한다.
 
 ### 2.5 문서
 
 - `docs/benchmarks.md`의 "How decode tok/s is counted"에 히스토그램의 입력, N-1 계산, 건너뛰는 경우, 바뀌지 않은 llama 카운터를 설명하는 문단이 추가되었다.
 - `mlxcel_request_decode_tok_s`의 `/metrics` HELP 문구가 decode window 안에서 생성된 토큰만 센다고 명시한다.
-- `CHANGELOG.md`의 Unreleased에 히스토그램 변경 항목이 있다.
+- `CHANGELOG.md`의 Unreleased에 히스토그램 변경과 `mlxcel run` 요약 줄 항목이 있다.
 - `llamacpp:tokens_predicted_*` 카운터와 `timings.predicted_*`가 바뀌지 않으므로 `docs/llama-server-compat.md`는 수정하지 않았다.
 
 ## 3. 검증
@@ -63,7 +63,8 @@ completion이 토큰 하나뿐이면 그 토큰은 prefill에서 나오므로 wi
 | `florence2_worker_tests`, `nemotron_parse_worker_tests` (`result_reports_wall_time_without_a_decode_window`) | wall time, `None`, recorder에 넣은 뒤 decode 히스토그램이 비어 있음 |
 | `metrics_llama_tests` | 새 인자를 넣어도 llama 카운터 값은 그대로 |
 
-- **게이트 결과: 대기 중.** 이 보고서를 작성할 때 worktree에서 전체 `make verify-test`와 `cargo clippy --workspace --all-targets -- -D warnings`가 실행 중이었다. 이 보고서는 그 통과 여부를 기록하지 않는다.
+- **게이트 결과.** `make verify-test`(직렬, CI와 같은 방식)가 15405개 테스트 모두 통과했고, `cargo clippy --workspace --all-targets --features metal,accelerate -- -D warnings`도 경고가 없다.
+- **실제 체크포인트.** `mlx-community/Llama-3.2-1B-Instruct-4bit`에서 `mlxcel run -p ... -n 64`가 `[Generated 64 tokens; decoded 63 in 0.26s = 240.46 tok/s]`를 출력했다. decode window 안의 63개 토큰을 window 시간으로 나눈 값이다. `/metrics` scrape는 기록하지 않았고, 히스토그램 경로는 단위 테스트가 다룬다.
 - **실제 체크포인트 측정 기록은 없다.** PR 본문은 절차를 제시한다(`mlxcel-server --metrics`에서 `n_predict: 128`로 native `/completion`을 한 번 보내고, `mlxcel_request_decode_tok_s_sum`의 변화량을 응답의 `timings.predicted_per_second`와 비교). 하지만 실행한 결과는 PR에 없다.
 - `a04b39db`의 `mlxcel run` 변경은 `src/commands/run.rs`만 수정하고 테스트를 추가하지 않는다.
 
@@ -95,12 +96,11 @@ Florence-2와 Nemotron-Parse는 모델이 소유한 하나의 호출 안에서 e
 
 ## 5. 한계와 남은 일
 
-- **`mlxcel run` 변경이 PR 본문과 CHANGELOG에 없다.** 둘 다 히스토그램만 설명한다. 이 PR 전후의 `run` 속도를 비교하는 사용자는 설명 항목 없이 1/N만큼 떨어진 값을 보게 된다.
-- **`run` 출력 줄의 수치가 더 이상 맞아떨어지지 않는다.** 여전히 `completion_tokens`와 window 초를 출력하면서 속도는 N-1 토큰으로 계산하므로, N / S가 출력된 속도와 같지 않다. 토큰 하나짜리 turn은 이전에는 window가 0이 아니면 1 / S를 출력했지만 이제 0.00 tok/s를 출력한다.
-- **히스토그램 변화의 크기.** 각 기록값은 이전 값의 (N-1)/N이 된다. N = 128에서 0.78% 낮아지고(이전 값이 128/127, 즉 0.79% 높았음), N = 2에서는 50% 낮아진다. PR 본문과 CHANGELOG는 이 수치 옆에 "drops by (N-1)/N"이라고 쓰는데, (N-1)/N은 새 값과 이전 값의 비율이고 감소량 자체는 1/N이다.
-- **diffusion의 수는 상한이다.** 히스토그램에는 도달하지 않지만, diffusion 모델에서 `mlxcel run`은 이 값으로 계산한 속도를 출력한다.
+- **토큰 하나짜리 `run` turn은 0.00 tok/s를 출력한다.** decode window에 토큰이 없으니 규칙대로지만, 이전에는 window가 0이 아니면 1 / S를 출력했다.
+- **히스토그램 변화의 크기.** 각 기록값은 이전 값의 (N-1)/N이 된다. N = 128에서 0.78% 낮아지고(이전 값이 128/127, 즉 0.79% 높았음), N = 2에서는 50% 낮아진다.
+- **diffusion의 수는 상한이다.** diffusion은 블록 단위로 확정하므로 N-1은 상한이다. 지금은 히스토그램에도 `mlxcel run` 출력 줄에도 도달하지 않으므로, 어느 한쪽이 이 값을 쓰기 시작할 때만 문제가 된다.
 - **builder 주석의 producer 설명은 테스트되지 않았다.** XLA나 diffusion worker가 주석대로 첫 토큰 시점을 기록하는지 확인하는 테스트는 없다.
-- **게이트 대기 중이며 실제 체크포인트 scrape 없음**, 3절 참고.
+- **실제 체크포인트 `/metrics` scrape 없음**, 3절 참고.
 
 ## 6. 학습 포인트
 
