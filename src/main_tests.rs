@@ -1869,15 +1869,22 @@ fn serve_responses_background_flags_parse_with_defaults() {
         defaults.responses_background_ephemeral_ttl_secs,
         mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS
     );
+    assert_eq!(
+        defaults.responses_background_event_log_bytes,
+        mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES
+    );
 
     let args = parse_serve_args(&[
         "--responses-background-max-jobs",
         "7",
         "--responses-background-ephemeral-ttl-secs",
         "30",
+        "--responses-background-event-log-bytes",
+        "65536",
     ]);
     assert_eq!(args.responses_background_max_jobs, 7);
     assert_eq!(args.responses_background_ephemeral_ttl_secs, 30);
+    assert_eq!(args.responses_background_event_log_bytes, 65536);
 }
 
 #[test]
@@ -1889,12 +1896,14 @@ fn serve_responses_background_envs_parse_when_flags_are_absent() {
     let _env = ScopedEnv::set(&[
         ("MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS", "3"),
         ("MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS", "45"),
+        ("MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES", "1024"),
     ]);
 
     let args = parse_serve_args(&[]);
 
     assert_eq!(args.responses_background_max_jobs, 3);
     assert_eq!(args.responses_background_ephemeral_ttl_secs, 45);
+    assert_eq!(args.responses_background_event_log_bytes, 1024);
 }
 
 #[test]

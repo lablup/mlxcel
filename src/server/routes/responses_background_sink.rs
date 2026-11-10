@@ -17,10 +17,17 @@
 //! store, and [`BackgroundSink`] is the
 //! [`ResponseEventSink`] a background generation runs with. The job
 //! lifecycle is described in [`super::responses_background`].
+//!
+//! A job created with `stream: true` has an event log (issue #2900). The
+//! sink appends the driver's events to it; the terminal event is appended by
+//! `ResponsesStore::finish_background` from the object it recorded, whichever
+//! path here recorded it, so every stream ends with exactly one terminal
+//! event that matches the stored response.
 
 use std::sync::Arc;
 
 use crate::server::AppState;
+use crate::server::responses_background_events::BackgroundEventLog;
 use crate::server::responses_store::ResponsesStore;
 use crate::server::responses_translator::TranslatedRequest;
 use crate::server::types::ErrorResponse;
@@ -193,7 +200,8 @@ impl Drop for JobRecorder {
     }
 }
 
-/// The sink of a background generation: events are dropped, the first
+/// The sink of a background generation: events go to the job's event log
+/// when it has one (`stream: true`) and are dropped otherwise, the first
 /// progress callback moves the job to `in_progress`, and the terminal
 /// response is recorded in the response store.
 ///
@@ -204,6 +212,8 @@ pub(crate) struct BackgroundSink {
     state: AppState,
     request: Arc<CreateResponseRequest>,
     translated: Arc<TranslatedRequest>,
+    /// The event log of a job created with `stream: true`.
+    event_log: Option<Arc<BackgroundEventLog>>,
 }
 
 impl BackgroundSink {
@@ -211,20 +221,48 @@ impl BackgroundSink {
     ///
     /// Used by: the background job task.
     pub(crate) fn new(run: &PreparedRun, recorder: Arc<JobRecorder>) -> Self {
+        let event_log = recorder.store.background_event_log(&recorder.response_id);
         Self {
+            event_log,
             recorder,
             state: run.state.clone(),
             request: Arc::clone(&run.request),
             translated: Arc::clone(&run.translated),
         }
     }
+
+    /// The sequence number the driver's first event gets: the events
+    /// delivered at admission come before it. A job without an event log
+    /// counts the two opening events it would have had.
+    pub(super) fn next_sequence_number(&self) -> u64 {
+        self.event_log
+            .as_ref()
+            .map_or(2, |log| log.next_sequence_number())
+    }
 }
 
 impl ResponseEventSink for BackgroundSink {
     fn emit(&self, event: &ResponseStreamEvent) {
-        // The driver reports a failed generation only as this event.
-        if let ResponseStreamEvent::Error { code, message, .. } = event {
-            self.recorder.fail(code, message);
+        match event {
+            // The driver reports a failed generation only as this event. A
+            // background stream ends with `response.failed` instead, which
+            // the store appends when `fail` records the object.
+            ResponseStreamEvent::Error { code, message, .. } => {
+                self.recorder.fail(code, message);
+            }
+            // The store appended the terminal event when `record_terminal`
+            // stored the object, and the opening events were appended at
+            // admission.
+            ResponseStreamEvent::Created { .. }
+            | ResponseStreamEvent::Queued { .. }
+            | ResponseStreamEvent::Completed { .. }
+            | ResponseStreamEvent::Incomplete { .. }
+            | ResponseStreamEvent::Failed { .. } => {}
+            _ => {
+                if let Some(log) = self.event_log.as_ref() {
+                    log.append(event);
+                }
+            }
         }
     }
 

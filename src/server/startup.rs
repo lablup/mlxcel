@@ -618,6 +618,11 @@ pub struct ServerStartupConfig {
     /// `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS`; the CLI rejects `0`
     /// and the store build clamps a programmatic `0` to 1.
     pub responses_background_ephemeral_ttl_secs: u64,
+    /// Byte budget of the event log of one streamed background response.
+    /// `0` refuses `stream: true` on background responses. Resolved from
+    /// `--responses-background-event-log-bytes` /
+    /// `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES`.
+    pub responses_background_event_log_bytes: usize,
     /// capacity cap for the conversation transcript store.
     /// `0` disables the store; requests referencing `conversation` still
     /// succeed but operate as if the transcript is empty.
@@ -867,6 +872,8 @@ impl Default for ServerStartupConfig {
                 super::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
             responses_background_ephemeral_ttl_secs:
                 super::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+            responses_background_event_log_bytes:
+                super::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
             conversation_store_max_entries: 256,
             conversation_store_max_bytes:
                 super::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
@@ -4268,6 +4275,7 @@ async fn serve_with_side_model_workers(
                 background_ephemeral_ttl: std::time::Duration::from_secs(
                     startup.responses_background_ephemeral_ttl_secs.max(1),
                 ),
+                background_event_log_bytes: startup.responses_background_event_log_bytes,
             },
         )))
     };

@@ -115,7 +115,7 @@ pub struct ResponseSseKeepAlive(Option<KeepAlive>);
 
 impl ResponseSseKeepAlive {
     /// `None` disables the pings (`--sse-ping-interval -1`, #1432).
-    fn from_interval(interval: Option<Duration>) -> Self {
+    pub(crate) fn from_interval(interval: Option<Duration>) -> Self {
         Self(interval.map(|d| KeepAlive::new().interval(d)))
     }
 }
@@ -218,8 +218,14 @@ impl Default for ResponseStreamEmitter {
 
 impl ResponseStreamEmitter {
     pub fn new() -> Self {
+        Self::starting_at(0)
+    }
+
+    /// An emitter whose first sequence number is `first`: a streamed
+    /// background response already delivered the events before it (#2900).
+    pub(crate) fn starting_at(first: u64) -> Self {
         Self {
-            seq: SequenceCounter::new(),
+            seq: SequenceCounter::starting_at(first),
             output_index: 0,
             active_message_id: None,
             active_reasoning_id: None,

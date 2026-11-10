@@ -131,6 +131,8 @@ impl ResponsesStore {
         // The snapshot is the `queued` object without output, so this is
         // cheap enough to size under the lock.
         let terminal_bytes = serialized_json_len_saturating(&terminal);
-        Some(self.record_terminal_locked(jobs, id, job, terminal, terminal_bytes, now))
+        // No prepared stream event: the terminal event of a streamed job is
+        // serialized from the recorded object under the log lock.
+        Some(self.record_terminal_locked(jobs, id, job, terminal, terminal_bytes, None, now))
     }
 }

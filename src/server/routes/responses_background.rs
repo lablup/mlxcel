@@ -34,6 +34,17 @@
 //!    `ResponsesStore::finish_background`: the driver's final response
 //!    (`completed`, `incomplete`, `cancelled`) or a `failed` object.
 //!
+//! ## Streaming
+//!
+//! A job created with `stream: true` (issue #2900) gets a
+//! [`BackgroundEventLog`] at admission, already holding `response.created`
+//! (status `queued`) and `response.queued`. The driver appends its events
+//! through the [`BackgroundSink`], starting with `response.in_progress` at
+//! the first progress callback, and `ResponsesStore::finish_background`
+//! appends the one terminal event. The create call and every
+//! `GET /v1/responses/{id}?stream=true` read that log through
+//! [`super::responses_background_stream`].
+//!
 //! ## Cancellation token
 //!
 //! The token `admit_background` returns is the job's only cancellation flag.
@@ -86,6 +97,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::server::config::ReasoningBudgetOverride;
+use crate::server::responses_background_events::BackgroundEventLog;
 use crate::server::responses_store::{
     BackgroundAdmitError, BackgroundCancel, InFlightToken, ResponsesStore,
 };
@@ -96,6 +108,7 @@ use crate::server::streaming_responses::CancellationToken;
 use crate::server::types::ErrorResponse;
 use crate::server::types::responses_request::CreateResponseRequest;
 use crate::server::types::responses_response::{ResponseObject, ResponseStatus};
+use crate::server::types::responses_stream::ResponseStreamEvent;
 use crate::server::{AppState, LiveSettings};
 
 use super::responses_auto_compact::{AutoCompaction, apply_auto_compaction};
@@ -130,13 +143,6 @@ pub(crate) fn validate_background_request(
     state: &AppState,
     request: &CreateResponseRequest,
 ) -> Result<(), ErrorResponse> {
-    if request.stream {
-        return Err(ErrorResponse::new(
-            "streaming a background response is not supported yet; set stream to false \
-             and poll GET /v1/responses/{id}",
-            "invalid_request_error",
-        ));
-    }
     let Some(store) = state.responses_store.as_ref() else {
         return Err(ErrorResponse::new(
             "background mode needs the response store, which is disabled on this server; \
@@ -149,6 +155,14 @@ pub(crate) fn validate_background_request(
     let config = store.config();
     if config.background_max_jobs == 0 || config.max_entries == 0 || config.max_bytes == 0 {
         return Err(background_disabled());
+    }
+    if request.stream && config.background_event_log_bytes == 0 {
+        return Err(ErrorResponse::new(
+            "streaming a background response is disabled on this server; restart with \
+             --responses-background-event-log-bytes > 0, or set stream to false and poll \
+             GET /v1/responses/{id}",
+            "invalid_request_error",
+        ));
     }
     Ok(())
 }
@@ -177,8 +191,15 @@ pub(crate) fn create_background_response(job: BackgroundJob) -> Response {
     if let Err(err) = job.state.model_provider.reserve_single_stream_queue_slot() {
         return super::generation_error_to_response(err).into_response();
     }
+    let streamed = job.request.stream.then(|| job.state.clone());
     match spawn_background_job(job) {
-        Ok(queued) => Json(queued).into_response(),
+        Ok(queued) => match streamed {
+            // `stream: true` (issue #2900): the create call is the first
+            // reader of the job's event log. `X-Conversation-Id` is not
+            // read: the resume cursor is `starting_after`.
+            Some(state) => super::responses_background_stream::stream_from_start(&state, queued),
+            None => Json(queued).into_response(),
+        },
         Err(BackgroundAdmitError::Disabled) => background_disabled().into_response(),
         Err(BackgroundAdmitError::LimitReached { limit }) => rate_limited(format!(
             "{limit} background responses are already active \
@@ -303,6 +324,22 @@ where
                 .insert(job.response_id.clone(), cancelled.clone());
         }
     }
+    // `stream: true` (issue #2900): the log exists, with its two opening
+    // events, before the create call answers.
+    if job.request.stream {
+        let log = Arc::new(BackgroundEventLog::new(
+            store.config().background_event_log_bytes,
+        ));
+        log.append(&ResponseStreamEvent::Created {
+            sequence_number: 0,
+            response: queued.clone(),
+        });
+        log.append(&ResponseStreamEvent::Queued {
+            sequence_number: 1,
+            response: queued.clone(),
+        });
+        store.attach_background_event_log(&job.response_id, log);
+    }
     let recorder = Arc::new(JobRecorder::new(
         store,
         job.response_id.clone(),
@@ -404,8 +441,9 @@ async fn run_background_job<D>(
         None => return,
     };
 
-    let sink: Arc<dyn ResponseEventSink> =
-        Arc::new(BackgroundSink::new(&run, Arc::clone(&recorder)));
+    let sink = BackgroundSink::new(&run, Arc::clone(&recorder));
+    run.background_opening = Some(sink.next_sequence_number());
+    let sink: Arc<dyn ResponseEventSink> = Arc::new(sink);
     let admission = run.arm_admission(cancelled.clone());
     let generation = tokio::task::spawn_blocking(move || driver(run, cancelled, sink));
     // The waiter is held until the provider answers: dropping it unanswered

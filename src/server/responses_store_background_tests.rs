@@ -480,3 +480,6 @@ fn cancel_background_leaves_an_in_progress_job_to_its_driver() {
     assert_background_accounting(&store);
     assert_indexes_consistent(&store);
 }
+
+#[path = "responses_store_event_log_tests.rs"]
+mod event_log;
