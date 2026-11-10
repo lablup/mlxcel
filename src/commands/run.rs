@@ -367,10 +367,16 @@ fn run_once(args: RunArgs) -> Result<()> {
     printer.finish(&turn, "Re-run");
     println!();
     let seconds = turn.result.generation_only_ms as f64 / 1000.0;
-    let rate = if seconds > 0.0 {
-        turn.result.completion_tokens as f64 / seconds
-    } else {
-        0.0
+    // Count only the tokens produced inside the timed window, the rule in
+    // docs/benchmarks.md "How decode tok/s is counted". A producer without an
+    // isolated decode window reports None and keeps the whole-call rate.
+    let rate = match turn.result.decode_window_tokens {
+        Some(window_tokens) => mlxcel_core::generate::decode_tok_per_sec(
+            window_tokens,
+            turn.result.generation_only_ms as f64,
+        ),
+        None if seconds > 0.0 => turn.result.completion_tokens as f64 / seconds,
+        None => 0.0,
     };
     println!(
         "[Generated {} tokens in {seconds:.2}s = {rate:.2} tok/s]",
