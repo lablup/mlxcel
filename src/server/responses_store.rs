@@ -26,11 +26,30 @@
 //! - Lookup on `GET /v1/responses/:id` and on chained creates that
 //!   reference `previous_response_id`.
 //! - Delete on `DELETE /v1/responses/:id` and by the LRU/TTL sweep.
+//!
+//! ## Background jobs
+//!
+//! `background: true` responses need a record from the moment they are
+//! created, not only after generation ends. Those live in a separate `jobs`
+//! map under its own lock, outside `entries`, so an active job is exempt from
+//! TTL and LRU eviction by construction. Its approximate bytes are tracked
+//! separately (`active_bytes`), counted by
+//! [`ResponsesStore::approximate_total_bytes`], and never drive eviction of
+//! stored entries. [`ResponsesStore::finish_background`] removes the job and
+//! inserts its terminal object as a normal entry in one critical section.
+//! The lock order is always `jobs`, then `inner`.
+//!
+//! A job created with `store: false` keeps its terminal object as an
+//! *ephemeral* entry: [`ResponsesStore::background_snapshot`] can read it for
+//! the ephemeral TTL, but [`ResponsesStore::get`] (and therefore
+//! `previous_response_id` chaining) never returns it.
+//!
+//! Jobs are in memory only; a restart loses them.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::server::store_budget::{
@@ -40,7 +59,8 @@ use crate::server::types::responses_request::{
     ResponseInputContent, ResponseInputItem, ResponseInputPart, ResponseInputRole,
     ResponseToolOutput,
 };
-use crate::server::types::responses_response::ResponseObject;
+use crate::server::types::responses_response::{ResponseErrorBody, ResponseObject, ResponseStatus};
+use tokio::sync::Notify;
 
 /// Default approximate retained-byte budget for the in-memory response store.
 ///
@@ -48,6 +68,16 @@ use crate::server::types::responses_response::ResponseObject;
 /// multimodal entries" footprint while leaving room for several max-size image
 /// requests inside the one-hour TTL window.
 pub const DEFAULT_RESPONSES_STORE_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// Default cap on concurrently active `background: true` responses.
+///
+/// Each active job holds one blocking generation thread, so the default stays
+/// well below Tokio's default of 512 blocking threads.
+pub const DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS: usize = 64;
+
+/// Default retention, in seconds, of the terminal object of a `store: false`
+/// background response. Only background polling can read it.
+pub const DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS: u64 = 600;
 
 /// Persisted entry. Inputs and outputs are kept separately so the
 /// chain-resolution path can reconstruct the original conversation
@@ -65,6 +95,17 @@ struct Entry {
     last_accessed: Instant,
     size_bytes: usize,
     lru_key: LruKey,
+    /// Set for the terminal object of a `store: false` background job. The
+    /// entry expires after this long (or after the normal TTL, whichever
+    /// comes first) and is hidden from [`ResponsesStore::get`].
+    ephemeral_ttl: Option<Duration>,
+}
+
+impl Entry {
+    fn is_expired(&self, ttl: Duration, now: Instant) -> bool {
+        let age = now.saturating_duration_since(self.inserted_at);
+        age >= ttl || self.ephemeral_ttl.is_some_and(|ephemeral| age >= ephemeral)
+    }
 }
 
 #[derive(Debug)]
@@ -92,6 +133,12 @@ pub struct ResponsesStoreConfig {
     pub max_entries: usize,
     pub max_bytes: usize,
     pub ttl: Duration,
+    /// Maximum number of concurrently active background jobs
+    /// (`--responses-background-max-jobs`). `0` disables background mode.
+    pub background_max_jobs: usize,
+    /// Retention of the terminal object of a `store: false` background job
+    /// (`--responses-background-ephemeral-ttl-secs`).
+    pub background_ephemeral_ttl: Duration,
 }
 
 impl Default for ResponsesStoreConfig {
@@ -100,8 +147,66 @@ impl Default for ResponsesStoreConfig {
             max_entries: 1024,
             max_bytes: DEFAULT_RESPONSES_STORE_MAX_BYTES,
             ttl: Duration::from_secs(3600),
+            background_max_jobs: DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+            background_ephemeral_ttl: Duration::from_secs(
+                DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+            ),
         }
     }
+}
+
+/// Why [`ResponsesStore::admit_background`] refused a job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundAdmitError {
+    /// Background mode is off: the job limit, `max_entries`, or `max_bytes`
+    /// is `0`.
+    Disabled,
+    /// `limit` jobs are already active.
+    LimitReached { limit: usize },
+    /// The active jobs plus this one would exceed the store's byte budget.
+    OverBudget,
+}
+
+/// Outcome of [`ResponsesStore::request_background_cancel`].
+#[derive(Debug, Clone)]
+pub enum BackgroundCancel {
+    /// No active job and no retained terminal object has this id.
+    NotFound,
+    /// The job's cancellation token was flipped. The job stays active until
+    /// its task calls [`ResponsesStore::finish_background`].
+    Requested,
+    /// The response already reached a terminal state; this is the recorded
+    /// object.
+    Terminal(ResponseObject),
+}
+
+/// Terminal hand-off shared between [`ResponsesStore::finish_background`]
+/// and [`ResponsesStore::wait_background_terminal`]. The recorded object is
+/// set before waiters are woken, so a waiter gets it even if the stored entry
+/// was evicted in the meantime.
+#[derive(Debug, Default)]
+struct BackgroundSignal {
+    notify: Notify,
+    terminal: OnceLock<ResponseObject>,
+}
+
+#[derive(Debug)]
+struct BackgroundJob {
+    snapshot: ResponseObject,
+    input_items: Vec<ResponseInputItem>,
+    /// Approximate bytes of `input_items`, computed once at admission.
+    input_bytes: usize,
+    effective_store: bool,
+    token: InFlightToken,
+    size_bytes: usize,
+    signal: Arc<BackgroundSignal>,
+}
+
+#[derive(Debug, Default)]
+struct BackgroundState {
+    jobs: HashMap<String, BackgroundJob>,
+    /// Sum of `size_bytes` over `jobs`.
+    active_bytes: usize,
 }
 
 /// Cancellation handle for in-flight streaming responses (review H2).
@@ -126,6 +231,8 @@ pub struct ResponsesStore {
     /// `in_flight` read guard and drained under its write guard, so the
     /// streaming task learns exactly which cancels the client was told about.
     cancel_acknowledged: Mutex<HashSet<String>>,
+    /// Active `background: true` jobs. Lock order: `jobs`, then `inner`.
+    jobs: Mutex<BackgroundState>,
 }
 
 impl ResponsesStore {
@@ -135,6 +242,7 @@ impl ResponsesStore {
             config,
             in_flight: RwLock::new(HashMap::new()),
             cancel_acknowledged: Mutex::new(HashSet::new()),
+            jobs: Mutex::new(BackgroundState::default()),
         }
     }
 
@@ -218,16 +326,29 @@ impl ResponsesStore {
     /// entry count and approximate retained bytes under budget. Returns the count of
     /// remaining entries after the insert for tests/telemetry.
     pub fn insert(&self, id: String, payload: StoredResponse) -> usize {
+        let size_bytes = Self::entry_size_bytes(&id, &payload);
         let now = Instant::now();
         let mut state = match self.inner.write() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        Self::sweep_expired(&mut state, &self.config, now);
-        Self::remove_entry(&mut state, &id);
+        Self::insert_locked(&mut state, &self.config, id, payload, size_bytes, None, now);
+        state.entries.len()
+    }
 
-        let size_bytes = Self::entry_size_bytes(&id, &payload);
-        let lru_key = Self::next_lru_key(&mut state, &id, now);
+    fn insert_locked(
+        state: &mut StoreState,
+        config: &ResponsesStoreConfig,
+        id: String,
+        payload: StoredResponse,
+        size_bytes: usize,
+        ephemeral_ttl: Option<Duration>,
+        now: Instant,
+    ) {
+        Self::sweep_expired(state, config, now);
+        Self::remove_entry(state, &id);
+
+        let lru_key = Self::next_lru_key(state, &id, now);
         state.total_bytes = state.total_bytes.saturating_add(size_bytes);
         state.lru.insert(lru_key.clone());
         state.entries.insert(
@@ -238,14 +359,15 @@ impl ResponsesStore {
                 last_accessed: now,
                 size_bytes,
                 lru_key,
+                ephemeral_ttl,
             },
         );
-        Self::evict_to_limits(&mut state, &self.config);
-        state.entries.len()
+        Self::evict_to_limits(state, config);
     }
 
     /// Look up a stored response. Refreshes the entry's LRU stamp.
-    /// Returns `None` for missing or expired entries.
+    /// Returns `None` for missing or expired entries, and for the ephemeral
+    /// terminal object of a `store: false` background job.
     pub fn get(&self, id: &str) -> Option<StoredResponse> {
         let now = Instant::now();
         let mut state = match self.inner.write() {
@@ -253,7 +375,11 @@ impl ResponsesStore {
             Err(poisoned) => poisoned.into_inner(),
         };
         Self::sweep_expired(&mut state, &self.config, now);
-        let old_lru_key = state.entries.get(id)?.lru_key.clone();
+        let existing = state.entries.get(id)?;
+        if existing.ephemeral_ttl.is_some() {
+            return None;
+        }
+        let old_lru_key = existing.lru_key.clone();
         state.lru.remove(&old_lru_key);
         let lru_key = Self::next_lru_key(&mut state, id, now);
         let entry = state.entries.get_mut(id)?;
@@ -290,11 +416,288 @@ impl ResponsesStore {
         &self.config
     }
 
-    /// Approximate retained bytes currently accounted by the store.
+    /// Approximate retained bytes currently accounted by the store: stored
+    /// entries plus active background jobs.
     pub fn approximate_total_bytes(&self) -> usize {
-        match self.inner.read() {
+        let jobs = self.lock_jobs();
+        let stored = match self.inner.read() {
             Ok(g) => g.total_bytes,
             Err(poisoned) => poisoned.into_inner().total_bytes,
+        };
+        stored.saturating_add(jobs.active_bytes)
+    }
+
+    // -- Background jobs -----------------------------------------------------
+
+    /// Admit a `background: true` response and start tracking it as an active
+    /// job with status `queued`. The snapshot's status is forced to
+    /// [`ResponseStatus::Queued`]. The returned token is the job's
+    /// cancellation flag; [`Self::request_background_cancel`] flips it.
+    ///
+    /// Refuses with [`BackgroundAdmitError::Disabled`] when the job limit,
+    /// `max_entries`, or `max_bytes` is `0`,
+    /// [`BackgroundAdmitError::LimitReached`] when the job limit is reached,
+    /// and [`BackgroundAdmitError::OverBudget`] when the active jobs plus this
+    /// record would exceed `max_bytes`.
+    pub fn admit_background(
+        &self,
+        snapshot: ResponseObject,
+        input_items: Vec<ResponseInputItem>,
+        effective_store: bool,
+    ) -> Result<InFlightToken, BackgroundAdmitError> {
+        let limit = self.config.background_max_jobs;
+        if limit == 0 || self.config.max_entries == 0 || self.config.max_bytes == 0 {
+            return Err(BackgroundAdmitError::Disabled);
+        }
+        let mut snapshot = snapshot;
+        snapshot.status = ResponseStatus::Queued;
+        let id = snapshot.id.clone();
+        let input_bytes = input_items_size_bytes(&input_items);
+        let size_bytes = id
+            .len()
+            .saturating_add(serialized_json_len_saturating(&snapshot))
+            .saturating_add(input_bytes);
+
+        let mut jobs = self.lock_jobs();
+        // A colliding id replaces the old job (ids are random, so this is
+        // defensive); its bytes must not be counted twice.
+        let replaced_bytes = jobs.jobs.get(&id).map_or(0, |job| job.size_bytes);
+        let active_without_replaced = jobs.active_bytes.saturating_sub(replaced_bytes);
+        if replaced_bytes == 0 && jobs.jobs.len() >= limit {
+            return Err(BackgroundAdmitError::LimitReached { limit });
+        }
+        if active_without_replaced.saturating_add(size_bytes) > self.config.max_bytes {
+            return Err(BackgroundAdmitError::OverBudget);
+        }
+        let token: InFlightToken = Arc::new(AtomicBool::new(false));
+        let job = BackgroundJob {
+            snapshot,
+            input_items,
+            input_bytes,
+            effective_store,
+            token: token.clone(),
+            size_bytes,
+            signal: Arc::new(BackgroundSignal::default()),
+        };
+        if let Some(old) = jobs.jobs.insert(id, job) {
+            old.token.store(true, Ordering::Relaxed);
+        }
+        jobs.active_bytes = active_without_replaced.saturating_add(size_bytes);
+        Ok(token)
+    }
+
+    /// Move an active job from `queued` to `in_progress`. Returns `false`
+    /// when the job is unknown, already terminal, or not `queued`.
+    pub fn mark_background_in_progress(&self, id: &str) -> bool {
+        let mut jobs = self.lock_jobs();
+        match jobs.jobs.get_mut(id) {
+            Some(job) if job.snapshot.status == ResponseStatus::Queued => {
+                job.snapshot.status = ResponseStatus::InProgress;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Record a job's terminal object. The first call for an active job
+    /// removes the job and inserts the terminal object as a stored entry in
+    /// one critical section (ephemeral when the job was admitted with
+    /// `effective_store: false`), wakes [`Self::wait_background_terminal`]
+    /// callers, and returns what was recorded. A terminal object larger than
+    /// `max_bytes` is recorded as a `failed` object instead.
+    ///
+    /// Later calls (or a call for an unknown id) return the recorded object
+    /// when it is still retained, otherwise the `terminal` argument.
+    pub fn finish_background(&self, id: &str, terminal: ResponseObject) -> ResponseObject {
+        // Serialize the (possibly large) terminal object once, before taking
+        // any lock, so admits and polls are not blocked behind it.
+        let terminal_bytes = serialized_json_len_saturating(&terminal);
+        let now = Instant::now();
+        let mut jobs = self.lock_jobs();
+        let Some(job) = jobs.jobs.remove(id) else {
+            let mut state = self.write_inner();
+            return Self::retained_response_locked(&mut state, &self.config, id, now)
+                .unwrap_or(terminal);
+        };
+        jobs.active_bytes = jobs.active_bytes.saturating_sub(job.size_bytes);
+
+        let (payload, size_bytes) = self.fit_terminal(
+            id,
+            terminal,
+            terminal_bytes,
+            job.input_items,
+            job.input_bytes,
+        );
+        let recorded = payload.response.clone();
+        let ephemeral_ttl = (!job.effective_store).then_some(self.config.background_ephemeral_ttl);
+        {
+            let mut state = self.write_inner();
+            Self::insert_locked(
+                &mut state,
+                &self.config,
+                id.to_string(),
+                payload,
+                size_bytes,
+                ephemeral_ttl,
+                now,
+            );
+        }
+        let _ = job.signal.terminal.set(recorded.clone());
+        drop(jobs);
+        job.signal.notify.notify_waiters();
+        recorded
+    }
+
+    /// Current object for `id`: the live snapshot of an active job, or the
+    /// retained terminal object, including the ephemeral one of a
+    /// `store: false` job. Does not refresh the entry's LRU stamp.
+    pub fn background_snapshot(&self, id: &str) -> Option<ResponseObject> {
+        let now = Instant::now();
+        let jobs = self.lock_jobs();
+        if let Some(job) = jobs.jobs.get(id) {
+            return Some(job.snapshot.clone());
+        }
+        let mut state = self.write_inner();
+        Self::retained_response_locked(&mut state, &self.config, id, now)
+    }
+
+    /// Status of an active job; `None` once the job is terminal or unknown.
+    pub fn background_status(&self, id: &str) -> Option<ResponseStatus> {
+        self.lock_jobs().jobs.get(id).map(|job| job.snapshot.status)
+    }
+
+    /// Request cancellation of a job. For an active job this flips its token
+    /// and keeps it active; the job's task records the terminal object
+    /// through [`Self::finish_background`].
+    pub fn request_background_cancel(&self, id: &str) -> BackgroundCancel {
+        let now = Instant::now();
+        let jobs = self.lock_jobs();
+        if let Some(job) = jobs.jobs.get(id) {
+            job.token.store(true, Ordering::Relaxed);
+            return BackgroundCancel::Requested;
+        }
+        let mut state = self.write_inner();
+        match Self::retained_response_locked(&mut state, &self.config, id, now) {
+            Some(response) => BackgroundCancel::Terminal(response),
+            None => BackgroundCancel::NotFound,
+        }
+    }
+
+    /// Wait up to `timeout` for a job to reach a terminal state. Returns the
+    /// recorded terminal object, immediately when the job is already terminal
+    /// and retained. Returns `None` on timeout or when no job or retained
+    /// object has this id.
+    pub async fn wait_background_terminal(
+        &self,
+        id: &str,
+        timeout: Duration,
+    ) -> Option<ResponseObject> {
+        let signal = {
+            let jobs = self.lock_jobs();
+            match jobs.jobs.get(id) {
+                Some(job) => job.signal.clone(),
+                None => {
+                    let now = Instant::now();
+                    let mut state = self.write_inner();
+                    return Self::retained_response_locked(&mut state, &self.config, id, now);
+                }
+            }
+        };
+        // `finish_background` sets `terminal` before `notify_waiters`. A
+        // `Notified` future observes every `notify_waiters` call made after it
+        // is created, so creating it first and then checking `terminal` cannot
+        // miss the transition.
+        let notified = signal.notify.notified();
+        if let Some(recorded) = signal.terminal.get() {
+            return Some(recorded.clone());
+        }
+        let _ = tokio::time::timeout(timeout, notified).await;
+        signal.terminal.get().cloned()
+    }
+
+    /// Number of active background jobs.
+    pub fn active_background_jobs(&self) -> usize {
+        self.lock_jobs().jobs.len()
+    }
+
+    /// Payload stored for a job's terminal object. When it exceeds
+    /// `max_bytes` it is replaced by a small `failed` object so a poll
+    /// gets an explanation instead of a surprise 404.
+    /// `terminal_bytes` and `input_bytes` are the precomputed sizes of the
+    /// two parts; the returned size is the stored entry's accounted bytes.
+    fn fit_terminal(
+        &self,
+        id: &str,
+        terminal: ResponseObject,
+        terminal_bytes: usize,
+        input_items: Vec<ResponseInputItem>,
+        input_bytes: usize,
+    ) -> (StoredResponse, usize) {
+        let max_bytes = self.config.max_bytes;
+        let size_bytes = id
+            .len()
+            .saturating_add(terminal_bytes)
+            .saturating_add(input_bytes);
+        let payload = StoredResponse {
+            response: terminal,
+            input_items,
+        };
+        if size_bytes <= max_bytes {
+            return (payload, size_bytes);
+        }
+        let mut failed = payload.response;
+        failed.status = ResponseStatus::Failed;
+        failed.output = Vec::new();
+        failed.output_text = String::new();
+        failed.incomplete_details = None;
+        failed.error = Some(ResponseErrorBody {
+            code: "server_error".to_string(),
+            message: format!(
+                "The response exceeded the response store budget of {max_bytes} bytes \
+                 (--responses-store-max-bytes) and was not retained."
+            ),
+        });
+        let mut payload = StoredResponse {
+            response: failed,
+            input_items: Vec::new(),
+        };
+        let mut size_bytes = Self::entry_size_bytes(id, &payload);
+        if size_bytes > max_bytes {
+            // Large echoed request fields can still overflow the budget.
+            payload.response.instructions = None;
+            payload.response.tools = None;
+            payload.response.metadata = None;
+            size_bytes = Self::entry_size_bytes(id, &payload);
+        }
+        (payload, size_bytes)
+    }
+
+    /// Retained (non-expired) stored object for `id`, ephemeral entries
+    /// included. Runs the lazy expiry sweep; does not refresh LRU.
+    fn retained_response_locked(
+        state: &mut StoreState,
+        config: &ResponsesStoreConfig,
+        id: &str,
+        now: Instant,
+    ) -> Option<ResponseObject> {
+        Self::sweep_expired(state, config, now);
+        state
+            .entries
+            .get(id)
+            .map(|entry| entry.payload.response.clone())
+    }
+
+    fn lock_jobs(&self) -> MutexGuard<'_, BackgroundState> {
+        match self.jobs.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn write_inner(&self) -> std::sync::RwLockWriteGuard<'_, StoreState> {
+        match self.inner.write() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 
@@ -303,7 +706,7 @@ impl ResponsesStore {
         let expired: Vec<String> = state
             .entries
             .iter()
-            .filter(|(_, entry)| now.saturating_duration_since(entry.inserted_at) >= ttl)
+            .filter(|(_, entry)| entry.is_expired(ttl, now))
             .map(|(id, _)| id.clone())
             .collect();
         for id in expired {
@@ -460,7 +863,7 @@ mod tests {
     use crate::server::types::responses_request::{ResponseInputContent, ResponseInputRole};
     use crate::server::types::responses_response::{ResponseStatus, ResponseUsage};
 
-    fn make_response(id: &str) -> StoredResponse {
+    pub(super) fn make_response(id: &str) -> StoredResponse {
         StoredResponse {
             response: ResponseObject {
                 id: id.to_string(),
@@ -504,7 +907,7 @@ mod tests {
         }
     }
 
-    fn make_response_with_input(id: &str, text: &str) -> StoredResponse {
+    pub(super) fn make_response_with_input(id: &str, text: &str) -> StoredResponse {
         let mut response = make_response(id);
         response.input_items.push(ResponseInputItem::Message {
             role: ResponseInputRole::User,
@@ -514,11 +917,12 @@ mod tests {
         response
     }
 
-    fn config(max_entries: usize, max_bytes: usize) -> ResponsesStoreConfig {
+    pub(super) fn config(max_entries: usize, max_bytes: usize) -> ResponsesStoreConfig {
         ResponsesStoreConfig {
             max_entries,
             max_bytes,
             ttl: Duration::from_secs(3600),
+            ..ResponsesStoreConfig::default()
         }
     }
 
@@ -526,7 +930,7 @@ mod tests {
         ResponsesStore::entry_size_bytes(id, payload)
     }
 
-    fn assert_indexes_consistent(store: &ResponsesStore) {
+    pub(super) fn assert_indexes_consistent(store: &ResponsesStore) {
         let state = store.inner.read().expect("store state lock");
         let summed = state.entries.values().fold(0usize, |bytes, entry| {
             assert!(
@@ -741,6 +1145,7 @@ mod tests {
             max_entries: 8,
             max_bytes: DEFAULT_RESPONSES_STORE_MAX_BYTES,
             ttl: Duration::from_millis(10),
+            ..ResponsesStoreConfig::default()
         });
         store.insert("a".to_string(), make_response_with_input("a", "first"));
         store.insert("b".to_string(), make_response_with_input("b", "second"));
@@ -755,3 +1160,7 @@ mod tests {
         assert_indexes_consistent(&store);
     }
 }
+
+#[cfg(test)]
+#[path = "responses_store_background_tests.rs"]
+mod background_tests;

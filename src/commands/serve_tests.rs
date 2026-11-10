@@ -219,6 +219,10 @@ fn sample_args() -> crate::ServeArgs {
         responses_store_max_bytes:
             mlxcel::server::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
         responses_store_ttl_secs: 3600,
+        responses_background_max_jobs:
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+        responses_background_ephemeral_ttl_secs:
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
         conversation_store_max_entries: 256,
         conversation_store_max_bytes:
             mlxcel::server::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,

@@ -224,9 +224,13 @@ JSON bytes, and TTL.
 | `--responses-store-max-entries` | `1024` | `LLAMA_ARG_RESPONSES_STORE_MAX_ENTRIES` | `0` disables response persistence. |
 | `--responses-store-max-bytes` | `268435456` | `MLXCEL_RESPONSES_STORE_MAX_BYTES` | Approximate retained-byte budget; `0` keeps the route enabled but immediately evicts stored responses. |
 | `--responses-store-ttl-secs` | `3600` | `LLAMA_ARG_RESPONSES_STORE_TTL_SECS` | `0` disables TTL. |
+| `--responses-background-max-jobs` | `64` | `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS` | Cap on concurrently active `background: true` responses; each holds one generation thread. `0` disables background mode. |
+| `--responses-background-ephemeral-ttl-secs` | `600` | `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS` | How long a finished `background: true` response created with `store: false` stays readable by polling. Must be at least `1`; `0` fails startup. |
 | `--conversation-store-max-entries` | `256` | `LLAMA_ARG_CONVERSATION_STORE_MAX_ENTRIES` | `0` disables conversations. |
 | `--conversation-store-max-bytes` | `67108864` | `MLXCEL_CONVERSATION_STORE_MAX_BYTES` | Approximate retained-byte budget; `0` keeps the route enabled but immediately evicts transcripts. |
 | `--conversation-store-ttl-secs` | `3600` | `LLAMA_ARG_CONVERSATION_STORE_TTL_SECS` | `0` disables TTL. |
+
+Active background jobs are tracked outside the TTL and LRU limits, so a running job is never evicted. Their approximate bytes count against `--responses-store-max-bytes` at admission (a job that would push the active total past the budget is refused) but never evict stored responses. When a job finishes, its final object becomes a stored response. If that object alone is larger than `--responses-store-max-bytes`, a `failed` response with `error.code: "server_error"` and empty output is kept instead, so a poll still gets an answer. The final object of a `store: false` job is kept only for `--responses-background-ephemeral-ttl-secs` and is never usable as `previous_response_id`. Background jobs are in memory only and a restart loses them. Background mode is disabled when the job limit, the entry limit, or the byte budget is `0`.
 
 When response storage is disabled, retrieve/delete/cancel-by-id and
 `previous_response_id` chaining return an error. When conversation storage is
