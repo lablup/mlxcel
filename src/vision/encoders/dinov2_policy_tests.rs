@@ -3,18 +3,17 @@
 #![allow(clippy::excessive_precision)]
 use super::super::{Attention, Mlp};
 use super::*;
-use crate::vision::addmm_oracle_test_support::{
-    ROUTING_ROWS, routing_rows, single_row_addmm_rounds_twice,
-};
+use crate::vision::addmm_oracle_test_support::{ROUTING_ROWS, routing_rows};
 use anyhow::Result;
 use mlxcel_core::{self as mx, layers::Linear, weights::WeightMap};
 
 // Authenticated MLX 0.32.4 oracle, already used by Sapiens2. The source JSON
 // SHA256 is ab93240df9362f37bdc00fa5a179cf850630af7a9903c13d2eae52a2098e35b8,
 // pinned in tests/fixtures/sapiens2/reference-output-hashes.json. No new oracle
-// values are inferred from the implementation under test. The routing checks
-// run on `ROUTING_ROWS` identical rows because single-row Metal addmm rounds
-// like a separate add; see `crate::vision::addmm_oracle_test_support`.
+// values are inferred from the implementation under test. The pinned MLX
+// rounds `addmm` once at every row count on every backend, so the fused value
+// holds at one row and at `ROUTING_ROWS`; see
+// `crate::vision::addmm_oracle_test_support`.
 const INPUT: [f32; 4] = [-0.447265625, 0.84375, 1.140625, -0.08935546875];
 const WEIGHT: [f32; 12] = [
     0.80078125,
@@ -72,15 +71,10 @@ fn objects_dino_linear_matches_authentic_bf16_addmm_oracle() {
         &linear_with_policy(&layer, &x, false),
         &routing_rows(&SEPARATE),
     );
-    // One row still routes through addmm, but Metal's gemv epilogue rounds
-    // the product first, so only CPU and ROCm keep the fused value there.
+    // One row routes Metal through `gemv_axbpy`, whose epilogue also adds the
+    // bias before rounding at the pinned MLX.
     let single = bf16(&INPUT, &[1, 4]);
-    let single_expected = if single_row_addmm_rounds_twice() {
-        &SEPARATE
-    } else {
-        &FUSED
-    };
-    exact(&linear_with_policy(&layer, &single, true), single_expected);
+    exact(&linear_with_policy(&layer, &single, true), &FUSED);
     exact(&linear_with_policy(&layer, &single, false), &SEPARATE);
     // Bias-free layers retain matmul semantics in either policy.
     let unbiased = Linear::new(bf16(&WEIGHT, &[3, 4]), None);
