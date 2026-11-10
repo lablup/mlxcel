@@ -180,11 +180,12 @@ pub(crate) use builder::{
 pub(crate) use model::{
     PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
     PrefillEmbeddingsInputMetadata, emit_decode, emit_decode_batched, emit_decode_ragged,
-    emit_decode_ragged_with, emit_decode_with, emit_decode_with_native, emit_moe_probe,
-    emit_moe_probe_with, emit_prefill, emit_prefill_embeddings,
-    emit_prefill_embeddings_deepstack_diagnostics_with, emit_prefill_embeddings_deepstack_with,
-    emit_prefill_embeddings_with, emit_prefill_with, mrope_axis_selector,
-    validate_prefill_embeddings_attention_bias, validate_prefill_embeddings_metadata,
+    emit_decode_ragged_with, emit_decode_ragged_with_native, emit_decode_with,
+    emit_decode_with_native, emit_moe_probe, emit_moe_probe_with, emit_prefill,
+    emit_prefill_embeddings, emit_prefill_embeddings_deepstack_diagnostics_with,
+    emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
+    mrope_axis_selector, validate_prefill_embeddings_attention_bias,
+    validate_prefill_embeddings_metadata,
 };
 #[allow(unused_imports)]
 pub(crate) use molmo_vision::emit_molmo_vision;
@@ -1595,6 +1596,125 @@ mod tests {
                 && fallback.contains("tensor<2048x128256xf16>"),
             "the fallback declares the packed head and reads the f16 operand"
         );
+    }
+
+    /// issue #2922: the ragged batch engine keeps the projections packed and
+    /// dispatches the multi-row HIP GEMV. q/k/v and gate/up stay one launch per
+    /// layer instead of one per row, and the f16 graph is emitted unchanged when
+    /// the native module is absent.
+    #[test]
+    fn native_ragged_decode_emits_multi_row_dispatches() {
+        use super::builder::Precision;
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::OutIn;
+        c.packed_args = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let mlir = emit_decode_ragged_with_native(
+            &c,
+            8,
+            true,
+            Precision::F16,
+            Some((
+                "#mlxcel_qmv_target = #hal.executable.target<\"rocm\", \"rocm-hsaco-fb\">\n",
+                "  source-block\n",
+            )),
+        );
+        assert!(
+            mlir.starts_with("#mlxcel_qmv_target = #hal.executable.target")
+                && mlir.contains("  source-block")
+                && mlir.contains("\nmodule @decode_step {"),
+            "the alias precedes the module and the executable source sits inside it"
+        );
+        // llama-3.2-1b: o_proj and down_proj per layer through the single-output
+        // multi-row export (down has K = 8192, so it takes the block-per-row
+        // export); q/k/v and gate/up through the fused multi-row exports.
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_multi::@qmv4_multi_kernel[")
+                .count(),
+            16,
+            "o_proj per layer"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_multi::@qmv4_multi_row_kernel[")
+                .count(),
+            16,
+            "down_proj per layer on the long-row export"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_qkv_multi::@qmv4_qkv_multi_kernel[")
+                .count(),
+            16,
+            "one q/k/v launch per layer, not one per row"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_gateup_multi::@qmv4_gateup_multi_kernel[")
+                .count(),
+            16,
+            "one gate/up launch per layer, not one per row"
+        );
+        assert!(
+            !mlir.contains("@custom_qmv::@qmv4_kernel")
+                && !mlir.contains("@custom_qmv::@qmv4_row_kernel"),
+            "the rank-1 exports are not used by the ragged graph"
+        );
+        assert!(
+            mlir.contains("arith.constant 8 : i32"),
+            "the batch size travels as the kernel's B constant"
+        );
+        assert!(mlir.contains("arith.constant 384 : index"), "q/k/v grid");
+        assert!(mlir.contains("arith.constant 2048 : index"), "gate/up grid");
+        assert!(
+            mlir.contains("tensor<8x8192xf32>"),
+            "fused multi-row outputs keep the [B, N] shape"
+        );
+
+        // The other bundled graph (B=4) keeps the same launch structure: one
+        // dispatch per projection group, so the count does not grow with the
+        // batch, and only the B constant and output rows change. A regression
+        // that multiplies launches by B or hardcodes the B=8 constant fails here.
+        let b4 = emit_decode_ragged_with_native(
+            &c,
+            4,
+            true,
+            Precision::F16,
+            Some((
+                "#mlxcel_qmv_target = #hal.executable.target<\"rocm\", \"rocm-hsaco-fb\">\n",
+                "  source-block\n",
+            )),
+        );
+        for dispatch in [
+            "flow.dispatch @custom_qmv_multi::@qmv4_multi_kernel[",
+            "flow.dispatch @custom_qmv_multi::@qmv4_multi_row_kernel[",
+            "flow.dispatch @custom_qmv_qkv_multi::@qmv4_qkv_multi_kernel[",
+            "flow.dispatch @custom_qmv_gateup_multi::@qmv4_gateup_multi_kernel[",
+        ] {
+            assert_eq!(
+                b4.matches(dispatch).count(),
+                mlir.matches(dispatch).count(),
+                "the ragged launch count is independent of B: {dispatch}"
+            );
+        }
+        assert!(
+            b4.contains("arith.constant 4 : i32"),
+            "the B=4 graph carries its batch size as the kernel's B constant"
+        );
+        assert!(
+            b4.contains("tensor<4x8192xf32>"),
+            "the B=4 graph writes [4, N] outputs"
+        );
+
+        // Without the native module the graph is the same f16 one emitted before
+        // this issue: the packed operands are never registered and no dispatch is
+        // emitted.
+        let mut fallback_cfg = Config::llama_3_2_1b();
+        fallback_cfg.projection_layout = ProjectionLayout::OutIn;
+        let fallback = emit_decode_ragged_with(&fallback_cfg, 8, true, Precision::F16);
+        assert!(!fallback.contains("@custom_qmv"));
+        assert!(fallback.contains("stablehlo.dot_general"));
+        assert!(fallback.contains("tensor<8192x2048xf16>"));
     }
 
     /// Each dense-pack family parses to its architecture switches. Cohere/Cohere2

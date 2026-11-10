@@ -405,16 +405,18 @@ fn take_weight(
                 format!("{loc}.biases"),
             );
             if b.native_proj_enabled() {
-                // issue #2889: leave the weight packed and let the native HIP
-                // GEMV consume the three tensors; the returned handle only
-                // names the packed argument for the linear helpers to find.
-                assert!(
-                    matches!(b.projection_layout(), ProjectionLayout::InOut),
-                    "the native packed projection is a single-sequence (InOut) path"
-                );
+                // issue #2889 / #2922: leave the weight packed and let the native
+                // HIP GEMV consume the three tensors; the returned handle only
+                // names the packed argument for the linear helpers to find. Both
+                // layouts are native now: `InOut` (single decode) dispatches the
+                // rank-1 kernel and `OutIn` (ragged batch) the multi-row one, so
+                // the logical shape follows the graph's layout.
                 let logical = Val {
                     name: packed.name.clone(),
-                    ty: Ty::f32(vec![in_, out]),
+                    ty: Ty::f32(match b.projection_layout() {
+                        ProjectionLayout::OutIn => vec![out, in_],
+                        ProjectionLayout::InOut => vec![in_, out],
+                    }),
                 };
                 b.register_packed_operand(
                     &logical,
@@ -1460,14 +1462,29 @@ fn emit_mlp_body(
             (gate, up)
         }
         _ => {
-            let gate = b.linear_seq_proj(hn, lw.gate.as_ref().expect("gated MLP has a gate"));
-            let delta = gate_up_lora(b, layout, lw, hn);
-            let gate = up_down_delta_gate(b, gate, &delta, c.inter);
-            let gate = layout.add_bias(b, gate, lw.gate_bias.as_ref());
-            let up = b.linear_seq_proj(hn, LayerW::dense(&lw.up));
-            let up = up_down_delta_up(b, up, &delta, c.inter);
-            let up = layout.add_bias(b, up, lw.up_bias.as_ref());
-            (gate, up)
+            let gate_w = lw.gate.as_ref().expect("gated MLP has a gate");
+            let up_w = LayerW::dense(&lw.up);
+            if b.packed_group(&[gate_w, up_w]).is_some() {
+                // issue #2922: the ragged batch engine projects gate and up in one
+                // multi-row launch when both weights are packed, so the per-layer
+                // launch count does not grow with the batch.
+                let (gate, up) = b.gate_up_proj(hn, gate_w, up_w);
+                let delta = gate_up_lora(b, layout, lw, hn);
+                let gate = up_down_delta_gate(b, gate, &delta, c.inter);
+                let gate = layout.add_bias(b, gate, lw.gate_bias.as_ref());
+                let up = up_down_delta_up(b, up, &delta, c.inter);
+                let up = layout.add_bias(b, up, lw.up_bias.as_ref());
+                (gate, up)
+            } else {
+                let gate = b.linear_seq_proj(hn, gate_w);
+                let delta = gate_up_lora(b, layout, lw, hn);
+                let gate = up_down_delta_gate(b, gate, &delta, c.inter);
+                let gate = layout.add_bias(b, gate, lw.gate_bias.as_ref());
+                let up = b.linear_seq_proj(hn, up_w);
+                let up = up_down_delta_up(b, up, &delta, c.inter);
+                let up = layout.add_bias(b, up, lw.up_bias.as_ref());
+                (gate, up)
+            }
         }
     };
     let act = if c.mlp_geglu {
@@ -1893,6 +1910,48 @@ impl AttnLayout {
             .phi4_lora
             .as_ref()
             .map(|lora| self.modal_lora_delta(b, hn, &lora.qkv));
+        // issue #2922: the ragged batch engine projects q, k and v in one
+        // multi-row launch when all three weights are packed, so the launch count
+        // per layer does not grow with B. The unfused path below keeps the
+        // original op order for the graphs that never run the dispatch.
+        if let Some(operands) = b.packed_group(&[
+            lw.wq.as_ref().expect("ordinary q projection"),
+            lw.wk.as_ref().expect("ordinary k projection"),
+            lw.wv.as_ref().expect("ordinary v projection"),
+        ]) {
+            let mut outs = b.native_qmv_rows(hn, &operands);
+            let vv = outs.pop().expect("q/k/v dispatch results");
+            let kk = outs.pop().expect("q/k/v dispatch results");
+            let q = outs.pop().expect("q/k/v dispatch results");
+            let q = match &lora {
+                Some(delta) => {
+                    let delta = b.slice(delta, &[(0, n), (0, nq * d)]);
+                    b.add(&q, &delta)
+                }
+                None => q,
+            };
+            let q = add_proj_bias_seq(b, q, &lw.bq, n, nq * d);
+            let q = b.reshape(&q, vec![n, nq, d]);
+            let kk = match &lora {
+                Some(delta) => {
+                    let delta = b.slice(delta, &[(0, n), (nq * d, nq * d + nkv * d)]);
+                    b.add(&kk, &delta)
+                }
+                None => kk,
+            };
+            let kk = add_proj_bias_seq(b, kk, &lw.bk, n, nkv * d);
+            let kk = b.reshape(&kk, vec![n, nkv, d]);
+            let vv = match &lora {
+                Some(delta) => {
+                    let delta = b.slice(delta, &[(0, n), (nq * d + nkv * d, nq * d + 2 * nkv * d)]);
+                    b.add(&vv, &delta)
+                }
+                None => vv,
+            };
+            let vv = add_proj_bias_seq(b, vv, &lw.bv, n, nkv * d);
+            let vv = b.reshape(&vv, vec![n, nkv, d]);
+            return (q, kk, vv);
+        }
         let q = b.linear_seq_proj(hn, lw.wq.as_ref().expect("ordinary q projection"));
         let q = match &lora {
             Some(delta) => {
@@ -3474,9 +3533,32 @@ pub fn emit_decode_ragged_with(
     sample: bool,
     precision: Precision,
 ) -> String {
+    emit_decode_ragged_with_native(c, bsz, sample, precision, None)
+}
+
+/// Emit the ragged `decode_step` module, optionally with the native packed
+/// multi-row GEMV (issue #2922).
+///
+/// `native` carries the target alias and the `hal.executable.source` block that
+/// embeds the compiled HIP kernel. When it is present the projections stay
+/// packed and the rank-2 calls go through the multi-row exports, which reduce
+/// every activation row against one weight read; when it is absent the graph is
+/// the same f16 one emitted before this issue.
+pub fn emit_decode_ragged_with_native(
+    c: &Config,
+    bsz: usize,
+    sample: bool,
+    precision: Precision,
+    native: Option<(&str, &str)>,
+) -> String {
+    assert!(
+        native.is_none() || bsz <= crate::native_qmv::MAX_BATCH,
+        "the multi-row native GEMV supports B <= MAX_BATCH"
+    );
     let mut b = Builder::new()
         .with_precision(precision)
-        .with_projection_layout(c.projection_layout);
+        .with_projection_layout(c.projection_layout)
+        .with_native_proj(native.is_some());
     let (decls, a) = build_ragged_arg_schema(&mut b, c, bsz);
     let k = emit_consts(&mut b, c);
     // Constant row indices 0..bsz for the per-row KV-write dim-0 offsets.
@@ -3581,7 +3663,9 @@ pub fn emit_decode_ragged_with(
     let sig = render_signature(&decls);
     let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.cache_heads(), c.cache_dim()]).render();
     format!(
-        "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        "{alias}module @decode_step {{\n{native}  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        alias = native.map(|(alias, _)| alias).unwrap_or(""),
+        native = native.map(|(_, source)| source).unwrap_or(""),
         sig = sig,
         out_ty = out_ty,
         cache_ty = cache_ty,
