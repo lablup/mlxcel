@@ -132,3 +132,43 @@ async fn fail_active_background_ends_every_job_as_failed() {
     assert_eq!(store.fail_active_background("server_error", "again"), 0);
     assert_indexes_consistent(&store);
 }
+
+#[tokio::test]
+async fn fail_active_background_records_cancelled_for_a_requested_cancel() {
+    let store = ResponsesStore::new(ResponsesStoreConfig::default());
+    store
+        .admit_background(queued("plain"), vec![], true)
+        .expect("admit");
+    store
+        .admit_background(queued("cancelling"), vec![], true)
+        .expect("admit");
+    assert!(store.mark_background_in_progress("plain"));
+    assert!(store.mark_background_in_progress("cancelling"));
+    // The cancel route flips the token of an `in_progress` job and waits for
+    // the job's own terminal write; the unload arrives first.
+    assert!(matches!(
+        store.request_background_cancel("cancelling"),
+        BackgroundCancel::Requested
+    ));
+
+    assert_eq!(
+        store.fail_active_background("server_error", "model unloaded"),
+        2
+    );
+    assert_eq!(store.active_background_jobs(), 0);
+
+    let plain = store
+        .wait_background_terminal("plain", Duration::from_secs(1))
+        .await
+        .expect("terminal object retained");
+    assert_eq!(plain.status, ResponseStatus::Failed);
+    assert!(plain.error.is_some());
+
+    let cancelling = store
+        .wait_background_terminal("cancelling", Duration::from_secs(1))
+        .await
+        .expect("terminal object retained");
+    assert_eq!(cancelling.status, ResponseStatus::Cancelled);
+    assert!(cancelling.error.is_none(), "a cancel carries no error body");
+    assert_indexes_consistent(&store);
+}

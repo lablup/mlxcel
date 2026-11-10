@@ -124,6 +124,11 @@ impl ResponsesStore {
     /// write is a no-op. The recorded object is the job's snapshot, without
     /// the output generated so far.
     ///
+    /// A job whose cancel was already requested ([`Self::cancel_background`]
+    /// or [`Self::request_background_cancel`]) but not yet recorded ends
+    /// `cancelled` instead, without an error, as `JobRecorder::fail` records
+    /// it: a cancel never ends a job `failed`.
+    ///
     /// After this returns, [`Self::active_background_jobs`] reads 0 unless a
     /// job was admitted concurrently; the caller stops admission first.
     ///
@@ -142,12 +147,16 @@ impl ResponsesStore {
             };
             job.token.store(true, Ordering::Release);
             let mut terminal = job.snapshot.clone();
-            terminal.status = ResponseStatus::Failed;
             terminal.completed_at = None;
-            terminal.error = Some(ResponseErrorBody {
-                code: code.to_string(),
-                message: message.to_string(),
-            });
+            if job.cancel_requested {
+                terminal.status = ResponseStatus::Cancelled;
+            } else {
+                terminal.status = ResponseStatus::Failed;
+                terminal.error = Some(ResponseErrorBody {
+                    code: code.to_string(),
+                    message: message.to_string(),
+                });
+            }
             // The snapshot carries no output, so sizing it under the lock is
             // cheap. The guard is consumed by the terminal write.
             let terminal_bytes = serialized_json_len_saturating(&terminal);
