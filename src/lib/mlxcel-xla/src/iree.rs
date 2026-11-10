@@ -60,7 +60,7 @@ use safetensors::{Dtype, SafeTensors};
 use crate::emitter::{
     Config, DeepStackConfig, Gemma3nConfig, Gemma3nWeightSpec, LlavaVisionConfig, Precision,
     ProjectionLayout, QuantConfig, VisionProjector, WeightScheme, check_packed_supported,
-    emit_decode_ragged_with, emit_decode_with_native, emit_gemma3n_decode_ragged_with_qmv,
+    emit_decode_ragged_with_native, emit_decode_with_native, emit_gemma3n_decode_ragged_with_qmv,
     emit_gemma3n_decode_with_qmv, emit_gemma3n_prefill_embeddings_ple_with_qmv,
     emit_gemma3n_prefill_with_qmv, emit_prefill_embeddings_deepstack_with,
     emit_prefill_embeddings_with, emit_prefill_with, gemma3n_qmv_artifact_identity,
@@ -3140,8 +3140,7 @@ impl IreeRaggedLlama {
                 .count()
                 <= 1
         );
-        let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
-        runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
+        let mut cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
         checked_ffi_int(b_max, "b_max")?;
         if !RAGGED_B_VALUES.contains(&b_max) {
             return Err(format!(
@@ -3149,6 +3148,40 @@ impl IreeRaggedLlama {
                  {b_max} is not one of them"
             ));
         }
+        // issue #2922: run the ragged batch engine's projections from the
+        // checkpoint's packed 4-bit weights through the native multi-row HIP
+        // GEMV. As on the single-sequence path, any unsupported checkpoint or
+        // missing compiler falls back to the f16 weight graph with one warning
+        // rather than failing the load. The packed argument list is shared with
+        // the prefill graphs, so the decision is taken once here, before
+        // `runtime_ffi_dimensions` and weight upload see the config.
+        let mut native_module: Option<(String, String)> = None;
+        if crate::native_qmv::requested() && device == "hip" {
+            if !native_quant_supported(&cfg) {
+                eprintln!(
+                    "mlxcel: MLXCEL_XLA_QUANT=native needs a 4-bit group-64 checkpoint; \
+                     using the f16 weight path"
+                );
+            } else {
+                match rocm_arch() {
+                    Ok(arch) => match crate::native_qmv::hsaco(&arch) {
+                        Ok(bytes) => {
+                            cfg.set_packed_args(true);
+                            native_module = Some(crate::native_qmv::module_parts(&bytes, &arch));
+                        }
+                        Err(error) => eprintln!(
+                            "mlxcel: native 4-bit batch projections unavailable ({error}); \
+                             falling back to the f16 weight path"
+                        ),
+                    },
+                    Err(error) => eprintln!(
+                        "mlxcel: native 4-bit batch projections unavailable ({error}); \
+                         falling back to the f16 weight path"
+                    ),
+                }
+            }
+        }
+        runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
         // Emit the logits prefill + the ragged decode graph for this model + b_max
         // at the device-resolved precision (f16 on GPU by default, f32 on CPU).
         let precision = effective_precision(device, &cfg)?;
@@ -3156,12 +3189,18 @@ impl IreeRaggedLlama {
             RuntimeConfig::Dense(_) => false,
             RuntimeConfig::Gemma3n(config) => gemma3n_native_qmv(device, config)?,
         };
+        let native_ragged = native_module
+            .as_ref()
+            .map(|(alias, source)| (alias.as_str(), source.as_str()));
         let (prefill_mlir, prefill_embeddings_mlir, prefill_embeddings_deepstack_mlir, decode_mlir) =
             match &cfg {
                 RuntimeConfig::Dense(config) => {
+                    // The packed argument list is active for both the in-graph
+                    // dequant (`MLXCEL_XLA_QUANT=packed`) and the native GEMV
+                    // (`MLXCEL_XLA_QUANT=native`), so gate on the resolved flag.
                     check_packed_supported(
                         device,
-                        quant_in_graph() && config.supports_packed_quant(),
+                        config.packed_args && config.supports_packed_quant(),
                     )?;
                     (
                         emit_prefill_with(config, false, precision),
@@ -3169,7 +3208,13 @@ impl IreeRaggedLlama {
                         config.deepstack.as_ref().map(|_| {
                             emit_prefill_embeddings_deepstack_with(config, false, precision)
                         }),
-                        emit_decode_ragged_with(config, b_max, false, precision),
+                        emit_decode_ragged_with_native(
+                            config,
+                            b_max,
+                            false,
+                            precision,
+                            native_ragged,
+                        ),
                     )
                 }
                 RuntimeConfig::Gemma3n(config) => (
