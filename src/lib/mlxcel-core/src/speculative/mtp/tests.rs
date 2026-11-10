@@ -1195,3 +1195,25 @@ fn a_linear_tree_round_lands_where_the_chain_round_lands() {
         "the script must exercise an immediate rejection too"
     );
 }
+
+#[test]
+fn session_stats_rate_excludes_the_prefill_bonus() {
+    // 11 emitted: the first bonus from `prefill_and_seed`, 10 from rounds
+    // inside the 200 ms decode window.
+    let stats = MtpGenerator::<MockMtpTarget>::build_stats(
+        4,
+        11,
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_millis(200),
+    );
+    assert_eq!(stats.generated_tokens, 11);
+    assert!((stats.decode_tok_per_sec - 50.0).abs() < 1e-9);
+    // Only the bonus: nothing came out of the window.
+    let only_bonus = MtpGenerator::<MockMtpTarget>::build_stats(
+        4,
+        1,
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_millis(200),
+    );
+    assert_eq!(only_bonus.decode_tok_per_sec, 0.0);
+}

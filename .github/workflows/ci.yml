@@ -1142,6 +1142,9 @@ jobs:
       # moved the score by more than the 2 percent budget), and then fails closed, naming each
       # process, if any GPU compute process remains. The step timeout covers both 600-second lock
       # waits and the 600-second quiet wait on top of the 45 minutes the gate itself was given.
+      # The precheck also refuses, as an infrastructure failure (#2940), when $RUNNER_TEMP has less
+      # than 5 GB free, and a verifier failure whose log shows ENOSPC/EDQUOT/EIO is reported as
+      # `activity gate infrastructure failure` instead of a performance verification failure.
       - name: Run Activity performance gate with the hidden acceptance deferred
         timeout-minutes: 75
         env:
@@ -1160,6 +1163,7 @@ jobs:
             --installed-dir "$RUNNER_TEMP/mlxcel-webui-installed" \
             --run-root "$RUNNER_TEMP" \
             --host-state "$RUNNER_TEMP/webui-activity-host-state.json" \
+            --min-free-gb 5 \
             --quiet-timeout 600
           full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
           summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"

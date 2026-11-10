@@ -34,12 +34,13 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
    ```bash
    # macOS (Apple Silicon)
    cargo build --release --features metal,accelerate
-   cargo test --workspace --profile test-fast --features metal,accelerate
+   cargo test --workspace --profile test-fast --features metal,accelerate --no-fail-fast -- --test-threads=1   # same as `make verify-test`
 
    # Linux / CUDA
    cargo build --release --features cuda
    cargo test --workspace --profile test-fast --features cuda -- --test-threads=1
    ```
+   Keep `--test-threads=1`: this is the command `make verify-test` and the nightly workflow run, and the one that must pass even though no PR job runs it (step 4). Without it libtest runs many MLX-backed tests concurrently inside one test binary, which faults the Metal device (#1092, #1210) and reports failures the real gate never sees.
 4. Run the local quality gates:
    ```bash
    cargo fmt --all -- --check   # gated at PR time; fmt violations block merge

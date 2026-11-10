@@ -1440,7 +1440,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
         );
     }
 
-    fn build_stats(
+    pub(super) fn build_stats(
         prompt_count: usize,
         gen_count: usize,
         prefill_time: Duration,
@@ -1448,6 +1448,9 @@ impl<T: MtpTarget> MtpGenerator<T> {
     ) -> GenerationStats {
         let prefill_ms = duration_ms(prefill_time);
         let decode_ms = duration_ms(decode_time);
+        // `gen_count` includes the first bonus `prefill_and_seed` sampled
+        // before the decode window opened.
+        let decode_count = gen_count.saturating_sub(1);
         GenerationStats {
             prompt_tokens: prompt_count,
             generated_tokens: gen_count,
@@ -1458,11 +1461,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
             } else {
                 0.0
             },
-            decode_tok_per_sec: if decode_ms > 0.0 {
-                gen_count as f64 / (decode_ms / 1000.0)
-            } else {
-                0.0
-            },
+            decode_tok_per_sec: crate::generate::decode_tok_per_sec(decode_count, decode_ms),
         }
     }
 }
