@@ -103,12 +103,22 @@ impl JobRecorder {
             .set_background_input_items(&self.response_id, input_items);
     }
 
-    /// Record `failed` with `error: { code, message }`. A cancel the client
-    /// was already told about wins: the job is then recorded `cancelled`.
+    /// Record `failed` with `error: { code, message }`. A cancel wins: when
+    /// one was acknowledged, or requested through
+    /// `request_background_cancel` or `cancel_background` (a generation
+    /// stopped before its first token reports that as an error), the job is
+    /// recorded `cancelled`, so a cancel never ends a job `failed`. The
+    /// job's token alone does not count: a refused admission sets it too.
+    ///
+    /// A no-op once a terminal object is recorded.
     pub(super) fn fail(&self, code: &str, message: &str) {
         let cancel_acknowledged = self.store.finish_in_flight(&self.response_id);
+        if !self.is_active() {
+            return;
+        }
+        let cancel_requested = self.store.background_cancel_requested(&self.response_id);
         let mut terminal = self.template.clone();
-        if cancel_acknowledged {
+        if cancel_acknowledged || cancel_requested {
             terminal.status = ResponseStatus::Cancelled;
         } else {
             tracing::warn!(
@@ -152,6 +162,10 @@ impl Drop for JobRecorder {
                 "The background response ended unexpectedly; check the server log.",
             );
         }
+        // The cancel route can record the terminal object while the job
+        // still runs; a job that then panics would otherwise never retire
+        // its cancel registration.
+        self.store.finish_in_flight(&self.response_id);
     }
 }
 
@@ -202,10 +216,12 @@ impl ResponseEventSink for BackgroundSink {
             .store
             .finish_background(&self.recorder.response_id, response.clone());
         // The conversation gets this turn unless nothing was generated (a
-        // cancel before the first token) or the store kept a `failed`
-        // object in place of an oversized one.
+        // cancel before the first token), the store kept a `failed` object
+        // in place of an oversized one, or the cancel route recorded the
+        // terminal object first (`cancelled` without output; this write was
+        // then a no-op).
         let generated =
-            !(response.status == ResponseStatus::Cancelled && response.output.is_empty());
+            !(recorded.status == ResponseStatus::Cancelled && recorded.output.is_empty());
         if self.translated.effective_store && generated && recorded.status == response.status {
             append_conversation_turn(&self.state, &self.request, &self.translated, &recorded);
         }

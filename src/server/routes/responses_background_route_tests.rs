@@ -44,6 +44,10 @@ const TEMPLATE: &str = "{% for m in messages %}<|{{ m['role'] }}|>{{ m['content'
 {% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}";
 const WAIT: Duration = Duration::from_secs(10);
 
+/// `POST /v1/responses/{id}/cancel` on background responses (issue #2899).
+#[path = "responses_background_cancel_tests.rs"]
+mod cancel;
+
 struct Harness {
     app: Router,
     state: AppState,
@@ -456,15 +460,16 @@ async fn a_cancel_keeps_working_through_the_in_flight_registry() {
         "nothing dispatched"
     );
 
-    // Cancelled mid-generation through the route.
+    // Cancelled mid-generation through the registry: the driver records
+    // `cancelled` with the output generated so far.
     let id = h.create_background(background_body()).await;
     h.handle.token("Hel");
     h.poll_until(&id, "in_progress").await;
-    let cancel = format!("/v1/responses/{id}/cancel");
-    let (_, reply) = h.send(Method::POST, &cancel, None).await;
-    assert_eq!(reply["status"], "cancelled", "{reply}");
+    assert!(h.store.cancel_in_flight(&id));
     h.handle.finish();
-    assert_eq!(h.terminal(&id).await["status"], "cancelled");
+    let done = h.terminal(&id).await;
+    assert_eq!(done["status"], "cancelled", "{done}");
+    assert_eq!(done["output_text"], "Hel", "{done}");
     assert_eq!(h.store.active_background_jobs(), 0);
 }
 

@@ -29,7 +29,7 @@ Implementation source map:
 | POST | `/v1/responses` | Create a response: non-streaming, streaming, or as a background job (`background: true`, see [Background mode](#background-mode)). |
 | GET | `/v1/responses/{id}` | Retrieve a stored response, or poll a background response. |
 | DELETE | `/v1/responses/{id}` | Delete a stored response. A background response that has not finished returns `400`; cancel it first. |
-| POST | `/v1/responses/{id}/cancel` | Best-effort cancellation of an in-flight streaming response. The stream ends with `response.completed` whose `response.status` is `cancelled`, and the stored copy has the same status. Cancelling a response already stored as `cancelled` is idempotent and returns the stored Response object. Other finished responses return `400 invalid_request_error` without changing the saved result. |
+| POST | `/v1/responses/{id}/cancel` | Best-effort cancellation of an in-flight streaming response. The stream ends with `response.completed` whose `response.status` is `cancelled`, and the stored copy has the same status. Cancelling a response already stored as `cancelled` is idempotent and returns the stored Response object. Other finished responses return `400 invalid_request_error` without changing the saved result. A background response answers with its full final Response object instead; see [Background mode](#background-mode). |
 | POST | `/v1/responses/compact` | Summarize older turns into a `compaction` item; see [Conversation compaction](#conversation-compaction). |
 | POST | `/v1/responses/input_tokens` | Count the prompt tokens a body would prefill; see `docs/llama-server-compat.md`. |
 
@@ -244,6 +244,17 @@ What create answers:
 - `400 invalid_request_error` for everything a foreground request is refused for before generation (malformed fields, unsupported media, invalid sampling or tool parameters, an invalid schema, an unknown `previous_response_id`), and also when `stream` is `true`, when the response store is disabled, or when `--responses-background-max-jobs`, the response store entry limit, or `--responses-store-max-bytes` is `0`. No job is created.
 - `429` with `error.code: "rate_limit_exceeded"` when `--responses-background-max-jobs` jobs are already active, or when the active jobs fill `--responses-store-max-bytes`. Retry after a job finishes.
 - `503` when the generation queue is full, as for a foreground request.
+
+Cancelling a job: `POST /v1/responses/{id}/cancel` returns the job's final Response object with `status: "cancelled"`, byte for byte what a following `GET` returns, so `client.responses.cancel()` gets a full object.
+
+- A `queued` job is recorded `cancelled` at once with `output: []` and `completed_at: null`, and never starts generating. An automatic compaction pass that is already running finishes, and its result is discarded.
+- An `in_progress` job stops at its next token. The reply waits up to 5 seconds for it and carries the output generated so far. A job that does not stop in time is recorded `cancelled` with `output: []`; whatever it produces later is discarded.
+- A repeated cancel returns the same object.
+- A job that finished as `completed`, `incomplete` or `failed` before the cancel took effect returns `400 invalid_request_error` (`response '<id>' has already finished and cannot be cancelled`) and keeps its result. The reply never says `cancelled` for a response that `GET` reports otherwise.
+- `store: false` jobs behave the same for as long as the final object is readable.
+- An unknown id returns `404`.
+
+A cancelled job stops counting against `--responses-background-max-jobs` when its final object is recorded, which is before the cancel reply.
 
 Interactions:
 
