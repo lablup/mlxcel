@@ -29,9 +29,10 @@ Implementation source map:
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/v1/responses` | Create a response: non-streaming, streaming, or as a background job (`background: true`, see [Background mode](#background-mode)). |
-| GET | `/v1/responses/{id}` | Retrieve a stored response, or poll a background response. With `?stream=true` it replays and tails the events of a streamed background response; see [Streaming and resuming](#streaming-and-resuming). |
+| GET | `/v1/responses/{id}` | Retrieve a stored response, or poll a background response. |
+| GET | `/v1/responses/{id}?stream=true&starting_after=N` | Replay and tail the events of a streamed background response after `sequence_number` `N` (all of them without `starting_after`); see [Streaming and resuming](#streaming-and-resuming). |
 | DELETE | `/v1/responses/{id}` | Delete a stored response. A background response that has not finished returns `400`; cancel it first. |
-| POST | `/v1/responses/{id}/cancel` | Best-effort cancellation of an in-flight streaming response. The stream ends with `response.completed` whose `response.status` is `cancelled`, and the stored copy has the same status. Cancelling a response already stored as `cancelled` is idempotent and returns the stored Response object. Other finished responses return `400 invalid_request_error` without changing the saved result. A background response answers with its full final Response object instead; see [Background mode](#background-mode). |
+| POST | `/v1/responses/{id}/cancel` | Cancel a background job or an in-flight foreground stream. A background job answers with its full final Response object (`status: "cancelled"`), the same object a following `GET` and a repeated cancel return; see [Background mode](#background-mode). A foreground stream answers with a minimal `{id, object, status: "cancelled"}` envelope and ends with `response.completed` whose `response.status` is `cancelled`; once stored, a repeated cancel returns the stored object. A response that already finished otherwise returns `400 invalid_request_error` and keeps its result. |
 | POST | `/v1/responses/compact` | Summarize older turns into a `compaction` item; see [Conversation compaction](#conversation-compaction). |
 | POST | `/v1/responses/input_tokens` | Count the prompt tokens a body would prefill; see `docs/llama-server-compat.md`. |
 
@@ -83,7 +84,7 @@ with client.responses.stream(
 | `reasoning` | supported subset | `reasoning.effort` is echoed unchanged and feeds the same template controls as chat-completions `reasoning_effort`: `none`, `off`, `disabled`, `false`, and `0` (case-insensitive after trimming) disable `enable_thinking`; other values enable thinking and are forwarded verbatim as `reasoning_effort`, or as `reasoning_strength` when that is the identifier the loaded template reads. The derived controls override server-wide template defaults per key. `summary` remains model/runtime dependent. |
 | `conversation` | supported | String id or `{ "id": "..." }`; uses in-memory conversation store. |
 | `previous_response_id` | supported | Rehydrates stored prior input/output items. Mutually exclusive with `conversation`. |
-| `store` | supported | Defaults to `true`; `false` skips persistence. |
+| `store` | supported | Defaults to `true`; `false` skips persistence. A background response needs the response store; with `false` its final object stays readable by polling for `--responses-background-ephemeral-ttl-secs`. |
 | `stream` | supported | Streams typed SSE events. |
 | `max_output_tokens` | supported | Must be greater than zero. |
 | `max_tool_calls` | supported | Soft cap on emitted function-call items. |
@@ -261,11 +262,12 @@ A cancelled job stops counting against `--responses-background-max-jobs` when it
 Interactions:
 
 - Dropping the create connection or a poll cancels nothing. Only the cancel endpoint stops a job.
+- `store` omitted or `true`: the final object becomes a stored response and follows `--responses-store-ttl-secs` and LRU eviction like a foreground one.
 - `store: false` is allowed. The final object is then readable by polling for `--responses-background-ephemeral-ttl-secs` and cannot be used as `previous_response_id`.
 - `previous_response_id` that names a job that has not finished returns `400` with `previous response '<id>' has not finished (status: <status>)`. Once the job is terminal it chains like any stored response.
 - `conversation` history is read when the job is created, and the turn is appended when the job finishes with output. A `failed` job appends nothing.
 - `context_management` runs inside the job, so a compaction failure ends the job as `failed` instead of failing the create call.
-- Media inputs are allowed. Whether the model supports a media kind is checked at create; reading and decoding happen inside the job.
+- Media inputs are allowed. Whether the model supports a media kind is checked at create; reading and decoding happen inside the job, so a media file that cannot be read or decoded ends the job as `failed` with `invalid_prompt`.
 
 ### Streaming and resuming
 
@@ -294,6 +296,8 @@ With the OpenAI Python SDK this is `client.responses.create(..., background=True
 - Other `400` answers: a `starting_after` that is not a non-negative integer, a `starting_after` past the newest `sequence_number` sent so far (on a finished response, past its terminal event), a `stream` that is not a boolean, a response whose event log was dropped for the store budget (the message says it is no longer retained), and a response that has no event log because it was not created with both `background: true` and `stream: true`. An unknown id returns `404`.
 - The log lives as long as the response: it is counted in `--responses-store-max-bytes` and is freed when the response is evicted, deleted or expires (after `--responses-background-ephemeral-ttl-secs` for `store: false`), even while a client keeps a stream open without reading it; such a stream then receives the `response.error` event with `code: "stream_events_evicted"` and ends. A log too large to fit the store budget beside its response is dropped when the job finishes; streams waiting on the live tail still receive the terminal event.
 - While a job runs, its log is counted in the store's byte accounting but not in the admission budget, so active logs can add up to `--responses-background-max-jobs` times `--responses-background-event-log-bytes` (256 MiB with the defaults) beside `--responses-store-max-bytes`. Size the two flags together on memory-constrained hosts.
+
+`scripts/verify_responses_background.py` checks this behavior end to end with the official OpenAI Python SDK against a running server (create and poll, `store: false`, cancel, streaming, resume after a dropped stream, chaining, the job limit, and an RSS leak bound): `uv run --with openai python scripts/verify_responses_background.py --base-url http://127.0.0.1:8080/v1 --model <name>`. Pass `--expect-max-jobs N` for a server started with `--responses-background-max-jobs N` to include the 429 check, and `--jobs 200 --pid <server pid>` for the leak bound.
 
 Jobs are held in memory. The single-model server does not drain them on exit: stopping or restarting the process loses queued and running jobs, and their ids return `404` afterwards. If the model worker exits while the process keeps running, its jobs end as `failed`.
 
