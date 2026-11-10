@@ -21,7 +21,8 @@
 use std::collections::HashMap;
 
 use mlxcel_xla::{
-    SampleParams, XlaBatchEngine, batch_kv_allocation_counters, reset_batch_kv_allocation_counters,
+    IreeRaggedLlama, SampleParams, XlaBatchEngine, batch_kv_allocation_counters,
+    reset_batch_kv_allocation_counters,
 };
 use safetensors::{Dtype, tensor::TensorView};
 use tempfile::TempDir;
@@ -131,6 +132,31 @@ fn create_tiny_model() -> TinyModel {
 
 fn device() -> String {
     std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string())
+}
+
+/// Item 3: a reset at a batch size other than the compiled one is rejected
+/// instead of surfacing later as an opaque graph shape mismatch inside IREE.
+#[test]
+#[ignore = "requires the pinned IREE runtime and compiler"]
+fn ragged_reset_rejects_a_batch_size_the_graph_was_not_compiled_for() {
+    let fixture = create_tiny_model();
+    let mut engine = IreeRaggedLlama::load(fixture.path(), &device(), 4, CAPACITY)
+        .expect("ragged engine at B=4");
+    assert_ne!(
+        engine.test_bind_and_reset(8, 4),
+        0,
+        "reset at B=4 must be rejected when the graph was bound at B=8"
+    );
+    assert_ne!(
+        engine.test_bind_and_reset(0, 4),
+        0,
+        "reset before any bind must be rejected"
+    );
+    assert_eq!(
+        engine.test_bind_and_reset(4, 4),
+        0,
+        "a reset matching the bound compiled B must still succeed"
+    );
 }
 
 /// Item 1: the lazy rank-5 batch KV is zeroed on the device, with no host

@@ -299,6 +299,9 @@ unsafe extern "C" {
     // copy the per-row `[vocab]` logits to host so the engine samples there (Stage
     // 2d). `prefill_slot_logits` also does the device-side KV slot write.
     fn xla_llama_ragged_reset(c: *mut XlaCtx, bsz: c_int) -> c_int;
+    /// Record the ragged batch size baked into this context's decode graph.
+    /// Must be called before the first `xla_llama_ragged_reset`.
+    fn xla_llama_ragged_bind(c: *mut XlaCtx, compiled_b: c_int) -> c_int;
     /// Test support (issue #2923): host-mirror and host-to-device byte counters
     /// for the lazy rank-5 batch-KV allocation path.
     #[cfg(feature = "test-support")]
@@ -3321,6 +3324,15 @@ impl IreeRaggedLlama {
         };
         // Safety: ctx is a fresh valid context from create_ctx; free it on error.
         let b_max_ffi = checked_ffi_int(b_max, "b_max")?;
+        // Record the compiled B before any reset. The ragged decode graph's
+        // static [B,...] shapes were fixed when it was emitted, so a reset at
+        // any other size can only fail inside IREE with an opaque shape error;
+        // binding first turns that into a clear rejection naming both values.
+        let rc = unsafe { xla_llama_ragged_bind(ctx, b_max_ffi) };
+        if rc != 0 {
+            unsafe { xla_llama_free(ctx) };
+            return Err(format!("xla_llama_ragged_bind failed (status {rc})"));
+        }
         let rc = unsafe { xla_llama_ragged_reset(ctx, b_max_ffi) };
         if rc != 0 {
             unsafe { xla_llama_free(ctx) };
@@ -3409,6 +3421,21 @@ impl IreeRaggedLlama {
             return Err(format!("xla_llama_ragged_reset failed (status {rc})"));
         }
         Ok(())
+    }
+
+    /// Test support (issue #2923): record `compiled_b` as this context's
+    /// compiled ragged batch size and then reset to `bsz`, returning the shim's
+    /// status code. The engine's own `b_max` is rebound by the caller.
+    #[cfg(feature = "test-support")]
+    pub fn test_bind_and_reset(&mut self, compiled_b: i32, bsz: i32) -> i32 {
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        let rc = unsafe { xla_llama_ragged_bind(self.ctx, compiled_b) };
+        if rc != 0 {
+            return rc;
+        }
+        // Safety: as above; the reset only releases and re-sizes this ctx's
+        // batch state.
+        unsafe { xla_llama_ragged_reset(self.ctx, bsz) }
     }
 
     /// The vocabulary size (logits per row). The engine slices the ragged decode's

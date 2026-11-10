@@ -130,6 +130,10 @@ typedef struct xla_ctx {
   iree_hal_buffer_view_t* kcache_b;
   iree_hal_buffer_view_t* vcache_b;
   int32_t rg_bsz;
+  // Batch size baked into the resident ragged decode graph, recorded by
+  // `xla_llama_ragged_bind` before the first reset (issue #2923). Zero means
+  // "not bound"; a reset never guesses it.
+  int32_t rg_compiled_b;
   iree_host_size_t rg_per;
   iree_hal_dim_t rg_dims[4];
 } xla_ctx;
@@ -1257,12 +1261,46 @@ static int xla_store_prefill_kv_slot(xla_ctx* c, int32_t slot,
   return 0;
 }
 
+// Record the batch size compiled into this context's ragged decode graph.
+// Must be called once after the context is created and before the first reset;
+// the graph's static [B,...] shapes cannot be renegotiated at runtime.
+int xla_llama_ragged_bind(xla_ctx* c, int32_t compiled_b) {
+  if (!c || compiled_b <= 0) {
+    fprintf(stderr,
+            "xla_llama_ragged_bind: invalid context or compiled_b=%d\n",
+            compiled_b);
+    return 1;
+  }
+  c->rg_compiled_b = compiled_b;
+  return 0;
+}
+
 // Reset the batched state for `bsz` slots: drop any rank-5 KV and forget the
 // per-slot dims (re-captured by the next prefill_slot, which lazily reallocates
 // the rank-5 KV once the dims are known). Call once before seeding slots.
+//
+// `bsz` must equal the batch size baked into this context's ragged decode
+// graph. The graph's [B,...] shapes are static, so any other value used to fail
+// deep inside IREE as an opaque shape mismatch; reject it here with both values
+// instead. `xla_llama_ragged_bind` must have recorded that size first.
 int xla_llama_ragged_reset(xla_ctx* c, int32_t bsz) {
-  if (bsz <= 0) {
-    fprintf(stderr, "xla_llama_ragged_reset: bsz must be positive\n");
+  if (!c || bsz <= 0) {
+    fprintf(stderr, "xla_llama_ragged_reset: bsz must be positive, got %d\n",
+            bsz);
+    return 1;
+  }
+  if (c->rg_compiled_b <= 0) {
+    fprintf(stderr,
+            "xla_llama_ragged_reset: no compiled ragged batch size is bound "
+            "(bsz=%d); call xla_llama_ragged_bind first\n",
+            bsz);
+    return 1;
+  }
+  if (bsz != c->rg_compiled_b) {
+    fprintf(stderr,
+            "xla_llama_ragged_reset: bsz=%d does not match the compiled ragged "
+            "batch size compiled_b=%d\n",
+            bsz, c->rg_compiled_b);
     return 1;
   }
   c->rg_bsz = bsz;

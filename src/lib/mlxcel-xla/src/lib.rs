@@ -172,6 +172,10 @@ pub use aux_smoke::{AuxiliaryAbiSmokeReport, run_auxiliary_abi_smoke};
 /// Test support only (issue #2923): batch-KV allocation instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters};
+/// Test support only (issue #2923): the ragged engine's raw bind/reset hooks
+/// live behind `test-support`.
+#[cfg(feature = "test-support")]
+pub use iree::IreeRaggedLlama;
 #[cfg(feature = "iree")]
 pub use batch::XlaBucketSet;
 /// Test support only (issue #2790): production builds do not compile it.
