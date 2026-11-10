@@ -444,6 +444,41 @@ impl ResponsesStore {
         Some(payload)
     }
 
+    /// Whether this store knows the response `id`: an active background
+    /// job, a stored response, the retained ephemeral object of a
+    /// `store: false` background job, or a foreground stream that is still
+    /// generating (cancellable through the in-flight registry).
+    ///
+    /// Read-only: it takes no write lock, does not refresh the LRU stamp and
+    /// does not run the expiry sweep. An entry past its TTL that has not been
+    /// swept yet counts as absent.
+    ///
+    /// Used by: the router pool's response affinity probe, which finds the
+    /// loaded model that owns an id when a retrieve, delete or cancel request
+    /// names no model (issue #2901).
+    pub fn contains_response(&self, id: &str) -> bool {
+        if self.lock_jobs().jobs.contains_key(id) {
+            return true;
+        }
+        let stored = {
+            let state = match self.inner.read() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            state
+                .entries
+                .get(id)
+                .is_some_and(|entry| !entry.is_expired(self.config.ttl, Instant::now()))
+        };
+        if stored {
+            return true;
+        }
+        match self.in_flight.read() {
+            Ok(g) => g.contains_key(id),
+            Err(poisoned) => poisoned.into_inner().contains_key(id),
+        }
+    }
+
     /// Remove an entry. Returns the previous value when present.
     pub fn remove(&self, id: &str) -> Option<StoredResponse> {
         let mut state = match self.inner.write() {
@@ -1381,3 +1416,7 @@ mod tests {
 #[cfg(test)]
 #[path = "responses_store_background_tests.rs"]
 mod background_tests;
+
+#[cfg(test)]
+#[path = "responses_store_affinity_tests.rs"]
+mod affinity_tests;

@@ -156,6 +156,12 @@ parameter on GET routes. `--models-max` bounds the resident set with LRU
 eviction. Autoload is on by default and can be disabled globally with
 `--no-models-autoload` or controlled on a management request with `autoload`.
 
+Responses API calls that address a response by id (`GET` and `DELETE
+/v1/responses/{id}`, `POST /v1/responses/{id}/cancel`) need no `model`: the
+router finds the loaded model that holds the id. A model with a running
+background response is not evicted. See
+[`responses-api.md`](responses-api.md#serving-roles).
+
 Router management uses `GET /models` or `/v1/models` for inventory and reload,
 `POST /models` for a background download, `DELETE /models?model=...` for a
 cache-owned model, and `GET /models/sse` for status events. Model-specific

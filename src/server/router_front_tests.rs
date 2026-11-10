@@ -591,6 +591,37 @@ async fn router_chat_json_body_rejection_precedes_handoff() {
     }
 }
 
+/// Issue #2901: the front has no response store, so it refuses the Responses
+/// API with a 400 that names where to send the request, not a bare 404.
+#[tokio::test]
+async fn router_refuses_responses_api_requests_with_a_json_400() {
+    const MESSAGE: &str = "the disaggregated router does not serve /v1/responses; send Responses API requests, including background mode, to a serving node";
+    let cases = [
+        json!({"model": "test-model", "input": "hello", "background": true}),
+        json!({"model": "test-model", "input": "hello"}),
+        json!({"model": "test-model", "input": "hello", "stream": true}),
+    ];
+    for path in ["/v1/responses", "/responses"] {
+        for body in &cases {
+            let response = post_router_json(path, body.clone()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path} {body}");
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                content_type.starts_with("application/json"),
+                "{content_type}"
+            );
+            let error = error_body(response).await;
+            assert_eq!(error["error"]["message"], MESSAGE, "{path} {body}");
+            assert_eq!(error["error"]["type"], "invalid_request_error");
+        }
+    }
+}
+
 #[tokio::test]
 async fn router_chat_json_body_rejection_message_is_bounded() {
     let body = format!(

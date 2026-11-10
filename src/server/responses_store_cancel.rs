@@ -28,7 +28,10 @@
 //! - [`ResponsesStore::force_background_cancel`] is the fallback for a job
 //!   that did not record a terminal object in time.
 //!
-//! Both write through the same path as
+//! - [`ResponsesStore::fail_active_background`] ends every active job as
+//!   `failed` when the model that runs them is unloaded (issue #2901).
+//!
+//! All of them write through the same path as
 //! [`ResponsesStore::finish_background`], so the first terminal object wins
 //! and a later write by the job is a no-op.
 
@@ -37,7 +40,7 @@ use std::time::Instant;
 
 use super::{BackgroundCancel, BackgroundState, ResponsesStore};
 use crate::server::store_budget::serialized_json_len_saturating;
-use crate::server::types::responses_response::{ResponseObject, ResponseStatus};
+use crate::server::types::responses_response::{ResponseErrorBody, ResponseObject, ResponseStatus};
 
 impl ResponsesStore {
     /// Cancel a job on behalf of the cancel route.
@@ -113,6 +116,44 @@ impl ResponsesStore {
         }
         let mut state = self.write_inner();
         Self::retained_response_locked(&mut state, &self.config, id, now)
+    }
+
+    /// End every active job as `failed` with `code` and `message`, and
+    /// return how many were ended. Each job's token is set, so a generation
+    /// still running stops at its next token check, and its later terminal
+    /// write is a no-op. The recorded object is the job's snapshot, without
+    /// the output generated so far.
+    ///
+    /// After this returns, [`Self::active_background_jobs`] reads 0 unless a
+    /// job was admitted concurrently; the caller stops admission first.
+    ///
+    /// Used by: the router pool's unload, before it stops the model worker
+    /// (issue #2901).
+    pub fn fail_active_background(&self, code: &str, message: &str) -> usize {
+        let mut failed = 0usize;
+        loop {
+            let now = Instant::now();
+            let mut jobs = self.lock_jobs();
+            let Some(id) = jobs.jobs.keys().next().cloned() else {
+                return failed;
+            };
+            let Some(job) = jobs.jobs.remove(&id) else {
+                return failed;
+            };
+            job.token.store(true, Ordering::Release);
+            let mut terminal = job.snapshot.clone();
+            terminal.status = ResponseStatus::Failed;
+            terminal.completed_at = None;
+            terminal.error = Some(ResponseErrorBody {
+                code: code.to_string(),
+                message: message.to_string(),
+            });
+            // The snapshot carries no output, so sizing it under the lock is
+            // cheap. The guard is consumed by the terminal write.
+            let terminal_bytes = serialized_json_len_saturating(&terminal);
+            self.record_terminal_locked(jobs, &id, job, terminal, terminal_bytes, None, now);
+            failed += 1;
+        }
     }
 
     /// Remove the active job `id` and record a `cancelled` copy of its

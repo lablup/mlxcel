@@ -4199,6 +4199,36 @@ impl SideWorkerProvider for Arc<crate::server::realtime_engine::RealtimeVoiceCha
     }
 }
 
+/// Build the Responses-API store from the resolved limits, shared by the
+/// single-model server and by every model a router pool loads (issue #2901).
+///
+/// `--responses-store-max-entries 0` disables the store. A TTL of `0` means
+/// "no TTL", mapped to a very large duration so the sweep is a no-op.
+pub(crate) fn build_responses_store(
+    startup: &ServerStartupConfig,
+) -> Option<Arc<super::responses_store::ResponsesStore>> {
+    if startup.responses_store_max_entries == 0 {
+        return None;
+    }
+    let ttl = if startup.responses_store_ttl_secs == 0 {
+        std::time::Duration::from_secs(u64::MAX / 2)
+    } else {
+        std::time::Duration::from_secs(startup.responses_store_ttl_secs)
+    };
+    Some(Arc::new(super::responses_store::ResponsesStore::new(
+        super::responses_store::ResponsesStoreConfig {
+            max_entries: startup.responses_store_max_entries,
+            max_bytes: startup.responses_store_max_bytes,
+            ttl,
+            background_max_jobs: startup.responses_background_max_jobs,
+            background_ephemeral_ttl: std::time::Duration::from_secs(
+                startup.responses_background_ephemeral_ttl_secs.max(1),
+            ),
+            background_event_log_bytes: startup.responses_background_event_log_bytes,
+        },
+    )))
+}
+
 async fn serve_with_side_model_workers(
     startup: ServerStartupConfig,
     inputs: ChatServeInputs,
@@ -4254,31 +4284,8 @@ async fn serve_with_side_model_workers(
     // It also runs the writable-allowlist-directory warning.
     let video_dir_allowlist = resolve_video_request_inputs(media_support);
 
-    // build the Responses-API stores from the resolved limits.
-    // `max_entries = 0` disables the store entirely; otherwise build with
-    // the configured TTL (a TTL of 0 means "no TTL" which we map to a
-    // very large duration so the sweep is a no-op).
-    let responses_store = if startup.responses_store_max_entries == 0 {
-        None
-    } else {
-        let ttl = if startup.responses_store_ttl_secs == 0 {
-            std::time::Duration::from_secs(u64::MAX / 2)
-        } else {
-            std::time::Duration::from_secs(startup.responses_store_ttl_secs)
-        };
-        Some(Arc::new(super::responses_store::ResponsesStore::new(
-            super::responses_store::ResponsesStoreConfig {
-                max_entries: startup.responses_store_max_entries,
-                max_bytes: startup.responses_store_max_bytes,
-                ttl,
-                background_max_jobs: startup.responses_background_max_jobs,
-                background_ephemeral_ttl: std::time::Duration::from_secs(
-                    startup.responses_background_ephemeral_ttl_secs.max(1),
-                ),
-                background_event_log_bytes: startup.responses_background_event_log_bytes,
-            },
-        )))
-    };
+    // Build the Responses-API stores from the resolved limits.
+    let responses_store = build_responses_store(&startup);
     let conversation_store = if startup.conversation_store_max_entries == 0 {
         None
     } else {
