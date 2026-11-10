@@ -110,6 +110,14 @@ pub(crate) struct PreparedRun {
     pub(crate) echo_scope: Option<ReasoningEchoScope>,
     pub(crate) primed_open_thinking: bool,
     pub(crate) auto: Option<AutoCompaction>,
+    /// Set by a background job (issue #2900), whose stream opens differently:
+    /// `response.created` (status `queued`) and `response.queued` were
+    /// delivered when the job was admitted, under the sequence numbers below
+    /// this value. The driver then sends no `response.created`, numbers its
+    /// events from this value, and sends `response.in_progress` (followed by
+    /// the compaction events) with the first progress callback instead of at
+    /// once. `None` is the foreground opening.
+    pub(crate) background_opening: Option<u64>,
 }
 
 impl PreparedRun {
@@ -246,6 +254,7 @@ pub(crate) async fn prepare_response_run(
         echo_scope,
         primed_open_thinking,
         auto,
+        background_opening: None,
     })
 }
 
@@ -281,10 +290,13 @@ impl RunEvents {
     }
 
     /// Report the first prefill-progress or token callback to the sink once.
-    fn mark_started(&self) {
-        if !self.started.swap(true, Ordering::AcqRel) {
+    /// Returns whether this call was the first.
+    fn mark_started(&self) -> bool {
+        let first = !self.started.swap(true, Ordering::AcqRel);
+        if first {
             self.sink.on_started();
         }
+        first
     }
 }
 
@@ -301,7 +313,7 @@ impl ResponseEventSink for RunEvents {
     }
 
     fn on_started(&self) {
-        self.mark_started();
+        let _ = self.mark_started();
     }
 
     fn record_terminal(&self, response: &ResponseObject) {
@@ -343,6 +355,7 @@ pub(crate) fn drive_response_run(
         echo_scope,
         primed_open_thinking,
         auto,
+        background_opening,
     } = run;
     let events = RunEvents::new(sink);
     let parse_tools = tool_calls::should_parse_tool_calls(&translated.chat_request);
@@ -356,7 +369,7 @@ pub(crate) fn drive_response_run(
     // disconnect, or `DELETE /v1/stream`).
     let cancelled_for_status = cancelled.clone();
 
-    let mut emitter = ResponseStreamEmitter::new();
+    let mut emitter = ResponseStreamEmitter::starting_at(background_opening.unwrap_or(0));
     let initial_response = build_response_object(OutboundContext {
         response_id: response_id.clone(),
         model_id: model_id.clone(),
@@ -377,17 +390,26 @@ pub(crate) fn drive_response_run(
         finish_reason: "in_progress".to_string(),
     });
 
-    events.emit(&ResponseStreamEvent::Created {
-        sequence_number: emitter.next_seq(),
-        response: initial_response.clone(),
-    });
-    events.emit(&ResponseStreamEvent::InProgress {
-        sequence_number: emitter.next_seq(),
-        response: initial_response,
-    });
-    // Automatic compaction ran before the stream opened (issue #2397):
-    // report it and emit its item at output_index 0.
-    send_compaction_events(&events, &mut emitter, &response_id, auto.as_ref());
+    // A background run sends `response.in_progress` with its first progress
+    // callback (issue #2900); the object waits here until then.
+    let pending_in_progress = std::sync::Mutex::new(None);
+    if background_opening.is_some() {
+        if let Ok(mut pending) = pending_in_progress.lock() {
+            *pending = Some(initial_response);
+        }
+    } else {
+        events.emit(&ResponseStreamEvent::Created {
+            sequence_number: emitter.next_seq(),
+            response: initial_response.clone(),
+        });
+        events.emit(&ResponseStreamEvent::InProgress {
+            sequence_number: emitter.next_seq(),
+            response: initial_response,
+        });
+        // Automatic compaction ran before the stream opened (issue #2397):
+        // report it and emit its item at output_index 0.
+        send_compaction_events(&events, &mut emitter, &response_id, auto.as_ref());
+    }
 
     // Lazy envelope state: we don't open the message or reasoning
     // item until the first matching chunk arrives, so we can emit
@@ -433,6 +455,29 @@ pub(crate) fn drive_response_run(
     let tool_stream_for_callback = tool_stream.clone();
     let emitter_arc = Arc::new(std::sync::Mutex::new(emitter));
     let emitter_for_callback = emitter_arc.clone();
+    // The first progress callback: tell the sink, and open a background
+    // run's stream. It runs before any item is opened, so the compaction
+    // item still takes output_index 0.
+    let announce_started = || {
+        if !events.mark_started() {
+            return;
+        }
+        let Some(response) = pending_in_progress
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
+        else {
+            return;
+        };
+        if let Ok(mut em) = emitter_for_callback.lock() {
+            let sequence_number = em.next_seq();
+            events.emit(&ResponseStreamEvent::InProgress {
+                sequence_number,
+                response,
+            });
+            send_compaction_events(&events, &mut em, &response_id, auto.as_ref());
+        }
+    };
 
     let result = state
         .model_provider
@@ -447,7 +492,7 @@ pub(crate) fn drive_response_run(
             cancelled,
             &live,
             |token, _lp| {
-                events.mark_started();
+                announce_started();
                 slot.on_token(&token);
                 if let Ok(mut acc) = acc_clone.lock() {
                     acc.push_str(&token);
@@ -572,12 +617,17 @@ pub(crate) fn drive_response_run(
                 }
             },
             |stats| {
-                events.mark_started();
+                announce_started();
                 slot.on_prefill_progress(stats.prompt_tokens, stats.cached_tokens, stats.processed);
             },
         );
     // Generation is over: from here a client disconnect is not a cancel.
     events.generation_finished();
+    // A background run that produced a result without any progress callback
+    // still opens its stream before the items below.
+    if background_opening.is_some() && result.is_ok() {
+        announce_started();
+    }
 
     // Flush any buffered content out of the stream filter.
     let trailing = stream_filter

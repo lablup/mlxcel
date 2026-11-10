@@ -301,7 +301,6 @@ async fn a_failed_generation_ends_failed_with_an_error() {
 async fn validation_errors_return_400_and_create_no_job() {
     let h = harness();
     let invalid = [
-        json!({"stream": true}),
         json!({"input": "  "}),
         json!({"xtc_probability": 2.0}),
         json!({"previous_response_id": "resp_missing"}),
@@ -534,3 +533,6 @@ async fn previous_response_id_waits_for_the_job_and_delete_refuses_an_active_job
     let (_, reply) = h.send(Method::DELETE, &path, None).await;
     assert_eq!(reply["deleted"], true, "{reply}");
 }
+
+#[path = "responses_background_stream_route_tests.rs"]
+mod stream;

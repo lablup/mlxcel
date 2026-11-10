@@ -52,6 +52,7 @@ pub mod responses;
 mod responses_auto_compact;
 pub(crate) mod responses_background;
 mod responses_background_sink;
+mod responses_background_stream;
 pub mod responses_compact;
 mod responses_compact_media;
 pub(crate) mod responses_run;

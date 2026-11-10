@@ -44,6 +44,12 @@
 //! the ephemeral TTL, but [`ResponsesStore::get`] (and therefore
 //! `previous_response_id` chaining) never returns it.
 //!
+//! A job created with `stream: true` also owns a
+//! [`BackgroundEventLog`] (issue #2900). The job record holds it while the job
+//! is active; `finish_background` appends the terminal event and moves the log
+//! onto the stored entry, whose `size_bytes` then includes the log's bytes, so
+//! evicting the entry frees it.
+//!
 //! Jobs are in memory only; a restart loses them.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -52,6 +58,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::server::responses_background_events::BackgroundEventLog;
 use crate::server::store_budget::{
     INITIAL_HASH_CAPACITY_LIMIT, LruKey, serialized_json_len_saturating,
 };
@@ -79,6 +86,15 @@ pub const DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS: usize = 64;
 /// background response. Only background polling can read it.
 pub const DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS: u64 = 600;
 
+/// Default byte budget of the event log of one streamed background response
+/// (`--responses-background-event-log-bytes`): the per-session cap of the
+/// resumable streams of #1444.
+pub const DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES: usize = 4 * 1024 * 1024;
+const _: () = assert!(
+    DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES
+        == crate::server::stream_session::STREAM_SESSION_MAX_BYTES
+);
+
 /// Persisted entry. Inputs and outputs are kept separately so the
 /// chain-resolution path can reconstruct the original conversation
 /// without re-serialising the response.
@@ -99,6 +115,20 @@ struct Entry {
     /// entry expires after this long (or after the normal TTL, whichever
     /// comes first) and is hidden from [`ResponsesStore::get`].
     ephemeral_ttl: Option<Duration>,
+    /// The event log of a streamed background response (issue #2900). Its
+    /// bytes at the time the job finished are part of `size_bytes`.
+    event_log: Option<Arc<BackgroundEventLog>>,
+    /// The job had an event log that was not retained because it did not
+    /// fit the store budget beside the response.
+    event_log_dropped: bool,
+}
+
+/// What a background job's terminal entry carries beyond its payload.
+#[derive(Debug, Default)]
+struct BackgroundRetention {
+    ephemeral_ttl: Option<Duration>,
+    event_log: Option<Arc<BackgroundEventLog>>,
+    event_log_dropped: bool,
 }
 
 impl Entry {
@@ -139,6 +169,10 @@ pub struct ResponsesStoreConfig {
     /// Retention of the terminal object of a `store: false` background job
     /// (`--responses-background-ephemeral-ttl-secs`).
     pub background_ephemeral_ttl: Duration,
+    /// Byte budget of the event log of one streamed background response
+    /// (`--responses-background-event-log-bytes`). `0` refuses `stream: true`
+    /// on a background response.
+    pub background_event_log_bytes: usize,
 }
 
 impl Default for ResponsesStoreConfig {
@@ -151,6 +185,7 @@ impl Default for ResponsesStoreConfig {
             background_ephemeral_ttl: Duration::from_secs(
                 DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
             ),
+            background_event_log_bytes: DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
         }
     }
 }
@@ -200,6 +235,9 @@ struct BackgroundJob {
     token: InFlightToken,
     size_bytes: usize,
     signal: Arc<BackgroundSignal>,
+    /// Set for a job created with `stream: true` (issue #2900). Its bytes
+    /// are not part of `size_bytes`: they change with every event.
+    event_log: Option<Arc<BackgroundEventLog>>,
 }
 
 #[derive(Debug, Default)]
@@ -332,7 +370,15 @@ impl ResponsesStore {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        Self::insert_locked(&mut state, &self.config, id, payload, size_bytes, None, now);
+        Self::insert_locked(
+            &mut state,
+            &self.config,
+            id,
+            payload,
+            size_bytes,
+            BackgroundRetention::default(),
+            now,
+        );
         state.entries.len()
     }
 
@@ -342,7 +388,7 @@ impl ResponsesStore {
         id: String,
         payload: StoredResponse,
         size_bytes: usize,
-        ephemeral_ttl: Option<Duration>,
+        retention: BackgroundRetention,
         now: Instant,
     ) {
         Self::sweep_expired(state, config, now);
@@ -359,7 +405,9 @@ impl ResponsesStore {
                 last_accessed: now,
                 size_bytes,
                 lru_key,
-                ephemeral_ttl,
+                ephemeral_ttl: retention.ephemeral_ttl,
+                event_log: retention.event_log,
+                event_log_dropped: retention.event_log_dropped,
             },
         );
         Self::evict_to_limits(state, config);
@@ -417,14 +465,22 @@ impl ResponsesStore {
     }
 
     /// Approximate retained bytes currently accounted by the store: stored
-    /// entries plus active background jobs.
+    /// entries (with the event logs they carry) plus active background jobs
+    /// and the current size of their event logs.
     pub fn approximate_total_bytes(&self) -> usize {
         let jobs = self.lock_jobs();
         let stored = match self.inner.read() {
             Ok(g) => g.total_bytes,
             Err(poisoned) => poisoned.into_inner().total_bytes,
         };
-        stored.saturating_add(jobs.active_bytes)
+        let live_logs = jobs
+            .jobs
+            .values()
+            .filter_map(|job| job.event_log.as_ref())
+            .fold(0usize, |sum, log| sum.saturating_add(log.retained_bytes()));
+        stored
+            .saturating_add(jobs.active_bytes)
+            .saturating_add(live_logs)
     }
 
     // -- Background jobs -----------------------------------------------------
@@ -478,6 +534,7 @@ impl ResponsesStore {
             token: token.clone(),
             size_bytes,
             signal: Arc::new(BackgroundSignal::default()),
+            event_log: None,
         };
         if let Some(old) = jobs.jobs.insert(id, job) {
             old.token.store(true, Ordering::Relaxed);
@@ -497,6 +554,54 @@ impl ResponsesStore {
             }
             _ => false,
         }
+    }
+
+    /// Give an active job its event log (issue #2900): the job was created
+    /// with `stream: true`. Returns `false` when no active job has this id.
+    ///
+    /// Call it right after [`Self::admit_background`], before the id is
+    /// handed to anyone who could look the log up.
+    pub fn attach_background_event_log(&self, id: &str, log: Arc<BackgroundEventLog>) -> bool {
+        match self.lock_jobs().jobs.get_mut(id) {
+            Some(job) => {
+                job.event_log = Some(log);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The event log of a streamed background response: the active job's,
+    /// or the one retained with its terminal object. `None` for an unknown
+    /// id and for a response that was not created with `background: true`
+    /// and `stream: true`. Does not refresh the entry's LRU stamp.
+    pub fn background_event_log(&self, id: &str) -> Option<Arc<BackgroundEventLog>> {
+        let now = Instant::now();
+        let jobs = self.lock_jobs();
+        if let Some(job) = jobs.jobs.get(id) {
+            return job.event_log.clone();
+        }
+        let mut state = self.write_inner();
+        Self::sweep_expired(&mut state, &self.config, now);
+        state
+            .entries
+            .get(id)
+            .and_then(|entry| entry.event_log.clone())
+    }
+
+    /// Whether `id` is a retained streamed background response whose event
+    /// log was not kept because it did not fit the store budget beside the
+    /// response. Lets a resume tell that apart from a response that never
+    /// had a log.
+    pub fn background_event_log_dropped(&self, id: &str) -> bool {
+        let state = match self.inner.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state
+            .entries
+            .get(id)
+            .is_some_and(|entry| entry.event_log_dropped)
     }
 
     /// Replace the input items an active job will be stored with. Automatic
@@ -538,12 +643,32 @@ impl ResponsesStore {
     /// callers, and returns what was recorded. A terminal object larger than
     /// `max_bytes` is recorded as a `failed` object instead.
     ///
+    /// A streamed job's event log gets its terminal event here, built from
+    /// the recorded object (`response.failed`, `response.incomplete`, or
+    /// `response.completed`), and moves onto the stored entry with its bytes.
+    /// The event is serialized before the job lock is taken. A log that does
+    /// not fit `max_bytes` beside the object is not retained: readers waiting
+    /// on the live tail still receive the terminal event, a reader that is
+    /// still replaying gets the not-retained error, and a resume gets a 400
+    /// saying so.
+    ///
     /// Later calls (or a call for an unknown id) return the recorded object
     /// when it is still retained, otherwise the `terminal` argument.
     pub fn finish_background(&self, id: &str, terminal: ResponseObject) -> ResponseObject {
         // Serialize the (possibly large) terminal object once, before taking
         // any lock, so admits and polls are not blocked behind it.
         let terminal_bytes = serialized_json_len_saturating(&terminal);
+        // Likewise the terminal event of a streamed job (issue #2900); it is
+        // used when the object is recorded as given.
+        let streamed = self
+            .lock_jobs()
+            .jobs
+            .get(id)
+            .and_then(|job| job.event_log.clone());
+        let prepared = streamed.as_ref().and_then(|log| {
+            log.prepare_terminal(&terminal)
+                .map(|p| (Arc::clone(log), p))
+        });
         let now = Instant::now();
         let mut jobs = self.lock_jobs();
         let Some(job) = jobs.jobs.remove(id) else {
@@ -553,7 +678,7 @@ impl ResponsesStore {
         };
         jobs.active_bytes = jobs.active_bytes.saturating_sub(job.size_bytes);
 
-        let (payload, size_bytes) = self.fit_terminal(
+        let (payload, size_bytes, as_given) = self.fit_terminal(
             id,
             terminal,
             terminal_bytes,
@@ -562,6 +687,24 @@ impl ResponsesStore {
         );
         let recorded = payload.response.clone();
         let ephemeral_ttl = (!job.effective_store).then_some(self.config.background_ephemeral_ttl);
+        // The terminal event goes in before the entry is sized, so the
+        // entry accounts for the whole log.
+        let mut size_bytes = size_bytes;
+        let mut event_log = None;
+        let mut event_log_dropped = false;
+        if let Some(log) = job.event_log {
+            let prepared = prepared
+                .filter(|(prepared_for, _)| as_given && Arc::ptr_eq(prepared_for, &log))
+                .map(|(_, prepared)| prepared);
+            log.append_terminal_prepared(&recorded, prepared);
+            let total = size_bytes.saturating_add(log.retained_bytes());
+            if total <= self.config.max_bytes {
+                size_bytes = total;
+                event_log = Some(log);
+            } else {
+                event_log_dropped = true;
+            }
+        }
         {
             let mut state = self.write_inner();
             Self::insert_locked(
@@ -570,7 +713,11 @@ impl ResponsesStore {
                 id.to_string(),
                 payload,
                 size_bytes,
-                ephemeral_ttl,
+                BackgroundRetention {
+                    ephemeral_ttl,
+                    event_log,
+                    event_log_dropped,
+                },
                 now,
             );
         }
@@ -656,7 +803,8 @@ impl ResponsesStore {
     /// `max_bytes` it is replaced by a small `failed` object so a poll
     /// gets an explanation instead of a surprise 404.
     /// `terminal_bytes` and `input_bytes` are the precomputed sizes of the
-    /// two parts; the returned size is the stored entry's accounted bytes.
+    /// two parts; the returned size is the stored entry's accounted bytes,
+    /// and the flag says whether the object was stored as given.
     fn fit_terminal(
         &self,
         id: &str,
@@ -664,7 +812,7 @@ impl ResponsesStore {
         terminal_bytes: usize,
         input_items: Vec<ResponseInputItem>,
         input_bytes: usize,
-    ) -> (StoredResponse, usize) {
+    ) -> (StoredResponse, usize, bool) {
         let max_bytes = self.config.max_bytes;
         let size_bytes = id
             .len()
@@ -675,7 +823,7 @@ impl ResponsesStore {
             input_items,
         };
         if size_bytes <= max_bytes {
-            return (payload, size_bytes);
+            return (payload, size_bytes, true);
         }
         let mut failed = payload.response;
         failed.status = ResponseStatus::Failed;
@@ -701,7 +849,7 @@ impl ResponsesStore {
             payload.response.metadata = None;
             size_bytes = Self::entry_size_bytes(id, &payload);
         }
-        (payload, size_bytes)
+        (payload, size_bytes, false)
     }
 
     /// Retained (non-expired) stored object for `id`, ephemeral entries

@@ -2160,6 +2160,18 @@ pub(crate) struct ServeArgs {
     )]
     responses_background_ephemeral_ttl_secs: u64,
 
+    /// Byte budget of the replayable event log of one `background: true`
+    /// Responses API response created with `stream: true`. The oldest events
+    /// are dropped when it is full. `0` refuses `stream: true` on background
+    /// responses. Also reads `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES`.
+    #[arg(
+        long = "responses-background-event-log-bytes",
+        env = "MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
+        value_name = "BYTES"
+    )]
+    responses_background_event_log_bytes: usize,
+
     /// Maximum number of conversation transcripts persisted
     /// for the OpenAI Responses API `conversation` field. `0` disables
     /// the conversation store; requests referencing `conversation` are

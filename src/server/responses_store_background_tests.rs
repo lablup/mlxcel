@@ -396,3 +396,6 @@ fn set_background_input_items_replaces_what_the_terminal_entry_stores() {
     );
     assert_background_accounting(&store);
 }
+
+#[path = "responses_store_event_log_tests.rs"]
+mod event_log;
