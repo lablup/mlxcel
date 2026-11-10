@@ -482,3 +482,274 @@ fn validate_target_compat_refuses_a_different_hc_count() {
         "{err}"
     );
 }
+
+// ── Embedded head (issue #2917) ────────────────────────────────────────────
+
+use std::path::Path;
+
+use crate::models::embedding_test_support::write_f32_safetensors;
+
+/// The fixture's head tensors (`target.*` excluded) as `(name, shape, values)`,
+/// each name passed through `rename`.
+fn head_tensors(
+    fixture: &Value,
+    rename: impl Fn(&str) -> String,
+) -> Vec<(String, Vec<i32>, Vec<f32>)> {
+    let weights = weights(fixture);
+    let mut names: Vec<&String> = weights
+        .keys()
+        .filter(|name| !name.starts_with("target."))
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let tensor = &weights[name];
+            (
+                rename(name),
+                mlxcel_core::array_shape(tensor),
+                values(tensor),
+            )
+        })
+        .collect()
+}
+
+/// The released target layout: the head under `mtp.*` in its own shard, the
+/// target's tensors in another shard the index points at. That shard holds
+/// invalid bytes, so any attempt to open it fails the load.
+fn write_target_checkpoint(dir: &Path, fixture: &Value, with_head: bool) {
+    let mut text = fixture["tiny_config"].clone();
+    text["model_type"] = json!("qwen4_exp_text");
+    text["mtp_num_hidden_layers"] = json!(1);
+    std::fs::write(
+        dir.join("config.json"),
+        json!({
+            "model_type": "qwen4_exp",
+            "tie_word_embeddings": false,
+            "text_config": text,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("model-00001-of-00001.safetensors"),
+        b"not a safetensors file",
+    )
+    .unwrap();
+    let mut weight_map = serde_json::Map::new();
+    for name in [
+        "language_model.model.embed_tokens.weight",
+        "language_model.lm_head.weight",
+    ] {
+        weight_map.insert(name.to_string(), json!("model-00001-of-00001.safetensors"));
+    }
+    if with_head {
+        let tensors = head_tensors(fixture, |name| format!("mtp.{name}"));
+        for (name, _, _) in &tensors {
+            weight_map.insert(name.clone(), json!("model-mtp-00001-of-00001.safetensors"));
+        }
+        write_f32_safetensors(&dir.join("model-mtp-00001-of-00001.safetensors"), &tensors);
+    }
+    std::fs::write(
+        dir.join("model.safetensors.index.json"),
+        json!({"metadata": {}, "weight_map": weight_map}).to_string(),
+    )
+    .unwrap();
+}
+
+/// The split drafter layout: stripped names, the drafter's own config.
+fn write_split_drafter(dir: &Path, fixture: &Value) {
+    std::fs::write(
+        dir.join("config.json"),
+        json!({
+            "model_type": "qwen4_exp_mtp",
+            "block_size": 4,
+            "text_config": fixture["tiny_config"].clone(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    write_f32_safetensors(
+        &dir.join("model.safetensors"),
+        &head_tensors(fixture, str::to_string),
+    );
+}
+
+fn bind(drafter: &mut Qwen4ExpMtpDraftModel, target: &MockTarget) {
+    drafter.validate_target_compat(target).expect("compatible");
+    drafter.bind(target).expect("bind");
+}
+
+/// One forward over the fixture prompt plus one cached step; returns both
+/// logits.
+fn draft_logits(drafter: &mut Qwen4ExpMtpDraftModel, fixture: &Value) -> (Vec<f32>, Vec<f32>) {
+    let tokens = ints(&fixture["tokens"]);
+    let spec = &fixture["hidden"];
+    let hidden = hashed(
+        spec["name"].as_str().expect("name"),
+        &shape_of(&spec["shape"]),
+        spec["scale"].as_f64().expect("scale"),
+        0.0,
+    );
+    let (mixed, streams) = drafter
+        .forward_hidden_stack(&tokens, &hidden)
+        .expect("forward");
+    let logits = values(&drafter.project_logits(&mixed).expect("logits"));
+    let next = fixture["next_token"].as_i64().expect("next token") as i32;
+    let (next_mixed, _) = drafter
+        .forward_hidden_stack(&[next], &last_position(&streams))
+        .expect("cached step");
+    let next_logits = values(&drafter.project_logits(&next_mixed).expect("logits"));
+    (logits, next_logits)
+}
+
+/// The same head written as a target checkpoint and as a split drafter
+/// directory loads to the same drafter: identical draft logits, both equal
+/// to upstream's, and the same block size.
+#[test]
+fn embedded_head_and_split_directory_produce_identical_draft_logits() {
+    let fixture = fixture("mtp");
+    let target_dir = tempfile::tempdir().unwrap();
+    let split_dir = tempfile::tempdir().unwrap();
+    write_target_checkpoint(target_dir.path(), &fixture, true);
+    write_split_drafter(split_dir.path(), &fixture);
+    let target = MockTarget::new(&weights(&fixture));
+
+    let mut embedded =
+        Qwen4ExpMtpDraftModel::from_target_checkpoint(target_dir.path()).expect("embedded head");
+    let mut split = Qwen4ExpMtpDraftModel::from_path(split_dir.path()).expect("split drafter");
+    bind(&mut embedded, &target);
+    bind(&mut split, &target);
+    assert_eq!(embedded.configured_block_size(), Some(4));
+    assert_eq!(split.configured_block_size(), Some(4));
+
+    let (embedded_logits, embedded_next) = draft_logits(&mut embedded, &fixture);
+    let (split_logits, split_next) = draft_logits(&mut split, &fixture);
+    assert_eq!(embedded_logits, split_logits, "prompt logits");
+    assert_eq!(embedded_next, split_next, "cached-step logits");
+    let upstream = expected(&fixture["logits"]);
+    let scale = upstream.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    let diff = embedded_logits
+        .iter()
+        .zip(&upstream)
+        .map(|(a, e)| (a - e).abs())
+        .fold(0.0f32, f32::max);
+    assert!(diff <= RTOL * scale, "embedded head vs upstream: {diff:e}");
+}
+
+/// The target shard holds invalid bytes and the load still succeeds: the
+/// index-filtered loader never opens a shard without a head tensor. The
+/// binary-side factory auto-detects the head with no `--draft-kind`.
+#[test]
+fn embedded_head_loads_without_opening_the_target_shards() {
+    let fixture = fixture("mtp");
+    let dir = tempfile::tempdir().unwrap();
+    write_target_checkpoint(dir.path(), &fixture, true);
+    assert!(
+        mlxcel_core::weights::load_weights_from_dir(dir.path()).is_err(),
+        "the target shard must be unreadable for this test to mean anything"
+    );
+    Qwen4ExpMtpDraftModel::from_target_checkpoint(dir.path()).expect("head only");
+
+    let (drafter, kind) =
+        crate::models::drafter_loader::load_drafter(dir.path(), None).expect("factory");
+    assert_eq!(kind, mlxcel_core::drafter::DrafterKind::Mtp);
+    assert_eq!(drafter.configured_block_size(), Some(4));
+}
+
+/// `from_target_json` keeps the default pair and the `mtp.*` overrides under
+/// their stripped names, drops the target's own overrides, and starts the
+/// head at block size 4.
+#[test]
+fn from_target_json_strips_the_mtp_overrides_and_sets_block_size_4() {
+    let fixture = fixture("mtp");
+    let mut text = fixture["tiny_config"].clone();
+    text["mtp_num_hidden_layers"] = json!(1);
+    let full = json!({
+        "model_type": "qwen4_exp",
+        "tie_word_embeddings": false,
+        "quantization": {
+            "group_size": 32,
+            "bits": 4,
+            "mode": "affine",
+            "mtp.layers.0.mlp.switch_mlp.gate_proj": {"group_size": 64, "bits": 8, "mode": "affine"},
+            "language_model.model.layers.0.mlp.gate": {"group_size": 64, "bits": 8, "mode": "affine"},
+            "language_model.model.layers.0.mlp.switch_mlp.up_proj": {"group_size": 64, "bits": 2},
+        },
+        "text_config": text,
+    });
+    let config = Qwen4ExpMtpConfig::from_target_json(&full).expect("embedded config");
+    assert_eq!(config.block_size, 4);
+    let quantization = &config.layer.quantization;
+    assert_eq!(
+        quantization.for_module("layers.0.mlp.switch_mlp.gate_proj"),
+        (64, 8)
+    );
+    // Target overrides never reach the head, whatever their name.
+    assert_eq!(quantization.for_module("layers.0.mlp.gate"), (32, 4));
+    assert_eq!(quantization.for_module("model.layers.0.mlp.gate"), (32, 4));
+    assert_eq!(
+        quantization.for_module("layers.0.mlp.switch_mlp.up_proj"),
+        (32, 4)
+    );
+    assert_eq!(config.layer.raw.num_hidden_layers, 1);
+    assert!(!config.layer.is_linear_layer(0));
+    assert!(config.layer.ple_layer_ids.is_empty());
+
+    // The target's own family only, and the existing depth refusal.
+    let mut split = full.clone();
+    split["model_type"] = json!("qwen4_exp_mtp");
+    let err = Qwen4ExpMtpConfig::from_target_json(&split).expect_err("not a target config");
+    assert!(err.contains("qwen4_exp"), "{err}");
+    let mut deep = full;
+    deep["text_config"]["mtp_num_hidden_layers"] = json!(2);
+    let err = Qwen4ExpMtpConfig::from_target_json(&deep).expect_err("two layers");
+    assert!(err.contains("mtp_num_hidden_layers = 2"), "{err}");
+}
+
+/// A `qwen4_exp` checkpoint without `mtp.*`: `--draft-kind mtp` is refused
+/// by name through the factory, and the constructor itself refuses it the
+/// same way rather than building an empty head.
+#[test]
+fn a_target_without_the_head_is_refused_as_no_embedded_mtp_head() {
+    let fixture = fixture("mtp");
+    let dir = tempfile::tempdir().unwrap();
+    write_target_checkpoint(dir.path(), &fixture, false);
+    let err = crate::models::drafter_loader::load_drafter(
+        dir.path(),
+        Some(mlxcel_core::drafter::DrafterKind::Mtp),
+    )
+    .expect_err("no head");
+    assert!(
+        matches!(err, DrafterError::NoEmbeddedMtpHead { .. }),
+        "{err}"
+    );
+    let err = Qwen4ExpMtpDraftModel::from_target_checkpoint(dir.path()).expect_err("no head");
+    assert!(
+        matches!(err, DrafterError::NoEmbeddedMtpHead { .. }),
+        "{err}"
+    );
+    // Without `--draft-kind` the directory resolves as it did before #2917.
+    assert_eq!(
+        mlxcel_core::drafter::resolve_drafter_kind(dir.path(), None).unwrap(),
+        mlxcel_core::drafter::DEFAULT_DRAFTER_KIND
+    );
+}
+
+/// The embedded head keeps the split drafter's `hc_count` guard.
+#[test]
+fn embedded_head_refuses_a_target_with_a_different_hc_count() {
+    let fixture = fixture("mtp");
+    let dir = tempfile::tempdir().unwrap();
+    write_target_checkpoint(dir.path(), &fixture, true);
+    let drafter = Qwen4ExpMtpDraftModel::from_target_checkpoint(dir.path()).expect("head");
+    let mut target = MockTarget::new(&weights(&fixture));
+    target.residual_streams = Some(drafter.config().hc_count() + 1);
+    let err = drafter
+        .validate_target_compat(&target)
+        .expect_err("different count");
+    assert!(
+        matches!(err, DrafterError::BindFailed { ref reason } if reason.contains("hc_count")),
+        "{err}"
+    );
+}

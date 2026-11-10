@@ -537,6 +537,17 @@ pub enum DrafterError {
          mlxcel_core::drafter::load_drafter"
     )]
     BinaryCrateDrafter { model_type: String },
+
+    /// `--draft-kind mtp` named a target checkpoint (`model_type:
+    /// "qwen4_exp"`) as its own drafter, but the checkpoint carries no
+    /// `mtp.*` head tensors (issue #2917). Conversions that drop the head
+    /// need the split `qwen4_exp_mtp` drafter directory instead.
+    #[error(
+        "{path} is a qwen4_exp target checkpoint without an embedded MTP head (no mtp.* \
+         tensors); pass a split qwen4_exp_mtp drafter directory as the drafter, or a \
+         conversion that keeps the mtp.* tensors"
+    )]
+    NoEmbeddedMtpHead { path: String },
 }
 
 /// Subset of the drafter's `config.json` that [`resolve_drafter_kind`] and
@@ -566,6 +577,45 @@ pub const GLM4_MOE_LITE_MTP_MODEL_TYPE: &str = "glm4_moe_lite_mtp";
 /// Public for the same reason as [`GLM4_MOE_LITE_MTP_MODEL_TYPE`]: the drafter
 /// is built by the binary crate's `mlxcel::models::drafter_loader`.
 pub const QWEN4_EXP_MTP_MODEL_TYPE: &str = "qwen4_exp_mtp";
+
+/// `model_type` of a Qwen3.8-Flash-Next (`qwen4_exp`) target checkpoint.
+/// Passed as its own drafter, a checkpoint that keeps its `mtp.*` head
+/// resolves to [`DrafterKind::Mtp`] (issue #2917); the binary crate's
+/// `mlxcel::models::drafter_loader` builds the head from those tensors.
+pub const QWEN4_EXP_MODEL_TYPE: &str = "qwen4_exp";
+
+/// Tensor-name prefixes of the `qwen4_exp` MTP head in every checkpoint
+/// layout: raw Hugging Face (`mtp.`), the canonical text layout
+/// (`model.mtp.`) and the mlx-vlm VLM wrapper (`language_model.mtp.`),
+/// the three upstream's drafter `sanitize` strips.
+pub const QWEN4_EXP_MTP_PREFIXES: [&str; 3] = ["mtp.", "model.mtp.", "language_model.mtp."];
+
+/// The `qwen4_exp` MTP head's tensor predicate (issue #2917). The target's
+/// sanitize skips exactly these keys and the drafter keeps exactly these,
+/// so both delegate here.
+///
+/// Used by: [`resolve_drafter_kind`] (through
+/// [`has_qwen4_exp_mtp_tensors`]), `mlxcel::models::qwen4_exp_sanitize`
+/// (`is_mtp_key`), `Qwen4ExpMtpDraftModel::from_target_checkpoint`.
+pub fn is_qwen4_exp_mtp_tensor_name(name: &str) -> bool {
+    strip_qwen4_exp_mtp_prefix(name).is_some()
+}
+
+/// `name` without its `qwen4_exp` MTP head prefix, or `None` when `name` is
+/// not a head tensor (or quantization module path).
+pub fn strip_qwen4_exp_mtp_prefix(name: &str) -> Option<&str> {
+    QWEN4_EXP_MTP_PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+}
+
+/// Whether the checkpoint at `path` stores any `qwen4_exp` MTP head tensor.
+/// Reads the index and the safetensors headers only; with an index, only
+/// the shards it maps head tensors to are opened.
+pub fn has_qwen4_exp_mtp_tensors(path: &Path) -> Result<bool, DrafterError> {
+    crate::weights::dir_has_tensor_name(path, is_qwen4_exp_mtp_tensor_name)
+        .map_err(|reason| DrafterError::WeightLoad { reason })
+}
 
 fn read_drafter_config_peek(model_path: &Path) -> Option<DrafterConfigPeek> {
     let cfg_path = model_path.join("config.json");
@@ -723,6 +773,28 @@ pub fn resolve_drafter_kind(
             "Auto-detected Inkling MTP from model.mtp.layers.* tensors"
         );
         return Ok(DrafterKind::Mtp);
+    }
+
+    // A `qwen4_exp` target checkpoint passed as its own drafter (issue
+    // #2917): detected by the head's tensors, like Inkling above. An explicit
+    // `--draft-kind mtp` on a checkpoint without them is refused by name; any
+    // other explicit kind is honored without probing.
+    if model_type.as_deref() == Some(QWEN4_EXP_MODEL_TYPE)
+        && matches!(kind, None | Some(DrafterKind::Mtp))
+    {
+        if has_qwen4_exp_mtp_tensors(model_path)? {
+            tracing::info!(
+                drafter = %model_path.display(),
+                resolved = %DrafterKind::Mtp,
+                "Auto-detected the qwen4_exp checkpoint's embedded MTP head from mtp.* tensors"
+            );
+            return Ok(DrafterKind::Mtp);
+        }
+        if kind == Some(DrafterKind::Mtp) {
+            return Err(DrafterError::NoEmbeddedMtpHead {
+                path: model_path.display().to_string(),
+            });
+        }
     }
 
     match (kind, expected) {
@@ -1480,6 +1552,10 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
                 Some(QWEN4_EXP_MTP_MODEL_TYPE) => Err(DrafterError::BinaryCrateDrafter {
                     model_type: QWEN4_EXP_MTP_MODEL_TYPE.to_string(),
                 }),
+                // The same head embedded in the target checkpoint (#2917).
+                Some(QWEN4_EXP_MODEL_TYPE) => Err(DrafterError::BinaryCrateDrafter {
+                    model_type: QWEN4_EXP_MODEL_TYPE.to_string(),
+                }),
                 _ => {
                     let model = gemma4_assistant::Gemma4AssistantDraftModel::from_path(path)?;
                     Ok((Box::new(model), resolved))
@@ -1676,6 +1752,113 @@ mod tests {
             matches!(err, DrafterError::BinaryCrateDrafter { ref model_type } if model_type == "qwen4_exp_mtp"),
             "unexpected error: {err}"
         );
+    }
+
+    /// A one-tensor safetensors file whose header names `name`.
+    fn write_one_tensor(path: &Path, name: &str) {
+        let mut header =
+            format!("{{\"{name}\":{{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}}}");
+        while !header.len().is_multiple_of(8) {
+            header.push(' ');
+        }
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&1.0_f32.to_le_bytes());
+        fs::write(path, bytes).expect("write safetensors");
+    }
+
+    #[test]
+    fn qwen4_exp_target_with_mtp_tensors_resolves_to_mtp_and_is_refused_by_name_here() {
+        // Issue #2917: the target checkpoint passed again as its own drafter.
+        for name in [
+            "mtp.fc_hidden.weight",
+            "model.mtp.fc_hidden.weight",
+            "language_model.mtp.fc_hidden.weight",
+        ] {
+            let dir = tempdir().unwrap();
+            write_drafter_config(&dir, Some("qwen4_exp"));
+            write_one_tensor(&dir.path().join("model.safetensors"), name);
+            assert!(
+                super::has_qwen4_exp_mtp_tensors(dir.path()).unwrap(),
+                "{name}"
+            );
+            assert_eq!(resolve(dir.path(), None).unwrap(), DrafterKind::Mtp);
+            assert_eq!(
+                resolve(dir.path(), Some(DrafterKind::Mtp)).unwrap(),
+                DrafterKind::Mtp
+            );
+            let err = load(dir.path(), None).expect_err("must refuse");
+            assert!(
+                matches!(err, DrafterError::BinaryCrateDrafter { ref model_type } if model_type == "qwen4_exp"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen4_exp_target_without_mtp_tensors_keeps_the_old_resolution() {
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("qwen4_exp"));
+        write_one_tensor(
+            &dir.path().join("model.safetensors"),
+            "language_model.model.embed_tokens.weight",
+        );
+        assert!(!super::has_qwen4_exp_mtp_tensors(dir.path()).unwrap());
+        // No `--draft-kind`: the default fallback, exactly as before #2917.
+        assert_eq!(resolve(dir.path(), None).unwrap(), DEFAULT_DRAFTER_KIND);
+        // Another explicit kind is honored without probing.
+        assert_eq!(
+            resolve(dir.path(), Some(DrafterKind::FullModel)).unwrap(),
+            DrafterKind::FullModel
+        );
+        // `--draft-kind mtp` names the missing head.
+        let err = resolve(dir.path(), Some(DrafterKind::Mtp)).expect_err("no head");
+        assert!(
+            matches!(err, DrafterError::NoEmbeddedMtpHead { ref path } if path == &dir.path().display().to_string()),
+            "unexpected error: {err}"
+        );
+        assert!(err.to_string().contains("qwen4_exp_mtp"), "{err}");
+    }
+
+    #[test]
+    fn qwen4_exp_head_probe_names_a_missing_indexed_shard() {
+        // The index maps the head to a shard that is not on disk: the probe
+        // fails with a weight-load error naming that shard.
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("qwen4_exp"));
+        fs::write(
+            dir.path().join("model.safetensors.index.json"),
+            r#"{"weight_map": {"mtp.fc_hidden.weight": "model-mtp-00001-of-00001.safetensors"}}"#,
+        )
+        .unwrap();
+        let err = resolve(dir.path(), None).expect_err("missing shard");
+        assert!(
+            matches!(err, DrafterError::WeightLoad { ref reason } if reason.contains("model-mtp-00001-of-00001.safetensors")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn qwen4_exp_mtp_prefix_predicate_matches_the_three_layouts_only() {
+        assert_eq!(
+            super::strip_qwen4_exp_mtp_prefix("mtp.layers.0.mlp.switch_mlp.gate_proj"),
+            Some("layers.0.mlp.switch_mlp.gate_proj")
+        );
+        assert_eq!(
+            super::strip_qwen4_exp_mtp_prefix("model.mtp.fc_hidden.weight"),
+            Some("fc_hidden.weight")
+        );
+        assert_eq!(
+            super::strip_qwen4_exp_mtp_prefix("language_model.mtp.fc_hidden.weight"),
+            Some("fc_hidden.weight")
+        );
+        for other in [
+            "language_model.model.layers.0.mlp.gate.weight",
+            "model.layers.0.mtp.weight",
+            "mtpx.weight",
+        ] {
+            assert!(!super::is_qwen4_exp_mtp_tensor_name(other), "{other}");
+        }
     }
 
     #[test]

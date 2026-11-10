@@ -90,8 +90,10 @@ pub fn sanitize_weights(
     let mut vision = WeightMap::new();
     for (key, value) in weights {
         // The MTP predictor is a separate speculative artifact: the
-        // `qwen4_exp_mtp` drafter loads it from its own directory
-        // (`qwen4_exp_mtp_drafter`), so the target never reads these keys.
+        // `qwen4_exp_mtp` drafter loads it from its own directory, or from
+        // this same checkpoint when it keeps the head (issue #2917,
+        // `Qwen4ExpMtpDraftModel::from_target_checkpoint`), so the target
+        // never reads these keys.
         if is_mtp_key(&key) {
             continue;
         }
@@ -141,11 +143,14 @@ pub fn sanitize_weights(
 /// canonical text layout (`model.mtp.`), the three upstream's drafter
 /// `sanitize` strips.
 ///
-/// Used by: [`sanitize_weights`], the `qwen4_exp_mtp` drafter's sanitize.
+/// Delegates to core's [`mlxcel_core::drafter::is_qwen4_exp_mtp_tensor_name`],
+/// which the drafter-kind probe uses too, so what the target skips and what
+/// the drafter detects and loads cannot drift apart (issue #2917).
+///
+/// Used by: [`sanitize_weights`], the `qwen4_exp_mtp` drafter's sanitize and
+/// its embedded-head loader.
 pub(crate) fn is_mtp_key(key: &str) -> bool {
-    key.starts_with("mtp.")
-        || key.starts_with("model.mtp.")
-        || key.starts_with("language_model.mtp.")
+    mlxcel_core::drafter::is_qwen4_exp_mtp_tensor_name(key)
 }
 
 /// Bring one MoE block's expert tensors into the stacked `switch_mlp` layout
