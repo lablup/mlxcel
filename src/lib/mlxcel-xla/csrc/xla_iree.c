@@ -154,6 +154,22 @@ static const iree_hal_buffer_params_t kDeviceLocalParams = {
     .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
 };
 
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+// Instrumentation for the lazy batch-KV allocation path (issue #2923). The
+// shim records any host mirror and host-to-device upload performed while that
+// path is active, so a device test can assert both stay at zero on first admit.
+static uint64_t xla_test_bk_host_bytes = 0;
+static uint64_t xla_test_bk_h2d_bytes = 0;
+static bool xla_test_bk_window = false;
+
+uint64_t xla_test_batch_kv_host_bytes(void) { return xla_test_bk_host_bytes; }
+uint64_t xla_test_batch_kv_h2d_bytes(void) { return xla_test_bk_h2d_bytes; }
+void xla_test_batch_kv_reset_counters(void) {
+  xla_test_bk_host_bytes = 0;
+  xla_test_bk_h2d_bytes = 0;
+}
+#endif
+
 static int32_t xla_argmax_f32(const float* v, int32_t n) {
   int32_t best = 0;
   float bv = v[0];
@@ -313,10 +329,65 @@ static iree_status_t xla_alloc_bv(xla_ctx* c, iree_host_size_t rank,
                                   iree_hal_element_type_t elt, const void* data,
                                   iree_host_size_t nbytes,
                                   iree_hal_buffer_view_t** out) {
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+  if (xla_test_bk_window && data && nbytes > 0) {
+    // Every byte here is one host-resident copy plus one host-to-device
+    // upload; the batch-KV path must report neither (issue #2923).
+    xla_test_bk_host_bytes += (uint64_t)nbytes;
+    xla_test_bk_h2d_bytes += (uint64_t)nbytes;
+  }
+#endif
   return iree_hal_buffer_view_allocate_buffer_copy(
       c->device, c->allocator, rank, shape, elt,
       IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, kDeviceLocalParams,
       iree_make_const_byte_span(data, nbytes), out);
+}
+
+// Zero a device-local buffer with a queue-ordered device fill and wait for it,
+// so the caller never needs a host mirror of the buffer.
+static iree_status_t xla_zero_fill_device(xla_ctx* c, iree_hal_buffer_t* buffer,
+                                          iree_device_size_t bytes) {
+  iree_hal_semaphore_t* fence = NULL;
+  IREE_RETURN_IF_ERROR(iree_hal_semaphore_create(
+      c->device, IREE_HAL_QUEUE_AFFINITY_ANY, 0ull,
+      IREE_HAL_SEMAPHORE_FLAG_DEFAULT, &fence));
+  uint64_t signal_value = 1ull;
+  iree_hal_semaphore_list_t signal_list = {
+      .count = 1, .semaphores = &fence, .payload_values = &signal_value};
+  // A 4-byte zero pattern is the natural f32 fill and a legal HAL pattern
+  // length (1, 2, 4 or 8 bytes).
+  uint32_t zero = 0;
+  iree_status_t status = iree_hal_device_queue_fill(
+      c->device, IREE_HAL_QUEUE_AFFINITY_ANY,
+      iree_hal_semaphore_list_empty(), signal_list, buffer, 0, bytes, &zero,
+      sizeof(zero), IREE_HAL_FILL_FLAG_NONE);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_semaphore_wait(fence, signal_value,
+                                     iree_infinite_timeout(),
+                                     IREE_ASYNC_WAIT_FLAG_NONE);
+  }
+  iree_hal_semaphore_release(fence);
+  return status;
+}
+
+// Allocate a zeroed device-local buffer view without a host mirror. The fill is
+// awaited before the view is published, so no un-awaited fill can escape.
+static iree_status_t xla_alloc_zeroed_bv(xla_ctx* c, iree_host_size_t rank,
+                                         const iree_hal_dim_t* shape,
+                                         iree_hal_element_type_t elt,
+                                         iree_device_size_t nbytes,
+                                         iree_hal_buffer_view_t** out) {
+  iree_hal_buffer_t* buffer = NULL;
+  IREE_RETURN_IF_ERROR(iree_hal_allocator_allocate_buffer(
+      c->allocator, kDeviceLocalParams, nbytes, &buffer));
+  iree_status_t status = xla_zero_fill_device(c, buffer, nbytes);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_buffer_view_create(
+        buffer, rank, shape, elt, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+        iree_runtime_instance_host_allocator(c->instance), out);
+  }
+  iree_hal_buffer_release(buffer);
+  return status;
 }
 
 // Push the request-scoped Phi4MM adapter mode immediately after resident
@@ -1085,7 +1156,12 @@ int xla_llama_decode_mrope(xla_ctx* c, int32_t adapter_mode, int32_t token,
 // the rank-4 dims the first prefill_slot captured. Inactive slots stay zeroed
 // until a prefill_slot overwrites their region; the ragged decode's per-row mask
 // makes a zeroed (cache_len 0) slot a harmless no-op whose output is discarded.
-static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
+//
+// The zeroing is a device fill on each cache, not a host mirror: the rank-5
+// cache is hundreds of MiB at B=4 and capacity 2048, so a calloc plus two full
+// host-to-device uploads doubled the first admit's cost for no benefit
+// (issue #2923).
+static iree_status_t xla_ensure_batch_kv_inner(xla_ctx* c) {
   if (c->kcache_b && c->vcache_b) return iree_ok_status();
   if (c->rg_bsz <= 0 || c->rg_per == 0 ||
       (iree_host_size_t)c->rg_bsz > SIZE_MAX / c->rg_per) {
@@ -1098,17 +1174,15 @@ static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
                             "batch KV byte count overflowed");
   }
   iree_host_size_t bytes = count * sizeof(float);
-  float* zeros = (float*)calloc((size_t)count, sizeof(float));
-  if (!zeros) return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
   iree_hal_dim_t shape5[5] = {(iree_hal_dim_t)c->rg_bsz, c->rg_dims[0],
                               c->rg_dims[1], c->rg_dims[2], c->rg_dims[3]};
-  iree_status_t s = xla_alloc_bv(c, 5, shape5, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
-                                 zeros, bytes, &c->kcache_b);
+  iree_status_t s = xla_alloc_zeroed_bv(c, 5, shape5,
+                                        IREE_HAL_ELEMENT_TYPE_FLOAT_32, bytes,
+                                        &c->kcache_b);
   if (iree_status_is_ok(s)) {
-    s = xla_alloc_bv(c, 5, shape5, IREE_HAL_ELEMENT_TYPE_FLOAT_32, zeros, bytes,
-                     &c->vcache_b);
+    s = xla_alloc_zeroed_bv(c, 5, shape5, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
+                            bytes, &c->vcache_b);
   }
-  free(zeros);
   if (!iree_status_is_ok(s)) {
     if (c->kcache_b) {
       iree_hal_buffer_view_release(c->kcache_b);
@@ -1120,6 +1194,17 @@ static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
     }
   }
   return s;
+}
+
+static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+  xla_test_bk_window = true;
+#endif
+  iree_status_t status = xla_ensure_batch_kv_inner(c);
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+  xla_test_bk_window = false;
+#endif
+  return status;
 }
 
 // Copy one rank-4 prefill KV pair directly into the selected region of the

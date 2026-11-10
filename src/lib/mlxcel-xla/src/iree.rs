@@ -299,6 +299,14 @@ unsafe extern "C" {
     // copy the per-row `[vocab]` logits to host so the engine samples there (Stage
     // 2d). `prefill_slot_logits` also does the device-side KV slot write.
     fn xla_llama_ragged_reset(c: *mut XlaCtx, bsz: c_int) -> c_int;
+    /// Test support (issue #2923): host-mirror and host-to-device byte counters
+    /// for the lazy rank-5 batch-KV allocation path.
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_kv_host_bytes() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_kv_h2d_bytes() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_kv_reset_counters();
     fn xla_llama_prefill_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
@@ -476,6 +484,25 @@ unsafe extern "C" {
 /// ragged decode graph for the chosen `b_max` is emitted from the model config at
 /// load (any `b_max` is emittable; the worker selects from this set).
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
+
+/// Test support (issue #2923): reset the shim's counters for host-resident and
+/// host-to-device bytes spent by the lazy rank-5 batch-KV allocation. A first
+/// admit must leave both at zero now that the caches are zeroed with a device
+/// fill instead of a host mirror.
+#[cfg(feature = "test-support")]
+pub fn reset_batch_kv_allocation_counters() {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { xla_test_batch_kv_reset_counters() };
+}
+
+/// Test support (issue #2923): bytes the rank-5 batch-KV path has allocated or
+/// uploaded from host memory since the last reset.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn batch_kv_allocation_counters() -> (u64, u64) {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { (xla_test_batch_kv_host_bytes(), xla_test_batch_kv_h2d_bytes()) }
+}
 
 #[derive(Clone, Debug)]
 enum RuntimeConfig {

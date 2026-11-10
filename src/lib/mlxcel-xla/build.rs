@@ -89,6 +89,11 @@ fn add_iree_shim_sources(build: &mut cc::Build) {
         .file("csrc/xla_iree.c")
         .file("csrc/xla_aux.c")
         .file("csrc/xla_local_task.c");
+    // Test-only shim hooks (issue #2923) are compiled only for the crate's
+    // `test-support` feature, which the root `test-utils` feature enables.
+    if env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some() {
+        build.define("MLXCEL_XLA_TEST_SUPPORT", None);
+    }
     if env::var_os("CARGO_FEATURE_DIAGNOSTICS").is_some() {
         build.file("csrc/xla_diagnostic_flags.c");
     }
