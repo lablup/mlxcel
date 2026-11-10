@@ -995,6 +995,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         responses_store_ttl_secs: args.responses_store_ttl_secs,
         responses_background_max_jobs: args.responses_background_max_jobs,
         responses_background_ephemeral_ttl_secs: args.responses_background_ephemeral_ttl_secs,
+        responses_background_event_log_bytes: args.responses_background_event_log_bytes,
         conversation_store_max_entries: args.conversation_store_max_entries,
         conversation_store_max_bytes: args.conversation_store_max_bytes,
         conversation_store_ttl_secs: args.conversation_store_ttl_secs,

@@ -504,6 +504,7 @@ These variables are applied when the corresponding CLI flag is absent.
 | `MLXCEL_RESPONSES_STORE_MAX_BYTES` | unsigned integer bytes | `268435456` | `--responses-store-max-bytes` |
 | `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS` | unsigned integer | `64` | `--responses-background-max-jobs` |
 | `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS` | unsigned integer seconds, at least `1` | `600` | `--responses-background-ephemeral-ttl-secs` |
+| `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES` | unsigned integer bytes | `4194304` | `--responses-background-event-log-bytes` |
 | `MLXCEL_CONVERSATION_STORE_MAX_BYTES` | unsigned integer bytes | `67108864` | `--conversation-store-max-bytes` |
 | `APC_ENABLED` | boolean | `true` | `--apc-enabled` |
 | `APC_BLOCK_SIZE` | unsigned integer tokens | `16` | `--apc-block-size` |
@@ -577,7 +578,7 @@ for `/v1/responses` response history and conversation transcripts. The entry
 count and TTL limits still apply. A value of `0` leaves the route surface
 enabled but makes newly stored entries immediately evict themselves.
 
-`MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS` caps concurrently active `background: true` Responses API jobs (`0` disables background mode), and `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS` sets how long the final object of a `store: false` background job stays readable by polling. An ephemeral TTL of `0` is refused at startup. See `docs/responses-api.md`.
+`MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS` caps concurrently active `background: true` Responses API jobs (`0` disables background mode), and `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS` sets how long the final object of a `store: false` background job stays readable by polling. An ephemeral TTL of `0` is refused at startup. `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES` is the byte budget of the replayable event log each streamed background response keeps for `GET /v1/responses/{id}?stream=true`; `0` refuses `stream: true` on background responses. See `docs/responses-api.md`.
 
 The three `SNAPSHOT` variables budget a separate store: whole model-owned
 state snapshots, which cannot share KV blocks and are therefore kept as

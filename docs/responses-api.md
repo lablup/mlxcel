@@ -19,6 +19,8 @@ Implementation source map:
 | `src/server/routes/responses_run.rs` | One streamed generation, driven into an event sink. |
 | `src/server/routes/responses_background.rs` | Background job admission and lifecycle. |
 | `src/server/routes/responses_background_sink.rs` | Background event sink and terminal recording. |
+| `src/server/responses_background_events.rs` | Replayable event log of a streamed background response. |
+| `src/server/routes/responses_background_stream.rs` | SSE readers of that log: the streamed create and `GET ...?stream=true`. |
 | `src/server/responses_compaction.rs` | Compaction capsule, replay, selection and summarization core. |
 | `src/server/routes/responses_compact.rs` | `POST /v1/responses/compact` handler. |
 
@@ -27,7 +29,7 @@ Implementation source map:
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/v1/responses` | Create a response: non-streaming, streaming, or as a background job (`background: true`, see [Background mode](#background-mode)). |
-| GET | `/v1/responses/{id}` | Retrieve a stored response, or poll a background response. |
+| GET | `/v1/responses/{id}` | Retrieve a stored response, or poll a background response. With `?stream=true` it replays and tails the events of a streamed background response; see [Streaming and resuming](#streaming-and-resuming). |
 | DELETE | `/v1/responses/{id}` | Delete a stored response. A background response that has not finished returns `400`; cancel it first. |
 | POST | `/v1/responses/{id}/cancel` | Best-effort cancellation of an in-flight streaming response. The stream ends with `response.completed` whose `response.status` is `cancelled`, and the stored copy has the same status. Cancelling a response already stored as `cancelled` is idempotent and returns the stored Response object. Other finished responses return `400 invalid_request_error` without changing the saved result. |
 | POST | `/v1/responses/compact` | Summarize older turns into a `compaction` item; see [Conversation compaction](#conversation-compaction). |
@@ -89,7 +91,7 @@ with client.responses.stream(
 | `metadata` | supported | Maximum 16 entries. |
 | `prompt_cache_key` | accepted | Forwarded to prompt-cache plumbing. |
 | `user`, `safety_identifier` | accepted | `user` is used when both are present; `safety_identifier` is used as a fallback. |
-| `background` | supported | `true` returns a `queued` response at once and runs the generation as a job; see [Background mode](#background-mode). Combining it with `stream: true` returns 400. |
+| `background` | supported | `true` returns a `queued` response at once and runs the generation as a job; see [Background mode](#background-mode). With `stream: true` the events are streamed and can be resumed. |
 | `truncation` | only `disabled` | Other values, including `auto`, return 400. |
 | `service_tier` | accepted | Echoed/ignored; no scheduling tier is implemented. |
 | `context_management` | supported subset | `[{"type":"compaction","compact_threshold":N}]` enables automatic compaction; see [Automatic compaction](#automatic-compaction). `[]` or `null` disables it. |
@@ -241,7 +243,7 @@ Every object of a background response carries `"background": true`; a foreground
 
 What create answers:
 
-- `400 invalid_request_error` for everything a foreground request is refused for before generation (malformed fields, unsupported media, invalid sampling or tool parameters, an invalid schema, an unknown `previous_response_id`), and also when `stream` is `true`, when the response store is disabled, or when `--responses-background-max-jobs`, the response store entry limit, or `--responses-store-max-bytes` is `0`. No job is created.
+- `400 invalid_request_error` for everything a foreground request is refused for before generation (malformed fields, unsupported media, invalid sampling or tool parameters, an invalid schema, an unknown `previous_response_id`), and also when the response store is disabled, when `stream` is `true` and `--responses-background-event-log-bytes` is `0`, or when `--responses-background-max-jobs`, the response store entry limit, or `--responses-store-max-bytes` is `0`. No job is created.
 - `429` with `error.code: "rate_limit_exceeded"` when `--responses-background-max-jobs` jobs are already active, or when the active jobs fill `--responses-store-max-bytes`. Retry after a job finishes.
 - `503` when the generation queue is full, as for a foreground request.
 
@@ -253,6 +255,33 @@ Interactions:
 - `conversation` history is read when the job is created, and the turn is appended when the job finishes with output. A `failed` job appends nothing.
 - `context_management` runs inside the job, so a compaction failure ends the job as `failed` instead of failing the create call.
 - Media inputs are allowed. Whether the model supports a media kind is checked at create; reading and decoding happen inside the job.
+
+### Streaming and resuming
+
+`"background": true` with `"stream": true` answers with an SSE stream of the job's events, and the same events stay readable from the server afterwards. Every event carries a `sequence_number` that starts at 0 and increases by one, so a client that lost its connection resumes after the last one it received:
+
+```bash
+curl -N http://127.0.0.1:8080/v1/responses -H 'Content-Type: application/json' \
+  -d '{"model":"local","input":"Write a haiku about rain.","background":true,"stream":true}'
+# event: response.created      (sequence_number 0, status queued; carries the id)
+# event: response.queued       (sequence_number 1)
+# event: response.in_progress  (when the model starts)
+# ... the same item and delta events a foreground stream sends ...
+# event: response.completed
+curl -N 'http://127.0.0.1:8080/v1/responses/resp_...?stream=true&starting_after=7'
+# events 8, 9, ... then the live ones, closing after the terminal event
+```
+
+With the OpenAI Python SDK this is `client.responses.create(..., background=True, stream=True)` and `client.responses.retrieve(id, stream=True, starting_after=n)`.
+
+- The stream ends with exactly one terminal event carrying the stored object: `response.completed`, `response.incomplete`, or `response.failed`. A cancelled job ends with `response.completed` whose `response.status` is `cancelled`. The foreground `response.error` event is not used for a job failure.
+- After an automatic compaction, `response.in_progress` is followed by the two `mlx.compaction.*` events and the compaction item, as in the foreground.
+- Any number of readers can stream the same response, each with its own cursor. Closing a stream ends that reader only; the job keeps running, and only the cancel endpoint stops it. Idle streams get the SSE comment ping (`--sse-ping-interval`).
+- `X-Conversation-Id` is ignored on a background create: `starting_after` is the resume cursor.
+- `GET /v1/responses/{id}?stream=true` without `starting_after` replays from the first event. `stream=false` or no `stream` returns the JSON object as before.
+- The server keeps about `--responses-background-event-log-bytes` of events per response (default 4 MiB) and drops the oldest when the log is full; the terminal event is never dropped. A resume that asks for dropped events (a `starting_after` below the oldest retained `sequence_number` minus one, or no `starting_after` once the first event is gone) returns `400 invalid_request_error` naming the oldest retained `sequence_number`; retrieve the response with a plain GET instead. A reader that falls behind the retained window while streaming receives one `response.error` event with `code: "stream_events_evicted"` and the same message, and its stream ends.
+- Other `400` answers: a `starting_after` that is not a non-negative integer, a `stream` that is not a boolean, and a response that has no event log because it was not created with both `background: true` and `stream: true`. An unknown id returns `404`.
+- The log lives as long as the response: it is counted in `--responses-store-max-bytes` and is freed when the response is evicted, deleted or expires (after `--responses-background-ephemeral-ttl-secs` for `store: false`). A log too large to fit the store budget beside its response is dropped when the job finishes; streams already open still end normally.
 
 Jobs are held in memory. The single-model server does not drain them on exit: stopping or restarting the process loses queued and running jobs, and their ids return `404` afterwards. If the model worker exits while the process keeps running, its jobs end as `failed`.
 
@@ -268,6 +297,7 @@ JSON bytes, and TTL.
 | `--responses-store-ttl-secs` | `3600` | `LLAMA_ARG_RESPONSES_STORE_TTL_SECS` | `0` disables TTL. |
 | `--responses-background-max-jobs` | `64` | `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS` | Cap on concurrently active `background: true` responses; each holds one generation thread. `0` disables background mode. |
 | `--responses-background-ephemeral-ttl-secs` | `600` | `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS` | How long a finished `background: true` response created with `store: false` stays readable by polling. Must be at least `1`; `0` fails startup. |
+| `--responses-background-event-log-bytes` | `4194304` | `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES` | Byte budget of the replayable event log of one `background: true` response created with `stream: true`; the oldest events are dropped when it is full. `0` refuses `stream: true` on background responses. |
 | `--conversation-store-max-entries` | `256` | `LLAMA_ARG_CONVERSATION_STORE_MAX_ENTRIES` | `0` disables conversations. |
 | `--conversation-store-max-bytes` | `67108864` | `MLXCEL_CONVERSATION_STORE_MAX_BYTES` | Approximate retained-byte budget; `0` keeps the route enabled but immediately evicts transcripts. |
 | `--conversation-store-ttl-secs` | `3600` | `LLAMA_ARG_CONVERSATION_STORE_TTL_SECS` | `0` disables TTL. |
@@ -518,7 +548,7 @@ Only function tools are accepted. Built-in/external tool types such as
 
 Notable gaps:
 
-- background responses cannot be streamed or resumed, and are lost on restart;
+- background responses are lost on restart, and their event streams are retained up to a byte budget rather than in full;
 - no input-items pagination endpoint;
 - no built-in tools or MCP connector execution;
 - no disk-persisted response store;

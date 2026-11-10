@@ -34,7 +34,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -564,7 +564,14 @@ async fn stream_create_response(
 }
 
 /// GET /v1/responses/:id
-pub async fn retrieve_response(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+///
+/// With `?stream=true` it replays and tails the events of a streamed
+/// background response, from `starting_after` when given (issue #2900).
+pub async fn retrieve_response(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<super::responses_background_stream::RetrieveResponseQuery>,
+) -> Response {
     let Some(store) = state.responses_store.as_ref() else {
         return ErrorResponse::new(
             "response storage is disabled on this server; restart with --responses-store-max-entries > 0",
@@ -572,6 +579,11 @@ pub async fn retrieve_response(State(state): State<AppState>, Path(id): Path<Str
         )
         .into_response();
     };
+    if let Some(response) =
+        super::responses_background_stream::resume_stream(&state, store, &id, &query)
+    {
+        return response;
+    }
     // A background response is readable before it is stored (`queued`,
     // `in_progress`), and a `store: false` one only through its snapshot.
     let response = store

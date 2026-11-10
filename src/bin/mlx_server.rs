@@ -1103,6 +1103,18 @@ struct ServerArgs {
     )]
     responses_background_ephemeral_ttl_secs: u64,
 
+    /// Byte budget of the replayable event log of one `background: true`
+    /// Responses API response created with `stream: true`. The oldest events
+    /// are dropped when it is full. `0` refuses `stream: true` on background
+    /// responses. Also reads `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES`.
+    #[arg(
+        long = "responses-background-event-log-bytes",
+        env = "MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
+        value_name = "BYTES"
+    )]
+    responses_background_event_log_bytes: usize,
+
     /// Maximum number of conversation transcripts persisted
     /// for the OpenAI Responses API `conversation` field. `0` disables.
     /// Also reads `LLAMA_ARG_CONVERSATION_STORE_MAX_ENTRIES`.
@@ -3066,6 +3078,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         responses_store_ttl_secs: args.responses_store_ttl_secs,
         responses_background_max_jobs: args.responses_background_max_jobs,
         responses_background_ephemeral_ttl_secs: args.responses_background_ephemeral_ttl_secs,
+        responses_background_event_log_bytes: args.responses_background_event_log_bytes,
         conversation_store_max_entries: args.conversation_store_max_entries,
         conversation_store_max_bytes: args.conversation_store_max_bytes,
         conversation_store_ttl_secs: args.conversation_store_ttl_secs,
@@ -3642,6 +3655,10 @@ mod tests {
             defaults.responses_background_ephemeral_ttl_secs,
             mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS
         );
+        assert_eq!(
+            defaults.responses_background_event_log_bytes,
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES
+        );
 
         let args = parse_server_args(&[
             "mlxcel-server",
@@ -3651,9 +3668,12 @@ mod tests {
             "7",
             "--responses-background-ephemeral-ttl-secs",
             "30",
+            "--responses-background-event-log-bytes",
+            "65536",
         ]);
         assert_eq!(args.responses_background_max_jobs, 7);
         assert_eq!(args.responses_background_ephemeral_ttl_secs, 30);
+        assert_eq!(args.responses_background_event_log_bytes, 65536);
     }
 
     #[test]
@@ -3665,12 +3685,14 @@ mod tests {
         let _env = ScopedEnv::set(&[
             ("MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS", "3"),
             ("MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS", "45"),
+            ("MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES", "1024"),
         ]);
 
         let args = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
 
         assert_eq!(args.responses_background_max_jobs, 3);
         assert_eq!(args.responses_background_ephemeral_ttl_secs, 45);
+        assert_eq!(args.responses_background_event_log_bytes, 1024);
     }
 
     #[test]
