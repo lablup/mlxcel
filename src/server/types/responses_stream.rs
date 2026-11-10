@@ -330,6 +330,7 @@ mod tests {
             service_tier: None,
             user: None,
             store: None,
+            background: None,
         }
     }
 
