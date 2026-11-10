@@ -644,6 +644,19 @@ pub async fn cancel_response(State(state): State<AppState>, Path(id): Path<Strin
         .into_response();
     };
 
+    // A background response answers with its final object (issue #2899).
+    // Checked first: an active job is in neither the stored entries nor,
+    // for a moment before its terminal write, the in-flight registry.
+    if let Some(reply) = super::responses_background::cancel_background_response(
+        store,
+        &id,
+        super::responses_background::BACKGROUND_CANCEL_WAIT,
+    )
+    .await
+    {
+        return reply;
+    }
+
     // Responses are persisted only after generation finishes. Check before
     // signalling a stream whose in-flight token may not yet be unregistered.
     if let Some(stored) = store.get(&id) {

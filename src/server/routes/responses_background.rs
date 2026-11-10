@@ -49,10 +49,34 @@
 //!
 //! The token `admit_background` returns is the job's only cancellation flag.
 //! It is registered in the store's in-flight registry under the response id
-//! before the create call returns, so `POST /v1/responses/{id}/cancel` reaches
-//! it through `cancel_in_flight`, and it is the token handed to
-//! [`drive_response_run`]. Nothing ties it to the client connection: dropping
+//! before the create call returns, and it is the token handed to
+//! [`drive_response_run`]. `POST /v1/responses/{id}/cancel` flips it through
+//! `ResponsesStore::cancel_background`. Nothing ties it to the client connection: dropping
 //! the create response or a poll cancels nothing.
+//!
+//! ## Cancel
+//!
+//! `POST /v1/responses/{id}/cancel` on a background response answers with
+//! the final object, the one a following `GET` returns
+//! ([`cancel_background_response`], issue #2899):
+//!
+//! - `queued`: the route records `cancelled` with no output at once. The job
+//!   task drops its pre-generation work (video decode, compaction, request
+//!   preparation) as a foreground client disconnect does (a summary pass or
+//!   clip decode already running finishes that step), and skips generation
+//!   or stops at its next token check.
+//! - `in_progress`: the route flips the token and waits up to
+//!   [`BACKGROUND_CANCEL_WAIT`] for the driver to record its terminal
+//!   object, which keeps the partial output. A job that does not answer in
+//!   time is recorded `cancelled` with no output by the route.
+//! - The first terminal object wins in every case. When the job finished
+//!   `completed`, `incomplete` or `failed` first, the cancel is refused with
+//!   400, as for any finished response; an already `cancelled` response is
+//!   returned unchanged.
+//!
+//! The terminal write frees the job slot. The blocking generation may run on
+//! until it next checks the token; its late terminal write is a no-op, and it
+//! holds no job slot meanwhile.
 //!
 //! ## No job stays active
 //!
@@ -66,13 +90,17 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use axum::Json;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::responses_background_events::BackgroundEventLog;
-use crate::server::responses_store::{BackgroundAdmitError, InFlightToken};
+use crate::server::responses_store::{
+    BackgroundAdmitError, BackgroundCancel, InFlightToken, ResponsesStore,
+};
 use crate::server::responses_translator::{
     OutboundContext, TranslatedRequest, build_response_object,
 };
@@ -190,8 +218,68 @@ pub(crate) fn create_background_response(job: BackgroundJob) -> Response {
 fn rate_limited(message: String) -> ErrorResponse {
     let mut response = ErrorResponse::new(message, "rate_limit_exceeded");
     response.error.code = Some("rate_limit_exceeded".to_string());
-    response.status = axum::http::StatusCode::TOO_MANY_REQUESTS;
+    response.status = StatusCode::TOO_MANY_REQUESTS;
     response
+}
+
+/// How long a cancel waits for an `in_progress` job to record its own
+/// terminal object (with the partial output) before the route records
+/// `cancelled` itself. A generation checks its token once per token, so the
+/// wait only runs out for a job stuck in one long step.
+pub(crate) const BACKGROUND_CANCEL_WAIT: Duration = Duration::from_secs(5);
+
+/// Cancel the background response `id` and answer with its final object, or
+/// return `None` when `id` is not a background response (the caller then
+/// applies the foreground rules). `wait` bounds the wait for an
+/// `in_progress` job; the route passes [`BACKGROUND_CANCEL_WAIT`].
+///
+/// The reply is always the object a following `GET` returns: the recorded
+/// `cancelled` object, or 400 when the response finished with another status
+/// first. See the module documentation for each case.
+///
+/// Used by: `cancel_response`.
+pub(crate) async fn cancel_background_response(
+    store: &ResponsesStore,
+    id: &str,
+    wait: Duration,
+) -> Option<Response> {
+    let recorded = match store.cancel_background(id) {
+        BackgroundCancel::NotFound => return None,
+        // A stored foreground response keeps the foreground rules.
+        BackgroundCancel::Terminal(response) if response.background != Some(true) => return None,
+        BackgroundCancel::Terminal(response) => Some(response),
+        BackgroundCancel::Requested => match store.wait_background_terminal(id, wait).await {
+            Some(response) => Some(response),
+            None => {
+                tracing::warn!(
+                    response_id = %id,
+                    "background response did not stop within {wait:?} of its cancel; \
+                     recording it as cancelled"
+                );
+                store.force_background_cancel(id)
+            }
+        },
+    };
+    Some(match recorded {
+        Some(response) if response.status == ResponseStatus::Cancelled => {
+            Json(response).into_response()
+        }
+        Some(_) => ErrorResponse::new(
+            format!("response '{id}' has already finished and cannot be cancelled"),
+            "invalid_request_error",
+        )
+        .into_response(),
+        // The job finished and its object was evicted while the cancel
+        // waited.
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(
+                format!("response '{id}' not found"),
+                "not_found",
+            )),
+        )
+            .into_response(),
+    })
 }
 
 /// Admit `job` as a `queued` background response and spawn its task.
@@ -311,28 +399,28 @@ async fn run_background_job<D>(
         compact_threshold,
     } = job;
 
-    let auto = match run_prelude(
+    let prelude = run_prelude(
         &state,
         &live,
         &request,
         &mut translated,
         compact_threshold,
         &recorder,
-    )
-    .await
-    {
-        Ok(auto) => auto,
-        Err(err) => {
+    );
+    let auto = match unless_cancelled(&recorder, prelude).await {
+        Some(Ok(auto)) => auto,
+        Some(Err(err)) => {
             recorder.fail_with(&err);
             return;
         }
+        None => return,
     };
     // A cancel that arrived while the job was still queued: skip generation.
     if cancelled.load(Ordering::Acquire) {
         recorder.cancel_before_start();
         return;
     }
-    let mut run = match prepare_response_run(
+    let prepare = prepare_response_run(
         state,
         live,
         request,
@@ -343,14 +431,14 @@ async fn run_background_job<D>(
         budget_override,
         structured,
         auto,
-    )
-    .await
-    {
-        Ok(run) => run,
-        Err(err) => {
+    );
+    let mut run = match unless_cancelled(&recorder, prepare).await {
+        Some(Ok(run)) => run,
+        Some(Err(err)) => {
             recorder.fail_with(&err);
             return;
         }
+        None => return,
     };
 
     let sink = BackgroundSink::new(&run, Arc::clone(&recorder));
@@ -382,6 +470,25 @@ async fn run_background_job<D>(
             Ok(()) => recorder.fail_server_error(
                 "The background response ended without a result; check the server log.",
             ),
+        }
+    }
+}
+
+/// Run `work`, the job's pre-generation work, unless the job is cancelled
+/// first: a cancel of a `queued` job records its terminal object and frees
+/// its slot at once, so the work is dropped (stopping a queued video decode,
+/// a compaction pass, or a media fetch, as a foreground client disconnect
+/// does) instead of running on with no slot bounding it. `None` when the job
+/// was cancelled; its cancel registration is retired.
+async fn unless_cancelled<F: std::future::Future>(
+    recorder: &JobRecorder,
+    work: F,
+) -> Option<F::Output> {
+    tokio::select! {
+        output = work => Some(output),
+        () = recorder.terminal_recorded() => {
+            recorder.cancel_before_start();
+            None
         }
     }
 }

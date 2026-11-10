@@ -332,6 +332,36 @@ async fn a_cancelled_stream_ends_with_response_completed_and_status_cancelled() 
     assert_eq!(events[2].1["response"]["output"], json!([]));
 }
 
+/// The cancel route records the terminal object itself for a queued job
+/// (issue #2899), so the stream's terminal event must carry that object: the
+/// cancel reply, a GET and the stream all report the same `cancelled` result.
+#[tokio::test]
+async fn a_route_cancel_of_a_queued_streamed_job_ends_its_stream() {
+    let h = harness();
+    let (mut reader, id, _) = h.create_streamed(streamed_body()).await;
+    assert_eq!(
+        reader.event().await.expect("response.queued").0,
+        "response.queued"
+    );
+    // Nothing is scripted, so the job is still `queued` at the cancel.
+    let (status, cancelled) = h
+        .send(Method::POST, &format!("/v1/responses/{id}/cancel"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{cancelled}");
+    assert_eq!(cancelled["status"], "cancelled");
+    let rest = reader.rest().await;
+    let (name, terminal) = rest.last().expect("a terminal event");
+    assert_eq!(name, "response.completed");
+    assert_eq!(terminal["response"], cancelled);
+    assert_eq!(h.get(&id).await.1, cancelled);
+    let replayed = h.replay(&id, None).await;
+    assert_eq!(
+        replayed.last().map(|(_, e)| &e["response"]),
+        Some(&cancelled)
+    );
+    assert_eq!(h.store.active_background_jobs(), 0);
+}
+
 #[tokio::test]
 async fn keepalive_frames_arrive_while_the_job_is_paused() {
     let h = harness_full(

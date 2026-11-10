@@ -58,7 +58,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::server::responses_background_events::BackgroundEventLog;
+use crate::server::responses_background_events::{BackgroundEventLog, PreparedTerminal};
 use crate::server::store_budget::{
     INITIAL_HASH_CAPACITY_LIMIT, LruKey, serialized_json_len_saturating,
 };
@@ -233,6 +233,10 @@ struct BackgroundJob {
     input_bytes: usize,
     effective_store: bool,
     token: InFlightToken,
+    /// A cancel was requested through [`ResponsesStore::request_background_cancel`]
+    /// or [`ResponsesStore::cancel_background`]. Unlike `token`, which a
+    /// refused admission also sets, this is only ever a client's cancel.
+    cancel_requested: bool,
     size_bytes: usize,
     signal: Arc<BackgroundSignal>,
     /// Set for a job created with `stream: true` (issue #2900). Its bytes
@@ -269,7 +273,9 @@ pub struct ResponsesStore {
     /// `in_flight` read guard and drained under its write guard, so the
     /// streaming task learns exactly which cancels the client was told about.
     cancel_acknowledged: Mutex<HashSet<String>>,
-    /// Active `background: true` jobs. Lock order: `jobs`, then `inner`.
+    /// Active `background: true` jobs. Lock order: `jobs`, then `inner`;
+    /// a cancel also takes `in_flight` (read) under `jobs`. Nothing takes
+    /// `jobs` while holding `in_flight` or `inner`.
     jobs: Mutex<BackgroundState>,
 }
 
@@ -532,6 +538,7 @@ impl ResponsesStore {
             input_bytes,
             effective_store,
             token: token.clone(),
+            cancel_requested: false,
             size_bytes,
             signal: Arc::new(BackgroundSignal::default()),
             event_log: None,
@@ -676,6 +683,29 @@ impl ResponsesStore {
             return Self::retained_response_locked(&mut state, &self.config, id, now)
                 .unwrap_or(terminal);
         };
+        self.record_terminal_locked(jobs, id, job, terminal, terminal_bytes, prepared, now)
+    }
+
+    /// Store `terminal` as the terminal object of `job`, which the caller
+    /// already removed from `jobs`, and wake the waiters. Consumes the `jobs`
+    /// guard: the entry is inserted before the guard is released, so no
+    /// reader sees the job neither active nor stored. `prepared` is the
+    /// terminal stream event serialized outside the lock for `terminal`; it
+    /// is used only when `terminal` is recorded as given, otherwise the event
+    /// is serialized here from the recorded object.
+    ///
+    /// Used by: [`Self::finish_background`] and the cancel paths in
+    /// `responses_store_cancel.rs`.
+    fn record_terminal_locked(
+        &self,
+        mut jobs: MutexGuard<'_, BackgroundState>,
+        id: &str,
+        job: BackgroundJob,
+        terminal: ResponseObject,
+        terminal_bytes: usize,
+        prepared: Option<(Arc<BackgroundEventLog>, PreparedTerminal)>,
+        now: Instant,
+    ) -> ResponseObject {
         jobs.active_bytes = jobs.active_bytes.saturating_sub(job.size_bytes);
 
         let (payload, size_bytes, as_given) = self.fit_terminal(
@@ -745,14 +775,17 @@ impl ResponsesStore {
         self.lock_jobs().jobs.get(id).map(|job| job.snapshot.status)
     }
 
-    /// Request cancellation of a job. For an active job this flips its token
-    /// and keeps it active; the job's task records the terminal object
-    /// through [`Self::finish_background`].
+    /// Request cancellation of a job. For an active job this flips its token,
+    /// marks the cancel as requested
+    /// ([`Self::background_cancel_requested`]) and keeps the job active; the
+    /// job's task records the terminal object through
+    /// [`Self::finish_background`].
     pub fn request_background_cancel(&self, id: &str) -> BackgroundCancel {
         let now = Instant::now();
-        let jobs = self.lock_jobs();
-        if let Some(job) = jobs.jobs.get(id) {
-            job.token.store(true, Ordering::Relaxed);
+        let mut jobs = self.lock_jobs();
+        if let Some(job) = jobs.jobs.get_mut(id) {
+            job.cancel_requested = true;
+            job.token.store(true, Ordering::Release);
             return BackgroundCancel::Requested;
         }
         let mut state = self.write_inner();
@@ -1036,6 +1069,9 @@ fn response_tool_output_size_bytes(output: &ResponseToolOutput) -> usize {
 fn str_size_bytes(value: &str) -> usize {
     serialized_json_len_saturating(value)
 }
+
+#[path = "responses_store_cancel.rs"]
+mod background_cancel;
 
 #[cfg(test)]
 mod tests {

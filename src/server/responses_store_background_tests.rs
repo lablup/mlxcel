@@ -308,6 +308,7 @@ fn request_background_cancel_flips_token_and_keeps_job_active() {
         BackgroundCancel::Requested
     ));
     assert!(token.load(Ordering::Relaxed));
+    assert!(store.background_cancel_requested("bg_cancel"));
     assert_eq!(store.active_background_jobs(), 1);
 
     let mut cancelled = terminal("bg_cancel", "");
@@ -395,6 +396,89 @@ fn set_background_input_items_replaces_what_the_terminal_entry_stores() {
         response_input_item_size_bytes(&make_response_with_input("job", "short").input_items[0])
     );
     assert_background_accounting(&store);
+}
+
+#[test]
+fn cancel_background_finishes_a_queued_job_at_once() {
+    let store = ResponsesStore::new(ResponsesStoreConfig::default());
+    let token = admit(&store, "bg_queued", true);
+    store
+        .in_flight_write()
+        .expect("registry lock")
+        .insert("bg_queued".to_string(), token.clone());
+
+    let BackgroundCancel::Terminal(recorded) = store.cancel_background("bg_queued") else {
+        panic!("a queued job is finished by the cancel");
+    };
+    assert_eq!(recorded.status, ResponseStatus::Cancelled);
+    assert!(recorded.completed_at.is_none());
+    assert!(token.load(Ordering::Relaxed));
+    assert_eq!(store.active_background_jobs(), 0);
+    // The cancel was acknowledged for the job's driver, and the job's late
+    // terminal write is a no-op.
+    assert!(store.finish_in_flight("bg_queued"));
+    let late = store.finish_background("bg_queued", terminal("bg_queued", "late"));
+    assert_eq!(late.status, ResponseStatus::Cancelled);
+    assert_eq!(
+        store.get("bg_queued").map(|s| s.response.status),
+        Some(ResponseStatus::Cancelled)
+    );
+    // A repeat returns the recorded object.
+    assert!(matches!(
+        store.cancel_background("bg_queued"),
+        BackgroundCancel::Terminal(ref r) if r.status == ResponseStatus::Cancelled
+    ));
+    assert!(matches!(
+        store.cancel_background("never"),
+        BackgroundCancel::NotFound
+    ));
+    assert_background_accounting(&store);
+    assert_indexes_consistent(&store);
+}
+
+#[test]
+fn cancel_background_leaves_an_in_progress_job_to_its_driver() {
+    let store = ResponsesStore::new(ResponsesStoreConfig::default());
+    let token = admit(&store, "bg_running", false);
+    assert!(store.mark_background_in_progress("bg_running"));
+    // The token alone (a refused admission sets it too) is not a cancel.
+    token.store(true, Ordering::Relaxed);
+    assert!(!store.background_cancel_requested("bg_running"));
+    token.store(false, Ordering::Relaxed);
+
+    assert!(matches!(
+        store.cancel_background("bg_running"),
+        BackgroundCancel::Requested
+    ));
+    assert!(token.load(Ordering::Relaxed));
+    assert!(store.background_cancel_requested("bg_running"));
+    assert_eq!(store.active_background_jobs(), 1);
+    // No registration: nothing is left behind in the acknowledged set.
+    assert!(!store.finish_in_flight("bg_running"));
+
+    // The fallback records `cancelled`; the driver's late write loses.
+    let forced = store
+        .force_background_cancel("bg_running")
+        .expect("the job is active");
+    assert_eq!(forced.status, ResponseStatus::Cancelled);
+    assert_eq!(store.active_background_jobs(), 0);
+    let late = store.finish_background("bg_running", terminal("bg_running", "late"));
+    assert_eq!(late.status, ResponseStatus::Cancelled);
+    assert!(
+        store.get("bg_running").is_none(),
+        "store: false stays hidden"
+    );
+
+    // A job that finished first keeps its result.
+    admit(&store, "bg_done", true);
+    store.finish_background("bg_done", terminal("bg_done", "done"));
+    let kept = store
+        .force_background_cancel("bg_done")
+        .expect("the result is retained");
+    assert_eq!(kept.status, ResponseStatus::Completed);
+    assert!(store.force_background_cancel("never").is_none());
+    assert_background_accounting(&store);
+    assert_indexes_consistent(&store);
 }
 
 #[path = "responses_store_event_log_tests.rs"]

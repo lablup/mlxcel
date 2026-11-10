@@ -100,6 +100,23 @@ impl JobRecorder {
         self.store.background_status(&self.response_id).is_some()
     }
 
+    /// Resolve once a terminal object is recorded, whoever recorded it. While
+    /// the job is `queued` that can only be the cancel route, so the job task
+    /// races its pre-generation work against this and drops that work when
+    /// the job was cancelled.
+    ///
+    /// Used by: `run_background_job`.
+    pub(super) async fn terminal_recorded(&self) {
+        // The wait wakes on the terminal write; the bound only re-checks.
+        const RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
+        while self.is_active() {
+            let _ = self
+                .store
+                .wait_background_terminal(&self.response_id, RECHECK)
+                .await;
+        }
+    }
+
     /// Replace the input items the terminal object is stored with, after
     /// automatic compaction rewrote them.
     pub(super) fn set_input_items(
@@ -110,12 +127,29 @@ impl JobRecorder {
             .set_background_input_items(&self.response_id, input_items);
     }
 
-    /// Record `failed` with `error: { code, message }`. A cancel the client
-    /// was already told about wins: the job is then recorded `cancelled`.
+    /// Record `failed` with `error: { code, message }`. A cancel wins: when
+    /// one was acknowledged, or requested through
+    /// `request_background_cancel` or `cancel_background` (a generation
+    /// stopped before its first token reports that as an error), the job is
+    /// recorded `cancelled`, so a cancel never ends a job `failed`. The
+    /// job's token alone does not count: a refused admission sets it too.
+    ///
+    /// A no-op once a terminal object is recorded.
     pub(super) fn fail(&self, code: &str, message: &str) {
         let cancel_acknowledged = self.store.finish_in_flight(&self.response_id);
+        if !self.is_active() {
+            return;
+        }
+        let cancel_requested = self.store.background_cancel_requested(&self.response_id);
         let mut terminal = self.template.clone();
-        if cancel_acknowledged {
+        if cancel_acknowledged || cancel_requested {
+            // Usually the error the cancel itself caused, but it can be an
+            // unrelated failure (a driver panic) that the cancel hides.
+            tracing::debug!(
+                response_id = %self.response_id,
+                code,
+                "background response failure superseded by its cancel: {message}"
+            );
             terminal.status = ResponseStatus::Cancelled;
         } else {
             tracing::warn!(
@@ -159,6 +193,10 @@ impl Drop for JobRecorder {
                 "The background response ended unexpectedly; check the server log.",
             );
         }
+        // The cancel route can record the terminal object while the job
+        // still runs; a job that then panics would otherwise never retire
+        // its cancel registration.
+        self.store.finish_in_flight(&self.response_id);
     }
 }
 
@@ -240,10 +278,12 @@ impl ResponseEventSink for BackgroundSink {
             .store
             .finish_background(&self.recorder.response_id, response.clone());
         // The conversation gets this turn unless nothing was generated (a
-        // cancel before the first token) or the store kept a `failed`
-        // object in place of an oversized one.
+        // cancel before the first token), the store kept a `failed` object
+        // in place of an oversized one, or the cancel route recorded the
+        // terminal object first (`cancelled` without output; this write was
+        // then a no-op).
         let generated =
-            !(response.status == ResponseStatus::Cancelled && response.output.is_empty());
+            !(recorded.status == ResponseStatus::Cancelled && recorded.output.is_empty());
         if self.translated.effective_store && generated && recorded.status == response.status {
             append_conversation_turn(&self.state, &self.request, &self.translated, &recorded);
         }
