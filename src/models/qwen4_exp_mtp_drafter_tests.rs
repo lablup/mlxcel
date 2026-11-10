@@ -719,8 +719,7 @@ fn a_target_without_the_head_is_refused_as_no_embedded_mtp_head() {
         dir.path(),
         Some(mlxcel_core::drafter::DrafterKind::Mtp),
     )
-    .err()
-    .expect("no head");
+    .expect_err("no head");
     assert!(
         matches!(err, DrafterError::NoEmbeddedMtpHead { .. }),
         "{err}"

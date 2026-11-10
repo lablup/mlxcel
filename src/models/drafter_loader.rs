@@ -58,8 +58,8 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
             }
             // The target checkpoint passed again as its own drafter: its
             // embedded `mtp.*` head (issue #2917). `resolve_drafter_kind`
-            // only resolves `Mtp` here when the tensors exist or the user
-            // asked for it explicitly.
+            // resolves `Mtp` here only when the head's tensors exist; an
+            // explicit `--draft-kind mtp` without them is refused there.
             Some(QWEN4_EXP_MODEL_TYPE) => {
                 let model = Qwen4ExpMtpDraftModel::from_target_checkpoint(path)?;
                 return Ok((Box::new(model), resolved));
