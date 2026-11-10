@@ -1405,6 +1405,71 @@ fn extract_frames_preserves_color_increment_per_frame() {
     }
 }
 
+/// The sampled loader reports the source index of every returned frame and
+/// the probed container frame rate, which is what the Qwen3-VL per-group video
+/// timestamps are computed from (#2402).
+#[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
+fn sampled_loader_reports_source_indices_and_fps() {
+    if !video_capability_available("sampled_loader_reports_source_indices_and_fps") {
+        return;
+    }
+
+    const TOTAL_FRAMES: usize = 50;
+    const VIDEO_FPS: u32 = 10;
+    let video_path = std::env::temp_dir().join("mlxcel-test-sampled-indices.mp4");
+    let _ = std::fs::remove_file(&video_path);
+    if !synth_color_increment_video(&video_path, TOTAL_FRAMES, VIDEO_FPS, 64, 64) {
+        skip_or_fail_video_fixture(
+            "sampled_loader_reports_source_indices_and_fps",
+            "could not synthesize the color-increment video",
+        );
+        return;
+    }
+
+    let source = VideoSource::from_path(video_path.clone());
+    let sampled = load_video_source_sampled_with_policy(
+        &source,
+        Some(5.0),
+        None,
+        FrameSamplingPolicy::default(),
+        &VideoLimits::default(),
+    );
+    let _ = std::fs::remove_file(&video_path);
+    let sampled = sampled.expect("the sampled loader must decode the synthetic video");
+
+    assert!(!sampled.frames.is_empty());
+    assert_eq!(
+        sampled.frames.len(),
+        sampled.frame_indices.len(),
+        "every returned frame needs its source index"
+    );
+    assert!(
+        (sampled.source_fps - f64::from(VIDEO_FPS)).abs() < 0.01,
+        "source fps {} should be the container's {VIDEO_FPS}",
+        sampled.source_fps
+    );
+    assert!(
+        sampled
+            .frame_indices
+            .windows(2)
+            .all(|pair| pair[0] <= pair[1]),
+        "indices must be in source order, got {:?}",
+        sampled.frame_indices
+    );
+    assert!(sampled.frame_indices.iter().all(|&idx| idx < TOTAL_FRAMES));
+    // Frame i of the color-increment clip has R = 5 * i (clamped), so the
+    // reported index must agree with the decoded pixels, not just the plan.
+    for (frame, &idx) in sampled.frames.iter().zip(&sampled.frame_indices) {
+        let (mean_r, _, _) = rgb_channel_means(frame);
+        let expected_r = (idx * 5).min(255) as f64;
+        assert!(
+            (mean_r - expected_r).abs() <= 15.0,
+            "index {idx}: decoded R {mean_r:.1} != expected {expected_r:.1}"
+        );
+    }
+}
+
 /// Test that load_video returns frames with the correct RGB channel order (not
 /// BGR). Synthesizes a 1-second video where every frame is the same solid color
 /// (R=200, G=100, B=50) and asserts center-pixel channel layout after decoding.

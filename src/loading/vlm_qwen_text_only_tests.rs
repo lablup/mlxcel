@@ -122,6 +122,7 @@ fn assert_text_only(loaded: &LoadedModel, dir: &Path) {
         &[],
         None,
         None,
+        None,
     )
     .err()
     .expect("an image request against a text-only model must be refused");

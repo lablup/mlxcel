@@ -1374,6 +1374,38 @@ pub fn load_video_source_with_policy(
     )
 }
 
+/// Frames sampled from one clip together with the timing needed to place
+/// them on the source timeline (#2402).
+///
+/// `frame_indices[i]` is the source frame index that produced `frames[i]`, and
+/// `source_fps` is the probed frame rate of the container. Frame time in
+/// seconds is `frame_indices[i] / source_fps`, which stays correct when the
+/// sampler resamples a clip at a rate other than the one requested.
+pub struct SampledVideo {
+    pub frames: Vec<DynamicImage>,
+    pub frame_indices: Vec<usize>,
+    pub source_fps: f64,
+}
+
+/// Like [`load_video_source_with_policy`], but keeps the source frame indices
+/// and the probed frame rate beside the frames.
+pub fn load_video_source_sampled_with_policy(
+    source: &VideoSource,
+    target_fps: Option<f64>,
+    target_nframes: Option<usize>,
+    policy: FrameSamplingPolicy,
+    limits: &VideoLimits,
+) -> Result<SampledVideo, VideoError> {
+    load_video_source_sampled_with_policy_and_budget(
+        source,
+        target_fps,
+        target_nframes,
+        policy,
+        limits,
+        None,
+    )
+}
+
 /// Like [`load_video_source_with_policy`], with an optional aggregate budget
 /// for decoded frames. The budget uses four bytes per source pixel and is
 /// checked after sampling is planned but before ffmpeg starts decoding.
@@ -1385,6 +1417,27 @@ pub fn load_video_source_with_policy_and_budget(
     limits: &VideoLimits,
     max_decoded_bytes: Option<usize>,
 ) -> Result<Vec<DynamicImage>, VideoError> {
+    load_video_source_sampled_with_policy_and_budget(
+        source,
+        target_fps,
+        target_nframes,
+        policy,
+        limits,
+        max_decoded_bytes,
+    )
+    .map(|sampled| sampled.frames)
+}
+
+/// Like [`load_video_source_with_policy_and_budget`], returning the sampled
+/// frames with their source indices and the probed frame rate.
+pub fn load_video_source_sampled_with_policy_and_budget(
+    source: &VideoSource,
+    target_fps: Option<f64>,
+    target_nframes: Option<usize>,
+    policy: FrameSamplingPolicy,
+    limits: &VideoLimits,
+    max_decoded_bytes: Option<usize>,
+) -> Result<SampledVideo, VideoError> {
     if !ffmpeg_available() {
         return Err(VideoError::FfmpegMissing);
     }
@@ -1414,13 +1467,20 @@ pub fn load_video_source_with_policy_and_budget(
         )?;
     }
 
-    let indices = frame_indices_with_policy(meta.total_frames, nframes, target_fps, policy);
+    let mut indices = frame_indices_with_policy(meta.total_frames, nframes, target_fps, policy);
     let frames = extract_frames_single_pass(source, &indices, meta.fps, limits)?;
 
     if frames.is_empty() {
         return Err(VideoError::EmptyVideo(canonical));
     }
-    Ok(frames)
+    // ffmpeg's `select` filter emits frames in source order, so a short read
+    // drops the trailing indices rather than interior ones.
+    indices.truncate(frames.len());
+    Ok(SampledVideo {
+        frames,
+        frame_indices: indices,
+        source_fps: meta.fps,
+    })
 }
 
 fn frame_indices_with_policy(

@@ -3309,7 +3309,7 @@ fn prepare_request_video_embeddings(
     // Qwen-VL video path (issue #1166): shared image/video patchifier,
     // prompt-order placeholder expansion, and exact scatter cardinality.
     if let Some(qwen) = crate::vlm_runtime::qwen_video_runtime(model) {
-        return prepare_qwen_vl_video_embeddings(qwen, prompt_tokens, images, videos);
+        return prepare_qwen_vl_video_embeddings(qwen, tokenizer, prompt_tokens, images, videos);
     }
 
     let gemma4_vl = match model {
@@ -3601,6 +3601,7 @@ fn prepare_kimi_vl_video_embeddings(
 /// `max_frames` are rejected before generation instead of silently clamped.
 fn prepare_qwen_vl_video_embeddings(
     qwen: &dyn crate::qwen_vl::QwenVlRuntime,
+    tokenizer: &MlxcelTokenizer,
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
@@ -3618,9 +3619,10 @@ fn prepare_qwen_vl_video_embeddings(
     let policy = info.processor.video_sampling_policy();
     let limits = video::VideoLimits::from_env();
     let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
+    let mut sampled_timing: Vec<(Vec<usize>, f64)> = Vec::with_capacity(videos.len());
     for resolved in videos.iter() {
         let fps = resolved.fps.unwrap_or(info.processor.video_default_fps);
-        let frames = video::load_video_source_with_policy(
+        let sampled = video::load_video_source_sampled_with_policy(
             &resolved.source,
             Some(fps),
             None,
@@ -3634,7 +3636,8 @@ fn prepare_qwen_vl_video_embeddings(
                 err
             )
         })?;
-        decoded_videos.push(frames);
+        sampled_timing.push((sampled.frame_indices, sampled.source_fps));
+        decoded_videos.push(sampled.frames);
     }
 
     let total_frames: usize = decoded_videos.iter().map(Vec::len).sum();
@@ -3650,11 +3653,45 @@ fn prepare_qwen_vl_video_embeddings(
         decode_request_images(images)?
     };
 
+    // Qwen3-VL renders a `<t seconds>` marker before each temporal group; the
+    // times come from the frames the sampler actually kept (#2402).
+    let group_seconds: Vec<Vec<f64>> = if info.video_timestamps {
+        let temporal_patch_size = info.processor.temporal_patch_size;
+        sampled_timing
+            .iter()
+            .zip(&decoded_videos)
+            .map(|((indices, source_fps), frames)| {
+                let grid_t = frames.len().div_ceil(temporal_patch_size.max(1));
+                crate::qwen_vl::qwen_video_group_timestamps(
+                    indices,
+                    *source_fps,
+                    temporal_patch_size,
+                    grid_t,
+                )
+            })
+            .collect::<Result<_>>()?
+    } else {
+        Vec::new()
+    };
+    let encode_text = |text: &str| -> Result<Vec<i32>> {
+        let ids = tokenizer
+            .encode(text, false)
+            .map_err(|err| anyhow!("Failed to tokenize Qwen-VL video timestamp: {err}"))?;
+        Ok(ids.into_iter().map(|id| id as i32).collect())
+    };
+    let timestamps = info
+        .video_timestamps
+        .then_some(crate::vlm_runtime::QwenVideoTimestamps {
+            group_seconds: &group_seconds,
+            encode_text: &encode_text,
+        });
+
     let (embeddings, _stats) = crate::vlm_runtime::compute_qwen_vl_media_embeddings(
         qwen,
         prompt_tokens,
         &decoded_images,
         &decoded_videos,
+        timestamps.as_ref(),
         None,
         None,
     )?;
