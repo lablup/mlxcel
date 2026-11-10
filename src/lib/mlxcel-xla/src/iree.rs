@@ -493,6 +493,22 @@ fn native_quant_supported(cfg: &RuntimeConfig) -> bool {
     }
 }
 
+/// Whether the ragged engine's native GEMV can register any packed projection
+/// (issue #2922). `take_weight` keeps a weight packed only when the config's
+/// projection layout is one the packed path supports, so a 4-bit group-64
+/// checkpoint with fused q/k/v, fused gate/up, MoE, MLA or a dense MLP would
+/// compile and embed the HSACO while every projection stayed on the f16 path.
+/// The ragged loader reports the fallback instead of paying for an unused
+/// artifact.
+fn native_ragged_supported(cfg: &RuntimeConfig) -> bool {
+    match cfg {
+        RuntimeConfig::Dense(config) => {
+            config.native_qmv_supported() && config.supports_packed_quant()
+        }
+        RuntimeConfig::Gemma3n(_) => false,
+    }
+}
+
 /// The dtype of one checkpoint tensor, from the safetensors header only.
 fn checkpoint_tensor_dtype(model_dir: &Path, tensor: &str) -> Result<Option<Dtype>, String> {
     let single = model_dir.join("model.safetensors");
@@ -3157,10 +3173,10 @@ impl IreeRaggedLlama {
         // `runtime_ffi_dimensions` and weight upload see the config.
         let mut native_module: Option<(String, String)> = None;
         if crate::native_qmv::requested() && device == "hip" {
-            if !native_quant_supported(&cfg) {
+            if !native_ragged_supported(&cfg) {
                 eprintln!(
-                    "mlxcel: MLXCEL_XLA_QUANT=native needs a 4-bit group-64 checkpoint; \
-                     using the f16 weight path"
+                    "mlxcel: MLXCEL_XLA_QUANT=native needs a 4-bit group-64 checkpoint in a \
+                     layout the packed projections support; using the f16 weight path"
                 );
             } else {
                 match rocm_arch() {
@@ -3196,9 +3212,10 @@ impl IreeRaggedLlama {
         let (prefill_mlir, prefill_embeddings_mlir, prefill_embeddings_deepstack_mlir, decode_mlir) =
             match &cfg {
                 RuntimeConfig::Dense(config) => {
-                    // The packed argument list is active for both the in-graph
-                    // dequant (`MLXCEL_XLA_QUANT=packed`) and the native GEMV
-                    // (`MLXCEL_XLA_QUANT=native`), so gate on the resolved flag.
+                    // Gate on the resolved `packed_args` flag rather than the
+                    // environment: it is what the ragged loader can actually
+                    // enable here (the native GEMV), so the check matches the
+                    // argument list the graphs and the weight specs declare.
                     check_packed_supported(
                         device,
                         config.packed_args && config.supports_packed_quant(),
