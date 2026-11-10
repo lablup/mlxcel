@@ -47,7 +47,8 @@ enum Call {
     /// An event: its SSE name and `sequence_number`.
     Emit(String, u64),
     Started,
-    RecordTerminal(ResponseStatus),
+    /// The terminal response's status and its number of output items.
+    RecordTerminal(ResponseStatus, usize),
     FinishRegistration,
     GenerationFinished,
 }
@@ -55,6 +56,8 @@ enum Call {
 #[derive(Default)]
 struct RecordingSink {
     calls: Mutex<Vec<Call>>,
+    /// What `finish_registration` answers: whether a cancel was acknowledged.
+    cancel_acknowledged: bool,
 }
 
 impl RecordingSink {
@@ -81,12 +84,12 @@ impl ResponseEventSink for RecordingSink {
     }
 
     fn record_terminal(&self, response: &ResponseObject) {
-        self.push(Call::RecordTerminal(response.status));
+        self.push(Call::RecordTerminal(response.status, response.output.len()));
     }
 
     fn finish_registration(&self) -> bool {
         self.push(Call::FinishRegistration);
-        false
+        self.cancel_acknowledged
     }
 
     fn generation_finished(&self) {
@@ -175,6 +178,11 @@ impl Harness {
     /// Prepare one streamed request the way the handler does and drive it
     /// to the end into a recording sink.
     async fn drive(&self) -> Vec<Call> {
+        self.drive_into(RecordingSink::default()).await
+    }
+
+    /// [`Self::drive`] into the given recording sink.
+    async fn drive_into(&self, sink: RecordingSink) -> Vec<Call> {
         let request: CreateResponseRequest =
             serde_json::from_value(request_body()).expect("request parses");
         let translated = responses_request_to_chat(
@@ -205,7 +213,7 @@ impl Harness {
         )
         .await
         .unwrap_or_else(|err| panic!("run prepares: {}", err.error.message));
-        let sink = Arc::new(RecordingSink::default());
+        let sink = Arc::new(sink);
         let sink_for_run: Arc<dyn ResponseEventSink> = sink.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
         tokio::task::spawn_blocking(move || drive_response_run(run, cancelled, sink_for_run))
@@ -262,13 +270,13 @@ async fn record_terminal_runs_once_before_the_terminal_event() {
     let recorded: Vec<usize> = calls
         .iter()
         .enumerate()
-        .filter(|(_, call)| matches!(call, Call::RecordTerminal(_)))
+        .filter(|(_, call)| matches!(call, Call::RecordTerminal(..)))
         .map(|(index, _)| index)
         .collect();
     assert_eq!(recorded.len(), 1, "{calls:?}");
     assert_eq!(
         calls[recorded[0]],
-        Call::RecordTerminal(ResponseStatus::Completed)
+        Call::RecordTerminal(ResponseStatus::Completed, 1)
     );
     let terminal = calls
         .iter()
@@ -313,4 +321,67 @@ async fn on_started_fires_once_across_several_tokens() {
         )
         .expect("a delta was emitted");
     assert!(started[0] < first_delta, "{calls:?}");
+}
+
+#[tokio::test]
+async fn failed_generation_reports_only_an_error_event() {
+    let harness = harness();
+    harness.handle.fail("boom");
+    let calls = harness.drive().await;
+
+    assert!(
+        !calls
+            .iter()
+            .any(|call| matches!(call, Call::RecordTerminal(..))),
+        "{calls:?}"
+    );
+    let retired = calls
+        .iter()
+        .position(|call| *call == Call::FinishRegistration)
+        .expect("finish_registration called");
+    assert!(
+        matches!(calls.last(), Some(Call::Emit(name, _)) if name == "response.error"),
+        "error is the terminal event: {calls:?}"
+    );
+    assert!(retired < calls.len() - 1, "{calls:?}");
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| **call == Call::FinishRegistration)
+            .count(),
+        1,
+        "{calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn cancel_before_the_first_token_records_an_empty_cancelled_response() {
+    let harness = harness();
+    // A cancel acknowledged before the first token ends generation with an
+    // error; the sink acknowledging the cancel selects that branch.
+    harness.handle.fail("cancelled before the first token");
+    let calls = harness
+        .drive_into(RecordingSink {
+            cancel_acknowledged: true,
+            ..RecordingSink::default()
+        })
+        .await;
+
+    let recorded: Vec<usize> = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, call)| matches!(call, Call::RecordTerminal(..)))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(recorded.len(), 1, "{calls:?}");
+    assert_eq!(
+        calls[recorded[0]],
+        Call::RecordTerminal(ResponseStatus::Cancelled, 0)
+    );
+    let terminal = calls
+        .iter()
+        .position(|call| matches!(call, Call::Emit(name, _) if name == "response.completed"))
+        .expect("terminal event emitted");
+    assert_eq!(terminal, calls.len() - 1, "{calls:?}");
+    assert!(recorded[0] < terminal, "{calls:?}");
 }

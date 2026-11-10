@@ -51,6 +51,8 @@ use crate::server::streaming::sse_response;
 use crate::server::streaming_responses::responses_sse_channel_resumable;
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
+// The streamed generation moved to `responses_run` (#2896); these stay
+// imported here for the inline test module's `use super::*`.
 #[cfg(test)]
 use crate::server::tool_calls::stream_filter::StreamFilter;
 use crate::server::types::ErrorResponse;

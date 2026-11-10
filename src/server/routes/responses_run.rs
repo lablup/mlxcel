@@ -67,6 +67,20 @@ use super::responses_auto_compact::{
 ///
 /// The foreground SSE route implements it with [`SseResponseSink`]; every
 /// caller of [`drive_response_run`] supplies one.
+///
+/// Terminal outcomes, as [`drive_response_run`] reports them:
+/// - A finished generation (also a cancel during generation): `record_terminal`
+///   with the final response, then `response.completed` or
+///   `response.incomplete`.
+/// - A cancel acknowledged before the first token: `record_terminal` with a
+///   `cancelled` response whose `output` is empty, then `response.completed`.
+///   The turn produced no output, so nothing is appended to a conversation.
+/// - A failed generation: no `record_terminal`; the failure is only the
+///   emitted [`ResponseStreamEvent::Error`], which a sink that does not
+///   forward events must inspect in `emit`.
+///
+/// `finish_registration` runs exactly once in every case, before the
+/// terminal outcome is decided.
 pub(crate) trait ResponseEventSink: Send + Sync {
     /// Deliver one event. Must not block on a slow reader unless it is the foreground SSE sink.
     fn emit(&self, event: &ResponseStreamEvent);
@@ -952,6 +966,11 @@ impl SseResponseSink {
     /// store's in-flight registry so `POST /v1/responses/:id/cancel` can
     /// abort this response from another request.
     ///
+    /// `sender` and `cancelled` must come from the same
+    /// [`crate::server::streaming_responses::responses_sse_channel_resumable`]
+    /// call. The SSE stream ends only once every clone of this sink is dropped,
+    /// which [`drive_response_run`] does when it returns.
+    ///
     /// Used by: the streaming `/v1/responses` handler.
     pub(crate) fn new(
         run: &PreparedRun,
@@ -1004,7 +1023,7 @@ impl ResponseEventSink for SseResponseSink {
     fn on_started(&self) {}
 
     fn record_terminal(&self, response: &ResponseObject) {
-        if response.output.is_empty() {
+        if response.status == ResponseStatus::Cancelled && response.output.is_empty() {
             // A cancel acknowledged before the first token: the stored
             // record is kept, but the conversation gets nothing, since this
             // turn produced no output. Every generated response carries at
