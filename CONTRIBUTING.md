@@ -40,7 +40,7 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
    cargo build --release --features cuda
    cargo test --workspace --profile test-fast --features cuda -- --test-threads=1
    ```
-   The `--test-threads=1` is the gate, not an optimization to drop: libtest otherwise runs many MLX-backed tests concurrently inside one test binary, which faults the Metal device (#1092, #1210), so a threaded run reports failures that `make verify-test` and the nightly workflow never see.
+   Keep `--test-threads=1`: this is the command `make verify-test` and the nightly workflow run, and the one that must pass even though no PR job runs it (step 4). Without it libtest runs many MLX-backed tests concurrently inside one test binary, which faults the Metal device (#1092, #1210) and reports failures the real gate never sees.
 4. Run the local quality gates:
    ```bash
    cargo fmt --all -- --check   # gated at PR time; fmt violations block merge

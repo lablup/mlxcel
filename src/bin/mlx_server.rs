@@ -3184,24 +3184,26 @@ mod tests {
 
     impl ScopedEnv {
         fn set(values: &[(&'static str, &str)]) -> Self {
+            assert_cli_env_lock_held();
             let saved = values
                 .iter()
                 .map(|(key, _)| (*key, std::env::var_os(key)))
                 .collect();
             for (key, value) in values {
-                // SAFETY: every env-mutating test in this binary holds CLI_ENV_LOCK.
+                // SAFETY: asserted above; every env reader in this module holds CLI_ENV_LOCK.
                 unsafe { std::env::set_var(key, value) };
             }
             Self(saved)
         }
 
         fn unset(keys: &[&'static str]) -> Self {
+            assert_cli_env_lock_held();
             let saved = keys
                 .iter()
                 .map(|key| (*key, std::env::var_os(key)))
                 .collect();
             for key in keys {
-                // SAFETY: every env-mutating test in this binary holds CLI_ENV_LOCK.
+                // SAFETY: asserted above; every env reader in this module holds CLI_ENV_LOCK.
                 unsafe { std::env::remove_var(key) };
             }
             Self(saved)
