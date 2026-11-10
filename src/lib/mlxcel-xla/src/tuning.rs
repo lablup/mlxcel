@@ -35,9 +35,13 @@ use std::path::Path;
 /// result. The default config for that shape runs it at about 74 us per
 /// dispatch on llama-3.2-1b, where the same MAC count in the context matmul
 /// takes about 6.5 us; the spec's tile drops it to about 1.5 us (issue #2921).
-/// It matches only `group = 4` and `head_dim = 64` with at least 128 keys, the
-/// measured shape of the single-sequence decode graph; every other shape keeps
-/// the compiler default.
+/// It matches only `batch = n_kv = 8`, `group = 4` and `head_dim = 64` with at
+/// least 128 keys, the measured shape of the single-sequence decode graph. The
+/// batch predicate is load-bearing: the ragged and uniform-B `dot_general`s
+/// collapse to the same rank-3 contraction with the same maps, but with
+/// `bsz * n_kv` as the batch, so without it a multi-row ragged graph would
+/// silently pick up a config that was measured only for one row. Every other
+/// shape keeps the compiler default.
 pub(crate) const ROCM_BIGK_VECMAT_TUNING: &str =
     include_str!("../assets/rocm/bigk_vecmat_tuning.mlir");
 
@@ -102,9 +106,11 @@ mod tests {
     }
 
     /// issue #2921: the spec must keep both contraction matches wired into the
-    /// entrypoint. The grouped-query score match is intentionally narrow (group
-    /// 4, head_dim 64, at least 128 keys) because only that shape was measured;
-    /// widening it would apply an unmeasured config to other models.
+    /// entrypoint. The grouped-query score match is intentionally narrow (batch
+    /// 8, group 4, head_dim 64, at least 128 keys) because only that shape was
+    /// measured; widening it would apply an unmeasured config to other models,
+    /// and dropping the batch predicate would apply it to the ragged and
+    /// uniform-B score matmuls, whose collapsed batch is `bsz * n_kv`.
     #[test]
     fn tuning_spec_matches_the_gqa_decode_score_shape() {
         assert!(ROCM_BIGK_VECMAT_TUNING.contains("@match_bigk_vecmat"));
@@ -122,6 +128,10 @@ mod tests {
             .split("@match_gqa_score")
             .nth(1)
             .expect("the score matcher");
+        assert!(
+            score.contains("transform.iree.match.dims_equal %batch_dims, [8]"),
+            "the score matcher targets the single-sequence batch of 8 KV heads"
+        );
         assert!(
             score.contains("transform.iree.match.dims_equal %m_dims, [4]"),
             "the score matcher targets group = 4"

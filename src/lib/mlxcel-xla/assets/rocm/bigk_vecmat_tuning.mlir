@@ -19,10 +19,14 @@
 //    matmul (K = 256) runs at about 6.5 us for the same MAC count. The config
 //    below tiles all four query rows and 32 keys per workgroup with the whole
 //    64-wide reduction in one step and drops the dispatch to about 1.5 us
-//    (issue #2921). The match is deliberately narrow: M = 4 and K = 64 exactly,
-//    N >= 128, which is the measured shape of the single-sequence decode graph
-//    for context capacities 128 and up. Other group sizes and head widths keep
-//    the compiler default until they are measured.
+//    (issue #2921). The match is deliberately narrow: batch = n_kv = 8, M = 4,
+//    K = 64 exactly and N >= 128, which is the measured shape of the
+//    single-sequence decode graph for context capacities 128 and up. The batch
+//    predicate is what keeps the ragged and uniform-B graphs out: their
+//    rank-4 dot_general collapses to the same rank-3 contraction with the same
+//    maps, but with `bsz * n_kv` as the batch, so a multi-row graph has 16 or
+//    more and keeps the compiler default. Other group sizes, head widths and
+//    batch counts keep the compiler default until they are measured.
 module attributes {iree_codegen.tuning_spec_with_default_entrypoint, transform.with_named_sequence} {
   transform.named_sequence @apply_op_config(%op: !transform.any_op {transform.readonly}, %config: !transform.any_param {transform.readonly}) {
     transform.annotate %op "compilation_info" = %config : !transform.any_op, !transform.any_param
@@ -46,6 +50,7 @@ module attributes {iree_codegen.tuning_spec_with_default_entrypoint, transform.w
       lhs_type = f16, rhs_type = f16, output_type = f32,
       indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d3, d2)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2)>]
       : !transform.any_op -> !transform.param<i64>
+    transform.iree.match.dims_equal %batch_dims, [8] : !transform.param<i64>
     transform.iree.match.dims_equal %m_dims, [4] : !transform.param<i64>
     transform.iree.match.dims_equal %k_dims, [64] : !transform.param<i64>
     %rhs = transform.get_operand %arg0[1] : (!transform.any_op) -> !transform.any_value
