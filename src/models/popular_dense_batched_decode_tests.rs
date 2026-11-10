@@ -21,7 +21,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 const HIDDEN: i32 = 8;
 const HEAD_DIM: i32 = 4;
@@ -535,7 +535,9 @@ macro_rules! dense_contract {
     ($name:ident, $fixture:ident) => {
         #[test]
         fn $name() {
-            let _guard = test_guard().lock().expect("dense test lock");
+            // A failing case must fail alone: `expect` here turned one panic
+            // into a `PoisonError` for every later case (#2937).
+            let _guard = test_guard().lock().unwrap_or_else(PoisonError::into_inner);
             assert_contract(&$fixture());
         }
     };
