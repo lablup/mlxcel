@@ -590,3 +590,39 @@ fn only_a_whole_page_arena_of_at_least_top_k_slots_can_stream() {
     let error = check_streamable(&source, &[64, 2048], 4).unwrap_err();
     assert!(error.contains("whole number"), "{error}");
 }
+
+/// Restores `EXPERT_STREAM_ENV` on drop. Declare it after the `env_lock` guard.
+#[cfg(not(target_os = "macos"))]
+struct ExpertStreamEnvRestore(Option<std::ffi::OsString>);
+
+#[cfg(not(target_os = "macos"))]
+impl Drop for ExpertStreamEnvRestore {
+    fn drop(&mut self) {
+        // SAFETY: serialized via env_lock, which the owner of this guard still holds.
+        unsafe {
+            match self.0.take() {
+                Some(value) => std::env::set_var(super::EXPERT_STREAM_ENV, value),
+                None => std::env::remove_var(super::EXPERT_STREAM_ENV),
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn resolve_refuses_streaming_off_metal() {
+    let _lock = crate::test_support::env_lock::env_lock();
+    let _restore = ExpertStreamEnvRestore(std::env::var_os(super::EXPERT_STREAM_ENV));
+    let dir = Path::new("/nonexistent");
+
+    // SAFETY: serialized via env_lock.
+    unsafe { std::env::set_var(super::EXPERT_STREAM_ENV, "1") };
+    let error =
+        super::ExpertStream::resolve(dir, 2, 8, 2, 0).expect_err("=1 must be refused off Metal");
+    assert!(error.contains("Metal only"), "unexpected error: {error}");
+
+    // SAFETY: serialized via env_lock.
+    unsafe { std::env::set_var(super::EXPERT_STREAM_ENV, "auto") };
+    let resolved = super::ExpertStream::resolve(dir, 2, 8, 2, 0).expect("auto must not error");
+    assert!(resolved.is_none(), "auto must stay resident off Metal");
+}

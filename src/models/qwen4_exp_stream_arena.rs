@@ -428,7 +428,10 @@ fn read_chunk(
     total
 }
 
-#[cfg(test)]
+// MLX's CUDA allocator has no `make_buffer`, so `from_bytes_nocopy` always copies there.
+// Streaming is Metal-only (`ExpertStream::resolve` refuses it elsewhere), so the zero-copy
+// wrap is only checked on macOS.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
