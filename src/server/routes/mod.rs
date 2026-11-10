@@ -52,6 +52,7 @@ pub mod responses;
 mod responses_auto_compact;
 pub mod responses_compact;
 mod responses_compact_media;
+pub(crate) mod responses_run;
 pub mod settings;
 pub mod slots;
 pub mod stream;
