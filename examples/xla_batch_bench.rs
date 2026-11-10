@@ -23,6 +23,21 @@
 //! output stream must equal its INDEPENDENT single-sequence reference, regardless
 //! of when it was admitted or which peers shared its batch.
 //!
+//! # Modes (issue #2923)
+//!
+//! - Default: greedy requests through one `XlaBatchEngine`. Unchanged.
+//! - `--buckets <c1,c2,...>`: build an `XlaBucketSet` with those capacities and
+//!   add one prompt sized to route into EACH bucket, so bucket routing and every
+//!   compiled shape are reference-checked, not just the largest.
+//! - `--seed <n>` (with `--temperature` and `--top-p`): run the same seeded
+//!   non-greedy workload twice and require identical streams; a `top_k = 1`
+//!   request must still equal the greedy reference.
+//! - `--cancel <count>`: cancel that many admitted requests mid-stream, require
+//!   no later events for them, and require every non-cancelled stream to stay
+//!   reference-exact after their slots are reused by later requests.
+//!
+//! Each mode prints its own pass line and any mismatch exits non-zero.
+//!
 //! Build needs the `xla-iree` feature (real IREE execution); see
 //! `src/lib/mlxcel-xla/README.md`.
 //!
@@ -34,12 +49,19 @@
 //! IREE_CUDA_HOME=... MLXCEL_XLA_IREE_COMPILE=... cargo run --release \
 //!   --features xla-iree --example xla_batch_bench -- \
 //!   --device cuda --batch 8 --requests 16 --maxcap 48
+//! # All extended modes together (ROCm):
+//! MLXCEL_XLA_DEVICE=hip cargo run --release --features xla-iree \
+//!   --example xla_batch_bench -- --batch 8 --requests 16 --maxcap 48 \
+//!   --buckets 256,2048 --seed 7 --cancel 2
 //! ```
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use mlxcel_xla::{EngineEvent, FinishReason, SampleParams, XlaBatchEngine, XlaReferenceEngine};
+use mlxcel_xla::{
+    EngineEvent, FinishReason, SampleParams, XlaAdmissionError, XlaBatchEngine, XlaBucketSet,
+    XlaReferenceEngine,
+};
 
 fn arg(flag: &str, default: &str) -> String {
     let args: Vec<String> = std::env::args().collect();
@@ -87,6 +109,220 @@ fn read_eos(model_dir: &Path) -> Vec<i32> {
     }
 }
 
+/// One request: a prompt of cycling source tokens plus its generation budget.
+type Spec = (Vec<i32>, usize);
+
+/// The subset of both engine types this harness drives, so the greedy, seeded
+/// and cancel passes share one loop.
+trait GateEngine {
+    fn submit(
+        &mut self,
+        prompt: &[i32],
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError>;
+    fn pump(&mut self) -> Result<Vec<EngineEvent>, String>;
+    fn is_idle(&self) -> bool;
+    fn cancel(&mut self, req_id: u64) -> bool;
+}
+
+impl GateEngine for XlaBatchEngine {
+    fn submit(
+        &mut self,
+        prompt: &[i32],
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError> {
+        XlaBatchEngine::submit(self, prompt, max_new_tokens, params)
+    }
+
+    fn pump(&mut self) -> Result<Vec<EngineEvent>, String> {
+        XlaBatchEngine::pump(self)
+    }
+
+    fn is_idle(&self) -> bool {
+        XlaBatchEngine::is_idle(self)
+    }
+
+    fn cancel(&mut self, req_id: u64) -> bool {
+        XlaBatchEngine::cancel(self, req_id)
+    }
+}
+
+impl GateEngine for XlaBucketSet {
+    fn submit(
+        &mut self,
+        prompt: &[i32],
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError> {
+        XlaBucketSet::submit(self, prompt, max_new_tokens, params)
+    }
+
+    fn pump(&mut self) -> Result<Vec<EngineEvent>, String> {
+        XlaBucketSet::pump(self)
+    }
+
+    fn is_idle(&self) -> bool {
+        XlaBucketSet::is_idle(self)
+    }
+
+    fn cancel(&mut self, req_id: u64) -> bool {
+        XlaBucketSet::cancel(self, req_id)
+    }
+}
+
+struct Outcome {
+    streams: Vec<Vec<i32>>,
+    finished: Vec<Option<FinishReason>>,
+    cancelled: Vec<bool>,
+    steps: usize,
+}
+
+/// Submit every request, pump to idle, and optionally cancel admitted requests
+/// after their first token. A cancelled request must never emit again.
+fn drive(
+    engine: &mut dyn GateEngine,
+    specs: &[Spec],
+    maxcap: usize,
+    params_of: &dyn Fn(usize) -> SampleParams,
+    cancel_count: usize,
+) -> Outcome {
+    let n = specs.len();
+    let mut streams: Vec<Vec<i32>> = vec![Vec::new(); n];
+    let mut finished: Vec<Option<FinishReason>> = vec![None; n];
+    let mut cancelled = vec![false; n];
+    let mut seen = vec![0usize; n];
+    let mut to_cancel = cancel_count;
+    // A bucket set namespaces its request ids per bucket, so an id is not the
+    // submission index. Map it back explicitly instead of assuming they match.
+    let mut req_ids = Vec::with_capacity(n);
+    let mut row_of = std::collections::HashMap::with_capacity(n);
+    for (index, (prompt, cap)) in specs.iter().enumerate() {
+        let req_id = engine
+            .submit(prompt, *cap, params_of(index))
+            .unwrap_or_else(|error| panic!("submit request {index}: {error}"));
+        assert!(
+            row_of.insert(req_id, index).is_none(),
+            "duplicate request id {req_id}"
+        );
+        req_ids.push(req_id);
+    }
+    let mut steps = 0usize;
+    let safety = n * (maxcap + 2) + 64;
+    while !engine.is_idle() {
+        steps += 1;
+        assert!(steps < safety, "engine exceeded the safety step cap");
+        let events = engine.pump().expect("pump");
+        for event in events {
+            match event {
+                EngineEvent::Token { req_id, token } => {
+                    let row = *row_of
+                        .get(&req_id)
+                        .unwrap_or_else(|| panic!("event for unknown request id {req_id}"));
+                    assert!(
+                        !cancelled[row],
+                        "cancelled request {req_id} emitted a later token"
+                    );
+                    streams[row].push(token);
+                    seen[row] += 1;
+                }
+                EngineEvent::Finished { req_id, reason } => {
+                    let row = *row_of
+                        .get(&req_id)
+                        .unwrap_or_else(|| panic!("event for unknown request id {req_id}"));
+                    assert!(
+                        !cancelled[row],
+                        "cancelled request {req_id} emitted Finished"
+                    );
+                    finished[row] = Some(reason);
+                }
+            }
+        }
+        // Cancel after the whole step, on requests that emitted their first
+        // token in it. The step already ran to completion, so this is the first
+        // point a cancel can take effect; any later event for these rows is a
+        // real violation and the asserts above catch it.
+        while to_cancel > 0 {
+            let candidate =
+                (0..n).find(|&row| seen[row] > 0 && !cancelled[row] && finished[row].is_none());
+            let Some(row) = candidate else {
+                break;
+            };
+            assert!(engine.cancel(req_ids[row]), "cancel admitted request {row}");
+            cancelled[row] = true;
+            to_cancel -= 1;
+        }
+    }
+    assert_eq!(
+        to_cancel, 0,
+        "could not cancel {to_cancel} admitted requests"
+    );
+    Outcome {
+        streams,
+        finished,
+        cancelled,
+        steps,
+    }
+}
+
+/// Compare each non-cancelled stream to its reference, printing the first
+/// divergence. Returns true when every compared stream matched.
+fn compare(label: &str, outcome: &Outcome, references: &[Vec<i32>], specs: &[Spec]) -> bool {
+    let mut all_ok = true;
+    for (index, (stream, reference)) in outcome.streams.iter().zip(references).enumerate() {
+        if outcome.cancelled[index] {
+            continue;
+        }
+        if stream != reference {
+            all_ok = false;
+            let common = stream.len().min(reference.len());
+            let divergence = (0..common).find(|&j| stream[j] != reference[j]);
+            println!(
+                "  {label} req {index} (len {} cap {}): MISMATCH (got {} ref {}, first div {divergence:?})",
+                specs[index].0.len(),
+                specs[index].1,
+                stream.len(),
+                reference.len(),
+            );
+        }
+    }
+    let unfinished = outcome
+        .finished
+        .iter()
+        .zip(&outcome.cancelled)
+        .filter(|(finished, cancelled)| finished.is_none() && !**cancelled)
+        .count();
+    if unfinished > 0 {
+        all_ok = false;
+        println!("  {label}: {unfinished} non-cancelled requests never emitted Finished");
+    }
+    all_ok
+}
+
+fn load_gate(
+    model: &Path,
+    device: &str,
+    b_max: usize,
+    buckets: Option<&[usize]>,
+    reference_capacity: usize,
+) -> Box<dyn GateEngine> {
+    match buckets {
+        Some(capacities) => {
+            let (set, dropped) =
+                XlaBucketSet::load(model, b_max, device, capacities).expect("load bucket set");
+            for reason in dropped {
+                println!("  bucket dropped: {reason}");
+            }
+            Box::new(set)
+        }
+        None => Box::new(
+            XlaBatchEngine::load_with_context_capacity(model, b_max, device, reference_capacity)
+                .expect("load batch engine"),
+        ),
+    }
+}
+
 fn main() {
     let here = env!("CARGO_MANIFEST_DIR");
     let model = PathBuf::from(arg(
@@ -119,28 +355,93 @@ fn main() {
     let maxcap: usize = arg("--maxcap", "24").parse().expect("--maxcap int");
     assert!(b_max >= 1 && nreq >= 1 && maxcap >= 2);
 
+    let buckets: Option<Vec<usize>> = {
+        let raw = arg("--buckets", "");
+        if raw.is_empty() {
+            None
+        } else {
+            let values: Vec<usize> = raw
+                .split(',')
+                .map(|value| {
+                    value
+                        .trim()
+                        .parse()
+                        .unwrap_or_else(|_| panic!("--buckets element {value:?} is not an int"))
+                })
+                .collect();
+            assert!(!values.is_empty(), "--buckets needs at least one capacity");
+            Some(values)
+        }
+    };
+    let sorted_buckets: Option<Vec<usize>> = buckets.as_ref().map(|values| {
+        let mut sorted = values.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        sorted
+    });
+    let seed: Option<u64> = {
+        let raw = arg("--seed", "");
+        if raw.is_empty() {
+            None
+        } else {
+            Some(raw.parse().expect("--seed int"))
+        }
+    };
+    let temperature: f32 = arg("--temperature", "0.8")
+        .parse()
+        .expect("--temperature float");
+    let top_p: f32 = arg("--top-p", "0.95").parse().expect("--top-p float");
+    let cancel_count: usize = arg("--cancel", "0").parse().expect("--cancel int");
+
     let prompt_ids = read_int_array(&prompts_json, "prompt_ids");
     let full = prompt_ids.len();
+    assert!(full > 0, "the prompts artifact has no prompt ids");
     let eos = read_eos(&model);
 
     // N requests with varied lengths AND budgets (same spread as the spike
     // scheduler), so they evict at staggered steps and later ones admit mid-stream.
-    let specs: Vec<(usize, usize)> = (0..nreq)
+    let mut specs: Vec<Spec> = (0..nreq)
         .map(|i| {
             let len = (20 + (i * 13) % full.saturating_sub(20).max(1)).min(full);
             let cap = (12 + (i * 11) % 28).min(maxcap);
-            (len, cap)
+            (prompt_ids[..len].to_vec(), cap)
         })
         .collect();
 
-    println!(
-        "model = {}\ndevice = {device}, slots B_max = {b_max}, requests N = {nreq}, \
-         full prompt = {full}, eos = {eos:?}",
-        model.display()
+    // One extra request per capacity bucket, sized so it routes there: the
+    // prompt fills capacity - 1 tokens and the budget is 1, so prompt + budget
+    // lands exactly on that capacity and above the previous one. Prompts are
+    // cycled when the source artifact is shorter than the target shape.
+    let mut coverage: Vec<(usize, usize)> = Vec::new();
+    if let Some(capacities) = &sorted_buckets {
+        for (index, &capacity) in capacities.iter().enumerate() {
+            let len = capacity.saturating_sub(1).max(1);
+            let prompt = (0..len).map(|i| prompt_ids[i % full]).collect();
+            specs.push((prompt, 1));
+            coverage.push((specs.len() - 1, index));
+        }
+    }
+
+    let reference_capacity = match &sorted_buckets {
+        Some(capacities) => *capacities.last().expect("non-empty --buckets"),
+        None => mlxcel_xla::context_capacity_from_env().expect("context capacity"),
+    };
+    assert!(
+        cancel_count == 0 || specs.len() > b_max,
+        "--cancel needs --requests > --batch"
     );
-    for (i, (len, cap)) in specs.iter().enumerate() {
+
+    println!(
+        "model = {}\ndevice = {device}, slots B_max = {b_max}, requests N = {}, \
+         full prompt = {full}, buckets = {:?}, eos = {eos:?}",
+        model.display(),
+        specs.len(),
+        sorted_buckets,
+    );
+    for (i, (prompt, cap)) in specs.iter().enumerate() {
         print!(
-            "  req {i}: len {len} cap {cap}{}",
+            "  req {i}: len {} cap {cap}{}",
+            prompt.len(),
             if i % 4 == 3 { "\n" } else { "" }
         );
     }
@@ -152,12 +453,14 @@ fn main() {
     // peak memory stays at one resident weight set.
     let t_ref = Instant::now();
     let references: Vec<Vec<i32>> = {
-        let mut refeng = XlaReferenceEngine::load(&model, &device).expect("load reference engine");
+        let mut refeng =
+            XlaReferenceEngine::load_with_context_capacity(&model, &device, reference_capacity)
+                .expect("load reference engine");
         specs
             .iter()
-            .map(|&(len, cap)| {
+            .map(|(prompt, cap)| {
                 refeng
-                    .generate(&prompt_ids[..len], cap, &eos)
+                    .generate(prompt, *cap, &eos)
                     .expect("reference generate")
             })
             .collect()
@@ -165,65 +468,54 @@ fn main() {
     let ref_tokens: usize = references.iter().map(Vec::len).sum();
     let ref_secs = t_ref.elapsed().as_secs_f64();
     println!(
-        "phase 1: captured {nreq} single-seq references ({ref_tokens} tokens, \
+        "phase 1: captured {} single-seq references ({ref_tokens} tokens, \
          {:.2} tok/s sequential baseline)",
+        specs.len(),
         ref_tokens as f64 / ref_secs
     );
 
     // === Phase 2: drive all requests through the continuous-batching engine ===
-    let mut engine = XlaBatchEngine::load(&model, b_max, &device).expect("load batch engine");
-    let mut streams: Vec<Vec<i32>> = vec![Vec::new(); nreq];
-    let mut finished: Vec<Option<FinishReason>> = vec![None; nreq];
-    for &(len, cap) in &specs {
-        // Greedy keeps the reference-equivalence gate exact: host argmax of the
-        // logits graph == the single-seq argmax reference, token for token.
-        engine
-            .submit(&prompt_ids[..len], cap, SampleParams::greedy())
-            .expect("submit request");
-    }
-
-    let mut steps = 0usize;
-    let safety = nreq * (maxcap + 2) + 64;
-    let t_run = Instant::now();
-    while !engine.is_idle() {
-        steps += 1;
-        assert!(steps < safety, "engine exceeded the safety step cap");
-        for ev in engine.pump().expect("pump") {
-            match ev {
-                EngineEvent::Token { req_id, token } => streams[req_id as usize].push(token),
-                EngineEvent::Finished { req_id, reason } => {
-                    finished[req_id as usize] = Some(reason)
-                }
-            }
-        }
-    }
-    let run_secs = t_run.elapsed().as_secs_f64();
-    let gen_tokens: usize = streams.iter().map(Vec::len).sum();
-
-    // === compare each request's collected stream to its reference ===
     let mut all_ok = true;
-    for (i, (stream, reference)) in streams.iter().zip(&references).enumerate() {
-        let ok = stream == reference;
-        all_ok &= ok;
-        if !ok {
-            let m = stream.len().min(reference.len());
-            let div = (0..m).find(|&j| stream[j] != reference[j]);
-            println!(
-                "  req {i} (len {} cap {}): MISMATCH (got {} ref {}, first div {div:?})",
-                specs[i].0,
-                specs[i].1,
-                stream.len(),
-                reference.len(),
-            );
+    let t_run = Instant::now();
+    let outcome = match &sorted_buckets {
+        Some(capacities) => {
+            let (mut set, dropped) =
+                XlaBucketSet::load(&model, b_max, &device, capacities).expect("load bucket set");
+            for reason in &dropped {
+                println!("  bucket dropped: {reason}");
+            }
+            // Prove the added requests really land in every requested bucket.
+            for &(spec_index, bucket_index) in &coverage {
+                let (prompt, cap) = &specs[spec_index];
+                assert_eq!(
+                    set.route(prompt.len(), *cap),
+                    Some(bucket_index),
+                    "coverage request {spec_index} must route into bucket {bucket_index} \
+                     ({:?})",
+                    set.capacities(),
+                );
+            }
+            drive(&mut set, &specs, maxcap, &|_| SampleParams::greedy(), 0)
         }
-    }
-    let unfinished = finished.iter().filter(|f| f.is_none()).count();
-    assert_eq!(
-        unfinished, 0,
-        "{unfinished} requests never emitted Finished"
+        None => {
+            let mut engine = XlaBatchEngine::load_with_context_capacity(
+                &model,
+                b_max,
+                &device,
+                reference_capacity,
+            )
+            .expect("load batch engine");
+            drive(&mut engine, &specs, maxcap, &|_| SampleParams::greedy(), 0)
+        }
+    };
+    let run_secs = t_run.elapsed().as_secs_f64();
+    let gen_tokens: usize = outcome.streams.iter().map(Vec::len).sum();
+    all_ok &= compare("greedy", &outcome, &references, &specs);
+    println!(
+        "\nphase 2: {} pump steps, {} requests served, {gen_tokens} tokens",
+        outcome.steps,
+        specs.len(),
     );
-
-    println!("\nphase 2: {steps} pump steps, {nreq} requests served, {gen_tokens} tokens",);
     println!(
         "throughput: {:.2} tok/s batched (vs {:.2} tok/s sequential baseline, {:.1}x)",
         gen_tokens as f64 / run_secs,
@@ -239,8 +531,101 @@ fn main() {
         }
     );
     println!(
-        "BENCH\tdevice={device}\tB={b_max}\tN={nreq}\ttok_s={:.3}\tpass={all_ok}",
+        "BENCH\tdevice={device}\tB={b_max}\tN={}\ttok_s={:.3}\tpass={all_ok}",
+        specs.len(),
         gen_tokens as f64 / run_secs
     );
+    if sorted_buckets.is_some() {
+        println!(
+            "BUCKETS {} (every bucket routed and reference-exact)",
+            if all_ok {
+                "REFERENCE-EXACT PASS"
+            } else {
+                "MISMATCH"
+            }
+        );
+    }
+
+    // === Seeded sampling: determinism plus a top_k = 1 greedy equivalence ===
+    if let Some(seed) = seed {
+        let seeded_params = |index: usize| SampleParams {
+            temperature,
+            top_p,
+            seed: Some(seed.wrapping_add(index as u64)),
+            ..SampleParams::greedy()
+        };
+        let first = {
+            let mut engine = load_gate(
+                &model,
+                &device,
+                b_max,
+                sorted_buckets.as_deref(),
+                reference_capacity,
+            );
+            drive(&mut *engine, &specs, maxcap, &seeded_params, 0)
+        };
+        let second = {
+            let mut engine = load_gate(
+                &model,
+                &device,
+                b_max,
+                sorted_buckets.as_deref(),
+                reference_capacity,
+            );
+            drive(&mut *engine, &specs, maxcap, &seeded_params, 0)
+        };
+        let deterministic = first.streams == second.streams;
+        let top1_params = |index: usize| SampleParams {
+            temperature,
+            top_p: 1.0,
+            top_k: 1,
+            seed: Some(seed.wrapping_add(index as u64)),
+            ..SampleParams::greedy()
+        };
+        let top1 = {
+            let mut engine = load_gate(
+                &model,
+                &device,
+                b_max,
+                sorted_buckets.as_deref(),
+                reference_capacity,
+            );
+            drive(&mut *engine, &specs, maxcap, &top1_params, 0)
+        };
+        let top1_exact = compare("top_k=1", &top1, &references, &specs);
+        let passed = deterministic && top1_exact;
+        all_ok &= passed;
+        println!(
+            "SEEDED SAMPLING {} (deterministic={deterministic}, top_k=1==greedy={top1_exact})",
+            if passed { "PASS" } else { "MISMATCH" }
+        );
+    }
+
+    // === Cancellation: silence after cancel, slot reuse, exact survivors ===
+    if cancel_count > 0 {
+        let mut engine = load_gate(
+            &model,
+            &device,
+            b_max,
+            sorted_buckets.as_deref(),
+            reference_capacity,
+        );
+        let outcome = drive(
+            &mut *engine,
+            &specs,
+            maxcap,
+            &|_| SampleParams::greedy(),
+            cancel_count,
+        );
+        let cancelled = outcome.cancelled.iter().filter(|flag| **flag).count();
+        let survivors_exact = compare("cancel", &outcome, &references, &specs);
+        let passed = cancelled == cancel_count && survivors_exact;
+        all_ok &= passed;
+        println!(
+            "CANCEL {} ({cancelled}/{cancel_count} cancelled, non-cancelled requests reference-exact={survivors_exact})",
+            if passed { "PASS" } else { "MISMATCH" }
+        );
+    }
+
     std::process::exit(if all_ok { 0 } else { 1 });
 }
