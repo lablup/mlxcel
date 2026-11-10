@@ -194,6 +194,8 @@ struct BackgroundSignal {
 struct BackgroundJob {
     snapshot: ResponseObject,
     input_items: Vec<ResponseInputItem>,
+    /// Approximate bytes of `input_items`, computed once at admission.
+    input_bytes: usize,
     effective_store: bool,
     token: InFlightToken,
     size_bytes: usize,
@@ -324,12 +326,13 @@ impl ResponsesStore {
     /// entry count and approximate retained bytes under budget. Returns the count of
     /// remaining entries after the insert for tests/telemetry.
     pub fn insert(&self, id: String, payload: StoredResponse) -> usize {
+        let size_bytes = Self::entry_size_bytes(&id, &payload);
         let now = Instant::now();
         let mut state = match self.inner.write() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        Self::insert_locked(&mut state, &self.config, id, payload, None, now);
+        Self::insert_locked(&mut state, &self.config, id, payload, size_bytes, None, now);
         state.entries.len()
     }
 
@@ -338,13 +341,13 @@ impl ResponsesStore {
         config: &ResponsesStoreConfig,
         id: String,
         payload: StoredResponse,
+        size_bytes: usize,
         ephemeral_ttl: Option<Duration>,
         now: Instant,
     ) {
         Self::sweep_expired(state, config, now);
         Self::remove_entry(state, &id);
 
-        let size_bytes = Self::entry_size_bytes(&id, &payload);
         let lru_key = Self::next_lru_key(state, &id, now);
         state.total_bytes = state.total_bytes.saturating_add(size_bytes);
         state.lru.insert(lru_key.clone());
@@ -449,10 +452,11 @@ impl ResponsesStore {
         let mut snapshot = snapshot;
         snapshot.status = ResponseStatus::Queued;
         let id = snapshot.id.clone();
+        let input_bytes = input_items_size_bytes(&input_items);
         let size_bytes = id
             .len()
             .saturating_add(serialized_json_len_saturating(&snapshot))
-            .saturating_add(input_items_size_bytes(&input_items));
+            .saturating_add(input_bytes);
 
         let mut jobs = self.lock_jobs();
         // A colliding id replaces the old job (ids are random, so this is
@@ -469,6 +473,7 @@ impl ResponsesStore {
         let job = BackgroundJob {
             snapshot,
             input_items,
+            input_bytes,
             effective_store,
             token: token.clone(),
             size_bytes,
@@ -504,6 +509,9 @@ impl ResponsesStore {
     /// Later calls (or a call for an unknown id) return the recorded object
     /// when it is still retained, otherwise the `terminal` argument.
     pub fn finish_background(&self, id: &str, terminal: ResponseObject) -> ResponseObject {
+        // Serialize the (possibly large) terminal object once, before taking
+        // any lock, so admits and polls are not blocked behind it.
+        let terminal_bytes = serialized_json_len_saturating(&terminal);
         let now = Instant::now();
         let mut jobs = self.lock_jobs();
         let Some(job) = jobs.jobs.remove(id) else {
@@ -513,7 +521,13 @@ impl ResponsesStore {
         };
         jobs.active_bytes = jobs.active_bytes.saturating_sub(job.size_bytes);
 
-        let payload = self.fit_terminal(id, terminal, job.input_items);
+        let (payload, size_bytes) = self.fit_terminal(
+            id,
+            terminal,
+            terminal_bytes,
+            job.input_items,
+            job.input_bytes,
+        );
         let recorded = payload.response.clone();
         let ephemeral_ttl = (!job.effective_store).then_some(self.config.background_ephemeral_ttl);
         {
@@ -523,6 +537,7 @@ impl ResponsesStore {
                 &self.config,
                 id.to_string(),
                 payload,
+                size_bytes,
                 ephemeral_ttl,
                 now,
             );
@@ -608,19 +623,27 @@ impl ResponsesStore {
     /// Payload stored for a job's terminal object. When it exceeds
     /// `max_bytes` it is replaced by a small `failed` object so a poll
     /// gets an explanation instead of a surprise 404.
+    /// `terminal_bytes` and `input_bytes` are the precomputed sizes of the
+    /// two parts; the returned size is the stored entry's accounted bytes.
     fn fit_terminal(
         &self,
         id: &str,
         terminal: ResponseObject,
+        terminal_bytes: usize,
         input_items: Vec<ResponseInputItem>,
-    ) -> StoredResponse {
+        input_bytes: usize,
+    ) -> (StoredResponse, usize) {
         let max_bytes = self.config.max_bytes;
+        let size_bytes = id
+            .len()
+            .saturating_add(terminal_bytes)
+            .saturating_add(input_bytes);
         let payload = StoredResponse {
             response: terminal,
             input_items,
         };
-        if Self::entry_size_bytes(id, &payload) <= max_bytes {
-            return payload;
+        if size_bytes <= max_bytes {
+            return (payload, size_bytes);
         }
         let mut failed = payload.response;
         failed.status = ResponseStatus::Failed;
@@ -638,13 +661,15 @@ impl ResponsesStore {
             response: failed,
             input_items: Vec::new(),
         };
-        if Self::entry_size_bytes(id, &payload) > max_bytes {
+        let mut size_bytes = Self::entry_size_bytes(id, &payload);
+        if size_bytes > max_bytes {
             // Large echoed request fields can still overflow the budget.
             payload.response.instructions = None;
             payload.response.tools = None;
             payload.response.metadata = None;
+            size_bytes = Self::entry_size_bytes(id, &payload);
         }
-        payload
+        (payload, size_bytes)
     }
 
     /// Retained (non-expired) stored object for `id`, ephemeral entries
