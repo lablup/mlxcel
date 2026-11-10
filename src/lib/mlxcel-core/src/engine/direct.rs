@@ -535,6 +535,9 @@ impl<M: LanguageModel> DirectEngine<M> {
         let gen_count = generated.len();
         let prefill_ms = prefill_time.as_secs_f64() * 1000.0;
         let decode_ms = decode_time.as_secs_f64() * 1000.0;
+        // The first token comes out of `complete_prefill`, before
+        // `decode_start`, so the window produced the rest.
+        let decode_count = gen_count.saturating_sub(1);
         let stats = GenerationStats {
             prompt_tokens: prompt_count,
             generated_tokens: gen_count,
@@ -545,11 +548,7 @@ impl<M: LanguageModel> DirectEngine<M> {
             } else {
                 0.0
             },
-            decode_tok_per_sec: if decode_ms > 0.0 {
-                gen_count as f64 / (decode_ms / 1000.0)
-            } else {
-                0.0
-            },
+            decode_tok_per_sec: crate::generate::decode_tok_per_sec(decode_count, decode_ms),
         };
         Ok(DirectRun {
             tokens: generated,

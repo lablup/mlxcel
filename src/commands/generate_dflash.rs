@@ -239,6 +239,9 @@ pub(super) fn run_offline_dflash(
     let tokens = super::generate::strip_trailing_eos(tokens, &eos_token_ids);
 
     let decode_time_ms = output.stats.decode_time_ms;
+    // `tokens` starts with the first bonus sampled in prefill, outside the
+    // round loop's decode window.
+    let decode_count = tokens.len().saturating_sub(1);
     let stats = GenerationStats {
         prompt_tokens: prompt_tokens.len(),
         generated_tokens: tokens.len(),
@@ -249,11 +252,7 @@ pub(super) fn run_offline_dflash(
         } else {
             0.0
         },
-        decode_tok_per_sec: if decode_time_ms > 0.0 {
-            tokens.len() as f64 / (decode_time_ms / 1000.0)
-        } else {
-            0.0
-        },
+        decode_tok_per_sec: mlxcel_core::generate::decode_tok_per_sec(decode_count, decode_time_ms),
     };
     Ok((tokens, stats))
 }

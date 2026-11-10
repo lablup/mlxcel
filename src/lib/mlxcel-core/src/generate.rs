@@ -1501,8 +1501,36 @@ pub struct GenerationStats {
     pub decode_time_ms: f64,
     /// Prefill throughput: prompt tokens per second
     pub prefill_tok_per_sec: f64,
-    /// Decode throughput: generated tokens per second
+    /// Decode throughput: tokens produced inside the decode window per
+    /// second of that window. See [`decode_tok_per_sec`] for why a path
+    /// whose first token comes out of prefill counts `generated_tokens - 1`.
     pub decode_tok_per_sec: f64,
+}
+
+/// Decode throughput over a timed decode window, in tokens per second.
+///
+/// `window_tokens` counts only the tokens produced inside the window that
+/// `decode_ms` measures. A path whose first token comes out of prefill (it is
+/// sampled and evaluated before the decode timer starts) passes
+/// `generated_tokens - 1`: its window holds N-1 forward steps, and putting
+/// the prefill token in the numerator as well overstates the rate by
+/// N/(N-1), 0.79% at N = 128. A path that produces every token inside the
+/// window passes N.
+///
+/// This is the rule llama-server's `predicted_per_second` follows (see
+/// `src/server/types/native_completion.rs`). mlx-lm's and mlx-vlm's
+/// `generation_tps` start their clock after the first token but count all N
+/// tokens ([mlx-lm](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py)
+/// `stream_generate`), so they read N/(N-1) higher than this for the same run;
+/// `scripts/bench_mlxlm.py` converts them before comparing.
+///
+/// Returns 0.0 for an empty or zero-length window instead of dividing by zero.
+pub fn decode_tok_per_sec(window_tokens: usize, decode_ms: f64) -> f64 {
+    if window_tokens > 0 && decode_ms > 0.0 {
+        window_tokens as f64 / (decode_ms / 1000.0)
+    } else {
+        0.0
+    }
 }
 
 impl GenerationStats {
@@ -2227,3 +2255,7 @@ mod history_tests;
 #[cfg(test)]
 #[path = "generate_finish_tests.rs"]
 mod finish_tests;
+
+#[cfg(test)]
+#[path = "generate_rate_tests.rs"]
+mod rate_tests;
