@@ -288,6 +288,17 @@ The same partition rule decides whether a cold server request matches `mlxcel ge
 
 `MLXCEL_PREFILL_CHUNK=65 mlxcel generate` takes the server's partition and produces the server's answer. On `Qwen3.8-Flash-Next-OptiQ-2bit` the defaults run diverges at answer character 205 with the same boundary (65), and `--no-cache-prompt` matches. A speculative server (`--model-draft`) matched `mlxcel generate` in that run because its prefill logged no boundary split. To compare the server with `mlxcel generate` byte for byte on a snapshot family, set `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1`, which keeps the prompt cache but gives up the multi-turn hit the boundary snapshot buys, or compare against `MLXCEL_PREFILL_CHUNK=<boundary> mlxcel generate`.
 
+A chained multi-turn hit is the common case where the plan half of that condition fails. Turn N adopts the history-boundary snapshot of turn N-1, whose rows were written by every earlier turn's pieces (split at each earlier boundary), while a cold run of turn N splits only at its own root and boundary. #2974 measured how far that moves `qwen4_exp` (M3 Ultra, `Qwen3.8-Flash-Next-OptiQ-2bit`, a 19,984-token agent prompt, first completion token):
+
+| prefill of the same prompt | first token (runner-up) |
+|---|---|
+| cold, split at the history boundary (19,979); the same with the root (4,744) also on | `The` -0.125 (`Not` -2.25) |
+| cold, `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1`, chunk 2048, 4096 or one piece | `The` -0.25 (`Not` -1.875), identical across the three |
+| cold, `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1`, chunk 512 | `Not` -0.625 (`The` -1.0) |
+| chained hit adopting the previous turn's boundary at 17,120 | `The` -0.5 (`Not` -1.625) |
+
+The model's logits are bfloat16, whose spacing at this magnitude is 0.125, so every difference in the table is one to three units in the last place. They come from the partition alone, with no snapshot involved (the chunk 512 row flips the first token), and they move a greedy stream as soon as two candidates are within a few units. `qwen4_exp_snapshot_tests::a_chained_restore_matches_a_cold_run_of_the_same_partition` pins the other half: a restore, a further prefill, a second snapshot and a second restore reproduce a cold run that forwards the same pieces bit for bit, so the chain loses no state. Making chained hits match a cold run exactly would need every turn to adopt and split only on a fixed grid (the periodic checkpoints at a small interval, with the history-boundary snapshot no longer adopted), which re-prefills up to one interval per turn; it is not done.
+
 Known limitations of the plan, recorded for the epic's end-of-run measurement:
 
 - The history segment of a snapshot family's prefill (the span before the history boundary, #1143) is always one unchunked forward, whatever `--prefill-chunk-size` says. With periodic checkpoints on (#2885), it is instead one forward per checkpoint interval. This predates the plan (it has been the case since #1143), and the plan keeps it because the segment is where the prompt cache snapshots the model state. A long chat history on a snapshot family therefore prefills as one forward that does not interleave with concurrent decode ticks; only the pieces after the boundary do.
