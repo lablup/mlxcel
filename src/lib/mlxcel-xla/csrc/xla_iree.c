@@ -189,6 +189,24 @@ int32_t xla_test_slot_valid(const xla_ctx* c, int32_t slot) {
   if (!c || !c->rg_valid || slot < 0 || slot >= c->rg_bsz) return -1;
   return c->rg_valid[slot] ? 1 : 0;
 }
+
+// Instrumentation for the resident-weight upload path (issue #2961). A base
+// context uploads every weight spec exactly once; a capacity bucket shares the
+// base's views and uploads nothing. These counters make both claims assertable
+// from a device test.
+static uint64_t xla_test_weight_upload_calls = 0;
+static uint64_t xla_test_weight_upload_bytes = 0;
+
+uint64_t xla_test_weight_upload_calls_get(void) {
+  return xla_test_weight_upload_calls;
+}
+uint64_t xla_test_weight_upload_bytes_get(void) {
+  return xla_test_weight_upload_bytes;
+}
+void xla_test_weight_upload_reset(void) {
+  xla_test_weight_upload_calls = 0;
+  xla_test_weight_upload_bytes = 0;
+}
 #endif
 
 static int32_t xla_argmax_f32(const float* v, int32_t n) {
@@ -825,6 +843,18 @@ int xla_llama_upload_weight(xla_ctx* c, int32_t i, const void* weight_data,
     iree_status_ignore(s);
     return 1;
   }
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+  {
+    iree_host_size_t elements = 1;
+    for (int32_t d = 0; d < weight_rank; d++) {
+      elements *= (iree_host_size_t)weight_dims[d];
+    }
+    const iree_host_size_t esize =
+        weight_dtype == 1 ? 2 : 4;  // f16, else f32 / packed U32
+    xla_test_weight_upload_calls += 1;
+    xla_test_weight_upload_bytes += (uint64_t)(elements * esize);
+  }
+#endif
   return 0;
 }
 
