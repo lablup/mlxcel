@@ -5557,11 +5557,18 @@ bool quantized_matmul_matches_dense_gemm(
 namespace {
     // `single_dtype_scalars` is true on non-Metal backends (issue #636): build
     // the comparison/fill scalars in the working dtype so the CUDA bf16
-    // promotion patch inserts no per-step AsType on the scalar. On Metal it is
-    // false, keeping the bare `array(f32)` scalars exactly as before so the
-    // unpatched f16+f32 rule upcasts the chain to an f32 softmax unchanged.
+    // promotion patch inserts no per-step AsType on the scalar. For bf16
+    // inputs, upcast to float32 for softmax + cumsum so large-vocab nucleus
+    // scans do not swamp tail probabilities below 2^-9 once cumulative mass
+    // passes 0.5 (issue #2958), while keeping `sorted_logits` and `fill_scalar`
+    // in `x.dtype()`. On Metal `single_dtype_scalars` is false, keeping the
+    // bare `array(f32)` scalars exactly as before so the unpatched f16+f32
+    // rule upcasts the chain to an f32 softmax unchanged.
     array top_p_filter(const array& x, float top_p, bool single_dtype_scalars) {
-        auto probs = mlx::core::softmax(x, -1);
+        auto softmax_in = (single_dtype_scalars && x.dtype() == mlx::core::bfloat16)
+            ? mlx::core::astype(x, mlx::core::float32)
+            : x;
+        auto probs = mlx::core::softmax(softmax_in, -1);
         auto sorted_indices = mlx::core::argsort(mlx::core::negative(probs), -1);
         auto sorted_probs = mlx::core::take_along_axis(probs, sorted_indices, -1);
         auto cum_probs = mlx::core::cumsum(sorted_probs, -1, false, true);

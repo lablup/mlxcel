@@ -171,13 +171,54 @@ function(mlx_apply_source_overlays mlx_source_dir)
     message(STATUS "Applied CUDA backend patches (${_cuda_patch_files})")
   endif()
 
-  # CUDA-only patches: bf16 type promotion and norm computation changes.
+  # CUDA-only patches: bf16 type promotion, norm computation, and random
+  # distribution precision changes (issue #2958).
   # These change dtype promotion rules (bf16+fp32→bf16) to avoid copy_v kernel
   # overhead on CUDA, but break Metal precision for bf16 vision weights
-  # (e.g., SigLIP position embeddings). Apply ONLY for CUDA builds.
+  # (e.g., SigLIP position embeddings). Apply ONLY for CUDA builds, and restore
+  # any retired or inactive top-level mlx/*.cpp overlay in a reused _deps/mlx-src
+  # checkout on non-ROCm builds.
+  set(_cuda_only_patches "")
+  set(_cuda_mlx_patch_relpaths "")
   if(MLX_BUILD_CUDA AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda/mlx")
-    file(GLOB _cuda_only_patches
+    file(GLOB _cuda_only_patches CONFIGURE_DEPENDS
          "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda/mlx/*.cpp")
+    foreach(_patch_file ${_cuda_only_patches})
+      get_filename_component(_fname "${_patch_file}" NAME)
+      list(APPEND _cuda_mlx_patch_relpaths "mlx/${_fname}")
+    endforeach()
+  endif()
+  if(NOT MLX_BUILD_ROCM AND GIT_FOUND AND EXISTS "${mlx_source_dir}/.git")
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${mlx_source_dir}"
+              diff --name-only -- mlx
+      RESULT_VARIABLE _cuda_mlx_diff_result
+      OUTPUT_VARIABLE _cuda_mlx_modified_files
+      ERROR_VARIABLE _cuda_mlx_diff_error
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_cuda_mlx_diff_result EQUAL 0)
+      string(REPLACE "\n" ";" _cuda_mlx_modified_files "${_cuda_mlx_modified_files}")
+      foreach(_modified_file ${_cuda_mlx_modified_files})
+        if(_modified_file MATCHES "^mlx/[^/]+\\.cpp$"
+           AND NOT _modified_file IN_LIST _cuda_mlx_patch_relpaths)
+          execute_process(
+            COMMAND "${GIT_EXECUTABLE}" -C "${mlx_source_dir}"
+                    checkout -- "${_modified_file}"
+            RESULT_VARIABLE _cuda_mlx_restore_result
+            ERROR_VARIABLE _cuda_mlx_restore_error)
+          if(_cuda_mlx_restore_result EQUAL 0)
+            message(STATUS
+              "Restored upstream ${_modified_file} (no longer overlaid)")
+          else()
+            message(FATAL_ERROR
+              "Cannot restore upstream ${_modified_file} in "
+              "${mlx_source_dir}: ${_cuda_mlx_restore_error}")
+          endif()
+        endif()
+      endforeach()
+    endif()
+  endif()
+  if(MLX_BUILD_CUDA AND _cuda_only_patches)
     foreach(_patch_file ${_cuda_only_patches})
       get_filename_component(_fname "${_patch_file}" NAME)
       configure_file(
@@ -185,7 +226,7 @@ function(mlx_apply_source_overlays mlx_source_dir)
         "${mlx_source_dir}/mlx/${_fname}"
         COPYONLY)
     endforeach()
-    message(STATUS "Applied CUDA-only dtype/precision patches")
+    message(STATUS "Applied CUDA-only dtype/precision patches (${_cuda_mlx_patch_relpaths})")
   endif()
 
   # ROCm overlay, the ROCm part of mlxcelverse (issue #1802): the AMD GPU
