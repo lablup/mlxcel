@@ -38,8 +38,13 @@
 #include <hip/hip_fp16.h>
 
 // Largest batch the multi-row kernels accept; the ragged engine's bundled
-// graphs use 4 and 8 (`RAGGED_B_VALUES` in `src/iree.rs`).
+// graphs use 4 and 8 (`RAGGED_B_VALUES` in `src/iree.rs`). The loader compiles
+// one HSACO per batch bucket with `-DQMV4_MAX_B=<bucket>` (issue #2955), so a
+// narrower bucket does not carry the register pressure, LDS footprint and
+// predication branches of the widest one.
+#ifndef QMV4_MAX_B
 #define QMV4_MAX_B 8
+#endif
 
 struct QmvSet {
     const uint32_t* w;

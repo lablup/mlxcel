@@ -43,18 +43,47 @@ fn content_hash() -> u64 {
     h.finish()
 }
 
+/// The batch bound one bucket compiles with: `None` reuses the default
+/// compilation, whose bound already equals [`MAX_BATCH`].
+fn bucket_bound(b_max: usize) -> Result<Option<usize>, String> {
+    if !(1..=MAX_BATCH).contains(&b_max) {
+        return Err(format!(
+            "the multi-row kernel is compiled for 1..={MAX_BATCH} activation rows; {b_max} is out of range"
+        ));
+    }
+    Ok((b_max != MAX_BATCH).then_some(b_max))
+}
+
+/// The `hipcc` arguments for one kernel compilation.
+fn genco_args(arch: &str, max_b: Option<usize>) -> Vec<String> {
+    let mut args = vec![
+        "--genco".to_string(),
+        "-O3".to_string(),
+        format!("--offload-arch={arch}"),
+    ];
+    if let Some(max_b) = max_b {
+        args.push(format!("-DQMV4_MAX_B={max_b}"));
+    }
+    args
+}
+
+/// The cache stem for one compilation. The default bound keeps the unsuffixed
+/// form, so a narrower bucket never displaces the default entry.
+fn cache_stem(arch: &str, hash: u64, max_b: Option<usize>) -> String {
+    match max_b {
+        Some(max_b) => format!("qmv4-{arch}-{hash:016x}-b{max_b}"),
+        None => format!("qmv4-{arch}-{hash:016x}"),
+    }
+}
+
 /// Compile [`QMV_KERNEL`] to an HSACO for `arch`, caching the result by kernel
-/// content and architecture.
-///
-/// Returns the HSACO bytes, or an error the caller turns into a fallback to the
-/// f16 path (a missing `hipcc`, an unsupported arch, or a compile failure must
-/// never fail the model load).
-pub(crate) fn hsaco(arch: &str) -> Result<Vec<u8>, String> {
+/// content, architecture and, when present, the batch bound.
+fn compile(arch: &str, hash: u64, max_b: Option<usize>) -> Result<Vec<u8>, String> {
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let hash = content_hash();
+    let stem = cache_stem(arch, hash, max_b);
     let source: PathBuf = dir.join(format!("qmv4-{hash:016x}.hip"));
-    let output: PathBuf = dir.join(format!("qmv4-{arch}-{hash:016x}.hsaco"));
+    let output: PathBuf = dir.join(format!("{stem}.hsaco"));
     if output.is_file() {
         return std::fs::read(&output).map_err(|e| format!("read {}: {e}", output.display()));
     }
@@ -62,12 +91,12 @@ pub(crate) fn hsaco(arch: &str) -> Result<Vec<u8>, String> {
     // in another process never reads a half-written HSACO.
     let pid = std::process::id();
     let source_tmp: PathBuf = dir.join(format!("qmv4-{hash:016x}.{pid}.hip"));
-    let output_tmp: PathBuf = dir.join(format!("qmv4-{arch}-{hash:016x}.{pid}.hsaco"));
+    let output_tmp: PathBuf = dir.join(format!("{stem}.{pid}.hsaco"));
     std::fs::write(&source_tmp, QMV_KERNEL)
         .map_err(|e| format!("write {}: {e}", source_tmp.display()))?;
     let hipcc = std::env::var("HIPCC").unwrap_or_else(|_| "hipcc".to_string());
     let out = Command::new(&hipcc)
-        .args(["--genco", "-O3", &format!("--offload-arch={arch}")])
+        .args(genco_args(arch, max_b))
         .arg(&source_tmp)
         .arg("-o")
         .arg(&output_tmp)
@@ -83,6 +112,33 @@ pub(crate) fn hsaco(arch: &str) -> Result<Vec<u8>, String> {
     publish(&source_tmp, &source)?;
     publish(&output_tmp, &output)?;
     std::fs::read(&output).map_err(|e| format!("read {}: {e}", output.display()))
+}
+
+/// Compile [`QMV_KERNEL`] to an HSACO for `arch`, caching the result by kernel
+/// content and architecture.
+///
+/// Returns the HSACO bytes, or an error the caller turns into a fallback to the
+/// f16 path (a missing `hipcc`, an unsupported arch, or a compile failure must
+/// never fail the model load).
+pub(crate) fn hsaco(arch: &str) -> Result<Vec<u8>, String> {
+    compile(arch, content_hash(), None)
+}
+
+/// Compile [`QMV_KERNEL`] for a ragged bucket that carries at most `b_max`
+/// activation rows (issue #2955).
+///
+/// The multi-row exports unroll over `QMV4_MAX_B` and predicate the live rows.
+/// Compiling the widest bound for every bucket makes a `B=4` step carry the
+/// register pressure, shared-memory footprint and predication branches of
+/// `B=8` while half its accumulators are dead, which measured slower than the
+/// f16 path at `B=4`. Each bucket now gets an artifact compiled with its own
+/// bound; the widest bucket reuses [`hsaco`] because the default bound already
+/// equals [`MAX_BATCH`].
+///
+/// Errors follow [`hsaco`]'s fallback contract.
+pub(crate) fn hsaco_multi(arch: &str, b_max: usize) -> Result<Vec<u8>, String> {
+    let max_b = bucket_bound(b_max)?;
+    compile(arch, content_hash(), max_b)
 }
 
 /// Rename `tmp` onto `final_path`, tolerating a concurrent load that published
@@ -494,6 +550,58 @@ mod tests {
             ROWS_PER_BLOCK * 32,
             THREADS_PER_BLOCK,
             "one warp per row must fill the workgroup"
+        );
+    }
+
+    /// The kernel's bound is a default the loader overrides per batch bucket
+    /// (issue #2955).
+    #[test]
+    fn kernel_bound_is_overridable_at_compile_time() {
+        assert!(
+            QMV_KERNEL.contains(&format!(
+                "#ifndef QMV4_MAX_B\n#define QMV4_MAX_B {MAX_BATCH}\n#endif"
+            )),
+            "a guarded define lets `-DQMV4_MAX_B=<bucket>` reach the kernel"
+        );
+    }
+
+    /// Each ragged bucket compiles with its own bound; the widest bucket reuses
+    /// the default artifact and the out-of-range buckets are rejected before
+    /// `hipcc` runs (issue #2955).
+    #[test]
+    fn ragged_buckets_compile_with_their_own_bound() {
+        assert_eq!(bucket_bound(4).unwrap(), Some(4));
+        assert_eq!(
+            bucket_bound(MAX_BATCH).unwrap(),
+            None,
+            "the default artifact already carries the widest bound"
+        );
+        assert!(bucket_bound(0).is_err());
+        assert!(bucket_bound(MAX_BATCH + 1).is_err());
+
+        let narrow_args = genco_args("gfx1151", Some(4));
+        let args: Vec<&str> = narrow_args.iter().map(String::as_str).collect();
+        assert_eq!(
+            args,
+            ["--genco", "-O3", "--offload-arch=gfx1151", "-DQMV4_MAX_B=4"]
+        );
+        assert!(
+            !genco_args("gfx1151", None)
+                .iter()
+                .any(|arg| arg.starts_with("-DQMV4_MAX_B")),
+            "the default bound comes from the source"
+        );
+
+        let hash = content_hash();
+        assert_eq!(
+            cache_stem("gfx1151", hash, Some(4)),
+            format!("qmv4-gfx1151-{hash:016x}-b4"),
+            "a narrow bucket must not share the default cache entry"
+        );
+        assert_eq!(
+            cache_stem("gfx1151", hash, None),
+            format!("qmv4-gfx1151-{hash:016x}"),
+            "the default stem keeps its pre-fix form"
         );
     }
 
