@@ -1,0 +1,7 @@
+# cuda-oxide pins Rust 1.99.1 and builds a rustc plugin against rustc_private,
+# so the backend and the compiler that loads it must be the same toolchain.
+# This file applies only inside this directory: the application pin in the
+# repository root (rust-toolchain.toml) is untouched and stays at 1.97.1.
+[toolchain]
+channel = "1.99.1"
+components = ["rust-src", "rustc-dev", "llvm-tools", "rustfmt", "clippy"]

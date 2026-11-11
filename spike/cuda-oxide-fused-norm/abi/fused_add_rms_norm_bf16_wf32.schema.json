@@ -1,0 +1,145 @@
+{
+  "schema": "mlxcel.cuda-oxide-fused-norm.abi/v1",
+  "abi_version": 1,
+  "entry_symbol": "fused_add_rms_norm_bf16_wf32",
+  "kernel": "spike/cuda-oxide-fused-norm/src/main.rs::kernels::fused_add_rms_norm_bf16_wf32",
+  "activation_dtype": "bf16",
+  "weight_dtype": "f32",
+  "lane_encoding": "f32 lanes are IEEE binary32; f16 lanes are IEEE binary16 bit patterns in u16; bf16 lanes are bfloat16 bit patterns in u16 (round-to-nearest-even on store)",
+  "source_revision": {
+    "repository": "https://github.com/NVIDIA/cuda-rust",
+    "revision": "b631530700a8a4a5f165456f2d71fe9195b323b5"
+  },
+  "arguments": [
+    {
+      "ordinal": 0,
+      "name": "x_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "u16",
+      "access": "read",
+      "allocation_align_bytes": 2,
+      "length_argument": 1
+    },
+    {
+      "ordinal": 1,
+      "name": "x_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements"
+    },
+    {
+      "ordinal": 2,
+      "name": "residual_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "u16",
+      "access": "read",
+      "allocation_align_bytes": 2,
+      "length_argument": 3
+    },
+    {
+      "ordinal": 3,
+      "name": "residual_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements"
+    },
+    {
+      "ordinal": 4,
+      "name": "weight_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "f32",
+      "access": "read",
+      "allocation_align_bytes": 4,
+      "length_argument": 5
+    },
+    {
+      "ordinal": 5,
+      "name": "weight_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements"
+    },
+    {
+      "ordinal": 6,
+      "name": "eps",
+      "cuda_param_type": "f32",
+      "width_bits": 32,
+      "kind": "value"
+    },
+    {
+      "ordinal": 7,
+      "name": "weight_bias",
+      "cuda_param_type": "f32",
+      "width_bits": 32,
+      "kind": "value"
+    },
+    {
+      "ordinal": 8,
+      "name": "dim",
+      "cuda_param_type": "u32",
+      "width_bits": 32,
+      "kind": "value"
+    },
+    {
+      "ordinal": 9,
+      "name": "normed_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "u16",
+      "access": "write",
+      "allocation_align_bytes": 2,
+      "length_argument": 10
+    },
+    {
+      "ordinal": 10,
+      "name": "normed_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements"
+    },
+    {
+      "ordinal": 11,
+      "name": "new_residual_ptr",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "device_pointer",
+      "pointee": "u16",
+      "access": "write",
+      "allocation_align_bytes": 2,
+      "length_argument": 12
+    },
+    {
+      "ordinal": 12,
+      "name": "new_residual_len",
+      "cuda_param_type": "u64",
+      "width_bits": 64,
+      "kind": "length",
+      "unit": "elements"
+    }
+  ],
+  "launch": {
+    "index_space": "1d, one block per row",
+    "grid_dim_rule": "rows",
+    "block_dim_rule": "fused_norm_threads(dim)",
+    "block_dim_definition": "clamp(ceil_div(ceil_div(dim, 4), 32) * 32, 32, 1024); rows wider than 4096 loop",
+    "shared_mem_bytes": 0,
+    "static_shared_bytes_per_block": 132,
+    "buffer_layout": "x, residual, normed, new_residual are row-major [rows, dim] with exactly rows*dim elements; weight has exactly dim elements",
+    "semantics": "new_residual = round_act(x + residual); normed = round_act(gain * round_act(new_residual * rsqrt(mean(new_residual^2) + eps))) with gain = weight when weight_bias == 0, else round_w(weight_bias + weight); f32 accumulation, f32 FMA on the squares, two-stage warp butterfly reduction in the reference kernel's order",
+    "out_of_range_threads": "lanes past dim skip the element; the grid is exact, so no block returns before a barrier",
+    "rejected_on_host": "rows == 0, dim == 0, x/residual length != rows*dim, weight length != dim, rows*dim > 2^32-1",
+    "case_count": 26,
+    "elements_total": 436278
+  }
+}

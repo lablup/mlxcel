@@ -56,6 +56,14 @@ path = "examples/benchmark.rs"
 name = "wht_microbench"
 path = "examples/wht_microbench.rs"
 
+# Replays the standalone cuda-oxide fused-norm fixtures (spike/cuda-oxide-fused-norm,
+# issue #2832) through the existing fused kernel and the graph path. Needs a GPU
+# backend feature at build time (`cuda` on the GB10 host); the example refuses to
+# run without a fused port rather than writing a graph-only oracle.
+[[example]]
+name = "oxide_fused_norm_oracle"
+path = "examples/oxide_fused_norm_oracle.rs"
+
 # Per-call time and TFLOP/s of the fused ROCm SDPA prefill path at the
 # chunked-prefill shapes (issue #2251). Needs a ROCm host; builds only under
 # the rocm feature, which carries the overlay link recipe.
