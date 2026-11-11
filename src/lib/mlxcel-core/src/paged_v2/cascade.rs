@@ -59,14 +59,18 @@
 //! row, which the merge kernel resolves to the identity (`l = 1`, `out = v`).
 //! That is what lets one launch serve a mixed batch.
 //!
-//! ## Thresholds are unmeasured
+//! ## Measured and rejected: default off
 //!
-//! The defaults below are derived from what the decomposition costs, not from a
-//! benchmark: two extra launches plus a merge against the bytes saved. The
-//! feature is therefore **default off** ([`DEFAULT_CASCADE_ENABLED`]) until
-//! `docs/benchmark_results/` carries a number for it, and the whole gate is one
+//! The layer-level benchmark on an Apple M1 Ultra (2026-08-03, recorded in
+//! `docs/benchmark_results/versions/v0.5.0.md`) found cascade decode slower than
+//! the flat launch in all eight measurements, 0.356x to 0.784x, so the feature
+//! is **default off** ([`DEFAULT_CASCADE_ENABLED`]). The whole gate is one
 //! constant plus two environment overrides so re-measuring does not need a code
 //! change.
+//!
+//! The thresholds below are still reasoned from what the decomposition costs
+//! (two extra launches plus a merge against the bytes saved), not tuned by
+//! measurement, and no serving-level run has been recorded.
 
 use std::sync::OnceLock;
 
@@ -81,9 +85,10 @@ pub const CASCADE_ENV: &str = "MLXCEL_CASCADE_ATTENTION";
 /// switch, which reads as "default on"; that spelling still disables the
 /// feature here, so the documented kill switch behaves as documented under
 /// either default. Shipping default-on would mean routing production decode
-/// through a path whose benefit has not been measured on this hardware, which
+/// through a path whose measured result on this hardware was a slowdown, which
 /// is exactly the mistake epic #909 has already paid for twice. Flip this one
-/// constant once a shared-prefix benchmark exists.
+/// constant only once a recorded shared-prefix benchmark finds a configuration
+/// where cascade beats the flat launch.
 pub const DEFAULT_CASCADE_ENABLED: bool = false;
 
 /// Environment override for [`DEFAULT_MIN_SHARED_PAGES`].
