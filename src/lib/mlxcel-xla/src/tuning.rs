@@ -34,13 +34,24 @@ use std::path::Path;
 /// `[n_kv, group, head_dim]` by `[n_kv, head_dim, keys]` f16 matmul with an f32
 /// result. The default config for that shape runs it at about 74 us per
 /// dispatch on llama-3.2-1b, where the same MAC count in the context matmul
-/// takes about 6.5 us; the spec's tile drops it to about 1.5 us (issue #2921).
-/// It matches only `batch = n_kv = 8`, `group = 4` and `head_dim = 64` with at
-/// least 128 keys, the measured shape of the single-sequence decode graph. The
-/// batch predicate is load-bearing: the ragged and uniform-B `dot_general`s
-/// collapse to the same rank-3 contraction with the same maps, but with
-/// `bsz * n_kv` as the batch, so without it a multi-row ragged graph would
-/// silently pick up a config that was measured only for one row. Every other
+/// took about 6.5 us under its own default config; the spec's tile drops the
+/// score dispatch to about 1.5 us (issue #2921). It matches only
+/// `batch = n_kv = 8`, `group = 4` and `head_dim = 64` with at least 128 keys,
+/// the measured shape of the single-sequence decode graph. The batch predicate
+/// is load-bearing: the ragged and uniform-B `dot_general`s collapse to the
+/// same rank-3 contraction with the same maps, but with `bsz * n_kv` as the
+/// batch, so without it a multi-row ragged graph would silently pick up a
+/// config that was measured only for one row.
+///
+/// The third match is the companion context contraction, the same batched
+/// layout with the operands' roles swapped: `[n_kv, group, keys]` by
+/// `[n_kv, keys, head_dim]`. It reduces over the key axis and writes 64
+/// outputs, and the compiler default leaves it at about 6.4 us per dispatch at
+/// capacity 256, where the score dispatch already runs at about 1.5 us. The
+/// spec's tile brings it to about 1.8 us at capacity 256, 2.8 us at 512 and
+/// 5.9 us at 1024 (issue #2956). It is pinned the same way: batch 8, group 4
+/// and head_dim 64 exactly, at least 128 keys. The M predicate also keeps
+/// prefill out, since prefill's M axis carries the prompt length. Every other
 /// shape keeps the compiler default.
 pub(crate) const ROCM_BIGK_VECMAT_TUNING: &str =
     include_str!("../assets/rocm/bigk_vecmat_tuning.mlir");
@@ -105,12 +116,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// issue #2921: the spec must keep both contraction matches wired into the
-    /// entrypoint. The grouped-query score match is intentionally narrow (batch
-    /// 8, group 4, head_dim 64, at least 128 keys) because only that shape was
-    /// measured; widening it would apply an unmeasured config to other models,
-    /// and dropping the batch predicate would apply it to the ragged and
-    /// uniform-B score matmuls, whose collapsed batch is `bsz * n_kv`.
+    /// issues #2921, #2956: the spec must keep every contraction match wired
+    /// into the entrypoint. The grouped-query score match is intentionally
+    /// narrow (batch 8, group 4, head_dim 64, at least 128 keys) because only
+    /// that shape was measured; widening it would apply an unmeasured config to
+    /// other models, and dropping the batch predicate would apply it to the
+    /// ragged and uniform-B score matmuls, whose collapsed batch is
+    /// `bsz * n_kv`.
     #[test]
     fn tuning_spec_matches_the_gqa_decode_score_shape() {
         assert!(ROCM_BIGK_VECMAT_TUNING.contains("@match_bigk_vecmat"));
@@ -121,8 +133,9 @@ mod tests {
             .expect("the tuning-spec entrypoint");
         assert!(
             entrypoint.contains("@match_bigk_vecmat -> @apply_op_config")
-                && entrypoint.contains("@match_gqa_score -> @apply_op_config"),
-            "both matchers must run from the tuning-spec entrypoint"
+                && entrypoint.contains("@match_gqa_score -> @apply_op_config")
+                && entrypoint.contains("@match_gqa_context -> @apply_op_config"),
+            "every matcher must run from the tuning-spec entrypoint"
         );
         let score = ROCM_BIGK_VECMAT_TUNING
             .split("@match_gqa_score")
@@ -147,6 +160,49 @@ mod tests {
         assert!(
             score.contains("workgroup_size = [32, 4, 1]"),
             "the score matcher sets the 128-thread workgroup measured in #2921"
+        );
+    }
+
+    /// issue #2956: the context contraction gets its own narrow matcher. The
+    /// reduction is the key axis and the output is 64 wide, the mirror image of
+    /// the score matcher, so the predicates are batch 8, group 4, head_dim 64
+    /// and at least 128 keys. Prefill is kept out by the M predicate (its M
+    /// axis carries the prompt length) and the ragged and uniform-B graphs by
+    /// the batch predicate.
+    #[test]
+    fn tuning_spec_matches_the_gqa_decode_context_shape() {
+        let context = ROCM_BIGK_VECMAT_TUNING
+            .split("@match_gqa_context")
+            .nth(1)
+            .expect("the context matcher")
+            .split("@__kernel_config")
+            .next()
+            .expect("the context matcher body");
+        assert!(
+            context.contains("transform.iree.match.dims_equal %batch_dims, [8]"),
+            "the context matcher targets the single-sequence batch of 8 KV heads"
+        );
+        assert!(
+            context.contains("transform.iree.match.dims_equal %m_dims, [4]"),
+            "the context matcher targets group = 4"
+        );
+        assert!(
+            context.contains("transform.iree.match.dims_equal %n_dims, [64]"),
+            "the context matcher targets head_dim = 64 as the output width"
+        );
+        assert!(
+            context.contains("transform.iree.match.dim_bounds %rhs[1], umin = 128, none"),
+            "the context matcher targets at least 128 keys on the reduction axis"
+        );
+        assert!(
+            context.contains(
+                "reduction = [0, 0, 0, 64], thread = [1, 1, 2, 0], workgroup = [1, 4, 64, 1]"
+            ),
+            "the context matcher sets the tile measured in #2956"
+        );
+        assert!(
+            context.contains("workgroup_size = [32, 4, 1]"),
+            "the context matcher sets the 128-thread workgroup measured in #2956"
         );
     }
 }
