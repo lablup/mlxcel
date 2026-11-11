@@ -209,6 +209,11 @@ pub use emitter::{
     run_gemma3n_qmv_diagnostic_probe, run_gemma3n_rms_diagnostic_probe,
     run_gemma3n_sdpa_vector_context_diagnostic_probe,
 };
+/// Test support only (issue #2954): the single-sequence engine exposes the
+/// prefill C entry with caller-supplied positions, so a device test can prove
+/// the C boundary bounds values the public API never forwards.
+#[cfg(feature = "test-support")]
+pub use iree::IreeLlama;
 /// Test support only (issue #2923): the ragged engine's raw bind/reset hooks
 /// live behind `test-support`.
 #[cfg(feature = "test-support")]

@@ -316,6 +316,29 @@ unsafe extern "C" {
     fn xla_test_set_slot_store_failure(c: *mut XlaCtx, fail: c_int);
     #[cfg(feature = "test-support")]
     fn xla_test_slot_valid(c: *const XlaCtx, slot: c_int) -> c_int;
+    /// Test support (issue #2954): reach the prefill C entry points with
+    /// caller-supplied positions, so a device test can prove the C boundary
+    /// rejects out-of-range values the public API never forwards.
+    #[cfg(feature = "test-support")]
+    fn xla_test_prefill(
+        c: *mut XlaCtx,
+        tokens: *const c_int,
+        lp: c_int,
+        positions: *const c_int,
+        real_len: c_int,
+        out_token: *mut c_int,
+    ) -> c_int;
+    #[cfg(feature = "test-support")]
+    fn xla_test_prefill_slot_logits(
+        c: *mut XlaCtx,
+        slot: c_int,
+        tokens: *const c_int,
+        lp: c_int,
+        positions: *const c_int,
+        real_len: c_int,
+        vocab: c_int,
+        out_logits: *mut f32,
+    ) -> c_int;
     fn xla_llama_prefill_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
@@ -3026,6 +3049,59 @@ impl IreeLlama {
         }
         Ok(out)
     }
+
+    /// Test support (issue #2954): run the token prefill C entry with exactly
+    /// the caller's positions. The public `prefill_*` path synthesizes
+    /// canonical positions, so this is the only way to prove the C boundary
+    /// bounds direct-caller values. `tokens` must be `context_capacity` long and
+    /// `positions` must be `context_capacity` (`3 * context_capacity` for
+    /// M-RoPE) long, matching what the entry reads; `real_len` may be shorter,
+    /// because the padded tail reaches the same gather.
+    #[cfg(feature = "test-support")]
+    pub fn test_prefill_with_positions(
+        &mut self,
+        tokens: &[i32],
+        positions: &[i32],
+        real_len: usize,
+    ) -> Result<i32, String> {
+        let axes = match self.position_mode {
+            PreparedPositionMode::OneD => 1,
+            PreparedPositionMode::Mrope3D => 3,
+        };
+        if tokens.len() != self.context_capacity {
+            return Err(format!(
+                "test prefill tokens must be context_capacity={} long, got {}",
+                self.context_capacity,
+                tokens.len()
+            ));
+        }
+        let expected = self.context_capacity * axes;
+        if positions.len() != expected {
+            return Err(format!(
+                "test prefill positions must be {expected} long ({axes} axes), got {}",
+                positions.len()
+            ));
+        }
+        let lp = checked_ffi_int(self.context_capacity, "context_capacity")?;
+        let real_len = checked_ffi_int(real_len, "real_len")?;
+        let mut out_token = 0i32;
+        // Safety: both slices outlive the call and match the C entry's expected
+        // lengths; `out_token` is a single valid output element.
+        let rc = unsafe {
+            xla_test_prefill(
+                self.ctx,
+                tokens.as_ptr(),
+                lp,
+                positions.as_ptr(),
+                real_len,
+                &mut out_token,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("xla_test_prefill failed (status {rc})"));
+        }
+        Ok(out_token)
+    }
 }
 
 impl Drop for IreeLlama {
@@ -3471,6 +3547,66 @@ impl IreeRaggedLlama {
             1 => Some(true),
             _ => None,
         }
+    }
+
+    /// Test support (issue #2954): run the slot-logits prefill C entry with
+    /// exactly the caller's positions. The public `prefill_slot_logits`
+    /// synthesizes canonical positions, so this is the only way to prove the C
+    /// boundary bounds direct-caller values. `tokens` must be
+    /// `context_capacity` long and `positions` must be `context_capacity`
+    /// (`3 * context_capacity` for M-RoPE) long; `real_len` may be shorter,
+    /// because the padded tail reaches the same gather.
+    #[cfg(feature = "test-support")]
+    pub fn test_prefill_slot_logits_with_positions(
+        &mut self,
+        slot: usize,
+        tokens: &[i32],
+        positions: &[i32],
+        real_len: usize,
+    ) -> Result<Vec<f32>, String> {
+        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        let axes = match self.position_mode {
+            PreparedPositionMode::OneD => 1,
+            PreparedPositionMode::Mrope3D => 3,
+        };
+        if tokens.len() != self.context_capacity {
+            return Err(format!(
+                "test prefill tokens must be context_capacity={} long, got {}",
+                self.context_capacity,
+                tokens.len()
+            ));
+        }
+        let expected = self.context_capacity * axes;
+        if positions.len() != expected {
+            return Err(format!(
+                "test prefill positions must be {expected} long ({axes} axes), got {}",
+                positions.len()
+            ));
+        }
+        let slot = checked_ffi_int(slot, "slot")?;
+        let lp = checked_ffi_int(self.context_capacity, "context_capacity")?;
+        let real_len = checked_ffi_int(real_len, "real_len")?;
+        let vocab = checked_ffi_int(self.vocab, "vocab_size")?;
+        let mut logits = vec![0f32; self.vocab];
+        // Safety: both input slices outlive the call and match the C entry's
+        // expected lengths; `logits` has `self.vocab` elements for the shim to
+        // fill, and the shim also writes the slot's KV device-side.
+        let rc = unsafe {
+            xla_test_prefill_slot_logits(
+                self.ctx,
+                slot,
+                tokens.as_ptr(),
+                lp,
+                positions.as_ptr(),
+                real_len,
+                vocab,
+                logits.as_mut_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(format!("xla_test_prefill_slot_logits failed (status {rc})"));
+        }
+        Ok(logits)
     }
 
     /// The vocabulary size (logits per row). The engine slices the ragged decode's

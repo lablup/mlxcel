@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 
 use mlxcel_xla::{
-    IreeRaggedLlama, SampleParams, XlaBatchEngine, XlaReferenceEngine,
+    IreeLlama, IreeRaggedLlama, SampleParams, XlaBatchEngine, XlaReferenceEngine,
     batch_kv_allocation_counters, reset_batch_kv_allocation_counters,
 };
 use safetensors::{Dtype, tensor::TensorView};
@@ -399,5 +399,72 @@ fn first_batch_admit_does_not_upload_a_host_kv_mirror() {
     assert_eq!(
         h2d_bytes, 0,
         "the batch KV path must not upload the rank-5 cache from host memory"
+    );
+}
+
+/// Issue #2954: the prefill C entry points bound every position, including the
+/// padded tail that `real_len` does not cover, before any IREE call. The public
+/// Rust API never forwards an invalid position, so the `test-support`
+/// forwarders drive the C boundary directly: the same tokens fail with one
+/// out-of-range value and succeed with every value in `[0, context_capacity)`.
+#[test]
+#[ignore = "requires the pinned IREE runtime and compiler"]
+fn prefill_c_entry_points_reject_out_of_range_positions() {
+    // 1-D token prefill (`xla_llama_prefill`). `real_len` is 3, so any failure
+    // below proves the padded tail is checked too.
+    let fixture = create_tiny_model();
+    let mut engine = IreeLlama::load(fixture.path(), &device(), CAPACITY)
+        .expect("single-sequence engine at the compiled capacity");
+    let mut tokens = vec![0i32; CAPACITY];
+    tokens[..3].copy_from_slice(&[1, 2, 3]);
+    let mut positions: Vec<i32> = (0..CAPACITY as i32).collect();
+
+    for bad in [-1, CAPACITY as i32] {
+        positions[CAPACITY - 1] = bad;
+        let error = engine
+            .test_prefill_with_positions(&tokens, &positions, 3)
+            .expect_err("an out-of-range padded-tail position must be rejected");
+        assert!(
+            error.contains("xla_test_prefill failed"),
+            "the C position guard must fail the call, got: {error}"
+        );
+    }
+    positions[CAPACITY - 1] = (CAPACITY - 1) as i32;
+    engine
+        .test_prefill_with_positions(&tokens, &positions, 3)
+        .expect("the same tokens reach the graph once every position is in range");
+
+    // 3-row M-RoPE slot prefill (`xla_llama_prefill_slot_logits`). A value on
+    // any axis fails, and the whole per-axis buffer is checked.
+    let mrope = create_tiny_mrope_model();
+    let mut ragged = IreeRaggedLlama::load(mrope.path(), &device(), 4, CAPACITY)
+        .expect("M-RoPE ragged engine at B=4");
+    let mut positions = vec![0i32; 3 * CAPACITY];
+    for axis in 0..3 {
+        for index in 0..CAPACITY {
+            positions[axis * CAPACITY + index] = index as i32;
+        }
+    }
+
+    // (offset, value): the third axis' first slot at -1, then the first axis'
+    // padded tail at the capacity. Both reset to their in-range value after.
+    for (offset, bad) in [(2 * CAPACITY, -1), (CAPACITY - 1, CAPACITY as i32)] {
+        positions[offset] = bad;
+        let error = ragged
+            .test_prefill_slot_logits_with_positions(0, &tokens, &positions, 3)
+            .expect_err("an out-of-range M-RoPE coordinate must be rejected");
+        assert!(
+            error.contains("xla_test_prefill_slot_logits failed"),
+            "the C position guard must fail the call, got: {error}"
+        );
+        positions[offset] = (offset % CAPACITY) as i32;
+    }
+    let logits = ragged
+        .test_prefill_slot_logits_with_positions(0, &tokens, &positions, 3)
+        .expect("the same tokens prefill once every axis is in range");
+    assert_eq!(
+        logits.len(),
+        VOCAB,
+        "a valid M-RoPE slot prefill must return one row of logits"
     );
 }

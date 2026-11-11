@@ -488,6 +488,29 @@ static int xla_validate_tensor_desc(const char* name,
   return 0;
 }
 
+// Reject any prefill position outside [0, context_capacity) before the graph
+// runs (issue #2954). The emitted prefill graph indexes the
+// [context_capacity, rot] RoPE table with the caller's values and clamps
+// nothing, so an out-of-range value is an out-of-bounds device read rather than
+// an error the graph can report. All `count` entries of every M-RoPE axis are
+// checked, because the padded tail (real_len < count) reaches the same gather.
+// `positions` is axis-major: `axis * count + index`.
+static int xla_check_prefill_positions(const char* caller,
+                                       const int32_t* positions, int32_t count,
+                                       int32_t axes, int32_t context_capacity) {
+  for (int32_t axis = 0; axis < axes; ++axis) {
+    for (int32_t i = 0; i < count; ++i) {
+      const int32_t value = positions[(size_t)axis * (size_t)count + (size_t)i];
+      if (value < 0 || value >= context_capacity) {
+        fprintf(stderr, "%s: position[axis=%d index=%d]=%d outside [0,%d)\n",
+                caller, axis, i, value, context_capacity);
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
 static iree_status_t xla_alloc_desc_bv(xla_ctx* c,
                                        const xla_tensor_desc* desc,
                                        iree_hal_buffer_view_t** out) {
@@ -988,10 +1011,20 @@ int xla_llama_prefill(xla_ctx* c, int32_t adapter_mode,
                       const int32_t* tokens, int32_t lp,
                       const int32_t* positions, int32_t real_len,
                       int32_t* out_token) {
+  if (!c || !tokens || !positions || !out_token) {
+    fprintf(stderr,
+            "xla_llama_prefill: invalid context/token/position/output contract\n");
+    return 1;
+  }
   if (lp != c->context_capacity || real_len < 0 || real_len > lp) {
     fprintf(stderr,
             "xla_llama_prefill: lp=%d real_len=%d context_capacity=%d\n", lp,
             real_len, c->context_capacity);
+    return 1;
+  }
+  if (xla_check_prefill_positions(
+          "xla_llama_prefill", positions, lp,
+          c->position_mode == 1 ? 3 : 1, c->context_capacity) != 0) {
     return 1;
   }
   iree_runtime_call_t call;
@@ -1414,6 +1447,11 @@ int xla_llama_prefill_slot_logits(
       return 1;
     }
   }
+  if (xla_check_prefill_positions(
+          "xla_llama_prefill_slot_logits", positions, lp,
+          c->position_mode == 1 ? 3 : 1, c->context_capacity) != 0) {
+    return 1;
+  }
 
   int rc = 0;
   bool call_initialized = false;
@@ -1490,6 +1528,26 @@ cleanup:
   return rc;
 }
 
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+// Test support (issue #2954): forward to the real prefill entry points with
+// caller-supplied positions. The public Rust API synthesizes canonical
+// positions and rejects out-of-range explicit ones before reaching C, so a
+// device test cannot otherwise prove the C boundary itself enforces the bound.
+int32_t xla_test_prefill(xla_ctx* c, const int32_t* tokens, int32_t lp,
+                         const int32_t* positions, int32_t real_len,
+                         int32_t* out_token) {
+  return xla_llama_prefill(c, 0, tokens, lp, positions, real_len, out_token);
+}
+
+int32_t xla_test_prefill_slot_logits(xla_ctx* c, int32_t slot,
+                                     const int32_t* tokens, int32_t lp,
+                                     const int32_t* positions, int32_t real_len,
+                                     int32_t vocab, float* out_logits) {
+  return xla_llama_prefill_slot_logits(c, slot, 0, tokens, lp, positions,
+                                       real_len, vocab, out_logits);
+}
+#endif
+
 // Test-only Gemma3n intermediate-oracle entry. The optional diagnostic module
 // is never loaded by normal bundles. Its first output is one statically laid
 // out f32 vector; K/V are handled exactly like ordinary slot prefill so the
@@ -1498,11 +1556,17 @@ int xla_llama_prefill_diagnostics_slot(
     xla_ctx* c, int32_t slot, int32_t adapter_mode, const int32_t* tokens,
     int32_t lp, const int32_t* positions, int32_t real_len,
     int32_t diagnostic_len, float* out_diagnostics) {
-  if (!c || !c->has_prefill_diagnostics || slot < 0 || slot >= c->rg_bsz ||
+  if (!c || !c->has_prefill_diagnostics || !tokens || !positions ||
+      slot < 0 || slot >= c->rg_bsz ||
       lp != c->context_capacity || real_len <= 0 || real_len > lp ||
       diagnostic_len <= 0 || !out_diagnostics) {
     fprintf(stderr,
             "xla_llama_prefill_diagnostics_slot: invalid diagnostic bundle/input contract\n");
+    return 1;
+  }
+  if (xla_check_prefill_positions(
+          "xla_llama_prefill_diagnostics_slot", positions, lp,
+          c->position_mode == 1 ? 3 : 1, c->context_capacity) != 0) {
     return 1;
   }
   int rc = 0;
@@ -1620,6 +1684,15 @@ static int xla_llama_prefill_embeddings_impl(
                                 dense_ple_dims) != 0)) {
     fprintf(stderr,
             "xla_llama_prefill_embeddings: dense PLE does not match bundle kind\n");
+    return 1;
+  }
+  // The descriptor check above proves the buffer holds exactly
+  // `context_capacity` positions per axis, so every slot reaches the graph's
+  // RoPE gather and must be bounded here (issue #2954).
+  if (xla_check_prefill_positions(
+          "xla_llama_prefill_embeddings", (const int32_t*)positions->data,
+          c->context_capacity, position_mode == 1 ? 3 : 1,
+          c->context_capacity) != 0) {
     return 1;
   }
   bool batched = slot >= 0;
