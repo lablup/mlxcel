@@ -223,6 +223,9 @@ pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
 /// Test support only (issue #2923): batch-KV allocation instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters};
+/// Test support only (issue #2961): resident-weight upload instrumentation.
+#[cfg(feature = "test-support")]
+pub use iree::{reset_weight_upload_counters, weight_upload_counters};
 pub use local_task::{
     LOCAL_TASK_WORKERS_ENV, is_local_task_device, local_task_workers_for, parse_local_task_workers,
 };

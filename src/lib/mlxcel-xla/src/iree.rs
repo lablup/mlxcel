@@ -201,6 +201,50 @@ impl WeightBuf {
             WeightBuf::Raw(v) => v.as_ptr(),
         }
     }
+
+    /// Bytes the shim copies for this weight (issue #2961: upload accounting).
+    fn byte_len(&self) -> u64 {
+        match self {
+            WeightBuf::F32(v) => (v.len() as u64) * 4,
+            WeightBuf::F16(v) => (v.len() as u64) * 2,
+            WeightBuf::Raw(v) => v.len() as u64,
+        }
+    }
+}
+
+/// What one `upload_weights_with_sink` pass spent, split by stage (issue #2961).
+///
+/// The ragged f16 load path reports about 4 s in `ragged-context-and-upload`,
+/// which lumps module load together with host dequantization, f16 packing and
+/// the device copies. These counters separate the three so the regression can
+/// be attributed instead of guessed.
+#[derive(Default)]
+struct WeightUploadStats {
+    /// Device uploads issued, one per weight spec.
+    tensors: usize,
+    /// Bytes copied to the device across every upload.
+    uploaded_bytes: u64,
+    /// Host widening: affine dequantization or bf16/f16/f32 conversion.
+    widen_micros: u128,
+    /// f16 packing of the widened projection weights.
+    pack_micros: u128,
+    /// Time inside the sink, i.e. the shim copy to the device.
+    upload_micros: u128,
+}
+
+impl WeightUploadStats {
+    /// Extra `key=value` fields appended to the phase line. Silent-free: the
+    /// caller only prints this when `MLXCEL_XLA_LOAD_TIMING` is set.
+    fn detail(&self) -> String {
+        format!(
+            "tensors={} uploaded_bytes={} dequantize_ms={} pack_ms={} copy_ms={}",
+            self.tensors,
+            self.uploaded_bytes,
+            self.widen_micros / 1000,
+            self.pack_micros / 1000,
+            self.upload_micros / 1000,
+        )
+    }
 }
 
 fn load_timing_enabled() -> bool {
@@ -217,13 +261,33 @@ fn current_rss_kib() -> Option<u64> {
 }
 
 fn report_load_timing(label: &str, started: std::time::Instant) {
+    report_load_timing_detail(label, started, None);
+}
+
+/// The one line format every load phase prints. Kept separate from the env gate
+/// so the shape is unit-testable without touching process-global environment.
+fn load_timing_line(label: &str, elapsed_ms: u128, rss_kib: &str, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) => {
+            format!(
+                "mlxcel-xla-load: phase={label} elapsed_ms={elapsed_ms} rss_kib={rss_kib} {detail}"
+            )
+        }
+        None => format!("mlxcel-xla-load: phase={label} elapsed_ms={elapsed_ms} rss_kib={rss_kib}"),
+    }
+}
+
+/// [`report_load_timing`] with extra `key=value` fields, for a phase that has
+/// counters of its own (issue #2961). One env gate and one line format: a
+/// detail line stays silent unless `MLXCEL_XLA_LOAD_TIMING` is set.
+fn report_load_timing_detail(label: &str, started: std::time::Instant, detail: Option<&str>) {
     if load_timing_enabled() {
+        let rss = current_rss_kib()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unavailable".to_string());
         eprintln!(
-            "mlxcel-xla-load: phase={label} elapsed_ms={} rss_kib={}",
-            started.elapsed().as_millis(),
-            current_rss_kib()
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unavailable".to_string())
+            "{}",
+            load_timing_line(label, started.elapsed().as_millis(), &rss, detail)
         );
     }
 }
@@ -316,6 +380,15 @@ unsafe extern "C" {
     fn xla_test_set_slot_store_failure(c: *mut XlaCtx, fail: c_int);
     #[cfg(feature = "test-support")]
     fn xla_test_slot_valid(c: *const XlaCtx, slot: c_int) -> c_int;
+    /// Test support (issue #2961): resident-weight upload call and byte
+    /// counters, so a device test can prove every weight uploads once and a
+    /// bucket context uploads none.
+    #[cfg(feature = "test-support")]
+    fn xla_test_weight_upload_calls_get() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_weight_upload_bytes_get() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_weight_upload_reset();
     /// Test support (issue #2954): reach the prefill C entry points with
     /// caller-supplied positions, so a device test can prove the C boundary
     /// rejects out-of-range values the public API never forwards.
@@ -537,6 +610,28 @@ pub fn batch_kv_allocation_counters() -> (u64, u64) {
         (
             xla_test_batch_kv_host_bytes(),
             xla_test_batch_kv_h2d_bytes(),
+        )
+    }
+}
+
+/// Test support (issue #2961): reset the shim's resident-weight upload counters
+/// before a load.
+#[cfg(feature = "test-support")]
+pub fn reset_weight_upload_counters() {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { xla_test_weight_upload_reset() };
+}
+
+/// Test support (issue #2961): `(calls, bytes)` the shim has uploaded through
+/// `xla_llama_upload_weight` since the last reset.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn weight_upload_counters() -> (u64, u64) {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe {
+        (
+            xla_test_weight_upload_calls_get(),
+            xla_test_weight_upload_bytes_get(),
         )
     }
 }
@@ -2058,6 +2153,25 @@ fn upload_weights_with_sink<F>(
 where
     F: FnMut(usize, WeightBuf, c_int, c_int, [i64; 4]) -> Result<(), String>,
 {
+    let upload_started = std::time::Instant::now();
+    let mut stats = WeightUploadStats::default();
+    // One device upload: time the shim copy and account the bytes that crossed.
+    // The counters live on the stack here, so a macro (not a closure) keeps
+    // `stats` usable between the calls.
+    macro_rules! emit_weight {
+        ($i:expr, $buf:expr, $dtype:expr, $rank:expr, $dims:expr) => {{
+            let buf = $buf;
+            let bytes = buf.byte_len();
+            let started = std::time::Instant::now();
+            let result = sink($i, buf, $dtype, $rank, $dims);
+            stats.upload_micros += started.elapsed().as_micros();
+            if result.is_ok() {
+                stats.tensors += 1;
+                stats.uploaded_bytes += bytes;
+            }
+            result
+        }};
+    }
     let specs = cfg.weight_specs();
     let names: Vec<String> = specs.iter().map(|s| s.tensor_name().to_string()).collect();
     let (shard_paths, mut dense_name_scheme, gemma3n_name_scheme) = match cfg {
@@ -2149,6 +2263,7 @@ where
             let needs_widened = tensor_idxs
                 .iter()
                 .any(|&i| !matches!(specs[i], WeightSpec::QuantRaw { .. }));
+            let widen_started = std::time::Instant::now();
             let widened: Option<(Vec<f32>, Vec<usize>)> = if needs_widened {
                 // Widen the whole tensor to row-major `[out, in]` (or `[out]`) f32 (the
                 // graph's dtype): an MLX affine `U32`-packed weight is dequantized (the
@@ -2277,6 +2392,7 @@ where
             } else {
                 None
             };
+            stats.widen_micros += widen_started.elapsed().as_micros();
 
             let mut remaining = tensor_idxs.len();
             let mut owned_widened = widened;
@@ -2303,7 +2419,7 @@ where
                     let mut dims = [0i64; 4];
                     dims[0] = checked_ffi_i64(shape[0], &format!("weight {name} dim 0"))?;
                     dims[1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
-                    sink(i, WeightBuf::Raw(t.data().to_vec()), code, 2, dims)?;
+                    emit_weight!(i, WeightBuf::Raw(t.data().to_vec()), code, 2, dims)?;
                     continue;
                 }
 
@@ -2322,7 +2438,7 @@ where
                         } else {
                             data_ref.clone()
                         };
-                        sink(i, WeightBuf::F32(data), WDT_F32, rank, dims)?;
+                        emit_weight!(i, WeightBuf::F32(data), WDT_F32, rank, dims)?;
                     }
                     WeightSpec::Proj(_) => {
                         if shape.len() != 2 {
@@ -2340,26 +2456,31 @@ where
                             dims[0] = checked_ffi_i64(in_, &format!("weight {name} in axis"))?;
                             dims[1] = checked_ffi_i64(out, &format!("weight {name} out axis"))?;
                             if resident_f16 {
-                                sink(i, WeightBuf::F16(pack_f16(&transposed)), WDT_F16, 2, dims)?;
+                                let pack_started = std::time::Instant::now();
+                                let packed = pack_f16(&transposed);
+                                stats.pack_micros += pack_started.elapsed().as_micros();
+                                emit_weight!(i, WeightBuf::F16(packed), WDT_F16, 2, dims)?;
                             } else {
-                                sink(i, WeightBuf::F32(transposed), WDT_F32, 2, dims)?;
+                                emit_weight!(i, WeightBuf::F32(transposed), WDT_F32, 2, dims)?;
                             }
                         } else {
                             dims[0] = checked_ffi_i64(out, &format!("weight {name} dim 0"))?;
                             dims[1] = checked_ffi_i64(in_, &format!("weight {name} dim 1"))?;
                             if resident_f16 {
+                                let pack_started = std::time::Instant::now();
                                 let packed = pack_f16(data_ref);
+                                stats.pack_micros += pack_started.elapsed().as_micros();
                                 if remaining == 0 {
                                     drop(owned_widened.take());
                                 }
-                                sink(i, WeightBuf::F16(packed), WDT_F16, 2, dims)?;
+                                emit_weight!(i, WeightBuf::F16(packed), WDT_F16, 2, dims)?;
                             } else {
                                 let data = if remaining == 0 {
                                     owned_widened.take().unwrap().0
                                 } else {
                                     data_ref.clone()
                                 };
-                                sink(i, WeightBuf::F32(data), WDT_F32, 2, dims)?;
+                                emit_weight!(i, WeightBuf::F32(data), WDT_F32, 2, dims)?;
                             }
                         }
                     }
@@ -2387,9 +2508,12 @@ where
                             drop(owned_widened.take());
                         }
                         if resident_f16 {
-                            sink(i, WeightBuf::F16(pack_f16(&data)), WDT_F16, 2, dims)?;
+                            let pack_started = std::time::Instant::now();
+                            let packed = pack_f16(&data);
+                            stats.pack_micros += pack_started.elapsed().as_micros();
+                            emit_weight!(i, WeightBuf::F16(packed), WDT_F16, 2, dims)?;
                         } else {
-                            sink(i, WeightBuf::F32(data), WDT_F32, 2, dims)?;
+                            emit_weight!(i, WeightBuf::F32(data), WDT_F32, 2, dims)?;
                         }
                     }
                     WeightSpec::Elements { start, end, .. } => {
@@ -2414,7 +2538,7 @@ where
                         if remaining == 0 {
                             drop(owned_widened.take());
                         }
-                        sink(i, buf, WDT_F32, 1, dims)?;
+                        emit_weight!(i, buf, WDT_F32, 1, dims)?;
                     }
                     WeightSpec::QuantRaw { .. } => {
                         unreachable!("QuantRaw is handled by the early-continue above")
@@ -2423,6 +2547,11 @@ where
             }
         }
     }
+    report_load_timing_detail(
+        "language-weight-upload-parts",
+        upload_started,
+        Some(&stats.detail()),
+    );
     Ok(())
 }
 
@@ -2502,6 +2631,7 @@ fn create_bucket_ctx(
         .transpose()?;
     let c_dec = path_cstring(&bundle.decode_vmfb)?;
     let capacity = checked_ffi_int(context_capacity, "context_capacity")?;
+    let bucket_started = std::time::Instant::now();
     // Safety: every pointer is a live CString owned above for the duration of
     // the call, `base` is a live context by this function's contract, and the
     // shim treats a null deepstack or diagnostics path as "this bundle has
@@ -2524,6 +2654,14 @@ fn create_bucket_ctx(
             "failed to create an OpenXLA capacity bucket at {context_capacity} tokens"
         ));
     }
+    // issue #2961: a bucket shares the base's resident weights, so it must
+    // report no upload at all. The line makes a re-upload regression visible in
+    // the same measurement that caught the load cost.
+    report_load_timing_detail(
+        "language-weight-upload-parts",
+        bucket_started,
+        Some("tensors=0 uploaded_bytes=0 dequantize_ms=0 pack_ms=0 copy_ms=0"),
+    );
     Ok(ctx)
 }
 
@@ -2578,6 +2716,11 @@ fn create_ctx_with_diagnostics(
     // Safety: pointers are valid for the duration of the call; passing null
     // weight pointers allocates the empty weight slot table so each tensor can
     // be uploaded and freed incrementally via `xla_llama_upload_weight`.
+    // issue #2961: split what was one opaque span. `xla_llama_create` builds the
+    // instance, opens the device, creates the session and loads the vmfb
+    // modules; the loop below is host prep plus device copies. Only the latter
+    // changes with the weight dtype, so the two must be reported apart.
+    let create_started = std::time::Instant::now();
     let ctx = unsafe {
         xla_llama_create(
             c_dev.as_ptr(),
@@ -2632,6 +2775,8 @@ fn create_ctx_with_diagnostics(
              (IREE runtime; see stderr for the annotated status)"
         ));
     }
+    report_load_timing("language-module-load", create_started);
+    let upload_started = std::time::Instant::now();
     if let Err(error) = upload_weights_with_sink(
         model_dir,
         cfg,
@@ -2661,6 +2806,7 @@ fn create_ctx_with_diagnostics(
         unsafe { xla_llama_free(ctx) };
         return Err(error);
     }
+    report_load_timing("language-weight-upload", upload_started);
     report_load_timing("language-vmfb-and-device-upload", load_started);
     Ok(ctx)
 }
@@ -3156,6 +3302,11 @@ pub struct IreeRaggedLlama {
     vocab: usize,
     context_capacity: usize,
     hidden_size: usize,
+    /// Weight slots this engine declares, i.e. how many uploads one base load
+    /// must issue (issue #2961). Test-only so a device test can assert the
+    /// upload count instead of trusting it.
+    #[cfg(feature = "test-support")]
+    n_weights: usize,
     has_adapter_modes: bool,
     #[cfg(feature = "diagnostics")]
     model_layers: usize,
@@ -3443,6 +3594,8 @@ impl IreeRaggedLlama {
             vocab: cfg.vocab(),
             context_capacity: cfg.context_capacity(),
             hidden_size: cfg.hidden(),
+            #[cfg(feature = "test-support")]
+            n_weights: cfg.weight_specs().len(),
             has_adapter_modes: cfg.has_adapter_modes(),
             #[cfg(feature = "diagnostics")]
             model_layers: cfg.n_layers(),
@@ -3502,6 +3655,14 @@ impl IreeRaggedLlama {
     #[must_use]
     pub fn b_max(&self) -> usize {
         self.b_max
+    }
+
+    /// Test support (issue #2961): weight slots this engine declares. One base
+    /// load must issue exactly this many `xla_llama_upload_weight` calls.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn weight_count(&self) -> usize {
+        self.n_weights
     }
 
     /// Clear all ragged KV slots before an independent diagnostic capture.
@@ -4293,5 +4454,49 @@ impl Drop for IreeRaggedLlama {
             unsafe { xla_llama_free(self.ctx) };
             self.ctx = std::ptr::null_mut();
         }
+    }
+}
+
+#[cfg(test)]
+mod load_timing_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn weight_buf_byte_lengths_match_the_shim_copy_size() {
+        assert_eq!(WeightBuf::F32(vec![0.0; 3]).byte_len(), 12);
+        assert_eq!(WeightBuf::F16(vec![0; 3]).byte_len(), 6);
+        assert_eq!(WeightBuf::Raw(vec![0; 5]).byte_len(), 5);
+    }
+
+    #[test]
+    fn upload_detail_reports_tensors_bytes_and_stage_milliseconds() {
+        let stats = WeightUploadStats {
+            tensors: 7,
+            uploaded_bytes: 1_500_000_000,
+            widen_micros: 2_400_000,
+            pack_micros: 300_000,
+            upload_micros: 900_000,
+        };
+        assert_eq!(
+            stats.detail(),
+            "tensors=7 uploaded_bytes=1500000000 dequantize_ms=2400 pack_ms=300 copy_ms=900"
+        );
+    }
+
+    #[test]
+    fn phase_line_keeps_its_shape_with_and_without_detail() {
+        assert_eq!(
+            load_timing_line("ragged-config", 12, "3456", None),
+            "mlxcel-xla-load: phase=ragged-config elapsed_ms=12 rss_kib=3456"
+        );
+        assert_eq!(
+            load_timing_line(
+                "language-weight-upload-parts",
+                4800,
+                "unavailable",
+                Some("tensors=0 uploaded_bytes=0"),
+            ),
+            "mlxcel-xla-load: phase=language-weight-upload-parts elapsed_ms=4800 rss_kib=unavailable tensors=0 uploaded_bytes=0"
+        );
     }
 }
