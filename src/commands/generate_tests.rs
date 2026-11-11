@@ -1744,3 +1744,19 @@ fn offline_mtp_declines_an_empty_prompt_by_name() {
     assert!(msg.contains("--draft-model"), "{msg}");
     assert!(ensure_mtp_prompt_not_empty(&[1]).is_ok());
 }
+
+/// `MLXCEL_PRINT_TOKEN_IDS` prints the same two lines on every backend: a
+/// label, the count, then the ids separated by single spaces. Scripts that
+/// compare two runs split on that shape.
+#[test]
+fn token_ids_line_lists_the_count_then_the_ids() {
+    assert_eq!(
+        super::token_ids_line("prompt ids", &[128000, 791, 6864]),
+        "[prompt ids (3): 128000 791 6864]"
+    );
+    assert_eq!(
+        super::token_ids_line("token ids", &[42]),
+        "[token ids (1): 42]"
+    );
+    assert_eq!(super::token_ids_line("token ids", &[]), "[token ids (0): ]");
+}
