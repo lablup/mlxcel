@@ -398,9 +398,16 @@ except Exception as e:
     sys.exit(3)
 
 last = None
+# Each GenerationResult carries only its own segment in `.text`, so the answer
+# is the concatenation over the measured loop. The parent reads it to tell an
+# image the model ignored from one it described (see vlm_refusal_reason).
+_text_parts = []
 try:
     for r in stream_generate(model, processor, prompt=formatted_prompt, image=image_path, max_tokens=max_tokens, **_kw):
         last = r
+        _segment = getattr(r, 'text', None)
+        if _segment:
+            _text_parts.append(_segment)
 except Exception as e:
     print('ERROR bench:', repr(e), file=sys.stderr)
     sys.exit(4)
@@ -416,6 +423,7 @@ result = {
     'gen_tokens': getattr(last, 'generation_tokens', None),
     'decode_tps': getattr(last, 'generation_tps', None),
     'text_only_prompt_tokens': _text_only_tokens,
+    'generated_text': ''.join(_text_parts),
 }
 print('RESULT', json.dumps(result))
 """
@@ -544,6 +552,40 @@ def decode_window(gen_tokens, generation_tps):
     return window_s * 1000, (n - 1) / window_s
 
 
+# Phrases a VLM uses when it answers an image prompt without having seen the
+# image. All lowercase with a plain apostrophe; vlm_refusal_reason normalizes
+# the text the same way before matching. A Rust-side check on the mlxcel sweep
+# should reuse this list rather than copy it (lablup/mlxcel#2134).
+VLM_REFUSAL_PHRASES = (
+    "can't see",
+    "cannot see",
+    "unable to view",
+    "don't have the ability to view",
+    "can't provide a description",
+)
+
+
+def vlm_refusal_reason(text: str) -> str | None:
+    """Return the refusal phrase `text` contains, or None.
+
+    A prompt-token count shows that the image reached the prompt, not that the
+    model used it: granite-vision-3.2-2b-4bit took 1485 image tokens and still
+    answered "I can't provide a description of the image as I can't see it"
+    (lablup/mlxcel#1683). This reads the generated text for that class.
+
+    Matching is case-insensitive, treats the typographic apostrophe as a plain
+    one, and looks anywhere in the text, because EOS is suppressed during the
+    measured pass and the refusal is followed by filler. The first phrase of
+    VLM_REFUSAL_PHRASES that matches is returned. Empty text never matches, so
+    a run that produced no text keeps the status it already had.
+    """
+    normalized = text.lower().replace("\u2019", "'")
+    for phrase in VLM_REFUSAL_PHRASES:
+        if phrase in normalized:
+            return phrase
+    return None
+
+
 def resolve_python() -> list[str]:
     """Interpreter that has mlx-lm / mlx-vlm importable.
 
@@ -638,6 +680,17 @@ def bench_one(model_path: Path, vlm: bool, vlm_image: str, max_tokens: int,
                     text_only = data.get("text_only_prompt_tokens")
                     if got is not None and text_only is not None and got <= text_only:
                         return ("FAIL:image_not_applied", None)
+                    # FAIL:image_ignored is the case the length check above
+                    # cannot see: the image expanded the prompt and the model
+                    # still answered that it cannot see one. Checked only for
+                    # VLM runs and only once the image is known to be in the
+                    # prompt, so the two statuses stay distinct. The matched
+                    # phrase goes to stderr so the sweep log says why.
+                    reason = vlm_refusal_reason(data.get("generated_text") or "")
+                    if reason is not None:
+                        print(f"    image_ignored: generated text contains {reason!r}",
+                              file=sys.stderr)
+                        return ("FAIL:image_ignored", None)
                 return ("OK", data)
         return ("FAIL:no_result", None)
 
