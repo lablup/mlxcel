@@ -208,6 +208,8 @@ pub(super) fn cache_ctx() -> PromptCacheRequestContext {
         mm_digest: MultimodalDigest::empty(),
         history_prompt: None,
         history_prefix_tokens: None,
+        root_prompt: None,
+        root_prefix_tokens: None,
     }
 }
 

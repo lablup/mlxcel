@@ -1117,15 +1117,15 @@ pub(crate) struct BurstContext<'a> {
     /// the DFlash and batched burst arms.
     pub(crate) profile_probe_rounds: usize,
     pub(crate) prefill_chunk_size: usize,
-    /// Classic history-boundary prefill split for the B=1 sequence (issue
-    /// #2160); `None` for batched bursts and requests without one.
-    pub(crate) prefill_boundary: Option<usize>,
+    /// Classic snapshot-boundary prefill splits for the B=1 sequence (issue
+    /// #2160, #2885); empty for batched bursts and requests without one.
+    pub(crate) prefill_boundary: mlxcel_core::prefill_plan::PrefillSplits,
     /// The scheduler's context bound (#1472), applied by the burst stream's
     /// finish step exactly as classic decode applies it (#2168).
     pub(crate) context_bound: ContextBound,
     /// The same split for each row of a batched window, in window order
     /// (issue #2190); empty for B=1 bursts.
-    pub(crate) prefill_boundaries: Vec<Option<usize>>,
+    pub(crate) prefill_boundaries: Vec<mlxcel_core::prefill_plan::PrefillSplits>,
 }
 
 impl<'a> BurstContext<'a> {

@@ -67,7 +67,7 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
                     reason: format!("Gemma4 batched MTP target: prompt row {r} must be non-empty"),
                 });
             }
-            let boundary = self.prefill_boundaries.get(r).copied().flatten();
+            let boundary = self.prefill_boundaries.get(r).copied().unwrap_or_default();
             rows.push(self.prefill_row(prompt, boundary, sampler));
         }
 
@@ -108,7 +108,7 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
     fn prefill_row(
         &self,
         prompt: &[i32],
-        boundary: Option<usize>,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
         sampler: &SamplingConfig,
     ) -> PrefilledRow {
         let mut caches = self.wrapper.make_speculative_caches();

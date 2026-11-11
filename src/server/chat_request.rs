@@ -157,6 +157,14 @@ pub(crate) struct PreparedChatRequest {
     /// sampled ids. Tokenizing this string is therefore the only way to obtain
     /// a token vector that is guaranteed to prefix the next turn's prompt.
     pub(crate) history_prompt: Option<String>,
+    /// The system-prompt root render (#2885 Part B): the leading system
+    /// messages and tool list as the template renders them, followed by the
+    /// first user turn's header, cut where that turn's content would start.
+    /// `None` unless `MLXCEL_PROMPT_CACHE_SYSTEM_ROOT` is on, the history render
+    /// exists, the request opens with system messages or tools followed by a
+    /// user turn, and the cut is a strictly shorter text prefix of
+    /// [`Self::history_prompt`]. See [`render_system_root`].
+    pub(crate) root_prompt: Option<String>,
     pub(crate) image_data: Vec<Vec<u8>>,
     /// Cardinalities before and after the tolerant media resolver.
     ///
@@ -195,7 +203,24 @@ pub(crate) struct PreparedChatRequest {
     pub(crate) videos: Vec<ResolvedVideo>,
 }
 
+/// The boundary renders a prepared chat request hands to the prompt-cache
+/// context: the history render (#1143) and the system-prompt root (#2885).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct BoundaryRenders<'a> {
+    pub(crate) history: Option<&'a str>,
+    pub(crate) root: Option<&'a str>,
+}
+
 impl PreparedChatRequest {
+    /// The boundary renders for
+    /// [`super::routes::chat::build_prompt_cache_request_context`].
+    pub(crate) fn boundary_renders(&self) -> BoundaryRenders<'_> {
+        BoundaryRenders {
+            history: self.history_prompt.as_deref(),
+            root: self.root_prompt.as_deref(),
+        }
+    }
+
     /// Whether the request resolved any image, audio or video. Each such part
     /// is one placeholder in [`prompt`](Self::prompt) and becomes its soft
     /// tokens only on the worker, so the prompt text alone cannot be counted
@@ -1006,7 +1031,12 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
             || processor.supports_audio_content()
             || !request.audio_inputs().is_empty());
 
-    let (prompt, history_render) = if has_tool_fields(request)
+    // The system-prompt root (#2885 Part B) rides the history render: same
+    // gates, plus its own opt-in switch.
+    let render_system_root_prefix =
+        render_history_prefix && super::prompt_cache::system_root_min_prompt_tokens().is_some();
+
+    let (prompt, history_render, root_render) = if has_tool_fields(request)
         || has_reasoning_fields(request)
         || media_parts_need_raw_render
     {
@@ -1038,7 +1068,19 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
                         &merged_kwargs,
                     )
                 });
-                (rendered, history)
+                let root = render_system_root_prefix
+                    .then(|| root_raw_messages(&raw_messages, effective_tools))
+                    .flatten()
+                    .and_then(|root_messages| {
+                        processor
+                            .apply_raw_history_with_kwargs(
+                                &root_messages,
+                                effective_tools,
+                                &merged_kwargs,
+                            )
+                            .ok()
+                    });
+                (rendered, history, root)
             }
             Err(err) => {
                 // A deliberate template refusal is a client error, not a render
@@ -1052,7 +1094,7 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
                 // Security (H-1): use pre-stripped messages so that a
                 // template-breaking payload cannot bypass rolling-checkpoint
                 // stripping and leak prior <think> blocks to the model prompt.
-                (render_simple_fallback(&stripped), None)
+                (render_simple_fallback(&stripped), None, None)
             }
         }
     } else {
@@ -1066,7 +1108,19 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
                     history_boundary_render_attempted();
                     processor.apply_history_with_kwargs(&messages, effective_tools, &merged_kwargs)
                 });
-                (rendered, history)
+                let root = render_system_root_prefix
+                    .then(|| root_typed_messages(&messages, effective_tools))
+                    .flatten()
+                    .and_then(|root_messages| {
+                        processor
+                            .apply_history_with_kwargs(
+                                &root_messages,
+                                effective_tools,
+                                &merged_kwargs,
+                            )
+                            .ok()
+                    });
+                (rendered, history, root)
             }
             Err(err) => {
                 // Same split as the raw/multimodal arm above: a template that
@@ -1075,7 +1129,7 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
                 let err = reject_or_return_render_error(err)?;
                 tracing::warn!("Chat template render failed, using fallback: {:#}", err);
                 // Security (H-1): use pre-stripped messages for the same reason.
-                (render_simple_fallback(&messages), None)
+                (render_simple_fallback(&messages), None, None)
             }
         }
     };
@@ -1100,6 +1154,10 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
             None
         }
     });
+
+    let root_prompt = history_prompt
+        .as_deref()
+        .and_then(|history| system_root_prefix(root_render, history));
 
     // Validate the per-request soft-token budget before any image is fetched or
     // decoded: an unsupported `detail` / `max_soft_tokens` is a client error, so
@@ -1153,6 +1211,7 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
         prompt_token_ids: None,
         assistant_prefill,
         history_prompt,
+        root_prompt,
         image_data,
         media,
         image_soft_tokens,
@@ -1270,6 +1329,7 @@ fn prepare_kimi_k3_chat_request(
         prompt_token_ids: Some(rendered.ids),
         assistant_prefill: None,
         history_prompt: None,
+        root_prompt: None,
         image_data,
         media,
         image_soft_tokens: None,
@@ -1881,6 +1941,80 @@ fn message_has_effective_input(message: &Message) -> bool {
 #[cfg(test)]
 pub(super) fn build_raw_json_messages(request: &ChatCompletionRequest) -> serde_json::Value {
     build_raw_json_messages_with_thinking(request, true)
+}
+
+/// Content of the placeholder user turn the system-prompt root is rendered
+/// with (#2885 Part B). The render is cut where this text starts, so it only
+/// has to be a string no template rewrites and no real system prompt contains.
+const SYSTEM_ROOT_SENTINEL: &str = "\u{2063}mlxcel-system-root-2885\u{2063}";
+
+/// Number of leading `system` / `developer` messages, when the message after
+/// them is a `user` turn; `None` otherwise.
+fn leading_system_messages<'a>(roles: impl Iterator<Item = Option<&'a str>>) -> Option<usize> {
+    let mut count = 0;
+    for role in roles {
+        match role {
+            Some("system" | "developer") => count += 1,
+            Some("user") => return Some(count),
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn has_any_tool(tools: Option<&[Tool]>) -> bool {
+    tools.is_some_and(|tools| !tools.is_empty())
+}
+
+/// The raw-JSON message list the system-prompt root is rendered from: the
+/// request's leading system messages followed by one user turn holding
+/// [`SYSTEM_ROOT_SENTINEL`]. `None` when the request does not open with system
+/// messages or tools followed by a user turn.
+fn root_raw_messages(
+    messages: &serde_json::Value,
+    tools: Option<&[Tool]>,
+) -> Option<serde_json::Value> {
+    let array = messages.as_array()?;
+    let count = leading_system_messages(
+        array
+            .iter()
+            .map(|m| m.get("role").and_then(serde_json::Value::as_str)),
+    )?;
+    if count == 0 && !has_any_tool(tools) {
+        return None;
+    }
+    let mut root: Vec<serde_json::Value> = array[..count].to_vec();
+    root.push(serde_json::json!({"role": "user", "content": SYSTEM_ROOT_SENTINEL}));
+    Some(serde_json::Value::Array(root))
+}
+
+/// [`root_raw_messages`] for the typed render path.
+fn root_typed_messages(
+    messages: &[ChatMessage],
+    tools: Option<&[Tool]>,
+) -> Option<Vec<ChatMessage>> {
+    let count = leading_system_messages(messages.iter().map(|m| Some(m.role.as_str())))?;
+    if count == 0 && !has_any_tool(tools) {
+        return None;
+    }
+    let mut root = messages[..count].to_vec();
+    root.push(ChatMessage {
+        role: "user".to_string(),
+        content: SYSTEM_ROOT_SENTINEL.to_string(),
+    });
+    Some(root)
+}
+
+/// Cut a system-root render at its sentinel and keep it only when it is a
+/// non-empty, strictly shorter prefix of the history render (which is itself a
+/// prefix of the prompt). Everything before the sentinel is what any chat with
+/// the same system messages and tools renders before its first user content.
+fn system_root_prefix(rendered: Option<String>, history: &str) -> Option<String> {
+    let rendered = rendered?;
+    let cut = rendered.find(SYSTEM_ROOT_SENTINEL)?;
+    let root = &rendered[..cut];
+    (!root.is_empty() && root.len() < history.len() && history.starts_with(root))
+        .then(|| root.to_string())
 }
 
 /// build raw JSON messages with optional rolling-checkpoint

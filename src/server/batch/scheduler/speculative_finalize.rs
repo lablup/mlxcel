@@ -297,10 +297,7 @@ impl BatchScheduler {
             let context_bound = self.context_bound();
             // Each row's classic history-boundary split, so the row-wise
             // Gemma 4 prefill builds the KV classic serving builds (#2190).
-            let prefill_boundaries = window
-                .iter()
-                .map(|row| self.history_boundary_split(row))
-                .collect();
+            let prefill_boundaries = window.iter().map(|row| self.snapshot_splits(row)).collect();
             let ctx = crate::server::batch::speculative_burst::BurstContext {
                 model: self.engine.model(),
                 tokenizer: &self.tokenizer,
@@ -309,7 +306,7 @@ impl BatchScheduler {
                 prefill_chunk_size: self.prefill_chunk_policy.alone,
                 // Classic-step probes are a B=1 profiling concern (#736).
                 profile_probe_rounds: 0,
-                prefill_boundary: None,
+                prefill_boundary: mlxcel_core::prefill_plan::PrefillSplits::NONE,
                 context_bound,
                 prefill_boundaries,
             };
@@ -414,7 +411,7 @@ impl BatchScheduler {
 
             // Classic prefill splits a chat prompt at its history boundary;
             // the row-wise Gemma 4 prefill mirrors that partition (#2160).
-            let prefill_boundary = self.history_boundary_split(&seq);
+            let prefill_boundary = self.snapshot_splits(&seq);
             let context_bound = self.context_bound();
             let ctx = crate::server::batch::speculative_burst::BurstContext {
                 model: self.engine.model(),

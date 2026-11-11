@@ -1212,6 +1212,8 @@ fn compose_prompt_cache_key_folds_request_multimodal_digest() {
         mm_digest: MultimodalDigest::empty(),
         history_prompt: None,
         history_prefix_tokens: None,
+        root_prompt: None,
+        root_prefix_tokens: None,
     };
     let image_a = PromptCacheRequestContext {
         mm_digest: multimodal_digest_from_vecs(&[b"IMAGE-A".to_vec()], &[]),
@@ -2301,4 +2303,33 @@ fn a_string_stop_outranks_a_fired_generation_bound() {
         seq.state,
         SequenceState::Finished(FinishReason::StopSequence)
     ));
+}
+
+#[test]
+fn system_root_len_drops_the_seam_token_and_stays_before_the_history_boundary() {
+    use super::system_root_len;
+
+    let prompt: Vec<i32> = (0..100).collect();
+    // The root render tokenizes to the first 21 prompt tokens; the last one is
+    // the user-header seam and is dropped.
+    let root: Vec<i32> = (0..21).collect();
+    assert_eq!(system_root_len(&root, &prompt, Some(60), 4, 0), Some(20));
+    // A seam that merged differently: the common prefix is shorter, minus one.
+    let mut merged = root.clone();
+    merged[20] = 9999;
+    assert_eq!(system_root_len(&merged, &prompt, Some(60), 4, 0), Some(19));
+    // The opt-in prompt-length threshold.
+    assert_eq!(system_root_len(&root, &prompt, Some(60), 4, 101), None);
+    assert_eq!(system_root_len(&root, &prompt, Some(60), 4, 100), Some(20));
+    // Below the store minimum.
+    assert_eq!(system_root_len(&root, &prompt, Some(60), 21, 0), None);
+    // Must end strictly before the history boundary (or the prompt end).
+    assert_eq!(system_root_len(&root, &prompt, Some(20), 4, 0), None);
+    assert_eq!(system_root_len(&root, &prompt, Some(21), 4, 0), Some(20));
+    assert_eq!(system_root_len(&root, &prompt[..20], None, 4, 0), Some(19));
+    assert_eq!(system_root_len(&root, &prompt[..5], None, 5, 0), None);
+    assert_eq!(system_root_len(&root, &prompt[..21], None, 4, 0), Some(20));
+    // Nothing in common.
+    assert_eq!(system_root_len(&[500], &prompt, None, 0, 0), None);
+    assert_eq!(system_root_len(&[], &prompt, None, 0, 0), None);
 }

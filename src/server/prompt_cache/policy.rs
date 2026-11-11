@@ -104,6 +104,90 @@ pub fn boundary_snapshot_disabled() -> bool {
     })
 }
 
+/// Default prompt length at or above which the system-prompt root snapshot is
+/// taken once `MLXCEL_PROMPT_CACHE_SYSTEM_ROOT` is on (#2885 Part B).
+pub const SYSTEM_ROOT_DEFAULT_MIN_PROMPT_TOKENS: usize = 2048;
+
+/// Opt-in switch for the system-prompt root snapshot (#2885 Part B).
+///
+/// A snapshot-only family can reuse a stored state only when a new prompt
+/// starts with exactly its tokens. The history boundary (#1143) covers the next
+/// turn of the same chat; it does not cover a fresh chat that shares only the
+/// system prompt and tool list with earlier ones, which is the common shape of
+/// an agent client. With this switch on, a chat prompt of at least the returned
+/// number of tokens also stores a snapshot at the end of its system block (the
+/// system messages and the tool list, plus the first user turn's header), so
+/// the next chat with the same system prompt starts after it.
+///
+/// `MLXCEL_PROMPT_CACHE_SYSTEM_ROOT`:
+/// * unset, empty or `0`: off (the default);
+/// * `1`, `on` or `true`: on, for prompts of at least
+///   [`SYSTEM_ROOT_DEFAULT_MIN_PROMPT_TOKENS`] tokens;
+/// * any other integer: on, with that minimum prompt length.
+///
+/// Ignored when the history boundary itself is disabled
+/// ([`boundary_snapshot_disabled`]), since both ride the same render and the
+/// same prefill split. Read once per process.
+///
+/// Used by: `server::chat_request::prepare_chat_request_with_cache`,
+/// `server::batch::scheduler::BatchScheduler::resolve_history_boundary`
+pub fn system_root_min_prompt_tokens() -> Option<usize> {
+    #[cfg(test)]
+    if let Some(value) = SYSTEM_ROOT_TEST_OVERRIDE.with(std::cell::Cell::get) {
+        return value;
+    }
+    static VALUE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        if boundary_snapshot_disabled() {
+            return None;
+        }
+        parse_system_root(
+            std::env::var("MLXCEL_PROMPT_CACHE_SYSTEM_ROOT")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static SYSTEM_ROOT_TEST_OVERRIDE: std::cell::Cell<Option<Option<usize>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Pin [`system_root_min_prompt_tokens`] for the current test thread until the
+/// guard drops, without touching the process environment.
+#[cfg(test)]
+pub(crate) fn override_system_root_for_test(value: Option<usize>) -> impl Drop {
+    struct Reset(Option<Option<usize>>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SYSTEM_ROOT_TEST_OVERRIDE.with(|cell| cell.set(self.0));
+        }
+    }
+    let previous = SYSTEM_ROOT_TEST_OVERRIDE.with(|cell| cell.replace(Some(value)));
+    Reset(previous)
+}
+
+/// Parse an `MLXCEL_PROMPT_CACHE_SYSTEM_ROOT` value; see
+/// [`system_root_min_prompt_tokens`]. Invalid text warns once and stays off.
+pub(crate) fn parse_system_root(value: Option<&str>) -> Option<usize> {
+    let raw = value?.trim();
+    match raw.to_ascii_lowercase().as_str() {
+        "" | "0" | "off" | "false" => None,
+        "1" | "on" | "true" => Some(SYSTEM_ROOT_DEFAULT_MIN_PROMPT_TOKENS),
+        other => match other.parse::<usize>() {
+            Ok(min) => Some(min),
+            Err(_) => {
+                tracing::warn!(
+                    "MLXCEL_PROMPT_CACHE_SYSTEM_ROOT={raw:?} is neither a switch nor a token count; the system-prompt root snapshot stays off"
+                );
+                None
+            }
+        },
+    }
+}
+
 /// Operator kill switch for the background prompt-cache warm-up (issue #1144).
 ///
 /// Separate from [`boundary_snapshot_disabled`] on purpose. The boundary
@@ -354,5 +438,33 @@ impl fmt::Display for PromptCacheStats {
             self.snapshot_lookups,
             self.snapshot_self_evictions,
         )
+    }
+}
+
+#[cfg(test)]
+mod system_root_tests {
+    use super::{SYSTEM_ROOT_DEFAULT_MIN_PROMPT_TOKENS, parse_system_root};
+
+    #[test]
+    fn system_root_switch_parses_off_on_and_thresholds() {
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("off"),
+            Some("false"),
+            Some("nope"),
+        ] {
+            assert_eq!(parse_system_root(off), None, "{off:?}");
+        }
+        for on in ["1", "on", "TRUE", " true "] {
+            assert_eq!(
+                parse_system_root(Some(on)),
+                Some(SYSTEM_ROOT_DEFAULT_MIN_PROMPT_TOKENS),
+                "{on:?}"
+            );
+        }
+        assert_eq!(parse_system_root(Some("4096")), Some(4096));
+        assert_eq!(parse_system_root(Some("2")), Some(2));
     }
 }

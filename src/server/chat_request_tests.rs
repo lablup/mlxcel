@@ -4228,3 +4228,119 @@ fn queued_video_decode_returns_without_decoding_once_cancelled() {
 
     assert!(decoded.is_none());
 }
+
+/// ChatML with a Qwen3-style refusal to render a message list that has no user
+/// query, which is why the system-prompt root is rendered with a placeholder
+/// user turn rather than with the system messages alone (#2885 Part B).
+fn chatml_requiring_user_template() -> String {
+    "{%- set ns = namespace(has_user=false) -%}\
+     {%- for m in messages %}{% if m.role == 'user' %}{% set ns.has_user = true %}{% endif %}{% endfor -%}\
+     {%- if not ns.has_user %}{{ raise_exception('No user query found in messages.') }}{% endif -%}\
+     {%- for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor -%}\
+     {%- if add_generation_prompt %}<|im_start|>assistant\n{% endif -%}"
+        .to_string()
+}
+
+async fn prepare_cached(
+    processor: &ChatTemplateProcessor,
+    messages: Vec<Message>,
+) -> super::PreparedChatRequest {
+    prepare_chat_request_with_cache(
+        processor,
+        &cached_request(messages),
+        None,
+        true,
+        true,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn system_root_render_is_the_shared_prefix_of_chats_with_the_same_system_prompt() {
+    let _root_on = crate::server::prompt_cache::policy::override_system_root_for_test(Some(0));
+    let processor = ChatTemplateProcessor::with_template(chatml_requiring_user_template());
+
+    let chat_a = prepare_cached(
+        &processor,
+        vec![
+            text_message(Role::System, "You are a coding agent."),
+            text_message(Role::User, "q1"),
+            text_message(Role::Assistant, "a1"),
+            text_message(Role::User, "q2"),
+        ],
+    )
+    .await;
+    let chat_b = prepare_cached(
+        &processor,
+        vec![
+            text_message(Role::System, "You are a coding agent."),
+            text_message(Role::User, "a different first question"),
+        ],
+    )
+    .await;
+
+    let root = chat_a.root_prompt.as_deref().expect("chat A has a root");
+    assert_eq!(
+        root,
+        "<|im_start|>system\nYou are a coding agent.<|im_end|>\n<|im_start|>user\n"
+    );
+    let history = chat_a
+        .history_prompt
+        .as_deref()
+        .expect("chat A has a history");
+    assert!(history.starts_with(root) && root.len() < history.len());
+    assert!(chat_a.prompt.starts_with(root));
+    assert!(
+        chat_b.prompt.starts_with(root),
+        "a new chat shares the root"
+    );
+    assert_eq!(chat_b.root_prompt.as_deref(), Some(root));
+    assert_eq!(chat_a.boundary_renders().root, Some(root));
+}
+
+#[tokio::test]
+async fn system_root_is_absent_without_a_system_block_or_with_the_switch_off() {
+    let processor = ChatTemplateProcessor::with_template(chatml_requiring_user_template());
+    {
+        let _root_on = crate::server::prompt_cache::policy::override_system_root_for_test(Some(0));
+        // No system message and no tools: nothing is shared ahead of the user.
+        let no_system = prepare_cached(
+            &processor,
+            vec![
+                text_message(Role::User, "q1"),
+                text_message(Role::Assistant, "a1"),
+                text_message(Role::User, "q2"),
+            ],
+        )
+        .await;
+        assert!(no_system.history_prompt.is_some());
+        assert!(no_system.root_prompt.is_none());
+        // The turn after the system block is not a user turn.
+        let assistant_first = prepare_cached(
+            &processor,
+            vec![
+                text_message(Role::System, "sys"),
+                text_message(Role::Assistant, "a0"),
+                text_message(Role::User, "q1"),
+            ],
+        )
+        .await;
+        assert!(assistant_first.root_prompt.is_none());
+    }
+    let _root_off = crate::server::prompt_cache::policy::override_system_root_for_test(None);
+    let off = prepare_cached(
+        &processor,
+        vec![
+            text_message(Role::System, "sys"),
+            text_message(Role::User, "q1"),
+            text_message(Role::Assistant, "a1"),
+            text_message(Role::User, "q2"),
+        ],
+    )
+    .await;
+    assert!(off.history_prompt.is_some());
+    assert!(off.root_prompt.is_none());
+}

@@ -83,7 +83,7 @@ impl BatchScheduler {
         PrefillPlan::resume_at(
             seq.prompt_tokens.len(),
             seq.prefill_start_offset,
-            self.history_boundary_split(seq),
+            self.snapshot_splits(seq),
             seq.prefill_offset,
             self.prefill_chunk_for_tick(),
             caps,
@@ -117,7 +117,7 @@ impl BatchScheduler {
         PrefillPlan::with_prefix(
             seq.prompt_tokens.len(),
             seq.prefill_start_offset,
-            self.history_boundary_split(seq),
+            self.snapshot_splits(seq),
             chunk,
             caps,
         )
@@ -245,7 +245,7 @@ impl BatchScheduler {
         while let Some(piece) = plan.piece_starting_at(seq.prefill_offset).cloned() {
             logits = Some(self.run_prefill_piece(seq, plan, &piece, continuation)?);
             if plan.ends_at_boundary(&piece) {
-                self.insert_history_boundary_snapshot(seq, piece.range.end);
+                self.insert_boundary_snapshot(seq, piece.range.end);
                 // Return the segment's intermediates to the allocator before
                 // the next piece runs; without this they stay resident through
                 // the rest of the prefill.

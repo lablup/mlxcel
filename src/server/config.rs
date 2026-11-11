@@ -175,6 +175,19 @@ pub struct PromptCacheRequestContext {
     /// tokenizer was available on the dispatch thread, or when the clipped
     /// prefix turned out too short to be worth a snapshot.
     pub history_prefix_tokens: Option<Vec<i32>>,
+
+    /// The system-prompt root render (#2885 Part B): the request's leading
+    /// system messages and tool list followed by the first user turn's header,
+    /// cut where that turn's content starts. Same two-stage life as
+    /// [`Self::history_prompt`] / [`Self::history_prefix_tokens`]. `None`
+    /// unless `MLXCEL_PROMPT_CACHE_SYSTEM_ROOT` is on and the render is a text
+    /// prefix of the prompt.
+    pub root_prompt: Option<String>,
+
+    /// Tokenization of [`Self::root_prompt`], clipped by the scheduler to a
+    /// stable prefix of the live prompt tokens that ends strictly before the
+    /// history boundary. `None` when no root snapshot applies to this request.
+    pub root_prefix_tokens: Option<Vec<i32>>,
 }
 
 /// Bridge between server request params and `mlxcel-core` `SamplingConfig`.

@@ -349,7 +349,7 @@ impl BatchScheduler {
             let pad = PrefillPlan::next_piece_at(
                 total,
                 seq.prefill_start_offset,
-                self.history_boundary_split(seq),
+                self.snapshot_splits(seq),
                 seq.prefill_offset,
                 self.prefill_chunk_for_tick(),
                 caps,

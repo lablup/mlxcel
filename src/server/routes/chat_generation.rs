@@ -215,11 +215,12 @@ pub(crate) async fn prepare_chat_generation<'r>(
         request,
         &prepared.image_data,
         &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
+        prepared.boundary_renders(),
     );
     let warmup_ctx = prompt_cache_ctx.as_ref().map(|ctx| {
         let mut c = ctx.clone();
         c.history_prompt = None;
+        c.root_prompt = None;
         c
     });
     let primed_open_thinking =

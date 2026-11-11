@@ -28,22 +28,23 @@
 //! The partition, in order:
 //!
 //! 1. The adopted prefix `[0..adopted)` is never forwarded.
-//! 2. When a history boundary applies (a chat prompt's rendering without its
-//!    generation prompt, strictly inside the remaining span), the segment up
-//!    to it is one unpadded piece, whatever the chunk size: the snapshot the
-//!    prompt cache stores there must describe exactly the keyed tokens, and
-//!    several snapshot families cannot rewind pad positions out of their
-//!    recurrent state. The Gemma 4 MTP burst mirrors this partition through
-//!    [`PrefillPlan::ranges`].
+//! 2. Each snapshot boundary strictly inside the remaining span (a
+//!    [`PrefillSplits`]: the history boundary, a chat prompt's rendering
+//!    without its generation prompt, and optionally the system-prompt root
+//!    before it) ends one unpadded piece, whatever the chunk size: the
+//!    snapshot the prompt cache stores there must describe exactly the keyed
+//!    tokens, and several snapshot families cannot rewind pad positions out
+//!    of their recurrent state. The Gemma 4 MTP burst mirrors this partition
+//!    through [`PrefillPlan::ranges`].
 //! 3. What remains is cut into pieces of at most `chunk` tokens, starting at
-//!    the boundary (or at the adopted offset), when chunking applies: a
+//!    the last boundary (or at the adopted offset), when chunking applies: a
 //!    non-zero chunk, a model that supports a multi-call prefill, token input
 //!    rather than pre-merged embeddings, and more remaining tokens than one
 //!    chunk. Otherwise the remainder is one piece.
 //! 4. A piece is padded to the Neural Accelerator tile when alignment is on,
 //!    the model supports padded prefill, and the input can be padded (tokens
 //!    always; embedding input only where the executor extends the embedding
-//!    rows). A piece ending at the history boundary is never padded.
+//!    rows). A piece ending at a snapshot boundary is never padded.
 //!
 //! The direct engine uses [`prefill_chunk_len`]. The server uses
 //! [`PrefillChunkPolicy`]: the larger default while no other sequence is
@@ -276,12 +277,114 @@ impl PrefillPiece {
     }
 }
 
+/// Maximum number of snapshot boundaries one plan splits at.
+const MAX_SPLITS: usize = 4;
+
+/// The snapshot boundaries a prefill is split at, ascending and distinct.
+///
+/// The prompt cache stores a model-state snapshot at each of them, so each
+/// one ends an unpadded piece (see the module docs). Today a chat request
+/// carries at most two: the system-prompt root (#2885 Part B) and the history
+/// boundary (#1143). `Option<usize>` converts into a single-boundary set, which
+/// keeps every caller that only knows the history boundary unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct PrefillSplits {
+    points: [usize; MAX_SPLITS],
+    len: usize,
+}
+
+impl PrefillSplits {
+    /// No boundary.
+    pub const NONE: Self = Self {
+        points: [0; MAX_SPLITS],
+        len: 0,
+    };
+
+    /// Build from any boundaries: sorted, deduplicated, and capped at the
+    /// first [`MAX_SPLITS`] (the deepest ones are dropped, which only costs a
+    /// snapshot, never correctness).
+    #[must_use]
+    pub fn from_points(points: &[usize]) -> Self {
+        let mut sorted: Vec<usize> = points.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let mut out = Self::NONE;
+        for p in sorted.into_iter().take(MAX_SPLITS) {
+            out.points[out.len] = p;
+            out.len += 1;
+        }
+        out
+    }
+
+    /// The boundaries, ascending.
+    #[must_use]
+    pub fn as_slice(&self) -> &[usize] {
+        &self.points[..self.len]
+    }
+
+    /// Whether there is no boundary.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The deepest boundary (the history boundary when one is present).
+    #[must_use]
+    pub fn last(&self) -> Option<usize> {
+        self.as_slice().last().copied()
+    }
+
+    /// Whether `pos` is one of the boundaries.
+    #[must_use]
+    pub fn contains(&self, pos: usize) -> bool {
+        self.as_slice().contains(&pos)
+    }
+
+    /// The first boundary strictly after `pos`.
+    #[must_use]
+    pub fn next_after(&self, pos: usize) -> Option<usize> {
+        self.as_slice().iter().copied().find(|&b| b > pos)
+    }
+
+    fn retain(self, keep: impl Fn(usize) -> bool) -> Self {
+        let mut out = Self::NONE;
+        for &p in self.as_slice() {
+            if keep(p) {
+                out.points[out.len] = p;
+                out.len += 1;
+            }
+        }
+        out
+    }
+}
+
+impl From<Option<usize>> for PrefillSplits {
+    fn from(boundary: Option<usize>) -> Self {
+        match boundary {
+            Some(b) => Self::from_points(&[b]),
+            None => Self::NONE,
+        }
+    }
+}
+
+impl From<&[usize]> for PrefillSplits {
+    fn from(points: &[usize]) -> Self {
+        Self::from_points(points)
+    }
+}
+
+impl<const N: usize> From<[usize; N]> for PrefillSplits {
+    fn from(points: [usize; N]) -> Self {
+        Self::from_points(&points)
+    }
+}
+
 /// The partition of one prompt's prefill. See the module docs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PrefillPlan {
     prompt_len: usize,
     adopted: usize,
-    boundary: Option<usize>,
+    splits: PrefillSplits,
     chunk: Option<usize>,
     pad_mask: bool,
     pieces: Vec<PrefillPiece>,
@@ -296,23 +399,23 @@ impl PrefillPlan {
     }
 
     /// Plan a prefill whose first `adopted` tokens are already in the KV
-    /// state (a prompt-cache hit) and whose history boundary, when inside the
-    /// remaining span, splits it.
+    /// state (a prompt-cache hit) and whose snapshot boundaries, those inside
+    /// the remaining span, split it.
     #[must_use]
     pub fn with_prefix(
         prompt_len: usize,
         adopted: usize,
-        boundary: Option<usize>,
+        splits: impl Into<PrefillSplits>,
         chunk: usize,
         caps: PrefillCaps,
     ) -> Self {
-        let (start, boundary, can_pad, pad_mask) =
-            plan_metadata(prompt_len, adopted, boundary, caps);
+        let (start, splits, can_pad, pad_mask) =
+            plan_metadata(prompt_len, adopted, splits.into(), caps);
         let remaining = prompt_len - start;
         let chunk = eligible_chunk(chunk, caps).filter(|chunk| remaining > *chunk);
         let mut pieces = Vec::new();
         let mut cursor = start;
-        if let Some(boundary) = boundary {
+        for &boundary in splits.as_slice() {
             pieces.push(piece_to_boundary(cursor, boundary));
             cursor = boundary;
         }
@@ -322,7 +425,7 @@ impl PrefillPlan {
         Self {
             prompt_len,
             adopted: start,
-            boundary,
+            splits,
             chunk,
             pad_mask,
             pieces,
@@ -334,35 +437,41 @@ impl PrefillPlan {
     /// point of the new partition.
     ///
     /// The initial call (`cursor <= adopted`) is exactly [`Self::with_prefix`].
-    /// A continuation retains that plan's adopted-prefix and history-boundary
-    /// metadata, then partitions only `[cursor, prompt_len)`. The boundary
-    /// segment has already run before a continuation is parked.
+    /// A continuation retains that plan's adopted-prefix and snapshot-boundary
+    /// metadata, then partitions only `[cursor, prompt_len)`: boundaries after
+    /// the cursor still end their own pieces, and the rest is chunked from the
+    /// last of them. A continuation never starts inside a boundary segment,
+    /// because each segment is one piece.
     #[must_use]
     pub fn resume_at(
         prompt_len: usize,
         adopted: usize,
-        boundary: Option<usize>,
+        splits: impl Into<PrefillSplits>,
         cursor: usize,
         chunk: usize,
         caps: PrefillCaps,
     ) -> Self {
-        let (adopted, boundary, can_pad, pad_mask) =
-            plan_metadata(prompt_len, adopted, boundary, caps);
+        let (adopted, splits, can_pad, pad_mask) =
+            plan_metadata(prompt_len, adopted, splits.into(), caps);
         if cursor <= adopted {
-            return Self::with_prefix(prompt_len, adopted, boundary, chunk, caps);
+            return Self::with_prefix(prompt_len, adopted, splits, chunk, caps);
         }
 
         debug_assert!(cursor <= prompt_len);
-        debug_assert!(boundary.is_none_or(|boundary| cursor >= boundary));
         let cursor = cursor.min(prompt_len);
         let chunk = eligible_chunk(chunk, caps);
         let mut pieces = Vec::new();
-        let step = chunk.unwrap_or((prompt_len - cursor).max(1));
-        append_pieces(&mut pieces, cursor, prompt_len, step, can_pad);
+        let mut at = cursor;
+        for &boundary in splits.as_slice().iter().filter(|&&b| b > cursor) {
+            pieces.push(piece_to_boundary(at, boundary));
+            at = boundary;
+        }
+        let step = chunk.unwrap_or((prompt_len - at).max(1));
+        append_pieces(&mut pieces, at, prompt_len, step, can_pad);
         Self {
             prompt_len,
             adopted,
-            boundary,
+            splits,
             chunk,
             pad_mask,
             pieces,
@@ -381,10 +490,17 @@ impl PrefillPlan {
         self.adopted
     }
 
-    /// The history boundary the plan splits at, when one applies.
+    /// The deepest snapshot boundary the plan splits at (the history
+    /// boundary), when one applies.
     #[must_use]
     pub fn boundary(&self) -> Option<usize> {
-        self.boundary
+        self.splits.last()
+    }
+
+    /// Every snapshot boundary the plan splits at, ascending.
+    #[must_use]
+    pub fn splits(&self) -> PrefillSplits {
+        self.splits
     }
 
     /// The chunk the remainder is cut into, when chunking applies.
@@ -435,29 +551,26 @@ impl PrefillPlan {
     pub fn next_piece_at(
         prompt_len: usize,
         adopted: usize,
-        boundary: Option<usize>,
+        splits: impl Into<PrefillSplits>,
         cursor: usize,
         chunk: usize,
         caps: PrefillCaps,
     ) -> Option<PrefillPiece> {
-        let (adopted, boundary, can_pad) = plan_geometry(prompt_len, adopted, boundary, caps);
+        let (adopted, splits, can_pad) = plan_geometry(prompt_len, adopted, splits.into(), caps);
         if cursor < adopted || cursor >= prompt_len {
             return None;
         }
-        if cursor == adopted {
-            if let Some(boundary) = boundary {
-                return Some(piece_to_boundary(cursor, boundary));
-            }
-            let remaining = prompt_len - cursor;
-            let step = eligible_chunk(chunk, caps)
-                .filter(|chunk| remaining > *chunk)
-                .unwrap_or(remaining.max(1));
-            return piece_from_cursor(cursor, prompt_len, step, can_pad);
+        if let Some(boundary) = splits.next_after(cursor) {
+            return Some(piece_to_boundary(cursor, boundary));
         }
-
-        debug_assert!(boundary.is_none_or(|boundary| cursor >= boundary));
         let remaining = prompt_len - cursor;
-        let step = eligible_chunk(chunk, caps).unwrap_or(remaining.max(1));
+        let step = if cursor == adopted {
+            eligible_chunk(chunk, caps)
+                .filter(|chunk| remaining > *chunk)
+                .unwrap_or(remaining.max(1))
+        } else {
+            eligible_chunk(chunk, caps).unwrap_or(remaining.max(1))
+        };
         piece_from_cursor(cursor, prompt_len, step, can_pad)
     }
 
@@ -467,11 +580,11 @@ impl PrefillPlan {
         piece.range.end >= self.prompt_len
     }
 
-    /// Whether `piece` ends at the history boundary, where the prompt cache
+    /// Whether `piece` ends at a snapshot boundary, where the prompt cache
     /// snapshots the model state before the next piece runs.
     #[must_use]
     pub fn ends_at_boundary(&self, piece: &PrefillPiece) -> bool {
-        self.boundary == Some(piece.range.end)
+        self.splits.contains(piece.range.end)
     }
 
     /// Whether a padded piece needs an explicit padding mask (the model did
@@ -519,29 +632,31 @@ impl PrefillPlan {
 fn plan_metadata(
     prompt_len: usize,
     adopted: usize,
-    boundary: Option<usize>,
+    splits: PrefillSplits,
     caps: PrefillCaps,
-) -> (usize, Option<usize>, bool, bool) {
-    let (adopted, boundary, can_pad) = plan_geometry(prompt_len, adopted, boundary, caps);
+) -> (usize, PrefillSplits, bool, bool) {
+    let (adopted, splits, can_pad) = plan_geometry(prompt_len, adopted, splits, caps);
     let pad_mask = !caps.supports_maskless_padded_prefill || force_padded_prefill_array_mask();
-    (adopted, boundary, can_pad, pad_mask)
+    (adopted, splits, can_pad, pad_mask)
 }
 
 fn plan_geometry(
     prompt_len: usize,
     adopted: usize,
-    boundary: Option<usize>,
+    splits: PrefillSplits,
     caps: PrefillCaps,
-) -> (usize, Option<usize>, bool) {
+) -> (usize, PrefillSplits, bool) {
     let adopted = adopted.min(prompt_len);
-    // Embedding input is consumed whole and never split, so a history
+    // Embedding input is consumed whole and never split, so a snapshot
     // boundary does not apply to it: honoring one would cut the embedding
     // rows into two forwards and advance a cursor the executor does not keep.
-    let boundary = boundary.filter(|boundary| {
-        !caps.is_embedding_input() && *boundary > adopted && *boundary < prompt_len
-    });
+    let splits = if caps.is_embedding_input() {
+        PrefillSplits::NONE
+    } else {
+        splits.retain(|boundary| boundary > adopted && boundary < prompt_len)
+    };
     let can_pad = caps.can_pad();
-    (adopted, boundary, can_pad)
+    (adopted, splits, can_pad)
 }
 
 fn eligible_chunk(chunk: usize, caps: PrefillCaps) -> Option<usize> {

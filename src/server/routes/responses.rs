@@ -400,7 +400,7 @@ async fn non_stream_create_response(
         &translated.chat_request,
         &prepared.image_data,
         &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
+        prepared.boundary_renders(),
     );
 
     // Slot accounting (#1440): ties this request to a numbered slot for

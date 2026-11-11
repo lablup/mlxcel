@@ -248,7 +248,7 @@ impl BatchScheduler {
 
         // Classic prefill splits a chat prompt at its history boundary; the
         // row-wise Gemma 4 prefill mirrors that partition (#2160).
-        let prefill_boundary = self.history_boundary_split(&seq);
+        let prefill_boundary = self.snapshot_splits(&seq);
         // Slice 0: prefill + seed + first bonus, streamed immediately.
         let started = match self.engine.model() {
             LoadedModel::Gemma4(wrapper) => {

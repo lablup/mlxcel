@@ -643,6 +643,8 @@ truncation or cross-session sharing. The supported snapshot families are
 Mamba, Mamba2, Jamba, Nemotron-H, Qwen 3.5 / 3.6 text, MoE, and VLM wrappers,
 and Gemma 4 text, VLM, and Unified wrappers.
 
+Two snapshots are captured during prefill rather than at finish. The history boundary (#1143, on by default) stores the state at the end of the conversation rendered without its generation prompt, which is what the next turn of the same chat starts with. The system-prompt root (#2885, opt-in with `MLXCEL_PROMPT_CACHE_SYSTEM_ROOT=1`) stores the state at the end of the system messages and tool list, followed by the first user turn's header, so a new chat that opens with the same system block restores it and prefills only what follows. The root applies to chat prompts of at least 2,048 tokens by default (a number instead of `1` sets the threshold), lives in the request's session bucket like every snapshot, and is kept out of LRU eviction while roots hold at most half of the snapshot budget. Each boundary ends one unpadded prefill piece, so a hit that adopts either one forwards exactly the pieces a cold prefill of the same prompt forwards after it.
+
 For multimodal servers, `--enable-vlm-prefix-cache` opts image requests into
 prompt-prefix reuse across same-session follow-up turns with the same image.
 The default stays off for VLM requests, and text-only prompt-cache behavior is

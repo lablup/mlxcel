@@ -538,3 +538,92 @@ fn unparseable_chunk_env_warns_once_and_falls_back_to_the_default() {
     assert!(warnings[0].contains("MLXCEL_PREFILL_CHUNK") && warnings[0].contains("2k"));
     assert!(warnings[1].contains("MLXCEL_PREFILL_CHUNK") && warnings[1].contains("-1"));
 }
+
+/// #2885 Part B: a system-prompt root before the history boundary ends its
+/// own unpadded piece, the suffix still chunks from the deepest boundary, and
+/// a hit that adopts the root forwards exactly the cold plan's pieces after it.
+#[test]
+fn two_snapshot_boundaries_each_end_one_piece_and_a_root_hit_reproduces_the_miss() {
+    let caps = tokens(true);
+    let miss = PrefillPlan::with_prefix(5000, 0, [300, 2100], 512, caps);
+    assert_eq!(
+        ranges(&miss),
+        vec![
+            0..300,
+            300..2100,
+            2100..2612,
+            2612..3124,
+            3124..3636,
+            3636..4148,
+            4148..4660,
+            4660..5000
+        ]
+    );
+    assert!(!miss.pieces()[0].is_padded());
+    assert!(!miss.pieces()[1].is_padded());
+    assert!(miss.ends_at_boundary(&miss.pieces()[0]));
+    assert!(miss.ends_at_boundary(&miss.pieces()[1]));
+    assert!(!miss.ends_at_boundary(&miss.pieces()[2]));
+    assert_eq!(miss.boundary(), Some(2100));
+    assert_eq!(miss.splits().as_slice(), &[300, 2100]);
+
+    // Order and duplicates do not matter.
+    assert_eq!(
+        PrefillPlan::with_prefix(5000, 0, [2100, 300, 2100], 512, caps),
+        miss
+    );
+
+    // A new chat sharing only the system prompt adopts the root.
+    let root_hit = PrefillPlan::with_prefix(5000, 300, [300, 2100], 512, caps);
+    assert_eq!(root_hit.splits().as_slice(), &[2100]);
+    assert!(root_hit.reproduces(&miss));
+    // The next turn of the same chat adopts the history boundary.
+    assert!(PrefillPlan::with_prefix(5000, 2100, [300, 2100], 512, caps).reproduces(&miss));
+    // An Option boundary is the single-split set.
+    assert_eq!(
+        PrefillPlan::with_prefix(5000, 0, Some(2100), 512, caps),
+        PrefillPlan::with_prefix(5000, 0, [2100], 512, caps)
+    );
+}
+
+#[test]
+fn resume_and_next_piece_walk_two_boundaries() {
+    for chunk in [0, 64, 512, 2048] {
+        for align in [false, true] {
+            let caps = tokens(align);
+            let splits = [300, 2100];
+            let base = PrefillPlan::with_prefix(5000, 0, splits, chunk, caps);
+            let mut cursors = base.split_points();
+            cursors.push(base.prompt_len());
+            for cursor in cursors {
+                let resumed = PrefillPlan::resume_at(5000, 0, splits, cursor, chunk, caps);
+                let expected: Vec<_> = base
+                    .pieces()
+                    .iter()
+                    .filter(|piece| piece.range.start >= cursor)
+                    .cloned()
+                    .collect();
+                assert_eq!(
+                    resumed.pieces(),
+                    expected,
+                    "chunk={chunk}, align={align}, cursor={cursor}"
+                );
+                assert_eq!(
+                    PrefillPlan::next_piece_at(5000, 0, splits, cursor, chunk, caps),
+                    resumed.piece_starting_at(cursor).cloned(),
+                    "chunk={chunk}, align={align}, cursor={cursor}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn embedding_input_ignores_every_boundary() {
+    let caps = tokens(false).with_input(PrefillInput::Embeddings {
+        executor_pads: false,
+    });
+    let plan = PrefillPlan::with_prefix(400, 0, [100, 200], 512, caps);
+    assert_eq!(ranges(&plan), vec![0..400]);
+    assert!(plan.splits().is_empty());
+}

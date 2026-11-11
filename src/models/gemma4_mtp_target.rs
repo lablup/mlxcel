@@ -192,9 +192,10 @@ pub struct Gemma4MtpTargetAdapter<'a> {
     prefill_start_offset: usize,
     /// Serving prefill geometry; zero keeps a single prompt forward.
     prefill_chunk_size: usize,
-    /// Chat history boundary the classic scheduler splits its prefill at
-    /// (issue #1143); see [`mtp_prefill_ranges`].
-    prefill_boundary: Option<usize>,
+    /// Snapshot boundaries the classic scheduler splits its prefill at (the
+    /// history boundary of issue #1143, plus the system-prompt root of #2885
+    /// when enabled); see [`mtp_prefill_ranges`].
+    prefill_boundary: mlxcel_core::prefill_plan::PrefillSplits,
 }
 
 /// Token ranges the row-wise MTP prefill forwards, in order.
@@ -211,7 +212,7 @@ pub(crate) fn mtp_prefill_ranges(
     start: usize,
     len: usize,
     chunk_size: usize,
-    boundary: Option<usize>,
+    boundary: impl Into<mlxcel_core::prefill_plan::PrefillSplits>,
 ) -> Vec<std::ops::Range<usize>> {
     // The classic partition itself (#2170): token input, chunkable, no tile
     // padding (the row-wise forwards pad nothing).
@@ -378,7 +379,7 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
             rotating_buffer_size: mtp_rotating_buffer_size(block_size),
             prefill_start_offset: 0,
             prefill_chunk_size: mlxcel_core::generate::prefill_chunk_len(),
-            prefill_boundary: None,
+            prefill_boundary: mlxcel_core::prefill_plan::PrefillSplits::NONE,
         }
     }
 
@@ -386,8 +387,11 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
     /// scheduler would split at, so both build the prompt KV from the same
     /// partition. Ignored outside the row-wise (linear singleton) prefill.
     #[must_use]
-    pub fn with_prefill_boundary(mut self, boundary: Option<usize>) -> Self {
-        self.prefill_boundary = boundary;
+    pub fn with_prefill_boundary(
+        mut self,
+        boundary: impl Into<mlxcel_core::prefill_plan::PrefillSplits>,
+    ) -> Self {
+        self.prefill_boundary = boundary.into();
         self
     }
 
@@ -1105,7 +1109,10 @@ impl<'a> Gemma4VLMtpTargetAdapter<'a> {
 
     /// Forward the classic history-boundary split to the text target.
     #[must_use]
-    pub fn with_prefill_boundary(mut self, boundary: Option<usize>) -> Self {
+    pub fn with_prefill_boundary(
+        mut self,
+        boundary: impl Into<mlxcel_core::prefill_plan::PrefillSplits>,
+    ) -> Self {
         self.inner = self.inner.with_prefill_boundary(boundary);
         self
     }
@@ -1243,7 +1250,10 @@ impl<'a> Gemma4UnifiedMtpTargetAdapter<'a> {
 
     /// Forward the classic history-boundary split to the text target.
     #[must_use]
-    pub fn with_prefill_boundary(mut self, boundary: Option<usize>) -> Self {
+    pub fn with_prefill_boundary(
+        mut self,
+        boundary: impl Into<mlxcel_core::prefill_plan::PrefillSplits>,
+    ) -> Self {
         self.inner = self.inner.with_prefill_boundary(boundary);
         self
     }
@@ -1423,7 +1433,7 @@ pub struct Gemma4MtpBatchedTargetAdapter<'a> {
     prefill_chunk_size: usize,
     /// Per-row chat history boundary (issue #1143) for that prefill; `None`
     /// rows, and rows past the end of this vector, have no boundary.
-    prefill_boundaries: Vec<Option<usize>>,
+    prefill_boundaries: Vec<mlxcel_core::prefill_plan::PrefillSplits>,
 }
 
 impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
@@ -1472,7 +1482,10 @@ impl<'a> Gemma4MtpBatchedTargetAdapter<'a> {
     /// Split each row's prefill at its classic history boundary (issue #1143),
     /// as [`Gemma4MtpTargetAdapter::with_prefill_boundary`] does for B = 1.
     #[must_use]
-    pub fn with_prefill_boundaries(mut self, boundaries: Vec<Option<usize>>) -> Self {
+    pub fn with_prefill_boundaries(
+        mut self,
+        boundaries: Vec<mlxcel_core::prefill_plan::PrefillSplits>,
+    ) -> Self {
         self.prefill_boundaries = boundaries;
         self
     }
@@ -2503,7 +2516,10 @@ impl<'a> Gemma4VLMtpBatchedTargetAdapter<'a> {
 
     /// See [`Gemma4MtpBatchedTargetAdapter::with_prefill_boundaries`].
     #[must_use]
-    pub fn with_prefill_boundaries(mut self, boundaries: Vec<Option<usize>>) -> Self {
+    pub fn with_prefill_boundaries(
+        mut self,
+        boundaries: Vec<mlxcel_core::prefill_plan::PrefillSplits>,
+    ) -> Self {
         self.inner = self.inner.with_prefill_boundaries(boundaries);
         self
     }
@@ -2638,7 +2654,10 @@ impl<'a> Gemma4UnifiedMtpBatchedTargetAdapter<'a> {
 
     /// See [`Gemma4MtpBatchedTargetAdapter::with_prefill_boundaries`].
     #[must_use]
-    pub fn with_prefill_boundaries(mut self, boundaries: Vec<Option<usize>>) -> Self {
+    pub fn with_prefill_boundaries(
+        mut self,
+        boundaries: Vec<mlxcel_core::prefill_plan::PrefillSplits>,
+    ) -> Self {
         self.inner = self.inner.with_prefill_boundaries(boundaries);
         self
     }

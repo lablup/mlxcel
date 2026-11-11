@@ -41,6 +41,7 @@ use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
 };
+use mlxcel_core::prefill_plan::PrefillSplits;
 use mlxcel_core::sampling::{FusedSampleParams, TokenBiasMap};
 use mlxcel_core::sampling_row_step::{LogitMask, RowSampler};
 use mlxcel_core::sampling_token_bias::compose_token_bias;
@@ -256,6 +257,36 @@ pub(crate) fn history_boundary_len(
         return None;
     }
     Some(boundary)
+}
+
+/// Decide the system-prompt root for a request (#2885 Part B).
+///
+/// `root` is the tokenized root render, `prompt_tokens` what the model will
+/// prefill, `history_boundary` the already resolved history boundary. The root
+/// is their longest common prefix minus its last token: the render ends at the
+/// first user turn's header, and the token there can merge with the first
+/// characters of the user's text, so dropping it keeps the length identical
+/// across chats that share the system prompt. Rejected when the prompt is
+/// shorter than `min_prompt_tokens` (the opt-in threshold), when the root is
+/// below the store's `min_prefix_tokens`, or when it does not end strictly
+/// before the history boundary (or the prompt end).
+///
+/// Used by: `BatchScheduler::resolve_history_boundary`
+pub(crate) fn system_root_len(
+    root: &[i32],
+    prompt_tokens: &[i32],
+    history_boundary: Option<usize>,
+    min_prefix_tokens: usize,
+    min_prompt_tokens: usize,
+) -> Option<usize> {
+    if prompt_tokens.len() < min_prompt_tokens {
+        return None;
+    }
+    let len = common_prefix_len(root, prompt_tokens)
+        .min(root.len())
+        .checked_sub(1)?;
+    let upper = history_boundary.unwrap_or(prompt_tokens.len());
+    (len > 0 && len >= min_prefix_tokens && len < upper).then_some(len)
 }
 
 /// Whether a resolved boundary still splits this sequence's prefill at
