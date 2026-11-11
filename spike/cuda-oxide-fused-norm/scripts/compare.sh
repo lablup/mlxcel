@@ -27,6 +27,13 @@ cubin=artifacts/fused_add_rms_norm.$target_arch.cubin
 
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 gpu=$(nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader 2>/dev/null | head -1 || echo unknown)
+# Record which lock serialized the GPU steps without leaking a home directory.
+# Hosts without the maintainers' gpu-lock set GPU_LOCK_KIND to say what stood in.
+gpu_lock_path=$(command -v gpu-lock || echo missing)
+case "$gpu_lock_path" in
+    "$HOME"/*) gpu_lock_path="~${gpu_lock_path#"$HOME"}" ;;
+esac
+gpu_lock_kind=${GPU_LOCK_KIND:-unspecified}
 mkdir -p results
 harness=target/release/cuda-oxide-fused-norm
 [ -x "$harness" ] || {
@@ -46,4 +53,5 @@ harness=target/release/cuda-oxide-fused-norm
     --note "cuda_toolkit=$(nvcc --version | tail -1 | sed 's/^ *//')" \
     --note "mlxcel_commit=$(git -C "$pkg_dir/../.." rev-parse HEAD 2>/dev/null || echo unknown)" \
     --note "run_date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --note "gpu_lock=$(command -v gpu-lock)"
+    --note "gpu_lock=$gpu_lock_path" \
+    --note "gpu_lock_kind=$gpu_lock_kind"

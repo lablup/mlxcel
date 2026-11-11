@@ -13,8 +13,9 @@
     "host": "Linux 7.0.0-1019-nvidia aarch64",
     "cuda_toolkit": "Build cuda_13.0.r13.0/compiler.36424714_0",
     "mlxcel_commit": "28d884a5f2bf1750138b1c99d99c716274aedf1d",
-    "run_date_utc": "2026-11-11T01:55:57Z",
-    "gpu_lock": "/home/jaeyeong2022/.local/bin/gpu-lock"
+    "run_date_utc": "2026-11-11T02:25:29Z",
+    "gpu_lock": "~/.local/bin/gpu-lock",
+    "gpu_lock_kind": "user-local flock(1) shim with the gpu-lock CLI shape, not the upstream tool"
   },
   "oracle": {
     "backend": "Cuda",
