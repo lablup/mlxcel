@@ -27,6 +27,31 @@ Source: [`spike/cuda-oxide-fused-norm/src/main.rs`](../../spike/cuda-oxide-fused
 
 Launch rule, mirrored from the reference launcher (`fused_norm_threads`): `grid = rows`, `block = clamp(ceil_div(ceil_div(dim, 4), 32) * 32, 32, 1024)`, no dynamic shared memory (132 static bytes per block). The host refuses `rows = 0`, `dim = 0`, `x`/`residual` lengths other than `rows * dim`, a weight length other than `dim`, and more than `2^32 - 1` elements, with a message, before any launch.
 
+## Reference semantics, traced
+
+The issue's premise is that the existing fused kernel fixes the numerical contract. Each point below was read from the reference at `28d884a5` and from the compiled code on this host before it was relied on.
+
+| Semantic | Reference (`src/lib/mlxcelverse/kernels/fused_norm.cpp`) | This kernel (`spike/cuda-oxide-fused-norm/src/main.rs`) |
+| --- | --- | --- |
+| Residual sum in f32, rounded to the activation dtype, stored, re-read and squared | lines 195 to 199 | lines 187 to 193 |
+| Warp butterfly, `xor 16, 8, 4, 2, 1`, then per-warp partials through 32 shared floats | lines 204 to 221 | `warp_sum`, lines 137 to 144; lines 200 to 214 |
+| `rsqrt(total / dim + eps)` | line 223 | line 216 |
+| Weight bias folded in the weight dtype, skipped when it is 0 | line 238 | lines 237 to 241 |
+| `x * inv_mean` rounded before the gain multiply | lines 239 to 240 | lines 244 to 245 |
+| Launch width | `fused_norm_threads`, line 259 | `fused_norm_threads`, line 73 |
+
+The budgets are `tolerance_for` at `src/lib/mlxcel-core/src/fused_norm_parity_tests.rs` line 58; the two oracle entry points are `fused_add_rms_norm` and `graph_add_rms_norm` at `src/lib/mlxcel-core/src/layers.rs` lines 1103 and 1133.
+
+The reference source writes the accumulation as `acc += sr * sr`. What the device executes was checked by disassembling the cubins MLX's NVRTC path cached during the oracle run (`cuobjdump -sass` on `MLX_PTX_CACHE_DIR/sm121-nvrtc13.0/custom_kernel_mlxcel_fused_add_rms_norm_*`; the `.ptx` cache entries are cubins) and the committed cubin of this package:
+
+- Reference, every width inspected (3, 1000, 3072, 4096, 8191, 8192, f32; 4096 for f16 and bf16): each square is one `FFMA Rd, Rs, Rs, Racc`, so NVRTC contracts the accumulation. The butterfly is five `SHFL.BFLY` + `FADD` pairs per stage, and the reciprocal square root is `MUFU.RSQ`.
+- Reference, constant `Dim`: the kernel is specialized per width, so for a power-of-two width `total / dim + eps` compiles to one `FFMA total, 1/dim, eps` (for example `0.000244140625` at 4096), and for other widths to a true division. The power-of-two scaling is exact, so the value equals divide-then-add.
+- This kernel: four square `FFMA` per entry (20 in the module), the same butterfly, `MUFU.RSQ`, and a runtime division for every width because `dim` is a launch parameter.
+
+That is the mechanism behind the bit identity reported below, at power-of-two and other widths alike. One control was run: replacing `fma_rn_f32(sr, sr, acc)` with `acc + sr * sr` in an isolated copy of the package produced the same PTX instruction stream (no difference after normalizing register and label names; 20 `fma.rn.f32`) and the same 130 of 130 bit-identical cases, so the pinned toolchain contracts the expression by default and the explicit intrinsic only keeps that from depending on a compiler default. A variant with contraction disabled was not built, so the size of the deviation an uncontracted accumulation would cause is not measured here.
+
+Relation to #2831: before any new code, `spike/cuda-oxide-smoke` was rebuilt and run on this host with the same toolchain (14 of 14 cases, exact bitwise, launch check valid), which is the target-execution gate this issue depends on. This package reuses that package's toolchain discovery (`scripts/env.sh`) and its `.oxart` container and cubin parsers (`scripts/oxide_artifact.py`), and extends the manifest to several entries per module.
+
 ## Target
 
 | Property | Emitted value |
