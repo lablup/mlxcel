@@ -20,7 +20,8 @@ server configurations see byte-identical requests:
 * one system prompt plus a tool list, shared by every chat;
 * session A: ten turns that each append a user message and a scripted
   assistant reply, where turn 8 rewrites the user message of turn 3 (an agent
-  compacting its history a few thousand tokens back);
+  compacting its history a few thousand tokens back; --edit-turn and
+  --edit-target move both);
 * sessions B and C: new chats with the same system prompt and tools, three
   turns each.
 
@@ -79,7 +80,7 @@ def corpus(repo):
     return "\n\n".join(p.read_text(errors="ignore") for p in docs)
 
 
-def build_workload(repo, system_tokens, turn_tokens):
+def build_workload(repo, system_tokens, turn_tokens, edit_turn=8, edit_target=3):
     text = corpus(repo)
     cursor = 0
 
@@ -103,15 +104,15 @@ def build_workload(repo, system_tokens, turn_tokens):
 
     requests = []
 
-    # Session A: ten turns, turn 8 rewrites turn 3's user message.
+    # Session A: ten turns, turn `edit_turn` rewrites turn `edit_target`'s user message.
     history = [{"role": "system", "content": system}]
     for turn in range(1, 11):
-        if turn == 8:
-            # Compaction: the user message of turn 3 is replaced by a summary.
-            idx = 1 + 2 * (3 - 1)
-            history[idx] = {"role": "user", "content": "Step 3 (compacted). Earlier material summarised: build, test and serve flow."}
+        if turn == edit_turn:
+            # Compaction: the user message of the target turn is replaced by a summary.
+            idx = 1 + 2 * (edit_target - 1)
+            history[idx] = {"role": "user", "content": f"Step {edit_target} (compacted). Earlier material summarised: build, test and serve flow."}
         history.append({"role": "user", "content": user(f"A{turn}")})
-        requests.append({"session": "A", "turn": turn, "edited": turn == 8, "messages": [dict(m) for m in history]})
+        requests.append({"session": "A", "turn": turn, "edited": turn == edit_turn, "messages": [dict(m) for m in history]})
         history.append({"role": "assistant", "content": reply(f"A{turn}")})
 
     # Sessions B and C: new chats with the same system prompt and tools.
@@ -188,13 +189,17 @@ def main():
     ap.add_argument("--system-tokens", type=int, default=4096)
     ap.add_argument("--turn-tokens", type=int, default=1536)
     ap.add_argument("--max-tokens", type=int, default=32)
+    ap.add_argument("--edit-turn", type=int, default=8, help="session A turn that rewrites an earlier user message")
+    ap.add_argument("--edit-target", type=int, default=3, help="session A turn whose user message is rewritten")
     ap.add_argument("--label", default="")
     ap.add_argument("--out", required=True)
     ap.add_argument("--verify", action="store_true", help="resend each request after a cache reset and compare")
     a = ap.parse_args()
 
     base = f"http://127.0.0.1:{a.port}"
-    requests = build_workload(pathlib.Path(a.repo), a.system_tokens, a.turn_tokens)
+    if not 1 <= a.edit_target < a.edit_turn <= 10:
+        ap.error("need 1 <= --edit-target < --edit-turn <= 10")
+    requests = build_workload(pathlib.Path(a.repo), a.system_tokens, a.turn_tokens, a.edit_turn, a.edit_target)
     post(base + "/v1/cache/reset", {}).read()
 
     rows = []

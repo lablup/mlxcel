@@ -925,7 +925,15 @@ impl PromptCacheStore {
         // of the reply). Chaining per producer keeps both intact while still
         // bounding each chain to one entry: turn N+1's boundary supersedes turn
         // N's boundary, and likewise for completions.
-        if let Some(session_key) = key.session_key {
+        //
+        // Periodic checkpoints (#2885 Part B) are exempt: a conversation keeps
+        // its 16K, 32K, ... checkpoints side by side, since the shallower one
+        // is exactly what a request that edits history between them resumes
+        // from. Their number is bounded by the byte budget's LRU instead.
+        if let Some(session_key) = key
+            .session_key
+            .filter(|_| entry.origin != SnapshotOrigin::Checkpoint)
+        {
             let new_tokens = entry.tokens.as_slice();
             let new_origin = entry.origin;
             let superseded: Vec<PromptCacheKeyDigest> = guard
