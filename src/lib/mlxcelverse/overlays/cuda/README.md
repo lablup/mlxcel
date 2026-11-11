@@ -1,6 +1,6 @@
 # overlays/cuda: CUDA backend and core overlay
 
-This directory holds mlxcelverse's source overlays for MLX's CUDA backend (`mlx/backend/cuda/**`, 30 files) and CUDA-only MLX core files (`mlx/*.cpp`, 4 files).
+This directory holds mlxcelverse's source overlays for MLX's CUDA backend (`mlx/backend/cuda/**`, 33 files) and CUDA-only MLX core files (`mlx/*.cpp`, 4 files).
 
 ## How `CMakeLists.txt` applies this directory
 
