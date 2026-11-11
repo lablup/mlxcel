@@ -454,16 +454,26 @@ in `docs/benchmark_results/fused-norm-rope-<hw>-<date>.md`.
 
 ## Fused tanh-GELU f32: the same measure-then-keep gate
 
-The fused `gelu_tanh_f32` Metal kernel from issue #2780's family lands under the
-same policy: it keeps its wiring only if it beats the graph it replaced at op
-level. `examples/fused_gelu_tanh_microbench.rs` produces that evidence. It loads
-no model and times the eager chain, the `compile_shapeless` chain and the fused
-kernel on the three shapes the tanh-switched encoders feed.
+The fused `gelu_tanh_f32` kernel (Metal port #2857, CUDA port #2780) lands under
+the same policy: it keeps its wiring only if it beats the graph it replaced at
+op level. `examples/fused_gelu_tanh_microbench.rs` produces that evidence. It
+loads no model and times the eager chain, the `compile_shapeless` chain and the
+fused kernel on the three shapes the tanh-switched encoders feed.
 
 ```bash
 caffeinate -i cargo run --release --features metal,accelerate \
     --example fused_gelu_tanh_microbench
+# CUDA host: quiet GPU, PTX cache warm (the first call compiles the kernel)
+cargo run --release --features cuda --example fused_gelu_tanh_microbench
 ```
+
+On CUDA the op-level figure is not the whole claim: #2780 was filed because the
+`compile_shapeless` chain ran as more than one kernel there, so the issue's
+acceptance is the end-to-end image prefill of the tanh-switched families against
+their erf arm, within the null floor, measured as in the
+[GELU erf-vs-tanh record](benchmark_results/versions/v0.8.0.md#gelu-erf-vs-tanh-2026-10-23).
+The GB10 measurement is
+[fused-gelu-tanh-f32-cuda-gb10-2026-11-11](benchmark_results/fused-gelu-tanh-f32-cuda-gb10-2026-11-11.md).
 
 The harness interleaves its trials and reports the per-arm minimum, because
 background load only ever adds time and a single non-interleaved pass on a

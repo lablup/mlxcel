@@ -1990,11 +1990,11 @@ std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x) {
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Real Metal custom kernel for `fused_gelu_tanh_f32` (#2857): the
-// tanh-GELU as one 1-D elementwise JIT Metal kernel instead of the compiled
-// graph above. Flattens any shape to 1-D for the launch and reshapes back;
-// f32, bfloat16 and float16 are upcast inside the kernel and rounded back at
-// the store. Throws when there is no port on this backend. Rust-side callers
+// Custom kernel for `fused_gelu_tanh_f32` (Metal #2857, CUDA #2780): the
+// tanh-GELU as one 1-D elementwise JIT kernel instead of the compiled graph
+// above. Flattens any shape to 1-D for the launch and reshapes back; f32,
+// bfloat16 and float16 are upcast inside the kernel and rounded back at the
+// store. Throws when there is no port on this backend (ROCm). Rust-side callers
 // gate on `fused_gelu_tanh_f32_available()` first or route to the compiled chain.
 std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x) {
     return std::make_unique<MlxArray>(mlxcel::turbo::fused_gelu_tanh_f32(x.inner));
@@ -2002,6 +2002,10 @@ std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x) {
 
 bool fused_gelu_tanh_f32_available() {
     return mlxcel::turbo::fused_gelu_tanh_f32_available();
+}
+
+bool fused_gelu_tanh_f32_matches_eager_bits() {
+    return mlxcel::turbo::fused_gelu_tanh_f32_matches_eager_bits();
 }
 
 // Compiled GeGLU: gelu(gate) * x

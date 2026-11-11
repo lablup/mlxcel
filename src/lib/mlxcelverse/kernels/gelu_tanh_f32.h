@@ -14,16 +14,19 @@
 
 #pragma once
 
-// Fused tanh-GELU custom Metal kernel launcher, f32 arithmetic.
+// Fused tanh-GELU custom kernel launcher, f32 arithmetic: a Metal port (#2857)
+// and a CUDA port (#2780) of one body.
 //
-// This header exposes two C++ entry points that together implement the
-// "real Metal port" of the #2857 fused path:
+// This header exposes three C++ entry points that together implement the
+// fused path:
 //
 //   - `fused_gelu_tanh_f32_available()`: whether the fused kernel runs on
-//     this backend (Metal), read the same way the launcher decides.
+//     this backend (Metal, CUDA), read the same way the launcher decides.
+//   - `fused_gelu_tanh_f32_matches_eager_bits()`: whether the kernel that
+//     runs here returns the eager chain's bits (CUDA).
 //   - `fused_gelu_tanh_f32(const mlx::core::array& x)`: issue the
-//     runtime-JIT Metal kernel via `mlx::core::fast::metal_kernel` and
-//     return the activated tensor.
+//     runtime-JIT kernel via `mlx::core::fast::metal_kernel` or
+//     `mlx::core::fast::cuda_kernel` and return the activated tensor.
 //
 // The kernel is 1-D elementwise: one thread per element, upcast to f32,
 // compute the tanh-GELU in f32, cast back to the output dtype:
@@ -35,12 +38,15 @@
 //     out = x * cdf
 //
 // Same formula and op order as the eager `gelu_tanh_f32` chain
-// (cpp/mlx_cxx_internal.h `gelu_tanh_approx`); the fused kernel may contract
-// a [multiply-add] inside the compiled region, so lanes may differ from it
-// by f32 rounding. The upcast and the downcast happen inside the kernel.
+// (cpp/mlx_cxx_internal.h `gelu_tanh_approx`). The Metal body may contract
+// `x + 0.044715 * x3` into a fused multiply-add, so its lanes may differ from
+// the eager chain by f32 rounding; the CUDA body rounds every operation on its
+// own and returns the eager chain's bits. The upcast and the downcast happen
+// inside the kernel.
 //
 // Used by: `cpp/mlx_cxx_bridge.cpp` (`fused_gelu_tanh_f32`), which is the
-// `GeluActivation::TanhF32Compiled` dispatch target.
+// `GeluActivation::TanhF32Compiled` dispatch target on Metal and CUDA and the
+// `GeluActivation::TanhF32` one on CUDA.
 
 #include <mlx/array.h>
 
@@ -52,7 +58,18 @@ namespace mlxcel::turbo {
 // the launch throwing (the same check as fused_xielu_kernel_available).
 bool fused_gelu_tanh_f32_available();
 
-// Evaluate tanh-GELU on `x` with one fused custom Metal kernel.
+// Whether the fused kernel on this backend returns the bits the eager
+// `gelu_tanh_f32` chain returns, so a caller pinned to that chain may launch
+// the kernel instead.
+//
+// True on CUDA with a GPU default device: the CUDA body rounds each multiply
+// and add on its own (`__fmul_rn` / `__fadd_rn`), as the eager chain's
+// one-kernel-per-op evaluation does. False on Metal, whose body may contract
+// a multiply-add, on a backend without a port, and with MLXCEL_DEVICE=cpu.
+// Implies `fused_gelu_tanh_f32_available()`.
+bool fused_gelu_tanh_f32_matches_eager_bits();
+
+// Evaluate tanh-GELU on `x` with one fused custom kernel (Metal or CUDA).
 //
 // Inputs:
 // - `x`: any shape; flattened to 1-D for the launch and reshaped back on the
@@ -60,13 +77,14 @@ bool fused_gelu_tanh_f32_available();
 //   element type to f32 and rounds back at the store).
 //
 // Output:
-// - activated array with `x`'s shape and dtype. May differ from the eager
-//   `gelu_tanh_f32` chain by f32 rounding (FMA contraction inside the fused
-//   kernel).
+// - activated array with `x`'s shape and dtype. On Metal it may differ from
+//   the eager `gelu_tanh_f32` chain by f32 rounding (FMA contraction inside
+//   the fused kernel); on CUDA it is that chain's bits.
 //
 // Panics (throws) when there is no port on this backend (no GPU default
-// device, or no Metal port in the table). Rust-side callers must gate on
-// `fused_gelu_tanh_f32_available()` first or route to the compiled chain.
+// device, or no port for the running backend in the table, which is ROCm
+// today). Rust-side callers must gate on `fused_gelu_tanh_f32_available()`
+// first or route to the compiled chain.
 mlx::core::array fused_gelu_tanh_f32(const mlx::core::array& x);
 
 } // namespace mlxcel::turbo
