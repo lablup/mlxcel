@@ -3043,13 +3043,26 @@ pub(crate) fn top_k_filter(logits: &MlxArray, k: i32) -> UniquePtr<MlxArray> {
 /// implementation is a reference/test-parity copy used to validate the
 /// algorithm and in unit tests for batched correctness.
 ///
+/// Non-`float32` inputs (such as `bfloat16` or `float16`) are upcast to
+/// `float32` at entry so large-vocabulary `cumsum` cannot swamp tail
+/// probabilities smaller than 1 ULP and the returned logits always have
+/// `float32` dtype across every backend (#2971).
+///
 /// Used by: unit tests (`top_p_filter_*`,
 /// `fused_sample_probs_equals_softmax_of_filtered_over_t` in
 /// `sampling::tests`)
 #[allow(dead_code)]
 pub(crate) fn top_p_filter(logits: &MlxArray, p: f32) -> UniquePtr<MlxArray> {
+    let owned_f32;
+    let logits_f32: &MlxArray = if ffi::array_dtype(logits) == dtype::FLOAT32 {
+        logits
+    } else {
+        owned_f32 = ffi::astype(logits, dtype::FLOAT32);
+        &owned_f32
+    };
+
     // Step 1: per-row softmax probabilities.
-    let probs = ffi::softmax(logits, -1);
+    let probs = ffi::softmax(logits_f32, -1);
 
     // Step 2: per-row descending sort via ascending argsort of negated probs.
     let neg_probs = ffi::negative(&probs);
@@ -3065,16 +3078,16 @@ pub(crate) fn top_p_filter(logits: &MlxArray, p: f32) -> UniquePtr<MlxArray> {
     let cum_probs = ffi::cumsum(&sorted_probs, -1, false, true);
     let shifted_cum = ffi::subtract(&cum_probs, &sorted_probs);
 
-    // Step 5: mask — keep tokens whose cumulative-before-prob is <= p.
+    // Step 5: mask - keep tokens whose cumulative-before-prob is <= p.
     let p_scalar = ffi::full_f32(&[1], p, dtype::FLOAT32);
     let mask = ffi::less_equal(&shifted_cum, &p_scalar);
 
     // Step 6: apply mask to sorted logits; excluded positions become -inf.
-    let sorted_logits = ffi::take_along_axis(logits, &sorted_indices, -1);
+    let sorted_logits = ffi::take_along_axis(logits_f32, &sorted_indices, -1);
     let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
     let filtered_sorted = ffi::where_cond(&mask, &sorted_logits, &neg_inf);
 
-    // Step 7: per-row inverse permutation — argsort of the sort indices undoes
+    // Step 7: per-row inverse permutation - argsort of the sort indices undoes
     // the sort (stable property of argsort on a permutation).
     let unsort_indices = ffi::argsort(&sorted_indices, -1);
 
@@ -4628,6 +4641,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn top_p_filter_bf16_large_vocab_masks_tail_and_returns_f32() {
+        // Issue #2971: at vocab = 262_144, row[0] = 12.0 (p_0 ~= 0.601),
+        // row[1..=10_000] = 2.0 (p_i ~= 2.73e-5 each, cumulative ~0.874 > 0.80),
+        // and row[10_001..262_144] = -2.0 (~12.6% tail mass). Running sequential
+        // cumsum in bfloat16 stalls at 0.601 because 2.73e-5 < 1 bf16 ULP at 0.5
+        // (3.91e-3), leaving all 252,143 tail entries unmasked, and on CUDA
+        // bfloat16 promotion also demotes where_cond's output dtype from float32
+        // to bfloat16.
+        const VOCAB: usize = 262_144;
+        let mut row = vec![-2.0_f32; VOCAB];
+        row[0] = 12.0;
+        for slot in &mut row[1..=10_000] {
+            *slot = 2.0;
+        }
+
+        let check = |stream_label: &str| {
+            let logits_f32 = ffi::from_slice_f32(&row, &[1, VOCAB as i32]);
+            let logits_bf16 = ffi::astype(&logits_f32, dtype::BFLOAT16);
+            ffi::eval(&logits_bf16);
+
+            let result = top_p_filter(&logits_bf16, 0.80);
+            ffi::eval(&result);
+
+            let unmasked_tail = logits_to_f32_vec(&result)[10_001..VOCAB]
+                .iter()
+                .filter(|val| !(val.is_infinite() && **val < 0.0))
+                .count();
+            assert_eq!(
+                unmasked_tail, 0,
+                "{stream_label}: bfloat16 top_p_filter left {unmasked_tail} tail entries unmasked"
+            );
+            assert_eq!(
+                ffi::array_dtype(&result),
+                dtype::FLOAT32,
+                "{stream_label}: top_p_filter on bfloat16 logits must return float32"
+            );
+
+            let v = to_vec_f32(&result);
+            assert_eq!(v.len(), VOCAB);
+            assert!(
+                v[0].is_finite(),
+                "{stream_label}: top token 0 must remain finite (got {})",
+                v[0]
+            );
+            for (offset, &val) in v[1..=7_000].iter().enumerate() {
+                let idx = offset + 1;
+                assert!(
+                    val.is_finite(),
+                    "{stream_label}: nucleus token {idx} should survive top_p=0.80 (got {val})"
+                );
+            }
+            for (offset, &val) in v[10_001..VOCAB].iter().enumerate() {
+                let idx = offset + 10_001;
+                assert!(
+                    val.is_infinite() && val < 0.0,
+                    "{stream_label}: tail token {idx} must be masked to -inf (got {val})"
+                );
+            }
+        };
+
+        check("default stream");
+        let _dev_lock = crate::streams::lock_default_device();
+        let _cpu = crate::streams::DefaultDeviceGuard::cpu();
+        check("cpu stream");
     }
 
     // -- incremental SamplerState parity (issue #328) --
