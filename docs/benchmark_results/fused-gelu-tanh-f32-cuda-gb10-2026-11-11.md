@@ -408,6 +408,31 @@ recorded and left for a follow-up, which should decide between routing
 CUDA compile backend splits that region too) and an erf port of the custom
 kernel.
 
+## StableHLO twins, after the rebase onto `ce6855bc8`
+
+The change was rebased onto `ce6855bc8` (five commits after `28d884a5`, the
+patch unchanged), and the IREE toolchain was then built on this host with
+`scripts/iree/setup-cuda.sh` (IREE 3.12.0rc20260721). The three twins the
+issue names were run against real checkpoints, eager MLX on CUDA against the
+IREE lowering on `local-task`, under
+`--profile test-fast --features xla-diagnostics,xla-reference-diagnostics`,
+once on the rebased change and once on a clean `ce6855bc8`.
+
+| Twin (tanh-GELU route) | Command, checkpoint | With the change | Clean `ce6855bc8` |
+|---|---|---|---|
+| Molmo2 vision (`TanhF32`) | `cargo test --test molmo2_xla_vision_parity -- --include-ignored`, `Molmo2-8B-4bit` at `4fcbe9265776` | passes (8 tests, the real-checkpoint gate among them): vision projection max abs 0.3047 at a magnitude of 8.06e4 (0.0004 %), rms 0.00167, no element over the limit | passes, all 25 stage lines identical |
+| Gemma 3 SigLIP (`TanhF32Compiled`) | `cargo run --example xla_gemma3_reference_check`, gemma-3-4b-it-4bit | **fails**: first divergence at `siglip.hidden.block4.output`, max abs 0.1067 against `atol` 0.08 on 5 of 4718592 elements; `siglip.block0.mlp_activation` itself passes at max abs 4.8e-4 | fails the same way, all 34 stage lines identical |
+| Qwen3-VL DeepStack (`TanhF32`) | `cargo run --example xla_qwen3_vl_deepstack_check`, qwen3-vl-2b | passes its gate (same-input operator controls clean, greedy top-1 exact, both negative controls detected); 42 of its 67 free-running stage comparisons are outside tolerance | passes, all 67 comparisons identical |
+
+Every per-stage number is the same with and without the change, which is what
+an MLX side that is unchanged in bits predicts. The Gemma 3 gate's failure and
+the Qwen3-VL free-running drift are therefore how `main` behaves on this host
+with these 4-bit checkpoints; neither was investigated further here.
+
+A release build of the rebased change (`cargo build --release --features
+cuda`, sha256 `ef52cc865b9326818060509ad425afc6de18179409445873ce9e29806cd44fd7`)
+gives the six greedy replies above again, identical to both binaries.
+
 ## What this does and does not establish
 
 Established on GB10: the compiled tanh-GELU region was at least two launches
@@ -422,10 +447,10 @@ replies are unchanged on six checkpoints.
 
 Not established here:
 
-- The StableHLO twin re-check under the `xla-iree` feature (no IREE toolchain
-  on this host). What stands in for it is the bit comparison: on this host the
-  kernel's output is the eager chain's and the compiled chain's on every lane
-  measured, so the MLX side of each twin comparison is unchanged.
+- StableHLO twins other than the three above. The other tanh-switched families
+  were not run against IREE; for them the bit comparison stands in: on this
+  host the kernel's output is the eager chain's and the compiled chain's on
+  every lane measured, so the MLX side of each twin comparison is unchanged.
 - Metal. The Metal port and its routing are untouched, but two backend-neutral
   tests added here
   (`fused_tanh_f32_matches_the_eager_helper_to_f32_rounding_on_the_sweep`,
@@ -435,7 +460,8 @@ Not established here:
 - Image-prefill timing for MiniCPM-V 4.6 and PaliGemma (the acceptance names
   Gemma 3 and Gemma 4; the 2026-10-23 record had these two inside the null
   floor with the compiled chain), and for Molmo2 and BERT on the `TanhF32`
-  route. Molmo2 has no usable end-to-end check here at all.
+  route. Molmo2's replies are degenerate on the pinned main as well, so its
+  check here is the vision twin above and not a reply comparison.
 - A host whose NVRTC and build toolkit are different CUDA releases.
 
 The absolute prefill numbers are for this host, kernel and driver, under its
