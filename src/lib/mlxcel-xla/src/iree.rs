@@ -3274,6 +3274,7 @@ impl IreeRaggedLlama {
                 .count()
                 <= 1
         );
+        let load_started = std::time::Instant::now();
         let mut cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
         checked_ffi_int(b_max, "b_max")?;
         if !RAGGED_B_VALUES.contains(&b_max) {
@@ -3298,7 +3299,7 @@ impl IreeRaggedLlama {
                 );
             } else {
                 match rocm_arch() {
-                    Ok(arch) => match crate::native_qmv::hsaco(&arch) {
+                    Ok(arch) => match crate::native_qmv::hsaco_multi(&arch, b_max) {
                         Ok(bytes) => {
                             cfg.set_packed_args(true);
                             native_module =
@@ -3317,8 +3318,10 @@ impl IreeRaggedLlama {
             }
         }
         runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
+        report_load_timing("ragged-config", load_started);
         // Emit the logits prefill + the ragged decode graph for this model + b_max
         // at the device-resolved precision (f16 on GPU by default, f32 on CPU).
+        let emit_started = std::time::Instant::now();
         let precision = effective_precision(device, &cfg)?;
         let native_qmv = match &cfg {
             RuntimeConfig::Dense(_) => false,
@@ -3364,6 +3367,8 @@ impl IreeRaggedLlama {
                     ),
                 ),
             };
+        report_load_timing("ragged-emit", emit_started);
+        let compile_started = std::time::Instant::now();
         let bundle = compile_bundle(
             device,
             &cfg,
@@ -3379,6 +3384,7 @@ impl IreeRaggedLlama {
             &decode_mlir,
             &format!("decode_ragged_logits_b{b_max}"),
         )?;
+        report_load_timing("ragged-compile", compile_started);
         #[cfg(feature = "diagnostics")]
         let (diagnostic_vmfb, diagnostic_layout) = if diagnostics || all_layer_diagnostics {
             let (vmfb, layout) = compile_gemma3n_diagnostics(device, &cfg, all_layer_diagnostics)?;
@@ -3390,6 +3396,7 @@ impl IreeRaggedLlama {
         };
         #[cfg(not(feature = "diagnostics"))]
         debug_assert!(!diagnostics && !all_layer_diagnostics && !deepstack_diagnostics);
+        let ctx_started = std::time::Instant::now();
         let ctx = match base {
             Some(base) => create_bucket_ctx(base, &bundle, cfg.context_capacity())?,
             None => {
@@ -3409,8 +3416,10 @@ impl IreeRaggedLlama {
                 }
             }
         };
+        report_load_timing("ragged-context-and-upload", ctx_started);
         // Safety: ctx is a fresh valid context from create_ctx; free it on error.
         let b_max_ffi = checked_ffi_int(b_max, "b_max")?;
+        let reset_started = std::time::Instant::now();
         // Record the compiled B before any reset. The ragged decode graph's
         // static [B,...] shapes were fixed when it was emitted, so a reset at
         // any other size can only fail inside IREE with an opaque shape error;
@@ -3425,6 +3434,8 @@ impl IreeRaggedLlama {
             unsafe { xla_llama_free(ctx) };
             return Err(format!("xla_llama_ragged_reset failed (status {rc})"));
         }
+        report_load_timing("ragged-bind-and-reset", reset_started);
+        report_load_timing("ragged-total", load_started);
         Ok(Self {
             ctx,
             compatibility_fingerprint: bundle.compatibility_fingerprint,
