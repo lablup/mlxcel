@@ -11,6 +11,7 @@ import logging
 import os
 import stat
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -128,6 +129,44 @@ def test_socket_path_too_long(tmp_path: Path) -> None:
     long_path = "/tmp/" + ("x" * 200) + ".sock"
     with pytest.raises(MlxcelServerError):
         ManagedServer("fake/model", socket_path=long_path)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="UDS not supported on Windows")
+@pytest.mark.parametrize("byte_length", [101, 133])
+@pytest.mark.parametrize("caller", ["manager", "sync", "async"])
+def test_unicode_socket_path_rejected_before_start(
+    monkeypatch: pytest.MonkeyPatch, byte_length: int, caller: str
+) -> None:
+    def unexpected_start(_self: ManagedServer) -> None:
+        pytest.fail("an overlong socket path reached child startup")
+
+    monkeypatch.setattr(ManagedServer, "start", unexpected_start)
+    with tempfile.TemporaryDirectory(prefix="mlx-byte-", dir="/tmp") as directory:
+        prefix = directory + "/"
+        budget = byte_length - len(os.fsencode(prefix)) - len(b".sock")
+        path = prefix + "가" * (budget // 3) + "x" * (budget % 3) + ".sock"
+        assert len(path) < 100 < len(os.fsencode(path))
+        with pytest.raises(MlxcelServerError, match=rf"{byte_length} > 100 bytes"):
+            if caller == "manager":
+                ManagedServer("fake/model", socket_path=path)
+            elif caller == "sync":
+                mlxcel.LLM("fake/model", socket=path)
+            else:
+                mlxcel.AsyncLLM("fake/model", socket=path)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="UDS not supported on Windows")
+@pytest.mark.parametrize("unicode_name", [False, True])
+def test_socket_path_at_byte_limit_serves_requests(fake_binary: str, unicode_name: bool) -> None:
+    with tempfile.TemporaryDirectory(prefix="mlx-byte-", dir="/tmp") as directory:
+        prefix = directory + "/"
+        budget = 100 - len(os.fsencode(prefix)) - len(b".sock")
+        name = "가" * (budget // 3) + "x" * (budget % 3) if unicode_name else "x" * budget
+        path = prefix + name + ".sock"
+        assert len(os.fsencode(path)) == 100
+        with mlxcel.LLM("fake/model", binary=fake_binary, socket=path) as llm:
+            assert llm.generate("hello") == "hello world"
+        assert not os.path.exists(path)
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="UDS not supported on Windows")

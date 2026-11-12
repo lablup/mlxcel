@@ -146,9 +146,10 @@ class ManagedServer:
             self.port = port if port is not None else _free_tcp_port()
         else:
             path = socket_path or _default_socket_path()
-            if len(path) > _MAX_SOCKET_PATH:
+            path_bytes = len(os.fsencode(path))
+            if path_bytes > _MAX_SOCKET_PATH:
                 raise MlxcelServerError(
-                    f"Unix socket path is too long ({len(path)} > {_MAX_SOCKET_PATH} bytes): "
+                    f"Unix socket path is too long ({path_bytes} > {_MAX_SOCKET_PATH} bytes): "
                     f"{path!r}. Pass a shorter socket=... path (e.g. under /tmp)."
                 )
             self.uds_path = path
