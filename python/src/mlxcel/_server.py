@@ -297,29 +297,35 @@ class ManagedServer:
                         stderr=self._stderr_snapshot(),
                     )
 
-                ready = self._probe_once(client, url)
-                if ready:
-                    return
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    # A slow /health request must not use the full five-second
+                    # probe timeout when less startup budget remains.
+                    ready = self._probe_once(client, url, timeout=min(5.0, remaining))
+                    remaining = deadline - time.monotonic()
+                    if ready and remaining > 0:
+                        return
 
-                if time.monotonic() >= deadline:
+                if remaining <= 0:
                     raise MlxcelTimeoutError(
                         f"mlxcel server did not become ready within {self._startup_timeout:.0f}s.",
                         stderr=self._stderr_snapshot(),
                     )
 
-                time.sleep(backoff)
+                time.sleep(min(backoff, remaining))
                 backoff = min(backoff * 1.5, 1.0)
 
     @staticmethod
-    def _probe_once(client: httpx.Client, url: str) -> bool:
+    def _probe_once(client: httpx.Client, url: str, *, timeout: float = 5.0) -> bool:
         """Return True once ``/health`` answers HTTP 200.
 
-        Connection errors (socket file not yet present, connection refused) and
-        HTTP 503 (loading / no slot) are treated as "still starting".
+        Connection errors, transient probe timeouts and HTTP 503 (loading / no
+        slot) are treated as "still starting". The caller enforces the overall
+        startup deadline and caps the per-phase HTTP timeout to its budget.
         """
         try:
-            resp = client.get(url)
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError):
+            resp = client.get(url, timeout=timeout)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError):
             return False
         if resp.status_code == 200:
             return True

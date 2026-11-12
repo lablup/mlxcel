@@ -28,6 +28,7 @@ from typing import Any, Dict
 MODEL_ID = "fake-model"
 START_TIME = time.monotonic()
 READY_AFTER = 0.0
+HEALTH_DELAY = 0.0
 
 
 def _now() -> int:
@@ -66,6 +67,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         if self.path == "/health":
+            time.sleep(HEALTH_DELAY)
             if not self._is_ready():
                 self._send_json(503, {"status": "loading model"})
                 return
@@ -203,13 +205,14 @@ class ThreadingTCPServer(ThreadingMixIn, TCPServer):
 
 
 def main() -> None:
-    global READY_AFTER, MODEL_ID
+    global READY_AFTER, MODEL_ID, HEALTH_DELAY
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--uds")
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
     parser.add_argument("--ready-after", type=float, default=0.0)
+    parser.add_argument("--health-delay", type=float, default=0.0)
     parser.add_argument("--model", default="fake-model")
     parser.add_argument("--crash", action="store_true", help="exit before binding")
     # Accept and ignore the flags the client always passes so this can stand in
@@ -225,6 +228,7 @@ def main() -> None:
     args, _unknown = parser.parse_known_args()
 
     READY_AFTER = args.ready_after
+    HEALTH_DELAY = args.health_delay
     MODEL_ID = args.alias or args.model
 
     if args.crash:
