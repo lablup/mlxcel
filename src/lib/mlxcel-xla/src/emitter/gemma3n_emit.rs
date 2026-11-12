@@ -760,7 +760,7 @@ mod tests {
         assert!(ragged.contains("tensor<4x2x4x1x4xf32> loc(\"kcache\")"));
         assert!(ragged.contains("tensor<4x12xf32>"));
         assert!(!ragged.contains("layers.2.self_attn.k_proj.weight"));
-        #[cfg(xla_iree_cuda)]
+        #[cfg(xla_iree_cuda_ptx)]
         {
             let mut native = c.clone();
             native.altup_num_inputs = 4;

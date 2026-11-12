@@ -1142,7 +1142,7 @@ fn gemma3n_native_qmv_eligibility(
     if !qmv_available {
         return Err(
             "Gemma3n CUDA Q4 requires the token-exact native QMV, but this binary was \
-             built without the CUDA-IREE PTX (`cfg(xla_iree_cuda)`). Rebuild with \
+             built without the CUDA-IREE PTX (`cfg(xla_iree_cuda_ptx)`). Rebuild with \
              IREE_CUDA_HOME and nvcc; refusing the numerically different dot fallback."
                 .to_string(),
         );
@@ -1413,6 +1413,7 @@ fn compile_bundle(
     cfg: &RuntimeConfig,
     gemma3_vlm_contract: Option<&Gemma3VlmCompatibilityContract>,
     gemma3n_qmv: bool,
+    native_cuda_ptx: bool,
     prefill_mlir: &str,
     prefill_tag: &str,
     prefill_embeddings_mlir: &str,
@@ -1429,8 +1430,14 @@ fn compile_bundle(
         ));
     }
     let mut flags = target_flags(device)?;
-    if gemma3n_qmv {
-        flags.push("--iree-cuda-target=sm_80".to_string());
+    // Both embedded CUDA kernels are PTX built for compute_80, so a graph that
+    // carries one is compiled for the same target (issue #2905 for the native
+    // 4-bit GEMV).
+    if gemma3n_qmv || native_cuda_ptx {
+        flags.push(format!(
+            "--iree-cuda-target=sm_{}",
+            crate::native_qmv::CUDA_MIN_SM
+        ));
     }
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
@@ -1539,6 +1546,7 @@ fn compile_vmfbs(
         cfg,
         gemma3_vlm_contract,
         native_qmv,
+        packed_native.is_some() && device == "cuda",
         &prefill,
         "prefill",
         &prefill_embeddings,
@@ -2840,11 +2848,12 @@ impl IreeLlama {
         let mut cfg = RuntimeConfig::from_json(model_dir, context_capacity)?
             .with_projection_layout(ProjectionLayout::InOut);
         // issue #2889: run the decode projections from the checkpoint's packed
-        // 4-bit weights through the native HIP GEMV. The HSACO is compiled for
-        // the active gfx target at load; any failure falls back to the f16
-        // path rather than failing the model.
+        // 4-bit weights through the native GEMV. On hip the HSACO is compiled
+        // for the active gfx target at load; on cuda the PTX was compiled with
+        // the crate (issue #2905). Any failure falls back to the f16 path
+        // rather than failing the model.
         let mut native_module: Option<(String, String)> = None;
-        if crate::native_qmv::requested() && device == "hip" {
+        if crate::native_qmv::requested() && matches!(device, "hip" | "cuda") {
             // The kernel is MLX affine 4-bit with a group of 64; any other
             // packing (8-bit, another group size) keeps the f16 path rather than
             // computing the wrong dequant.
@@ -2854,9 +2863,15 @@ impl IreeLlama {
                      using the f16 weight path"
                 );
             } else {
-                let arch = rocm_arch()?;
-                match crate::native_qmv::hsaco(&arch) {
-                    Ok(bytes) => {
+                let module = if device == "cuda" {
+                    crate::native_qmv::cuda_ptx().map(crate::native_qmv::cuda_module_parts)
+                } else {
+                    let arch = rocm_arch()?;
+                    crate::native_qmv::hsaco(&arch)
+                        .map(|bytes| crate::native_qmv::module_parts(&bytes, &arch))
+                };
+                match module {
+                    Ok(module) => {
                         cfg.set_packed_args(true);
                         // issue #2891: the head joins the native path only when
                         // the checkpoint stores it 4-bit; the dtype decides, not
@@ -2871,7 +2886,7 @@ impl IreeLlama {
                                  keeping the f16 head path"
                             ),
                         }
-                        native_module = Some(crate::native_qmv::module_parts(&bytes, &arch));
+                        native_module = Some(module);
                     }
                     Err(error) => {
                         eprintln!(
@@ -3525,6 +3540,8 @@ impl IreeRaggedLlama {
             &cfg,
             gemma3_vlm_compatibility(model_dir, &cfg)?.as_ref(),
             native_qmv,
+            // The ragged engine's native path is HIP-only.
+            false,
             &prefill_mlir,
             "prefill_logits",
             &prefill_embeddings_mlir,

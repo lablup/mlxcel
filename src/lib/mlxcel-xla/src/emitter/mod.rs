@@ -1561,7 +1561,7 @@ mod tests {
     // ======================================================================
 
     /// issue #2889: the native decode graph keeps the projections packed and
-    /// dispatches the HIP GEMV; the f16 path stays the default. issue #2891:
+    /// dispatches the native GEMV; the f16 path stays the default. issue #2891:
     /// the packed LM head joins the same dispatch, with its grid rounded to the
     /// rows one workgroup reduces.
     #[test]
@@ -1655,6 +1655,38 @@ mod tests {
                 && fallback.contains("tensor<2048x128256xf16>"),
             "the fallback declares the packed head and reads the f16 operand"
         );
+    }
+
+    /// issue #2905: the emitter is device-agnostic, so the CUDA decode graph is
+    /// the hip one with only the target alias and the embedded object swapped.
+    /// Every dispatch, grid and operand type is shared.
+    #[test]
+    fn native_decode_graph_is_the_same_on_cuda_apart_from_the_embedded_object() {
+        use super::builder::Precision;
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::InOut;
+        c.packed_args = true;
+        c.native_head = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let object = b"object";
+        let (hip_alias, hip_source) = crate::native_qmv::module_parts(object, "gfx1151");
+        let (cuda_alias, cuda_source) = crate::native_qmv::cuda_module_parts(object);
+        let hip =
+            emit_decode_with_native(&c, true, Precision::F16, Some((&hip_alias, &hip_source)));
+        let cuda =
+            emit_decode_with_native(&c, true, Precision::F16, Some((&cuda_alias, &cuda_source)));
+        assert!(cuda.starts_with(
+            "#mlxcel_qmv_target = #hal.executable.target<\"cuda\", \"cuda-nvptx-fb\">"
+        ));
+        assert_eq!(
+            cuda,
+            hip.replace(&hip_alias, &cuda_alias)
+                .replace("qmv4-gfx1151.hsaco", "qmv4_compute80.ptx")
+        );
+        assert_eq!(cuda.matches("flow.dispatch @custom_qmv").count(), 65);
     }
 
     /// issue #2922: the ragged batch engine keeps the projections packed and
