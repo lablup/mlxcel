@@ -439,3 +439,31 @@ fn responses_streaming_replay_final_answer_and_malformed_eof() {
     assert!(malformed_stream.reasoning.is_empty());
     assert!(malformed_stream.calls.is_empty());
 }
+
+#[test]
+fn responses_streaming_muse_primed_user_and_tool_headers_do_not_leak_envelope() {
+    let request = make_request(json!([
+        {"type": "message", "role": "user", "content": "인사해줘."}
+    ]));
+    let direct_user = " to=user<|message|>안녕하세요! 반갑습니다.<|eot|>";
+    let user_stream = stream_responses(&request, support::one_byte_chunks(direct_user));
+    assert_eq!(user_stream.text, "안녕하세요! 반갑습니다.");
+    assert!(user_stream.reasoning.is_empty());
+    assert!(user_stream.calls.is_empty());
+    assert_eq!(
+        user_stream.completed.expect("completed").output_text,
+        "안녕하세요! 반갑습니다."
+    );
+
+    let direct_tool = concat!(
+        " to=weather.get_current<|message|><atem:function_calls>",
+        "<atem:invoke name=\"weather.get_current\">",
+        "<atem:parameter name=\"city\">Seoul</atem:parameter>",
+        "</atem:invoke></atem:function_calls><|eot|>"
+    );
+    let tool_stream = stream_responses(&request, support::one_byte_chunks(direct_tool));
+    assert!(tool_stream.text.is_empty());
+    assert!(tool_stream.reasoning.is_empty());
+    assert_eq!(tool_stream.calls.len(), 1);
+    assert_eq!(tool_stream.calls[0].name, "weather.get_current");
+}

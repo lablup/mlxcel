@@ -267,7 +267,17 @@ enum DelimiterAction {
     EnterToolCall,
     /// Exit tool call state — resume content emission.
     ExitToolCall,
-    /// End a Muse recipient-oriented message and resume visible content.
+    /// A Muse `to=user<|message|>` (or recipient-less `<|start|>assistant<|message|>`)
+    /// header: visible content follows, trimmed and `\n`-joined across Muse messages.
+    EnterMuseContent,
+    /// A Muse `to=self<|message|>` header: reasoning follows, trimmed and
+    /// `\n`-joined across Muse messages.
+    EnterMuseThinking,
+    /// A Muse `to=<tool><|message|>` header: tool-call body is suppressed until
+    /// `<|eom|>` / `<|eot|>` or the next Muse header.
+    EnterMuseToolCall,
+    /// End a Muse recipient-oriented message (`<|eom|>` / `<|eot|>`) and resume
+    /// visible content while re-arming boundary `to=<recipient><|message|>` headers.
     ExitMuseMessage,
     /// Strip the delimiter but don't change state.
     Strip,
@@ -303,8 +313,6 @@ const ATEM_DYNAMIC_OPENERS: &[(&str, DelimiterAction)] = &[
 
 const MUSE_ASSISTANT_TO: &str = "<|start|>assistant to=";
 const MUSE_MESSAGE: &str = "<|message|>";
-const MUSE_PRIMED_SELF: &str = "to=self<|message|>";
-const MUSE_PRIMED_SELF_SPACED: &str = " to=self<|message|>";
 
 /// gpt-oss Harmony channel header opener. The header runs to
 /// [`HARMONY_MESSAGE`] and names the channel plus any `to=` recipient and
@@ -409,14 +417,19 @@ const MAX_HEADER_HOLD: usize = 256;
 /// owned by the model worker so new reasoning families don't require a rebuild.
 const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // Muse/Onyx recipient-oriented channels. The prompt may prime the first
-    // `<|start|>assistant`, leaving generation to begin at `to=self`.
+    // `<|start|>assistant`, leaving generation to begin at `[ws]to=<recipient><|message|>`
+    // (matched dynamically at Muse message boundaries).
     (
         "<|start|>assistant to=user<|message|>",
-        DelimiterAction::ExitMuseMessage,
+        DelimiterAction::EnterMuseContent,
     ),
     (
         "<|start|>assistant to=self<|message|>",
-        DelimiterAction::EnterThinking,
+        DelimiterAction::EnterMuseThinking,
+    ),
+    (
+        "<|start|>assistant<|message|>",
+        DelimiterAction::EnterMuseContent,
     ),
     ("<|eom|>", DelimiterAction::ExitMuseMessage),
     ("<|eot|>", DelimiterAction::ExitMuseMessage),
@@ -637,9 +650,30 @@ pub struct StreamFilter {
     leading_trim: LeadingTrim,
     /// Harmony output has been seen, so its terminators are live delimiters.
     harmony_active: bool,
+    /// Muse recipient-channel output has been seen, so `to=self` bodies use
+    /// trimmed/joined channel reasoning to match `split_muse_channels`.
+    muse_active: bool,
+    /// At the start of the turn or immediately after `<|eom|>` / `<|eot|>`,
+    /// where a boundary `[ws]to=<recipient><|message|>` header may open a
+    /// Muse message without `<|start|>assistant`.
+    muse_boundary: bool,
+    /// Currently inside a `to=<tool><|message|>` Muse message, keeping the
+    /// body suppressed through `<|eom|>` / `<|eot|>` or the next Muse header
+    /// even after an inner `</atem:function_calls>` closes.
+    muse_in_tool_message: bool,
     /// Strip [`ANSWER_WRAPPER`] from content; see
     /// [`with_answer_wrapper`](Self::with_answer_wrapper).
     answer_wrapper: bool,
+}
+
+/// A Muse recipient header found by [`StreamFilter::scan_muse_boundary_header`]
+/// or [`StreamFilter::scan_muse_assistant_header`].
+enum MuseHeader {
+    /// `(pos, len, action)` of a header to act on now.
+    Delimiter(usize, usize, DelimiterAction),
+    /// A header starting at this byte offset that may still reach
+    /// `<|message|>` within [`MAX_HEADER_HOLD`] bytes.
+    Pending(usize),
 }
 
 /// A Harmony channel header found by [`StreamFilter::scan_harmony_header`].
@@ -764,6 +798,9 @@ impl StreamFilter {
             harmony_reasoning: HarmonyReasoning::default(),
             leading_trim: LeadingTrim::None,
             harmony_active: false,
+            muse_active: false,
+            muse_boundary: true,
+            muse_in_tool_message: false,
             answer_wrapper: false,
         }
     }
@@ -793,6 +830,7 @@ impl StreamFilter {
     pub fn new_primed_open_thinking() -> Self {
         let mut s = Self::new();
         s.state = FilterState::Thinking;
+        s.muse_boundary = false;
         s
     }
 
@@ -853,7 +891,7 @@ impl StreamFilter {
         if remaining > 0 {
             match self.state {
                 FilterState::Content => self.emit_content_prefix(remaining, &mut acc),
-                FilterState::Thinking if self.harmony_active => {
+                FilterState::Thinking if self.harmony_active || self.muse_active => {
                     self.emit_harmony_reasoning(remaining, &mut acc);
                 }
                 FilterState::Thinking => {
@@ -1017,7 +1055,9 @@ impl StreamFilter {
     fn emit_prefix(&mut self, n: usize, acc: &mut Drained) {
         match self.state {
             FilterState::Content => self.emit_content_prefix(n, acc),
-            FilterState::Thinking if self.harmony_active => self.emit_harmony_reasoning(n, acc),
+            FilterState::Thinking if self.harmony_active || self.muse_active => {
+                self.emit_harmony_reasoning(n, acc);
+            }
             FilterState::Thinking => {
                 acc.reasoning.push_str(&self.buffer[..n]);
                 acc.consumed_positions += self.drain_fragment_lengths(n);
@@ -1087,6 +1127,7 @@ impl StreamFilter {
         acc.consumed_positions += self.drain_fragment_lengths(visible);
         self.buffer.drain(..visible);
         self.content_started = true;
+        self.muse_boundary = false;
         self.hold_ws(n - visible);
     }
 
@@ -1188,20 +1229,26 @@ impl StreamFilter {
         if let Some((_, end @ None)) = &mut self.post_close_ws {
             *end = Some(self.held_ws.len());
         }
-        if action.is_harmony() {
+        if action.is_harmony() || action.is_muse() {
             self.post_close_ws = None;
-            // A Harmony header or terminator ends the previous message, and
-            // `try_harmony` trims every body: its trailing whitespace is gone.
+            // A Harmony or Muse header or terminator ends the previous message,
+            // and `try_harmony` / `split_muse_channels` trim every body: its
+            // trailing whitespace is gone.
             self.drop_held_ws(acc);
             self.hold_ws_after_call = false;
             self.drop_held_reasoning_ws(acc);
         }
+        self.muse_boundary =
+            matches!(action, DelimiterAction::ExitMuseMessage) && !self.harmony_active;
         let after = self.state;
         if after != FilterState::Content {
             // The held content whitespace stays held: it is content only if
             // visible text follows the call or reasoning block (#2464).
             self.leading_trim = LeadingTrim::None;
-            if matches!(action, DelimiterAction::EnterHarmonyThinking) {
+            if matches!(
+                action,
+                DelimiterAction::EnterHarmonyThinking | DelimiterAction::EnterMuseThinking
+            ) {
                 let reasoning = &mut self.harmony_reasoning;
                 reasoning.at_body_start = true;
                 reasoning.separator = reasoning.started;
@@ -1209,7 +1256,9 @@ impl StreamFilter {
             return;
         }
         match action {
-            DelimiterAction::EnterHarmonyContent => {
+            DelimiterAction::EnterHarmonyContent
+            | DelimiterAction::EnterMuseContent
+            | DelimiterAction::ExitMuseMessage => {
                 self.leading_trim = LeadingTrim::Whitespace;
                 self.content_separator = self.content_started;
             }
@@ -1404,13 +1453,18 @@ impl StreamFilter {
             Some(HarmonyHeader::Pending(start)) => Some(start),
             _ => None,
         };
-        let muse = self.buffer.find(MUSE_ASSISTANT_TO).filter(|&pos| {
-            let tail = &self.buffer[pos + MUSE_ASSISTANT_TO.len()..];
-            tail.len() <= MAX_HEADER_HOLD && !tail.contains(MUSE_MESSAGE)
-        });
+        let muse_boundary = match self.scan_muse_boundary_header(false) {
+            Some(MuseHeader::Pending(start)) => Some(start),
+            _ => None,
+        };
+        let muse_assistant = match self.scan_muse_assistant_header(false) {
+            Some(MuseHeader::Pending(start)) => Some(start),
+            _ => None,
+        };
         harmony
             .into_iter()
-            .chain(muse)
+            .chain(muse_boundary)
+            .chain(muse_assistant)
             .chain(self.pending_harmony_role_header())
             .min()
     }
@@ -1440,44 +1494,111 @@ impl StreamFilter {
         None
     }
 
+    /// Scan for a boundary `[ws]to=<recipient><|message|>` Muse header at the
+    /// start of the assistant turn (when `<|start|>assistant` was primed by the
+    /// generation prompt) or immediately after `<|eom|>` / `<|eot|>`.
+    fn scan_muse_boundary_header(&self, end_of_stream: bool) -> Option<MuseHeader> {
+        if !self.muse_boundary
+            || self.harmony_active
+            || self.atem_depth > 0
+            || self.state != FilterState::Content
+        {
+            return None;
+        }
+        let buf = &self.buffer;
+        let ws_len = buf.len() - buf.trim_start().len();
+        if ws_len > MAX_HEADER_HOLD {
+            return None;
+        }
+        let after_ws = &buf[ws_len..];
+        if after_ws.is_empty() {
+            return (!end_of_stream).then_some(MuseHeader::Pending(0));
+        }
+        if after_ws.len() < 3 && "to=".starts_with(after_ws) {
+            return (!end_of_stream).then_some(MuseHeader::Pending(0));
+        }
+        let tail = after_ws.strip_prefix("to=")?;
+        let (recipient, from_lt) = tail.split_at(tail.find('<').unwrap_or(tail.len()));
+        if !super::atem::is_valid_muse_recipient(recipient) {
+            return None;
+        }
+        if from_lt.starts_with(MUSE_MESSAGE) {
+            let len = ws_len + "to=".len() + recipient.len() + MUSE_MESSAGE.len();
+            return Some(MuseHeader::Delimiter(
+                0,
+                len,
+                muse_recipient_action(recipient, false),
+            ));
+        }
+        if !end_of_stream && from_lt.len() < MUSE_MESSAGE.len() && MUSE_MESSAGE.starts_with(from_lt)
+        {
+            return Some(MuseHeader::Pending(0));
+        }
+        None
+    }
+
+    /// Scan for an explicit `<|start|>assistant to=<recipient><|message|>` Muse
+    /// header anywhere in the buffer within [`MAX_HEADER_HOLD`] bytes.
+    fn scan_muse_assistant_header(&self, end_of_stream: bool) -> Option<MuseHeader> {
+        let mut from = 0;
+        while let Some(rel) = self.buffer[from..].find(MUSE_ASSISTANT_TO) {
+            let pos = from + rel;
+            let recipient_start = pos + MUSE_ASSISTANT_TO.len();
+            let tail = &self.buffer[recipient_start..];
+            match tail.find(MUSE_MESSAGE) {
+                Some(message_rel) if message_rel <= MAX_HEADER_HOLD => {
+                    // A Harmony role header (`<|start|>assistant to=functions.NAME<|channel|>
+                    // ...`) belongs to `scan_harmony_header`, which routes it the way
+                    // `try_harmony` does and keeps Harmony isolation live (#2464).
+                    let region = &tail[..message_rel];
+                    if region
+                        .find(HARMONY_CHANNEL)
+                        .is_some_and(|channel| !region[..channel].contains("<|"))
+                    {
+                        from = recipient_start;
+                        continue;
+                    }
+                    let recipient = region.trim();
+                    let action = muse_recipient_action(recipient, self.harmony_active);
+                    return Some(MuseHeader::Delimiter(
+                        pos,
+                        recipient_start + message_rel + MUSE_MESSAGE.len() - pos,
+                        action,
+                    ));
+                }
+                None if !end_of_stream && tail.len() <= MAX_HEADER_HOLD => {
+                    return Some(MuseHeader::Pending(pos));
+                }
+                None if end_of_stream && tail.len() <= MAX_HEADER_HOLD => {
+                    return Some(MuseHeader::Delimiter(
+                        pos,
+                        self.buffer.len() - pos,
+                        DelimiterAction::Strip,
+                    ));
+                }
+                _ => {}
+            }
+            from = recipient_start;
+        }
+        None
+    }
+
     fn find_muse_recipient_header(
         &self,
         end_of_stream: bool,
     ) -> Option<(usize, usize, DelimiterAction)> {
-        if self.buffer.starts_with(MUSE_PRIMED_SELF) {
-            return Some((0, MUSE_PRIMED_SELF.len(), DelimiterAction::EnterThinking));
-        }
-        if self.buffer.starts_with(MUSE_PRIMED_SELF_SPACED) {
-            return Some((
-                0,
-                MUSE_PRIMED_SELF_SPACED.len(),
-                DelimiterAction::EnterThinking,
-            ));
-        }
-        let pos = self.buffer.find(MUSE_ASSISTANT_TO)?;
-        let recipient_start = pos + MUSE_ASSISTANT_TO.len();
-        let Some(message_rel) = self.buffer[recipient_start..].find(MUSE_MESSAGE) else {
-            return end_of_stream.then_some((pos, self.buffer.len() - pos, DelimiterAction::Strip));
-        };
-        let recipient_end = recipient_start + message_rel;
-        // A Harmony role header (`<|start|>assistant to=functions.NAME<|channel|>
-        // ...`) belongs to `scan_harmony_header`, which routes it the way
-        // `try_harmony` does and keeps Harmony isolation live (#2464).
-        let region = &self.buffer[recipient_start..recipient_end];
-        if region
-            .find(HARMONY_CHANNEL)
-            .is_some_and(|channel| !region[..channel].contains("<|"))
+        let mut earliest: Option<(usize, usize, DelimiterAction)> = None;
+        if let Some(MuseHeader::Delimiter(pos, len, action)) =
+            self.scan_muse_boundary_header(end_of_stream)
         {
-            return None;
+            earliest = choose_earlier(earliest, (pos, len, action));
         }
-        let recipient = region.trim();
-        let action = match recipient {
-            "self" => DelimiterAction::EnterThinking,
-            "user" => DelimiterAction::ExitMuseMessage,
-            "" => DelimiterAction::Strip,
-            _ => DelimiterAction::EnterToolCall,
-        };
-        Some((pos, recipient_end + MUSE_MESSAGE.len() - pos, action))
+        if let Some(MuseHeader::Delimiter(pos, len, action)) =
+            self.scan_muse_assistant_header(end_of_stream)
+        {
+            earliest = choose_earlier(earliest, (pos, len, action));
+        }
+        earliest
     }
 
     fn find_atem_dynamic_open(&self, prefix: &str, end_of_stream: bool) -> Option<(usize, usize)> {
@@ -1531,12 +1652,6 @@ impl StreamFilter {
                 continue;
             }
             let suffix = &buf[i..];
-            if i == 0 && MUSE_PRIMED_SELF.starts_with(suffix) {
-                return 0;
-            }
-            if i == 0 && suffix != " " && MUSE_PRIMED_SELF_SPACED.starts_with(suffix) {
-                return 0;
-            }
             for &(delim, _) in CHAT_DELIMITERS {
                 // A suffix is a partial match if it's a proper prefix of a
                 // delimiter (shorter, and the delimiter starts with it).
@@ -1606,7 +1721,25 @@ impl StreamFilter {
                 self.atem_wrapper_depth = 0;
                 self.state = FilterState::Content;
             }
-            DelimiterAction::ExitMuseMessage => self.state = FilterState::Content,
+            DelimiterAction::EnterMuseContent => {
+                self.muse_active = true;
+                self.muse_in_tool_message = false;
+                self.state = FilterState::Content;
+            }
+            DelimiterAction::EnterMuseThinking => {
+                self.muse_active = true;
+                self.muse_in_tool_message = false;
+                self.state = FilterState::Thinking;
+            }
+            DelimiterAction::EnterMuseToolCall => {
+                self.muse_active = true;
+                self.muse_in_tool_message = true;
+                self.state = FilterState::ToolCall;
+            }
+            DelimiterAction::ExitMuseMessage => {
+                self.muse_in_tool_message = false;
+                self.state = FilterState::Content;
+            }
             DelimiterAction::Strip => { /* consume delimiter, no state change */ }
             DelimiterAction::EnterAtemBlock => {
                 self.atem_wrapper_depth = self.atem_wrapper_depth.saturating_add(1);
@@ -1623,7 +1756,9 @@ impl StreamFilter {
                 }
                 if self.atem_wrapper_depth == 0 {
                     self.atem_depth = 0;
-                    self.state = FilterState::Content;
+                    if !self.muse_in_tool_message {
+                        self.state = FilterState::Content;
+                    }
                 } else if self.atem_depth > self.atem_wrapper_depth {
                     self.atem_depth -= 1;
                 }
@@ -1635,21 +1770,24 @@ impl StreamFilter {
                     }
                 } else if self.atem_depth > 0 {
                     self.atem_depth -= 1;
-                    if self.atem_depth == 0 {
+                    if self.atem_depth == 0 && !self.muse_in_tool_message {
                         self.state = FilterState::Content;
                     }
                 }
             }
             DelimiterAction::EnterHarmonyContent => {
                 self.harmony_active = true;
+                self.muse_in_tool_message = false;
                 self.state = FilterState::Content;
             }
             DelimiterAction::EnterHarmonyThinking => {
                 self.harmony_active = true;
+                self.muse_in_tool_message = false;
                 self.state = FilterState::Thinking;
             }
             DelimiterAction::EnterHarmonySuppressed | DelimiterAction::ExitHarmonyMessage => {
                 self.harmony_active = true;
+                self.muse_in_tool_message = false;
                 self.state = FilterState::ToolCall;
             }
         }
@@ -1669,6 +1807,17 @@ impl DelimiterAction {
         )
     }
 
+    /// A Muse channel header or terminator.
+    fn is_muse(self) -> bool {
+        matches!(
+            self,
+            DelimiterAction::EnterMuseContent
+                | DelimiterAction::EnterMuseThinking
+                | DelimiterAction::EnterMuseToolCall
+                | DelimiterAction::ExitMuseMessage
+        )
+    }
+
     fn is_atem(self) -> bool {
         matches!(
             self,
@@ -1679,6 +1828,20 @@ impl DelimiterAction {
                 | DelimiterAction::EnterAtemParameter
                 | DelimiterAction::ExitAtemParameter
         )
+    }
+}
+
+fn muse_recipient_action(recipient: &str, harmony_active: bool) -> DelimiterAction {
+    if harmony_active {
+        return match recipient {
+            "" => DelimiterAction::Strip,
+            _ => DelimiterAction::EnterHarmonySuppressed,
+        };
+    }
+    match recipient {
+        "self" => DelimiterAction::EnterMuseThinking,
+        "user" | "" => DelimiterAction::EnterMuseContent,
+        _ => DelimiterAction::EnterMuseToolCall,
     }
 }
 
