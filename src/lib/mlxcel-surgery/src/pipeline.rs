@@ -33,7 +33,7 @@ use crate::{SharedSurgeryOp, SurgeryOp};
 /// `Arc<dyn SurgeryOp>`), so a parsed pipeline can be shared by
 /// every concurrent model loader without re-parsing the config.
 ///
-/// Used by: future `mlxcel::surgery` integration glue (CLI flag —
+/// Used by: `mlxcel::surgery` integration glue (`--surgery` CLI flag —
 /// A4), text and VLM consolidated loaders (via the WeightTransform hook)
 #[derive(Default, Clone)]
 pub struct SurgeryPipeline {

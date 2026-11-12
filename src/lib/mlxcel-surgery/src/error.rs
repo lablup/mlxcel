@@ -20,7 +20,7 @@ use thiserror::Error;
 
 /// Errors that can arise while applying a surgery operation.
 ///
-/// Variants cover the common failure modes for the future op set
+/// Variants cover the common failure modes for the shipped op set
 /// (A5–A9): missing weight key, shape mismatch when materializing a
 /// donor tensor, dtype mismatch when interpolating between
 /// checkpoints, I/O failure when loading an external source file,
