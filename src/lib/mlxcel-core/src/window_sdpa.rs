@@ -379,6 +379,15 @@ pub(crate) fn fused_memo_len() -> usize {
     FUSED_MEMO.with(|memo| memo.borrow().len())
 }
 
+/// Whether MLX's fused SDPA kernel will run for an array-masked call at this
+/// shape. `false` means MLX's fallback materialises the full
+/// `[B, H, q_len, k_len]` score matrix, which is the premise
+/// `layers::sdpa_query_chunk_within_budget` uses to bound it by chunking the
+/// query axis. Shares this module's per-thread memo.
+pub(crate) fn legacy_mask_uses_fused_kernel(shape: &WindowSdpaShape) -> bool {
+    memoized_fused_verdict(shape, ProbedArm::LegacyMask)
+}
+
 /// MLX's own verdict on whether the native arm over `shape` runs a fused
 /// kernel. Metal only; `false` elsewhere, and `false` for a non-positive
 /// window, which the native entry would reject. Memoized per thread, since

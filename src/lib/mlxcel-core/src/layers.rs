@@ -5166,6 +5166,18 @@ fn attention_chunk_budget_bytes() -> usize {
     })
 }
 
+/// `MLXCEL_METAL_ATTENTION_CHUNK=0` restores the pre-gate Metal prefill — one
+/// unchunked SDPA over the whole prompt — so a numerics or latency regression
+/// can be bisected against the old route. Unset or any other value keeps the
+/// gate on.
+fn metal_attention_chunk_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var("MLXCEL_METAL_ATTENTION_CHUNK") {
+        Ok(raw) => !matches!(raw.trim(), "0" | "false" | "off"),
+        Err(_) => true,
+    })
+}
+
 /// True when this q/v + softcap combination cannot reach a fused
 /// (memory-linear) SDPA kernel on the CUDA backend, so MLX's fallback would
 /// materialize the full `[B, heads, q_len, k_len]` score matrix.
@@ -5406,16 +5418,35 @@ fn sdpa_query_chunk_within_budget(
         return None;
     }
     let k_len = k_shape[2];
-    // Neither gate can fire off CUDA, so skip the dtype query there.
-    if !cfg!(feature = "cuda") {
+    // Whether this backend would materialise the full
+    // `[B, H, q_len, k_len]` score matrix for this call. CUDA has its own
+    // predicates; Metal asks MLX itself through the fused-kernel probe,
+    // because its support matrix is per GPU generation — a pre-M5 GPU never
+    // fuses an array-mask call at head_dim 256 (#2621/#2646), and MLX's
+    // fallback then forms the scores: 24 heads at a 26.6k-token prompt is
+    // 33.9 GB, over Metal's 30.15 GB per-buffer cap, so the whole request
+    // fails at the eval boundary. Chunking the query axis keeps that
+    // transient inside `budget`; every row's result is unchanged because
+    // softmax and the value matmul are row-independent.
+    if cfg!(feature = "cuda") {
+        let attention_dtype = ffi::sdpa_attention_dtype(q, k, v);
+        if !cuda_sdpa_materializes_scores(q, v, attention_dtype, softcap)
+            && !cuda_sdpa_small_query_fallback(q_len, k_len, arr_masked, do_causal)
+        {
+            return None;
+        }
+    } else if cfg!(feature = "metal") {
+        if !metal_attention_chunk_enabled() {
+            return None;
+        }
+        let shape = crate::window_sdpa::WindowSdpaShape::of(q, k, v);
+        if crate::window_sdpa::legacy_mask_uses_fused_kernel(&shape) {
+            return None;
+        }
+    } else {
         return None;
     }
     let attention_dtype = ffi::sdpa_attention_dtype(q, k, v);
-    if !cuda_sdpa_materializes_scores(q, v, attention_dtype, softcap)
-        && !cuda_sdpa_small_query_fallback(q_len, k_len, arr_masked, do_causal)
-    {
-        return None;
-    }
     let bytes = crate::dtype::size_bytes(attention_dtype).unwrap_or(4);
     let per_row = (q_shape[0].max(1) as usize)
         .saturating_mul(q_shape[1].max(1) as usize)
@@ -8356,6 +8387,25 @@ mod tests {
         // Every chunk's scores stay within budget.
         let chunk = query_chunk_len(1000, 100, 7000).unwrap();
         assert!(chunk as usize * 1000 <= 7000);
+    }
+
+    #[test]
+    fn query_chunk_len_covers_the_arex_long_prompt_geometry() {
+        // AREX-2 (Qwen3.5 hybrid): 24 query heads, head_dim 256, bf16 scores.
+        // A 26,602-token prefill materialises 24 * 26602^2 * 2 B = 33.97 GB in
+        // one buffer, which is what Metal refuses at the 30.15 GB cap; the
+        // same matrix at the attention dtype's 4 B is 67.9 GB.
+        let budget = 1024 * 1024 * 1024;
+        let q_len = 26_602;
+        for per_row in [24 * q_len * 2, 24 * q_len * 4] {
+            let chunk = query_chunk_len(per_row, q_len, budget).expect("must chunk");
+            assert!(chunk > 1 && chunk < q_len);
+            // No chunk's score matrix exceeds the budget ...
+            assert!(per_row * chunk as usize <= budget);
+            // ... and the chunks still cover the whole query axis.
+            let chunks = (q_len as usize).div_ceil(chunk as usize);
+            assert!(chunks * chunk as usize >= q_len as usize);
+        }
     }
 
     #[test]
