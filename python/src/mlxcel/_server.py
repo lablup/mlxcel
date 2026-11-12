@@ -17,6 +17,7 @@ import os
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -81,6 +82,71 @@ def _free_tcp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _clear_stale_socket(path: str) -> None:
+    """Remove a socket nobody listens on; refuse any other existing entry.
+
+    A socket file outlives the process that bound it, so a leftover from a
+    crashed server is removed and the path reused. Two things are left alone,
+    with an error instead of a start: an entry that is not a socket (a regular
+    file, a directory, a symlink), and a socket that still has a listener, which
+    would otherwise keep running with its path taken away.
+
+    One non-blocking connection attempt decides which it is. Only "connection
+    refused" reads as nobody there. A connection that is accepted or queued, or
+    a full accept queue (EAGAIN on Linux), means a listener; any other error (no
+    permission to connect, a socket of another type) leaves the question open,
+    and the socket is not removed on a guess. macOS answers "connection refused"
+    for a full accept queue too, so a saturated listener cannot be told from a
+    stale socket there. The check and the removal are two steps, so this is not
+    a lock against another process creating the path in between.
+    """
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise MlxcelServerError(f"Cannot inspect Unix socket path {path!r}: {exc}") from exc
+    if not stat.S_ISSOCK(mode):
+        raise MlxcelServerError(
+            f"Unix socket path {path!r} exists and is not a socket; it is left as it is. "
+            "Remove it or pass another socket=... path."
+        )
+
+    stale = False
+    unknown: Optional[OSError] = None
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.setblocking(False)
+        probe.connect(path)
+    except (ConnectionRefusedError, FileNotFoundError):
+        stale = True
+    except BlockingIOError:
+        # The listener's accept queue is full: it is there.
+        pass
+    except OSError as exc:
+        unknown = exc
+    finally:
+        probe.close()
+    if unknown is not None:
+        raise MlxcelServerError(
+            f"Cannot tell whether Unix socket {path!r} is still in use ({unknown}); it is left "
+            "as it is. Remove it or pass another socket=... path."
+        ) from unknown
+    if not stale:
+        raise MlxcelServerError(
+            f"Unix socket path {path!r} is in use by a running listener; it is left as it is. "
+            "Stop that server, pass another socket=... path, or connect to it by passing "
+            "socket=... without a model."
+        )
+
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise MlxcelServerError(f"Cannot remove stale Unix socket {path!r}: {exc}") from exc
 
 
 def _default_socket_path() -> str:
@@ -223,12 +289,10 @@ class ManagedServer:
         if self.api_key:
             env["LLAMA_API_KEY"] = self.api_key
 
-        # Remove a stale socket file so bind does not fail on EADDRINUSE.
-        if self.uds_path is not None and os.path.exists(self.uds_path):
-            try:
-                os.unlink(self.uds_path)
-            except OSError:
-                pass
+        # Remove a stale socket file so bind does not fail on EADDRINUSE, and
+        # refuse to start over anything else that is already at the path.
+        if self.uds_path is not None:
+            _clear_stale_socket(self.uds_path)
 
         try:
             self._proc = subprocess.Popen(  # noqa: S603 - command built from trusted args
