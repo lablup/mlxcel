@@ -7,8 +7,10 @@ without the real Rust binary or a model.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import socket
 import stat
 import sys
 import time
@@ -100,6 +102,72 @@ def test_managed_tcp_lifecycle(fake_binary: str) -> None:
     finally:
         server.close()
     assert server._proc is not None and server._proc.poll() is not None
+
+
+@pytest.mark.parametrize(
+    "host", ["127.0.0.1", "localhost", "::1", "[::1]", "2001:db8::1", "[2001:db8::1]"]
+)
+def test_managed_tcp_urls_preserve_host_and_port(host: str) -> None:
+    server = ManagedServer("fake/model", binary=sys.executable, host=host, port=18080)
+    try:
+        for raw_url, path in [(server.base_url, "/v1"), (server._health_url, "/health")]:
+            url = httpx.URL(raw_url)
+            assert url.host == host.strip("[]")
+            assert url.port == 18080
+            assert url.path == path
+        # URL brackets must not change the address passed to the server CLI.
+        command = server._build_command()
+        assert command[command.index("--host") + 1] == host
+    finally:
+        server.close()
+
+
+@pytest.fixture()
+def ipv6_port() -> int:
+    if not socket.has_ipv6:
+        pytest.skip("IPv6 unavailable")
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+            return int(probe.getsockname()[1])
+    except OSError as exc:
+        pytest.skip(f"IPv6 loopback unavailable: {exc}")
+
+
+@pytest.mark.parametrize("host", ["::1", "[::1]"])
+def test_managed_ipv6_client(
+    fake_binary: str, ipv6_port: int, host: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NO_PROXY", "*")
+    with mlxcel.LLM(
+        "fake/model", binary=fake_binary, host=host, port=ipv6_port, startup_timeout=10.0
+    ) as client:
+        assert client.model == "fake-model"
+        assert client.generate("hi") == "hello world"
+        assert client._server is not None
+        proc = client._server._proc
+        assert proc is not None and proc.poll() is None
+    assert proc.poll() is not None
+
+
+@pytest.mark.parametrize("host", ["::1", "[::1]"])
+def test_async_managed_ipv6_client(
+    fake_binary: str, ipv6_port: int, host: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NO_PROXY", "*")
+
+    async def go() -> None:
+        async with mlxcel.AsyncLLM(
+            "fake/model", binary=fake_binary, host=host, port=ipv6_port, startup_timeout=10.0
+        ) as client:
+            assert await client.generate("hi") == "hello world"
+            assert client.model == "fake-model"
+            assert client._server is not None
+            proc = client._server._proc
+            assert proc is not None and proc.poll() is None
+        assert proc.poll() is not None
+
+    asyncio.run(go())
 
 
 def test_early_exit_raises_with_stderr(fake_binary: str, tmp_path: Path) -> None:

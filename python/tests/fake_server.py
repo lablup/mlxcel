@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 from http.server import BaseHTTPRequestHandler
@@ -202,6 +203,10 @@ class ThreadingTCPServer(ThreadingMixIn, TCPServer):
     allow_reuse_address = True
 
 
+class ThreadingIPv6Server(ThreadingTCPServer):
+    address_family = socket.AF_INET6
+
+
 def main() -> None:
     global READY_AFTER, MODEL_ID
 
@@ -250,8 +255,11 @@ def main() -> None:
         sys.stderr.write(f"Starting mlxcel server on unix:{uds}\n")
     else:
         host = args.host or "127.0.0.1"
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
         port = args.port or 8080
-        server = ThreadingTCPServer((host, port), Handler)
+        server_type = ThreadingIPv6Server if ":" in host else ThreadingTCPServer
+        server = server_type((host, port), Handler)
         sys.stderr.write(f"Starting mlxcel server on {host}:{port}\n")
     sys.stderr.flush()
 
