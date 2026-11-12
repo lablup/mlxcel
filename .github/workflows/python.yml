@@ -1,9 +1,10 @@
 # PR / push CI for the Python client package under python/. Runs ruff (lint +
 # format), mypy (type check) once on the pinned interpreter, and pytest (unit
 # + lifecycle tests) across a floor/current/ceiling Python version matrix. It
-# needs neither MLX nor the mlxcel binary, so it runs on plain ubuntu-latest
-# and is independent of the Rust CI in ci.yml. The e2e test is skipped here
-# because it requires a built binary (set MLXCEL_BIN to run it locally).
+# needs neither MLX nor the mlxcel binary, so it runs on plain GitHub-hosted
+# Ubuntu runners and is independent of the Rust CI in ci.yml. The e2e test is
+# skipped here because it requires a built binary (set MLXCEL_BIN to run it
+# locally).
 
 name: Python
 
@@ -49,11 +50,19 @@ jobs:
 
   test:
     name: test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.11', '3.13']
+        include:
+          # actions/setup-python has no CPython 3.9 build for Ubuntu 26.04
+          # (ubuntu-latest), so the floor version stays on 24.04.
+          - python-version: '3.9'
+            os: ubuntu-24.04
+          - python-version: '3.11'
+            os: ubuntu-latest
+          - python-version: '3.13'
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
