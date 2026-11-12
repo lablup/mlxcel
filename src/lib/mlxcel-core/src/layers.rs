@@ -57,6 +57,40 @@ pub struct QuantizedWeight {
     pub runtime_loras: Vec<crate::runtime_lora::RuntimeLoraTerm>,
 }
 
+/// The quantized weights of a gate/up/down MLP when one fused kernel can run
+/// all three projections.
+///
+/// A fused MLP forward such as `compiled_gelu_approx_mlp_forward` takes a
+/// single group size, bit width and mode for the three of them. A mixed-bit
+/// checkpoint, where a recipe gives single modules more bits than the rest,
+/// has projections of one MLP on different layouts, and handing the kernel the
+/// gate's layout for all three makes MLX throw across the bridge at the first
+/// forward ("[quantized_matmul] The shapes of the weight and scales are
+/// incompatible"). `None` sends the caller to its projection-by-projection
+/// forwards, which carry each projection's own layout.
+///
+/// Used by: the Gemma 1, Gemma 2 and Gemma 3 MLPs.
+#[must_use]
+pub fn fused_mlp_quantized_weights<'a>(
+    gate: &'a UnifiedLinear,
+    up: &'a UnifiedLinear,
+    down: &'a UnifiedLinear,
+) -> Option<(
+    &'a QuantizedWeight,
+    &'a QuantizedWeight,
+    &'a QuantizedWeight,
+)> {
+    let (gate, up, down) = (
+        gate.quantized_weight()?,
+        up.quantized_weight()?,
+        down.quantized_weight()?,
+    );
+    let same_layout = |other: &QuantizedWeight| {
+        gate.group_size == other.group_size && gate.bits == other.bits && gate.mode == other.mode
+    };
+    (same_layout(up) && same_layout(down)).then_some((gate, up, down))
+}
+
 impl QuantizedWeight {
     /// Create a new quantized weight from raw components (affine mode)
     pub fn new(
@@ -6301,6 +6335,68 @@ mod tests {
     fn raw_bytes(arr: &MlxArray) -> Vec<u8> {
         ffi::eval(arr);
         ffi::array_to_raw_bytes(arr)
+    }
+
+    fn quantized_linear(dense: &MlxArray, bits: i32) -> UnifiedLinear {
+        let q = ffi::quantize_weights(dense, 64, bits);
+        UnifiedLinear::new(
+            QuantizedWeight::new(
+                ffi::quantized_weights_w(&q),
+                ffi::quantized_weights_scales(&q),
+                ffi::quantized_weights_biases(&q),
+                64,
+                bits,
+            ),
+            None,
+        )
+    }
+
+    #[test]
+    fn a_fused_mlp_needs_one_quantization_layout_for_its_three_projections() {
+        let (gate_dense, down_dense) = (seeded(&[128, 64], 11), seeded(&[64, 128], 13));
+        let bits_of = |linear: &UnifiedLinear| linear.quantized_weight().map(|w| w.bits);
+
+        // Uniform: the fused kernel may run, and gets the three weights back.
+        let (gate, up, down) = (
+            quantized_linear(&gate_dense, 4),
+            quantized_linear(&gate_dense, 4),
+            quantized_linear(&down_dense, 4),
+        );
+        let fused = fused_mlp_quantized_weights(&gate, &up, &down).expect("one layout");
+        assert_eq!((fused.0.bits, fused.1.bits, fused.2.bits), (4, 4, 4));
+
+        // Mixed bits, in each position. Layer 2 of `mlx-community/gemma-3-1b-it-DQ`
+        // is the first of these: gate and down at 8 bits, up at 4.
+        for bits in [[8, 4, 8], [4, 8, 4], [4, 4, 8], [8, 8, 4]] {
+            let (gate, up, down) = (
+                quantized_linear(&gate_dense, bits[0]),
+                quantized_linear(&gate_dense, bits[1]),
+                quantized_linear(&down_dense, bits[2]),
+            );
+            assert_eq!(
+                [bits_of(&gate), bits_of(&up), bits_of(&down)],
+                bits.map(Some)
+            );
+            assert!(
+                fused_mlp_quantized_weights(&gate, &up, &down).is_none(),
+                "{bits:?}"
+            );
+        }
+
+        // A group size or a mode that differs is a different layout as well.
+        let with = |edit: fn(&mut QuantizedWeight)| {
+            let mut weight = quantized_4bit(&gate_dense);
+            edit(&mut weight);
+            UnifiedLinear::new(weight, None)
+        };
+        let other_group = with(|weight| weight.group_size = 32);
+        assert!(fused_mlp_quantized_weights(&gate, &other_group, &down).is_none());
+        let other_mode = with(|weight| weight.mode = "mxfp4".to_string());
+        assert!(fused_mlp_quantized_weights(&gate, &other_mode, &down).is_none());
+
+        // A projection that is not quantized at all leaves nothing to fuse.
+        let dense = UnifiedLinear::Regular(Linear::new(seeded(&[128, 64], 17), None));
+        assert!(fused_mlp_quantized_weights(&gate, &dense, &down).is_none());
     }
 
     /// Issues #1994 and #2001: with matching f16 or bf16 scales and input and
