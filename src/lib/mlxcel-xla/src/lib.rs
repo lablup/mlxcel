@@ -223,6 +223,9 @@ pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
 /// Test support only (issue #2923): batch-KV allocation instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters};
+/// Test support only (issue #3028): decode-step scalar reuse instrumentation.
+#[cfg(feature = "test-support")]
+pub use iree::{decode_scalar_counters, reset_decode_scalar_counters};
 /// Test support only (issue #2961): resident-weight upload instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{reset_weight_upload_counters, weight_upload_counters};

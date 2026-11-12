@@ -454,6 +454,13 @@ required-features = ["test-utils"]
 name = "xla_prepared_prefill"
 required-features = ["xla-iree", "test-utils"]
 
+# Decode-step scalar reuse gate (#3028). Needs real IREE execution plus the
+# shim's test-support counters, so like the other XLA device gates it is
+# discovered only under both features and runs as `-- --ignored`.
+[[test]]
+name = "xla_decode_scalar_reuse"
+required-features = ["xla-iree", "test-utils"]
+
 [[test]]
 name = "molmo2_xla_vision_parity"
 required-features = ["xla-iree"]
