@@ -863,6 +863,54 @@ pub(crate) fn load_qwen3_5_moe_vlm(model_path: &Path) -> Result<LoadedModel> {
     load_qwen3_5_vlm_with_variant(model_path, Qwen35VlmVariant::Moe)
 }
 
+/// Split a Qwen3.5 VLM checkpoint into the text model's weights and the vision
+/// tower's, each under its own key names, and repack a ModelOpt NVFP4 export's
+/// text weights.
+///
+/// ModelOpt stores each quantized linear as a `{weight, weight_scale,
+/// weight_scale_2}` triplet. The text-only loader repacks them inside
+/// `load_text_weights`; this route reads the checkpoint itself, so the same
+/// repack has to run here, or the packed `uint8` planes reach the model as
+/// dense weights. It runs on the split map: the keys then carry the text
+/// model's own names, and the vision tower, which ModelOpt leaves unquantized,
+/// has no triplets.
+///
+/// Used by: [`load_qwen3_5_vlm_with_variant`]
+pub(super) fn split_qwen3_5_vlm_weights(
+    raw_weights: WeightMap,
+    full_config: &serde_json::Value,
+    model_path: &Path,
+) -> Result<(WeightMap, WeightMap)> {
+    let mut text_weights = WeightMap::new();
+    let mut vision_weights = WeightMap::new();
+
+    for (key, value) in raw_weights {
+        if key.starts_with("model.language_model.") || key.starts_with("language_model.model.") {
+            let new_key = key
+                .replace("model.language_model.", "model.")
+                .replace("language_model.model.", "model.");
+            text_weights.insert(new_key, value);
+        } else if key.starts_with("model.visual.") {
+            let new_key = key.replacen("model.visual.", "vision_tower.", 1);
+            vision_weights.insert(new_key, value);
+        } else if key.starts_with("vision_tower.") {
+            vision_weights.insert(key, value);
+        } else if key.starts_with("language_model.lm_head.") {
+            let new_key = key.replacen("language_model.", "", 1);
+            text_weights.insert(new_key, value);
+        } else if key.starts_with("lm_head.") || key.starts_with("model.") {
+            text_weights.insert(key, value);
+        }
+    }
+
+    if models::is_modelopt_nvfp4_text_checkpoint(Some(full_config), model_path) {
+        models::sanitize_modelopt_nvfp4_weights(&mut text_weights, Some(full_config))
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+
+    Ok((text_weights, vision_weights))
+}
+
 fn load_qwen3_5_vlm_with_variant(
     model_path: &Path,
     variant: Qwen35VlmVariant,
@@ -889,27 +937,8 @@ fn load_qwen3_5_vlm_with_variant(
     let raw_weights = load_vlm_weights_common(model_path, None)?;
     let raw_weights = models::requantize_fp8_weights(raw_weights, fp8)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let mut text_weights = mlxcel_core::weights::WeightMap::new();
-    let mut vision_weights = mlxcel_core::weights::WeightMap::new();
-
-    for (key, value) in raw_weights {
-        if key.starts_with("model.language_model.") || key.starts_with("language_model.model.") {
-            let new_key = key
-                .replace("model.language_model.", "model.")
-                .replace("language_model.model.", "model.");
-            text_weights.insert(new_key, value);
-        } else if key.starts_with("model.visual.") {
-            let new_key = key.replacen("model.visual.", "vision_tower.", 1);
-            vision_weights.insert(new_key, value);
-        } else if key.starts_with("vision_tower.") {
-            vision_weights.insert(key, value);
-        } else if key.starts_with("language_model.lm_head.") {
-            let new_key = key.replacen("language_model.", "", 1);
-            text_weights.insert(new_key, value);
-        } else if key.starts_with("lm_head.") || key.starts_with("model.") {
-            text_weights.insert(key, value);
-        }
-    }
+    let (text_weights, mut vision_weights) =
+        split_qwen3_5_vlm_weights(raw_weights, &full_config, model_path)?;
 
     let mut text_config_val = full_config
         .get("text_config")

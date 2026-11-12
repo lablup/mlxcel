@@ -1188,9 +1188,11 @@ pub(crate) fn sanitize_gemma4_nvfp4_weights(
 /// weight_scale_2}` triplets for the running backend. A no-op for a checkpoint
 /// without `weight_scale_2` keys.
 ///
-/// Used by: [`sanitize_gemma4_nvfp4_weights`], and [`load_text_weights`] for
-/// every other text family whose config declares ModelOpt NVFP4 (issue #2351)
-fn sanitize_modelopt_nvfp4_weights(
+/// Used by: [`sanitize_gemma4_nvfp4_weights`], [`load_text_weights`] for
+/// every other text family whose config declares ModelOpt NVFP4 (issue #2351),
+/// and the Qwen3.5 VLM loader's `split_qwen3_5_vlm_weights`, which reads its
+/// checkpoint without going through `load_text_weights`
+pub(crate) fn sanitize_modelopt_nvfp4_weights(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
 ) -> Result<(), String> {
@@ -1247,8 +1249,14 @@ fn modelopt_quantization_config(
 }
 
 /// Whether a non-Gemma text checkpoint is a ModelOpt NVFP4 export whose
-/// triplets [`load_text_weights`] must repack (issue #2351).
-fn is_modelopt_nvfp4_text_checkpoint(config: Option<&Value>, model_dir: &std::path::Path) -> bool {
+/// triplets its loader must repack (issue #2351).
+///
+/// Used by: [`load_text_weights`], and the Qwen3.5 VLM loader's
+/// `split_qwen3_5_vlm_weights`
+pub(crate) fn is_modelopt_nvfp4_text_checkpoint(
+    config: Option<&Value>,
+    model_dir: &std::path::Path,
+) -> bool {
     modelopt_quantization_config(config, model_dir)
         .is_some_and(|qc| crate::models::gemma4::is_modelopt_nvfp4(&qc))
 }
