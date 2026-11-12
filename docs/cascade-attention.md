@@ -2,7 +2,7 @@
 
 Cascade attention computes a prompt prefix shared by several concurrent sequences **once per decode step** instead of once per sequence. It is the compute-side counterpart to the storage-side deduplication mlxcel already performs.
 
-Status: opt-in, off by default. Correctness is verified against both a host f64 reference and the flat fused launch, on Metal, with f32 and f16 pools. Throughput on a real serving workload has not been measured yet, which is why it is off; see [Measuring it](#measuring-it).
+Status: opt-in, off by default. Correctness is verified against both a host f64 reference and the flat fused launch, on Metal, with f32 and f16 pools. It is off because it was measured and rejected: in the layer-level run on an Apple M1 Ultra (2026-08-03) cascade decode was slower than the flat launch in all eight measurements, 0.356x to 0.784x ([`docs/benchmark_results/versions/v0.5.0.md#cascade-attention-m1ultra-2026-08-03`](benchmark_results/versions/v0.5.0.md#cascade-attention-m1ultra-2026-08-03)). A serving-level run has not been recorded; see [Measuring it](#measuring-it).
 
 ## What is duplicated today
 
@@ -117,7 +117,7 @@ python3 scripts/bench_serving_concurrency.py \
 
 `--shared-prefix-tokens` makes every client send an identical system prompt and differ only in a short user question, which is what produces refcounted shared blocks; `--metrics` scrapes `/metrics` around each level and reports the paged decode path split, so a level that did not actually run cascade says so instead of being assumed. Run the same command with `MLXCEL_CASCADE_ATTENTION=1` and without it, on the same server build, for the before/after pair.
 
-Record results under `docs/benchmark_results/cascade-attention-<hw>-<date>.md` following the format in [`benchmarks.md`](benchmarks.md). Until such a file exists, the default in `paged_v2::cascade::DEFAULT_CASCADE_ENABLED` stays `false`.
+Record results following the format and retention rules in [`benchmarks.md`](benchmarks.md#result-retention-and-release-consolidation). The layer-level M1 Ultra run of 2026-08-03 is already recorded in [`docs/benchmark_results/versions/v0.5.0.md#cascade-attention-m1ultra-2026-08-03`](benchmark_results/versions/v0.5.0.md#cascade-attention-m1ultra-2026-08-03): cascade lost in every configuration it measured, so `paged_v2::cascade::DEFAULT_CASCADE_ENABLED` stays `false`. Flip it only after a recorded run finds a configuration where cascade wins.
 
 ## Limitations
 
