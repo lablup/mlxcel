@@ -1902,6 +1902,130 @@ fn load_text_weights_leaves_undeclared_triplets_alone() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// One ModelOpt NVFP4 linear on disk in the Llama-family layout, 8 x 64, under
+/// a config that declares `quant_algo`.
+fn write_modelopt_linear_fixture(dir: &Path, quant_algo: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&json!({
+            "model_type": "qwen2",
+            "tie_word_embeddings": false,
+            "quantization_config": {
+                "quant_method": "modelopt",
+                "quant_algo": quant_algo,
+                "config_groups": {"group_0": {"weights": {
+                    "num_bits": 4, "type": "float", "group_size": 16
+                }}},
+                "producer": {"name": "modelopt"}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let base = "model.layers.0.mlp.gate_proj";
+    write_safetensors(
+        &dir.join("model.safetensors"),
+        &[
+            (
+                &format!("{base}.weight"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::U8,
+                    shape: vec![8, 32],
+                    data: (0..8 * 32).map(|i| (i * 37 + 19) as u8).collect(),
+                },
+            ),
+            (
+                &format!("{base}.weight_scale"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F8_E4M3,
+                    shape: vec![8, 4],
+                    data: (0..8 * 4).map(|i| [0x20, 0x28, 0x30][i % 3]).collect(),
+                },
+            ),
+            (
+                &format!("{base}.weight_scale_2"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F32,
+                    shape: vec![],
+                    data: 0.5_f32.to_le_bytes().to_vec(),
+                },
+            ),
+        ],
+    );
+}
+
+/// `W4A16_NVFP4` is ModelOpt's name for NVFP4 weights with unquantized
+/// activations: the same triplets on disk. It was not recognized, nothing was
+/// repacked, and the packed bytes reached a dense matmul, which aborts
+/// (`AnveshGummala/qwen2.5-0.5b-nvfp4-max-quant`). A family without an mlx-lm
+/// `quantization` block then declares its default group size of 64, under which
+/// the repacked plane has to load as `nvfp4` all the same.
+#[test]
+fn a_w4a16_nvfp4_checkpoint_is_repacked_and_loads_as_nvfp4() {
+    if !backend_runs_native_nvfp4("a_w4a16_nvfp4_checkpoint_is_repacked_and_loads_as_nvfp4") {
+        return;
+    }
+    let _env_guard = env_lock();
+    let _nvfp4_env = EnvRestore::clear(NVFP4_REPACK_ENV_KEYS);
+    let base = "model.layers.0.mlp.gate_proj";
+    let input: Vec<f32> = (0..64).map(|i| ((i % 13) as f32 - 6.0) * 0.03).collect();
+    let x = mlxcel_core::from_slice_f32(&input, &[1, 1, 64]);
+    let mut outputs = Vec::new();
+    for quant_algo in ["NVFP4", "W4A16_NVFP4", "w4a16_nvfp4"] {
+        let dir = temp_model_dir(&format!("modelopt_linear_{quant_algo}"));
+        write_modelopt_linear_fixture(&dir, quant_algo);
+        let weights = load_text_weights(&dir, None).unwrap();
+        for gone in ["weight_scale", "weight_scale_2"] {
+            assert!(
+                !weights.contains_key(&format!("{base}.{gone}")),
+                "{quant_algo}: {gone} was not repacked"
+            );
+        }
+        assert!(weights.contains_key(&format!("{base}.global_scale")));
+
+        // The Llama family's declared default, 64.
+        let linear = mlxcel_core::layers::UnifiedLinear::from_weights(&weights, base, 64, 4)
+            .expect("the repacked plane loads");
+        let plane = linear.as_quantized_weight().expect("a packed plane");
+        assert_eq!(
+            (plane.mode.as_str(), plane.group_size, plane.bits),
+            ("nvfp4", 16, 4),
+            "{quant_algo}"
+        );
+        let y = linear.forward(&x);
+        mlxcel_core::eval(&y);
+        outputs.push(mlxcel_core::array_to_raw_bytes(&y));
+        drop(linear);
+        drop(weights);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    assert_eq!(
+        outputs[0], outputs[1],
+        "the two names are one weight format"
+    );
+    assert_eq!(outputs[0], outputs[2]);
+}
+
+/// The other ModelOpt algorithms are not this format and stay untouched:
+/// `NVFP4_AWQ` adds a pre-quantization scale per layer, `MIXED_PRECISION` and
+/// `FP8` store other planes.
+#[test]
+fn other_modelopt_algorithms_are_not_repacked_as_nvfp4() {
+    let _env_guard = env_lock();
+    for quant_algo in ["NVFP4_AWQ", "MIXED_PRECISION", "FP8", "W4A8_NVFP4_FP8"] {
+        let dir = temp_model_dir(&format!("modelopt_linear_other_{quant_algo}"));
+        write_modelopt_linear_fixture(&dir, quant_algo);
+        let weights = load_text_weights(&dir, None).unwrap();
+        assert!(
+            weights.contains_key("model.layers.0.mlp.gate_proj.weight_scale_2"),
+            "{quant_algo}"
+        );
+        drop(weights);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 /// mlx-lm's per-expert tensor scale is resolved in the funnel against the
 /// config flag, on the file's key names (issue #2351).
 #[test]
