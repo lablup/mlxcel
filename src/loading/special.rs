@@ -149,7 +149,7 @@ pub(crate) fn try_load_special_model_from_weights(
             let language_model = models::gemma3n::Gemma3nLanguageModel::from_weights(
                 weights,
                 &config,
-                "language_model.model",
+                models::gemma3n::text_only_language_model_prefix(weights),
             )
             .map_err(|err| anyhow::anyhow!("{}", err))?;
             LoadedModel::Gemma3n(models::Gemma3nModel {
