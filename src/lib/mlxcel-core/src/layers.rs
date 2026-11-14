@@ -2302,7 +2302,8 @@ const MAX_QUANT_GROUP_SIZE: i32 = 1 << 20;
 /// construction, which is why a caller that goes through here can never trip
 /// [`validate_quantization_mode`] or [`validate_quantization_biases`].
 ///
-/// Used by: UnifiedLinear::from_weights, QuantizedEmbedding::from_weights,
+/// Used by: [`infer_plane_quantization_mode`] (the linear and separate-QKV
+///          loaders), QuantizedEmbedding::from_weights,
 ///          [`QuantizedMultiLinear::new`] and
 ///          [`QuantizedMultiLinear::from_weights`] (MLA `embed_q` /
 ///          `unembed_out`), BailingMoe weight validation, `kimi_linear`'s
@@ -2318,6 +2319,48 @@ pub fn infer_quantization_mode(has_biases: bool, group_size: i32, bits: i32) -> 
         "nvfp4"
     } else {
         "mxfp4"
+    }
+}
+
+/// [`infer_quantization_mode`] for a plane whose tensors are in `weights`.
+///
+/// A block-float mode is tied to its block: MXFP4 packs 32 elements under one
+/// scale, NVFP4 16. The declared `group_size` is often only a family's default
+/// (64, for a config that carries no mlx-lm `quantization` block, as a ModelOpt
+/// export does), and the loader already trusts the shapes over it when it
+/// reconciles the layout. The mode has to follow the same group size, or a
+/// 16-wide NVFP4 plane loads as `mxfp4` with a 16-wide group and decodes its
+/// E4M3 block scales as MXFP4 exponents. A plane with `.biases` is affine
+/// either way, and one whose shapes reconcile to nothing keeps the declared
+/// guess so the loader reports that error itself.
+///
+/// Used by: [`UnifiedLinear::from_weights`], [`FusedQKVLinear::from_weights_separate`]
+fn infer_plane_quantization_mode(
+    weights: &crate::weights::WeightMap,
+    prefix: &str,
+    has_biases: bool,
+    group_size: i32,
+    bits: i32,
+) -> &'static str {
+    let declared = infer_quantization_mode(has_biases, group_size, bits);
+    if has_biases {
+        return declared;
+    }
+    let (Some(weight), Some(scales)) = (
+        weights.get(&format!("{prefix}.weight")),
+        weights.get(&format!("{prefix}.scales")),
+    ) else {
+        return declared;
+    };
+    match reconcile_quantization_layout(
+        &ffi::array_shape(weight),
+        &ffi::array_shape(scales),
+        group_size,
+        bits,
+        declared,
+    ) {
+        Ok(layout) => infer_quantization_mode(false, layout.group_size, layout.bits),
+        Err(_) => declared,
     }
 }
 
@@ -2683,7 +2726,7 @@ impl UnifiedLinear {
         // this affine default) load non-affine weights correctly instead of
         // aborting in quantized_matmul ("Biases must be provided for affine").
         let has_biases = weights.get(&format!("{}.biases", prefix)).is_some();
-        let mode = infer_quantization_mode(has_biases, group_size, bits);
+        let mode = infer_plane_quantization_mode(weights, prefix, has_biases, group_size, bits);
         Self::from_weights_with_mode(weights, prefix, group_size, bits, mode)
     }
 
@@ -3371,7 +3414,13 @@ impl FusedQKVLinear {
         head_dim: i32,
     ) -> Result<Self, String> {
         let has_biases = weights.contains_key(&format!("{prefix}.q_proj.biases"));
-        let mode = infer_quantization_mode(has_biases, group_size, bits);
+        let mode = infer_plane_quantization_mode(
+            weights,
+            &format!("{prefix}.q_proj"),
+            has_biases,
+            group_size,
+            bits,
+        );
         Self::from_weights_separate_with_mode(
             weights, prefix, group_size, bits, n_heads, n_kv_heads, head_dim, mode,
         )
@@ -8137,6 +8186,131 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// One bias-free 4-bit block-float plane, `p`, 8 x 64.
+    fn block_float_plane(mode: &str, group: i32, seed: i32) -> crate::weights::WeightMap {
+        let packed = ffi::quantize_weights_with_mode(&mixed_dense_plane(8, seed), group, 4, mode);
+        let mut weights = crate::weights::WeightMap::new();
+        weights.insert("p.weight".to_string(), ffi::quantized_weights_w(&packed));
+        weights.insert(
+            "p.scales".to_string(),
+            ffi::quantized_weights_scales(&packed),
+        );
+        weights
+    }
+
+    fn output_bytes(linear: &UnifiedLinear, x: &MlxArray) -> Vec<u8> {
+        let y = linear.forward(x);
+        ffi::eval(&y);
+        ffi::array_to_raw_bytes(&y)
+    }
+
+    /// A family whose config has no mlx-lm `quantization` block declares its
+    /// default group size, 64, for every plane, which is what a ModelOpt export
+    /// gets. The mode has to follow the group size the packing has: a 16-wide
+    /// NVFP4 plane used to load as `mxfp4` at group 16 and decode its E4M3 block
+    /// scales as MXFP4 exponents.
+    #[test]
+    fn a_block_float_linear_takes_the_mode_its_packing_implies() {
+        use crate::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+        let layout = |weights: &crate::weights::WeightMap, declared: i32| {
+            let linear = UnifiedLinear::from_weights(weights, "p", declared, 4)
+                .expect("a block-float plane loads under any declared group size");
+            let UnifiedLinear::Quantized { weight, .. } = &linear else {
+                panic!("the plane must stay packed");
+            };
+            (weight.mode.clone(), weight.group_size, weight.bits)
+        };
+
+        if quant_mode_support(QuantMode::Nvfp4) == QuantModeSupport::Native {
+            let nvfp4 = block_float_plane("nvfp4", 16, 3);
+            assert_eq!(layout(&nvfp4, 16), ("nvfp4".to_string(), 16, 4));
+            assert_eq!(layout(&nvfp4, 64), ("nvfp4".to_string(), 16, 4));
+            assert_eq!(layout(&nvfp4, 32), ("nvfp4".to_string(), 16, 4));
+
+            // And the numbers are the ones the right declaration gives.
+            let x = probe_input(5, 0.04);
+            let declared = UnifiedLinear::from_weights(&nvfp4, "p", 16, 4).unwrap();
+            let defaulted = UnifiedLinear::from_weights(&nvfp4, "p", 64, 4).unwrap();
+            assert_eq!(output_bytes(&defaulted, &x), output_bytes(&declared, &x));
+        }
+
+        if quant_mode_support(QuantMode::Mxfp4) == QuantModeSupport::Native {
+            // MXFP4 is 32 wide whatever was declared, 16 included.
+            let mxfp4 = block_float_plane("mxfp4", 32, 7);
+            assert_eq!(layout(&mxfp4, 64), ("mxfp4".to_string(), 32, 4));
+            assert_eq!(layout(&mxfp4, 32), ("mxfp4".to_string(), 32, 4));
+            assert_eq!(layout(&mxfp4, 16), ("mxfp4".to_string(), 32, 4));
+        }
+
+        // A plane with zero-point biases is affine under any declaration.
+        let weight = quantized_4bit(&mixed_dense_plane(8, 9));
+        let mut weights = crate::weights::WeightMap::new();
+        weights.insert("p.weight".to_string(), ffi::copy(&weight.weight));
+        weights.insert("p.scales".to_string(), ffi::copy(&weight.scales));
+        weights.insert(
+            "p.biases".to_string(),
+            ffi::copy(weight.biases.as_ref().expect("affine biases")),
+        );
+        assert_eq!(layout(&weights, 64), ("affine".to_string(), 64, 4));
+        assert_eq!(layout(&weights, 16).0, "affine");
+    }
+
+    /// The attention half of the same case: ModelOpt NVFP4 q/k/v under the
+    /// default group size split as before and load as `nvfp4` at 16, with the
+    /// numbers the right declaration gives.
+    #[test]
+    fn modelopt_nvfp4_qkv_under_the_default_group_size_loads_as_nvfp4() {
+        use crate::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+        if quant_mode_support(QuantMode::Nvfp4) != QuantModeSupport::Native {
+            eprintln!("skipping: this backend has no native NVFP4 kernel");
+            return;
+        }
+        let mut weights = crate::weights::WeightMap::new();
+        for (name, out, seed, scale) in [("q", 8, 1, 0.5f32), ("k", 4, 2, 2.0), ("v", 4, 3, 3.25)] {
+            let prefix = format!("l.self_attn.{name}_proj");
+            let packed =
+                ffi::quantize_weights_with_mode(&mixed_dense_plane(out, seed), 16, 4, "nvfp4");
+            weights.insert(
+                format!("{prefix}.weight"),
+                ffi::quantized_weights_w(&packed),
+            );
+            weights.insert(
+                format!("{prefix}.scales"),
+                ffi::quantized_weights_scales(&packed),
+            );
+            weights.insert(
+                format!("{prefix}.global_scale"),
+                ffi::from_slice_f32(&[scale], &[1]),
+            );
+        }
+        let load = |declared: i32| {
+            FusedQKVLinear::from_weights_separate(&weights, "l.self_attn", declared, 4, 2, 1, 4)
+                .expect("ModelOpt NVFP4 q/k/v must load")
+        };
+        let (declared, defaulted) = (load(16), load(MIXED_GROUP));
+        let QkvProjection::Split { q, k, v } = &defaulted.qkv_proj else {
+            panic!("per-plane global scales cannot share one fused plane");
+        };
+        for (name, plane) in [("q", q), ("k", k), ("v", v)] {
+            let UnifiedLinear::Quantized { weight, .. } = plane else {
+                panic!("{name}_proj must stay packed");
+            };
+            assert_eq!(weight.mode, "nvfp4", "{name}_proj mode");
+            assert_eq!((weight.bits, weight.group_size), (4, 16), "{name}_proj");
+            assert!(weight.global_scale.is_some(), "{name}_proj lost its scale");
+        }
+
+        let x = probe_input(3, 0.05);
+        let bytes = |array: &MlxArray| {
+            ffi::eval(array);
+            ffi::array_to_raw_bytes(array)
+        };
+        let (want, got) = (declared.forward(&x), defaulted.forward(&x));
+        assert_eq!(bytes(&got.0), bytes(&want.0), "q");
+        assert_eq!(bytes(&got.1), bytes(&want.1), "k");
+        assert_eq!(bytes(&got.2), bytes(&want.2), "v");
     }
 
     /// Bias-free mxfp4 q/k/v without a global scale still fuse, but the fused

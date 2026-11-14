@@ -4695,8 +4695,9 @@ fn trimmed_family_row_mask(
 }
 
 /// Whether a `quantization_config` object declares NVIDIA ModelOpt NVFP4:
-/// `quant_method: "modelopt"`, `quant_algo: "NVFP4"`, and every config group's
-/// weights 4-bit float at group size 16, the `{weight, weight_scale,
+/// `quant_method: "modelopt"`, `quant_algo: "NVFP4"` or `"W4A16_NVFP4"` (the
+/// same weight format with the activations left unquantized), and every config
+/// group's weights 4-bit float at group size 16, the `{weight, weight_scale,
 /// weight_scale_2}` triplet layout the sanitize layer repacks at load.
 ///
 /// Used by: [`validate_quantization_scheme`], and `load_text_weights` /
@@ -4715,7 +4716,10 @@ pub(crate) fn is_modelopt_nvfp4(obj: &serde_json::Value) -> bool {
         .get("quant_algo")
         .and_then(|v| v.as_str())
         .map(|v| v.trim().to_ascii_lowercase());
-    if algo.as_deref() != Some("nvfp4") {
+    // `W4A16_NVFP4` is the same weight format with unquantized activations:
+    // the triplets on disk are identical, and activations are not this
+    // loader's concern.
+    if !matches!(algo.as_deref(), Some("nvfp4" | "w4a16_nvfp4")) {
         return false;
     }
 
