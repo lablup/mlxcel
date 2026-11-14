@@ -356,10 +356,11 @@ fn resolve_wired_limit() -> Option<usize> {
 /// Resolve the MLX allocator soft limit from MLXCEL_MEMORY_LIMIT (issue #55).
 ///
 /// Returns the limit actually applied to MLX, or `None` when the env var
-/// is unset / explicitly disabled. This is the hook the capstone preflight
-/// (#56) drives when a model is too large to fit comfortably — calling
-/// `mlxcel_core::memory::set_memory_limit` makes MLX raise an exception
-/// during evaluation instead of thrashing the system allocator.
+/// is unset / explicitly disabled. The limit is soft, and stays soft by
+/// decision (#3045): past it MLX's evaluation waits for in-flight command
+/// buffers and its allocator releases cached buffers, but no allocation is
+/// refused, so a single large transient still exceeds it. The prefill chunk,
+/// not this limit, bounds the prefill peak.
 fn resolve_memory_limit() -> Option<usize> {
     let raw = std::env::var(MEMORY_LIMIT_ENV).ok();
     let bytes = match raw.as_deref() {
