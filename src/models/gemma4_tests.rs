@@ -1135,6 +1135,62 @@ fn gemma4_config_parses_real_checkpoint_rope_parameters() {
 }
 
 #[test]
+fn gemma4_text_only_overrides_resolve_under_the_adopted_prefix() {
+    // A text-only mlx-lm export (issue #2996) keys its mixed-bit overrides by
+    // `model.layers.N...`; its weights are renamed under `language_model.`
+    // before the model asks for `language_model.model.layers.N...`.
+    let args: ModelArgs = serde_json::from_value(serde_json::json!({
+        "model_type": "gemma4_text",
+        "text_config": real_gemma4_e2b_text_config(),
+        "eos_token_id": [1],
+        "quantization": {
+            "group_size": 64,
+            "bits": 4,
+            "model.layers.0.mlp.down_proj": {
+                "group_size": 64,
+                "bits": 8
+            },
+            "language_model.model.layers.1.mlp.down_proj": {
+                "group_size": 32,
+                "bits": 6
+            },
+            "model.layers.1.mlp.down_proj": {
+                "group_size": 64,
+                "bits": 8
+            }
+        }
+    }))
+    .expect("ModelArgs must deserialize root quantization overrides");
+
+    let cfg = args.text_args();
+
+    assert_eq!(
+        cfg.quant_params_for("language_model.model.layers.0.mlp.down_proj"),
+        QuantizationParams {
+            group_size: 64,
+            bits: 8
+        },
+        "a text-only override must reach the renamed module"
+    );
+    assert_eq!(
+        cfg.quant_params_for("language_model.model.layers.1.mlp.down_proj"),
+        QuantizationParams {
+            group_size: 32,
+            bits: 6
+        },
+        "the exact multimodal key wins over the text-only one"
+    );
+    assert_eq!(
+        cfg.quant_params_for("language_model.model.layers.0.mlp.up_proj"),
+        QuantizationParams {
+            group_size: 64,
+            bits: 4
+        },
+        "modules without overrides keep the root default"
+    );
+}
+
+#[test]
 fn gemma4_root_quantization_preserves_per_module_overrides() {
     let args: ModelArgs = serde_json::from_value(serde_json::json!({
         "model_type": "gemma4",

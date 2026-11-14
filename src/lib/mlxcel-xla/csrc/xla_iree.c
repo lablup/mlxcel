@@ -122,6 +122,27 @@ typedef struct xla_ctx {
   iree_hal_buffer_view_t** weights;  // resident weights, uploaded once
   iree_hal_buffer_view_t* kcache;    // threaded KV (set by prefill, advanced by decode)
   iree_hal_buffer_view_t* vcache;
+  // Persistent single-sequence decode scalars. The decode loop used to allocate
+  // a device-local buffer for each of token/positions/cache_len and a fresh
+  // readback staging buffer every step; each host-visible staging allocation is
+  // a pinned hipHostMalloc/hipHostFree pair, and on gfx1151 the free alone costs
+  // about 120 us, which shows up as GPU idle between the step's input copies
+  // (#3028). These views are allocated once as host-local, device-visible,
+  // host-coherent page-locked memory and mapped for their whole lifetime, so a
+  // step only writes a few bytes in place. `decode_result` is the persistent
+  // device-to-device target of the token readback.
+  // `step_scalars_state`: 0 = not allocated yet, 1 = ready, -1 = unsupported
+  // here, keep the per-step allocation path.
+  int32_t step_scalars_state;
+  int32_t step_position_count;
+  iree_hal_buffer_view_t* step_token;
+  iree_hal_buffer_view_t* step_pos;
+  iree_hal_buffer_view_t* step_len;
+  iree_hal_buffer_view_t* decode_result;
+  iree_hal_buffer_mapping_t step_token_map;
+  iree_hal_buffer_mapping_t step_pos_map;
+  iree_hal_buffer_mapping_t step_len_map;
+  iree_hal_buffer_mapping_t decode_result_map;
   // Batched (continuous-batching) state, used by the ragged decode path
   // (#449 M3 Stage 2b). kcache_b/vcache_b are the rank-5 per-slot KV
   // [B,L,S,nkv,d] the ragged decode threads; a slot is seeded by a single-seq
@@ -157,6 +178,9 @@ typedef struct xla_tensor_desc {
 
 // Forward declaration: xla_llama_create's error path frees a partial context.
 void xla_llama_free(xla_ctx* c);
+// Forward declaration: the test-support fallback hook releases the persistent
+// decode scalars before the helper that defines that release appears.
+static void xla_release_step_scalars(xla_ctx* c);
 
 static const iree_hal_buffer_params_t kDeviceLocalParams = {
     .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
@@ -207,6 +231,37 @@ void xla_test_weight_upload_reset(void) {
   xla_test_weight_upload_calls = 0;
   xla_test_weight_upload_bytes = 0;
 }
+
+// Instrumentation for the per-decode-step staging path (issue #3028). A second
+// decode step must not allocate any input or readback buffer once the
+// persistent scalars exist, so a device test asserts both counters.
+static uint64_t xla_test_decode_scalar_alloc_calls = 0;
+static uint64_t xla_test_decode_d2d_readbacks = 0;
+
+uint64_t xla_test_decode_scalar_alloc_calls_get(void) {
+  return xla_test_decode_scalar_alloc_calls;
+}
+uint64_t xla_test_decode_d2d_readbacks_get(void) {
+  return xla_test_decode_d2d_readbacks;
+}
+int32_t xla_test_decode_step_scalars_state(const xla_ctx* c) {
+  return c ? c->step_scalars_state : -1;
+}
+void xla_test_decode_counters_reset(void) {
+  xla_test_decode_scalar_alloc_calls = 0;
+  xla_test_decode_d2d_readbacks = 0;
+}
+// Force the next step onto the per-step allocation path (and keep it there), so
+// a device test can prove the fallback still decodes identically.
+void xla_test_force_step_scalars_unsupported(xla_ctx* c, int32_t unsupported) {
+  if (!c) return;
+  if (unsupported) {
+    xla_release_step_scalars(c);
+    c->step_scalars_state = -1;
+  } else {
+    c->step_scalars_state = 0;
+  }
+}
 #endif
 
 static int32_t xla_argmax_f32(const float* v, int32_t n) {
@@ -246,6 +301,33 @@ static iree_status_t xla_read_token(xla_ctx* c, iree_hal_buffer_view_t* out,
   if (iree_status_is_ok(s)) *out_token = xla_argmax_f32(host, (int32_t)n);
   free(host);
   return s;
+}
+
+// Single-sequence decode readback (#3028). A scalar i32 output is copied
+// device-to-device into the persistent, already-mapped slot instead of paying
+// the host staging allocation and pinned free that `transfer_d2h` performs per
+// call. Any other output shape (the logits-returning vmfbs) and every context
+// without the persistent scalars fall back to `xla_read_token`. Only the decode
+// step uses this; prefill and ragged decode keep the plain readback.
+static iree_status_t xla_read_token_decode(xla_ctx* c,
+                                           iree_hal_buffer_view_t* out,
+                                           int32_t* out_token) {
+  if (c->step_scalars_state != 1 || !c->decode_result) {
+    return xla_read_token(c, out, out_token);
+  }
+  if (iree_hal_buffer_view_element_count(out) != 1 ||
+      iree_hal_buffer_view_element_type(out) != IREE_HAL_ELEMENT_TYPE_INT_32) {
+    return xla_read_token(c, out, out_token);
+  }
+  IREE_RETURN_IF_ERROR(iree_hal_device_transfer_d2d(
+      c->device, iree_hal_buffer_view_buffer(out), 0,
+      iree_hal_buffer_view_buffer(c->decode_result), 0, sizeof(int32_t),
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+  xla_test_decode_d2d_readbacks++;
+#endif
+  *out_token = *(const int32_t*)c->decode_result_map.contents.data;
+  return iree_ok_status();
 }
 
 // Batched output readback (ragged decode): a [B] i32 buffer is an on-device
@@ -380,6 +462,119 @@ static iree_status_t xla_alloc_bv(xla_ctx* c, iree_host_size_t rank,
       c->device, c->allocator, rank, shape, elt,
       IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, kDeviceLocalParams,
       iree_make_const_byte_span(data, nbytes), out);
+}
+
+// Host-local, device-visible, host-coherent page-locked scalars. Allocated and
+// mapped once per context; the decode loop writes a few bytes in place instead
+// of paying a pinned hipHostMalloc/hipHostFree pair per step (#3028).
+static const iree_hal_buffer_params_t kStepScalarParams = {
+    .type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL |
+            IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE |
+            IREE_HAL_MEMORY_TYPE_HOST_COHERENT,
+    .access = IREE_HAL_MEMORY_ACCESS_ALL,
+    .usage = IREE_HAL_BUFFER_USAGE_DEFAULT | IREE_HAL_BUFFER_USAGE_MAPPING |
+             IREE_HAL_BUFFER_USAGE_MAPPING_PERSISTENT,
+};
+
+// The readback slot is the device's write target and the host's read source, so
+// it uses the cached download heap instead of the write-combined upload heap:
+// a CPU read of write-combined memory bypasses the cache.
+static const iree_hal_buffer_params_t kStepResultParams = {
+    .type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL |
+            IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE |
+            IREE_HAL_MEMORY_TYPE_HOST_COHERENT |
+            IREE_HAL_MEMORY_TYPE_HOST_CACHED,
+    .access = IREE_HAL_MEMORY_ACCESS_ALL,
+    .usage = IREE_HAL_BUFFER_USAGE_DEFAULT | IREE_HAL_BUFFER_USAGE_MAPPING |
+             IREE_HAL_BUFFER_USAGE_MAPPING_PERSISTENT,
+};
+
+static iree_status_t xla_alloc_step_scalar(
+    xla_ctx* c, const iree_hal_buffer_params_t* params,
+    iree_host_size_t rank, const iree_hal_dim_t* shape,
+    iree_host_size_t nbytes, iree_hal_buffer_view_t** out_view,
+    iree_hal_buffer_mapping_t* out_map) {
+  IREE_RETURN_IF_ERROR(iree_hal_buffer_view_allocate_buffer_copy(
+      c->device, c->allocator, rank, shape, IREE_HAL_ELEMENT_TYPE_INT_32,
+      IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, *params,
+      iree_const_byte_span_empty(), out_view));
+  iree_status_t status = iree_hal_buffer_map_range(
+      iree_hal_buffer_view_buffer(*out_view), IREE_HAL_MAPPING_MODE_PERSISTENT,
+      IREE_HAL_MEMORY_ACCESS_READ | IREE_HAL_MEMORY_ACCESS_WRITE, 0, nbytes,
+      out_map);
+  if (!iree_status_is_ok(status)) {
+    iree_hal_buffer_view_release(*out_view);
+    *out_view = NULL;
+  }
+  return status;
+}
+
+static void xla_release_step_scalars(xla_ctx* c) {
+  iree_hal_buffer_mapping_t* maps[4] = {
+      &c->step_token_map, &c->step_pos_map, &c->step_len_map,
+      &c->decode_result_map};
+  iree_hal_buffer_view_t** views[4] = {
+      &c->step_token, &c->step_pos, &c->step_len, &c->decode_result};
+  for (int i = 0; i < 4; i++) {
+    if (*views[i]) {
+      iree_hal_buffer_unmap_range(maps[i]);
+      iree_hal_buffer_view_release(*views[i]);
+      *views[i] = NULL;
+    }
+  }
+  c->step_scalars_state = 0;
+}
+
+// Allocate the persistent decode scalars on first use. Returns the state: 1
+// when reuse is active, -1 when the device cannot serve the host-local,
+// device-visible heap (the caller keeps today's per-step allocation path).
+static int32_t xla_step_scalars_ensure(xla_ctx* c, int32_t position_count) {
+  if (c->step_scalars_state != 0) {
+    // A context has one fixed position mode, so the shape can only disagree
+    // with a direct C caller that switched modes on it; use the per-step path.
+    if (c->step_scalars_state == 1 &&
+        c->step_position_count != position_count) {
+      return -1;
+    }
+    return c->step_scalars_state;
+  }
+  c->step_scalars_state = -1;
+  iree_hal_dim_t pos_shape[1] = {3};
+  iree_status_t status = xla_alloc_step_scalar(
+      c, &kStepScalarParams, 0, NULL, sizeof(int32_t), &c->step_token,
+      &c->step_token_map);
+  if (iree_status_is_ok(status)) {
+    status = xla_alloc_step_scalar(c, &kStepScalarParams, 0, NULL,
+                                   sizeof(int32_t), &c->step_len,
+                                   &c->step_len_map);
+  }
+  if (iree_status_is_ok(status)) {
+    status = xla_alloc_step_scalar(
+        c, &kStepScalarParams, position_count > 1 ? 1 : 0,
+        position_count > 1 ? pos_shape : NULL,
+        (iree_host_size_t)position_count * sizeof(int32_t), &c->step_pos,
+        &c->step_pos_map);
+  }
+  if (iree_status_is_ok(status)) {
+    status = xla_alloc_step_scalar(c, &kStepResultParams, 0, NULL,
+                                   sizeof(int32_t), &c->decode_result,
+                                   &c->decode_result_map);
+  }
+  if (!iree_status_is_ok(status)) {
+    // Degrade to the per-step allocation path, but say so once: a driver that
+    // cannot serve this heap is worth seeing in a log.
+    fprintf(stderr,
+            "xla_iree: persistent decode scalars unavailable, using per-step "
+            "allocations (status %d):\n",
+            iree_status_code(status));
+    iree_status_fprint(stderr, status);
+    iree_status_ignore(status);
+    xla_release_step_scalars(c);
+    return -1;
+  }
+  c->step_position_count = position_count;
+  c->step_scalars_state = 1;
+  return 1;
 }
 
 // Zero a device-local buffer with a queue-ordered device fill and wait for it,
@@ -1174,16 +1369,37 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
   iree_hal_buffer_view_t* tok_bv = NULL;
   iree_hal_buffer_view_t* pos_bv = NULL;
   iree_hal_buffer_view_t* len_bv = NULL;
-  XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &token,
-                         sizeof(int32_t), &tok_bv));
-  iree_hal_dim_t position_shape[1] = {3};
-  XLA_CHECK(xla_alloc_bv(c, position_mode == 1 ? 1 : 0,
-                         position_mode == 1 ? position_shape : NULL,
-                         IREE_HAL_ELEMENT_TYPE_INT_32, positions,
-                         (iree_host_size_t)position_count * sizeof(int32_t),
-                         &pos_bv));
-  XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &cache_len,
-                         sizeof(int32_t), &len_bv));
+  // Steady-state decode writes the three scalars into buffers allocated and
+  // mapped once, instead of allocating a fresh pinned staging buffer per input
+  // (see xla_step_scalars_ensure). Fall back to per-step allocation when the
+  // device cannot serve that heap.
+  bool owns_scalars = true;
+  if (xla_step_scalars_ensure(c, position_count) == 1) {
+    owns_scalars = false;
+    *(int32_t*)c->step_token_map.contents.data = token;
+    *(int32_t*)c->step_len_map.contents.data = cache_len;
+    memcpy(c->step_pos_map.contents.data, positions,
+           (size_t)position_count * sizeof(int32_t));
+    tok_bv = c->step_token;
+    pos_bv = c->step_pos;
+    len_bv = c->step_len;
+  } else {
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+    // One per input view. Counted here rather than inside xla_alloc_bv so the
+    // prefill and ragged allocations do not distort it.
+    xla_test_decode_scalar_alloc_calls += 3;
+#endif
+    XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &token,
+                           sizeof(int32_t), &tok_bv));
+    iree_hal_dim_t position_shape[1] = {3};
+    XLA_CHECK(xla_alloc_bv(c, position_mode == 1 ? 1 : 0,
+                           position_mode == 1 ? position_shape : NULL,
+                           IREE_HAL_ELEMENT_TYPE_INT_32, positions,
+                           (iree_host_size_t)position_count * sizeof(int32_t),
+                           &pos_bv));
+    XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &cache_len,
+                           sizeof(int32_t), &len_bv));
+  }
   XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
   XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
   XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
@@ -1202,9 +1418,11 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
     iree_hal_buffer_view_release(token_out);
     iree_hal_buffer_view_release(kc);
     iree_hal_buffer_view_release(vc);
-    iree_hal_buffer_view_release(tok_bv);
-    iree_hal_buffer_view_release(pos_bv);
-    iree_hal_buffer_view_release(len_bv);
+    if (owns_scalars) {
+      iree_hal_buffer_view_release(tok_bv);
+      iree_hal_buffer_view_release(pos_bv);
+      iree_hal_buffer_view_release(len_bv);
+    }
     if (mode_bv) iree_hal_buffer_view_release(mode_bv);
     iree_runtime_call_deinitialize(&call);
     return 1;
@@ -1214,12 +1432,14 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
   c->kcache = kc;
   c->vcache = vc;
 
-  XLA_CHECK(xla_read_token(c, token_out, out_token));
+  XLA_CHECK(xla_read_token_decode(c, token_out, out_token));
 
   iree_hal_buffer_view_release(token_out);
-  iree_hal_buffer_view_release(tok_bv);
-  iree_hal_buffer_view_release(pos_bv);
-  iree_hal_buffer_view_release(len_bv);
+  if (owns_scalars) {
+    iree_hal_buffer_view_release(tok_bv);
+    iree_hal_buffer_view_release(pos_bv);
+    iree_hal_buffer_view_release(len_bv);
+  }
   if (mode_bv) iree_hal_buffer_view_release(mode_bv);
   iree_runtime_call_deinitialize(&call);
   // The old KV was an input to this call; the call held a ref during invoke and
@@ -2371,6 +2591,7 @@ void xla_llama_free(xla_ctx* c) {
   if (c->vcache) iree_hal_buffer_view_release(c->vcache);
   if (c->kcache_b) iree_hal_buffer_view_release(c->kcache_b);
   if (c->vcache_b) iree_hal_buffer_view_release(c->vcache_b);
+  xla_release_step_scalars(c);
   free(c->rg_valid);
   free(c->deepstack_target_layers);
   if (c->session) iree_runtime_session_release(c->session);

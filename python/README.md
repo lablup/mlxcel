@@ -59,6 +59,8 @@ Runnable scripts live in [`examples/`](examples/). Each expects the `mlxcel` bin
 
 On POSIX, managed mode defaults to a Unix domain socket for low-overhead local IPC. Keep socket paths short (`sun_path` is about 104 bytes on macOS, 108 on Linux); the default lives under `/tmp`. Pass `socket=` to override. Windows uses TCP.
 
+When a managed start finds something at the socket path, it removes a socket nobody listens on (a leftover from a server that crashed) and starts. It does not replace a socket another server is listening on, or an entry that is not a socket (a file, a directory, a symlink): the start raises `MlxcelServerError` and the entry is left as it is. The check is not a lock against another process creating the path at the same moment.
+
 ## Server options (`**server_kwargs`)
 
 In managed mode, extra keyword arguments to `LLM` / `AsyncLLM` are forwarded to the spawned `mlxcel serve` process: `ctx_size`, `n_predict`, `alias`, and `warmup` map to the matching CLI flags, `extra_args=[...]` appends raw CLI arguments verbatim, and `shutdown_grace` sets the termination grace period on close.
