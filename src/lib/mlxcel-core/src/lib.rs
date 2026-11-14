@@ -4272,6 +4272,24 @@ pub fn causal_attention(
         );
     }
 
+    // Maskless causal prefill with no fused SDPA kernel would materialize the
+    // full [heads, L, L] score matrix in MLX's fallback; chunk the query axis
+    // instead. On CUDA that is a config such as head_dim > 128 (issue #672);
+    // on Metal it is whatever MLX's own verdict for the causal mode says
+    // falls back, for example head_dim 256 over `q_len != k_len` (a later
+    // prefill chunk) or head_dim 512 before M5 (issue #3033). It runs ahead
+    // of the M5 route, which issues the same causal SDPA, and fires only on
+    // a fallback. `k_len >= q_len` guards the bottom-right causal alignment
+    // the chunked path reproduces. This call is maskless and causal, so it
+    // passes `arr_masked = false, do_causal = true`: #1820's bucketing needs
+    // an array mask to widen and declines here, which leaves #1799's ops
+    // fallback running and the chunking it needs still switched on.
+    if k_len >= q_len
+        && let Some(chunk) = layers::materializing_sdpa_query_chunk(q, k, v, 0.0, false, true)
+    {
+        return layers::chunked_causal_attention(q, k, v, scale, chunk);
+    }
+
     // Shared predicate rather than a second copy of the hardware test:
     // this site and `layers::should_use_metal4_attention` had drifted apart
     // to the extent that `MLXCEL_METAL4_ATTENTION=0` would have disabled
@@ -4279,20 +4297,6 @@ pub fn causal_attention(
     // switch at all for a diagnostic whose whole job is a clean A/B.
     if layers::should_use_metal4_attention() {
         return layers::metal4_causal_attention(q, k, v, scale);
-    }
-
-    // Maskless causal prefill on a CUDA config with no fused SDPA kernel
-    // (e.g. head_dim > 128) would materialize the full [heads, L, L] score
-    // matrix in MLX's fallback; chunk the query axis instead (issue #672).
-    // `k_len >= q_len` guards the bottom-right causal alignment the chunked
-    // path reproduces. This call is maskless and causal, so it passes
-    // `arr_masked = false, do_causal = true`: #1820's bucketing needs an array
-    // mask to widen and declines here, which leaves #1799's ops fallback
-    // running and the chunking it needs still switched on.
-    if k_len >= q_len
-        && let Some(chunk) = layers::materializing_sdpa_query_chunk(q, k, v, 0.0, false, true)
-    {
-        return layers::chunked_causal_attention(q, k, v, scale, chunk);
     }
 
     ffi::ffi_fast_scaled_dot_product_attention_causal(q, k, v, scale)

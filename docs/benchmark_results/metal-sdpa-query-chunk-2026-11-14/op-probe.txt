@@ -1,0 +1,13 @@
+# cargo test --profile test-fast -p mlxcel-core --lib metal_chunk_tests::sdpa_chunk_peak_memory_probe -- --ignored --nocapture
+# MLXCEL_SDPA_PROBE_LEN=28000, Apple M3 Ultra (512 GB), MLXCEL_ATTENTION_CHUNK_BUDGET_MB as labelled.
+# "gated" is the production entry point (layers::attention / causal_attention); "single_call" is the unchunked SDPA it replaces.
+# Peaks are MLX get_peak_memory after reset; the gated figure also holds the single call's 0.34 GB output.
+backend=Metal shape=[1,24,28000,256] fp16 kv_heads=4
+budget=256  array mask: mlx_fused=false single_call peak=43.48 GB 2084 ms | gated peak=9.84 GB 1409 ms | max_abs_diff=0
+budget=256  causal mode: mlx_fused=true single_call peak=3.94 GB 498 ms | gated peak=4.28 GB 484 ms | max_abs_diff=0
+budget=512  array mask: mlx_fused=false single_call peak=43.48 GB 2072 ms | gated peak=15.30 GB 1279 ms | max_abs_diff=0
+budget=512  causal mode: mlx_fused=true single_call peak=3.94 GB 504 ms | gated peak=4.28 GB 484 ms | max_abs_diff=0
+budget=1024 array mask: mlx_fused=false single_call peak=43.48 GB 2206 ms | gated peak=25.98 GB 1337 ms | max_abs_diff=0
+budget=1024 causal mode: mlx_fused=true single_call peak=3.94 GB 614 ms | gated peak=4.28 GB 484 ms | max_abs_diff=0
+budget=2048 array mask: mlx_fused=false single_call peak=43.48 GB 2079 ms | gated peak=43.35 GB 1390 ms | max_abs_diff=0
+budget=2048 causal mode: mlx_fused=true single_call peak=3.94 GB 567 ms | gated peak=4.28 GB 485 ms | max_abs_diff=0

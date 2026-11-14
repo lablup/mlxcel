@@ -1,0 +1,58 @@
+# MLXCEL_SDPA_PROBE_LEN=28000, default shape [1,24,28000,256] fp16, 4 KV heads
+=== budget 256
+backend=Metal shape=[1,24,28000,256] fp16 kv_heads=4
+array mask: mlx_fused=true single_call peak=5.51 GB 668 ms | gated peak=5.85 GB 540 ms | max_abs_diff=0
+causal mode: mlx_fused=true single_call peak=3.94 GB 377 ms | gated peak=4.28 GB 236 ms | max_abs_diff=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2268 filtered out; finished in 2.11s
+=== budget 1024
+backend=Metal shape=[1,24,28000,256] fp16 kv_heads=4
+array mask: mlx_fused=true single_call peak=5.51 GB 545 ms | gated peak=5.85 GB 548 ms | max_abs_diff=0
+causal mode: mlx_fused=true single_call peak=3.94 GB 241 ms | gated peak=4.28 GB 232 ms | max_abs_diff=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2268 filtered out; finished in 1.80s
+=== budget 16
+backend=Metal shape=[1,24,28000,256] fp16 kv_heads=4
+array mask: mlx_fused=true single_call peak=5.51 GB 566 ms | gated peak=5.85 GB 595 ms | max_abs_diff=0
+causal mode: mlx_fused=true single_call peak=3.94 GB 259 ms | gated peak=4.28 GB 266 ms | max_abs_diff=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2268 filtered out; finished in 1.92s
+
+# MLXCEL_SDPA_PROBE_LEN=20000 MLXCEL_SDPA_PROBE_HEADS=16 MLXCEL_SDPA_PROBE_KV_HEADS=1 MLXCEL_SDPA_PROBE_DIM=512 (array mask unfused on M5)
+=== budget 256
+TMP dim=512 kv_heads=1
+array mask: mlx_fused=false single_call peak=16.22 GB 691 ms | gated peak=8.23 GB 942 ms | max_abs_diff=0.000030517578
+causal mode: mlx_fused=true single_call peak=2.30 GB 293 ms | gated peak=2.62 GB 170 ms | max_abs_diff=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2268 filtered out; finished in 2.32s
+=== budget 512
+TMP dim=512 kv_heads=1
+array mask: mlx_fused=false single_call peak=16.22 GB 594 ms | gated peak=13.84 GB 464 ms | max_abs_diff=0
+causal mode: mlx_fused=true single_call peak=2.30 GB 178 ms | gated peak=2.62 GB 169 ms | max_abs_diff=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2268 filtered out; finished in 1.61s
+=== budget 1024
+TMP dim=512 kv_heads=1
+array mask: mlx_fused=false single_call peak=16.22 GB 587 ms | gated peak=16.20 GB 677 ms | max_abs_diff=0
+causal mode: mlx_fused=true single_call peak=2.30 GB 187 ms | gated peak=2.62 GB 170 ms | max_abs_diff=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2268 filtered out; finished in 1.81s
+=== budget 2048
+TMP dim=512 kv_heads=1
+array mask: mlx_fused=false single_call peak=16.22 GB 601 ms | gated peak=16.22 GB 527 ms | max_abs_diff=0
+causal mode: mlx_fused=true single_call peak=2.30 GB 194 ms | gated peak=2.62 GB 169 ms | max_abs_diff=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2268 filtered out; finished in 1.68s
+
+# same d512 shape, three repetitions per budget
+=== rep 1 budget 256
+array mask: mlx_fused=false single_call peak=16.22 GB 581 ms | gated peak=8.23 GB 409 ms | max_abs_diff=0.000030517578
+=== rep 1 budget 512
+array mask: mlx_fused=false single_call peak=16.22 GB 591 ms | gated peak=13.84 GB 456 ms | max_abs_diff=0
+=== rep 1 budget 1024
+array mask: mlx_fused=false single_call peak=16.22 GB 580 ms | gated peak=16.20 GB 499 ms | max_abs_diff=0
+=== rep 2 budget 256
+array mask: mlx_fused=false single_call peak=16.22 GB 584 ms | gated peak=8.23 GB 416 ms | max_abs_diff=0.000030517578
+=== rep 2 budget 512
+array mask: mlx_fused=false single_call peak=16.22 GB 584 ms | gated peak=13.84 GB 457 ms | max_abs_diff=0
+=== rep 2 budget 1024
+array mask: mlx_fused=false single_call peak=16.22 GB 584 ms | gated peak=16.20 GB 495 ms | max_abs_diff=0
+=== rep 3 budget 256
+array mask: mlx_fused=false single_call peak=16.22 GB 587 ms | gated peak=8.23 GB 414 ms | max_abs_diff=0.000030517578
+=== rep 3 budget 512
+array mask: mlx_fused=false single_call peak=16.22 GB 598 ms | gated peak=13.84 GB 456 ms | max_abs_diff=0
+=== rep 3 budget 1024
+array mask: mlx_fused=false single_call peak=16.22 GB 587 ms | gated peak=16.20 GB 493 ms | max_abs_diff=0

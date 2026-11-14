@@ -188,6 +188,13 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_WEBUI_ROUTER_MODELS_DIR",
         "MLXCEL_WEBUI_ROUTER_URL",
     )),
+    ("test-only: shape of the ignored Metal SDPA chunk peak-memory probe in "
+     "layers_metal_chunk_tests.rs (#3033)", (
+        "MLXCEL_SDPA_PROBE_DIM",
+        "MLXCEL_SDPA_PROBE_HEADS",
+        "MLXCEL_SDPA_PROBE_KV_HEADS",
+        "MLXCEL_SDPA_PROBE_LEN",
+    )),
     ("test-only: sample count of a statistical sampler test", (
         "MLXCEL_SPEC_DIST_SAMPLES",
         "MLXCEL_TEST_GUMBEL_SAMPLES",
