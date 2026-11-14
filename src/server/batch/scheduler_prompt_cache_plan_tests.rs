@@ -491,14 +491,13 @@ fn only_real_chunks_count_and_emit_prompt_progress() {
     assert_eq!(run.chunks_counted, 5);
     assert_eq!(run.progress_frames, vec![0, 8, 16, 24, 32, 40]);
 
-    // Chunked with a boundary: the segment is chunked too (#3045); the piece
-    // that ends on the boundary is the snapshot point, not a chunk, and every
-    // other piece counts.
+    // Chunked with a boundary: the segment is chunked too (#3045), and every
+    // piece, the one ending on the boundary included, counts.
     let mut sched = plan_scheduler(test_store(), 8);
     let run = run_turn_observed(&mut sched, &turn, Some(&history), 2);
     assert_eq!(run.plan.ranges(), vec![0..8, 8..16, 16..24, 24..32, 32..40]);
-    assert_eq!(run.chunks_counted, 4);
-    assert_eq!(run.progress_frames, vec![0, 8, 16, 32, 40]);
+    assert_eq!(run.chunks_counted, 5);
+    assert_eq!(run.progress_frames, vec![0, 8, 16, 24, 32, 40]);
 }
 
 /// #2885 Part B: with the system-prompt root on, chat A stores a root
