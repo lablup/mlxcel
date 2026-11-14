@@ -153,23 +153,35 @@ fn sanitize_gemma3n_weights(raw_weights: WeightMap) -> WeightMap {
     weights
 }
 
-/// Load a Gemma3 VLM model (text + vision tower + projector).
-pub(crate) fn load_gemma3_vlm(model_path: &Path) -> Result<LoadedModel> {
-    use vision::config::VLMConfig;
-    use vision::connectors::avg_pool::AvgPoolProjector;
-    use vision::encoders::siglip::SigLipVisionModel;
-    use vision::processors::siglip::SigLipProcessor;
-
-    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
-    let mut vlm_config: VLMConfig = serde_json::from_value(full_config.clone())
+/// Parse a Gemma 3 VLM `config.json` as the eager model reads it.
+///
+/// The shipped Gemma 3 configs omit `vision_config.hidden_act`; the SigLIP
+/// default is the tanh GELU (#2423), and the serde default of the shared
+/// [`VLMConfig`](vision::config::VLMConfig) alone would leave the tower on
+/// exact erf.
+///
+/// Used by: [`load_gemma3_vlm`], and the eager reference of the pinned
+/// eager-MLX-versus-IREE boundary gate (`xla_tests::reference_boundary`), which
+/// has to build the tower the loader builds.
+fn parse_gemma3_vlm_config(full_config: &Value) -> Result<vision::config::VLMConfig> {
+    let mut vlm_config: vision::config::VLMConfig = serde_json::from_value(full_config.clone())
         .map_err(|e| anyhow::anyhow!("Failed to parse VLM config: {}", e))?;
-    // The shipped Gemma 3 configs omit `vision_config.hidden_act`; the SigLIP
-    // default is the tanh GELU (#2423).
     if let Some(raw_vision) = full_config.get("vision_config") {
         vlm_config
             .vision_config
             .default_missing_hidden_act_to_siglip(raw_vision);
     }
+    Ok(vlm_config)
+}
+
+/// Load a Gemma3 VLM model (text + vision tower + projector).
+pub(crate) fn load_gemma3_vlm(model_path: &Path) -> Result<LoadedModel> {
+    use vision::connectors::avg_pool::AvgPoolProjector;
+    use vision::encoders::siglip::SigLipVisionModel;
+    use vision::processors::siglip::SigLipProcessor;
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let vlm_config = parse_gemma3_vlm_config(&full_config)?;
     let text_config: models::gemma3::ModelArgs =
         serde_json::from_value(vlm_config.text_config.clone())
             .map_err(|e| anyhow::anyhow!("Failed to parse text_config: {}", e))?;
