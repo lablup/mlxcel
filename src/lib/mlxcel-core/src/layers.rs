@@ -5242,16 +5242,40 @@ fn attention_chunk_budget_bytes() -> usize {
     })
 }
 
-/// `MLXCEL_METAL_ATTENTION_CHUNK=0` restores the pre-gate Metal prefill — one
-/// unchunked SDPA over the whole prompt — so a numerics or latency regression
-/// can be bisected against the old route. Unset or any other value keeps the
-/// gate on.
+/// `MLXCEL_METAL_ATTENTION_CHUNK=0` (or `false`/`off`) restores the pre-#3033
+/// Metal prefill, one unchunked SDPA over the whole prompt, so a numerics or
+/// latency regression can be bisected against the old route. Unset or any
+/// other value keeps the gate on.
 fn metal_attention_chunk_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| match std::env::var("MLXCEL_METAL_ATTENTION_CHUNK") {
         Ok(raw) => !matches!(raw.trim(), "0" | "false" | "off"),
         Err(_) => true,
     })
+}
+
+/// True when this call would materialize the full `[B, H, q_len, k_len]`
+/// score matrix on Metal.
+///
+/// A softcap call never reaches MLX's SDPA: [`attention_dispatch`] runs the
+/// compiled softcap composite, which forms the scores at every shape. Every
+/// other call asks MLX's own `use_fallback` for the arm it issues (array
+/// mask, causal mode, or none) through the memoized probe in `window_sdpa`;
+/// probing the array-mask arm for a maskless causal call would chunk a call
+/// MLX fuses and turn it into per-chunk array-mask fallbacks.
+fn metal_sdpa_materializes_scores(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    softcap: f32,
+    arr_masked: bool,
+    do_causal: bool,
+) -> bool {
+    if softcap > 0.0 {
+        return true;
+    }
+    let shape = crate::window_sdpa::WindowSdpaShape::of(q, k, v);
+    !crate::window_sdpa::sdpa_call_uses_fused_kernel(&shape, arr_masked, do_causal)
 }
 
 /// True when this q/v + softcap combination cannot reach a fused
@@ -5496,33 +5520,33 @@ fn sdpa_query_chunk_within_budget(
     let k_len = k_shape[2];
     // Whether this backend would materialise the full
     // `[B, H, q_len, k_len]` score matrix for this call. CUDA has its own
-    // predicates; Metal asks MLX itself through the fused-kernel probe,
-    // because its support matrix is per GPU generation — a pre-M5 GPU never
+    // predicates; Metal asks MLX itself (`metal_sdpa_materializes_scores`),
+    // because its support matrix is per GPU generation: a pre-M5 GPU never
     // fuses an array-mask call at head_dim 256 (#2621/#2646), and MLX's
-    // fallback then forms the scores: 24 heads at a 26.6k-token prompt is
+    // fallback then forms the scores. 24 heads at a 26.6k-token prompt is
     // 33.9 GB, over Metal's 30.15 GB per-buffer cap, so the whole request
-    // fails at the eval boundary. Chunking the query axis keeps that
+    // fails at the eval boundary (#3033). Chunking the query axis keeps that
     // transient inside `budget`; every row's result is unchanged because
     // softmax and the value matmul are row-independent.
+    if !cfg!(any(feature = "cuda", target_os = "macos")) {
+        return None;
+    }
+    let attention_dtype = ffi::sdpa_attention_dtype(q, k, v);
     if cfg!(feature = "cuda") {
-        let attention_dtype = ffi::sdpa_attention_dtype(q, k, v);
         if !cuda_sdpa_materializes_scores(q, v, attention_dtype, softcap)
             && !cuda_sdpa_small_query_fallback(q_len, k_len, arr_masked, do_causal)
         {
             return None;
         }
-    } else if cfg!(feature = "metal") {
-        if !metal_attention_chunk_enabled() {
+    } else if cfg!(target_os = "macos") {
+        // `target_os`, not the `metal` Cargo feature: a plain `cargo build`
+        // on macOS builds the Metal backend without that feature (#1988).
+        if !metal_attention_chunk_enabled()
+            || !metal_sdpa_materializes_scores(q, k, v, softcap, arr_masked, do_causal)
+        {
             return None;
         }
-        let shape = crate::window_sdpa::WindowSdpaShape::of(q, k, v);
-        if crate::window_sdpa::legacy_mask_uses_fused_kernel(&shape) {
-            return None;
-        }
-    } else {
-        return None;
     }
-    let attention_dtype = ffi::sdpa_attention_dtype(q, k, v);
     let bytes = crate::dtype::size_bytes(attention_dtype).unwrap_or(4);
     let per_row = (q_shape[0].max(1) as usize)
         .saturating_mul(q_shape[1].max(1) as usize)
@@ -8527,22 +8551,66 @@ mod tests {
         assert!(chunk as usize * 1000 <= 7000);
     }
 
+    /// Metal half of the chunk gate (#3033): chunk exactly when MLX reports
+    /// that the arm the call issues (array mask, causal mode, or none) falls
+    /// back, size the chunk from the attention dtype, and always chunk a
+    /// softcap call, whose compiled composite forms the scores at any shape.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_query_chunk_gate_follows_mlx_fused_verdict() {
+        use crate::dtype::{BFLOAT16, FLOAT16};
+        use crate::window_sdpa::{WindowSdpaShape, sdpa_call_uses_fused_kernel};
+        // [1, 2, 64, D] over 64 keys: 128 scores per row, 256 B in a half
+        // type, so 64 rows over an 8 KiB budget split into 2 chunks of 32.
+        const BUDGET: usize = 8 * 1024;
+        for d in [64, 128, 256] {
+            for dt in [BFLOAT16, FLOAT16] {
+                let q = ffi::astype(&test_tensor(&[1, 2, 64, d]), dt);
+                let k = ffi::astype(&test_tensor(&[1, 2, 64, d]), dt);
+                let v = ffi::astype(&test_tensor(&[1, 2, 64, d]), dt);
+                let shape = WindowSdpaShape::of(&q, &k, &v);
+                for (arr_masked, do_causal) in [(true, false), (false, true), (false, false)] {
+                    let fused = sdpa_call_uses_fused_kernel(&shape, arr_masked, do_causal);
+                    let decision = sdpa_query_chunk_within_budget(
+                        &q, &k, &v, 0.0, arr_masked, do_causal, BUDGET,
+                    );
+                    assert_eq!(
+                        decision,
+                        (!fused).then_some(32),
+                        "d={d} dtype={dt} arr_masked={arr_masked} causal={do_causal}"
+                    );
+                }
+                // Softcap never reaches MLX's fused SDPA.
+                assert_eq!(
+                    sdpa_query_chunk_within_budget(&q, &k, &v, 30.0, true, false, BUDGET),
+                    Some(32)
+                );
+                // A budget the whole matrix fits in leaves the call alone.
+                assert_eq!(
+                    sdpa_query_chunk_within_budget(&q, &k, &v, 30.0, true, false, 1 << 20),
+                    None
+                );
+            }
+        }
+    }
+
     #[test]
     fn query_chunk_len_covers_the_arex_long_prompt_geometry() {
         // AREX-2 (Qwen3.5 hybrid): 24 query heads, head_dim 256, bf16 scores.
         // A 26,602-token prefill materialises 24 * 26602^2 * 2 B = 33.97 GB in
-        // one buffer, which is what Metal refuses at the 30.15 GB cap; the
-        // same matrix at the attention dtype's 4 B is 67.9 GB.
-        let budget = 1024 * 1024 * 1024;
-        let q_len = 26_602;
-        for per_row in [24 * q_len * 2, 24 * q_len * 4] {
+        // one buffer, which Metal refuses at its 30.15 GB per-buffer cap; the
+        // same matrix at a 4 B attention dtype is 67.9 GB.
+        let budget: usize = 1024 * 1024 * 1024;
+        let q_len: i32 = 26_602;
+        let keys = q_len as usize;
+        for per_row in [24 * keys * 2, 24 * keys * 4] {
             let chunk = query_chunk_len(per_row, q_len, budget).expect("must chunk");
             assert!(chunk > 1 && chunk < q_len);
-            // No chunk's score matrix exceeds the budget ...
+            // No chunk's score matrix exceeds the budget, and the chunks
+            // still cover the whole query axis.
             assert!(per_row * chunk as usize <= budget);
-            // ... and the chunks still cover the whole query axis.
-            let chunks = (q_len as usize).div_ceil(chunk as usize);
-            assert!(chunks * chunk as usize >= q_len as usize);
+            let chunks = keys.div_ceil(chunk as usize);
+            assert!(chunks * chunk as usize >= keys);
         }
     }
 
@@ -8717,21 +8785,25 @@ mod tests {
             sdpa_query_chunk_within_budget(&q, &k, &v, 0.0, false, false, BUDGET)
         };
 
-        // Mixed half precisions: chunked, sized at 4 bytes per score.
-        assert_eq!(decide(128, BFLOAT16, FLOAT16), cuda.then_some(16));
-        // An fp16 query over bf16 K/V folds back to bf16 on CUDA (see
-        // `sdpa_attention_dtype_follows_the_backend_promotion_table`), which
-        // cuDNN takes at head_dim 128.
-        assert_eq!(decide(128, FLOAT16, BFLOAT16), None);
-        assert_eq!(decide(256, BFLOAT16, FLOAT16), cuda.then_some(16));
+        // The CUDA predicates are what this test pins; Metal asks MLX per GPU
+        // generation, covered by `metal_query_chunk_gate_follows_mlx_fused_verdict`.
+        if !cfg!(target_os = "macos") {
+            // Mixed half precisions: chunked, sized at 4 bytes per score.
+            assert_eq!(decide(128, BFLOAT16, FLOAT16), cuda.then_some(16));
+            // An fp16 query over bf16 K/V folds back to bf16 on CUDA (see
+            // `sdpa_attention_dtype_follows_the_backend_promotion_table`), which
+            // cuDNN takes at head_dim 128.
+            assert_eq!(decide(128, FLOAT16, BFLOAT16), None);
+            assert_eq!(decide(256, BFLOAT16, FLOAT16), cuda.then_some(16));
 
-        // Same dtype: head_dim 128 stays on cuDNN, head_dim 256 materializes
-        // at 2 bytes per score, float32 at 4. Unchanged by the fix.
-        for dt in [BFLOAT16, FLOAT16] {
-            assert_eq!(decide(128, dt, dt), None);
-            assert_eq!(decide(256, dt, dt), cuda.then_some(32));
+            // Same dtype: head_dim 128 stays on cuDNN, head_dim 256 materializes
+            // at 2 bytes per score, float32 at 4. Unchanged by the fix.
+            for dt in [BFLOAT16, FLOAT16] {
+                assert_eq!(decide(128, dt, dt), None);
+                assert_eq!(decide(256, dt, dt), cuda.then_some(32));
+            }
+            assert_eq!(decide(128, FLOAT32, FLOAT32), cuda.then_some(16));
         }
-        assert_eq!(decide(128, FLOAT32, FLOAT32), cuda.then_some(16));
 
         // The chunk the gate picks runs the mixed attention correctly.
         let (q, k, v) = qkv(128, BFLOAT16, FLOAT16);
