@@ -461,6 +461,12 @@ required-features = ["xla-iree", "test-utils"]
 name = "xla_decode_scalar_reuse"
 required-features = ["xla-iree", "test-utils"]
 
+# Greedy-run phase accounting gate (#3041). Real IREE execution, so it is
+# discovered only under both features and runs as `-- --ignored`.
+[[test]]
+name = "xla_greedy_timing"
+required-features = ["xla-iree", "test-utils"]
+
 [[test]]
 name = "molmo2_xla_vision_parity"
 required-features = ["xla-iree"]
