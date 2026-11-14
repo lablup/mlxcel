@@ -223,6 +223,9 @@ pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
 /// Test support only (issue #2923): batch-KV allocation instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters};
+/// Test support only (issue #3028): decode-step scalar reuse instrumentation.
+#[cfg(feature = "test-support")]
+pub use iree::{decode_scalar_counters, reset_decode_scalar_counters};
 /// Test support only (issue #2961): resident-weight upload instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{reset_weight_upload_counters, weight_upload_counters};
@@ -432,6 +435,21 @@ fn read_eos(_model_path: &Path) -> Vec<i32> {
     Vec::new()
 }
 
+/// Wall time of the two phases of a greedy run, split the way the OpenXLA
+/// session executes them.
+///
+/// `prefill_ms` covers the KV seed the prompt prefix produces; `decode_ms`
+/// covers the first decode step (which emits the first generated token) through
+/// the last one. See [`XlaInferenceSession::generate_streaming_greedy_timed`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GreedyTiming {
+    /// Wall time of the prompt-prefix prefill, in milliseconds.
+    pub prefill_ms: f64,
+    /// Wall time of the decode loop, in milliseconds, including the first
+    /// generated token.
+    pub decode_ms: f64,
+}
+
 /// The single-sequence OpenXLA inference session.
 ///
 /// Owns its per-sequence KV state and runs generation token-in / token-out with
@@ -605,6 +623,30 @@ impl XlaInferenceSession {
         eos_token_ids: &[i32],
         on_token: F,
     ) -> Result<Vec<i32>, String> {
+        self.generate_streaming_greedy_timed(prompt_tokens, max_new_tokens, eos_token_ids, on_token)
+            .map(|(tokens, _)| tokens)
+    }
+
+    /// [`Self::generate_streaming_greedy`], also returning the wall time of
+    /// each phase.
+    ///
+    /// The prefill window covers the KV seed (all prompt tokens but the last);
+    /// the decode window starts at the first `decode_step` and therefore
+    /// contains every generated token, including the first. That is the
+    /// opposite split from the MLX `DirectEngine`, whose first token comes out
+    /// of prefill; reporters must count all generated tokens over the decode
+    /// window here, not `generated_tokens - 1`.
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`Self::generate_streaming_greedy`].
+    pub fn generate_streaming_greedy_timed<F: FnMut(i32) -> bool>(
+        &mut self,
+        prompt_tokens: &[i32],
+        max_new_tokens: usize,
+        eos_token_ids: &[i32],
+        on_token: F,
+    ) -> Result<(Vec<i32>, GreedyTiming), String> {
         if prompt_tokens.is_empty() {
             return Err("XLA generation requires a non-empty prompt".to_string());
         }
@@ -615,12 +657,29 @@ impl XlaInferenceSession {
         // keeps decode_step's "given the previously emitted token" contract exact
         // and avoids double-counting the last prompt token in the cache.
         let split = prompt_tokens.len() - 1;
+        let prefill_started = std::time::Instant::now();
         self.prefill(&prompt_tokens[..split])?;
+        let prefill_ms = prefill_started.elapsed().as_secs_f64() * 1000.0;
         if max_new_tokens == 0 {
-            return Ok(Vec::new());
+            return Ok((
+                Vec::new(),
+                GreedyTiming {
+                    prefill_ms,
+                    decode_ms: 0.0,
+                },
+            ));
         }
+        let decode_started = std::time::Instant::now();
         let first = self.decode_step(prompt_tokens[split])?;
-        self.drive_greedy(first, max_new_tokens, eos_token_ids, on_token)
+        let tokens = self.drive_greedy(first, max_new_tokens, eos_token_ids, on_token)?;
+        let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+        Ok((
+            tokens,
+            GreedyTiming {
+                prefill_ms,
+                decode_ms,
+            },
+        ))
     }
 
     /// Advance greedy decode from `first` (a prefill's argmax) and collect the
