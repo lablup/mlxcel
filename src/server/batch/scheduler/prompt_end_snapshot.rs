@@ -53,7 +53,11 @@ impl BatchScheduler {
         {
             return;
         }
-        let Some(ctx) = self.prompt_cache_seq_ctx.get(&seq.seq_id).cloned() else {
+        let Some(has_boundary) = self
+            .prompt_cache_seq_ctx
+            .get(&seq.seq_id)
+            .map(|ctx| ctx.history_prefix_tokens.is_some())
+        else {
             return;
         };
         self.prompt_cache_prompt_end_stored.insert(seq.seq_id);
@@ -62,9 +66,16 @@ impl BatchScheduler {
         // the small-row kernels; the next turn's cold run forwards those
         // tokens inside its history segment, so a state including them would
         // reproduce no cold run (measured on the live-replies replay, #3040).
-        if self.history_boundary_split(seq).is_some() {
+        // This holds whether or not this request captured the boundary: a
+        // regenerated turn adopts the boundary snapshot an earlier request of
+        // the same turn stored and captures nothing, and a prompt-end entry
+        // from it would be the next turn's longest match.
+        if has_boundary {
             return;
         }
+        let Some(ctx) = self.prompt_cache_seq_ctx.get(&seq.seq_id).cloned() else {
+            return;
+        };
         let _span = tracing::info_span!(
             "prompt_end_snapshot",
             seq_id = %seq.seq_id,

@@ -322,6 +322,22 @@ fn a_chat_turn_with_a_history_boundary_resumes_the_next_turn_from_it() {
         "the next turn resumes at the boundary"
     );
 
+    // A regenerated turn 2 adopts the boundary turn 2 stored and captures
+    // nothing itself; it must not store a prompt-end entry either, or the
+    // next turn would adopt that instead of the boundary.
+    let entries = store.stats().snapshot_entries;
+    let (_, adopted) = run_chat_request(&mut sched, &turn_2, Some(&history_2), true, 4);
+    assert_eq!(
+        adopted,
+        history_2.len(),
+        "the regenerate adopts the boundary"
+    );
+    assert_eq!(
+        store.stats().snapshot_entries,
+        entries,
+        "and stores no prompt-end entry"
+    );
+
     let mut cold = scheduler(test_store());
     let (cold_seen, cold_adopted) = run_chat_request(&mut cold, &turn_2, Some(&history_2), true, 4);
     assert_eq!(cold_adopted, 0);
