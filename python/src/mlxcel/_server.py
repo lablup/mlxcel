@@ -368,7 +368,9 @@ class ManagedServer:
         if self._log_thread is not None and self._log_thread.is_alive():
             self._log_thread.join(timeout=1.0)
 
-        if self.uds_path is not None and os.path.exists(self.uds_path):
+        # Before a child is spawned (for example, binary discovery failed),
+        # this manager has not created a socket and must not unlink that path.
+        if proc is not None and self.uds_path is not None and os.path.exists(self.uds_path):
             try:
                 os.unlink(self.uds_path)
             except OSError:
