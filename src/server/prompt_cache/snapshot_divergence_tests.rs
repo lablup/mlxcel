@@ -101,7 +101,8 @@ fn outcome(
 fn diverged(outcome: SnapshotLookupOutcome) -> SnapshotDivergence {
     match outcome {
         SnapshotLookupOutcome::Diverged(d) => d,
-        SnapshotLookupOutcome::Hit { matched_len, .. } => {
+        SnapshotLookupOutcome::Hit { matched_len, .. }
+        | SnapshotLookupOutcome::CheckpointHit { matched_len, .. } => {
             panic!("expected a divergence report, got a hit at {matched_len} tokens")
         }
         SnapshotLookupOutcome::NoCandidate => {

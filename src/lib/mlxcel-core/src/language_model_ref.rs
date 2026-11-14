@@ -185,6 +185,22 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).restore_sequence_state_truncated(seq_id, snapshot, target_len)
     }
 
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &ModelStateSnapshot,
+    ) -> Option<ModelStateSnapshot> {
+        (**self).state_checkpoint_from_snapshot(snapshot)
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &ModelStateSnapshot,
+        donor: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        (**self).restore_sequence_state_from_checkpoint(seq_id, checkpoint, donor)
+    }
+
     fn sequence_state_layout(&self) -> SequenceStateLayout {
         (**self).sequence_state_layout()
     }

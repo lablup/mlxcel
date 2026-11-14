@@ -203,6 +203,7 @@ fn turn_ctx(history: Option<&[i32]>) -> PromptCacheRequestContext {
         history_prefix_tokens: history.map(<[i32]>::to_vec),
         root_prompt: None,
         root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
     }
 }
 

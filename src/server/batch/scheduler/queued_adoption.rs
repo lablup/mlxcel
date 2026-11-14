@@ -64,7 +64,10 @@ impl BatchScheduler {
                 return true;
             }
         };
-        if let Some(ctx) = self.prompt_cache_seq_ctx.remove(&old_id) {
+        if let Some(mut ctx) = self.prompt_cache_seq_ctx.remove(&old_id) {
+            // The request now prefills every row itself, so nothing it stores
+            // descends from the dropped prefix (issue #3047).
+            ctx.snapshot_lineage = Default::default();
             self.prompt_cache_seq_ctx.insert(new_id, ctx);
         }
         if let Some(seq) = self.prefill_queue.get_mut(old_id) {

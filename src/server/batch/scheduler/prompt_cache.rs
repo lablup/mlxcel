@@ -171,6 +171,14 @@ impl BatchScheduler {
                     Some(divergence.stored_len),
                 );
         }
+        if let SnapshotLookupOutcome::CheckpointHit {
+            checkpoint,
+            donor,
+            matched_len,
+        } = snapshot_outcome
+        {
+            return self.adopt_state_checkpoint(&checkpoint, &donor, matched_len, tokens.len());
+        }
         if let SnapshotLookupOutcome::Hit {
             entry: snapshot_entry,
             matched_len: store_matched_len,
@@ -282,6 +290,8 @@ impl BatchScheduler {
                         "prompt-cache snapshot hit: restored {matched_len}/{} tokens",
                         tokens.len()
                     );
+                    self.prompt_cache_adopted_lineage
+                        .insert(seq_id, snapshot_entry.lineage.clipped(matched_len));
                     self.batch_observability
                         .record_prompt_cache_hit(matched_len);
                     self.batch_metrics
@@ -777,6 +787,77 @@ impl BatchScheduler {
         });
     }
 
+    /// Restore a turn-boundary state checkpoint over its donor (issue #3047):
+    /// the checkpoint's recurrent state plus the donor's attention rows cut
+    /// back to `matched_len`. Returns the adopted sequence, or `None` (cold
+    /// prefill) when the model refuses the pair.
+    fn adopt_state_checkpoint(
+        &mut self,
+        checkpoint: &ModelSnapshotEntry,
+        donor: &ModelSnapshotEntry,
+        matched_len: usize,
+        prompt_len: usize,
+    ) -> Option<(SequenceId, usize)> {
+        let seq_id = match self.allocate_sequence_state() {
+            Ok(id) => id,
+            Err(err) => {
+                tracing::warn!("Cache pool allocation failed during checkpoint restore: {err}");
+                return None;
+            }
+        };
+        let restore = checkpoint.with_snapshot(|state| {
+            donor.with_snapshot(|whole| {
+                self.engine
+                    .model()
+                    .restore_sequence_state_from_checkpoint(seq_id, state, whole)
+            })
+        });
+        if let Err(err) = restore {
+            tracing::warn!(
+                seq_id = %seq_id,
+                checkpoint = matched_len,
+                donor = donor.tokens.len(),
+                "prompt-cache checkpoint restore failed ({err}); falling back to cold prefill"
+            );
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::LayoutConstraints,
+                Some(seq_id.as_u64()),
+                matched_len,
+            );
+            self.release_sequence_caches(seq_id);
+            return None;
+        }
+        tracing::debug!(
+            seq_id = %seq_id,
+            matched = matched_len,
+            donor = donor.tokens.len(),
+            total = prompt_len,
+            "prompt-cache checkpoint hit: rebuilt {matched_len}/{prompt_len} tokens from a \
+             turn-boundary checkpoint and a {}-token snapshot",
+            donor.tokens.len()
+        );
+        self.prompt_cache_adopted_lineage
+            .insert(seq_id, checkpoint.lineage.clone());
+        self.batch_observability
+            .record_prompt_cache_hit(matched_len);
+        self.batch_metrics
+            .record_prompt_cache_snapshot_hit(matched_len);
+        if let Some(ref store) = self.prompt_cache {
+            self.batch_metrics
+                .update_prompt_cache_gauges(store.bytes(), store.len());
+        }
+        if apc_trace_enabled() {
+            tracing::info!(
+                apc_event = "adopt",
+                seq_id = %seq_id,
+                matched_len,
+                total_tokens = prompt_len,
+                "prompt-cache adopt (state checkpoint)"
+            );
+        }
+        Some((seq_id, matched_len))
+    }
+
     /// Copy the model-owned state of `seq_id` and insert it into the
     /// prompt-cache snapshot bucket keyed by `tokens`.
     ///
@@ -874,7 +955,23 @@ impl BatchScheduler {
             }
             return;
         }
-        let entry = ModelSnapshotEntry::new(tokens, snapshot).with_origin(origin);
+        // Every row past the adopted prefix was computed by this sequence
+        // (issue #3047). A history-boundary snapshot also yields a state
+        // checkpoint, taken now while the whole state is at hand; its tensors
+        // share the snapshot's buffers, so it costs no copy here.
+        let lineage = ctx.snapshot_lineage.extended(tokens.len(), seq_id.as_u64());
+        let checkpoint = (origin == SnapshotOrigin::Boundary
+            && store.state_checkpoint_capacity_bytes() > 0)
+            .then(|| {
+                self.engine
+                    .model()
+                    .state_checkpoint_from_snapshot(&snapshot)
+            })
+            .flatten()
+            .filter(|state| !state.is_empty());
+        let entry = ModelSnapshotEntry::new(tokens, snapshot)
+            .with_origin(origin)
+            .with_lineage(lineage.clone());
         let entry_bytes = entry.size_bytes;
         let key_tokens = entry.tokens.clone();
         let key =
@@ -913,6 +1010,25 @@ impl BatchScheduler {
                         origin = ?origin,
                         "prompt-cache store (snapshot)"
                     );
+                }
+                if let Some(checkpoint) = checkpoint {
+                    let checkpoint = ModelSnapshotEntry::new(key_tokens.clone(), checkpoint)
+                        .with_origin(origin)
+                        .with_lineage(lineage);
+                    let checkpoint_bytes = checkpoint.size_bytes;
+                    match store.insert_state_checkpoint(&key, checkpoint) {
+                        Ok(()) => tracing::debug!(
+                            seq_id = %seq_id,
+                            token_len = key_tokens.len(),
+                            checkpoint_bytes,
+                            "prompt-cache state checkpoint inserted"
+                        ),
+                        Err(err) => tracing::debug!(
+                            seq_id = %seq_id,
+                            checkpoint_bytes,
+                            "prompt-cache state checkpoint skipped: {err}"
+                        ),
+                    }
                 }
             }
             Err(err) => {
@@ -1011,7 +1127,7 @@ impl BatchScheduler {
             self.prompt_cache_warmups.clear();
             return;
         }
-        let Some((tokens, ctx)) = self.prompt_cache_warmups.pop_front() else {
+        let Some((tokens, mut ctx)) = self.prompt_cache_warmups.pop_front() else {
             return;
         };
         // Warm-ups compute KV for future requests, which snapshot the server
@@ -1095,6 +1211,9 @@ impl BatchScheduler {
         // conversation at one boundary snapshot while making that one cover the
         // previous reply as well.
         let warmed_len = tokens.len();
+        // The restored rows keep their producers; the delta is this
+        // sequence's own (issue #3047).
+        ctx.snapshot_lineage = entry.lineage.clipped(matched_len);
         self.insert_model_state_snapshot(
             seq_id,
             &ctx,

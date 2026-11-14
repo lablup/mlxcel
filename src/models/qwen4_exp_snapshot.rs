@@ -151,6 +151,13 @@ fn decode_contexts(array: &MlxArray) -> Result<Vec<Vec<i64>>, String> {
     Ok(contexts)
 }
 
+/// Whether a snapshot tensor belongs in a turn-boundary state checkpoint:
+/// everything but the per-token attention rows (`kv.*`) and the QSA index
+/// (`qsa.*`), which a longer snapshot of the same conversation carries.
+fn is_checkpoint_tensor(name: &str) -> bool {
+    !(name.contains(".kv.") || name.contains(".qsa."))
+}
+
 fn check_shape(
     layer: &str,
     what: &str,
@@ -290,82 +297,7 @@ impl Qwen4ExpModel {
                             "Qwen4-Exp snapshot restore, {prefix}: layer kind {kind} does not match a linear layer"
                         ));
                     }
-                    if let Some(state) = snapshot.tensor(&format!("{prefix}.state_cache")) {
-                        check_shape(
-                            &prefix,
-                            "state_cache",
-                            state,
-                            &[
-                                Some(1),
-                                as_dim(raw.linear_num_value_heads),
-                                as_dim(raw.linear_value_head_dim),
-                                as_dim(raw.linear_key_head_dim),
-                            ],
-                        )?;
-                    }
-                    if let Some(window) = snapshot.tensor(&format!("{prefix}.conv_state")) {
-                        let conv_dim = 2 * raw.linear_key_head_dim * raw.linear_num_key_heads
-                            + raw.linear_value_head_dim * raw.linear_num_value_heads;
-                        check_shape(
-                            &prefix,
-                            "conv_state",
-                            window,
-                            &[
-                                Some(1),
-                                as_dim(raw.linear_conv_kernel_dim - 1),
-                                as_dim(conv_dim),
-                            ],
-                        )?;
-                    }
-                    if token_len > 0
-                        && (snapshot.tensor(&format!("{prefix}.state_cache")).is_none()
-                            || snapshot.tensor(&format!("{prefix}.conv_state")).is_none())
-                    {
-                        return Err(format!(
-                            "Qwen4-Exp snapshot restore, {prefix}: missing GatedDeltaNet state for {token_len} tokens"
-                        ));
-                    }
-                    *delta = GatedDeltaCache::new();
-                    delta.restore_from(snapshot, &prefix);
-                    if let Some(ple) = ple {
-                        let window_rows =
-                            (raw.ple_conv_kernel_size as i32 - 1) * raw.ngram_size as i32;
-                        if let Some(window) = snapshot.tensor(&format!("{prefix}.ple.conv_state")) {
-                            check_shape(
-                                &prefix,
-                                "ple.conv_state",
-                                window,
-                                &[Some(1), Some(window_rows), None],
-                            )?;
-                        }
-                        if token_len > 0
-                            && snapshot
-                                .tensor(&format!("{prefix}.ple.conv_state"))
-                                .is_none()
-                        {
-                            return Err(format!(
-                                "Qwen4-Exp snapshot restore, {prefix}: missing PLE window for {token_len} tokens"
-                            ));
-                        }
-                        ple.conv_state =
-                            restore_optional(snapshot, format!("{prefix}.ple.conv_state"));
-                        let contexts = snapshot
-                            .tensor(&format!("{prefix}.ple.contexts"))
-                            .ok_or_else(|| {
-                                format!(
-                                    "Qwen4-Exp snapshot restore, {prefix}: missing n-gram contexts"
-                                )
-                            })?;
-                        ple.contexts = decode_contexts(contexts).map_err(|err| {
-                            format!("Qwen4-Exp snapshot restore, {prefix}: {err}")
-                        })?;
-                        let context_len = raw.ngram_size - 1;
-                        if ple.contexts.iter().any(|row| row.len() != context_len) {
-                            return Err(format!(
-                                "Qwen4-Exp snapshot restore, {prefix}: n-gram contexts are not {context_len} tokens long"
-                            ));
-                        }
-                    }
+                    self.restore_linear_layer(snapshot, &prefix, token_len, delta, ple)?;
                 }
                 Qwen4ExpCache::Attention { kv, index } => {
                     if kind != LAYER_KIND_ATTENTION {
@@ -447,6 +379,211 @@ impl Qwen4ExpModel {
             }
         }
         Ok(caches)
+    }
+
+    /// The turn-boundary state checkpoint of a whole snapshot (issue #3047):
+    /// every tensor except the attention layers' KV cache and QSA index.
+    ///
+    /// Those two hold one row per token, and a longer snapshot of the same
+    /// conversation holds the same rows at its front, so
+    /// [`Self::checkpoint_caches`] takes them from there. What stays is the
+    /// state a longer snapshot cannot give back: the GatedDeltaNet state and
+    /// convolution window, the PLE window and n-gram contexts, and the layer
+    /// table that validates the rest.
+    pub(crate) fn state_checkpoint(
+        &self,
+        snapshot: &ModelStateSnapshot,
+    ) -> Option<ModelStateSnapshot> {
+        if snapshot.family() != SNAPSHOT_FAMILY {
+            return None;
+        }
+        Some(snapshot.subset(is_checkpoint_tensor))
+    }
+
+    /// The caches for `checkpoint.token_len()` tokens, built from a state
+    /// checkpoint and a longer whole snapshot of the same conversation (issue
+    /// #3047).
+    ///
+    /// The donor is restored and validated like any snapshot, its attention
+    /// layers are cut back to the checkpoint's length with the same trim the
+    /// speculative rollback uses (KV rows, QSA raw keys and positions, and the
+    /// block summaries of blocks no longer complete), and every linear layer
+    /// takes the checkpoint's state. `Err` names what does not fit; nothing is
+    /// installed.
+    ///
+    /// Used by: [`Self::restore_sequence_checkpoint`], the checkpoint tests.
+    pub(crate) fn checkpoint_caches(
+        &self,
+        checkpoint: &ModelStateSnapshot,
+        donor: &ModelStateSnapshot,
+    ) -> Result<Vec<Qwen4ExpCache>, String> {
+        if checkpoint.family() != SNAPSHOT_FAMILY {
+            return Err(format!(
+                "cannot restore a {} checkpoint into Qwen4-Exp",
+                checkpoint.family()
+            ));
+        }
+        let keep = checkpoint.token_len();
+        let have = donor.token_len();
+        if keep == 0 || keep > have {
+            return Err(format!(
+                "Qwen4-Exp checkpoint restore: a {keep}-token checkpoint cannot be rebuilt from a {have}-token snapshot"
+            ));
+        }
+        let keep = i32::try_from(keep)
+            .map_err(|_| format!("Qwen4-Exp checkpoint restore: {keep} does not fit int32"))?;
+        let trim = i32::try_from(have)
+            .map_err(|_| format!("Qwen4-Exp checkpoint restore: {have} does not fit int32"))?
+            - keep;
+        let mut caches = self.restore_snapshot_caches(donor)?;
+        let layers = restore_i32(checkpoint, "layers")
+            .ok_or_else(|| "Qwen4-Exp checkpoint restore: missing layer count".to_string())?;
+        if layers as usize != caches.len() {
+            return Err(format!(
+                "Qwen4-Exp checkpoint restore: layer count {layers} does not match the model's {}",
+                caches.len()
+            ));
+        }
+        for (idx, cache) in caches.iter_mut().enumerate() {
+            let prefix = format!("layer{idx}");
+            let kind = restore_i32(checkpoint, format!("{prefix}.kind")).ok_or_else(|| {
+                format!("Qwen4-Exp checkpoint restore, {prefix}: missing layer kind")
+            })?;
+            match cache {
+                Qwen4ExpCache::Linear { delta, ple } => {
+                    if kind != LAYER_KIND_LINEAR {
+                        return Err(format!(
+                            "Qwen4-Exp checkpoint restore, {prefix}: layer kind {kind} does not match a linear layer"
+                        ));
+                    }
+                    self.restore_linear_layer(checkpoint, &prefix, keep, delta, ple)?;
+                }
+                Qwen4ExpCache::Attention { .. } => {
+                    if kind != LAYER_KIND_ATTENTION {
+                        return Err(format!(
+                            "Qwen4-Exp checkpoint restore, {prefix}: layer kind {kind} does not match an attention layer"
+                        ));
+                    }
+                    if trim > 0 {
+                        self.layers[idx].trim_cache_to_prefill_state(cache, trim)?;
+                    }
+                    if let Qwen4ExpCache::Attention { kv, index } = cache
+                        && (kv.offset != keep || index.len() != keep)
+                    {
+                        return Err(format!(
+                            "Qwen4-Exp checkpoint restore, {prefix}: attention holds {} rows and the index {} after the cut to {keep}",
+                            kv.offset,
+                            index.len()
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(caches)
+    }
+
+    /// `LanguageModel::restore_sequence_state_from_checkpoint`. Same contract
+    /// as [`Self::restore_sequence_snapshot`]: an empty rollback log, and `Err`
+    /// leaves the sequence untouched.
+    pub(super) fn restore_sequence_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &ModelStateSnapshot,
+        donor: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        let caches = self.checkpoint_caches(checkpoint, donor)?;
+        self.sequence_state.replace_sequence_state(seq_id, caches);
+        self.rollback_log
+            .replace_sequence_state(seq_id, vec![super::RollbackLog::default()]);
+        Ok(())
+    }
+
+    /// Restore one GatedDeltaNet layer's state and PLE window from `snapshot`
+    /// for `token_len` tokens, validated against this model's configuration.
+    ///
+    /// Used by: [`Self::restore_snapshot_caches`], [`Self::checkpoint_caches`].
+    fn restore_linear_layer(
+        &self,
+        snapshot: &ModelStateSnapshot,
+        prefix: &str,
+        token_len: i32,
+        delta: &mut GatedDeltaCache,
+        ple: &mut Option<super::ple::PleCache>,
+    ) -> Result<(), String> {
+        let raw = &self.config.raw;
+        let as_dim = |value: usize| Some(value as i32);
+        if let Some(state) = snapshot.tensor(&format!("{prefix}.state_cache")) {
+            check_shape(
+                prefix,
+                "state_cache",
+                state,
+                &[
+                    Some(1),
+                    as_dim(raw.linear_num_value_heads),
+                    as_dim(raw.linear_value_head_dim),
+                    as_dim(raw.linear_key_head_dim),
+                ],
+            )?;
+        }
+        if let Some(window) = snapshot.tensor(&format!("{prefix}.conv_state")) {
+            let conv_dim = 2 * raw.linear_key_head_dim * raw.linear_num_key_heads
+                + raw.linear_value_head_dim * raw.linear_num_value_heads;
+            check_shape(
+                prefix,
+                "conv_state",
+                window,
+                &[
+                    Some(1),
+                    as_dim(raw.linear_conv_kernel_dim - 1),
+                    as_dim(conv_dim),
+                ],
+            )?;
+        }
+        if token_len > 0
+            && (snapshot.tensor(&format!("{prefix}.state_cache")).is_none()
+                || snapshot.tensor(&format!("{prefix}.conv_state")).is_none())
+        {
+            return Err(format!(
+                "Qwen4-Exp snapshot restore, {prefix}: missing GatedDeltaNet state for {token_len} tokens"
+            ));
+        }
+        *delta = GatedDeltaCache::new();
+        delta.restore_from(snapshot, prefix);
+        if let Some(ple) = ple {
+            let window_rows = (raw.ple_conv_kernel_size as i32 - 1) * raw.ngram_size as i32;
+            if let Some(window) = snapshot.tensor(&format!("{prefix}.ple.conv_state")) {
+                check_shape(
+                    prefix,
+                    "ple.conv_state",
+                    window,
+                    &[Some(1), Some(window_rows), None],
+                )?;
+            }
+            if token_len > 0
+                && snapshot
+                    .tensor(&format!("{prefix}.ple.conv_state"))
+                    .is_none()
+            {
+                return Err(format!(
+                    "Qwen4-Exp snapshot restore, {prefix}: missing PLE window for {token_len} tokens"
+                ));
+            }
+            ple.conv_state = restore_optional(snapshot, format!("{prefix}.ple.conv_state"));
+            let contexts = snapshot
+                .tensor(&format!("{prefix}.ple.contexts"))
+                .ok_or_else(|| {
+                    format!("Qwen4-Exp snapshot restore, {prefix}: missing n-gram contexts")
+                })?;
+            ple.contexts = decode_contexts(contexts)
+                .map_err(|err| format!("Qwen4-Exp snapshot restore, {prefix}: {err}"))?;
+            let context_len = raw.ngram_size - 1;
+            if ple.contexts.iter().any(|row| row.len() != context_len) {
+                return Err(format!(
+                    "Qwen4-Exp snapshot restore, {prefix}: n-gram contexts are not {context_len} tokens long"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// `LanguageModel::snapshot_sequence_state`: `None`, with the reason

@@ -556,6 +556,17 @@ impl QsaAttention {
         index.trim(n, self.indexer.compress_ratio, trim_blocks);
     }
 
+    /// Drop the block summaries a prefill of `index.len()` positions would
+    /// not have computed: the indexer pools blocks only once a query sees
+    /// more complete blocks than its budget. A cache cut back from a longer
+    /// prefix then holds exactly what a direct prefill of the shorter one
+    /// writes (issue #3047).
+    pub(crate) fn forget_unpooled_blocks(&self, index: &mut QsaIndexCache) {
+        if index.len() / self.indexer.compress_ratio <= self.indexer.block_topk {
+            index.block_keys = None;
+        }
+    }
+
     pub(crate) fn forward(
         &self,
         x: &MlxArray,

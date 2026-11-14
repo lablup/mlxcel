@@ -254,6 +254,74 @@ impl Qwen3NextCache {
             }
         }
     }
+
+    /// Whether a snapshot tensor belongs in a turn-boundary state checkpoint
+    /// (issue #3047): the GatedDeltaNet layers' state and convolution window.
+    /// The attention layers' rows are taken from a longer snapshot instead.
+    ///
+    /// Used by: Qwen3-Next and Qwen 3.5 `state_checkpoint_from_snapshot`.
+    pub fn is_checkpoint_tensor(name: &str) -> bool {
+        name.contains(".linear.")
+    }
+
+    /// Rebuild this layer for `checkpoint.token_len()` tokens from a state
+    /// checkpoint and a longer whole snapshot of the same conversation (issue
+    /// #3047).
+    ///
+    /// A GatedDeltaNet layer takes the checkpoint's state, which must be
+    /// present. An attention layer restores the donor's rows and cuts them
+    /// back with [`KVCache::trim`], the same trim a speculative rollback uses.
+    ///
+    /// Used by: Qwen3-Next and Qwen 3.5
+    /// `restore_sequence_state_from_checkpoint`.
+    pub fn restore_from_checkpoint(
+        &mut self,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
+        let keep = checkpoint.token_len();
+        let have = donor.token_len();
+        if keep == 0 || keep > have {
+            return Err(format!(
+                "{prefix}: a {keep}-token checkpoint cannot be rebuilt from a {have}-token snapshot"
+            ));
+        }
+        if let Qwen3NextCache::Linear(_) = self {
+            for field in ["conv_state", "state_cache"] {
+                if checkpoint
+                    .tensor(&format!("{prefix}.linear.{field}"))
+                    .is_none()
+                {
+                    return Err(format!(
+                        "{prefix}.linear: checkpoint has no {field} for {keep} tokens"
+                    ));
+                }
+            }
+            return self.restore_from(checkpoint, prefix);
+        }
+        self.restore_from(donor, prefix)?;
+        if let Qwen3NextCache::Attention(kv) = self {
+            if kv.keys.is_none() || kv.values.is_none() {
+                return Err(format!(
+                    "{prefix}.attention: the {have}-token snapshot holds no attention rows"
+                ));
+            }
+            let trim = (have - keep) as i32;
+            if trim > 0 && kv.trim(trim) != trim {
+                return Err(format!(
+                    "{prefix}.attention: could not cut {have} rows back to {keep}"
+                ));
+            }
+            if kv.offset != keep as i32 {
+                return Err(format!(
+                    "{prefix}.attention: {} rows after the cut, expected {keep}",
+                    kv.offset
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 // GatedDeltaNet - Linear Attention Layer.
@@ -2295,6 +2363,35 @@ impl LanguageModel for Qwen3NextModel {
         let mut state = self.make_internal_caches();
         for (idx, cache) in state.iter_mut().enumerate() {
             cache.restore_from(snapshot, &format!("layer{idx}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        (snapshot.family() == "qwen3_next")
+            .then(|| snapshot.subset(Qwen3NextCache::is_checkpoint_tensor))
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if checkpoint.family() != "qwen3_next" || donor.family() != "qwen3_next" {
+            return Err(format!(
+                "cannot restore a {} checkpoint over a {} snapshot into qwen3_next",
+                checkpoint.family(),
+                donor.family()
+            ));
+        }
+        let mut state = self.make_internal_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from_checkpoint(checkpoint, donor, &format!("layer{idx}"))?;
         }
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())

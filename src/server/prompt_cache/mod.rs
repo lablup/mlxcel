@@ -43,6 +43,7 @@ pub mod decoded_tail;
 pub mod entry;
 pub mod hybrid_ssm;
 pub mod key;
+pub mod lineage;
 mod lookup;
 pub mod metrics;
 pub mod policy;
@@ -73,6 +74,7 @@ pub use key::{
     multimodal_digest, multimodal_digest_from_vecs, resolve_session_key, template_sig,
     tools_digest,
 };
+pub use lineage::SnapshotLineage;
 pub use metrics::{
     AtomicPromptCacheMetrics, NoopPromptCacheMetrics, PromptCacheLastReject, PromptCacheMetrics,
     PromptCacheRejectCounters, PromptCacheRejectReason,
@@ -80,13 +82,15 @@ pub use metrics::{
 pub use policy::{
     ApcConfig, CHECKPOINT_DEFAULT_INTERVAL_TOKENS, PromptCacheConfig, PromptCacheStats,
     SYSTEM_ROOT_DEFAULT_MIN_PROMPT_TOKENS, boundary_snapshot_disabled, cache_warmup_disabled,
-    checkpoint_interval_tokens, keep_previous_turn_enabled, system_root_min_prompt_tokens,
+    checkpoint_interval_tokens, keep_previous_turn_enabled, state_checkpoint_capacity_override,
+    system_root_min_prompt_tokens,
 };
 pub use snapshot_sizing::{
     MODEL_AWARE_SNAPSHOT_CONTEXT_TOKENS, MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES,
-    MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES_KEEP_PREVIOUS_TURN, SnapshotCapacityRecommendation,
+    MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES_KEEP_PREVIOUS_TURN,
+    MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES, SnapshotCapacityRecommendation,
     model_aware_snapshot_target_entries, recommend_model_kv_store_capacity,
-    recommend_model_snapshot_capacity,
+    recommend_model_snapshot_capacity, recommend_state_checkpoint_capacity,
 };
 pub use store::{PromptCacheStore, SnapshotDivergence, SnapshotLookupOutcome};
 pub use types::{BucketKey, InsertError};
