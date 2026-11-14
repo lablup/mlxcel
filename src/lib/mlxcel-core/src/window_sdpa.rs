@@ -332,6 +332,10 @@ enum ProbedArm {
     NativeWindow(i32),
     /// The explicit array mask, no causal mode, no window.
     LegacyMask,
+    /// MLX's built-in causal mode, no array mask, no window.
+    Causal,
+    /// No mask at all.
+    Unmasked,
 }
 
 thread_local! {
@@ -351,6 +355,8 @@ fn memoized_fused_verdict(shape: &WindowSdpaShape, arm: ProbedArm) -> bool {
     let (has_arr_mask, do_causal, window) = match arm {
         ProbedArm::NativeWindow(window) => (false, true, window),
         ProbedArm::LegacyMask => (true, false, -1),
+        ProbedArm::Causal => (false, true, -1),
+        ProbedArm::Unmasked => (false, false, -1),
     };
     let verdict = ffi::sdpa_uses_fused_kernel(
         &shape.q_shape(),
@@ -377,6 +383,27 @@ fn memoized_fused_verdict(shape: &WindowSdpaShape, arm: ProbedArm) -> bool {
 #[cfg(test)]
 pub(crate) fn fused_memo_len() -> usize {
     FUSED_MEMO.with(|memo| memo.borrow().len())
+}
+
+/// Whether MLX's fused SDPA kernel will run for a call at this shape with the
+/// mask the caller actually issues: an array mask, MLX's causal mode, or none.
+/// `false` means MLX's fallback materialises the full `[B, H, q_len, k_len]`
+/// score matrix, which is the premise `layers::sdpa_query_chunk_within_budget`
+/// uses to bound it by chunking the query axis. The arm matters: a GPU can fuse
+/// the causal mode at a shape whose array-mask call falls back, and chunking
+/// such a call would trade a fused kernel for per-chunk fallbacks. Metal only;
+/// `false` elsewhere. Shares this module's per-thread memo.
+pub(crate) fn sdpa_call_uses_fused_kernel(
+    shape: &WindowSdpaShape,
+    has_arr_mask: bool,
+    do_causal: bool,
+) -> bool {
+    let arm = match (has_arr_mask, do_causal) {
+        (true, _) => ProbedArm::LegacyMask,
+        (false, true) => ProbedArm::Causal,
+        (false, false) => ProbedArm::Unmasked,
+    };
+    memoized_fused_verdict(shape, arm)
 }
 
 /// MLX's own verdict on whether the native arm over `shape` runs a fused
