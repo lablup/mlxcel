@@ -5229,24 +5229,42 @@ fn attention_dispatch(
 }
 
 /// Score-matrix byte budget above which a prefill SDPA is query-chunked, from
-/// `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` (MiB, default 1024; `0` disables
-/// chunking entirely).
+/// `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` (MiB; `0` disables chunking entirely).
 ///
 /// The budget bounds the raw `[B, heads, chunk, k_len]` score matmul output;
 /// the fallback composite briefly holds a few score-sized buffers per chunk
-/// (masked scores, softmax), so the live attention transient is a small
-/// multiple of this value. 1024 MiB keeps that multiple to a few GiB while
-/// leaving per-chunk matmuls large enough to stay bandwidth-bound.
+/// (masked scores, softmax), so the live attention transient is a multiple of
+/// this value. The default is per backend ([`DEFAULT_CUDA_CHUNK_BUDGET_MB`],
+/// [`DEFAULT_METAL_CHUNK_BUDGET_MB`]) because that multiple is not.
 fn attention_chunk_budget_bytes() -> usize {
     static BUDGET: OnceLock<usize> = OnceLock::new();
     *BUDGET.get_or_init(|| {
+        let default = if cfg!(feature = "cuda") {
+            DEFAULT_CUDA_CHUNK_BUDGET_MB
+        } else {
+            DEFAULT_METAL_CHUNK_BUDGET_MB
+        };
         std::env::var("MLXCEL_ATTENTION_CHUNK_BUDGET_MB")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(1024)
+            .unwrap_or(default)
             .saturating_mul(1024 * 1024)
     })
 }
+
+/// CUDA's default chunk budget (MiB). 1024 keeps the live multiple to a few
+/// GiB while leaving per-chunk matmuls large enough to stay bandwidth-bound
+/// (#672).
+const DEFAULT_CUDA_CHUNK_BUDGET_MB: usize = 1024;
+
+/// Metal's default chunk budget (MiB). MLX keeps up to ten command buffers in
+/// flight and frees a chunk's scores only when its buffer completes, so on
+/// Metal about that many chunks are live at once. Measured on an M3 Ultra for
+/// one `[1, 24, 28000, 256]` fp16 array-mask call (#3033): the single call
+/// peaked at 43.5 GB of MLX memory, chunked at 1024 MiB at 26.0 GB, at 512 at
+/// 15.3 GB and at 256 at 9.8 GB, and every chunked variant ran faster than the
+/// single call (1.3 to 1.4 s against 2.1 s).
+const DEFAULT_METAL_CHUNK_BUDGET_MB: usize = 256;
 
 /// Which backend's fallback rules the score-materialization chunk gate
 /// applies.

@@ -194,3 +194,93 @@ fn metal_chunked_paths_match_the_single_call_at_head_dim_256_fp16() {
         );
     }
 }
+
+/// One attention call at a real prefill shape, timed and measured.
+struct ProbeRun {
+    peak_bytes: usize,
+    millis: f64,
+    out: UniquePtr<MlxArray>,
+}
+
+fn probe_run(f: impl FnOnce() -> UniquePtr<MlxArray>) -> ProbeRun {
+    ffi::eval(&ffi::zeros(&[1], dtype::FLOAT32));
+    crate::memory::clear_cache();
+    crate::memory::reset_peak_memory();
+    let start = std::time::Instant::now();
+    let out = f();
+    ffi::eval(&out);
+    let millis = start.elapsed().as_secs_f64() * 1e3;
+    ProbeRun {
+        peak_bytes: ffi::get_peak_memory(),
+        millis,
+        out,
+    }
+}
+
+/// Op-level evidence for #3033, run by hand on a GPU host:
+/// `MLXCEL_SDPA_PROBE_LEN=28000 cargo test --release -p mlxcel-core --lib
+/// metal_chunk_tests::sdpa_chunk_peak_memory_probe -- --ignored --nocapture`.
+///
+/// For the reporter's shape (24 query heads over 4 KV heads, head_dim 256,
+/// fp16) it measures MLX's peak active memory and wall time of one prefill
+/// attention call through the production entry points ([`super::attention`]
+/// with the additive causal mask a model passes, and
+/// [`crate::causal_attention`] in MLX's causal mode) against the single
+/// unchunked call they would make without the gate, and the largest
+/// difference between the two outputs.
+#[test]
+#[ignore = "allocates tens of GB; run by hand with MLXCEL_SDPA_PROBE_LEN"]
+fn sdpa_chunk_peak_memory_probe() {
+    let len: i32 = std::env::var("MLXCEL_SDPA_PROBE_LEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(28000);
+    let heads: i32 = std::env::var("MLXCEL_SDPA_PROBE_HEADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+    let normal = |shape: &[i32]| {
+        // SAFETY: a null key draws from MLX's global generator.
+        let x = unsafe { ffi::random_normal(shape, dtype::FLOAT16, std::ptr::null()) };
+        ffi::eval(&x);
+        x
+    };
+    crate::ffi::random_seed(3033);
+    let q = normal(&[1, heads, len, 256]);
+    let k = normal(&[1, 4, len, 256]);
+    let v = normal(&[1, 4, len, 256]);
+    let scale = 1.0 / 16.0_f32;
+    let mask = crate::utils::create_causal_mask(len, 0);
+    ffi::eval(&mask);
+    let mask = mask.as_ref().unwrap();
+    let gb = |b: usize| b as f64 / 1e9;
+    println!(
+        "backend={:?} shape=[1,{heads},{len},256] fp16 kv_heads=4",
+        crate::hardware::gpu_backend_kind()
+    );
+
+    let arr_fused = sdpa_mode_is_fused(&WindowSdpaShape::of(&q, &k, &v), true, false);
+    let single = probe_run(|| attention_dispatch(&q, &k, &v, scale, Some(mask), 0.0));
+    let gated = probe_run(|| super::attention(&q, &k, &v, scale, Some(mask), 0.0, 0));
+    println!(
+        "array mask: mlx_fused={arr_fused} single_call peak={:.2} GB {:.0} ms | gated peak={:.2} GB {:.0} ms | max_abs_diff={}",
+        gb(single.peak_bytes),
+        single.millis,
+        gb(gated.peak_bytes),
+        gated.millis,
+        max_abs_diff(&single.out, &gated.out)
+    );
+    drop((single, gated));
+
+    let causal_fused = sdpa_mode_is_fused(&WindowSdpaShape::of(&q, &k, &v), false, true);
+    let single = probe_run(|| ffi::ffi_fast_scaled_dot_product_attention_causal(&q, &k, &v, scale));
+    let gated = probe_run(|| crate::causal_attention(&q, &k, &v, scale, 0.0, 0));
+    println!(
+        "causal mode: mlx_fused={causal_fused} single_call peak={:.2} GB {:.0} ms | gated peak={:.2} GB {:.0} ms | max_abs_diff={}",
+        gb(single.peak_bytes),
+        single.millis,
+        gb(gated.peak_bytes),
+        gated.millis,
+        max_abs_diff(&single.out, &gated.out)
+    );
+}
