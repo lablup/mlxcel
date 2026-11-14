@@ -157,6 +157,7 @@ impl BatchScheduler {
             thinking_token_ids: None,
             prompt_cache: None,
             prompt_cache_seq_ctx: std::collections::HashMap::new(),
+            prompt_cache_prompt_end_stored: std::collections::HashSet::new(),
             prompt_cache_warmups: std::collections::VecDeque::new(),
             kv_cache_mode: KVCacheMode::Fp16,
             batch_kv_quant: BatchKvQuantConfig::default(),

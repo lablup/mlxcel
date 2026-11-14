@@ -72,6 +72,36 @@ fn is_gemma4_text_weight(name: &str) -> bool {
         || name.starts_with("lm_head.")
 }
 
+/// Move a text-only Gemma 4 export under the `language_model.` prefix.
+///
+/// mlx-lm names the tensors of such an export `model.*` and `lm_head.*`. The
+/// Gemma 4 model, the KV-shared-layer strip and the tied-embedding step are
+/// written against the multimodal layout, `language_model.model.*`, and a
+/// text-only checkpoint used to stop at "Weight not found:
+/// language_model.model.embed_tokens.weight". A checkpoint with any
+/// `language_model.` tensor is left as it is.
+///
+/// Used by: [`load_gemma4_text_weights`], [`load_gemma4_text_weights_with_backing`].
+fn adopt_gemma4_language_model_prefix(weights: &mut mlxcel_core::weights::WeightMap) {
+    if !weights.contains_key("model.embed_tokens.weight")
+        || weights
+            .keys()
+            .any(|name| name.starts_with("language_model."))
+    {
+        return;
+    }
+    let names: Vec<String> = weights
+        .keys()
+        .filter(|name| name.starts_with("model.") || name.starts_with("lm_head."))
+        .cloned()
+        .collect();
+    for name in names {
+        if let Some(tensor) = weights.remove(&name) {
+            weights.insert(format!("language_model.{name}"), tensor);
+        }
+    }
+}
+
 fn is_gemma4_vlm_weight(name: &str) -> bool {
     is_gemma4_text_weight(name)
         || name.starts_with("vision_tower.")
@@ -1699,7 +1729,9 @@ fn load_gemma4_text_weights<P: AsRef<Path>>(
     // including pure language-model shards. Keep Gemma 4 on the selective
     // mmap + eager materialization path until the native loader can handle
     // these checkpoints.
-    load_weights_from_dir_with_filter(model_dir, is_gemma4_text_weight, false)
+    let mut weights = load_weights_from_dir_with_filter(model_dir, is_gemma4_text_weight, false)?;
+    adopt_gemma4_language_model_prefix(&mut weights);
+    Ok(weights)
 }
 
 pub(crate) fn load_gemma4_text_weights_with_backing<P: AsRef<Path>>(
@@ -1711,7 +1743,10 @@ pub(crate) fn load_gemma4_text_weights_with_backing<P: AsRef<Path>>(
     // VLM and unified variants, which delegate, went without it. Diagnosing
     // that cost three wrong guesses about where Gemma 4 loads, because both
     // functions look right when read on their own.
-    load_gemma4_family_weights_with_backing(model_dir, is_gemma4_text_weight)
+    let (mut weights, backing) =
+        load_gemma4_family_weights_with_backing(model_dir, is_gemma4_text_weight)?;
+    adopt_gemma4_language_model_prefix(&mut weights);
+    Ok((weights, backing))
 }
 
 pub(crate) fn load_gemma4_vlm_weights_with_backing<P: AsRef<Path>>(
@@ -3626,6 +3661,77 @@ mod tests {
         normalize_nvfp4_keys(&mut weights);
         // The existing key should remain unchanged.
         assert!(weights.contains_key("language_model.model.layers.0.mlp.gate_proj.weight"));
+    }
+
+    // --- adopt_gemma4_language_model_prefix tests ---
+
+    fn weights_named(names: &[&str]) -> mlxcel_core::weights::WeightMap {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    mlxcel_core::from_slice_f32(&[1.0], &[1]),
+                )
+            })
+            .collect()
+    }
+
+    fn sorted_names(weights: &mlxcel_core::weights::WeightMap) -> Vec<&str> {
+        let mut names: Vec<&str> = weights.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[test]
+    fn a_text_only_gemma4_export_moves_under_the_language_model_prefix() {
+        // The layout of `mlx-community/Gemma4-E2B-IT-Text-int4`, which used to
+        // stop at "Weight not found: language_model.model.embed_tokens.weight".
+        let mut weights = weights_named(&[
+            "model.embed_tokens.weight",
+            "model.embed_tokens.scales",
+            "model.embed_tokens_per_layer.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.norm.weight",
+            "lm_head.weight",
+        ]);
+        adopt_gemma4_language_model_prefix(&mut weights);
+        assert_eq!(
+            sorted_names(&weights),
+            [
+                "language_model.lm_head.weight",
+                "language_model.model.embed_tokens.scales",
+                "language_model.model.embed_tokens.weight",
+                "language_model.model.embed_tokens_per_layer.weight",
+                "language_model.model.layers.0.self_attn.q_proj.weight",
+                "language_model.model.norm.weight",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gemma4_checkpoint_in_another_layout_keeps_its_names() {
+        // The multimodal layout, with or without stray top-level tensors.
+        let multimodal = [
+            "language_model.model.embed_tokens.weight",
+            "language_model.model.layers.0.self_attn.q_proj.weight",
+            "model.embed_tokens.weight",
+        ];
+        let mut weights = weights_named(&multimodal);
+        adopt_gemma4_language_model_prefix(&mut weights);
+        let mut expected = multimodal;
+        expected.sort_unstable();
+        assert_eq!(sorted_names(&weights), expected);
+
+        // `model.` tensors without the text-only embedding table are not that
+        // layout, and nothing is guessed about them.
+        let other = [
+            "model.language_model.embed_tokens.weight",
+            "model.vision_tower.weight",
+        ];
+        let mut weights = weights_named(&other);
+        adopt_gemma4_language_model_prefix(&mut weights);
+        assert_eq!(sorted_names(&weights), other);
     }
 
     // --- strip_gemma4_kv_shared_weights tests ---

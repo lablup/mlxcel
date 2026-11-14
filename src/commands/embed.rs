@@ -206,7 +206,7 @@ pub(crate) fn run_embed(args: EmbedArgs) -> Result<()> {
     for path in &args.images {
         let bytes =
             std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-        let image = image::load_from_memory(&bytes)
+        let image = mlxcel::multimodal::image_orientation::load_upright_from_memory(&bytes)
             .with_context(|| format!("failed to decode {}", path.display()))?;
         let reply = engine
             .embed_image(ImageInput { image }, &options)

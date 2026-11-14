@@ -169,6 +169,58 @@ fn parse_tokenizer_config_eos_token_ids(config: &serde_json::Value) -> Vec<i32> 
         .collect()
 }
 
+/// The ids of the tokenizer's `eos_token` looked up in `tokenizer.json`, for a
+/// `tokenizer_config.json` that names the token but whose
+/// `added_tokens_decoder` does not resolve it.
+///
+/// Recent `transformers` releases write no such table at all: the added tokens
+/// live only in `tokenizer.json`. The Qwen3.5 conversions on the Hub are such
+/// checkpoints. Their tokenizer config says `eos_token: "<|im_end|>"`, while
+/// the only id the model config declares (`text_config.eos_token_id`) is
+/// `<|endoftext|>`, so the end-of-turn token was not a stop id, was printed,
+/// and generation ran on until the model happened to emit `<|endoftext|>`.
+/// Only `added_tokens` is deserialized; the vocabulary, which is most of the
+/// file, is skipped. A token that exists only in the vocabulary is not found.
+///
+/// Used by: [`read_eos_token_ids`]
+fn tokenizer_json_eos_token_ids(
+    model_dir: &Path,
+    tokenizer_config: &serde_json::Value,
+) -> Vec<i32> {
+    // Optional fields: one entry of an unexpected shape must not discard the
+    // whole list.
+    #[derive(serde::Deserialize)]
+    struct AddedToken {
+        #[serde(default)]
+        id: Option<i64>,
+        #[serde(default)]
+        content: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct AddedTokens {
+        #[serde(default)]
+        added_tokens: Vec<AddedToken>,
+    }
+
+    let Some(eos_token) = tokenizer_eos_token_content(tokenizer_config) else {
+        return Vec::new();
+    };
+    let Ok(content) = std::fs::read_to_string(model_dir.join("tokenizer.json")) else {
+        return Vec::new();
+    };
+    let Ok(tokenizer) = serde_json::from_str::<AddedTokens>(&content) else {
+        return Vec::new();
+    };
+    tokenizer
+        .added_tokens
+        .into_iter()
+        .filter(|token| token.content.as_deref() == Some(eos_token))
+        .filter_map(|token| token.id)
+        .filter(|id| *id >= 0)
+        .filter_map(|id| i32::try_from(id).ok())
+        .collect()
+}
+
 /// Sampling and stop-token defaults read from `generation_config.json`.
 ///
 /// Fields are optional because many checkpoints omit some or all sampling
@@ -464,8 +516,9 @@ pub fn read_generation_config_defaults(model_dir: &Path) -> GenerationConfigDefa
 /// generation config lists only one of the model's stop ids therefore still
 /// stops on the others. Each `eos_token_id` field can be either a single
 /// integer or an array of integers. Tokenizer configs that declare only an
-/// `eos_token` string are resolved through `added_tokens_decoder`. Returns an
-/// empty vec if no source declares an id.
+/// `eos_token` string are resolved through `added_tokens_decoder`, or through
+/// the `added_tokens` of `tokenizer.json` when that table is absent or does
+/// not list the token. Returns an empty vec if no source declares an id.
 pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
     let model_dir = resolve_model_dir(model_dir);
     let mut ids = read_generation_config_defaults(&model_dir).eos_token_ids;
@@ -485,7 +538,11 @@ pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
         let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) else {
             continue;
         };
-        for id in parser(&config) {
+        let mut declared = parser(&config);
+        if declared.is_empty() && file_name == "tokenizer_config.json" {
+            declared = tokenizer_json_eos_token_ids(&model_dir, &config);
+        }
+        for id in declared {
             if seen.insert(id) {
                 ids.push(id);
             }

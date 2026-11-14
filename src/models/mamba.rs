@@ -49,71 +49,103 @@ pub struct Quantization {
     pub bits: i32,
 }
 
+/// A Mamba `config.json`.
+///
+/// Each setting has two spellings in the wild: the Hugging Face `MambaConfig`
+/// attribute (`hidden_size`) and the name the original state-spaces configs
+/// use (`d_model`). The `*-hf` checkpoints carry both at once, so this is not
+/// a derive with aliases, which refuses a config that names a field twice
+/// ("duplicate field `hidden_size`"). The Hugging Face name wins when both
+/// are present, as it does in transformers and in mlx-lm; the two disagree in
+/// `state-spaces/mamba-370m-hf`, whose `d_inner` is 160 beside an
+/// `intermediate_size` of 2048.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "serde_json::Value")]
 pub struct MambaConfig {
     pub model_type: String,
     pub vocab_size: usize,
-    #[serde(alias = "d_model")]
     pub hidden_size: usize,
-    #[serde(alias = "d_inner")]
     pub intermediate_size: usize,
-    #[serde(alias = "d_state")]
     pub state_size: usize,
-    #[serde(alias = "n_layer", alias = "n_layers")]
     pub num_hidden_layers: usize,
-    #[serde(alias = "d_conv")]
     pub conv_kernel: usize,
-    #[serde(alias = "bias", default)]
     pub use_bias: bool,
-    #[serde(alias = "conv_bias", default = "default_true")]
     pub use_conv_bias: bool,
-    #[serde(deserialize_with = "deserialize_time_step_rank")]
     pub time_step_rank: usize,
-    #[serde(default = "default_true")]
     pub tie_word_embeddings: bool,
-    #[serde(default)]
     pub use_bcdt_rms: bool,
-    #[serde(default = "default_mixer_rms_eps")]
     pub mixer_rms_eps: f32,
-    #[serde(default = "default_rms_norm_eps")]
     pub rms_norm_eps: f32,
-    #[serde(default)]
     pub quantization: Option<Quantization>,
-    #[serde(default)]
     pub eos_token_id: Option<serde_json::Value>,
-    #[serde(default)]
     pub bos_token_id: Option<serde_json::Value>,
 }
 
-fn default_true() -> bool {
-    true
+/// One setting read out of a config object under the first spelling present.
+///
+/// `None` for a setting that is absent or `null` under every spelling.
+fn config_field<T: serde::de::DeserializeOwned>(
+    config: &serde_json::Map<String, serde_json::Value>,
+    spellings: &[&str],
+) -> Result<Option<T>, String> {
+    let Some((name, value)) = spellings.iter().find_map(|name| {
+        config
+            .get(*name)
+            .filter(|v| !v.is_null())
+            .map(|v| (name, v))
+    }) else {
+        return Ok(None);
+    };
+    T::deserialize(value)
+        .map(Some)
+        .map_err(|error| format!("`{name}`: {error}"))
 }
 
-fn default_mixer_rms_eps() -> f32 {
-    1e-6
+/// [`config_field`] for a setting the model cannot be built without. The
+/// error names the first spelling, as the derive this replaces did.
+fn required_config_field<T: serde::de::DeserializeOwned>(
+    config: &serde_json::Map<String, serde_json::Value>,
+    spellings: &[&str],
+) -> Result<T, String> {
+    config_field(config, spellings)?.ok_or_else(|| format!("missing field `{}`", spellings[0]))
 }
 
-fn default_rms_norm_eps() -> f32 {
-    1e-5
-}
+impl TryFrom<serde_json::Value> for MambaConfig {
+    type Error = String;
 
-fn deserialize_time_step_rank<'de, D>(deserializer: D) -> Result<usize, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum TimeStepRank {
-        Number(usize),
-        String(String),
-    }
-
-    match TimeStepRank::deserialize(deserializer)? {
-        TimeStepRank::Number(n) => Ok(n),
-        TimeStepRank::String(s) if s == "auto" => Ok(0), // Will be computed later
-        TimeStepRank::String(s) => Err(D::Error::custom(format!("invalid time_step_rank: {}", s))),
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        let serde_json::Value::Object(config) = value else {
+            return Err("a Mamba config is a JSON object".to_string());
+        };
+        let time_step_rank = match required_config_field(&config, &["time_step_rank"])? {
+            serde_json::Value::String(text) if text == "auto" => 0, // Will be computed later
+            serde_json::Value::String(text) => {
+                return Err(format!("invalid time_step_rank: {text}"));
+            }
+            number => usize::deserialize(&number).map_err(|e| format!("`time_step_rank`: {e}"))?,
+        };
+        Ok(Self {
+            model_type: required_config_field(&config, &["model_type"])?,
+            vocab_size: required_config_field(&config, &["vocab_size"])?,
+            hidden_size: required_config_field(&config, &["hidden_size", "d_model"])?,
+            intermediate_size: required_config_field(&config, &["intermediate_size", "d_inner"])?,
+            state_size: required_config_field(&config, &["state_size", "d_state"])?,
+            num_hidden_layers: required_config_field(
+                &config,
+                &["num_hidden_layers", "n_layer", "n_layers"],
+            )?,
+            conv_kernel: required_config_field(&config, &["conv_kernel", "d_conv"])?,
+            use_bias: config_field(&config, &["use_bias", "bias"])?.unwrap_or(false),
+            use_conv_bias: config_field(&config, &["use_conv_bias", "conv_bias"])?.unwrap_or(true),
+            time_step_rank,
+            tie_word_embeddings: config_field(&config, &["tie_word_embeddings"])?.unwrap_or(true),
+            use_bcdt_rms: config_field(&config, &["use_bcdt_rms"])?.unwrap_or(false),
+            mixer_rms_eps: config_field(&config, &["mixer_rms_eps"])?.unwrap_or(1e-6),
+            rms_norm_eps: config_field(&config, &["rms_norm_eps"])?.unwrap_or(1e-5),
+            quantization: config_field(&config, &["quantization"])?,
+            eos_token_id: config_field(&config, &["eos_token_id"])?,
+            bos_token_id: config_field(&config, &["bos_token_id"])?,
+        })
     }
 }
 
