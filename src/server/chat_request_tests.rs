@@ -4295,7 +4295,9 @@ async fn prepare_cached(
     processor: &ChatTemplateProcessor,
     messages: Vec<Message>,
 ) -> super::PreparedChatRequest {
-    prepare_chat_request_with_cache(
+    // Boxed so the three chat-template renders of a cached request do not
+    // overflow the default 2 MiB test-thread stack in a debug build.
+    Box::pin(prepare_chat_request_with_cache(
         processor,
         &cached_request(messages),
         None,
@@ -4303,7 +4305,7 @@ async fn prepare_cached(
         true,
         true,
         &crate::tokenizer::ThinkingMarkers::default(),
-    )
+    ))
     .await
     .unwrap()
 }
