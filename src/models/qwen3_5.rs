@@ -44,7 +44,7 @@ use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
+use mlxcel_core::utils::{create_causal_mask, prefill_causal_mask, silu, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -1465,7 +1465,9 @@ impl Qwen35Model {
         let shape = mlxcel_core::array_shape(&h);
         let seq_len = shape[1];
 
-        // Create masks
+        // Create masks. A single-row prefill leaves causality to MLX's causal
+        // mode (`prefill_causal_mask`, #3051), which the full-attention layer
+        // takes for a mask-less multi-token forward.
         let fa_idx = self.config.full_attention_interval - 1;
         let fa_mask = if seq_len > 1 {
             let offset = if fa_idx < caches.len() {
@@ -1473,7 +1475,7 @@ impl Qwen35Model {
             } else {
                 0
             };
-            Some(create_causal_mask(seq_len, offset))
+            prefill_causal_mask(seq_len, offset, shape[0])
         } else {
             None
         };
@@ -2710,7 +2712,7 @@ impl Qwen35Model {
             } else {
                 0
             };
-            Some(create_causal_mask(seq_len, offset))
+            prefill_causal_mask(seq_len, offset, shape[0])
         } else {
             None
         };
@@ -3146,7 +3148,7 @@ impl Qwen35Model {
             } else {
                 0
             };
-            Some(create_causal_mask(seq_len, offset))
+            prefill_causal_mask(seq_len, offset, shape[0])
         } else {
             None
         };
@@ -3759,7 +3761,7 @@ impl Qwen35StageModel {
                     })
                 })
                 .unwrap_or(0);
-            Some(create_causal_mask(seq_len, offset))
+            prefill_causal_mask(seq_len, offset, shape[0])
         } else {
             None
         };

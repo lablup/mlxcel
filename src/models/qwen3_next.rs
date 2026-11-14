@@ -46,7 +46,7 @@ use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
+use mlxcel_core::utils::{prefill_causal_mask, silu, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -2195,7 +2195,9 @@ impl Qwen3NextModel {
                 let mask = if seq_len > 1 {
                     let fa_idx = self.full_attention_interval - 1;
                     let offset = caches.get(fa_idx).map(|c| c.offset()).unwrap_or(0);
-                    Some(create_causal_mask(seq_len, offset))
+                    // One row: MLX's causal mode instead of the array (#3051).
+                    let batch = mlxcel_core::array_shape(input)[0];
+                    prefill_causal_mask(seq_len, offset, batch)
                 } else {
                     None
                 };
@@ -2692,7 +2694,7 @@ impl Qwen3NextStageModel {
         let fa_mask = if seq_len > 1 {
             let is_linear: Vec<bool> = self.layers.iter().map(|layer| layer.is_linear).collect();
             let offset = stage_attention_offset(&is_linear, caches);
-            Some(create_causal_mask(seq_len, offset))
+            prefill_causal_mask(seq_len, offset, shape[0])
         } else {
             None
         };

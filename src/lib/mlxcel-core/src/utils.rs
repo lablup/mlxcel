@@ -185,6 +185,69 @@ pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
     additive_causal_window_mask(size, offset, None)
 }
 
+/// Whether a model's own prefill causal mask can be left to MLX's causal
+/// mode instead of being built as an array (issue #3051).
+///
+/// The full-attention layers of the hybrid and Qwen-VL families build
+/// [`create_causal_mask`]`(seq_len, offset)` for a multi-token forward. MLX's
+/// SDPA fuses causal mode on every Metal generation where it does not fuse an
+/// additive array mask (pre-M5 at head_dim 256), and the array itself is an
+/// f32 `[seq_len, offset + seq_len]` buffer (3.65 GiB at 28K tokens). The two
+/// mask the same keys when:
+///
+/// - the forward has more than one query (`seq_len > 1`; a decode row needs
+///   no mask at all);
+/// - it is one row (`batch == 1`): batched rows keep the array, which the
+///   broadcast and padded batch paths are written against;
+/// - the caller supplied no mask of its own (`has_caller_mask == false`): a
+///   left-padding, windowed or multimodal mask is never replaced;
+/// - the layer attends exactly `offset + seq_len` keys, which holds for the
+///   dense `KVCache` these layers fetch from: MLX aligns causal mode
+///   bottom-right (query `i` sees keys `0..=k_len - q_len + i`), the same
+///   keys `create_causal_mask` allows at `offset = k_len - q_len`.
+///
+/// Position ids (MRoPE) only change the rotary embedding, not which keys a
+/// query attends, so they do not affect the choice.
+///
+/// `MLXCEL_PREFILL_CAUSAL_MODE=0` keeps the array mask everywhere, which is
+/// the pre-#3051 dispatch.
+///
+/// Used by: [`prefill_causal_mask`].
+pub fn prefill_uses_causal_mode(seq_len: i32, batch: i32, has_caller_mask: bool) -> bool {
+    seq_len > 1 && batch == 1 && !has_caller_mask && prefill_causal_mode_enabled()
+}
+
+/// The causal mask a model-built prefill needs: `None` for a decode row or
+/// when [`prefill_uses_causal_mode`] says MLX's causal mode applies, in which
+/// case the layer must route a `seq_len > 1` forward without a mask through
+/// [`crate::causal_attention`]; else [`create_causal_mask`]`(seq_len, offset)`.
+///
+/// Used by: Qwen 3.5, Qwen3-Next (single model and pipeline stage),
+/// GraniteMoeHybrid, Qwen2-VL, Qwen3-VL, Qwen3-VL-MoE.
+pub fn prefill_causal_mask(seq_len: i32, offset: i32, batch: i32) -> Option<UniquePtr<MlxArray>> {
+    if seq_len <= 1 || prefill_uses_causal_mode(seq_len, batch, false) {
+        None
+    } else {
+        Some(create_causal_mask(seq_len, offset))
+    }
+}
+
+/// `MLXCEL_PREFILL_CAUSAL_MODE`, read once: anything but `0`, `false` or
+/// `off` (the default is on) lets [`prefill_uses_causal_mode`] pick causal mode.
+fn prefill_causal_mode_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_prefill_causal_mode(std::env::var("MLXCEL_PREFILL_CAUSAL_MODE").ok().as_deref())
+    })
+}
+
+fn parse_prefill_causal_mode(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "off")
+    )
+}
+
 /// Shared builder for full-width additive causal / windowed-causal masks.
 ///
 /// Query row `q` (logical position `q + offset`) attends key column `k` iff
@@ -1718,6 +1781,10 @@ mod gelu_tests;
 #[cfg(test)]
 #[path = "utils_state_tail_tests.rs"]
 mod state_tail_tests;
+
+#[cfg(test)]
+#[path = "utils_prefill_causal_mode_tests.rs"]
+mod prefill_causal_mode_tests;
 
 #[cfg(test)]
 mod tests {
