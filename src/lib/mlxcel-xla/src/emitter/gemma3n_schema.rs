@@ -384,7 +384,7 @@ fn norm(decls: &mut Vec<Decl>, index: &mut usize, width: usize, name: String) ->
 mod tests {
     use super::*;
     use crate::emitter::{Gemma3nWeightSpec, gemma3n_weight_specs};
-    #[cfg(xla_iree_cuda)]
+    #[cfg(xla_iree_cuda_ptx)]
     use crate::emitter::{Precision, emit_gemma3n_prefill_with_qmv};
 
     fn config() -> Gemma3nConfig {
@@ -445,7 +445,7 @@ mod tests {
             }
         }
 
-        #[cfg(xla_iree_cuda)]
+        #[cfg(xla_iree_cuda_ptx)]
         {
             let graph = emit_gemma3n_prefill_with_qmv(&config, false, Precision::Bf16, true);
             assert_eq!(

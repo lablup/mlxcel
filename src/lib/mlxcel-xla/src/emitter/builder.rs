@@ -2055,8 +2055,8 @@ impl Builder {
     /// Emit the native packed-weight GEMV (issue #2889).
     ///
     /// `y[n] = sum_k x[k] * (q[n,k] * scale[n,k/group] + bias[n,k/group])`,
-    /// computed by the HIP kernel embedded in the module as an external
-    /// executable. Activations are narrowed to f16 (matching the `dot_general`
+    /// computed by the device kernel embedded in the module as an external
+    /// executable (`csrc/qmv4.hip` on hip, `csrc/qmv4.cu` on cuda). Activations are narrowed to f16 (matching the `dot_general`
     /// operand demotion this replaces) and the kernel accumulates in f32.
     ///
     /// The kernel gives each output row one warp and each workgroup

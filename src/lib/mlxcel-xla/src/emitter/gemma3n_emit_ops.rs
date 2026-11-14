@@ -1066,7 +1066,7 @@ pub(super) fn attention_decode_traced(
     )
 }
 
-#[cfg(xla_iree_cuda)]
+#[cfg(xla_iree_cuda_ptx)]
 fn native_decode_sdpa_supported(b: &Builder, c: &Gemma3nConfig, window: Option<usize>) -> bool {
     b.gemma3n_qmv_enabled()
         && c.head_dim == 256
@@ -1077,7 +1077,7 @@ fn native_decode_sdpa_supported(b: &Builder, c: &Gemma3nConfig, window: Option<u
         && window.is_none_or(|width| width >= c.context_capacity)
 }
 
-#[cfg(not(xla_iree_cuda))]
+#[cfg(not(xla_iree_cuda_ptx))]
 fn native_decode_sdpa_supported(_b: &Builder, _c: &Gemma3nConfig, _window: Option<usize>) -> bool {
     false
 }
