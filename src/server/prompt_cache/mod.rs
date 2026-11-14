@@ -39,6 +39,7 @@
 
 mod apc_lookup;
 pub mod block_hash;
+pub mod decoded_tail;
 pub mod entry;
 pub mod hybrid_ssm;
 pub mod key;
@@ -61,6 +62,7 @@ pub use apc_lookup::ApcStoreStats;
 pub use block_hash::{
     ApcBlockHash, ApcHashAlgo, BlockHashChain, DEFAULT_APC_BLOCK_SIZE, ParseApcHashError,
 };
+pub use decoded_tail::decoded_tail_snapshot_enabled;
 pub use entry::{CacheEntry, DetachedKvSet, ModelSnapshotEntry, SnapshotOrigin};
 pub use hybrid_ssm::{
     HYBRID_SSM_MODEL_TYPES, detect_hybrid_ssm, detect_hybrid_ssm_from_path,

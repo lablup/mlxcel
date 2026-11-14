@@ -1466,3 +1466,7 @@ mod rollback_tests;
 #[cfg(test)]
 #[path = "qwen4_exp_snapshot_tests.rs"]
 mod snapshot_tests;
+
+#[cfg(test)]
+#[path = "qwen4_exp_decode_tail_tests.rs"]
+mod decode_tail_tests;
