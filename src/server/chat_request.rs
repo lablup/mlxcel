@@ -1354,19 +1354,7 @@ fn kimi_k3_image_prompts(
     let mut prompts = Vec::with_capacity(image_data.len());
     let mut media_tokens = Vec::with_capacity(image_data.len());
     for (index, bytes) in image_data.iter().enumerate() {
-        let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
-            .with_guessed_format()
-            .map_err(|e| anyhow::anyhow!("image {index}: unreadable image header: {e}"))?
-            .into_dimensions()
-            .map_err(|e| anyhow::anyhow!("image {index}: unreadable image dimensions: {e}"))?;
-        if width > limits.max_width || height > limits.max_height {
-            anyhow::bail!(
-                "image {index}: {width}x{height} exceeds the configured image limits \
-                 ({}x{})",
-                limits.max_width,
-                limits.max_height
-            );
-        }
+        let (width, height) = planned_image_size(index, bytes, limits)?;
         media_tokens.push(
             renderer
                 .navit_config()
@@ -1383,6 +1371,39 @@ fn kimi_k3_image_prompts(
     crate::vision::processors::kimi_k3::check_media_token_budget(media_tokens)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(prompts)
+}
+
+/// `(width, height)` of the picture the worker will hand the processor, read
+/// from the header of `bytes` alone.
+///
+/// The limits are checked on the stored pixels, as the decoder checks them.
+/// The size returned is the upright one: the worker turns a picture by its
+/// EXIF orientation before it builds the grid, and a prompt sized for the
+/// stored pixels of a quarter-turned picture would not match that grid.
+///
+/// Used by: [`kimi_k3_image_prompts`].
+fn planned_image_size(
+    index: usize,
+    bytes: &[u8],
+    limits: super::media::ImageInputLimits,
+) -> Result<(u32, u32)> {
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| anyhow::anyhow!("image {index}: unreadable image header: {e}"))?
+        .into_dimensions()
+        .map_err(|e| anyhow::anyhow!("image {index}: unreadable image dimensions: {e}"))?;
+    if width > limits.max_width || height > limits.max_height {
+        anyhow::bail!(
+            "image {index}: {width}x{height} exceeds the configured image limits \
+             ({}x{})",
+            limits.max_width,
+            limits.max_height
+        );
+    }
+    Ok(crate::multimodal::image_orientation::upright_dimensions(
+        bytes,
+        (width, height),
+    ))
 }
 
 /// Read a boolean chat-template kwarg, rejecting a value of the wrong type

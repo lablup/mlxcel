@@ -26,7 +26,8 @@ use mlxcel::LoadedModel;
 ///
 /// Used by `generate_diffusion::prepare_diffusion_vision`.
 pub(crate) fn open_image(path: &Path) -> Result<image::DynamicImage> {
-    image::open(path).map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
+    mlxcel::multimodal::image_orientation::open_upright(path)
+        .map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
 }
 
 /// `--output-audio` (issue #665): synthesize speech for a completed
