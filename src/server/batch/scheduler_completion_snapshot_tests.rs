@@ -50,10 +50,25 @@ fn run_request(
     ignore_eos: bool,
     max_tokens: usize,
 ) -> Vec<i32> {
+    run_chat_request(sched, first, None, ignore_eos, max_tokens).0
+}
+
+/// [`run_request`] for a chat turn whose history boundary is `history`;
+/// also returns how many prompt tokens the request adopted.
+fn run_chat_request(
+    sched: &mut BatchScheduler,
+    first: &[i32],
+    history: Option<&[i32]>,
+    ignore_eos: bool,
+    max_tokens: usize,
+) -> (Vec<i32>, usize) {
     let (tx, rx) = mpsc::channel();
     let mut opts = options();
     opts.ignore_eos = ignore_eos;
     opts.max_tokens = max_tokens;
+    let mut ctx = cache_ctx();
+    ctx.history_prefix_tokens = history.map(<[i32]>::to_vec);
+    opts.prompt_cache_ctx = Some(ctx);
     sched.enqueue_request(
         "prompt".to_string(),
         Some(first.to_vec()),
@@ -68,7 +83,7 @@ fn run_request(
     let result = drive(sched, &rx);
     let mut seen = first.to_vec();
     seen.extend_from_slice(&result.generated_token_ids);
-    seen
+    (seen, result.cached_tokens)
 }
 
 /// Drive the scheduler until `rx` reports the request done. Unlike the
@@ -271,4 +286,47 @@ fn the_decoded_tail_switch_keeps_the_end_of_generation_entry() {
     let (stored, _) = stored_len_and_offset(&sched, &store, &seen);
     assert_eq!(stored, seen.len() - 1);
     assert_eq!(store.stats().snapshot_entries, 1);
+}
+
+/// A chat turn with a history boundary stores no completion snapshot at all
+/// (#3040): its prompt end is only the generation prompt past the boundary,
+/// written by a small last piece no cold run of the next turn forwards. The
+/// next turn adopts the boundary, so its plan is the tail of its cold plan,
+/// and it decodes what a cold run of the same request decodes.
+#[test]
+fn a_chat_turn_with_a_history_boundary_resumes_the_next_turn_from_it() {
+    let _tail = crate::server::prompt_cache::decoded_tail::override_decoded_tail_for_test(false);
+    let history = prompt(36);
+    let mut turn_1 = history.clone();
+    turn_1.extend([3, 4, 5]);
+
+    let store = test_store();
+    let mut sched = scheduler(store.clone());
+    let (seen, adopted) = run_chat_request(&mut sched, &turn_1, Some(&history), true, 4);
+    assert_eq!(adopted, 0);
+    assert_eq!(
+        store.stats().snapshot_entries,
+        1,
+        "the boundary entry alone, no completion entry"
+    );
+
+    // The next turn re-renders the reply into its history.
+    let mut history_2 = seen.clone();
+    history_2.extend([1, 2]);
+    let mut turn_2 = history_2.clone();
+    turn_2.extend([3, 4, 5]);
+    let (served, adopted) = run_chat_request(&mut sched, &turn_2, Some(&history_2), true, 4);
+    assert_eq!(
+        adopted,
+        history.len(),
+        "the next turn resumes at the boundary"
+    );
+
+    let mut cold = scheduler(test_store());
+    let (cold_seen, cold_adopted) = run_chat_request(&mut cold, &turn_2, Some(&history_2), true, 4);
+    assert_eq!(cold_adopted, 0);
+    assert_eq!(
+        served, cold_seen,
+        "the hit decodes what the cold run decodes"
+    );
 }

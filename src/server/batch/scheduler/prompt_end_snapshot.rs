@@ -12,35 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The completion snapshot of a snapshot-only family, taken at the prompt
-//! boundary when the prefill finishes (issue #3040).
+//! The completion snapshot of a snapshot-only family, decided when the
+//! prefill finishes rather than at the end of generation (issue #3040).
 
 use super::*;
 use crate::server::prompt_cache::entry::SnapshotOrigin;
 
 impl BatchScheduler {
-    /// Store `seq`'s model state as its completion snapshot, keyed by the
-    /// prompt alone, right after the prefill sampled the first token and
-    /// before any decode step runs.
+    /// Decide `seq`'s completion snapshot when its prefill finishes, before
+    /// any decode step writes the reply into the state.
     ///
-    /// The end-of-generation snapshot it replaces held `prompt + generated`,
-    /// and the generated part was written by single-token decode steps, which
+    /// The end-of-generation snapshot this replaces held `prompt + generated`,
+    /// and the generated rows were written by single-token decode steps, which
     /// do not write the bytes a prefill of the same tokens writes. Restoring
-    /// it on the next turn therefore reproduced no cold run of that turn
-    /// (#3040). A prompt-boundary state is prefill-written throughout, and the
-    /// next turn prefills the reply with its new text, so a hit matches a cold
-    /// run split at the same point, as #2974 pinned for chained restores.
+    /// it reproduced no cold run of the next turn (#3040). Instead:
     ///
-    /// The sequence is recorded in `prompt_cache_prompt_end_stored` whenever
-    /// the gates pass, including when the store declines the entry, so
+    /// * a chat turn with a history boundary stores nothing more: the boundary
+    ///   snapshot is where the next turn resumes, and the prompt end is only
+    ///   the generation prompt past it, written by a forward of a handful of
+    ///   rows that the next turn's cold run never makes;
+    /// * any other request (a raw completion, or the boundary disabled) stores
+    ///   the state at the prompt end, keyed by the prompt alone.
+    ///
+    /// Either way the sequence is recorded in `prompt_cache_prompt_end_stored`,
+    /// including when the store declines the entry, so
     /// [`Self::donate_finished_sequence_cache`] stores no decode-written tail
-    /// for it at the finish. Paths that never reach the classic
-    /// `finish_prefill` (the speculative bursts) are not recorded and keep
-    /// the end-of-generation snapshot. `MLXCEL_PROMPT_CACHE_DECODED_TAIL=1`
-    /// turns this off ([`decoded_tail_snapshot_enabled`]).
+    /// at the finish. Paths that never reach the classic `finish_prefill`
+    /// (the speculative bursts) are not recorded and keep the
+    /// end-of-generation snapshot. `MLXCEL_PROMPT_CACHE_DECODED_TAIL=1` turns
+    /// this off ([`decoded_tail_snapshot_enabled`]).
     ///
-    /// The copy runs after the first token was emitted, so it adds nothing to
-    /// TTFT, and it replaces the end-of-generation copy rather than adding one.
+    /// The prompt-end copy runs after the first token was emitted, so it adds
+    /// nothing to TTFT, and it replaces the end-of-generation copy.
     ///
     /// [`decoded_tail_snapshot_enabled`]: crate::server::prompt_cache::decoded_tail_snapshot_enabled
     pub(super) fn insert_prompt_end_snapshot(&mut self, seq: &SequenceInfo) {
@@ -54,6 +57,14 @@ impl BatchScheduler {
             return;
         };
         self.prompt_cache_prompt_end_stored.insert(seq.seq_id);
+        // The history boundary is the next turn's restore point. The rows past
+        // it came from a forward of a few generation-prompt tokens, which runs
+        // the small-row kernels; the next turn's cold run forwards those
+        // tokens inside its history segment, so a state including them would
+        // reproduce no cold run (measured on the live-replies replay, #3040).
+        if self.history_boundary_split(seq).is_some() {
+            return;
+        }
         let _span = tracing::info_span!(
             "prompt_end_snapshot",
             seq_id = %seq.seq_id,

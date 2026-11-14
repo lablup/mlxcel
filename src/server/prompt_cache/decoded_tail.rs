@@ -16,7 +16,7 @@
 
 use super::policy::parse_switch;
 
-/// Opt-out switch for the prompt-boundary completion snapshot (#3040).
+/// Opt-out switch for the prefill-written completion snapshot (#3040).
 ///
 /// A snapshot-only family used to store its completion snapshot at the end of
 /// generation, keyed by `prompt + generated`. The generated part of that state
@@ -24,14 +24,16 @@ use super::policy::parse_switch;
 /// a prefill of the same tokens writes (the kernels depend on the row count),
 /// so restoring it on the next turn reproduced no cold run of that turn: on
 /// Qwen3.8-Flash-Next with live replies 13 of 16 `--verify` requests differed
-/// from their cold runs. The snapshot is now taken when the prefill finishes,
-/// keyed by the prompt alone, and the next turn prefills the reply together
-/// with its own new text.
+/// from their cold runs. Now a chat turn with a history boundary stores no
+/// completion snapshot (the next turn resumes from the boundary), and any
+/// other request stores one at the prompt end when its prefill finishes; the
+/// next turn prefills the reply together with its new text. The replay then
+/// matched 16 of 16 at the same TTFT.
 ///
 /// `MLXCEL_PROMPT_CACHE_DECODED_TAIL`: `1`, `on` or `true` restores the
 /// end-of-generation snapshot with its decode-written tail, which saves
 /// re-prefilling the reply at the cost of that divergence; anything else,
-/// including unset, keeps the prompt boundary. Read once per process.
+/// including unset, keeps the new behavior. Read once per process.
 ///
 /// Used by: `server::batch::scheduler::BatchScheduler::insert_prompt_end_snapshot`,
 /// `server::batch::scheduler::BatchScheduler::donate_finished_sequence_cache`
