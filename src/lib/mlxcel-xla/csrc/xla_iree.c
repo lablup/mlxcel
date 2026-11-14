@@ -122,6 +122,15 @@ typedef struct xla_ctx {
   iree_hal_buffer_view_t** weights;  // resident weights, uploaded once
   iree_hal_buffer_view_t* kcache;    // threaded KV (set by prefill, advanced by decode)
   iree_hal_buffer_view_t* vcache;
+  // issue #3043: the single-sequence decode graph may hold its KV cache in two
+  // module-level mutable globals instead of the argument list, so the step
+  // updates it in place and IREE stops copying the whole 16 MB cache into a
+  // fresh output tensor every step. `kv_globals` is set by probing for the
+  // `decode_step.kv_import` entry after the bundle loads; `kv_import_pending`
+  // means the shim-side kcache/vcache changed (prefill, or a prefill variant)
+  // and must be pushed into the globals before the next decode.
+  int32_t kv_globals;
+  int32_t kv_import_pending;
   // Persistent single-sequence decode scalars. The decode loop used to allocate
   // a device-local buffer for each of token/positions/cache_len and a fresh
   // readback staging buffer every step; each host-visible staging allocation is
@@ -833,6 +842,23 @@ static iree_status_t xla_append_bundle(xla_ctx* c, const char* prefill_vmfb,
         c->session, iree_make_cstring_view(diagnostic_entry), &probe));
     iree_runtime_call_deinitialize(&probe);
   }
+  // issue #3043: a decode graph that keeps its KV cache in module globals
+  // exports `decode_step.kv_import` to seed them from the prefill result. Its
+  // absence (Gemma3n's fixed-schedule CUDA decode, an older compiled cache)
+  // keeps the full-cache argument ABI, which still works unchanged.
+  c->kv_globals = 0;
+  c->kv_import_pending = 0;
+  {
+    iree_runtime_call_t probe;
+    iree_status_t s = iree_runtime_call_initialize_by_name(
+        c->session, iree_make_cstring_view("decode_step.kv_import"), &probe);
+    if (iree_status_is_ok(s)) {
+      c->kv_globals = 1;
+      iree_runtime_call_deinitialize(&probe);
+    } else {
+      iree_status_ignore(s);
+    }
+  }
   return iree_ok_status();
 }
 
@@ -1305,6 +1331,7 @@ int xla_llama_prefill(xla_ctx* c, int32_t adapter_mode,
   if (c->vcache) iree_hal_buffer_view_release(c->vcache);
   c->kcache = kc;
   c->vcache = vc;
+  c->kv_import_pending = 1;
 
   XLA_CHECK(xla_read_token(c, token_out, out_token));
 
@@ -1319,6 +1346,42 @@ int xla_llama_prefill(xla_ctx* c, int32_t adapter_mode,
 
 // Shared decode implementation. `position_mode` is an explicit ABI contract,
 // never inferred from the position buffer rank.
+// Seed the decode graph's KV globals from the shim-side rank-4 cache (issue
+// #3043). Runs once per prefill (or prefill variant) rather than per step: each
+// decode invocation then advances the globals in place.
+//
+// The copy is one 32 MB device-to-device pass, against a prefill that costs
+// hundreds of milliseconds, so it is paid at a boundary where it does not
+// matter. `kv_import_pending` is what keeps it there: a decode never re-imports,
+// so a second request that reuses the same session's cache keeps advancing the
+// resident globals.
+static int xla_kv_import_globals(xla_ctx* c) {
+  if (!c->kv_globals || !c->kv_import_pending) return 0;
+  iree_runtime_call_t call;
+  iree_status_t status = iree_runtime_call_initialize_by_name(
+      c->session, iree_make_cstring_view("decode_step.kv_import"), &call);
+  if (iree_status_is_ok(status)) {
+    status = iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_runtime_call_invoke(&call, 0);
+  }
+  if (iree_status_is_ok(status)) {
+    iree_runtime_call_deinitialize(&call);
+    c->kv_import_pending = 0;
+    return 0;
+  }
+  iree_runtime_call_deinitialize(&call);
+  fprintf(stderr,
+          "xla_llama_decode: seeding the decode KV globals from the prefill "
+          "cache failed\n");
+  iree_status_ignore(status);
+  return 1;
+}
+
 static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
                                  int32_t token,
                                  const int32_t* positions,
@@ -1357,6 +1420,7 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
     }
   }
   iree_runtime_call_t call;
+  if (xla_kv_import_globals(c) != 0) return 1;
   XLA_CHECK(iree_runtime_call_initialize_by_name(
       c->session, iree_make_cstring_view("decode_step.main"), &call));
   for (int32_t i = 0; i < c->n_weights; i++) {
@@ -1403,21 +1467,42 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
   XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
   XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
   XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache));
+  // issue #3043: with the cache in module globals the step takes and returns no
+  // cache at all; the global is read and written in place by the invocation, so
+  // there is no 32 MB input-to-output copy and no per-step cache adoption.
+  if (!c->kv_globals) {
+    XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache));
+    XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache));
+  }
 
   XLA_CHECK(iree_runtime_call_invoke(&call, 0));
 
   iree_hal_buffer_view_t* token_out = NULL;
-  iree_hal_buffer_view_t* kc = NULL;
-  iree_hal_buffer_view_t* vc = NULL;
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &token_out));
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
-  if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+  if (!c->kv_globals) {
+    iree_hal_buffer_view_t* kc = NULL;
+    iree_hal_buffer_view_t* vc = NULL;
+    XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
+    XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+    if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+      iree_hal_buffer_view_release(token_out);
+      iree_hal_buffer_view_release(kc);
+      iree_hal_buffer_view_release(vc);
+      if (owns_scalars) {
+        iree_hal_buffer_view_release(tok_bv);
+        iree_hal_buffer_view_release(pos_bv);
+        iree_hal_buffer_view_release(len_bv);
+      }
+      if (mode_bv) iree_hal_buffer_view_release(mode_bv);
+      iree_runtime_call_deinitialize(&call);
+      return 1;
+    }
+    iree_hal_buffer_view_t* old_k = c->kcache;
+    iree_hal_buffer_view_t* old_v = c->vcache;
+    c->kcache = kc;
+    c->vcache = vc;
+    XLA_CHECK(xla_read_token_decode(c, token_out, out_token));
     iree_hal_buffer_view_release(token_out);
-    iree_hal_buffer_view_release(kc);
-    iree_hal_buffer_view_release(vc);
     if (owns_scalars) {
       iree_hal_buffer_view_release(tok_bv);
       iree_hal_buffer_view_release(pos_bv);
@@ -1425,12 +1510,12 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
     }
     if (mode_bv) iree_hal_buffer_view_release(mode_bv);
     iree_runtime_call_deinitialize(&call);
-    return 1;
+    // The old KV was an input to this call; the call held a ref during invoke
+    // and dropped it at deinitialize, so release our own ref now.
+    iree_hal_buffer_view_release(old_k);
+    iree_hal_buffer_view_release(old_v);
+    return 0;
   }
-  iree_hal_buffer_view_t* old_k = c->kcache;
-  iree_hal_buffer_view_t* old_v = c->vcache;
-  c->kcache = kc;
-  c->vcache = vc;
 
   XLA_CHECK(xla_read_token_decode(c, token_out, out_token));
 
@@ -1442,10 +1527,6 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
   }
   if (mode_bv) iree_hal_buffer_view_release(mode_bv);
   iree_runtime_call_deinitialize(&call);
-  // The old KV was an input to this call; the call held a ref during invoke and
-  // dropped it at deinitialize, so release our own ref now.
-  iree_hal_buffer_view_release(old_k);
-  iree_hal_buffer_view_release(old_v);
   return 0;
 }
 
@@ -2033,6 +2114,7 @@ static int xla_llama_prefill_embeddings_impl(
     iree_hal_buffer_view_t* old_v = c->vcache;
     c->kcache = kc;
     c->vcache = vc;
+    c->kv_import_pending = 1;
     kc = NULL;
     vc = NULL;
     if (old_k) iree_hal_buffer_view_release(old_k);
@@ -2313,6 +2395,7 @@ static int xla_llama_prefill_embeddings_deepstack_impl(
     iree_hal_buffer_view_t* old_v = c->vcache;
     c->kcache = kc;
     c->vcache = vc;
+    c->kv_import_pending = 1;
     kc = NULL;
     vc = NULL;
     if (old_k) iree_hal_buffer_view_release(old_k);

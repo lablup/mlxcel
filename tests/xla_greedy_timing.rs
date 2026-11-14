@@ -183,3 +183,44 @@ fn zero_budget_reports_prefill_only() {
     assert!(timing.prefill_ms > 0.0, "prefill still runs: {timing:?}");
     assert_eq!(timing.decode_ms, 0.0, "no decode step runs: {timing:?}");
 }
+
+/// Issue #3043: the single-token decode graph keeps its KV cache in module
+/// globals, so a step takes and returns no cache and the prefill result is
+/// seeded once through `decode_step.kv_import`.
+///
+/// A session that runs end to end proves the globals survive across steps (the
+/// mask and the attention read what earlier steps wrote at their own position),
+/// and a second session on the same fixture proves the seeding is what makes
+/// the first token correct: both start from an empty module state.
+#[test]
+#[ignore = "requires the pinned IREE runtime and compiler"]
+fn decode_threads_kv_through_module_globals() {
+    let fixture = create_tiny_model();
+    // The fixture's compiled capacity is 8, so a three-token prompt leaves room
+    // for four decode steps.
+    let prompt = [1, 2, 3];
+    let mut first = load_session(&fixture);
+    let tokens = first
+        .generate_greedy(&prompt, 4, &[])
+        .expect("greedy run over the global KV");
+    assert_eq!(tokens.len(), 4, "four tokens past the prefill");
+
+    let mut second = load_session(&fixture);
+    let repeated = second
+        .generate_greedy(&prompt, 4, &[])
+        .expect("greedy run in a fresh module state");
+    assert_eq!(
+        repeated, tokens,
+        "a fresh session must reproduce the same stream from its own import"
+    );
+
+    // Re-prefilling the same session returns the globals to the prefill state:
+    // the import runs again because the shim marks the cache changed.
+    let reseeded = first
+        .generate_greedy(&prompt, 4, &[])
+        .expect("greedy run after a second prefill");
+    assert_eq!(
+        reseeded, tokens,
+        "the second prefill must re-seed the globals, not continue the old cache"
+    );
+}

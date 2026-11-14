@@ -994,6 +994,30 @@ impl Builder {
         Val { name: r, ty }
     }
 
+    /// Load a module-level `util.global` into an SSA value. The decode graph
+    /// holds its KV cache this way (issue #3043) so the step updates it in
+    /// place instead of copying the whole cache into a fresh output tensor.
+    pub(crate) fn global_load(&mut self, symbol: &str, ty: Ty) -> Val {
+        let r = self.fresh();
+        self.line(format!(
+            "{} = util.global.load @{} : {}",
+            r,
+            symbol,
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
+    /// Store an SSA value back into a module-level `util.global`.
+    pub(crate) fn global_store(&mut self, symbol: &str, x: &Val) {
+        self.line(format!(
+            "util.global.store {}, @{} : {}",
+            x.name,
+            symbol,
+            x.ty.render()
+        ));
+    }
+
     pub fn broadcast(&mut self, x: &Val, dims: &[usize], out_shape: Vec<usize>) -> Val {
         let ty = Ty::new(out_shape, x.ty.elt);
         let r = self.fresh();

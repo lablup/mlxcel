@@ -1476,6 +1476,14 @@ fn compile_bundle(
     if device == "hip" && matches!(cfg, RuntimeConfig::Dense(_)) {
         flags.push(rocm_tuning_spec_flag()?);
     }
+    // issue #3043: the decode step is a long chain of small elementwise and
+    // reduction dispatches whose cost is dominated by per-dispatch launch
+    // latency (about 2.5 us each on gfx1151, 0.79 ms per step in total).
+    // Aggressive fusion removes two dispatches per layer on this graph (309 to
+    // 277) without changing the results, so the decode compile turns it on and
+    // the prefill compiles keep the defaults.
+    let mut decode_flags = flags.clone();
+    decode_flags.push("--iree-dispatch-creation-enable-aggressive-fusion".to_string());
     let pre = compile_one(
         &iree_compile,
         prefill_mlir,
@@ -1507,7 +1515,7 @@ fn compile_bundle(
     let dec = compile_one(
         &iree_compile,
         decode_mlir,
-        &flags,
+        &decode_flags,
         &cache,
         decode_tag,
         cfg.context_capacity(),

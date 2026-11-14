@@ -1413,8 +1413,10 @@ fn a_budget_wider_than_the_shape_is_clamped_instead_of_refused() {
     // context window, which is wider than any static OpenXLA graph. Build the
     // options at a context size that leaves the requested budget intact, so what
     // this exercises is the worker's clamp and not the server's own cap.
-    let mut config = ServerConfig::default();
-    config.context_size = 8_192;
+    let config = ServerConfig {
+        context_size: 8_192,
+        ..Default::default()
+    };
     let budget_options = build_server_generate_options(
         &config,
         RequestOptionOverrides {
