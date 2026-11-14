@@ -376,6 +376,63 @@ impl LanguageModel for Qwen35VLModel {
         )
     }
 
+    // The prefill's last-logits entry points go to the text model, which
+    // projects only the sampled row through the LM head (#3045); the trait
+    // default would materialize the full-sequence logits behind this wrapper.
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::generate::LanguageModel::forward_last_logits(
+            &self.text_model,
+            input_ids,
+            caches,
+            mask,
+            last_pos,
+        )
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::generate::LanguageModel::forward_last_logits_with_sequence_id(
+            &self.text_model,
+            input_ids,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        )
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::generate::LanguageModel::forward_last_logits_with_embeddings_and_sequence_id(
+            &self.text_model,
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        )
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         mlxcel_core::generate::LanguageModel::release_sequence_state_by_id(
             &self.text_model,

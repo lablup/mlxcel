@@ -1828,12 +1828,30 @@ impl Qwen3NextModel {
         caches: &mut [Qwen3NextCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_at(input_ids, caches, mask, None)
+    }
+
+    /// [`Self::forward`] that, with `last_pos`, projects only that position's
+    /// hidden row through the final norm and the LM head and returns
+    /// `[batch, 1, vocab]` logits, so a prefill never materializes the
+    /// full-sequence logits it does not sample (#3045).
+    fn forward_at(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, mask, cache);
         }
 
+        let h = match last_pos {
+            Some(pos) => mlxcel_core::generate::logits_at_position(&h, pos),
+            None => h,
+        };
         let h = self.norm.forward(&h);
 
         if let Some(ref lm_head) = self.lm_head {
@@ -2164,6 +2182,17 @@ impl Qwen3NextModel {
         input: &MlxArray,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_at(input, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] with the `last_pos` projection of
+    /// [`Self::forward_at`]. Used by: the `forward_last_logits*` overrides.
+    fn forward_for_sequence_at(
+        &self,
+        input: &MlxArray,
+        seq_id: Option<SequenceId>,
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input)[1];
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
@@ -2176,7 +2205,7 @@ impl Qwen3NextModel {
                 } else {
                     None
                 };
-                self.forward(input, caches, mask.as_deref())
+                self.forward_at(input, caches, mask.as_deref(), last_pos)
             },
         )
     }
@@ -2203,6 +2232,42 @@ impl LanguageModel for Qwen3NextModel {
     ) -> UniquePtr<MlxArray> {
         // Server path: route through the scheduler's per-sequence model-owned cache.
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    // The prefill entry points: project only the sampled row through the LM
+    // head (#3045).
+    fn forward_last_logits(
+        &self,
+        input: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_at(input, None, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_at(input_ids, seq_id, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        // Text-only, like `forward_with_embeddings_and_sequence_id`.
+        self.forward_for_sequence_at(input_ids, seq_id, Some(last_pos))
     }
 
     fn forward_batched(

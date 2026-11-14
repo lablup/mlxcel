@@ -244,14 +244,6 @@ impl BatchScheduler {
         let mut logits = None;
         while let Some(piece) = plan.piece_starting_at(seq.prefill_offset).cloned() {
             logits = Some(self.run_prefill_piece(seq, plan, &piece, continuation)?);
-            if plan.ends_at_boundary(&piece) {
-                self.insert_boundary_snapshot(seq, piece.range.end);
-                // Return the segment's intermediates to the allocator before
-                // the next piece runs; without this they stay resident through
-                // the rest of the prefill.
-                mlxcel_core::clear_memory_cache();
-                continue;
-            }
             // A chunked prefill reports one `prompt_progress` frame per
             // evaluated chunk, b10621's per-batch-iteration cadence (#1477),
             // and counts each chunk: the counter is the dispatch proof for the
@@ -259,11 +251,21 @@ impl BatchScheduler {
             // into chunks (a prompt that fits one chunk, `--prefill-chunk-size
             // 0`, a model that cannot chunk, the segment-plus-suffix shape of a
             // history boundary) is one unchunked prefill, which neither counts
-            // nor emits a progress frame, as before the plan existed. The
-            // boundary segment is not a chunk the tick policy scheduled either.
+            // nor emits a progress frame, as before the plan existed. In a
+            // chunked plan the piece that ends on a snapshot boundary is a
+            // chunk like the others, since the segment before it is chunked
+            // too (#3045).
             if plan.chunk().is_some() {
                 self.batch_observability.record_prefill_chunk();
                 seq.report_prefill_progress(piece.range.end);
+            }
+            if plan.ends_at_boundary(&piece) {
+                self.insert_boundary_snapshot(seq, piece.range.end);
+                // Return the segment's intermediates to the allocator before
+                // the next piece runs; without this they stay resident through
+                // the rest of the prefill.
+                mlxcel_core::clear_memory_cache();
+                continue;
             }
             if !all {
                 break;

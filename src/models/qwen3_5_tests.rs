@@ -163,24 +163,31 @@ fn compact_attention_rows_is_a_no_op_when_every_row_ends_at_the_offset() {
 
 /// A gated-delta layer followed by a full-attention layer, the smallest shape
 /// `Qwen35Model::from_weights` accepts that has both cache kinds.
-fn two_layer_config() -> Qwen35Config {
+fn two_layer_config_with_vocab(vocab_size: usize) -> Qwen35Config {
     Qwen35Config {
         num_hidden_layers: 2,
         intermediate_size: 8,
         linear_key_head_dim: 2,
         linear_value_head_dim: 2,
         full_attention_interval: 2,
-        vocab_size: 8,
+        vocab_size,
         rope_parameters: Some(serde_json::json!({ "partial_rotary_factor": 0.5 })),
         ..make_tiny_config()
     }
 }
 
-/// The two-layer synthetic model of [`two_layer_config`].
+/// The two-layer synthetic model of [`two_layer_config_with_vocab`], vocab 8.
 ///
 /// Also used by the server DFlash burst and scheduler routing tests (#2442),
 /// which need a real `LoadedModel::Qwen35` without a checkpoint.
 pub(crate) fn two_layer_model() -> Qwen35Model {
+    two_layer_model_with_vocab(8)
+}
+
+/// [`two_layer_model`] with a `vocab`-entry embedding table and LM head, for
+/// tests that need the logits to dominate memory (#3045).
+pub(crate) fn two_layer_model_with_vocab(vocab: usize) -> Qwen35Model {
+    let vocab = vocab as i32;
     let mut weights = WeightMap::new();
     let mut put = |name: &str, shape: &[i32]| {
         let len: i32 = shape.iter().product();
@@ -190,7 +197,7 @@ pub(crate) fn two_layer_model() -> Qwen35Model {
             mlxcel_core::from_slice_f32(&values, shape),
         );
     };
-    put("model.embed_tokens.weight", &[8, 8]);
+    put("model.embed_tokens.weight", &[vocab, 8]);
     put("model.layers.0.linear_attn.in_proj_qkv.weight", &[12, 8]);
     put("model.layers.0.linear_attn.in_proj_z.weight", &[4, 8]);
     put("model.layers.0.linear_attn.in_proj_b.weight", &[2, 8]);
@@ -227,8 +234,8 @@ pub(crate) fn two_layer_model() -> Qwen35Model {
         );
     }
     put("model.norm.weight", &[8]);
-    put("lm_head.weight", &[8, 8]);
-    Qwen35Model::from_weights(&weights, &two_layer_config())
+    put("lm_head.weight", &[vocab, 8]);
+    Qwen35Model::from_weights(&weights, &two_layer_config_with_vocab(vocab as usize))
         .expect("two-layer synthetic Qwen 3.5 must build")
 }
 
