@@ -133,6 +133,16 @@ async fn unix_bind_leaves_a_regular_file() {
 }
 
 #[tokio::test]
+async fn unix_bind_leaves_a_directory() {
+    let directory = directory();
+    let path = directory.path().join("dir.sock");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("inside"), b"sentinel").unwrap();
+    assert_left_alone(&path, "is not a socket");
+    assert_eq!(std::fs::read(path.join("inside")).unwrap(), b"sentinel");
+}
+
+#[tokio::test]
 async fn unix_bind_leaves_both_symlink_kinds() {
     let directory = directory();
     let target = directory.path().join("target");

@@ -274,6 +274,10 @@ fn probe_unix_socket(path: &Path) -> UnixSocketProbe {
         Err(error) => match error.kind() {
             io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound => UnixSocketProbe::Stale,
             io::ErrorKind::WouldBlock => UnixSocketProbe::InUse,
+            // A connection still being set up has reached a listener. Neither
+            // Linux nor macOS reports this for a Unix stream socket today, but
+            // it must never read as stale.
+            _ if error.raw_os_error() == Some(libc::EINPROGRESS) => UnixSocketProbe::InUse,
             _ => UnixSocketProbe::Unknown(error),
         },
     }
