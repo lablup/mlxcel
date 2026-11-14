@@ -1,13 +1,13 @@
 # PR #3049: Metal에서 점수 행렬을 통째로 만드는 prefill SDPA 제한
 
 **날짜**: 2026-11-14
-**상태**: PR 열림 (#3033 해결, #3034 대체). M3 Ultra 검증 완료, M5 이상 검증 대기
+**상태**: PR 열림 (#3033 해결, #3034 대체). M3 Ultra와 M5 Max에서 검증 완료
 
 ## 요약
 
 MLX가 어떤 SDPA 호출에 fused attention 커널을 쓰지 못하면, 그래프 fallback이 query 축 전체에 대해 `q @ k^T`를 계산하고 `[B, heads, L, L]` 점수 행렬을 버퍼 하나에 담습니다. mlxcel은 이런 호출의 query 축을 나눠 그 버퍼를 `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` 안에 두는 장치를 이미 갖고 있었지만(#672), 이 게이트가 CUDA가 아닌 빌드에서는 곧바로 반환했습니다. 그래서 Metal에서 24 head, head_dim 256 모델에 26.6K 토큰 프롬프트를 넣으면 33.9 GB 버퍼 하나를 요청했고, M4 Pro의 Metal 버퍼 한도 30.15 GB를 넘어 요청이 실패했습니다(#3033).
 
-이 PR은 Metal에서도 게이트를 실행합니다. 호출이 점수 행렬을 만드는지는 MLX 자신(`ScaledDotProductAttention::use_fallback`)에게, 그 호출이 실제로 쓰는 mask 모드로 묻습니다. 그래서 어느 GPU 세대에서도 fused 커널을 대체하지 않습니다. Metal의 기본 예산은 CUDA의 1024 MiB가 아닌 256 MiB인데, MLX가 청크 열 개 정도를 동시에 살려 두기 때문입니다. M3 Ultra에서 28K 단일 패스 prefill의 peak footprint는 66.5 GB에서 44.4 GB(qwen3.5-4b), 114.0 GB에서 78.5 GB(qwen3.8-27b)로 줄었고, greedy 출력은 동일하며 prefill 시간 차이는 1.2% 이내입니다. MLX가 fuse하는 Gemma 4는 그대로입니다. M5 이상에서의 검증은 아직 남아 있습니다.
+이 PR은 Metal에서도 게이트를 실행합니다. 호출이 점수 행렬을 만드는지는 MLX 자신(`ScaledDotProductAttention::use_fallback`)에게, 그 호출이 실제로 쓰는 mask 모드로 묻습니다. 그래서 어느 GPU 세대에서도 fused 커널을 대체하지 않습니다. Metal의 기본 예산은 CUDA의 1024 MiB가 아닌 256 MiB인데, MLX가 청크 열 개 정도를 동시에 살려 두기 때문입니다. M3 Ultra에서 28K 단일 패스 prefill의 peak footprint는 66.5 GB에서 44.4 GB(qwen3.5-4b), 114.0 GB에서 78.5 GB(qwen3.8-27b)로 줄었고, greedy 출력은 동일하며 prefill 시간 차이는 1.2% 이내입니다. MLX가 fuse하는 Gemma 4는 그대로입니다. MLX가 Qwen의 array mask 호출을 fuse하는 M5 Max에서는 28K 셀 전부에서 게이트가 한 번도 동작하지 않았고, peak와 prefill이 기준선과 같았으며, MLX가 여전히 fallback으로 보내는 호출만 청크로 나뉘었습니다.
 
 ## 1. 변경 요약
 
@@ -56,7 +56,8 @@ M3 Ultra, 512 GB, release 빌드. 기준선은 같은 바이너리에 `MLXCEL_ME
 
 ## 4. 미검증 및 남은 항목
 
-- **M5 이상.** 예상: 그곳에서는 Qwen의 array mask 호출이 fused이고 게이트가 동작하지 않습니다. 벤치마크 문서에 재실행 명령과 대기 중 섹션이 있습니다.
+- **M5 이상.** M5 Max에서 검증했습니다(벤치마크 문서 "M5+ results" 섹션). 28K 셀 전부에서 게이트 동작 0회와 peak 변화 없음, 모든 셀에서 출력 동일이었고, M5가 fuse하지 않는 호출(array mask를 쓰는 head_dim 512)에서도 256 MiB가 peak가 가장 낮고 가장 빠른 예산이었습니다(16.22 GB에서 8.23 GB, 585 ms에서 412 ms). 다만 256 MiB에서 이 호출의 출력은 단일 호출과 3.05e-5(fp16 1~2 ulp) 차이가 나는데, M3 Ultra에서는 0이었고 원인은 추적하지 않았습니다.
+- **연속 실행 A/B 시간.** `verify.sh`와 `server_verify.sh`는 두 arm을 쉬지 않고 이어서 실행하므로, 발열로 성능이 떨어지는 M5 Max에서는 게이트가 한 번도 동작하지 않았는데도 두 번째 arm이 최대 14%(서버 TTFT, 27B CLI prefill은 9%) 느리게 측정됐습니다. 순서를 뒤집고 매 실행 전에 쉬게 한 재측정에서는 두 arm의 차이가 2.2% 이내였습니다.
 - **보고자의 장비.** 33.9 GB 단일 버퍼는 사라졌지만(청크마다 점수는 256 MiB 이내), M4 Pro에서 직접 다시 돌리지는 않았습니다.
 - **남은 peak.** 남은 44~78 GB 대부분은 별도의 전체 시퀀스 일시 메모리이며(logits로 추정), 다른 이슈에서 추적합니다.
 - **Chunked prefill 비용.** 기본 2048 토큰 prefill 청크에서의 2~3.5% 비용은 낮은 예산 때문입니다. 문제가 되면 그 경우 예산을 올리거나 예산 초과 폭이 작을 때 청크를 생략할 수 있습니다.

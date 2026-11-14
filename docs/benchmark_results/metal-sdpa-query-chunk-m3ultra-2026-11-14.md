@@ -63,9 +63,66 @@ Peak is unchanged because these calls were already small (at most 2.75 GB) and a
 
 The Gemma run includes 8 calls in causal mode at head_dim 512 (`q=[1, 16, 455, 512] k=[1, 1, 4551, 512] do_causal=true`): the last, 455-row prefill chunk, which MLX's blocked D512 kernel does not take below 1024 query rows, so the per-mode probe correctly reports a fallback there while the 2048-row chunks stay fused.
 
-## M5+ results: pending
+## M5+ results (M5 Max)
 
-The gate asks MLX at runtime and MLX's fused support differs by generation (on M5 and later an array-mask call at head_dim 256 fuses, #2646), so the same commands must be rerun on an M5-class GPU. Expected there: the Qwen single-pass array-mask calls are fused and the gate does not fire (unchanged peak and TTFT), and any call MLX still sends to the fallback is chunked. Results from the M5 Max run will be added here.
+The gate asks MLX at runtime and MLX's fused support differs by generation (on M5 and later an array-mask call at head_dim 256 fuses, #2646), so the same harness was rerun on an M5-class GPU.
+
+Host: Apple M5 Max, 40-core GPU, 128 GB, macOS 27.2.1 (26B131), NAX present. MLX pin `9f806b3606eaa9f7c807238f6bd465185cd94d6d`. Branch `fix/issue-3033-metal-sdpa-chunk` at `8a5405f8`, release build, same checkpoints and prompts as above. Greedy, 48 tokens, one run at a time on an idle GPU.
+
+On M5 the gate fired only on calls MLX still sends to the fallback, no fused call was chunked, and every cell's output matched its baseline byte for byte. The M3 Ultra figures above do not carry over, because on this GPU most of those calls are fused.
+
+### M5.1 The reporter's call is fused here
+
+Every 28K CLI cell, single pass and 2048-token chunked prefill, logged 0 gated calls, and peak footprint matched between the two switches to within 3 MB. The server's log filter does not show the gate's lines, so its row rests on the unchanged peak.
+
+| cell | gated calls (M3 Ultra) | gated calls (M5 Max) | peak before | peak after | output |
+|---|---|---|---|---|---|
+| qwen3.5-4b-4bit, 28707 tokens, single pass | 8 | 0 | 39.61 GB | 39.61 GB | identical |
+| qwen3.8-27b-4bit, 28749 tokens, single pass | 16 | 0 | 73.78 GB | 73.78 GB | identical |
+| gemma-4-12b-it-4bit, 28710 tokens, single pass | 0 | 0 | 27.38 GB | 27.38 GB | identical |
+| qwen3.5-4b-4bit, 2048-token chunks | 96 | 0 | 8.85 GB | 8.85 GB | identical |
+| qwen3.8-27b-4bit, 2048-token chunks | 208 | 0 | 24.74 GB | 24.74 GB | identical |
+| gemma-4-12b-it-4bit, 2048-token chunks | 0 | 0 | 14.17 GB | 14.17 GB | identical |
+| qwen3.5-4b-4bit server, `--parallel 1` | not logged | not logged | 39.78 GB | 39.78 GB | identical |
+
+The single-pass baseline peaks (39.61 GB and 73.78 GB) are already below the M3 Ultra's post-fix figures (44.38 GB and 78.48 GB), because MLX's fused array-mask kernel never materializes the scores here. The later 2048-row prefill chunks over the growing cache, unfused on the M3 Ultra (section 2b), are fused on M5 as well.
+
+Prefill time needed a control. `verify.sh` runs the baseline then the fix back to back with no pause, and in that matrix the fix's single-pass prefill read slower (27B 73.55 to 80.27 s, Gemma 23.88 to 25.25 s; server TTFT 10.18 to 11.58 s) although the gate fired 0 times. Repeating those cells in the opposite order (fix first) with a 90 s pause before every run, twice:
+
+| cell | fix (`=1`) | baseline (`=0`) |
+|---|---|---|
+| qwen3.8-27b-4bit single pass, prefill | 53.41 s, 53.55 s | 53.52 s, 54.43 s |
+| gemma-4-12b-it-4bit single pass, prefill | 20.59 s, 20.15 s | 20.47 s, 20.40 s |
+| qwen3.5-4b-4bit single pass, prefill | 10.11 s, 10.29 s | 10.16 s, 10.18 s |
+| qwen3.5-4b-4bit server, TTFT | 10.17 s, 10.16 s | 10.23 s, 10.05 s |
+
+With cooling, the four runs of each cell fall within 2.2% of one another and neither arm is consistently ahead. The matrix itself ran slower than the cooled runs (27B baseline 73.55 s against 53.5 s, fix 80.27 s), so it was measured on a throttled GPU, and its second arm more so. For a fused call, the only work the gate adds is one memoized `use_fallback` query per distinct shape.
+
+### M5.2 Calls MLX still sends to the fallback are chunked
+
+Forced short prompts (`MLXCEL_ATTENTION_CHUNK_BUDGET_MB=16`, 2048-token prefill chunks):
+
+| model | prompt tokens | gated calls (M3 Ultra) | gated calls (M5 Max) | what was chunked | 48 greedy tokens |
+|---|---|---|---|---|---|
+| qwen3.5-4b-4bit | 4548 | 24 | 8 | `q=[1, 16, 452, 256] k=[1, 4, 4548, 256]`, array mask | identical |
+| gemma-4-12b-it-4bit | 4551 | 88 | 48 | 40 x `q=[1, 16, 455, 256] k=[1, 8, 1478, 256]`, array mask; 8 x `q=[1, 16, 455, 512] k=[1, 1, 4551, 512]`, causal mode | identical |
+
+On M5 the two 2048-row chunks of each prompt are fused and only the last 452 or 455-row chunk falls back, so the gate fires on that chunk alone. The Gemma head_dim 512 causal calls below 1024 query rows fall back on both generations. At this forced 16 MiB budget Gemma's prefill rose from 2.53 to 3.89 s (Qwen went from 1.77 to 1.49 s); this measures 16 MiB chunks, not the 256 MiB default.
+
+### M5.3 Op level, and the 256 MiB default on M5
+
+The probe's default shape, `[1, 24, 28000, 256]` fp16 over 4 KV heads, is fused on M5 in both array-mask and causal mode (`mlx_fused=true`), so at 256, 1024 and 16 MiB the gate passed both calls through unchanged: max abs diff 0, single call 5.51 GB (array mask) and 3.94 GB (causal), the gated run 0.34 GB higher because it still holds the single call's output.
+
+To measure the budget on a call M5 does not fuse, the probe was run at head_dim 512 with an array mask (`MLXCEL_SDPA_PROBE_DIM=512 MLXCEL_SDPA_PROBE_KV_HEADS=1 MLXCEL_SDPA_PROBE_HEADS=16 MLXCEL_SDPA_PROBE_LEN=20000`, Gemma 4's global-layer shape with an explicit mask), three repetitions per budget:
+
+| budget | single call | gated | single call time | gated time | max abs diff |
+|---|---|---|---|---|---|
+| 256 MiB (Metal default) | 16.22 GB | 8.22 to 8.23 GB | 581 to 590 ms | 407 to 416 ms | 3.05e-5 |
+| 512 MiB | 16.22 GB | 13.84 GB | 584 to 598 ms | 456 to 457 ms | 0 |
+| 1024 MiB (CUDA default) | 16.22 GB | 16.20 GB | 580 to 587 ms | 493 to 499 ms | 0 |
+| 2048 MiB (one run) | 16.22 GB | 16.22 GB | 601 ms | 527 ms | 0 |
+
+256 MiB is still the right Metal default on M5: it halves the peak and is the fastest setting, about 30% faster than the single call. At 1024 MiB the peak barely moves, for the same reason as on the M3 Ultra (about ten chunks are live at once). Unlike the M3 Ultra, the 256 MiB run is not bit-exact: its max abs diff is 3.05e-5 on every repetition, a 1 to 2 ulp change in fp16 outputs of this magnitude, while 512 MiB and above give 0. A 256 MiB chunk here is 419 query rows. A plausible cause is a different matmul kernel for that operand height on this GPU, which would change the reduction order; that was not traced. Every model-level cell above still produced byte-identical text.
 
 ## How to rerun
 
@@ -84,7 +141,14 @@ MODELS_DIR=/path/to/models \
 # Op-level probe (section 1 and 2 tables); vary the budget per run.
 MLXCEL_ATTENTION_CHUNK_BUDGET_MB=256 MLXCEL_SDPA_PROBE_LEN=28000 RUST_MIN_STACK=16777216 \
   cargo test --profile test-fast -p mlxcel-core --lib metal_chunk_tests::sdpa_chunk_peak_memory_probe -- --ignored --nocapture
+
+# On M5 and later the default probe shape is fused; this one is not (section M5.3).
+MLXCEL_SDPA_PROBE_DIM=512 MLXCEL_SDPA_PROBE_KV_HEADS=1 MLXCEL_SDPA_PROBE_HEADS=16 MLXCEL_SDPA_PROBE_LEN=20000 \
+  MLXCEL_ATTENTION_CHUNK_BUDGET_MB=256 RUST_MIN_STACK=16777216 \
+  cargo test --profile test-fast -p mlxcel-core --lib metal_chunk_tests::sdpa_chunk_peak_memory_probe -- --ignored --nocapture
 ```
+
+`verify.sh` and `server_verify.sh` run the baseline and the fix back to back, so on a GPU that throttles (the M5 Max does) their prefill and TTFT columns compare a cool arm with a warm one. Read time from an order-reversed run with a pause before each run, as in section M5.1.
 
 - Prompt: `scripts/bench/metal_sdpa_chunk/make_prompt.py <tokens>` prints a deterministic ledger of numbered records plus a lookup question (about 27 tokens per record on the Qwen 3.5 tokenizer; the CLI prints the real count).
 - Peak memory: `/usr/bin/time -l`, "peak memory footprint" of the `mlxcel` process. Prefill time: `mlxcel generate --profile`. Server TTFT: `scripts/bench/metal_sdpa_chunk/server_ttft.py`, request start to the first streamed delta.
@@ -102,5 +166,11 @@ In `metal-sdpa-query-chunk-2026-11-14/`:
 - `gated-calls.csv`: every call the Metal gate chunked, by cell, with its q/k shapes, mask mode and chunk length, from the debug log.
 - `completions.txt`: the greedy completions; each matched its `MLXCEL_METAL_ATTENTION_CHUNK=0` run byte for byte.
 - `op-probe.txt`: the op-level probe output at four budgets.
+- `m5max-cli-budget256.csv`: the M5 Max CLI matrix as written by `verify.sh`.
+- `m5max-cli-control.csv`: the order-reversed, cooled single-pass prefill repeats (section M5.1).
+- `m5max-server-budget256.csv`: the M5 Max server runs, matrix and cooled control.
+- `m5max-gated-calls.csv`: every call the gate chunked on the M5 Max (only the forced 4.6K cells).
+- `m5max-completions.txt`: the M5 Max greedy completions of the fix runs.
+- `m5max-op-probe.txt`: the M5 Max op-level probe, default shape and the head_dim 512 array-mask shape.
 
 The harness lives in `scripts/bench/metal_sdpa_chunk/` (`verify.sh`, `server_verify.sh`, `server_ttft.py`, `make_prompt.py`).

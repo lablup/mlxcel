@@ -235,10 +235,19 @@ fn sdpa_chunk_peak_memory_probe() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(28000);
-    let heads: i32 = std::env::var("MLXCEL_SDPA_PROBE_HEADS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(24);
+    let env_i32 = |name: &str, default: i32| -> i32 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let heads = env_i32("MLXCEL_SDPA_PROBE_HEADS", 24);
+    // head_dim and KV heads default to the reporter's shape. On M5 and later
+    // MLX fuses that array-mask call, so the fallback the gate chunks is
+    // reached there with `MLXCEL_SDPA_PROBE_DIM=512` (one KV head, 16 query
+    // heads: Gemma 4's global-layer shape with an array mask).
+    let dim = env_i32("MLXCEL_SDPA_PROBE_DIM", 256);
+    let kv_heads = env_i32("MLXCEL_SDPA_PROBE_KV_HEADS", 4);
     let normal = |shape: &[i32]| {
         // SAFETY: a null key draws from MLX's global generator.
         let x = unsafe { ffi::random_normal(shape, dtype::FLOAT16, std::ptr::null()) };
@@ -246,16 +255,16 @@ fn sdpa_chunk_peak_memory_probe() {
         x
     };
     crate::ffi::random_seed(3033);
-    let q = normal(&[1, heads, len, 256]);
-    let k = normal(&[1, 4, len, 256]);
-    let v = normal(&[1, 4, len, 256]);
-    let scale = 1.0 / 16.0_f32;
+    let q = normal(&[1, heads, len, dim]);
+    let k = normal(&[1, kv_heads, len, dim]);
+    let v = normal(&[1, kv_heads, len, dim]);
+    let scale = 1.0 / (dim as f32).sqrt();
     let mask = crate::utils::create_causal_mask(len, 0);
     ffi::eval(&mask);
     let mask = mask.as_ref().unwrap();
     let gb = |b: usize| b as f64 / 1e9;
     println!(
-        "backend={:?} shape=[1,{heads},{len},256] fp16 kv_heads=4",
+        "backend={:?} shape=[1,{heads},{len},{dim}] fp16 kv_heads={kv_heads}",
         crate::hardware::gpu_backend_kind()
     );
 

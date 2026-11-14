@@ -1,0 +1,4 @@
+metal_budget_mib,cell,calls,shape_and_mode
+16,gemma-4-12b-it-4bit_4600_pc2048_b16,40,"q=[1, 16, 455, 256] k=[1, 8, 1478, 256] softcap=0.0 arr_masked=true do_causal=false chunk=228"
+16,gemma-4-12b-it-4bit_4600_pc2048_b16,8,"q=[1, 16, 455, 512] k=[1, 1, 4551, 512] softcap=0.0 arr_masked=false do_causal=true chunk=114"
+16,qwen3.5-4b-4bit_4600_pc2048_b16,8,"q=[1, 16, 452, 256] k=[1, 4, 4548, 256] softcap=0.0 arr_masked=true do_causal=false chunk=113"

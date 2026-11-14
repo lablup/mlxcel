@@ -1,13 +1,13 @@
 # PR #3049: Bound the materializing prefill SDPA on Metal
 
 **Date**: 2026-11-14
-**Status**: PR open (closes #3033, supersedes #3034); M3 Ultra verified, M5+ verification pending
+**Status**: PR open (closes #3033, supersedes #3034); verified on M3 Ultra and M5 Max
 
 ## Executive Summary
 
 When MLX cannot run a fused attention kernel for an SDPA call, its graph fallback computes `q @ k^T` over the whole query axis and holds the `[B, heads, L, L]` score matrix in one buffer. mlxcel already split the query axis of such calls to keep that buffer within `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` (#672), but the gate returned early on every non-CUDA build. On Metal a 26.6K-token prompt on a 24-head, head_dim 256 model therefore asked for one 33.9 GB buffer, past the M4 Pro's 30.15 GB Metal limit, and the request failed (#3033).
 
-This PR runs the gate on Metal. Whether a call materializes is asked of MLX itself (`ScaledDotProductAttention::use_fallback`) for the mask mode the call issues, so a fused kernel is never replaced on any GPU generation. Metal's default budget is 256 MiB rather than CUDA's 1024 because MLX keeps about ten chunks alive at once. On an M3 Ultra a 28K single-pass prefill drops from 66.5 to 44.4 GB peak footprint (qwen3.5-4b) and from 114.0 to 78.5 GB (qwen3.8-27b), with identical greedy output and prefill time within 1.2%. Gemma 4, whose calls MLX fuses, is untouched. Verification on M5 or later is still pending.
+This PR runs the gate on Metal. Whether a call materializes is asked of MLX itself (`ScaledDotProductAttention::use_fallback`) for the mask mode the call issues, so a fused kernel is never replaced on any GPU generation. Metal's default budget is 256 MiB rather than CUDA's 1024 because MLX keeps about ten chunks alive at once. On an M3 Ultra a 28K single-pass prefill drops from 66.5 to 44.4 GB peak footprint (qwen3.5-4b) and from 114.0 to 78.5 GB (qwen3.8-27b), with identical greedy output and prefill time within 1.2%. Gemma 4, whose calls MLX fuses, is untouched. On an M5 Max, where MLX fuses the Qwen array-mask call, the gate fired 0 times on every 28K cell, peak and prefill matched the baseline, and only the calls MLX still sends to the fallback were chunked.
 
 ## 1. Change Summary
 
@@ -56,7 +56,8 @@ Finding: on this build the Qwen 3.5 family's full-attention layers pass an expli
 
 ## 4. Unverified and Open Items
 
-- **M5 and later.** Expected: the Qwen array-mask calls fuse there and the gate does not fire. The benchmark doc carries the rerun commands and a pending section.
+- **M5 and later.** Verified on an M5 Max (benchmark doc, section "M5+ results"): 0 gated calls and unchanged peak on all 28K cells, identical output everywhere, and 256 MiB still the fastest, lowest-peak budget for a call M5 does not fuse (head_dim 512 with an array mask: 16.22 to 8.23 GB, 585 to 412 ms). At 256 MiB that call's output differs from the single call by 3.05e-5 (1 to 2 fp16 ulp), where the M3 Ultra gave 0; the cause was not traced.
+- **Back-to-back A/B timing.** `verify.sh` and `server_verify.sh` run the two arms with no pause, which on the throttling M5 Max made the second arm read up to 14% slower (server TTFT; 9% on the 27B CLI prefill) with the gate never firing; an order-reversed, cooled repeat put both arms within 2.2%.
 - **The reporter's machine.** The 33.9 GB single buffer is removed (each chunk's scores stay within 256 MiB), but the M4 Pro run itself was not repeated.
 - **Remaining peak.** Most of the 44 to 78 GB left is a separate full-sequence transient, with logits as the suspect, tracked in another issue.
 - **Chunked-prefill cost.** The 2 to 3.5% prefill cost on the default 2048-token prefill chunk comes from the lower budget. If it matters, raise the budget for that case or skip chunking there once the over-budget margin is small.

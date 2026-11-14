@@ -1,0 +1,7 @@
+run,order,prompt_tokens,ttft_s,total_s,peak_footprint_bytes
+server_qwen3.5-4b-4bit_28000_mc0,matrix mc0-then-mc1 no cooldown,28707,10.185,10.592,39781124904
+server_qwen3.5-4b-4bit_28000_mc1,matrix mc0-then-mc1 no cooldown,28707,11.578,11.994,39781501736
+server_qwen3.5-4b-4bit_28000_r1_mc1,control mc1-then-mc0 90s cooldown,28707,10.173,10.584,39782402880
+server_qwen3.5-4b-4bit_28000_r1_mc0,control mc1-then-mc0 90s cooldown,28707,10.229,10.635,39782370112
+server_qwen3.5-4b-4bit_28000_r2_mc1,control mc1-then-mc0 90s cooldown,28707,10.157,10.565,39781026600
+server_qwen3.5-4b-4bit_28000_r2_mc0,control mc1-then-mc0 90s cooldown,28707,10.053,10.463,39782402880
