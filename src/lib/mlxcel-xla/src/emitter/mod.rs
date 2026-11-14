@@ -673,6 +673,79 @@ mod tests {
         assert!(!mlir.contains("['bv']"));
     }
 
+    /// Issue #3043: the single-token decode graph holds its KV cache in two
+    /// module-level mutable globals instead of the argument list, so IREE
+    /// updates the cache in place and stops copying the full cache into a fresh
+    /// output tensor every step. The graph must therefore take and return no
+    /// cache at all, and it must export the seeding entry the shim probes for.
+    /// The ragged and prefill graphs keep the full-cache ABI.
+    #[test]
+    fn single_decode_threads_kv_through_module_globals() {
+        let c = Config::llama_3_2_1b();
+        let mlir = emit_decode(&c, true);
+        let cache_ty = format!(
+            "tensor<{}x{}x{}x{}xf32>",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        assert!(
+            mlir.contains(&format!("util.global private mutable @kcache : {cache_ty}")),
+            "decode must declare the K global: {cache_ty}"
+        );
+        assert!(
+            mlir.contains(&format!("util.global private mutable @vcache : {cache_ty}")),
+            "decode must declare the V global: {cache_ty}"
+        );
+        for symbol in ["kcache", "vcache"] {
+            assert!(
+                !mlir.contains(&format!("loc(\"{symbol}\")")),
+                "the cache must not stay an argument: {symbol}"
+            );
+            assert!(
+                mlir.contains(&format!("util.global.load @{symbol} : {cache_ty}")),
+                "the step must read {symbol} from its global"
+            );
+        }
+        assert!(
+            mlir.contains(&format!("func.func public @kv_import(%k: {cache_ty}")),
+            "the shim seeds the globals through @kv_import"
+        );
+        // One output (the sampled token), not the two full caches.
+        let main_signature = mlir
+            .split("func.func public @main(")
+            .nth(1)
+            .expect("decode main function")
+            .split("{\n")
+            .next()
+            .expect("signature text");
+        assert!(
+            main_signature.contains(") -> tensor<i32>"),
+            "decode returns the token only: {main_signature}"
+        );
+
+        // The other graph kinds keep the full-cache ABI: the ragged decode takes
+        // the caches as arguments, and prefill still returns them.
+        let ragged = emit_decode_ragged(&c, 4, false);
+        assert!(
+            ragged.contains("loc(\"kcache\")"),
+            "ragged decode keeps the full-cache argument ABI"
+        );
+        let prefill = emit_prefill(&c, false);
+        let prefill_signature = prefill
+            .split("func.func public @main(")
+            .nth(1)
+            .expect("prefill main function")
+            .split("{\n")
+            .next()
+            .expect("signature text");
+        assert!(
+            prefill_signature.contains(&cache_ty),
+            "prefill still returns the full caches: {prefill_signature}"
+        );
+    }
+
     /// The shared attention core (issue #494) keeps a family's attention / MLP
     /// deltas reaching every graph kind from one authoring site. Gemma2's GeGLU
     /// and its attention / final soft-caps are the only source of `stablehlo.tanh`
