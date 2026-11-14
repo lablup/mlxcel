@@ -178,6 +178,23 @@ impl ModelStateSnapshot {
     pub fn nbytes(&self) -> usize {
         self.tensors.iter().map(ModelStateTensor::nbytes).sum()
     }
+
+    /// A snapshot of the same family and length holding only the tensors
+    /// whose name `keep` accepts (issue #3047).
+    ///
+    /// Each kept tensor is captured through [`ModelStateTensor::new`], so it
+    /// shares the source tensor's buffer instead of duplicating it, and the
+    /// tensors left out are not referenced at all: once the source snapshot is
+    /// dropped, their memory goes with it.
+    ///
+    /// Used by: the hybrid families' turn-boundary state checkpoints.
+    pub fn subset(&self, keep: impl Fn(&str) -> bool) -> Self {
+        let mut subset = Self::new(self.family.clone(), self.token_len);
+        for tensor in self.tensors.iter().filter(|t| keep(t.name())) {
+            subset.push_tensor(tensor.name(), tensor.array());
+        }
+        subset
+    }
 }
 
 /// Whether prefill should be padded to the 32-token Neural Accelerator tile.
@@ -768,6 +785,44 @@ pub trait LanguageModel {
         _target_len: usize,
     ) -> Result<(), String> {
         Err("model does not support truncated state snapshot restore".to_string())
+    }
+
+    /// The turn-boundary state checkpoint of `snapshot` (issue #3047): the
+    /// part of the state that cannot be rebuilt from a longer snapshot of the
+    /// same conversation, or `None` when this model does not split its state.
+    ///
+    /// A hybrid model's attention KV and per-token index rows for a prefix
+    /// are the leading rows of the same tensors in any longer snapshot whose
+    /// rows were computed by the same prefill, so they need not be stored
+    /// again at every turn. Its recurrent and convolution state is a summary
+    /// of every token consumed and cannot be rewound, so that part is what
+    /// the checkpoint keeps. The default is `None`, which keeps a family on
+    /// whole snapshots only.
+    fn state_checkpoint_from_snapshot(
+        &self,
+        _snapshot: &ModelStateSnapshot,
+    ) -> Option<ModelStateSnapshot> {
+        None
+    }
+
+    /// Restore into `seq_id` the state for `checkpoint.token_len()` tokens,
+    /// built from a checkpoint made by [`Self::state_checkpoint_from_snapshot`]
+    /// and a longer whole snapshot `donor` of the same conversation (issue
+    /// #3047): the donor's attention state truncated to the checkpoint's
+    /// length, and the checkpoint's recurrent state.
+    ///
+    /// The caller guarantees that the donor's first `checkpoint.token_len()`
+    /// tokens are the checkpoint's tokens and that both were produced by the
+    /// same prefill computation over them. Implementors validate everything
+    /// they can see (family, lengths, layer layout) and return `Err` instead
+    /// of installing a partial state.
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        _seq_id: SequenceId,
+        _checkpoint: &ModelStateSnapshot,
+        _donor: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        Err("model does not support turn-boundary state checkpoints".to_string())
     }
 
     /// Describe how one sequence's runtime state should be allocated.

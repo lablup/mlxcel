@@ -650,3 +650,73 @@ fn keep_previous_turn_raises_the_implicit_target_by_half() {
     .expect("tight recommendation");
     assert_eq!(tight.capacity_bytes, 4 * 1024 * 1024 * 1024);
 }
+
+#[test]
+fn state_checkpoint_default_counts_float32_recurrent_state_only() {
+    // qwen3.8-27b: 48 GatedDeltaNet layers of a 48x128x128 float32 state and
+    // a 3-row bf16 convolution window; no attention KV.
+    let cfg = json!({
+        "model_type": "qwen3_5",
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "num_hidden_layers": 64,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 8,
+            "head_dim": 128,
+            "full_attention_interval": 4,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 48,
+            "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128,
+            "linear_conv_kernel_dim": 4
+        }
+    });
+    let rec = recommend_state_checkpoint_capacity_from_config(&cfg, Some(64 << 30))
+        .expect("a hybrid family gets a checkpoint budget");
+    let per_layer = 48 * 128 * 128 * 4 + 3 * (2 * 16 * 128 + 48 * 128) * 2;
+    assert_eq!(rec.entry_bytes, 48 * per_layer);
+    assert_eq!(
+        rec.capacity_bytes,
+        rec.entry_bytes * MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES as usize
+    );
+
+    // A small host clamps the budget to an eighth of what is left.
+    let tight =
+        recommend_state_checkpoint_capacity_from_config(&cfg, Some(4 << 30)).expect("still sized");
+    assert_eq!(tight.capacity_bytes, (4usize << 30) / 8);
+}
+
+#[test]
+fn state_checkpoint_default_leaves_out_the_qwen4_exp_index() {
+    let cfg = json!({
+        "model_type": "qwen4_exp",
+        "text_config": {
+            "model_type": "qwen4_exp_text",
+            "num_hidden_layers": 48,
+            "hidden_size": 2560,
+            "full_attention_interval": 4,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 48,
+            "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128,
+            "linear_conv_kernel_dim": 4,
+            "ple_layer_ids": [2],
+            "ple_conv_kernel_size": 4,
+            "ngram_size": 3
+        }
+    });
+    let rec = recommend_state_checkpoint_capacity_from_config(&cfg, None).expect("sized");
+    let state = 48 * 128 * 128 * 4;
+    let window = 3 * (2 * 16 * 128 + 48 * 128) * 2;
+    assert_eq!(rec.entry_bytes, 36 * (state + window) + 9 * 2560 * 2);
+}
+
+#[test]
+fn attention_only_families_get_no_state_checkpoint_budget() {
+    assert!(
+        recommend_state_checkpoint_capacity_from_config(&gemma4_31b_vlm_config(), None).is_none()
+    );
+    assert!(
+        recommend_state_checkpoint_capacity_from_config(&llama4_scout_config(), None).is_none()
+    );
+}

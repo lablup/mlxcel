@@ -1763,6 +1763,10 @@ mod qwen_vl_position_tests;
 pub(crate) mod qwen3_5_tests;
 
 #[cfg(test)]
+#[path = "qwen3_5_checkpoint_tests.rs"]
+mod qwen3_5_checkpoint_tests;
+
+#[cfg(test)]
 #[path = "apertus_tests.rs"]
 mod apertus_tests;
 

@@ -371,6 +371,99 @@ fn snapshot_family_is_model_aware(
     })
 }
 
+/// Representative turn-boundary state checkpoints the implicit checkpoint
+/// budget holds (issue #3047). A conversation stores one per turn, so this is
+/// about a dozen turns of one long conversation, or the last few turns of
+/// several, before the checkpoints' own LRU drops the oldest.
+pub const MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES: u64 = 12;
+/// Fraction of the memory left after the model that the implicit checkpoint
+/// budget may use. Half of the snapshot store's quarter, since this budget
+/// comes on top of it.
+pub const MODEL_AWARE_STATE_CHECKPOINT_AVAILABLE_MEMORY_DENOMINATOR: u64 = 8;
+
+/// Model-aware default for the turn-boundary state checkpoint budget (issue
+/// #3047): [`MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES`] checkpoints,
+/// clamped to an eighth of the memory left after the model.
+///
+/// Returns `None` for families whose snapshots carry no recurrent state, which
+/// never store checkpoints.
+#[must_use]
+pub fn recommend_state_checkpoint_capacity(
+    model_dir: &Path,
+    context_size: usize,
+) -> Option<SnapshotCapacityRecommendation> {
+    let config = read_config(model_dir)?;
+    recommend_state_checkpoint_capacity_from_config(
+        &config,
+        memory_left_after_model(model_dir, representative_tokens(context_size)),
+    )
+}
+
+#[must_use]
+pub fn recommend_state_checkpoint_capacity_from_config(
+    config: &Value,
+    available_memory_bytes: Option<u64>,
+) -> Option<SnapshotCapacityRecommendation> {
+    let entry_bytes = state_checkpoint_bytes(config);
+    if entry_bytes == 0 {
+        return None;
+    }
+    let target = entry_bytes.saturating_mul(
+        usize::try_from(MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES).unwrap_or(usize::MAX),
+    );
+    let ceiling = available_memory_bytes.map(|bytes| {
+        usize::try_from(bytes / MODEL_AWARE_STATE_CHECKPOINT_AVAILABLE_MEMORY_DENOMINATOR)
+            .unwrap_or(usize::MAX)
+    });
+    let capacity_bytes = ceiling.map_or(target, |ceiling| target.min(ceiling));
+    Some(SnapshotCapacityRecommendation {
+        capacity_bytes,
+        entry_bytes,
+        representative_tokens: 0,
+        kv_bytes_at_representative_tokens: 0,
+        fixed_state_bytes: entry_bytes,
+        available_ceiling_bytes: ceiling,
+        target_entries: MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES,
+        architecture: model_types(config).join("/"),
+    })
+}
+
+/// Bytes of one turn-boundary state checkpoint: the recurrent state at its
+/// stored dtype (float32), the convolution windows and, for `qwen4_exp`, the
+/// PLE window. The attention KV and the QSA index are not part of it.
+fn state_checkpoint_bytes(config: &Value) -> usize {
+    qwen3_next_checkpoint_bytes(config).saturating_add(qwen4_exp_state_bytes(config, 0))
+}
+
+/// [`qwen3_next_fixed_state_bytes`] with the state at float32, which is how
+/// the GatedDeltaNet kernels keep it, and the windows at the stream dtype.
+fn qwen3_next_checkpoint_bytes(config: &Value) -> usize {
+    let bf16 = qwen3_next_fixed_state_bytes(config);
+    if bf16 == 0 {
+        return 0;
+    }
+    let text = text_config(config);
+    let num_layers = get_u64(text, LAYER_COUNT_KEYS).unwrap_or(0);
+    let interval = get_u64(text, &["full_attention_interval"])
+        .filter(|v| *v > 0)
+        .unwrap_or(1);
+    let linear_layers = (0..num_layers)
+        .filter(|layer| !(layer + 1).is_multiple_of(interval))
+        .count() as u64;
+    let key_head_dim = get_u64(text, &["linear_key_head_dim"])
+        .or_else(|| get_u64(text, HEAD_DIM_KEYS))
+        .unwrap_or(128);
+    let value_head_dim = get_u64(text, &["linear_value_head_dim"]).unwrap_or(key_head_dim);
+    let value_heads = get_u64(text, &["linear_num_value_heads"]).unwrap_or(64);
+    // The bf16 estimate counted the state at two bytes per element; add the
+    // other two.
+    let state_elems = value_heads
+        .saturating_mul(value_head_dim)
+        .saturating_mul(key_head_dim);
+    let extra = state_elems.saturating_mul(2).saturating_mul(linear_layers);
+    bf16.saturating_add(usize::try_from(extra).unwrap_or(usize::MAX))
+}
+
 /// The per-entry state a family carries besides its attention KV.
 fn recurrent_fixed_state_bytes(config: &Value, representative_tokens: u64) -> usize {
     qwen3_next_fixed_state_bytes(config)
