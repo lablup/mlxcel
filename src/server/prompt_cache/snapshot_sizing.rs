@@ -38,6 +38,23 @@ use crate::execution::memory_estimate::{QuantHint, estimate_total_memory};
 pub const MODEL_AWARE_SNAPSHOT_CONTEXT_TOKENS: u64 = 8192;
 /// Target number of representative snapshots for the implicit default.
 pub const MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES: u64 = 6;
+/// Target number of representative snapshots when
+/// `MLXCEL_PROMPT_CACHE_KEEP_PREVIOUS_TURN` is on (#3035). A conversation
+/// normally holds two snapshots (history boundary and completion); the switch
+/// keeps a third, the previous turn's restore source, so the same number of
+/// conversations needs half as many entries again.
+pub const MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES_KEEP_PREVIOUS_TURN: u64 =
+    MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES * 3 / 2;
+
+/// Representative-entry target for the implicit snapshot budget.
+#[must_use]
+pub fn model_aware_snapshot_target_entries(keep_previous_turn: bool) -> u64 {
+    if keep_previous_turn {
+        MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES_KEEP_PREVIOUS_TURN
+    } else {
+        MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES
+    }
+}
 /// Fraction of the memory left after the model's own estimated footprint
 /// (weights, KV at the representative length, runtime headroom) available to
 /// the implicit snapshot-cache raise. This keeps a metadata-derived default from
@@ -69,13 +86,15 @@ pub fn recommend_model_snapshot_capacity(
     model_dir: &Path,
     context_size: usize,
     current_capacity_bytes: usize,
+    target_entries: u64,
 ) -> Option<SnapshotCapacityRecommendation> {
     let config = read_config(model_dir)?;
-    recommend_model_snapshot_capacity_from_config(
+    recommend_model_snapshot_capacity_from_config_with_entries(
         &config,
         context_size,
         current_capacity_bytes,
         memory_left_after_model(model_dir, representative_tokens(context_size)),
+        target_entries,
     )
 }
 
@@ -126,8 +145,12 @@ pub fn recommend_model_kv_store_capacity_from_config(
     if entry_bytes == 0 {
         return None;
     }
-    let (capacity_bytes, available_ceiling_bytes) =
-        bounded_capacity(entry_bytes, current_capacity_bytes, available_memory_bytes);
+    let (capacity_bytes, available_ceiling_bytes) = bounded_capacity(
+        entry_bytes,
+        MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES,
+        current_capacity_bytes,
+        available_memory_bytes,
+    );
     Some(SnapshotCapacityRecommendation {
         capacity_bytes,
         entry_bytes,
@@ -165,16 +188,17 @@ fn memory_left_after_model(model_dir: &Path, representative_tokens: u64) -> Opti
     (estimate.available_bytes > 0).then(|| estimate.slack_bytes())
 }
 
-/// Six representative entries, clamped to a quarter of the memory left,
+/// `target_entries` representative entries, clamped to a quarter of the memory left,
 /// floored at one entry when that fits in half of it, and never below the
 /// current (compiled-in) capacity. Returns the capacity and the ceiling.
 fn bounded_capacity(
     entry_bytes: usize,
+    target_entries: u64,
     current_capacity_bytes: usize,
     available_memory_bytes: Option<u64>,
 ) -> (usize, Option<usize>) {
-    let target_capacity = entry_bytes
-        .saturating_mul(usize::try_from(MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES).unwrap_or(usize::MAX));
+    let target_capacity =
+        entry_bytes.saturating_mul(usize::try_from(target_entries).unwrap_or(usize::MAX));
     // A zero ceiling is kept as zero: it means the model leaves no room, and
     // the `max` below then falls back to the compiled-in default rather than
     // treating "no room" as "no limit".
@@ -211,6 +235,25 @@ pub fn recommend_model_snapshot_capacity_from_config(
     current_capacity_bytes: usize,
     available_memory_bytes: Option<u64>,
 ) -> Option<SnapshotCapacityRecommendation> {
+    recommend_model_snapshot_capacity_from_config_with_entries(
+        config,
+        context_size,
+        current_capacity_bytes,
+        available_memory_bytes,
+        MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES,
+    )
+}
+
+/// [`recommend_model_snapshot_capacity_from_config`] with an explicit
+/// representative-entry target; see [`model_aware_snapshot_target_entries`].
+#[must_use]
+pub fn recommend_model_snapshot_capacity_from_config_with_entries(
+    config: &Value,
+    context_size: usize,
+    current_capacity_bytes: usize,
+    available_memory_bytes: Option<u64>,
+    target_entries: u64,
+) -> Option<SnapshotCapacityRecommendation> {
     let representative_tokens = representative_tokens(context_size);
     // Unwindowed on purpose: the history-boundary snapshot is captured right
     // after a prefill forward, before any sliding layer wraps, so a
@@ -230,8 +273,12 @@ pub fn recommend_model_snapshot_capacity_from_config(
         return None;
     }
 
-    let (bounded_capacity, available_ceiling_bytes) =
-        bounded_capacity(entry_bytes, current_capacity_bytes, available_memory_bytes);
+    let (bounded_capacity, available_ceiling_bytes) = bounded_capacity(
+        entry_bytes,
+        target_entries,
+        current_capacity_bytes,
+        available_memory_bytes,
+    );
 
     Some(SnapshotCapacityRecommendation {
         capacity_bytes: bounded_capacity,
@@ -240,7 +287,7 @@ pub fn recommend_model_snapshot_capacity_from_config(
         kv_bytes_at_representative_tokens: kv_bytes,
         fixed_state_bytes,
         available_ceiling_bytes,
-        target_entries: MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES,
+        target_entries,
         architecture: arch.detail,
     })
 }

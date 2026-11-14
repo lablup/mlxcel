@@ -1405,6 +1405,38 @@ pub struct Linear {
     runtime_loras: Vec<crate::runtime_lora::RuntimeLoraTerm>,
 }
 
+/// A BitLinear plane has U8 packed rows and a singular `weight_scale`, not
+/// the `.scales` plane used by MLX affine/block-float quantization. Absence of
+/// `.scales` therefore does not establish that the weight is a dense matrix.
+/// Treating it as one loses the four-to-one row packing and can abort in the
+/// first attention reshape (Falcon3's Llama-format 1.58-bit checkpoints).
+///
+/// The same key pair is what an FP8 (E4M3) projection, or a ModelOpt NVFP4
+/// one, looks like when the model's loader did not convert it first, so the
+/// message names the layout and lists what it can be instead of claiming one.
+///
+/// Used by: dense `Linear`/`UnifiedLinear` loads and separate-plane fused QKV
+/// loads (Llama/Qwen/Gemma and their callers). The dedicated BitNet model's
+/// BitLinear loader does not call this helper and remains supported.
+fn reject_packed_bitlinear_as_dense(
+    weights: &crate::weights::WeightMap,
+    prefix: &str,
+    weight: &MlxArray,
+) -> Result<(), String> {
+    if ffi::array_dtype(weight) == crate::dtype::UINT8
+        && weights.contains_key(&format!("{prefix}.weight_scale"))
+    {
+        return Err(format!(
+            "Unsupported packed weight: {prefix}.weight is uint8 with \
+             {prefix}.weight_scale; this dense linear loader cannot decode \
+             it. That layout is a packed or quantized export (BitLinear/ternary, \
+             FP8, or NVFP4) that this model's loader does not convert. Use a \
+             float or MLX-quantized export of this model."
+        ));
+    }
+    Ok(())
+}
+
 impl Linear {
     /// Create a new linear layer
     pub fn new(weight: UniquePtr<MlxArray>, bias: Option<UniquePtr<MlxArray>>) -> Self {
@@ -1417,7 +1449,8 @@ impl Linear {
         }
     }
 
-    /// Load from weight map
+    /// Load from weight map. Used by dense projections, including the dense
+    /// fallback of `UnifiedLinear` and pre-concatenated fused QKV loaders.
     pub fn from_weights(weights: &crate::weights::WeightMap, prefix: &str) -> Result<Self, String> {
         let weight_name = format!("{}.weight", prefix);
 
@@ -1425,6 +1458,8 @@ impl Linear {
             .get(&weight_name)
             .map(|w| ffi::copy(w))
             .ok_or_else(|| format!("Weight not found: {}", weight_name))?;
+
+        reject_packed_bitlinear_as_dense(weights, prefix, &weight)?;
 
         // Check for optional bias
         let bias_name = format!("{}.bias", prefix);
@@ -3632,6 +3667,13 @@ impl FusedQKVLinear {
             let v_w = weights
                 .get(&format!("{}.weight", v_prefix))
                 .ok_or_else(|| format!("Weight not found: {}.weight", v_prefix))?;
+
+            // This path constructs Linear directly, bypassing its weight-map
+            // loader. Refuse each packed plane before concatenating, even if
+            // only k or v carries the unsupported layout.
+            for (plane_prefix, plane) in [(&q_prefix, q_w), (&k_prefix, k_w), (&v_prefix, v_w)] {
+                reject_packed_bitlinear_as_dense(weights, plane_prefix, plane)?;
+            }
 
             let qkv_weight = {
                 let ptrs: &[*const MlxArray] = &[
@@ -10244,3 +10286,7 @@ mod residual_add3_layer_norm_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "layers_packed_weight_tests.rs"]
+mod packed_weight_tests;

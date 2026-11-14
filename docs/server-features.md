@@ -423,6 +423,14 @@ when migrating an existing llama-server command. TLS is enabled by supplying
 both `--ssl-cert-file` and `--ssl-key-file`. A `--host` ending in `.sock` starts
 a Unix-domain-socket listener, and `--api-prefix` nests all routes below a path.
 
+The server does not remove its socket file when it stops, so a start on the same
+path replaces a socket nobody listens on any more. It does not replace a socket
+another server is still listening on, a socket it cannot probe (no permission to
+connect, or a socket of another type), or an entry at that path that is not a
+socket (a regular file, a symlink): the start fails and the entry is left as it
+is. On macOS a listener whose accept queue is completely full answers like a
+socket nobody listens on and is not recognised as in use.
+
 The public set is matched literally against the request path as the client sent
 it, prefix included. With `--api-prefix /llama` and keys enabled,
 `/llama/health` and `/llama/v1/health` are therefore not public and need a

@@ -865,3 +865,52 @@ fn harmony_role_header_with_unusual_whitespace_is_held_until_it_resolves() {
         assert_eq!(content, "", "separator {sep:?}");
     }
 }
+
+// -- 9. Muse Glimmer primed and post-`<|eom|>` recipient headers (#3025) --
+
+#[test]
+fn muse_primed_user_and_tool_headers_match_non_streamed_across_chunkings() {
+    let primed_user = " to=user<|message|>안녕하세요! 반갑습니다.<|eot|>";
+    let (content, reasoning, _) = assert_parity(primed_user, None);
+    assert_eq!(content, "안녕하세요! 반갑습니다.");
+    assert_eq!(reasoning, "");
+
+    let tools = [tool("weather.get_current")];
+    let primed_tool = concat!(
+        " to=weather.get_current<|message|><atem:function_calls>",
+        "<atem:invoke name=\"weather.get_current\">",
+        "<atem:parameter name=\"city\">Seoul</atem:parameter>",
+        "</atem:invoke></atem:function_calls><|eot|>"
+    );
+    let (content, reasoning, calls) = assert_parity(primed_tool, Some(&tools));
+    assert_eq!(content, "");
+    assert_eq!(reasoning, "");
+    assert_eq!(calls.map(|c| c.len()), Some(1));
+    let (content, _, _) = assert_parity(primed_tool, None);
+    assert_eq!(content, "");
+
+    let multi_channel = concat!(
+        " to=self<|message|> First thought. <|eom|>\n",
+        "to=self<|message|> Second thought. <|eom|>\n",
+        "<|start|>assistant to=user<|message|> Part 1. <|eom|>",
+        " to=user<|message|> Part 2. <|eot|>"
+    );
+    let (content, reasoning, _) = assert_parity(multi_channel, Some(&tools));
+    assert_eq!(content, "Part 1.\nPart 2.");
+    assert_eq!(reasoning, "First thought.\nSecond thought.");
+    let (content, reasoning, _) = assert_parity(multi_channel, None);
+    assert_eq!(content, "Part 1.\nPart 2.");
+    assert_eq!(reasoning, "First thought.\nSecond thought.");
+}
+
+#[test]
+fn overlong_primed_to_prefix_does_not_hold_the_stream() {
+    let raw = format!("to={} {}", "x".repeat(400), filler(2000));
+    let (expected, _, _) = non_streamed(&raw, None);
+    assert_eq!(expected, raw);
+    for width in [1, 7, 64, raw.len()] {
+        let (live, all) = feed_bounded(&raw, width);
+        assert_eq!(all, expected, "width {width}");
+        assert!(live.len() + 64 >= raw.len(), "width {width} held the reply");
+    }
+}

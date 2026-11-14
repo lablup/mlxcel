@@ -323,6 +323,24 @@ fn load_gate(
     }
 }
 
+/// The concrete engine phase 2 drives. It is loaded outside the timed region
+/// (issue #2961): weight upload and module load are one-time costs, and folding
+/// them into the decode window made the reported tok/s a function of the load
+/// path rather than of the decode kernel.
+enum LoadedGate {
+    Buckets(XlaBucketSet),
+    Engine(XlaBatchEngine),
+}
+
+impl LoadedGate {
+    fn as_gate(&mut self) -> &mut dyn GateEngine {
+        match self {
+            LoadedGate::Buckets(set) => set,
+            LoadedGate::Engine(engine) => engine,
+        }
+    }
+}
+
 fn main() {
     let here = env!("CARGO_MANIFEST_DIR");
     let model = PathBuf::from(arg(
@@ -451,35 +469,41 @@ fn main() {
     // The reference engine loads the weights once and reuses them; the KV is
     // overwritten per request. It is dropped before the batched engine loads, so
     // peak memory stays at one resident weight set.
+    let t_ref_load = Instant::now();
+    let mut refeng =
+        XlaReferenceEngine::load_with_context_capacity(&model, &device, reference_capacity)
+            .expect("load reference engine");
+    println!(
+        "phase 1 load: reference engine (B_max=4, capacity {reference_capacity}) {:.2} s",
+        t_ref_load.elapsed().as_secs_f64()
+    );
     let t_ref = Instant::now();
-    let references: Vec<Vec<i32>> = {
-        let mut refeng =
-            XlaReferenceEngine::load_with_context_capacity(&model, &device, reference_capacity)
-                .expect("load reference engine");
-        specs
-            .iter()
-            .map(|(prompt, cap)| {
-                refeng
-                    .generate(prompt, *cap, &eos)
-                    .expect("reference generate")
-            })
-            .collect()
-    };
+    let references: Vec<Vec<i32>> = specs
+        .iter()
+        .map(|(prompt, cap)| {
+            refeng
+                .generate(prompt, *cap, &eos)
+                .expect("reference generate")
+        })
+        .collect();
     let ref_tokens: usize = references.iter().map(Vec::len).sum();
     let ref_secs = t_ref.elapsed().as_secs_f64();
+    drop(refeng);
     println!(
         "phase 1: captured {} single-seq references ({ref_tokens} tokens, \
-         {:.2} tok/s sequential baseline)",
+         {:.2} tok/s sequential baseline, generation only)",
         specs.len(),
         ref_tokens as f64 / ref_secs
     );
 
     // === Phase 2: drive all requests through the continuous-batching engine ===
+    // Load first, then start the clock: the #2933 targets are decode throughput,
+    // so the one-time weight upload must not sit in the denominator (#2961).
     let mut all_ok = true;
-    let t_run = Instant::now();
-    let outcome = match &sorted_buckets {
+    let t_load = Instant::now();
+    let mut loaded = match &sorted_buckets {
         Some(capacities) => {
-            let (mut set, dropped) =
+            let (set, dropped) =
                 XlaBucketSet::load(&model, b_max, &device, capacities).expect("load bucket set");
             for reason in &dropped {
                 println!("  bucket dropped: {reason}");
@@ -495,19 +519,31 @@ fn main() {
                     set.capacities(),
                 );
             }
-            drive(&mut set, &specs, maxcap, &|_| SampleParams::greedy(), 0)
+            LoadedGate::Buckets(set)
         }
-        None => {
-            let mut engine = XlaBatchEngine::load_with_context_capacity(
-                &model,
-                b_max,
-                &device,
-                reference_capacity,
-            )
-            .expect("load batch engine");
-            drive(&mut engine, &specs, maxcap, &|_| SampleParams::greedy(), 0)
-        }
+        None => LoadedGate::Engine(
+            XlaBatchEngine::load_with_context_capacity(&model, b_max, &device, reference_capacity)
+                .expect("load batch engine"),
+        ),
     };
+    println!(
+        "phase 2 load: {} (B_max={b_max}, capacity {reference_capacity}) {:.2} s",
+        if sorted_buckets.is_some() {
+            "bucket set"
+        } else {
+            "batch engine"
+        },
+        t_load.elapsed().as_secs_f64()
+    );
+    let t_run = Instant::now();
+    let outcome = drive(
+        loaded.as_gate(),
+        &specs,
+        maxcap,
+        &|_| SampleParams::greedy(),
+        0,
+    );
+    drop(loaded);
     let run_secs = t_run.elapsed().as_secs_f64();
     let gen_tokens: usize = outcome.streams.iter().map(Vec::len).sum();
     all_ok &= compare("greedy", &outcome, &references, &specs);
