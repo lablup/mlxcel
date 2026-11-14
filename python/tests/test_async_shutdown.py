@@ -29,6 +29,7 @@ from mlxcel._server import ManagedServer
         "cancel-twice",
         "kill",
         "worker-error",
+        "cancel-worker-error",
     ],
 )
 def test_async_close_yields_and_finishes_reaping(
@@ -65,7 +66,7 @@ while True:
     def record_close():
         calls.append(threading.get_ident())
         real_close()
-        if mode == "worker-error":
+        if mode in ("worker-error", "cancel-worker-error"):
             raise RuntimeError("managed close failed")
 
     monkeypatch.setattr(server, "close", record_close)
@@ -109,7 +110,7 @@ while True:
             assert not task.done(), "close blocked the loop until the child exited"
             assert proc.poll() is None, "child exited before the event loop could run"
 
-            if mode in ("cancel", "cancel-twice"):
+            if mode in ("cancel", "cancel-twice", "cancel-worker-error"):
                 task.cancel()
                 await asyncio.sleep(0.02)
                 assert not task.done(), "cancellation abandoned the cleanup worker"
@@ -120,7 +121,9 @@ while True:
             if mode != "kill":
                 release.touch()
 
-            if mode in ("http-cancel", "cancel", "cancel-twice"):
+            if mode in ("http-cancel", "cancel", "cancel-twice", "cancel-worker-error"):
+                # A failing worker must not swallow a cancellation delivered
+                # while the client waited for it.
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(task, 4.0)
             elif mode == "http-error":

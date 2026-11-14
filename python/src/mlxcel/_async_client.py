@@ -368,12 +368,20 @@ class AsyncLLM:
                     cancelled = None
                     while not cleanup.done():
                         try:
-                            await asyncio.shield(cleanup)
+                            # wait() never cancels the worker and never raises
+                            # its error, so the outcome is read once below.
+                            await asyncio.wait((cleanup,))
                         except asyncio.CancelledError as exc:
                             cancelled = exc
-                    cleanup.result()
+                    # Retrieve the worker's outcome first so a failure is never
+                    # reported as unretrieved, but let a cancellation that
+                    # arrived meanwhile win: swallowing it would break the
+                    # caller's cancel() and timeout contracts.
+                    error = cleanup.exception()
                     if cancelled is not None:
                         raise cancelled
+                    if error is not None:
+                        raise error
 
     async def __aenter__(self) -> "AsyncLLM":
         return self
