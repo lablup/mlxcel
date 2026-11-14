@@ -28,6 +28,11 @@
 //!
 //! Each test reads the stored entry back and compares its token count with
 //! the `offset` the snapshot itself carries.
+//!
+//! Since #3040 a request that goes on to decode stores its completion
+//! snapshot at the prompt boundary when the prefill finishes, so the
+//! decode-written reply never reaches the store; the #1754 accounting of the
+//! end-of-generation snapshot is pinned under `MLXCEL_PROMPT_CACHE_DECODED_TAIL`.
 
 use super::scheduler_model_owned_cache_tests::{cache_ctx, options, prompt, scheduler, test_store};
 use super::*;
@@ -127,6 +132,7 @@ fn stored_len_and_offset(
 /// request saw, and must equal the offset the state holds.
 #[test]
 fn length_finish_snapshot_claims_only_forwarded_tokens() {
+    let _tail = crate::server::prompt_cache::decoded_tail::override_decoded_tail_for_test(true);
     let store = test_store();
     let mut sched = scheduler(store.clone());
     let first = prompt(40);
@@ -226,4 +232,43 @@ fn model_owned_sequence_primes_the_decode_lookahead_only_with_a_rewind() {
         sched.lookahead_params(&[seq_id]).is_some(),
         "Gemma 3 rewinds its own state, so it pipelines"
     );
+}
+
+/// Default since #3040: a request that decodes stores the prompt-boundary
+/// state taken when its prefill finished, and the finish adds no entry with
+/// the decode-written reply.
+#[test]
+fn a_decoded_request_stores_only_its_prompt_boundary() {
+    let _tail = crate::server::prompt_cache::decoded_tail::override_decoded_tail_for_test(false);
+    let store = test_store();
+    let mut sched = scheduler(store.clone());
+    let first = prompt(40);
+    let seen = run_request(&mut sched, &first, true, 4);
+    assert_eq!(seen.len(), first.len() + 4, "four tokens generated");
+
+    let (stored, offset) = stored_len_and_offset(&sched, &store, &seen);
+    assert_eq!(stored, first.len(), "the entry ends at the prompt boundary");
+    assert_eq!(
+        stored as i32, offset,
+        "and its state holds exactly the prompt"
+    );
+    assert_eq!(store.stats().snapshot_entries, 1, "no decode-written entry");
+    assert!(
+        sched.prompt_cache_prompt_end_stored.is_empty(),
+        "the finish clears the record"
+    );
+}
+
+/// The opt-out keeps the end-of-generation entry and takes no
+/// prompt-boundary copy.
+#[test]
+fn the_decoded_tail_switch_keeps_the_end_of_generation_entry() {
+    let _tail = crate::server::prompt_cache::decoded_tail::override_decoded_tail_for_test(true);
+    let store = test_store();
+    let mut sched = scheduler(store.clone());
+    let first = prompt(40);
+    let seen = run_request(&mut sched, &first, true, 4);
+    let (stored, _) = stored_len_and_offset(&sched, &store, &seen);
+    assert_eq!(stored, seen.len() - 1);
+    assert_eq!(store.stats().snapshot_entries, 1);
 }

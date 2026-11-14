@@ -1390,7 +1390,9 @@ impl BatchScheduler {
     /// prefix's physical pool blocks so a later `adopt_paged` can share them).
     /// `ModelOwned` sequences carry no detachable cross-request KV; families
     /// that opt into snapshot reuse donate a copied model-owned snapshot, while
-    /// the rest are skipped.
+    /// the rest are skipped. A snapshot family whose sequence decoded after a
+    /// classic prefill already stored its prompt-boundary snapshot in
+    /// [`Self::insert_prompt_end_snapshot`] and donates nothing here (#3040).
     ///
     /// `generated_tokens` must be the generated tokens the model state holds,
     /// which for the classic decode and prefill finishes is
@@ -1405,6 +1407,10 @@ impl BatchScheduler {
         generated_tokens: &[i32],
         healthy_finish: bool,
     ) {
+        // A sequence whose prompt-boundary snapshot was taken when its prefill
+        // finished stores nothing more here (#3040): the state now also holds
+        // the decode-written reply, which a restore must not reuse.
+        let prompt_end_stored = self.prompt_cache_prompt_end_stored.remove(&seq_id);
         if !healthy_finish {
             return;
         }
@@ -1461,6 +1467,9 @@ impl BatchScheduler {
         // placeholder even though the real state lives in
         // `ModelOwnedSequenceState` and cannot be detached as KV blocks.
         if self.engine.model().supports_snapshot_reuse() {
+            if prompt_end_stored {
+                return;
+            }
             let encoded_span = tokens.len();
             self.insert_model_state_snapshot(
                 seq_id,

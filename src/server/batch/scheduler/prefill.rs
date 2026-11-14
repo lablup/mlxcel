@@ -1035,6 +1035,10 @@ impl BatchScheduler {
             return;
         }
 
+        // The sequence goes on to decode: store its prompt-boundary state now,
+        // before a decode step writes the reply into it (#3040).
+        self.insert_prompt_end_snapshot(&seq);
+
         self.prepare_turbo4_delegated_for_sequence_decode(seq.seq_id);
 
         if let Err(err) = seq.state.transition_to(SequenceState::Decoding) {

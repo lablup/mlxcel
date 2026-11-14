@@ -17,6 +17,7 @@ use crate::server::batch::generation_bounds::GenerationBounds;
 
 impl BatchScheduler {
     pub(super) fn release_sequence_caches(&mut self, seq_id: SequenceId) {
+        self.prompt_cache_prompt_end_stored.remove(&seq_id);
         self.engine.close(seq_id);
         self.release_model_owned_slot_if_held_by(seq_id);
     }
