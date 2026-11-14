@@ -9,6 +9,7 @@ async. The model id resolves lazily on the first request.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterable, List, Optional, cast
 
 import httpx
@@ -332,14 +333,55 @@ class AsyncLLM:
             self._server.ensure_alive()
 
     async def close(self) -> None:
-        """Close the async HTTP client and stop the managed server, if any."""
+        """Close HTTP and stop the managed server, yielding on asyncio.
+
+        Cancellation during managed shutdown is propagated after that shutdown
+        finishes, so the child cleanup is not left running in the background.
+        Other async backends, and a loop whose executor no longer accepts
+        work, retain the previous synchronous managed cleanup.
+        """
         if self._closed:
             return
         self._closed = True
-        if self._http_client is not None:
-            await self._http_client.aclose()
-        if self._server is not None:
-            self._server.close()
+        try:
+            if self._http_client is not None:
+                await self._http_client.aclose()
+        finally:
+            # HTTP cleanup can raise (or be cancelled). Still reap our child.
+            if self._server is not None:
+                # Process waits and log-thread joins must not block the loop.
+                # Keep the one worker alive across cancellation, including a
+                # second cancel(), and finish reaping before propagating it.
+                try:
+                    loop = asyncio.get_running_loop()
+                    cleanup = loop.run_in_executor(None, self._server.close)
+                except RuntimeError:
+                    # Either there is no asyncio loop (HTTPX also supports
+                    # other backends, e.g. Trio), or the loop's executor no
+                    # longer takes work: it was shut down, or the interpreter
+                    # is exiting. Reap synchronously, as before, instead of
+                    # leaving the child running behind a client that is already
+                    # marked closed. Do not return from this finally block: an
+                    # HTTP-close error must propagate.
+                    self._server.close()
+                else:
+                    cancelled = None
+                    while not cleanup.done():
+                        try:
+                            # wait() never cancels the worker and never raises
+                            # its error, so the outcome is read once below.
+                            await asyncio.wait((cleanup,))
+                        except asyncio.CancelledError as exc:
+                            cancelled = exc
+                    # Retrieve the worker's outcome first so a failure is never
+                    # reported as unretrieved, but let a cancellation that
+                    # arrived meanwhile win: swallowing it would break the
+                    # caller's cancel() and timeout contracts.
+                    error = cleanup.exception()
+                    if cancelled is not None:
+                        raise cancelled
+                    if error is not None:
+                        raise error
 
     async def __aenter__(self) -> "AsyncLLM":
         return self
