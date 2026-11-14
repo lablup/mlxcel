@@ -5132,16 +5132,22 @@ pub fn attention(
     softcap: f32,
     window_size: i32,
 ) -> UniquePtr<MlxArray> {
-    if should_use_metal4_attention() {
-        return metal4_attention(q, k, v, scale, mask, softcap, window_size);
-    }
-
     // `attention` always issues an array-masked (or unmasked) SDPA through
     // `fast_scaled_dot_product_attention`; it never asks MLX for causal mode,
     // so `do_causal` is false here. The causal entry point is
     // `crate::fast_scaled_dot_product_attention_causal_windowed`.
+    //
+    // The gate runs ahead of the M5 route: the Metal 4 bridge issues the same
+    // array-mask SDPA (or softcap composite), so a call MLX does not fuse on
+    // M5 (head_dim 512 with an array mask, any softcap) materializes there as
+    // well. The gate only fires on a fallback, so fused M5 calls keep their
+    // route.
     if let Some(chunk) = materializing_sdpa_query_chunk(q, k, v, softcap, mask.is_some(), false) {
         return chunked_query_attention(q, k, v, scale, mask, softcap, chunk);
+    }
+
+    if should_use_metal4_attention() {
+        return metal4_attention(q, k, v, scale, mask, softcap, window_size);
     }
 
     attention_dispatch(q, k, v, scale, mask, softcap)
@@ -5223,23 +5229,124 @@ fn attention_dispatch(
 }
 
 /// Score-matrix byte budget above which a prefill SDPA is query-chunked, from
-/// `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` (MiB, default 1024; `0` disables
-/// chunking entirely).
+/// `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` (MiB; `0` disables chunking entirely).
 ///
 /// The budget bounds the raw `[B, heads, chunk, k_len]` score matmul output;
 /// the fallback composite briefly holds a few score-sized buffers per chunk
-/// (masked scores, softmax), so the live attention transient is a small
-/// multiple of this value. 1024 MiB keeps that multiple to a few GiB while
-/// leaving per-chunk matmuls large enough to stay bandwidth-bound.
+/// (masked scores, softmax), so the live attention transient is a multiple of
+/// this value. The default is per backend ([`DEFAULT_CUDA_CHUNK_BUDGET_MB`],
+/// [`DEFAULT_METAL_CHUNK_BUDGET_MB`]) because that multiple is not.
 fn attention_chunk_budget_bytes() -> usize {
     static BUDGET: OnceLock<usize> = OnceLock::new();
     *BUDGET.get_or_init(|| {
+        let default = if cfg!(feature = "cuda") {
+            DEFAULT_CUDA_CHUNK_BUDGET_MB
+        } else {
+            DEFAULT_METAL_CHUNK_BUDGET_MB
+        };
         std::env::var("MLXCEL_ATTENTION_CHUNK_BUDGET_MB")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(1024)
+            .unwrap_or(default)
             .saturating_mul(1024 * 1024)
     })
+}
+
+/// CUDA's default chunk budget (MiB). 1024 keeps the live multiple to a few
+/// GiB while leaving per-chunk matmuls large enough to stay bandwidth-bound
+/// (#672).
+const DEFAULT_CUDA_CHUNK_BUDGET_MB: usize = 1024;
+
+/// Metal's default chunk budget (MiB). MLX keeps up to ten command buffers in
+/// flight and frees a chunk's scores only when its buffer completes, so on
+/// Metal about that many chunks are live at once. Measured on an M3 Ultra for
+/// one `[1, 24, 28000, 256]` fp16 array-mask call (#3033): the single call
+/// peaked at 43.5 GB of MLX memory, chunked at 1024 MiB at 26.0 GB, at 512 at
+/// 15.3 GB and at 256 at 9.8 GB, and every chunked variant ran faster than the
+/// single call (1.3 to 1.4 s against 2.1 s).
+const DEFAULT_METAL_CHUNK_BUDGET_MB: usize = 256;
+
+/// Which backend's fallback rules the score-materialization chunk gate
+/// applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkGateBackend {
+    /// The CUDA mirrors of `supports_sdpa_cudnn` and the #1799 small-query
+    /// fallback.
+    Cuda,
+    /// MLX's own per-call verdict, `ScaledDotProductAttention::use_fallback`
+    /// through [`crate::window_sdpa::sdpa_mode_is_fused`] (#3033).
+    Metal,
+    /// No chunking: every other backend, and Metal under
+    /// `MLXCEL_METAL_ATTENTION_CHUNK=0`.
+    Unchunked,
+}
+
+/// The backend the chunk gate judges for this process.
+///
+/// Metal is the runtime backend MLX resolved, not the `metal` Cargo feature:
+/// a plain `cargo build` on macOS builds the Metal backend without that
+/// feature (#1988). The CUDA arm keeps its compile-time test so CUDA
+/// behaviour does not move.
+fn chunk_gate_backend() -> ChunkGateBackend {
+    if cfg!(feature = "cuda") {
+        ChunkGateBackend::Cuda
+    } else if metal_attention_chunk_enabled()
+        && crate::hardware::gpu_backend_kind() == crate::hardware::GpuBackendKind::Metal
+    {
+        ChunkGateBackend::Metal
+    } else {
+        ChunkGateBackend::Unchunked
+    }
+}
+
+/// `MLXCEL_METAL_ATTENTION_CHUNK=0` (or `false`/`no`/`off`) turns the Metal
+/// chunk gate off and restores the single-call fallback. Read once per
+/// process; any other value, or unset, leaves it on.
+fn metal_attention_chunk_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        metal_attention_chunk_switch(
+            std::env::var("MLXCEL_METAL_ATTENTION_CHUNK")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// The kill-switch parse behind [`metal_attention_chunk_enabled`], with the
+/// value passed in so a test can vary it.
+fn metal_attention_chunk_switch(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
+}
+
+/// True when MLX's Metal backend would send this call to its graph fallback,
+/// which materializes the full `[B, heads, q_len, k_len]` score matrix.
+///
+/// The probe is asked about the mask mode the call actually issues: MLX
+/// answers per mode, and on a pre-M5 GPU the causal call at head_dim 256
+/// over `q_len == k_len >= 2048` is fused while the array-mask call over the
+/// same shapes is not. Asking about the array mask for a causal call would
+/// swap a fused kernel for chunked fallbacks. The softcap composite
+/// (`compiled_softcap_sdpa*`) is an explicit op graph and always
+/// materializes. A probe that fails answers "not fused", which chunks: the
+/// chunked result is the same per row, so the cost of a wrong "no" is speed,
+/// never memory or output.
+fn metal_sdpa_materializes_scores(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    softcap: f32,
+    arr_masked: bool,
+    do_causal: bool,
+) -> bool {
+    if softcap > 0.0 {
+        return true;
+    }
+    let shape = crate::window_sdpa::WindowSdpaShape::of(q, k, v);
+    !crate::window_sdpa::sdpa_mode_is_fused(&shape, arr_masked, do_causal)
 }
 
 /// True when this q/v + softcap combination cannot reach a fused
@@ -5253,8 +5360,8 @@ fn attention_chunk_budget_bytes() -> usize {
 /// qualify, issue #672). The softcap composite (`compiled_softcap_sdpa*`)
 /// is an explicit op graph and always materializes. `supports_sdpa_vector`
 /// only covers `q_len < 4`, which the chunk gate's own `q_len` threshold
-/// already excludes. Non-CUDA builds return false: Metal has a different
-/// fused-SDPA support matrix and keeps its current behavior.
+/// already excludes. Non-CUDA builds return false: Metal asks MLX itself
+/// through [`metal_sdpa_materializes_scores`] instead (#3033).
 ///
 /// The dtype is the attention dtype ([`ffi::sdpa_attention_dtype`] of q, k
 /// and v), not q's: MLX casts all three to `result_type(q, k, v)` before
@@ -5446,17 +5553,23 @@ pub(crate) fn materializing_sdpa_query_chunk(
         arr_masked,
         do_causal,
         attention_chunk_budget_bytes(),
+        chunk_gate_backend(),
     )
 }
 
-/// [`materializing_sdpa_query_chunk`] with the score budget passed in, so a
-/// test can exercise the decision without the `OnceLock` environment read in
-/// [`attention_chunk_budget_bytes`].
+/// [`materializing_sdpa_query_chunk`] with the score budget and the gate's
+/// backend passed in, so a test can exercise the decision without the
+/// `OnceLock` environment reads in [`attention_chunk_budget_bytes`] and
+/// [`chunk_gate_backend`].
+///
+/// The budget is checked before the backend's fallback rules, so the Metal
+/// probe only runs for a call that would be over budget if it materialized.
 ///
 /// Both the flash-eligibility check and the score row size use the attention
 /// dtype, `result_type(q, k, v)`, because that is the dtype MLX's fallback
 /// materializes the scores in: 4 bytes for a bf16 query over fp16 K/V, where
 /// q's dtype would say 2 (issue #2422).
+#[allow(clippy::too_many_arguments)]
 fn sdpa_query_chunk_within_budget(
     q: &MlxArray,
     k: &MlxArray,
@@ -5465,8 +5578,9 @@ fn sdpa_query_chunk_within_budget(
     arr_masked: bool,
     do_causal: bool,
     budget: usize,
+    backend: ChunkGateBackend,
 ) -> Option<i32> {
-    if budget == 0 {
+    if budget == 0 || backend == ChunkGateBackend::Unchunked {
         return None;
     }
     let q_shape = ffi::array_shape(q);
@@ -5482,22 +5596,38 @@ fn sdpa_query_chunk_within_budget(
         return None;
     }
     let k_len = k_shape[2];
-    // Neither gate can fire off CUDA, so skip the dtype query there.
-    if !cfg!(feature = "cuda") {
+    if ffi::array_shape(v).len() != 4 {
         return None;
     }
     let attention_dtype = ffi::sdpa_attention_dtype(q, k, v);
-    if !cuda_sdpa_materializes_scores(q, v, attention_dtype, softcap)
-        && !cuda_sdpa_small_query_fallback(q_len, k_len, arr_masked, do_causal)
-    {
-        return None;
-    }
     let bytes = crate::dtype::size_bytes(attention_dtype).unwrap_or(4);
     let per_row = (q_shape[0].max(1) as usize)
         .saturating_mul(q_shape[1].max(1) as usize)
         .saturating_mul(k_len.max(1) as usize)
         .saturating_mul(bytes);
-    query_chunk_len(per_row, q_len, budget)
+    let chunk = query_chunk_len(per_row, q_len, budget)?;
+    let materializes = match backend {
+        ChunkGateBackend::Cuda => {
+            cuda_sdpa_materializes_scores(q, v, attention_dtype, softcap)
+                || cuda_sdpa_small_query_fallback(q_len, k_len, arr_masked, do_causal)
+        }
+        ChunkGateBackend::Metal => {
+            metal_sdpa_materializes_scores(q, k, v, softcap, arr_masked, do_causal)
+        }
+        ChunkGateBackend::Unchunked => false,
+    };
+    if materializes && backend == ChunkGateBackend::Metal {
+        tracing::debug!(
+            q = ?q_shape,
+            k = ?k_shape,
+            softcap,
+            arr_masked,
+            do_causal,
+            chunk,
+            "metal sdpa fallback would materialize scores over budget; query-chunking"
+        );
+    }
+    materializes.then_some(chunk)
 }
 
 /// Slice query rows `[start, stop)` from a `[B, H, L, D]` tensor.
@@ -8664,7 +8794,14 @@ mod tests {
         };
         let decide = |d: i32, q_dt: i32, kv_dt: i32| {
             let (q, k, v) = qkv(d, q_dt, kv_dt);
-            sdpa_query_chunk_within_budget(&q, &k, &v, 0.0, false, false, BUDGET)
+            // The CUDA mirror on a CUDA build and no chunking elsewhere, as
+            // before #3033; the Metal gate has its own tests.
+            let backend = if cuda {
+                ChunkGateBackend::Cuda
+            } else {
+                ChunkGateBackend::Unchunked
+            };
+            sdpa_query_chunk_within_budget(&q, &k, &v, 0.0, false, false, BUDGET, backend)
         };
 
         // Mixed half precisions: chunked, sized at 4 bytes per score.
@@ -10290,3 +10427,7 @@ mod residual_add3_layer_norm_tests {
 #[cfg(test)]
 #[path = "layers_packed_weight_tests.rs"]
 mod packed_weight_tests;
+
+#[cfg(test)]
+#[path = "layers_metal_chunk_tests.rs"]
+mod metal_chunk_tests;

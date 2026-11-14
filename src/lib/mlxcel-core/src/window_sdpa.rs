@@ -332,6 +332,10 @@ enum ProbedArm {
     NativeWindow(i32),
     /// The explicit array mask, no causal mode, no window.
     LegacyMask,
+    /// `mask_mode = "causal"` with no window: the maskless causal prefill.
+    Causal,
+    /// No mask at all.
+    Unmasked,
 }
 
 thread_local! {
@@ -351,6 +355,8 @@ fn memoized_fused_verdict(shape: &WindowSdpaShape, arm: ProbedArm) -> bool {
     let (has_arr_mask, do_causal, window) = match arm {
         ProbedArm::NativeWindow(window) => (false, true, window),
         ProbedArm::LegacyMask => (true, false, -1),
+        ProbedArm::Causal => (false, true, -1),
+        ProbedArm::Unmasked => (false, false, -1),
     };
     let verdict = ffi::sdpa_uses_fused_kernel(
         &shape.q_shape(),
@@ -394,6 +400,22 @@ pub fn native_arm_is_fused(shape: &WindowSdpaShape, window: i32) -> bool {
 /// Memoized like [`native_arm_is_fused`].
 pub fn legacy_arm_is_fused(shape: &WindowSdpaShape) -> bool {
     memoized_fused_verdict(shape, ProbedArm::LegacyMask)
+}
+
+/// MLX's verdict on whether a window-less SDPA over `shape` in the mask mode
+/// the call will actually use runs a fused kernel: an array mask
+/// (`has_arr_mask`), MLX's `"causal"` mode (`do_causal`), or no mask. MLX
+/// answers per mode (on a pre-M5 GPU the causal call at head_dim 256 fuses
+/// where the array-mask call does not, #3033), so asking about the wrong mode
+/// gives the wrong answer. Metal only; `false` elsewhere. Memoized like
+/// [`native_arm_is_fused`].
+pub fn sdpa_mode_is_fused(shape: &WindowSdpaShape, has_arr_mask: bool, do_causal: bool) -> bool {
+    let arm = match (has_arr_mask, do_causal) {
+        (true, _) => ProbedArm::LegacyMask,
+        (false, true) => ProbedArm::Causal,
+        (false, false) => ProbedArm::Unmasked,
+    };
+    memoized_fused_verdict(shape, arm)
 }
 
 /// Decide the route under an explicit mode, backend and fused probe, so the
