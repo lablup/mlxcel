@@ -814,17 +814,26 @@ mod ffi {
         /// Used by: `GeluActivation::TanhF32Compiled` (#2423).
         fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray>;
 
-        /// Whether the fused tanh-GELU Metal kernel can run on this backend
-        /// (issue #2857): the default device is the GPU and the kernel has a
-        /// Metal port. Read from the kernel's port table, the one the dispatch
-        /// reads. False on the CPU device and on CUDA or ROCm, where `compiled_gelu_tanh_f32`
-        /// chain runs instead.
+        /// Whether the fused tanh-GELU kernel can run on this backend (Metal
+        /// port #2857, CUDA port #2780): the default device is the GPU and the
+        /// kernel has a port for it. Read from the kernel's port table, the one
+        /// the dispatch reads. False on the CPU device and on ROCm, where the
+        /// `compiled_gelu_tanh_f32` chain runs instead.
         fn fused_gelu_tanh_f32_available() -> bool;
 
-        /// tanh-approximate GELU as one 1-D elementwise Metal JIT kernel;
-        /// throws when there is no port on this backend, so declare `-> Result`
-        /// so cxx catches the throw at the FFI boundary (#2857).
-        /// Used by: `GeluActivation::TanhF32Compiled`.
+        /// Whether the fused tanh-GELU kernel on this backend returns the bits
+        /// the eager `gelu_tanh_f32` chain returns (#2780): true for the CUDA
+        /// port with a GPU default device, whose body rounds each multiply and
+        /// add on its own; false for the Metal port, which may contract a
+        /// multiply-add, and wherever `fused_gelu_tanh_f32_available` is false.
+        /// Used by: `GeluActivation::TanhF32`.
+        fn fused_gelu_tanh_f32_matches_eager_bits() -> bool;
+
+        /// tanh-approximate GELU as one 1-D elementwise JIT kernel (Metal or
+        /// CUDA); throws when there is no port on this backend, so declare
+        /// `-> Result` so cxx catches the throw at the FFI boundary (#2857).
+        /// Used by: `GeluActivation::TanhF32Compiled`, and
+        /// `GeluActivation::TanhF32` on CUDA.
         fn fused_gelu_tanh_f32(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
 
         /// Compiled GeGLU activation: gelu(gate) * x — single fused kernel

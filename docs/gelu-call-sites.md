@@ -14,7 +14,7 @@ Verdict is mlxcel versus the mlx-lm / mlx-vlm / mlx-audio port it follows. Where
 
 ## 0. What #2423 changed, and what it decided not to change
 
-New code chooses its formula through `mlxcel_core::utils::GeluActivation` (`Erf`, `Tanh`, `TanhF32`, `TanhF32Compiled`, `Fast`, plus `from_hf_name` for a config string), backed by the C++ `gelu_tanh_approx` helper the fused GeGLU kernels use. `TanhF32Compiled` is `TanhF32` as one compiled kernel (equal up to f32 rounding); the families switched in #2423 use it so the switch does not add prefill time, while the call sites folded onto `TanhF32` keep the eager, bit-exact helper. The measurements behind each decision are in [benchmark_results/gelu-erf-vs-tanh-2026-10-23.md](benchmark_results/versions/v0.8.0.md#gelu-erf-vs-tanh-2026-10-23).
+New code chooses its formula through `mlxcel_core::utils::GeluActivation` (`Erf`, `Tanh`, `TanhF32`, `TanhF32Compiled`, `Fast`, plus `from_hf_name` for a config string), backed by the C++ `gelu_tanh_approx` helper the fused GeGLU kernels use. `TanhF32Compiled` is `TanhF32` as one compiled kernel (equal up to f32 rounding); the families switched in #2423 use it so the switch does not add prefill time, while the call sites folded onto `TanhF32` keep the eager helper's bits: the helper itself, or on CUDA the one fused kernel that returns them (#2780). The measurements behind each decision are in [benchmark_results/gelu-erf-vs-tanh-2026-10-23.md](benchmark_results/versions/v0.8.0.md#gelu-erf-vs-tanh-2026-10-23).
 
 | Family | Sites | Checkpoint / Hugging Face | mlx-vlm | Before | After |
 |---|---|---|---|---|---|

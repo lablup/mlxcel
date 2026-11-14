@@ -1146,7 +1146,9 @@ pub fn gelu_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// Hugging Face `gelu_pytorch_tanh` as the SigLIP, Molmo2 and Qwen3-VL eager
 /// encoders compute it; those were qualified against f32 StableHLO graphs.
 ///
-/// Used by: [`GeluActivation::TanhF32`].
+/// Used by: [`gelu_tanh_f32_fused_where_bit_exact`], the
+/// [`GeluActivation::TanhF32`] dispatch, wherever the fused kernel does not
+/// return these bits (every backend but CUDA, and the CPU device).
 #[inline]
 pub fn gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::gelu_tanh_f32(x)
@@ -1168,9 +1170,15 @@ pub fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::compiled_gelu_tanh_f32(x)
 }
 
-/// [`gelu_tanh_f32`] evaluated in f32 by one fused custom kernel.
+/// [`gelu_tanh_f32`] evaluated in f32 by one fused custom kernel: a Metal
+/// port (#2857) and a CUDA port (#2780) of the same body.
 ///
-/// Used by: [`GeluActivation::TanhF32Compiled`].
+/// The Metal port may contract a multiply-add into an FMA, so a lane can
+/// differ from [`gelu_tanh_f32`] by f32 rounding. The CUDA port rounds every
+/// operation on its own and returns [`gelu_tanh_f32`]'s bits.
+///
+/// Used by: [`GeluActivation::TanhF32Compiled`], and
+/// [`GeluActivation::TanhF32`] on CUDA.
 ///
 /// # Panics
 ///
@@ -1212,6 +1220,25 @@ pub fn gelu_tanh_f32_compiled_where_available(x: &MlxArray) -> UniquePtr<MlxArra
     }
 }
 
+/// [`fused_gelu_tanh_f32`] where the kernel returns [`gelu_tanh_f32`]'s bits
+/// and accepts the input, and [`gelu_tanh_f32`] itself everywhere else.
+///
+/// This is the dispatch [`GeluActivation::TanhF32`] takes. Its call sites are
+/// pinned bit for bit to the private copies they replaced, so the kernel may
+/// stand in for the eager chain only where it rounds exactly as that chain
+/// does, which is the CUDA port (#2780). On Metal, on a backend without a
+/// port and on the CPU device this is the eager helper, unchanged.
+#[inline]
+pub fn gelu_tanh_f32_fused_where_bit_exact(x: &MlxArray) -> UniquePtr<MlxArray> {
+    if ffi::fused_gelu_tanh_f32_matches_eager_bits()
+        && fused_gelu_tanh_f32_accepts(ffi::array_dtype(x), ffi::array_size(x))
+    {
+        fused_gelu_tanh_f32(x)
+    } else {
+        gelu_tanh_f32(x)
+    }
+}
+
 /// Which GELU formula a call site computes.
 ///
 /// Spelled out because the names are a trap: MLX `nn.gelu_approx` is the tanh
@@ -1246,13 +1273,22 @@ pub enum GeluActivation {
     /// `nn.gelu_approx` computes.
     Tanh,
     /// tanh approximation evaluated in f32, cast back ([`gelu_tanh_f32`]).
+    ///
+    /// The call sites folded onto this variant are pinned bit for bit to the
+    /// copies it replaced, so it is the eager helper everywhere except where
+    /// the fused custom kernel returns that helper's bits: on CUDA it is one
+    /// kernel launch ([`gelu_tanh_f32_fused_where_bit_exact`], #2780).
     TanhF32,
-    /// [`TanhF32`](Self::TanhF32) as one compiled kernel
-    /// ([`compiled_gelu_tanh_f32`]); equal to it up to f32 rounding.
+    /// [`TanhF32`](Self::TanhF32) as one kernel: the fused custom kernel
+    /// ([`fused_gelu_tanh_f32`]) where this backend has a port for it (Metal,
+    /// CUDA), the compiled chain ([`compiled_gelu_tanh_f32`]) elsewhere; equal
+    /// to [`TanhF32`](Self::TanhF32) up to f32 rounding either way, and bit
+    /// for bit on CUDA.
     ///
     /// The families switched from erf to tanh in #2423 use this so the switch
-    /// does not add prefill time. The call sites folded onto `TanhF32` stay on
-    /// the eager helper, which is pinned bit-for-bit to the copies it replaced.
+    /// does not add prefill time. On Metal the call sites folded onto
+    /// `TanhF32` stay on the eager helper, because the Metal kernel may round
+    /// a lane differently and they are pinned bit for bit.
     TanhF32Compiled,
     /// `x * sigmoid(1.702 x)` ([`gelu_sigmoid`]).
     Fast,
@@ -1301,7 +1337,7 @@ impl GeluActivation {
         match self {
             Self::Erf => gelu_approx(x),
             Self::Tanh => gelu_tanh(x),
-            Self::TanhF32 => gelu_tanh_f32(x),
+            Self::TanhF32 => gelu_tanh_f32_fused_where_bit_exact(x),
             Self::TanhF32Compiled => gelu_tanh_f32_compiled_where_available(x),
             Self::Fast => gelu_sigmoid(x),
         }

@@ -592,14 +592,22 @@ std::unique_ptr<MlxArray> compiled_gelu_approx(const MlxArray& x);
 // Used by: Rust `GeluActivation::TanhF32Compiled` (#2423)
 std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x);
 
-// Whether the real Metal tanh-GELU kernel runs on this backend (#2857):
-// a GPU default device with a Metal port in the table. False with
-// MLXCEL_DEVICE=cpu, where callers take the compiled chain. Read from the same
-// table the launcher dispatches through.
+// Whether the fused tanh-GELU kernel runs on this backend (Metal #2857,
+// CUDA #2780): a GPU default device with a port for it in the table. False
+// with MLXCEL_DEVICE=cpu and on ROCm, where callers take the compiled chain.
+// Read from the same table the launcher dispatches through.
 bool fused_gelu_tanh_f32_available();
 
-// Real Metal custom kernel for `fused_gelu_tanh_f32` (#2857): the
-// tanh-GELU as one 1-D elementwise JIT Metal kernel. Rust-side callers gate on
+// Whether that kernel returns the bits the eager `gelu_tanh_f32` chain
+// returns on this backend (#2780): true for the CUDA port, whose body rounds
+// each operation on its own, false for the Metal port and wherever
+// `fused_gelu_tanh_f32_available()` is false.
+// Used by: Rust `GeluActivation::TanhF32`, which is pinned to the eager chain
+// and may take the kernel only where this holds.
+bool fused_gelu_tanh_f32_matches_eager_bits();
+
+// Custom kernel for `fused_gelu_tanh_f32` (Metal #2857, CUDA #2780): the
+// tanh-GELU as one 1-D elementwise JIT kernel. Rust-side callers gate on
 // `fused_gelu_tanh_f32_available()` first or route to the compiled chain.
 std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x);
 

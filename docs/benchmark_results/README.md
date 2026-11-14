@@ -29,6 +29,7 @@ These remain standalone because their reports leave a substantive measurement ga
 - [MLA absorbed decode](mla-absorbed-decode-m1ultra-2026-08-02.md): real-checkpoint token parity was not available; default-on is not justified by synthetic memory savings.
 - [Qwen3.8 snapshot capacity](qwen38-snapshot-capacity-default-2026-08-30.md): sizing unit tests are not a rerun of the Apple Silicon multi-turn benchmark.
 - [ROCm flash prefill](sdpa-flash-prefill-gfx1151-2026-10-13.md): kernel timings exist, but model-level before/after was not measured.
+- [Fused tanh-GELU f32 on CUDA](fused-gelu-tanh-f32-cuda-gb10-2026-11-11.md): the `xla-iree` StableHLO twin re-check was not run on the measuring host, and the new tests were not run on Metal.
 
 ## Release decision archives
 
