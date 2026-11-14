@@ -378,12 +378,20 @@ class ManagedServer:
     def _probe_once(client: httpx.Client, url: str) -> bool:
         """Return True once ``/health`` answers HTTP 200.
 
-        Connection errors (socket file not yet present, connection refused) and
-        HTTP 503 (loading / no slot) are treated as "still starting".
+        Connection errors (socket file not yet present, connection refused), a
+        connection dropped before a response (a child that exits mid-request:
+        macOS reports it as a protocol error, Linux as a read error) and HTTP
+        503 (loading / no slot) are treated as "still starting"; the caller's
+        liveness check then reports a dead child as ``MlxcelServerError``.
         """
         try:
             resp = client.get(url)
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError):
+        except (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadError,
+            httpx.RemoteProtocolError,
+        ):
             return False
         if resp.status_code == 200:
             return True

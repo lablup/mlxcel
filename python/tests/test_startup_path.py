@@ -105,7 +105,10 @@ def test_startup_keeps_an_entry_that_is_not_a_stale_socket(
     else:
         owner = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         owner.bind(str(path))
-        owner.listen(0 if path_kind == "full_backlog" else 1)
+        # The probe's connection stays queued until accepted, and macOS refuses
+        # new connections once a backlog of 1 holds it, so leave room for the
+        # reachability check below.
+        owner.listen(0 if path_kind == "full_backlog" else 8)
         owner.settimeout(1.0)
         if path_kind == "full_backlog":
             # Fill the accept queue until the kernel stops taking connections.
