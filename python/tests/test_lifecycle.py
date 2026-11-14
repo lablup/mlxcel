@@ -7,10 +7,13 @@ without the real Rust binary or a model.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import socket
 import stat
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -102,6 +105,72 @@ def test_managed_tcp_lifecycle(fake_binary: str) -> None:
     assert server._proc is not None and server._proc.poll() is not None
 
 
+@pytest.mark.parametrize(
+    "host", ["127.0.0.1", "localhost", "::1", "[::1]", "2001:db8::1", "[2001:db8::1]"]
+)
+def test_managed_tcp_urls_preserve_host_and_port(host: str) -> None:
+    server = ManagedServer("fake/model", binary=sys.executable, host=host, port=18080)
+    try:
+        for raw_url, path in [(server.base_url, "/v1"), (server._health_url, "/health")]:
+            url = httpx.URL(raw_url)
+            assert url.host == host.strip("[]")
+            assert url.port == 18080
+            assert url.path == path
+        # URL brackets must not change the address passed to the server CLI.
+        command = server._build_command()
+        assert command[command.index("--host") + 1] == host
+    finally:
+        server.close()
+
+
+@pytest.fixture()
+def ipv6_port() -> int:
+    if not socket.has_ipv6:
+        pytest.skip("IPv6 unavailable")
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+            return int(probe.getsockname()[1])
+    except OSError as exc:
+        pytest.skip(f"IPv6 loopback unavailable: {exc}")
+
+
+@pytest.mark.parametrize("host", ["::1", "[::1]"])
+def test_managed_ipv6_client(
+    fake_binary: str, ipv6_port: int, host: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NO_PROXY", "*")
+    with mlxcel.LLM(
+        "fake/model", binary=fake_binary, host=host, port=ipv6_port, startup_timeout=10.0
+    ) as client:
+        assert client.model == "fake-model"
+        assert client.generate("hi") == "hello world"
+        assert client._server is not None
+        proc = client._server._proc
+        assert proc is not None and proc.poll() is None
+    assert proc.poll() is not None
+
+
+@pytest.mark.parametrize("host", ["::1", "[::1]"])
+def test_async_managed_ipv6_client(
+    fake_binary: str, ipv6_port: int, host: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NO_PROXY", "*")
+
+    async def go() -> None:
+        async with mlxcel.AsyncLLM(
+            "fake/model", binary=fake_binary, host=host, port=ipv6_port, startup_timeout=10.0
+        ) as client:
+            assert await client.generate("hi") == "hello world"
+            assert client.model == "fake-model"
+            assert client._server is not None
+            proc = client._server._proc
+            assert proc is not None and proc.poll() is None
+        assert proc.poll() is not None
+
+    asyncio.run(go())
+
+
 def test_early_exit_raises_with_stderr(fake_binary: str, tmp_path: Path) -> None:
     sock = _short_socket(tmp_path)
     server = ManagedServer(
@@ -178,6 +247,44 @@ def test_slow_health_within_startup_budget_is_ready(fake_binary: str) -> None:
         server.ensure_alive()
     finally:
         server.close()
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="UDS not supported on Windows")
+@pytest.mark.parametrize("byte_length", [101, 133])
+@pytest.mark.parametrize("caller", ["manager", "sync", "async"])
+def test_unicode_socket_path_rejected_before_start(
+    monkeypatch: pytest.MonkeyPatch, byte_length: int, caller: str
+) -> None:
+    def unexpected_start(_self: ManagedServer) -> None:
+        pytest.fail("an overlong socket path reached child startup")
+
+    monkeypatch.setattr(ManagedServer, "start", unexpected_start)
+    with tempfile.TemporaryDirectory(prefix="mlx-byte-", dir="/tmp") as directory:
+        prefix = directory + "/"
+        budget = byte_length - len(os.fsencode(prefix)) - len(b".sock")
+        path = prefix + "가" * (budget // 3) + "x" * (budget % 3) + ".sock"
+        assert len(path) < 100 < len(os.fsencode(path))
+        with pytest.raises(MlxcelServerError, match=rf"{byte_length} > 100 bytes"):
+            if caller == "manager":
+                ManagedServer("fake/model", socket_path=path)
+            elif caller == "sync":
+                mlxcel.LLM("fake/model", socket=path)
+            else:
+                mlxcel.AsyncLLM("fake/model", socket=path)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="UDS not supported on Windows")
+@pytest.mark.parametrize("unicode_name", [False, True])
+def test_socket_path_at_byte_limit_serves_requests(fake_binary: str, unicode_name: bool) -> None:
+    with tempfile.TemporaryDirectory(prefix="mlx-byte-", dir="/tmp") as directory:
+        prefix = directory + "/"
+        budget = 100 - len(os.fsencode(prefix)) - len(b".sock")
+        name = "가" * (budget // 3) + "x" * (budget % 3) if unicode_name else "x" * budget
+        path = prefix + name + ".sock"
+        assert len(os.fsencode(path)) == 100
+        with mlxcel.LLM("fake/model", binary=fake_binary, socket=path) as llm:
+            assert llm.generate("hello") == "hello world"
+        assert not os.path.exists(path)
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="UDS not supported on Windows")
@@ -287,3 +394,144 @@ def test_ensure_alive_after_crash(fake_binary: str, tmp_path: Path) -> None:
     with pytest.raises(MlxcelServerError):
         server.ensure_alive()
     server.close()
+
+
+class _HttpCloseFailure(RuntimeError):
+    pass
+
+
+@pytest.mark.parametrize("context_exit", [False, True])
+def test_http_close_error_still_reaps_the_managed_child(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, context_exit: bool
+) -> None:
+    llm = mlxcel.LLM("fake/model", binary=fake_binary, host="127.0.0.1")
+    server = llm._server
+    assert server is not None and server._proc is not None
+    proc = server._proc
+    assert proc.poll() is None and llm._http_client is not None
+    original_close = llm._http_client.close
+
+    def failing_close() -> None:
+        original_close()
+        raise _HttpCloseFailure("injected HTTP cleanup failure")
+
+    monkeypatch.setattr(llm._http_client, "close", failing_close)
+    try:
+        with pytest.raises(_HttpCloseFailure, match="injected HTTP cleanup failure"):
+            if context_exit:
+                with llm:
+                    pass
+            else:
+                llm.close()
+        assert proc.poll() is not None, "HTTP cleanup failure left the managed child alive"
+        llm.close()  # Still idempotent after the first close reported its error.
+    finally:
+        server.close()  # Also reap the intentionally failing baseline arm.
+        original_close()
+
+
+@pytest.mark.parametrize("context_exit", [False, True])
+def test_async_http_close_error_still_reaps_the_managed_child(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, context_exit: bool
+) -> None:
+    async def exercise() -> None:
+        llm = mlxcel.AsyncLLM("fake/model", binary=fake_binary, host="127.0.0.1")
+        server = llm._server
+        assert server is not None and server._proc is not None
+        proc = server._proc
+        assert proc.poll() is None and llm._http_client is not None
+        original_close = llm._http_client.aclose
+
+        async def failing_close() -> None:
+            await original_close()
+            raise _HttpCloseFailure("injected HTTP cleanup failure")
+
+        monkeypatch.setattr(llm._http_client, "aclose", failing_close)
+        try:
+            with pytest.raises(_HttpCloseFailure, match="injected HTTP cleanup failure"):
+                if context_exit:
+                    async with llm:
+                        pass
+                else:
+                    await llm.close()
+            assert proc.poll() is not None, "HTTP cleanup failure left the managed child alive"
+            await llm.close()
+        finally:
+            server.close()
+            await original_close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("context_exit", [False, True])
+def test_cancelled_async_http_close_still_reaps_the_managed_child(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, context_exit: bool
+) -> None:
+    async def exercise() -> None:
+        llm = mlxcel.AsyncLLM("fake/model", binary=fake_binary, host="127.0.0.1")
+        server = llm._server
+        assert server is not None and server._proc is not None
+        proc = server._proc
+        assert proc.poll() is None and llm._http_client is not None
+        original_close = llm._http_client.aclose
+        entered = asyncio.Event()
+        never = asyncio.Event()
+
+        async def suspended_close() -> None:
+            entered.set()
+            await never.wait()
+
+        async def close_client() -> None:
+            if context_exit:
+                async with llm:
+                    pass
+            else:
+                await llm.close()
+
+        monkeypatch.setattr(llm._http_client, "aclose", suspended_close)
+        task = asyncio.create_task(close_client())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert proc.poll() is not None, "cancelled HTTP cleanup left the managed child alive"
+            await llm.close()
+        finally:
+            task.cancel()
+            if not task.done():
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            server.close()
+            await original_close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_successful_http_close_reaps_the_managed_child(fake_binary: str, async_mode: bool) -> None:
+    async def exercise_async() -> None:
+        llm = mlxcel.AsyncLLM("fake/model", binary=fake_binary, host="127.0.0.1")
+        server = llm._server
+        assert server is not None and server._proc is not None
+        try:
+            await llm.close()
+            await llm.close()
+            assert server._proc.poll() is not None
+        finally:
+            server.close()
+
+    if async_mode:
+        asyncio.run(exercise_async())
+    else:
+        llm = mlxcel.LLM("fake/model", binary=fake_binary, host="127.0.0.1")
+        server = llm._server
+        assert server is not None and server._proc is not None
+        try:
+            llm.close()
+            llm.close()
+            assert server._proc.poll() is not None
+        finally:
+            server.close()

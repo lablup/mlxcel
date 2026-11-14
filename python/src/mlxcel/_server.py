@@ -17,6 +17,7 @@ import os
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -83,6 +84,71 @@ def _free_tcp_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _clear_stale_socket(path: str) -> None:
+    """Remove a socket nobody listens on; refuse any other existing entry.
+
+    A socket file outlives the process that bound it, so a leftover from a
+    crashed server is removed and the path reused. Two things are left alone,
+    with an error instead of a start: an entry that is not a socket (a regular
+    file, a directory, a symlink), and a socket that still has a listener, which
+    would otherwise keep running with its path taken away.
+
+    One non-blocking connection attempt decides which it is. Only "connection
+    refused" reads as nobody there. A connection that is accepted or queued, or
+    a full accept queue (EAGAIN on Linux), means a listener; any other error (no
+    permission to connect, a socket of another type) leaves the question open,
+    and the socket is not removed on a guess. macOS answers "connection refused"
+    for a full accept queue too, so a saturated listener cannot be told from a
+    stale socket there. The check and the removal are two steps, so this is not
+    a lock against another process creating the path in between.
+    """
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise MlxcelServerError(f"Cannot inspect Unix socket path {path!r}: {exc}") from exc
+    if not stat.S_ISSOCK(mode):
+        raise MlxcelServerError(
+            f"Unix socket path {path!r} exists and is not a socket; it is left as it is. "
+            "Remove it or pass another socket=... path."
+        )
+
+    stale = False
+    unknown: Optional[OSError] = None
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.setblocking(False)
+        probe.connect(path)
+    except (ConnectionRefusedError, FileNotFoundError):
+        stale = True
+    except BlockingIOError:
+        # The listener's accept queue is full: it is there.
+        pass
+    except OSError as exc:
+        unknown = exc
+    finally:
+        probe.close()
+    if unknown is not None:
+        raise MlxcelServerError(
+            f"Cannot tell whether Unix socket {path!r} is still in use ({unknown}); it is left "
+            "as it is. Remove it or pass another socket=... path."
+        ) from unknown
+    if not stale:
+        raise MlxcelServerError(
+            f"Unix socket path {path!r} is in use by a running listener; it is left as it is. "
+            "Stop that server, pass another socket=... path, or connect to it by passing "
+            "socket=... without a model."
+        )
+
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise MlxcelServerError(f"Cannot remove stale Unix socket {path!r}: {exc}") from exc
+
+
 def _default_socket_path() -> str:
     """A short, unique Unix socket path under ``/tmp``.
 
@@ -146,12 +212,24 @@ class ManagedServer:
             self.port = port if port is not None else _free_tcp_port()
         else:
             path = socket_path or _default_socket_path()
-            if len(path) > _MAX_SOCKET_PATH:
+            path_bytes = len(os.fsencode(path))
+            if path_bytes > _MAX_SOCKET_PATH:
                 raise MlxcelServerError(
-                    f"Unix socket path is too long ({len(path)} > {_MAX_SOCKET_PATH} bytes): "
+                    f"Unix socket path is too long ({path_bytes} > {_MAX_SOCKET_PATH} bytes): "
                     f"{path!r}. Pass a shorter socket=... path (e.g. under /tmp)."
                 )
             self.uds_path = path
+
+    @property
+    def _http_origin(self) -> str:
+        """HTTP origin, bracketing IPv6 literals without altering the bind host."""
+        if self.uds_path is not None:
+            return "http://mlxcel"
+        assert self.host is not None and self.port is not None
+        host = self.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"http://{host}:{self.port}"
 
     @property
     def base_url(self) -> str:
@@ -160,15 +238,11 @@ class ManagedServer:
         For a Unix socket the host portion is a placeholder; the actual routing
         happens through the httpx ``uds`` transport.
         """
-        if self.uds_path is not None:
-            return "http://mlxcel/v1"
-        return f"http://{self.host}:{self.port}/v1"
+        return f"{self._http_origin}/v1"
 
     @property
     def _health_url(self) -> str:
-        if self.uds_path is not None:
-            return "http://mlxcel/health"
-        return f"http://{self.host}:{self.port}/health"
+        return f"{self._http_origin}/health"
 
     def _build_command(self) -> List[str]:
         """Build the ``mlxcel serve`` argv.
@@ -223,12 +297,10 @@ class ManagedServer:
         if self.api_key:
             env["LLAMA_API_KEY"] = self.api_key
 
-        # Remove a stale socket file so bind does not fail on EADDRINUSE.
-        if self.uds_path is not None and os.path.exists(self.uds_path):
-            try:
-                os.unlink(self.uds_path)
-            except OSError:
-                pass
+        # Remove a stale socket file so bind does not fail on EADDRINUSE, and
+        # refuse to start over anything else that is already at the path.
+        if self.uds_path is not None:
+            _clear_stale_socket(self.uds_path)
 
         try:
             self._proc = subprocess.Popen(  # noqa: S603 - command built from trusted args
@@ -319,13 +391,22 @@ class ManagedServer:
     def _probe_once(client: httpx.Client, url: str, *, timeout: float = 5.0) -> bool:
         """Return True once ``/health`` answers HTTP 200.
 
-        Connection errors, transient probe timeouts and HTTP 503 (loading / no
-        slot) are treated as "still starting". The caller enforces the overall
-        startup deadline and caps the per-phase HTTP timeout to its budget.
+        Connection errors (socket file not yet present, connection refused),
+        transient probe timeouts, a connection dropped before a response (a
+        child that exits mid-request: macOS reports it as a protocol error,
+        Linux as a read error) and HTTP 503 (loading / no slot) are treated as
+        "still starting"; the caller's liveness check then reports a dead child
+        as ``MlxcelServerError``. The caller enforces the overall startup
+        deadline and caps the per-phase HTTP timeout to its budget.
         """
         try:
             resp = client.get(url, timeout=timeout)
-        except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError):
+        except (
+            httpx.ConnectError,
+            httpx.TimeoutException,
+            httpx.ReadError,
+            httpx.RemoteProtocolError,
+        ):
             return False
         if resp.status_code == 200:
             return True
@@ -374,7 +455,9 @@ class ManagedServer:
         if self._log_thread is not None and self._log_thread.is_alive():
             self._log_thread.join(timeout=1.0)
 
-        if self.uds_path is not None and os.path.exists(self.uds_path):
+        # Before a child is spawned (for example, binary discovery failed),
+        # this manager has not created a socket and must not unlink that path.
+        if proc is not None and self.uds_path is not None and os.path.exists(self.uds_path):
             try:
                 os.unlink(self.uds_path)
             except OSError:
