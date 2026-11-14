@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Regression tests for CUDA `bfloat16` categorical sampling at large vocabulary
-//! sizes (issue #2958).
+//! Regression tests for CUDA `bfloat16` categorical and multivariate-normal
+//! sampling under CUDA `bfloat16` type promotion (issues #2958, #2971).
 //!
 //! `overlays/cuda/mlx/dtype.cpp` maps `promote_types(bfloat16, float32) -> bfloat16`
 //! so elementwise transformer ops avoid `copy_v` round-trips. Upstream MLX's
@@ -33,6 +33,9 @@
 //!    `add(g /*float32*/, logits /*bfloat16*/)` demoted the `float32` Gumbel
 //!    noise to `bfloat16`, collapsing fine logit differences and shift-invariance
 //!    into `argmax` index-0 ties.
+//! 3. Multivariate normal (`multivariate_normal`, issue #2971): despite
+//!    enforcing `dtype == float32`, `add(mean /*bfloat16*/, scaled_out /*float32*/)`
+//!    demoted the `float32` samples to `bfloat16` whenever `mean` was `bfloat16`.
 
 #![cfg(feature = "cuda")]
 
@@ -266,4 +269,91 @@ fn fused_sample_bf16_top_p_only_masks_tail_without_cumsum_swamping() {
         leaked_tail.len(),
         &leaked_tail[..leaked_tail.len().min(10)]
     );
+}
+
+#[test]
+fn random_multivariate_normal_bf16_mean_returns_f32_samples() {
+    let _gpu = gpu_guard();
+    if !on_cuda() {
+        eprintln!("skip: not a CUDA build/device");
+        return;
+    }
+
+    // MLX's `linalg::svd` inside `multivariate_normal` requires a CPU stream,
+    // while `overlays/cuda/mlx/dtype.cpp` overrides `promote_types(bfloat16, float32)`
+    // process-wide on `--features cuda` builds (including on the CPU stream).
+    let _cpu = DefaultDeviceGuard::cpu();
+    let mean_f32 = mlxcel_core::from_slice_f32(&[3.5, -2.25], &[2]);
+    let mean_bf16 = mlxcel_core::astype(&mean_f32, dtype::BFLOAT16);
+    mlxcel_core::eval(&mean_bf16);
+
+    let cov_f32 = mlxcel_core::from_slice_f32(&[1.0, 0.0, 0.0, 1.0], &[2, 2]);
+    mlxcel_core::eval(&cov_f32);
+    let cov_bf16 = mlxcel_core::astype(&cov_f32, dtype::BFLOAT16);
+    mlxcel_core::eval(&cov_bf16);
+
+    mlxcel_core::random_seed(0x2971_0001);
+    const SAMPLES: i32 = 512;
+
+    for (cov, label) in [(&cov_bf16, "bf16 cov"), (&cov_f32, "f32 cov")] {
+        // SAFETY: null key pointer selects MLX's default RNG key sequence.
+        let samples = unsafe {
+            mlxcel_core::random_multivariate_normal(
+                &mean_bf16,
+                cov,
+                &[SAMPLES],
+                dtype::FLOAT32,
+                std::ptr::null(),
+            )
+        };
+        mlxcel_core::eval(&samples);
+
+        assert_eq!(
+            mlxcel_core::array_dtype(&samples),
+            dtype::FLOAT32,
+            "multivariate_normal({label}) with bfloat16 mean must return float32 samples"
+        );
+        assert_eq!(
+            mlxcel_core::array_shape(&samples),
+            vec![SAMPLES, 2],
+            "multivariate_normal({label}) shape mismatch"
+        );
+
+        let bytes = mlxcel_core::array_to_raw_bytes(&samples);
+        assert_eq!(bytes.len(), (SAMPLES as usize) * 2 * 4);
+        let samples_f32: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert!(
+            samples_f32.iter().all(|x| x.is_finite()),
+            "multivariate_normal({label}) emitted non-finite values"
+        );
+
+        let mean0 = samples_f32
+            .iter()
+            .step_by(2)
+            .map(|&x| f64::from(x))
+            .sum::<f64>()
+            / f64::from(SAMPLES);
+        let mean1 = samples_f32
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|&x| f64::from(x))
+            .sum::<f64>()
+            / f64::from(SAMPLES);
+        assert!(
+            (mean0 - 3.5).abs() < 0.2,
+            "multivariate_normal({label}) col 0 empirical mean {mean0} too far from 3.5"
+        );
+        assert!(
+            (mean1 - (-2.25)).abs() < 0.2,
+            "multivariate_normal({label}) col 1 empirical mean {mean1} too far from -2.25"
+        );
+        assert!(
+            samples_f32.iter().any(|x| (x.to_bits() & 0xffff) != 0),
+            "multivariate_normal({label}) samples lost low 16 float32 mantissa bits (truncated to bfloat16)"
+        );
+    }
 }

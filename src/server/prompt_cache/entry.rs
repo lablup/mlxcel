@@ -407,6 +407,12 @@ pub enum SnapshotOrigin {
     /// that opens with the same system block, so LRU eviction passes over it
     /// while roots hold at most half of the snapshot budget.
     SystemRoot,
+    /// Captured mid-prefill at a multiple of the checkpoint interval (#2885
+    /// Part B, `MLXCEL_PROMPT_CACHE_CHECKPOINT_INTERVAL`). Exempt from the
+    /// session-chain supersede rule: a conversation keeps several of them so a
+    /// request that edits its history resumes from the last one before the
+    /// edit. LRU eviction treats them like any other entry.
+    Checkpoint,
 }
 
 /// A single exact-prefix recurrent/model-owned state snapshot.

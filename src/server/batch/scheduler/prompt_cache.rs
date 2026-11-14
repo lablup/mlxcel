@@ -1238,26 +1238,92 @@ impl BatchScheduler {
     pub(super) fn insert_boundary_snapshot(&mut self, seq: &SequenceInfo, end: usize) {
         if self.system_root_split(seq) == Some(end) {
             self.insert_system_root_snapshot(seq, end);
-        } else {
+        } else if self.history_boundary_split(seq) == Some(end) {
             self.insert_history_boundary_snapshot(seq, end);
+        } else {
+            self.insert_checkpoint_snapshot(seq, end);
         }
     }
 
+    /// Copy the model state at the periodic checkpoint `end` and insert it as
+    /// a [`SnapshotOrigin::Checkpoint`] entry (#2885 Part B).
+    ///
+    /// Same mechanics as [`Self::insert_history_boundary_snapshot`]: the plan
+    /// forwarded `[.., end)` as pieces ending exactly at `end`, so the state
+    /// describes exactly `prompt_tokens[..end]`.
+    pub(super) fn insert_checkpoint_snapshot(&mut self, seq: &SequenceInfo, end: usize) {
+        let _span = tracing::info_span!(
+            "checkpoint_snapshot",
+            seq_id = %seq.seq_id,
+            start = seq.prefill_start_offset,
+            end,
+            prompt_len = seq.prompt_tokens.len(),
+        )
+        .entered();
+        let ctx = match self.prompt_cache_seq_ctx.get(&seq.seq_id) {
+            Some(c) => c.clone(),
+            None => return,
+        };
+        let tokens = seq.prompt_tokens[..end].to_vec();
+        let encoded_span = seq.prompt_tokens.len();
+        self.insert_model_state_snapshot(
+            seq.seq_id,
+            &ctx,
+            tokens,
+            SnapshotOrigin::Checkpoint,
+            encoded_span,
+        );
+    }
+
     /// Every snapshot boundary `seq`'s `PrefillPlan` splits at: the
-    /// system-prompt root (#2885 Part B) and the history boundary (#1143).
+    /// system-prompt root and the periodic checkpoints (#2885 Part B), and the
+    /// history boundary (#1143).
     ///
     /// The classic plan, the paged reservation estimate and both Gemma 4 MTP
     /// prefill mirrors take their splits from here, so all of them build the
     /// prompt state from the same partition.
     pub(super) fn snapshot_splits(&self, seq: &SequenceInfo) -> PrefillSplits {
-        let points: Vec<usize> = [
-            self.system_root_split(seq),
-            self.history_boundary_split(seq),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let root = self.system_root_split(seq);
+        let history = self.history_boundary_split(seq);
+        let reserved = usize::from(root.is_some()) + usize::from(history.is_some());
+        let mut points: Vec<usize> = [root, history].into_iter().flatten().collect();
+        points.extend(self.checkpoint_splits(seq, history, MAX_SPLITS - reserved));
         PrefillSplits::from_points(&points)
+    }
+
+    /// The periodic checkpoints `seq`'s plan splits at (#2885 Part B): every
+    /// multiple of `MLXCEL_PROMPT_CACHE_CHECKPOINT_INTERVAL` after the adopted
+    /// prefix and before the history boundary (or the prompt end), under the
+    /// same gates as [`Self::history_boundary_split`]. Capped at `max`, the
+    /// deepest points kept.
+    pub(super) fn checkpoint_splits(
+        &self,
+        seq: &SequenceInfo,
+        history: Option<usize>,
+        max: usize,
+    ) -> Vec<usize> {
+        let Some(interval) = crate::server::prompt_cache::checkpoint_interval_tokens() else {
+            return Vec::new();
+        };
+        if !self.engine.model().supports_snapshot_reuse()
+            || !self.prompt_cache_active()
+            || seq.vlm_embeddings.is_some()
+            || !self.prompt_cache_seq_ctx.contains_key(&seq.seq_id)
+        {
+            return Vec::new();
+        }
+        let min_prefix = self
+            .prompt_cache
+            .as_ref()
+            .map(|s| s.min_prefix_tokens())
+            .unwrap_or(0);
+        checkpoint_points(
+            interval,
+            seq.prefill_start_offset,
+            history.unwrap_or(seq.prompt_tokens.len()),
+            min_prefix,
+            max,
+        )
     }
 
     /// The system-prompt root `seq`'s plan splits at (#2885 Part B), under the
