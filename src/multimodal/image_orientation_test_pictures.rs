@@ -16,13 +16,15 @@
 //!
 //! No binary fixture: the stored pixels are computed from the upright picture
 //! with the tag's own definition, and the tag is written into the container by
-//! hand (a JPEG `APP1` segment, a PNG `eXIf` chunk).
+//! hand (a JPEG `APP1` segment, a PNG `eXIf` chunk) or handed to the WebP
+//! encoder as its `EXIF` chunk.
 //!
 //! Used by: `image_orientation_tests.rs` and `server::model_worker_tests`.
 
 use std::io::Cursor;
 
-use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+use image::codecs::webp::WebPEncoder;
+use image::{DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, Rgb, RgbImage};
 
 /// The pixels a camera stores for `upright` under EXIF orientation `tag`.
 ///
@@ -110,6 +112,24 @@ pub(crate) fn jpeg_with_orientation(stored: &RgbImage, tag: u16) -> Vec<u8> {
     out.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
     out.extend_from_slice(&payload);
     out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// `stored` as a lossless WebP whose `EXIF` chunk says `tag`.
+pub(crate) fn webp_with_orientation(stored: &RgbImage, tag: u16) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut encoder = WebPEncoder::new_lossless(&mut out);
+    encoder
+        .set_exif_metadata(exif_block(tag))
+        .expect("the WebP encoder takes EXIF metadata");
+    encoder
+        .write_image(
+            stored.as_raw(),
+            stored.width(),
+            stored.height(),
+            ExtendedColorType::Rgb8,
+        )
+        .expect("encode a test picture");
     out
 }
 

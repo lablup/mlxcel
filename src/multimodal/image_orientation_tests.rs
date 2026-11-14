@@ -17,6 +17,7 @@ use image::{DynamicImage, GenericImageView, ImageFormat, RgbImage};
 
 use super::test_pictures::{
     colour_blocks, distinct_pixels, jpeg_with_orientation, png_with_orientation, stored_for,
+    webp_with_orientation,
 };
 use super::{
     exif_orientation, load_upright_from_memory, open_upright, swaps_dimensions, turn_upright,
@@ -47,6 +48,30 @@ fn every_exif_orientation_comes_back_upright_pixel_for_pixel() {
         let loaded = load_upright_from_memory(&bytes).unwrap().to_rgb8();
         assert_eq!(loaded.dimensions(), upright.dimensions(), "tag {tag}");
         assert_eq!(loaded, upright, "tag {tag}");
+    }
+}
+
+#[test]
+fn a_webp_exif_chunk_is_read_as_well() {
+    let upright = distinct_pixels();
+    for tag in TAGS {
+        let stored = stored_for(tag, &upright);
+        let bytes = webp_with_orientation(&stored, u16::from(tag));
+        assert_eq!(
+            exif_orientation(&bytes),
+            Orientation::from_exif(tag).unwrap(),
+            "tag {tag}"
+        );
+        assert_eq!(
+            image::load_from_memory(&bytes).unwrap().to_rgb8(),
+            stored,
+            "tag {tag}: the decode alone"
+        );
+        assert_eq!(
+            load_upright_from_memory(&bytes).unwrap().to_rgb8(),
+            upright,
+            "tag {tag}"
+        );
     }
 }
 
