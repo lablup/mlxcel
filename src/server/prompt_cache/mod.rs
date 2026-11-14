@@ -78,11 +78,12 @@ pub use metrics::{
 pub use policy::{
     ApcConfig, CHECKPOINT_DEFAULT_INTERVAL_TOKENS, PromptCacheConfig, PromptCacheStats,
     SYSTEM_ROOT_DEFAULT_MIN_PROMPT_TOKENS, boundary_snapshot_disabled, cache_warmup_disabled,
-    checkpoint_interval_tokens, system_root_min_prompt_tokens,
+    checkpoint_interval_tokens, keep_previous_turn_enabled, system_root_min_prompt_tokens,
 };
 pub use snapshot_sizing::{
     MODEL_AWARE_SNAPSHOT_CONTEXT_TOKENS, MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES,
-    SnapshotCapacityRecommendation, recommend_model_kv_store_capacity,
+    MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES_KEEP_PREVIOUS_TURN, SnapshotCapacityRecommendation,
+    model_aware_snapshot_target_entries, recommend_model_kv_store_capacity,
     recommend_model_snapshot_capacity,
 };
 pub use store::{PromptCacheStore, SnapshotDivergence, SnapshotLookupOutcome};

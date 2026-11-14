@@ -588,3 +588,65 @@ fn a_snapshot_is_unaffected_by_the_donor_continuing() {
         );
     }
 }
+
+/// Issue #2974: a chained prompt-cache hit, as a multi-turn chat on the
+/// server produces it. Turn 1 prefills `[0..a)` and snapshots; turn 2
+/// restores that, prefills `[a..b)`, snapshots again and runs on (its
+/// generation-prompt suffix and decode); turn 3 restores the second snapshot
+/// and prefills `[b..n)`. Its logits must equal a cold run that forwards the
+/// same three pieces bit for bit, so the restore chain itself loses no state.
+/// Against a cold run with another partition the chain agrees only to
+/// rounding, which is the partition effect #2974 measured on the real model.
+#[test]
+fn a_chained_restore_matches_a_cold_run_of_the_same_partition() {
+    let model = tiny_model(&fixture("model"));
+    let probes = decode_tokens();
+    for (a, b, n) in [(22_usize, 38_usize, 55_usize), (24, 40, 56), (10, 18, 47)] {
+        let prompt = tokens(n);
+
+        let first = snapshot_of(&model, &prompt[..a], SnapshotParts::ALL);
+        let mut turn2 = model
+            .restore_snapshot_caches(&first)
+            .expect("restore turn 2");
+        let _ = model.forward_hidden(&ids(&prompt[a..b]), None, &mut turn2, None);
+        let second = model
+            .capture_snapshot(&turn2, b, SnapshotParts::ALL)
+            .expect("capture turn 2");
+        // Turn 2 goes on with its generation-prompt suffix and its reply.
+        let _ = model.forward_hidden(&ids(&[5, 6, 7]), None, &mut turn2, None);
+        let _ = decode_all(&model, &mut turn2, &probes[..4]);
+        drop(turn2);
+
+        let mut turn3 = model
+            .restore_snapshot_caches(&second)
+            .expect("restore turn 3");
+        let _ = model.forward_hidden(&ids(&prompt[b..]), None, &mut turn3, None);
+        let chained = decode_all(&model, &mut turn3, &probes);
+
+        let mut cold = model.make_internal_caches();
+        for range in [0..a, a..b, b..n] {
+            let _ = model.forward_hidden(&ids(&prompt[range]), None, &mut cold, None);
+        }
+        let same_partition = decode_all(&model, &mut cold, &probes);
+
+        let mut whole = cold_caches(&model, &prompt);
+        let one_piece = decode_all(&model, &mut whole, &probes);
+
+        for step in 0..probes.len() {
+            assert!(
+                identical(&chained[step], &same_partition[step]),
+                "({a}, {b}, {n}): step {step} differs from the same partition run cold"
+            );
+            let (x, y) = (float_values(&one_piece[step]), float_values(&chained[step]));
+            let worst = x
+                .iter()
+                .zip(&y)
+                .map(|(p, q)| (p - q).abs() / p.abs().max(1.0))
+                .fold(0.0_f32, f32::max);
+            assert!(
+                worst < 1e-3,
+                "({a}, {b}, {n}): step {step} is {worst} from a one-piece cold prefill"
+            );
+        }
+    }
+}

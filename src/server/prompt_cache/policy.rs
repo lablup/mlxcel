@@ -71,6 +71,11 @@ pub struct PromptCacheConfig {
     pub snapshot_max_entries: usize,
     /// Time-to-live for snapshot entries since their last successful restore.
     pub snapshot_ttl: Duration,
+    /// Keep each session's most recent restore source out of the
+    /// session-chain supersede rule, so a request that edits or compacts the
+    /// last turn resumes where that turn started. See
+    /// [`keep_previous_turn_enabled`]; startup copies the switch in here.
+    pub keep_previous_turn: bool,
 }
 
 /// Operator kill switch for the history-boundary snapshot (issue #1143).
@@ -281,6 +286,47 @@ pub(crate) fn parse_checkpoint_interval(value: Option<&str>) -> Option<usize> {
     }
 }
 
+/// Opt-in switch that keeps the previous turn's restore point (#2885 Part B).
+///
+/// The session-chain supersede rule keeps one boundary and one completion
+/// snapshot per conversation. Turn N restores from turn N-1's snapshot, and
+/// inserting turn N's own snapshot supersedes it, so a request that replaces
+/// or compacts turn N's user message finds no snapshot before the edit: turn
+/// N's history boundary ends after that message. With this switch on, the
+/// store remembers, per session, the snapshot the latest turn restored from
+/// and exempts it from the supersede rule until a later turn restores from
+/// something else. A conversation then holds one more snapshot, and such an
+/// edit resumes where the previous turn started instead of at the
+/// system-prompt root.
+///
+/// `MLXCEL_PROMPT_CACHE_KEEP_PREVIOUS_TURN`: `1`, `on` or `true` turns it on;
+/// anything else, including unset, leaves it off. Ignored when the history
+/// boundary is disabled ([`boundary_snapshot_disabled`]). Read once per
+/// process.
+///
+/// Used by: `server::startup::resolve_prompt_cache_store`
+pub fn keep_previous_turn_enabled() -> bool {
+    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        !boundary_snapshot_disabled()
+            && parse_switch(
+                std::env::var("MLXCEL_PROMPT_CACHE_KEEP_PREVIOUS_TURN")
+                    .ok()
+                    .as_deref(),
+            )
+    })
+}
+
+/// Parse an on/off environment switch: `1`, `on` or `true` (any case) is on.
+pub(crate) fn parse_switch(value: Option<&str>) -> bool {
+    value.is_some_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "on" | "true"
+        )
+    })
+}
+
 /// Operator kill switch for the background prompt-cache warm-up (issue #1144).
 ///
 /// Separate from [`boundary_snapshot_disabled`] on purpose. The boundary
@@ -384,7 +430,16 @@ impl PromptCacheConfig {
             snapshot_capacity_bytes_explicit: false,
             snapshot_max_entries: Self::DEFAULT_SNAPSHOT_MAX_ENTRIES,
             snapshot_ttl: Duration::from_secs(Self::DEFAULT_SNAPSHOT_TTL_SECONDS),
+            keep_previous_turn: false,
         }
+    }
+
+    /// Builder-style: keep each session's previous-turn restore source; see
+    /// [`Self::keep_previous_turn`].
+    #[must_use]
+    pub fn with_keep_previous_turn(mut self, keep: bool) -> Self {
+        self.keep_previous_turn = keep;
+        self
     }
 
     /// Builder-style: attach APC configuration. Returns `self` so callers can
@@ -456,6 +511,7 @@ impl Default for PromptCacheConfig {
             snapshot_capacity_bytes_explicit: false,
             snapshot_max_entries: Self::DEFAULT_SNAPSHOT_MAX_ENTRIES,
             snapshot_ttl: Duration::from_secs(Self::DEFAULT_SNAPSHOT_TTL_SECONDS),
+            keep_previous_turn: false,
         }
     }
 }

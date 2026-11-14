@@ -600,3 +600,53 @@ fn qwen4_exp_counts_recurrent_state_and_qsa_index() {
         "six representative snapshots fit on a roomy host"
     );
 }
+
+#[test]
+fn keep_previous_turn_raises_the_implicit_target_by_half() {
+    let cfg = json!({
+        "model_type": "qwen3_next",
+        "num_hidden_layers": 64,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "full_attention_interval": 4,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 48,
+        "linear_key_head_dim": 128,
+        "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4
+    });
+    let memory = Some(64 * 1024 * 1024 * 1024);
+    let base = recommend_model_snapshot_capacity_from_config(
+        &cfg,
+        131_072,
+        PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+        memory,
+    )
+    .expect("default recommendation");
+    let kept = recommend_model_snapshot_capacity_from_config_with_entries(
+        &cfg,
+        131_072,
+        PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+        memory,
+        model_aware_snapshot_target_entries(true),
+    )
+    .expect("keep-previous-turn recommendation");
+
+    assert_eq!(model_aware_snapshot_target_entries(false), 6);
+    assert_eq!(kept.target_entries, 9);
+    assert_eq!(kept.entry_bytes, base.entry_bytes);
+    assert_eq!(kept.capacity_bytes, base.entry_bytes * 9);
+    assert_eq!(base.capacity_bytes, base.entry_bytes * 6);
+
+    // The quarter-of-free-memory ceiling still binds.
+    let tight = recommend_model_snapshot_capacity_from_config_with_entries(
+        &cfg,
+        131_072,
+        PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+        Some(16 * 1024 * 1024 * 1024),
+        9,
+    )
+    .expect("tight recommendation");
+    assert_eq!(tight.capacity_bytes, 4 * 1024 * 1024 * 1024);
+}

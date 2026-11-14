@@ -43,6 +43,86 @@ fn muse_prompt_primed_leading_space_routes_reasoning() {
 }
 
 #[test]
+fn muse_prompt_primed_user_header_strips_envelope_and_preserves_korean_greeting() {
+    for prefix in ["to=user<|message|>", " to=user<|message|>"] {
+        let raw =
+            format!("{prefix}안녕하세요! 신정규님, 반갑습니다. 😊\n\n무엇을 도와드릴까요?<|eot|>");
+        let chunks: Vec<String> = raw.chars().map(|c| c.to_string()).collect();
+        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let (visible, _, consumed) = collect_visible(&refs);
+        assert_eq!(
+            visible,
+            "안녕하세요! 신정규님, 반갑습니다. 😊\n\n무엇을 도와드릴까요?"
+        );
+        assert_eq!(consumed, refs.len());
+    }
+}
+
+#[test]
+fn muse_standalone_leading_space_token_does_not_leak_before_answer() {
+    let mut filter = StreamFilter::new();
+    let fragments = [
+        " ",
+        "to=self",
+        "<|message|>",
+        "Think first.",
+        "<|eom|>",
+        "<|start|>assistant to=user<|message|>",
+        "Done",
+        "<|eot|>",
+    ];
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut consumed = 0usize;
+    for fragment in fragments {
+        let out = filter.feed(fragment);
+        consumed += out.consumed_positions;
+        content.push_str(out.content.as_deref().unwrap_or(""));
+        reasoning.push_str(out.reasoning.as_deref().unwrap_or(""));
+    }
+    let tail = filter.flush();
+    consumed += tail.consumed_positions;
+    content.push_str(tail.content.as_deref().unwrap_or(""));
+    reasoning.push_str(tail.reasoning.as_deref().unwrap_or(""));
+    assert_eq!(reasoning, "Think first.");
+    assert_eq!(content, "Done");
+    assert_eq!(consumed, fragments.len());
+}
+
+#[test]
+fn muse_prompt_primed_tool_recipient_and_post_eom_boundary_headers_route_cleanly() {
+    let primed_tool = concat!(
+        " to=weather.get_current<|message|><atem:function_calls>",
+        "<atem:invoke name=\"weather.get_current\">",
+        "<atem:parameter name=\"city\">Seoul</atem:parameter>",
+        "</atem:invoke></atem:function_calls><|eot|>"
+    );
+    let chunks: Vec<String> = primed_tool.chars().map(|c| c.to_string()).collect();
+    let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+    let (visible, _, consumed) = collect_visible(&refs);
+    assert_eq!(visible, "");
+    assert_eq!(consumed, refs.len());
+
+    let post_eom = "to=self<|message|>Check facts.<|eom|> to=user<|message|>29 C.<|eot|>";
+    let post_chunks: Vec<String> = post_eom.chars().map(|c| c.to_string()).collect();
+    let post_refs: Vec<&str> = post_chunks.iter().map(String::as_str).collect();
+    let (visible, _, consumed) = collect_visible(&post_refs);
+    assert_eq!(visible, "29 C.");
+    assert_eq!(consumed, post_refs.len());
+}
+
+#[test]
+fn plain_prose_starting_with_to_equals_streams_through_unchanged() {
+    for prose in ["to=user is a query flag", " to= or not to= in plain prose"] {
+        let chunks: Vec<String> = prose.chars().map(|c| c.to_string()).collect();
+        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let (visible, _, consumed) = collect_visible(&refs);
+        assert_eq!(visible, prose);
+        assert_eq!(consumed, refs.len());
+    }
+}
+
+#[test]
 fn muse_dynamic_tool_recipient_header_is_suppressed() {
     let mut filter = StreamFilter::new();
     let fragments = [
