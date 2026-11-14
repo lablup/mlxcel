@@ -84,14 +84,34 @@ pub fn try_atem(text: &str) -> Option<ToolCallParseResult> {
     })
 }
 
+pub(super) const MUSE_MAX_RECIPIENT_BYTES: usize = 256;
+
+/// Whether `recipient` can appear in a boundary `to=<recipient><|message|>`
+/// Muse header without a preceding `<|start|>assistant` role marker.
+pub(super) fn is_valid_muse_recipient(recipient: &str) -> bool {
+    recipient.len() <= MUSE_MAX_RECIPIENT_BYTES
+        && !recipient.chars().any(char::is_whitespace)
+        && !recipient.contains('<')
+        && !recipient.contains('>')
+}
+
+fn parse_muse_boundary_header(text: &str) -> Option<(&str, usize)> {
+    let after_to = text.strip_prefix("to=")?;
+    let message_pos = after_to.find("<|message|>")?;
+    let recipient = &after_to[..message_pos];
+    is_valid_muse_recipient(recipient)
+        .then_some((recipient, "to=".len() + message_pos + "<|message|>".len()))
+}
+
 /// Split the recipient-oriented message envelope used by Muse/Onyx.
 ///
 /// The chat template primes `<|start|>assistant`, so the first generated
-/// message commonly starts with only ` to=self<|message|>`. Subsequent
-/// messages include the full `<|start|>assistant to=...<|message|>` header.
-/// Reasoning addressed to `self` must not leak into user-visible content, and
-/// a tool-recipient header must remain hidden after its ATEM payload has been
-/// extracted.
+/// message commonly starts with ` to=<recipient><|message|>` or
+/// `to=<recipient><|message|>`. Subsequent messages include the full
+/// `<|start|>assistant to=...<|message|>` header, or another boundary
+/// `to=<recipient><|message|>` header after `<|eom|>`. Reasoning addressed to
+/// `self` must not leak into user-visible content, and a tool-recipient header
+/// must remain hidden after its ATEM payload has been extracted.
 pub(super) fn split_muse_channels(text: &str) -> (String, Option<String>) {
     const START: &str = "<|start|>assistant";
     const MESSAGE: &str = "<|message|>";
@@ -99,7 +119,7 @@ pub(super) fn split_muse_channels(text: &str) -> (String, Option<String>) {
 
     let trimmed = text.trim();
     if !trimmed.contains(MESSAGE)
-        || !(trimmed.starts_with("to=") || trimmed.starts_with(" to=") || trimmed.contains(START))
+        || (parse_muse_boundary_header(trimmed).is_none() && !trimmed.contains(START))
     {
         return (text.to_string(), None);
     }
@@ -109,27 +129,34 @@ pub(super) fn split_muse_channels(text: &str) -> (String, Option<String>) {
     let mut rest = trimmed;
 
     while !rest.is_empty() {
-        let (header_start, header_len) = if rest.starts_with("to=") {
-            (0, 0)
-        } else if rest.starts_with(" to=") {
-            (1, 0)
-        } else if let Some(start) = rest.find(START) {
-            let prefix = rest[..start].trim();
-            if !prefix.is_empty() {
-                append_channel_text(&mut content, prefix);
-            }
-            (start, START.len())
-        } else {
-            append_channel_text(&mut content, rest);
-            break;
-        };
+        let (recipient, body_region) =
+            if let Some((recipient, consumed)) = parse_muse_boundary_header(rest) {
+                let recipient = if recipient.is_empty() {
+                    "user"
+                } else {
+                    recipient
+                };
+                (recipient, &rest[consumed..])
+            } else if let Some(start) = rest.find(START) {
+                let prefix = rest[..start].trim();
+                if !prefix.is_empty() {
+                    append_channel_text(&mut content, prefix);
+                }
+                let after_start = &rest[start + START.len()..];
+                let Some(message_pos) = after_start.find(MESSAGE) else {
+                    break;
+                };
+                let header = after_start[..message_pos].trim();
+                let recipient = header
+                    .strip_prefix("to=")
+                    .and_then(|value| value.split_whitespace().next())
+                    .unwrap_or("user");
+                (recipient, &after_start[message_pos + MESSAGE.len()..])
+            } else {
+                append_channel_text(&mut content, rest);
+                break;
+            };
 
-        let after_start = &rest[header_start + header_len..];
-        let Some(message_pos) = after_start.find(MESSAGE) else {
-            break;
-        };
-        let header = after_start[..message_pos].trim();
-        let body_region = &after_start[message_pos + MESSAGE.len()..];
         let body_end = TERMINATORS
             .iter()
             .filter_map(|marker| body_region.find(marker))
@@ -137,10 +164,6 @@ pub(super) fn split_muse_channels(text: &str) -> (String, Option<String>) {
             .unwrap_or(body_region.len());
         let body = body_region[..body_end].trim();
 
-        let recipient = header
-            .strip_prefix("to=")
-            .and_then(|value| value.split_whitespace().next())
-            .unwrap_or("user");
         match recipient {
             "self" => append_channel_text(&mut reasoning, body),
             "user" => append_channel_text(&mut content, body),
@@ -175,9 +198,8 @@ pub fn render_muse_channels_for_display(
 ) -> Option<String> {
     let trimmed = text.trim();
     if !trimmed.contains("<|message|>")
-        || !(trimmed.starts_with("to=")
-            || trimmed.starts_with(" to=")
-            || trimmed.contains("<|start|>assistant"))
+        || (parse_muse_boundary_header(trimmed).is_none()
+            && !trimmed.contains("<|start|>assistant"))
     {
         return None;
     }

@@ -389,6 +389,19 @@ unsafe extern "C" {
     fn xla_test_weight_upload_bytes_get() -> u64;
     #[cfg(feature = "test-support")]
     fn xla_test_weight_upload_reset();
+    /// Test support (issue #3028): per-decode-step staging allocation and
+    /// persistent readback counters, plus the state field and a hook that forces
+    /// the fallback path, so a device test can prove reuse and degradation.
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_scalar_alloc_calls_get() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_d2d_readbacks_get() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_step_scalars_state(c: *const XlaCtx) -> c_int;
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_counters_reset();
+    #[cfg(feature = "test-support")]
+    fn xla_test_force_step_scalars_unsupported(c: *mut XlaCtx, unsupported: c_int);
     /// Test support (issue #2954): reach the prefill C entry points with
     /// caller-supplied positions, so a device test can prove the C boundary
     /// rejects out-of-range values the public API never forwards.
@@ -632,6 +645,28 @@ pub fn weight_upload_counters() -> (u64, u64) {
         (
             xla_test_weight_upload_calls_get(),
             xla_test_weight_upload_bytes_get(),
+        )
+    }
+}
+
+/// Test support (issue #3028): reset the shim's per-decode-step staging and
+/// persistent-readback counters.
+#[cfg(feature = "test-support")]
+pub fn reset_decode_scalar_counters() {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { xla_test_decode_counters_reset() };
+}
+
+/// Test support (issue #3028): `(scalar_alloc_calls, d2d_readbacks)` the single-
+/// sequence decode shim has made since the last reset.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn decode_scalar_counters() -> (u64, u64) {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe {
+        (
+            xla_test_decode_scalar_alloc_calls_get(),
+            xla_test_decode_d2d_readbacks_get(),
         )
     }
 }
@@ -3194,6 +3229,24 @@ impl IreeLlama {
             return Err(format!("xla_llama_decode failed (status {rc})"));
         }
         Ok(out)
+    }
+
+    /// Test support (issue #3028): the shim's decode-step scalar state
+    /// (`0` not attempted, `1` reuse active, `-1` fallback).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_decode_step_scalars_state(&self) -> i32 {
+        // Safety: the state is a plain field read from a live context.
+        unsafe { xla_test_decode_step_scalars_state(self.ctx) }
+    }
+
+    /// Test support (issue #3028): force the per-step allocation path on
+    /// (`true`) or clear the forced state (`false`), so a device test can drive
+    /// the fallback directly.
+    #[cfg(feature = "test-support")]
+    pub fn test_force_step_scalars_unsupported(&mut self, unsupported: bool) {
+        // Safety: only writes one state field on a live context.
+        unsafe { xla_test_force_step_scalars_unsupported(self.ctx, i32::from(unsupported)) };
     }
 
     /// Test support (issue #2954): run the token prefill C entry with exactly

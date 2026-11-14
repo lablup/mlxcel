@@ -3414,12 +3414,20 @@ pub(super) fn resolve_prompt_cache_store(
     model_path: &Path,
     batch_metrics: &Arc<BatchMetrics>,
 ) -> Option<Arc<crate::server::prompt_cache::PromptCacheStore>> {
+    // Copied before sizing so the default budget can make room for the extra
+    // snapshot per conversation the switch keeps (#3035).
+    if crate::server::prompt_cache::keep_previous_turn_enabled() {
+        config.prompt_cache.keep_previous_turn = true;
+    }
     if config.prompt_cache.is_enabled()
         && !config.prompt_cache.snapshot_capacity_bytes_explicit
         && let Some(rec) = crate::server::prompt_cache::recommend_model_snapshot_capacity(
             model_path,
             config.context_size,
             config.prompt_cache.snapshot_capacity_bytes,
+            crate::server::prompt_cache::model_aware_snapshot_target_entries(
+                config.prompt_cache.keep_previous_turn,
+            ),
         )
         && rec.capacity_bytes > config.prompt_cache.snapshot_capacity_bytes
     {
