@@ -41,12 +41,16 @@ def _executable(path: Path, body: str) -> str:
 
 
 def _start(caller: str, binary: str, path: Path) -> None:
+    # Generous budget: the stand-in children exit on their own well before it,
+    # but a freshly written executable can take seconds to launch on a loaded
+    # macOS host (first-run malware scan), and a timeout would kill the child
+    # before it records that it bound the path.
     if caller == "manager":
         manager = ManagedServer(
             "unused/model",
             binary=binary,
             socket_path=str(path),
-            startup_timeout=2.0,
+            startup_timeout=10.0,
             shutdown_grace=0.1,
         )
         try:
@@ -55,11 +59,19 @@ def _start(caller: str, binary: str, path: Path) -> None:
             manager.close()
     elif caller == "sync_constructor":
         mlxcel.LLM(
-            "unused/model", binary=binary, socket=str(path), startup_timeout=2.0, shutdown_grace=0.1
+            "unused/model",
+            binary=binary,
+            socket=str(path),
+            startup_timeout=10.0,
+            shutdown_grace=0.1,
         )
     else:
         mlxcel.AsyncLLM(
-            "unused/model", binary=binary, socket=str(path), startup_timeout=2.0, shutdown_grace=0.1
+            "unused/model",
+            binary=binary,
+            socket=str(path),
+            startup_timeout=10.0,
+            shutdown_grace=0.1,
         )
 
 

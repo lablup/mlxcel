@@ -22,7 +22,7 @@ import pytest
 
 import mlxcel
 from mlxcel._server import ManagedServer
-from mlxcel.errors import MlxcelServerError
+from mlxcel.errors import MlxcelServerError, MlxcelTimeoutError
 
 HERE = Path(__file__).resolve().parent
 FAKE_SERVER = HERE / "fake_server.py"
@@ -197,6 +197,56 @@ def test_socket_path_too_long(tmp_path: Path) -> None:
     long_path = "/tmp/" + ("x" * 200) + ".sock"
     with pytest.raises(MlxcelServerError):
         ManagedServer("fake/model", socket_path=long_path)
+
+
+@pytest.mark.parametrize(
+    "timeout_error",
+    [httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout],
+)
+def test_health_probe_timeout_is_retryable(timeout_error: type[httpx.TimeoutException]) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise timeout_error("temporary health-probe timeout", request=request)
+        return httpx.Response(200)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert not ManagedServer._probe_once(client, "http://unused/health")
+        assert ManagedServer._probe_once(client, "http://unused/health")
+
+
+def test_slow_health_cannot_succeed_after_startup_deadline(fake_binary: str) -> None:
+    server = ManagedServer(
+        "fake/model",
+        binary=fake_binary,
+        host="127.0.0.1",
+        startup_timeout=0.2,
+        extra_args=["--health-delay", "1.0"],
+    )
+    try:
+        with pytest.raises(MlxcelTimeoutError):
+            server.start()
+        assert server._proc is not None and server._proc.poll() is not None
+    finally:
+        server.close()
+
+
+def test_slow_health_within_startup_budget_is_ready(fake_binary: str) -> None:
+    server = ManagedServer(
+        "fake/model",
+        binary=fake_binary,
+        host="127.0.0.1",
+        startup_timeout=5.0,
+        extra_args=["--health-delay", "0.05"],
+    )
+    try:
+        server.start()
+        server.ensure_alive()
+    finally:
+        server.close()
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="UDS not supported on Windows")
