@@ -336,10 +336,13 @@ class AsyncLLM:
         if self._closed:
             return
         self._closed = True
-        if self._http_client is not None:
-            await self._http_client.aclose()
-        if self._server is not None:
-            self._server.close()
+        try:
+            if self._http_client is not None:
+                await self._http_client.aclose()
+        finally:
+            # HTTP cleanup can raise (or be cancelled). Still reap our child.
+            if self._server is not None:
+                self._server.close()
 
     async def __aenter__(self) -> "AsyncLLM":
         return self

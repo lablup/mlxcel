@@ -31,7 +31,7 @@
 //! 2. Each snapshot boundary strictly inside the remaining span (a
 //!    [`PrefillSplits`]: the history boundary, a chat prompt's rendering
 //!    without its generation prompt, and optionally the system-prompt root
-//!    before it) ends one unpadded piece, whatever the chunk size: the
+//!    and the periodic checkpoints before it) ends one unpadded piece, whatever the chunk size: the
 //!    snapshot the prompt cache stores there must describe exactly the keyed
 //!    tokens, and several snapshot families cannot rewind pad positions out
 //!    of their recurrent state. The Gemma 4 MTP burst mirrors this partition
@@ -277,15 +277,17 @@ impl PrefillPiece {
     }
 }
 
-/// Maximum number of snapshot boundaries one plan splits at.
-const MAX_SPLITS: usize = 4;
+/// Maximum number of snapshot boundaries one plan splits at: the
+/// system-prompt root, the history boundary and up to fourteen periodic
+/// checkpoints (#2885 Part B).
+pub const MAX_SPLITS: usize = 16;
 
 /// The snapshot boundaries a prefill is split at, ascending and distinct.
 ///
 /// The prompt cache stores a model-state snapshot at each of them, so each
-/// one ends an unpadded piece (see the module docs). Today a chat request
-/// carries at most two: the system-prompt root (#2885 Part B) and the history
-/// boundary (#1143). `Option<usize>` converts into a single-boundary set, which
+/// one ends an unpadded piece (see the module docs). A chat request carries
+/// the history boundary (#1143) and, when their switches are on, the
+/// system-prompt root and the periodic checkpoints before it (#2885 Part B). `Option<usize>` converts into a single-boundary set, which
 /// keeps every caller that only knows the history boundary unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PrefillSplits {
