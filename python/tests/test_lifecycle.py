@@ -7,6 +7,7 @@ without the real Rust binary or a model.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import stat
@@ -276,3 +277,144 @@ def test_ensure_alive_after_crash(fake_binary: str, tmp_path: Path) -> None:
     with pytest.raises(MlxcelServerError):
         server.ensure_alive()
     server.close()
+
+
+class _HttpCloseFailure(RuntimeError):
+    pass
+
+
+@pytest.mark.parametrize("context_exit", [False, True])
+def test_http_close_error_still_reaps_the_managed_child(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, context_exit: bool
+) -> None:
+    llm = mlxcel.LLM("fake/model", binary=fake_binary, host="127.0.0.1")
+    server = llm._server
+    assert server is not None and server._proc is not None
+    proc = server._proc
+    assert proc.poll() is None and llm._http_client is not None
+    original_close = llm._http_client.close
+
+    def failing_close() -> None:
+        original_close()
+        raise _HttpCloseFailure("injected HTTP cleanup failure")
+
+    monkeypatch.setattr(llm._http_client, "close", failing_close)
+    try:
+        with pytest.raises(_HttpCloseFailure, match="injected HTTP cleanup failure"):
+            if context_exit:
+                with llm:
+                    pass
+            else:
+                llm.close()
+        assert proc.poll() is not None, "HTTP cleanup failure left the managed child alive"
+        llm.close()  # Still idempotent after the first close reported its error.
+    finally:
+        server.close()  # Also reap the intentionally failing baseline arm.
+        original_close()
+
+
+@pytest.mark.parametrize("context_exit", [False, True])
+def test_async_http_close_error_still_reaps_the_managed_child(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, context_exit: bool
+) -> None:
+    async def exercise() -> None:
+        llm = mlxcel.AsyncLLM("fake/model", binary=fake_binary, host="127.0.0.1")
+        server = llm._server
+        assert server is not None and server._proc is not None
+        proc = server._proc
+        assert proc.poll() is None and llm._http_client is not None
+        original_close = llm._http_client.aclose
+
+        async def failing_close() -> None:
+            await original_close()
+            raise _HttpCloseFailure("injected HTTP cleanup failure")
+
+        monkeypatch.setattr(llm._http_client, "aclose", failing_close)
+        try:
+            with pytest.raises(_HttpCloseFailure, match="injected HTTP cleanup failure"):
+                if context_exit:
+                    async with llm:
+                        pass
+                else:
+                    await llm.close()
+            assert proc.poll() is not None, "HTTP cleanup failure left the managed child alive"
+            await llm.close()
+        finally:
+            server.close()
+            await original_close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("context_exit", [False, True])
+def test_cancelled_async_http_close_still_reaps_the_managed_child(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, context_exit: bool
+) -> None:
+    async def exercise() -> None:
+        llm = mlxcel.AsyncLLM("fake/model", binary=fake_binary, host="127.0.0.1")
+        server = llm._server
+        assert server is not None and server._proc is not None
+        proc = server._proc
+        assert proc.poll() is None and llm._http_client is not None
+        original_close = llm._http_client.aclose
+        entered = asyncio.Event()
+        never = asyncio.Event()
+
+        async def suspended_close() -> None:
+            entered.set()
+            await never.wait()
+
+        async def close_client() -> None:
+            if context_exit:
+                async with llm:
+                    pass
+            else:
+                await llm.close()
+
+        monkeypatch.setattr(llm._http_client, "aclose", suspended_close)
+        task = asyncio.create_task(close_client())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert proc.poll() is not None, "cancelled HTTP cleanup left the managed child alive"
+            await llm.close()
+        finally:
+            task.cancel()
+            if not task.done():
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            server.close()
+            await original_close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_successful_http_close_reaps_the_managed_child(fake_binary: str, async_mode: bool) -> None:
+    async def exercise_async() -> None:
+        llm = mlxcel.AsyncLLM("fake/model", binary=fake_binary, host="127.0.0.1")
+        server = llm._server
+        assert server is not None and server._proc is not None
+        try:
+            await llm.close()
+            await llm.close()
+            assert server._proc.poll() is not None
+        finally:
+            server.close()
+
+    if async_mode:
+        asyncio.run(exercise_async())
+    else:
+        llm = mlxcel.LLM("fake/model", binary=fake_binary, host="127.0.0.1")
+        server = llm._server
+        assert server is not None and server._proc is not None
+        try:
+            llm.close()
+            llm.close()
+            assert server._proc.poll() is not None
+        finally:
+            server.close()

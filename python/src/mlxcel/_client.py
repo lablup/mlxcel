@@ -318,10 +318,13 @@ class LLM:
         if self._closed:
             return
         self._closed = True
-        if self._http_client is not None:
-            self._http_client.close()
-        if self._server is not None:
-            self._server.close()
+        try:
+            if self._http_client is not None:
+                self._http_client.close()
+        finally:
+            # HTTP cleanup can raise (or be cancelled). Still reap our child.
+            if self._server is not None:
+                self._server.close()
 
     def __enter__(self) -> "LLM":
         return self
