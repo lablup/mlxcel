@@ -188,6 +188,17 @@ and date; it has no `-m` and no `--runs`.
 # 128 GB host 1.209 yields a ~90 GB budget.
 BENCH_MEM_OVERHEAD_FACTOR=1.209 ./scripts/bench_decode.sh all --cooldown 30 --big-cooldown 30
 
+# Paired A/B of two builds of the OpenXLA / IREE backend on one HAL device.
+# The two arms run interleaved, medians are reported with the number of rounds
+# the new arm won, and the greedy text has to match. --old takes a git ref
+# (built in a temporary worktree) or a path to an already-built binary; --new
+# defaults to the working tree. Three cases are refused rather than measured:
+# two arms holding the same bytes, a zero prefill window (whole-run accounting,
+# #3042), and differing text. `--help` lists the device, capacity and quant
+# flags. The script applies the matching setup-*.sh env when it is not exported.
+./scripts/xla/ab_decode_pair.sh --model models/llama-3.2-1b-instruct-4bit \
+    --device hip --old origin/main --tokens 128 --rounds 6
+
 # Speculative / MTP sweep. Prints a Markdown table on stdout and writes no CSV;
 # transcribe it into benchmarks/{backend}_{hw}_spec_{date}.csv.
 ./target/release/speculative_bench --sweep --max-tokens 128
