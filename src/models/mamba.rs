@@ -233,8 +233,30 @@ pub struct MambaBlock {
     out_proj: UnifiedLinear,
 
     // SSM parameters
-    a_log: UniquePtr<MlxArray>,
+    /// `A = -exp(A_log)` in float32, from [`ssm_a_from_log`].
+    a: UniquePtr<MlxArray>,
     d_param: UniquePtr<MlxArray>,
+}
+
+/// The SSM transition `A = -exp(A_log)`, computed once in float32.
+///
+/// Issue #3046: on Apple Silicon a bf16 checkpoint is cast to f16 at load, and
+/// `exp` of a trained `A_log` overflows f16, whose largest finite value
+/// (65504) is `exp(11.09)`. `state-spaces/mamba-130m` carries `A_log` up to
+/// 19.5, so 1530 of its 589824 `A` entries (in 23 of 24 layers) became
+/// `-inf`, and a channel whose `softplus` step underflowed to zero in f16 then
+/// computed `0 * -inf = NaN` for its decay. The NaN reached every logit on the
+/// first token, greedy sampling took token 0, which is this model's EOS, and
+/// generation stopped with no output. Without the f16 conversion (an f32
+/// checkpoint, or `MLXCEL_KEEP_BF16`) it never appeared, because f32 and bf16
+/// both hold `exp(19.5)`. Computing `A` from a float32 copy keeps the value
+/// the checkpoint describes whatever the load-time dtype policy did to
+/// `A_log`; `MambaBlock::scan_a` decides the dtype each scan reads it in.
+pub(crate) fn ssm_a_from_log(a_log: &MlxArray) -> UniquePtr<MlxArray> {
+    let a_log = mlxcel_core::astype(a_log, mlxcel_core::dtype::FLOAT32);
+    let a = mlxcel_core::negative(&mlxcel_core::exp(&a_log));
+    mlxcel_core::eval(&a);
+    a
 }
 
 impl MambaBlock {
@@ -303,6 +325,22 @@ impl MambaBlock {
         silu(&conv_out)
     }
 
+    /// `A` as both scans consume it: in the activation dtype, so a bf16 or
+    /// float32 model rounds exactly as it did before `A` moved to float32
+    /// (rounding the float32 `-exp(A_log)` to bf16 gives the value `exp` of a
+    /// bf16 `A_log` always gave). f16 is the exception, because it cannot hold
+    /// `A` at all (issue #3046): there `A` stays float32, which the fused
+    /// kernel reads as is, and in the graph scan `delta * A` and its `exp` run
+    /// in float32 and `ssm_step` rounds only the decay back.
+    fn scan_a(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let dtype = mlxcel_core::array_dtype(x);
+        if dtype == mlxcel_core::dtype::FLOAT16 {
+            mlxcel_core::copy(&self.a)
+        } else {
+            mlxcel_core::astype(&self.a, dtype)
+        }
+    }
+
     fn ssm_step(
         &self,
         x: &MlxArray,
@@ -350,6 +388,14 @@ impl MambaBlock {
             let delta_exp = mlxcel_core::expand_dims(&delta, -1);
             let delta_a = mlxcel_core::multiply(&delta_exp, a);
             let decay = mlxcel_core::exp(&delta_a);
+            // `a` is float32 only for f16 activations (see `scan_a`).
+            // The decay lies in (0, 1], so rounding it back to the activation
+            // dtype keeps the state, and everything after it, in that dtype.
+            let decay = if mlxcel_core::array_dtype(&decay) == mlxcel_core::array_dtype(x) {
+                decay
+            } else {
+                mlxcel_core::astype(&decay, mlxcel_core::array_dtype(x))
+            };
             let state_contrib = mlxcel_core::multiply(prev_state, &decay);
             new_state = mlxcel_core::add(&new_state, &state_contrib);
         }
@@ -379,8 +425,8 @@ impl MambaBlock {
         // Conv1d with caching
         let x_conv = self.conv(&x_part, cache.as_deref_mut());
 
-        // A = -exp(A_log)
-        let a = mlxcel_core::negative(&mlxcel_core::exp(&self.a_log));
+        // A = -exp(A_log), precomputed in float32 at load (issue #3046).
+        let a = self.scan_a(&x_conv);
 
         // Process sequence step by step
         let state_cache = cache
@@ -771,6 +817,7 @@ impl MambaModel {
                 .remove(&format!("{}.mixer.D", prefix))
                 .ok_or(format!("Missing D for layer {}", i))?;
 
+            let a = ssm_a_from_log(&a_log);
             let mixer = MambaBlock {
                 hidden_size: config.hidden_size,
                 intermediate_size: config.intermediate_size,
@@ -785,7 +832,7 @@ impl MambaModel {
                 x_proj,
                 dt_proj,
                 out_proj,
-                a_log,
+                a,
                 d_param,
             };
 

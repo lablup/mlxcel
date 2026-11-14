@@ -628,7 +628,7 @@ fn tiny_mamba_block(use_bcdt_rms: bool, mixer_rms_eps: f32) -> super::MambaBlock
         x_proj,
         dt_proj,
         out_proj,
-        a_log,
+        a: super::ssm_a_from_log(&a_log),
         d_param,
     }
 }
@@ -732,7 +732,7 @@ fn varied_mamba_block(use_bcdt_rms: bool) -> super::MambaBlock {
             Some(varied(&[i as i32], 6, 0.2, -0.5)),
         )),
         out_proj: lin(h, i, 7),
-        a_log: varied(&[i as i32, n as i32], 8, 0.5, 0.0),
+        a: super::ssm_a_from_log(&varied(&[i as i32, n as i32], 8, 0.5, 0.0)),
         d_param: varied(&[i as i32], 9, 1.0, 0.0),
     }
 }
@@ -801,4 +801,151 @@ fn mamba_reports_every_layer_stateless() {
     let storage = model.kv_cache_storage_modes().expect("a storage report");
     assert_eq!(storage.len(), model.num_layers());
     assert!(storage.iter().all(Option::is_none), "{storage:?}");
+}
+
+/// A two-layer Mamba whose SSM parameters sit where `mamba-130m`'s do, stored
+/// as bf16 and then put through the load-time bf16 -> f16 conversion Apple
+/// Silicon applies (`convert_bf16_weights`), so the model is built from exactly
+/// the f16 tensors `MambaModel::load` hands it there.
+///
+/// Channels 0..4 carry `A_log = 19.5` (the checkpoint's largest value; 1530
+/// of its 589824 entries exceed `ln(65504) = 11.09`, the f16 limit for
+/// `exp`), and channels 0..2 a `dt_proj` bias of -30, so their `softplus`
+/// step is about 1e-13 and rounds to zero in f16, as a trained `dt_proj` bias
+/// of -20.6 does on real activations.
+fn f16_converted_model_with_overflowing_a_log() -> super::MambaModel {
+    use crate::models::embedding_test_support::Rng;
+
+    let (vocab, h, i, n, r, layers) = (16i32, 8i32, 16i32, 4i32, 1i32, 2usize);
+    let config = serde_json::from_value(serde_json::json!({
+        "model_type": "mamba",
+        "vocab_size": vocab,
+        "hidden_size": h,
+        "intermediate_size": i,
+        "state_size": n,
+        "num_hidden_layers": layers,
+        "conv_kernel": 4,
+        "use_bias": false,
+        "use_conv_bias": true,
+        "time_step_rank": r,
+        "tie_word_embeddings": true
+    }))
+    .expect("synthetic Mamba config");
+    let mut weights = WeightMap::new();
+    let mut rng = Rng::new(3046);
+    rng.insert(&mut weights, "backbone.embeddings.weight", &[vocab, h], 0.5);
+    weights.insert(
+        "backbone.norm_f.weight".into(),
+        mlxcel_core::ones(&[h], dtype::FLOAT32),
+    );
+    let a_log: Vec<f32> = (0..i * n)
+        .map(|k| if k / n < 4 { 19.5 } else { 0.5 })
+        .collect();
+    let dt_bias: Vec<f32> = (0..i).map(|c| if c < 2 { -30.0 } else { 0.0 }).collect();
+    for layer in 0..layers {
+        let prefix = format!("backbone.layers.{layer}");
+        weights.insert(
+            format!("{prefix}.norm.weight"),
+            mlxcel_core::ones(&[h], dtype::FLOAT32),
+        );
+        for (name, shape, scale) in [
+            ("mixer.conv1d.weight", vec![i, 4, 1], 0.3),
+            ("mixer.conv1d.bias", vec![i], 0.1),
+            ("mixer.in_proj.weight", vec![2 * i, h], 0.3),
+            ("mixer.x_proj.weight", vec![r + 2 * n, i], 0.3),
+            ("mixer.dt_proj.weight", vec![i, r], 0.1),
+            ("mixer.out_proj.weight", vec![h, i], 0.3),
+            ("mixer.D", vec![i], 1.0),
+        ] {
+            rng.insert(&mut weights, &format!("{prefix}.{name}"), &shape, scale);
+        }
+        weights.insert(
+            format!("{prefix}.mixer.A_log"),
+            mlxcel_core::from_slice_f32(&a_log, &[i, n]),
+        );
+        weights.insert(
+            format!("{prefix}.mixer.dt_proj.bias"),
+            mlxcel_core::from_slice_f32(&dt_bias, &[i]),
+        );
+    }
+    let keys: Vec<String> = weights.keys().cloned().collect();
+    for key in keys {
+        let bf16 = mlxcel_core::astype(&weights[&key], dtype::BFLOAT16);
+        weights.insert(key, bf16);
+    }
+    assert!(
+        crate::models::convert_bf16_weights(&mut weights),
+        "every fixture tensor is bf16, so the conversion must run"
+    );
+    assert_eq!(
+        mlxcel_core::array_dtype(&weights["backbone.layers.0.mixer.A_log"]),
+        dtype::FLOAT16
+    );
+    super::MambaModel::from_weights(config, weights).expect("synthetic Mamba model")
+}
+
+/// Prefill four tokens, decode one, and return both logits rows.
+fn prefill_and_decode_logits(model: &super::MambaModel) -> Vec<f32> {
+    use mlxcel_core::generate::LanguageModel;
+    let mut caches = LanguageModel::make_caches(model);
+    let prompt = mlxcel_core::from_slice_i32(&[1, 5, 9, 3], &[1, 4]);
+    let mut out = rows(&model.forward(&prompt, &mut caches, None));
+    let next = mlxcel_core::from_slice_i32(&[7], &[1, 1]);
+    out.extend(rows(&model.forward(&next, &mut caches, None)));
+    out
+}
+
+/// Issue #3046: `mlx-community/mamba-130m-hf-bf16` loaded on Metal and then
+/// generated nothing. Apple Silicon casts a bf16 checkpoint to f16 at load,
+/// and `A = -exp(A_log)` was evaluated in that dtype, so every `A_log` above
+/// 11.09 gave `A = -inf`; a channel whose f16 `softplus` step was zero then
+/// computed `exp(0 * -inf) = NaN` for its decay, the NaN spread through the
+/// state into every logit, and greedy sampling picked token 0, the EOS. `A` is
+/// now computed from a float32 `A_log`. Both scans are checked: the fused
+/// kernel the GPU takes and the per-step graph scan the CPU takes.
+#[test]
+fn mamba_f16_converted_bf16_checkpoint_produces_finite_logits() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = f16_converted_model_with_overflowing_a_log();
+
+    let gpu = prefill_and_decode_logits(&model);
+    assert_eq!(gpu.len(), 5 * 16);
+    assert!(
+        gpu.iter().all(|v| v.is_finite()),
+        "default-device logits must be finite: {gpu:?}"
+    );
+
+    let cpu = {
+        let _cpu = mlxcel_core::streams::DefaultDeviceGuard::cpu();
+        prefill_and_decode_logits(&model)
+    };
+    assert!(
+        cpu.iter().all(|v| v.is_finite()),
+        "CPU (graph scan) logits must be finite: {cpu:?}"
+    );
+    let max = crate::models::embedding_test_support::max_abs_diff(&gpu, &cpu);
+    assert!(
+        max < 5e-2,
+        "fused and graph scans disagree: max |diff| {max}"
+    );
+}
+
+/// `A` is computed in float32 whatever dtype `A_log` was loaded in, and keeps
+/// the value an f16 `exp` cannot represent.
+#[test]
+fn mamba_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
+    let a_log = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&[0.0, 11.0, 19.5], &[1, 3]),
+        dtype::FLOAT16,
+    );
+    let a = super::ssm_a_from_log(&a_log);
+    assert_eq!(mlxcel_core::array_dtype(&a), dtype::FLOAT32);
+    let got = rows(&a);
+    let want = [-1.0f32, -(11.0f32.exp()), -(19.5f32.exp())];
+    for (g, w) in got.iter().zip(want) {
+        assert!(
+            g.is_finite() && ((g - w) / w).abs() < 1e-6,
+            "{got:?} vs {want:?}"
+        );
+    }
 }
