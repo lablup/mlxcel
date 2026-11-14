@@ -233,6 +233,28 @@ fn tokenizer_json_resolves_an_eos_token_the_decoder_table_omits() {
     assert_eq!(read_eos_token_ids(dir.path()), vec![9]);
 }
 
+/// The fallback reads `added_tokens` only. An `eos_token` that is an ordinary
+/// vocabulary entry (here `.`, which a model emits mid-sentence) must not
+/// become a stop id through the base vocabulary.
+#[test]
+fn tokenizer_json_fallback_ignores_the_base_vocabulary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        dir.path().join("tokenizer_config.json"),
+        r#"{ "eos_token": "." }"#,
+    )
+    .expect("write tokenizer config");
+    fs::write(
+        dir.path().join("tokenizer.json"),
+        r#"{
+            "added_tokens": [ { "id": 100, "content": "<|im_end|>", "special": true } ],
+            "model": { "type": "BPE", "vocab": { ".": 13, "a": 0 }, "merges": [] }
+        }"#,
+    )
+    .expect("write tokenizer");
+    assert_eq!(read_eos_token_ids(dir.path()), Vec::<i32>::new());
+}
+
 /// #2729: the declared ids keep their order and the sidecar ids not already
 /// declared follow them.
 #[test]
