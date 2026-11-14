@@ -163,6 +163,11 @@ struct Inner {
     /// counter so operators get one actionable WARN per affected session while
     /// statistics still count every event.
     warned_snapshot_self_evictions: HashSet<SnapshotSelfEvictionKey>,
+    /// Per session, the snapshot its latest turn restored from. With
+    /// [`PromptCacheConfig::keep_previous_turn`] on, the session-chain
+    /// supersede rule skips this entry, so an edit of the last turn still finds
+    /// the point where that turn started (#3035). Unused when the switch is off.
+    restore_sources: HashMap<SnapshotSelfEvictionKey, PromptCacheKeyDigest>,
     /// Paged detached sets that an eviction or rejection path removed from
     /// the store but could not release: returning a paged set's pool block
     /// pins requires a `CachePool` handle, which the store does not hold.
@@ -196,6 +201,7 @@ impl Inner {
             snapshot_supersedes: 0,
             snapshot_self_evictions: 0,
             warned_snapshot_self_evictions: HashSet::new(),
+            restore_sources: HashMap::new(),
             pending_paged_releases: Vec::new(),
         }
     }
@@ -270,6 +276,15 @@ impl Inner {
     ) -> Option<(BucketKey, Arc<ModelSnapshotEntry>)> {
         let slot = self.snapshots.remove(digest)?;
         self.snapshot_bytes = self.snapshot_bytes.saturating_sub(slot.entry.size_bytes);
+        if !self.restore_sources.is_empty() {
+            let session = SnapshotSelfEvictionKey {
+                sessionless: slot.sessionless.clone(),
+                session_key: slot.bucket.session_key.clone(),
+            };
+            if self.restore_sources.get(&session) == Some(digest) {
+                self.restore_sources.remove(&session);
+            }
+        }
         Some((slot.bucket, slot.entry))
     }
 
@@ -930,6 +945,25 @@ impl PromptCacheStore {
         // its 16K, 32K, ... checkpoints side by side, since the shallower one
         // is exactly what a request that edits history between them resumes
         // from. Their number is bounded by the byte budget's LRU instead.
+        //
+        // With `keep_previous_turn` on (#3035), the snapshot this session's
+        // latest turn restored from is exempt as well. Turn N restores from
+        // turn N-1's snapshot, and turn N's own insert would supersede it,
+        // leaving a request that replaces turn N's user message nothing closer
+        // than the system-prompt root (turn N's boundary ends after the edited
+        // message). The exemption moves with the next restore, so the chain
+        // holds at most one extra entry.
+        let kept_restore_source = guard
+            .config
+            .keep_previous_turn
+            .then(|| {
+                guard.restore_sources.get(&SnapshotSelfEvictionKey {
+                    sessionless: sessionless.clone(),
+                    session_key: bucket.session_key.clone(),
+                })
+            })
+            .flatten()
+            .copied();
         if let Some(session_key) = key
             .session_key
             .filter(|_| entry.origin != SnapshotOrigin::Checkpoint)
@@ -939,8 +973,9 @@ impl PromptCacheStore {
             let superseded: Vec<PromptCacheKeyDigest> = guard
                 .snapshots
                 .iter()
-                .filter(|(_, slot)| {
-                    slot.sessionless == sessionless
+                .filter(|(digest, slot)| {
+                    Some(**digest) != kept_restore_source
+                        && slot.sessionless == sessionless
                         && slot.bucket.session_key.as_deref() == Some(session_key)
                         && slot.entry.origin == new_origin
                         && slot.entry.tokens.len() < new_tokens.len()
@@ -1338,6 +1373,15 @@ impl PromptCacheStore {
                     };
                     guard.snapshot_hits = guard.snapshot_hits.saturating_add(1);
                     entry.touch();
+                    if guard.config.keep_previous_turn && key.session_key.is_some() {
+                        guard.restore_sources.insert(
+                            SnapshotSelfEvictionKey {
+                                sessionless: sessionless.clone(),
+                                session_key: key.session_key.map(str::to_owned),
+                            },
+                            digest,
+                        );
+                    }
                     (Some(entry), matched)
                 }
                 None => (None, 0),
@@ -1432,6 +1476,7 @@ impl PromptCacheStore {
         }
         guard.tries.clear();
         guard.snapshots.clear();
+        guard.restore_sources.clear();
         guard.total_bytes = 0;
         guard.snapshot_bytes = 0;
     }
