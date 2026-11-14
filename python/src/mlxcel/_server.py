@@ -221,21 +221,28 @@ class ManagedServer:
             self.uds_path = path
 
     @property
+    def _http_origin(self) -> str:
+        """HTTP origin, bracketing IPv6 literals without altering the bind host."""
+        if self.uds_path is not None:
+            return "http://mlxcel"
+        assert self.host is not None and self.port is not None
+        host = self.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"http://{host}:{self.port}"
+
+    @property
     def base_url(self) -> str:
         """OpenAI base URL (with the ``/v1`` suffix) for this transport.
 
         For a Unix socket the host portion is a placeholder; the actual routing
         happens through the httpx ``uds`` transport.
         """
-        if self.uds_path is not None:
-            return "http://mlxcel/v1"
-        return f"http://{self.host}:{self.port}/v1"
+        return f"{self._http_origin}/v1"
 
     @property
     def _health_url(self) -> str:
-        if self.uds_path is not None:
-            return "http://mlxcel/health"
-        return f"http://{self.host}:{self.port}/health"
+        return f"{self._http_origin}/health"
 
     def _build_command(self) -> List[str]:
         """Build the ``mlxcel serve`` argv.
