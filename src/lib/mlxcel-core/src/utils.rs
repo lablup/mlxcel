@@ -201,6 +201,8 @@ pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 ///   broadcast and padded batch paths are written against;
 /// - the caller supplied no mask of its own (`has_caller_mask == false`): a
 ///   left-padding, windowed or multimodal mask is never replaced;
+/// - it is not a speculative verify block (no `DecodeLookaheadAppendScope`
+///   is active), which keeps the dispatch the verify path had before;
 /// - the layer attends exactly `offset + seq_len` keys, which holds for the
 ///   dense `KVCache` these layers fetch from: MLX aligns causal mode
 ///   bottom-right (query `i` sees keys `0..=k_len - q_len + i`), the same
@@ -214,7 +216,28 @@ pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 ///
 /// Used by: [`prefill_causal_mask`].
 pub fn prefill_uses_causal_mode(seq_len: i32, batch: i32, has_caller_mask: bool) -> bool {
-    seq_len > 1 && batch == 1 && !has_caller_mask && prefill_causal_mode_enabled()
+    causal_mode_applies(
+        seq_len,
+        batch,
+        has_caller_mask,
+        crate::cache::speculative_append_active(),
+        prefill_causal_mode_enabled(),
+    )
+}
+
+/// The decision behind [`prefill_uses_causal_mode`], with the thread and
+/// process state passed in so it can be tested without them. A verify block
+/// (`speculative`, inside a `DecodeLookaheadAppendScope`) keeps the array
+/// mask, so a speculative verify scores its positions with the same kernel
+/// as before #3051.
+pub(crate) fn causal_mode_applies(
+    seq_len: i32,
+    batch: i32,
+    has_caller_mask: bool,
+    speculative: bool,
+    enabled: bool,
+) -> bool {
+    seq_len > 1 && batch == 1 && !has_caller_mask && !speculative && enabled
 }
 
 /// The causal mask a model-built prefill needs: `None` for a decode row or

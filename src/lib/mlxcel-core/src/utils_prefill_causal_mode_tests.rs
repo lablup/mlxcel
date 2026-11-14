@@ -17,8 +17,10 @@
 //! keys `create_causal_mask` allows, at offset 0 and behind a cache.
 
 use super::{
-    create_causal_mask, parse_prefill_causal_mode, prefill_causal_mask, prefill_uses_causal_mode,
+    causal_mode_applies, create_causal_mask, parse_prefill_causal_mode, prefill_causal_mask,
+    prefill_causal_mode_enabled, prefill_uses_causal_mode,
 };
+use crate::cache::DecodeLookaheadAppendScope;
 use crate::ffi;
 use cxx::UniquePtr;
 
@@ -34,20 +36,30 @@ fn draw(shape: &[i32], seed: u32) -> UniquePtr<ffi::MlxArray> {
     ffi::from_slice_f32(&values, shape)
 }
 
-/// Causal mode against the array mask for one `[1, heads, q_len, 64]` query
-/// over `offset + q_len` keys, the shape a prefill piece behind a cache sees.
+/// Causal mode against the array mask for one `[1, heads, q_len, 64]` f32
+/// query over `offset + q_len` keys, the shape a prefill piece behind a cache
+/// sees.
 fn assert_causal_mode_matches_array_mask(q_len: i32, offset: i32) {
-    let (heads, kv_heads, dim) = (4, 2, 64);
+    assert_matches_at(q_len, offset, 64, None, 1e-4, 1e-5);
+}
+
+/// The same comparison at head dimension `dim`, optionally cast to `dtype`.
+fn assert_matches_at(q_len: i32, offset: i32, dim: i32, dtype: Option<i32>, rtol: f64, atol: f64) {
+    let (heads, kv_heads) = (4, 2);
     let k_len = offset + q_len;
-    let q = draw(&[1, heads, q_len, dim], 1 + offset as u32);
-    let k = draw(&[1, kv_heads, k_len, dim], 2 + offset as u32);
-    let v = draw(&[1, kv_heads, k_len, dim], 3 + offset as u32);
+    let cast = |a: UniquePtr<ffi::MlxArray>| match dtype {
+        Some(d) => ffi::astype(&a, d),
+        None => a,
+    };
+    let q = cast(draw(&[1, heads, q_len, dim], 1 + offset as u32));
+    let k = cast(draw(&[1, kv_heads, k_len, dim], 2 + offset as u32));
+    let v = cast(draw(&[1, kv_heads, k_len, dim], 3 + offset as u32));
     let scale = 1.0 / (dim as f32).sqrt();
     let mask = create_causal_mask(q_len, offset);
     let reference = crate::layers::attention(&q, &k, &v, scale, Some(&mask), 0.0, 0);
     let causal = crate::causal_attention(&q, &k, &v, scale, 0.0, 0);
     assert_eq!(ffi::array_shape(&causal), ffi::array_shape(&reference));
-    let close = ffi::allclose(&causal, &reference, 1e-4, 1e-5);
+    let close = ffi::allclose(&causal, &reference, rtol, atol);
     ffi::eval(&close);
     assert!(
         ffi::item_bool(&close),
@@ -57,8 +69,11 @@ fn assert_causal_mode_matches_array_mask(q_len: i32, offset: i32) {
 
 #[test]
 fn a_cold_single_row_prefill_uses_causal_mode_and_matches_the_array_mask() {
-    assert!(prefill_uses_causal_mode(37, 1, false));
-    assert!(prefill_causal_mask(37, 0, 1).is_none());
+    assert!(causal_mode_applies(37, 1, false, false, true));
+    if prefill_causal_mode_enabled() {
+        assert!(prefill_uses_causal_mode(37, 1, false));
+        assert!(prefill_causal_mask(37, 0, 1).is_none());
+    }
     assert_causal_mode_matches_array_mask(37, 0);
 }
 
@@ -67,14 +82,40 @@ fn a_prefill_piece_behind_a_cache_uses_causal_mode_and_matches_the_array_mask() 
     // The offset is not an input to the choice: MLX aligns causal mode
     // bottom-right, which is `create_causal_mask`'s offset when the layer
     // attends `offset + q_len` keys.
-    assert!(prefill_uses_causal_mode(16, 1, false));
-    assert!(prefill_causal_mask(16, 300, 1).is_none());
+    assert!(causal_mode_applies(16, 1, false, false, true));
+    if prefill_causal_mode_enabled() {
+        assert!(prefill_causal_mask(16, 300, 1).is_none());
+    }
     assert_causal_mode_matches_array_mask(16, 5);
     assert_causal_mode_matches_array_mask(16, 300);
 }
 
 #[test]
+fn a_bf16_head_dim_256_piece_behind_a_cache_matches_the_array_mask() {
+    // The Qwen 3.5 full-attention shape that motivated #3051, with more
+    // queries than keys behind them so the causal path's chunked and native
+    // routes both see `q_len != k_len`.
+    assert_matches_at(96, 200, 256, Some(crate::dtype::BFLOAT16), 1e-2, 1e-2);
+    assert_matches_at(300, 40, 256, Some(crate::dtype::BFLOAT16), 1e-2, 1e-2);
+}
+
+#[test]
+fn a_speculative_verify_block_keeps_the_array_mask() {
+    assert!(!causal_mode_applies(4, 1, false, true, true));
+    let _scope = DecodeLookaheadAppendScope::enter();
+    assert!(!prefill_uses_causal_mode(4, 1, false));
+    let mask = prefill_causal_mask(4, 100, 1).expect("a verify block keeps the array mask");
+    assert_eq!(ffi::array_shape(&mask), vec![4, 104]);
+}
+
+#[test]
+fn the_kill_switch_keeps_the_array_mask() {
+    assert!(!causal_mode_applies(16, 1, false, false, false));
+}
+
+#[test]
 fn a_padded_prefill_keeps_its_caller_mask() {
+    assert!(!causal_mode_applies(16, 1, true, false, true));
     assert!(!prefill_uses_causal_mode(16, 1, true));
 }
 
