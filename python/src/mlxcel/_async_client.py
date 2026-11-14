@@ -254,7 +254,7 @@ class AsyncLLM:
         return resp.choices[0].text or ""
 
     async def stream(self, prompt: str, **sampling: Any) -> AsyncIterator[str]:
-        """Stream completion text deltas for ``prompt``."""
+        """Stream completion deltas; await generator.aclose() when stopping early."""
         self._ensure_alive()
         model = await self._resolve_model()
         params = build_params(sampling, chat=False)
@@ -264,9 +264,10 @@ class AsyncLLM:
                 model=model, prompt=prompt, stream=True, **params
             ),
         )
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].text:
-                yield chunk.choices[0].text
+        async with stream:
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].text:
+                    yield chunk.choices[0].text
 
     async def chat(self, messages: ChatMessages, **sampling: Any) -> str:
         """Run a chat completion and return the assistant message content."""
@@ -279,7 +280,7 @@ class AsyncLLM:
         return resp.choices[0].message.content or ""
 
     async def chat_stream(self, messages: ChatMessages, **sampling: Any) -> AsyncIterator[str]:
-        """Stream chat completion content deltas."""
+        """Stream chat content deltas; await generator.aclose() when stopping early."""
         self._ensure_alive()
         model = await self._resolve_model()
         params = build_params(sampling, chat=True)
@@ -289,9 +290,10 @@ class AsyncLLM:
                 model=model, messages=as_messages(messages), stream=True, **params
             ),
         )
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        async with stream:
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
 
     # -- model / tokenizer helpers ----------------------------------------
 
