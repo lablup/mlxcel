@@ -176,12 +176,56 @@ fn resolve_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow::anyhow!("--host {host}: resolved to no addresses"))
 }
 
-/// Bind a Unix domain socket, clearing a stale path first.
+/// Bind a Unix domain socket, clearing a stale socket first.
+///
+/// A socket file outlives the process that bound it, and the server leaves its
+/// own behind on shutdown, so a socket nobody listens on is removed and the
+/// path bound again. Everything else is left alone, with an error instead of a
+/// bind: an entry that is not a socket (a regular file, a symlink), a socket
+/// that still has a listener, which would otherwise keep running with its path
+/// taken away, and a socket whose state cannot be determined.
+///
+/// The check and the removal are two steps. Two servers started on one stale
+/// path at the same moment can both pass the check; the later bind then takes
+/// the path, as it always did.
 #[cfg(unix)]
 fn bind_unix(path: &Path) -> Result<UnixListener> {
-    if path.exists() {
-        std::fs::remove_file(path)
-            .with_context(|| format!("failed to remove stale socket: {}", path.display()))?;
+    use std::os::unix::fs::FileTypeExt;
+
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect socket path: {}", path.display()));
+        }
+        Ok(entry) if !entry.file_type().is_socket() => bail!(
+            "--host {}: the path exists and is not a socket; it is left as it is. Remove it or \
+             choose another path",
+            path.display()
+        ),
+        Ok(_) => {
+            match probe_unix_socket(path) {
+                UnixSocketProbe::Stale => {}
+                UnixSocketProbe::InUse => bail!(
+                    "--host {}: the socket is in use by a running listener; it is left as it is. \
+                     Stop that server or choose another path",
+                    path.display()
+                ),
+                UnixSocketProbe::Unknown(error) => bail!(
+                    "--host {}: cannot tell whether the socket is still in use ({error}); it is \
+                     left as it is. Remove it or choose another path",
+                    path.display()
+                ),
+            }
+            match std::fs::remove_file(path) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    return Err(error).with_context(|| {
+                        format!("failed to remove stale socket: {}", path.display())
+                    });
+                }
+                _ => {}
+            }
+        }
     }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
@@ -189,6 +233,54 @@ fn bind_unix(path: &Path) -> Result<UnixListener> {
     }
     UnixListener::bind(path)
         .with_context(|| format!("failed to bind Unix socket: {}", path.display()))
+}
+
+/// What one connection attempt says about the socket at a path.
+#[cfg(unix)]
+enum UnixSocketProbe {
+    /// The kernel refused the connection: the socket's owner is gone.
+    Stale,
+    /// The connection was accepted or queued, or the accept queue is full.
+    InUse,
+    /// Neither could be established (no permission to connect, a socket of
+    /// another type, ...).
+    Unknown(io::Error),
+}
+
+/// Ask the kernel whether anything still listens on the socket at `path`.
+///
+/// One non-blocking connection attempt. Only "connection refused" (and a path
+/// that vanished meanwhile) reads as nobody there: that is what the kernel
+/// answers for a socket whose owner is gone. Non-blocking, because a blocking
+/// connect to a full accept queue waits for the listener to accept; Linux
+/// answers "would block" instead, which reads as in use. Any other error
+/// leaves the question open, and the caller does not take the path on a guess.
+///
+/// macOS answers "connection refused" for a full accept queue too, so a live
+/// listener that is saturated at that moment cannot be told from a stale
+/// socket there. A socket that is bound but not listening yet reads as stale
+/// on both systems.
+///
+/// Used by: [`bind_unix`].
+#[cfg(unix)]
+fn probe_unix_socket(path: &Path) -> UnixSocketProbe {
+    let probe = || -> io::Result<()> {
+        let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+        socket.set_nonblocking(true)?;
+        socket.connect(&socket2::SockAddr::unix(path)?)
+    };
+    match probe() {
+        Ok(()) => UnixSocketProbe::InUse,
+        Err(error) => match error.kind() {
+            io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound => UnixSocketProbe::Stale,
+            io::ErrorKind::WouldBlock => UnixSocketProbe::InUse,
+            // A connection still being set up has reached a listener. Neither
+            // Linux nor macOS reports this for a Unix stream socket today, but
+            // it must never read as stale.
+            _ if error.raw_os_error() == Some(libc::EINPROGRESS) => UnixSocketProbe::InUse,
+            _ => UnixSocketProbe::Unknown(error),
+        },
+    }
 }
 
 async fn accept_tcp(listener: TcpListener, app: Router, options: ServeOptions) -> Result<()> {
@@ -327,3 +419,7 @@ where
 #[cfg(test)]
 #[path = "listen_tests.rs"]
 mod listen_tests;
+
+#[cfg(all(test, unix))]
+#[path = "listen_unix_tests.rs"]
+mod listen_unix_tests;

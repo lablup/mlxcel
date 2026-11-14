@@ -152,7 +152,7 @@ impl RtDetrV2Processor {
 
     /// Load and preprocess an image file.
     pub fn process_path<P: AsRef<Path>>(&self, path: P) -> Result<ProcessedImage, String> {
-        let img = image::open(path.as_ref())
+        let img = crate::multimodal::image_orientation::open_upright(path.as_ref())
             .map_err(|e| format!("failed to open image {}: {e}", path.as_ref().display()))?;
         Ok(self.process_image(&img))
     }

@@ -324,11 +324,12 @@ pub struct MLP {
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         // GeGLU: gelu(gate_proj(x)) * up_proj(x), then down_proj
-        // Quantized path: fused compiled quantized MLP
-        if let (Some(gate_qw), Some(up_qw), Some(down_qw)) = (
-            self.gate_proj.quantized_weight(),
-            self.up_proj.quantized_weight(),
-            self.down_proj.quantized_weight(),
+        // Quantized path: fused compiled quantized MLP, when the three
+        // projections share one quantization layout.
+        if let Some((gate_qw, up_qw, down_qw)) = mlxcel_core::layers::fused_mlp_quantized_weights(
+            &self.gate_proj,
+            &self.up_proj,
+            &self.down_proj,
         ) {
             return unsafe {
                 mlxcel_core::compiled_gelu_approx_mlp_forward(

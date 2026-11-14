@@ -241,16 +241,17 @@ class LLM:
         return resp.choices[0].text or ""
 
     def stream(self, prompt: str, **sampling: Any) -> Iterator[str]:
-        """Stream completion text deltas for ``prompt``."""
+        """Stream completion text deltas; close the generator when stopping early."""
         self._ensure_alive()
         params = build_params(sampling, chat=False)
         stream = cast(
             "Stream[Completion]",
             self._client.completions.create(model=self.model, prompt=prompt, stream=True, **params),
         )
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].text:
-                yield chunk.choices[0].text
+        with stream:
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].text:
+                    yield chunk.choices[0].text
 
     def chat(self, messages: ChatMessages, **sampling: Any) -> str:
         """Run a chat completion and return the assistant message content."""
@@ -262,7 +263,7 @@ class LLM:
         return resp.choices[0].message.content or ""
 
     def chat_stream(self, messages: ChatMessages, **sampling: Any) -> Iterator[str]:
-        """Stream chat completion content deltas."""
+        """Stream chat content deltas; close the generator when stopping early."""
         self._ensure_alive()
         params = build_params(sampling, chat=True)
         stream = cast(
@@ -271,9 +272,10 @@ class LLM:
                 model=self.model, messages=as_messages(messages), stream=True, **params
             ),
         )
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        with stream:
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
 
     # -- model / tokenizer helpers ----------------------------------------
 
@@ -318,10 +320,13 @@ class LLM:
         if self._closed:
             return
         self._closed = True
-        if self._http_client is not None:
-            self._http_client.close()
-        if self._server is not None:
-            self._server.close()
+        try:
+            if self._http_client is not None:
+                self._http_client.close()
+        finally:
+            # HTTP cleanup can raise (or be cancelled). Still reap our child.
+            if self._server is not None:
+                self._server.close()
 
     def __enter__(self) -> "LLM":
         return self

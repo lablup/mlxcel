@@ -104,6 +104,129 @@ fn mamba_cache_snapshot_restore_round_trips_state_shapes() {
     assert_eq!(mlxcel_core::array_shape(ssm), vec![1, 2, 4, 8]);
 }
 
+/// The settings of `state-spaces/mamba-130m-hf`'s `config.json` that
+/// `MambaConfig` reads. A Hugging Face `MambaConfig` writes three of them under
+/// both of their names.
+fn hugging_face_config() -> serde_json::Value {
+    serde_json::json!({
+        "architectures": ["MambaForCausalLM"],
+        "bos_token_id": 0,
+        "conv_kernel": 4,
+        "d_inner": 1536,
+        "d_model": 768,
+        "eos_token_id": 0,
+        "expand": 2,
+        "hidden_size": 768,
+        "intermediate_size": 1536,
+        "model_type": "mamba",
+        "n_layer": 24,
+        "num_hidden_layers": 24,
+        "state_size": 16,
+        "time_step_rank": 48,
+        "use_bias": false,
+        "use_conv_bias": true,
+        "vocab_size": 50280
+    })
+}
+
+#[test]
+fn a_config_that_names_a_setting_both_ways_parses() {
+    // The derive with aliases this replaced refused it: "duplicate field
+    // `hidden_size`", for every `*-hf` Mamba checkpoint.
+    let config: super::MambaConfig = serde_json::from_value(hugging_face_config()).unwrap();
+    assert_eq!(config.model_type, "mamba");
+    assert_eq!(config.vocab_size, 50280);
+    assert_eq!(config.hidden_size, 768);
+    assert_eq!(config.intermediate_size, 1536);
+    assert_eq!(config.state_size, 16);
+    assert_eq!(config.num_hidden_layers, 24);
+    assert_eq!(config.conv_kernel, 4);
+    assert_eq!(config.time_step_rank, 48);
+    assert!(!config.use_bias);
+    assert!(config.use_conv_bias);
+    assert!(config.tie_word_embeddings);
+    assert!(config.quantization.is_none());
+
+    // The same text through `from_str`, which is how a checkpoint is read.
+    let text = serde_json::to_string(&hugging_face_config()).unwrap();
+    let from_text: super::MambaConfig = serde_json::from_str(&text).unwrap();
+    assert_eq!(from_text.hidden_size, 768);
+}
+
+#[test]
+fn the_hugging_face_name_wins_when_the_two_disagree() {
+    // `state-spaces/mamba-370m-hf`: `d_inner` 160 beside `intermediate_size`
+    // 2048. The weights are 2048 wide, and transformers reads that name.
+    let mut raw = hugging_face_config();
+    raw["d_model"] = 1024.into();
+    raw["hidden_size"] = 1024.into();
+    raw["d_inner"] = 160.into();
+    raw["intermediate_size"] = 2048.into();
+    raw["n_layer"] = 48.into();
+    raw["num_hidden_layers"] = 48.into();
+    let config: super::MambaConfig = serde_json::from_value(raw).unwrap();
+    assert_eq!(config.hidden_size, 1024);
+    assert_eq!(config.intermediate_size, 2048);
+    assert_eq!(config.num_hidden_layers, 48);
+}
+
+#[test]
+fn the_original_spellings_alone_still_parse() {
+    let mut config: super::MambaConfig = serde_json::from_value(serde_json::json!({
+        "model_type": "mamba",
+        "vocab_size": 50280,
+        "d_model": 768,
+        "d_inner": 1536,
+        "d_state": 16,
+        "n_layers": 24,
+        "d_conv": 4,
+        "bias": true,
+        "conv_bias": false,
+        "time_step_rank": "auto"
+    }))
+    .unwrap();
+    assert_eq!(config.hidden_size, 768);
+    assert_eq!(config.intermediate_size, 1536);
+    assert_eq!(config.state_size, 16);
+    assert_eq!(config.num_hidden_layers, 24);
+    assert_eq!(config.conv_kernel, 4);
+    assert!(config.use_bias);
+    assert!(!config.use_conv_bias);
+    // "auto" is resolved from the width.
+    assert_eq!(config.time_step_rank, 0);
+    config.compute_time_step_rank();
+    assert_eq!(config.time_step_rank, 48);
+    assert!((config.mixer_rms_eps - 1e-6).abs() < f32::EPSILON);
+    assert!((config.rms_norm_eps - 1e-5).abs() < f32::EPSILON);
+    assert!(!config.use_bcdt_rms);
+}
+
+#[test]
+fn a_config_error_names_the_setting() {
+    let parse = |edit: fn(&mut serde_json::Value)| {
+        let mut raw = hugging_face_config();
+        edit(&mut raw);
+        serde_json::from_value::<super::MambaConfig>(raw)
+            .expect_err("the config must be refused")
+            .to_string()
+    };
+    // A setting absent under every spelling: the Hugging Face name is reported.
+    let error = parse(|raw| {
+        let object = raw.as_object_mut().unwrap();
+        object.remove("hidden_size");
+        object.remove("d_model");
+    });
+    assert!(error.contains("missing field `hidden_size`"), "{error}");
+    let error = parse(|raw| raw["time_step_rank"] = "wide".into());
+    assert!(error.contains("invalid time_step_rank: wide"), "{error}");
+    let error = parse(|raw| raw["hidden_size"] = "wide".into());
+    assert!(error.contains("`hidden_size`"), "{error}");
+    let error = serde_json::from_value::<super::MambaConfig>(serde_json::json!([1, 2]))
+        .expect_err("an array is not a config")
+        .to_string();
+    assert!(error.contains("a Mamba config is a JSON object"), "{error}");
+}
+
 /// The config every embedding-load test below shares.
 ///
 /// `num_hidden_layers: 0` plus tied embeddings reduces the load to the

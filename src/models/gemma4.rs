@@ -134,7 +134,15 @@ impl QuantizationArgs {
             group_size: self.group_size as i32,
             bits: self.bits as i32,
         };
-        let Some(value) = self.overrides.get(prefix) else {
+        // A text-only mlx-lm export keys its overrides by the names it was
+        // saved under (`model.layers.N...`), while the loader asks by the
+        // multimodal names its weights were moved to
+        // (`adopt_gemma4_language_model_prefix`, issue #2996).
+        let Some(value) = self.overrides.get(prefix).or_else(|| {
+            prefix
+                .strip_prefix("language_model.")
+                .and_then(|text_only| self.overrides.get(text_only))
+        }) else {
             return params;
         };
         let Some(override_obj) = value.as_object() else {
