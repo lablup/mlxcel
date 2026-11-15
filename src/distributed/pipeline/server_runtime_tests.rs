@@ -30,6 +30,8 @@ struct RuntimeLog {
     prepared: Mutex<Vec<u64>>,
     released: Mutex<Vec<u64>>,
     single_forwards: Mutex<Vec<u64>>,
+    /// `(seq, last_pos)` of every `forward_sequence_last_row` call.
+    last_row_forwards: Mutex<Vec<(u64, usize)>>,
     batched_forwards: Mutex<Vec<Vec<u64>>>,
 }
 
@@ -76,6 +78,30 @@ impl PipelineModelRuntime for FakeRuntime {
             .unwrap()
             .push(seq_id.as_u64());
         Ok(from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 2, 2]))
+    }
+
+    /// A stage that honors the request: only the asked row of the same
+    /// `[1, 2, 2]` logits `forward_sequence` returns, as `[1, 1, 2]`.
+    fn forward_sequence_last_row(
+        &self,
+        seq_id: SequenceId,
+        _input_ids: &MlxArray,
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> anyhow::Result<UniquePtr<MlxArray>> {
+        if self.fail_forward {
+            anyhow::bail!("remote stage {STAGE_ADDR} timed out after 30s");
+        }
+        self.log
+            .last_row_forwards
+            .lock()
+            .unwrap()
+            .push((seq_id.as_u64(), last_pos));
+        let full = from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 2, 2]);
+        Ok(mlxcel_core::generate::logits_at_position(
+            &full,
+            last_pos.min(1),
+        ))
     }
 
     fn forward_batched(
@@ -198,7 +224,12 @@ fn pipeline_server_model_try_forwards_use_the_runtime() {
         .expect("a served batched forward is Ok");
     assert_eq!(mlxcel_core::array_shape(&batched), vec![2, 1, 2]);
 
-    assert_eq!(log.single_forwards.lock().unwrap().as_slice(), &[1, 1]);
+    assert_eq!(log.single_forwards.lock().unwrap().as_slice(), &[1]);
+    assert_eq!(
+        log.last_row_forwards.lock().unwrap().as_slice(),
+        &[(1, 1)],
+        "the prefill takes the last-row hook, not the all-positions one"
+    );
     assert_eq!(
         log.batched_forwards.lock().unwrap().as_slice(),
         &[vec![1, 2]]
@@ -285,4 +316,98 @@ fn pipeline_server_model_reports_its_per_row_schedule() {
         model.batched_decode_kind(),
         mlxcel_core::generate::BatchedDecodeKind::PerRowFallback
     );
+}
+
+/// #3074: a prefill reaches the runtime's last-row hook and the single row it
+/// answers is the sampled one; the fallible and infallible hooks agree.
+#[test]
+fn pipeline_server_model_prefill_requests_only_the_sampled_row() {
+    let log = Arc::new(RuntimeLog::default());
+    let model = model_with(FakeRuntime {
+        log: log.clone(),
+        ..FakeRuntime::default()
+    });
+    let ids = from_slice_i32(&[1, 2, 3], &[1, 3]);
+    let seq_id = SequenceId::from_raw(5);
+
+    let row = model
+        .try_forward_last_logits_with_sequence_id(&ids, Some(seq_id), &mut [], None, 2)
+        .expect("prefill forward");
+    assert_eq!(mlxcel_core::array_shape(&row), vec![1, 1, 2]);
+    let row = model.forward_last_logits_with_sequence_id(&ids, Some(seq_id), &mut [], None, 2);
+    assert_eq!(mlxcel_core::array_shape(&row), vec![1, 1, 2]);
+
+    assert_eq!(
+        log.last_row_forwards.lock().unwrap().as_slice(),
+        &[(5, 2), (5, 2)]
+    );
+    assert!(
+        log.single_forwards.lock().unwrap().is_empty(),
+        "a prefill must not take the all-positions path"
+    );
+}
+
+/// A runtime without the hook (the trait default, as with an older stage)
+/// still yields the sampled row: the model slices it out of the full answer.
+#[test]
+fn pipeline_server_model_slices_the_row_when_the_runtime_answers_every_position() {
+    struct FullOnly;
+    impl PipelineModelRuntime for FullOnly {
+        fn prepare_sequence_state(&self, _seq_id: SequenceId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn release_sequence_state_by_id(&self, _seq_id: SequenceId) {}
+        fn forward_sequence(
+            &self,
+            _seq_id: SequenceId,
+            _input_ids: &MlxArray,
+            _mask: Option<&MlxArray>,
+        ) -> anyhow::Result<UniquePtr<MlxArray>> {
+            Ok(from_slice_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 3, 2]))
+        }
+        fn forward_batched(
+            &self,
+            _seq_ids: &[SequenceId],
+            _input_ids: &MlxArray,
+        ) -> anyhow::Result<UniquePtr<MlxArray>> {
+            unreachable!("no batched decode in this test")
+        }
+    }
+    let model = PipelineServerModel::new(2, vec![2], Box::new(FullOnly));
+    let ids = from_slice_i32(&[1, 2, 3], &[1, 3]);
+    let row = model
+        .try_forward_last_logits_with_sequence_id(
+            &ids,
+            Some(SequenceId::from_raw(1)),
+            &mut [],
+            None,
+            1,
+        )
+        .expect("prefill forward");
+    assert_eq!(mlxcel_core::array_shape(&row), vec![1, 1, 2]);
+    let want = from_slice_f32(&[3.0, 4.0], &[1, 1, 2]);
+    assert!(mlxcel_core::item_bool(&mlxcel_core::allclose(
+        &row, &want, 0.0, 0.0
+    )));
+}
+
+/// The failure mapping of the full forward applies to the last-row one.
+#[test]
+fn pipeline_server_model_last_row_failure_is_client_safe() {
+    let model = model_with(FakeRuntime {
+        fail_forward: true,
+        ..FakeRuntime::default()
+    });
+    let ids = from_slice_i32(&[1, 2, 3], &[1, 3]);
+    let Err(err) = model.try_forward_last_logits_with_sequence_id(
+        &ids,
+        Some(SequenceId::from_raw(3)),
+        &mut [],
+        None,
+        2,
+    ) else {
+        panic!("a failing stage fails the prefill");
+    };
+    assert_eq!(err, PIPELINE_FORWARD_FAILED);
+    assert_client_safe(&err);
 }

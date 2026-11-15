@@ -41,6 +41,9 @@ pub struct PipelineWorkerInput {
     pub request_id: RequestId,
     pub input_ids: UniquePtr<MlxArray>,
     pub attention_mask: Option<UniquePtr<MlxArray>>,
+    /// Sequence position the request samples; the final stage projects only
+    /// that row through the LM head (#3074). `None` returns every position.
+    pub last_pos: Option<u32>,
 }
 
 impl PipelineWorkerInput {
@@ -49,7 +52,14 @@ impl PipelineWorkerInput {
             request_id,
             input_ids,
             attention_mask: None,
+            last_pos: None,
         }
+    }
+
+    /// Ask the final stage for the logits of `last_pos` only.
+    pub fn with_last_pos(mut self, last_pos: u32) -> Self {
+        self.last_pos = Some(last_pos);
+        self
     }
 
     pub fn with_attention_mask(mut self, attention_mask: UniquePtr<MlxArray>) -> Self {
@@ -68,6 +78,7 @@ struct ForwardInboxEntry {
     request_id: RequestId,
     hidden_states: UniquePtr<MlxArray>,
     attention_mask: Option<UniquePtr<MlxArray>>,
+    last_pos: Option<u32>,
 }
 
 struct CompletedLastStageOutput {
@@ -163,6 +174,7 @@ impl PipelineStageWorker {
                 request_id: msg.request_id,
                 hidden_states,
                 attention_mask,
+                last_pos: msg.last_pos,
             },
         );
         Ok(())
@@ -174,7 +186,7 @@ impl PipelineStageWorker {
         request: Option<&PipelineWorkerInput>,
     ) -> Result<()> {
         let mut owned_hidden = None;
-        let (request_id, input_ids, owned_attention_mask) = if self.stage_index == 0 {
+        let (request_id, input_ids, owned_attention_mask, last_pos) = if self.stage_index == 0 {
             let request = request.ok_or_else(|| {
                 anyhow!(
                     "entry stage missing pipeline input for micro-batch {}",
@@ -185,6 +197,7 @@ impl PipelineStageWorker {
                 request.request_id.clone(),
                 Some(request.input_ids.as_ref().unwrap()),
                 None,
+                request.last_pos,
             )
         } else {
             let inbox = self.forward_inbox.remove(&micro_batch_id).ok_or_else(|| {
@@ -196,7 +209,7 @@ impl PipelineStageWorker {
             })?;
             let request_id = inbox.request_id;
             owned_hidden = Some(inbox.hidden_states);
-            (request_id, None, inbox.attention_mask)
+            (request_id, None, inbox.attention_mask, inbox.last_pos)
         };
         let attention_mask = request
             .and_then(|request| {
@@ -214,17 +227,19 @@ impl PipelineStageWorker {
             .or_insert_with(|| self.executor.make_caches());
 
         let output = match owned_hidden.as_ref() {
-            Some(hidden) => self.executor.execute(
+            Some(hidden) => self.executor.execute_last_row(
                 StageExecutionInput::HiddenStates(hidden.as_ref().unwrap()),
                 caches,
                 attention_mask,
+                last_pos.map(|pos| pos as usize),
             )?,
             None => {
                 let input_ids = input_ids.ok_or_else(|| anyhow!("missing stage input ids"))?;
-                self.executor.execute(
+                self.executor.execute_last_row(
                     StageExecutionInput::TokenIds(input_ids),
                     caches,
                     attention_mask,
+                    last_pos.map(|pos| pos as usize),
                 )?
             }
         };
@@ -247,7 +262,8 @@ impl PipelineStageWorker {
                     attention_mask.map(serialize_mlx_array).transpose()?,
                     None,
                     seq_len,
-                );
+                )
+                .with_last_pos(last_pos);
                 sender.try_send(msg)?;
             }
             StageExecutionOutput::Logits(logits) => {

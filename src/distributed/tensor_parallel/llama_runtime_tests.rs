@@ -2187,3 +2187,146 @@ fn tensor_parallel_gemma4_embed_scale_not_doubled_for_input_embeddings() {
         "TP Gemma4 logits with input_ids must match non-TP (text-only embed_scale must still be applied)"
     );
 }
+
+/// #3074: every prefill entry point of a TP runtime returns exactly the
+/// requested row of the full forward, as `[batch, 1, vocab]`. Checked at the
+/// last position and an interior one, through the plain, sequence-id,
+/// fallible and (when `with_embeddings`) embedding-prefill hooks.
+fn assert_last_row_matches_full_row<M: LanguageModel>(model: &M, with_embeddings: bool) {
+    let input_ids = mlxcel_core::from_slice_i32(&[1, 2, 1], &[1, 3]);
+    let embeddings = with_embeddings.then(|| model.embed_tokens(&input_ids).unwrap());
+
+    let run_full = |embeddings: Option<&mlxcel_core::MlxArray>| {
+        let mut caches = model.make_caches();
+        let logits = match embeddings {
+            Some(e) => model.forward_with_embeddings(&input_ids, Some(e), &mut caches, None),
+            None => model.forward(&input_ids, &mut caches, None),
+        };
+        model.release_sequence_state(&mut caches);
+        logits
+    };
+    let full = run_full(None);
+    let full_shape = mlxcel_core::array_shape(&full);
+    assert_eq!(full_shape[1], 3, "the full forward keeps every position");
+    let assert_row = |got: &mlxcel_core::MlxArray, want: &mlxcel_core::MlxArray, what: &str| {
+        assert_eq!(
+            mlxcel_core::array_shape(got),
+            vec![full_shape[0], 1, full_shape[2]],
+            "{what}: shape"
+        );
+        let close = mlxcel_core::allclose(got, want, 1e-4, 1e-4);
+        assert!(mlxcel_core::item_bool(&close), "{what}: row differs");
+    };
+
+    for last_pos in [2usize, 1] {
+        let want = mlxcel_core::generate::logits_at_position(&full, last_pos);
+        let seq_id = Some(SequenceId::from_raw(9));
+
+        let mut caches = model.make_caches();
+        let got = model.forward_last_logits(&input_ids, &mut caches, None, last_pos);
+        model.release_sequence_state(&mut caches);
+        assert_row(&got, &want, "forward_last_logits");
+
+        let mut caches = model.make_caches();
+        let got = model.forward_last_logits_with_sequence_id(
+            &input_ids,
+            seq_id,
+            &mut caches,
+            None,
+            last_pos,
+        );
+        model.release_sequence_state(&mut caches);
+        assert_row(&got, &want, "forward_last_logits_with_sequence_id");
+
+        let mut caches = model.make_caches();
+        let got = model
+            .try_forward_last_logits_with_sequence_id(
+                &input_ids,
+                seq_id,
+                &mut caches,
+                None,
+                last_pos,
+            )
+            .unwrap();
+        model.release_sequence_state(&mut caches);
+        assert_row(&got, &want, "try_forward_last_logits_with_sequence_id");
+
+        if let Some(embeddings) = embeddings.as_ref() {
+            let want_emb =
+                mlxcel_core::generate::logits_at_position(&run_full(Some(embeddings)), last_pos);
+            let mut caches = model.make_caches();
+            let got = model.forward_last_logits_with_embeddings_and_sequence_id(
+                &input_ids,
+                Some(embeddings),
+                seq_id,
+                &mut caches,
+                None,
+                last_pos,
+            );
+            model.release_sequence_state(&mut caches);
+            assert_row(
+                &got,
+                &want_emb,
+                "forward_last_logits_with_embeddings_and_sequence_id",
+            );
+        }
+    }
+}
+
+#[test]
+fn tensor_parallel_llama_last_row_matches_full_forward_row() {
+    for tp_size in [1, 2] {
+        assert_last_row_matches_full_row(&make_tp_llama_model(tp_size), true);
+    }
+}
+
+#[test]
+fn tensor_parallel_qwen3_last_row_matches_full_forward_row() {
+    for tp_size in [1, 2] {
+        assert_last_row_matches_full_row(&make_tp_qwen3_model(tp_size), true);
+    }
+}
+
+#[test]
+fn tensor_parallel_qwen35_last_row_matches_full_forward_row() {
+    for tp_size in [1, 2] {
+        assert_last_row_matches_full_row(&make_tp_qwen35_model(tp_size), true);
+    }
+}
+
+#[test]
+fn tensor_parallel_ernie45_last_row_matches_full_forward_row() {
+    for tp_size in [1, 2] {
+        assert_last_row_matches_full_row(&make_tp_ernie45_model(tp_size), false);
+    }
+}
+
+#[test]
+fn tensor_parallel_hunyuan_v1_dense_last_row_matches_full_forward_row() {
+    for tp_size in [1, 2] {
+        assert_last_row_matches_full_row(&make_tp_hunyuan_v1_dense_model(tp_size), false);
+    }
+}
+
+#[test]
+fn tensor_parallel_gemma3_last_row_matches_full_forward_row() {
+    for tp_size in [1, 2] {
+        assert_last_row_matches_full_row(&make_tp_gemma3_model(tp_size), true);
+    }
+}
+
+#[test]
+fn tensor_parallel_gemma4_last_row_matches_full_forward_row() {
+    let args = make_test_gemma4_args();
+    let weights = make_test_gemma4_weight_map();
+    for tp_size in [1, 2] {
+        let plan = generate_shard_plan(
+            "gemma4",
+            args.text_args().num_hidden_layers,
+            &ShardConfig::with_tp_size(tp_size),
+        )
+        .unwrap();
+        let tp = TensorParallelGemma4Model::from_full_weights(&args, &weights, &plan).unwrap();
+        assert_last_row_matches_full_row(&tp, true);
+    }
+}

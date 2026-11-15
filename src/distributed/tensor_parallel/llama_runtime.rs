@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
+use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::weights::WeightMap;
@@ -30,6 +31,17 @@ use super::{
     EmbeddingMode, ModelShardPlan, ShardConfig, ShardSpec, ShardStrategy,
     TensorParallelPlanSummary, compute_shard_spec, resolve_model_shard_plan,
 };
+
+/// Keep only hidden row `last_pos` (`[batch, 1, hidden]`) ahead of the final
+/// norm and LM head, or pass the hidden state through when `None`. The norm,
+/// the head and any logit softcap act on each position independently, so the
+/// projected row equals the full forward's row at `last_pos` (#3074).
+fn select_last_row(hidden: UniquePtr<MlxArray>, last_pos: Option<usize>) -> UniquePtr<MlxArray> {
+    match last_pos {
+        Some(pos) => mlxcel_core::generate::logits_at_position(&hidden, pos),
+        None => hidden,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensorParallelRuntimeKind {
@@ -183,68 +195,20 @@ impl TensorParallelLlamaModel {
     }
 }
 
-impl LanguageModel for TensorParallelLlamaModel {
-    fn batched_decode_kind(&self) -> BatchedDecodeKind {
-        BatchedDecodeKind::Native
-    }
-
-    fn forward(
-        &self,
-        input_ids: &MlxArray,
-        caches: &mut [KVCache],
-        mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        let mut rank_caches = split_rank_caches(caches, self.num_layers_per_rank, self.ranks.len())
-            .expect("tensor-parallel caches must match num_layers");
-        let mut h = self.ranks[0].embed_tokens.forward(input_ids);
-
-        for layer_idx in 0..self.num_layers_per_rank {
-            let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
-            let attn_parts: Vec<_> = self
-                .ranks
-                .iter()
-                .zip(rank_caches.iter_mut())
-                .map(|(rank, caches)| {
-                    rank.layers[layer_idx].self_attn.forward(
-                        &attn_norm,
-                        &mut caches[layer_idx],
-                        mask,
-                    )
-                })
-                .collect();
-            let attn_out = if self.prefer_precise_reduction {
-                reduce_sum_f32(attn_parts)
-            } else {
-                reduce_sum(attn_parts)
-            };
-            h = mlxcel_core::add(&h, &attn_out);
-
-            let ffn_norm = self.ranks[0].layers[layer_idx]
-                .post_attention_layernorm
-                .forward(&h);
-            let ffn_parts: Vec<_> = self
-                .ranks
-                .iter()
-                .map(|rank| rank.layers[layer_idx].mlp.forward(&ffn_norm))
-                .collect();
-            let ff_out = if self.prefer_precise_reduction {
-                reduce_sum_f32(ffn_parts)
-            } else {
-                reduce_sum(ffn_parts)
-            };
-            h = mlxcel_core::add(&h, &ff_out);
-        }
-
-        let h = self.ranks[0].norm.forward(&h);
-        self.ranks[0].lm_head.forward(&h)
-    }
-
-    fn forward_with_embeddings(
+impl TensorParallelLlamaModel {
+    /// Forward pass shared by `forward` and the last-row prefill entry points.
+    ///
+    /// `last_pos = Some(p)` slices the hidden state to row `p` before the
+    /// final norm and LM head, so a prefill projects one row through the
+    /// vocabulary instead of every prompt position (#3074). `None` keeps the
+    /// full `[batch, seq, vocab]` output.
+    fn forward_rows(
         &self,
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let mut rank_caches = split_rank_caches(caches, self.num_layers_per_rank, self.ranks.len())
             .expect("tensor-parallel caches must match num_layers");
@@ -290,8 +254,67 @@ impl LanguageModel for TensorParallelLlamaModel {
             h = mlxcel_core::add(&h, &ff_out);
         }
 
+        let h = select_last_row(h, last_pos);
         let h = self.ranks[0].norm.forward(&h);
         self.ranks[0].lm_head.forward(&h)
+    }
+}
+
+impl LanguageModel for TensorParallelLlamaModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, None)
+    }
+
+    fn forward_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, Some(last_pos))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -966,77 +989,20 @@ impl TensorParallelGemma3Model {
     }
 }
 
-impl LanguageModel for TensorParallelGemma3Model {
-    fn batched_decode_kind(&self) -> BatchedDecodeKind {
-        BatchedDecodeKind::Native
-    }
-
-    fn forward(
-        &self,
-        input_ids: &MlxArray,
-        caches: &mut [KVCache],
-        mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        let cache_key = Self::cache_key(caches);
-        let mut rank_caches = self.rank_caches_for_key(cache_key, caches);
-        let mut h = self.ranks[0].get_embed_tokens(input_ids);
-        let seq_len = mlxcel_core::array_shape(input_ids)[1];
-
-        let (global_mask, sliding_mask) =
-            gemma3_masks(mask, seq_len, &mut rank_caches[0], &self.ranks[0]);
-
-        for layer_idx in 0..self.num_layers_per_rank {
-            let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
-            let layer_mask = gemma3_layer_mask(
-                layer_idx,
-                self.ranks[0].sliding_window_pattern,
-                global_mask.as_deref(),
-                sliding_mask.as_deref(),
-            );
-            let attn_parts: Vec<_> = self
-                .ranks
-                .iter()
-                .zip(rank_caches.iter_mut())
-                .map(|(rank, caches)| {
-                    rank.layers[layer_idx].self_attn.forward(
-                        &attn_norm,
-                        gemma3_cache_interface(&mut caches[layer_idx]),
-                        layer_mask,
-                    )
-                })
-                .collect();
-            let attn_out = reduce_sum_f32(attn_parts);
-            let post_attn = self.ranks[0].layers[layer_idx]
-                .post_attention_layernorm
-                .forward(&attn_out);
-            h = mlxcel_core::compiled_clip_residual(&h, &post_attn);
-
-            let ffn_norm = self.ranks[0].layers[layer_idx]
-                .pre_feedforward_layernorm
-                .forward(&h);
-            let ffn_parts: Vec<_> = self
-                .ranks
-                .iter()
-                .map(|rank| rank.layers[layer_idx].mlp.forward(&ffn_norm))
-                .collect();
-            let ff_out = reduce_sum_f32(ffn_parts);
-            let post_ff = self.ranks[0].layers[layer_idx]
-                .post_feedforward_layernorm
-                .forward(&ff_out);
-            h = mlxcel_core::compiled_clip_residual(&h, &post_ff);
-        }
-
-        let h = self.ranks[0].norm.forward(&h);
-        Self::sync_external_offsets(caches, &rank_caches[0]);
-        self.ranks[0].lm_head.forward(&h)
-    }
-
-    fn forward_with_embeddings(
+impl TensorParallelGemma3Model {
+    /// Forward pass shared by `forward` and the last-row prefill entry points.
+    ///
+    /// `last_pos = Some(p)` slices the hidden state to row `p` before the
+    /// final norm and LM head, so a prefill projects one row through the
+    /// vocabulary instead of every prompt position (#3074). `None` keeps the
+    /// full `[batch, seq, vocab]` output.
+    fn forward_rows(
         &self,
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let cache_key = Self::cache_key(caches);
         let mut rank_caches = self.rank_caches_for_key(cache_key, caches);
@@ -1092,9 +1058,68 @@ impl LanguageModel for TensorParallelGemma3Model {
             h = mlxcel_core::compiled_clip_residual(&h, &post_ff);
         }
 
+        let h = select_last_row(h, last_pos);
         let h = self.ranks[0].norm.forward(&h);
         Self::sync_external_offsets(caches, &rank_caches[0]);
         self.ranks[0].lm_head.forward(&h)
+    }
+}
+
+impl LanguageModel for TensorParallelGemma3Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, None)
+    }
+
+    fn forward_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, Some(last_pos))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -1319,24 +1344,41 @@ impl TensorParallelGemma4Model {
         })
     }
 
+    /// `last_pos = Some(p)` slices the hidden state to row `p` before the final
+    /// norm, the tied head and the logit softcap, so a prefill projects one
+    /// row through the vocabulary (#3074).
     fn forward_impl(
         &self,
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         if let Some(model) = self.fallback_loaded_model.as_ref() {
-            return if let Some(embeddings) = input_embeddings {
-                LanguageModel::forward_with_embeddings(
+            return match (input_embeddings, last_pos) {
+                (Some(embeddings), Some(pos)) => {
+                    LanguageModel::forward_last_logits_with_embeddings_and_sequence_id(
+                        model.as_ref(),
+                        input_ids,
+                        Some(embeddings),
+                        None,
+                        caches,
+                        mask,
+                        pos,
+                    )
+                }
+                (Some(embeddings), None) => LanguageModel::forward_with_embeddings(
                     model.as_ref(),
                     input_ids,
                     Some(embeddings),
                     caches,
                     mask,
-                )
-            } else {
-                LanguageModel::forward(model.as_ref(), input_ids, caches, mask)
+                ),
+                (None, Some(pos)) => {
+                    LanguageModel::forward_last_logits(model.as_ref(), input_ids, caches, mask, pos)
+                }
+                (None, None) => LanguageModel::forward(model.as_ref(), input_ids, caches, mask),
             };
         }
         let cache_key = Self::cache_key(caches);
@@ -1518,6 +1560,7 @@ impl TensorParallelGemma4Model {
             h = mlxcel_core::multiply(&h, &layer0.layer_scalar);
         }
 
+        let h = select_last_row(h, last_pos);
         let h = self.ranks[0].text_model.norm.forward(&h);
         Self::sync_external_offsets(caches, &rank_caches[0]);
         let mut logits = self.ranks[0].text_model.embed_tokens.as_linear(&h);
@@ -1535,7 +1578,7 @@ impl LanguageModel for TensorParallelGemma4Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_impl(input_ids, None, caches, mask)
+        self.forward_impl(input_ids, None, caches, mask, None)
     }
 
     fn forward_with_embeddings(
@@ -1545,7 +1588,40 @@ impl LanguageModel for TensorParallelGemma4Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_impl(input_ids, input_embeddings, caches, mask)
+        self.forward_impl(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_impl(input_ids, None, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_impl(input_ids, None, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_impl(input_ids, input_embeddings, caches, mask, Some(last_pos))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -1602,60 +1678,20 @@ impl LanguageModel for TensorParallelGemma4Model {
     }
 }
 
-impl LanguageModel for TensorParallelQwen3Model {
-    fn batched_decode_kind(&self) -> BatchedDecodeKind {
-        BatchedDecodeKind::Native
-    }
-
-    fn forward(
-        &self,
-        input_ids: &MlxArray,
-        caches: &mut [KVCache],
-        mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        let mut rank_caches = split_rank_caches(caches, self.num_layers_per_rank, self.ranks.len())
-            .expect("tensor-parallel caches must match num_layers");
-        let mut h = self.ranks[0].embed_tokens.forward(input_ids);
-
-        for layer_idx in 0..self.num_layers_per_rank {
-            let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
-            let attn_parts: Vec<_> = self
-                .ranks
-                .iter()
-                .zip(rank_caches.iter_mut())
-                .map(|(rank, caches)| {
-                    rank.layers[layer_idx].self_attn.forward(
-                        &attn_norm,
-                        &mut caches[layer_idx],
-                        mask,
-                    )
-                })
-                .collect();
-            let attn_out = reduce_sum_f32(attn_parts);
-            h = mlxcel_core::add(&h, &attn_out);
-
-            let ffn_norm = self.ranks[0].layers[layer_idx]
-                .post_attention_layernorm
-                .forward(&h);
-            let ffn_parts: Vec<_> = self
-                .ranks
-                .iter()
-                .map(|rank| rank.layers[layer_idx].mlp.forward(&ffn_norm))
-                .collect();
-            let ff_out = reduce_sum_f32(ffn_parts);
-            h = mlxcel_core::add(&h, &ff_out);
-        }
-
-        let h = self.ranks[0].norm.forward(&h);
-        self.final_logits(&h)
-    }
-
-    fn forward_with_embeddings(
+impl TensorParallelQwen3Model {
+    /// Forward pass shared by `forward` and the last-row prefill entry points.
+    ///
+    /// `last_pos = Some(p)` slices the hidden state to row `p` before the
+    /// final norm and LM head, so a prefill projects one row through the
+    /// vocabulary instead of every prompt position (#3074). `None` keeps the
+    /// full `[batch, seq, vocab]` output.
+    fn forward_rows(
         &self,
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let mut rank_caches = split_rank_caches(caches, self.num_layers_per_rank, self.ranks.len())
             .expect("tensor-parallel caches must match num_layers");
@@ -1693,8 +1729,67 @@ impl LanguageModel for TensorParallelQwen3Model {
             h = mlxcel_core::add(&h, &ff_out);
         }
 
+        let h = select_last_row(h, last_pos);
         let h = self.ranks[0].norm.forward(&h);
         self.final_logits(&h)
+    }
+}
+
+impl LanguageModel for TensorParallelQwen3Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, None)
+    }
+
+    fn forward_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, Some(last_pos))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -1733,104 +1828,20 @@ impl LanguageModel for TensorParallelQwen3Model {
     }
 }
 
-impl LanguageModel for TensorParallelQwen35Model {
-    fn batched_decode_kind(&self) -> BatchedDecodeKind {
-        BatchedDecodeKind::Native
-    }
-
-    fn forward(
-        &self,
-        input_ids: &MlxArray,
-        caches: &mut [KVCache],
-        mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        let cache_key = Self::cache_key(caches);
-        let mut rank_caches = self.rank_caches_for_key(cache_key, caches);
-        let mut h = self.ranks[0].embed_tokens.forward(input_ids);
-        let seq_len = mlxcel_core::array_shape(&h)[1];
-        let fa_idx = self.ranks[0].config.full_attention_interval - 1;
-        let fa_mask = if seq_len > 1 {
-            let offset = if fa_idx < rank_caches[0].len() {
-                qwen3_next_cache_offset_ref(&rank_caches[0][fa_idx])
-            } else {
-                0
-            };
-            Some(mlxcel_core::utils::create_causal_mask(seq_len, offset))
-        } else {
-            None
-        };
-
-        for layer_idx in 0..self.num_layers_per_rank {
-            let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
-            let attn_parts: Vec<_> = self
-                .ranks
-                .iter()
-                .zip(rank_caches.iter_mut())
-                .map(|(rank, caches)| {
-                    match (&rank.layers[layer_idx].attention, &mut caches[layer_idx]) {
-                        (
-                            crate::models::qwen3_5::Qwen35AttentionVariant::Linear(attn),
-                            crate::models::qwen3_next::Qwen3NextCache::Linear(cache),
-                        ) => attn.forward_hidden_tp(&attn_norm, mask, Some(cache)),
-                        (
-                            crate::models::qwen3_5::Qwen35AttentionVariant::FullAttention(attn),
-                            crate::models::qwen3_next::Qwen3NextCache::Attention(cache),
-                        ) => attn.forward_hidden_with_position_ids(
-                            &attn_norm,
-                            cache,
-                            fa_mask.as_deref(),
-                            None,
-                        ),
-                        _ => unreachable!("Qwen3.5 tensor-parallel cache/layout mismatch"),
-                    }
-                })
-                .collect();
-            let attn_out = if self.ranks[0].layers[layer_idx].is_linear {
-                let full_hidden = concat_last_dim(attn_parts);
-                self.full_linear_out_projs[layer_idx]
-                    .as_ref()
-                    .expect("missing Qwen3.5 linear out_proj")
-                    .forward(&full_hidden)
-            } else {
-                let full_hidden = concat_last_dim(attn_parts);
-                self.full_attention_out_projs[layer_idx]
-                    .as_ref()
-                    .expect("missing Qwen3.5 attention o_proj")
-                    .forward(&full_hidden)
-            };
-            h = mlxcel_core::add(&h, &attn_out);
-
-            let ffn_norm = self.ranks[0].layers[layer_idx]
-                .post_attention_layernorm
-                .forward(&h);
-            let ffn_parts: Vec<_> = self
-                .ranks
-                .iter()
-                .map(|rank| match &rank.layers[layer_idx].mlp {
-                    crate::models::qwen3_5::Qwen35MLPVariant::Dense(mlp) => {
-                        mlp.forward_hidden(&ffn_norm)
-                    }
-                    crate::models::qwen3_5::Qwen35MLPVariant::MoE(_) => {
-                        unreachable!("dense Qwen3.5 tensor parallel runtime loaded MoE layer")
-                    }
-                })
-                .collect();
-            let ff_hidden = concat_last_dim(ffn_parts);
-            let ff_out = self.full_mlp_down_projs[layer_idx].forward(&ff_hidden);
-            h = mlxcel_core::add(&h, &ff_out);
-        }
-
-        let h = self.ranks[0].norm.forward(&h);
-        Self::sync_external_offsets(caches, &rank_caches[0]);
-        self.final_logits(&h)
-    }
-
-    fn forward_with_embeddings(
+impl TensorParallelQwen35Model {
+    /// Forward pass shared by `forward` and the last-row prefill entry points.
+    ///
+    /// `last_pos = Some(p)` slices the hidden state to row `p` before the
+    /// final norm and LM head, so a prefill projects one row through the
+    /// vocabulary instead of every prompt position (#3074). `None` keeps the
+    /// full `[batch, seq, vocab]` output.
+    fn forward_rows(
         &self,
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let cache_key = Self::cache_key(caches);
         let mut rank_caches = self.rank_caches_for_key(cache_key, caches);
@@ -1911,9 +1922,68 @@ impl LanguageModel for TensorParallelQwen35Model {
             h = mlxcel_core::add(&h, &ff_out);
         }
 
+        let h = select_last_row(h, last_pos);
         let h = self.ranks[0].norm.forward(&h);
         Self::sync_external_offsets(caches, &rank_caches[0]);
         self.final_logits(&h)
+    }
+}
+
+impl LanguageModel for TensorParallelQwen35Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, None)
+    }
+
+    fn forward_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, None, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, Some(last_pos))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -2078,16 +2148,19 @@ impl TensorParallelErnie45Model {
     }
 }
 
-impl LanguageModel for TensorParallelErnie45Model {
-    fn batched_decode_kind(&self) -> BatchedDecodeKind {
-        BatchedDecodeKind::Native
-    }
-
-    fn forward(
+impl TensorParallelErnie45Model {
+    /// Forward pass shared by `forward` and the last-row prefill entry points.
+    ///
+    /// `last_pos = Some(p)` slices the hidden state to row `p` before the
+    /// final norm and LM head, so a prefill projects one row through the
+    /// vocabulary instead of every prompt position (#3074). `None` keeps the
+    /// full `[batch, seq, vocab]` output.
+    fn forward_rows(
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let mut rank_caches = split_rank_caches(caches, self.num_layers_per_rank, self.ranks.len())
             .expect("tensor-parallel caches must match num_layers");
@@ -2122,8 +2195,45 @@ impl LanguageModel for TensorParallelErnie45Model {
             h = mlxcel_core::add(&h, &ff_out);
         }
 
+        let h = select_last_row(h, last_pos);
         let h = self.ranks[0].norm.forward(&h);
         self.final_logits(&h)
+    }
+}
+
+impl LanguageModel for TensorParallelErnie45Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, None)
+    }
+
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, Some(last_pos))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -2278,16 +2388,19 @@ impl TensorParallelHunyuanV1DenseModel {
     }
 }
 
-impl LanguageModel for TensorParallelHunyuanV1DenseModel {
-    fn batched_decode_kind(&self) -> BatchedDecodeKind {
-        BatchedDecodeKind::Native
-    }
-
-    fn forward(
+impl TensorParallelHunyuanV1DenseModel {
+    /// Forward pass shared by `forward` and the last-row prefill entry points.
+    ///
+    /// `last_pos = Some(p)` slices the hidden state to row `p` before the
+    /// final norm and LM head, so a prefill projects one row through the
+    /// vocabulary instead of every prompt position (#3074). `None` keeps the
+    /// full `[batch, seq, vocab]` output.
+    fn forward_rows(
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let mut rank_caches = split_rank_caches(caches, self.num_layers_per_rank, self.ranks.len())
             .expect("tensor-parallel caches must match num_layers");
@@ -2322,8 +2435,45 @@ impl LanguageModel for TensorParallelHunyuanV1DenseModel {
             h = mlxcel_core::add(&h, &ff_out);
         }
 
+        let h = select_last_row(h, last_pos);
         let h = self.ranks[0].norm.forward(&h);
         self.final_logits(&h)
+    }
+}
+
+impl LanguageModel for TensorParallelHunyuanV1DenseModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, None)
+    }
+
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, Some(last_pos))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

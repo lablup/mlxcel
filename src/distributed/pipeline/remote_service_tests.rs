@@ -480,6 +480,7 @@ async fn run_entry_error(harness: &Harness, nonce: u64, request_id: &str) -> Str
                 micro_batch_id: 0,
                 input_ids,
                 attention_mask: None,
+                last_pos: None,
             },
         )
         .await;
@@ -643,6 +644,7 @@ async fn commands_from_authenticated_non_coordinator_have_no_effect() {
             micro_batch_id: 0,
             input_ids: vec![1, 2, 3],
             attention_mask: None,
+            last_pos: None,
         },
         RemoteStageCommand::Shutdown,
     ] {
@@ -830,6 +832,7 @@ async fn run_entry_with_bad_tensor_answers_error_and_keeps_serving() {
                 micro_batch_id: 0,
                 input_ids: vec![0xde, 0xad],
                 attention_mask: None,
+                last_pos: None,
             },
         )
         .await;
@@ -863,6 +866,7 @@ async fn run_entry_with_out_of_bounds_ids_answers_limit_error() {
                 micro_batch_id: 0,
                 input_ids: ids,
                 attention_mask: None,
+                last_pos: None,
             },
         )
         .await;
@@ -1094,6 +1098,7 @@ async fn non_owner_cannot_cancel_or_release_a_prepared_sequence() {
                 micro_batch_id: 0,
                 input_ids: vec![1, 2, 3],
                 attention_mask: None,
+                last_pos: None,
             },
         ),
     ] {
@@ -1248,6 +1253,7 @@ async fn unowned_run_entry_cannot_seed_state_before_first_prepare() {
                 micro_batch_id: 0,
                 input_ids,
                 attention_mask: None,
+                last_pos: None,
             },
         )
         .await;
@@ -1301,6 +1307,7 @@ async fn unprepared_run_entry_is_refused_and_creates_no_state() {
                 micro_batch_id: 0,
                 input_ids,
                 attention_mask: None,
+                last_pos: None,
             },
         )
         .await;

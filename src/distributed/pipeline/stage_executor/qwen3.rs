@@ -108,6 +108,16 @@ impl FamilyStageExecutor for Qwen3StageExecutor {
     ) -> Result<StageExecutionOutput> {
         self.model.execute(input, caches, mask)
     }
+
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        self.model.execute_last_row(input, caches, mask, last_pos)
+    }
 }
 
 struct Qwen3StageLayer(models::qwen3::TransformerBlock);

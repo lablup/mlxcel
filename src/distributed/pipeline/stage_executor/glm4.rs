@@ -120,6 +120,16 @@ impl FamilyStageExecutor for Glm4StageExecutor {
     ) -> Result<StageExecutionOutput> {
         self.model.execute(input, caches, mask)
     }
+
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        self.model.execute_last_row(input, caches, mask, last_pos)
+    }
 }
 
 impl FamilyStageExecutor for Glm4MoeStageExecutor {
@@ -135,6 +145,16 @@ impl FamilyStageExecutor for Glm4MoeStageExecutor {
     ) -> Result<StageExecutionOutput> {
         self.model.execute(input, caches, mask)
     }
+
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        self.model.execute_last_row(input, caches, mask, last_pos)
+    }
 }
 
 impl FamilyStageExecutor for Glm4MoeLiteStageExecutor {
@@ -146,10 +166,22 @@ impl FamilyStageExecutor for Glm4MoeLiteStageExecutor {
         &self,
         input: StageExecutionInput<'_>,
         caches: &mut [KVCache],
-        _mask: Option<&MlxArray>,
+        mask: Option<&MlxArray>,
     ) -> Result<StageExecutionOutput> {
-        self.model
-            .execute_with_computed_mask(input, caches, |hidden, caches| {
+        self.execute_last_row(input, caches, mask, None)
+    }
+
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        self.model.execute_with_computed_mask_last_row(
+            input,
+            caches,
+            |hidden, caches| {
                 let shape = mlxcel_core::array_shape(hidden);
                 let seq_len = shape[1];
                 if seq_len > 1 {
@@ -158,7 +190,9 @@ impl FamilyStageExecutor for Glm4MoeLiteStageExecutor {
                 } else {
                     None
                 }
-            })
+            },
+            last_pos,
+        )
     }
 }
 
