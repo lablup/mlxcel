@@ -27,19 +27,19 @@ pub(crate) const GEMMA3N_QMV_ABI_VERSION: u32 = 6;
 pub(crate) const GEMMA3N_QMV_KERNEL_VERSION: u32 = 8;
 pub(crate) const GEMMA3N_QMV_MIN_SM: u32 = 80;
 
-#[cfg(xla_iree_cuda)]
+#[cfg(xla_iree_cuda_ptx)]
 const GEMMA3N_QMV_PTX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gemma3n_qmv_sm80.ptx"));
 
 pub(crate) fn is_available() -> bool {
-    cfg!(xla_iree_cuda)
+    cfg!(xla_iree_cuda_ptx)
 }
 
-#[cfg(xla_iree_cuda)]
+#[cfg(xla_iree_cuda_ptx)]
 fn ptx() -> &'static [u8] {
     GEMMA3N_QMV_PTX
 }
 
-#[cfg(not(xla_iree_cuda))]
+#[cfg(not(xla_iree_cuda_ptx))]
 fn ptx() -> &'static [u8] {
     &[]
 }
@@ -86,7 +86,7 @@ fn sdpa_vector_export() -> &'static str {
 pub(crate) fn executable_source() -> String {
     assert!(
         is_available(),
-        "Gemma3n native QMV requires a CUDA-IREE build"
+        "Gemma3n native QMV requires compiled CUDA-IREE PTX (nvcc at build time)"
     );
     let bytes = ptx();
     assert!(!bytes.is_empty(), "Gemma3n native QMV PTX is empty");
@@ -1869,12 +1869,12 @@ pub fn run_ple_injection_all_planes_diagnostic_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(any(feature = "diagnostics", xla_iree_cuda))]
+    #[cfg(any(feature = "diagnostics", xla_iree_cuda_ptx))]
     use crate::emitter::builder::Builder;
     use crate::weights::round_bf16_f32;
-    #[cfg(xla_iree_cuda)]
+    #[cfg(xla_iree_cuda_ptx)]
     use std::path::PathBuf;
-    #[cfg(xla_iree_cuda)]
+    #[cfg(xla_iree_cuda_ptx)]
     use std::process::Command;
 
     fn reference_qmv(input: &[f32], weight: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
@@ -1938,7 +1938,7 @@ mod tests {
         bits.wrapping_add(0x0fff + retained_lsb) & 0xffff_e000
     }
 
-    #[cfg(xla_iree_cuda)]
+    #[cfg(xla_iree_cuda_ptx)]
     fn probe_mlir(m: usize, n: usize, k: usize) -> String {
         let mut builder = Builder::new().with_gemma3n_qmv(true);
         let input = Builder::arg(0, crate::emitter::builder::Ty::f32(vec![m, k]));
@@ -1959,7 +1959,7 @@ mod tests {
         )
     }
 
-    #[cfg(xla_iree_cuda)]
+    #[cfg(xla_iree_cuda_ptx)]
     fn sdpa_dynamic_position_probe_mlir() -> String {
         const CAPACITY: usize = 8;
         const QUERY_HEADS: usize = 8;
@@ -1996,7 +1996,7 @@ mod tests {
         )
     }
 
-    #[cfg(xla_iree_cuda)]
+    #[cfg(xla_iree_cuda_ptx)]
     fn required_path(env_name: &str, fallback: impl FnOnce() -> Option<PathBuf>) -> PathBuf {
         std::env::var_os(env_name)
             .map(PathBuf::from)
@@ -2077,7 +2077,7 @@ mod tests {
         assert!(cuda.contains("window != 0 && window < live"));
     }
 
-    #[cfg(xla_iree_cuda)]
+    #[cfg(xla_iree_cuda_ptx)]
     #[test]
     #[ignore = "requires the pinned CUDA-capable IREE compiler"]
     fn sdpa_dynamic_tensor_position_compiles_to_scalar_push_constant() {
@@ -2131,7 +2131,7 @@ mod tests {
         assert!(!source.contains("void gemma3n_altup_predict_mma("));
     }
 
-    #[cfg(xla_iree_cuda)]
+    #[cfg(xla_iree_cuda_ptx)]
     #[test]
     fn native_altup_ptx_has_one_mma_and_no_scalar_reduction() {
         let ptx = std::str::from_utf8(ptx()).expect("nvcc PTX is UTF-8 text");
@@ -2184,7 +2184,7 @@ mod tests {
         );
     }
 
-    #[cfg(xla_iree_cuda)]
+    #[cfg(xla_iree_cuda_ptx)]
     #[test]
     #[ignore = "requires pinned IREE compiler/runtime plus a CUDA device"]
     fn actual_cuda_dispatch_matches_q4_group64_reference_bit_exactly() {

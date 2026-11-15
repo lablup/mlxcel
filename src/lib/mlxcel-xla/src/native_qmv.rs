@@ -19,12 +19,51 @@
 //! `gfx` target and hands the graph a `hal.executable.source` block that
 //! embeds it, so IREE dispatches the kernel directly while the loader keeps the
 //! checkpoint's 4-bit tensors resident.
+//!
+//! On `MLXCEL_XLA_DEVICE=cuda` the same exports come from `csrc/qmv4.cu`, which
+//! `build.rs` compiles to PTX when the crate is built against a CUDA IREE
+//! runtime (issue #2905). The dispatch ABI, the entry names and the workgroup
+//! geometry are shared; only the embedded object and its executable target
+//! differ. The ragged multi-row exports are HIP-only.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 /// The kernel source, compiled at model load with `hipcc --genco`.
 pub(crate) const QMV_KERNEL: &str = include_str!("../csrc/qmv4.hip");
+
+/// The CUDA port of the single-sequence exports of [`QMV_KERNEL`] (issue
+/// #2905). `build.rs` compiles this file to the PTX behind [`cuda_ptx`]; the
+/// source text itself is only read by the tests that pin it to the HIP kernel.
+#[cfg(test)]
+pub(crate) const QMV_KERNEL_CUDA: &str = include_str!("../csrc/qmv4.cu");
+
+/// Lowest compute capability the embedded PTX targets, matching the
+/// `--iree-cuda-target=sm_80` the loader compiles the graph with.
+pub(crate) const CUDA_MIN_SM: u32 = 80;
+
+#[cfg(xla_iree_cuda_ptx)]
+const QMV4_PTX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/qmv4_sm80.ptx"));
+
+/// The PTX compiled from `csrc/qmv4.cu`, or an error the caller turns into a
+/// fallback to the f16 path.
+///
+/// Present only in a build against a CUDA IREE runtime (`IREE_CUDA_HOME`),
+/// and an available `nvcc`. Without either, the loader warns once and keeps
+/// the f16 weight path, even when the CUDA IREE runtime itself is available.
+pub(crate) fn cuda_ptx() -> Result<&'static [u8], String> {
+    #[cfg(xla_iree_cuda_ptx)]
+    {
+        if QMV4_PTX.is_empty() {
+            return Err("the embedded native GEMV PTX is empty".to_string());
+        }
+        Ok(QMV4_PTX)
+    }
+    #[cfg(not(xla_iree_cuda_ptx))]
+    {
+        Err("this build has no native GEMV PTX (CUDA IREE runtime and nvcc are required at build time)".to_string())
+    }
+}
 
 /// Whether `MLXCEL_XLA_QUANT=native` asked for the native packed projection.
 #[must_use]
@@ -158,6 +197,12 @@ fn publish(tmp: &std::path::Path, final_path: &std::path::Path) -> Result<(), St
 /// The `#hal.executable.target` alias the executable objects are keyed by.
 fn target_alias() -> &'static str {
     "#mlxcel_qmv_target = #hal.executable.target<\"rocm\", \"rocm-hsaco-fb\">\n"
+}
+
+/// The CUDA counterpart of [`target_alias`]. The alias name is the same, so the
+/// source blocks below key their object by it on either device.
+fn cuda_target_alias() -> &'static str {
+    "#mlxcel_qmv_target = #hal.executable.target<\"cuda\", \"cuda-nvptx-fb\">\n"
 }
 
 fn hex(bytes: &[u8], out: &mut String) {
@@ -313,6 +358,28 @@ fn export_block(
     )
 }
 
+/// `(name, ordinal, constants, read-only bindings, writable bindings)` per
+/// export of one source block.
+type ExportTable = &'static [(&'static str, usize, usize, usize, usize)];
+
+/// The single-output exports: two constants (K, N), the activation row, one
+/// packed/scales/biases set and the `[N]` output.
+const SINGLE_EXPORTS: ExportTable = &[("qmv4_kernel", 0, 2, 4, 1), ("qmv4_row_kernel", 1, 2, 4, 1)];
+
+/// The fused q/k/v exports (issue #2895): four constants (K, N0, N1, N2), the
+/// activation row, three weight sets and three outputs.
+const QKV_EXPORTS: ExportTable = &[
+    ("qmv4_qkv_kernel", 0, 4, 10, 3),
+    ("qmv4_qkv_row_kernel", 1, 4, 10, 3),
+];
+
+/// The fused gate/up exports (issue #2895): three constants (K, N0, N1), the
+/// activation row, two weight sets and two outputs.
+const GATEUP_EXPORTS: ExportTable = &[
+    ("qmv4_gateup_kernel", 0, 3, 7, 2),
+    ("qmv4_gateup_row_kernel", 1, 3, 7, 2),
+];
+
 /// One `hal.executable.source` block: the embedded HSACO plus one export per
 /// entry point, each with its own pipeline layout.
 fn executable_source_named(
@@ -321,18 +388,30 @@ fn executable_source_named(
     symbol: &str,
     exports: &[(&str, usize, usize, usize, usize)],
 ) -> String {
-    let mut dense = String::with_capacity(hsaco.len() * 2);
-    hex(hsaco, &mut dense);
+    executable_source_object(hsaco, &format!("qmv4-{arch}.hsaco"), symbol, exports)
+}
+
+/// [`executable_source_named`] for an object of any target: `object` is the
+/// device binary (an HSACO or a PTX module) and `path` the name it is embedded
+/// under.
+fn executable_source_object(
+    object: &[u8],
+    path: &str,
+    symbol: &str,
+    exports: &[(&str, usize, usize, usize, usize)],
+) -> String {
+    let mut dense = String::with_capacity(object.len() * 2);
+    hex(object, &mut dense);
     let mut out = format!(
         "  hal.executable.source private @{symbol} attributes {{\n\
          \x20   objects = #hal.executable.objects<{{\n\
          \x20     #mlxcel_qmv_target = [#hal.executable.object<{{\n\
-         \x20       path = \"qmv4-{arch}.hsaco\",\n\
+         \x20       path = \"{path}\",\n\
          \x20       data = dense<\"0x{dense}\"> : vector<{len}xi8>\n\
          \x20     }}>]\n\
          \x20   }}>\n\
          \x20 }} {{\n",
-        len = hsaco.len(),
+        len = object.len(),
     );
     for (name, ordinal, constants, readonly, writable) in exports {
         out.push_str(&export_block(
@@ -353,42 +432,21 @@ fn executable_source_named(
 /// `ceil(N / ROWS_PER_BLOCK)` workgroups; `@qmv4_row_kernel` puts a whole
 /// workgroup on one row and takes `N` workgroups.
 pub(crate) fn executable_source(hsaco: &[u8], arch: &str) -> String {
-    executable_source_named(
-        hsaco,
-        arch,
-        "custom_qmv",
-        &[("qmv4_kernel", 0, 2, 4, 1), ("qmv4_row_kernel", 1, 2, 4, 1)],
-    )
+    executable_source_named(hsaco, arch, "custom_qmv", SINGLE_EXPORTS)
 }
 
 /// The `hal.executable.source` block for the fused q/k/v export (issue #2895):
 /// four constants (K, N0, N1, N2), the activation row, three packed/scales/biases
 /// sets and three outputs.
 pub(crate) fn qkv_source(hsaco: &[u8], arch: &str) -> String {
-    executable_source_named(
-        hsaco,
-        arch,
-        "custom_qmv_qkv",
-        &[
-            ("qmv4_qkv_kernel", 0, 4, 10, 3),
-            ("qmv4_qkv_row_kernel", 1, 4, 10, 3),
-        ],
-    )
+    executable_source_named(hsaco, arch, "custom_qmv_qkv", QKV_EXPORTS)
 }
 
 /// The `hal.executable.source` block for the fused gate/up export (issue #2895):
 /// three constants (K, N0, N1), the activation row, two packed/scales/biases
 /// sets and two outputs.
 pub(crate) fn gateup_source(hsaco: &[u8], arch: &str) -> String {
-    executable_source_named(
-        hsaco,
-        arch,
-        "custom_qmv_gateup",
-        &[
-            ("qmv4_gateup_kernel", 0, 3, 7, 2),
-            ("qmv4_gateup_row_kernel", 1, 3, 7, 2),
-        ],
-    )
+    executable_source_named(hsaco, arch, "custom_qmv_gateup", GATEUP_EXPORTS)
 }
 
 /// The `hal.executable.source` block for the multi-row export (issue #2922):
@@ -452,6 +510,28 @@ pub(crate) fn module_parts(hsaco: &[u8], arch: &str) -> (String, String) {
             executable_source(hsaco, arch),
             qkv_source(hsaco, arch),
             gateup_source(hsaco, arch),
+        ),
+    )
+}
+
+/// Name the PTX module is embedded under.
+const CUDA_OBJECT_PATH: &str = "qmv4_compute80.ptx";
+
+/// [`module_parts`] for `MLXCEL_XLA_DEVICE=cuda` (issue #2905): the same three
+/// source blocks, exports and pipeline layouts, embedding the PTX compiled from
+/// `csrc/qmv4.cu` under the CUDA executable target.
+#[must_use]
+pub(crate) fn cuda_module_parts(ptx: &[u8]) -> (String, String) {
+    let block = |symbol: &str, exports: ExportTable| {
+        executable_source_object(ptx, CUDA_OBJECT_PATH, symbol, exports)
+    };
+    (
+        cuda_target_alias().to_string(),
+        format!(
+            "{}{}{}",
+            block("custom_qmv", SINGLE_EXPORTS),
+            block("custom_qmv_qkv", QKV_EXPORTS),
+            block("custom_qmv_gateup", GATEUP_EXPORTS),
         ),
     )
 }
@@ -749,5 +829,132 @@ mod tests {
             assert!(own.contains(export), "missing export {export}");
             assert!(!other.contains(export), "export {export} embedded twice");
         }
+    }
+    /// The CUDA file carries the six single-sequence exports and nothing of the
+    /// ragged form.
+    #[test]
+    fn cuda_kernel_source_matches_the_dispatch_contract() {
+        for kernel in [
+            "qmv4_kernel",
+            "qmv4_row_kernel",
+            "qmv4_qkv_kernel",
+            "qmv4_qkv_row_kernel",
+            "qmv4_gateup_kernel",
+            "qmv4_gateup_row_kernel",
+        ] {
+            assert!(
+                QMV_KERNEL_CUDA.contains(&format!("extern \"C\" __global__ void {kernel}(")),
+                "missing {kernel}"
+            );
+        }
+        assert_eq!(
+            QMV_KERNEL_CUDA.matches("extern \"C\" __global__").count(),
+            6,
+            "the ragged multi-row exports are HIP-only"
+        );
+        assert!(!QMV_KERNEL_CUDA.contains("void qmv4_multi_kernel"));
+        assert!(QMV_KERNEL_CUDA.contains("#include <cuda_fp16.h>"));
+        assert!(!QMV_KERNEL_CUDA.contains("#include <hip/"));
+        assert!(
+            QMV_KERNEL_CUDA.contains("__shfl_down_sync(0xffffffffu, acc, off)"),
+            "CUDA has no maskless warp shuffle"
+        );
+    }
+
+    /// The CUDA kernels are the HIP single-sequence kernels, line for line, with
+    /// one intrinsic renamed. A change to either file that does not reach the
+    /// other fails here, so the two devices cannot drift in arithmetic.
+    #[test]
+    fn cuda_kernels_are_the_hip_single_sequence_kernels() {
+        let slice = |source: &'static str, from: &str, to: &str| -> &'static str {
+            let start = source
+                .find(from)
+                .unwrap_or_else(|| panic!("marker {from:?} not found"));
+            let end = source[start..]
+                .find(to)
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("marker {to:?} not found"));
+            &source[start..end]
+        };
+        // HIP: the shared helpers, then (past the multi-row helpers) the six
+        // single-sequence kernels, up to the first ragged kernel.
+        let helpers = slice(QMV_KERNEL, "struct QmvSet {", "// B-row warp dot:");
+        let kernels = slice(
+            QMV_KERNEL,
+            "// One warp per output row, eight rows per workgroup.\nextern",
+            "// B activation rows in one launch",
+        );
+        let expected = format!("{}\n{}", helpers.trim_end(), kernels.trim_end()).replace(
+            "__shfl_down(acc, off)",
+            "__shfl_down_sync(0xffffffffu, acc, off)",
+        );
+        let cuda_start = QMV_KERNEL_CUDA
+            .find("struct QmvSet {")
+            .expect("the CUDA file defines QmvSet");
+        let actual = QMV_KERNEL_CUDA[cuda_start..].trim_end();
+        // Compare modulo blank lines, which separate the two HIP slices
+        // differently from the CUDA file.
+        let lines = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(lines(actual), lines(&expected));
+    }
+
+    /// The CUDA module is the HIP single-sequence module with the object and
+    /// the executable target swapped: same symbols, exports, ordinals and
+    /// pipeline layouts, so the emitter's dispatches bind on either device.
+    #[test]
+    fn cuda_module_parts_embed_the_ptx_under_the_cuda_target() {
+        let object = b"\x01\xABptx";
+        let (alias, source) = cuda_module_parts(object);
+        assert_eq!(
+            alias,
+            "#mlxcel_qmv_target = #hal.executable.target<\"cuda\", \"cuda-nvptx-fb\">\n"
+        );
+        assert!(source.contains("path = \"qmv4_compute80.ptx\""));
+        assert!(source.contains("data = dense<\"0x01AB707478\"> : vector<5xi8>"));
+        assert!(!source.contains("hsaco"));
+        for block in ["@custom_qmv ", "@custom_qmv_qkv ", "@custom_qmv_gateup "] {
+            assert!(source.contains(block), "missing source block {block}");
+        }
+        assert!(!source.contains("_multi"), "the ragged blocks are HIP-only");
+
+        let (hip_alias, hip_source) = module_parts(object, "gfx1151");
+        assert_ne!(alias, hip_alias);
+        assert_eq!(
+            source,
+            hip_source.replace("qmv4-gfx1151.hsaco", "qmv4_compute80.ptx")
+        );
+    }
+
+    /// A build against a CUDA IREE runtime carries the PTX for every
+    /// single-sequence entry point, compiled for the minimum architecture the
+    /// graph is compiled for.
+    #[cfg(xla_iree_cuda_ptx)]
+    #[test]
+    fn cuda_ptx_carries_every_single_sequence_entry() {
+        let ptx = cuda_ptx().expect("a CUDA IREE build embeds the PTX");
+        let text = std::str::from_utf8(ptx).expect("PTX is text");
+        assert!(text.contains(&format!(".target sm_{CUDA_MIN_SM}")));
+        for exports in [SINGLE_EXPORTS, QKV_EXPORTS, GATEUP_EXPORTS] {
+            for (entry, ..) in exports {
+                assert!(
+                    text.contains(&format!(".entry {entry}(")),
+                    "missing {entry}"
+                );
+            }
+        }
+    }
+
+    /// Any other build has no PTX; the accessor reports why and the loader
+    /// keeps the f16 path.
+    #[cfg(not(xla_iree_cuda_ptx))]
+    #[test]
+    fn cuda_ptx_is_absent_without_a_compiled_artifact() {
+        let reason = cuda_ptx().expect_err("no compiled artifact, no PTX");
+        assert!(reason.contains("CUDA IREE runtime"), "{reason}");
     }
 }

@@ -379,7 +379,7 @@ fn take_weight(
             // signless `i32` operand. The StableHLO input pipeline legalizes
             // unsigned integers away, and a `flow.dispatch` operand with a `ui32`
             // type has no legalization (the pass rejects it outright), so the
-            // native path uses the same-width signless type. The HIP kernel reads
+            // native path uses the same-width signless type. The kernel reads
             // the buffer as `uint32_t`, so the bits are unchanged.
             let packed_elt = if b.native_proj_enabled() {
                 "i32"
@@ -2893,7 +2893,8 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
 /// projection dispatch (issue #2889).
 ///
 /// `native` carries the target alias and the `hal.executable.source` block that
-/// embeds the compiled HIP kernel; the projections then stay packed and the
+/// embeds the compiled kernel (an HSACO on hip, PTX on cuda since issue
+/// #2905); the projections then stay packed and the
 /// graph calls `@custom_qmv::@qmv4_kernel` instead of dequantizing weights.
 pub fn emit_decode_with_native(
     c: &Config,
