@@ -3,6 +3,7 @@
 // Mamba2/SSM, GatedDeltaNet, and the decode-MoE expert path. Split out of
 // mlx_cxx_bridge.cpp; see mlx_cxx_internal.h for the shared helpers.
 
+#include <mutex>
 #include "mlx_cxx_internal.h"
 #include "qwen4_qsa_source.h"
 #include "../../mlxcelverse/kernels/gpu_backend.h"
@@ -413,17 +414,16 @@ namespace {
 
     struct XieluKernelHolder {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::metal_kernel(
                     "xielu_fused",
                     {"x", "alpha_p", "alpha_n", "beta", "eps"},
                     {"out"},
                     XIELU_METAL_SOURCE,
                     XIELU_METAL_HEADER);
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -479,9 +479,9 @@ namespace {
 
     struct XieluKernelHolderHip {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
                 kernel = mlx::core::fast::hip_kernel(
                     "xielu_fused_hip",
@@ -492,8 +492,7 @@ namespace {
                 throw std::runtime_error(
                     "[fused_xielu] this build has no ROCm backend");
 #endif
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -647,18 +646,17 @@ namespace {
 
     struct SsmKernelHolder {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
 
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::metal_kernel(
                     "ssm_kernel",
                     {"X", "A_log", "B", "C", "D", "dt", "state_in"},
                     {"out", "state_out"},
                     SSM_METAL_SOURCE
                 );
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -723,18 +721,17 @@ namespace {
 
     struct SsmKernelHolderCuda {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
 
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::cuda_kernel(
                     "ssm_kernel_cu",
                     {"X", "A_log", "B", "C", "D", "dt", "state_in"},
                     {"out", "state_out"},
                     SSM_CUDA_SOURCE
                 );
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -813,10 +810,10 @@ namespace {
 
     struct SsmKernelHolderHip {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
 
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
                 kernel = mlx::core::fast::hip_kernel(
                     "ssm_kernel_hip",
@@ -828,8 +825,7 @@ namespace {
                 throw std::runtime_error(
                     "[ssm_update_kernel] this build has no ROCm backend");
 #endif
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -1250,19 +1246,18 @@ namespace {
     // Kernel holder structs (lazy init, one per variant)
     struct GatedDeltaKernelHolder {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
 
         mlx::core::fast::CustomKernelFunction& get(const char* name,
                                                     const std::vector<std::string>& inputs,
                                                     const char* source) {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::metal_kernel(
                     name, inputs,
                     {"y", "state_out"},
                     source
                 );
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -1690,16 +1685,15 @@ static const char* INKLING_ROUTE_METAL_SOURCE = R"(
 
 struct InklingRouteKernelHolder {
     std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-    bool initialized = false;
+    std::once_flag once;
     mlx::core::fast::CustomKernelFunction& get() {
-        if (!initialized) {
+        std::call_once(once, [&] {
             kernel = mlx::core::fast::metal_kernel(
                 "inkling_moe_route",
                 {"logits", "corr", "wscale"},
                 {"idx", "wk", "gamma"},
                 INKLING_ROUTE_METAL_SOURCE);
-            initialized = true;
-        }
+        });
         return *kernel;
     }
 };
@@ -1826,16 +1820,15 @@ static const char* INKLING_DOWN_COMBINE_METAL_SOURCE = R"(
 
 struct InklingDownCombineKernelHolder {
     std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-    bool initialized = false;
+    std::once_flag once;
     mlx::core::fast::CustomKernelFunction& get() {
-        if (!initialized) {
+        std::call_once(once, [&] {
             kernel = mlx::core::fast::metal_kernel(
                 "inkling_moe_down_combine",
                 {"xin", "wq", "sc", "bi", "idx", "wk"},
                 {"out"},
                 INKLING_DOWN_COMBINE_METAL_SOURCE);
-            initialized = true;
-        }
+        });
         return *kernel;
     }
 };
@@ -2081,9 +2074,9 @@ for (int row = 0; row < RESULTS_PER_SIMDGROUP; ++row) {
 
 struct MoeSwitchGateUpKernelHolder {
     std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-    bool initialized = false;
+    std::once_flag once;
     mlx::core::fast::CustomKernelFunction& get() {
-        if (!initialized) {
+        std::call_once(once, [&] {
             kernel = mlx::core::fast::metal_kernel(
                 "moe_switch_gate_up",
                 {"x", "indices", "up_w", "up_scales", "up_biases",
@@ -2091,8 +2084,7 @@ struct MoeSwitchGateUpKernelHolder {
                 {"up_y", "gate_y"},
                 MOE_SWITCH_GATE_UP_METAL_SOURCE,
                 MOE_SWITCH_GATE_UP_HEADER);
-            initialized = true;
-        }
+        });
         return *kernel;
     }
 };
@@ -2602,18 +2594,17 @@ namespace {
 
     struct Mamba1ScanKernelHolder {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
 
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::metal_kernel(
                     "mamba1_selective_scan",
                     {"X", "DT", "Bm", "Cm", "A", "Dp", "state_in"},
                     {"Y", "state_out"},
                     MAMBA1_SCAN_METAL_SOURCE
                 );
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -2712,10 +2703,10 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
 
     struct Mamba1ScanKernelHolderCuda {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
 
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::cuda_kernel(
                     "mamba1_selective_scan_cu",
                     {"X", "DT", "Bm", "Cm", "A", "Dp", "state_in"},
@@ -2723,8 +2714,7 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
                     MAMBA1_SCAN_CUDA_SOURCE,
                     MAMBA1_SCAN_CUDA_HEADER
                 );
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -2799,10 +2789,10 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
 
     struct Mamba1ScanKernelHolderHip {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
 
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
                 kernel = mlx::core::fast::hip_kernel(
                     "mamba1_selective_scan_hip",
@@ -2813,8 +2803,7 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
                 throw std::runtime_error(
                     "[mamba1_selective_scan] this build has no ROCm backend");
 #endif
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -3125,9 +3114,9 @@ namespace {
 
     struct MoeGateUpKernelHolder {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::metal_kernel(
                     "moe_gateup_kernel",
                     {"x", "indices", "gate_w", "gate_s", "gate_b",
@@ -3135,8 +3124,7 @@ namespace {
                     {"act_g"},
                     MOE_GATEUP_METAL_SOURCE
                 );
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -3147,17 +3135,16 @@ namespace {
 
     struct MoeDownKernelHolder {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::metal_kernel(
                     "moe_down_kernel",
                     {"indices", "down_w", "down_s", "down_b", "act_g", "scores"},
                     {"out"},
                     MOE_DOWN_METAL_SOURCE
                 );
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -3294,9 +3281,9 @@ namespace {
 
     struct MoeGateUpKernelHolderCuda {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::cuda_kernel(
                     "moe_gateup_kernel_cu",
                     {"x", "indices", "gate_w", "gate_s", "gate_b",
@@ -3304,8 +3291,7 @@ namespace {
                     {"act_g"},
                     MOE_GATEUP_CUDA_SOURCE
                 );
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -3395,9 +3381,9 @@ namespace {
 
     struct MoeGateUpKernelHolderHip {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
                 kernel = mlx::core::fast::hip_kernel(
                     "moe_gateup_kernel_hip",
@@ -3409,8 +3395,7 @@ namespace {
                 throw std::runtime_error(
                     "[fused_moe] this build has no ROCm backend");
 #endif
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -3439,17 +3424,16 @@ const mlxcel::KernelPorts& moe_gateup_ports() {
 
     struct MoeDownKernelHolderCuda {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::cuda_kernel(
                     "moe_down_kernel_cu",
                     {"indices", "down_w", "down_s", "down_b", "act_g", "scores"},
                     {"out"},
                     MOE_DOWN_CUDA_SOURCE
                 );
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -3532,9 +3516,9 @@ const mlxcel::KernelPorts& moe_gateup_ports() {
 
     struct MoeDownKernelHolderHip {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
                 kernel = mlx::core::fast::hip_kernel(
                     "moe_down_kernel_hip",
@@ -3545,8 +3529,7 @@ const mlxcel::KernelPorts& moe_gateup_ports() {
                 throw std::runtime_error(
                     "[fused_moe] this build has no ROCm backend");
 #endif
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -3616,17 +3599,16 @@ const mlxcel::KernelPorts& moe_down_ports() {
 
     struct MoeFc1Relu2KernelHolder {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::metal_kernel(
                     "moe_fc1_relu2_kernel",
                     {"x", "indices", "fc1_w", "fc1_s", "fc1_b"},
                     {"act_g"},
                     MOE_FC1_RELU2_METAL_SOURCE
                 );
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -3688,9 +3670,9 @@ const mlxcel::KernelPorts& moe_down_ports() {
 
     struct MoeFc1Relu2KernelHolderHip {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
                 kernel = mlx::core::fast::hip_kernel(
                     "moe_fc1_relu2_kernel_hip",
@@ -3701,8 +3683,7 @@ const mlxcel::KernelPorts& moe_down_ports() {
                 throw std::runtime_error(
                     "[fused_moe_forward] this build has no ROCm backend");
 #endif
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -4368,17 +4349,16 @@ namespace {
 
     struct Add3LayerNormKernelHolder {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
                 kernel = mlx::core::fast::metal_kernel(
                     "mlxcel_add3_layer_norm",
                     {"ra", "rb", "rx", "w", "bias", "eps"},
                     {"x_out", "h_out"},
                     ADD3_LN_METAL_SOURCE,
                     ADD3_LN_METAL_HEADER);
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -4527,9 +4507,9 @@ namespace {
 
     struct Add3LayerNormKernelHolderHip {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag once;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(once, [&] {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
                 kernel = mlx::core::fast::hip_kernel(
                     "mlxcel_add3_layer_norm_hip",
@@ -4540,8 +4520,7 @@ namespace {
                 throw std::runtime_error(
                     "[fused_add3_layer_norm] this build has no ROCm backend");
 #endif
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
