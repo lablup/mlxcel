@@ -963,3 +963,7 @@ mod tests;
 #[cfg(test)]
 #[path = "vlm_qwen_text_only_tests.rs"]
 mod qwen_text_only_tests;
+
+#[cfg(test)]
+#[path = "vlm_qwen35_modelopt_tests.rs"]
+mod qwen35_modelopt_tests;

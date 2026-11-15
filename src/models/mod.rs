@@ -435,9 +435,10 @@ pub use qwen4_exp::Qwen4ExpModel;
 pub use recurrent_gemma::GriffinModel;
 pub use rwkv7::Rwkv7;
 pub(crate) use sanitize::{
-    Gemma4WeightBacking, config_has_quantization_metadata, load_gemma4_text_weights_with_backing,
-    load_gemma4_unified_weights_with_backing, load_gemma4_vlm_weights_with_backing,
-    sanitize_gemma4_nvfp4_weights, strip_gemma4_kv_shared_weights,
+    Gemma4WeightBacking, config_has_quantization_metadata, is_modelopt_nvfp4_text_checkpoint,
+    load_gemma4_text_weights_with_backing, load_gemma4_unified_weights_with_backing,
+    load_gemma4_vlm_weights_with_backing, sanitize_gemma4_nvfp4_weights,
+    sanitize_modelopt_nvfp4_weights, strip_gemma4_kv_shared_weights,
 };
 // The only consumer outside `sanitize` is the diagnostics-gated Molmo2 vision
 // reference loader, so an unconditional re-export is dead in a default build
