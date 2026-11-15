@@ -1037,6 +1037,9 @@ impl KVCache {
             return;
         }
 
+        // A multi-token growth of an existing buffer (a chunked-prefill piece)
+        // also releases the superseded buffer before the graph runs; see
+        // `cache/fp16_growth.rs` (issues #3084, #3092).
         if self.fp16_append_needs_growth(new_seq_len) {
             self.grow_fp16_buffers(&new_keys, &new_values);
         }

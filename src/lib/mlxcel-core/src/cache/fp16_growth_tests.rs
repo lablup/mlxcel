@@ -12,10 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `KVCache::reserve_rows` (issue #3084): an eager growth must leave the cache
-//! exactly as the lazy growth inside `update_fp16` would have.
+//! The eager, releasing FP16 growth inside `update_fp16` (issues #3084,
+//! #3092): it must fire only for a multi-token growth of an existing buffer,
+//! and leave the cache holding exactly the rows and capacity the lazy growth
+//! leaves. The memory effect is measured in `tests/kv_growth_release.rs`.
+
+use std::cell::RefCell;
 
 use super::*;
+use crate::cache::{PagedBlockPool, PagedKvLayout, PagedSequenceState};
 use crate::dtype;
 
 /// `[1, 2, n, d]` rows with distinct values, so a misplaced row shows.
@@ -33,85 +38,144 @@ fn buffer_len(cache: &KVCache) -> i32 {
     ffi::array_shape(cache.keys.as_ref().unwrap())[2]
 }
 
-/// Appends `pieces` multi-token blocks (K width 6, V width 4, as MLA's K and V
-/// widths differ) through two eager layers and one lazy reference, reserving
-/// only on the eager pair, and checks layer 0's fetched windows and whole
-/// buffers match the reference after every piece.
-fn assert_eager_matches_lazy(pieces: &[i32], trim_after_first: i32) {
-    // Two layers, so a reservation's flush runs while another layer's grown
-    // copy is still queued.
-    let mut eager = [KVCache::new(), KVCache::new()];
-    let mut lazy = KVCache::new();
-    let mut grew_any = false;
-    for (i, &n) in pieces.iter().enumerate() {
-        let cap_before = eager[0].keys.as_ref().map(|_| buffer_len(&eager[0]));
-        let grown = eager
-            .iter_mut()
-            .map(|c| usize::from(c.reserve_rows(n)))
-            .sum::<usize>();
-        let cap_after = eager[0].keys.as_ref().map(|_| buffer_len(&eager[0]));
-        // Both layers hold the same row count, so they grow together, and a
-        // reservation that grew must leave the append nothing to grow.
-        assert!(grown == 0 || grown == 2, "piece {i}: {grown} caches grew");
-        assert_eq!(grown == 2, cap_before != cap_after, "piece {i}");
-        grew_any |= grown == 2;
-
-        let _ = eager[1].update_and_fetch(rows(i as f32, n, 6), rows(i as f32, n, 4));
-        let k_new = rows(i as f32 * 10.0, n, 6);
-        let v_new = rows(-(i as f32) * 10.0, n, 4);
-        let (k, v) = eager[0].update_and_fetch(k_new, v_new);
-        let (k_ref, v_ref) =
-            lazy.update_and_fetch(rows(i as f32 * 10.0, n, 6), rows(-(i as f32) * 10.0, n, 4));
-        assert_eq!(ffi::array_shape(&k), ffi::array_shape(&k_ref), "piece {i}");
-        assert_eq!(bytes(&k), bytes(&k_ref), "piece {i} keys");
-        assert_eq!(bytes(&v), bytes(&v_ref), "piece {i} values");
-        assert_eq!(
-            buffer_len(&eager[0]),
-            buffer_len(&lazy),
-            "piece {i} capacity"
-        );
-        assert_eq!(eager[0].offset, lazy.offset);
-        if i == 0 && trim_after_first > 0 {
-            for cache in eager.iter_mut().chain(std::iter::once(&mut lazy)) {
-                assert_eq!(cache.trim(trim_after_first), trim_after_first);
-            }
+/// The capacity the lazy growth rule leaves after appending `n` rows to a
+/// buffer of `cap` slots whose live prefix is `live` rows.
+fn lazy_capacity(cache: &KVCache, cap: Option<i32>, live: i32, n: i32) -> i32 {
+    match cap {
+        Some(cap) if live + n <= cap => cap,
+        _ => {
+            let grown = ((n + cache.step - 1) / cache.step) * cache.step;
+            if cap.is_some() { live + grown } else { grown }
         }
     }
-    assert!(grew_any, "the piece plan must exercise at least one growth");
+}
+
+/// Appends `pieces` blocks (K width 6, V width 4, as MLA's K and V widths
+/// differ) to two layers, the way a chunked prefill does, and checks after
+/// every piece that layer 0's fetched window holds exactly the rows appended
+/// so far, its capacity is the lazy rule's, and both layers released exactly
+/// when a multi-token piece outgrew an existing buffer.
+fn assert_growth_matches_lazy_rule(pieces: &[i32], trim_after_first: i32) {
+    // Two layers, so one layer's flush runs while the other's grown copy is
+    // still queued.
+    let mut layers = [KVCache::new(), KVCache::new()];
+    let mut want_k: Option<UniquePtr<MlxArray>> = None;
+    let mut want_v: Option<UniquePtr<MlxArray>> = None;
+    let mut released_any = false;
+    for (i, &n) in pieces.iter().enumerate() {
+        let cap = layers[0].keys.as_ref().map(|_| buffer_len(&layers[0]));
+        let live = layers[0].buffer_idx();
+        let should_release = n > 1 && cap.is_some_and(|c| live + n > c);
+        let want_cap = lazy_capacity(&layers[0], cap, live, n);
+        assert_eq!(
+            layers[0].fp16_growth_releases(n) && layers[0].fp16_append_needs_growth(n),
+            should_release,
+            "piece {i}"
+        );
+        released_any |= should_release;
+
+        let _ = layers[1].update_and_fetch(rows(i as f32, n, 6), rows(i as f32, n, 4));
+        let k_new = rows(i as f32 * 10.0, n, 6);
+        let v_new = rows(-(i as f32) * 10.0, n, 4);
+        want_k = Some(match want_k.take() {
+            Some(w) => concatenate(&w, &k_new, 2),
+            None => ffi::contiguous(&k_new, false),
+        });
+        want_v = Some(match want_v.take() {
+            Some(w) => concatenate(&w, &v_new, 2),
+            None => ffi::contiguous(&v_new, false),
+        });
+        let (k, v) = layers[0].update_and_fetch(k_new, v_new);
+        let (wk, wv) = (want_k.as_ref().unwrap(), want_v.as_ref().unwrap());
+        assert_eq!(ffi::array_shape(&k), ffi::array_shape(wk), "piece {i}");
+        assert_eq!(bytes(&k), bytes(wk), "piece {i} keys");
+        assert_eq!(bytes(&v), bytes(wv), "piece {i} values");
+        assert_eq!(buffer_len(&layers[0]), want_cap, "piece {i} capacity");
+        assert_eq!(buffer_len(&layers[1]), want_cap, "piece {i} layer 1");
+        if i == 0 && trim_after_first > 0 {
+            for cache in layers.iter_mut() {
+                assert_eq!(cache.trim(trim_after_first), trim_after_first);
+            }
+            let keep = ffi::array_shape(wk)[2] - trim_after_first;
+            want_k = Some(ffi::slice(wk, &[0, 0, 0, 0], &[1, 2, keep, 6]));
+            want_v = Some(ffi::slice(wv, &[0, 0, 0, 0], &[1, 2, keep, 4]));
+        }
+    }
+    assert!(
+        released_any,
+        "the piece plan must exercise a releasing growth"
+    );
 }
 
 #[test]
-fn eager_growth_matches_lazy_growth_across_chunked_pieces() {
+fn releasing_growth_matches_lazy_growth_across_chunked_pieces() {
     // The first piece allocates two 256-row steps; the second overflows them,
     // and every later growth starts from a non-step-aligned buffer.
-    assert_eager_matches_lazy(&[300, 300, 300, 7], 0);
+    assert_growth_matches_lazy_rule(&[300, 300, 300, 7], 0);
 }
 
 #[test]
-fn eager_growth_drops_dead_slots_after_a_trim() {
+fn releasing_growth_drops_dead_slots_after_a_trim() {
     // A trim keeps the old capacity; the growth must not carry the trimmed
     // rows into the new buffer.
-    assert_eager_matches_lazy(&[400, 300, 600], 50);
+    assert_growth_matches_lazy_rule(&[400, 300, 600], 50);
 }
 
 #[test]
-fn reserve_declines_when_there_is_nothing_to_release() {
-    let one = |c: &mut KVCache, n: i32| usize::from(c.reserve_rows(n));
+fn growth_stays_lazy_when_there_is_nothing_to_release() {
     let mut cache = KVCache::new();
     // First fill: no buffer yet.
-    assert_eq!(one(&mut cache, 8), 0);
+    assert!(!cache.fp16_growth_releases(8));
     let _ = cache.update_and_fetch(rows(0.0, 8, 6), rows(0.0, 8, 4));
     let cap = buffer_len(&cache);
-    // Fits in the current buffer.
-    assert_eq!(one(&mut cache, 4), 0);
-    // A decode row never reserves, even past the buffer edge.
-    assert_eq!(one(&mut cache, 1), 0);
-    assert_eq!(buffer_len(&cache), cap);
-    // A quantized layout keeps its own growth path.
+    // An append that fits allocates nothing.
+    assert!(!cache.fp16_append_needs_growth(4));
+    // A decode row never releases, even at the buffer edge.
+    assert!(!cache.fp16_growth_releases(1));
+    let edge = cap - cache.buffer_idx();
+    let _ = cache.update_and_fetch(rows(1.0, edge, 6), rows(1.0, edge, 4));
+    assert!(cache.fp16_append_needs_growth(1));
+    let (k, _) = cache.update_and_fetch(rows(2.0, 1, 6), rows(2.0, 1, 4));
+    assert_eq!(ffi::array_shape(&k)[2], cap + 1);
+    assert_eq!(buffer_len(&cache), cap + cache.step);
+}
+
+#[test]
+fn decode_and_first_fill_growths_report_no_release() {
+    let mut cache = KVCache::new();
+    let (k, v) = (rows(0.0, 8, 6), rows(0.0, 8, 4));
+    assert!(!cache.grow_fp16_buffers(&k, &v), "first fill");
+    let (k1, v1) = (rows(0.0, 1, 6), rows(0.0, 1, 4));
+    assert!(!cache.grow_fp16_buffers(&k1, &v1), "decode row");
+    assert!(cache.grow_fp16_buffers(&k, &v), "multi-token growth");
+}
+
+#[test]
+fn quantized_and_pooled_layouts_skip_the_fp16_growth() {
+    // INT8 keeps its own int8 buffers across multi-token growths; the FP16
+    // growth would have rebuilt them in the incoming f32.
     let mut int8 = KVCache::new_with_mode(KVCacheMode::Int8);
-    let _ = int8.update_and_fetch(
-        ffi::ones(&[1, 2, 8, 4], dtype::FLOAT32),
-        ffi::ones(&[1, 2, 8, 4], dtype::FLOAT32),
-    );
-    assert_eq!(one(&mut int8, 600), 0);
+    for _ in 0..3 {
+        let _ = int8.update_and_fetch(
+            ffi::ones(&[1, 2, 300, 4], dtype::FLOAT32),
+            ffi::ones(&[1, 2, 300, 4], dtype::FLOAT32),
+        );
+    }
+    assert_eq!(int8.offset, 900);
+    assert_eq!(ffi::array_dtype(int8.keys.as_ref().unwrap()), dtype::INT8);
+
+    // A pool-backed cache writes into the pool and never allocates the
+    // dense buffers the FP16 growth would grow.
+    const PAGE: usize = 32;
+    let layout = PagedKvLayout::uniform(1, PAGE, PAGE * 2 * 4 * 2).expect("valid layout");
+    let mut pool = PagedBlockPool::new(layout.clone());
+    pool.set_slab_blocks(64).expect("fresh pool has no storage");
+    let state = Rc::new(RefCell::new(PagedSequenceState::new(&layout)));
+    let mut paged = KVCache::new_paged(Rc::new(RefCell::new(pool)), state, 0);
+    for _ in 0..3 {
+        let k = ffi::astype(&ffi::ones(&[1, 2, 300, 4], dtype::FLOAT32), dtype::FLOAT16);
+        let v = ffi::astype(&ffi::ones(&[1, 2, 300, 4], dtype::FLOAT32), dtype::FLOAT16);
+        let _ = paged.update_and_fetch(k, v);
+    }
+    assert!(paged.keys.is_none() && paged.values.is_none());
 }

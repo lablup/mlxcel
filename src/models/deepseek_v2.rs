@@ -479,11 +479,10 @@ impl MLAAttention {
         let queries = concatenate(&q_nope, &q_pe, -1);
         let keys = concatenate(&k_nope, &k_pe, -1);
 
-        // Update cache. A multi-token step that outgrows the buffer grows it
-        // first, so the superseded per-head K/V buffer is returned rather than
-        // parked in MLX's allocator cache for the rest of the prefill piece
-        // (issue #3084).
-        cache.reserve_rows(l);
+        // Update cache. A multi-token step that outgrows the buffer releases
+        // the superseded per-head K/V buffer inside the shared FP16 growth
+        // rather than parking it in MLX's allocator cache for the rest of the
+        // prefill piece (issues #3084, #3092).
         let (keys, values) = cache.update_and_fetch(keys, values);
 
         // Scaled dot product attention.
@@ -550,9 +549,6 @@ impl MLAAttention {
 
         // [B, L, kv_lora_rank] -> [B, 1, L, kv_lora_rank]: one latent "head".
         let ckv = mlxcel_core::expand_dims(&ckv, 1);
-        // The same early growth as the decompressed path (issue #3084), on
-        // the latent buffers.
-        cache.reserve_rows(l);
 
         let mut view = MlaLatentCache::wrap(cache, geometry)
             .expect("supports() was checked immediately before this wrap");

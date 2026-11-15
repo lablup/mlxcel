@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Growing a dense FP16 [`KVCache`] buffer, and releasing the buffer it
-//! replaces before the step's graph runs (issue #3084).
+//! replaces before the step's graph runs (issues #3084, #3092).
 //!
 //! A multi-token append that outgrows the buffer concatenates the live prefix
 //! with a zero block. Inside a lazy chunked-prefill graph every layer does
@@ -21,35 +21,34 @@
 //! The freed buffer goes back to MLX's free-buffer cache, where nothing can
 //! reuse it: every later request in the same piece asks for the larger size,
 //! and MLX only hands out a cached buffer within two pages of the request. So
-//! the whole previous cache sits in the allocator cache until the piece ends.
-//! On DeepSeek-V2-Lite, whose default path caches decompressed per-head K/V
-//! (10 KiB per token per layer), that was 7.4 GB of the process footprint
-//! at a 28.7K-token prompt in 2048-token pieces.
+//! the whole previous cache would sit in the allocator cache until the piece
+//! ends and the engine flushes it (#672). On DeepSeek-V2-Lite, whose default
+//! path caches decompressed per-head K/V (10 KiB per token per layer), that
+//! was 7.4 GB of the process footprint at a 28.7K-token prompt in 2048-token
+//! pieces.
 //!
-//! [`KVCache::reserve_rows`] performs the same growth layer by layer before
-//! the step's graph is built, queues the copy, and empties the allocator
-//! cache at the next layer, so the superseded buffers are returned instead of
-//! parked. It cannot batch the layers: growing every layer at once holds every
-//! old and every new buffer together, which is the peak it set out to remove.
-//! Each grown buffer is the one [`KVCache::update_fp16`] would have built, so
-//! the appends that follow find room and write exactly the bytes they always
-//! wrote.
+//! So a multi-token growth of an existing buffer, the one a chunked-prefill
+//! piece or a follow-up turn makes, runs eagerly inside `update_fp16`, for
+//! every model on this cache: it empties the allocator cache (returning what
+//! the previous layers' growths released), builds the grown buffer, and
+//! queues its copy with `async_eval`, so the CPU keeps building the graph.
+//! Once that copy runs, the superseded buffer is freed, and the next layer's
+//! growth returns it. At most the last few layers' old buffers are still
+//! parked when the step's graph runs, instead of every layer's.
+//!
+//! The growth cannot be batched across layers at the start of the forward:
+//! growing every layer at once holds every old and every new buffer together,
+//! which is the peak it sets out to remove (measured in #3091). A first fill
+//! has nothing to release, a decode row writes in place or inside the step
+//! slack, and an append that fits allocates nothing, so none of them changes.
+//! The quantized, rotating and pool-backed layouts never reach this path. The
+//! grown buffer is exactly the one the lazy growth would build, so the append
+//! writes the bytes it always wrote.
 
-use super::{KVCache, KVCacheMode};
+use super::KVCache;
 use crate::concatenate;
 use crate::ffi;
 use crate::ffi::MlxArray;
-
-/// Shape and dtypes of a K/V append, the inputs of one FP16 growth.
-struct AppendGeometry {
-    batch: i32,
-    heads: i32,
-    rows: i32,
-    k_head_dim: i32,
-    v_head_dim: i32,
-    k_dtype: i32,
-    v_dtype: i32,
-}
 
 impl KVCache {
     /// Whether an FP16 append of `new_seq_len` rows must (re)allocate.
@@ -57,36 +56,51 @@ impl KVCache {
         self.keys.is_none() || (self.buffer_idx() + new_seq_len) > self.buffer_seq_len()
     }
 
-    /// Grow the FP16 buffers to fit an append shaped like `new_keys` /
-    /// `new_values`. The lazy growth inside [`Self::update_fp16`].
-    pub(super) fn grow_fp16_buffers(&mut self, new_keys: &MlxArray, new_values: &MlxArray) {
-        let key_shape = ffi::array_shape(new_keys);
-        self.grow_fp16_to(&AppendGeometry {
-            batch: key_shape[0],
-            heads: key_shape[1],
-            rows: key_shape[2],
-            k_head_dim: key_shape[3],
-            v_head_dim: ffi::array_shape(new_values)[3],
-            k_dtype: ffi::array_dtype(new_keys),
-            v_dtype: ffi::array_dtype(new_values),
-        });
+    /// Whether growing for an append of `new_rows` rows releases the
+    /// superseded buffer eagerly: a multi-token append to a buffer that
+    /// already exists.
+    pub(super) fn fp16_growth_releases(&self, new_rows: i32) -> bool {
+        new_rows > 1 && self.keys.is_some() && self.values.is_some()
     }
 
-    /// The single growth rule for the dense FP16 path, keeping the live prefix
-    /// and dropping dead slots. Both the lazy growth and the eager reservation
-    /// go through it, which is what keeps the two byte-identical.
-    fn grow_fp16_to(&mut self, g: &AppendGeometry) {
-        let prev = self.buffer_idx();
-        let n_steps = (self.step + g.rows - 1) / self.step;
-        let buf_size = n_steps * self.step;
+    /// Grow the FP16 buffers to fit an append shaped like `new_keys` /
+    /// `new_values`, keeping the live prefix and dropping dead slots.
+    ///
+    /// A multi-token growth of an existing buffer also hands back the buffers
+    /// earlier layers' growths replaced and queues its own copy (see the
+    /// module docs); every other growth stays lazy. Returns whether it
+    /// released.
+    ///
+    /// Used by: every model on the dense FP16 `KVCache` (through
+    /// `KVCache::update_fp16`), including DeepSeek V2's decompressed and
+    /// latent MLA caches (issues #3084, #3092).
+    pub(super) fn grow_fp16_buffers(&mut self, new_keys: &MlxArray, new_values: &MlxArray) -> bool {
+        let key_shape = ffi::array_shape(new_keys);
+        let (batch, heads, rows, k_head_dim) =
+            (key_shape[0], key_shape[1], key_shape[2], key_shape[3]);
+        let v_head_dim = ffi::array_shape(new_values)[3];
+        let release = self.fp16_growth_releases(rows);
+        if release {
+            // Return what the previous layers' grown copies released.
+            crate::memory::clear_cache();
+        }
 
-        let new_k = ffi::zeros(&[g.batch, g.heads, buf_size, g.k_head_dim], g.k_dtype);
-        let new_v = ffi::zeros(&[g.batch, g.heads, buf_size, g.v_head_dim], g.v_dtype);
+        let prev = self.buffer_idx();
+        let n_steps = (self.step + rows - 1) / self.step;
+        let buf_size = n_steps * self.step;
+        let new_k = ffi::zeros(
+            &[batch, heads, buf_size, k_head_dim],
+            ffi::array_dtype(new_keys),
+        );
+        let new_v = ffi::zeros(
+            &[batch, heads, buf_size, v_head_dim],
+            ffi::array_dtype(new_values),
+        );
 
         let (Some(keys), Some(values)) = (self.keys.take(), self.values.take()) else {
             self.keys = Some(new_k);
             self.values = Some(new_v);
-            return;
+            return false;
         };
         // Normalize the buffer to the live prefix before extending. The
         // buffer can be longer than `prev`: a logical `trim` keeps the old
@@ -95,96 +109,19 @@ impl KVCache {
         // and must not survive the concatenate.
         let (keys, values) = if prev != ffi::array_shape(&keys)[2] {
             (
-                ffi::slice(
-                    &keys,
-                    &[0, 0, 0, 0],
-                    &[g.batch, g.heads, prev, g.k_head_dim],
-                ),
-                ffi::slice(
-                    &values,
-                    &[0, 0, 0, 0],
-                    &[g.batch, g.heads, prev, g.v_head_dim],
-                ),
+                ffi::slice(&keys, &[0, 0, 0, 0], &[batch, heads, prev, k_head_dim]),
+                ffi::slice(&values, &[0, 0, 0, 0], &[batch, heads, prev, v_head_dim]),
             )
         } else {
             (keys, values)
         };
-        self.keys = Some(concatenate(&keys, &new_k, 2));
-        self.values = Some(concatenate(&values, &new_v, 2));
-    }
-
-    /// Grow this cache, lazily, for a coming append of `new_rows` rows shaped
-    /// like the rows it already holds. Returns `true` when it grew.
-    ///
-    /// Declines (returns `false`) unless the cache is plain
-    /// `KVCacheMode::Fp16`, not pool-backed, already holds a buffer, and that
-    /// buffer is too small for a multi-token append: the quantized and paged
-    /// layouts grow through their own paths, a first fill has nothing to
-    /// release, a decode row writes in place or inside the step slack, and an
-    /// append that fits allocates nothing.
-    ///
-    /// The append that follows must carry the cached dtypes (it always does:
-    /// the buffer was created from the same projection's first append).
-    fn grow_for_rows(&mut self, new_rows: i32) -> bool {
-        if self.mode != KVCacheMode::Fp16
-            || self.paged_backing.is_some()
-            || new_rows <= 1
-            || !self.fp16_append_needs_growth(new_rows)
-        {
-            return false;
+        let grown_k = concatenate(&keys, &new_k, 2);
+        let grown_v = concatenate(&values, &new_v, 2);
+        if release {
+            ffi::async_eval_pair(&grown_k, &grown_v);
         }
-        let (Some(keys), Some(values)) = (self.keys.as_ref(), self.values.as_ref()) else {
-            return false;
-        };
-        let ks = ffi::array_shape(keys);
-        let geometry = AppendGeometry {
-            batch: ks[0],
-            heads: ks[1],
-            rows: new_rows,
-            k_head_dim: ks[3],
-            v_head_dim: ffi::array_shape(values)[3],
-            k_dtype: ffi::array_dtype(keys),
-            v_dtype: ffi::array_dtype(values),
-        };
-        self.grow_fp16_to(&geometry);
-        true
-    }
-
-    /// Grow the buffer for a coming `new_rows`-row append now, before the
-    /// step's graph is built, and hand back the buffers earlier reservations
-    /// replaced instead of leaving them in MLX's allocator cache. Returns
-    /// `true` when it grew.
-    ///
-    /// Call it once per layer, before that layer's [`Self::update_and_fetch`].
-    /// The grown buffer (a copy of the already-evaluated cache into a larger
-    /// one) is queued with `async_eval`, so the CPU keeps building the graph;
-    /// once that copy runs, the superseded buffer is freed into the allocator
-    /// cache, and the next layer's reservation empties the cache before it
-    /// grows. At most the last few layers' old buffers are still parked when
-    /// the step's graph runs, instead of every layer's.
-    ///
-    /// Declines, at no cost, for a decode row, a first fill, an append that
-    /// fits, and any layout other than dense FP16 (see `grow_for_rows`). The
-    /// grown buffer is the one [`Self::update_fp16`] would have built, so the
-    /// append writes the bytes it always wrote.
-    ///
-    /// Used by: DeepSeek V2 MLA attention, decompressed and latent caches
-    /// (issue #3084).
-    pub fn reserve_rows(&mut self, new_rows: i32) -> bool {
-        if new_rows <= 1 || self.mode != KVCacheMode::Fp16 || self.paged_backing.is_some() {
-            return false;
-        }
-        if !self.fp16_append_needs_growth(new_rows) || self.keys.is_none() {
-            return false;
-        }
-        // Return what the previous layers' grown copies released.
-        crate::memory::clear_cache();
-        if !self.grow_for_rows(new_rows) {
-            return false;
-        }
-        let keys = self.keys.as_ref().expect("grow_for_rows sets keys");
-        let values = self.values.as_ref().expect("grow_for_rows sets values");
-        ffi::async_eval_pair(keys, values);
-        true
+        self.keys = Some(grown_k);
+        self.values = Some(grown_v);
+        release
     }
 }
