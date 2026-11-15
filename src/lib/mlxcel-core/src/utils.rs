@@ -99,10 +99,25 @@ pub const STATE_TAIL_EAGER_MIN_ROWS: i32 = 256;
 /// speculative path), KimiLinear and KimiK3 (short conv), RecurrentGemma,
 /// Inkling (short conv)
 pub fn materialized_state_tail(x: &MlxArray, n_keep: i32) -> UniquePtr<MlxArray> {
+    materialized_axis_tail(x, 1, n_keep)
+}
+
+/// The last `n_keep` entries of `x` along `axis`, as a fresh buffer that does
+/// not hold `x` alive once it has been evaluated. [`materialized_state_tail`]
+/// is the axis-1 case; a KV cache keeps its time axis at 2.
+///
+/// Evaluated eagerly (with `async_eval`, errors deferred to the next
+/// `try_eval`) when `x` is at least [`STATE_TAIL_EAGER_MIN_ROWS`] long along
+/// `axis`; the result is bit-identical either way.
+///
+/// Used by: [`materialized_state_tail`], `RotatingKVCache`'s first fill
+/// (Gemma 2/3/4, Cohere2, GPT-OSS, Ministral3 and every other family with
+/// sliding-window layers, issue #3062)
+pub fn materialized_axis_tail(x: &MlxArray, axis: usize, n_keep: i32) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(x);
-    let rows = shape[1];
+    let rows = shape[axis];
     let mut starts = vec![0i32; shape.len()];
-    starts[1] = rows - n_keep;
+    starts[axis] = rows - n_keep;
     let tail = ffi::contiguous(&ffi::slice(x, &starts, &shape), false);
     if rows >= STATE_TAIL_EAGER_MIN_ROWS {
         crate::deferred_eval::async_eval_or_defer(&tail);
