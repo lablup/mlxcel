@@ -854,3 +854,11 @@ fn tiny_dense_mla_diagnostics_cover_zero_nonzero_and_replaced_embeddings() {
     assert_ne!(position1.logits, image_position.logits);
     assert_ne!(position1.latent_kv, image_position.latent_kv);
 }
+
+// The prefill's last-row projection (#3070): tied head through
+// `embed_tokens.as_linear`, text and embeddings paths.
+crate::models::last_row_logits_harness::last_row_case!(
+    youtu_vl_lm_last_row_logits,
+    || build_tied_model(&minimal_config()),
+    embeddings
+);

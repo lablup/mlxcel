@@ -542,7 +542,7 @@ fn issue_2563_vlm_families_use_grouped_native_sequence_aware_decode() {
     }
 }
 
-fn visit_rs_files(dir: &Path, visit: &mut impl FnMut(&Path)) {
+pub(super) fn visit_rs_files(dir: &Path, visit: &mut impl FnMut(&Path)) {
     for entry in fs::read_dir(dir).unwrap_or_else(|err| panic!("read {}: {err}", dir.display())) {
         let path = entry.expect("directory entry").path();
         if path.is_dir() {
@@ -660,7 +660,7 @@ fn literal_false(body: &str) -> bool {
         == "false"
 }
 
-fn matching_brace(source: &str, open: usize) -> usize {
+pub(super) fn matching_brace(source: &str, open: usize) -> usize {
     let mut depth = 0usize;
     for (offset, byte) in source.as_bytes()[open..].iter().enumerate() {
         match byte {
@@ -677,7 +677,7 @@ fn matching_brace(source: &str, open: usize) -> usize {
     panic!("unclosed impl block at byte {open}")
 }
 
-fn relative_source_path(root: &Path, path: &Path) -> String {
+pub(super) fn relative_source_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .expect("source under repository root")
         .components()

@@ -72,12 +72,11 @@ fn tiny_vision_config() -> MiniMaxM3VisionConfig {
     serde_json::from_str(TINY_VISION_CONFIG).expect("tiny vision config parses")
 }
 
-#[test]
-fn text_only_decode_delegates_actual_native_batched_forward() {
+fn tiny_vl_model() -> MiniMaxM3VlModel {
     let cfg = tiny_vision_config();
     let encoder = MiniMaxM3VisionEncoder::from_weights(&tiny_tower_weights(&cfg), &cfg)
         .expect("tiny tower loads");
-    let model = MiniMaxM3VlModel {
+    MiniMaxM3VlModel {
         text_model: batched_model(),
         vision_encoder: encoder,
         processor: MiniMaxM3Processor::default(),
@@ -87,7 +86,20 @@ fn text_only_decode_delegates_actual_native_batched_forward() {
         vision_end_token_id: 28,
         spatial_merge_size: 2,
         eos_token_ids: vec![2],
-    };
+    }
+}
+
+// The wrapper's text and embeddings prefills both project only the sampled
+// row through the text model's norm and head (#3070).
+crate::models::last_row_logits_harness::last_row_case!(
+    minimax_m3_vl_last_row_logits,
+    tiny_vl_model,
+    embeddings
+);
+
+#[test]
+fn text_only_decode_delegates_actual_native_batched_forward() {
+    let model = tiny_vl_model();
     assert_eq!(
         LanguageModel::batched_decode_kind(&model),
         mlxcel_core::generate::BatchedDecodeKind::Native

@@ -688,3 +688,16 @@ fn rejects_a_sliding_window_a_dense_prefill_mask_cannot_take() {
         assert!(err.contains(&format!("got {window}")), "{err}");
     }
 }
+
+#[test]
+fn cohere2_moe_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let make = || {
+        let cfg = tiny_config("sigmoid", "average");
+        Cohere2MoeModel::from_weights(&tiny_weights(&cfg), &cfg).expect("build tiny model")
+    };
+    // The fixture's vocabulary holds ten ids.
+    let tokens = &[3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 7];
+    crate::models::last_row_logits_harness::assert_last_row_logits(make, tokens);
+    crate::models::last_row_logits_harness::assert_last_row_logits_with_embeddings(make, tokens);
+}

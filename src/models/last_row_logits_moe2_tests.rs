@@ -18,3 +18,16 @@
 //! `[1, 1, vocab]` logits equal to the full forward's row.
 
 use crate::models::last_row_logits_harness::last_row_case;
+use crate::models::mixtral_style_batched_decode_tests as mixtral_style;
+
+last_row_case!(olmoe_last_row_logits, mixtral_style::tiny_olmoe_model);
+last_row_case!(phimoe_last_row_logits, mixtral_style::tiny_phimoe_model);
+last_row_case!(
+    qwen2_moe_last_row_logits,
+    mixtral_style::tiny_qwen2_moe_model
+);
+last_row_case!(
+    step3p5_last_row_logits,
+    crate::models::mixed_cache_batched_decode_tests::step,
+    embeddings
+);

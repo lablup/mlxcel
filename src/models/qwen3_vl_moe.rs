@@ -1096,6 +1096,27 @@ impl Qwen3VLMoeModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input_ids, input_embeddings, caches, mask, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the row a
+    /// prefill samples, #3070). MRoPE resolution, DeepStack injection and
+    /// every decoder layer run over all positions either way; only the final
+    /// norm and the LM head see the selected row.
+    ///
+    /// Used by: [`Self::forward_for_sequence`], and
+    /// `LanguageModel::last_row_logits` of `Qwen3VLMoeModel` and of the
+    /// Qwen3-VL-MoE and Qwen3-Omni wrappers.
+    pub(crate) fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let cache_offset = caches[0].offset;
         if input_embeddings.is_none() && cache_offset == 0 {
             self.clear_mrope_state();
@@ -1109,7 +1130,7 @@ impl Qwen3VLMoeModel {
         }
 
         if input_embeddings.is_none() && self.can_use_text_only_fast_path(seq_id) {
-            return self.forward_text_only(input_ids, caches, mask);
+            return self.forward_text_only(input_ids, caches, mask, row);
         }
 
         let mut h = if let Some(embeds) = input_embeddings {
@@ -1210,6 +1231,7 @@ impl Qwen3VLMoeModel {
                 }
             }
 
+            h = mlxcel_core::generate::select_row(h, row);
             h = self.norm.forward(&h);
             self.lm_head.forward(&h)
         })
@@ -1220,6 +1242,7 @@ impl Qwen3VLMoeModel {
         input_ids: &MlxArray,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
 
@@ -1227,6 +1250,7 @@ impl Qwen3VLMoeModel {
             h = layer.forward_text_only(&h, &mut caches[layer_idx], mask);
         }
 
+        h = mlxcel_core::generate::select_row(h, row);
         h = self.norm.forward(&h);
         self.lm_head.forward(&h)
     }
@@ -1498,6 +1522,25 @@ impl mlxcel_core::generate::LanguageModel for Qwen3VLMoeModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.forward_rows_for_sequence(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            seq_id,
+            Some(last_pos),
+        ))
     }
 
     fn forward_batched_with_ids(

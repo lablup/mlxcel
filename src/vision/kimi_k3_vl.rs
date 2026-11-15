@@ -378,6 +378,25 @@ impl LanguageModel for KimiK3VLModel {
             .forward_for_sequence_with_embeddings(input_ids, input_embeddings, seq_id)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // With no embeddings this is the text model's sequence forward, as
+        // `forward_with_sequence_id` runs it.
+        Some(self.text.forward_rows_for_sequence(
+            input_ids,
+            input_embeddings,
+            seq_id,
+            Some(last_pos),
+        ))
+    }
+
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.text.embed_tokens.forward(input_ids))
     }

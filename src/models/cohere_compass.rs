@@ -278,7 +278,22 @@ impl CohereCompassTextModel {
         caches: &mut [KVCache],
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
-        let h = self.forward_hidden_for_sequence(input_ids, input_embeddings, caches, seq_id);
+        self.forward_rows_for_sequence(input_ids, input_embeddings, caches, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). The logit scale applies to the projected rows
+    /// only.
+    pub(crate) fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.forward_hidden_for_sequence(input_ids, input_embeddings, caches, seq_id, row);
         let logits = self.lm_head.forward(&h);
         // Command-family logit scaling, applied after the (tied) head.
         let scale =
@@ -286,12 +301,15 @@ impl CohereCompassTextModel {
         mlxcel_core::multiply(&logits, &scale)
     }
 
+    /// Normalized hidden states for every position (`row == None`) or for
+    /// position `row` alone, sliced after the last layer and before the norm.
     fn forward_hidden_for_sequence(
         &self,
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
         caches: &mut [KVCache],
         seq_id: Option<SequenceId>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let cache_offset = caches[0].offset;
         if input_embeddings.is_none() && cache_offset == 0 {
@@ -356,7 +374,12 @@ impl CohereCompassTextModel {
                 }
             }
 
-            self.norm.forward(&h)
+            match row {
+                Some(row) => self
+                    .norm
+                    .forward(&mlxcel_core::generate::logits_at_position(&h, row)),
+                None => self.norm.forward(&h),
+            }
         })
     }
 
@@ -556,6 +579,24 @@ impl mlxcel_core::generate::LanguageModel for CohereCompassTextModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.forward_rows_for_sequence(
+            input_ids,
+            input_embeddings,
+            caches,
+            seq_id,
+            Some(last_pos),
+        ))
     }
 
     fn forward_batched_with_ids(

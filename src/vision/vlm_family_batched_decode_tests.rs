@@ -85,7 +85,7 @@ fn glm_vision_weights(include_glm4v_only_weights: bool) -> WeightMap {
     weights
 }
 
-fn unused_glm4v_vision() -> crate::vision::encoders::glm4v::Glm4vVisionEncoder {
+pub(crate) fn unused_glm4v_vision() -> crate::vision::encoders::glm4v::Glm4vVisionEncoder {
     crate::vision::encoders::glm4v::Glm4vVisionEncoder::from_weights(
         &glm_vision_weights(true),
         &glm_vision_config(),
@@ -94,7 +94,7 @@ fn unused_glm4v_vision() -> crate::vision::encoders::glm4v::Glm4vVisionEncoder {
     .expect("tiny zero-depth GLM-4V tower builds")
 }
 
-fn unused_glm_ocr_vision() -> crate::vision::encoders::glm_ocr::GlmOcrVisionEncoder {
+pub(crate) fn unused_glm_ocr_vision() -> crate::vision::encoders::glm_ocr::GlmOcrVisionEncoder {
     crate::vision::encoders::glm_ocr::GlmOcrVisionEncoder::from_weights(
         &glm_vision_weights(false),
         &glm_vision_config(),
@@ -240,7 +240,7 @@ fn unused_paddle_connector() -> crate::vision::connectors::paddleocr_vl::PaddleO
     .expect("tiny PaddleOCR-VL connector builds")
 }
 
-fn unused_qwen3_vision() -> crate::vision::encoders::qwen3_vl::Qwen3VLVisionEncoder {
+pub(crate) fn unused_qwen3_vision() -> crate::vision::encoders::qwen3_vl::Qwen3VLVisionEncoder {
     let config: crate::vision::encoders::qwen3_vl::Qwen3VLVisionConfig =
         serde_json::from_value(serde_json::json!({
             "depth": 0,
@@ -271,11 +271,11 @@ fn unused_qwen3_vision() -> crate::vision::encoders::qwen3_vl::Qwen3VLVisionEnco
     .expect("tiny zero-depth Qwen3-VL tower builds")
 }
 
-fn qwen_processor() -> crate::vision::processors::qwen2_vl::Qwen2VLProcessor {
+pub(crate) fn qwen_processor() -> crate::vision::processors::qwen2_vl::Qwen2VLProcessor {
     crate::vision::processors::qwen2_vl::Qwen2VLProcessor::new(1, 1, 1)
 }
 
-fn qwen3_processor() -> crate::vision::processors::qwen2_vl::Qwen2VLProcessor {
+pub(crate) fn qwen3_processor() -> crate::vision::processors::qwen2_vl::Qwen2VLProcessor {
     crate::vision::processors::qwen2_vl::Qwen2VLProcessor::new_with_norm(
         1, 1, 1, [0.5; 3], [0.5; 3],
     )

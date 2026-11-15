@@ -2044,7 +2044,13 @@ mod tests {
         );
         assert_eq!(first(&no_embeddings), 2.0);
         // The same hook is reachable through a borrowed model.
-        let by_ref = (&model).forward_last_logits(&input, &mut caches, None, 0);
+        let by_ref = <&HookedStubModel as LanguageModel>::forward_last_logits(
+            &&model,
+            &input,
+            &mut caches,
+            None,
+            0,
+        );
         assert_eq!(first(&by_ref), 100.0);
     }
 

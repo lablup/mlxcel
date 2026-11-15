@@ -18,3 +18,43 @@
 //! `[1, 1, vocab]` logits equal to the full forward's row.
 
 use crate::models::last_row_logits_harness::last_row_case;
+use crate::models::mixed_cache_batched_decode_tests as mixed;
+use crate::vision::llmjp_vl_test_support as llmjp;
+
+last_row_case!(ministral3_last_row_logits, mixed::ministral);
+
+/// The Mellum fixture has an eight-entry vocabulary, so the shared prompt
+/// (ids up to 9) does not fit; the window of 4 is shorter than the prompt.
+#[test]
+fn mellum_last_row_logits() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::last_row_logits_harness::assert_last_row_logits(
+        mixed::mellum,
+        &[3, 1, 4, 1, 5, 2, 6, 5, 3, 7],
+    );
+}
+
+last_row_case!(laguna_last_row_logits, mixed::laguna);
+
+// The LLM-jp text arm is an enum over two dense backbones, and the VLM
+// wrapper drops the sequence id before delegating to it.
+last_row_case!(
+    llmjp_llama_text_last_row_logits,
+    || llmjp::build_text_model("llama"),
+    embeddings
+);
+last_row_case!(
+    llmjp_qwen3_text_last_row_logits,
+    || llmjp::build_text_model("qwen3"),
+    embeddings
+);
+last_row_case!(
+    llmjp_vl_llama_last_row_logits,
+    || llmjp::build_model("llama", 1e-6),
+    embeddings
+);
+last_row_case!(
+    llmjp_vl_qwen3_last_row_logits,
+    || llmjp::build_model("qwen3", 1e-6),
+    embeddings
+);

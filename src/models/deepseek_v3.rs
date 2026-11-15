@@ -1101,22 +1101,60 @@ impl DeepSeekV3Model {
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
-        _mask: Option<&MlxArray>,
+        mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(input_ids);
+        self.forward_rows(input_ids, None, caches, mask, None)
+    }
+
+    /// The single-sequence forward, from token ids or from precomputed
+    /// embeddings, projecting every position (`row == None`) or only position
+    /// `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    ///
+    /// Used by: `forward_impl`, `forward_impl_with_embeddings`,
+    /// `last_row_logits_impl`
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = match input_embeddings {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
 
         // Preserve any caller-provided mask (for padded prefill) but let the
         // attention stack use its implicit causal path for standard prefill.
-        let mask = _mask.map(mlxcel_core::copy);
+        let mask = mask.map(mlxcel_core::copy);
 
         // Pass through layers
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask.as_deref());
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm and lm_head
         let h = self.norm.forward(&h);
         self.lm_head.forward(&h)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only, from token ids or
+    /// from precomputed embeddings: the last-row counterpart of
+    /// [`Self::forward_impl_with_embeddings`].
+    ///
+    /// Used by: `LanguageModel::last_row_logits` for `DeepSeekV3Model` and
+    /// `vision::kimi_vl::KimiVLModel`.
+    pub fn last_row_logits_impl(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, Some(last_pos))
     }
 
     /// Text-embedding lookup, exposed so a VLM wrapper can build merged
@@ -1139,18 +1177,7 @@ impl DeepSeekV3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = match input_embeddings {
-            Some(embeds) => mlxcel_core::copy(embeds),
-            None => self.embed_tokens.forward(input_ids),
-        };
-
-        let mask = mask.map(mlxcel_core::copy);
-        for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[i], mask.as_deref());
-        }
-
-        let h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        self.forward_rows(input_ids, input_embeddings, caches, mask, None)
     }
 
     pub fn make_caches_impl(&self) -> Vec<KVCache> {
@@ -1499,6 +1526,23 @@ impl LanguageModel for DeepSeekV3Model {
         self.forward_impl(input_ids, caches, mask)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // The trait-level embeddings forward is the default, which ignores
+        // embeddings: decline so that behavior stays the default's.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.last_row_logits_impl(input_ids, None, caches, mask, last_pos))
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         self.make_caches_impl()
     }
@@ -1524,7 +1568,7 @@ impl LanguageModel for DeepSeekV3Model {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Build a minimal DeepSeekV3Config for testing weight sanitization.
@@ -2435,6 +2479,25 @@ mod tests {
         assert!(
             err.contains("scales but no biases"),
             "the wording must match the other four MLA sanitizers, got: {err}"
+        );
+    }
+    /// One dense direct-q MLA layer over an 11-token vocabulary.
+    ///
+    /// Used by: the last-row logits cases here and the Kimi-VL wrapper case in
+    /// `vision::encoders::kimi_vl_tests`
+    pub(crate) fn tiny_dense_model() -> DeepSeekV3Model {
+        let cfg = test_config_dense_direct_q();
+        let weights = DeepSeekV3Model::sanitize_weights(tiny_dense_model_weights(&cfg), &cfg)
+            .expect("sanitize must succeed");
+        DeepSeekV3Model::from_weights(&weights, &cfg).expect("tiny model must load")
+    }
+
+    #[test]
+    fn deepseek_v3_last_row_logits_match_the_full_forward() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        crate::models::last_row_logits_harness::assert_last_row_logits(
+            tiny_dense_model,
+            crate::models::last_row_logits_harness::TOKENS,
         );
     }
 }

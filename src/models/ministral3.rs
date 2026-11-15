@@ -729,6 +729,25 @@ impl Ministral3Model {
         }
     }
 
+    /// [`Self::forward_with_caches`] for position `last_pos` alone:
+    /// `[B, 1, vocab]`. Every layer runs over the whole input; the row is
+    /// sliced before the final norm and the LM head (#3070).
+    fn last_logits_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Cache],
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_states_unchecked(input_ids, caches, self.layers.len(), false);
+        let h = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        let h = self.norm.forward(&h);
+        if let Some(head) = &self.lm_head {
+            head.forward(&h)
+        } else {
+            self.embed_tokens.as_linear(&h)
+        }
+    }
+
     /// Hidden states after the embedding and the first `num_layers` decoder
     /// layers (`None` runs them all), with the final norm applied when
     /// `final_norm` is set: `[B, L, hidden_size]`, no LM head.
@@ -743,7 +762,8 @@ impl Ministral3Model {
     /// layer (or the only sliding one) still builds the mask for it, so such a
     /// checkpoint must not be truncated this way.
     ///
-    /// Used by: [`Self::forward_with_caches`], the ERNIE-Image text conditioner
+    /// Used by: [`Self::forward_with_caches`], `Self::last_logits_with_caches`,
+    /// the ERNIE-Image text conditioner
     /// (`num_layers = layers - 1`, no final norm) and prompt enhancer
     /// (`crate::imagegen::ernie_image`).
     pub fn forward_hidden_states(
@@ -1128,6 +1148,28 @@ impl mlxcel_core::generate::LanguageModel for Ministral3Wrapper {
             || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
+    }
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.fresh_caches(),
+            |caches| {
+                self.model
+                    .last_logits_with_caches(input_ids, caches, last_pos)
+            },
+        ))
     }
     fn sync_sequence_storage(
         &self,

@@ -261,6 +261,27 @@ impl LanguageModel for Step3p7VlModel {
         self.backbone
             .forward_with_embeddings_and_sequence_id(input_ids, embeddings, id, caches, mask)
     }
+    // Both sequence forwards above are the backbone's own, so the sampled
+    // row comes from its last-row projection.
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        embeddings: Option<&MlxArray>,
+        id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.backbone,
+            input_ids,
+            embeddings,
+            id,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
     fn sync_sequence_storage(
         &self,
         id: SequenceId,

@@ -401,3 +401,39 @@ fn tiny_forward_rejects_a_placeholder_count_mismatch() {
     let pixel_values = mlxcel_core::from_slice_f32(&noise(32 * 12, 0xBEEF), &[32, 12]);
     let _ = vlm.get_input_embeddings(&input_ids, &pixel_values, &[(1, 4, 4)]);
 }
+
+// The wrapper answers the text prefill with the text model's last-row
+// projection (#3070).
+crate::models::last_row_logits_harness::last_row_case!(mimo_v2_vl_text_last_row_logits, tiny_vlm);
+
+/// The embeddings prefill slices the sampled row before the final norm and
+/// the LM head instead of projecting every merged row (#3070).
+#[test]
+fn tiny_embedding_prefill_projects_only_the_sampled_row() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let vlm = tiny_vlm();
+    let input_ids = mlxcel_core::from_slice_i32(&[1, 7, 7, 7, 7, 2], &[1, 6]);
+    let pixel_values = mlxcel_core::from_slice_f32(&noise(32 * 12, 0xBEEF), &[32, 12]);
+    let prepared = vlm.get_input_embeddings(&input_ids, &pixel_values, &[(1, 4, 4)]);
+    mlxcel_core::eval(&prepared.inputs_embeds);
+
+    let mut caches = LanguageModel::make_caches(&vlm);
+    let full = LanguageModel::forward_with_embeddings_and_sequence_id(
+        &vlm,
+        &input_ids,
+        Some(&prepared.inputs_embeds),
+        None,
+        &mut caches,
+        None,
+    );
+    mlxcel_core::eval(&full);
+    assert_eq!(mlxcel_core::array_shape(&full), [1, 6, 48]);
+
+    crate::models::last_row_logits_harness::assert_embedded_rows(
+        &tiny_vlm,
+        &input_ids,
+        &prepared.inputs_embeds,
+        &full,
+        5,
+    );
+}

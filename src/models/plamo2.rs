@@ -884,6 +884,19 @@ impl Plamo2Model {
         inputs: &MlxArray,
         caches: &mut [Plamo2LayerCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(inputs, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). Every layer still runs over all rows, so the
+    /// recurrent and KV state advance exactly as in the full forward.
+    fn forward_rows_with_caches(
+        &self,
+        inputs: &MlxArray,
+        caches: &mut [Plamo2LayerCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(inputs);
 
         let shape = mlxcel_core::array_shape(&h);
@@ -912,6 +925,7 @@ impl Plamo2Model {
             h = layer.forward(&h, cache, mask);
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
 
         // Tied embeddings unless an explicit `lm_head` was loaded. No logit
@@ -1334,6 +1348,26 @@ impl LanguageModel for Plamo2Model {
             || Plamo2Model::make_caches(self),
             |internal| self.forward_with_caches(input_ids, internal),
         )
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || Plamo2Model::make_caches(self),
+            |internal| self.forward_rows_with_caches(input_ids, internal, Some(last_pos)),
+        ))
     }
 
     fn supports_snapshot_reuse(&self) -> bool {

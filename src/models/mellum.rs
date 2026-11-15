@@ -852,6 +852,19 @@ impl MellumModel {
         mask_full: Option<&MlxArray>,
         mask_sliding: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask_full, mask_sliding, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Cache],
+        mask_full: Option<&MlxArray>,
+        mask_sliding: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
 
         for (i, layer) in self.layers.iter().enumerate() {
@@ -862,6 +875,7 @@ impl MellumModel {
             };
             h = layer.forward(&h, caches[i].as_interface(), mask);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
         if let Some(head) = &self.lm_head {
@@ -876,13 +890,23 @@ impl MellumModel {
         input_ids: &MlxArray,
         caches: &mut [Cache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(input_ids, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] for every position or for `row` alone.
+    fn forward_rows_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Cache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         let seq_len = shape[1];
 
         // Decode (seq_len == 1) needs no explicit mask; the fused SDPA handles
         // single-token causal/windowed attention via `window_size`.
         if seq_len == 1 {
-            return self.forward(input_ids, caches, None, None);
+            return self.forward_rows(input_ids, caches, None, None, row);
         }
 
         // Prefill: build a full causal mask and a windowed mask, keyed off the
@@ -906,11 +930,12 @@ impl MellumModel {
             create_sliding_window_prefill_mask(seq_len, sliding_offset, max_cache)
         });
 
-        self.forward(
+        self.forward_rows(
             input_ids,
             caches,
             mask_full.as_ref().map(|m| m.as_ref().unwrap()),
             mask_sliding.as_ref().map(|m| m.as_ref().unwrap()),
+            row,
         )
     }
 
@@ -1214,6 +1239,28 @@ impl mlxcel_core::generate::LanguageModel for MellumWrapper {
             || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
+    }
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.fresh_caches(),
+            |caches| {
+                self.model
+                    .forward_rows_with_caches(input_ids, caches, Some(last_pos))
+            },
+        ))
     }
     fn sync_sequence_storage(
         &self,

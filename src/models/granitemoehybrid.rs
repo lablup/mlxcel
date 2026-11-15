@@ -1128,10 +1128,22 @@ impl GraniteMoeHybridModel {
         inputs: &MlxArray,
         caches: &mut [GraniteMoeHybridLayerCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(inputs, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070).
+    fn forward_rows_with_caches(
+        &self,
+        inputs: &MlxArray,
+        caches: &mut [GraniteMoeHybridLayerCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         // h = embed_tokens(x) * embedding_multiplier.
         let h = self.embed_tokens.forward(inputs);
         let h = mlxcel_core::multiply_scalar(&h, self.embedding_multiplier);
-        self.run_from_embedded(h, caches, None)
+        self.run_from_embedded(h, caches, None, row)
     }
 
     /// Raw token-embedding lookup, no `embedding_multiplier`. Used by the
@@ -1151,9 +1163,24 @@ impl GraniteMoeHybridModel {
         injection: Option<&HybridInjection>,
         seq_id: Option<mlxcel_core::cache::SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_embeds_rows_with_injection(inputs_embeds, injection, seq_id, None)
+    }
+
+    /// [`Self::forward_embeds_with_injection`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, #3070).
+    ///
+    /// Used by: `LanguageModel::last_row_logits` here and in
+    /// `Granite4VisionVLModel`
+    pub(crate) fn forward_embeds_rows_with_injection(
+        &self,
+        inputs_embeds: &MlxArray,
+        injection: Option<&HybridInjection>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let run = |internal: &mut [GraniteMoeHybridLayerCache]| {
             let h = mlxcel_core::multiply_scalar(inputs_embeds, self.embedding_multiplier);
-            self.run_from_embedded(h, internal, injection)
+            self.run_from_embedded(h, internal, injection, row)
         };
         match seq_id {
             Some(_) => self.sequence_state.with_or_create_sequence_state(
@@ -1167,12 +1194,17 @@ impl GraniteMoeHybridModel {
 
     /// Run the decoder stack + norm + head from an already-`embedding_multiplier`
     /// scaled hidden state. Injects visual features at masked positions *before*
-    /// each targeted layer when `injection` is present.
+    /// each targeted layer when `injection` is present. `row` selects the
+    /// positions the final norm and head project: all of them for `None`, one
+    /// for `Some` (every layer still runs over all rows, so the recurrent and
+    /// KV state advance as in the full forward; `logits_scaling` then divides
+    /// that row only).
     fn run_from_embedded(
         &self,
         mut h: UniquePtr<MlxArray>,
         caches: &mut [GraniteMoeHybridLayerCache],
         injection: Option<&HybridInjection>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(&h);
         let seq_len = shape[1];
@@ -1209,6 +1241,7 @@ impl GraniteMoeHybridModel {
             h = layer.forward(&h, cache, mask);
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
 
         // Tied embeddings unless an explicit lm_head exists, then logits /
@@ -1770,6 +1803,27 @@ impl LanguageModel for GraniteMoeHybridModel {
                 |internal| self.forward_with_caches(input_ids, internal),
             ),
         }
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(match input_embeddings {
+            Some(embeds) => {
+                self.forward_embeds_rows_with_injection(embeds, None, seq_id, Some(last_pos))
+            }
+            None => self.sequence_state.with_or_create_sequence_state(
+                seq_id,
+                || GraniteMoeHybridModel::make_caches(self),
+                |internal| self.forward_rows_with_caches(input_ids, internal, Some(last_pos)),
+            ),
+        })
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

@@ -1219,7 +1219,21 @@ impl Step3p5Model {
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
         caches: &mut [Cache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    /// [`Self::forward_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070).
+    fn forward_rows_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [Cache],
         _mask: Option<&MlxArray>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         // The step3p7 VLM wrapper supplies pre-merged `(batch, seq, hidden)`
         // embeddings on prefill; text-only decode falls back to the token
@@ -1263,6 +1277,8 @@ impl Step3p5Model {
             };
             h = layer.forward(&h, caches[i].as_interface(), mask);
         }
+
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm and lm_head
         let h = self.norm.forward(&h);
@@ -1596,6 +1612,32 @@ impl LanguageModel for Step3p5Model {
             || self.fresh_caches(),
             |caches| self.forward_with_caches(input_ids, input_embeddings, caches, mask),
         )
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // The token and embeddings forwards share one body and one
+        // per-sequence state lookup; `None` embeddings embed `input_ids`.
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.fresh_caches(),
+            |caches| {
+                self.forward_rows_with_caches(
+                    input_ids,
+                    input_embeddings,
+                    caches,
+                    mask,
+                    Some(last_pos),
+                )
+            },
+        ))
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {

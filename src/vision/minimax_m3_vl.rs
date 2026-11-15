@@ -108,6 +108,21 @@ impl LanguageModel for MiniMaxM3VlModel {
             .forward_with_embeddings_impl(input_ids, input_embeddings, caches, mask)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(
+            self.text_model
+                .last_logits(input_ids, input_embeddings, caches, mask, last_pos),
+        )
+    }
+
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.text_model.get_embed_tokens(input_ids))
     }

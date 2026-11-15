@@ -1041,3 +1041,14 @@ fn sanitize_stacks_unstacked_per_expert_moe_weights() {
         "the per-expert w1 tensors must be consumed, not left behind"
     );
 }
+
+crate::models::last_row_logits_harness::last_row_case!(
+    lfm2_last_row_logits,
+    speculative_model,
+    embeddings
+);
+crate::models::last_row_logits_harness::last_row_case!(
+    lfm2_moe_last_row_logits,
+    batching_moe_model,
+    embeddings
+);

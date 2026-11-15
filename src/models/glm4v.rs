@@ -759,6 +759,27 @@ impl Glm4vTextModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input_ids, input_embeddings, caches, mask, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the row a
+    /// prefill samples, #3070). The per-sequence position handling and every
+    /// decoder layer run over all positions either way; only the final norm
+    /// and the LM head see the selected row.
+    ///
+    /// Used by: [`Self::forward_for_sequence`], and
+    /// `LanguageModel::last_row_logits` of `Glm4vTextModel` and of the
+    /// GLM-4V and GLM-OCR wrappers.
+    pub(crate) fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
@@ -828,6 +849,7 @@ impl Glm4vTextModel {
             h = layer.forward(&h, &mut caches[i], mask, &cos_f, &sin_f);
         }
 
+        h = mlxcel_core::generate::select_row(h, row);
         h = self.norm.forward(&h);
         self.lm_head.forward(&h)
     }
@@ -1037,6 +1059,25 @@ impl mlxcel_core::generate::LanguageModel for Glm4vTextModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.forward_rows_for_sequence(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            seq_id,
+            Some(last_pos),
+        ))
     }
 
     fn forward_batched_with_ids(

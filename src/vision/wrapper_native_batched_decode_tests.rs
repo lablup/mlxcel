@@ -125,7 +125,7 @@ fn insert_projector(weights: &mut WeightMap, prefix: &str, input: i32, output: i
     insert_linear(weights, &format!("{prefix}.w2"), output, 6, 19);
 }
 
-fn tiny_molmo_vision() -> MolmoVisionModel {
+pub(super) fn tiny_molmo_vision() -> MolmoVisionModel {
     let config = MolmoVisionConfig {
         image_num_layers: 0,
         image_emb_dim: HIDDEN,
@@ -172,7 +172,7 @@ fn tiny_molmo_vision() -> MolmoVisionModel {
         .expect("tiny zero-layer Molmo vision tower builds")
 }
 
-fn tiny_molmo2_vision() -> Molmo2VisionModel {
+pub(super) fn tiny_molmo2_vision() -> Molmo2VisionModel {
     let mut weights = WeightMap::new();
     insert_molmo2_vit(&mut weights, "vision.image_vit", 1);
     for projection in ["wq", "wk", "wv", "wo"] {
@@ -212,7 +212,7 @@ fn tiny_molmo2_vision() -> Molmo2VisionModel {
     .expect("tiny Molmo2 vision tower builds")
 }
 
-fn tiny_molmo_point_parts() -> (
+pub(super) fn tiny_molmo_point_parts() -> (
     Molmo2VisionTransformer,
     MolmoPointConnector,
     PointPredictor,
@@ -268,7 +268,7 @@ fn tiny_molmo_point_parts() -> (
     (vision, connector, predictor, embedding)
 }
 
-fn tiny_moondream_vision() -> Moondream3VisionModel {
+pub(super) fn tiny_moondream_vision() -> Moondream3VisionModel {
     let config: Moondream3VisionConfig = serde_json::from_value(serde_json::json!({
         "enc_dim": 4,
         "enc_patch_size": 1,
@@ -483,9 +483,8 @@ fn jina_vlm_wrapper_delegates_native_batched_decode_to_text_tower() {
     assert_native_wrapper(&model);
 }
 
-#[test]
-fn dots_ocr_wrapper_delegates_native_batched_decode_to_text_tower() {
-    let model = DotsOcrVlModel {
+fn tiny_dots_ocr_wrapper() -> DotsOcrVlModel {
+    DotsOcrVlModel {
         text_model: tiny_qwen2_model(),
         vision_encoder: tiny_dots_vision(),
         processor: DotsOcrProcessor::default(),
@@ -494,19 +493,39 @@ fn dots_ocr_wrapper_delegates_native_batched_decode_to_text_tower() {
         vision_start_token_id: 22,
         spatial_merge_size: 1,
         eos_token_ids: vec![2],
-    };
-    assert_native_wrapper(&model);
+    }
 }
 
 #[test]
-fn minicpmo_wrapper_delegates_native_batched_decode_to_text_tower() {
+fn dots_ocr_wrapper_delegates_native_batched_decode_to_text_tower() {
+    assert_native_wrapper(&tiny_dots_ocr_wrapper());
+}
+
+fn tiny_minicpmo_wrapper() -> MiniCPMOVLModel {
     let (vision_tower, resampler) = tiny_minicpmo_parts();
-    let model = MiniCPMOVLModel {
+    MiniCPMOVLModel {
         text_model: tiny_qwen3_model(),
         vision_tower,
         resampler,
         processor: MiniCPMOProcessor::new(1, 2, 1),
         eos_token_ids: vec![2],
-    };
-    assert_native_wrapper(&model);
+    }
 }
+
+#[test]
+fn minicpmo_wrapper_delegates_native_batched_decode_to_text_tower() {
+    assert_native_wrapper(&tiny_minicpmo_wrapper());
+}
+
+// The wrappers hand the prefill to the text tower's last-row projection on
+// both the text and the merged-embeddings path (#3070).
+crate::models::last_row_logits_harness::last_row_case!(
+    dots_ocr_wrapper_last_row_logits,
+    tiny_dots_ocr_wrapper,
+    embeddings
+);
+crate::models::last_row_logits_harness::last_row_case!(
+    minicpmo_wrapper_last_row_logits,
+    tiny_minicpmo_wrapper,
+    embeddings
+);

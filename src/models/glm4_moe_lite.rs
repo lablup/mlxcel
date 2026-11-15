@@ -1029,6 +1029,16 @@ impl Glm4MoeLiteModel {
         input_ids: &MlxArray,
         caches: &mut [KVCache],
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let h = self.hidden_pre_norm(input_ids, caches);
+        let normed = self.norm.forward(&h);
+        (self.lm_head.forward(&normed), h)
+    }
+
+    /// Embeddings and every decoder layer: the pre-norm hidden state
+    /// `[B, L, hidden]` the final norm and LM head consume.
+    ///
+    /// Used by: `forward_with_hidden`, `LanguageModel::last_row_logits`
+    fn hidden_pre_norm(&self, input_ids: &MlxArray, caches: &mut [KVCache]) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
 
         let shape = mlxcel_core::array_shape(&h);
@@ -1044,9 +1054,7 @@ impl Glm4MoeLiteModel {
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask.as_deref());
         }
-
-        let normed = self.norm.forward(&h);
-        (self.lm_head.forward(&normed), h)
+        h
     }
 
     pub fn make_caches(&self) -> Vec<KVCache> {
@@ -1166,6 +1174,27 @@ impl LanguageModel for Glm4MoeLiteModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         Glm4MoeLiteModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        // The trait forward discards the captured hidden state (the MTP
+        // target reads it through `forward_with_hidden`), so nothing but the
+        // caches outlives this call.
+        let h = self.hidden_pre_norm(input_ids, caches);
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        Some(self.lm_head.forward(&self.norm.forward(&row)))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

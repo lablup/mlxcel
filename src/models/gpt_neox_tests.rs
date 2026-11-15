@@ -1478,3 +1478,8 @@ fn native_batched_decode_matches_unequal_partial_rope_rows() {
     );
     crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }
+
+crate::models::last_row_logits_harness::last_row_case!(gpt_neox_last_row_logits, || {
+    let args = tiny_args();
+    GptNeoxModel::from_weights(&hf_weights(&args), &args).expect("model builds")
+});

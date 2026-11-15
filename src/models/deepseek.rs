@@ -669,19 +669,53 @@ impl DeepSeekModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // Embed tokens
-        let mut h = self.embed_tokens.forward(input_ids);
+        self.forward_rows(input_ids, None, caches, mask, None)
+    }
+
+    /// The single-sequence forward, from token ids or from precomputed
+    /// embeddings, projecting every position (`row == None`) or only position
+    /// `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = match inputs_embeds {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
 
         // Pass through transformer layers
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm
         let h = self.norm.forward(&h);
 
         // LM head
         self.lm_head.forward(&h)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only, from token ids or
+    /// from precomputed embeddings.
+    ///
+    /// Used by: `LanguageModel::last_row_logits` for `DeepSeekModel`,
+    /// `vision::deepseekocr::DeepSeekOcrVlModel`,
+    /// `vision::deepseekocr_2::DeepSeekOcr2VlModel`
+    pub fn last_row_logits_impl(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, inputs_embeds, caches, mask, Some(last_pos))
     }
 
     /// Forward pass from precomputed input embeddings (VLM prefill), skipping the
@@ -692,12 +726,8 @@ impl DeepSeekModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = mlxcel_core::copy(inputs_embeds);
-        for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[i], mask);
-        }
-        let h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        // `input_ids` is unused when embeddings are given.
+        self.forward_rows(inputs_embeds, Some(inputs_embeds), caches, mask, None)
     }
 
     /// Raw token-embedding lookup, exposed for VLM feature splicing.
@@ -1149,6 +1179,18 @@ impl LanguageModel for DeepSeekModel {
             Some(embeds) => self.forward_from_embeds(embeds, caches, mask),
             None => DeepSeekModel::forward(self, input_ids, caches, mask),
         }
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.last_row_logits_impl(input_ids, input_embeddings, caches, mask, last_pos))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

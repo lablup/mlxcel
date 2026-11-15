@@ -20,4 +20,22 @@
 use crate::models::last_row_logits_harness::last_row_case;
 use crate::models::popular_dense_batched_decode_tests as dense;
 
+last_row_case!(apertus_last_row_logits, dense::tiny_apertus_model);
+last_row_case!(cohere_last_row_logits, dense::tiny_cohere_model);
+last_row_case!(ernie45_last_row_logits, dense::tiny_ernie45_model);
+last_row_case!(exaone_last_row_logits, dense::tiny_exaone_model);
+last_row_case!(gemma_last_row_logits, dense::tiny_gemma_model, embeddings);
 last_row_case!(glm4_last_row_logits, dense::tiny_glm4_model);
+last_row_case!(
+    granite_last_row_logits,
+    dense::tiny_granite_model,
+    embeddings
+);
+last_row_case!(hunyuan_v1_dense_last_row_logits, dense::tiny_hunyuan_model);
+last_row_case!(internlm2_last_row_logits, dense::tiny_internlm2_model);
+last_row_case!(internlm3_last_row_logits, dense::tiny_internlm3_model);
+last_row_case!(mimo_last_row_logits, dense::tiny_mimo_model);
+last_row_case!(olmo2_last_row_logits, dense::tiny_olmo2_model);
+last_row_case!(seed_oss_last_row_logits, dense::tiny_seed_oss_model);
+last_row_case!(smollm3_last_row_logits, dense::tiny_smollm3_model);
+last_row_case!(starcoder2_last_row_logits, dense::tiny_starcoder2_model);

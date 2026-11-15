@@ -1277,3 +1277,16 @@ fn chunked_prefill_is_on_unless_explicitly_switched_off() {
         );
     }
 }
+
+#[test]
+fn bailing_moe_linear_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::last_row_logits_moe_tests::assert_last_row_logits_under_sequence_ids(
+        || {
+            let args = small_args();
+            BailingMoeLinearModel::from_weights(&filled_weights(&args), &args)
+                .expect("the model builds")
+        },
+        crate::models::last_row_logits_harness::TOKENS,
+    );
+}

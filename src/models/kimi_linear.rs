@@ -1327,6 +1327,19 @@ impl KimiLinearModel {
         input_ids: &MlxArray,
         caches: &mut [KimiLinearCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    /// Every layer advances its attention or recurrent state over the whole
+    /// input either way.
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KimiLinearCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         assert_eq!(
             caches.len(),
             self.layers.len(),
@@ -1352,6 +1365,7 @@ impl KimiLinearModel {
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, attn_mask.as_deref(), ssm_mask.as_deref(), cache);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
 
@@ -1818,6 +1832,16 @@ impl KimiLinearModel {
         input_ids: &MlxArray,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input_ids, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] for every position or for `row` alone.
+    fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input_ids)[1];
         if seq_id.is_none() && seq_len > 1 {
             self.sequence_state
@@ -1826,11 +1850,13 @@ impl KimiLinearModel {
 
         if let Some(seq_id) = seq_id {
             self.sequence_state
-                .with_existing_sequence_state(seq_id, |internal| self.forward(input_ids, internal))
+                .with_existing_sequence_state(seq_id, |internal| {
+                    self.forward_rows(input_ids, internal, row)
+                })
                 .unwrap_or_else(|err| panic!("KimiLinear {err}"))
         } else {
             self.sequence_state
-                .with_sequence_state(None, |internal| self.forward(input_ids, internal))
+                .with_sequence_state(None, |internal| self.forward_rows(input_ids, internal, row))
         }
     }
 }
@@ -1953,6 +1979,22 @@ impl LanguageModel for KimiLinearModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows_for_sequence(input_ids, seq_id, Some(last_pos)))
     }
 
     fn forward_batched(

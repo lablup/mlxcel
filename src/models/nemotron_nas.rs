@@ -750,13 +750,15 @@ fn fresh_caches(layers: &[NASTransformerBlock], modes: &KvCacheLayerModes) -> Ve
         .collect()
 }
 
-// LanguageModel trait implementation.
-impl LanguageModel for NemotronNASModel {
-    fn forward(
+impl NemotronNASModel {
+    /// The single-sequence forward over the model-owned caches, projecting
+    /// every position (`row == None`) or only position `row` (`[B, 1, vocab]`,
+    /// the prefill's sampled row, #3070).
+    fn forward_rows(
         &self,
         input_ids: &MlxArray,
-        _caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         // The caller's slice is ignored: it is empty on the engine path, and
         // the model-owned caches are the only state this family reads.
@@ -802,6 +804,7 @@ impl LanguageModel for NemotronNASModel {
                 h = layer.forward(&h, None, None);
             }
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm
         let h = self.norm_f.forward(&h);
@@ -812,6 +815,34 @@ impl LanguageModel for NemotronNASModel {
         } else {
             self.embeddings.as_linear(&h)
         }
+    }
+}
+
+// LanguageModel trait implementation.
+impl LanguageModel for NemotronNASModel {
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, mask, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows(input_ids, mask, Some(last_pos)))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

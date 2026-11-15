@@ -390,3 +390,12 @@ fn longcat_flash_reports_fp16_only_kv() {
 fn longcat_flash_ngram_reports_fp16_only_kv() {
     assert_reports_fp16_only("longcat_flash_ngram");
 }
+
+// The prefill projects only the sampled row while the model-owned caches and
+// the n-gram tail still advance over every position (#3070).
+crate::models::last_row_logits_harness::last_row_case!(longcat_flash_last_row_logits, || {
+    tiny_model("longcat_flash")
+});
+crate::models::last_row_logits_harness::last_row_case!(longcat_flash_ngram_last_row_logits, || {
+    tiny_model("longcat_flash_ngram")
+});

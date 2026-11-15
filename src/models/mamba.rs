@@ -572,12 +572,26 @@ impl MambaModel {
         x: &MlxArray,
         caches: &mut [MambaCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(x, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). Every layer still runs over all rows, so the
+    /// recurrent and KV state advance exactly as in the full forward.
+    fn forward_rows_with_caches(
+        &self,
+        x: &MlxArray,
+        caches: &mut [MambaCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = self.embeddings.forward(x);
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, Some(cache));
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm_f.forward(&h);
 
         if let Some(ref head) = self.lm_head {
@@ -1049,6 +1063,26 @@ impl LanguageModel for MambaModel {
             || MambaModel::make_caches(self),
             |internal| self.forward_with_caches(input_ids, internal),
         )
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || MambaModel::make_caches(self),
+            |internal| self.forward_rows_with_caches(input_ids, internal, Some(last_pos)),
+        ))
     }
 
     fn supports_snapshot_reuse(&self) -> bool {

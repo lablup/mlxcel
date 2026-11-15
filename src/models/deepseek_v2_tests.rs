@@ -357,9 +357,8 @@ fn absorbed_decode_preserves_each_row_layout_in_a_mixed_storage_batch() {
     );
 }
 
-#[test]
-fn deepseek_v2_batched_decode_harness_covers_ragged_single_and_empty() {
-    let _runtime = crate::initialize_runtime();
+/// One dense MLA layer over a 16-token vocabulary.
+fn tiny_harness_model() -> super::DeepSeekV2Model {
     let mut args = mla_test_args();
     args.vocab_size = 16;
     args.intermediate_size = 64;
@@ -394,7 +393,13 @@ fn deepseek_v2_batched_decode_harness_covers_ragged_single_and_empty() {
             0.1,
         );
     }
-    let model = super::DeepSeekV2Model::from_weights(&weights, &args).expect("tiny model loads");
+    super::DeepSeekV2Model::from_weights(&weights, &args).expect("tiny model loads")
+}
+
+#[test]
+fn deepseek_v2_batched_decode_harness_covers_ragged_single_and_empty() {
+    let _runtime = crate::initialize_runtime();
+    let model = tiny_harness_model();
     crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
         &model,
         &[&[1], &[2, 3], &[4, 5, 6]],
@@ -496,5 +501,14 @@ fn absorbed_attention_leaves_a_much_smaller_cache_behind() {
         "decompressed cache {} bytes vs latent {} bytes; absorption did not take",
         base_cache.nbytes(),
         latent_cache.nbytes()
+    );
+}
+
+#[test]
+fn deepseek_v2_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::last_row_logits_harness::assert_last_row_logits(
+        tiny_harness_model,
+        crate::models::last_row_logits_harness::TOKENS,
     );
 }

@@ -83,6 +83,18 @@ impl UnlimitedOcrVlModel {
         embeds: Option<&MlxArray>,
         caches: &mut [RingSlidingKVCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_ring_rows(input_ids, embeds, caches, None)
+    }
+
+    /// [`Self::forward_ring`] projecting every position (`row == None`) or
+    /// only position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_ring_rows(
+        &self,
+        input_ids: &MlxArray,
+        embeds: Option<&MlxArray>,
+        caches: &mut [RingSlidingKVCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let tm = &self.inner.text_model;
         let mut h = match embeds {
             Some(e) => mlxcel_core::copy(e),
@@ -91,6 +103,7 @@ impl UnlimitedOcrVlModel {
         for (i, layer) in tm.layers.iter().enumerate() {
             h = Self::ring_block_forward(layer, &h, &mut caches[i]);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = tm.norm.forward(&h);
         tm.lm_head.forward(&h)
     }
@@ -223,6 +236,21 @@ impl LanguageModel for UnlimitedOcrVlModel {
             || self.make_ring_caches(),
             |ring| self.forward_ring(input_ids, input_embeddings, ring),
         )
+    }
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_ring_caches(),
+            |ring| self.forward_ring_rows(input_ids, input_embeddings, ring, Some(last_pos)),
+        ))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

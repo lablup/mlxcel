@@ -350,3 +350,8 @@ fn ones(shape: &[i32]) -> UniquePtr<MlxArray> {
     let n: i32 = shape.iter().product();
     mlxcel_core::from_slice_f32(&vec![1.0; n as usize], shape)
 }
+
+crate::models::last_row_logits_harness::last_row_case!(openelm_last_row_logits, || {
+    let args = tiny_args();
+    OpenElmModel::from_weights(&tiny_weights(&args), &args).expect("must build")
+});

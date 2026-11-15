@@ -275,3 +275,15 @@ fn dots1_native_batched_decode_matches_three_routed_rows() {
     );
     crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }
+
+#[test]
+fn dots1_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::last_row_logits_harness::assert_last_row_logits(
+        || {
+            let args = tiny_args();
+            Dots1Model::from_weights(&tiny_weights(&args), &args).unwrap()
+        },
+        crate::models::last_row_logits_harness::TOKENS,
+    );
+}

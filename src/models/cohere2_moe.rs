@@ -837,10 +837,14 @@ pub struct Cohere2MoeModel {
 }
 
 impl Cohere2MoeModel {
+    /// Layers, final norm, LM head and logit scale over `h`, projecting every
+    /// position (`row == None`) or only position `row` (`[B, 1, vocab]`, the
+    /// prefill's sampled row, #3070). The scale applies to the projected rows.
     fn run_layers(
         &self,
         mut h: UniquePtr<MlxArray>,
         caches: &mut [KVCache],
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(&h);
         let l = shape[1] as usize;
@@ -870,6 +874,7 @@ impl Cohere2MoeModel {
             };
             h = layer.forward(&h, &mut caches[i], mask);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
         let logits = self.lm_head.forward(&h);
@@ -886,7 +891,7 @@ impl Cohere2MoeModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
-        self.run_layers(h, caches)
+        self.run_layers(h, caches, None)
     }
 
     pub fn forward_batched_impl(
@@ -928,7 +933,7 @@ impl Cohere2MoeModel {
         } else {
             self.embed_tokens.forward(input_ids)
         };
-        self.run_layers(h, caches)
+        self.run_layers(h, caches, None)
     }
 
     /// Load model from a directory containing safetensors files and config.json.
@@ -1133,6 +1138,22 @@ impl LanguageModel for Cohere2MoeModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_with_embeddings_impl(input_ids, input_embeddings, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let h = match input_embeddings {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
+        Some(self.run_layers(h, caches, Some(last_pos)))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

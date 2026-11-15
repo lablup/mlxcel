@@ -254,6 +254,27 @@ impl LanguageModel for NemotronVoiceChatModel {
         LanguageModel::forward(self.lm.backbone(), input_ids, caches, mask)
     }
 
+    // The text forward is the backbone's, so the prefill takes the
+    // backbone's last-row projection (#3070). There is no embeddings path.
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(
+            self.lm
+                .backbone()
+                .forward_last_logits(input_ids, caches, mask, last_pos),
+        )
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         LanguageModel::make_caches(self.lm.backbone())
     }

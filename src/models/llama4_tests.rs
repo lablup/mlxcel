@@ -664,6 +664,12 @@ mod cache_attend_entry {
 
 mod batched_decode_entry {
     use super::snapshot_prompt_cache::*;
+
+    crate::models::last_row_logits_harness::last_row_case!(
+        llama4_last_row_logits,
+        build_wrapper,
+        embeddings
+    );
     use mlxcel_core::cache::SequenceId;
     use mlxcel_core::generate::LanguageModel;
     use mlxcel_core::layers::KVCache;

@@ -23,3 +23,8 @@ last_row_case!(
     exaone4_last_row_logits,
     crate::models::mixed_cache_batched_decode_tests::exaone
 );
+last_row_case!(
+    granitemoehybrid_last_row_logits,
+    crate::models::granitemoehybrid_tests::batching_model,
+    embeddings
+);

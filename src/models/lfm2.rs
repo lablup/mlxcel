@@ -1102,7 +1102,7 @@ impl Lfm2Model {
         caches: &mut [Lfm2LayerCache],
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(inputs);
-        self.forward_embeds_with_caches(&h, caches)
+        self.forward_embeds_rows_with_caches(&h, caches, None)
     }
 
     fn batch_states_uniform(&self, rows: &[Vec<Lfm2LayerCache>]) -> bool {
@@ -1211,6 +1211,19 @@ impl Lfm2Model {
         input_embeds: &MlxArray,
         caches: &mut [Lfm2LayerCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_embeds_rows_with_caches(input_embeds, caches, None)
+    }
+
+    /// [`Self::forward_embeds_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). Every layer, conv state included, runs over the
+    /// whole input either way.
+    fn forward_embeds_rows_with_caches(
+        &self,
+        input_embeds: &MlxArray,
+        caches: &mut [Lfm2LayerCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = mlxcel_core::copy(input_embeds);
 
         let shape = mlxcel_core::array_shape(&h);
@@ -1238,6 +1251,7 @@ impl Lfm2Model {
             };
             h = layer.forward(&h, cache, mask, None);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.embedding_norm.forward(&h);
         self.embed_tokens.as_linear(&h)
@@ -1648,6 +1662,30 @@ impl LanguageModel for Lfm2Model {
                 None => self.forward_with_caches(input_ids, internal),
             },
         )
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || Lfm2Model::make_caches(self),
+            |internal| match input_embeddings {
+                Some(embeds) => {
+                    self.forward_embeds_rows_with_caches(embeds, internal, Some(last_pos))
+                }
+                None => {
+                    let h = self.embed_tokens.forward(input_ids);
+                    self.forward_embeds_rows_with_caches(&h, internal, Some(last_pos))
+                }
+            },
+        ))
     }
 
     fn supports_snapshot_reuse(&self) -> bool {

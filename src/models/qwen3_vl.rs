@@ -1060,6 +1060,28 @@ impl Qwen3VLModel {
         self.lm_head.forward(&h)
     }
 
+    /// [`Self::forward_for_sequence`] projecting only position `last_pos`
+    /// through the LM head: `[B, 1, vocab]`, the row a prefill samples
+    /// (#3070). MRoPE resolution and DeepStack injection run over every
+    /// position exactly as in the full forward, and the final norm acts per
+    /// position, so the row equals the full forward's.
+    ///
+    /// Used by: `LanguageModel::last_row_logits` of `Qwen3VLModel` and of the
+    /// Qwen3-VL wrapper.
+    pub(crate) fn last_logits_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.forward_hidden_for_sequence(input_ids, input_embeddings, caches, mask, seq_id);
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        self.lm_head.forward(&row)
+    }
+
     /// Apply the language-model head to `[B, L, hidden_size]` hidden states.
     ///
     /// Used by: the Qwen3-VL reranker (#1356), which needs the yes/no logits at
@@ -1532,6 +1554,25 @@ impl mlxcel_core::generate::LanguageModel for Qwen3VLModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.last_logits_for_sequence(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            seq_id,
+            last_pos,
+        ))
     }
 
     fn forward_batched_with_ids(

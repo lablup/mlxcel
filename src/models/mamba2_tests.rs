@@ -423,3 +423,7 @@ fn mamba2_fresh_and_mixed_recurrent_states_match_solo_rows() {
         batching_model,
     );
 }
+
+// The prefill's last-row projection (#3070): the hook is taken and returns the
+// full forward's row while the recurrent state still advances over every row.
+crate::models::last_row_logits_harness::last_row_case!(mamba2_last_row_logits, batching_model);

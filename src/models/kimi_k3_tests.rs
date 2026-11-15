@@ -1856,3 +1856,38 @@ fn kimi_k3_sequence_state_isolates_prepared_sequences() {
             .is_err()
     );
 }
+
+crate::models::last_row_logits_harness::last_row_case!(kimi_k3_last_row_logits, || {
+    let config = tiny_text_config();
+    KimiK3Model::from_weights(&sanitized(&config), &config).expect("tiny model loads")
+});
+
+/// The VLM wrapper's embeddings prefill goes through
+/// `forward_rows_for_sequence`: its sampled row equals the row of the full
+/// embeddings forward (#3070).
+#[test]
+fn kimi_k3_last_row_from_embeddings_matches_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let make = || {
+        let config = tiny_text_config();
+        KimiK3Model::from_weights(&sanitized(&config), &config).expect("tiny model loads")
+    };
+    let ids = mlxcel_core::from_slice_i32(&[3, 1, 4, 1, 5, 9, 2], &[1, 7]);
+
+    let reference = make();
+    let embeds = reference.embed_tokens.forward(&ids);
+    let full = reference.forward_for_sequence_with_embeddings(&ids, Some(&embeds), None);
+    for pos in [2usize, 6] {
+        let model = make();
+        let row = model.forward_rows_for_sequence(&ids, Some(&embeds), None, Some(pos));
+        assert_eq!(
+            mlxcel_core::array_shape(&row),
+            vec![1, 1, VOCAB as i32],
+            "last-row logits must be [1, 1, vocab]"
+        );
+        let expected = mlxcel_core::generate::logits_at_position(&full, pos);
+        let close = mlxcel_core::allclose(&row, &expected, 1e-4, 1e-4);
+        mlxcel_core::eval(&close);
+        assert!(mlxcel_core::item_bool(&close), "row {pos} differs");
+    }
+}
