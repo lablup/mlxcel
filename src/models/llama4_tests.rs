@@ -488,6 +488,37 @@ mod snapshot_prompt_cache {
             "unexpected error: {err}"
         );
     }
+
+    /// Issue #3100: the chunked layers run their prefill per query chunk over
+    /// the cache's own keys. A prompt prefilled in one pass and the same
+    /// prompt split mid-chunk (5 + 15 tokens, the second piece starting
+    /// behind cached keys of its chunk and crossing two chunk boundaries)
+    /// must decode the same next-token logits.
+    #[test]
+    fn a_mid_chunk_split_prefill_matches_the_single_pass() {
+        let whole = build_wrapper();
+        let seq_whole = SequenceId::from_raw(SEQ_BASE + 16);
+        prefill(&whole, seq_whole, &ids(0..20));
+
+        let split = build_wrapper();
+        let seq_split = SequenceId::from_raw(SEQ_BASE + 17);
+        prefill(&split, seq_split, &ids(0..5));
+        let rest = ids(5..20);
+        let rest = mlxcel_core::from_slice_i32(&rest, &[1, rest.len() as i32]);
+        let _ = split.forward_with_sequence_id(&rest, Some(seq_split), &mut [], None);
+
+        for token in ids(20..23) {
+            let want = decode(&whole, seq_whole, token);
+            let got = decode(&split, seq_split, token);
+            assert_eq!(got.len(), want.len());
+            for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (g - w).abs() < 1e-4,
+                    "logit[{i}] differs between split and single-pass prefill: {g} vs {w}"
+                );
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------
