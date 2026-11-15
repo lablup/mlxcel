@@ -58,8 +58,9 @@ No new inputs, no host-visible surface, no changes to model loading or request p
 | Decode step | 5.56 ms | 5.10 ms | -0.46 ms |
 | Decode flow dispatches | 309 | 277 | -32 |
 | KV cache copies per step | 2 x 16 MiB | 0 | -32 MiB |
+| Decode rate on CUDA, GB10 f16 (n=128, cap 512) | 22.59 tok/s | 24.47 tok/s | +8.30% |
 
-The copy removal and the fusion each contribute; this PR does not separate them into two A/Bs, so the 9.05% is the combined figure.
+The copy removal and the fusion each contribute; this PR does not separate them into two A/Bs, so the 9.05% is the combined figure. The change also holds on CUDA, where the same A/B on a GB10 host measures a median 24.47 tok/s against 22.59 (5.22 against 5.66 ms per step), ahead in all six paired rounds with identical greedy output. Both arms there run the f16 weight path, because `MLXCEL_XLA_QUANT=native` is HIP-only, so those figures are comparable only with the other CUDA arm and not with the native 4-bit row above.
 
 ### 2.3 Compatibility & Dependencies
 
