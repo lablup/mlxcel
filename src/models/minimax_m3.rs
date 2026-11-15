@@ -238,6 +238,35 @@ impl MiniMaxM3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only: the prefill's
+    /// sampled row, sliced before the final norm and LM head (#3070).
+    ///
+    /// Used by: `LanguageModel::last_row_logits` here and on
+    /// `MiniMaxM3VlModel`
+    pub fn last_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, Some(last_pos))
+    }
+
+    /// [`Self::forward_with_embeddings_impl`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = match input_embeddings {
             Some(embeds) => mlxcel_core::copy(embeds),
             None => self.embed_tokens.forward(input_ids),
@@ -246,6 +275,7 @@ impl MiniMaxM3Model {
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
         if let Some(ref head) = self.lm_head {
@@ -404,6 +434,23 @@ impl LanguageModel for MiniMaxM3Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         MiniMaxM3Model::forward(self, input_ids, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // The trait's embeddings forward is the default, which ignores the
+        // embeddings: decline so it keeps that behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.last_logits(input_ids, None, caches, mask, last_pos))
     }
 
     fn batched_decode_kind(&self) -> BatchedDecodeKind {

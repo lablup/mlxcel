@@ -234,8 +234,8 @@ fn mixtral_native_batched_decode_contract() {
     assert_contract(&model);
 }
 
-#[test]
-fn phimoe_native_batched_decode_contract() {
+/// Tiny random-weight PhiMoeModel, shared with the last-row logits cases.
+pub(super) fn tiny_phimoe_model() -> super::phimoe::PhiMoeModel {
     use super::phimoe::{ModelArgs, PhiMoeModel};
 
     let args: ModelArgs = serde_json::from_value(serde_json::json!({
@@ -285,7 +285,12 @@ fn phimoe_native_batched_decode_contract() {
     weights.insert("model.norm.weight".into(), ones(&[8]));
     insert(&mut weights, "lm_head.weight", &[16, 8], 3);
 
-    let model = PhiMoeModel::from_weights(&weights, &args).unwrap();
+    PhiMoeModel::from_weights(&weights, &args).unwrap()
+}
+
+#[test]
+fn phimoe_native_batched_decode_contract() {
+    let model = tiny_phimoe_model();
     assert_eq!(LanguageModel::rope_table_regime(&model, 2), Some(0));
     assert_eq!(LanguageModel::rope_table_regime(&model, 3), Some(1));
     // At decode, the length-2 row crosses onto the long table while the
@@ -305,8 +310,8 @@ fn phimoe_native_batched_decode_contract() {
     crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }
 
-#[test]
-fn qwen2_moe_native_batched_decode_contract() {
+/// Tiny random-weight Qwen2MoeModel, shared with the last-row logits cases.
+pub(super) fn tiny_qwen2_moe_model() -> super::qwen2_moe::Qwen2MoeModel {
     use super::qwen2_moe::{ModelArgs, Qwen2MoeModel};
 
     let args: ModelArgs = serde_json::from_value(serde_json::json!({
@@ -359,12 +364,17 @@ fn qwen2_moe_native_batched_decode_contract() {
     weights.insert("model.norm.weight".into(), ones(&[8]));
     insert(&mut weights, "lm_head.weight", &[16, 8], 3);
 
-    let model = Qwen2MoeModel::from_weights(&weights, &args).unwrap();
-    assert_contract(&model);
+    Qwen2MoeModel::from_weights(&weights, &args).unwrap()
 }
 
 #[test]
-fn olmoe_native_batched_decode_contract() {
+fn qwen2_moe_native_batched_decode_contract() {
+    let model = tiny_qwen2_moe_model();
+    assert_contract(&model);
+}
+
+/// Tiny random-weight OlmoeModel, shared with the last-row logits cases.
+pub(super) fn tiny_olmoe_model() -> super::olmoe::OlmoeModel {
     use super::olmoe::{ModelArgs, OlmoeModel};
 
     let args: ModelArgs = serde_json::from_value(serde_json::json!({
@@ -397,13 +407,18 @@ fn olmoe_native_batched_decode_contract() {
     insert_switch_glu(&mut weights, "model.layers.0.mlp.switch_mlp", 3, 8, 12);
     weights.insert("model.norm.weight".into(), ones(&[8]));
 
-    let model = OlmoeModel::from_weights(&weights, &args).unwrap();
-    assert_contract(&model);
+    OlmoeModel::from_weights(&weights, &args).unwrap()
 }
 
 #[test]
-fn deepseek_native_batched_decode_contract() {
-    use super::deepseek::{DeepSeekModel, FeedForward, ModelArgs};
+fn olmoe_native_batched_decode_contract() {
+    let model = tiny_olmoe_model();
+    assert_contract(&model);
+}
+
+/// A dense layer and a MoE layer over a 16-token vocabulary.
+pub(super) fn tiny_deepseek_model() -> super::deepseek::DeepSeekModel {
+    use super::deepseek::{DeepSeekModel, ModelArgs};
 
     let args: ModelArgs = serde_json::from_value(serde_json::json!({
         "model_type": "deepseek",
@@ -479,7 +494,14 @@ fn deepseek_native_batched_decode_contract() {
     weights.insert("model.norm.weight".into(), ones(&[8]));
     insert(&mut weights, "lm_head.weight", &[16, 8], 3);
 
-    let model = DeepSeekModel::from_weights(&weights, &args).unwrap();
+    DeepSeekModel::from_weights(&weights, &args).unwrap()
+}
+
+#[test]
+fn deepseek_native_batched_decode_contract() {
+    use super::deepseek::FeedForward;
+
+    let model = tiny_deepseek_model();
     assert!(matches!(
         &model.layers[0].feed_forward,
         FeedForward::Dense(_)

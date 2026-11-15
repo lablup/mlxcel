@@ -949,3 +949,7 @@ fn mamba_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
         );
     }
 }
+
+// The prefill's last-row projection (#3070): the hook is taken and returns the
+// full forward's row while the recurrent state still advances over every row.
+crate::models::last_row_logits_harness::last_row_case!(mamba_last_row_logits, batching_model);

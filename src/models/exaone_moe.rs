@@ -812,11 +812,15 @@ impl ExaoneMoeModel {
     /// caches on every call. Sliding layers keep the full standard K/V history
     /// but pass the same window to attention, so outputs match the rotating
     /// cache path while prompt K/V remains available to the next decode step.
+    /// The trait-level single-sequence forward, projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070).
     fn forward_standard_caches(
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
         let seq_len = mlxcel_core::array_shape(&h)[1];
@@ -855,6 +859,7 @@ impl ExaoneMoeModel {
             };
             h = layer.forward(&h, &mut caches[idx], mask.or(generated_mask));
         }
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         if let Some(head) = &self.lm_head {
             head.forward(&h)
@@ -1263,7 +1268,23 @@ impl LanguageModel for ExaoneMoeModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_standard_caches(input_ids, caches, mask)
+        self.forward_standard_caches(input_ids, caches, mask, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_standard_caches(input_ids, caches, mask, Some(last_pos)))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

@@ -997,13 +997,31 @@ impl DeepSeekV2Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(input_ids);
+        self.forward_rows(input_ids, None, caches, mask, None)
+    }
+
+    /// The single-sequence forward, from token ids or from precomputed
+    /// embeddings, projecting every position (`row == None`) or only position
+    /// `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = match inputs_embeds {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
 
         let mask = mask.map(mlxcel_core::copy);
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, mask.as_deref(), cache);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
 
@@ -1056,17 +1074,24 @@ impl DeepSeekV2Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = mlxcel_core::copy(inputs_embeds);
-        let mask = mask.map(mlxcel_core::copy);
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
-            h = layer.forward(&h, mask.as_deref(), cache);
-        }
-        let h = self.norm.forward(&h);
-        if let Some(ref head) = self.lm_head {
-            head.forward(&h)
-        } else {
-            self.embed_tokens.as_linear(&h)
-        }
+        // `input_ids` is unused when embeddings are given.
+        self.forward_rows(inputs_embeds, Some(inputs_embeds), caches, mask, None)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only, from token ids or
+    /// from precomputed embeddings.
+    ///
+    /// Used by: `LanguageModel::last_row_logits` for `DeepSeekV2Model` and
+    /// `vision::deepseek_vl2::DeepSeekVl2VlModel`
+    pub fn last_row_logits_impl(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, inputs_embeds, caches, mask, Some(last_pos))
     }
 
     /// Raw token-embedding lookup, exposed for VLM feature splicing.
@@ -1465,6 +1490,22 @@ impl LanguageModel for DeepSeekV2Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         DeepSeekV2Model::forward(self, input_ids, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.last_row_logits_impl(input_ids, None, caches, mask, last_pos))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

@@ -141,16 +141,6 @@ impl LanguageModel for MimoV2VlModel {
         LanguageModel::forward(&self.text_model, input_ids, caches, mask)
     }
 
-    fn forward_last_logits(
-        &self,
-        input_ids: &MlxArray,
-        caches: &mut [KVCache],
-        mask: Option<&MlxArray>,
-        last_pos: usize,
-    ) -> UniquePtr<MlxArray> {
-        LanguageModel::forward_last_logits(&self.text_model, input_ids, caches, mask, last_pos)
-    }
-
     fn make_caches(&self) -> Vec<KVCache> {
         LanguageModel::make_caches(&self.text_model)
     }
@@ -273,24 +263,6 @@ impl LanguageModel for MimoV2VlModel {
         LanguageModel::forward_with_sequence_id(&self.text_model, input_ids, seq_id, caches, mask)
     }
 
-    fn forward_last_logits_with_sequence_id(
-        &self,
-        input_ids: &MlxArray,
-        seq_id: Option<SequenceId>,
-        caches: &mut [KVCache],
-        mask: Option<&MlxArray>,
-        last_pos: usize,
-    ) -> UniquePtr<MlxArray> {
-        LanguageModel::forward_last_logits_with_sequence_id(
-            &self.text_model,
-            input_ids,
-            seq_id,
-            caches,
-            mask,
-            last_pos,
-        )
-    }
-
     fn forward_with_embeddings_and_sequence_id(
         &self,
         input_ids: &MlxArray,
@@ -316,7 +288,11 @@ impl LanguageModel for MimoV2VlModel {
         )
     }
 
-    fn forward_last_logits_with_embeddings_and_sequence_id(
+    // One hook answers the three last-logits entry points. The embeddings
+    // branch mirrors `forward_with_embeddings_and_sequence_id`: the merged
+    // rows go to the text decoder as prepared embeddings, and only the
+    // sampled row reaches the final norm and the LM head.
+    fn last_row_logits(
         &self,
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
@@ -324,17 +300,18 @@ impl LanguageModel for MimoV2VlModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
         last_pos: usize,
-    ) -> UniquePtr<MlxArray> {
+    ) -> Option<UniquePtr<MlxArray>> {
         match input_embeddings {
-            Some(embeddings) => {
-                let logits = self
-                    .text_model
-                    .forward_prepared_embeddings_with_sequence_id(embeddings, seq_id);
-                slice_last_logits(&logits, last_pos)
-            }
-            None => LanguageModel::forward_last_logits_with_sequence_id(
+            Some(embeddings) => Some(
+                self.text_model
+                    .last_row_logits_prepared_embeddings_with_sequence_id(
+                        embeddings, seq_id, last_pos,
+                    ),
+            ),
+            None => LanguageModel::last_row_logits(
                 &self.text_model,
                 input_ids,
+                None,
                 seq_id,
                 caches,
                 mask,
@@ -366,19 +343,6 @@ impl LanguageModel for MimoV2VlModel {
     fn trim_state(&self, seq: Option<SequenceId>, excess: i32) -> Result<(), String> {
         LanguageModel::trim_state(&self.text_model, seq, excess)
     }
-}
-
-fn slice_last_logits(logits: &MlxArray, last_pos: usize) -> UniquePtr<MlxArray> {
-    let shape = mlxcel_core::array_shape(logits);
-    let position = i32::try_from(last_pos).unwrap_or(shape[1] - 1);
-    if position < 0 || position >= shape[1] {
-        return mlxcel_core::copy(logits);
-    }
-    mlxcel_core::slice(
-        logits,
-        &[0, position, 0],
-        &[shape[0], position + 1, shape[2]],
-    )
 }
 
 impl QwenVlRuntime for MimoV2VlModel {

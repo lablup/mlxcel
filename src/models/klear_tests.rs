@@ -783,3 +783,8 @@ fn a_dense_layer_and_a_sparse_layer_build_from_the_same_config() {
         FeedForward::Dense(_) => unreachable!("checked above"),
     };
 }
+
+crate::models::last_row_logits_harness::last_row_case!(klear_last_row_logits, || {
+    let args = small_args();
+    KlearModel::from_weights(&filled_weights(&args), &args).expect("the model builds")
+});

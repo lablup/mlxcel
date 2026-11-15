@@ -1218,6 +1218,18 @@ impl MiMoV2FlashModel {
         embeddings: &MlxArray,
         caches: &mut [Cache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_prepared_rows(embeddings, caches, None)
+    }
+
+    /// [`Self::forward_prepared`] projecting every position (`row == None`)
+    /// or only position `row` (`[B, 1, vocab]`, the prefill's sampled row,
+    /// #3070). The caches advance over every position either way.
+    fn forward_prepared_rows(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [Cache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(embeddings)[1];
         let mut h = mlxcel_core::copy(embeddings);
 
@@ -1257,6 +1269,7 @@ impl MiMoV2FlashModel {
             h = layer.forward(&h, caches[i].as_interface(), mask);
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         match &self.lm_head {
             Some(head) => head.forward(&h),
@@ -1312,6 +1325,31 @@ impl MiMoV2FlashModel {
         embeddings: &MlxArray,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_prepared_rows_with_sequence_id(embeddings, seq_id, None)
+    }
+
+    /// [`Self::forward_prepared_embeddings_with_sequence_id`] returning only
+    /// position `last_pos` as `[B, 1, vocab]`: the row is sliced before the
+    /// final norm and the LM head, so a prefill never materializes
+    /// `[B, L, vocab]` (#3070).
+    ///
+    /// Used by: `MimoV2VlModel::last_row_logits` (embeddings prefill) and
+    /// this model's own `last_row_logits`
+    pub fn last_row_logits_prepared_embeddings_with_sequence_id(
+        &self,
+        embeddings: &MlxArray,
+        seq_id: Option<SequenceId>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_prepared_rows_with_sequence_id(embeddings, seq_id, Some(last_pos))
+    }
+
+    fn forward_prepared_rows_with_sequence_id(
+        &self,
+        embeddings: &MlxArray,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(embeddings)[1];
         if seq_id.is_none() && seq_len > 1 {
             self.sequence_state
@@ -1320,7 +1358,7 @@ impl MiMoV2FlashModel {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
-            |caches| self.forward_prepared(embeddings, caches),
+            |caches| self.forward_prepared_rows(embeddings, caches, row),
         )
     }
 
@@ -1447,6 +1485,25 @@ impl LanguageModel for MiMoV2FlashModel {
     ) -> UniquePtr<MlxArray> {
         // Text-only family: there is no image-embedding prefill path.
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Text-only family: `forward_with_embeddings_and_sequence_id` ignores
+        // the embeddings too, so both branches are the token forward.
+        let embeddings = self.embed_tokens.forward(input_ids);
+        Some(self.last_row_logits_prepared_embeddings_with_sequence_id(
+            &embeddings,
+            seq_id,
+            last_pos,
+        ))
     }
 
     fn reset_runtime_state(&self) {

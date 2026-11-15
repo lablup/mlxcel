@@ -312,13 +312,67 @@ pub(crate) fn pad_embeddings(embeds: &MlxArray, padded_len: usize) -> UniquePtr<
 /// override also uses it to slice the hidden state before its LM head.
 ///
 /// Used by: the `forward_last_logits*` defaults, Llama3Model::last_logits,
-/// Gemma4Model::logits_at
+/// Gemma4Model::logits_at, every `LanguageModel::last_row_logits`
+/// implementation
 pub fn logits_at_position(logits: &MlxArray, pos: usize) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(logits);
     let batch = shape[0];
     let vocab = shape[2];
     // Slice [batch, pos:pos+1, vocab]  →  shape [batch, 1, vocab].
     ffi::slice(logits, &[0, pos as i32, 0], &[batch, pos as i32 + 1, vocab])
+}
+
+/// The rows of a `[batch, seq_len, hidden]` hidden state a forward goes on to
+/// project: all of them for `None`, row `row` alone (as `[batch, 1, hidden]`)
+/// for `Some(row)`.
+///
+/// A model's forward calls this once, right before its final norm and LM
+/// head, so one body serves both the full forward (`None`) and its
+/// [`LanguageModel::last_row_logits`] hook (`Some(last_pos)`). Everything
+/// after the call must act on each position independently.
+///
+/// Used by: every `LanguageModel::last_row_logits` implementation that
+/// threads the row through its forward
+pub fn select_row(hidden: UniquePtr<MlxArray>, row: Option<usize>) -> UniquePtr<MlxArray> {
+    match row {
+        Some(row) => logits_at_position(&hidden, row),
+        None => hidden,
+    }
+}
+
+/// [`LanguageModel::last_row_logits`] for a wrapper whose single-sequence
+/// forwards are plain delegations to `inner`'s trait methods: the row comes
+/// from `inner`'s own last-logits entry points, so the wrapper inherits
+/// whatever last-row projection `inner` has (its hook or its overrides).
+///
+/// Only correct when the wrapper's `forward_with_sequence_id` and
+/// `forward_with_embeddings_and_sequence_id` add nothing to `inner`'s. A
+/// wrapper that prepares positions, injects features or post-processes the
+/// logits implements the hook itself.
+///
+/// Used by: VLM wrappers around a text `LanguageModel` (`src/vision/`)
+pub fn last_row_logits_from<M: LanguageModel + ?Sized>(
+    inner: &M,
+    input_ids: &MlxArray,
+    input_embeddings: Option<&MlxArray>,
+    seq_id: Option<SequenceId>,
+    caches: &mut [KVCache],
+    mask: Option<&MlxArray>,
+    last_pos: usize,
+) -> UniquePtr<MlxArray> {
+    match input_embeddings {
+        Some(embeddings) => inner.forward_last_logits_with_embeddings_and_sequence_id(
+            input_ids,
+            Some(embeddings),
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ),
+        None => {
+            inner.forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos)
+        }
+    }
 }
 
 pub use crate::prefill_plan::{DEFAULT_PREFILL_CHUNK, prefill_chunk_len};
@@ -446,8 +500,51 @@ pub trait LanguageModel {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
+        if let Some(logits) = self.last_row_logits(input_ids, None, None, caches, mask, last_pos) {
+            return logits;
+        }
         let logits = self.forward(input_ids, caches, mask);
         logits_at_position(&logits, last_pos)
+    }
+
+    /// Opt-in hook behind the three `forward_last_logits*` defaults: run the
+    /// single-sequence forward up to the final hidden states, slice row
+    /// `last_pos`, and project only that row through the final norm, the LM
+    /// head and any logit softcap, scale or bias. Returns `[batch, 1, vocab]`.
+    ///
+    /// A model implements this once instead of overriding the three entry
+    /// points. The contract mirrors the forwards the defaults would have run:
+    ///
+    /// - `input_embeddings == None` must be the forward
+    ///   [`Self::forward_with_sequence_id`] runs for `seq_id` (which is
+    ///   [`Self::forward`] when `seq_id` is `None`).
+    /// - `input_embeddings == Some(_)` must be the forward
+    ///   [`Self::forward_with_embeddings_and_sequence_id`] runs.
+    /// - Everything applied after the slice must act on each position
+    ///   independently, so the row equals the full forward's row.
+    /// - To decline a combination (for example a model with no embeddings
+    ///   path), return `None` before touching `caches` or any model-owned
+    ///   state; the caller then runs the full forward and slices.
+    ///
+    /// The default declines, which keeps the full-logits behavior. At a 262K
+    /// vocabulary the full tensor is about 1 GB per 2048-token prefill piece
+    /// and tens of GB in a single pass, none of it sampled (issue #3070).
+    ///
+    /// Used by: the `forward_last_logits`,
+    /// `forward_last_logits_with_sequence_id` and
+    /// `forward_last_logits_with_embeddings_and_sequence_id` defaults, and VLM
+    /// wrappers that forward it to their text model.
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let _ = (input_ids, input_embeddings, seq_id, caches, mask, last_pos);
+        None
     }
 
     /// Forward with pre-computed embeddings (for VLM prefill)
@@ -969,6 +1066,10 @@ pub trait LanguageModel {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
+        if let Some(logits) = self.last_row_logits(input_ids, None, seq_id, caches, mask, last_pos)
+        {
+            return logits;
+        }
         let logits = self.forward_with_sequence_id(input_ids, seq_id, caches, mask);
         logits_at_position(&logits, last_pos)
     }
@@ -1011,6 +1112,14 @@ pub trait LanguageModel {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
+        // The hook's `None` embeddings mean the text forward, which is not
+        // what this entry runs when a caller passes no embeddings.
+        if input_embeddings.is_some()
+            && let Some(logits) =
+                self.last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
+        {
+            return logits;
+        }
         let logits = self.forward_with_embeddings_and_sequence_id(
             input_ids,
             input_embeddings,
@@ -1844,6 +1953,105 @@ mod tests {
             ffi::eval(&first);
             assert_eq!(ffi::item_f32(&first), pos as f32, "wrong row at pos {pos}");
         }
+    }
+
+    /// A model that implements only the `last_row_logits` hook: its row is
+    /// filled with `100 + pos`, while its full forward answers `pos`, so each
+    /// entry point shows which of the two it ran.
+    struct HookedStubModel;
+
+    impl LanguageModel for HookedStubModel {
+        fn forward(
+            &self,
+            input_ids: &MlxArray,
+            caches: &mut [KVCache],
+            mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            SeqStubModel.forward(input_ids, caches, mask)
+        }
+
+        fn last_row_logits(
+            &self,
+            _input_ids: &MlxArray,
+            _input_embeddings: Option<&MlxArray>,
+            _seq_id: Option<SequenceId>,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+            last_pos: usize,
+        ) -> Option<UniquePtr<MlxArray>> {
+            Some(ffi::from_slice_f32(
+                &[100.0 + last_pos as f32; 4],
+                &[1, 1, 4],
+            ))
+        }
+
+        fn make_caches(&self) -> Vec<KVCache> {
+            vec![KVCache::new()]
+        }
+
+        fn num_layers(&self) -> usize {
+            1
+        }
+
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![99]
+        }
+    }
+
+    /// Every `forward_last_logits*` default takes the model's last-row
+    /// projection when the hook offers one (#3070). The embeddings entry
+    /// called without embeddings keeps the full forward, because the hook
+    /// reads `None` embeddings as the text forward.
+    #[test]
+    fn forward_last_logits_defaults_use_the_last_row_hook() {
+        let model = HookedStubModel;
+        let input = ffi::from_slice_i32(&[5, 6, 7, 8], &[1, 4]);
+        let embeds = ffi::zeros(&[1, 4, 2], crate::dtype::FLOAT32);
+        let seq = SequenceId::from_raw(307_000);
+        let first = |logits: &MlxArray| {
+            assert_eq!(ffi::array_shape(logits).as_slice(), &[1, 1, 4]);
+            let first = ffi::slice(logits, &[0, 0, 0], &[1, 1, 1]);
+            ffi::eval(&first);
+            ffi::item_f32(&first)
+        };
+
+        let mut caches = model.make_caches();
+        let text = model.forward_last_logits(&input, &mut caches, None, 2);
+        assert_eq!(first(&text), 102.0);
+        let by_id =
+            model.forward_last_logits_with_sequence_id(&input, Some(seq), &mut caches, None, 3);
+        assert_eq!(first(&by_id), 103.0);
+        let fallible = model
+            .try_forward_last_logits_with_sequence_id(&input, Some(seq), &mut caches, None, 1)
+            .expect("the default wraps the infallible hook");
+        assert_eq!(first(&fallible), 101.0);
+        let embedded = model.forward_last_logits_with_embeddings_and_sequence_id(
+            &input,
+            Some(&embeds),
+            Some(seq),
+            &mut caches,
+            None,
+            2,
+        );
+        assert_eq!(first(&embedded), 102.0);
+        let no_embeddings = model.forward_last_logits_with_embeddings_and_sequence_id(
+            &input,
+            None,
+            Some(seq),
+            &mut caches,
+            None,
+            2,
+        );
+        assert_eq!(first(&no_embeddings), 2.0);
+        // The same hook is reachable through a borrowed model.
+        let by_ref = <&HookedStubModel as LanguageModel>::forward_last_logits(
+            &&model,
+            &input,
+            &mut caches,
+            None,
+            0,
+        );
+        assert_eq!(first(&by_ref), 100.0);
     }
 
     #[test]

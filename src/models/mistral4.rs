@@ -771,10 +771,14 @@ pub struct Mistral4Model {
 
 impl Mistral4Model {
     /// Shared transformer body: mask + scale + layer loop + norm + lm_head.
+    ///
+    /// `row == None` projects every position; `Some(row)` projects only that
+    /// position (`[B, 1, vocab]`, the prefill's sampled row, #3070).
     fn transformer_body(
         &self,
         mut h: UniquePtr<MlxArray>,
         caches: &mut [KVCache],
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(&h);
         let l = shape[1];
@@ -819,6 +823,8 @@ impl Mistral4Model {
             );
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
+
         // Final norm
         let h = self.norm.forward(&h);
 
@@ -837,7 +843,7 @@ impl Mistral4Model {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
-        self.transformer_body(h, caches)
+        self.transformer_body(h, caches, None)
     }
 
     pub fn make_caches_impl(&self) -> Vec<KVCache> {
@@ -1150,7 +1156,26 @@ impl LanguageModel for Mistral4Model {
         } else {
             self.embed_tokens.forward(input_ids)
         };
-        self.transformer_body(h, caches)
+        self.transformer_body(h, caches, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Same embedding choice as `forward_with_embeddings`, whose `None`
+        // branch is `forward_impl`.
+        let h = if let Some(embeds) = input_embeddings {
+            mlxcel_core::copy(embeds)
+        } else {
+            self.embed_tokens.forward(input_ids)
+        };
+        Some(self.transformer_body(h, caches, Some(last_pos)))
     }
 }
 
@@ -1313,4 +1338,12 @@ mod batched_decode_tests {
         );
         crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
     }
+
+    // The prefill projects only the sampled row; the embeddings path shares
+    // the same body (#3070).
+    crate::models::last_row_logits_harness::last_row_case!(
+        mistral4_last_row_logits,
+        tiny_model,
+        embeddings
+    );
 }

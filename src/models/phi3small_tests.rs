@@ -617,3 +617,8 @@ fn dummy_ids_respect_a_small_vocabulary() {
     assert!(dummy_tokenizer_ids(1000).is_empty());
     assert_eq!(dummy_tokenizer_ids(100260), vec![100256, 100258, 100259]);
 }
+
+crate::models::last_row_logits_harness::last_row_case!(
+    phi3small_last_row_logits,
+    tiny_batched_model
+);

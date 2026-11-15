@@ -686,3 +686,9 @@ fn kimi_linear_model_owned_sequence_state_refuses_missing_sequence_id() {
 
     assert!(err.contains("missing model-owned sequence state"));
 }
+
+crate::models::last_row_logits_harness::last_row_case!(kimi_linear_last_row_logits, || {
+    let config = hybrid_batching_config();
+    KimiLinearModel::from_weights(&hybrid_batching_weights(&config), &config)
+        .expect("two-layer KDA/MLA model loads")
+});

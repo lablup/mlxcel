@@ -228,3 +228,8 @@ fn minimax_native_batched_decode_matches_three_routed_rows() {
     );
     crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }
+
+crate::models::last_row_logits_harness::last_row_case!(minimax_last_row_logits, || {
+    let args = tiny_args();
+    MiniMaxModel::from_weights(&tiny_weights(&args), &args).expect("must build")
+});

@@ -270,18 +270,35 @@ impl Granite4VisionVLModel {
                 None => self.text_model.forward(input_ids, caches, mask),
             };
         };
+        self.inject_embeds_forward(embeds, seq_id, None)
+    }
+
+    /// The embeddings branch of [`Self::inject_forward`]: consume the stashed
+    /// injection (if any) and run the backbone, projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070).
+    fn inject_embeds_forward(
+        &self,
+        embeds: &MlxArray,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         match self.injection.borrow_mut().take() {
             Some(stash) => {
                 let injection = HybridInjection {
                     visual_pos_mask: &stash.mask,
                     targets: stash.targets,
                 };
-                self.text_model
-                    .forward_embeds_with_injection(embeds, Some(&injection), seq_id)
+                self.text_model.forward_embeds_rows_with_injection(
+                    embeds,
+                    Some(&injection),
+                    seq_id,
+                    row,
+                )
             }
             None => self
                 .text_model
-                .forward_embeds_with_injection(embeds, None, seq_id),
+                .forward_embeds_rows_with_injection(embeds, None, seq_id, row),
         }
     }
 }
@@ -393,6 +410,25 @@ impl LanguageModel for Granite4VisionVLModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.inject_forward(input_embeddings, input_ids, seq_id, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        match input_embeddings {
+            // The stashed multi-depth injection is consumed here exactly as
+            // the full embeddings forward consumes it.
+            Some(embeds) => Some(self.inject_embeds_forward(embeds, seq_id, Some(last_pos))),
+            None => self
+                .text_model
+                .last_row_logits(input_ids, None, seq_id, caches, mask, last_pos),
+        }
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -560,5 +596,19 @@ mod batching_tests {
             &actual, &expected,
         )));
         assert_eq!(mlxcel_core::item_f32(&delta), 0.0);
+    }
+
+    /// The prefill's last-row projection (#3070) through the wrapper: the
+    /// text path delegates to the backbone's hook and the embeddings path
+    /// (no injection stashed) projects the sampled row only.
+    #[test]
+    fn granite4_vlm_last_row_logits() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        let tokens = crate::models::last_row_logits_harness::TOKENS;
+        crate::models::last_row_logits_harness::assert_last_row_logits(tiny_wrapper, tokens);
+        crate::models::last_row_logits_harness::assert_last_row_logits_with_embeddings(
+            tiny_wrapper,
+            tokens,
+        );
     }
 }

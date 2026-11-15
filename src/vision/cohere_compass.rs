@@ -175,6 +175,26 @@ impl LanguageModel for CohereCompassModel {
         self.text_model.forward_impl(input_ids, None, caches)
     }
 
+    // The prefill's sampled row only (#3070), through the text model's
+    // per-sequence position state like this wrapper's forwards.
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.text_model.forward_rows_for_sequence(
+            input_ids,
+            input_embeddings,
+            caches,
+            seq_id,
+            Some(last_pos),
+        ))
+    }
+
     fn forward_with_embeddings(
         &self,
         input_ids: &MlxArray,

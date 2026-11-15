@@ -748,3 +748,8 @@ fn native_batched_decode_matches_unequal_learned_positions() {
         1e-4,
     );
 }
+
+crate::models::last_row_logits_harness::last_row_case!(gpt2_last_row_logits, || {
+    let args = tiny_args();
+    Gpt2Model::from_weights(&raw_hf_weights(&args, ""), &args).expect("model builds")
+});

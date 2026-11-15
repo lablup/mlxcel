@@ -860,6 +860,19 @@ impl DeepSeekV4Model {
         input_ids: &MlxArray,
         caches: &mut [V4LayerCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(input_ids, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). The row is taken after `hc_head` collapses the
+    /// hyper-connection streams, which it does per position.
+    fn forward_rows_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [V4LayerCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         let (b, l) = (shape[0], shape[1]);
 
@@ -907,6 +920,7 @@ impl DeepSeekV4Model {
         }
 
         let h = self.hc_head.forward(&h);
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         match &self.lm_head {
             Some(head) => head.forward(&h),
@@ -1010,6 +1024,23 @@ impl LanguageModel for DeepSeekV4Model {
     ) -> UniquePtr<MlxArray> {
         // Text-only family: there is no image-embedding prefill path.
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Text-only family: the embeddings entry runs the text forward too.
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| self.forward_rows_with_caches(input_ids, caches, Some(last_pos)),
+        ))
     }
 
     fn reset_runtime_state(&self) {

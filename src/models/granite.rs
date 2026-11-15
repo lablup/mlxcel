@@ -430,12 +430,26 @@ impl GraniteModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_embeds_rows(inputs_embeds, caches, mask, None)
+    }
+
+    /// [`Self::forward_embeds`] projecting every position (`row == None`) or
+    /// only position `row` (`[B, 1, vocab]`, the prefill's sampled row,
+    /// #3070). `logits_scaling` divides whichever rows were projected.
+    fn forward_embeds_rows(
+        &self,
+        inputs_embeds: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         // Scale the merged stream: h = inputs_embeds * embedding_multiplier.
         let mut h = mlxcel_core::multiply_scalar(inputs_embeds, self.embedding_multiplier);
 
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
 
@@ -537,6 +551,25 @@ impl LanguageModel for GraniteModel {
             Some(embeds) => self.forward_embeds(embeds, caches, mask),
             None => GraniteModel::forward(self, input_ids, caches, mask),
         }
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let row = Some(last_pos);
+        Some(match input_embeddings {
+            Some(embeds) => self.forward_embeds_rows(embeds, caches, mask, row),
+            None => {
+                let embeds = self.input_embeddings(input_ids);
+                self.forward_embeds_rows(&embeds, caches, mask, row)
+            }
+        })
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

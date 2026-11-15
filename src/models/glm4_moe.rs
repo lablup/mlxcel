@@ -1029,6 +1029,18 @@ impl Glm4MoeModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         // Embed tokens
         let mut h = self.embed_tokens.forward(input_ids);
 
@@ -1038,6 +1050,7 @@ impl Glm4MoeModel {
         }
 
         // Final norm
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
 
         // LM head
@@ -1189,6 +1202,22 @@ impl LanguageModel for Glm4MoeModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         Glm4MoeModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows(input_ids, caches, mask, Some(last_pos)))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
@@ -1736,5 +1765,18 @@ mod tests {
             .expect("a bf16 expert plane must not be gated on quantization params");
         SwitchLinear::from_separate_gate_up(&regular, &quant_args(0, 0), GATE_PREFIX, UP_PREFIX)
             .expect("a bf16 fused expert plane must not be gated on quantization params");
+    }
+    #[test]
+    fn glm4_moe_last_row_logits_match_the_full_forward() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        crate::models::last_row_logits_harness::assert_last_row_logits(
+            || {
+                let mut args = tiny_moe_args(8);
+                args.vocab_size = 24;
+                args.n_shared_experts = Some(1);
+                Glm4MoeModel::from_weights(&routed_model_weights(&args), &args).unwrap()
+            },
+            crate::models::last_row_logits_harness::TOKENS,
+        );
     }
 }

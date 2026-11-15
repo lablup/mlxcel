@@ -249,6 +249,28 @@ impl LanguageModel for LlmJpVlModel {
         )
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Both single-sequence forwards drop the sequence id and delegate to
+        // the text model unchanged.
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.text_model,
+            input_ids,
+            input_embeddings,
+            None,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn forward_batched(
         &self,
         input_ids: &MlxArray,

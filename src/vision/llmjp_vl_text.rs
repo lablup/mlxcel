@@ -100,6 +100,29 @@ impl LanguageModel for LlmJpTextModel {
         ))
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // The sequence-id forwards are the trait defaults, which drop the id.
+        Some(
+            on_text_model!(self, inner => mlxcel_core::generate::last_row_logits_from(
+                inner,
+                input_ids,
+                input_embeddings,
+                None,
+                caches,
+                mask,
+                last_pos,
+            )),
+        )
+    }
+
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         on_text_model!(self, inner => LanguageModel::embed_tokens(inner, input_ids))
     }

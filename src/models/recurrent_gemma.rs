@@ -757,10 +757,16 @@ struct GriffinBackbone {
 }
 
 impl GriffinBackbone {
+    /// Embeddings, every residual block and the final norm. `row` selects the
+    /// positions the final norm sees: all of them for `None`, one
+    /// (`[B, 1, hidden]`, the prefill's sampled row, #3070) for `Some`. Every
+    /// block still runs over all rows, so the recurrent and KV state advance
+    /// exactly as in the full forward.
     fn forward(
         &self,
         inputs: &MlxArray,
         caches: Option<&mut [GriffinLayerCache]>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(inputs);
 
@@ -824,6 +830,7 @@ impl GriffinBackbone {
             }
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         self.final_norm.forward(&h)
     }
 }
@@ -851,7 +858,19 @@ impl GriffinModel {
         inputs: &MlxArray,
         caches: Option<&mut [GriffinLayerCache]>,
     ) -> UniquePtr<MlxArray> {
-        let out = self.model.forward(inputs, caches);
+        self.forward_rows_with_caches(inputs, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`); the logits
+    /// soft cap then applies to that row only.
+    fn forward_rows_with_caches(
+        &self,
+        inputs: &MlxArray,
+        caches: Option<&mut [GriffinLayerCache]>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        let out = self.model.forward(inputs, caches, row);
 
         // Apply lm_head
         let logits = if let Some(ref head) = self.lm_head {
@@ -1259,6 +1278,17 @@ impl GriffinModel {
         input: &MlxArray,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`).
+    fn forward_rows_for_sequence(
+        &self,
+        input: &MlxArray,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input)[1];
         if seq_id.is_none() && seq_len > 1 {
             self.sequence_state
@@ -1268,12 +1298,12 @@ impl GriffinModel {
         if let Some(seq_id) = seq_id {
             self.sequence_state
                 .with_existing_sequence_state(seq_id, |internal| {
-                    self.forward_with_caches(input, Some(internal))
+                    self.forward_rows_with_caches(input, Some(internal), row)
                 })
                 .unwrap_or_else(|err| panic!("RecurrentGemma {err}"))
         } else {
             self.sequence_state.with_sequence_state(None, |internal| {
-                self.forward_with_caches(input, Some(internal))
+                self.forward_rows_with_caches(input, Some(internal), row)
             })
         }
     }
@@ -1490,6 +1520,22 @@ impl LanguageModel for GriffinModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows_for_sequence(input_ids, seq_id, Some(last_pos)))
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
@@ -1927,4 +1973,10 @@ mod tests {
         GriffinModel::from_weights(config, recurrent_gemma_test_weights())
             .expect("an all-recurrent config keeps its unused window");
     }
+
+    // The prefill's last-row projection (#3070).
+    crate::models::last_row_logits_harness::last_row_case!(
+        recurrent_gemma_last_row_logits,
+        batching_recurrent_gemma
+    );
 }

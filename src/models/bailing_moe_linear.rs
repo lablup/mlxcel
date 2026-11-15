@@ -2573,6 +2573,18 @@ impl BailingMoeLinearModel {
         caches: &mut [BailingLinearCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_positions(input_ids, caches, mask, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_positions(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [BailingLinearCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         // Upstream reads the offset from a global layer's KV cache once, before
         // any layer runs, and passes the same value to every linear layer. The
         // linear recurrence has no position of its own, so this is the only
@@ -2588,6 +2600,7 @@ impl BailingMoeLinearModel {
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, cache, mask, offset);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         match &self.lm_head {
             Some(head) => head.forward(&h),
@@ -2771,10 +2784,14 @@ impl BailingMoeLinearModel {
     /// on prefill so a new prompt does not inherit stale state. `Some(id)` uses
     /// the scheduler's per-sequence state so concurrent server requests stay
     /// isolated.
+    /// The single-sequence forward against the model-owned caches of
+    /// `seq_id`, projecting every position (`row == None`) or only position
+    /// `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
     fn forward_for_sequence(
         &self,
         input: &MlxArray,
         seq_id: Option<SequenceId>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input)[1];
         if seq_id.is_none() && seq_len > 1 {
@@ -2795,7 +2812,7 @@ impl BailingMoeLinearModel {
                 } else {
                     None
                 };
-                self.forward(input, caches, mask.as_deref())
+                self.forward_positions(input, caches, mask.as_deref(), row)
             },
         )
     }
@@ -2885,7 +2902,7 @@ impl LanguageModel for BailingMoeLinearModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_for_sequence(input_ids, None)
+        self.forward_for_sequence(input_ids, None, None)
     }
 
     fn forward_with_sequence_id(
@@ -2895,7 +2912,7 @@ impl LanguageModel for BailingMoeLinearModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_for_sequence(input_ids, seq_id)
+        self.forward_for_sequence(input_ids, seq_id, None)
     }
 
     fn forward_batched(
@@ -2960,7 +2977,20 @@ impl LanguageModel for BailingMoeLinearModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         // Text-only family: there is no image-embedding prefill path.
-        self.forward_for_sequence(input_ids, seq_id)
+        self.forward_for_sequence(input_ids, seq_id, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Text-only family: the embeddings entry runs the text forward too.
+        Some(self.forward_for_sequence(input_ids, seq_id, Some(last_pos)))
     }
 
     fn reset_runtime_state(&self) {

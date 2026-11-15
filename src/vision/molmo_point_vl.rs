@@ -323,6 +323,25 @@ impl LanguageModel for MolmoPointVLModel {
         self.language_model.forward(input_ids, caches, mask)
     }
 
+    // The prefill's sampled row only (#3070).
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.language_model.last_row_logits(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn forward_with_embeddings(
         &self,
         input_ids: &MlxArray,

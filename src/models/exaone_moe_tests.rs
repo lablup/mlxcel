@@ -258,3 +258,20 @@ fn rejects_a_sliding_window_a_rotating_cache_cannot_take() {
         assert!(err.contains(&format!("got {window}")), "{err}");
     }
 }
+
+#[test]
+fn exaone_moe_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    // Seven tokens: past the fixture's window of four in a single pass, while
+    // the harness's 3 + 4 chunked split stays inside what the dense caches of
+    // the trait path support (the continuation mask is sized for a rotating
+    // cache and stops matching the dense keys once the prior offset reaches
+    // the window).
+    crate::models::last_row_logits_harness::assert_last_row_logits(
+        || {
+            let args = tiny_args();
+            ExaoneMoeModel::from_weights(&tiny_weights(&args), &args).unwrap()
+        },
+        &[3, 1, 4, 1, 5, 9, 2],
+    );
+}

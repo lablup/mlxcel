@@ -1546,6 +1546,22 @@ impl Gemma3nLanguageModel {
     }
 
     pub fn forward(&self, inputs: &MlxArray, caches: &mut [KVCache]) -> UniquePtr<MlxArray> {
+        self.forward_rows(inputs, caches, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    /// Every layer and the AltUp collapse still run over all rows; the final
+    /// norm, the tied LM head and `final_logit_softcapping` see the one row.
+    ///
+    /// Used by: `LanguageModel::last_row_logits` of `Gemma3nModel` and
+    /// `Gemma3nVLModel`
+    pub fn forward_rows(
+        &self,
+        inputs: &MlxArray,
+        caches: &mut [KVCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         // Embed tokens
         let h = self.embed_tokens.forward(inputs);
         let h = mlxcel_core::multiply_scalar(&h, (self.config.hidden_size as f32).sqrt());
@@ -1650,6 +1666,7 @@ impl Gemma3nLanguageModel {
 
         // Mean across altup dimension
         let h = mean_arrays(&h_list);
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm
         let out = self.norm.forward(&h);
@@ -1745,6 +1762,20 @@ impl Gemma3nLanguageModel {
         per_layer_inputs: &MlxArray,
         caches: &mut [KVCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_inputs(inputs_embeds, per_layer_inputs, caches, None)
+    }
+
+    /// [`Self::forward_with_inputs`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, #3070).
+    ///
+    /// Used by: `Gemma3nVLModel`'s `LanguageModel::last_row_logits`
+    pub fn forward_rows_with_inputs(
+        &self,
+        inputs_embeds: &MlxArray,
+        per_layer_inputs: &MlxArray,
+        caches: &mut [KVCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let h = inputs_embeds;
 
         let shape = mlxcel_core::array_shape(h);
@@ -1835,6 +1866,7 @@ impl Gemma3nLanguageModel {
         normalize_magnitudes_from_idx(&mut h_list, 1, &target_magnitude);
 
         let h = mean_arrays(&h_list);
+        let h = mlxcel_core::generate::select_row(h, row);
         let out = self.norm.forward(&h);
         let out = if self.embed_tokens.is_quantized() {
             out
@@ -2082,6 +2114,26 @@ impl LanguageModel for Gemma3nModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.language_model.forward(input_ids, caches)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // The text model has no embeddings forward (the VLM wrapper owns the
+        // per-layer inputs): decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(
+            self.language_model
+                .forward_rows(input_ids, caches, Some(last_pos)),
+        )
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

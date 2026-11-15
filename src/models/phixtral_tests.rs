@@ -673,3 +673,10 @@ fn the_prefill_is_causal_without_being_handed_a_mask() {
         );
     }
 }
+
+// The prefill projects only the sampled row through the head norm and the
+// biased LM head (#3070).
+crate::models::last_row_logits_harness::last_row_case!(phixtral_last_row_logits, || {
+    let args = small_args();
+    PhixtralModel::from_weights(&filled_weights(&args), &args).expect("the model builds")
+});

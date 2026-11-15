@@ -1010,12 +1010,17 @@ impl LongcatFlashNgramModel {
 }
 
 impl LongcatFlashNgramModel {
-    /// Internal forward pass with proper cache management
+    /// Internal forward pass with proper cache management.
+    ///
+    /// `row == None` projects every position; `Some(row)` projects only that
+    /// position (`[B, 1, vocab]`, the prefill's sampled row, #3070). The
+    /// caches and the n-gram tail advance over every position either way.
     fn internal_forward(
         &self,
         input_ids: &MlxArray,
         caches: &mut [[KVCache; 2]],
         ngram_context: &mut Option<UniquePtr<MlxArray>>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         // Compute embeddings
         let h = if let Some(ref ngram) = self.ngram_embeddings {
@@ -1044,6 +1049,8 @@ impl LongcatFlashNgramModel {
             hidden = layer.forward(&hidden, mask_ref, &mut [c0, c1]);
         }
 
+        let hidden = mlxcel_core::generate::select_row(hidden, row);
+
         // Final norm and LM head
         let normed = self.norm.forward(&hidden);
         self.lm_head.forward(&normed)
@@ -1066,7 +1073,28 @@ impl LanguageModel for LongcatFlashNgramModel {
             caches,
             ngram_context,
         } = &mut *state;
-        self.internal_forward(input_ids, caches, ngram_context)
+        self.internal_forward(input_ids, caches, ngram_context, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        let mut state = self.state.borrow_mut();
+        let LongcatState {
+            caches,
+            ngram_context,
+        } = &mut *state;
+        Some(self.internal_forward(input_ids, caches, ngram_context, Some(last_pos)))
     }
 
     fn num_layers(&self) -> usize {

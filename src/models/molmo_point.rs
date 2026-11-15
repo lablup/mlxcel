@@ -190,6 +190,31 @@ impl MolmoPointLanguageModel {
         self.lm_head.forward(&h)
     }
 
+    /// Logits `[B, 1, vocab]` for position `last_pos` only (the prefill's
+    /// sampled row, #3070): [`Self::forward`] without embeddings,
+    /// [`Self::forward_with_embeddings`] with them. The row is sliced from the
+    /// pre-norm hidden state, so the final norm and the extended head run on
+    /// one position.
+    pub(crate) fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let (_, pre_ln) = match input_embeddings {
+            Some(embeds) => self
+                .model
+                .forward_with_pre_ln(None, Some(embeds), caches, mask),
+            None => self
+                .model
+                .forward_with_pre_ln(Some(input_ids), None, caches, mask),
+        };
+        let row = mlxcel_core::generate::logits_at_position(&pre_ln, last_pos);
+        self.lm_head.forward(&self.model.ln_f.forward(&row))
+    }
+
     pub(crate) fn forward_batched_impl(
         &self,
         input_ids: &MlxArray,

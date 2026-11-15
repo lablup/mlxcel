@@ -668,3 +668,12 @@ fn injected_kv_cache_modes_reach_the_mtp_slot() {
         "the fallback slot install must honour the table"
     );
 }
+
+#[test]
+fn glm4_moe_lite_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::last_row_logits_harness::assert_last_row_logits(
+        tiny_model,
+        crate::models::last_row_logits_harness::TOKENS,
+    );
+}

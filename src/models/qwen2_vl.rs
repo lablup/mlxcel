@@ -791,6 +791,28 @@ impl Qwen2VLModel {
         self.lm_head.forward(&h)
     }
 
+    /// [`Self::forward_for_sequence`] projecting only position `last_pos`
+    /// through the LM head: `[B, 1, vocab]`, the row a prefill samples
+    /// (#3070). The MRoPE entry for `seq_id` is resolved exactly as in the
+    /// full forward, and the final norm acts per position, so the row equals
+    /// the full forward's.
+    ///
+    /// Used by: `LanguageModel::last_row_logits` of `Qwen2VLModel` and of the
+    /// Qwen2-VL / Qwen2.5-VL wrappers.
+    pub(crate) fn last_logits_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.forward_hidden(input_ids, input_embeddings, caches, mask, seq_id);
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        self.lm_head.forward(&row)
+    }
+
     /// Everything [`Self::forward_for_sequence`] does except the head:
     /// returns the `[B, L, hidden_size]` states after the final norm.
     ///
@@ -1160,6 +1182,25 @@ impl mlxcel_core::generate::LanguageModel for Qwen2VLModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.last_logits_for_sequence(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            seq_id,
+            last_pos,
+        ))
     }
 
     fn forward_batched_with_ids(

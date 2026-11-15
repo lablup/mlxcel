@@ -689,3 +689,9 @@ fn bound_text_only_sequence_ignores_a_later_fallback_image() {
     model.release_sequence_state_by_id(new_id);
     model.clear_cross_attention_states();
 }
+
+crate::models::last_row_logits_harness::last_row_case!(
+    mllama_vl_last_row_logits,
+    tiny_wrapper,
+    embeddings
+);

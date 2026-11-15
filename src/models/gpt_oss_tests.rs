@@ -479,3 +479,8 @@ fn masked_and_multitoken_batches_keep_sequence_identity() {
         }
     }
 }
+
+// The prefill projects only the sampled row through the final norm and the
+// LM head, under the model-owned mixed caches (#3070).
+crate::models::last_row_logits_harness::last_row_case!(gpt_oss_last_row_logits, || tiny(false));
+crate::models::last_row_logits_harness::last_row_case!(gpt_oss_yarn_last_row_logits, || tiny(true));

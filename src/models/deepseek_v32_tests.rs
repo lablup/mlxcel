@@ -387,12 +387,16 @@ pub(crate) fn tiny_dsa_weights_and_args() -> (WeightMap, ModelArgs) {
     (weights, args)
 }
 
+/// One DSA layer (top-k 2) over a 16-token vocabulary.
+fn tiny_dsa_model() -> super::DeepSeekV32Model {
+    let (weights, args) = tiny_dsa_weights_and_args();
+    super::DeepSeekV32Model::from_weights(&weights, &args).expect("tiny DSA model loads")
+}
+
 #[test]
 fn deepseek_v32_batched_decode_harness_covers_mixed_threshold_single_and_empty() {
     let _runtime = crate::initialize_runtime();
-    let (weights, args) = tiny_dsa_weights_and_args();
-    let model =
-        super::DeepSeekV32Model::from_weights(&weights, &args).expect("tiny DSA model loads");
+    let model = tiny_dsa_model();
 
     // Length 1 remains dense after the decode token (kv_len == top-k), while
     // lengths 3 and 5 select sparse top-k entries in the same server batch.
@@ -782,5 +786,14 @@ fn quantized_kv_b_proj_rejects_scales_with_no_biases() {
     assert!(
         err.contains("scales but no biases"),
         "the wording must match the other four MLA sanitizers, got: {err}"
+    );
+}
+
+#[test]
+fn deepseek_v32_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::last_row_logits_harness::assert_last_row_logits(
+        tiny_dsa_model,
+        crate::models::last_row_logits_harness::TOKENS,
     );
 }

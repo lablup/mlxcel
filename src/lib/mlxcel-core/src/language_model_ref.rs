@@ -78,6 +78,18 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).forward_last_logits(input_ids, caches, mask, last_pos)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        (**self).last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
+    }
+
     fn forward_with_embeddings(
         &self,
         input_ids: &MlxArray,

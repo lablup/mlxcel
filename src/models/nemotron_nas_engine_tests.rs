@@ -364,3 +364,5 @@ fn nemotron_nas_int8_greedy_run_matches_fp16_first_token() {
         "Int8 prefill logits must be finite"
     );
 }
+
+crate::models::last_row_logits_harness::last_row_case!(nemotron_nas_last_row_logits, tiny_model);

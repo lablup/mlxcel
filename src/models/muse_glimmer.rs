@@ -67,6 +67,21 @@ impl MuseGlimmerTextModel {
         caches: &mut [MuseCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_muse_caches(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    /// [`Self::forward_with_muse_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). The output multiplier and the final softcap apply
+    /// to the projected rows only.
+    fn forward_rows_with_muse_caches(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [MuseCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = match input_embeddings {
             Some(embeds) => mlxcel_core::copy(embeds),
             None => self.embed_input_ids(input_ids),
@@ -74,6 +89,7 @@ impl MuseGlimmerTextModel {
         for (idx, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[idx], mask);
         }
+        h = mlxcel_core::generate::select_row(h, row);
         h = self.norm.forward(&h);
         let logits = self.lm_head.forward(&h);
         Self::softcap_logits(
@@ -268,13 +284,19 @@ impl MuseGlimmerTextWrapper {
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
         mask: Option<&MlxArray>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.model.make_muse_caches(),
             |state| {
-                self.model
-                    .forward_with_muse_caches(input_ids, input_embeddings, state, mask)
+                self.model.forward_rows_with_muse_caches(
+                    input_ids,
+                    input_embeddings,
+                    state,
+                    mask,
+                    row,
+                )
             },
         )
     }
@@ -292,7 +314,7 @@ impl MuseGlimmerTextWrapper {
         let shape = mlxcel_core::array_shape(input_ids);
         let row_len = if shape.len() >= 2 { shape[1] } else { 1 };
         if b == 1 {
-            return self.with_state(None, input_ids, None, mask);
+            return self.with_state(None, input_ids, None, mask, None);
         }
 
         let token_0 = mlxcel_core::slice(input_ids, &[0, 0], &[1, row_len]);
@@ -334,14 +356,14 @@ impl MuseGlimmerTextWrapper {
         let shape = mlxcel_core::array_shape(input_ids);
         let row_len = if shape.len() >= 2 { shape[1] } else { 1 };
         if b == 1 {
-            return self.with_state(seq_ids.first().copied(), input_ids, None, mask);
+            return self.with_state(seq_ids.first().copied(), input_ids, None, mask, None);
         }
 
         let token_0 = mlxcel_core::slice(input_ids, &[0, 0], &[1, row_len]);
-        let mut result = self.with_state(seq_ids.first().copied(), &token_0, None, None);
+        let mut result = self.with_state(seq_ids.first().copied(), &token_0, None, None, None);
         for (i, seq_id) in seq_ids.iter().copied().enumerate().skip(1) {
             let token_i = mlxcel_core::slice(input_ids, &[i as i32, 0], &[i as i32 + 1, row_len]);
-            let logits_i = self.with_state(Some(seq_id), &token_i, None, None);
+            let logits_i = self.with_state(Some(seq_id), &token_i, None, None, None);
             result = mlxcel_core::concatenate(&result, &logits_i, 0);
         }
         result
@@ -369,7 +391,7 @@ impl LanguageModel for MuseGlimmerTextWrapper {
         _caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.with_state(None, input_ids, None, mask)
+        self.with_state(None, input_ids, None, mask, None)
     }
 
     fn forward_with_embeddings(
@@ -379,7 +401,7 @@ impl LanguageModel for MuseGlimmerTextWrapper {
         _caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.with_state(None, input_ids, input_embeddings, mask)
+        self.with_state(None, input_ids, input_embeddings, mask, None)
     }
 
     fn forward_with_sequence_id(
@@ -389,7 +411,7 @@ impl LanguageModel for MuseGlimmerTextWrapper {
         _caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.with_state(seq_id, input_ids, None, mask)
+        self.with_state(seq_id, input_ids, None, mask, None)
     }
 
     fn forward_with_embeddings_and_sequence_id(
@@ -400,7 +422,19 @@ impl LanguageModel for MuseGlimmerTextWrapper {
         _caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.with_state(seq_id, input_ids, input_embeddings, mask)
+        self.with_state(seq_id, input_ids, input_embeddings, mask, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.with_state(seq_id, input_ids, input_embeddings, mask, Some(last_pos)))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

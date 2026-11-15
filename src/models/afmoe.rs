@@ -1330,10 +1330,13 @@ impl AfmoeModel {
         }
     }
 
-    pub(crate) fn forward(
+    /// Single-sequence forward projecting every position (`row == None`) or
+    /// only position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
         &self,
         input_ids: &MlxArray,
         caches: &mut [Cache],
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input_ids)[1];
 
@@ -1374,6 +1377,7 @@ impl AfmoeModel {
             h = layer.forward(&h, caches[i].as_interface(), mask);
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         match &self.lm_head {
             Some(head) => head.forward(&h),
@@ -1399,10 +1403,14 @@ impl AfmoeModel {
             .collect()
     }
 
+    /// The single-sequence forward against the model-owned caches of
+    /// `seq_id`, projecting every position (`row == None`) or only position
+    /// `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
     fn forward_for_sequence(
         &self,
         input: &MlxArray,
         seq_id: Option<SequenceId>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input)[1];
         if seq_id.is_none() && seq_len > 1 {
@@ -1412,7 +1420,7 @@ impl AfmoeModel {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
-            |caches| self.forward(input, caches),
+            |caches| self.forward_rows(input, caches, row),
         )
     }
 
@@ -1816,7 +1824,7 @@ impl LanguageModel for AfmoeModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_for_sequence(input_ids, None)
+        self.forward_for_sequence(input_ids, None, None)
     }
 
     fn forward_with_sequence_id(
@@ -1826,7 +1834,7 @@ impl LanguageModel for AfmoeModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_for_sequence(input_ids, seq_id)
+        self.forward_for_sequence(input_ids, seq_id, None)
     }
 
     fn forward_with_embeddings_and_sequence_id(
@@ -1838,7 +1846,20 @@ impl LanguageModel for AfmoeModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         // Text-only family: there is no image-embedding prefill path.
-        self.forward_for_sequence(input_ids, seq_id)
+        self.forward_for_sequence(input_ids, seq_id, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Text-only family: the embeddings entry runs the text forward too.
+        Some(self.forward_for_sequence(input_ids, seq_id, Some(last_pos)))
     }
 
     fn reset_runtime_state(&self) {

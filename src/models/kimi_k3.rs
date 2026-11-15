@@ -1886,7 +1886,7 @@ impl KimiK3Model {
         caches: &mut [KimiK3LayerCache],
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
-        self.forward_hidden(h, caches)
+        self.forward_hidden(h, caches, None)
     }
 
     /// The dtype the decoder runs in: that of the embedding table.
@@ -1911,13 +1911,18 @@ impl KimiK3Model {
         } else {
             mlxcel_core::astype(inputs_embeds, self.act_dtype)
         };
-        self.forward_hidden(h, caches)
+        self.forward_hidden(h, caches, None)
     }
 
+    /// The layer stack, final norm and LM head over input embeddings `h`,
+    /// projecting every position (`row == None`) or only position `row`
+    /// (`[B, 1, vocab]`, the prefill's sampled row, #3070). The layers and
+    /// the output Attention Residual mix run over the whole input either way.
     fn forward_hidden(
         &self,
         h: UniquePtr<MlxArray>,
         caches: &mut [KimiK3LayerCache],
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         assert_eq!(
             caches.len(),
@@ -1941,6 +1946,7 @@ impl KimiK3Model {
             Some((w, eps)) => attn_res_mix(&blocks, &h, w, *eps),
             None => h,
         };
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
 
         if let Some(lm_head) = &self.lm_head {
@@ -2301,15 +2307,37 @@ impl KimiK3Model {
         inputs_embeds: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input_ids, inputs_embeds, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence_with_embeddings`] projecting every
+    /// position (`row == None`) or only position `row` (`[B, 1, vocab]`, the
+    /// prefill's sampled row, #3070), against the same sequence state.
+    ///
+    /// Used by: [`Self::forward_for_sequence_with_embeddings`], this model's
+    /// `LanguageModel::last_row_logits` and `vision::kimi_k3_vl`'s.
+    pub(crate) fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input_ids)[1];
         if seq_id.is_none() && seq_len > 1 {
             self.sequence_state
                 .replace_internal(self.make_layer_caches());
         }
 
-        let run = |internal: &mut [KimiK3LayerCache]| match inputs_embeds {
-            Some(embeds) => self.forward_with_input_embeddings(embeds, internal),
-            None => self.forward(input_ids, internal),
+        let run = |internal: &mut [KimiK3LayerCache]| {
+            let h = match inputs_embeds {
+                Some(embeds) if mlxcel_core::array_dtype(embeds) == self.act_dtype => {
+                    mlxcel_core::copy(embeds)
+                }
+                Some(embeds) => mlxcel_core::astype(embeds, self.act_dtype),
+                None => self.embed_tokens.forward(input_ids),
+            };
+            self.forward_hidden(h, internal, row)
         };
         if let Some(seq_id) = seq_id {
             self.sequence_state
@@ -2438,6 +2466,23 @@ impl LanguageModel for KimiK3Model {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // The trait's embeddings forward is the default, which ignores them:
+        // decline so that path keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows_for_sequence(input_ids, None, seq_id, Some(last_pos)))
     }
 
     fn forward_batched(

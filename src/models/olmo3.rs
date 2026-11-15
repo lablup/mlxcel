@@ -593,7 +593,19 @@ impl OLMo3Model {
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, None)
+    }
+
+    /// [`Self::forward_impl`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         // Embed tokens
         let mut h = self.embed_tokens.forward(input_ids);
@@ -640,6 +652,7 @@ impl OLMo3Model {
             };
             h = layer.forward(&h, &mut caches[i], mask);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm
         let h = self.norm.forward(&h);
@@ -759,6 +772,22 @@ impl LanguageModel for OLMo3Model {
         self.forward_impl(input_ids, caches, mask)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows(input_ids, caches, mask, Some(last_pos)))
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         self.make_caches_impl()
     }
@@ -848,6 +877,8 @@ mod batched_decode_tests {
         }
         OLMo3Model::from_weights(&weights, &config).expect("tiny olmo3 builds")
     }
+
+    crate::models::last_row_logits_harness::last_row_case!(olmo3_last_row_logits, tiny_model);
 
     #[test]
     fn native_batched_decode_matches_three_rows_inside_and_past_window() {

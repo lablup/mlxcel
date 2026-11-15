@@ -446,3 +446,41 @@ fn a_text_only_checkpoint_loads_from_a_directory_in_each_layout() {
         "{error}"
     );
 }
+
+// The prefill's last-row projection (#3070): the final norm, the tied LM head
+// and `final_logit_softcapping` see the sampled row only.
+crate::models::last_row_logits_harness::last_row_case!(gemma3n_last_row_logits, || {
+    tiny_batched_model(1)
+});
+
+/// The VLM prefill enters through `forward_with_inputs`; its row variant must
+/// return that forward's row at `[1, 1, vocab]`.
+#[test]
+fn gemma3n_forward_rows_with_inputs_matches_the_full_forward_row() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let tokens = crate::models::last_row_logits_harness::TOKENS;
+    let ids = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+    let run = |row: Option<usize>| {
+        let model = tiny_batched_model(1);
+        let lm = &model.language_model;
+        let embeds = lm.get_embed_tokens(&ids);
+        let per_layer = lm.get_per_layer_inputs(&ids);
+        let mut caches = model.make_caches();
+        let logits = lm.forward_rows_with_inputs(&embeds, &per_layer, &mut caches, row);
+        mlxcel_core::eval(&logits);
+        logits
+    };
+    let full = run(None);
+    assert_eq!(mlxcel_core::array_shape(&full)[1] as usize, tokens.len());
+    for pos in [2, tokens.len() - 1] {
+        let row = run(Some(pos));
+        assert_eq!(
+            mlxcel_core::array_shape(&row),
+            vec![1, 1, mlxcel_core::array_shape(&full)[2]]
+        );
+        let expected = mlxcel_core::generate::logits_at_position(&full, pos);
+        let close = mlxcel_core::allclose(&row, &expected, 1e-4, 1e-4);
+        mlxcel_core::eval(&close);
+        assert!(mlxcel_core::item_bool(&close), "row {pos} differs");
+    }
+}

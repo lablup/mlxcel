@@ -560,6 +560,33 @@ fn concat_arrays_axis(arrays: &[UniquePtr<MlxArray>], axis: i32) -> UniquePtr<Ml
 }
 
 impl LanguageModel for Phi4MMVLModel {
+    // Same adapter-mode selection as the full forwards, then the text
+    // model's last-row projection (#3070).
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let mode = match input_embeddings {
+            Some(_) => self.request_modes.begin_prefill(input_embeddings, seq_id),
+            None => self.request_modes.decode_mode(seq_id),
+        };
+        self.activate_input_mode(mode);
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.text_model,
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
