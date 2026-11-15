@@ -1640,6 +1640,32 @@ fn xla_required_positions(
         .saturating_add(image_expansion)
 }
 
+/// One `MLXCEL_PRINT_TOKEN_IDS` line: `[<label> (<count>): <id> <id> ...]`.
+fn token_ids_line(label: &str, ids: &[i32]) -> String {
+    format!(
+        "[{label} ({}): {}]",
+        ids.len(),
+        ids.iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+/// `MLXCEL_PRINT_TOKEN_IDS`: dump the prompt and generated ids to stderr so two
+/// runs (classic versus `--draft-model`, fused MoE on versus off, one OpenXLA
+/// weight path versus another) can be compared on ids rather than on decoded
+/// text, which can round-trip two different id sequences to the same string.
+///
+/// Used by: the MLX tail of `run_generate` and its OpenXLA branch, which
+/// returns before that tail.
+fn print_token_ids_if_requested(prompt_tokens: &[i32], generated_tokens: &[i32]) {
+    if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
+        eprintln!("{}", token_ids_line("prompt ids", prompt_tokens));
+        eprintln!("{}", token_ids_line("token ids", generated_tokens));
+    }
+}
+
 /// The worst-case image expansion to include in an OpenXLA sizing hint.
 #[cfg(feature = "xla-backend")]
 fn xla_image_expansion(model_path: &Path, image_count: usize) -> usize {
@@ -3365,6 +3391,10 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             kv_cache_mode,
             token_bias,
         )?;
+        // This branch returns before the shared tail below, so it prints the
+        // ids itself; without this the diagnostic was silently ignored on the
+        // OpenXLA backend.
+        print_token_ids_if_requested(&prompt_tokens, &generated_tokens);
         let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
         let visible = filter_reasoning_for_display(
             &tokenizer,
@@ -3531,30 +3561,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         }
         generation
     };
-    // `MLXCEL_PRINT_TOKEN_IDS`: dump the generated ids to stderr so two runs
-    // (classic versus `--draft-model`, fused MoE on versus off) can be
-    // compared on ids rather than on decoded text, which can round-trip two
-    // different id sequences to the same string.
-    if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
-        eprintln!(
-            "[prompt ids ({}): {}]",
-            prompt_tokens.len(),
-            prompt_tokens
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        eprintln!(
-            "[token ids ({}): {}]",
-            generated_tokens.len(),
-            generated_tokens
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-    }
+    print_token_ids_if_requested(&prompt_tokens, &generated_tokens);
     let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
     let visible = filter_reasoning_for_display(
         &tokenizer,
