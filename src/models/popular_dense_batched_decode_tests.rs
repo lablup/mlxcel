@@ -124,7 +124,7 @@ fn assert_contract<M: LanguageModel>(model: &M) {
     crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(model);
 }
 
-fn tiny_apertus_model() -> crate::models::apertus::ApertusModel {
+pub(crate) fn tiny_apertus_model() -> crate::models::apertus::ApertusModel {
     let args = config(json!({
         "model_type": "apertus",
         "hidden_size": HIDDEN,
@@ -158,7 +158,7 @@ fn tiny_apertus_model() -> crate::models::apertus::ApertusModel {
         .expect("tiny Apertus builds")
 }
 
-fn tiny_cohere_model() -> crate::models::cohere::CohereModel {
+pub(crate) fn tiny_cohere_model() -> crate::models::cohere::CohereModel {
     let args = config(json!({
         "model_type": "cohere",
         "hidden_size": HIDDEN,
@@ -184,7 +184,7 @@ fn tiny_cohere_model() -> crate::models::cohere::CohereModel {
     crate::models::cohere::CohereModel::from_weights(&w.weights, &args).expect("tiny Cohere builds")
 }
 
-fn tiny_ernie45_model() -> crate::models::ernie4_5::Ernie45Model {
+pub(crate) fn tiny_ernie45_model() -> crate::models::ernie4_5::Ernie45Model {
     let args = config(json!({
         "model_type": "ernie4_5",
         "hidden_size": HIDDEN,
@@ -207,7 +207,7 @@ fn tiny_ernie45_model() -> crate::models::ernie4_5::Ernie45Model {
         .expect("tiny ERNIE 4.5 builds")
 }
 
-fn tiny_exaone_model() -> crate::models::exaone::ExaOneModel {
+pub(crate) fn tiny_exaone_model() -> crate::models::exaone::ExaOneModel {
     let args = config(json!({
         "model_type": "exaone",
         "hidden_size": HIDDEN,
@@ -239,7 +239,7 @@ fn tiny_exaone_model() -> crate::models::exaone::ExaOneModel {
     crate::models::exaone::ExaOneModel::from_weights(&w.weights, &args).expect("tiny ExaOne builds")
 }
 
-fn tiny_gemma_model() -> crate::models::gemma::GemmaModel {
+pub(crate) fn tiny_gemma_model() -> crate::models::gemma::GemmaModel {
     let args = config(json!({
         "model_type": "gemma",
         "hidden_size": HIDDEN,
@@ -322,7 +322,7 @@ pub(crate) fn tiny_granite_model() -> crate::models::granite::GraniteModel {
         .expect("tiny Granite builds")
 }
 
-fn tiny_hunyuan_model() -> crate::models::hunyuan_v1_dense::HunyuanV1DenseModel {
+pub(crate) fn tiny_hunyuan_model() -> crate::models::hunyuan_v1_dense::HunyuanV1DenseModel {
     let args = config(json!({
         "model_type": "hunyuan_v1_dense",
         "hidden_size": HIDDEN,
@@ -349,7 +349,7 @@ fn tiny_hunyuan_model() -> crate::models::hunyuan_v1_dense::HunyuanV1DenseModel 
         .expect("tiny Hunyuan V1 Dense builds")
 }
 
-fn tiny_internlm2_model() -> crate::models::internlm2::InternLM2Model {
+pub(crate) fn tiny_internlm2_model() -> crate::models::internlm2::InternLM2Model {
     let args = config(json!({
         "model_type": "internlm2",
         "hidden_size": HIDDEN,
@@ -378,7 +378,7 @@ fn tiny_internlm2_model() -> crate::models::internlm2::InternLM2Model {
         .expect("tiny InternLM2 builds")
 }
 
-fn tiny_internlm3_model() -> crate::models::internlm3::InternLM3Model {
+pub(crate) fn tiny_internlm3_model() -> crate::models::internlm3::InternLM3Model {
     let args = config(json!({
         "model_type": "internlm3",
         "hidden_size": HIDDEN,
@@ -399,7 +399,7 @@ fn tiny_internlm3_model() -> crate::models::internlm3::InternLM3Model {
         .expect("tiny InternLM3 builds")
 }
 
-fn tiny_mimo_model() -> crate::models::mimo::MiMoModel {
+pub(crate) fn tiny_mimo_model() -> crate::models::mimo::MiMoModel {
     let args = config(json!({
         "model_type": "mimo",
         "hidden_size": HIDDEN,
@@ -420,7 +420,7 @@ fn tiny_mimo_model() -> crate::models::mimo::MiMoModel {
     crate::models::mimo::MiMoModel::from_weights(&w.weights, &args).expect("tiny MiMo builds")
 }
 
-fn tiny_olmo2_model() -> crate::models::olmo2::OLMo2Model {
+pub(crate) fn tiny_olmo2_model() -> crate::models::olmo2::OLMo2Model {
     let args = config(json!({
         "model_type": "olmo2",
         "hidden_size": HIDDEN,
@@ -448,7 +448,7 @@ fn tiny_olmo2_model() -> crate::models::olmo2::OLMo2Model {
     crate::models::olmo2::OLMo2Model::from_weights(&w.weights, &args).expect("tiny OLMo2 builds")
 }
 
-fn tiny_seed_oss_model() -> crate::models::seed_oss::SeedOssModel {
+pub(crate) fn tiny_seed_oss_model() -> crate::models::seed_oss::SeedOssModel {
     let args = config(json!({
         "model_type": "seed_oss",
         "hidden_size": HIDDEN,
@@ -472,7 +472,7 @@ fn tiny_seed_oss_model() -> crate::models::seed_oss::SeedOssModel {
         .expect("tiny Seed-OSS builds")
 }
 
-fn tiny_smollm3_model() -> crate::models::smollm3::SmolLM3Model {
+pub(crate) fn tiny_smollm3_model() -> crate::models::smollm3::SmolLM3Model {
     let args = config(json!({
         "model_type": "smollm3",
         "hidden_size": HIDDEN,
@@ -496,7 +496,7 @@ fn tiny_smollm3_model() -> crate::models::smollm3::SmolLM3Model {
         .expect("tiny SmolLM3 builds")
 }
 
-fn tiny_starcoder2_model() -> crate::models::starcoder2::StarCoder2Model {
+pub(crate) fn tiny_starcoder2_model() -> crate::models::starcoder2::StarCoder2Model {
     let args = config(json!({
         "model_type": "starcoder2",
         "hidden_size": HIDDEN,

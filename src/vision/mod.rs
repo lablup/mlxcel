@@ -74,6 +74,8 @@ pub mod kimi_vl;
 #[cfg(test)]
 mod last_row_logits_vlm_tests;
 #[cfg(test)]
+mod last_row_logits_vlm2_tests;
+#[cfg(test)]
 mod last_row_logits_wrapper_tests;
 pub mod lfm2_vl;
 pub mod llmjp_vl;

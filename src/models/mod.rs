@@ -30,6 +30,10 @@ mod last_row_logits_moe_tests;
 #[cfg(test)]
 mod last_row_logits_stateful_tests;
 #[cfg(test)]
+mod last_row_logits_moe2_tests;
+#[cfg(test)]
+mod last_row_logits_stateful2_tests;
+#[cfg(test)]
 mod last_row_logits_tests;
 #[cfg(test)]
 mod mixtral_style_batched_decode_tests;
