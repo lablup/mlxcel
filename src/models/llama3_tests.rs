@@ -1114,3 +1114,25 @@ fn the_loaded_model_reports_the_config_eos_and_honors_an_override() {
     model.set_eos_token_ids(vec![5, 6]);
     assert_eq!(LanguageModel::eos_token_ids(&model), vec![5, 6]);
 }
+
+#[test]
+fn modelopt_nvfp4_declares_the_effective_llama_group_size() {
+    for algo in ["NVFP4", "W4A16_NVFP4", "w4a16_nvfp4"] {
+        let metadata = format!(
+            r#""quantization_config": {{"quant_method": "modelopt", "quant_algo": "{algo}", "config_groups": {{"group_0": {{"weights": {{"num_bits": 4, "type": "float", "group_size": 16}}}}}}}}"#
+        );
+        let args = parse_llama_config(&metadata);
+        assert_eq!((args.group_size(), args.bits()), (16, 4));
+        let explicit = parse_llama_config(&format!(
+            r#"{metadata}, "quantization": {{"group_size": 32, "bits": 8}}"#
+        ));
+        assert_eq!((explicit.group_size(), explicit.bits()), (32, 8));
+    }
+    for algo in ["NVFP4_AWQ", "FP8"] {
+        let args = parse_llama_config(&format!(
+            r#""quantization_config": {{"quant_method": "modelopt", "quant_algo": "{algo}"}}"#
+        ));
+        assert_eq!(args.group_size(), 64);
+    }
+    assert_eq!(parse_llama_config("").group_size(), 64);
+}

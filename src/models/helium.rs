@@ -426,6 +426,7 @@ impl ModelArgs {
             // YaRN's original-context fallback, which a scaling-free Helium
             // never reaches.
             max_position_embeddings: Some(self.max_position_embeddings),
+            quantization_config: None,
             quantization: self
                 .quantization
                 .as_ref()
