@@ -39,7 +39,7 @@ impl Decoder {
     fn load(weights: &WeightMap, config: &Flux2VaeConfig) -> Result<Self> {
         let eps = Flux2VaeConfig::NORM_EPS;
         let groups = config.norm_num_groups;
-        let channels = &config.block_out_channels;
+        let channels = config.decoder_channels();
         let top = channels[channels.len() - 1];
         let reversed: Vec<i32> = channels.iter().rev().copied().collect();
         let up_blocks = reversed

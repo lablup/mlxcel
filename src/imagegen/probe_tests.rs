@@ -367,3 +367,18 @@ fn flux2_klein_index_without_a_manifest_is_flux2() {
     );
     assert_eq!(probe(&dir), Some("flux2"));
 }
+
+#[test]
+fn moss_image_from_the_pipeline_class_name() {
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "model_index.json",
+        json!({
+            "_class_name": "MOSSImagePipeline",
+            "transformer": ["pipeline_moss_image", "MOSSImageTransformer"],
+            "text_encoder": ["transformers", "Qwen3_5Model"],
+        }),
+    );
+    assert_eq!(probe(&dir), Some("moss_image"));
+}

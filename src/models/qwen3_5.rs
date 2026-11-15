@@ -2296,6 +2296,20 @@ impl Qwen35Model {
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, Qwen35Config), String> {
+        Self::load_with_quantization(model_dir, None)
+    }
+
+    /// [`Self::load`] with an explicit MLX quantization block.
+    ///
+    /// An exported checkpoint may declare its quantization outside
+    /// `text_config` (MOSS-Image's MLX tiers nest it under
+    /// `moss_image_mlx.quantization`). The block has this family's usual
+    /// `{"group_size": N, "bits": N}` shape and is ignored when `text_config`
+    /// already carries one.
+    pub(crate) fn load_with_quantization<P: AsRef<Path>>(
+        model_dir: P,
+        extra_quantization: Option<&serde_json::Value>,
+    ) -> Result<(Self, Qwen35Config), String> {
         let model_dir = model_dir.as_ref();
 
         tracing::info!("[Qwen3.5] Loading config...");
@@ -2318,6 +2332,15 @@ impl Qwen35Model {
                 .as_object_mut()
                 .unwrap()
                 .insert("quantization".to_string(), v["quantization"].clone());
+        }
+        // …or from the caller's exported-checkpoint metadata.
+        if text_config_val.get("quantization").is_none() {
+            if let Some(quantization) = extra_quantization {
+                text_config_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("quantization".to_string(), quantization.clone());
+            }
         }
 
         // FP8 releases carry no `quantization` block at all. The vendor layout
@@ -3219,6 +3242,63 @@ impl Qwen35Model {
             || self.make_internal_caches(),
             |caches| self.forward_prefill_with_last_hidden(input_ids, caches),
         )
+    }
+
+    /// Post-final-norm hidden states of a prefill, with no LM head.
+    ///
+    /// The MOSS-Image prompt conditioner consumes `Qwen3_5Model`'s
+    /// `last_hidden_state`, which is the final block output after the model's
+    /// RMSNorm. Reusing [`Self::forward_prefill_with_last_hidden`] would also
+    /// project the full `[B, L, vocab]` logits — about 2 GB at 4096 tokens —
+    /// for a result nobody reads, so this runs the same loop and stops at the
+    /// norm.
+    ///
+    /// Used by: `imagegen::moss_image::text_encoder::TextEncoder`.
+    pub(crate) fn forward_prefill_hidden_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| self.prefill_hidden(input_ids, caches),
+        )
+    }
+
+    /// The body of [`Self::forward_prefill_hidden_for_sequence`], in lockstep
+    /// with [`Self::forward_prefill_with_last_hidden`] minus the head.
+    fn prefill_hidden(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        let shape = mlxcel_core::array_shape(&h);
+        let seq_len = shape[1];
+        let fa_idx = self.config.full_attention_interval - 1;
+        let fa_mask = if seq_len > 1 {
+            let offset = if fa_idx < caches.len() {
+                caches[fa_idx].offset()
+            } else {
+                0
+            };
+            full_attention_geometry(&self.layers).and_then(|attention| {
+                let dtype = mlxcel_core::array_dtype(&h);
+                prefill_causal_mask(seq_len, offset, shape[0], attention, dtype)
+            })
+        } else {
+            None
+        };
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            let mask = if layer.is_linear {
+                None
+            } else {
+                fa_mask.as_deref()
+            };
+            h = layer.forward(&h, mask, cache, None);
+        }
+        self.norm.forward(&h)
     }
 
     /// Sequence-routed [`Self::forward_speculative`].
