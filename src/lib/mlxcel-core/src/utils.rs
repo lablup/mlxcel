@@ -155,16 +155,17 @@ pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
 ///
 /// Used by: decoders that materialize an explicit prefill mask instead of
 /// leaving `mask: None` for fused SDPA to apply causality itself. At this
-/// commit that is 50 non-test files under `src/models`, in four groups.
+/// commit that is 45 non-test files under `src/models`, in four groups.
 /// Hybrid and mixed-layer stacks that build one mask at the full-attention
-/// offset: Jamba, FalconH1, NemotronH, NemotronNas, Plamo2, Qwen3Next,
-/// KimiLinear, GraniteMoeHybrid, MiniMaxM3, Lfm2, RecurrentGemma, Laguna,
-/// MiMoV2.
+/// offset: Jamba, FalconH1, NemotronH, NemotronNas, Plamo2, KimiLinear,
+/// MiniMaxM3, Lfm2, RecurrentGemma, Laguna, MiMoV2.
+/// Qwen3Next, GraniteMoeHybrid, Qwen2VL, Qwen3VL and Qwen3VLMoe build their
+/// prefill mask through [`prefill_causal_mask`] instead (#3051).
 /// Sliding-window, chunked and dual-attention families that build a separate
 /// global mask per forward: Gemma3, Gemma4, Gemma3n, DiffusionGemma, Cohere2,
 /// CohereCompass, Exaone4, Olmo3, Ministral3, Mistral4, Mellum, Llama4. VLM
-/// decoders that thread a mask down from the multimodal wrapper: Qwen2VL,
-/// Qwen3VL, GLM4V, Ernie4.5MoeVL, HunyuanVL, PaddleOcrVL, FalconOcr. MLA and
+/// decoders that thread a mask down from the multimodal wrapper: GLM4V,
+/// Ernie4.5MoeVL, HunyuanVL, PaddleOcrVL, FalconOcr. MLA and
 /// custom-attention decoders that add the mask to scores by hand: DeepSeekV2,
 /// DeepSeekV3.2, MiniCPM3, GptOss, AFMoE, Step3P5, LongcatFlashNgram,
 /// BailingMoeLinear, GLM4MoeLite, Qwen3.5, KimiK3. Outside `src/models` the
