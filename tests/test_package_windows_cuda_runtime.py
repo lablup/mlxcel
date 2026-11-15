@@ -24,10 +24,12 @@ Run with:
 import contextlib
 import importlib.util
 import io
+import os
 import pathlib
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "package_windows_cuda_runtime.py"
@@ -47,6 +49,11 @@ CUDA_NAMES = {
     "nvrtc64_*.dll": "nvrtc64_130_0.dll",
     "nvrtc-builtins64_*.dll": "nvrtc-builtins64_134.dll",
 }
+
+# The variables `parse_args` takes a default from. A CUDA build host exports
+# them (docs/installation.md: `set CUDNN_PATH=...`), and a case here must meet
+# the synthetic toolkit, not the host's.
+ENV_DEFAULTS = ("CUDA_HOME", "CUDA_PATH", "CUDNN_PATH", "CARGO_TARGET_DIR")
 
 LICENSE_TEXT = {
     "cuda": "End User License Agreement\n2. CUDA Toolkit Supplement to ...\n",
@@ -258,14 +265,65 @@ class PackageTest(unittest.TestCase):
             pkg.find_deps_dir(self.tmp / "target", "release")
         self.assertIn("--deps-dir", str(cm.exception))
 
-    def run_main(self, *args):
+    def environ(self, env):
+        """The process environment with only `env` among `ENV_DEFAULTS`."""
+        kept = {k: v for k, v in os.environ.items() if k not in ENV_DEFAULTS}
+        return mock.patch.dict(os.environ, {**kept, **env}, clear=True)
+
+    def run_main(self, *args, env=None):
+        argv = ["--cuda-path", str(self.cuda), "--deps-dir", str(self.deps), "--arch", "x64"]
         err = io.StringIO()
         out = io.StringIO()
-        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
-            code = pkg.main(
-                ["--cuda-path", str(self.cuda), "--deps-dir", str(self.deps), "--arch", "x64", *args]
-            )
+        with self.environ(env or {}):
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+                code = pkg.main([*argv, *args])
         return code, out.getvalue(), err.getvalue()
+
+    def parse(self, env, *argv):
+        with self.environ(env):
+            return pkg.parse_args(list(argv))
+
+    def test_defaults_come_from_the_environment(self):
+        exported = {"CUDA_PATH": "toolkit", "CUDNN_PATH": "cudnn", "CARGO_TARGET_DIR": "out"}
+        args = self.parse(exported)
+        self.assertEqual(
+            (args.cuda_path, args.cudnn_path, args.target_dir), ("toolkit", "cudnn", "out")
+        )
+        # CUDA_HOME is honored ahead of CUDA_PATH, as in the build.
+        self.assertEqual(self.parse({**exported, "CUDA_HOME": "home"}).cuda_path, "home")
+        # A flag wins over its variable.
+        args = self.parse(
+            exported, "--cuda-path", "a", "--cudnn-path", "b", "--target-dir", "c"
+        )
+        self.assertEqual((args.cuda_path, args.cudnn_path, args.target_dir), ("a", "b", "c"))
+        # With none of them, cuDNN is looked for inside the toolkit.
+        args = self.parse({}, "--cuda-path", "a")
+        self.assertEqual((args.cudnn_path, args.target_dir), (None, "target"))
+
+    def test_an_exported_cudnn_path_is_the_cudnn_root(self):
+        cudnn = self.tmp / "cudnn"
+        for dll in (self.cuda / "bin" / "x64").glob("cudnn*.dll"):
+            touch(cudnn / "bin" / "x64" / dll.name)
+            dll.unlink()
+        (self.cuda / "LICENSE").rename(cudnn / "LICENSE")
+        dest = self.tmp / "stage"
+        code, _, err = self.run_main("--stage-dir", str(dest), env={"CUDNN_PATH": str(cudnn)})
+        self.assertEqual(code, 0, err)
+        self.assertTrue((dest / "bin" / "cudnn64_9.dll").is_file())
+        self.assertTrue((dest / "licenses" / "cudnn" / "LICENSE").is_file())
+
+    def test_an_exported_cudnn_path_wins_over_cudnn_in_the_toolkit(self):
+        # The build reads cuDNN from CUDNN_PATH alone when it is set, so the
+        # bundle does too. Before `run_main` cleared the environment, this is
+        # how a host's own CUDNN_PATH failed the two cases below it.
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        code, _, err = self.run_main(
+            "--out", str(self.tmp / "dist"), env={"CUDNN_PATH": str(elsewhere)}
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(str(elsewhere / "bin" / "x64" / "cudnn64_*.dll"), err)
+        self.assertFalse((self.tmp / "dist").exists())
 
     def test_zip_is_named_by_version_and_wrapped_in_one_folder(self):
         code, out, _ = self.run_main("--out", str(self.tmp / "dist"))
