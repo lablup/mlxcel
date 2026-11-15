@@ -102,7 +102,12 @@ pub fn rope_table(
         .map(|i| 1.0 / base.powf(i as f32 / bands_n as f32))
         .collect();
     let n = (height * width + text_length) as usize;
-    let half = head_dim as usize;
+    // Half a head: the four axes each contribute `head_dim / 8` bands, so one
+    // token's rotation is `4 * head_dim / 8 = head_dim / 2` values, which the
+    // concatenation below doubles back into a full head. Striding by the full
+    // `head_dim` here makes the doubling write one head past the end of the
+    // last row (the panic: len 528000, index 528000 at n = 4125, head_dim = 128).
+    let half = (head_dim / 2) as usize;
     let mut sin = vec![0f32; n * half];
     let mut cos = vec![0f32; n * half];
     let centre_h = (height - 1) as f32 / 2.0;
