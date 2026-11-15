@@ -4332,6 +4332,37 @@ pub fn fast_scaled_dot_product_attention_causal(
     causal_attention(q, k, v, scale, 0.0, 0)
 }
 
+/// The attention a layer runs for a multi-token forward whose model left
+/// its prefill mask to MLX ([`utils::prefill_causal_mask`] or
+/// [`utils::prefill_sliding_window_mask`] returned `None`, #3072): MLX's
+/// causal mode while every key `k` returned is inside `window`, MLX's native
+/// `window_size` entry once they outgrow it (through [`causal_attention`]'s
+/// over-window branch, which keeps a window mask only where MLX would not
+/// fuse the native entry). A non-positive `window` is plain causal.
+///
+/// Passing the window only when the keys outgrow it matters: within the
+/// window, [`causal_attention`] with `window_size > 0` would build a
+/// windowed mask in every layer instead of asking for causal mode.
+///
+/// Used by: the hybrid, full-attention, GLM4V-family and sliding-window
+/// decoders that build their prefill mask through `prefill_causal_mask` or
+/// `prefill_sliding_window_mask` (#3072).
+pub fn maskless_prefill_attention(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    scale: f32,
+    window: i32,
+) -> UniquePtr<MlxArray> {
+    let k_len = ffi::array_shape(k)[2];
+    let window = if window > 0 && k_len > window {
+        window
+    } else {
+        0
+    };
+    causal_attention(q, k, v, scale, 0.0, window)
+}
+
 // High-level layer abstractions
 pub mod native_env;
 

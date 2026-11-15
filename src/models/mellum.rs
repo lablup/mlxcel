@@ -40,7 +40,9 @@ use mlxcel_core::cache::{
 };
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -345,8 +347,18 @@ impl Attention {
         // Update KV cache and get sliced views.
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Scaled dot-product attention (handles GQA expansion internally).
-        let attn_out = if l > 1 {
+        // Scaled dot-product attention (handles GQA expansion internally). A
+        // mask-less multi-token forward is a single-row prefill whose model
+        // left the mask to MLX's causal mode or native window route (#3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
+        } else if l > 1 {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -918,16 +930,33 @@ impl MellumModel {
             .unwrap_or(0);
         let sliding_idx = self.layers.iter().position(|l| l.self_attn.is_sliding);
 
+        // Each mask is `None` where a single row can take MLX's causal mode
+        // or native window route instead and MLX fuses it (#3072).
+        let attn = &self.layers[full_idx].self_attn;
+        let attention = PrefillAttention::new(
+            attn.num_heads as usize,
+            attn.num_kv_heads as usize,
+            attn.head_dim as usize,
+        );
+        let dtype = mlxcel_core::array_dtype(&self.norm.weight);
+        let batch = shape[0];
         let full_offset = caches[full_idx].as_interface().offset();
-        let mask_full = Some(create_causal_mask(seq_len, full_offset));
+        let mask_full = prefill_causal_mask(seq_len, full_offset, batch, attention, dtype);
 
-        let mask_sliding = sliding_idx.map(|idx| {
+        let mask_sliding = sliding_idx.and_then(|idx| {
             // Full-width windowed mask for a fresh single-pass prefill that
             // exceeds the window (the RotatingKVCache keeps all prefill keys),
             // clamped mask otherwise. See issue #408.
             let sliding_offset = caches[idx].as_interface().offset();
-            let max_cache = self.sliding_window;
-            create_sliding_window_prefill_mask(seq_len, sliding_offset, max_cache)
+            prefill_sliding_window_mask(
+                seq_len,
+                sliding_offset,
+                self.sliding_window,
+                batch,
+                attention,
+                dtype,
+                SlidingPrefillKeys::Rotating,
+            )
         });
 
         self.forward_rows(

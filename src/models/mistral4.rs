@@ -26,7 +26,7 @@
 use mlxcel_core::cache::attend_batched;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, slice_axis};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -332,8 +332,12 @@ impl Mistral4Attention {
         let scale_arr = mlxcel_core::astype(&scale_arr, mlxcel_core::array_dtype(&queries));
         let queries = mlxcel_core::multiply(&queries, &scale_arr);
 
-        // Scaled dot-product attention
-        let attn_out = if l > 1 {
+        // Scaled dot-product attention. A mask-less multi-token forward is a
+        // single-row prefill whose causality MLX's causal mode supplies
+        // (`prefill_causal_mask`, #3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(&queries, &keys, &values, self.scale, 0)
+        } else if l > 1 {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -792,12 +796,21 @@ impl Mistral4Model {
         // (`live_start == 0`), `live_len == offset`, so this is byte-identical
         // to the untrimmed path. The Llama-4 attention scale below keeps the
         // monotonic `offset`. See issue #421 (mirrors #419/#420).
-        let mask = if l > 1 {
-            let live_len = caches[0].live_len();
-            Some(create_causal_mask(l, live_len))
-        } else {
-            None
-        };
+        //
+        // A single row leaves causality to MLX's causal mode where MLX fuses
+        // it (#3072). The concatenated query and key heads are wider than the
+        // value heads, so this usually keeps the array.
+        let mask = self.layers.first().and_then(|layer| {
+            let attn = &layer.self_attn;
+            let attention = PrefillAttention::new(
+                attn.num_heads as usize,
+                attn.num_heads as usize,
+                attn.qk_head_dim as usize,
+            )
+            .with_value_dim(attn.v_head_dim as usize);
+            let dtype = mlxcel_core::array_dtype(&h);
+            prefill_causal_mask(l, caches[0].live_len(), shape[0], attention, dtype)
+        });
 
         // Compute Llama 4 attention scale
         let offset = caches[0].offset;
@@ -1095,6 +1108,15 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for Mistral4Model {
+    /// A tile-aligned padded prefill needs no padding mask: the pad tokens
+    /// follow the real ones, so a causal forward (MLX's causal mode, or the
+    /// shared causal or windowed array where MLX does not fuse it) already
+    /// hides them from every real row, and the caches the engine trims are
+    /// the caller's dense ones (#3072).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }

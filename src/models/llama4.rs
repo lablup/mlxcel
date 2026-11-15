@@ -1142,6 +1142,27 @@ pub struct Llama4CxxModel {
 }
 
 impl Llama4CxxModel {
+    /// The dense (global) layers' prefill mask: `None` for a decode row or
+    /// where MLX's causal mode applies and fuses
+    /// ([`mlxcel_core::utils::prefill_causal_mask`], #3072). Every layer
+    /// shares one attention geometry.
+    fn global_prefill_mask(
+        &self,
+        seq_len: i32,
+        offset: i32,
+        batch: i32,
+        h: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let attn = &self.layers.first()?.self_attn;
+        let attention = mlxcel_core::utils::PrefillAttention::new(
+            attn.num_heads as usize,
+            attn.num_kv_heads as usize,
+            attn.head_dim as usize,
+        );
+        let dtype = mlxcel_core::array_dtype(h);
+        mlxcel_core::utils::prefill_causal_mask(seq_len, offset, batch, attention, dtype)
+    }
+
     /// Forward pass with iGQA (Interleaved GQA) pattern
     pub fn forward_igqa(
         &self,
@@ -1178,12 +1199,10 @@ impl Llama4CxxModel {
             None
         };
 
-        // Create global mask for dense layers
-        let global_mask = if seq_len > 1 {
-            Some(mlxcel_core::utils::create_causal_mask(seq_len, offset))
-        } else {
-            None
-        };
+        // Create global mask for dense layers. A single row leaves causality
+        // to MLX's causal mode where MLX fuses it (#3072); `KVCache::attend`
+        // runs the causal helper for a mask-less multi-token step.
+        let global_mask = self.global_prefill_mask(seq_len, offset, shape[0], &h);
 
         // Pass through transformer layers with appropriate masks
         for (idx, layer) in self.layers.iter().enumerate() {
@@ -1254,11 +1273,7 @@ impl Llama4CxxModel {
             None
         };
 
-        let global_mask = if seq_len > 1 {
-            Some(mlxcel_core::utils::create_causal_mask(seq_len, offset))
-        } else {
-            None
-        };
+        let global_mask = self.global_prefill_mask(seq_len, offset, shape[0], &h);
 
         for (idx, layer) in self.layers.iter().enumerate() {
             let use_chunked = uses_chunked_cache(idx);

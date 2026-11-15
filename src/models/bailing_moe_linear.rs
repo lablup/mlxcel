@@ -116,7 +116,7 @@
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, slice_axis};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -2578,6 +2578,20 @@ impl BailingMoeLinearModel {
 
     /// [`Self::forward`] projecting every position (`row == None`) or only
     /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    /// The global layers' attention geometry, for the prefill mask choice
+    /// (#3072); `None` for a stack with no global layer.
+    fn global_attention(&self) -> Option<PrefillAttention> {
+        let layer = self.layers.get(self.global_layer_index?)?;
+        match &layer.attention {
+            AttentionKind::Full(attn) => Some(PrefillAttention::new(
+                attn.num_heads as usize,
+                attn.num_kv_heads as usize,
+                attn.head_dim as usize,
+            )),
+            AttentionKind::Linear(_) => None,
+        }
+    }
+
     fn forward_positions(
         &self,
         input_ids: &MlxArray,
@@ -2802,16 +2816,18 @@ impl BailingMoeLinearModel {
             seq_id,
             || self.make_internal_caches(),
             |caches| {
-                let mask = if seq_len > 1 {
+                // One row: MLX's causal mode instead of the array where MLX
+                // fuses it (#3072). The hidden state takes the norm's dtype.
+                let mask = self.global_attention().and_then(|attention| {
                     let offset = self
                         .global_layer_index
                         .and_then(|idx| caches.get(idx))
                         .map(BailingLinearCache::offset)
                         .unwrap_or(0);
-                    Some(create_causal_mask(seq_len, offset))
-                } else {
-                    None
-                };
+                    let batch = mlxcel_core::array_shape(input)[0];
+                    let dtype = mlxcel_core::array_dtype(&self.norm.weight);
+                    prefill_causal_mask(seq_len, offset, batch, attention, dtype)
+                });
                 self.forward_positions(input, caches, mask.as_deref(), row)
             },
         )

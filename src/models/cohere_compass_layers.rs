@@ -85,6 +85,15 @@ pub(crate) struct CompassAttention {
 }
 
 impl CompassAttention {
+    /// Head counts and head dim for the prefill mask choice (#3072).
+    pub(crate) fn prefill_attention(&self) -> mlxcel_core::utils::PrefillAttention {
+        mlxcel_core::utils::PrefillAttention::new(
+            self.num_heads as usize,
+            self.num_kv_heads as usize,
+            self.head_dim as usize,
+        )
+    }
+
     pub(crate) fn from_weights(
         weights: &WeightMap,
         config: &CompassTextConfig,
@@ -159,7 +168,17 @@ impl CompassAttention {
     ) -> UniquePtr<MlxArray> {
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        let attn_out = if l > 1 {
+        let attn_out = if l > 1 && mask.is_none() {
+            // A prefill whose model left the mask to MLX's causal mode or its
+            // native `window_size` route (#3072).
+            mlxcel_core::maskless_prefill_attention(
+                q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
+        } else if l > 1 {
             // A sliding layer's prefill mask is clamped to `window_size` keys
             // once the prefix outgrows the window, while the dense `KVCache`
             // still hands back every live key. Slice K/V down to the mask's key

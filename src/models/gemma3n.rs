@@ -33,6 +33,10 @@ use crate::models::gemma3n_helpers::{
 };
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
+#[cfg(all(test, feature = "xla-diagnostics"))]
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -526,13 +530,15 @@ impl Gemma3nAttention {
 
         // Scaled dot-product attention
         let attn_out = if l > 1 && mask.is_none() {
-            // Prefill: use causal masking
-            mlxcel_core::causal_attention(
+            // Prefill whose model left the mask to MLX's causal mode or its
+            // native `window_size` route (`prefill_sliding_window_mask`,
+            // #3072). Within the window this asks for causal mode instead of
+            // building a windowed mask in every layer.
+            mlxcel_core::maskless_prefill_attention(
                 &queries,
                 &keys,
                 &values,
                 self.scale,
-                0.0,
                 self.window_size,
             )
         } else {
@@ -1385,6 +1391,43 @@ struct Gemma3nMlxDiagnostics {
 }
 
 impl Gemma3nLanguageModel {
+    /// The global and sliding prefill masks of an `l`-row forward of `batch`
+    /// rows in `dtype`: `None` for a decode row, and where a single row can
+    /// take MLX's causal mode (global layers, or sliding layers inside their
+    /// window) or its native `window_size` route (sliding layers past it)
+    /// and MLX fuses it (#3072). Every layer shares one head geometry.
+    ///
+    /// Used by: `forward_rows`, `forward_rows_with_inputs`.
+    fn prefill_masks(
+        &self,
+        l: i32,
+        global_live_len: i32,
+        sliding_live_len: i32,
+        batch: i32,
+        dtype: i32,
+    ) -> (Option<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>) {
+        let Some(layer) = self.layers.first() else {
+            return (None, None);
+        };
+        let attn = &layer.self_attn;
+        let attention = PrefillAttention::new(
+            attn.num_heads as usize,
+            attn.num_kv_heads as usize,
+            attn.head_dim as usize,
+        );
+        let global = prefill_causal_mask(l, global_live_len, batch, attention, dtype);
+        let sliding = prefill_sliding_window_mask(
+            l,
+            sliding_live_len,
+            self.sliding_cache_window,
+            batch,
+            attention,
+            dtype,
+            SlidingPrefillKeys::Dense,
+        );
+        (global, sliding)
+    }
+
     fn pretranspose_large_m5_embedding(
         embedding: &UnifiedEmbedding,
     ) -> Option<UniquePtr<MlxArray>> {
@@ -1588,25 +1631,19 @@ impl Gemma3nLanguageModel {
         let global_live_len = caches[self.first_full_idx].live_len();
         let sliding_live_len = caches[self.first_sliding_idx].live_len();
 
-        let global_mask = if l > 1 {
-            Some(create_causal_mask(l, global_live_len))
-        } else {
-            None
-        };
-        let sliding_mask = if l > 1 {
-            // Dense `KVCache` keeps every key in the live window, so the
-            // prefill mask is the full windowed-causal mask over the retained
-            // (live) keys; the attention layer slices K/V to the mask's key
-            // axis. The window is enforced by the mask, not by dropping keys.
-            // See issues #408, #413, #419.
-            Some(create_sliding_window_prefill_mask_dense(
-                l,
-                sliding_live_len,
-                self.sliding_cache_window,
-            ))
-        } else {
-            None
-        };
+        // Dense `KVCache` keeps every key in the live window, so the sliding
+        // prefill mask is the full windowed-causal mask over the retained
+        // (live) keys; the attention layer slices K/V to the mask's key axis.
+        // The window is enforced by the mask, not by dropping keys. See issues
+        // #408, #413, #419. Either mask is `None` where MLX's own causal or
+        // native window masking applies and fuses (#3072).
+        let (global_mask, sliding_mask) = self.prefill_masks(
+            l,
+            global_live_len,
+            sliding_live_len,
+            b,
+            mlxcel_core::array_dtype(&h),
+        );
 
         // Expand for AltUp
         let h0 = mlxcel_core::copy(&h);
@@ -1796,25 +1833,19 @@ impl Gemma3nLanguageModel {
         let global_live_len = caches[self.first_full_idx].live_len();
         let sliding_live_len = caches[self.first_sliding_idx].live_len();
 
-        let global_mask = if l > 1 {
-            Some(create_causal_mask(l, global_live_len))
-        } else {
-            None
-        };
-        let sliding_mask = if l > 1 {
-            // Dense `KVCache` keeps every key in the live window, so the
-            // prefill mask is the full windowed-causal mask over the retained
-            // (live) keys; the attention layer slices K/V to the mask's key
-            // axis. The window is enforced by the mask, not by dropping keys.
-            // See issues #408, #413, #419.
-            Some(create_sliding_window_prefill_mask_dense(
-                l,
-                sliding_live_len,
-                self.sliding_cache_window,
-            ))
-        } else {
-            None
-        };
+        // Dense `KVCache` keeps every key in the live window, so the sliding
+        // prefill mask is the full windowed-causal mask over the retained
+        // (live) keys; the attention layer slices K/V to the mask's key axis.
+        // The window is enforced by the mask, not by dropping keys. See issues
+        // #408, #413, #419. Either mask is `None` where MLX's own causal or
+        // native window masking applies and fuses (#3072).
+        let (global_mask, sliding_mask) = self.prefill_masks(
+            l,
+            global_live_len,
+            sliding_live_len,
+            _b,
+            mlxcel_core::array_dtype(h),
+        );
 
         // Expand for AltUp
         let h0 = mlxcel_core::copy(h);
@@ -2103,6 +2134,15 @@ impl Gemma3nModel {
 }
 
 impl LanguageModel for Gemma3nModel {
+    /// A tile-aligned padded prefill needs no padding mask: the pad tokens
+    /// follow the real ones, so a causal forward (MLX's causal mode, or the
+    /// shared causal or windowed array where MLX does not fuse it) already
+    /// hides them from every real row, and the caches the engine trims are
+    /// the caller's dense ones (#3072).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }
