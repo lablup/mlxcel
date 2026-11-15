@@ -176,33 +176,8 @@ fn an_oversized_value_does_not_end_the_process() {
     assert_eq!(native_getenv(NAME).as_deref(), Some(&b"kept"[..]));
 }
 
-/// The two startup defaults #2803 was filed for, through the real appliers.
-#[cfg(feature = "cuda")]
-#[test]
-fn the_cuda_cache_defaults_reach_mlx() {
-    let _guard = env_lock();
-    for (name, apply) in [
-        (
-            "MLX_CUDA_GRAPH_CACHE_SIZE",
-            crate::hardware::apply_cuda_graph_cache_default as fn(),
-        ),
-        (
-            "MLX_CUDA_SDPA_CACHE_SIZE",
-            crate::hardware::apply_cuda_sdpa_cache_default as fn(),
-        ),
-    ] {
-        let before = std::env::var_os(name);
-        // SAFETY: serialized by `env_lock`.
-        unsafe { remove_native_var(name) };
-        apply();
-        let read = mlx_env_int(name, ABSENT);
-        // SAFETY: serialized by `env_lock`.
-        unsafe {
-            match &before {
-                Some(value) => set_native_var(name, value),
-                None => remove_native_var(name),
-            }
-        }
-        assert_eq!(read, 2000, "{name}");
-    }
-}
+// The two startup defaults #2803 was filed for are checked through the real
+// appliers in `tests/cuda_cache_defaults_env.rs`, not here. MLX resolves a
+// setting once per process, and in this binary the CUDA device has read
+// `MLX_CUDA_GRAPH_CACHE_SIZE` with its own default long before these tests run.
+// The names above are safe because nothing else reads `NATIVE_ENV_TEST_*`.
