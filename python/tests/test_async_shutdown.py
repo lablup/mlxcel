@@ -148,7 +148,7 @@ while True:
                 # an assertion failure in a deliberately broken implementation.
                 try:
                     await asyncio.wait_for(asyncio.shield(task), 4.0)
-                except (asyncio.CancelledError, RuntimeError, asyncio.TimeoutError):
+                except (TimeoutError, asyncio.CancelledError, RuntimeError):
                     pass
             elif not task.cancelled():
                 task.exception()
