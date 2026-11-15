@@ -55,8 +55,7 @@ jobs:
       fail-fast: false
       matrix:
         # 3.14 is the default python3 on Ubuntu 26.04 (ubuntu-latest).
-        # actions/setup-python has no CPython 3.9 build for 26.04, so the
-        # requires-python floor (>=3.9) is not exercised here.
+        # 3.11 is the requires-python floor (>=3.11).
         python-version: ['3.11', '3.13', '3.14']
     steps:
       - uses: actions/checkout@v7

@@ -11,7 +11,7 @@ pip install ./python          # from a repo checkout
 pip install "./python[dev]"     # with pytest, ruff, mypy for development
 ```
 
-Requires Python 3.9+. The client itself is pure Python (`openai>=1.40`, `httpx>=0.27`). Managed mode additionally needs the `mlxcel` binary on `PATH`, or pass `binary=` / set `MLXCEL_BIN`.
+Requires Python 3.11+. The client itself is pure Python (`openai>=1.40`, `httpx>=0.27`). Managed mode additionally needs the `mlxcel` binary on `PATH`, or pass `binary=` / set `MLXCEL_BIN`.
 
 ## Usage
 
