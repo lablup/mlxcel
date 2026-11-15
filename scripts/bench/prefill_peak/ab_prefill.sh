@@ -17,6 +17,8 @@
 #   SERVER_MODELS  space-separated models for the server cells ("" skips them)
 #   TOKENS         prompt length (default 28000), GEN_TOKENS (default 32)
 #   REPS           repetitions per arm (default 2), PORT (default 8237)
+#   COOLDOWN       seconds to sleep before each run (default 0); a thermally
+#                  limited host needs 60 to 90 to keep arms comparable
 #   EXTRA_ENV      space-separated VAR=VAL pairs applied to both arms
 #   BASE_ENV, NEW_ENV  VAR=VAL pairs applied to one arm only; with
 #                  BASE_BIN == NEW_BIN this A/Bs a runtime switch (#3051)
@@ -32,6 +34,7 @@ TOKENS=${TOKENS:-28000}
 GEN_TOKENS=${GEN_TOKENS:-32}
 REPS=${REPS:-2}
 PORT=${PORT:-8237}
+COOLDOWN=${COOLDOWN:-0}
 CLI_CELLS=${CLI_CELLS:-"qwen3.5-4b-4bit:0 qwen3.5-4b-4bit:2048 qwen3.8-27b-4bit:0 qwen3.8-27b-4bit:2048"}
 SERVER_MODELS=${SERVER_MODELS-"qwen3.5-4b-4bit qwen3.8-27b-4bit"}
 EXTRA_ENV=${EXTRA_ENV:-}
@@ -53,6 +56,7 @@ for cell in $CLI_CELLS; do
   IFS=: read -r model chunk <<<"$cell"
   for rep in $(seq 1 "$REPS"); do
     for arm in $(order "$rep"); do
+      sleep "$COOLDOWN"
       tag="$OUT/cli_${model}_pc${chunk}_${arm}_r${rep}"
       ld=$(load1)
       env $EXTRA_ENV $(env_of $arm) MLXCEL_PREFILL_CHUNK="$chunk" RUST_LOG=mlxcel_core::layers=debug NO_COLOR=1 /usr/bin/time -l "$(bin_of $arm)" generate \
@@ -74,6 +78,7 @@ done
 for model in $SERVER_MODELS; do
   for rep in $(seq 1 "$REPS"); do
     for arm in $(order "$rep"); do
+      sleep "$COOLDOWN"
       tag="$OUT/server_${model}_${arm}_r${rep}"
       ld=$(load1)
       env $EXTRA_ENV $(env_of $arm) RUST_LOG=mlxcel_core::layers=debug NO_COLOR=1 /usr/bin/time -l "$(bin_of $arm)" serve -m "$MODELS_DIR/$model" \
