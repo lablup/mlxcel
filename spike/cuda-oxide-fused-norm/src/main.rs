@@ -1169,7 +1169,49 @@ fn read_cases_tsv(path: &Path) -> Result<Vec<Case>, String> {
         }
         cases.push(case);
     }
+    // Input seeds depend on case order. A partial matrix is not qualification.
+    let expected: Vec<String> = case_matrix().iter().map(cases_tsv_line).collect();
+    if text.lines().skip(1).ne(expected.iter().map(String::as_str)) {
+        return Err(format!(
+            "{}: expected the complete canonical case matrix in order",
+            path.display()
+        ));
+    }
     Ok(cases)
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    #[test]
+    fn comparison_requires_the_complete_case_matrix() {
+        let path = std::env::temp_dir().join(format!(
+            "oxide-fused-norm-matrix-{}.tsv",
+            std::process::id()
+        ));
+        let rows: Vec<String> = case_matrix().iter().map(cases_tsv_line).collect();
+        fs::write(&path, format!("{CASES_TSV_HEADER}\n{}\n", rows.join("\n"))).unwrap();
+        assert_eq!(read_cases_tsv(&path).unwrap().len(), rows.len());
+        let mut reordered = rows.clone();
+        reordered.swap(0, 1);
+        let mut duplicate = rows.clone();
+        duplicate[1] = duplicate[0].clone();
+        for damaged in [
+            String::new(),
+            format!("{CASES_TSV_HEADER}\n"),
+            format!(
+                "{CASES_TSV_HEADER}\n{}\n",
+                rows[..rows.len() - 1].join("\n")
+            ),
+            format!("{CASES_TSV_HEADER}\n{}\n", reordered.join("\n")),
+            format!("{CASES_TSV_HEADER}\n{}\n", duplicate.join("\n")),
+        ] {
+            fs::write(&path, damaged).unwrap();
+            assert!(read_cases_tsv(&path).is_err());
+        }
+        fs::remove_file(path).unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------
