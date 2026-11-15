@@ -88,9 +88,12 @@ pub mod absorb;
 pub mod cache;
 pub mod decode;
 pub mod kv_b_split;
+pub mod prefill;
 pub mod split_kv;
 pub mod stats;
 
+#[cfg(test)]
+mod prefill_tests;
 #[cfg(test)]
 pub(crate) mod testkit;
 
@@ -101,6 +104,7 @@ pub use cache::{
 };
 pub use decode::{absorb_queries, absorbed_decode, unabsorb_output};
 pub use kv_b_split::{KvBProjGeometry, decompose_kv_b_proj};
+pub use prefill::{FoldedMask, rope_folded_attention};
 pub use split_kv::{MlaSplitPlan, absorbed_decode_split_kv};
 pub use stats::{MlaDecodePath, MlaDispatchCounts};
 

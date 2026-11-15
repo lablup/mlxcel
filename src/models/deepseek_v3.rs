@@ -24,7 +24,7 @@ use crate::models::switch_layers::validate_expert_quantization_params;
 use crate::models::switch_layers::{EXPERT_PLANE_LEAVES, stack_expert_leaf};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, slice_axis};
+use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -337,68 +337,107 @@ impl DeepSeekV3Attention {
             mlxcel_core::mla::MlaDecodePath::Decompressed
         });
 
-        // Compute positional encoding scores: pe_scores = (q_pe * scale) @ k_pe.T
-        let scale_scalar = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
-        let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
-        let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
-        let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
-
-        // Apply causal mask to pe_scores (for prefill).
-        //
-        // The MLA attention below receives `pe_scores` as its additive SDPA
-        // mask, so causality exists ONLY if it is baked in here. The standard
-        // generation paths (CLI text prefill and the VLM embeddings prefill)
-        // call the model with `mask == None`, expecting the model to apply its
-        // own causal mask, exactly like the reference
-        // `create_attention_mask(h, cache[0])` in mlx-lm deepseek_v3.py /
-        // mlx-vlm kimi_vl/language.py. Without this fallback a multi-token
-        // prefill was fully bidirectional: every layer above the first wrote
-        // future-contaminated K/V into the cache, corrupting the whole
-        // generation (issue #525 round 3).
-        let pe_scores = if let Some(m) = mask {
-            // mask has 0 for attend, -inf for blocked
-            mlxcel_core::add(&pe_scores, m)
-        } else if l > 1 {
-            let causal = create_causal_mask(l, live_before);
-            mlxcel_core::add(&pe_scores, &causal)
-        } else {
-            pe_scores
-        };
-
         // MLA attention: absorbed or materializing, chosen by the cost model
         // above rather than by the query count alone.
-        let output = if absorbed {
-            // Absorbed: project Q into latent space, use kv_latent as K=V
-            let q_projected = self.embed_q.forward(&q_nope);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            let output = unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+        let output = if l > 1 {
+            // Multi-token step (issue #3071): fold the rope half into the SDPA
+            // head dim, `[q_nope | q_pe] . [k | k_pe]`, instead of building the
+            // dense `[B, H, L, S]` rope-score tensor and handing it to SDPA as
+            // an additive mask. That tensor grew with the query length times
+            // the whole cache in every layer and existed before SDPA ran, so
+            // the attention chunk gate could not bound it.
+            //
+            // Causality is still the model's job. The standard generation
+            // paths (CLI text prefill and the VLM embeddings prefill) call the
+            // model with `mask == None`, expecting the model to apply its own
+            // causal mask, exactly like the reference
+            // `create_attention_mask(h, cache[0])` in mlx-lm deepseek_v3.py /
+            // mlx-vlm kimi_vl/language.py (issue #525 round 3). A maskless
+            // step therefore runs MLX's bottom-right aligned causal mode over
+            // the `live_before + l` live keys; a caller mask (padded prefill)
+            // is applied as given.
+            debug_assert_eq!(
+                mlxcel_core::array_shape(&kv_latent)[2],
+                live_before + l,
+                "causal mode needs the live window to end at this step"
+            );
+            let folded_mask = match mask {
+                Some(m) => mlxcel_core::mla::FoldedMask::Array(m),
+                None => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_projected = self.embed_q.forward(&q_nope);
+                let output = mlxcel_core::mla::rope_folded_attention(
                     &q_projected,
+                    &q_pe,
                     &kv_latent,
+                    &k_pe,
                     &kv_latent,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
-                )
-            };
-            // Project output from latent space to v_head_dim
-            self.unembed_out.forward(&output)
-        } else {
-            // Materialize: project kv_latent to K and V
-            let k = self.embed_q.forward_no_transpose(&kv_latent);
-            let v = self.unembed_out.forward(&kv_latent);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+                    folded_mask,
+                );
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to per-head K and V.
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                mlxcel_core::mla::rope_folded_attention(
                     &q_nope,
+                    &q_pe,
                     &k,
+                    &k_pe,
                     &v,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
+                    folded_mask,
                 )
+            }
+        } else {
+            // Single-token decode keeps the rope term as an additive mask: its
+            // score row is one `[B, H, 1, S]` slice, and the cost model always
+            // absorbs a single query.
+            // pe_scores = (q_pe * scale) @ k_pe.T
+            let scale_scalar =
+                mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
+            let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
+            let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
+            let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
+            let pe_scores = match mask {
+                // mask has 0 for attend, -inf for blocked
+                Some(m) => mlxcel_core::add(&pe_scores, m),
+                None => pe_scores,
+            };
+            let pe_mask_ptr = &*pe_scores as *const MlxArray;
+            if absorbed {
+                let q_projected = self.embed_q.forward(&q_nope);
+                // SAFETY: `pe_scores` outlives this call.
+                let output = unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_projected,
+                        &kv_latent,
+                        &kv_latent,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                };
+                self.unembed_out.forward(&output)
+            } else {
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                // SAFETY: `pe_scores` outlives this call.
+                unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_nope,
+                        &k,
+                        &v,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                }
             }
         };
 
