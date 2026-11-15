@@ -24,7 +24,7 @@
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
+use mlxcel_core::utils::{PrefillAttention, SlidingPrefillKeys, prefill_sliding_window_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -190,6 +190,17 @@ impl Cohere2Attention {
             // `(l, k_len)` mask array. mlx-lm passes `"causal"` in the same
             // case (`create_attention_mask` for `N <= window_size`).
             mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
+        } else if l > 1 && mask.is_none() {
+            // A sliding layer past its window whose model planned MLX's
+            // native `window_size` route (`prefill_sliding_window_mask`,
+            // #3072).
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
         } else if l > 1 {
             // Prefill: use mask. A sliding-window layer's mask is either the
             // clamped `(l, window_size)` mask or the full `(l, k_len)` mask for
@@ -530,9 +541,9 @@ pub struct Cohere2Model {
     /// The validated sliding window the dense prefill mask uses (issue
     /// #2798), computed once at load.
     sliding_cache_window: i32,
-    // Indices of first sliding window and first global attention layers
+    // Index of the first sliding window layer, which sizes the sliding mask.
+    // The global layers build no prefill mask (see `Cohere2Attention`).
     swa_idx: usize,
-    ga_idx: usize,
 }
 
 impl Cohere2Model {
@@ -621,20 +632,31 @@ impl Cohere2Model {
             // attention broadcast. With no trim (`live_start == 0`),
             // `live_len == offset`, so this is byte-identical to the untrimmed
             // path. See issue #419.
-            let ga_live_len = caches[self.ga_idx].live_len();
             let swa_live_len = caches[self.swa_idx].live_len();
 
-            let full = Some(create_causal_mask(l as i32, ga_live_len));
-            // Dense `KVCache` keeps every key in the live window, so the
-            // prefill mask is the full windowed-causal mask over the retained
-            // (live) keys; the attention layer slices K/V to the mask's key
-            // axis. The window is enforced by the mask, not by dropping keys.
-            // See issues #408, #413, #419.
-            let sliding = Some(create_sliding_window_prefill_mask_dense(
+            // The global layers always take MLX's causal mode for a prefill
+            // (see `Cohere2Attention::forward`), so they get no mask. Dense
+            // `KVCache` keeps every key in the live window, so the sliding
+            // mask is the full windowed-causal mask over the retained (live)
+            // keys; the attention layer slices K/V to the mask's key axis.
+            // The window is enforced by the mask, not by dropping keys. See
+            // issues #408, #413, #419. It is `None` where MLX's own causal or
+            // native window masking applies and fuses (#3072).
+            let full: Option<UniquePtr<MlxArray>> = None;
+            let attn = &self.layers[self.swa_idx].self_attn;
+            let sliding = prefill_sliding_window_mask(
                 l as i32,
                 swa_live_len,
                 self.sliding_cache_window,
-            ));
+                shape[0],
+                PrefillAttention::new(
+                    attn.num_heads as usize,
+                    attn.num_kv_heads as usize,
+                    attn.head_dim as usize,
+                ),
+                mlxcel_core::array_dtype(&h),
+                SlidingPrefillKeys::Dense,
+            );
             (full, sliding)
         } else {
             (None, None)
@@ -733,13 +755,9 @@ impl Cohere2Model {
         )?;
 
         // Find first indices for each attention type
-        let sliding_window_pattern = args.get_sliding_window_pattern();
         let swa_idx = (0..args.num_hidden_layers)
             .find(|&i| args.is_sliding_window_layer(i))
             .unwrap_or(0);
-        let ga_idx = (0..args.num_hidden_layers)
-            .find(|&i| !args.is_sliding_window_layer(i))
-            .unwrap_or(sliding_window_pattern - 1);
 
         // Load quantized embedding
         let embed_tokens =
@@ -774,13 +792,21 @@ impl Cohere2Model {
             config: args.clone(),
             sliding_cache_window,
             swa_idx,
-            ga_idx,
         })
     }
 }
 
 // LanguageModel trait implementation.
 impl LanguageModel for Cohere2Model {
+    /// A tile-aligned padded prefill needs no padding mask: the pad tokens
+    /// follow the real ones, so a causal forward (MLX's causal mode, or the
+    /// shared causal or windowed array where MLX does not fuse it) already
+    /// hides them from every real row, and the caches the engine trims are
+    /// the caller's dense ones (#3072).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }

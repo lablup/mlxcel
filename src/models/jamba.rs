@@ -28,7 +28,7 @@ use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_deco
 use mlxcel_core::layers::{
     FusedQKVLinear, KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear,
 };
-use mlxcel_core::utils::{create_causal_mask, silu, slice_axis};
+use mlxcel_core::utils::{silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -1225,28 +1225,12 @@ impl JambaModel {
             mlxcel_core::copy(inputs)
         };
 
-        // Build a mask anchored on the first attention layer inside this
-        // stage. If the stage has no attention layers (pure Mamba slice),
-        // no mask is required.
-        let local_attn_idx = layer_range.clone().enumerate().find_map(|(local, abs)| {
-            if self.model.layers_block_type.get(abs).map(|s| s.as_str()) == Some("attention") {
-                Some(local)
-            } else {
-                None
-            }
-        });
-        let shape = mlxcel_core::array_shape(&h);
-        let seq_len = shape[1];
-        let mask = if let Some(idx) = local_attn_idx {
-            if seq_len > 1 {
-                let offset = caches[idx].offset();
-                Some(create_causal_mask(seq_len, offset))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // No attention mask, the same dispatch as the single-process model
+        // (`JambaModelBackbone::forward`): the prefill mask would be plain
+        // bottom-right causal, so the attention layers take MLX's causal mode
+        // for a multi-token forward (#3072). A stage that built an array mask
+        // ran a different SDPA from the dense model (#2654).
+        let mask: Option<UniquePtr<MlxArray>> = None;
 
         for (local, abs) in layer_range.clone().enumerate() {
             h = self.model.layers[abs].forward(&h, mask.as_deref(), &mut caches[local]);

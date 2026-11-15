@@ -36,7 +36,9 @@ use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_deco
 use mlxcel_core::layers::{
     FusedQKVLinear, KVCache, LayerNorm, RMSNorm, UnifiedEmbedding, UnifiedLinear,
 };
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -424,7 +426,17 @@ impl Cohere2MoeAttention {
 
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        let attn_out = if l > 1 {
+        let attn_out = if l > 1 && mask.is_none() {
+            // A prefill whose model left the mask to MLX's causal mode or its
+            // native `window_size` route (#3072).
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
+        } else if l > 1 {
             // Prefill: slice K/V to the mask's key axis. A full mask keeps every
             // key, a clamped sliding mask drops the oldest (mirrors
             // `src/models/cohere2.rs`).
@@ -855,12 +867,33 @@ impl Cohere2MoeModel {
         let (full_mask, sliding_mask) = if l > 1 {
             let ga_live_len = caches[self.ga_idx].live_len();
             let swa_live_len = caches[self.swa_idx].live_len();
-            let full = Some(create_causal_mask(l as i32, ga_live_len));
-            let sliding = Some(create_sliding_window_prefill_mask_dense(
+            // Each is `None` where MLX's own causal or native window masking
+            // applies and fuses (#3072).
+            let dtype = mlxcel_core::array_dtype(&h);
+            let geometry = |idx: usize| {
+                let attn = &self.layers[idx].self_attn;
+                PrefillAttention::new(
+                    attn.num_heads as usize,
+                    attn.num_kv_heads as usize,
+                    attn.head_dim as usize,
+                )
+            };
+            let full = prefill_causal_mask(
+                l as i32,
+                ga_live_len,
+                shape[0],
+                geometry(self.ga_idx),
+                dtype,
+            );
+            let sliding = prefill_sliding_window_mask(
                 l as i32,
                 swa_live_len,
                 self.sliding_cache_window,
-            ));
+                shape[0],
+                geometry(self.swa_idx),
+                dtype,
+                SlidingPrefillKeys::Dense,
+            );
             (full, sliding)
         } else {
             (None, None)

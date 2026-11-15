@@ -491,12 +491,18 @@ impl Attention {
         // internally, so expanding them here only writes an n_rep-sized copy of
         // the whole live cache on every decode step (#1686).
 
-        let mask_ptr = mask
-            .map(|m| m as *const MlxArray)
-            .unwrap_or(std::ptr::null());
-        // SAFETY: q/k/v are valid arrays; mask_ptr is null or a valid array ref.
-        let output = unsafe {
-            mlxcel_core::layers::attention_from_ptr(&q, &k, &v, self.scale, mask_ptr, 0.0, 0)
+        // A mask-less multi-token forward is a single-row prefill whose
+        // causality MLX's causal mode supplies (`prefill_causal_mask`, #3072).
+        let output = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(&q, &k, &v, self.scale, 0)
+        } else {
+            let mask_ptr = mask
+                .map(|m| m as *const MlxArray)
+                .unwrap_or(std::ptr::null());
+            // SAFETY: q/k/v are valid arrays; mask_ptr is null or a valid array ref.
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(&q, &k, &v, self.scale, mask_ptr, 0.0, 0)
+            }
         };
 
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
@@ -1035,8 +1041,27 @@ impl Ernie45MoeVlTextModel {
         let mask = if mask.is_some() {
             mask
         } else if seq_len > 1 {
-            auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
-            Some(auto_mask.as_ref().unwrap() as &MlxArray)
+            // A single row takes MLX's causal mode instead of the array
+            // where MLX fuses it (`prefill_causal_mask`, #3072); the attention
+            // layer routes a mask-less multi-token forward through
+            // `maskless_prefill_attention`, whose bottom-right alignment
+            // matches the `live_len` offset.
+            auto_mask = self.layers.first().and_then(|layer| {
+                let attn = &layer.attn;
+                let attention = mlxcel_core::utils::PrefillAttention::new(
+                    attn.num_heads as usize,
+                    attn.num_kv_heads as usize,
+                    attn.head_dim as usize,
+                );
+                mlxcel_core::utils::prefill_causal_mask(
+                    seq_len,
+                    caches[0].live_len(),
+                    batch,
+                    attention,
+                    mlxcel_core::array_dtype(&h),
+                )
+            });
+            auto_mask.as_deref()
         } else {
             // Decode width. The one query row sits at logical position
             // `live_len`, so every key column is permitted: the mask would be

@@ -61,7 +61,7 @@ use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_s
 use mlxcel_core::cache::{BatchedAttentionMetadata, CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, slice_axis};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -645,11 +645,17 @@ impl FalconH1Attention {
 
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-        let attn_out = unsafe {
-            mlxcel_core::layers::attention_from_ptr(
-                &q, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
-            )
+        // A mask-less multi-token forward is a single-row prefill whose
+        // causality MLX's causal mode supplies (`prefill_causal_mask`, #3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(&q, &cache_k, &cache_v, self.scale, 0)
+        } else {
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    &q, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
+                )
+            }
         };
 
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
@@ -865,13 +871,24 @@ impl FalconH1Model {
 
         // Single causal attention mask anchored on the KV offset. The conv
         // branch stays causal via left padding, so no separate mamba mask is
-        // needed on the single-sequence (unpadded) path.
+        // needed on the single-sequence (unpadded) path. A single row leaves
+        // causality to MLX's causal mode where MLX fuses it (#3072).
         let attn_offset = caches.first().map(|c| c.offset()).unwrap_or(0);
-        let attn_mask = if seq_len > 1 {
-            Some(create_causal_mask(seq_len, attn_offset))
-        } else {
-            None
-        };
+        let attn_mask = self.layers.first().and_then(|layer| {
+            let attn = &layer.self_attn;
+            let attention = PrefillAttention::new(
+                attn.num_heads as usize,
+                attn.num_kv_heads as usize,
+                attn.head_dim as usize,
+            );
+            prefill_causal_mask(
+                seq_len,
+                attn_offset,
+                shape[0],
+                attention,
+                mlxcel_core::array_dtype(&h),
+            )
+        });
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, cache, attn_mask.as_deref());

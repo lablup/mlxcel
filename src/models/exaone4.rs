@@ -22,7 +22,9 @@
 //! - Output-norm architecture: h = x + norm(attn_out), out = h + norm(mlp_out)
 
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -155,8 +157,18 @@ impl Attention {
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Scaled dot-product attention (handles GQA expansion internally)
-        let attn_out = if l > 1 {
+        // Scaled dot-product attention (handles GQA expansion internally). A
+        // mask-less multi-token forward is a single-row prefill whose model
+        // left the mask to MLX's causal mode or native window route (#3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
+        } else if l > 1 {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -838,22 +850,38 @@ impl ExaOne4Model {
         let local_offset = caches[local_idx].as_interface().offset();
         let global_offset = caches[global_idx].as_interface().offset();
 
-        // Create masks (cast to bfloat16 to match model weights dtype for SDPA)
-        let mask_local = if self.sliding_window.is_some() {
-            let max_cache = self.sliding_window.map(|w| w as i32).unwrap_or(i32::MAX);
+        // Create masks (cast to bfloat16 to match model weights dtype for
+        // SDPA). Each is `None` for a decode row and where a single row can
+        // take MLX's causal mode or native window route instead and MLX fuses
+        // it (#3072); the attention layer runs `maskless_prefill_attention`.
+        let attn = &self.layers[global_idx].self_attn;
+        let attention = PrefillAttention::new(
+            attn.num_heads as usize,
+            attn.num_kv_heads as usize,
+            attn.head_dim as usize,
+        );
+        let dtype = mlxcel_core::array_dtype(&self.norm.weight);
+        let batch = shape[0];
+        let to_bf16 =
+            |mask: UniquePtr<MlxArray>| mlxcel_core::astype(&mask, mlxcel_core::dtype::BFLOAT16);
+        let mask_local = self.sliding_window.and_then(|w| {
             // Full-width windowed mask for a fresh single-pass prefill that
             // exceeds the window (RotatingKVCache keeps all prefill keys),
             // clamped mask otherwise. See issue #408.
-            let mask = create_sliding_window_prefill_mask(seq_len, local_offset, max_cache);
-            Some(mlxcel_core::astype(&mask, mlxcel_core::dtype::BFLOAT16))
-        } else {
-            None
-        };
+            prefill_sliding_window_mask(
+                seq_len,
+                local_offset,
+                w as i32,
+                batch,
+                attention,
+                dtype,
+                SlidingPrefillKeys::Rotating,
+            )
+            .map(to_bf16)
+        });
 
-        let mask_global = Some(mlxcel_core::astype(
-            &create_causal_mask(seq_len, global_offset),
-            mlxcel_core::dtype::BFLOAT16,
-        ));
+        let mask_global =
+            prefill_causal_mask(seq_len, global_offset, batch, attention, dtype).map(to_bf16);
 
         self.forward_rows(
             input_ids,

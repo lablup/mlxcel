@@ -1015,7 +1015,7 @@ impl TensorParallelGemma3Model {
         let seq_len = mlxcel_core::array_shape(input_ids)[1];
 
         let (global_mask, sliding_mask) =
-            gemma3_masks(mask, seq_len, &mut rank_caches[0], &self.ranks[0]);
+            gemma3_masks(mask, seq_len, &h, &rank_caches[0], &self.ranks[0]);
 
         for layer_idx in 0..self.num_layers_per_rank {
             let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
@@ -1851,13 +1851,25 @@ impl TensorParallelQwen35Model {
         };
         let seq_len = mlxcel_core::array_shape(&h)[1];
         let fa_idx = self.ranks[0].config.full_attention_interval - 1;
+        // The single-process model's prefill mask (`Qwen35Model`): MLX's
+        // causal mode where a single row allows it and MLX fuses it, else
+        // the shared array (#3051, #3072). Every rank has rank 0's sharded
+        // geometry.
         let fa_mask = if seq_len > 1 {
             let offset = if fa_idx < rank_caches[0].len() {
                 qwen3_next_cache_offset_ref(&rank_caches[0][fa_idx])
             } else {
                 0
             };
-            Some(mlxcel_core::utils::create_causal_mask(seq_len, offset))
+            crate::models::qwen3_5::full_attention_geometry(&self.ranks[0].layers).and_then(
+                |attention| {
+                    let shape = mlxcel_core::array_shape(&h);
+                    let dtype = mlxcel_core::array_dtype(&h);
+                    mlxcel_core::utils::prefill_causal_mask(
+                        seq_len, offset, shape[0], attention, dtype,
+                    )
+                },
+            )
         } else {
             None
         };
@@ -3568,10 +3580,20 @@ fn slice_axis0(
     Ok(mlxcel_core::slice(tensor, &starts, &stops))
 }
 
+/// The prefill masks of a tensor-parallel Gemma 3 forward: the caller's
+/// mask for every layer when there is one, else the single-process model's
+/// own text prefill masks (`Gemma3Model::forward_with_caches_and_embeddings`),
+/// so both run the same attention kernels (#3072, #2654). The global layers
+/// take no mask: their prefill mask is plain bottom-right causal, which the
+/// attention leaves to MLX's causal mode. The sliding mask is
+/// [`crate::models::gemma3::text_prefill_sliding_mask`], `None` while the
+/// keys fit the window or MLX's native window route is planned. Each rank's
+/// attention has the same sharded geometry, so rank 0 plans for all.
 fn gemma3_masks(
     mask: Option<&MlxArray>,
     seq_len: i32,
-    rank0_caches: &mut [crate::models::gemma3::Cache],
+    h: &MlxArray,
+    rank0_caches: &[crate::models::gemma3::Cache],
     rank0: &crate::models::Gemma3Model,
 ) -> (Option<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>) {
     if let Some(mask) = mask {
@@ -3581,31 +3603,31 @@ fn gemma3_masks(
         return (None, None);
     }
 
-    let global_idx = rank0.sliding_window_pattern - 1;
-    let global_offset = gemma3_cache_offset(&mut rank0_caches[global_idx]);
-    let global_mask = Some(mlxcel_core::utils::create_causal_mask(
-        seq_len,
-        global_offset,
-    ));
     let sliding_mask = if rank0.sliding_window_pattern > 1 {
-        let sliding_offset = gemma3_cache_offset(&mut rank0_caches[0]);
-        let max_cache = rank0.sliding_window;
-        // Mirror the single-process gemma3 `sliding_prefill_mask` (issue #401/#408):
-        // a fresh single-pass prefill longer than the window keeps every key (the
-        // RotatingKVCache returns all of them) and needs the full-width windowed
-        // mask, otherwise the clamped `(seq_len, window)` mask strands the earliest
-        // query rows with an all-(-inf) row and the broadcast crashes against the
-        // full key axis. The helper's else-branch is byte-identical to the prior
-        // `sliding_offset.min((max_cache - seq_len).max(0))` clamped construction.
-        Some(mlxcel_core::utils::create_sliding_window_prefill_mask(
+        let sliding_live_len = gemma3_cache_live_len(&rank0_caches[0]);
+        crate::models::gemma3::text_prefill_sliding_mask(
+            &rank0.layers[0].self_attn,
+            h,
+            rank0_caches,
             seq_len,
-            sliding_offset,
-            max_cache,
-        ))
+            sliding_live_len,
+            rank0.sliding_window,
+        )
     } else {
         None
     };
-    (global_mask, sliding_mask)
+    (None, sliding_mask)
+}
+
+fn gemma3_cache_live_len(cache: &crate::models::gemma3::Cache) -> i32 {
+    match cache {
+        crate::models::gemma3::Cache::Standard(cache) => {
+            crate::models::gemma3::CacheInterface::live_len(cache)
+        }
+        crate::models::gemma3::Cache::Rotating(cache) => {
+            crate::models::gemma3::CacheInterface::live_len(cache)
+        }
+    }
 }
 
 fn gemma3_layer_mask<'a>(
@@ -3619,13 +3641,6 @@ fn gemma3_layer_mask<'a>(
     }
     let is_global = (layer_idx % sliding_window_pattern) == (sliding_window_pattern - 1);
     if is_global { global_mask } else { sliding_mask }
-}
-
-fn gemma3_cache_offset(cache: &mut crate::models::gemma3::Cache) -> i32 {
-    match cache {
-        crate::models::gemma3::Cache::Standard(cache) => cache.offset,
-        crate::models::gemma3::Cache::Rotating(cache) => cache.offset,
-    }
 }
 
 fn gemma3_cache_offset_ref(cache: &crate::models::gemma3::Cache) -> i32 {

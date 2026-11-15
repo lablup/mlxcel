@@ -40,7 +40,7 @@ use crate::models::qwen3_vl::Qwen3VLModel;
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
+use mlxcel_core::utils::{SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -228,10 +228,17 @@ impl CohereCompassTextModel {
     /// The caller-supplied `mask` is deliberately not threaded through: this
     /// model needs two differently shaped masks per step, so it always builds
     /// them from its own caches. Same contract as `cohere2.rs` / `olmo3.rs`.
+    ///
+    /// Each mask is `None` where a single row can take MLX's causal mode or
+    /// its native `window_size` route instead and MLX fuses it (#3072); the
+    /// attention layer runs `maskless_prefill_attention` then. `batch` and
+    /// `dtype` are the hidden state's batch and dtype.
     fn prefill_masks(
         &self,
         l: i32,
         caches: &[KVCache],
+        batch: i32,
+        dtype: i32,
     ) -> (Option<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>) {
         if l <= 1 {
             return (None, None);
@@ -239,13 +246,23 @@ impl CohereCompassTextModel {
         // Size from the cache's live window, not the monotonic `offset`: under
         // `--max-kv-size` a trimmed cache returns only `live_len` keys and an
         // `offset`-sized mask would be wider than the K/V (issue #419).
-        let full = create_causal_mask(l, caches[self.ga_idx].live_len());
-        let sliding = create_sliding_window_prefill_mask_dense(
+        let full = prefill_causal_mask(
+            l,
+            caches[self.ga_idx].live_len(),
+            batch,
+            self.layers[self.ga_idx].self_attn.prefill_attention(),
+            dtype,
+        );
+        let sliding = prefill_sliding_window_mask(
             l,
             caches[self.swa_idx].live_len(),
             self.sliding_window,
+            batch,
+            self.layers[self.swa_idx].self_attn.prefill_attention(),
+            dtype,
+            SlidingPrefillKeys::Dense,
         );
-        (Some(full), Some(sliding))
+        (full, sliding)
     }
 
     fn mask_for_layer<'m>(
@@ -354,7 +371,8 @@ impl CohereCompassTextModel {
             )
         });
 
-        let (full_mask, sliding_mask) = self.prefill_masks(seq_len, caches);
+        let dtype = mlxcel_core::array_dtype(&h);
+        let (full_mask, sliding_mask) = self.prefill_masks(seq_len, caches, batch, dtype);
 
         self.deepstack_state.with_entry(seq_id, |deepstack| {
             for (layer_idx, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate()

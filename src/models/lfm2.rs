@@ -46,7 +46,8 @@ use mlxcel_core::cache::{
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{
-    create_bidirectional_padding_mask, create_causal_mask, slice_axis, stack_arrays,
+    PrefillAttention, create_bidirectional_padding_mask, prefill_causal_mask, slice_axis,
+    stack_arrays,
 };
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -1088,6 +1089,36 @@ impl Lfm2Model {
         self.config.num_hidden_layers
     }
 
+    /// The attention layers' prefill mask for `seq_len` rows of `h` after
+    /// `offset` keys: `None` for a decode row, or where a single row can take
+    /// MLX's causal mode (`prefill_causal_mask`, #3072), which the attention
+    /// layer runs for a mask-less multi-token forward.
+    ///
+    /// Used by: `forward_embeds_rows_with_caches`, `forward_speculative_with`.
+    pub(crate) fn prefill_attn_mask(
+        &self,
+        seq_len: i32,
+        offset: i32,
+        batch: i32,
+        h: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let attention = self.layers.iter().find_map(|layer| match &layer.mixer {
+            Mixer::Attention(attn) => Some(PrefillAttention::new(
+                attn.num_heads as usize,
+                attn.num_kv_heads as usize,
+                attn.head_dim as usize,
+            )),
+            Mixer::Conv(_) => None,
+        })?;
+        prefill_causal_mask(
+            seq_len,
+            offset,
+            batch,
+            attention,
+            mlxcel_core::array_dtype(h),
+        )
+    }
+
     pub fn make_caches(&self) -> Vec<Lfm2LayerCache> {
         self.layers
             .iter()
@@ -1237,11 +1268,7 @@ impl Lfm2Model {
             .find(|c| matches!(c, Lfm2LayerCache::Attention(_)))
             .map(|c| c.offset())
             .unwrap_or(0);
-        let attn_mask = if seq_len > 1 {
-            Some(create_causal_mask(seq_len, attn_offset))
-        } else {
-            None
-        };
+        let attn_mask = self.prefill_attn_mask(seq_len, attn_offset, shape[0], &h);
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             let mask = if layer.is_attention() {

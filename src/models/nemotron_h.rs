@@ -30,7 +30,7 @@ use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_s
 use mlxcel_core::cache::{BatchedAttentionMetadata, CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, relu_squared, silu, slice_axis, stack_arrays};
+use mlxcel_core::utils::{relu_squared, silu, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -1767,31 +1767,12 @@ impl NemotronHModel {
             mlxcel_core::copy(inputs)
         };
 
-        // Anchor attention mask on the first attention layer in this stage.
-        let shape = mlxcel_core::array_shape(&h);
-        let seq_len = shape[1];
-        let first_attn_local_cache_idx = {
-            let mut local_cache_idx = 0usize;
-            let mut found = None;
-            for &abs in &layer_range.clone().collect::<Vec<_>>() {
-                if self.layer_needs_cache(abs) {
-                    if self.block_types.get(abs) == Some(&BlockType::Attention) {
-                        found = Some(local_cache_idx);
-                        break;
-                    }
-                    local_cache_idx += 1;
-                }
-            }
-            found
-        };
-        let attn_mask = if seq_len > 1 {
-            let offset = first_attn_local_cache_idx
-                .map(|idx| caches[idx].offset())
-                .unwrap_or(0);
-            Some(create_causal_mask(seq_len, offset))
-        } else {
-            None
-        };
+        // No attention mask, the same dispatch as the single-process model
+        // (`hidden_layer_stack`): the prefill mask would be plain bottom-right
+        // causal, so the attention layers take MLX's causal mode for a
+        // multi-token forward (#3072). A stage that built an array mask ran a
+        // different SDPA from the dense model (#2654).
+        let attn_mask: Option<UniquePtr<MlxArray>> = None;
 
         let mut cache_idx = 0usize;
         for abs in layer_range.clone() {

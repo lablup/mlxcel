@@ -24,7 +24,9 @@
 
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -254,8 +256,16 @@ impl OLMo3Attention {
                 )
             }
         } else if l > 1 {
-            // Prefill without mask: use causal
-            mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
+            // Prefill without mask: MLX's causal mode, or its native
+            // `window_size` route for a sliding layer past its window
+            // (`prefill_sliding_window_mask`, #3072).
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
         } else {
             // Single token: use causal SDPA
             mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
@@ -627,17 +637,37 @@ impl OLMo3Model {
             let ga_live_len = caches[self.ga_idx].live_len();
             let swa_live_len = caches[self.swa_idx].live_len();
 
-            let full = Some(create_causal_mask(l as i32, ga_live_len));
             // Dense `KVCache` keeps every key in the live window, so the
             // prefill mask is the full windowed-causal mask over the retained
             // (live) keys; the attention layer slices K/V to the mask's key
             // axis. The window is enforced by the mask, not by dropping keys.
-            // See issues #408, #413, #419.
-            let sliding = Some(create_sliding_window_prefill_mask_dense(
+            // See issues #408, #413, #419. Each mask is `None` where MLX's own
+            // causal or native window masking applies and fuses (#3072).
+            let dtype = mlxcel_core::array_dtype(&h);
+            let geometry = |idx: usize| {
+                let attn = &self.layers[idx].self_attn;
+                PrefillAttention::new(
+                    attn.num_heads as usize,
+                    attn.num_kv_heads as usize,
+                    attn.head_dim as usize,
+                )
+            };
+            let full = prefill_causal_mask(
+                l as i32,
+                ga_live_len,
+                shape[0],
+                geometry(self.ga_idx),
+                dtype,
+            );
+            let sliding = prefill_sliding_window_mask(
                 l as i32,
                 swa_live_len,
                 self.sliding_cache_window,
-            ));
+                shape[0],
+                geometry(self.swa_idx),
+                dtype,
+                SlidingPrefillKeys::Dense,
+            );
             (full, sliding)
         } else {
             (None, None)
@@ -759,6 +789,15 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for OLMo3Model {
+    /// A tile-aligned padded prefill needs no padding mask: the pad tokens
+    /// follow the real ones, so a causal forward (MLX's causal mode, or the
+    /// shared causal or windowed array where MLX does not fuse it) already
+    /// hides them from every real row, and the caches the engine trims are
+    /// the caller's dense ones (#3072).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }

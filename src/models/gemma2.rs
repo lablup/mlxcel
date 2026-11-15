@@ -551,6 +551,19 @@ impl Gemma2Model {
         let scale = (hidden_size as f32).sqrt();
         h = mlxcel_core::multiply_scalar(&h, scale);
 
+        // A softcapped prefill with no caller mask builds its causal mask
+        // once here and shares it, instead of `causal_attention` building the
+        // same mask in every layer (#3072).
+        let seq_len = mlxcel_core::array_shape(&h)[1];
+        let shared_mask = if mask.is_none() {
+            let softcap = self.layers.first().map_or(0.0, |l| l.self_attn.softcapping);
+            let offset = caches.first().map_or(0, |c| c.live_len());
+            mlxcel_core::utils::softcap_prefill_causal_mask(seq_len, offset, softcap)
+        } else {
+            None
+        };
+        let mask = mask.or(shared_mask.as_deref());
+
         let n = self.layers.len();
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
