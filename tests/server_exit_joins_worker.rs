@@ -232,10 +232,17 @@ fn embedding_worker_is_joined_when_a_later_side_model_fails_to_load() {
     ) else {
         return;
     };
-    // A path that cannot be a checkpoint makes `--image-model` fail after the
-    // embedding worker has already loaded.
-    let missing_image =
-        std::env::temp_dir().join(format!("mlxcel-absent-image-model-{}", std::process::id()));
+    // Model resolution rejects an absent path before any worker starts, so the
+    // image model must be a directory that resolves (it holds a config.json)
+    // but fails to load. That makes `--image-model` fail after the embedding
+    // worker has already loaded (#3076).
+    let broken_image_dir = tempfile::tempdir().expect("temp dir for the broken image model");
+    std::fs::write(
+        broken_image_dir.path().join("config.json"),
+        "{ not valid json",
+    )
+    .expect("write the invalid config.json");
+    let missing_image = broken_image_dir.path().to_path_buf();
     let (_held, port) = held_port();
     let chat_arg = path_arg(&chat_dir);
     let embedding_arg = path_arg(&embedding_dir);
