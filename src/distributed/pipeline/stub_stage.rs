@@ -264,6 +264,7 @@ impl StubStageHandle {
                                     micro_batch_id,
                                     input_ids,
                                     attention_mask: _,
+                                    last_pos: _,
                                 } => {
                                     run_entries += 1;
                                     let error = |message: &str| RemoteStageResponse::Error {

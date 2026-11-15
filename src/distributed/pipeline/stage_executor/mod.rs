@@ -89,6 +89,28 @@ pub enum StageExecutionOutput {
     Logits(UniquePtr<MlxArray>),
 }
 
+/// Keep only logits row `last_pos` of a final-stage output; hidden states and
+/// `None` pass through. A one-row output (an executor that already projected
+/// only the sampled row) is left as is.
+fn slice_logits_row(output: StageExecutionOutput, last_pos: Option<usize>) -> StageExecutionOutput {
+    match (output, last_pos) {
+        (StageExecutionOutput::Logits(logits), Some(pos)) => {
+            let rows = mlxcel_core::array_shape(&logits)
+                .get(1)
+                .copied()
+                .unwrap_or(1);
+            if rows <= 1 {
+                StageExecutionOutput::Logits(logits)
+            } else {
+                StageExecutionOutput::Logits(mlxcel_core::generate::logits_at_position(
+                    &logits, pos,
+                ))
+            }
+        }
+        (output, _) => output,
+    }
+}
+
 impl StageExecutionOutput {
     pub fn into_hidden_states(self) -> Result<UniquePtr<MlxArray>> {
         match self {
@@ -117,6 +139,25 @@ pub trait StageExecutor {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> Result<StageExecutionOutput>;
+    /// [`Self::execute`] for a request that samples only position `last_pos`
+    /// of its sequence (a prefill): the final stage returns `[1, 1, vocab]`
+    /// logits for that row, so the LM head runs on one row and the logits
+    /// frame back to the coordinator is one row wide (#3074). `None` is
+    /// [`Self::execute`]. A non-final stage ignores `last_pos`.
+    ///
+    /// The default runs the full forward and slices the logits row, which is
+    /// correct for every executor and saves only the wire frame; executors
+    /// that own the LM head override it to slice before the projection.
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        let output = self.execute(input, caches, mask)?;
+        Ok(slice_logits_row(output, last_pos))
+    }
     /// Last-axis width of the hidden states this stage accepts from
     /// upstream, which bounds the activation frames a remote stage decodes.
     /// `None` leaves the width unchecked.
@@ -134,6 +175,18 @@ pub trait FamilyStageExecutor {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> Result<StageExecutionOutput>;
+    /// Family counterpart of [`StageExecutor::execute_last_row`], with the
+    /// same default: full forward, then slice the logits row.
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        let output = self.execute(input, caches, mask)?;
+        Ok(slice_logits_row(output, last_pos))
+    }
     /// Inbound hidden-state width when it differs from the config's
     /// `hidden_size` (a family that packs extra features into the stage
     /// boundary activation). `None`, the default, means `hidden_size`.
@@ -239,6 +292,16 @@ impl StageExecutor for LoadedStageExecutor {
         mask: Option<&MlxArray>,
     ) -> Result<StageExecutionOutput> {
         self.backend.execute(input, caches, mask)
+    }
+
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        self.backend.execute_last_row(input, caches, mask, last_pos)
     }
 
     fn inbound_activation_width(&self) -> Option<u64> {
