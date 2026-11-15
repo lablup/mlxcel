@@ -28,6 +28,7 @@ These remain standalone because their reports leave a substantive measurement ga
 
 - [MLA absorbed decode](mla-absorbed-decode-m1ultra-2026-08-02.md): real-checkpoint token parity was not available; default-on is not justified by synthetic memory savings.
 - [Qwen3.8 snapshot capacity](qwen38-snapshot-capacity-default-2026-08-30.md): sizing unit tests are not a rerun of the Apple Silicon multi-turn benchmark.
+- [GB10 fused decode-MoE Dff crossover](fused-moe-dff-crossover-gb10-2026-11-11.md): the 8192 bound is confirmed by the decision rule, but no fused-path model has been measured between Dff 6400 and 14336, and the fast models' run-to-run spread is unexplained.
 - [ROCm flash prefill](sdpa-flash-prefill-gfx1151-2026-10-13.md): kernel timings exist, but model-level before/after was not measured.
 
 ## Release decision archives
@@ -51,6 +52,7 @@ One concise file per release containing completed investigations, including nega
 
 The ordinary model/embedding/image sweeps also retain their CSVs under [`benchmarks/`](../../benchmarks/), linked from the final reports. Below are the smaller evidence sets kept with this directory. CSVs preserve observations, including warmup/status fields where present; do not silently filter or pool them. Compact legacy JSON preserves nested correctness/provenance fields rather than forcing them into a lossy table. Paths to retired captures inside those unchanged JSON objects refer to the frozen tree below.
 
+- [data/fused-moe-dff-crossover-gb10-2026-11-11/runs.csv](data/fused-moe-dff-crossover-gb10-2026-11-11/runs.csv)
 - [data/native-batched-decode-m3ultra-2026-10-27/gpt-oss-20b.json](data/native-batched-decode-m3ultra-2026-10-27/gpt-oss-20b.json)
 - [data/native-batched-decode-m3ultra-2026-10-27/linear-attention.json](data/native-batched-decode-m3ultra-2026-10-27/linear-attention.json)
 - [data/native-batched-decode-m3ultra-2026-10-27/mamba2-families.json](data/native-batched-decode-m3ultra-2026-10-27/mamba2-families.json)

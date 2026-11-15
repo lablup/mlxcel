@@ -160,24 +160,23 @@ pub(crate) fn fused_moe_enabled_from(value: Option<&str>) -> bool {
 const FUSED_MOE_MAX_DFF_METAL: i32 = 4096;
 
 /// CUDA default for the same bound. At batch=1 `gather_qmm` leaves far more of
-/// the GPU idle than on Metal, so the fused path keeps winning to a larger
-/// expert size. Re-measured on GB10 (DGX Spark, sm_121) under MLX pin e9463bb
-/// (#626, after the #625 pin bump moved `gather_gemm` to JIT and sped the
-/// fallback): fused wins through Dff 6400 (phi-3.5-moe +5%, lfm2 +12%), is
-/// break-even at 8192 (llama-4-scout, within run-to-run noise) and loses at
-/// 14336 (mixtral -1.2%), so the crossover interpolates to ~8000. Set to the
-/// 8192 break-even boundary, which stays well below the 14336 regression while
-/// capturing the phi-3.5-moe / llama-4-scout mid-size experts that the old 4096
-/// default silently declined. The env var overrides this on both backends.
+/// the GPU idle than on Metal, so the fused path keeps paying off to a larger
+/// expert size.
 ///
-/// Provenance caveat: that GB10 sweep ran on MLX pin e9463bb (#626). The pin has
-/// since advanced to 0.32.1 (#703/#704, commit 57c66cac), so 8192 is carried
-/// forward as the documented-data-based default, not a value re-measured on the
-/// current binaries. It is deliberately the conservative floor of the measured
-/// crossover (the 8192 break-even, not the 14336 regression edge), so MLX pin
-/// drift cannot flip the default into a regression. A GB10 re-validation on the
-/// 0.32.1 pin is pending; see the pending re-validation note in
-/// `docs/benchmark_results/versions/v0.3.0.md#fused-moe-decode-kernel-design`.
+/// Set to 8192 by the GB10 sweep of #626 (MLX pin e9463bb) and confirmed by
+/// #712 and by the 2026-11-11 re-measurement on pin 9f806b36 (#2540,
+/// `docs/benchmark_results/fused-moe-dff-crossover-gb10-2026-11-11.md`), which
+/// added a null arm and interleaved rounds. That record measures a clear fused
+/// win at Dff 768 (qwen3-30b, +28% to +35%), ties at 1792 (lfm2) and 6400
+/// (phi-3.5-moe), and a clear loss at 14336 (mixtral, about -2%), so the
+/// crossover lies between 6400 and 14336 and 8192 keeps mixtral on
+/// `gather_qmm`.
+///
+/// Dff 8192 itself has not been measured through the fused kernel. The
+/// llama-4-scout row the earlier sweeps read as "break-even at 8192" is not a
+/// fused-path point: Llama 4 has its own `SwitchGLU` (`llama4.rs`) that calls
+/// `gather_qmm` and never reads this bound, so both of its arms ran the same
+/// code. The env var overrides this default on every backend.
 const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 
 /// ROCm default for the same bound. On gfx1151, Mixtral-8x7B (Dff 14336) decodes
