@@ -71,6 +71,10 @@ pub mod internvl;
 pub mod jina_vlm;
 pub mod kimi_k3_vl;
 pub mod kimi_vl;
+#[cfg(test)]
+mod last_row_logits_vlm_tests;
+#[cfg(test)]
+mod last_row_logits_wrapper_tests;
 pub mod lfm2_vl;
 pub mod llmjp_vl;
 #[cfg(test)]
@@ -577,6 +581,19 @@ impl LanguageModel for VisionLanguageModel {
     ) -> UniquePtr<MlxArray> {
         self.text_model
             .forward_last_logits(input_ids, caches, mask, last_pos)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        self.text_model
+            .last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
     }
 
     fn forward_last_logits_with_sequence_id(

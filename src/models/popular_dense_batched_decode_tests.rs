@@ -258,7 +258,7 @@ fn tiny_gemma_model() -> crate::models::gemma::GemmaModel {
     crate::models::gemma::GemmaModel::from_weights(&w.weights, &args).expect("tiny Gemma builds")
 }
 
-fn tiny_glm4_model() -> crate::models::glm4::Glm4Model {
+pub(crate) fn tiny_glm4_model() -> crate::models::glm4::Glm4Model {
     let args = config(json!({
         "model_type": "glm4",
         "hidden_size": HIDDEN,
