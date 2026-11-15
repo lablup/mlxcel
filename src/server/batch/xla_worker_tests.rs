@@ -1415,7 +1415,7 @@ fn a_budget_wider_than_the_shape_is_clamped_instead_of_refused() {
     // this exercises is the worker's clamp and not the server's own cap.
     let config = ServerConfig {
         context_size: 8_192,
-        ..Default::default()
+        ..ServerConfig::default()
     };
     let budget_options = build_server_generate_options(
         &config,
