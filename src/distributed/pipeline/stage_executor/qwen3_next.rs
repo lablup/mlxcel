@@ -73,7 +73,20 @@ impl FamilyStageExecutor for Qwen3NextStageExecutor {
         &self,
         input: StageExecutionInput<'_>,
         caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> Result<StageExecutionOutput> {
+        self.execute_last_row(input, caches, mask, None)
+    }
+
+    /// The final stage slices the hidden state at `last_pos` before the final
+    /// norm and LM head, so the head runs on one row (#3081). A non-final
+    /// stage ignores `last_pos`.
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput> {
         let mut internal_caches = self.cache_store.caches_for_sequence(
             caches,
@@ -83,12 +96,13 @@ impl FamilyStageExecutor for Qwen3NextStageExecutor {
         );
 
         let output = match input {
-            StageExecutionInput::TokenIds(input_ids) => self
-                .model
-                .execute_from_token_ids(input_ids, &mut internal_caches),
+            StageExecutionInput::TokenIds(input_ids) => {
+                self.model
+                    .execute_from_token_ids(input_ids, &mut internal_caches, last_pos)
+            }
             StageExecutionInput::HiddenStates(hidden_states) => self
                 .model
-                .execute_from_hidden_states(copy(hidden_states), &mut internal_caches),
+                .execute_from_hidden_states(copy(hidden_states), &mut internal_caches, last_pos),
         }
         .map_err(anyhow::Error::msg)?;
 
@@ -98,5 +112,47 @@ impl FamilyStageExecutor for Qwen3NextStageExecutor {
             Qwen3NextCache::offset,
         );
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::distributed::pipeline::stage_executor::last_row_test_support::assert_last_row_matches_full;
+    use crate::models::qwen3_5_tests::two_layer_weights_and_config;
+
+    /// The final stage slices the hidden row before the norm and head and
+    /// returns the full forward's row (#3081). The Qwen3-Next stage loads the
+    /// Qwen 3.5 fixture's tensors, with the gated-delta layer's four separate
+    /// projections replaced by Qwen3-Next's fused `in_proj_qkvz` and `in_proj_ba`.
+    #[test]
+    fn last_row_matches_the_full_forward_row() {
+        let (mut weights, config) = two_layer_weights_and_config(8);
+        let config = config.to_qwen3next_config();
+        let linear = "model.layers.0.linear_attn";
+        for name in ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"] {
+            weights.remove(&format!("{linear}.{name}.weight"));
+        }
+        for (name, rows) in [("in_proj_qkvz", 16), ("in_proj_ba", 4)] {
+            let values: Vec<f32> = (0..rows * 8)
+                .map(|i| 0.01 + (i % 17) as f32 * 0.003)
+                .collect();
+            weights.insert(
+                format!("{linear}.{name}.weight"),
+                mlxcel_core::from_slice_f32(&values, &[rows, 8]),
+            );
+        }
+        assert_last_row_matches_full(
+            |filter| {
+                Box::new(Qwen3NextStageExecutor {
+                    model: Qwen3NextStageModel::from_filtered_weights(&weights, &config, filter, 0)
+                        .expect("fixture stage must load"),
+                    cache_store: PointerOwnedCacheStore::default(),
+                })
+            },
+            2,
+            8,
+            1e-4,
+        );
     }
 }

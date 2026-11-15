@@ -44,6 +44,9 @@ mod qwen35;
 mod qwen3_next;
 
 #[cfg(test)]
+mod last_row_test_support;
+
+#[cfg(test)]
 #[path = "family_registry_tests.rs"]
 mod family_registry_tests;
 

@@ -69,17 +69,55 @@ impl FamilyStageExecutor for GlmMoeDsaStageExecutor {
         &self,
         input: StageExecutionInput<'_>,
         caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> Result<StageExecutionOutput> {
+        self.execute_last_row(input, caches, mask, None)
+    }
+
+    /// The final stage slices the hidden state at `last_pos` before the final
+    /// norm and LM head, so the head runs on one row (#3081). A non-final
+    /// stage ignores `last_pos`.
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput> {
         match input {
             StageExecutionInput::TokenIds(input_ids) => self
                 .model
-                .execute_from_token_ids(input_ids, caches)
+                .execute_from_token_ids(input_ids, caches, last_pos)
                 .map_err(anyhow::Error::msg),
             StageExecutionInput::HiddenStates(hidden_states) => self
                 .model
-                .execute_from_hidden_states(mlxcel_core::copy(hidden_states), caches)
+                .execute_from_hidden_states(mlxcel_core::copy(hidden_states), caches, last_pos)
                 .map_err(anyhow::Error::msg),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::distributed::pipeline::stage_executor::last_row_test_support::assert_last_row_matches_full;
+    use crate::models::deepseek_v32::deepseek_v32_tests::tiny_dsa_weights_and_args;
+
+    /// The final stage slices the hidden row before the norm and head and
+    /// returns the full forward's row (#3081).
+    #[test]
+    fn last_row_matches_the_full_forward_row() {
+        let (weights, args) = tiny_dsa_weights_and_args();
+        assert_last_row_matches_full(
+            |filter| {
+                Box::new(GlmMoeDsaStageExecutor {
+                    model: DeepSeekV32StageModel::from_filtered_weights(&weights, &args, filter, 0)
+                        .expect("fixture stage must load"),
+                })
+            },
+            1,
+            16,
+            1e-4,
+        );
     }
 }

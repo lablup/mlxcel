@@ -14,7 +14,88 @@
 
 //! Regression tests for Jamba conv_state contiguous fix.
 
-use mlxcel_core::{dtype, generate::ModelStateSnapshot, layers::KVCache, utils::slice_axis};
+use super::{JambaConfig, JambaModel};
+use mlxcel_core::weights::WeightMap;
+use mlxcel_core::{
+    MlxArray, UniquePtr, dtype, generate::ModelStateSnapshot, layers::KVCache, utils::slice_axis,
+};
+
+/// Layers of the [`tiny_model`] fixture: a Mamba block, then an attention block.
+pub(crate) const TINY_LAYERS: usize = 2;
+
+/// Deterministic non-constant tensor, small enough to keep activations tame.
+fn ramp(shape: &[i32], scale: f32) -> UniquePtr<MlxArray> {
+    let n: i32 = shape.iter().product();
+    let data: Vec<f32> = (0..n)
+        .map(|i| ((i * 7 % 13) as f32 - 6.0) * scale)
+        .collect();
+    mlxcel_core::from_slice_f32(&data, shape)
+}
+
+/// A two-layer dense Jamba (Mamba then attention, tied embeddings, no experts)
+/// with synthetic weights, for the pipeline stage-executor tests.
+pub(crate) fn tiny_model() -> JambaModel {
+    let config: JambaConfig = serde_json::from_value(serde_json::json!({
+        "model_type": "jamba",
+        "hidden_size": 8,
+        "intermediate_size": 16,
+        "num_hidden_layers": TINY_LAYERS,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "vocab_size": 16,
+        "mamba_d_state": 4,
+        "mamba_d_conv": 4,
+        "mamba_expand": 2,
+        "mamba_dt_rank": 2,
+        "num_experts": 1,
+        "layers_block_type": ["mamba", "attention"],
+    }))
+    .expect("tiny Jamba config parses");
+    let ones = |n: i32| mlxcel_core::ones(&[n], dtype::FLOAT32);
+    let mut w = WeightMap::new();
+    let mut put = |k: &str, v: UniquePtr<MlxArray>| {
+        w.insert(k.to_string(), v);
+    };
+    put("model.embed_tokens.weight", ramp(&[16, 8], 0.1));
+    put("model.final_layernorm.weight", ones(8));
+    for layer in 0..TINY_LAYERS {
+        let p = format!("model.layers.{layer}");
+        put(&format!("{p}.input_layernorm.weight"), ones(8));
+        put(&format!("{p}.pre_ff_layernorm.weight"), ones(8));
+        put(
+            &format!("{p}.feed_forward.gate_proj.weight"),
+            ramp(&[16, 8], 0.02),
+        );
+        put(
+            &format!("{p}.feed_forward.up_proj.weight"),
+            ramp(&[16, 8], 0.03),
+        );
+        put(
+            &format!("{p}.feed_forward.down_proj.weight"),
+            ramp(&[8, 16], 0.02),
+        );
+    }
+    let m = "model.layers.0.mamba";
+    put(&format!("{m}.in_proj.weight"), ramp(&[32, 8], 0.03));
+    put(&format!("{m}.out_proj.weight"), ramp(&[8, 16], 0.02));
+    put(&format!("{m}.x_proj.weight"), ramp(&[10, 16], 0.02));
+    put(&format!("{m}.dt_proj.weight"), ramp(&[16, 2], 0.05));
+    put(&format!("{m}.dt_proj.bias"), ramp(&[16], 0.01));
+    put(&format!("{m}.conv1d.weight"), ramp(&[16, 4, 1], 0.05));
+    put(&format!("{m}.conv1d.bias"), ramp(&[16], 0.01));
+    put(&format!("{m}.dt_layernorm.weight"), ones(2));
+    put(&format!("{m}.b_layernorm.weight"), ones(4));
+    put(&format!("{m}.c_layernorm.weight"), ones(4));
+    put(&format!("{m}.A_log"), ramp(&[16, 4], 0.02));
+    put(&format!("{m}.D"), ones(16));
+    for (i, proj) in ["q_proj", "k_proj", "v_proj", "o_proj"].iter().enumerate() {
+        put(
+            &format!("model.layers.1.self_attn.{proj}.weight"),
+            ramp(&[8, 8], 0.03 * (i as f32 + 1.0)),
+        );
+    }
+    JambaModel::from_weights(config, w).expect("tiny Jamba must build")
+}
 
 /// Simulate 50 decode steps of conv-state update and assert the stored shape
 /// stays at [B=1, k-1=3, channels=8] regardless of how many steps we run.
@@ -154,9 +235,7 @@ fn jamba_attention_layer_snapshot_restore_round_trips_kv_state() {
 // all: the dense `gather_mm` path ignores the declared `group_size` / `bits`
 // pair entirely, so before the fix every hostile pair loaded without complaint.
 
-use super::{JambaConfig, JambaModel};
 use crate::models::switch_layers::{HOSTILE_QUANT_PARAMS, insert_stacked_quantized_expert_plane};
-use mlxcel_core::weights::WeightMap;
 
 /// Honest 4-bit geometry: `packed_in * 32 == bits * num_groups * group_size`
 /// on both projection shapes, so the positive controls below are planes MLX can

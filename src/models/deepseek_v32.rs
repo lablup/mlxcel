@@ -38,7 +38,7 @@ mod indexer;
 
 #[cfg(test)]
 #[path = "deepseek_v32_tests.rs"]
-mod deepseek_v32_tests;
+pub(crate) mod deepseek_v32_tests;
 
 use crate::distributed::pipeline::{LayerFilter, StageExecutionOutput};
 use crate::models::switch_layers::validate_expert_quantization_params;
@@ -1584,6 +1584,7 @@ impl DeepSeekV32StageModel {
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         let hidden = self
             .embed_tokens
@@ -1592,24 +1593,28 @@ impl DeepSeekV32StageModel {
                 "stage does not host embeddings; hidden-state input required".to_string()
             })?
             .forward(input_ids);
-        self.execute_hidden(hidden, caches)
+        self.execute_hidden(hidden, caches, last_pos)
     }
 
     pub(crate) fn execute_from_hidden_states(
         &self,
         hidden_states: UniquePtr<MlxArray>,
         caches: &mut [KVCache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if self.filter.has_embedding {
             return Err("entry stage expects token IDs, not hidden states".to_string());
         }
-        self.execute_hidden(hidden_states, caches)
+        self.execute_hidden(hidden_states, caches, last_pos)
     }
 
+    /// `last_pos` asks the final stage to project only that hidden row through
+    /// the norm and LM head (#3081); a non-final stage ignores it.
     fn execute_hidden(
         &self,
         mut hidden: UniquePtr<MlxArray>,
         caches: &mut [KVCache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if caches.len() != self.layers.len() {
             return Err(format!(
@@ -1623,6 +1628,12 @@ impl DeepSeekV32StageModel {
             hidden = layer.forward(&hidden, None, cache);
         }
 
+        // Norm and head act per position, so slicing first yields the row the
+        // full projection would have (#3081).
+        let hidden = match (self.filter.has_lm_head, last_pos) {
+            (true, Some(pos)) => mlxcel_core::generate::logits_at_position(&hidden, pos),
+            _ => hidden,
+        };
         let hidden = if let Some(norm) = &self.norm {
             norm.forward(&hidden)
         } else {

@@ -20,6 +20,13 @@ pub(crate) fn tiny_model_with_window(
     yarn: bool,
     sliding_window: usize,
 ) -> Result<GptOssModel, String> {
+    let (weights, args) = tiny_weights_and_args(yarn, sliding_window);
+    GptOssModel::from_weights(&weights, &args)
+}
+
+/// The synthetic weights and config behind [`tiny_model_with_window`], for
+/// stage-model tests that load the same tensors through a layer filter.
+pub(crate) fn tiny_weights_and_args(yarn: bool, sliding_window: usize) -> (WeightMap, ModelArgs) {
     let args: ModelArgs = serde_json::from_value(serde_json::json!({
         "model_type": "gpt_oss", "vocab_size": 32, "hidden_size": 64,
         "intermediate_size": 64, "num_hidden_layers": 2, "num_attention_heads": 2,
@@ -94,7 +101,7 @@ pub(crate) fn tiny_model_with_window(
             );
         }
     }
-    GptOssModel::from_weights(&weights, &args)
+    (weights, args)
 }
 
 fn input(tokens: &[i32]) -> UniquePtr<MlxArray> {

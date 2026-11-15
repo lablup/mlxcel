@@ -35,7 +35,7 @@ const INTERMEDIATE: i32 = 512;
 const HEAD_DIM: i32 = 256;
 const HEADS: i32 = 8;
 const KV_HEADS: i32 = 1;
-const LAYERS: usize = 4;
+pub(crate) const LAYERS: usize = 4;
 const WINDOW: i32 = 16;
 /// The activation dtype the real checkpoint runs in on CUDA.
 const DTYPE: i32 = mlxcel_core::dtype::FLOAT16;
@@ -62,7 +62,7 @@ fn ones(shape: &[i32]) -> UniquePtr<MlxArray> {
     mlxcel_core::astype(&f32_arr, DTYPE)
 }
 
-fn args() -> ModelArgs {
+pub(crate) fn args() -> ModelArgs {
     serde_json::from_str(&format!(
         r#"{{
             "model_type": "gemma3_text",
@@ -85,7 +85,7 @@ fn args() -> ModelArgs {
     .expect("fixture config must parse")
 }
 
-fn weights() -> WeightMap {
+pub(crate) fn weights() -> WeightMap {
     let mut w = WeightMap::new();
     w.insert(
         "model.embed_tokens.weight".into(),
@@ -154,13 +154,13 @@ fn two_stage_logits(
     caches1: &mut [Cache],
 ) -> UniquePtr<MlxArray> {
     let StageExecutionOutput::HiddenStates(hidden) = stage0
-        .execute_from_token_ids(ids, caches0)
+        .execute_from_token_ids(ids, caches0, None)
         .expect("stage 0 must run")
     else {
         panic!("stage 0 must hand hidden states downstream");
     };
     let StageExecutionOutput::Logits(logits) = stage1
-        .execute_from_hidden_states(hidden, caches1)
+        .execute_from_hidden_states(hidden, caches1, None)
         .expect("stage 1 must run")
     else {
         panic!("the last stage must produce logits");

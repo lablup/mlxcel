@@ -366,9 +366,9 @@ fn batched_dsa_mixes_dense_and_sparse_rows_after_live_cache_trim() {
     assert_eq!(actual_long.live_len(), 4, "trimmed long row remains sparse");
 }
 
-#[test]
-fn deepseek_v32_batched_decode_harness_covers_mixed_threshold_single_and_empty() {
-    let _runtime = crate::initialize_runtime();
+/// Sanitized weights and config of a one-layer DSA model, shared by the
+/// whole-model harness test below and the pipeline stage-executor tests.
+pub(crate) fn tiny_dsa_weights_and_args() -> (WeightMap, ModelArgs) {
     let args = tiny_mla_config(2);
     let mut weights = synthetic_mla_weights(&args, "model.layers.0.self_attn", true);
     let mut put = |key: &str, shape: &[i32]| {
@@ -384,6 +384,13 @@ fn deepseek_v32_batched_decode_harness_covers_mixed_threshold_single_and_empty()
     put("model.layers.0.mlp.down_proj.weight", &[6, 16]);
     let weights =
         super::DeepSeekV32Model::sanitize_weights(weights, &args).expect("sanitize tiny DSA model");
+    (weights, args)
+}
+
+#[test]
+fn deepseek_v32_batched_decode_harness_covers_mixed_threshold_single_and_empty() {
+    let _runtime = crate::initialize_runtime();
+    let (weights, args) = tiny_dsa_weights_and_args();
     let model =
         super::DeepSeekV32Model::from_weights(&weights, &args).expect("tiny DSA model loads");
 
