@@ -2,7 +2,7 @@
 
 **Date**: 2026-11-15
 **Reviewer**: -
-**Status**: Awaiting M5 verification
+**Status**: Verified on M3 Ultra and M5 Max
 **Languages**: Rust, Bash, Markdown
 **Risk Level**: Medium
 
@@ -10,7 +10,7 @@
 
 ## Executive Summary
 
-The full-attention layers of Qwen 3.5, Qwen3-Next, GraniteMoeHybrid and the Qwen-VL models built an f32 causal array mask for every prefill. Before M5, MLX does not fuse SDPA with that mask at head_dim 256, so a single-pass prefill took #3049's query-chunked fallback, and the 3.65 GiB mask stayed alive at 28K tokens (#3051). The models now leave causality to MLX's causal mode when it masks the same keys and MLX's own verdict says it fuses at the call's shape. Elsewhere they keep the shared array mask. On an M3 Ultra a 28K single pass drops from 30.13 to 19.82 GB (4B) and from 64.20 to 53.96 GB (27B), and runs 21% and 15% faster. Chunked CLI and server prefill are unchanged, and greedy output is byte-identical. The M5 run the issue requires is still open.
+The full-attention layers of Qwen 3.5, Qwen3-Next, GraniteMoeHybrid and the Qwen-VL models built an f32 causal array mask for every prefill. Before M5, MLX does not fuse SDPA with that mask at head_dim 256, so a single-pass prefill took #3049's query-chunked fallback, and the 3.65 GiB mask stayed alive at 28K tokens (#3051). The models now leave causality to MLX's causal mode when it masks the same keys and MLX's own verdict says it fuses at the call's shape. Elsewhere they keep the shared array mask. On an M3 Ultra a 28K single pass drops from 30.13 to 19.82 GB (4B) and from 64.20 to 53.96 GB (27B), and runs 21% and 15% faster. Chunked CLI and server prefill are unchanged, and greedy output is byte-identical. On an M5 Max, against a main build, the single pass drops from 14.53 to 8.76 GB (4B) and from 31.83 to 26.03 GB (27B) and runs 21% and 23% faster; the later 2048-token pieces take causal mode too, so the 28K chunked peak falls 6.0% and 1.7%. Output is byte-identical there as well.
 
 ---
 
@@ -89,6 +89,6 @@ Unit tests:
 
 ## 5. Remaining Work
 
-- M5 verification, which blocks merge. If MLX fuses causal mode for `q_len != k_len` on M5, the later pieces take causal mode and the chunked cells should show fewer gated calls. The commands are in the PR comment.
+- On M5 the short last piece of a chunked prefill (452 and 494 rows at 4.6K) still falls back: MLX reports causal mode unfused at that shape, so it keeps the shared array mask, as main does.
 - Before M5, a chunked prefill's later pieces still take MLX's fallback; no mask choice avoids it there.
 - Other hybrid families still build the array (`nemotron_h`, `falcon_h1`, `jamba`, `plamo2`, `lfm2`, `bailing_moe_linear`), as does the tensor-parallel Qwen 3.5 runtime. They are candidates for a grouped follow-up once each layer is confirmed to route a mask-less multi-token call through `causal_attention`.

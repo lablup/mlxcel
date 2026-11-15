@@ -1,4 +1,4 @@
-# Causal-mode prefill for the hybrid and Qwen-VL families (issue #3051), M3 Ultra, 2026-11-15
+# Causal-mode prefill for the hybrid and Qwen-VL families (issue #3051), M3 Ultra and M5 Max, 2026-11-15
 
 Issue #3051: the full-attention layers of Qwen 3.5, Qwen3-Next, GraniteMoeHybrid and the Qwen-VL models built an explicit f32 causal array mask for every prefill. Before M5, MLX fuses SDPA in causal mode at head_dim 256 but not with an array mask, so a single-pass prefill took the query-chunked fallback from #3049 and kept the 3.65 GiB mask alive for the whole pass at 28K tokens.
 
@@ -45,9 +45,44 @@ Two other ways to handle the pieces after the first were measured at 28K, in the
 
 Both variants regress the server's default chunked path. The per-layer mask also costs one f32 `[2048, 30K]` array per full-attention layer instead of one per forward. Asking MLX first, and keeping the shared mask where causal mode would fall back anyway, is the only variant tried that does not raise any peak.
 
-## M5
+## M5 Max
 
-Not run here. On an M5-generation GPU, MLX's verdict may fuse causal mode for the pieces after the first as well. In that case they take causal mode and the chunked cells should show fewer gated calls. The verification request with exact commands is on the PR.
+Host: Apple M5 Max, 128 GB, macOS 27.2.1, MLX pin `9f806b36`. Unlike the M3 Ultra run, the two arms are two release builds (`metal,accelerate`): base is `origin/main` at `49ea6cc9`, new is this branch rebased onto it. Same harness and prompts, greedy, 32 tokens, with `COOLDOWN=75` (a 75 s pause before every run) because back-to-back runs on this host throttle. The arms alternate A/B then B/A, everything in one GPU lock hold. Load average was 1.0 to 9.2. The highest readings came from a test build on the CPU during the qwen3.5-4b-4bit 28K cells and are recorded per row. The server cells were not run here. CSVs: `m5max-ab-summary-28k.csv`, `m5max-ab-summary-4600.csv`, `m5max-ab-summary-4600-rerun.csv`.
+
+On M5, MLX fuses head_dim 256 SDPA with an array mask too, so main already logs 0 gated calls at 28K. Causal mode still avoids the f32 mask and its fused kernel's working set. The 2048-row pieces behind a cache (`q_len != k_len`) take causal mode as well: `prefill_causal_mask` drops the mask only when MLX reports causal mode fused at the call's shape, and the chunked peaks fall in both models. On the M3 Ultra only the first piece did.
+
+28000-token prompt, means of two repetitions per arm:
+
+| Path | Model | Peak, main to branch | Prefill, main to branch | Gated calls |
+|---|---|---|---|---|
+| CLI single pass | qwen3.5-4b-4bit | 14.53 to **8.76 GB** (-39.7%) | 12.71 to **10.09 s** (-20.6%) | 0 to 0 |
+| CLI single pass | qwen3.8-27b-4bit | 31.83 to **26.03 GB** (-18.2%) | 57.65 to **44.63 s** (-22.6%) | 0 to 0 |
+| CLI 2048-token chunks | qwen3.5-4b-4bit | 6.06 to **5.70 GB** (-6.0%) | 7.78 to 7.67 s (-1.4%) | 0 to 0 |
+| CLI 2048-token chunks | qwen3.8-27b-4bit | 20.69 to **20.34 GB** (-1.7%) | 40.75 to 39.95 s (-2.0%) | 0 to 0 |
+
+The single-pass main repetitions spread widely (qwen3.5-4b-4bit 13.56 and 11.86 s, qwen3.8-27b-4bit 63.67 and 51.63 s), but both branch repetitions (9.63 and 10.54 s; 44.94 and 44.33 s) are below both main repetitions in each cell. Branch peaks agree within 22 MB between repetitions, main peaks within 1 MB.
+
+4600-token prompt with 2048-token chunks and `MLXCEL_ATTENTION_CHUNK_BUDGET_MB=16`:
+
+| Model | Peak, main to branch | Prefill, main to branch | Gated calls |
+|---|---|---|---|
+| qwen3.5-4b-4bit | 4.13 to 4.07 GB (-1.5%) | 819.2 to 810.9 ms (-1.0%) | 8 to 8 |
+| qwen3.8-27b-4bit (four repetitions, rerun) | 17.15 to 17.10 GB (-0.3%) | 4529.5 to 4398.3 ms (-2.9%) | 16 to 16 |
+
+In the first qwen3.8-27b-4bit pass, the branch's first repetition read 8550.7 ms against 4758.7 ms for its second, with main at 4391.8 and 4705.8 ms. That cell was rerun with four repetitions per arm. Every rerun branch repetition (4379.8 to 4415.0 ms) is below every main repetition (4486.0 to 4593.7 ms), so the slow reading was a one-off. Both passes are in the CSVs.
+
+The gated calls in the 4.6K cells are all on the last piece, `q=[1, 16, 452, 256]` over 4548 keys for qwen3.5-4b-4bit and `q=[1, 24, 494, 256]` over 4590 keys for qwen3.8-27b-4bit: MLX reports causal mode unfused at that shape too, so `prefill_causal_mask` keeps the shared array mask and the piece takes the same chunked fallback in both arms. This short tail is the remaining M5 gap the issue names.
+
+Greedy output is byte-identical between main and the branch in every cell and every repetition, and also between the two 4.6K passes.
+
+Op probe at the issue's shape (`sdpa_chunk_peak_memory_probe`, `[1,24,28000,256]` fp16, 4 KV heads, `test-fast` profile):
+
+| Mode | MLX fused | Single call peak / time | Gated peak / time |
+|---|---|---|---|
+| array mask | yes | 5.51 GB, 557 ms | 5.85 GB, 562 ms |
+| causal mode | yes | 3.94 GB, 245 ms | 4.28 GB, 235 ms |
+
+Both modes return `max_abs_diff=0` against their gated variant. These match the issue's earlier M5 Max reading (array mask 545 to 668 ms and 5.51 GB, causal mode 241 to 377 ms and 3.94 GB).
 
 ## Rerun
 
@@ -58,5 +93,15 @@ BASE_BIN=target/release/mlxcel NEW_BIN=target/release/mlxcel MODELS_DIR=models \
 BASE_BIN=target/release/mlxcel NEW_BIN=target/release/mlxcel MODELS_DIR=models \
   BASE_ENV=MLXCEL_PREFILL_CAUSAL_MODE=0 NEW_ENV=MLXCEL_PREFILL_CAUSAL_MODE=1 \
   TOKENS=4600 CLI_CELLS="qwen3.5-4b-4bit:2048 qwen3.8-27b-4bit:2048" SERVER_MODELS="" \
+  EXTRA_ENV=MLXCEL_ATTENTION_CHUNK_BUDGET_MB=16 scripts/bench/prefill_peak/ab_prefill.sh <out_dir>
+```
+
+The M5 Max run used a main build and a branch build instead, with a cooldown:
+
+```
+BASE_BIN=<main build> NEW_BIN=<branch build> MODELS_DIR=models COOLDOWN=75 SERVER_MODELS="" \
+  TOKENS=28000 scripts/bench/prefill_peak/ab_prefill.sh <out_dir>
+BASE_BIN=<main build> NEW_BIN=<branch build> MODELS_DIR=models COOLDOWN=75 SERVER_MODELS="" \
+  TOKENS=4600 CLI_CELLS="qwen3.5-4b-4bit:2048 qwen3.8-27b-4bit:2048" \
   EXTRA_ENV=MLXCEL_ATTENTION_CHUNK_BUDGET_MB=16 scripts/bench/prefill_peak/ab_prefill.sh <out_dir>
 ```

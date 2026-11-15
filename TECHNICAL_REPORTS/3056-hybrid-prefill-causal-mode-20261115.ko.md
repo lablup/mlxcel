@@ -2,7 +2,7 @@
 
 **날짜**: 2026-11-15
 **리뷰어**: -
-**상태**: M5 검증 대기
+**상태**: M3 Ultra, M5 Max 검증 완료
 **언어**: Rust, Bash, Markdown
 **위험도**: 중간
 
@@ -14,7 +14,7 @@ Qwen 3.5, Qwen3-Next, GraniteMoeHybrid, Qwen-VL 계열의 full-attention 레이�
 
 이제 모델은 두 조건을 모두 만족할 때 causality를 MLX causal mode에 맡깁니다. causal mode가 같은 키를 가려야 하고, 호출 shape에서 MLX 자체 판정이 fuse된다고 답해야 합니다. 그 밖의 경우에는 공유 array mask를 유지합니다.
 
-M3 Ultra에서 28K single pass의 피크는 30.13에서 19.82 GB(4B), 64.20에서 53.96 GB(27B)로 줄었고, 시간은 각각 21%, 15% 빨라졌습니다. 청크 CLI와 서버 prefill은 그대로이며 greedy 출력은 바이트 단위로 같습니다. 이슈가 요구하는 M5 측정은 아직 남아 있습니다.
+M3 Ultra에서 28K single pass의 피크는 30.13에서 19.82 GB(4B), 64.20에서 53.96 GB(27B)로 줄었고, 시간은 각각 21%, 15% 빨라졌습니다. 청크 CLI와 서버 prefill은 그대로이며 greedy 출력은 바이트 단위로 같습니다. M5 Max에서 main 빌드와 비교하면 single pass 피크는 14.53에서 8.76 GB(4B), 31.83에서 26.03 GB(27B)로 줄고 시간은 각각 21%, 23% 빨라집니다. 이후 2048 토큰 조각도 causal mode를 타므로 28K 청크 피크가 6.0%, 1.7% 내려갑니다. 여기서도 출력은 바이트 단위로 같습니다.
 
 ---
 
@@ -97,6 +97,6 @@ Metal이 아닌 빌드에서는 probe가 fused 커널이 없다고 답하므로,
 
 ## 5. 남은 작업
 
-- M5 검증(merge 차단). M5에서 MLX가 `q_len != k_len` causal mode를 fuse한다면 이후 조각들도 causal mode를 타고, 청크 셀의 gated call이 줄어야 합니다. 명령은 PR 코멘트에 있습니다.
+- M5에서도 청크 prefill의 짧은 마지막 조각(4.6K에서 452, 494 행)은 fallback합니다. MLX가 그 shape에서 causal mode를 fuse하지 않는다고 보고하므로 main과 같이 공유 array mask를 유지합니다.
 - M5 이전 하드웨어에서는 청크 prefill의 이후 조각이 여전히 MLX fallback을 탑니다. 그 경우에는 어떤 mask를 골라도 이를 피할 수 없습니다.
 - 다른 hybrid 계열(`nemotron_h`, `falcon_h1`, `jamba`, `plamo2`, `lfm2`, `bailing_moe_linear`)과 tensor-parallel Qwen 3.5 runtime은 아직 array를 만듭니다. 각 레이어가 mask 없는 multi-token 호출을 `causal_attention`으로 보내는지 확인한 뒤 묶어서 후속 작업으로 다룰 수 있습니다.
