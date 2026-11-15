@@ -1,0 +1,4 @@
+model,positions,top1_disagree,top1_disagree_pct,decided_positions_gap2,decided_disagree,decided_disagree_pct,largest_gap_at_disagreement,ppl_main,ppl_branch,ppl_delta_pct
+granite-4.0-h-tiny-4bit,16896,121,0.716,16148,4,0.025,2.750,1.2957,1.2945,-0.098
+falcon-h1-tiny-90m-instruct-4bit,16896,190,1.125,12168,0,0.000,1.172,2.2758,2.2752,-0.024
+plamo-2-1b,16896,19,0.112,9400,0,0.000,0.012,2.7860,2.7862,0.007

@@ -1,0 +1,19 @@
+round,model,chunk,greedy_output
+1,ai21-jamba-reasoning-3b-4bit,0,identical
+1,ai21-jamba-reasoning-3b-4bit,2048,identical
+1,falcon-h1-tiny-90m-instruct-4bit,0,main failed
+1,falcon-h1-tiny-90m-instruct-4bit,2048,differs
+1,granite-4.0-h-tiny-4bit,0,main failed
+1,granite-4.0-h-tiny-4bit,2048,identical
+1,plamo-2-1b,0,main failed
+1,plamo-2-1b,2048,identical
+2,ai21-jamba-reasoning-3b-4bit,0,identical
+2,ai21-jamba-reasoning-3b-4bit,2048,identical
+2,falcon-h1-tiny-90m-instruct-4bit,0,main failed
+2,falcon-h1-tiny-90m-instruct-4bit,2048,differs
+2,granite-4.0-h-tiny-4bit,0,main failed
+2,granite-4.0-h-tiny-4bit,2048,identical
+2,plamo-2-1b,0,main failed
+2,plamo-2-1b,2048,identical
+3,ai21-jamba-reasoning-3b-4bit,0,identical
+4,ai21-jamba-reasoning-3b-4bit,0,identical

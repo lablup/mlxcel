@@ -85,7 +85,11 @@ pub mod fp8_ct;
 // loaders, so the config merge and the weight pre-pass are one call each.
 pub mod fp8_checkpoint;
 pub mod gated_delta;
+// `ssd_scan` is the float32-hardened chunked Mamba2 SSD scan shared by the
+// hybrid families, so its working set is bounded by a chunk, not the prefill
+// piece (#3073).
 pub(crate) mod mla_batched;
+pub(crate) mod ssd_scan;
 // `rope_overrides` carries llama-server b10621's `--rope-scaling`,
 // `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` from the server
 // CLI down to the RoPE seams in `rope_utils` and `dynamic_ntk_rope` (#1450).

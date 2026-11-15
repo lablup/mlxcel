@@ -32,13 +32,14 @@ use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_deco
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, relu_squared, silu, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
-use mlxcel_core::{MlxArray, UniquePtr, concatenate, concatenate_many};
+use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::model_owned::ModelOwnedSequenceState;
 use super::recurrent_snapshot::{push_optional, restore_optional};
+use super::ssd_scan::{SsdEval, chunked_ssd_scan};
 
 static SSD_PREFILL_DISPATCH_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -975,43 +976,6 @@ impl NemotronHMamba2Mixer {
     }
 }
 
-/// Repeat array along axis by broadcasting (for Nemotron)
-fn repeat_axis_nemotron(x: &MlxArray, repeats: i32, axis: i32) -> UniquePtr<MlxArray> {
-    let shape = mlxcel_core::array_shape(x);
-    let ndim = shape.len() as i32;
-    let axis = if axis < 0 { ndim + axis } else { axis };
-
-    let mut new_shape: Vec<i32> = shape.iter().take(axis as usize + 1).copied().collect();
-    new_shape.push(1);
-    new_shape.extend(shape.iter().skip(axis as usize + 1));
-    let x_exp = mlxcel_core::reshape(x, &new_shape);
-
-    new_shape[axis as usize + 1] = repeats;
-    let x_broad = mlxcel_core::broadcast_to(&x_exp, &new_shape);
-
-    let mut final_shape: Vec<i32> = shape.clone();
-    final_shape[axis as usize] *= repeats;
-    mlxcel_core::reshape(&x_broad, &final_shape)
-}
-
-/// Segmented cumulative sum for SSM attention (for Nemotron)
-fn segsum_nemotron(x: &MlxArray) -> UniquePtr<MlxArray> {
-    let shape = mlxcel_core::array_shape(x);
-    let l = shape[shape.len() - 1];
-
-    let mut new_shape = shape.clone();
-    new_shape.push(1);
-    let x_exp = mlxcel_core::reshape(x, &new_shape);
-
-    let last_idx = new_shape.len() - 1;
-    new_shape[last_idx] = l;
-    let x_rep = mlxcel_core::broadcast_to(&x_exp, &new_shape);
-
-    let x_tril = mlxcel_core::tril(&x_rep, -1);
-    // Inclusive cumsum matching mamba2.rs segsum and Python mx.cumsum default
-    mlxcel_core::cumsum(&x_tril, -2, false, true)
-}
-
 /// Chunked SSD recurrence for Nemotron-H Mamba blocks.
 ///
 /// The surrogate attention matrices are quadratic in their sequence dimension.
@@ -1030,132 +994,20 @@ fn nemotron_h_ssm_attn(
     time_step_limit: (f32, f32),
     chunk_size: usize,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-    assert!(chunk_size > 0, "chunk_size must be greater than zero");
-
-    let input_dtype = mlxcel_core::array_dtype(x);
-    let x_shape = mlxcel_core::array_shape(x);
-    let batch = x_shape[0];
-    let seq_len = x_shape[1] as usize;
-    let num_heads = x_shape[2];
-    let head_dim = x_shape[3];
-
-    let b_shape = mlxcel_core::array_shape(b);
-    let n_groups = b_shape[2];
-    let state_dim = b_shape[3];
-    let repeats = num_heads / n_groups;
-
-    // Preserve the existing float32 precision boundary used to prevent the M5
-    // mixed-dtype and CB-matmul NaNs documented in `ssm_step`.
-    let dt_f32 = mlxcel_core::astype(dt, mlxcel_core::dtype::FLOAT32);
-    let dt_bias_f32 = mlxcel_core::astype(dt_bias, mlxcel_core::dtype::FLOAT32);
-    let dt_biased = mlxcel_core::add(&dt_f32, &dt_bias_f32);
-    let dt_soft = mlxcel_core::softplus(&dt_biased);
-    let min_val = mlxcel_core::full_f32(&[1], time_step_limit.0, mlxcel_core::dtype::FLOAT32);
-    let max_val = mlxcel_core::full_f32(&[1], time_step_limit.1, mlxcel_core::dtype::FLOAT32);
-    let dt = mlxcel_core::clip(&dt_soft, &min_val, &max_val);
-
-    let a = mlxcel_core::negative(&mlxcel_core::exp(a_log));
-    let a = mlxcel_core::astype(&a, mlxcel_core::dtype::FLOAT32);
-    let a_reshaped = mlxcel_core::reshape(&a, &[1, 1, num_heads]);
-    let dt_a = mlxcel_core::multiply(&dt, &a_reshaped);
-
-    let x_f32 = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
-    let dt_exp = mlxcel_core::reshape(&dt, &[batch, seq_len as i32, num_heads, 1]);
-    let dtx = mlxcel_core::multiply(&dt_exp, &x_f32);
-    let b_f32 = mlxcel_core::astype(b, mlxcel_core::dtype::FLOAT32);
-    let c_f32 = mlxcel_core::astype(c, mlxcel_core::dtype::FLOAT32);
-    let d_f32 = mlxcel_core::astype(d, mlxcel_core::dtype::FLOAT32);
-    let d_reshaped = mlxcel_core::reshape(&d_f32, &[1, 1, num_heads, 1]);
-
-    let output_capacity = seq_len / chunk_size + usize::from(!seq_len.is_multiple_of(chunk_size));
-    let mut outputs = Vec::with_capacity(output_capacity);
-    let mut current_state = state.map(mlxcel_core::copy);
-
-    for chunk_start in (0..seq_len).step_by(chunk_size) {
-        let chunk_end = chunk_start.saturating_add(chunk_size).min(seq_len);
-        let chunk_len = (chunk_end - chunk_start) as i32;
-
-        let chunk_x = slice_axis(&x_f32, 1, chunk_start as i32, chunk_end as i32);
-        let chunk_dtx = slice_axis(&dtx, 1, chunk_start as i32, chunk_end as i32);
-        let chunk_dt_a = slice_axis(&dt_a, 1, chunk_start as i32, chunk_end as i32);
-        let chunk_b = slice_axis(&b_f32, 1, chunk_start as i32, chunk_end as i32);
-        let chunk_c = slice_axis(&c_f32, 1, chunk_start as i32, chunk_end as i32);
-
-        let b_t = mlxcel_core::transpose_axes(&chunk_b, &[0, 2, 3, 1]);
-        let c_t = mlxcel_core::swap_axes(&chunk_c, 1, 2);
-        let cb = mlxcel_core::matmul(&c_t, &b_t);
-        let cb = repeat_axis_nemotron(&cb, repeats, 1);
-
-        let dt_a_t = mlxcel_core::swap_axes(&chunk_dt_a, 1, 2);
-        let decay = mlxcel_core::exp(&segsum_nemotron(&dt_a_t));
-        let attn_matrix = mlxcel_core::tril(&mlxcel_core::multiply(&cb, &decay), 0);
-        let dtx_t = mlxcel_core::swap_axes(&chunk_dtx, 1, 2);
-        let mut y_chunk = mlxcel_core::matmul(&attn_matrix, &dtx_t);
-        y_chunk = mlxcel_core::swap_axes(&y_chunk, 1, 2);
-
-        let decay_shape = mlxcel_core::array_shape(&decay);
-        let decay_last = slice_axis(&decay, 2, decay_shape[2] - 1, decay_shape[2]);
-        let decay_for_state = mlxcel_core::transpose_axes(&decay_last, &[0, 3, 1, 2]);
-        let b_rep = repeat_axis_nemotron(&b_t, repeats, 1);
-        let b_sw = mlxcel_core::swap_axes(&b_rep, 2, 3);
-        let dtx_decay = mlxcel_core::multiply(&chunk_dtx, &decay_for_state);
-        let dtx_decay_t = mlxcel_core::swap_axes(&dtx_decay, 1, 2);
-        let dtx_decay_t = mlxcel_core::swap_axes(&dtx_decay_t, 2, 3);
-        let mut next_state = mlxcel_core::matmul(&dtx_decay_t, &b_sw);
-
-        if let Some(ref previous_state) = current_state {
-            let dta_cumsum = mlxcel_core::cumsum(&chunk_dt_a, -2, false, true);
-            let exp_dta_cumsum = mlxcel_core::exp(&dta_cumsum);
-
-            let exp_shape = mlxcel_core::array_shape(&exp_dta_cumsum);
-            let last_exp = slice_axis(&exp_dta_cumsum, 1, exp_shape[1] - 1, exp_shape[1]);
-            let last_exp = mlxcel_core::reshape(&last_exp, &[batch, num_heads, 1, 1]);
-            let state_contrib = mlxcel_core::multiply(&last_exp, previous_state);
-            next_state = mlxcel_core::add(&next_state, &state_contrib);
-
-            let c_reshaped =
-                mlxcel_core::reshape(&chunk_c, &[batch, chunk_len, n_groups, 1, state_dim, 1]);
-            let state_reshaped = mlxcel_core::reshape(
-                previous_state,
-                &[batch, 1, n_groups, repeats, head_dim, state_dim],
-            );
-            let y_previous = mlxcel_core::matmul(&state_reshaped, &c_reshaped);
-            let y_previous = mlxcel_core::squeeze_axis(&y_previous, -1);
-            let y_previous =
-                mlxcel_core::reshape(&y_previous, &[batch, chunk_len, num_heads, head_dim]);
-            let mut exp_shape_y = mlxcel_core::array_shape(&exp_dta_cumsum);
-            exp_shape_y.push(1);
-            let exp_dta_exp = mlxcel_core::reshape(&exp_dta_cumsum, &exp_shape_y);
-            let y_previous = mlxcel_core::multiply(&exp_dta_exp, &y_previous);
-            y_chunk = mlxcel_core::add(&y_chunk, &y_previous);
-        }
-
-        let d_contrib = mlxcel_core::multiply(&chunk_x, &d_reshaped);
-        y_chunk = mlxcel_core::add(&y_chunk, &d_contrib);
-        y_chunk = mlxcel_core::astype(&y_chunk, input_dtype);
-
-        // Evaluation inside the loop is what releases each quadratic chunk
-        // graph before the next one is constructed. Evaluating only the final
-        // concatenation would retain every chunk's intermediates.
-        mlxcel_core::eval(&y_chunk);
-        mlxcel_core::eval(&next_state);
-        outputs.push(y_chunk);
-        current_state = Some(next_state);
-    }
-
-    let output = if outputs.len() == 1 {
-        outputs.pop().expect("one SSD output chunk")
-    } else {
-        let refs: Vec<&MlxArray> = outputs
-            .iter()
-            .map(|output| output.as_ref().expect("evaluated SSD output chunk"))
-            .collect();
-        concatenate_many(&refs, 1)
-    };
-
-    (
-        output,
-        current_state.expect("Nemotron-H SSM requires a non-empty sequence"),
+    // Each chunk is evaluated synchronously, which releases its quadratic
+    // graph before the next one is built.
+    chunked_ssd_scan(
+        x,
+        a_log,
+        b,
+        c,
+        d,
+        dt,
+        dt_bias,
+        state,
+        time_step_limit,
+        chunk_size,
+        SsdEval::EveryChunk,
     )
 }
 

@@ -83,6 +83,7 @@ use std::path::Path;
 use super::mamba2::Mamba2Cache;
 use super::model_owned::ModelOwnedSequenceState;
 use super::recurrent_snapshot::{push_optional, restore_optional};
+use super::ssd_scan::{SSD_CHUNK_SIZE, SSD_SCHEDULE_TOKENS, SsdEval, chunked_ssd_scan};
 
 // Per-norm offsets (folded into the stored weight at construction time).
 // Exposed to `plamo2_tests` so the exact PLaMo 2 offset values stay pinned.
@@ -214,44 +215,6 @@ impl ModelArgs {
         // `plamo-2-1b` uses `<|plamo:eos|>` (id 2) as EOS.
         super::mamba::parse_eos_token_ids(&self.eos_token_id, 2)
     }
-}
-
-// SSD-SSM helpers (adapted from `super::falcon_h1`).
-
-/// Repeat an array along `axis` by `repeats` (broadcast then reshape).
-fn repeat_axis(x: &MlxArray, repeats: i32, axis: i32) -> UniquePtr<MlxArray> {
-    let shape = mlxcel_core::array_shape(x);
-    let ndim = shape.len() as i32;
-    let axis = if axis < 0 { ndim + axis } else { axis };
-
-    let mut new_shape: Vec<i32> = shape.iter().take(axis as usize + 1).copied().collect();
-    new_shape.push(1);
-    new_shape.extend(shape.iter().skip(axis as usize + 1));
-    let x_exp = mlxcel_core::reshape(x, &new_shape);
-
-    new_shape[axis as usize + 1] = repeats;
-    let x_broad = mlxcel_core::broadcast_to(&x_exp, &new_shape);
-
-    let mut final_shape: Vec<i32> = shape.clone();
-    final_shape[axis as usize] *= repeats;
-    mlxcel_core::reshape(&x_broad, &final_shape)
-}
-
-/// Segmented cumulative sum used by the SSD surrogate-attention decay.
-fn segsum(x: &MlxArray) -> UniquePtr<MlxArray> {
-    let shape = mlxcel_core::array_shape(x);
-    let l = shape[shape.len() - 1];
-
-    let mut new_shape = shape.clone();
-    new_shape.push(1);
-    let x_exp = mlxcel_core::reshape(x, &new_shape);
-
-    let last_idx = new_shape.len() - 1;
-    new_shape[last_idx] = l;
-    let x_rep = mlxcel_core::broadcast_to(&x_exp, &new_shape);
-
-    let x_tril = mlxcel_core::tril(&x_rep, -1);
-    mlxcel_core::cumsum(&x_tril, -2, false, true)
 }
 
 // PLaMo 2 Mamba mixer.
@@ -451,107 +414,26 @@ impl Plamo2Mamba {
             ],
         );
 
-        let num_heads = self.num_heads as i32;
-        let n_groups = self.n_groups as i32;
-        let state_dim = self.ssm_state_size as i32;
-        let head_dim = self.head_dim as i32;
-        let repeats = num_heads / n_groups;
-
-        // dt = clip(softplus(dt + dt_bias), limit) in float32.
-        let dt_f32 = mlxcel_core::astype(dt, mlxcel_core::dtype::FLOAT32);
-        let dt_bias_f32 = mlxcel_core::astype(&self.dt_bias, mlxcel_core::dtype::FLOAT32);
-        let dt_biased = mlxcel_core::add(&dt_f32, &dt_bias_f32);
-        let dt_soft = mlxcel_core::softplus(&dt_biased);
-        let min_val =
-            mlxcel_core::full_f32(&[1], self.time_step_limit.0, mlxcel_core::dtype::FLOAT32);
-        let max_val =
-            mlxcel_core::full_f32(&[1], self.time_step_limit.1, mlxcel_core::dtype::FLOAT32);
-        let dt = mlxcel_core::clip(&dt_soft, &min_val, &max_val);
-
-        // A = -exp(A_log).
-        let a = mlxcel_core::negative(&mlxcel_core::exp(&self.a_log));
-        let a = mlxcel_core::astype(&a, mlxcel_core::array_dtype(&dt));
-        let a_reshaped = mlxcel_core::reshape(&a, &[1, 1, num_heads]);
-        let dt_a = mlxcel_core::multiply(&dt, &a_reshaped);
-
-        let dt_exp = mlxcel_core::reshape(&dt, &[batch, seq_len, num_heads, 1]);
-        let x_f32 = mlxcel_core::astype(&x, mlxcel_core::dtype::FLOAT32);
-        let dtx = mlxcel_core::multiply(&dt_exp, &x_f32);
-
-        let b_f32 = mlxcel_core::astype(&b, mlxcel_core::dtype::FLOAT32);
-        let c_f32 = mlxcel_core::astype(&c, mlxcel_core::dtype::FLOAT32);
-
-        // CB = C.swapaxes(1, 2) @ B.transpose(0, 2, 3, 1), repeated per head.
-        let b_t = mlxcel_core::transpose_axes(&b_f32, &[0, 2, 3, 1]);
-        let c_t = mlxcel_core::swap_axes(&c_f32, 1, 2);
-        let cb = mlxcel_core::matmul(&c_t, &b_t);
-        let cb = repeat_axis(&cb, repeats, 1);
-
-        // decay = exp(segsum(dtA.swapaxes(1, 2)));  surrogate = tril(CB * decay).
-        let dt_a_t = mlxcel_core::swap_axes(&dt_a, 1, 2);
-        let seg = segsum(&dt_a_t);
-        let decay = mlxcel_core::exp(&seg);
-        let attn_matrix = mlxcel_core::multiply(&cb, &decay);
-        let attn_matrix = mlxcel_core::tril(&attn_matrix, 0);
-
-        let dtx_t = mlxcel_core::swap_axes(&dtx, 1, 2);
-        let y = mlxcel_core::matmul(&attn_matrix, &dtx_t);
-        let y = mlxcel_core::swap_axes(&y, 1, 2);
-
-        // next_state from this chunk.
-        let decay_shape = mlxcel_core::array_shape(&decay);
-        let decay_last = slice_axis(&decay, 2, decay_shape[2] - 1, decay_shape[2]);
-        let decay_t = mlxcel_core::transpose_axes(&decay_last, &[0, 3, 1, 2]);
-
-        let b_rep = repeat_axis(&b_t, repeats, 1);
-        let b_sw = mlxcel_core::swap_axes(&b_rep, 2, 3);
-
-        let dtx_decay = mlxcel_core::multiply(&dtx, &decay_t);
-        let dtx_decay_t = mlxcel_core::swap_axes(&dtx_decay, 1, 2);
-        let dtx_decay_t = mlxcel_core::swap_axes(&dtx_decay_t, 2, 3);
-        let mut next_state = mlxcel_core::matmul(&dtx_decay_t, &b_sw);
-
-        // Carry the previous recurrent state forward.
-        let y = if let Some(prev_state) = state {
-            let dta_cumsum = mlxcel_core::cumsum(&dt_a, -2, false, true);
-            let exp_dta_cumsum = mlxcel_core::exp(&dta_cumsum);
-
-            let exp_shape = mlxcel_core::array_shape(&exp_dta_cumsum);
-            let last_exp = slice_axis(&exp_dta_cumsum, 1, exp_shape[1] - 1, exp_shape[1]);
-            let last_exp = mlxcel_core::reshape(&last_exp, &[batch, num_heads, 1, 1]);
-            let state_contrib = mlxcel_core::multiply(&last_exp, prev_state);
-            next_state = mlxcel_core::add(&next_state, &state_contrib);
-
-            let c_reshaped =
-                mlxcel_core::reshape(&c_f32, &[batch, seq_len, n_groups, 1, state_dim, 1]);
-            let state_reshaped = mlxcel_core::reshape(
-                prev_state,
-                &[batch, 1, n_groups, repeats, head_dim, state_dim],
-            );
-            let y_prev = mlxcel_core::matmul(&state_reshaped, &c_reshaped);
-            let y_prev = mlxcel_core::squeeze_axis(&y_prev, -1);
-            let y_prev = mlxcel_core::reshape(&y_prev, &[batch, seq_len, num_heads, head_dim]);
-
-            let mut exp_shape_y = mlxcel_core::array_shape(&exp_dta_cumsum);
-            exp_shape_y.push(1);
-            let exp_dta_exp = mlxcel_core::reshape(&exp_dta_cumsum, &exp_shape_y);
-            let y_prev_scaled = mlxcel_core::multiply(&exp_dta_exp, &y_prev);
-            mlxcel_core::add(&y, &y_prev_scaled)
-        } else {
-            y
-        };
-
-        // y = y + x * D (float32 throughout to avoid mixed-dtype NaN).
-        let d_f32 = mlxcel_core::astype(&self.d_param, mlxcel_core::dtype::FLOAT32);
-        let d_reshaped = mlxcel_core::reshape(&d_f32, &[1, 1, num_heads, 1]);
-        let d_contrib = mlxcel_core::multiply(&x_f32, &d_reshaped);
-        let y = mlxcel_core::add(&y, &d_contrib);
-
-        let y = mlxcel_core::astype(&y, mlxcel_core::array_dtype(hidden_states));
-
+        // Chunked over `SSD_CHUNK_SIZE` tokens, so the quadratic surrogate
+        // attention is bounded by the chunk rather than the prefill piece
+        // (#3073). The scan schedules its own output once more than
+        // `SSD_SCHEDULE_TOKENS` tokens have accumulated; the evaluation of the
+        // result below is the one this family always had.
+        let (y, next_state) = chunked_ssd_scan(
+            &x,
+            &self.a_log,
+            &b,
+            &c,
+            &self.d_param,
+            dt,
+            &self.dt_bias,
+            state,
+            self.time_step_limit,
+            SSD_CHUNK_SIZE,
+            SsdEval::ScheduleEvery(SSD_SCHEDULE_TOKENS),
+        );
         mlxcel_core::eval(&y);
         mlxcel_core::eval(&next_state);
-
         (y, next_state)
     }
 
