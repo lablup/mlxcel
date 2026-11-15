@@ -226,6 +226,14 @@ pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters}
 /// Test support only (issue #3028): decode-step scalar reuse instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{decode_scalar_counters, reset_decode_scalar_counters};
+/// Test support only (issue #3060): choose the single-sequence decode argument
+/// ABI for engines loaded from this thread (`Some(true)` ABI-level scalars,
+/// `Some(false)` the legacy buffer views, `None` the default scalar ABI). The
+/// device gate compiles both variants and compares their token streams.
+#[cfg(feature = "test-support")]
+pub fn set_decode_scalar_abi_for_thread(enabled: Option<bool>) {
+    emitter::set_decode_scalar_abi_for_thread(enabled);
+}
 /// Test support only (issue #2961): resident-weight upload instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{reset_weight_upload_counters, weight_upload_counters};

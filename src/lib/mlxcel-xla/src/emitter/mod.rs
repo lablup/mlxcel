@@ -176,6 +176,11 @@ pub(crate) use builder::{
     Precision, ProjectionLayout, check_packed_supported, precision_env_override, quant_in_graph,
     resolve_precision, resolve_precision_checked, target_flags_with_rocm_target,
 };
+/// Test support only (issue #3060): toggle the single-sequence decode scalar ABI
+/// per thread so the device gate can compile and run both the scalar and the
+/// legacy buffer-view variants.
+#[cfg(feature = "test-support")]
+pub(crate) use model::set_decode_scalar_abi_for_thread;
 #[allow(unused_imports)]
 pub(crate) use model::{
     PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
@@ -744,6 +749,80 @@ mod tests {
             prefill_signature.contains(&cache_ty),
             "prefill still returns the full caches: {prefill_signature}"
         );
+    }
+
+    fn main_signature<'a>(mlir: &'a str, graph: &str) -> &'a str {
+        mlir.split("func.func public @main(")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{graph} main function"))
+            .split("{\n")
+            .next()
+            .unwrap_or_else(|| panic!("{graph} signature text"))
+    }
+
+    /// Issue #3060: the single-sequence decode takes token, position and
+    /// cache_len as ABI-level `i32` arguments instead of rank-0 `tensor<i32>`
+    /// buffer views, so IREE stops materializing a host-visible staging resource
+    /// to bring them to the host. The prologue rebuilds the tensor operands, and
+    /// the module exports the capability marker the shim probes. Every other
+    /// graph keeps its current signature, and M-RoPE keeps its tensor position.
+    #[test]
+    fn single_decode_takes_its_scalars_as_abi_i32_arguments() {
+        let c = Config::llama_3_2_1b();
+        let mlir = emit_decode(&c, true);
+        let sig = main_signature(&mlir, "decode");
+        for (arg, loc) in [
+            ("token", "token"),
+            ("pos", "pos"),
+            ("cache_len", "cache_len"),
+        ] {
+            assert!(
+                sig.contains(&format!(": i32 loc(\"{loc}\")")),
+                "decode must pass {arg} as a bare i32: {sig}"
+            );
+            assert!(
+                !sig.contains(&format!("tensor<i32> loc(\"{loc}\")")),
+                "{loc} must not stay a rank-0 tensor argument: {sig}"
+            );
+        }
+        // The body still consumes rank-0 tensors: the prologue rebuilds one per
+        // ABI scalar, so the op sequence after it is unchanged.
+        let from_elements = mlir.matches("= tensor.from_elements %arg").count();
+        assert_eq!(
+            from_elements, 3,
+            "each ABI scalar must be rebuilt with tensor.from_elements"
+        );
+        assert!(
+            mlir.contains("func.func public @scalar_inputs()"),
+            "the shim probes this marker to choose the scalar push path"
+        );
+
+        // M-RoPE carries a tensor<3xi32> position, so that decode path keeps the
+        // whole buffer-argument ABI and does not export the marker.
+        let mrope = emit_decode(&mrope_qwen(MropeLayout::Interleaved), true);
+        let mrope_sig = main_signature(&mrope, "mrope decode");
+        assert!(mrope_sig.contains("tensor<i32> loc(\"token\")"));
+        assert!(mrope_sig.contains("tensor<3xi32> loc(\"pos\")"));
+        assert!(mrope_sig.contains("tensor<i32> loc(\"cache_len\")"));
+        assert!(!mrope.contains("@scalar_inputs"));
+
+        // Ragged / lockstep batch decode and prefill keep their signatures.
+        let ragged = emit_decode_ragged(&c, 4, false);
+        let ragged_sig = main_signature(&ragged, "ragged decode");
+        assert!(ragged_sig.contains("tensor<4xi32> loc(\"token\")"));
+        assert!(ragged_sig.contains("tensor<4xi32> loc(\"cache_len\")"));
+        assert!(!ragged.contains("@scalar_inputs"));
+
+        let batched = emit_decode_batched(&c, 4, false);
+        let batched_sig = main_signature(&batched, "batched decode");
+        assert!(batched_sig.contains("tensor<4xi32> loc(\"token\")"));
+        assert!(!batched.contains("@scalar_inputs"));
+
+        let prefill = emit_prefill(&c, false);
+        let prefill_sig = main_signature(&prefill, "prefill");
+        assert!(prefill_sig.contains("tensor<") && prefill_sig.contains("loc(\"tokens\")"));
+        assert!(prefill_sig.contains("loc(\"positions\")"));
+        assert!(!prefill.contains("@scalar_inputs"));
     }
 
     /// The shared attention core (issue #494) keeps a family's attention / MLP

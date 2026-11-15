@@ -922,6 +922,26 @@ impl Builder {
         }
     }
 
+    /// Rebuild a rank-0 `tensor<i32>` from an ABI-level `i32` function argument
+    /// (issue #3060): `tensor.from_elements %argN : tensor<i32>`. The single-
+    /// sequence decode receives token, pos and cache_len as bare `i32` VM
+    /// arguments so IREE does not materialize a host-visible staging resource,
+    /// but the StableHLO ops below (`dynamic_slice` offsets, the mask broadcast,
+    /// the RoPE index) take a tensor operand. Wrapping at the prologue keeps the
+    /// op sequence after it byte-identical to the buffer-argument graph and does
+    /// not reintroduce the staging resource.
+    pub fn tensor_from_elements_i32(&mut self, scalar: &Val) -> Val {
+        let r = self.fresh();
+        self.line(format!(
+            "{} = tensor.from_elements {} : tensor<i32>",
+            r, scalar.name
+        ));
+        Val {
+            name: r,
+            ty: Ty::scalar("i32"),
+        }
+    }
+
     pub fn const_i1(&mut self, value: bool) -> Val {
         let r = self.fresh();
         self.line(format!(
