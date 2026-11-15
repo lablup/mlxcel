@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Op-level measurement of the fused tanh-GELU f32 Metal kernel against the two
-//! chains it replaces.
+//! Op-level measurement of the fused tanh-GELU f32 kernel (Metal port #2857,
+//! CUDA port #2780) against the two chains it replaces.
 //!
 //! `gelu_tanh_f32` applies one eager elementwise formula and passes about a
 //! dozen times over a full-width intermediate. `compiled_gelu_tanh_f32` folds
@@ -46,6 +46,13 @@
 //! ```text
 //! caffeinate -i cargo run --release --features metal,accelerate \
 //!     --example fused_gelu_tanh_microbench
+//! ```
+//!
+//! On a CUDA host, where there is no idle throttling to hold off, run it on a
+//! quiet GPU with the PTX cache warm (the first call compiles the kernel):
+//!
+//! ```text
+//! cargo run --release --features cuda --example fused_gelu_tanh_microbench
 //! ```
 //!
 //! `fused_gelu_tanh_f32_available()` is false off the GPU stream, so with
@@ -113,7 +120,7 @@ fn main() {
     if !fused_gelu_tanh_f32_available() {
         println!(
             "fused_gelu_tanh_f32 has no port for this backend; run with MLXCEL_DEVICE=gpu \
-             on a Metal build"
+             on a Metal or CUDA build"
         );
         return;
     }

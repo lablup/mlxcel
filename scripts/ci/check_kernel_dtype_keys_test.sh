@@ -110,7 +110,7 @@ bridge="src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp"
 # below is caused by its mutation and not by the copy.
 dir="$(make_tree control)"
 if run_case control "$dir" 0; then
-  assert_contains control "9 in scope (launching cuda_kernel or hip_kernel) of"
+  assert_contains control "10 in scope (launching cuda_kernel or hip_kernel) of"
   assert_contains control "source files scanned"
 fi
 
@@ -252,7 +252,7 @@ git -C "$dir" init -q
 printf '/references/\n' >"$dir/.gitignore"
 write_launcher "$dir/references/mlx/python/src/fast.cpp" cuda_kernel
 if run_case git-work-tree-ignored "$dir" 0; then
-  assert_contains git-work-tree-ignored "9 in scope"
+  assert_contains git-work-tree-ignored "10 in scope"
 fi
 write_launcher "$dir/src/lib/mlxcelverse/kernels/untracked_launch.h" cuda_kernel
 if run_case git-work-tree-untracked "$dir" 1; then
