@@ -79,3 +79,63 @@ fn lazy_contiguous_tail_keeps_its_source() {
         "the lazy tail kept only {retained} bytes; the source is {SOURCE_BYTES}"
     );
 }
+
+/// Runs a single-pass first fill of a `[1, 1, ROWS, WIDTH]` prompt through a
+/// rotating cache with a 64-token window, evaluates only the attention-side
+/// consumer of the returned K/V (as the layer does), drops every handle but
+/// the cache, and returns the bytes still active (issue #3062).
+fn rotating_first_fill_retained(full_scope: bool) -> u64 {
+    use mlxcel_core::cache::{FullFirstFillScope, RotatingKVCache};
+    mlxcel_core::clear_memory_cache();
+    mlxcel_core::synchronize_default();
+    let before = mlxcel_core::memory::active_memory();
+    let mut cache = RotatingKVCache::new(64);
+    let ones = mlxcel_core::ones(&[1, 1, ROWS, WIDTH], mlxcel_core::dtype::FLOAT16);
+    let keys = mlxcel_core::multiply(
+        &ones,
+        &mlxcel_core::full_f32(&[1], 2.0, mlxcel_core::dtype::FLOAT16),
+    );
+    let values = mlxcel_core::multiply(
+        &ones,
+        &mlxcel_core::full_f32(&[1], 3.0, mlxcel_core::dtype::FLOAT16),
+    );
+    drop(ones);
+    let (k, v) = {
+        let _scope = full_scope.then(FullFirstFillScope::enter);
+        cache.update_and_fetch(keys, values)
+    };
+    let consumer = mlxcel_core::add(&mlxcel_core::sum_all(&k), &mlxcel_core::sum_all(&v));
+    drop(k);
+    drop(v);
+    mlxcel_core::eval(&consumer);
+    drop(consumer);
+    mlxcel_core::synchronize_default();
+    mlxcel_core::clear_memory_cache();
+    let retained = mlxcel_core::memory::active_memory().saturating_sub(before);
+    mlxcel_core::eval(cache.keys.as_ref().expect("cache holds keys"));
+    retained
+}
+
+#[test]
+fn rotating_first_fill_releases_the_full_prompt_after_attention() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let retained = rotating_first_fill_retained(false);
+    assert!(
+        retained < SOURCE_BYTES / 8,
+        "the first fill kept {retained} bytes alive; K and V are {} together",
+        2 * SOURCE_BYTES
+    );
+}
+
+/// The control: inside a `FullFirstFillScope` the cache stores the whole
+/// prompt, so the guard above cannot pass vacuously.
+#[test]
+fn scoped_rotating_first_fill_keeps_the_full_prompt() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let retained = rotating_first_fill_retained(true);
+    assert!(
+        retained >= SOURCE_BYTES,
+        "the scoped first fill kept only {retained} bytes; K and V are {} together",
+        2 * SOURCE_BYTES
+    );
+}
