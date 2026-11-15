@@ -240,15 +240,65 @@ pub(crate) fn causal_mode_applies(
     seq_len > 1 && batch == 1 && !has_caller_mask && !speculative && enabled
 }
 
-/// The causal mask a model-built prefill needs: `None` for a decode row or
-/// when [`prefill_uses_causal_mode`] says MLX's causal mode applies, in which
-/// case the layer must route a `seq_len > 1` forward without a mask through
-/// [`crate::causal_attention`]; else [`create_causal_mask`]`(seq_len, offset)`.
+/// The attention geometry of a model's full-attention layers, which the
+/// prefill mask choice needs to ask MLX whether causal mode fuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillAttention {
+    pub q_heads: i32,
+    pub kv_heads: i32,
+    pub head_dim: i32,
+}
+
+impl PrefillAttention {
+    pub fn new(q_heads: usize, kv_heads: usize, head_dim: usize) -> Self {
+        Self {
+            q_heads: q_heads as i32,
+            kv_heads: kv_heads as i32,
+            head_dim: head_dim as i32,
+        }
+    }
+}
+
+/// The causal mask a model-built prefill needs: `None` for a decode row, or
+/// when [`prefill_uses_causal_mode`] allows causal mode and MLX fuses causal
+/// SDPA at this shape, in which case the layer must route a `seq_len > 1`
+/// forward without a mask through [`crate::causal_attention`]; else
+/// [`create_causal_mask`]`(seq_len, offset)`.
+///
+/// Where MLX would fall back for causal mode too (pre-M5 Metal at head_dim
+/// 256 over `q_len != k_len`, every prefill piece after the first), the array
+/// mask stays: the model builds it once per forward and every full-attention
+/// layer shares it, which peaks lower than the per-layer chunked causal
+/// fallback (+4% on qwen3.8-27b at 28K tokens with 2048-token chunks). The
+/// verdict comes from MLX itself through
+/// [`crate::window_sdpa::sdpa_mode_is_fused`], memoized per shape.
+/// `activation_dtype` is the hidden state's dtype.
 ///
 /// Used by: Qwen 3.5, Qwen3-Next (single model and pipeline stage),
 /// GraniteMoeHybrid, Qwen2-VL, Qwen3-VL, Qwen3-VL-MoE.
-pub fn prefill_causal_mask(seq_len: i32, offset: i32, batch: i32) -> Option<UniquePtr<MlxArray>> {
-    if seq_len <= 1 || prefill_uses_causal_mode(seq_len, batch, false) {
+pub fn prefill_causal_mask(
+    seq_len: i32,
+    offset: i32,
+    batch: i32,
+    attention: PrefillAttention,
+    activation_dtype: i32,
+) -> Option<UniquePtr<MlxArray>> {
+    if seq_len <= 1 {
+        return None;
+    }
+    let causal = prefill_uses_causal_mode(seq_len, batch, false) && {
+        let shape = crate::window_sdpa::WindowSdpaShape::prefill(
+            batch,
+            attention.q_heads,
+            attention.kv_heads,
+            seq_len,
+            offset + seq_len,
+            attention.head_dim,
+            activation_dtype,
+        );
+        crate::window_sdpa::sdpa_mode_is_fused(&shape, false, true)
+    };
+    if causal {
         None
     } else {
         Some(create_causal_mask(seq_len, offset))

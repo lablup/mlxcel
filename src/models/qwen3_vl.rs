@@ -771,6 +771,16 @@ pub struct Qwen3VLDeepStackDiagnostics {
 }
 
 impl Qwen3VLModel {
+    /// Head counts and head dim for [`mlxcel_core::utils::prefill_causal_mask`]
+    /// (#3051).
+    fn prefill_attention(&self) -> mlxcel_core::utils::PrefillAttention {
+        mlxcel_core::utils::PrefillAttention::new(
+            self._config.num_attention_heads,
+            self._config.num_kv_heads(),
+            self._config.head_dim(),
+        )
+    }
+
     pub fn from_weights(weights: &WeightMap, config: &Qwen3VLConfig) -> Result<Self, String> {
         let gs = config.group_size();
         let bits = config.bits();
@@ -1258,8 +1268,13 @@ impl Qwen3VLModel {
         let mask = if mask.is_some() {
             mask
         } else if seq_len > 1 {
-            auto_mask =
-                mlxcel_core::utils::prefill_causal_mask(seq_len, caches[0].live_len(), batch);
+            auto_mask = mlxcel_core::utils::prefill_causal_mask(
+                seq_len,
+                caches[0].live_len(),
+                batch,
+                self.prefill_attention(),
+                mlxcel_core::array_dtype(&h),
+            );
             auto_mask.as_deref()
         } else {
             // Decode width. The one query row sits at logical position

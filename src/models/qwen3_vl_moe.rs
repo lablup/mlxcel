@@ -856,6 +856,16 @@ pub struct Qwen3VLMoeModel {
 }
 
 impl Qwen3VLMoeModel {
+    /// Head counts and head dim for [`mlxcel_core::utils::prefill_causal_mask`]
+    /// (#3051).
+    fn prefill_attention(&self) -> mlxcel_core::utils::PrefillAttention {
+        mlxcel_core::utils::PrefillAttention::new(
+            self._config.num_attention_heads,
+            self._config.num_kv_heads(),
+            self._config.head_dim(),
+        )
+    }
+
     pub fn from_weights(weights: &WeightMap, config: &Qwen3VLMoeConfig) -> Result<Self, String> {
         let gs = config.group_size();
         let bits = config.bits();
@@ -1210,8 +1220,13 @@ impl Qwen3VLMoeModel {
         let mask = if mask.is_some() {
             mask
         } else if seq_len > 1 {
-            auto_mask =
-                mlxcel_core::utils::prefill_causal_mask(seq_len, caches[0].live_len(), batch);
+            auto_mask = mlxcel_core::utils::prefill_causal_mask(
+                seq_len,
+                caches[0].live_len(),
+                batch,
+                self.prefill_attention(),
+                mlxcel_core::array_dtype(&h),
+            );
             auto_mask.as_deref()
         } else {
             // Decode width. The one query row sits at logical position
@@ -1316,7 +1331,13 @@ impl Qwen3VLMoeModel {
         let seq_len = shape[1];
         // `forward_text_only` takes MLX's causal mode for a mask-less
         // multi-token forward (#3051).
-        let mask = mlxcel_core::utils::prefill_causal_mask(seq_len, 0, shape[0]);
+        let mask = mlxcel_core::utils::prefill_causal_mask(
+            seq_len,
+            0,
+            shape[0],
+            self.prefill_attention(),
+            mlxcel_core::array_dtype(&h),
+        );
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()).take(num_layers) {
             h = layer.forward_text_only(&h, cache, mask.as_deref());
         }

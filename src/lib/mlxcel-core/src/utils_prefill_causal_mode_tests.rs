@@ -17,12 +17,27 @@
 //! keys `create_causal_mask` allows, at offset 0 and behind a cache.
 
 use super::{
-    causal_mode_applies, create_causal_mask, parse_prefill_causal_mode, prefill_causal_mask,
-    prefill_causal_mode_enabled, prefill_uses_causal_mode,
+    PrefillAttention, causal_mode_applies, create_causal_mask, parse_prefill_causal_mode,
+    prefill_causal_mask, prefill_causal_mode_enabled, prefill_uses_causal_mode,
 };
 use crate::cache::DecodeLookaheadAppendScope;
 use crate::ffi;
+use crate::window_sdpa::{WindowSdpaShape, sdpa_mode_is_fused};
 use cxx::UniquePtr;
+
+/// The geometry the equivalence helper below uses, in f32.
+const ATTN: PrefillAttention = PrefillAttention {
+    q_heads: 4,
+    kv_heads: 2,
+    head_dim: 64,
+};
+const F32: i32 = crate::dtype::FLOAT32;
+
+/// MLX's own verdict for causal mode at a single-row prefill of `ATTN`.
+fn causal_fuses(q_len: i32, offset: i32) -> bool {
+    let shape = WindowSdpaShape::prefill(1, 4, 2, q_len, offset + q_len, 64, F32);
+    sdpa_mode_is_fused(&shape, false, true)
+}
 
 fn draw(shape: &[i32], seed: u32) -> UniquePtr<ffi::MlxArray> {
     let len: i32 = shape.iter().product();
@@ -72,7 +87,10 @@ fn a_cold_single_row_prefill_uses_causal_mode_and_matches_the_array_mask() {
     assert!(causal_mode_applies(37, 1, false, false, true));
     if prefill_causal_mode_enabled() {
         assert!(prefill_uses_causal_mode(37, 1, false));
-        assert!(prefill_causal_mask(37, 0, 1).is_none());
+        assert_eq!(
+            prefill_causal_mask(37, 0, 1, ATTN, F32).is_none(),
+            causal_fuses(37, 0)
+        );
     }
     assert_causal_mode_matches_array_mask(37, 0);
 }
@@ -84,7 +102,10 @@ fn a_prefill_piece_behind_a_cache_uses_causal_mode_and_matches_the_array_mask() 
     // attends `offset + q_len` keys.
     assert!(causal_mode_applies(16, 1, false, false, true));
     if prefill_causal_mode_enabled() {
-        assert!(prefill_causal_mask(16, 300, 1).is_none());
+        assert_eq!(
+            prefill_causal_mask(16, 300, 1, ATTN, F32).is_none(),
+            causal_fuses(16, 300)
+        );
     }
     assert_causal_mode_matches_array_mask(16, 5);
     assert_causal_mode_matches_array_mask(16, 300);
@@ -104,8 +125,24 @@ fn a_speculative_verify_block_keeps_the_array_mask() {
     assert!(!causal_mode_applies(4, 1, false, true, true));
     let _scope = DecodeLookaheadAppendScope::enter();
     assert!(!prefill_uses_causal_mode(4, 1, false));
-    let mask = prefill_causal_mask(4, 100, 1).expect("a verify block keeps the array mask");
+    let mask =
+        prefill_causal_mask(4, 100, 1, ATTN, F32).expect("a verify block keeps the array mask");
     assert_eq!(ffi::array_shape(&mask), vec![4, 104]);
+}
+
+#[test]
+fn a_shape_mlx_does_not_fuse_in_causal_mode_keeps_the_shared_array_mask() {
+    // Where causal mode would fall back as well, the model's one array mask
+    // is shared by every layer instead of a chunked fallback per layer.
+    let bf16 = crate::dtype::BFLOAT16;
+    let attention = PrefillAttention::new(16, 4, 256);
+    let shape = WindowSdpaShape::prefill(1, 16, 4, 2048, 6144, 256, bf16);
+    let fused = sdpa_mode_is_fused(&shape, false, true);
+    let mask = prefill_causal_mask(2048, 4096, 1, attention, bf16);
+    assert_eq!(mask.is_none(), fused && prefill_causal_mode_enabled());
+    if let Some(mask) = mask {
+        assert_eq!(ffi::array_shape(&mask), vec![2048, 6144]);
+    }
 }
 
 #[test]
@@ -122,15 +159,16 @@ fn a_padded_prefill_keeps_its_caller_mask() {
 #[test]
 fn a_batched_prefill_keeps_the_array_mask() {
     assert!(!prefill_uses_causal_mode(16, 2, false));
-    let mask = prefill_causal_mask(16, 4, 2).expect("a batched prefill keeps the array mask");
+    let mask =
+        prefill_causal_mask(16, 4, 2, ATTN, F32).expect("a batched prefill keeps the array mask");
     assert_eq!(ffi::array_shape(&mask), vec![16, 20]);
 }
 
 #[test]
 fn a_decode_row_needs_no_mask() {
     assert!(!prefill_uses_causal_mode(1, 1, false));
-    assert!(prefill_causal_mask(1, 300, 1).is_none());
-    assert!(prefill_causal_mask(1, 300, 4).is_none());
+    assert!(prefill_causal_mask(1, 300, 1, ATTN, F32).is_none());
+    assert!(prefill_causal_mask(1, 300, 4, ATTN, F32).is_none());
 }
 
 #[test]
