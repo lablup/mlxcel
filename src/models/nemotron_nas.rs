@@ -904,11 +904,46 @@ impl LanguageModel for NemotronNASModel {
         self.config.num_hidden_layers
     }
 
+    /// Padded prefill is exact here: there is no recurrent state, only a
+    /// plain `KVCache` per attention block, and [`Self::trim_state`] rewinds
+    /// those model-owned caches by the pad width, which the caller's own
+    /// trim could not reach (#1755, #3101).
     fn supports_padded_prefill(&self) -> bool {
-        // No recurrent state here, only a plain `KVCache` per attention
-        // block, but those caches are model-owned: pad positions would land
-        // in state the caller's trim never reaches (#1755).
-        false
+        true
+    }
+
+    /// The pad tokens follow the real ones, so the causal forward (MLX's
+    /// causal mode, or the shared array where MLX does not fuse it) hides
+    /// them from every real row, and `trim_state` drops their K/V (#3101).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
+    /// Rewind the model-owned slot by the pad width of a padded prefill. The
+    /// family cannot batch, so `seq` is the one sequence the slot holds and
+    /// both the CLI (`None`) and the scheduler (`Some`) address it. A
+    /// `replace_with_linear` block keeps a slot it never writes, so a cache
+    /// at offset 0 has no pad positions to drop.
+    fn trim_state(
+        &self,
+        _seq: Option<mlxcel_core::cache::SequenceId>,
+        excess: i32,
+    ) -> Result<(), String> {
+        if excess <= 0 {
+            return Ok(());
+        }
+        for (slot, cache) in self.caches.borrow_mut().iter_mut().enumerate() {
+            if cache.offset == 0 {
+                continue;
+            }
+            let trimmed = cache.trim(excess);
+            if trimmed != excess {
+                return Err(format!(
+                    "Nemotron-NAS pad trim, slot {slot}: dropped {trimmed} of {excess} pad positions"
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn supports_batching(&self) -> bool {

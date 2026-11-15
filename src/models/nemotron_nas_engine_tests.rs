@@ -214,7 +214,7 @@ pub(crate) const PROMPT: [i32; 6] = [3, 17, 9, 25, 4, 30];
 fn nemotron_nas_direct_engine_run_completes() {
     let model = tiny_model();
     assert!(!model.supports_batching());
-    assert!(!model.supports_padded_prefill());
+    assert!(model.supports_padded_prefill());
     let tokens = DirectEngine::new(&model, 0)
         .run(&PROMPT, 8, &SamplingConfig::greedy())
         .expect("DirectEngine::run on NemotronNAS");
