@@ -1,0 +1,26 @@
+# Standalone cuda-oxide fused residual-add + RMSNorm kernel (issue #2832).
+#
+# The empty [workspace] table makes this its own workspace root, so it never
+# joins the mlxcel build graph: ordinary mlxcel builds neither resolve these
+# dependencies nor need the cuda-oxide compiler or LLVM 21. Same precedent as
+# spike/cuda-oxide-smoke (#2831), whose artifact/ABI contract this consumes.
+[workspace]
+
+[package]
+name = "cuda-oxide-fused-norm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "cuda-oxide-fused-norm"
+path = "src/main.rs"
+
+# Pinned to the source revision reviewed in
+# docs/mlxcelverse/cuda-oxide-feasibility.md and validated by #2831. All three
+# crates come from the same git revision so the codegen backend that lowers the
+# kernel is the one the device-side stubs were written against.
+[dependencies]
+cuda-core = { git = "https://github.com/NVIDIA/cuda-rust", rev = "b631530700a8a4a5f165456f2d71fe9195b323b5" }
+cuda-device = { git = "https://github.com/NVIDIA/cuda-rust", rev = "b631530700a8a4a5f165456f2d71fe9195b323b5" }
+cuda-host = { git = "https://github.com/NVIDIA/cuda-rust", rev = "b631530700a8a4a5f165456f2d71fe9195b323b5" }

@@ -1,6 +1,6 @@
 # cuda-oxide adoption feasibility for mlxcelverse
 
-Review date: 2026-11-02. Status: kernel-first investigation sequence agreed; #2831 validated the artifact boundary and standalone GB10 execution, integration and performance validation pending.
+Review date: 2026-11-02. Status: kernel-first investigation sequence agreed; #2831 validated the artifact boundary and standalone GB10 execution; #2832 validated the standalone fused residual-add + RMSNorm kernel against the existing fused CUDA kernel and the graph path on GB10 ([evidence](cuda-oxide-fused-norm-evidence.md)); integration (#2833) and performance validation (#2834) pending.
 
 Implementation planning update: 2026-11-03. The initial issues below cover the bounded experiment, not production enablement or an independent engine.
 
@@ -80,6 +80,8 @@ The local checkout was clean before this documentation change. Inspected revisio
 The intended project here is NVIDIA's SIMT compiler, formerly under `NVlabs/cuda-oxide` and now under `NVIDIA/cuda-rust/cuda-oxide`, rather than the unrelated older project with the same name. Current source and installation instructions supersede older launch articles that mention a nightly compiler and CUDA 12. See the [current repository](https://github.com/NVIDIA/cuda-rust) and [pinned cuda-oxide README](https://github.com/NVIDIA/cuda-rust/blob/b631530700a8a4a5f165456f2d71fe9195b323b5/cuda-oxide/README.md).
 
 This review inspected source and documentation only. It did not install the compiler, compile an oxide kernel, launch GPU work, measure speedups, or validate a specific driver/GPU combination. Source support and example availability are not hardware acceptance evidence.
+
+Experiment update (2026-11-11): [#2832](https://github.com/lablup/mlxcel/issues/2832) added the standalone fused residual-add + RMSNorm package ([`spike/cuda-oxide-fused-norm`](../../spike/cuda-oxide-fused-norm/README.md)). Five entry points (f32, f16, bf16 activations, plus f16 and bf16 activations with an f32 weight) executed 130 GB10 cases and reproduced the existing fused CUDA kernel bit for bit while staying inside the graph-path parity budgets; the [fused-norm evidence report](cuda-oxide-fused-norm-evidence.md) has the commands, results and limits. Still standalone: no MLX adapter and no end-to-end workload.
 
 Experiment update (2026-11-03): [#2831](https://github.com/lablup/mlxcel/issues/2831) installed the pinned toolchain on a GB10, compiled a bounded vector-add kernel to `sm_121`, and executed it on the device with host-verified outputs and a validated artifact manifest. Source, commands, and results are in [the smoke evidence report](cuda-oxide-smoke-evidence.md) and [the spike package](../../spike/cuda-oxide-smoke/README.md). That result covers ordinary SIMT compilation and the artifact boundary only. It is not evidence for MLX integration, Tensor Core support, or performance.
 
