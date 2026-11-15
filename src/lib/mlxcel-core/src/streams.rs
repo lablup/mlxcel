@@ -171,7 +171,7 @@ impl Drop for DefaultStreamGuard {
     }
 }
 
-/// RAII guard that restores MLX's process-wide default device on drop.
+/// RAII guard that restores the calling thread's MLX default device on drop.
 ///
 /// [`DefaultDeviceGuard::cpu`] and [`DefaultDeviceGuard::gpu`] record whether
 /// the default device is currently the GPU (`default_device_is_gpu`), move
@@ -179,9 +179,10 @@ impl Drop for DefaultStreamGuard {
 /// records without moving, for code that changes the device through another
 /// path such as [`set_default_gpu_device`].
 ///
-/// The default device is process-global and every MLX op dispatched without
-/// an explicit stream lands on it, so a test that moves it and never moves it
-/// back changes what every later test in the same process measures: under
+/// Every MLX op dispatched without an explicit stream lands on the default
+/// device, so a test that moves it and never moves it back changes what every
+/// later test on that thread measures. The default device is per thread (the
+/// core overlay `mlx/device.cpp`); before that it was process-global, and under
 /// `--test-threads=1` the real-checkpoint gates that sorted after
 /// `multimodal::host_preprocessor_tests` scored a reranker on the CPU backend
 /// instead of the GPU (issue #1421). A `Once` cannot restore anything; this
@@ -199,11 +200,11 @@ impl Drop for DefaultStreamGuard {
 /// MLX rejects `set_default_device(gpu)` there, and the guard must never ask
 /// for a device the backend cannot provide.
 ///
-/// The guard restores, it does not exclude. Creating one does not stop
-/// another thread from moving the same process-global device in the middle
-/// of the span, so every caller that moves the default device, or that
-/// measures something which depends on where it points, holds
-/// [`lock_default_device`] for that span as well.
+/// The guard moves only the calling thread's default. A test that pins the
+/// CPU therefore no longer moves a concurrent test's ops onto it, which made
+/// GPU tests compare a CPU result with a GPU reference in parallel runs.
+/// [`lock_default_device`] is still held by the movers, which keeps the
+/// process-wide guard count in [`default_device_guards_held`] meaningful.
 ///
 /// # Example
 ///
@@ -757,6 +758,26 @@ mod tests {
         .join()
         .expect("thread");
         assert_ne!(ia, other, "another thread must resolve its own stream");
+    }
+
+    /// The default device is per thread (core overlay `mlx/device.cpp`): a
+    /// CPU guard on one thread leaves every other thread on its own default,
+    /// so a test that pins the CPU cannot move a concurrent GPU test's ops.
+    #[test]
+    fn a_cpu_guard_moves_only_its_own_thread() {
+        if !ffi::gpu_backend_available() {
+            return;
+        }
+        let _lock = lock_default_device();
+        let _cpu = DefaultDeviceGuard::cpu();
+        assert!(!ffi::default_device_is_gpu());
+        let other = std::thread::spawn(ffi::default_device_is_gpu)
+            .join()
+            .expect("thread");
+        assert!(
+            other,
+            "a CPU guard on one thread moved another thread's default"
+        );
     }
 
     /// `new_generation_stream` (the deprecated, non-thread-local

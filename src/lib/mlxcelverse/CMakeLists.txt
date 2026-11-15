@@ -153,6 +153,23 @@ function(mlx_apply_source_overlays mlx_source_dir)
     message(STATUS "Applied CPU backend patches (${_cpu_patch_files})")
   endif()
 
+  # Core patches, applied on every build before the backend blocks below.
+  # mlx/device.cpp makes the default device per thread (upstream already keeps
+  # default streams per thread), so a thread that pins the CPU no longer moves
+  # every other thread's ops there; `mlxcel_set_process_default_device` sets
+  # the default for threads that never set their own. The ROCm overlay
+  # replaces this file with a copy carrying the same block, so a ROCm build
+  # still gets it. Refresh: take the new upstream file and re-apply the block
+  # marked `mlxcel:`.
+  set(_core_patch_files "mlx/device.cpp")
+  foreach(_patch_file ${_core_patch_files})
+    configure_file(
+      "${CMAKE_CURRENT_SOURCE_DIR}/overlays/core/${_patch_file}"
+      "${mlx_source_dir}/${_patch_file}"
+      COPYONLY)
+  endforeach()
+  message(STATUS "Applied core patches (${_core_patch_files})")
+
   # CUDA patches: custom grouped GEMM, quantized kernels, reduce ops, binary ops,
   # and device.cpp (captured child graphs as barriers inside a CUDA graph,
   # issue #2462).
@@ -200,7 +217,8 @@ function(mlx_apply_source_overlays mlx_source_dir)
       string(REPLACE "\n" ";" _cuda_mlx_modified_files "${_cuda_mlx_modified_files}")
       foreach(_modified_file ${_cuda_mlx_modified_files})
         if(_modified_file MATCHES "^mlx/[^/]+\\.cpp$"
-           AND NOT _modified_file IN_LIST _cuda_mlx_patch_relpaths)
+           AND NOT _modified_file IN_LIST _cuda_mlx_patch_relpaths
+           AND NOT _modified_file IN_LIST _core_patch_files)
           execute_process(
             COMMAND "${GIT_EXECUTABLE}" -C "${mlx_source_dir}"
                     checkout -- "${_modified_file}"

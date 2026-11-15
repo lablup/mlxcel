@@ -1411,8 +1411,11 @@ void detach_all(rust::Slice<const MlxArray* const> arrays);
 // Synchronize stream
 void synchronize_default();
 
-// Set default device for subsequent operations
+// Set the calling thread's default device for subsequent operations
 void set_default_device(bool gpu);
+
+// Set the default device of every thread that has not set its own
+void set_process_default_device(bool gpu);
 
 // Memory limits
 size_t set_wired_limit(size_t limit);
