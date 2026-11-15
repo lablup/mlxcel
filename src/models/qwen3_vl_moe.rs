@@ -484,6 +484,11 @@ impl Attention {
                     0,
                 )
             }
+        } else if l > 1 {
+            // A mask-less multi-token forward is a single-row prefill whose
+            // causality MLX's causal mode supplies (`prefill_causal_mask`,
+            // #3051).
+            mlxcel_core::causal_attention(&q, &k, &v, self.scale, 0.0, 0)
         } else {
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -851,6 +856,16 @@ pub struct Qwen3VLMoeModel {
 }
 
 impl Qwen3VLMoeModel {
+    /// Head counts and head dim for [`mlxcel_core::utils::prefill_causal_mask`]
+    /// (#3051).
+    fn prefill_attention(&self) -> mlxcel_core::utils::PrefillAttention {
+        mlxcel_core::utils::PrefillAttention::new(
+            self._config.num_attention_heads,
+            self._config.num_kv_heads(),
+            self._config.head_dim(),
+        )
+    }
+
     pub fn from_weights(weights: &WeightMap, config: &Qwen3VLMoeConfig) -> Result<Self, String> {
         let gs = config.group_size();
         let bits = config.bits();
@@ -1197,12 +1212,22 @@ impl Qwen3VLMoeModel {
         // byte-identical to the untrimmed path. `cache_offset` stays monotonic
         // above because position_ids/RoPE need absolute positions. See issue
         // #421 (mirrors #419/#420).
+        // A single-row prefill takes MLX's causal mode instead of the array
+        // (`prefill_causal_mask`, #3051); the attention layer routes a
+        // mask-less multi-token forward through `causal_attention`, whose
+        // bottom-right alignment matches the `live_len` offset below.
         let auto_mask;
         let mask = if mask.is_some() {
             mask
         } else if seq_len > 1 {
-            auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
-            Some(auto_mask.as_ref().unwrap() as &MlxArray)
+            auto_mask = mlxcel_core::utils::prefill_causal_mask(
+                seq_len,
+                caches[0].live_len(),
+                batch,
+                self.prefill_attention(),
+                mlxcel_core::array_dtype(&h),
+            );
+            auto_mask.as_deref()
         } else {
             // Decode width. The one query row sits at logical position
             // `live_len`, so every key column is permitted: the mask would be
@@ -1304,10 +1329,17 @@ impl Qwen3VLMoeModel {
         let mut h = self.embed_tokens.forward(input_ids);
         let shape = mlxcel_core::array_shape(input_ids);
         let seq_len = shape[1];
-        let mask = mlxcel_core::utils::create_causal_mask(seq_len, 0);
-        let mask_ref = mask.as_ref().unwrap() as &MlxArray;
+        // `forward_text_only` takes MLX's causal mode for a mask-less
+        // multi-token forward (#3051).
+        let mask = mlxcel_core::utils::prefill_causal_mask(
+            seq_len,
+            0,
+            shape[0],
+            self.prefill_attention(),
+            mlxcel_core::array_dtype(&h),
+        );
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()).take(num_layers) {
-            h = layer.forward_text_only(&h, cache, Some(mask_ref));
+            h = layer.forward_text_only(&h, cache, mask.as_deref());
         }
         h
     }

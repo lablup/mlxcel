@@ -74,7 +74,7 @@ use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_s
 use mlxcel_core::cache::{BatchedAttentionMetadata, CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, slice_axis};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -1217,11 +1217,20 @@ impl GraniteMoeHybridModel {
             .find(|c| matches!(c, GraniteMoeHybridLayerCache::Attention(_)))
             .map(|c| c.offset())
             .unwrap_or(0);
-        let attn_mask = if seq_len > 1 {
-            Some(create_causal_mask(seq_len, attn_offset))
-        } else {
-            None
-        };
+        // A single row leaves causality to MLX's causal mode where MLX
+        // fuses it (#3051).
+        let attention = PrefillAttention::new(
+            self.config.num_attention_heads,
+            self.config.num_key_value_heads,
+            self.config.head_dim(),
+        );
+        let attn_mask = prefill_causal_mask(
+            seq_len,
+            attn_offset,
+            shape[0],
+            attention,
+            mlxcel_core::array_dtype(&h),
+        );
 
         for (idx, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
             // Multi-depth visual injection happens before the targeted layer

@@ -155,16 +155,17 @@ pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
 ///
 /// Used by: decoders that materialize an explicit prefill mask instead of
 /// leaving `mask: None` for fused SDPA to apply causality itself. At this
-/// commit that is 50 non-test files under `src/models`, in four groups.
+/// commit that is 45 non-test files under `src/models`, in four groups.
 /// Hybrid and mixed-layer stacks that build one mask at the full-attention
-/// offset: Jamba, FalconH1, NemotronH, NemotronNas, Plamo2, Qwen3Next,
-/// KimiLinear, GraniteMoeHybrid, MiniMaxM3, Lfm2, RecurrentGemma, Laguna,
-/// MiMoV2.
+/// offset: Jamba, FalconH1, NemotronH, NemotronNas, Plamo2, KimiLinear,
+/// MiniMaxM3, Lfm2, RecurrentGemma, Laguna, MiMoV2.
+/// Qwen3Next, GraniteMoeHybrid, Qwen2VL, Qwen3VL and Qwen3VLMoe build their
+/// prefill mask through [`prefill_causal_mask`] instead (#3051).
 /// Sliding-window, chunked and dual-attention families that build a separate
 /// global mask per forward: Gemma3, Gemma4, Gemma3n, DiffusionGemma, Cohere2,
 /// CohereCompass, Exaone4, Olmo3, Ministral3, Mistral4, Mellum, Llama4. VLM
-/// decoders that thread a mask down from the multimodal wrapper: Qwen2VL,
-/// Qwen3VL, GLM4V, Ernie4.5MoeVL, HunyuanVL, PaddleOcrVL, FalconOcr. MLA and
+/// decoders that thread a mask down from the multimodal wrapper: GLM4V,
+/// Ernie4.5MoeVL, HunyuanVL, PaddleOcrVL, FalconOcr. MLA and
 /// custom-attention decoders that add the mask to scores by hand: DeepSeekV2,
 /// DeepSeekV3.2, MiniCPM3, GptOss, AFMoE, Step3P5, LongcatFlashNgram,
 /// BailingMoeLinear, GLM4MoeLite, Qwen3.5, KimiK3. Outside `src/models` the
@@ -183,6 +184,142 @@ pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
 /// `grep -rln '\bcreate_causal_mask(' src/models --include='*.rs' | grep -v 'tests\.rs$'`.
 pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
     additive_causal_window_mask(size, offset, None)
+}
+
+/// Whether a model's own prefill causal mask can be left to MLX's causal
+/// mode instead of being built as an array (issue #3051).
+///
+/// The full-attention layers of the hybrid and Qwen-VL families build
+/// [`create_causal_mask`]`(seq_len, offset)` for a multi-token forward. MLX's
+/// SDPA fuses causal mode on every Metal generation where it does not fuse an
+/// additive array mask (pre-M5 at head_dim 256), and the array itself is an
+/// f32 `[seq_len, offset + seq_len]` buffer (3.65 GiB at 28K tokens). The two
+/// mask the same keys when:
+///
+/// - the forward has more than one query (`seq_len > 1`; a decode row needs
+///   no mask at all);
+/// - it is one row (`batch == 1`): batched rows keep the array, which the
+///   broadcast and padded batch paths are written against;
+/// - the caller supplied no mask of its own (`has_caller_mask == false`): a
+///   left-padding, windowed or multimodal mask is never replaced;
+/// - it is not a speculative verify block (no `DecodeLookaheadAppendScope`
+///   is active), which keeps the dispatch the verify path had before;
+/// - the layer attends exactly `offset + seq_len` keys, which holds for the
+///   dense `KVCache` these layers fetch from: MLX aligns causal mode
+///   bottom-right (query `i` sees keys `0..=k_len - q_len + i`), the same
+///   keys `create_causal_mask` allows at `offset = k_len - q_len`.
+///
+/// Position ids (MRoPE) only change the rotary embedding, not which keys a
+/// query attends, so they do not affect the choice.
+///
+/// `MLXCEL_PREFILL_CAUSAL_MODE=0` keeps the array mask everywhere, which is
+/// the pre-#3051 dispatch.
+///
+/// Used by: [`prefill_causal_mask`].
+pub fn prefill_uses_causal_mode(seq_len: i32, batch: i32, has_caller_mask: bool) -> bool {
+    causal_mode_applies(
+        seq_len,
+        batch,
+        has_caller_mask,
+        crate::cache::speculative_append_active(),
+        prefill_causal_mode_enabled(),
+    )
+}
+
+/// The decision behind [`prefill_uses_causal_mode`], with the thread and
+/// process state passed in so it can be tested without them. A verify block
+/// (`speculative`, inside a `DecodeLookaheadAppendScope`) keeps the array
+/// mask, so a speculative verify scores its positions with the same kernel
+/// as before #3051.
+pub(crate) fn causal_mode_applies(
+    seq_len: i32,
+    batch: i32,
+    has_caller_mask: bool,
+    speculative: bool,
+    enabled: bool,
+) -> bool {
+    seq_len > 1 && batch == 1 && !has_caller_mask && !speculative && enabled
+}
+
+/// The attention geometry of a model's full-attention layers, which the
+/// prefill mask choice needs to ask MLX whether causal mode fuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillAttention {
+    pub q_heads: i32,
+    pub kv_heads: i32,
+    pub head_dim: i32,
+}
+
+impl PrefillAttention {
+    pub fn new(q_heads: usize, kv_heads: usize, head_dim: usize) -> Self {
+        Self {
+            q_heads: q_heads as i32,
+            kv_heads: kv_heads as i32,
+            head_dim: head_dim as i32,
+        }
+    }
+}
+
+/// The causal mask a model-built prefill needs: `None` for a decode row, or
+/// when [`prefill_uses_causal_mode`] allows causal mode and MLX fuses causal
+/// SDPA at this shape, in which case the layer must route a `seq_len > 1`
+/// forward without a mask through [`crate::causal_attention`]; else
+/// [`create_causal_mask`]`(seq_len, offset)`.
+///
+/// Where MLX would fall back for causal mode too (pre-M5 Metal at head_dim
+/// 256 over `q_len != k_len`, every prefill piece after the first), the array
+/// mask stays: the model builds it once per forward and every full-attention
+/// layer shares it, which peaks lower than the per-layer chunked causal
+/// fallback (+4% on qwen3.8-27b at 28K tokens with 2048-token chunks). The
+/// verdict comes from MLX itself through
+/// [`crate::window_sdpa::sdpa_mode_is_fused`], memoized per shape.
+/// `activation_dtype` is the hidden state's dtype.
+///
+/// Used by: Qwen 3.5, Qwen3-Next (single model and pipeline stage),
+/// GraniteMoeHybrid, Qwen2-VL, Qwen3-VL, Qwen3-VL-MoE.
+pub fn prefill_causal_mask(
+    seq_len: i32,
+    offset: i32,
+    batch: i32,
+    attention: PrefillAttention,
+    activation_dtype: i32,
+) -> Option<UniquePtr<MlxArray>> {
+    if seq_len <= 1 {
+        return None;
+    }
+    let causal = prefill_uses_causal_mode(seq_len, batch, false) && {
+        let shape = crate::window_sdpa::WindowSdpaShape::prefill(
+            batch,
+            attention.q_heads,
+            attention.kv_heads,
+            seq_len,
+            offset + seq_len,
+            attention.head_dim,
+            activation_dtype,
+        );
+        crate::window_sdpa::sdpa_mode_is_fused(&shape, false, true)
+    };
+    if causal {
+        None
+    } else {
+        Some(create_causal_mask(seq_len, offset))
+    }
+}
+
+/// `MLXCEL_PREFILL_CAUSAL_MODE`, read once: anything but `0`, `false` or
+/// `off` (the default is on) lets [`prefill_uses_causal_mode`] pick causal mode.
+fn prefill_causal_mode_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_prefill_causal_mode(std::env::var("MLXCEL_PREFILL_CAUSAL_MODE").ok().as_deref())
+    })
+}
+
+fn parse_prefill_causal_mode(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "off")
+    )
 }
 
 /// Shared builder for full-width additive causal / windowed-causal masks.
@@ -1718,6 +1855,10 @@ mod gelu_tests;
 #[cfg(test)]
 #[path = "utils_state_tail_tests.rs"]
 mod state_tail_tests;
+
+#[cfg(test)]
+#[path = "utils_prefill_causal_mode_tests.rs"]
+mod prefill_causal_mode_tests;
 
 #[cfg(test)]
 mod tests {

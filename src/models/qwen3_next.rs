@@ -46,7 +46,7 @@ use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, silu, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -664,6 +664,15 @@ pub(crate) struct Qwen3NextAttention {
 }
 
 impl Qwen3NextAttention {
+    /// Head counts and head dim for [`prefill_causal_mask`] (#3051).
+    pub(crate) fn prefill_attention(&self) -> PrefillAttention {
+        PrefillAttention {
+            q_heads: self.num_heads,
+            kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+        }
+    }
+
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
@@ -1707,6 +1716,15 @@ pub(crate) struct DecoderLayer {
     post_attention_layernorm: RMSNorm,
 }
 
+/// The full-attention geometry of `layers`, for the prefill mask choice
+/// (#3051); `None` when the slice holds no full-attention layer.
+fn full_attention_geometry(layers: &[DecoderLayer]) -> Option<PrefillAttention> {
+    layers.iter().find_map(|layer| match &layer.attention {
+        AttentionVariant::FullAttention(attn) => Some(attn.prefill_attention()),
+        AttentionVariant::LinearAttention(_) => None,
+    })
+}
+
 impl DecoderLayer {
     fn forward(
         &self,
@@ -2192,12 +2210,17 @@ impl Qwen3NextModel {
             seq_id,
             || self.make_internal_caches(),
             |caches| {
-                let mask = if seq_len > 1 {
-                    let fa_idx = self.full_attention_interval - 1;
-                    let offset = caches.get(fa_idx).map(|c| c.offset()).unwrap_or(0);
-                    Some(create_causal_mask(seq_len, offset))
-                } else {
-                    None
+                // One row: MLX's causal mode instead of the array where MLX
+                // fuses it (#3051). The hidden state takes the norm's dtype.
+                let mask = match full_attention_geometry(&self.layers) {
+                    Some(attention) if seq_len > 1 => {
+                        let fa_idx = self.full_attention_interval - 1;
+                        let offset = caches.get(fa_idx).map(|c| c.offset()).unwrap_or(0);
+                        let batch = mlxcel_core::array_shape(input)[0];
+                        let dtype = mlxcel_core::array_dtype(&self.norm.weight);
+                        prefill_causal_mask(seq_len, offset, batch, attention, dtype)
+                    }
+                    _ => None,
                 };
                 self.forward_at(input, caches, mask.as_deref(), last_pos)
             },
@@ -2689,12 +2712,15 @@ impl Qwen3NextStageModel {
 
         let shape = mlxcel_core::array_shape(hidden.as_ref().unwrap());
         let seq_len = shape[1];
-        let fa_mask = if seq_len > 1 {
-            let is_linear: Vec<bool> = self.layers.iter().map(|layer| layer.is_linear).collect();
-            let offset = stage_attention_offset(&is_linear, caches);
-            Some(create_causal_mask(seq_len, offset))
-        } else {
-            None
+        let fa_mask = match full_attention_geometry(&self.layers) {
+            Some(attention) if seq_len > 1 => {
+                let is_linear: Vec<bool> =
+                    self.layers.iter().map(|layer| layer.is_linear).collect();
+                let offset = stage_attention_offset(&is_linear, caches);
+                let dtype = mlxcel_core::array_dtype(hidden.as_ref().unwrap());
+                prefill_causal_mask(seq_len, offset, shape[0], attention, dtype)
+            }
+            _ => None,
         };
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
