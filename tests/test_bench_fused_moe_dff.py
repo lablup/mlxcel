@@ -49,5 +49,15 @@ class MeasurementExitTests(unittest.TestCase):
                 self.assertEqual(len(measured), 3 if outcome == "ok" else 9)
                 self.assertEqual({r["status"] for r in measured}, {"ok" if outcome == "ok" else "failed" if outcome == "failed" else "discarded_jit"})
 
+
+class LoadAverageTests(unittest.TestCase):
+    def test_hosts_without_proc_or_getloadavg_report_na(self):
+        with mock.patch("builtins.open", side_effect=FileNotFoundError), mock.patch.object(bench.os, "getloadavg", side_effect=OSError, create=True):
+            self.assertEqual(bench.loadavg(), "na")
+
+    def test_hosts_without_proc_fall_back_to_getloadavg(self):
+        with mock.patch("builtins.open", side_effect=FileNotFoundError), mock.patch.object(bench.os, "getloadavg", return_value=(1.5, 1.0, 0.5), create=True):
+            self.assertEqual(bench.loadavg(), "1.50")
+
 if __name__ == "__main__":
     unittest.main()

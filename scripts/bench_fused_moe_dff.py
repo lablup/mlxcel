@@ -23,6 +23,7 @@ Example (primary harness, one model):
       --cell hello-n100 --rounds 5 --out bench-results/fused-moe-dff
 """
 import argparse
+import contextlib
 import csv
 import os
 import re
@@ -65,8 +66,16 @@ def wait_quiet(log):
 
 
 def loadavg():
-    with open("/proc/loadavg") as f:
-        return f.read().split()[0]
+    """The 1-minute load average, or "na" where the host has none (Windows)."""
+    try:
+        with open("/proc/loadavg") as f:
+            return f.read().split()[0]
+    except OSError:
+        pass
+    try:
+        return f"{os.getloadavg()[0]:.2f}"
+    except (AttributeError, OSError):
+        return "na"
 
 
 def run_once(cmd, env_extra, raw_path, tag):
@@ -130,7 +139,14 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(os.path.join(args.out, "raw"), exist_ok=True)
-    logf = open(os.path.join(args.out, "harness.log"), "a")
+    # Every return path closes both files: Windows cannot remove an open file,
+    # so a handle left open past an early return breaks the caller's cleanup.
+    with contextlib.ExitStack() as files:
+        logf = files.enter_context(open(os.path.join(args.out, "harness.log"), "a"))
+        return _run(args, logf, files)
+
+
+def _run(args, logf, files):
 
     def log(msg):
         line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} [{args.name}/{args.cell}] {msg}"
@@ -163,7 +179,7 @@ def main():
 
     csv_path = os.path.join(args.out, "runs.csv")
     new = not os.path.exists(csv_path)
-    csvf = open(csv_path, "a", newline="")
+    csvf = files.enter_context(open(csv_path, "a", newline=""))
     fields = [
         "harness", "model", "cell", "round", "position", "arm", "attempt", "status",
         "rate", "decode_ms", "gen_tokens", "prompt_tokens", "prefill_ms",
@@ -223,8 +239,6 @@ def main():
             if one(r, position, arm, measured=True) != "ok":
                 failed = True
     log("done with failed measurements" if failed else "done")
-    csvf.close()
-    logf.close()
     return 3 if failed else 0
 
 
