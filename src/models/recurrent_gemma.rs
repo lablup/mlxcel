@@ -399,12 +399,12 @@ impl RecurrentBlock {
         let bias_reshaped = mlxcel_core::reshape(&self.conv_bias, &[1, 1, -1]);
         let h_conv = mlxcel_core::add(&conv_out, &bias_reshaped);
 
-        // Update conv cache
-        let new_conv_cache = {
-            let padded_shape = mlxcel_core::array_shape(&padded_input);
-            let len = padded_shape[1] as usize;
-            slice_axis(&padded_input, 1, (len - (k - 1)) as i32, len as i32)
-        };
+        // Update conv cache. The tail is a fresh buffer (a plain slice would
+        // keep `padded_input` alive even after eval), scheduled now on a long
+        // prefill so the full padded_input is not held until the caches are
+        // evaluated.
+        let new_conv_cache =
+            mlxcel_core::utils::materialized_state_tail(&padded_input, (k - 1) as i32);
 
         // RGLRU
         let (h_lru, new_state_cache) = self.rg_lru.forward(&h_conv, state_cache.as_deref());

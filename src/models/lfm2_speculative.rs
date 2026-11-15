@@ -238,9 +238,7 @@ impl Lfm2Model {
                             mlxcel_core::concatenate(&zeros, &committed, 1)
                         }
                     };
-                    let plen = n_keep + n;
-                    let tail = slice_axis(&padded, 1, plen - n_keep, plen);
-                    *state = Some(mlxcel_core::contiguous(&tail, false));
+                    *state = Some(mlxcel_core::utils::materialized_state_tail(&padded, n_keep));
                 }
             }
         }

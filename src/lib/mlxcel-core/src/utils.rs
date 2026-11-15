@@ -76,6 +76,54 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
     ffi::slice(x, &starts, &stops)
 }
 
+/// Sources at least this many rows long along the sliced axis have their
+/// state tail evaluated eagerly by [`materialized_state_tail`]. Below it the
+/// retained source is small (a decode step or a short verify block), and an
+/// extra `async_eval` per layer would only add scheduling overhead.
+pub const STATE_TAIL_EAGER_MIN_ROWS: i32 = 256;
+
+/// The last `n_keep` rows of `x` along axis 1, as a fresh buffer for a
+/// recurrent cache (a convolution state, for example).
+///
+/// A cache entry assigned as a plain lazy slice, or as `contiguous` of one,
+/// is a graph node that holds its whole source until something evaluates the
+/// cache. In a single-pass prefill nothing does until the forward ends, so a
+/// model that stores such a tail per layer keeps every layer's full-length
+/// source alive at once: 0.47 GB per linear-attention layer for Qwen 3.5 4B
+/// at 28.7K tokens, 11 GB over 24 layers. When the source is long, this
+/// schedules the tail with `async_eval` so the source is released once the
+/// layer's own consumers have run; the result is bit-identical.
+///
+/// Used by: Qwen 3.5, Qwen3-Next, Qwen4-Exp (gated-delta and PLE), Mamba,
+/// Mamba2, FalconH1, GraniteMoeHybrid, Plamo2, NemotronH, Jamba, Lfm2 (and its
+/// speculative path), KimiLinear and KimiK3 (short conv), RecurrentGemma,
+/// Inkling (short conv)
+pub fn materialized_state_tail(x: &MlxArray, n_keep: i32) -> UniquePtr<MlxArray> {
+    let shape = ffi::array_shape(x);
+    let rows = shape[1];
+    let mut starts = vec![0i32; shape.len()];
+    starts[1] = rows - n_keep;
+    let tail = ffi::contiguous(&ffi::slice(x, &starts, &shape), false);
+    if rows >= STATE_TAIL_EAGER_MIN_ROWS {
+        ffi::async_eval(&tail);
+    }
+    tail
+}
+
+/// Starts evaluating a recurrent state computed from a long prefill so its
+/// full-length inputs are released once the layer's consumers run (see
+/// [`materialized_state_tail`]). No-op below [`STATE_TAIL_EAGER_MIN_ROWS`] rows.
+///
+/// Used by: Mamba2, FalconH1, GraniteMoeHybrid (SSM final state), the
+/// gated-delta chunked scan (Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear,
+/// KimiK3), BailingMoeLinear (GLA state), and the conv-state sites that keep a
+/// per-row or non-axis-1 tail: Baichuan, Inkling batched, TP Qwen3.5 rows
+pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
+    if rows >= STATE_TAIL_EAGER_MIN_ROWS {
+        ffi::async_eval(state);
+    }
+}
+
 // Attention Mask Utilities.
 /// Create a causal attention mask.
 ///
@@ -1615,6 +1663,10 @@ mod embedding_mask_tests;
 #[cfg(test)]
 #[path = "utils_gelu_tests.rs"]
 mod gelu_tests;
+
+#[cfg(test)]
+#[path = "utils_state_tail_tests.rs"]
+mod state_tail_tests;
 
 #[cfg(test)]
 mod tests {

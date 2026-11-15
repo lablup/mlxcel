@@ -292,16 +292,14 @@ impl MambaBlock {
         };
 
         // Update conv cache.
-        // Wrap slice in contiguous() to force MLX to materialize a fresh,
-        // independent buffer. Without this, the slice is a lazy view that
-        // retains a reference to the full padded_input allocation, causing a
-        // memory leak proportional to the sequence length.
+        // The tail is a fresh buffer, scheduled now on a long prefill so the full
+        // padded_input is not held until the caches are evaluated.
         if let Some(c) = cache {
             let n_keep = k - 1;
-            let padded_shape = mlxcel_core::array_shape(&padded_input);
-            let len = padded_shape[1] as usize;
-            let tail = slice_axis(&padded_input, 1, (len - n_keep) as i32, len as i32);
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
+                &padded_input,
+                n_keep as i32,
+            ));
         }
 
         // Depthwise conv1d

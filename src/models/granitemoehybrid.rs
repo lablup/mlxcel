@@ -402,13 +402,13 @@ impl GraniteMoeHybridMamba2Mixer {
         };
 
         // Persist the trailing `k - 1` time steps as the next conv state.
-        // `contiguous` forces a fresh buffer so the cached slice does not retain
-        // the full `padded_input` allocation (a per-token memory leak otherwise).
+        // The tail is a fresh buffer, scheduled now on a long prefill so the full
+        // padded_input is not held until the caches are evaluated.
         if let Some(c) = cache.as_deref_mut() {
-            let padded_shape = mlxcel_core::array_shape(&padded_input);
-            let len = padded_shape[1] as usize;
-            let tail = slice_axis(&padded_input, 1, (len - (k - 1)) as i32, len as i32);
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
+                &padded_input,
+                (k - 1) as i32,
+            ));
         }
 
         let conv_out = mlxcel_core::conv1d(
@@ -461,6 +461,9 @@ impl GraniteMoeHybridMamba2Mixer {
             self.ssm_step(&hidden_ssm, &b, &c, &dt, ssm_state_ref)
         };
 
+        // The final state is not consumed by `y`, so on a long prefill it would
+        // hold the scan's full-length inputs until the caches are evaluated.
+        mlxcel_core::utils::schedule_prefill_state(&new_state, seq_len);
         if let Some(c) = cache {
             c.ssm_state = Some(new_state);
         }
@@ -625,6 +628,8 @@ impl GraniteMoeHybridMamba2Mixer {
         // materialization once per layer per prefill chunk is what the
         // measurement below charges them for. The NaN risk this family does
         // carry is covered by `tests/mamba2_hybrid_decode_finite.rs` (#1685).
+        // The caller schedules `next_state` with `async_eval` on a long prefill,
+        // which does not block the CPU the way those evals did.
         (y, next_state)
     }
 
