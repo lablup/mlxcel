@@ -534,6 +534,115 @@ impl JambaAttention {
 #[cfg(test)]
 thread_local! {
     pub(super) static GRAPH_SCAN_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // Makes the mixer take the graph scan even where the fused kernel would
+    // accept the inputs, so the fallback is testable on every backend (#3073).
+    pub(super) static FORCE_GRAPH_SCAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn graph_scan_forced() -> bool {
+    FORCE_GRAPH_SCAN.with(|f| f.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn graph_scan_forced() -> bool {
+    false
+}
+
+/// Timesteps of the Mamba1 graph scan whose `[B, T, D, N]` state increments
+/// and decays are built at once. Building them for the whole prefill piece
+/// cost two `[B, L, D, N]` tensors (one of them a float32 `exp`) before the
+/// sequential loop; per block they stay bounded by this length (#3073).
+pub(super) const GRAPH_SCAN_BLOCK: i32 = 256;
+
+/// Mamba1 selective scan as a graph, the fallback when the fused kernel does
+/// not accept the inputs (mixed dtypes on CUDA, the CPU,
+/// `MLXCEL_MAMBA1_SCAN_KERNEL=0`).
+///
+/// `x` and `delta` are `[B, L, D]`, `b` and `c` `[B, L, N]`, `a` `[D, N]`,
+/// `d` `[D]`. Walks the timesteps in order, building the per-step state
+/// increment `(delta * x) B` and decay `exp(delta A)` one block of `block`
+/// steps at a time. Each step reads its output row `y_t = state_t @ C_t`
+/// right away and the rows are stacked once at the end; materializing every
+/// `[B, D, N]` state and concatenating it one step at a time (as this used
+/// to) re-copied the growing tensor on every step, which made prefill
+/// quadratic in the prompt length. The arithmetic is elementwise per step, so
+/// the block length does not change the result.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn graph_selective_scan(
+    x: &MlxArray,
+    delta: &MlxArray,
+    b: &MlxArray,
+    c: &MlxArray,
+    a: &MlxArray,
+    d: &MlxArray,
+    state: Option<&MlxArray>,
+    block: i32,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    assert!(block > 0, "graph scan block must be greater than zero");
+    let shape = mlxcel_core::array_shape(x);
+    let (batch, seq_len, d_inner) = (shape[0], shape[1], shape[2]);
+    let state_size = mlxcel_core::array_shape(b)[2];
+
+    let mut current_state = state.map(mlxcel_core::copy);
+    let mut y_steps: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(seq_len as usize);
+
+    for block_start in (0..seq_len).step_by(block as usize) {
+        let block_end = (block_start + block).min(seq_len);
+        let block_len = block_end - block_start;
+        let x_blk = slice_axis(x, 1, block_start, block_end);
+        let delta_blk = slice_axis(delta, 1, block_start, block_end);
+        let b_blk = slice_axis(b, 1, block_start, block_end);
+
+        // new_state = (delta * x)[..., None] * B[..., None, :]
+        let delta_x = mlxcel_core::multiply(&delta_blk, &x_blk);
+        let delta_x_exp = mlxcel_core::reshape(&delta_x, &[batch, block_len, d_inner, 1]);
+        let b_exp = mlxcel_core::reshape(&b_blk, &[batch, block_len, 1, state_size]);
+        let new_state = mlxcel_core::multiply(&delta_x_exp, &b_exp);
+
+        // dtA = exp(delta[..., None] * A)
+        let delta_exp = mlxcel_core::reshape(&delta_blk, &[batch, block_len, d_inner, 1]);
+        let dt_a = mlxcel_core::exp(&mlxcel_core::multiply(&delta_exp, a));
+
+        for i in 0..block_len {
+            let new_state_t = mlxcel_core::squeeze_axis(&slice_axis(&new_state, 1, i, i + 1), 1);
+            let updated_t = if let Some(ref prev) = current_state {
+                // new_state[:, t] = state * dtA[:, t] + new_state[:, t]
+                let dt_a_t = mlxcel_core::squeeze_axis(&slice_axis(&dt_a, 1, i, i + 1), 1);
+                let prev_contrib = mlxcel_core::multiply(prev, &dt_a_t);
+                mlxcel_core::add(&prev_contrib, &new_state_t)
+            } else {
+                new_state_t
+            };
+
+            let t = block_start + i;
+            let c_t = mlxcel_core::squeeze_axis(&slice_axis(c, 1, t, t + 1), 1);
+            let c_exp = mlxcel_core::reshape(&c_t, &[batch, state_size, 1]);
+            y_steps.push(mlxcel_core::squeeze_axis(
+                &mlxcel_core::matmul(&updated_t, &c_exp),
+                -1,
+            ));
+            current_state = Some(updated_t);
+        }
+    }
+
+    let y_ptrs: Vec<*const MlxArray> = y_steps
+        .iter()
+        .map(|arr| arr.as_ref().unwrap() as *const MlxArray)
+        .collect();
+    let y = mlxcel_core::stack(&y_ptrs, 1);
+
+    // y = y + D * x
+    let d_reshaped = mlxcel_core::reshape(d, &[1, 1, d_inner]);
+    let d_contrib = mlxcel_core::multiply(&d_reshaped, x);
+    let y = mlxcel_core::add(&y, &d_contrib);
+
+    // Final state is the last timestep's state.
+    (
+        y,
+        current_state.expect("the graph scan requires a non-empty sequence"),
+    )
 }
 
 // Jamba Mamba Mixer.
@@ -604,7 +713,9 @@ impl JambaMambaMixer {
         // exactly as the graph scan below does, so output is unchanged there.
         // The graph scan remains for mixed-dtype inputs on CUDA, the CPU and
         // `MLXCEL_MAMBA1_SCAN_KERNEL=0`.
-        if mlxcel_core::mamba1_scan_kernel_accepts(x, &delta, &b, &c, a, &self.d_param) {
+        if !graph_scan_forced()
+            && mlxcel_core::mamba1_scan_kernel_accepts(x, &delta, &b, &c, a, &self.d_param)
+        {
             let zeros;
             let state_in = match state {
                 Some(s) => s,
@@ -642,21 +753,21 @@ impl JambaMambaMixer {
         #[cfg(test)]
         GRAPH_SCAN_STEPS.with(|n| n.set(n.get() + seq_len as usize));
 
-        // new_state = (delta * x)[..., None] * B[..., None, :]
-        let delta_x = mlxcel_core::multiply(&delta, x);
-        let delta_x_exp = mlxcel_core::reshape(
-            &delta_x,
-            &[batch, seq_len, self.intermediate_size as i32, 1],
-        );
-        let b_exp = mlxcel_core::reshape(&b, &[batch, seq_len, 1, self.ssm_state_size as i32]);
-        let new_state = mlxcel_core::multiply(&delta_x_exp, &b_exp);
-
-        // dtA = exp(delta[..., None] * A)
-        let delta_exp =
-            mlxcel_core::reshape(&delta, &[batch, seq_len, self.intermediate_size as i32, 1]);
-        let dt_a = mlxcel_core::exp(&mlxcel_core::multiply(&delta_exp, a));
-
         if seq_len == 1 {
+            // new_state = (delta * x)[..., None] * B[..., None, :]
+            let delta_x = mlxcel_core::multiply(&delta, x);
+            let delta_x_exp = mlxcel_core::reshape(
+                &delta_x,
+                &[batch, seq_len, self.intermediate_size as i32, 1],
+            );
+            let b_exp = mlxcel_core::reshape(&b, &[batch, seq_len, 1, self.ssm_state_size as i32]);
+            let new_state = mlxcel_core::multiply(&delta_x_exp, &b_exp);
+
+            // dtA = exp(delta[..., None] * A)
+            let delta_exp =
+                mlxcel_core::reshape(&delta, &[batch, seq_len, self.intermediate_size as i32, 1]);
+            let dt_a = mlxcel_core::exp(&mlxcel_core::multiply(&delta_exp, a));
+
             let new_state_t = mlxcel_core::squeeze_axis(&new_state, 1);
             let dt_a_t = mlxcel_core::squeeze_axis(&dt_a, 1);
             let updated_t = if let Some(prev) = state {
@@ -680,51 +791,7 @@ impl JambaMambaMixer {
             return (y, updated_t);
         }
 
-        // Sequential scan through timesteps. Each step reads the output row
-        // `y_t = state_t @ C_t` right away, the same per-step product the
-        // single-token branch above computes, and the rows are stacked once at
-        // the end. Materializing every `[B, D, N]` state and concatenating it
-        // one step at a time (as this used to) re-copied the growing tensor on
-        // every step, which made prefill quadratic in the prompt length.
-        let mut current_state = state.map(mlxcel_core::copy);
-        let mut y_steps: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(seq_len as usize);
-
-        for t in 0..seq_len {
-            let new_state_t = mlxcel_core::squeeze_axis(&slice_axis(&new_state, 1, t, t + 1), 1);
-            let updated_t = if let Some(ref prev) = current_state {
-                // new_state[:, t] = state * dtA[:, t] + new_state[:, t]
-                let dt_a_t = mlxcel_core::squeeze_axis(&slice_axis(&dt_a, 1, t, t + 1), 1);
-                let prev_contrib = mlxcel_core::multiply(prev, &dt_a_t);
-                mlxcel_core::add(&prev_contrib, &new_state_t)
-            } else {
-                new_state_t
-            };
-
-            let c_t = mlxcel_core::squeeze_axis(&slice_axis(&c, 1, t, t + 1), 1);
-            let c_exp = mlxcel_core::reshape(&c_t, &[batch, self.ssm_state_size as i32, 1]);
-            y_steps.push(mlxcel_core::squeeze_axis(
-                &mlxcel_core::matmul(&updated_t, &c_exp),
-                -1,
-            ));
-            current_state = Some(updated_t);
-        }
-
-        let y_ptrs: Vec<*const MlxArray> = y_steps
-            .iter()
-            .map(|arr| arr.as_ref().unwrap() as *const MlxArray)
-            .collect();
-        let y = mlxcel_core::stack(&y_ptrs, 1);
-
-        // y = y + D * x
-        let d_reshaped =
-            mlxcel_core::reshape(&self.d_param, &[1, 1, self.intermediate_size as i32]);
-        let d_contrib = mlxcel_core::multiply(&d_reshaped, x);
-        let y = mlxcel_core::add(&y, &d_contrib);
-
-        // Final state is current_state (the last timestep's state)
-        let final_state = current_state.unwrap();
-
-        (y, final_state)
+        graph_selective_scan(x, &delta, &b, &c, a, &self.d_param, state, GRAPH_SCAN_BLOCK)
     }
 
     fn forward(

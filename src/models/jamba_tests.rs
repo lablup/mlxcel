@@ -717,3 +717,104 @@ fn jamba_fresh_mixed_and_b1_transition_match_solo_rows() {
         batching_mamba_model,
     );
 }
+
+/// Issue #3073: the graph scan builds the per-step state increments and
+/// decays one block of timesteps at a time instead of as `[B, L, D, N]` for
+/// the whole piece. The arithmetic is per step, so any block length must give
+/// bit-identical output and state, from an empty and from a prior state.
+#[test]
+fn jamba_graph_scan_blocks_do_not_change_the_result() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let (bsz, l, d, n) = (2, 13, 6, 4);
+    for dt in [dtype::FLOAT32, dtype::BFLOAT16] {
+        let cast = |a: mlxcel_core::UniquePtr<mlxcel_core::MlxArray>| mlxcel_core::astype(&a, dt);
+        let x = cast(varied(&[bsz, l, d], 31));
+        let delta = mlxcel_core::softplus(&cast(varied(&[bsz, l, d], 32)));
+        let b = cast(varied(&[bsz, l, n], 33));
+        let c = cast(varied(&[bsz, l, n], 34));
+        let a = mlxcel_core::negative(&mlxcel_core::exp(&cast(varied(&[d, n], 35))));
+        let d_param = cast(varied(&[d], 36));
+        let prior = cast(varied(&[bsz, d, n], 37));
+        for state in [None, Some(prior.as_ref().unwrap())] {
+            let (whole_y, whole_state) =
+                super::graph_selective_scan(&x, &delta, &b, &c, &a, &d_param, state, l);
+            assert_eq!(mlxcel_core::array_shape(&whole_y), vec![bsz, l, d]);
+            for block in [1, 4, 5] {
+                let (y, s) =
+                    super::graph_selective_scan(&x, &delta, &b, &c, &a, &d_param, state, block);
+                assert_eq!(
+                    to_f32(&y),
+                    to_f32(&whole_y),
+                    "dtype {dt} block {block} prior {}: output differs",
+                    state.is_some()
+                );
+                assert_eq!(
+                    to_f32(&s),
+                    to_f32(&whole_state),
+                    "dtype {dt} block {block} prior {}: state differs",
+                    state.is_some()
+                );
+            }
+        }
+    }
+}
+
+/// Issue #3073: a prefill longer than `GRAPH_SCAN_BLOCK` forced onto the
+/// graph scan (the fallback when the fused kernel does not accept the inputs)
+/// walks every timestep across several blocks and gives what the fused
+/// kernel gives, where one exists, and the same decode step after it.
+#[test]
+fn jamba_forced_graph_scan_prefill_spans_blocks_and_matches_the_kernel() {
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let len = super::GRAPH_SCAN_BLOCK as usize * 2 + 7;
+    let prompt: Vec<i32> = (0..len as i32).map(|i| (i * 7 + 3) % VOCAB).collect();
+    let run = |forced: bool, seq: u64| {
+        super::FORCE_GRAPH_SCAN.with(|f| f.set(forced));
+        let model = JambaModel::from_weights(mamba_config(), mamba_weights())
+            .expect("Mamba Jamba fixture must load");
+        let seq = SequenceId::from_raw(seq);
+        model.prepare_sequence_state(seq);
+        let before = super::GRAPH_SCAN_STEPS.with(|n| n.get());
+        let x = mlxcel_core::from_slice_i32(&prompt, &[1, len as i32]);
+        let prefill = to_f32(&model.forward_with_sequence_id(&x, Some(seq), &mut [], None));
+        let x = mlxcel_core::from_slice_i32(&[5], &[1, 1]);
+        let decode = to_f32(&model.forward_with_sequence_id(&x, Some(seq), &mut [], None));
+        let walked = super::GRAPH_SCAN_STEPS.with(|n| n.get()) - before;
+        super::FORCE_GRAPH_SCAN.with(|f| f.set(false));
+        (prefill, decode, walked)
+    };
+
+    let (graph_prefill, graph_decode, walked) = run(true, 3_073_001);
+    assert_eq!(
+        walked,
+        len + 1,
+        "the forced prefill and decode must walk the graph scan"
+    );
+    assert!(
+        graph_prefill
+            .iter()
+            .chain(&graph_decode)
+            .all(|v| v.is_finite())
+    );
+
+    let (kernel_prefill, kernel_decode, kernel_walked) = run(false, 3_073_002);
+    if kernel_walked == 0 {
+        for (name, graph, kernel) in [
+            ("prefill", &graph_prefill, &kernel_prefill),
+            ("decode", &graph_decode, &kernel_decode),
+        ] {
+            let max_diff = graph
+                .iter()
+                .zip(kernel)
+                .map(|(g, k)| (g - k).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_diff < 1e-3,
+                "{name}: graph scan differs from the kernel by {max_diff}"
+            );
+        }
+    }
+}
