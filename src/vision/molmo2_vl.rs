@@ -22,6 +22,90 @@ use crate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+/// Largest magnitude an image feature keeps when it is stored as `float16`.
+///
+/// The Molmo2 projector has no output norm. On `mlx-community/Molmo2-8B-4bit`
+/// two of the 1,605,632 projected values of a one-image prompt reach about
+/// 8.2e4, above the `float16` maximum of 65504. mlx-vlm clamps the tower's
+/// output at this value before adding it to the text embeddings
+/// (`MAX_FLOAT16_IMAGE_FEATURE` in `mlx_vlm/models/molmo2/molmo2.py`,
+/// Blaizzy/mlx-vlm#1165).
+const MAX_FLOAT16_IMAGE_FEATURE: f32 = 65000.0;
+
+/// The magnitude limit for image features stored in `dtype`: mlx-vlm's
+/// `image_feature_clip_limit`. `float16` gets the constant above, every other
+/// dtype its own largest finite value.
+fn image_feature_clip_limit(dtype: i32) -> f32 {
+    if dtype == mlxcel_core::dtype::FLOAT16 {
+        MAX_FLOAT16_IMAGE_FEATURE
+    } else if dtype == mlxcel_core::dtype::BFLOAT16 {
+        // finfo(bfloat16).max = (2 - 2^-7) * 2^127
+        f32::from_bits(0x7F7F_0000)
+    } else {
+        f32::MAX
+    }
+}
+
+/// mlx-vlm's `clip_image_features` for the dtype the features are about to be
+/// added in: NaN becomes zero, and every value is clamped to the limit of
+/// `text_dtype` (and of the features' own dtype, when that is the narrower
+/// one). A finite value inside the limit is returned unchanged.
+///
+/// The vision tower runs in `float32`, so its output is finite. Without the
+/// clamp, the cast to a `float16` text dtype turns any value past 65504 into
+/// `inf`, and the one-hot matmul in [`merge_image_features`] multiplies that
+/// `inf` by the zeros of every other row: one NaN column across the whole
+/// sequence, NaN logits, and a reply made of token 0.
+///
+/// Used by: [`merge_image_features`].
+fn clip_image_features(image_features: &MlxArray, text_dtype: i32) -> UniquePtr<MlxArray> {
+    let feature_dtype = mlxcel_core::array_dtype(image_features);
+    let limit = image_feature_clip_limit(text_dtype).min(image_feature_clip_limit(feature_dtype));
+    let finite = mlxcel_core::nan_to_num(image_features, 0.0, limit, -limit);
+    let lo = mlxcel_core::full_f32(&[1], -limit, feature_dtype);
+    let hi = mlxcel_core::full_f32(&[1], limit, feature_dtype);
+    mlxcel_core::clip(&finite, &lo, &hi)
+}
+
+/// Additive merge: add row `i` of `image_features` to row `positions[i]` of
+/// `x` (`[..., hidden]`, any leading shape) and leave every other row as it
+/// is. The features are clamped into the range of `x`'s dtype first
+/// ([`clip_image_features`]) and then cast to it.
+///
+/// Used by: [`Molmo2VLModel::get_input_embeddings`].
+fn merge_image_features(
+    x: &MlxArray,
+    image_features: &MlxArray,
+    positions: &[i32],
+) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(x);
+    let txt_dtype = mlxcel_core::array_dtype(x);
+    let image_features = clip_image_features(image_features, txt_dtype);
+    // Cast to text embedding dtype only if different (avoids no-op astype graph node)
+    let image_features = if mlxcel_core::array_dtype(&image_features) != txt_dtype {
+        mlxcel_core::astype(&image_features, txt_dtype)
+    } else {
+        image_features
+    };
+
+    let h_dim = shape[shape.len() - 1];
+    let flat_x = mlxcel_core::reshape(x, &[-1, h_dim]);
+    let total_tokens = mlxcel_core::array_shape(&flat_x)[0];
+    let num_pos = positions.len() as i32;
+
+    // Additive scatter: flat_x += one_hot(positions) @ image_features
+    let row_indices: Vec<i32> = (0..total_tokens).collect();
+    let row_arr = mlxcel_core::from_slice_i32(&row_indices, &[total_tokens, 1]);
+    let pos_arr = mlxcel_core::from_slice_i32(positions, &[1, num_pos]);
+    let one_hot = mlxcel_core::equal(&row_arr, &pos_arr);
+    let one_hot_f = mlxcel_core::astype(&one_hot, mlxcel_core::array_dtype(&image_features));
+    // spread: [total_tokens, num_pos] @ [num_pos, h_dim] = [total_tokens, h_dim]
+    let spread = mlxcel_core::matmul(&one_hot_f, &image_features);
+    let spread = mlxcel_core::astype(&spread, mlxcel_core::array_dtype(&flat_x));
+    let merged = mlxcel_core::add(&flat_x, &spread);
+    mlxcel_core::reshape(&merged, &shape)
+}
+
 /// Molmo2 Vision-Language Model
 ///
 /// Uses additive merge: vision features are ADDED to text embeddings at
@@ -49,7 +133,6 @@ impl Molmo2VLModel {
     ) -> merge::InputEmbeddings {
         // 1. Embed all tokens
         let x = self.text_model.wte.forward(input_ids);
-        let shape = mlxcel_core::array_shape(&x);
 
         // 2. Encode images through vision tower (includes pooling + projection)
         let (images, token_pooling) = self.build_batched_images(
@@ -60,14 +143,6 @@ impl Molmo2VLModel {
             _image_num_crops,
         );
         let image_features = self.vision_tower.forward(&images, &token_pooling);
-        // Cast to text embedding dtype only if different (avoids no-op astype graph node)
-        let img_dtype = mlxcel_core::array_dtype(&image_features);
-        let txt_dtype = mlxcel_core::array_dtype(&x);
-        let image_features = if img_dtype != txt_dtype {
-            mlxcel_core::astype(&image_features, txt_dtype)
-        } else {
-            image_features
-        };
 
         // 3. Find image_patch_id positions in input_ids
         //    Vectorized: eval the boolean mask once, then extract positions on CPU
@@ -84,24 +159,9 @@ impl Molmo2VLModel {
             }
         }
 
+        // 4. Add the (clamped) image features at those positions
         let x = if !positions.is_empty() {
-            let x_shape = mlxcel_core::array_shape(&x);
-            let h_dim = x_shape[x_shape.len() - 1];
-            let flat_x = mlxcel_core::reshape(&x, &[-1, h_dim]);
-            let num_pos = positions.len() as i32;
-
-            // Additive scatter: flat_x += one_hot(positions) @ image_features
-            let row_indices: Vec<i32> = (0..total_tokens).collect();
-            let row_arr = mlxcel_core::from_slice_i32(&row_indices, &[total_tokens, 1]);
-            let pos_arr = mlxcel_core::from_slice_i32(&positions, &[1, num_pos]);
-            let one_hot = mlxcel_core::equal(&row_arr, &pos_arr);
-            let one_hot_f =
-                mlxcel_core::astype(&one_hot, mlxcel_core::array_dtype(&image_features));
-            // spread: [total_tokens, num_pos] @ [num_pos, h_dim] = [total_tokens, h_dim]
-            let spread = mlxcel_core::matmul(&one_hot_f, &image_features);
-            let spread = mlxcel_core::astype(&spread, mlxcel_core::array_dtype(&flat_x));
-            let merged = mlxcel_core::add(&flat_x, &spread);
-            mlxcel_core::reshape(&merged, &shape)
+            merge_image_features(&x, &image_features, &positions)
         } else {
             x
         };
@@ -192,3 +252,7 @@ impl LanguageModel for Molmo2VLModel {
         mlxcel_core::generate::LanguageModel::eos_token_ids(&self.text_model)
     }
 }
+
+#[cfg(test)]
+#[path = "molmo2_vl_tests.rs"]
+mod tests;
