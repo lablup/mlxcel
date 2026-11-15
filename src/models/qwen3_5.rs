@@ -2374,6 +2374,13 @@ impl Qwen35Model {
         tracing::info!("[Qwen3.5] Loading weights...");
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
+        // An exported conditioner (MOSS-Image's `Qwen3_5TextModel`, and any
+        // other checkpoint saved from the inner text model) carries the bare
+        // layout — `embed_tokens.*`, `layers.*`, `norm.*` — where every HF
+        // checkpoint wraps those under `model.`. The loader reads the wrapped
+        // names, so restore the wrapper before anything else looks at a key.
+        let weights = restore_text_model_prefix(weights);
+
         // Reconstruct FP8 tensors before any other sanitization: the sidecars
         // are keyed off the original tensor names, and the pass replaces
         // `<name>.weight` with a packed plane plus `<name>.scales`.
@@ -2409,6 +2416,18 @@ impl Qwen35Model {
             .ok_or_else(|| "Missing model.norm.weight".to_string())?;
 
         let lm_head = if config.tie_word_embeddings {
+            None
+        } else if !weights.contains_key("lm_head.weight") {
+            // A checkpoint exported head-free (MOSS-Image's conditioner keeps the
+            // language backbone and drops the vocabulary projection). The model
+            // already treats "no head" as the tied path everywhere it computes
+            // logits, so this is the honest shape rather than an error — but a
+            // chat checkpoint that lost its head to a bad conversion would now
+            // load too, so say so out loud.
+            tracing::warn!(
+                "[Qwen3.5] no lm_head.weight and tie_word_embeddings=false; \
+                 running head-free (logits fall back to the embedding matrix)"
+            );
             None
         } else {
             Some(UnifiedLinear::from_weights(
@@ -3913,7 +3932,6 @@ impl Qwen35StageModel {
 // Weight Sanitization.
 
 /// Whether a `conv1d.weight` tensor is still in the raw torch layout.
-///
 /// The gated-delta conv is depthwise (`groups == channels`), so a raw torch
 /// weight is `[out, 1, kW]` and the converted MLX weight is `[out, kW, 1]`. A
 /// tensor of rank < 3 carries no layout information, so it reads as converted:
@@ -3921,6 +3939,36 @@ impl Qwen35StageModel {
 /// degenerate tensor must not be able to trigger a shift that transposes nothing.
 fn is_raw_conv1d_layout(shape: &[i32]) -> bool {
     shape.len() >= 3 && shape[shape.len() - 1] != 1
+}
+
+/// Restore the `model.` wrapper on a bare text-model layout.
+///
+/// MOSS-Image's prompt conditioner — and any checkpoint exported from the inner
+/// `Qwen3_5TextModel` rather than the `Qwen3_5ForConditionalGeneration` wrapper —
+/// stores `embed_tokens.*`, `layers.*` and `norm.*` at the top level. `from_weights`
+/// reads the HF spelling (`model.embed_tokens`, `model.layers.N`, `model.norm`),
+/// so the bare layout has to be wrapped first. `lm_head.*` is top-level in BOTH
+/// layouts and is deliberately left alone, as is anything already wrapped.
+fn restore_text_model_prefix(weights: WeightMap) -> WeightMap {
+    const WRAPPED: [&str; 3] = ["embed_tokens.", "layers.", "norm."];
+    let bare = weights
+        .keys()
+        .any(|key| WRAPPED.iter().any(|prefix| key.starts_with(prefix)));
+    let already_wrapped = weights.keys().any(|key| key.starts_with("model."));
+    if !bare || already_wrapped {
+        return weights;
+    }
+    tracing::info!("[Qwen3.5] checkpoint carries the bare text-model layout; restoring the `model.` prefix");
+    weights
+        .into_iter()
+        .map(|(key, value)| {
+            if WRAPPED.iter().any(|prefix| key.starts_with(prefix)) {
+                (format!("model.{key}"), value)
+            } else {
+                (key, value)
+            }
+        })
+        .collect()
 }
 
 pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> WeightMap {
