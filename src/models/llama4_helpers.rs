@@ -104,10 +104,9 @@ pub(crate) fn chunked_causal_attention(
 
 /// Build the additive chunked attention mask used by Llama4 chunked caches.
 ///
-/// The prefill no longer builds it (issue #3100, see
-/// [`chunked_causal_attention`]); it stays as the reference the tests compare
-/// that path against.
-#[cfg(test)]
+/// A one-row prefill no longer builds it (issue #3100, see
+/// [`chunked_causal_attention`]); batched rows, speculative verify blocks and
+/// `MLXCEL_PREFILL_CAUSAL_MODE=0` keep it.
 pub(crate) fn create_chunked_attention_mask(
     seq_len: i32,
     start_position: i32,

@@ -19,7 +19,7 @@
 
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
 use crate::models::llama4_helpers::{
-    chunked_causal_attention, get_weight_copy, load_quantized_linear,
+    chunked_causal_attention, create_chunked_attention_mask, get_weight_copy, load_quantized_linear,
 };
 use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
@@ -1180,6 +1180,31 @@ impl Llama4CxxModel {
         mlxcel_core::utils::prefill_causal_mask(seq_len, offset, batch, attention, dtype)
     }
 
+    /// The MoE (chunked) layers' prefill mask. `None` for a decode row, and
+    /// for a prefill where MLX's causal mode applies
+    /// ([`mlxcel_core::utils::prefill_uses_causal_mode`]: one row, no
+    /// speculative verify, `MLXCEL_PREFILL_CAUSAL_MODE` not `0`), where
+    /// `Llama4Cache::attend` runs the chunked attention per query chunk in
+    /// causal mode instead of over this dense `[L, S]` array (#3100).
+    /// Otherwise the array mask, the earlier dispatch. Call it after the
+    /// front trim: the mask spans the visible keys from `start_position`.
+    fn chunked_prefill_mask(
+        &self,
+        seq_len: i32,
+        batch: i32,
+        caches: &[Llama4Cache],
+    ) -> Option<UniquePtr<MlxArray>> {
+        if seq_len <= 1 || mlxcel_core::utils::prefill_uses_causal_mode(seq_len, batch, false) {
+            return None;
+        }
+        Some(create_chunked_attention_mask(
+            seq_len,
+            caches[0].start_position(),
+            caches[0].offset(),
+            self.attention_chunk_size,
+        ))
+    }
+
     /// Forward pass with iGQA (Interleaved GQA) pattern
     pub fn forward_igqa(
         &self,
@@ -1200,8 +1225,9 @@ impl Llama4CxxModel {
             }
         }
 
-        // The MoE (chunked) layers take no mask: their cache runs the
-        // chunked attention per query chunk in MLX's causal mode (#3100).
+        // The MoE (chunked) layers usually take no mask: their cache runs
+        // the chunked attention per query chunk in MLX's causal mode (#3100).
+        let chunk_mask = self.chunked_prefill_mask(seq_len, shape[0], caches);
         let offset = caches[0].offset();
 
         // Create global mask for dense layers. A single row leaves causality
@@ -1213,7 +1239,7 @@ impl Llama4CxxModel {
         for (idx, layer) in self.layers.iter().enumerate() {
             // MoE layers use chunked attention, dense layers use global attention
             let mask = if uses_chunked_cache(idx) {
-                None
+                chunk_mask.as_deref()
             } else {
                 global_mask.as_deref()
             };
@@ -1263,14 +1289,15 @@ impl Llama4CxxModel {
             }
         }
 
-        // Chunked layers take no mask (#3100), as in `forward_igqa`.
+        // Chunked layers usually take no mask (#3100), as in `forward_igqa`.
+        let chunk_mask = self.chunked_prefill_mask(seq_len, shape[0], caches);
         let offset = caches[0].offset();
 
         let global_mask = self.global_prefill_mask(seq_len, offset, shape[0], &h);
 
         for (idx, layer) in self.layers.iter().enumerate() {
             let mask = if uses_chunked_cache(idx) {
-                None
+                chunk_mask.as_deref()
             } else {
                 global_mask.as_deref()
             };
