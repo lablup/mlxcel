@@ -1,0 +1,10 @@
+model,prefill_chunk,mla_absorbed,rep,greedy_output_vs_main
+deepseek-v2-lite-chat-4bit-mlx,0,0,1,identical
+deepseek-v2-lite-chat-4bit-mlx,0,0,2,identical
+deepseek-v2-lite-chat-4bit-mlx,2048,0,1,identical
+deepseek-v2-lite-chat-4bit-mlx,2048,0,2,identical
+deepseek-v2-lite-chat-4bit-mlx,2048,1,2,identical
+kimi-vl-a3b-thinking-4bit,0,0,1,differs
+kimi-vl-a3b-thinking-4bit,0,0,2,differs
+kimi-vl-a3b-thinking-4bit,2048,0,1,identical
+kimi-vl-a3b-thinking-4bit,2048,0,2,identical

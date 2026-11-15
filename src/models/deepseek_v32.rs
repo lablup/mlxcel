@@ -394,13 +394,14 @@ impl MLAAttention {
         };
 
         // Causal fallback (issue #619, same class as #618): both standard
-        // generation paths pass `mask == None` for prefill, and neither the
-        // SDPA wrapper nor the indexer applies implicit causality, so bake a
-        // causal mask in here for any maskless multi-token forward. It must
-        // reach BOTH consumers: the indexer top-k selection (or future keys
-        // get selected) and the additive `pe_scores` mask (which
-        // `apply_sparse_prefill_mask` documents as already-causal). Decode
-        // (`l == 1`) stays maskless: every cached position is causally valid.
+        // generation paths pass `mask == None` for prefill, and the indexer
+        // applies no implicit causality, so bake a causal mask in here for any
+        // maskless multi-token forward. It must reach BOTH consumers: the
+        // indexer top-k selection (or future keys get selected) and the sparse
+        // attention mask (which `apply_sparse_prefill_mask` documents as
+        // already-causal). Without a top-k selection the attention runs MLX's
+        // causal mode instead (issue #3071). Decode (`l == 1`) stays maskless:
+        // every cached position is causally valid.
         let causal_storage;
         let effective_mask: Option<&MlxArray> = if mask.is_some() {
             mask
@@ -418,34 +419,6 @@ impl MLAAttention {
                 idx.top_indices(idx_q, idx_k, idx_w, effective_mask)
             }
             _ => None,
-        };
-
-        // Compute positional encoding scores: pe_scores = (q_pe * scale) @ k_pe.T
-        let scale_scalar = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
-        let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
-        let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
-        let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
-
-        // Apply the (caller or fallback) causal mask to pe_scores.
-        let pe_scores = if let Some(m) = effective_mask {
-            mlxcel_core::add(&pe_scores, m)
-        } else {
-            pe_scores
-        };
-
-        // Multi-token steps fold the indexer's top-k selection into the
-        // additive mask (mirrors upstream's boolean sparse_mask & causal); a
-        // single-token step gathers the selected rows instead (below).
-        let pe_scores = if l > 1 {
-            match &topk_indices {
-                Some(indices) => {
-                    let kv_len = mlxcel_core::array_shape(&kv_latent)[2];
-                    apply_sparse_prefill_mask(&pe_scores, indices, kv_len)
-                }
-                None => pe_scores,
-            }
-        } else {
-            pe_scores
         };
 
         // Cost-model gate (issue #2408): one query is always absorbed, and a
@@ -471,11 +444,70 @@ impl MLAAttention {
 
         // MLA attention: absorbed or materializing, chosen by the cost model
         // above rather than by the query count alone.
-        let output = if absorbed {
-            // Absorbed: project Q into latent space, use kv_latent as K=V
-            let q_projected = self.embed_q.forward(&q_nope);
-
-            if l == 1 {
+        let output = if l > 1 {
+            // Multi-token step (issue #3071): fold the rope half into the SDPA
+            // head dim, `[q_nope | q_pe] . [k | k_pe]`, instead of building the
+            // dense `[B, H, L, S]` rope-score tensor as the additive mask. The
+            // mask that remains is the causal (caller or fallback) mask with
+            // the indexer's top-k selection folded in, mirroring upstream's
+            // boolean `sparse_mask & causal`; it is `[B, 1, L, S]`, shared by
+            // every head. A causal step with no top-k selection needs no mask
+            // array at all and runs MLX's causal mode.
+            let kv_len = mlxcel_core::array_shape(&kv_latent)[2];
+            let sparse_storage;
+            let folded_mask = match (&topk_indices, mask) {
+                (Some(indices), _) => {
+                    let m = effective_mask.expect("a multi-token step always has a mask");
+                    sparse_storage = apply_sparse_prefill_mask(m, indices, kv_len);
+                    mlxcel_core::mla::FoldedMask::Array(&sparse_storage)
+                }
+                (None, Some(m)) => mlxcel_core::mla::FoldedMask::Array(m),
+                (None, None) => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_projected = self.embed_q.forward(&q_nope);
+                let output = mlxcel_core::mla::rope_folded_attention(
+                    &q_projected,
+                    &q_pe,
+                    &kv_latent,
+                    &k_pe,
+                    &kv_latent,
+                    self.scale,
+                    folded_mask,
+                );
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to per-head K and V.
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                mlxcel_core::mla::rope_folded_attention(
+                    &q_nope,
+                    &q_pe,
+                    &k,
+                    &k_pe,
+                    &v,
+                    self.scale,
+                    folded_mask,
+                )
+            }
+        } else {
+            // Single-token decode keeps the rope term as an additive mask over
+            // one `[B, H, 1, S]` score row.
+            // pe_scores = (q_pe * scale) @ k_pe.T
+            let scale_scalar =
+                mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
+            let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
+            let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
+            let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
+            let pe_scores = if let Some(m) = effective_mask {
+                mlxcel_core::add(&pe_scores, m)
+            } else {
+                pe_scores
+            };
+            if absorbed {
+                // Absorbed: project Q into latent space, use kv_latent as K=V
+                let q_projected = self.embed_q.forward(&q_nope);
                 if let Some(indices) = &topk_indices {
                     // Sparse decode fast path: gather the selected KV subset
                     // with take_along_axis (no per-step sparse mask). Decode is
@@ -521,37 +553,21 @@ impl MLAAttention {
                     self.unembed_out.forward(&output)
                 }
             } else {
-                // Multi-token absorbed step: the causal, top-k-restricted mask
-                // computed above is the SDPA mask, and the latent is K and V.
+                // Materialize: project kv_latent to K and V, then attend.
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
                 let pe_mask_ptr = &*pe_scores as *const MlxArray;
-                let output = unsafe {
+                unsafe {
                     mlxcel_core::layers::attention_from_ptr(
-                        &q_projected,
-                        &kv_latent,
-                        &kv_latent,
+                        &q_nope,
+                        &k,
+                        &v,
                         self.scale,
                         pe_mask_ptr,
                         0.0,
                         0,
                     )
-                };
-                self.unembed_out.forward(&output)
-            }
-        } else {
-            // Materialize: project kv_latent to K and V, then attend.
-            let k = self.embed_q.forward_no_transpose(&kv_latent);
-            let v = self.unembed_out.forward(&kv_latent);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
-                    &q_nope,
-                    &k,
-                    &v,
-                    self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
-                )
+                }
             }
         };
 
@@ -687,12 +703,15 @@ fn gather_topk_kv(
 }
 
 /// Build a sparse additive mask for the multi-token prefill path: positions not
-/// in the per-query top-k become `-inf`. `pe_scores` already carries the causal
-/// mask, so keeping it where selected reproduces upstream's `sparse_mask & mask`.
+/// in the per-query top-k become `-inf`. `mask` is the additive causal (or
+/// caller) mask, so keeping it where selected reproduces upstream's
+/// `sparse_mask & mask`.
 ///
-/// `indices` is `[b, 1, s, index_topk]`; `pe_scores` is `[b, n_heads, s, kv_len]`.
+/// `indices` is `[b, 1, s, index_topk]`; `mask` broadcasts to `[b, 1, s, kv_len]`
+/// and so does the result, one mask shared by every head (issue #3071: it used
+/// to be applied to the per-head `[b, n_heads, s, kv_len]` rope scores).
 fn apply_sparse_prefill_mask(
-    pe_scores: &MlxArray,
+    mask: &MlxArray,
     indices: &MlxArray,
     kv_len: i32,
 ) -> UniquePtr<MlxArray> {
@@ -710,9 +729,8 @@ fn apply_sparse_prefill_mask(
     let half = mlxcel_core::full_f32(&[1], 0.5, mlxcel_core::dtype::FLOAT32);
     let keep = mlxcel_core::greater(&filled, &half);
 
-    let neg_inf =
-        mlxcel_core::full_f32(&[1], f32::NEG_INFINITY, mlxcel_core::array_dtype(pe_scores));
-    mlxcel_core::where_cond(&keep, pe_scores, &neg_inf)
+    let neg_inf = mlxcel_core::full_f32(&[1], f32::NEG_INFINITY, mlxcel_core::array_dtype(mask));
+    mlxcel_core::where_cond(&keep, mask, &neg_inf)
 }
 
 // MLP (Dense and MoE - reusing from V2).

@@ -42,6 +42,7 @@ use cxx::UniquePtr;
 use crate::ffi::{self, MlxArray};
 use crate::layers::attention;
 use crate::mla::absorb::MlaAbsorbedProjections;
+use crate::mla::prefill::{FoldedMask, rope_folded_attention};
 use crate::mla::stats::{self, MlaDecodePath};
 
 /// Fold `W_UK` into the query: `[B, H, L, qk_nope] -> [B, H, L, kv_lora_rank]`.
@@ -118,6 +119,15 @@ pub(crate) fn absorbed_attention(
         MlaDecodePath::AbsorbedPrefill
     });
 
+    if q_len > 1 {
+        // A multi-token step folds the rope half into the SDPA head dim
+        // instead of building the dense `[B, H, L, S]` rope-score mask, which
+        // grows with the query count times the whole cache (issue #3071). A
+        // single query keeps the mask form: its score row is one `[B, H, 1, S]`
+        // slice, and decode output stays what it was.
+        let mask = mask.map_or(FoldedMask::None, FoldedMask::Array);
+        return rope_folded_attention(q_absorbed, q_pe, ckv, kpe, ckv, scale, mask);
+    }
     let rope_mask = rope_score_mask(q_pe, kpe, scale, mask);
     attention(q_absorbed, ckv, ckv, scale, Some(&rope_mask), 0.0, 0)
 }
