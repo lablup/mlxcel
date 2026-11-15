@@ -841,7 +841,12 @@ impl ExaoneMoeModel {
                 .unwrap_or(0);
             (
                 Some(utils::create_causal_mask(seq_len, ga_live_len)),
-                Some(utils::create_sliding_window_prefill_mask(
+                // Dense caches keep every key, so the window is enforced by
+                // the mask over all of them. The rotating-cache variant sizes
+                // the key axis to `window - 1 + seq_len`, which stops
+                // matching the keys once the prior offset reaches the window
+                // (#3093).
+                Some(utils::create_sliding_window_prefill_mask_dense(
                     seq_len,
                     swa_live_len,
                     self.window_size,
