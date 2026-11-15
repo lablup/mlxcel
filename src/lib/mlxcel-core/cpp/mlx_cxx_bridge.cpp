@@ -29,6 +29,13 @@
 #include <utility>
 #include <vector>
 
+// Defined by the core overlay (mlxcelverse/overlays/core/mlx/device.cpp, and
+// its ROCm copy) on every backend; global scope for the reason given below.
+namespace mlx::core {
+struct Device;
+void mlxcel_set_process_default_device(const Device& d);
+} // namespace mlx::core
+
 #ifdef MLXCEL_BRIDGE_METAL_BACKEND
 // Defined by the mlx/backend/metal/quantized.cpp overlay (issue #1187).
 // Declared here rather than pulled from a header because upstream owns every
@@ -4959,6 +4966,11 @@ void synchronize_default() {
 
 void set_default_device(bool gpu) {
     mlx::core::set_default_device(gpu ? mlx::core::Device::gpu : mlx::core::Device::cpu);
+}
+
+void set_process_default_device(bool gpu) {
+    mlx::core::mlxcel_set_process_default_device(
+        gpu ? mlx::core::Device::gpu : mlx::core::Device::cpu);
 }
 
 size_t set_wired_limit(size_t limit) {

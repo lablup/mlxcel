@@ -2608,8 +2608,13 @@ mod ffi {
         /// Synchronize default stream
         fn synchronize_default();
 
-        /// Set default device for subsequent operations
+        /// Set the calling thread's default device for subsequent operations.
+        /// The default device is per thread (core overlay `mlx/device.cpp`).
         fn set_default_device(gpu: bool);
+
+        /// Set the default device of every thread that has not set its own,
+        /// and clear the calling thread's override.
+        fn set_process_default_device(gpu: bool);
 
         /// Set wired memory limit, returns previous limit
         fn set_wired_limit(limit: usize) -> usize;

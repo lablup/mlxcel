@@ -434,6 +434,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/grouped_gemm_arch_probe.cpp");
     println!("cargo:rerun-if-changed=metal/fused_attention_metal4.metal");
     println!("cargo:rerun-if-changed=../mlxcelverse/CMakeLists.txt");
+    println!("cargo:rerun-if-changed=../mlxcelverse/overlays/core");
     println!("cargo:rerun-if-changed=../mlxcelverse/overlays/cpu");
     println!("cargo:rerun-if-changed=../mlxcelverse/overlays/metal");
     println!("cargo:rerun-if-changed=../mlxcelverse/overlays/cuda");

@@ -152,7 +152,7 @@ All three should produce output within RMS < 5e-3 of the graph reference on Appl
 
 #### Reconciling CUDA, Metal, and CPU source overlays
 
-The overlays in `src/lib/mlxcelverse/overlays/{cpu,metal,cuda}/` are applied whole-file with `configure_file(... COPYONLY)`, so any upstream commit to an overlaid file is silently reverted when the pin moves unless the overlay is rebased first. Every overlay source file under those three directories therefore carries a single machine-readable base line in its header comment:
+The overlays in `src/lib/mlxcelverse/overlays/{core,cpu,metal,cuda}/` are applied whole-file with `configure_file(... COPYONLY)`, so any upstream commit to an overlaid file is silently reverted when the pin moves unless the overlay is rebased first. Every overlay source file under those three directories therefore carries a single machine-readable base line in its header comment:
 
 ```cpp
 // Modified from upstream MLX <sha> <upstream/relative/path>
@@ -165,7 +165,7 @@ Before and after bumping `GIT_TAG`, run the drift check against an `ml-explore/m
 ```bash
 MLX_SRC=<ml-explore/mlx clone, or $OUT_DIR/build/_deps/mlx-src>
 PIN=$(bash scripts/ci/mlx_pinned_commit.sh)
-for f in $(find src/lib/mlxcelverse/overlays/cpu src/lib/mlxcelverse/overlays/metal src/lib/mlxcelverse/overlays/cuda -type f ! -name README.md); do
+for f in $(find src/lib/mlxcelverse/overlays/core src/lib/mlxcelverse/overlays/cpu src/lib/mlxcelverse/overlays/metal src/lib/mlxcelverse/overlays/cuda -type f ! -name README.md); do
   up="${f#src/lib/mlxcelverse/overlays/*/}"
   base=$(sed -n 's|^// *Modified from upstream MLX \([0-9a-f]\{7,40\}\).*|\1|p' "$f" | head -1)
   [ -n "$base" ] || { echo "NO BASE $f"; continue; }
