@@ -187,6 +187,13 @@ pub(crate) fn two_layer_model() -> Qwen35Model {
 /// [`two_layer_model`] with a `vocab`-entry embedding table and LM head, for
 /// tests that need the logits to dominate memory (#3045).
 pub(crate) fn two_layer_model_with_vocab(vocab: usize) -> Qwen35Model {
+    let (weights, config) = two_layer_weights_and_config(vocab);
+    Qwen35Model::from_weights(&weights, &config).expect("two-layer synthetic Qwen 3.5 must build")
+}
+
+/// The synthetic weights and config behind [`two_layer_model_with_vocab`], for
+/// stage-model tests that load the same tensors through a layer filter.
+pub(crate) fn two_layer_weights_and_config(vocab: usize) -> (WeightMap, Qwen35Config) {
     let vocab = vocab as i32;
     let mut weights = WeightMap::new();
     let mut put = |name: &str, shape: &[i32]| {
@@ -235,8 +242,7 @@ pub(crate) fn two_layer_model_with_vocab(vocab: usize) -> Qwen35Model {
     }
     put("model.norm.weight", &[8]);
     put("lm_head.weight", &[vocab, 8]);
-    Qwen35Model::from_weights(&weights, &two_layer_config_with_vocab(vocab as usize))
-        .expect("two-layer synthetic Qwen 3.5 must build")
+    (weights, two_layer_config_with_vocab(vocab as usize))
 }
 
 #[test]

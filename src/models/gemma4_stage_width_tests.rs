@@ -115,16 +115,16 @@ fn per_layer_input_inbound_width_matches_upstream_packing() {
     let mut caches1: Vec<Cache> = stage1.make_caches();
     let mut caches2: Vec<Cache> = stage2.make_caches();
 
-    let packed0 = hidden_out(stage0.execute_from_token_ids(&ids, &mut caches0));
+    let packed0 = hidden_out(stage0.execute_from_token_ids(&ids, &mut caches0, None));
     assert_eq!(last_axis(&packed0), stage1.inbound_activation_width());
     let packed0 = decode_for(&stage1, &packed0);
 
-    let packed1 = hidden_out(stage1.execute_from_hidden_states(packed0, &mut caches1));
+    let packed1 = hidden_out(stage1.execute_from_hidden_states(packed0, &mut caches1, None));
     assert_eq!(last_axis(&packed1), stage2.inbound_activation_width());
     let packed1 = decode_for(&stage2, &packed1);
 
     match stage2
-        .execute_from_hidden_states(packed1, &mut caches2)
+        .execute_from_hidden_states(packed1, &mut caches2, None)
         .expect("last stage must run")
     {
         StageExecutionOutput::Logits(logits) => {

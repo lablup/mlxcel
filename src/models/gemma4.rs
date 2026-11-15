@@ -5183,7 +5183,7 @@ impl Gemma4StageModel {
         Self::from_filtered_weights(&weights, &args, filter, stage_index, weight_backing)
     }
 
-    fn from_filtered_weights(
+    pub(crate) fn from_filtered_weights(
         weights: &WeightMap,
         args: &ModelArgs,
         filter: &LayerFilter,
@@ -5328,6 +5328,7 @@ impl Gemma4StageModel {
         &self,
         input_ids: &MlxArray,
         caches: &mut [Cache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         let mut hidden = self
             .embed_tokens
@@ -5362,13 +5363,20 @@ impl Gemma4StageModel {
             }
         });
 
-        self.execute_hidden(hidden, local_inputs.as_ref(), downstream_inputs, caches)
+        self.execute_hidden(
+            hidden,
+            local_inputs.as_ref(),
+            downstream_inputs,
+            caches,
+            last_pos,
+        )
     }
 
     pub(crate) fn execute_from_hidden_states(
         &self,
         packed_hidden: UniquePtr<MlxArray>,
         caches: &mut [Cache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if self.filter.has_embedding {
             return Err("entry stage expects token IDs, not hidden states".to_string());
@@ -5376,15 +5384,24 @@ impl Gemma4StageModel {
 
         let (hidden, local_inputs, downstream_inputs) =
             self.unpack_stage_hidden(packed_hidden.as_ref().unwrap())?;
-        self.execute_hidden(hidden, local_inputs.as_ref(), downstream_inputs, caches)
+        self.execute_hidden(
+            hidden,
+            local_inputs.as_ref(),
+            downstream_inputs,
+            caches,
+            last_pos,
+        )
     }
 
+    /// `last_pos` asks the final stage to project only that hidden row through
+    /// the norm, LM head and softcap (#3081); a non-final stage ignores it.
     fn execute_hidden(
         &self,
         mut hidden: UniquePtr<MlxArray>,
         local_per_layer_inputs: Option<&UniquePtr<MlxArray>>,
         downstream_inputs: Option<UniquePtr<MlxArray>>,
         caches: &mut [Cache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if caches.len() != self.layers.len() {
             return Err(format!(
@@ -5471,6 +5488,12 @@ impl Gemma4StageModel {
         }
 
         if let Some(norm) = &self.norm {
+            let hidden = match last_pos {
+                Some(pos) => {
+                    mlxcel_core::generate::logits_at_position(hidden.as_ref().unwrap(), pos)
+                }
+                None => hidden,
+            };
             let hidden = norm.forward(hidden.as_ref().unwrap());
             let mut logits = self
                 .embed_tokens
@@ -8635,7 +8658,7 @@ mod quant_override_diagnostics_tests {
 
 #[cfg(test)]
 #[path = "gemma4_stage_tests.rs"]
-mod gemma4_stage_tests;
+pub(crate) mod gemma4_stage_tests;
 #[cfg(test)]
 #[path = "gemma4_stage_width_tests.rs"]
 mod gemma4_stage_width_tests;

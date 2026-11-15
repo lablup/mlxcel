@@ -37,7 +37,7 @@ const INTERMEDIATE: i32 = 512;
 const HEAD_DIM: i32 = 256;
 const HEADS: i32 = 8;
 const KV_HEADS: i32 = 1;
-pub(super) const LAYERS: usize = 4;
+pub(crate) const LAYERS: usize = 4;
 const WINDOW: i32 = 16;
 /// The activation dtype the real checkpoint runs in on CUDA.
 const DTYPE: i32 = mlxcel_core::dtype::BFLOAT16;
@@ -76,7 +76,7 @@ fn layer_types() -> Vec<&'static str> {
         .collect()
 }
 
-pub(super) fn args() -> ModelArgs {
+pub(crate) fn args() -> ModelArgs {
     let rope = serde_json::json!({
         "rope_theta": 10000.0,
         "partial_rotary_factor": 1.0,
@@ -122,7 +122,7 @@ pub(super) fn args() -> ModelArgs {
     }
 }
 
-pub(super) fn weights() -> WeightMap {
+pub(crate) fn weights() -> WeightMap {
     let prefix = "language_model.model";
     let mut w: WeightMap = HashMap::new();
     w.insert(
@@ -203,13 +203,13 @@ fn two_stage_logits(
     caches1: &mut [Cache],
 ) -> UniquePtr<MlxArray> {
     let StageExecutionOutput::HiddenStates(hidden) = stage0
-        .execute_from_token_ids(ids, caches0)
+        .execute_from_token_ids(ids, caches0, None)
         .expect("stage 0 must run")
     else {
         panic!("stage 0 must hand hidden states downstream");
     };
     let StageExecutionOutput::Logits(logits) = stage1
-        .execute_from_hidden_states(hidden, caches1)
+        .execute_from_hidden_states(hidden, caches1, None)
         .expect("stage 1 must run")
     else {
         panic!("the last stage must produce logits");
@@ -226,19 +226,19 @@ fn three_stage_logits(
     let [stage0, stage1, stage2] = stages;
     let [caches0, caches1, caches2] = caches;
     let StageExecutionOutput::HiddenStates(hidden) = stage0
-        .execute_from_token_ids(ids, caches0)
+        .execute_from_token_ids(ids, caches0, None)
         .expect("stage 0 must run")
     else {
         panic!("stage 0 must hand hidden states downstream");
     };
     let StageExecutionOutput::HiddenStates(hidden) = stage1
-        .execute_from_hidden_states(hidden, caches1)
+        .execute_from_hidden_states(hidden, caches1, None)
         .expect("stage 1 must run")
     else {
         panic!("stage 1 must hand hidden states downstream");
     };
     let StageExecutionOutput::Logits(logits) = stage2
-        .execute_from_hidden_states(hidden, caches2)
+        .execute_from_hidden_states(hidden, caches2, None)
         .expect("stage 2 must run")
     else {
         panic!("the last stage must produce logits");

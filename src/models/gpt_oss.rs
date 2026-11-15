@@ -1290,7 +1290,7 @@ impl GptOssStageModel {
         Self::from_filtered_weights(&weights, &args, filter, stage_index)
     }
 
-    fn from_filtered_weights(
+    pub(crate) fn from_filtered_weights(
         weights: &WeightMap,
         args: &ModelArgs,
         filter: &LayerFilter,
@@ -1386,6 +1386,7 @@ impl GptOssStageModel {
         &self,
         input_ids: &MlxArray,
         caches: &mut [Cache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         let hidden = self
             .embed_tokens
@@ -1394,24 +1395,28 @@ impl GptOssStageModel {
                 "stage does not host embeddings; hidden-state input required".to_string()
             })?
             .forward(input_ids);
-        self.execute_hidden(hidden, caches)
+        self.execute_hidden(hidden, caches, last_pos)
     }
 
     pub(crate) fn execute_from_hidden_states(
         &self,
         hidden: UniquePtr<MlxArray>,
         caches: &mut [Cache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if self.filter.has_embedding {
             return Err("entry stage expects token IDs, not hidden states".to_string());
         }
-        self.execute_hidden(hidden, caches)
+        self.execute_hidden(hidden, caches, last_pos)
     }
 
+    /// `last_pos` asks the final stage to project only that hidden row through
+    /// the norm and LM head (#3081); a non-final stage ignores it.
     fn execute_hidden(
         &self,
         mut hidden: UniquePtr<MlxArray>,
         caches: &mut [Cache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if caches.len() != self.layers.len() {
             return Err(format!(
@@ -1449,13 +1454,19 @@ impl GptOssStageModel {
             hidden = layer.forward(hidden.as_ref().unwrap(), caches[idx].as_interface(), mask);
         }
 
+        // Norm and head act per position, so the final stage slices first and
+        // projects only the sampled row (#3081).
+        let sampled_row = |hidden: &UniquePtr<MlxArray>| match last_pos {
+            Some(pos) => mlxcel_core::generate::logits_at_position(hidden.as_ref().unwrap(), pos),
+            None => mlxcel_core::copy(hidden.as_ref().unwrap()),
+        };
         match (&self.norm, &self.lm_head) {
             (Some(norm), Some(lm_head)) => {
-                let hidden = norm.forward(hidden.as_ref().unwrap());
+                let hidden = norm.forward(sampled_row(&hidden).as_ref().unwrap());
                 Ok(StageExecutionOutput::Logits(lm_head.forward(&hidden)))
             }
             (Some(norm), None) if self.filter.has_lm_head => {
-                let hidden = norm.forward(hidden.as_ref().unwrap());
+                let hidden = norm.forward(sampled_row(&hidden).as_ref().unwrap());
                 let embed_tokens = self
                     .embed_tokens
                     .as_ref()
@@ -1843,4 +1854,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "gpt_oss_tests.rs"]
-pub(super) mod batching_tests;
+pub(crate) mod batching_tests;

@@ -1187,6 +1187,31 @@ impl JambaModel {
         has_lm_head: bool,
         caches: &mut [JambaLayerCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_stage_last_row(
+            inputs,
+            layer_range,
+            has_embedding,
+            has_lm_head,
+            caches,
+            None,
+        )
+    }
+
+    /// [`Self::forward_stage`] for a request that samples only hidden row
+    /// `last_pos` (a prefill): the final stage slices that row before the final
+    /// norm and LM head and returns `[B, 1, vocab]` logits (#3081). `None`
+    /// projects every position; a non-final stage ignores `last_pos`.
+    ///
+    /// Used by: Jamba pipeline stage executor
+    pub fn forward_stage_last_row(
+        &self,
+        inputs: &MlxArray,
+        layer_range: std::ops::Range<usize>,
+        has_embedding: bool,
+        has_lm_head: bool,
+        caches: &mut [JambaLayerCache],
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         assert_eq!(
             caches.len(),
             layer_range.end - layer_range.start,
@@ -1228,6 +1253,10 @@ impl JambaModel {
         }
 
         if has_lm_head {
+            let h = match last_pos {
+                Some(pos) => mlxcel_core::generate::logits_at_position(&h, pos),
+                None => h,
+            };
             let h = self.model.final_layernorm.forward(&h);
             if let Some(ref head) = self.lm_head {
                 head.forward(&h)
@@ -1858,4 +1887,4 @@ impl LanguageModel for JambaModel {
 
 #[cfg(test)]
 #[path = "jamba_tests.rs"]
-mod tests;
+pub(crate) mod tests;
