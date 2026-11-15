@@ -33,3 +33,21 @@ fn state_tail_matches_the_slice() {
         );
     }
 }
+
+#[test]
+fn axis_tail_matches_the_slice_on_the_time_axis() {
+    for rows in [5, STATE_TAIL_EAGER_MIN_ROWS + 5] {
+        let src = ffi::reshape(
+            &ffi::arange_f32(0.0, (2 * rows * 3) as f32, 1.0),
+            &[1, 2, rows, 3],
+        );
+        let tail = super::materialized_axis_tail(&src, 2, 4);
+        let expected = ffi::slice(&src, &[0, 0, rows - 4, 0], &[1, 2, rows, 3]);
+        let same = ffi::array_equal(&tail, &expected, false);
+        crate::eval(&same);
+        assert!(
+            ffi::item_bool(&same),
+            "tail differs from the slice at {rows} rows"
+        );
+    }
+}

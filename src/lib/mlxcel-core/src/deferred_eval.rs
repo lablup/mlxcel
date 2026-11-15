@@ -54,7 +54,8 @@ impl std::error::Error for EvalError {}
 /// Starts evaluating `arr`. A failure is kept for the next [`try_eval`] on
 /// this thread instead of aborting the process; the first one wins.
 ///
-/// Used by: [`crate::utils::materialized_state_tail`],
+/// Used by: [`crate::utils::materialized_axis_tail`] (and through it
+/// [`crate::utils::materialized_state_tail`]),
 /// [`crate::utils::schedule_prefill_state`]
 pub(crate) fn async_eval_or_defer(arr: &MlxArray) {
     if let Err(err) = ffi::try_async_eval(arr) {
