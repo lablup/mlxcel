@@ -1679,6 +1679,10 @@ fn generate_xla(
         Some(required_positions),
     )?;
     let start_time = Instant::now();
+    // The plain text path reports its two phases from the session's own
+    // windows. Every other XLA path keeps the whole-run accounting, which
+    // folds prefill into decode, so this stays optional.
+    let mut xla_timing: Option<mlxcel_xla::GreedyTiming> = None;
     let tokens = match &mut session {
         mlxcel::Session::Xla(s) => {
             let capacity = s.context_capacity();
@@ -1838,8 +1842,11 @@ fn generate_xla(
                     anyhow::bail!("OpenXLA audio execution requires the xla-iree feature");
                 }
             } else if image_paths.is_empty() {
-                s.generate_greedy(prompt_tokens, max_tokens, &eos)
-                    .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?
+                let (tokens, timing) = s
+                    .generate_streaming_greedy_timed(prompt_tokens, max_tokens, &eos, |_| true)
+                    .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?;
+                xla_timing = Some(timing);
+                tokens
             } else {
                 ensure!(
                     s.supports_images(),
@@ -1856,6 +1863,32 @@ fn generate_xla(
     };
     let total_time = start_time.elapsed();
     let generated_len = tokens.len();
+    if let Some(timing) = xla_timing {
+        // The OpenXLA session's decode window already contains the first
+        // generated token (it comes out of `decode_step` on the last prompt
+        // token), so all generated tokens belong to the decode numerator. Its
+        // prefill window seeds the prompt prefix, one token short of the
+        // prompt.
+        let prefill_tokens = prompt_tokens.len().saturating_sub(1);
+        return Ok((
+            tokens,
+            GenerationStats {
+                prompt_tokens: prompt_tokens.len(),
+                generated_tokens: generated_len,
+                prefill_time_ms: timing.prefill_ms,
+                decode_time_ms: timing.decode_ms,
+                prefill_tok_per_sec: if timing.prefill_ms > 0.0 {
+                    prefill_tokens as f64 / (timing.prefill_ms / 1000.0)
+                } else {
+                    0.0
+                },
+                decode_tok_per_sec: mlxcel_core::generate::decode_tok_per_sec(
+                    generated_len,
+                    timing.decode_ms,
+                ),
+            },
+        ));
+    }
     Ok((
         tokens,
         generation_stats_from_duration(prompt_tokens.len(), generated_len, total_time),

@@ -91,7 +91,7 @@ impl Yolo11Predictor {
         if size == Some(0) {
             return Err("YOLO11 --size must be a positive pixel count".into());
         }
-        let image = image::open(path)
+        let image = crate::multimodal::image_orientation::open_upright(path)
             .map_err(|error| format!("failed to open image {}: {error}", path.display()))?;
         self.predict_image(&image, size, iou)
     }

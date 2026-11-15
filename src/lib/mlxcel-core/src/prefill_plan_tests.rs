@@ -82,10 +82,11 @@ fn chunks_cover_the_prompt_in_order_without_overlap() {
 }
 
 /// The server partition the Gemma 4 MTP burst mirrors: the boundary segment is
-/// one forward even past the chunk size, and the suffix chunks from the
-/// boundary (`mtp_prefill_ranges_mirror_classic_history_boundary_split`).
+/// cut into unpadded chunks that end on the boundary (#3045), and the suffix
+/// chunks from the boundary
+/// (`mtp_prefill_ranges_mirror_classic_history_boundary_split`).
 #[test]
-fn boundary_segment_is_one_unpadded_piece_and_chunks_restart_there() {
+fn boundary_segment_chunks_end_on_the_boundary_and_chunks_restart_there() {
     let caps = tokens(false);
     assert_eq!(
         ranges(&PrefillPlan::with_prefix(40, 0, None, 512, caps)),
@@ -97,8 +98,17 @@ fn boundary_segment_is_one_unpadded_piece_and_chunks_restart_there() {
     );
     assert_eq!(
         ranges(&PrefillPlan::with_prefix(1300, 0, Some(700), 512, caps)),
-        vec![0..700, 700..1212, 1212..1300]
+        vec![0..512, 512..700, 700..1212, 1212..1300]
     );
+    // #3045: a chat prompt whose history boundary sits a few tokens before
+    // its end prefills in chunks, not as one near-whole-prompt forward.
+    let chat = PrefillPlan::with_prefix(28_707, 0, Some(28_703), 2048, tokens(true));
+    assert!(chat.pieces().iter().all(|p| p.len() <= 2048));
+    assert_eq!(chat.pieces().len(), 16);
+    assert_eq!(chat.pieces()[14].range, 28_672..28_703);
+    assert!(chat.pieces()[..15].iter().all(|p| !p.is_padded()));
+    assert!(chat.ends_at_boundary(&chat.pieces()[14]));
+    assert_eq!(chat.pieces()[15].range, 28_703..28_707);
     // An adopted prefix already past the boundary, or a boundary covering the
     // whole prompt, splits nothing.
     assert_eq!(
@@ -264,7 +274,7 @@ fn piece_lookup_by_cursor_drives_a_stepping_scheduler() {
         plan.piece_starting_at(5).is_none(),
         "cursors land only on piece starts"
     );
-    assert_eq!(plan.split_points(), vec![0, 700, 1212]);
+    assert_eq!(plan.split_points(), vec![0, 512, 700, 1212]);
 }
 
 /// The prompt-cache invariant of issue #2170: a hit forwards the same pieces
@@ -389,10 +399,9 @@ fn next_piece_matches_resumed_plan_across_boundaries_cursors_chunks_and_padding(
         for caps in caps {
             for chunk in [0, 64, 512, 2048] {
                 for &cursor in &cursors {
-                    if cursor < adopted
-                        || cursor > prompt_len
-                        || (cursor > adopted && boundary.is_some_and(|boundary| cursor < boundary))
-                    {
+                    // A cursor inside a boundary segment is a real
+                    // continuation now that segments are chunked (#3045).
+                    if cursor < adopted || cursor > prompt_len {
                         continue;
                     }
                     let plan =
@@ -539,18 +548,21 @@ fn unparseable_chunk_env_warns_once_and_falls_back_to_the_default() {
     assert!(warnings[1].contains("MLXCEL_PREFILL_CHUNK") && warnings[1].contains("-1"));
 }
 
-/// #2885 Part B: a system-prompt root before the history boundary ends its
-/// own unpadded piece, the suffix still chunks from the deepest boundary, and
+/// #2885 Part B: a system-prompt root before the history boundary ends an
+/// unpadded piece, the segment between them is chunked (#3045), the suffix still chunks from the deepest boundary, and
 /// a hit that adopts the root forwards exactly the cold plan's pieces after it.
 #[test]
-fn two_snapshot_boundaries_each_end_one_piece_and_a_root_hit_reproduces_the_miss() {
+fn two_snapshot_boundaries_each_end_a_piece_and_a_root_hit_reproduces_the_miss() {
     let caps = tokens(true);
     let miss = PrefillPlan::with_prefix(5000, 0, [300, 2100], 512, caps);
     assert_eq!(
         ranges(&miss),
         vec![
             0..300,
-            300..2100,
+            300..812,
+            812..1324,
+            1324..1836,
+            1836..2100,
             2100..2612,
             2612..3124,
             3124..3636,
@@ -559,11 +571,11 @@ fn two_snapshot_boundaries_each_end_one_piece_and_a_root_hit_reproduces_the_miss
             4660..5000
         ]
     );
-    assert!(!miss.pieces()[0].is_padded());
-    assert!(!miss.pieces()[1].is_padded());
+    assert!(miss.pieces()[..5].iter().all(|p| !p.is_padded()));
     assert!(miss.ends_at_boundary(&miss.pieces()[0]));
-    assert!(miss.ends_at_boundary(&miss.pieces()[1]));
-    assert!(!miss.ends_at_boundary(&miss.pieces()[2]));
+    assert!(!miss.ends_at_boundary(&miss.pieces()[1]));
+    assert!(miss.ends_at_boundary(&miss.pieces()[4]));
+    assert!(!miss.ends_at_boundary(&miss.pieces()[5]));
     assert_eq!(miss.boundary(), Some(2100));
     assert_eq!(miss.splits().as_slice(), &[300, 2100]);
 

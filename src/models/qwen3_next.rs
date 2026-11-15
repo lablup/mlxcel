@@ -254,6 +254,74 @@ impl Qwen3NextCache {
             }
         }
     }
+
+    /// Whether a snapshot tensor belongs in a turn-boundary state checkpoint
+    /// (issue #3047): the GatedDeltaNet layers' state and convolution window.
+    /// The attention layers' rows are taken from a longer snapshot instead.
+    ///
+    /// Used by: Qwen3-Next and Qwen 3.5 `state_checkpoint_from_snapshot`.
+    pub fn is_checkpoint_tensor(name: &str) -> bool {
+        name.contains(".linear.")
+    }
+
+    /// Rebuild this layer for `checkpoint.token_len()` tokens from a state
+    /// checkpoint and a longer whole snapshot of the same conversation (issue
+    /// #3047).
+    ///
+    /// A GatedDeltaNet layer takes the checkpoint's state, which must be
+    /// present. An attention layer restores the donor's rows and cuts them
+    /// back with [`KVCache::trim`], the same trim a speculative rollback uses.
+    ///
+    /// Used by: Qwen3-Next and Qwen 3.5
+    /// `restore_sequence_state_from_checkpoint`.
+    pub fn restore_from_checkpoint(
+        &mut self,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
+        let keep = checkpoint.token_len();
+        let have = donor.token_len();
+        if keep == 0 || keep > have {
+            return Err(format!(
+                "{prefix}: a {keep}-token checkpoint cannot be rebuilt from a {have}-token snapshot"
+            ));
+        }
+        if let Qwen3NextCache::Linear(_) = self {
+            for field in ["conv_state", "state_cache"] {
+                if checkpoint
+                    .tensor(&format!("{prefix}.linear.{field}"))
+                    .is_none()
+                {
+                    return Err(format!(
+                        "{prefix}.linear: checkpoint has no {field} for {keep} tokens"
+                    ));
+                }
+            }
+            return self.restore_from(checkpoint, prefix);
+        }
+        self.restore_from(donor, prefix)?;
+        if let Qwen3NextCache::Attention(kv) = self {
+            if kv.keys.is_none() || kv.values.is_none() {
+                return Err(format!(
+                    "{prefix}.attention: the {have}-token snapshot holds no attention rows"
+                ));
+            }
+            let trim = (have - keep) as i32;
+            if trim > 0 && kv.trim(trim) != trim {
+                return Err(format!(
+                    "{prefix}.attention: could not cut {have} rows back to {keep}"
+                ));
+            }
+            if kv.offset != keep as i32 {
+                return Err(format!(
+                    "{prefix}.attention: {} rows after the cut, expected {keep}",
+                    kv.offset
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 // GatedDeltaNet - Linear Attention Layer.
@@ -401,21 +469,15 @@ impl GatedDeltaNet {
         // Concatenate with conv state
         let conv_input = concatenate(&conv_state, &mixed_qkv, 1);
 
-        // Update cache with new conv state.
-        // Wrap slice in contiguous() to force MLX to materialize a fresh,
-        // independent buffer. Without this, the slice is a lazy view that
-        // retains a reference to the full conv_input allocation, causing a
-        // memory leak proportional to the sequence length.
+        // Update cache with new conv state: a fresh buffer, scheduled now on a
+        // long prefill so this layer's full conv_input is not held until the
+        // caches are evaluated after the forward (see the helper).
         if let Some(c) = cache.as_deref_mut() {
             let n_keep = (self.conv_kernel_size - 1) as i32;
-            let conv_shape = mlxcel_core::array_shape(&conv_input);
-            let conv_len = conv_shape[1];
-            let tail = mlxcel_core::slice(
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
                 &conv_input,
-                &[0, conv_len - n_keep, 0],
-                &[b, conv_len, self.conv_dim as i32],
-            );
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+                n_keep,
+            ));
         }
 
         // Apply conv1d with SiLU activation
@@ -1760,12 +1822,30 @@ impl Qwen3NextModel {
         caches: &mut [Qwen3NextCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_at(input_ids, caches, mask, None)
+    }
+
+    /// [`Self::forward`] that, with `last_pos`, projects only that position's
+    /// hidden row through the final norm and the LM head and returns
+    /// `[batch, 1, vocab]` logits, so a prefill never materializes the
+    /// full-sequence logits it does not sample (#3045).
+    fn forward_at(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, mask, cache);
         }
 
+        let h = match last_pos {
+            Some(pos) => mlxcel_core::generate::logits_at_position(&h, pos),
+            None => h,
+        };
         let h = self.norm.forward(&h);
 
         if let Some(ref lm_head) = self.lm_head {
@@ -2096,6 +2176,17 @@ impl Qwen3NextModel {
         input: &MlxArray,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_at(input, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] with the `last_pos` projection of
+    /// [`Self::forward_at`]. Used by: the `forward_last_logits*` overrides.
+    fn forward_for_sequence_at(
+        &self,
+        input: &MlxArray,
+        seq_id: Option<SequenceId>,
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input)[1];
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
@@ -2108,7 +2199,7 @@ impl Qwen3NextModel {
                 } else {
                     None
                 };
-                self.forward(input, caches, mask.as_deref())
+                self.forward_at(input, caches, mask.as_deref(), last_pos)
             },
         )
     }
@@ -2135,6 +2226,42 @@ impl LanguageModel for Qwen3NextModel {
     ) -> UniquePtr<MlxArray> {
         // Server path: route through the scheduler's per-sequence model-owned cache.
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    // The prefill entry points: project only the sampled row through the LM
+    // head (#3045).
+    fn forward_last_logits(
+        &self,
+        input: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_at(input, None, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_at(input_ids, seq_id, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        // Text-only, like `forward_with_embeddings_and_sequence_id`.
+        self.forward_for_sequence_at(input_ids, seq_id, Some(last_pos))
     }
 
     fn forward_batched(
@@ -2295,6 +2422,35 @@ impl LanguageModel for Qwen3NextModel {
         let mut state = self.make_internal_caches();
         for (idx, cache) in state.iter_mut().enumerate() {
             cache.restore_from(snapshot, &format!("layer{idx}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        (snapshot.family() == "qwen3_next")
+            .then(|| snapshot.subset(Qwen3NextCache::is_checkpoint_tensor))
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if checkpoint.family() != "qwen3_next" || donor.family() != "qwen3_next" {
+            return Err(format!(
+                "cannot restore a {} checkpoint over a {} snapshot into qwen3_next",
+                checkpoint.family(),
+                donor.family()
+            ));
+        }
+        let mut state = self.make_internal_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from_checkpoint(checkpoint, donor, &format!("layer{idx}"))?;
         }
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())

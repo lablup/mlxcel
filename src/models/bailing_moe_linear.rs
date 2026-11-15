@@ -1802,6 +1802,10 @@ impl LinearAttention {
             let exp_g = mlxcel_core::astype(&self.exp_decay, mlxcel_core::array_dtype(&q));
             gla_sequential(&q, &k, &v, &exp_g, self.scale, cache.state.as_deref())
         };
+        // The final state is not consumed by `out`; schedule it on a long
+        // prefill so the scan's full-length inputs are not held until the caches
+        // are evaluated.
+        mlxcel_core::utils::schedule_prefill_state(&new_state, l);
         cache.state = Some(new_state);
         cache.offset += l;
 

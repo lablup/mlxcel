@@ -535,6 +535,10 @@ Refused: loopback, the unspecified address and the rest of `0.0.0.0/8`, multicas
 
 The existing byte and decode limits are unchanged and still apply: `--max-image-payload-size`, `--max-images`, the decoder's width, height and allocation caps, the audio per-clip and per-request ceilings, and the 10-second fetch timeout. For base64 `data:` images in JSON requests, the HTTP body extractor is sized from the configured image budget rather than Axum's 2 MiB default: `--max-image-payload-size * --max-images` is expanded by base64's 4/3 envelope and a small JSON/data-URL overhead. A request whose JSON body exceeds that derived ceiling is rejected before parsing with an OpenAI-shaped `413` error object. The derived extractor ceiling is clamped at 2 GiB so extreme image-limit settings cannot turn buffered JSON parsing into an unbounded allocation path; per-image decoding still enforces the exact configured image payload, count, dimension and allocation limits after the body has parsed.
 
+### Pictures are turned upright by their EXIF orientation
+
+A camera stores the sensor's rows and records how the device was held in the EXIF `Orientation` tag. Every picture a request or a command carries (JPEG, PNG `eXIf`, WebP) is decoded and then turned by that tag before a processor sees it, so a portrait photo from a phone reaches the model upright. mlx-vlm's and transformers' `load_image` do the same with `PIL.ImageOps.exif_transpose`, which is how the checkpoints were measured. A picture without the tag, or with one that cannot be read, is used as stored. The width, height and allocation limits above apply to the stored pixels; a quarter turn then swaps width and height, and that upright size is what the preprocessors and `--image-min-tokens` / `--image-max-tokens` see.
+
 ## Audio transcription
 
 `POST /v1/audio/transcriptions` and its `/audio/transcriptions` alias are the only audio routes b10621 mounts, and the only ones this section governs. `/v1/audio/speech` and `/v1/audio/translations` are mlxcel's own and are documented in [`audio-api.md`](audio-api.md).

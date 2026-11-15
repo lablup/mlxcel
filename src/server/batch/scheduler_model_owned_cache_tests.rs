@@ -210,6 +210,7 @@ pub(super) fn cache_ctx() -> PromptCacheRequestContext {
         history_prefix_tokens: None,
         root_prompt: None,
         root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
     }
 }
 

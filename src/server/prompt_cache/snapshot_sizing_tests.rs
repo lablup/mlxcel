@@ -600,3 +600,123 @@ fn qwen4_exp_counts_recurrent_state_and_qsa_index() {
         "six representative snapshots fit on a roomy host"
     );
 }
+
+#[test]
+fn keep_previous_turn_raises_the_implicit_target_by_half() {
+    let cfg = json!({
+        "model_type": "qwen3_next",
+        "num_hidden_layers": 64,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "full_attention_interval": 4,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 48,
+        "linear_key_head_dim": 128,
+        "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4
+    });
+    let memory = Some(64 * 1024 * 1024 * 1024);
+    let base = recommend_model_snapshot_capacity_from_config(
+        &cfg,
+        131_072,
+        PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+        memory,
+    )
+    .expect("default recommendation");
+    let kept = recommend_model_snapshot_capacity_from_config_with_entries(
+        &cfg,
+        131_072,
+        PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+        memory,
+        model_aware_snapshot_target_entries(true),
+    )
+    .expect("keep-previous-turn recommendation");
+
+    assert_eq!(model_aware_snapshot_target_entries(false), 6);
+    assert_eq!(kept.target_entries, 9);
+    assert_eq!(kept.entry_bytes, base.entry_bytes);
+    assert_eq!(kept.capacity_bytes, base.entry_bytes * 9);
+    assert_eq!(base.capacity_bytes, base.entry_bytes * 6);
+
+    // The quarter-of-free-memory ceiling still binds.
+    let tight = recommend_model_snapshot_capacity_from_config_with_entries(
+        &cfg,
+        131_072,
+        PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+        Some(16 * 1024 * 1024 * 1024),
+        9,
+    )
+    .expect("tight recommendation");
+    assert_eq!(tight.capacity_bytes, 4 * 1024 * 1024 * 1024);
+}
+
+#[test]
+fn state_checkpoint_default_counts_float32_recurrent_state_only() {
+    // qwen3.8-27b: 48 GatedDeltaNet layers of a 48x128x128 float32 state and
+    // a 3-row bf16 convolution window; no attention KV.
+    let cfg = json!({
+        "model_type": "qwen3_5",
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "num_hidden_layers": 64,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 8,
+            "head_dim": 128,
+            "full_attention_interval": 4,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 48,
+            "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128,
+            "linear_conv_kernel_dim": 4
+        }
+    });
+    let rec = recommend_state_checkpoint_capacity_from_config(&cfg, Some(64 << 30))
+        .expect("a hybrid family gets a checkpoint budget");
+    let per_layer = 48 * 128 * 128 * 4 + 3 * (2 * 16 * 128 + 48 * 128) * 2;
+    assert_eq!(rec.entry_bytes, 48 * per_layer);
+    assert_eq!(
+        rec.capacity_bytes,
+        rec.entry_bytes * MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES as usize
+    );
+
+    // A small host clamps the budget to an eighth of what is left.
+    let tight =
+        recommend_state_checkpoint_capacity_from_config(&cfg, Some(4 << 30)).expect("still sized");
+    assert_eq!(tight.capacity_bytes, (4usize << 30) / 8);
+}
+
+#[test]
+fn state_checkpoint_default_leaves_out_the_qwen4_exp_index() {
+    let cfg = json!({
+        "model_type": "qwen4_exp",
+        "text_config": {
+            "model_type": "qwen4_exp_text",
+            "num_hidden_layers": 48,
+            "hidden_size": 2560,
+            "full_attention_interval": 4,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 48,
+            "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128,
+            "linear_conv_kernel_dim": 4,
+            "ple_layer_ids": [2],
+            "ple_conv_kernel_size": 4,
+            "ngram_size": 3
+        }
+    });
+    let rec = recommend_state_checkpoint_capacity_from_config(&cfg, None).expect("sized");
+    let state = 48 * 128 * 128 * 4;
+    let window = 3 * (2 * 16 * 128 + 48 * 128) * 2;
+    assert_eq!(rec.entry_bytes, 36 * (state + window) + 9 * 2560 * 2);
+}
+
+#[test]
+fn attention_only_families_get_no_state_checkpoint_budget() {
+    assert!(
+        recommend_state_checkpoint_capacity_from_config(&gemma4_31b_vlm_config(), None).is_none()
+    );
+    assert!(
+        recommend_state_checkpoint_capacity_from_config(&llama4_scout_config(), None).is_none()
+    );
+}

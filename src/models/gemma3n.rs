@@ -2005,6 +2005,28 @@ impl Gemma3nLanguageModel {
     }
 }
 
+/// Where a text-only Gemma 3n checkpoint keeps its language model.
+///
+/// `language_model.model` is the mlx-vlm conversion and `language_model` the
+/// dense one, the two the multimodal loader also knows. `model.language_model`
+/// is a language-model-only export that keeps the Hugging Face names, such as
+/// `mlx-community/gemma-3n-E2B-it-lm-4bit`. An unknown layout falls back to the
+/// first, so the error still names the tensor that was looked for.
+///
+/// Used by: [`Gemma3nModel::load`] and the weight-map loader in
+/// `loading::special`.
+pub(crate) fn text_only_language_model_prefix(weights: &WeightMap) -> &'static str {
+    const LAYOUTS: [&str; 3] = [
+        "language_model.model",
+        "language_model",
+        "model.language_model",
+    ];
+    LAYOUTS
+        .into_iter()
+        .find(|prefix| weights.contains_key(&format!("{prefix}.embed_tokens.weight")))
+        .unwrap_or(LAYOUTS[0])
+}
+
 // Model.
 pub struct Gemma3nModel {
     pub language_model: Gemma3nLanguageModel,
@@ -2027,8 +2049,11 @@ impl Gemma3nModel {
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Create model
-        let language_model =
-            Gemma3nLanguageModel::from_weights(&weights, &config, "language_model.model")?;
+        let language_model = Gemma3nLanguageModel::from_weights(
+            &weights,
+            &config,
+            text_only_language_model_prefix(&weights),
+        )?;
 
         Ok(Self {
             language_model,

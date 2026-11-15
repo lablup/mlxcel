@@ -2787,7 +2787,8 @@ pub(crate) struct ServeArgs {
     ///
     /// When set to N > 1, model weights are sharded across N in-process ranks.
     /// Current multi-rank runtime support is limited to dense Llama, Qwen2/2.5,
-    /// Qwen3, Gemma 3 text, ERNIE 4.5, and Hunyuan v1 Dense models.
+    /// Qwen3, Qwen3.5 text, Gemma 3 text, Gemma 4 text, ERNIE 4.5, and
+    /// Hunyuan v1 Dense models.
     #[arg(long = "tp-size", default_value_t = 1, value_name = "N")]
     tp_size: usize,
 

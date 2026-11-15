@@ -41,7 +41,7 @@ use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
 };
-use mlxcel_core::prefill_plan::PrefillSplits;
+use mlxcel_core::prefill_plan::{MAX_SPLITS, PrefillSplits};
 use mlxcel_core::sampling::{FusedSampleParams, TokenBiasMap};
 use mlxcel_core::sampling_row_step::{LogitMask, RowSampler};
 use mlxcel_core::sampling_token_bias::compose_token_bias;
@@ -287,6 +287,39 @@ pub(crate) fn system_root_len(
         .checked_sub(1)?;
     let upper = history_boundary.unwrap_or(prompt_tokens.len());
     (len > 0 && len >= min_prefix_tokens && len < upper).then_some(len)
+}
+
+/// The periodic checkpoint positions of a prefill (#2885 Part B): every
+/// multiple of `interval` strictly after `start` (the adopted prefix) and
+/// strictly before `upper` (the history boundary, or the prompt end when there
+/// is none), at or above the store's `min_prefix_tokens`.
+///
+/// The points are absolute multiples, so they depend only on the prompt
+/// prefix: two prompts that share the first `k * interval` tokens both split
+/// at `k * interval`. At most `max` points are returned, the deepest ones,
+/// so a very long prompt keeps the checkpoints closest to its history
+/// boundary and leaves the plan room for the root and the boundary.
+///
+/// Used by: `BatchScheduler::checkpoint_splits`
+pub(crate) fn checkpoint_points(
+    interval: usize,
+    start: usize,
+    upper: usize,
+    min_prefix_tokens: usize,
+    max: usize,
+) -> Vec<usize> {
+    if interval == 0 || max == 0 {
+        return Vec::new();
+    }
+    let first = (start / interval + 1) * interval;
+    let mut points: Vec<usize> = (first..upper)
+        .step_by(interval)
+        .filter(|&p| p >= min_prefix_tokens.max(1))
+        .collect();
+    if points.len() > max {
+        points.drain(..points.len() - max);
+    }
+    points
 }
 
 /// Whether a resolved boundary still splits this sequence's prefill at
@@ -643,6 +676,18 @@ pub struct BatchScheduler {
     /// request layer again. Dropped automatically when the sequence is
     /// removed from the map on finish / error.
     prompt_cache_seq_ctx: std::collections::HashMap<SequenceId, PromptCacheRequestContext>,
+
+    /// Sequences whose completion snapshot was taken at the prompt boundary
+    /// when their prefill finished (issue #3040), so the finish stores no
+    /// decode-written tail for them. Cleared at donate and at release.
+    prompt_cache_prompt_end_stored: std::collections::HashSet<SequenceId>,
+
+    /// Lineage of the rows a sequence adopted from the prompt cache (issue
+    /// #3047), set by `try_adopt_cached_prefix` and moved into the sequence's
+    /// [`PromptCacheRequestContext::snapshot_lineage`] at admission. Cleared at
+    /// release, so a request that fails between the two leaves nothing.
+    prompt_cache_adopted_lineage:
+        std::collections::HashMap<SequenceId, crate::server::prompt_cache::SnapshotLineage>,
 
     /// Pending background prompt-cache warm-ups (issue #1144).
     ///
@@ -1029,6 +1074,7 @@ mod paged_layout;
 mod planned_prefill;
 mod prefill;
 mod prompt_cache;
+mod prompt_end_snapshot;
 pub(crate) mod prompt_lookup;
 mod queued_adoption;
 mod request_memory;
@@ -1102,6 +1148,10 @@ mod scheduler_dflash_routing_tests;
 #[cfg(test)]
 #[path = "../scheduler_completion_snapshot_tests.rs"]
 mod scheduler_completion_snapshot_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_state_checkpoint_tests.rs"]
+mod scheduler_state_checkpoint_tests;
 
 #[cfg(test)]
 #[path = "../scheduler_model_owned_pad_trim_tests.rs"]

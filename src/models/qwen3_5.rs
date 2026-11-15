@@ -688,21 +688,15 @@ impl Qwen35GatedDeltaNet {
         // Concatenate with conv state
         let conv_input = concatenate(&conv_state, &qkv, 1);
 
-        // Update cache with new conv state.
-        // Wrap slice in contiguous() to force MLX to materialize a fresh,
-        // independent buffer. Without this, the slice is a lazy view that
-        // retains a reference to the full conv_input allocation, causing a
-        // memory leak proportional to the sequence length.
+        // Update cache with new conv state: a fresh buffer, scheduled now on a
+        // long prefill so this layer's full conv_input is not held until the
+        // caches are evaluated after the forward (see the helper).
         if let Some(c) = cache.as_deref_mut() {
             let n_keep = (self.conv_kernel_size - 1) as i32;
-            let conv_shape = mlxcel_core::array_shape(&conv_input);
-            let conv_len = conv_shape[1];
-            let tail = mlxcel_core::slice(
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
                 &conv_input,
-                &[0, conv_len - n_keep, 0],
-                &[b, conv_len, self.conv_dim as i32],
-            );
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+                n_keep,
+            ));
         }
 
         // Apply conv1d with SiLU activation
@@ -877,14 +871,10 @@ impl Qwen35GatedDeltaNet {
         // rollback path will overwrite this with the per-row trimmed window.
         if let Some(c) = cache.as_deref_mut() {
             let n_keep = (self.conv_kernel_size - 1) as i32;
-            let conv_shape = mlxcel_core::array_shape(&conv_input);
-            let conv_len = conv_shape[1];
-            let tail = mlxcel_core::slice(
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
                 &conv_input,
-                &[0, conv_len - n_keep, 0],
-                &[b, conv_len, self.conv_dim as i32],
-            );
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+                n_keep,
+            ));
         }
 
         // Conv1d + SiLU.
@@ -1446,6 +1436,26 @@ impl Qwen35Model {
         caches: &mut [Qwen3NextCache],
         position_ids: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_internal_at(input_ids, input_embeddings, caches, position_ids, None)
+    }
+
+    /// [`Self::forward_internal`] that, with `last_pos`, projects only that
+    /// position's hidden row through the final norm and the LM head and
+    /// returns `[batch, 1, vocab]` logits.
+    ///
+    /// A prefill samples only the last real position, so the full
+    /// `[batch, seq_len, vocab]` projection is pure transient: at a 28K-token
+    /// prompt and the 248K-entry Qwen 3.5 vocabulary it is about 14 GB in
+    /// bf16, the largest single buffer of the prefill (issue #3045). The
+    /// final norm is per row, so slicing before it gives the same row.
+    fn forward_internal_at(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [Qwen3NextCache],
+        position_ids: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
@@ -1484,6 +1494,10 @@ impl Qwen35Model {
             h = layer.forward(&h, mask, cache, position_ids);
         }
 
+        let h = match last_pos {
+            Some(pos) => mlxcel_core::generate::logits_at_position(&h, pos),
+            None => h,
+        };
         let h = self.norm.forward(&h);
 
         if let Some(ref lm_head) = self.lm_head {
@@ -2168,11 +2182,32 @@ impl Qwen35Model {
         input_embeddings: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_with_sequence_caches_at(input_ids, input_embeddings, seq_id, None)
+    }
+
+    /// [`Self::forward_with_sequence_caches`] with the `last_pos` projection
+    /// of [`Self::forward_internal_at`].
+    ///
+    /// Used by: the three `forward_last_logits*` overrides, which the
+    /// engine's prefill (CLI and server) calls for every prompt piece.
+    fn forward_with_sequence_caches_at(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
             |sequence_caches| {
-                self.forward_with_mrope_state(input_ids, input_embeddings, sequence_caches, seq_id)
+                self.forward_with_mrope_state(
+                    input_ids,
+                    input_embeddings,
+                    sequence_caches,
+                    seq_id,
+                    last_pos,
+                )
             },
         )
     }
@@ -2183,6 +2218,7 @@ impl Qwen35Model {
         input_embeddings: Option<&MlxArray>,
         caches: &mut [Qwen3NextCache],
         seq_id: Option<SequenceId>,
+        last_pos: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let cache_offset = caches
             .iter()
@@ -2234,7 +2270,13 @@ impl Qwen35Model {
             }
         });
 
-        self.forward_internal(input_ids, input_embeddings, caches, position_ids.as_deref())
+        self.forward_internal_at(
+            input_ids,
+            input_embeddings,
+            caches,
+            position_ids.as_deref(),
+            last_pos,
+        )
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, Qwen35Config), String> {
@@ -4228,6 +4270,35 @@ impl LanguageModel for Qwen35Model {
         Ok(())
     }
 
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        (snapshot.family() == "qwen3_5")
+            .then(|| snapshot.subset(Qwen3NextCache::is_checkpoint_tensor))
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if checkpoint.family() != "qwen3_5" || donor.family() != "qwen3_5" {
+            return Err(format!(
+                "cannot restore a {} checkpoint over a {} snapshot into Qwen 3.5",
+                checkpoint.family(),
+                donor.family()
+            ));
+        }
+        let mut state = self.make_internal_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from_checkpoint(checkpoint, donor, &format!("layer{idx}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
     fn forward_with_sequence_id(
         &self,
         input_ids: &MlxArray,
@@ -4236,6 +4307,41 @@ impl LanguageModel for Qwen35Model {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_with_sequence_caches(input_ids, None, seq_id)
+    }
+
+    // The prefill entry points: project only the sampled row through the LM
+    // head instead of slicing it out of the full-sequence logits (#3045).
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_with_sequence_caches_at(input_ids, None, None, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_with_sequence_caches_at(input_ids, None, seq_id, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_with_sequence_caches_at(input_ids, input_embeddings, seq_id, Some(last_pos))
     }
 
     fn forward_with_embeddings_and_sequence_id(
@@ -4791,3 +4897,7 @@ mod qwen3_5_dflash_probe_tests;
 #[cfg(test)]
 #[path = "qwen3_5_rope_attribution_tests.rs"]
 mod qwen3_5_rope_attribution_tests;
+
+#[cfg(test)]
+#[path = "qwen3_5_prefill_memory_tests.rs"]
+mod qwen3_5_prefill_memory_tests;

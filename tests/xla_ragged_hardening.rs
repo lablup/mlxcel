@@ -28,7 +28,8 @@ use std::collections::HashMap;
 
 use mlxcel_xla::{
     IreeLlama, IreeRaggedLlama, SampleParams, XlaBatchEngine, XlaReferenceEngine,
-    batch_kv_allocation_counters, reset_batch_kv_allocation_counters,
+    batch_kv_allocation_counters, reset_batch_kv_allocation_counters, reset_weight_upload_counters,
+    weight_upload_counters,
 };
 use safetensors::{Dtype, tensor::TensorView};
 use tempfile::TempDir;
@@ -399,6 +400,38 @@ fn first_batch_admit_does_not_upload_a_host_kv_mirror() {
     assert_eq!(
         h2d_bytes, 0,
         "the batch KV path must not upload the rank-5 cache from host memory"
+    );
+}
+
+/// Issue #2961: a base load uploads every declared weight exactly once, and a
+/// capacity bucket adds no upload at all. The bucket shares the base's device
+/// views by refcount, so a non-zero count here would mean the documented
+/// sharing has regressed into a per-bucket copy.
+#[test]
+#[ignore = "requires the pinned IREE runtime and compiler"]
+fn base_load_uploads_each_weight_once_and_a_bucket_uploads_none() {
+    let fixture = create_tiny_model();
+    reset_weight_upload_counters();
+    let engine = IreeRaggedLlama::load(fixture.path(), &device(), 4, CAPACITY)
+        .expect("ragged engine at B=4");
+    let (calls, bytes) = weight_upload_counters();
+    assert_eq!(
+        calls as usize,
+        engine.weight_count(),
+        "one upload per declared weight slot"
+    );
+    assert!(bytes > 0, "the base load must upload weight bytes");
+
+    reset_weight_upload_counters();
+    let bucket = engine
+        .load_bucket(fixture.path(), &device(), CAPACITY * 2)
+        .expect("capacity bucket");
+    assert_eq!(bucket.b_max(), 4);
+    let (calls, bytes) = weight_upload_counters();
+    assert_eq!(
+        (calls, bytes),
+        (0, 0),
+        "a bucket context shares the base weights and must upload none"
     );
 }
 

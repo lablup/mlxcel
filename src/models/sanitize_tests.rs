@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::sanitize::{
-    load_text_weights, load_weights_from_dir_with_filter, sanitize_config_json,
-    sanitize_tied_embeddings,
+    load_gemma4_text_weights_with_backing, load_text_weights, load_weights_from_dir_with_filter,
+    sanitize_config_json, sanitize_tied_embeddings,
 };
 use crate::test_support::env_lock::env_lock;
 use mlxcel_core::weights::{WeightMap, WeightTransform};
@@ -138,6 +138,93 @@ fn selective_loader_materializes_only_retained_names_across_mixed_shards() {
     assert_eq!(
         weights.keys().map(String::as_str).collect::<Vec<_>>(),
         ["vision_tower.projector.weight"]
+    );
+    drop(weights);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A text-only Gemma 4 export on disk: mlx-lm's names, `model.*` and
+/// `lm_head.*`, as `mlx-community/Gemma4-E2B-IT-Text-int4` has them.
+fn write_text_only_gemma4_checkpoint(dir: &Path, names: &[&str]) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("config.json"), r#"{"model_type": "gemma4"}"#).unwrap();
+    let tensors: Vec<(&str, OwnedTensor)> = names
+        .iter()
+        .map(|name| {
+            (
+                *name,
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F32,
+                    shape: vec![2],
+                    data: [1.0_f32, 2.0_f32]
+                        .into_iter()
+                        .flat_map(f32::to_le_bytes)
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    write_safetensors(&dir.join("model.safetensors"), &tensors);
+}
+
+fn sorted_names(weights: &WeightMap) -> Vec<&str> {
+    let mut names: Vec<&str> = weights.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    names
+}
+
+// Both Gemma 4 text loaders hand the model the multimodal names. Before, the
+// tensors were kept under `model.*` and the model stopped at "Weight not
+// found: language_model.model.embed_tokens.weight".
+#[test]
+fn a_text_only_gemma4_directory_loads_under_the_language_model_prefix() {
+    let dir = temp_model_dir("gemma4_text_only_backing");
+    write_text_only_gemma4_checkpoint(
+        &dir,
+        &[
+            "model.embed_tokens.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+            "lm_head.weight",
+        ],
+    );
+    let (weights, backing) = load_gemma4_text_weights_with_backing(&dir).unwrap();
+    assert_eq!(
+        sorted_names(&weights),
+        [
+            "language_model.lm_head.weight",
+            "language_model.model.embed_tokens.weight",
+            "language_model.model.layers.0.self_attn.q_proj.weight",
+        ]
+    );
+    drop(weights);
+    drop(backing);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_text_only_gemma4_directory_ties_its_head_under_the_language_model_prefix() {
+    // `load_text_weights(_, None)` reads the process-global surgery slot.
+    #[cfg(feature = "surgery")]
+    let _env_guard = crate::test_support::env_lock::env_lock();
+
+    // No `lm_head`: the tied-embedding step has to find the embedding table
+    // under the name the model reads, and tie the head there.
+    let dir = temp_model_dir("gemma4_text_only_tied");
+    write_text_only_gemma4_checkpoint(
+        &dir,
+        &[
+            "model.embed_tokens.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+        ],
+    );
+    let weights = load_text_weights(&dir, None).unwrap();
+    assert_eq!(
+        sorted_names(&weights),
+        [
+            "language_model.lm_head.weight",
+            "language_model.model.embed_tokens.weight",
+            "language_model.model.layers.0.self_attn.q_proj.weight",
+        ]
     );
     drop(weights);
     std::fs::remove_dir_all(dir).unwrap();

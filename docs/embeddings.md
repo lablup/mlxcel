@@ -421,7 +421,7 @@ A mask is never built as `(1 - m) * C` with a finite `C` in the activation dtype
 - Token-id inputs are used verbatim (no special tokens added) and every id must be `< vocab_size`.
 - `encoding_format: base64` encodes each vector as little-endian f32 bytes, standard base64 with padding. For multi-vector (late-interaction) models `embedding` is a list of vectors, `[num_real_tokens][D]`, in float mode; in base64 mode it is the row-major bytes plus a sibling `"shape": [num_real_tokens, D]`.
 - `usage.prompt_tokens` counts the real (non-padding) tokens across all inputs, special tokens included; `total_tokens` equals it.
-- `image_url` items accept a `data:image/...;base64,` URI, a `file://` path, an `http(s)://` URL or a local path, bounded by the shared image limits. Images are embedded one at a time; text items are sorted by token length, cut into micro-batches of `--embedding-batch-size`, and written back in request order.
+- `image_url` items accept a `data:image/...;base64,` URI, a `file://` path, an `http(s)://` URL or a local path, bounded by the shared image limits. A picture is turned upright by its EXIF orientation tag before it is embedded. Images are embedded one at a time; text items are sorted by token length, cut into micro-batches of `--embedding-batch-size`, and written back in request order.
 
 ### Errors
 

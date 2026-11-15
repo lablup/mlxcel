@@ -821,8 +821,10 @@ impl KimiK3DeltaAttention {
             &self.conv_decode_weight,
             in_dtype,
         ));
-        let tail = mlxcel_core::slice(&padded, &[0, 1, 0], &[b, self.kernel_size, channels]);
-        (out, mlxcel_core::contiguous(&tail, false))
+        (
+            out,
+            mlxcel_core::utils::materialized_state_tail(&padded, self.kernel_size - 1),
+        )
     }
 
     /// Everything after the conv: q/k norm, gate, recurrence, output gate,

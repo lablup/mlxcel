@@ -213,6 +213,23 @@ impl LanguageModel for Qwen4ExpVLModel {
         self.text_model.restore_sequence_state(seq_id, snapshot)
     }
 
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.text_model.state_checkpoint_from_snapshot(snapshot)
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        self.text_model
+            .restore_sequence_state_from_checkpoint(seq_id, checkpoint, donor)
+    }
+
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.text_model.get_embed_tokens(input_ids))
     }

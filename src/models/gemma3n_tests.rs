@@ -312,3 +312,137 @@ fn an_unknown_layer_kind_still_validates_the_window() {
     assert!(err.contains("Gemma 3n"), "{err}");
     assert!(err.contains("got 0"), "{err}");
 }
+
+// A text-only checkpoint in each of its layouts.
+
+/// `tiny_weights()` with its `lm` prefix replaced.
+fn tiny_weights_under(prefix: &str) -> WeightMap {
+    tiny_weights()
+        .into_iter()
+        .map(|(name, tensor)| {
+            let leaf = name
+                .strip_prefix("lm.")
+                .expect("the tiny weights are under `lm.`");
+            (format!("{prefix}.{leaf}"), tensor)
+        })
+        .collect()
+}
+
+/// `weights`, all f32, as one safetensors file.
+fn write_safetensors(path: &std::path::Path, weights: &WeightMap) {
+    use std::io::Write;
+
+    let mut names: Vec<&String> = weights.keys().collect();
+    names.sort();
+    let mut data: Vec<u8> = Vec::new();
+    let mut header = serde_json::Map::new();
+    for name in names {
+        let tensor = &weights[name];
+        let start = data.len();
+        for value in mlxcel_core::utils::array_to_vec_f32(tensor) {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        header.insert(
+            name.clone(),
+            serde_json::json!({
+                "dtype": "F32",
+                "shape": mlxcel_core::array_shape(tensor),
+                "data_offsets": [start, data.len()],
+            }),
+        );
+    }
+    let header = serde_json::to_string(&header).unwrap();
+    let mut file = std::fs::File::create(path).unwrap();
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(header.as_bytes()).unwrap();
+    file.write_all(&data).unwrap();
+}
+
+#[test]
+fn the_text_only_prefix_follows_the_embedding_table() {
+    let with_embedding_at = |name: &str| {
+        let mut weights = WeightMap::new();
+        weights.insert(name.to_string(), mlxcel_core::from_slice_f32(&[1.0], &[1]));
+        weights
+    };
+    for prefix in [
+        "language_model.model",
+        "language_model",
+        "model.language_model",
+    ] {
+        let weights = with_embedding_at(&format!("{prefix}.embed_tokens.weight"));
+        assert_eq!(super::text_only_language_model_prefix(&weights), prefix);
+    }
+
+    // The mlx-vlm layout wins when a checkpoint has more than one.
+    let mut both = with_embedding_at("model.language_model.embed_tokens.weight");
+    both.insert(
+        "language_model.model.embed_tokens.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[1.0], &[1]),
+    );
+    assert_eq!(
+        super::text_only_language_model_prefix(&both),
+        "language_model.model"
+    );
+
+    // An unknown layout keeps the name the error has always reported.
+    let unknown = with_embedding_at("decoder.embed_tokens.weight");
+    assert_eq!(
+        super::text_only_language_model_prefix(&unknown),
+        "language_model.model"
+    );
+}
+
+/// The directory loader, `Gemma3nModel::load`, on the same tiny model written
+/// to disk under each layout. `model.language_model` is the layout of
+/// `mlx-community/gemma-3n-E2B-it-lm-4bit`, which used to stop at "Weight not
+/// found: language_model.model.embed_tokens.weight".
+#[test]
+fn a_text_only_checkpoint_loads_from_a_directory_in_each_layout() {
+    // `load_text_weights` reads the process-global surgery pipeline slot.
+    #[cfg(feature = "surgery")]
+    let _env_guard = crate::test_support::env_lock::env_lock();
+
+    let expected = last_logits(&tiny_model(), &[12]);
+    for prefix in [
+        "language_model.model",
+        "language_model",
+        "model.language_model",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            format!(r#"{{"model_type": "gemma3n", "text_config": {TINY_CONFIG}}}"#),
+        )
+        .unwrap();
+        write_safetensors(
+            &dir.path().join("model.safetensors"),
+            &tiny_weights_under(prefix),
+        );
+
+        let model = Gemma3nModel::load(dir.path())
+            .unwrap_or_else(|error| panic!("layout `{prefix}`: {error}"));
+        let difference = max_abs_diff(&expected, &last_logits(&model.language_model, &[12]));
+        assert!(difference < 1e-4, "layout `{prefix}`: {difference}");
+    }
+
+    // A layout nobody writes is still refused, by the name it always was.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        format!(r#"{{"model_type": "gemma3n", "text_config": {TINY_CONFIG}}}"#),
+    )
+    .unwrap();
+    write_safetensors(
+        &dir.path().join("model.safetensors"),
+        &tiny_weights_under("decoder"),
+    );
+    let error = Gemma3nModel::load(dir.path())
+        .err()
+        .expect("an unknown layout must not load");
+    assert!(
+        error.contains("language_model.model.embed_tokens.weight"),
+        "{error}"
+    );
+}

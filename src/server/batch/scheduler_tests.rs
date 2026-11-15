@@ -1214,6 +1214,7 @@ fn compose_prompt_cache_key_folds_request_multimodal_digest() {
         history_prefix_tokens: None,
         root_prompt: None,
         root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
     };
     let image_a = PromptCacheRequestContext {
         mm_digest: multimodal_digest_from_vecs(&[b"IMAGE-A".to_vec()], &[]),
@@ -2332,4 +2333,25 @@ fn system_root_len_drops_the_seam_token_and_stays_before_the_history_boundary() 
     // Nothing in common.
     assert_eq!(system_root_len(&[500], &prompt, None, 0, 0), None);
     assert_eq!(system_root_len(&[], &prompt, None, 0, 0), None);
+}
+
+/// #2885 Part B: checkpoints are absolute multiples of the interval between
+/// the adopted prefix and the history boundary (both exclusive), at or above
+/// the store's minimum prefix, and the deepest ones win the cap.
+#[test]
+fn checkpoint_points_are_absolute_multiples_inside_the_unadopted_span() {
+    use super::checkpoint_points;
+
+    assert_eq!(checkpoint_points(8, 0, 30, 0, 16), vec![8, 16, 24]);
+    // Exclusive at both ends.
+    assert_eq!(checkpoint_points(8, 8, 24, 0, 16), vec![16]);
+    // An adopted prefix inside an interval does not shift the grid.
+    assert_eq!(checkpoint_points(8, 11, 40, 0, 16), vec![16, 24, 32]);
+    // The store's minimum prefix drops shallow points.
+    assert_eq!(checkpoint_points(8, 0, 30, 10, 16), vec![16, 24]);
+    // The cap keeps the deepest points.
+    assert_eq!(checkpoint_points(8, 0, 50, 0, 2), vec![40, 48]);
+    assert!(checkpoint_points(8, 0, 8, 0, 16).is_empty());
+    assert!(checkpoint_points(0, 0, 100, 0, 16).is_empty());
+    assert!(checkpoint_points(8, 0, 100, 0, 0).is_empty());
 }

@@ -20,12 +20,17 @@ server configurations see byte-identical requests:
 * one system prompt plus a tool list, shared by every chat;
 * session A: ten turns that each append a user message and a scripted
   assistant reply, where turn 8 rewrites the user message of turn 3 (an agent
-  compacting its history a few thousand tokens back);
+  compacting its history a few thousand tokens back; --edit-turn and
+  --edit-target move both);
 * sessions B and C: new chats with the same system prompt and tools, three
   turns each.
 
 Assistant replies in the history are scripted rather than taken from the
-model, so the prompts do not depend on what an arm generated. Each request
+model, so the prompts do not depend on what an arm generated. A scripted reply
+never matches the completion snapshot the server stored for that turn, so that
+snapshot is dead weight in the snapshot budget, which a real client does not
+cause. --live-replies appends the model's own reply instead, as a client does;
+the prompts then depend on the arm's outputs. Each request
 streams a short greedy completion and records time to first token, prompt
 tokens and the cached (reused) tokens the server reports.
 
@@ -79,7 +84,14 @@ def corpus(repo):
     return "\n\n".join(p.read_text(errors="ignore") for p in docs)
 
 
-def build_workload(repo, system_tokens, turn_tokens):
+def build_workload(repo, system_tokens, turn_tokens, edit_turn=8, edit_target=3, live_replies=None):
+    """Yield the requests in order.
+
+    With `live_replies` (a dict the caller fills with each request's generated
+    content, keyed by "<session><turn>"), the assistant message appended after a
+    turn is the model's own reply instead of the scripted one. The generator is
+    lazy, so the caller must record a request's reply before asking for the next.
+    """
     text = corpus(repo)
     cursor = 0
 
@@ -99,19 +111,19 @@ def build_workload(repo, system_tokens, turn_tokens):
         return f"Step {i}. Here is the next part of the material:\n\n{take(turn_tokens)}\n\nWhat is the single most important point in it?"
 
     def reply(i):
+        if live_replies is not None:
+            return live_replies[i]
         return f"Noted step {i}. The key point is recorded; continue."
 
-    requests = []
-
-    # Session A: ten turns, turn 8 rewrites turn 3's user message.
+    # Session A: ten turns, turn `edit_turn` rewrites turn `edit_target`'s user message.
     history = [{"role": "system", "content": system}]
     for turn in range(1, 11):
-        if turn == 8:
-            # Compaction: the user message of turn 3 is replaced by a summary.
-            idx = 1 + 2 * (3 - 1)
-            history[idx] = {"role": "user", "content": "Step 3 (compacted). Earlier material summarised: build, test and serve flow."}
+        if turn == edit_turn:
+            # Compaction: the user message of the target turn is replaced by a summary.
+            idx = 1 + 2 * (edit_target - 1)
+            history[idx] = {"role": "user", "content": f"Step {edit_target} (compacted). Earlier material summarised: build, test and serve flow."}
         history.append({"role": "user", "content": user(f"A{turn}")})
-        requests.append({"session": "A", "turn": turn, "edited": turn == 8, "messages": [dict(m) for m in history]})
+        yield {"session": "A", "turn": turn, "edited": turn == edit_turn, "messages": [dict(m) for m in history]}
         history.append({"role": "assistant", "content": reply(f"A{turn}")})
 
     # Sessions B and C: new chats with the same system prompt and tools.
@@ -119,9 +131,8 @@ def build_workload(repo, system_tokens, turn_tokens):
         history = [{"role": "system", "content": system}]
         for turn in range(1, 4):
             history.append({"role": "user", "content": user(f"{name}{turn}")})
-            requests.append({"session": name, "turn": turn, "edited": False, "messages": [dict(m) for m in history]})
+            yield {"session": name, "turn": turn, "edited": False, "messages": [dict(m) for m in history]}
             history.append({"role": "assistant", "content": reply(f"{name}{turn}")})
-    return requests
 
 
 def post(url, body=None, timeout=3600):
@@ -148,6 +159,7 @@ def stream(base, messages, max_tokens):
     t0 = time.perf_counter()
     ttft = None
     text = []
+    content = []
     usage = None
     with post(base + "/v1/chat/completions", body) as r:
         for raw in r:
@@ -162,6 +174,7 @@ def stream(base, messages, max_tokens):
                 usage = obj["usage"]
             for ch in obj.get("choices", []):
                 d = ch.get("delta", {})
+                content.append(d.get("content") or "")
                 piece = (d.get("content") or "") + (d.get("reasoning_content") or "")
                 for call in d.get("tool_calls") or []:
                     piece += json.dumps(call, sort_keys=True)
@@ -178,6 +191,7 @@ def stream(base, messages, max_tokens):
         "cached_tokens": cached,
         "completion_tokens": usage.get("completion_tokens"),
         "sha": hashlib.sha256(out.encode()).hexdigest()[:16],
+        "content": "".join(content),
     }
 
 
@@ -188,21 +202,34 @@ def main():
     ap.add_argument("--system-tokens", type=int, default=4096)
     ap.add_argument("--turn-tokens", type=int, default=1536)
     ap.add_argument("--max-tokens", type=int, default=32)
+    ap.add_argument("--edit-turn", type=int, default=8, help="session A turn that rewrites an earlier user message")
+    ap.add_argument("--edit-target", type=int, default=3, help="session A turn whose user message is rewritten")
     ap.add_argument("--label", default="")
     ap.add_argument("--out", required=True)
     ap.add_argument("--verify", action="store_true", help="resend each request after a cache reset and compare")
+    ap.add_argument(
+        "--live-replies",
+        action="store_true",
+        help="append the model's own reply to the history instead of a scripted one, as a real client does",
+    )
     a = ap.parse_args()
 
     base = f"http://127.0.0.1:{a.port}"
-    requests = build_workload(pathlib.Path(a.repo), a.system_tokens, a.turn_tokens)
+    if not 1 <= a.edit_target < a.edit_turn <= 10:
+        ap.error("need 1 <= --edit-target < --edit-turn <= 10")
+    live = {} if a.live_replies else None
     post(base + "/v1/cache/reset", {}).read()
 
+    requests = []
     rows = []
-    for req in requests:
+    for req in build_workload(pathlib.Path(a.repo), a.system_tokens, a.turn_tokens, a.edit_turn, a.edit_target, live):
         r = stream(base, req["messages"], a.max_tokens)
+        if live is not None:
+            live[f"{req['session']}{req['turn']}"] = r["content"]
         r.update(session=req["session"], turn=req["turn"], edited=req["edited"])
+        requests.append(req)
         rows.append(r)
-        print(json.dumps(r), flush=True)
+        print(json.dumps({k: v for k, v in r.items() if k != "content"}), flush=True)
     stats = get_json(base + "/v1/cache/stats")
 
     mismatches = []
@@ -217,6 +244,7 @@ def main():
 
     summary = {
         "label": a.label,
+        "live_replies": a.live_replies,
         "requests": len(rows),
         "prompt_tokens": sum(r["prompt_tokens"] or 0 for r in rows),
         "cached_tokens": sum(r["cached_tokens"] or 0 for r in rows),

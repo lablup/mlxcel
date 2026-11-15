@@ -2905,7 +2905,23 @@ pub fn emit_decode_with_native(
         .with_precision(precision)
         .with_projection_layout(c.projection_layout)
         .with_native_proj(native.is_some());
-    let (decls, a) = build_arg_schema(&mut b, c);
+    let (mut decls, mut a) = build_arg_schema(&mut b, c);
+    // The KV cache lives in two module globals instead of the argument list
+    // (issue #3043). The step still emits exactly the same ops, but the cache
+    // is updated in place in the persistent global buffer, so IREE no longer
+    // copies the 16 MB input cache into a fresh 16 MB output cache on every
+    // step (32 MB of device traffic and two `stream.cmd.copy` ops per step).
+    // `kv_import` seeds the globals from the prefill result once per request;
+    // there is no per-step cache hand-off through the ABI at all.
+    decls.truncate(decls.len() - 2);
+    let cache_ty = Ty::f32(vec![
+        c.n_layers,
+        c.context_capacity,
+        c.cache_heads(),
+        c.cache_dim(),
+    ]);
+    a.kcache = b.global_load("kcache", cache_ty.clone());
+    a.vcache = b.global_load("vcache", cache_ty.clone());
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
@@ -3006,18 +3022,18 @@ pub fn emit_decode_with_native(
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![c.n_layers, seq, c.cache_heads(), c.cache_dim()]).render();
+    let cache_ty_s = cache_ty.render();
+    b.global_store("kcache", &kcache);
+    b.global_store("vcache", &vcache);
     format!(
-        "{alias}module @decode_step {{\n{native}  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        "{alias}module @decode_step {{\n  util.global private mutable @kcache : {cache_ty_s}\n  util.global private mutable @vcache : {cache_ty_s}\n{native}  func.func public @main({sig}) -> {out_ty} {{\n{body}    return {l} : {out_ty}\n  }}\n  func.func public @kv_import(%k: {cache_ty_s}, %v: {cache_ty_s}) {{\n    util.global.store %k, @kcache : {cache_ty_s}\n    util.global.store %v, @vcache : {cache_ty_s}\n    return\n  }}\n}}\n",
         alias = native.map(|(alias, _)| alias).unwrap_or(""),
         native = native.map(|(_, source)| source).unwrap_or(""),
+        cache_ty_s = cache_ty_s,
         sig = sig,
         out_ty = out_ty,
-        cache_ty = cache_ty,
         body = b.body(),
         l = out_val,
-        kc = kcache.name,
-        vc = vcache.name,
     )
 }
 

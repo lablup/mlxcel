@@ -202,8 +202,8 @@ pub struct Gemma4MtpTargetAdapter<'a> {
 ///
 /// Classic serving does not prefill a chat prompt in one forward when the
 /// prompt cache is on: its `PrefillPlan` first forwards `[start..boundary]`
-/// as one segment, then the suffix runs in `prefill_chunk_size` chunks from
-/// the boundary. These are that plan's ranges. KV built from a different
+/// in `prefill_chunk_size` chunks ending on the boundary, then the suffix
+/// runs in chunks from the boundary. These are that plan's ranges. KV built from a different
 /// partition differs in the last bit, so a verify that is byte-exact per
 /// block still drifts from classic decode once a flipped key matters (#2160,
 /// measured on one of three 256-token chat prompts per pair before this).

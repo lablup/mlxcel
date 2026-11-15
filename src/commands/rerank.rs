@@ -80,7 +80,7 @@ pub(crate) struct RerankArgs {
 fn load_image(path: &std::path::Path) -> Result<ImageInput> {
     let bytes =
         std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let image = image::load_from_memory(&bytes)
+    let image = mlxcel::multimodal::image_orientation::load_upright_from_memory(&bytes)
         .with_context(|| format!("failed to decode {}", path.display()))?;
     Ok(ImageInput { image })
 }

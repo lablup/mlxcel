@@ -203,6 +203,7 @@ fn turn_ctx(history: Option<&[i32]>) -> PromptCacheRequestContext {
         history_prefix_tokens: history.map(<[i32]>::to_vec),
         root_prompt: None,
         root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
     }
 }
 
@@ -349,12 +350,12 @@ fn cache_hit_reproduces_miss_exactly_from_a_plan_split_point() {
             miss_forwarded, 40,
             "chunk {chunk}: the cold run forwards the whole prompt"
         );
-        let mut expected: Vec<std::ops::Range<usize>> = std::iter::once(0..24).collect();
-        expected.extend(if chunk == 8 {
-            vec![24..32, 32..40]
+        // The segment before the boundary is chunked too (#3045).
+        let expected: Vec<std::ops::Range<usize>> = if chunk == 8 {
+            vec![0..8, 8..16, 16..24, 24..32, 32..40]
         } else {
-            std::iter::once(24..40).collect()
-        });
+            vec![0..24, 24..40]
+        };
         assert_eq!(miss_plan.ranges(), expected, "chunk {chunk}");
 
         // Turn 1 in the served session stores the boundary snapshot...
@@ -491,12 +492,13 @@ fn only_real_chunks_count_and_emit_prompt_progress() {
     assert_eq!(run.chunks_counted, 5);
     assert_eq!(run.progress_frames, vec![0, 8, 16, 24, 32, 40]);
 
-    // Chunked with a boundary: the segment is skipped, each chunk counts.
+    // Chunked with a boundary: the segment is chunked too (#3045), and every
+    // piece, the one ending on the boundary included, counts.
     let mut sched = plan_scheduler(test_store(), 8);
     let run = run_turn_observed(&mut sched, &turn, Some(&history), 2);
-    assert_eq!(run.plan.ranges(), vec![0..24, 24..32, 32..40]);
-    assert_eq!(run.chunks_counted, 2);
-    assert_eq!(run.progress_frames, vec![0, 32, 40]);
+    assert_eq!(run.plan.ranges(), vec![0..8, 8..16, 16..24, 24..32, 32..40]);
+    assert_eq!(run.chunks_counted, 5);
+    assert_eq!(run.progress_frames, vec![0, 8, 16, 24, 32, 40]);
 }
 
 /// #2885 Part B: with the system-prompt root on, chat A stores a root
@@ -525,7 +527,15 @@ fn new_chat_adopts_the_system_root_and_reproduces_its_cold_run() {
         let miss = run_turn_with_ctx(&mut cold, &chat_b, ctx(&chat_b, 24, 11), 4);
         assert_eq!(miss.result.cached_tokens, 0, "chunk {chunk}");
         assert_eq!(miss.plan.splits().as_slice(), &[11, 24], "chunk {chunk}");
-        assert_eq!(miss.plan.ranges()[..2], [0..11, 11..24], "chunk {chunk}");
+        if chunk == 8 {
+            assert_eq!(
+                miss.plan.ranges()[..4],
+                [0..8, 8..11, 11..19, 19..24],
+                "chunk {chunk}"
+            );
+        } else {
+            assert_eq!(miss.plan.ranges()[..2], [0..11, 11..24], "chunk {chunk}");
+        }
 
         // Chat A stores the root and its history boundary.
         let store = test_store();
@@ -571,4 +581,70 @@ fn system_root_is_ignored_when_the_switch_is_off() {
     let mut sched = plan_scheduler(test_store(), 0);
     let run = run_turn_with_ctx(&mut sched, &tokens, ctx, 1);
     assert_eq!(run.plan.splits().as_slice(), &[24]);
+}
+
+/// #2885 Part B: with periodic checkpoints on, a prefill also splits at every
+/// multiple of the interval before its history boundary and stores a snapshot
+/// at each. A later request that edits the history between two checkpoints
+/// adopts the last one before the edit, forwards the rest, and decodes what a
+/// cold run of the edited prompt (split at the same points) decodes.
+#[test]
+fn edited_history_adopts_the_last_checkpoint_and_reproduces_its_cold_run() {
+    let _checkpoints_on =
+        crate::server::prompt_cache::policy::override_checkpoint_interval_for_test(Some(8));
+    for chunk in [0usize, 8] {
+        let original: Vec<i32> = prompt(32);
+        // Rewrite the conversation from token 19 on, as an agent compacting
+        // its history would.
+        let mut edited = original[..19].to_vec();
+        edited.extend((0..13).map(|i| (i + 2) % 7));
+
+        let mut cold = plan_scheduler(test_store(), chunk);
+        let miss = run_turn_with_ctx(&mut cold, &edited, turn_ctx(Some(&edited[..28])), 4);
+        assert_eq!(miss.result.cached_tokens, 0, "chunk {chunk}");
+        assert_eq!(
+            miss.plan.splits().as_slice(),
+            &[8, 16, 24, 28],
+            "chunk {chunk}"
+        );
+
+        let store = test_store();
+        let mut served = plan_scheduler(store.clone(), chunk);
+        let first = run_turn_with_ctx(&mut served, &original, turn_ctx(Some(&original[..28])), 1);
+        assert_eq!(
+            first.plan.splits().as_slice(),
+            &[8, 16, 24, 28],
+            "chunk {chunk}"
+        );
+        assert_eq!(
+            store.stats().snapshot_supersedes,
+            0,
+            "chunk {chunk}: checkpoints of one conversation stay side by side"
+        );
+
+        let hit = run_turn_with_ctx(&mut served, &edited, turn_ctx(Some(&edited[..28])), 4);
+        assert_eq!(hit.result.cached_tokens, 16, "chunk {chunk}");
+        assert_eq!(hit.forwarded, (edited.len() - 16) as u64, "chunk {chunk}");
+        assert!(
+            hit.plan.reproduces(&miss.plan),
+            "chunk {chunk}: hit {:?} vs miss {:?}",
+            hit.plan.ranges(),
+            miss.plan.ranges()
+        );
+        assert_eq!(
+            hit.result.generated_token_ids, miss.result.generated_token_ids,
+            "chunk {chunk}"
+        );
+    }
+}
+
+/// With the switch off the plan splits only at the history boundary.
+#[test]
+fn checkpoints_are_off_by_default() {
+    let _checkpoints_off =
+        crate::server::prompt_cache::policy::override_checkpoint_interval_for_test(None);
+    let tokens = prompt(32);
+    let mut sched = plan_scheduler(test_store(), 0);
+    let run = run_turn_with_ctx(&mut sched, &tokens, turn_ctx(Some(&tokens[..28])), 1);
+    assert_eq!(run.plan.splits().as_slice(), &[28]);
 }

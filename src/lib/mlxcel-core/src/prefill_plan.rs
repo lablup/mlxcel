@@ -31,11 +31,14 @@
 //! 2. Each snapshot boundary strictly inside the remaining span (a
 //!    [`PrefillSplits`]: the history boundary, a chat prompt's rendering
 //!    without its generation prompt, and optionally the system-prompt root
-//!    before it) ends one unpadded piece, whatever the chunk size: the
+//!    and the periodic checkpoints before it) ends an unpadded piece: the
 //!    snapshot the prompt cache stores there must describe exactly the keyed
 //!    tokens, and several snapshot families cannot rewind pad positions out
-//!    of their recurrent state. The Gemma 4 MTP burst mirrors this partition
-//!    through [`PrefillPlan::ranges`].
+//!    of their recurrent state. When chunking applies, the segment before a
+//!    boundary is itself cut into unpadded pieces of at most `chunk` tokens,
+//!    so a long chat prompt keeps the chunked prefill's peak (#3045). The
+//!    Gemma 4 MTP burst mirrors this partition through
+//!    [`PrefillPlan::ranges`].
 //! 3. What remains is cut into pieces of at most `chunk` tokens, starting at
 //!    the last boundary (or at the adopted offset), when chunking applies: a
 //!    non-zero chunk, a model that supports a multi-call prefill, token input
@@ -277,15 +280,17 @@ impl PrefillPiece {
     }
 }
 
-/// Maximum number of snapshot boundaries one plan splits at.
-const MAX_SPLITS: usize = 4;
+/// Maximum number of snapshot boundaries one plan splits at: the
+/// system-prompt root, the history boundary and up to fourteen periodic
+/// checkpoints (#2885 Part B).
+pub const MAX_SPLITS: usize = 16;
 
 /// The snapshot boundaries a prefill is split at, ascending and distinct.
 ///
 /// The prompt cache stores a model-state snapshot at each of them, so each
-/// one ends an unpadded piece (see the module docs). Today a chat request
-/// carries at most two: the system-prompt root (#2885 Part B) and the history
-/// boundary (#1143). `Option<usize>` converts into a single-boundary set, which
+/// one ends an unpadded piece (see the module docs). A chat request carries
+/// the history boundary (#1143) and, when their switches are on, the
+/// system-prompt root and the periodic checkpoints before it (#2885 Part B). `Option<usize>` converts into a single-boundary set, which
 /// keeps every caller that only knows the history boundary unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PrefillSplits {
@@ -416,7 +421,7 @@ impl PrefillPlan {
         let mut pieces = Vec::new();
         let mut cursor = start;
         for &boundary in splits.as_slice() {
-            pieces.push(piece_to_boundary(cursor, boundary));
+            append_segment_pieces(&mut pieces, cursor, boundary, chunk);
             cursor = boundary;
         }
         let step = chunk.unwrap_or(remaining.max(1));
@@ -439,9 +444,9 @@ impl PrefillPlan {
     /// The initial call (`cursor <= adopted`) is exactly [`Self::with_prefix`].
     /// A continuation retains that plan's adopted-prefix and snapshot-boundary
     /// metadata, then partitions only `[cursor, prompt_len)`: boundaries after
-    /// the cursor still end their own pieces, and the rest is chunked from the
-    /// last of them. A continuation never starts inside a boundary segment,
-    /// because each segment is one piece.
+    /// the cursor still end pieces, the segment up to each is chunked from
+    /// where it starts (the cursor for the first), and the rest is chunked
+    /// from the last boundary.
     #[must_use]
     pub fn resume_at(
         prompt_len: usize,
@@ -463,7 +468,7 @@ impl PrefillPlan {
         let mut pieces = Vec::new();
         let mut at = cursor;
         for &boundary in splits.as_slice().iter().filter(|&&b| b > cursor) {
-            pieces.push(piece_to_boundary(at, boundary));
+            append_segment_pieces(&mut pieces, at, boundary, chunk);
             at = boundary;
         }
         let step = chunk.unwrap_or((prompt_len - at).max(1));
@@ -560,17 +565,19 @@ impl PrefillPlan {
         if cursor < adopted || cursor >= prompt_len {
             return None;
         }
+        // The initial plan filters the chunk against everything after the
+        // adopted prefix, a continuation does not (see `with_prefix` and
+        // `resume_at`).
+        let chunk = if cursor == adopted {
+            eligible_chunk(chunk, caps).filter(|chunk| prompt_len - adopted > *chunk)
+        } else {
+            eligible_chunk(chunk, caps)
+        };
         if let Some(boundary) = splits.next_after(cursor) {
-            return Some(piece_to_boundary(cursor, boundary));
+            return Some(segment_piece(cursor, boundary, chunk));
         }
         let remaining = prompt_len - cursor;
-        let step = if cursor == adopted {
-            eligible_chunk(chunk, caps)
-                .filter(|chunk| remaining > *chunk)
-                .unwrap_or(remaining.max(1))
-        } else {
-            eligible_chunk(chunk, caps).unwrap_or(remaining.max(1))
-        };
+        let step = chunk.unwrap_or(remaining.max(1));
         piece_from_cursor(cursor, prompt_len, step, can_pad)
     }
 
@@ -663,10 +670,36 @@ fn eligible_chunk(chunk: usize, caps: PrefillCaps) -> Option<usize> {
     (chunk > 0 && caps.supports_chunked_prefill && !caps.is_embedding_input()).then_some(chunk)
 }
 
-fn piece_to_boundary(cursor: usize, boundary: usize) -> PrefillPiece {
+/// The first piece of the snapshot segment `[cursor, boundary)`: at most
+/// `chunk` tokens when chunking applies, the whole segment otherwise, and
+/// never padded.
+fn segment_piece(cursor: usize, boundary: usize, chunk: Option<usize>) -> PrefillPiece {
+    let end = chunk.map_or(boundary, |chunk| cursor.saturating_add(chunk).min(boundary));
     PrefillPiece {
-        range: cursor..boundary,
-        padded_len: boundary - cursor,
+        range: cursor..end,
+        padded_len: end - cursor,
+    }
+}
+
+/// Cut the snapshot segment `[cursor, boundary)` into unpadded pieces of at
+/// most `chunk` tokens, the last one ending on the boundary (#3045).
+///
+/// A segment used to be one forward whatever the chunk, so a chat prompt
+/// whose history boundary sits a few tokens before its end prefilled almost
+/// the whole prompt in one pass on the server and peaked at the single-pass
+/// level. Only the boundary itself must end a piece: the snapshot stored
+/// there describes exactly the keyed tokens either way, and the pieces after
+/// it, which a prompt-cache hit replays, are unchanged.
+fn append_segment_pieces(
+    pieces: &mut Vec<PrefillPiece>,
+    mut cursor: usize,
+    boundary: usize,
+    chunk: Option<usize>,
+) {
+    while cursor < boundary {
+        let piece = segment_piece(cursor, boundary, chunk);
+        cursor = piece.range.end;
+        pieces.push(piece);
     }
 }
 

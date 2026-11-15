@@ -66,6 +66,108 @@ fn max_abs_diff(a: &mlxcel_core::MlxArray, b: &mlxcel_core::MlxArray) -> f32 {
         .fold(0.0_f32, f32::max)
 }
 
+// A mixed-bit MLP.
+
+/// A deterministic float matrix in `[-1, 1)`.
+fn seeded(shape: &[i32], seed: u64) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let len: usize = shape.iter().map(|d| *d as usize).product();
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+    let data: Vec<f32> = (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 40) as f32) / ((1u32 << 24) as f32) * 2.0 - 1.0
+        })
+        .collect();
+    mlxcel_core::from_slice_f32(&data, shape)
+}
+
+/// A Gemma 3 MLP (hidden 64, intermediate 128) loaded from a weight map whose
+/// gate, up and down projections are quantized at `bits`, under a config that
+/// declares 4 bits for everything, the way a mixed-bit checkpoint declares it.
+fn mlp_quantized_at(bits: [i32; 3]) -> super::MLP {
+    let mut weights = mlxcel_core::weights::WeightMap::new();
+    for ((name, shape), bits) in [
+        ("gate_proj", [128, 64]),
+        ("up_proj", [128, 64]),
+        ("down_proj", [64, 128]),
+    ]
+    .into_iter()
+    .zip(bits)
+    {
+        let dense = seeded(&shape, shape[0] as u64 + name.len() as u64);
+        for (part, tensor) in [
+            ("weight", mlxcel_core::quantize_weights_w(&dense, 64, bits)),
+            (
+                "scales",
+                mlxcel_core::quantize_weights_scales(&dense, 64, bits),
+            ),
+            (
+                "biases",
+                mlxcel_core::quantize_weights_biases(&dense, 64, bits),
+            ),
+        ] {
+            weights.insert(format!("mlp.{name}.{part}"), tensor);
+        }
+    }
+    let declared = args(r#"{"quantization": {"group_size": 64, "bits": 4}}"#);
+    super::MLP::from_weights(&weights, &declared, "mlp").expect("the MLP must load")
+}
+
+/// `down(gelu(gate(x)) * up(x))`, one projection at a time.
+fn projection_by_projection(
+    mlp: &super::MLP,
+    x: &mlxcel_core::MlxArray,
+) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let activated = mlxcel_core::compiled_geglu_approx_activation(
+        &mlp.gate_proj.forward(x),
+        &mlp.up_proj.forward(x),
+    );
+    mlp.down_proj.forward(&activated)
+}
+
+#[test]
+fn a_mixed_bit_mlp_runs_each_projection_on_its_own_layout() {
+    // Layer 2 of `mlx-community/gemma-3-1b-it-DQ`: gate and down at 8 bits, up
+    // at 4. The fused forward takes one layout for the three and was handed the
+    // gate's, which MLX refuses for `up_proj` with an exception that crosses
+    // the bridge and ends the process.
+    for bits in [[8, 4, 8], [4, 8, 4], [4, 4, 8]] {
+        let mlp = mlp_quantized_at(bits);
+        let loaded = [&mlp.gate_proj, &mlp.up_proj, &mlp.down_proj]
+            .map(|projection| projection.quantized_weight().map(|weight| weight.bits));
+        assert_eq!(loaded, bits.map(Some), "the loader reads each width");
+
+        let x = seeded(&[1, 3, 64], 7);
+        let got = mlp.forward(&x);
+        assert_eq!(mlxcel_core::array_shape(&got), [1, 3, 64]);
+        assert_eq!(
+            to_vec(&got),
+            to_vec(&projection_by_projection(&mlp, &x)),
+            "{bits:?}"
+        );
+    }
+}
+
+#[test]
+fn a_uniform_mlp_keeps_the_fused_forward() {
+    for bits in [4, 8] {
+        let mlp = mlp_quantized_at([bits; 3]);
+        assert!(
+            mlxcel_core::layers::fused_mlp_quantized_weights(
+                &mlp.gate_proj,
+                &mlp.up_proj,
+                &mlp.down_proj
+            )
+            .is_some()
+        );
+        let x = seeded(&[1, 3, 64], 7);
+        let difference = max_abs_diff(&mlp.forward(&x), &projection_by_projection(&mlp, &x));
+        assert!(difference < 1e-3, "{bits} bits: {difference}");
+    }
+}
+
 // What the block resolves to.
 
 #[test]

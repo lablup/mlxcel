@@ -49,71 +49,103 @@ pub struct Quantization {
     pub bits: i32,
 }
 
+/// A Mamba `config.json`.
+///
+/// Each setting has two spellings in the wild: the Hugging Face `MambaConfig`
+/// attribute (`hidden_size`) and the name the original state-spaces configs
+/// use (`d_model`). The `*-hf` checkpoints carry both at once, so this is not
+/// a derive with aliases, which refuses a config that names a field twice
+/// ("duplicate field `hidden_size`"). The Hugging Face name wins when both
+/// are present, as it does in transformers and in mlx-lm; the two disagree in
+/// `state-spaces/mamba-370m-hf`, whose `d_inner` is 160 beside an
+/// `intermediate_size` of 2048.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "serde_json::Value")]
 pub struct MambaConfig {
     pub model_type: String,
     pub vocab_size: usize,
-    #[serde(alias = "d_model")]
     pub hidden_size: usize,
-    #[serde(alias = "d_inner")]
     pub intermediate_size: usize,
-    #[serde(alias = "d_state")]
     pub state_size: usize,
-    #[serde(alias = "n_layer", alias = "n_layers")]
     pub num_hidden_layers: usize,
-    #[serde(alias = "d_conv")]
     pub conv_kernel: usize,
-    #[serde(alias = "bias", default)]
     pub use_bias: bool,
-    #[serde(alias = "conv_bias", default = "default_true")]
     pub use_conv_bias: bool,
-    #[serde(deserialize_with = "deserialize_time_step_rank")]
     pub time_step_rank: usize,
-    #[serde(default = "default_true")]
     pub tie_word_embeddings: bool,
-    #[serde(default)]
     pub use_bcdt_rms: bool,
-    #[serde(default = "default_mixer_rms_eps")]
     pub mixer_rms_eps: f32,
-    #[serde(default = "default_rms_norm_eps")]
     pub rms_norm_eps: f32,
-    #[serde(default)]
     pub quantization: Option<Quantization>,
-    #[serde(default)]
     pub eos_token_id: Option<serde_json::Value>,
-    #[serde(default)]
     pub bos_token_id: Option<serde_json::Value>,
 }
 
-fn default_true() -> bool {
-    true
+/// One setting read out of a config object under the first spelling present.
+///
+/// `None` for a setting that is absent or `null` under every spelling.
+fn config_field<T: serde::de::DeserializeOwned>(
+    config: &serde_json::Map<String, serde_json::Value>,
+    spellings: &[&str],
+) -> Result<Option<T>, String> {
+    let Some((name, value)) = spellings.iter().find_map(|name| {
+        config
+            .get(*name)
+            .filter(|v| !v.is_null())
+            .map(|v| (name, v))
+    }) else {
+        return Ok(None);
+    };
+    T::deserialize(value)
+        .map(Some)
+        .map_err(|error| format!("`{name}`: {error}"))
 }
 
-fn default_mixer_rms_eps() -> f32 {
-    1e-6
+/// [`config_field`] for a setting the model cannot be built without. The
+/// error names the first spelling, as the derive this replaces did.
+fn required_config_field<T: serde::de::DeserializeOwned>(
+    config: &serde_json::Map<String, serde_json::Value>,
+    spellings: &[&str],
+) -> Result<T, String> {
+    config_field(config, spellings)?.ok_or_else(|| format!("missing field `{}`", spellings[0]))
 }
 
-fn default_rms_norm_eps() -> f32 {
-    1e-5
-}
+impl TryFrom<serde_json::Value> for MambaConfig {
+    type Error = String;
 
-fn deserialize_time_step_rank<'de, D>(deserializer: D) -> Result<usize, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum TimeStepRank {
-        Number(usize),
-        String(String),
-    }
-
-    match TimeStepRank::deserialize(deserializer)? {
-        TimeStepRank::Number(n) => Ok(n),
-        TimeStepRank::String(s) if s == "auto" => Ok(0), // Will be computed later
-        TimeStepRank::String(s) => Err(D::Error::custom(format!("invalid time_step_rank: {}", s))),
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        let serde_json::Value::Object(config) = value else {
+            return Err("a Mamba config is a JSON object".to_string());
+        };
+        let time_step_rank = match required_config_field(&config, &["time_step_rank"])? {
+            serde_json::Value::String(text) if text == "auto" => 0, // Will be computed later
+            serde_json::Value::String(text) => {
+                return Err(format!("invalid time_step_rank: {text}"));
+            }
+            number => usize::deserialize(&number).map_err(|e| format!("`time_step_rank`: {e}"))?,
+        };
+        Ok(Self {
+            model_type: required_config_field(&config, &["model_type"])?,
+            vocab_size: required_config_field(&config, &["vocab_size"])?,
+            hidden_size: required_config_field(&config, &["hidden_size", "d_model"])?,
+            intermediate_size: required_config_field(&config, &["intermediate_size", "d_inner"])?,
+            state_size: required_config_field(&config, &["state_size", "d_state"])?,
+            num_hidden_layers: required_config_field(
+                &config,
+                &["num_hidden_layers", "n_layer", "n_layers"],
+            )?,
+            conv_kernel: required_config_field(&config, &["conv_kernel", "d_conv"])?,
+            use_bias: config_field(&config, &["use_bias", "bias"])?.unwrap_or(false),
+            use_conv_bias: config_field(&config, &["use_conv_bias", "conv_bias"])?.unwrap_or(true),
+            time_step_rank,
+            tie_word_embeddings: config_field(&config, &["tie_word_embeddings"])?.unwrap_or(true),
+            use_bcdt_rms: config_field(&config, &["use_bcdt_rms"])?.unwrap_or(false),
+            mixer_rms_eps: config_field(&config, &["mixer_rms_eps"])?.unwrap_or(1e-6),
+            rms_norm_eps: config_field(&config, &["rms_norm_eps"])?.unwrap_or(1e-5),
+            quantization: config_field(&config, &["quantization"])?,
+            eos_token_id: config_field(&config, &["eos_token_id"])?,
+            bos_token_id: config_field(&config, &["bos_token_id"])?,
+        })
     }
 }
 
@@ -201,8 +233,30 @@ pub struct MambaBlock {
     out_proj: UnifiedLinear,
 
     // SSM parameters
-    a_log: UniquePtr<MlxArray>,
+    /// `A = -exp(A_log)` in float32, from [`ssm_a_from_log`].
+    a: UniquePtr<MlxArray>,
     d_param: UniquePtr<MlxArray>,
+}
+
+/// The SSM transition `A = -exp(A_log)`, computed once in float32.
+///
+/// Issue #3046: on Apple Silicon a bf16 checkpoint is cast to f16 at load, and
+/// `exp` of a trained `A_log` overflows f16, whose largest finite value
+/// (65504) is `exp(11.09)`. `state-spaces/mamba-130m` carries `A_log` up to
+/// 19.5, so 1530 of its 589824 `A` entries (in 23 of 24 layers) became
+/// `-inf`, and a channel whose `softplus` step underflowed to zero in f16 then
+/// computed `0 * -inf = NaN` for its decay. The NaN reached every logit on the
+/// first token, greedy sampling took token 0, which is this model's EOS, and
+/// generation stopped with no output. Without the f16 conversion (an f32
+/// checkpoint, or `MLXCEL_KEEP_BF16`) it never appeared, because f32 and bf16
+/// both hold `exp(19.5)`. Computing `A` from a float32 copy keeps the value
+/// the checkpoint describes whatever the load-time dtype policy did to
+/// `A_log`; `MambaBlock::scan_a` decides the dtype each scan reads it in.
+pub(crate) fn ssm_a_from_log(a_log: &MlxArray) -> UniquePtr<MlxArray> {
+    let a_log = mlxcel_core::astype(a_log, mlxcel_core::dtype::FLOAT32);
+    let a = mlxcel_core::negative(&mlxcel_core::exp(&a_log));
+    mlxcel_core::eval(&a);
+    a
 }
 
 impl MambaBlock {
@@ -238,16 +292,14 @@ impl MambaBlock {
         };
 
         // Update conv cache.
-        // Wrap slice in contiguous() to force MLX to materialize a fresh,
-        // independent buffer. Without this, the slice is a lazy view that
-        // retains a reference to the full padded_input allocation, causing a
-        // memory leak proportional to the sequence length.
+        // The tail is a fresh buffer, scheduled now on a long prefill so the full
+        // padded_input is not held until the caches are evaluated.
         if let Some(c) = cache {
             let n_keep = k - 1;
-            let padded_shape = mlxcel_core::array_shape(&padded_input);
-            let len = padded_shape[1] as usize;
-            let tail = slice_axis(&padded_input, 1, (len - n_keep) as i32, len as i32);
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
+                &padded_input,
+                n_keep as i32,
+            ));
         }
 
         // Depthwise conv1d
@@ -269,6 +321,22 @@ impl MambaBlock {
         };
 
         silu(&conv_out)
+    }
+
+    /// `A` as both scans consume it: in the activation dtype, so a bf16 or
+    /// float32 model rounds exactly as it did before `A` moved to float32
+    /// (rounding the float32 `-exp(A_log)` to bf16 gives the value `exp` of a
+    /// bf16 `A_log` always gave). f16 is the exception, because it cannot hold
+    /// `A` at all (issue #3046): there `A` stays float32, which the fused
+    /// kernel reads as is, and in the graph scan `delta * A` and its `exp` run
+    /// in float32 and `ssm_step` rounds only the decay back.
+    fn scan_a(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let dtype = mlxcel_core::array_dtype(x);
+        if dtype == mlxcel_core::dtype::FLOAT16 {
+            mlxcel_core::copy(&self.a)
+        } else {
+            mlxcel_core::astype(&self.a, dtype)
+        }
     }
 
     fn ssm_step(
@@ -318,6 +386,14 @@ impl MambaBlock {
             let delta_exp = mlxcel_core::expand_dims(&delta, -1);
             let delta_a = mlxcel_core::multiply(&delta_exp, a);
             let decay = mlxcel_core::exp(&delta_a);
+            // `a` is float32 only for f16 activations (see `scan_a`).
+            // The decay lies in (0, 1], so rounding it back to the activation
+            // dtype keeps the state, and everything after it, in that dtype.
+            let decay = if mlxcel_core::array_dtype(&decay) == mlxcel_core::array_dtype(x) {
+                decay
+            } else {
+                mlxcel_core::astype(&decay, mlxcel_core::array_dtype(x))
+            };
             let state_contrib = mlxcel_core::multiply(prev_state, &decay);
             new_state = mlxcel_core::add(&new_state, &state_contrib);
         }
@@ -347,8 +423,8 @@ impl MambaBlock {
         // Conv1d with caching
         let x_conv = self.conv(&x_part, cache.as_deref_mut());
 
-        // A = -exp(A_log)
-        let a = mlxcel_core::negative(&mlxcel_core::exp(&self.a_log));
+        // A = -exp(A_log), precomputed in float32 at load (issue #3046).
+        let a = self.scan_a(&x_conv);
 
         // Process sequence step by step
         let state_cache = cache
@@ -739,6 +815,7 @@ impl MambaModel {
                 .remove(&format!("{}.mixer.D", prefix))
                 .ok_or(format!("Missing D for layer {}", i))?;
 
+            let a = ssm_a_from_log(&a_log);
             let mixer = MambaBlock {
                 hidden_size: config.hidden_size,
                 intermediate_size: config.intermediate_size,
@@ -753,7 +830,7 @@ impl MambaModel {
                 x_proj,
                 dt_proj,
                 out_proj,
-                a_log,
+                a,
                 d_param,
             };
 

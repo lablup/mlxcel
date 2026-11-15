@@ -388,6 +388,23 @@ impl DecoderLayer {
         }
     }
 
+    /// Cut an attention layer's cache back by `n` positions to the state a
+    /// direct prefill of the shorter prefix writes, for turn-boundary state
+    /// checkpoints (issue #3047).
+    pub(crate) fn trim_cache_to_prefill_state(
+        &self,
+        cache: &mut Qwen4ExpCache,
+        n: i32,
+    ) -> Result<(), String> {
+        self.trim_cache(cache, n)?;
+        if let (Mixer::Attention(attention), Qwen4ExpCache::Attention { index, .. }) =
+            (&self.mixer, cache)
+        {
+            attention.forget_unpooled_blocks(index);
+        }
+        Ok(())
+    }
+
     /// Rewind `cache` to the first `keep` positions of the block `capture`
     /// describes, dropping `trim` positions.
     pub(crate) fn rollback(
@@ -1385,6 +1402,22 @@ impl LanguageModel for Qwen4ExpModel {
         self.restore_sequence_snapshot(seq_id, snapshot)
     }
 
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.state_checkpoint(snapshot)
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        self.restore_sequence_checkpoint(seq_id, checkpoint, donor)
+    }
+
     fn forward_with_sequence_id(
         &self,
         input_ids: &MlxArray,
@@ -1466,3 +1499,11 @@ mod rollback_tests;
 #[cfg(test)]
 #[path = "qwen4_exp_snapshot_tests.rs"]
 mod snapshot_tests;
+
+#[cfg(test)]
+#[path = "qwen4_exp_decode_tail_tests.rs"]
+mod decode_tail_tests;
+
+#[cfg(test)]
+#[path = "qwen4_exp_checkpoint_tests.rs"]
+mod checkpoint_tests;

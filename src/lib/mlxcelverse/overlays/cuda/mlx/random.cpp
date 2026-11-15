@@ -1,13 +1,13 @@
 // Copyright © 2023-2024 Apple Inc.
 //
 // CUDA patch: preserve float32 precision in random distributions under
-// bf16+fp32 -> bf16 promotion (issue #2958)
+// bf16+fp32 -> bf16 promotion (issues #2958, #2971)
 //
 // Modified from upstream MLX 9f806b3606eaa9f7c807238f6bd465185cd94d6d mlx/random.cpp
 //
 // overlays/cuda/mlx/dtype.cpp overrides promote_types(bfloat16, float32) and
 // promote_types(uint32, bfloat16) to return bfloat16 so binary ops in the LLM
-// compute graph do not insert copy_v<bf16, float> casts. Four sites in
+// compute graph do not insert copy_v<bf16, float> casts. Five sites in
 // mlx/random.cpp rely on standard promotion to float32 for distribution
 // correctness:
 //   1. bernoulli: multiply(p_bf16, upper_f32) and less(bits_u32, bf16) demoted
@@ -22,6 +22,8 @@
 //      float32 Gumbel noise to bfloat16 before argmax.
 //   4. laplace: multiply(array(-1.0f, bfloat16), abs(samples_f32)) rounded
 //      uniform draws near 1.0 to -1.0_bf16, making log1p(-1.0_bf16) emit -inf.
+//   5. multivariate_normal: add(mean_bf16, scaled_out_f32) demoted the float32
+//      samples to bfloat16 despite dtype == float32 being enforced.
 //
 // Applied only when MLX_BUILD_CUDA is ON via overlays/cuda/mlx/*.cpp in
 // CMakeLists.txt; Metal, ROCm, and CPU-only builds compile upstream verbatim.
@@ -308,7 +310,8 @@ array multivariate_normal(
       matmul(expand_dims(standard_normal, -2, stream), std, stream),
       -2,
       stream);
-  return add(mean, scaled_out, stream);
+  auto mean_up = mean.dtype() == bfloat16 ? astype(mean, float32, stream) : mean; /* PATCHED: keep multivariate_normal output in fp32 (#2971) */
+  return add(mean_up, scaled_out, stream);
 }
 
 array randint(

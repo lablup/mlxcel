@@ -11,7 +11,7 @@ pip install ./python          # from a repo checkout
 pip install "./python[dev]"     # adds pytest, ruff, mypy
 ```
 
-Requires Python 3.9 or newer. Runtime dependencies are `openai>=1.40` and `httpx>=0.27`. Managed mode additionally needs the `mlxcel` binary; the client finds it via the `binary=` argument, the `MLXCEL_BIN` environment variable, or `mlxcel` on `PATH`, in that order. See [Installation](installation.md) for building the binary.
+Requires Python 3.11 or newer. Runtime dependencies are `openai>=1.40` and `httpx>=0.27`. Managed mode additionally needs the `mlxcel` binary; the client finds it via the `binary=` argument, the `MLXCEL_BIN` environment variable, or `mlxcel` on `PATH`, in that order. See [Installation](installation.md) for building the binary.
 
 ## Managed mode
 

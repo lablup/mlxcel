@@ -163,6 +163,8 @@ fn clean_content_markers(text: &str) -> String {
         .replace("<|END_RESPONSE|>", "")
         .replace("<|begin_of_box|>", "")
         .replace("<|end_of_box|>", "")
+        .replace("<|eom|>", "")
+        .replace("<|eot|>", "")
         .trim()
         .to_string()
 }

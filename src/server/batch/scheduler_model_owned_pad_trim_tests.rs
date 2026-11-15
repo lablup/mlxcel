@@ -396,6 +396,7 @@ fn padded_prefill_keeps_snapshot_reuse() {
         history_prefix_tokens: None,
         root_prompt: None,
         root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
     };
     let enqueue = |sched: &mut BatchScheduler, prompt: Vec<i32>| {
         let mut opts = options(1);

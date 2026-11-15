@@ -287,3 +287,30 @@ fn chat_streaming_atem_allowlist_and_malformed_eof_do_not_leak() {
     assert!(streamed.reasoning.is_empty());
     assert_eq!(streamed.finish_reason.as_deref(), Some("stop"));
 }
+
+#[test]
+fn chat_streaming_muse_primed_user_and_tool_headers_do_not_leak_envelope() {
+    let request = support::chat_request();
+    let direct_user = " to=user<|message|>안녕하세요! 무엇을 도와드릴까요?<|eot|>";
+    let user_stream = stream_chat(&request, support::one_byte_chunks(direct_user));
+    assert_eq!(user_stream.content, "안녕하세요! 무엇을 도와드릴까요?");
+    assert!(user_stream.reasoning.is_empty());
+    assert!(user_stream.calls.is_empty());
+    assert_eq!(user_stream.finish_reason.as_deref(), Some("stop"));
+
+    let direct_tool = concat!(
+        " to=weather.get_current<|message|><atem:function_calls>",
+        "<atem:invoke name=\"weather.get_current\">",
+        "<atem:parameter name=\"city\">Seoul</atem:parameter>",
+        "</atem:invoke></atem:function_calls><|eot|>"
+    );
+    let tool_stream = stream_chat(&request, support::one_byte_chunks(direct_tool));
+    assert!(tool_stream.content.is_empty());
+    assert!(tool_stream.reasoning.is_empty());
+    assert_eq!(tool_stream.calls.len(), 1);
+    assert_eq!(
+        tool_stream.calls[0].name.as_deref(),
+        Some("weather.get_current")
+    );
+    assert_eq!(tool_stream.finish_reason.as_deref(), Some("tool_calls"));
+}

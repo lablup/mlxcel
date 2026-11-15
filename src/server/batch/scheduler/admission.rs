@@ -569,6 +569,10 @@ impl BatchScheduler {
             && let Some(mut ctx) = options.prompt_cache_ctx.clone()
         {
             self.resolve_history_boundary(&mut ctx, &prompt_tokens, is_multimodal);
+            ctx.snapshot_lineage = self
+                .prompt_cache_adopted_lineage
+                .remove(&seq_id)
+                .unwrap_or_default();
             self.prompt_cache_seq_ctx.insert(seq_id, ctx);
         }
 

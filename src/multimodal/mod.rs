@@ -25,6 +25,7 @@
 //! - `gemma3_vlm_prompt`: Gemma 3 image-block newline merging
 //! - `gemma4_vl`: Gemma 4 mixed-length batching helpers
 //! - `host_preprocessor`: owned host-first prefill production for compiler backends
+//! - `image_orientation`: pictures turned upright by their EXIF orientation at decode
 //! - `phi4mm_prompt`: Phi4MM numbered image/audio placeholder normalization
 //! - `phi4_siglip_prompt`: Phi4-SigLIP `<image>` placeholder handling
 //! - `minicpmo_prompt`: MiniCPM-o image placeholder expansion and bounds
@@ -47,6 +48,7 @@ pub mod gemma4_vl;
 pub mod got_ocr_prompt;
 pub mod granite_vision_prompt;
 pub mod host_preprocessor;
+pub mod image_orientation;
 pub mod inkling_audio;
 pub mod internvl_prompt;
 pub mod kimi_k3_prompt;

@@ -46,11 +46,16 @@ impl InklingShortConv {
         let mut stacked = Some(crate::concatenate_many(&state_refs, 0));
         let out = self.forward(input, &mut stacked, residual);
         let state = stacked.expect("convolution retains its tail");
+        let rows = crate::array_shape(input)[1];
         for (i, cache) in caches.iter_mut().enumerate() {
-            cache.conv[slot] = Some(crate::contiguous(
+            // Per-row slice along axis 0 of the already-scheduled tail, so it
+            // stays a slice plus `contiguous` and is scheduled explicitly.
+            let row = crate::contiguous(
                 &crate::utils::slice_axis(&state, 0, i as i32, i as i32 + 1),
                 false,
-            ));
+            );
+            crate::utils::schedule_prefill_state(&row, rows);
+            cache.conv[slot] = Some(row);
         }
         out
     }
@@ -92,8 +97,9 @@ impl InklingShortConv {
             }
         };
         let padded_len = crate::array_shape(&padded)[1];
-        let tail = crate::utils::slice_axis(&padded, 1, padded_len - keep, padded_len);
-        *state = Some(crate::contiguous(&tail, false));
+        // A fresh buffer, scheduled now on a long prefill so `padded` is not
+        // held until the caches are evaluated.
+        *state = Some(crate::utils::materialized_state_tail(&padded, keep));
 
         let convolved = if shape[1] == 1 {
             let window = crate::utils::slice_axis(&padded, 1, padded_len - self.kernel, padded_len);

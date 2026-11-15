@@ -553,13 +553,10 @@ impl PleLayer {
                 )
             });
         let conv_input = concatenate(&state, x, 1);
-        let total = mlxcel_core::array_shape(&conv_input)[1];
-        let tail = mlxcel_core::slice(
+        cache.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
             &conv_input,
-            &[0, total - self.conv_state_len, 0],
-            &[shape[0], total, shape[2]],
-        );
-        cache.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+            self.conv_state_len,
+        ));
         let out = if decode_equivalent {
             super::gated_delta::conv1d_per_position(
                 &conv_input,

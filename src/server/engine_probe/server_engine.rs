@@ -274,6 +274,7 @@ impl ServerEngine {
                 history_prefix_tokens: key.history_tokens.clone(),
                 root_prompt: None,
                 root_prefix_tokens: None,
+                snapshot_lineage: Default::default(),
             });
         let options = ServerGenerateOptions {
             max_tokens: request.max_tokens,

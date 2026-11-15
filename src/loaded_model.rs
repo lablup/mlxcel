@@ -703,6 +703,25 @@ impl LanguageModel for LoadedModel {
         )
     }
 
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        delegate_language_model!(self, state_checkpoint_from_snapshot(snapshot))
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        delegate_language_model!(
+            self,
+            restore_sequence_state_from_checkpoint(seq_id, checkpoint, donor)
+        )
+    }
+
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         delegate_language_model!(self, sequence_state_layout())
     }
