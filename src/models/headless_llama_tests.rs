@@ -51,6 +51,7 @@ fn tiny_args() -> ModelArgs {
         rope_theta: 500_000.0,
         rope_scaling: None,
         quantization: None,
+        quantization_config: None,
         tie_word_embeddings: true,
         rope_traditional: false,
         eos_token_id: None,

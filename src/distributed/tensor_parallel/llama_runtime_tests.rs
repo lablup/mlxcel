@@ -59,6 +59,7 @@ fn make_test_model_args() -> LlamaModelArgs {
         rope_theta: 10_000.0,
         rope_scaling: None,
         quantization: None,
+        quantization_config: None,
         tie_word_embeddings: false,
         // Every published Llama-family checkpoint rotates split-half, and none
         // declares the key, so this is the shape the runtime actually sees. The
@@ -1298,6 +1299,7 @@ fn local_llama_args_preserves_computed_head_dim_when_config_omits_it() {
         rope_theta: 1_000_000.0,
         rope_scaling: None,
         quantization: None,
+        quantization_config: None,
         tie_word_embeddings: true,
         rope_traditional: false,
         eos_token_id: None,
