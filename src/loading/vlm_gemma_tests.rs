@@ -14,11 +14,113 @@
 
 use super::{
     gemma3n_language_model_prefix, gemma3n_metadata, gemma3n_needs_conv_transpose,
-    sanitize_gemma3n_weights, sanitize_gemma4_audio_weights,
+    parse_gemma3_vlm_config, sanitize_gemma3n_weights, sanitize_gemma4_audio_weights,
 };
+use crate::vision::config::{VLMConfig, VisionHiddenActivation};
 use mlxcel_core::dtype;
 use mlxcel_core::weights::WeightMap;
 use serde_json::json;
+
+/// The fields of `mlx-community/gemma-3-4b-it-4bit`'s `config.json` that
+/// `VLMConfig` reads, with the `vision_config` as shipped: no `hidden_act`.
+fn gemma3_vlm_config() -> serde_json::Value {
+    json!({
+        "model_type": "gemma3",
+        "boi_token_index": 255_999,
+        "eoi_token_index": 256_000,
+        "image_token_index": 262_144,
+        "mm_tokens_per_image": 256,
+        "text_config": {"model_type": "gemma3_text", "hidden_size": 2560},
+        "vision_config": {
+            "model_type": "siglip_vision_model",
+            "hidden_size": 1152,
+            "image_size": 896,
+            "intermediate_size": 4304,
+            "num_attention_heads": 16,
+            "num_hidden_layers": 27,
+            "patch_size": 14,
+            "skip_vision": true,
+            "vision_use_head": false
+        }
+    })
+}
+
+#[test]
+fn gemma3_vlm_config_resolves_an_omitted_hidden_act_to_the_siglip_tanh_gelu() {
+    // As shipped the key is absent, and the serde default alone is exact erf.
+    // That is the tower the pinned eager-MLX-versus-IREE gate used to build
+    // for its reference while the loader and the IREE graph ran tanh.
+    let shipped = gemma3_vlm_config();
+    let direct: VLMConfig = serde_json::from_value(shipped.clone()).unwrap();
+    assert_eq!(
+        direct.vision_config.hidden_act,
+        VisionHiddenActivation::ExactGelu
+    );
+    let parsed = parse_gemma3_vlm_config(&shipped).unwrap();
+    assert_eq!(
+        parsed.vision_config.hidden_act,
+        VisionHiddenActivation::GeluPytorchTanh
+    );
+
+    // A null key is an omitted key.
+    let mut null_act = gemma3_vlm_config();
+    null_act["vision_config"]["hidden_act"] = serde_json::Value::Null;
+    assert_eq!(
+        parse_gemma3_vlm_config(&null_act)
+            .unwrap()
+            .vision_config
+            .hidden_act,
+        VisionHiddenActivation::GeluPytorchTanh
+    );
+
+    // Nothing else of the config moves.
+    assert_eq!(parsed.model_type, "gemma3");
+    assert_eq!(parsed.image_token_index, 262_144);
+    assert_eq!(parsed.boi_token_index, 255_999);
+    assert_eq!(parsed.eoi_token_index, 256_000);
+    assert_eq!(parsed.get_mm_tokens_per_image(), 256);
+    assert_eq!(parsed.vision_config.num_hidden_layers, 27);
+    assert_eq!(parsed.vision_config.hidden_size, 1152);
+    assert_eq!(parsed.vision_config.intermediate_size, 4304);
+    assert_eq!(parsed.vision_config.image_size, 896);
+    assert_eq!(parsed.vision_config.patch_size, 14);
+}
+
+#[test]
+fn gemma3_vlm_config_keeps_a_declared_hidden_act_and_the_loader_errors() {
+    for (declared, expected) in [
+        ("gelu", VisionHiddenActivation::ExactGelu),
+        ("gelu_pytorch_tanh", VisionHiddenActivation::GeluPytorchTanh),
+        ("quick_gelu", VisionHiddenActivation::QuickGelu),
+    ] {
+        let mut config = gemma3_vlm_config();
+        config["vision_config"]["hidden_act"] = declared.into();
+        assert_eq!(
+            parse_gemma3_vlm_config(&config)
+                .unwrap()
+                .vision_config
+                .hidden_act,
+            expected,
+            "{declared}"
+        );
+    }
+
+    // A name that is not a GELU is still an error, with the loader's prefix.
+    let mut not_a_gelu = gemma3_vlm_config();
+    not_a_gelu["vision_config"]["hidden_act"] = "relu".into();
+    let error = parse_gemma3_vlm_config(&not_a_gelu)
+        .expect_err("relu")
+        .to_string();
+    assert!(error.starts_with("Failed to parse VLM config: "), "{error}");
+    assert!(error.contains("unsupported vision hidden_act"), "{error}");
+
+    let mut no_tower = gemma3_vlm_config();
+    no_tower.as_object_mut().unwrap().remove("vision_config");
+    let error = parse_gemma3_vlm_config(&no_tower)
+        .expect_err("no vision_config")
+        .to_string();
+    assert!(error.starts_with("Failed to parse VLM config: "), "{error}");
+}
 
 #[test]
 fn gemma3n_metadata_applies_defaults_and_overrides() {

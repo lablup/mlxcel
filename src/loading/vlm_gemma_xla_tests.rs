@@ -765,8 +765,11 @@ pub mod reference_boundary {
             ProgressHeartbeat::start("load filtered MLX SigLIP/projector/text embedding weights");
         let (_config_str, full_config) =
             read_sanitized_vlm_config(model).expect("read pinned Gemma3 config");
-        let config: VLMConfig =
-            serde_json::from_value(full_config.clone()).expect("parse pinned Gemma3 VLM config");
+        // The config the eager loader builds its tower from. The pinned config
+        // omits `vision_config.hidden_act`, which the loader and the OpenXLA
+        // emitter both resolve to the tanh GELU (#2423); parsing `VLMConfig`
+        // directly would leave this reference on the serde default, exact erf.
+        let config = parse_gemma3_vlm_config(&full_config).expect("parse pinned Gemma3 VLM config");
         let text_config: models::gemma3::ModelArgs =
             serde_json::from_value(config.text_config.clone())
                 .expect("parse pinned Gemma3 text config");
