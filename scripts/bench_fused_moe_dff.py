@@ -215,12 +215,17 @@ def main():
         if one(0, position, arm, measured=False) != "warmup":
             log("warm-up run failed; recording this model/cell as NA and stopping")
             return 3
+    failed = False
     for r in range(1, args.rounds + 1):
         shift = (r - 1) % len(ARM_ORDER)
         order = ARM_ORDER[shift:] + ARM_ORDER[:shift]
         for position, arm in enumerate(order):
-            one(r, position, arm, measured=True)
-    log("done")
+            if one(r, position, arm, measured=True) != "ok":
+                failed = True
+    log("done with failed measurements" if failed else "done")
+    csvf.close()
+    logf.close()
+    return 3 if failed else 0
 
 
 if __name__ == "__main__":
