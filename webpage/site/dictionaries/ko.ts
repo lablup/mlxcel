@@ -14,7 +14,7 @@ export const ko: Dictionary = {
     title_suffix: "네이티브 LLM 추론,",
     title_accent: "극한의 속도로",
     description:
-      "60개 이상의 LLM/VLM 모델을 Metal 가속으로 Mac에서 바로 실행하세요.\nPython 없이, 컨테이너 없이, 순수 Rust 속도 그대로.",
+      "100개 이상의 LLM/VLM 모델을 Metal 가속으로 Mac에서 바로 실행하세요.\nPython 없이, 컨테이너 없이, 순수 Rust 속도 그대로.",
     description_secondary:
       "Llama부터 DeepSeek, Qwen, Gemma까지.\nOpenAI 호환 API 서버가 내장되어 있습니다.",
     supporting_note: "Python 의존성 제로",
@@ -38,7 +38,7 @@ export const ko: Dictionary = {
       },
       {
         meta: "모델",
-        title: "60개 이상의 모델 아키텍처",
+        title: "100개 이상의 모델 아키텍처",
         description:
           "Transformer, MoE, SSM, Hybrid. Llama, Qwen, Gemma, DeepSeek, Mixtral, Mamba, RWKV, Jamba 등. 텍스트와 비전 모델 모두 지원.",
       },
@@ -120,7 +120,7 @@ export const ko: Dictionary = {
       {
         label: "모델",
         alt: "mlxcel 지원 모델 목록",
-        title: "60개 이상의 아키텍처, 계속 확장 중",
+        title: "100개 이상의 아키텍처, 계속 확장 중",
         description:
           "Transformer, MoE, SSM, Hybrid 아키텍처. 0.5B부터 200B+ 파라미터까지. 지속적으로 모델 지원 확대.",
       },
@@ -148,7 +148,7 @@ export const ko: Dictionary = {
         step: "Step 3",
         title: "통합하고\n확장하기",
         description:
-          "API 서버를 통해 기존 도구, IDE, 워크플로에 연결합니다. 60개 이상의 모든 모델 아키텍처에 동일한 인터페이스.",
+          "API 서버를 통해 기존 도구, IDE, 워크플로에 연결합니다. 100개 이상의 모든 모델 아키텍처에 동일한 인터페이스.",
       },
     ],
     mesh_badges: [
