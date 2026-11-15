@@ -105,7 +105,7 @@ pub fn materialized_state_tail(x: &MlxArray, n_keep: i32) -> UniquePtr<MlxArray>
     starts[1] = rows - n_keep;
     let tail = ffi::contiguous(&ffi::slice(x, &starts, &shape), false);
     if rows >= STATE_TAIL_EAGER_MIN_ROWS {
-        ffi::async_eval(&tail);
+        crate::deferred_eval::async_eval_or_defer(&tail);
     }
     tail
 }
@@ -120,7 +120,7 @@ pub fn materialized_state_tail(x: &MlxArray, n_keep: i32) -> UniquePtr<MlxArray>
 /// per-row or non-axis-1 tail: Baichuan, Inkling batched, TP Qwen3.5 rows
 pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
     if rows >= STATE_TAIL_EAGER_MIN_ROWS {
-        ffi::async_eval(state);
+        crate::deferred_eval::async_eval_or_defer(state);
     }
 }
 

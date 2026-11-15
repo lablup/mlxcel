@@ -3812,6 +3812,10 @@ mod ffi {
 // Re-export the FFI types and functions
 pub use ffi::*;
 
+mod deferred_eval;
+// Shadows the glob-exported FFI `try_eval`: see `deferred_eval`.
+pub use deferred_eval::{EvalError, take_deferred_eval_error, try_eval};
+
 /// The sorted flags of one `GatherMM` or `GatherQMM` node, as the primitive
 /// carries them (issue #2241).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
