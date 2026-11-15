@@ -836,6 +836,10 @@ fn gated_delta_chunked(
         y
     };
 
+    // The final state is not consumed by `y`; schedule it on a long prefill so
+    // the scan's full-length inputs are not held until the caches are evaluated.
+    mlxcel_core::utils::schedule_prefill_state(&state, t as i32);
+
     (y, state)
 }
 

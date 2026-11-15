@@ -2913,14 +2913,18 @@ fn qwen35_linear_forward_batched(
     if let Some(conv_state) = combined.conv_state.take() {
         let shape = mlxcel_core::array_shape(&conv_state);
         for (row_idx, cache) in caches.iter_mut().enumerate() {
-            cache.conv_state = Some(mlxcel_core::contiguous(
+            // Per-row slice along axis 0, so it stays a slice plus `contiguous`
+            // and is scheduled explicitly on a long prefill.
+            let row = mlxcel_core::contiguous(
                 &mlxcel_core::slice(
                     &conv_state,
                     &[row_idx as i32, 0, 0],
                     &[row_idx as i32 + 1, shape[1], shape[2]],
                 ),
                 false,
-            ));
+            );
+            mlxcel_core::utils::schedule_prefill_state(&row, seq_len);
+            cache.conv_state = Some(row);
         }
     }
     if let Some(state_cache) = combined.state_cache.take() {

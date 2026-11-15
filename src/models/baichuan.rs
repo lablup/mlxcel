@@ -433,7 +433,11 @@ impl BaichuanDecoderLayer {
 fn conv_state_token(u: &MlxArray, l: i32) -> UniquePtr<MlxArray> {
     let last = mlxcel_core::utils::slice_axis(u, 2, l - 1, l);
     if l > 1 {
-        mlxcel_core::contiguous(&last, false)
+        // The time axis is 2 of `[B, H, L, D]`, not axis 1, so this cannot use
+        // `materialized_state_tail`; schedule the fresh buffer on a long prefill.
+        let token = mlxcel_core::contiguous(&last, false);
+        mlxcel_core::utils::schedule_prefill_state(&token, l);
+        token
     } else {
         last
     }

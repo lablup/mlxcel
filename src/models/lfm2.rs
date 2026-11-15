@@ -609,13 +609,11 @@ impl ShortConv {
         };
 
         // Persist the last `L_cache - 1` time steps as the next conv state.
-        // `contiguous` forces a fresh buffer so the cached slice does not retain
-        // the full padded allocation (mirrors the Mamba conv-state handling).
+        // The tail is a fresh buffer, scheduled now on a long prefill so the full
+        // padded allocation is not held until the caches are evaluated.
         // The non-causal mixer never decodes, so it keeps the state untouched.
         if self.causal {
-            let plen = mlxcel_core::array_shape(&padded)[1];
-            let tail = slice_axis(&padded, 1, plen - n_keep, plen);
-            *conv_state = Some(mlxcel_core::contiguous(&tail, false));
+            *conv_state = Some(mlxcel_core::utils::materialized_state_tail(&padded, n_keep));
         }
 
         // Depthwise Conv1d (groups == hidden). Match the conv weight dtype to

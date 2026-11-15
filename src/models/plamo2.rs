@@ -307,13 +307,13 @@ impl Plamo2Mamba {
         };
 
         // Persist the trailing `k - 1` time steps as the next conv state.
-        // `contiguous` forces a fresh buffer so the cached slice does not retain
-        // the full `padded_input` allocation (a per-token memory leak otherwise).
+        // The tail is a fresh buffer, scheduled now on a long prefill so the full
+        // padded_input is not held until the caches are evaluated.
         if let Some(c) = cache {
-            let padded_shape = mlxcel_core::array_shape(&padded_input);
-            let len = padded_shape[1] as usize;
-            let tail = slice_axis(&padded_input, 1, (len - (k - 1)) as i32, len as i32);
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
+                &padded_input,
+                (k - 1) as i32,
+            ));
         }
 
         // Match the conv weight dtype to the (possibly bf16/f16) activations.

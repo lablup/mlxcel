@@ -372,19 +372,10 @@ impl ShortConv1d {
         let conv_out = silu(&conv_out);
 
         // Extract new state: last kernel_size-1 positions from conv_input.
-        // Wrap slice in contiguous() to force MLX to materialize a fresh,
-        // independent buffer. Without this, the slice is a lazy view that
-        // retains a reference to the full conv_input allocation, causing a
-        // memory leak proportional to the sequence length.
+        // The tail is a fresh buffer, scheduled now on a long prefill so the full
+        // conv_input is not held until the caches are evaluated.
         let n_keep = (self.kernel_size - 1) as i32;
-        let conv_shape = mlxcel_core::array_shape(&conv_input);
-        let total_len = conv_shape[1];
-        let tail = mlxcel_core::slice(
-            &conv_input,
-            &[0, total_len - n_keep, 0],
-            &[b, total_len, self.channels as i32],
-        );
-        let new_state = mlxcel_core::contiguous(&tail, false);
+        let new_state = mlxcel_core::utils::materialized_state_tail(&conv_input, n_keep);
 
         (conv_out, new_state)
     }
