@@ -94,6 +94,10 @@ mod first_fill;
 #[cfg(test)]
 #[path = "cache/first_fill_tests.rs"]
 mod first_fill_tests;
+mod fp16_growth;
+#[cfg(test)]
+#[path = "cache/fp16_growth_tests.rs"]
+mod fp16_growth_tests;
 pub use first_fill::{FIRST_FILL_REWIND_SLACK, FullFirstFillScope};
 #[cfg(test)]
 #[path = "cache/kv_trim_tests.rs"]
@@ -1033,46 +1037,8 @@ impl KVCache {
             return;
         }
 
-        if self.keys.is_none() || (prev + new_seq_len) > self.buffer_seq_len() {
-            let b = key_shape[0];
-            let n_kv_heads = key_shape[1];
-            let k_head_dim = key_shape[3];
-            let val_shape = ffi::array_shape(&new_values);
-            let v_head_dim = val_shape[3];
-
-            let n_steps = (self.step + new_seq_len - 1) / self.step;
-            let buf_size = n_steps * self.step;
-
-            let k_dtype = ffi::array_dtype(&new_keys);
-            let v_dtype = ffi::array_dtype(&new_values);
-            let new_k = ffi::zeros(&[b, n_kv_heads, buf_size, k_head_dim], k_dtype);
-            let new_v = ffi::zeros(&[b, n_kv_heads, buf_size, v_head_dim], v_dtype);
-
-            if self.keys.is_some() {
-                // Normalize the buffer to the live prefix before extending.
-                // The buffer can be longer than `prev`: a logical `trim`
-                // keeps the old capacity (issue #1209), and a partial growth
-                // chunk leaves a non-step-aligned length. Either way the
-                // slots past `prev` are dead and must not survive the
-                // concatenate.
-                if prev != self.buffer_seq_len() {
-                    self.keys = Some(ffi::slice(
-                        self.keys.as_ref().unwrap(),
-                        &[0, 0, 0, 0],
-                        &[b, n_kv_heads, prev, k_head_dim],
-                    ));
-                    self.values = Some(ffi::slice(
-                        self.values.as_ref().unwrap(),
-                        &[0, 0, 0, 0],
-                        &[b, n_kv_heads, prev, v_head_dim],
-                    ));
-                }
-                self.keys = Some(concatenate(self.keys.as_ref().unwrap(), &new_k, 2));
-                self.values = Some(concatenate(self.values.as_ref().unwrap(), &new_v, 2));
-            } else {
-                self.keys = Some(new_k);
-                self.values = Some(new_v);
-            }
+        if self.fp16_append_needs_growth(new_seq_len) {
+            self.grow_fp16_buffers(&new_keys, &new_values);
         }
 
         self.offset += new_seq_len;
