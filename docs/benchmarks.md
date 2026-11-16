@@ -196,6 +196,11 @@ BENCH_MEM_OVERHEAD_FACTOR=1.209 ./scripts/bench_decode.sh all --cooldown 30 --bi
 # two arms holding the same bytes, a zero prefill window (whole-run accounting,
 # #3042), and differing text. `--help` lists the device, capacity and quant
 # flags. The script applies the matching setup-*.sh env when it is not exported.
+# A ref arm builds in its own temporary worktree of about 2 GB; the script
+# removes those worktrees on every exit path, including an interrupt, and says
+# which ones it removed. --keep-worktrees leaves them for inspection. The
+# summary line reports the median over every round it measured and refuses to
+# print one when a round is missing.
 ./scripts/xla/ab_decode_pair.sh --model models/llama-3.2-1b-instruct-4bit \
     --device hip --old origin/main --tokens 128 --rounds 6
 
