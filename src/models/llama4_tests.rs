@@ -494,6 +494,21 @@ mod snapshot_prompt_cache {
     /// prompt split mid-chunk (5 + 15 tokens, the second piece starting
     /// behind cached keys of its chunk and crossing two chunk boundaries)
     /// must decode the same next-token logits.
+    /// A one-row prefill wider than the attention chunk hands the chunked
+    /// layers no dense `[L, S]` mask: `ChunkedKVCache::attend` splits it per
+    /// query chunk in MLX's causal mode (#3100). A Scout prefill past 8192
+    /// relies on this to stay near the weights (#3132). Batched rows keep the
+    /// array mask.
+    #[test]
+    fn a_one_row_prefill_past_the_chunk_builds_no_dense_chunk_mask() {
+        let wrapper = build_wrapper();
+        let model = &wrapper.model;
+        let caches = model.make_llama4_caches();
+        let len = 2 * CHUNK + 3;
+        assert!(model.chunked_prefill_mask(len, 1, &caches).is_none());
+        assert!(model.chunked_prefill_mask(len, 2, &caches).is_some());
+    }
+
     #[test]
     fn a_mid_chunk_split_prefill_matches_the_single_pass() {
         let whole = build_wrapper();
