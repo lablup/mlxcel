@@ -836,6 +836,23 @@ mod ffi {
         /// `GeluActivation::TanhF32` on CUDA.
         fn fused_gelu_tanh_f32(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
 
+        /// Whether the fused absorbed-MLA decode kernel runs here (#3121): a
+        /// GPU default device with a Metal port.
+        fn mla_absorbed_decode_fused_available() -> bool;
+
+        /// Absorbed single-query MLA attention in one partial pass plus a
+        /// merge (#3121). `q_abs [B, H, 1, R]`, `q_pe [B, H, 1, P]`,
+        /// `ckv [B, 1, S, R]`, `kpe [B, 1, S, P]`; returns `[B, H, 1, R]`.
+        /// Throws off-Metal or outside the shape contract, so `-> Result`.
+        /// Used by: `mla::decode::absorbed_attention`.
+        fn mla_absorbed_decode_fused(
+            q_abs: &MlxArray,
+            q_pe: &MlxArray,
+            ckv: &MlxArray,
+            kpe: &MlxArray,
+            scale: f32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Compiled GeGLU activation: gelu(gate) * x — single fused kernel
         /// Used by: legacy/tests for precise GeGLU
         fn compiled_geglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;

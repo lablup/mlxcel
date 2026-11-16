@@ -108,23 +108,38 @@ pub(crate) fn mla_latent_decode_rows(
             None => (kv_all, k_pe_all),
         };
 
-        let scale_value = mlxcel_core::full_f32(&[1], scale, mlxcel_core::array_dtype(&q_pe_row));
-        let q_pe_scaled = mlxcel_core::multiply(&q_pe_row, &scale_value);
-        let k_pe_t = mlxcel_core::transpose_axes(&k_pe_selected, &[0, 1, 3, 2]);
-        let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
-        let pe_scores_ptr = pe_scores.as_ref().unwrap() as *const MlxArray;
-        // SAFETY: `pe_scores_ptr` points to the live local `pe_scores`; the
-        // attention call only reads it during this invocation.
-        let output = unsafe {
-            mlxcel_core::layers::attention_from_ptr(
-                &q_row,
-                &kv_selected,
-                &kv_selected,
-                scale,
-                pe_scores_ptr,
-                0.0,
-                0,
-            )
+        // Unmasked single-query rows take the fused kernel where it applies
+        // (#3121); the composed rope-score mask and SDPA otherwise.
+        let fused = mlxcel_core::mla::fused_absorbed_decode(
+            &q_row,
+            &q_pe_row,
+            &kv_selected,
+            &k_pe_selected,
+            scale,
+        );
+        let output = match fused {
+            Some(output) => output,
+            None => {
+                let scale_value =
+                    mlxcel_core::full_f32(&[1], scale, mlxcel_core::array_dtype(&q_pe_row));
+                let q_pe_scaled = mlxcel_core::multiply(&q_pe_row, &scale_value);
+                let k_pe_t = mlxcel_core::transpose_axes(&k_pe_selected, &[0, 1, 3, 2]);
+                let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
+                let pe_scores_ptr = pe_scores.as_ref().unwrap() as *const MlxArray;
+                // SAFETY: `pe_scores_ptr` points to the live local `pe_scores`; the
+                // attention call only reads it during this invocation.
+                unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_row,
+                        &kv_selected,
+                        &kv_selected,
+                        scale,
+                        pe_scores_ptr,
+                        0.0,
+                        0,
+                    )
+                }
+            }
         };
         outputs.push(output);
     }

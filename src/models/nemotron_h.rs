@@ -764,14 +764,18 @@ impl NemotronHMamba2Mixer {
         let y_normed = self.norm.forward(&y, Some(&gate));
         let result = self.out_proj.forward(&y_normed);
 
-        // Materialize at a clean dtype boundary ONLY on M5 Max (Metal GPU
-        // Family 4): there the lazy float32/float16 SSM graph can fuse into NaN
-        // within one Metal command buffer. On every other chip this per-mixer
-        // sync is pure decode-throughput loss (it blocks cross-layer
-        // pipelining), so skip it. Decode never reaches the prefill chunked-eval
-        // path (`needs_chunked_eval` is `seq_len > 1`), so this is the only
-        // per-token eval to gate. CLAUDE.md "Apple Silicon precision".
-        if mlxcel_core::hardware::is_m5_neural_accelerator() {
+        // Materialize at a clean dtype boundary ONLY where MLX dispatches its
+        // NAx GEMM kernels: on M5 Max those kernels can fuse the lazy
+        // float32/float16 SSM graph into NaN within one Metal command buffer.
+        // The gate is MLX's own NAX flag rather than the sysctl brand string
+        // (`is_m5_neural_accelerator`), because the failure belongs to the
+        // kernel MLX picks, and the two views disagree on some hosts (#2806,
+        // #3123); gating on the brand string left the boundary off on hosts
+        // that run NAx. Elsewhere this per-mixer sync is pure decode-throughput
+        // loss (it blocks cross-layer pipelining), so skip it. Decode never
+        // reaches the prefill chunked-eval path (`needs_chunked_eval` is
+        // `seq_len > 1`), so this is the only per-token eval to gate.
+        if mlxcel_core::hardware::mlx_nax_available() {
             mlxcel_core::eval(&result);
         }
 

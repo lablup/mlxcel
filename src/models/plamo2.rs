@@ -361,12 +361,16 @@ impl Plamo2Mamba {
         let gated = mlxcel_core::compiled_swiglu_activation(&z_flat, &y);
         let result = self.out_proj.forward(&gated);
 
-        // Materialize at a clean dtype boundary ONLY on M5 Max (Metal GPU
-        // Family 4): there the lazy float32/float16 SSM graph can fuse into NaN
-        // within one Metal command buffer. On every other chip this per-layer
-        // sync is pure decode-throughput loss (it blocks cross-layer
-        // pipelining), so skip it. CLAUDE.md "Apple Silicon precision".
-        if mlxcel_core::hardware::is_m5_neural_accelerator() {
+        // Materialize at a clean dtype boundary ONLY where MLX dispatches its
+        // NAx GEMM kernels: on M5 Max those kernels can fuse the lazy
+        // float32/float16 SSM graph into NaN within one Metal command buffer.
+        // The gate is MLX's own NAX flag rather than the sysctl brand string
+        // (`is_m5_neural_accelerator`), because the failure belongs to the
+        // kernel MLX picks, and the two views disagree on some hosts (#2806,
+        // #3123); gating on the brand string left the boundary off on hosts
+        // that run NAx. Elsewhere this per-layer sync is pure decode-throughput
+        // loss (it blocks cross-layer pipelining), so skip it.
+        if mlxcel_core::hardware::mlx_nax_available() {
             mlxcel_core::eval(&result);
         }
         result

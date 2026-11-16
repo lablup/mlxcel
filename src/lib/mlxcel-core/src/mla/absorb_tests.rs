@@ -21,7 +21,9 @@
 
 use super::*;
 use crate::dtype;
-use crate::mla::testkit::{MlaFixture, TINY, to_vec_f32};
+use crate::ffi::{self, MlxArray};
+use crate::mla::testkit::{MlaFixture, TINY, max_rel_error, to_vec_f32};
+use cxx::UniquePtr;
 
 #[test]
 fn fold_splits_kv_b_proj_into_the_two_identity_operands() {
@@ -36,16 +38,16 @@ fn fold_splits_kv_b_proj_into_the_two_identity_operands() {
     let rows = TINY.kv_b_rows_per_head();
 
     assert_eq!(
-        crate::ffi::array_shape(proj.w_uk()),
+        crate::ffi::array_shape(proj.w_uk().unwrap()),
         vec![1, h as i32, nope as i32, r as i32]
     );
     assert_eq!(
-        crate::ffi::array_shape(proj.w_uv()),
+        crate::ffi::array_shape(proj.w_uv().unwrap()),
         vec![1, h as i32, r as i32, v as i32]
     );
 
     // W_UK[h, d, i] == kv_b[h * rows + d, i], no transpose.
-    let w_uk = to_vec_f32(proj.w_uk());
+    let w_uk = to_vec_f32(proj.w_uk().unwrap());
     for head in 0..h {
         for d in 0..nope {
             for i in 0..r {
@@ -59,7 +61,7 @@ fn fold_splits_kv_b_proj_into_the_two_identity_operands() {
     }
 
     // W_UV is stored transposed: w_uv[h, i, e] == kv_b[h * rows + nope + e, i].
-    let w_uv = to_vec_f32(proj.w_uv());
+    let w_uv = to_vec_f32(proj.w_uv().unwrap());
     for head in 0..h {
         for i in 0..r {
             for e in 0..v {
@@ -137,6 +139,99 @@ fn fold_accepts_an_unquantized_kv_b_proj_layer() {
     let proj = MlaAbsorbedProjections::from_kv_b_proj(&linear, TINY).unwrap();
     assert_eq!(proj.geometry(), TINY);
     let direct = MlaAbsorbedProjections::from_dense(&fx.kv_b_array(dtype::FLOAT32), TINY).unwrap();
-    assert_eq!(to_vec_f32(proj.w_uk()), to_vec_f32(direct.w_uk()));
-    assert_eq!(to_vec_f32(proj.w_uv()), to_vec_f32(direct.w_uv()));
+    assert_eq!(
+        to_vec_f32(proj.w_uk().unwrap()),
+        to_vec_f32(direct.w_uk().unwrap())
+    );
+    assert_eq!(
+        to_vec_f32(proj.w_uv().unwrap()),
+        to_vec_f32(direct.w_uv().unwrap())
+    );
+}
+
+/// A quantized `kv_b_proj` and the dense matrix it dequantizes to, as a layer
+/// and as that dense matrix.
+fn quantized_kv_b(fx: &MlaFixture) -> (crate::layers::UnifiedLinear, UniquePtr<MlxArray>) {
+    let prefix = "kv_b_proj";
+    let q = crate::quantize_weights(&fx.kv_b_array(dtype::FLOAT32), 32, 4);
+    let mut weights = crate::weights::WeightMap::new();
+    weights.insert(format!("{prefix}.weight"), crate::quantized_weights_w(&q));
+    weights.insert(
+        format!("{prefix}.scales"),
+        crate::quantized_weights_scales(&q),
+    );
+    weights.insert(
+        format!("{prefix}.biases"),
+        crate::quantized_weights_biases(&q),
+    );
+    let linear = crate::layers::UnifiedLinear::from_weights(&weights, prefix, 32, 4).unwrap();
+    let dense = unsafe {
+        ffi::dequantize(
+            &crate::quantized_weights_w(&q),
+            &crate::quantized_weights_scales(&q),
+            &*crate::quantized_weights_biases(&q) as *const MlxArray,
+            32,
+            4,
+            "affine",
+        )
+    };
+    (linear, dense)
+}
+
+#[test]
+fn quantized_fold_keeps_the_packed_planes_and_matches_the_dequantized_fold() {
+    // Issue #3121: a quantized kv_b_proj folds without dequantizing, and its
+    // three contractions agree with the dense fold of the same dequantized
+    // matrix, so the only difference is where the dequantization happens.
+    let fx = MlaFixture::new(TINY, 2, 1, 5, 0x3121);
+    let (linear, dense) = quantized_kv_b(&fx);
+    let quantized = MlaAbsorbedProjections::from_kv_b_proj(&linear, TINY).unwrap();
+    let reference = MlaAbsorbedProjections::from_dense(&dense, TINY).unwrap();
+    assert!(quantized.is_quantized());
+    assert!(!reference.is_quantized());
+    assert!(quantized.w_uk().is_none() && quantized.w_uv().is_none());
+    // 4-bit packed rows plus per-group scales and biases, against f32 dense.
+    assert!(
+        quantized.weight_bytes() * 4 < reference.weight_bytes(),
+        "quantized fold {} bytes vs dense {}",
+        quantized.weight_bytes(),
+        reference.weight_bytes()
+    );
+
+    let q_nope = fx.q_nope_array(dtype::FLOAT32);
+    let got = to_vec_f32(&quantized.absorb(&q_nope));
+    let want = to_vec_f32(&reference.absorb(&q_nope));
+    assert!(
+        max_rel_error(&got, &want) < 1e-4,
+        "absorb {}",
+        max_rel_error(&got, &want)
+    );
+
+    let o_latent = crate::ffi::astype(
+        &crate::ffi::from_slice_f32(
+            &fx.q_nope
+                .iter()
+                .cycle()
+                .take(2 * TINY.num_heads * TINY.kv_lora_rank)
+                .copied()
+                .collect::<Vec<_>>(),
+            &[2, TINY.num_heads as i32, 1, TINY.kv_lora_rank as i32],
+        ),
+        dtype::FLOAT32,
+    );
+    let got = to_vec_f32(&quantized.unabsorb(&o_latent));
+    let want = to_vec_f32(&reference.unabsorb(&o_latent));
+    assert!(
+        max_rel_error(&got, &want) < 1e-4,
+        "unabsorb {}",
+        max_rel_error(&got, &want)
+    );
+
+    let ckv = fx.ckv_array(dtype::FLOAT32);
+    let (gk, gv) = quantized.expand(&ckv);
+    let (wk, wv) = reference.expand(&ckv);
+    assert_eq!(crate::ffi::array_shape(&gk), crate::ffi::array_shape(&wk));
+    assert_eq!(crate::ffi::array_shape(&gv), crate::ffi::array_shape(&wv));
+    assert!(max_rel_error(&to_vec_f32(&gk), &to_vec_f32(&wk)) < 1e-4);
+    assert!(max_rel_error(&to_vec_f32(&gv), &to_vec_f32(&wv)) < 1e-4);
 }

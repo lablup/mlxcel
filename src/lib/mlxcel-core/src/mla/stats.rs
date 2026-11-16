@@ -46,6 +46,10 @@ pub enum MlaDecodePath {
     /// Stage 2: absorbed decode split across latent chunks, merged with issue
     /// #898's `paged_attention_merge_states`.
     AbsorbedSplitKv,
+    /// Absorbed single-token decode on the fused Metal kernel (issue #3121):
+    /// both score halves, the softmax and the latent-value sum in one launch
+    /// plus a merge, instead of the composed rope-score mask and SDPA.
+    AbsorbedFused,
 }
 
 impl MlaDecodePath {
@@ -57,22 +61,25 @@ impl MlaDecodePath {
             Self::AbsorbedPrefill => "absorbed_prefill",
             Self::AbsorbedComposed => "absorbed_composed",
             Self::AbsorbedSplitKv => "absorbed_split_kv",
+            Self::AbsorbedFused => "absorbed_fused",
         }
     }
 }
 
 /// Every path, in report order.
-pub const MLA_DECODE_PATHS: [MlaDecodePath; 4] = [
+pub const MLA_DECODE_PATHS: [MlaDecodePath; 5] = [
     MlaDecodePath::Decompressed,
     MlaDecodePath::AbsorbedPrefill,
     MlaDecodePath::AbsorbedComposed,
     MlaDecodePath::AbsorbedSplitKv,
+    MlaDecodePath::AbsorbedFused,
 ];
 
 static DECOMPRESSED: AtomicU64 = AtomicU64::new(0);
 static ABSORBED_PREFILL: AtomicU64 = AtomicU64::new(0);
 static ABSORBED_COMPOSED: AtomicU64 = AtomicU64::new(0);
 static ABSORBED_SPLIT_KV: AtomicU64 = AtomicU64::new(0);
+static ABSORBED_FUSED: AtomicU64 = AtomicU64::new(0);
 
 fn counter(path: MlaDecodePath) -> &'static AtomicU64 {
     match path {
@@ -80,6 +87,7 @@ fn counter(path: MlaDecodePath) -> &'static AtomicU64 {
         MlaDecodePath::AbsorbedPrefill => &ABSORBED_PREFILL,
         MlaDecodePath::AbsorbedComposed => &ABSORBED_COMPOSED,
         MlaDecodePath::AbsorbedSplitKv => &ABSORBED_SPLIT_KV,
+        MlaDecodePath::AbsorbedFused => &ABSORBED_FUSED,
     }
 }
 
@@ -99,6 +107,7 @@ pub struct MlaDispatchCounts {
     pub absorbed_prefill: u64,
     pub absorbed_composed: u64,
     pub absorbed_split_kv: u64,
+    pub absorbed_fused: u64,
 }
 
 impl MlaDispatchCounts {
@@ -110,13 +119,18 @@ impl MlaDispatchCounts {
             MlaDecodePath::AbsorbedPrefill => self.absorbed_prefill,
             MlaDecodePath::AbsorbedComposed => self.absorbed_composed,
             MlaDecodePath::AbsorbedSplitKv => self.absorbed_split_kv,
+            MlaDecodePath::AbsorbedFused => self.absorbed_fused,
         }
     }
 
     /// Total recorded calls.
     #[must_use]
     pub const fn total(&self) -> u64 {
-        self.decompressed + self.absorbed_prefill + self.absorbed_composed + self.absorbed_split_kv
+        self.decompressed
+            + self.absorbed_prefill
+            + self.absorbed_composed
+            + self.absorbed_split_kv
+            + self.absorbed_fused
     }
 
     /// One-line `path=count` summary, in [`MLA_DECODE_PATHS`] order.
@@ -141,6 +155,7 @@ pub fn snapshot() -> MlaDispatchCounts {
         absorbed_prefill: ABSORBED_PREFILL.load(Ordering::Relaxed),
         absorbed_composed: ABSORBED_COMPOSED.load(Ordering::Relaxed),
         absorbed_split_kv: ABSORBED_SPLIT_KV.load(Ordering::Relaxed),
+        absorbed_fused: ABSORBED_FUSED.load(Ordering::Relaxed),
     }
 }
 
@@ -155,6 +170,7 @@ pub fn take() -> MlaDispatchCounts {
         absorbed_prefill: ABSORBED_PREFILL.swap(0, Ordering::Relaxed),
         absorbed_composed: ABSORBED_COMPOSED.swap(0, Ordering::Relaxed),
         absorbed_split_kv: ABSORBED_SPLIT_KV.swap(0, Ordering::Relaxed),
+        absorbed_fused: ABSORBED_FUSED.swap(0, Ordering::Relaxed),
     }
 }
 

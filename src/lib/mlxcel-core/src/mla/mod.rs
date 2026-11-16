@@ -67,20 +67,21 @@
 //!
 //! Off unless `MLXCEL_MLA_ABSORBED` is set to one of the tree's usual on
 //! spellings ([`absorbed_enabled`]). With it unset nothing in this module is
-//! constructed, no weight is dequantized, and the families keep the byte-identical
+//! constructed, no fold is built, and the families keep the byte-identical
 //! decompressed path.
 //!
 //! ## Cost of the fold
 //!
 //! `W_UK` and `W_UV` are slices of `kv_b_proj`, which ships quantized in every
-//! mlx-community MLA checkpoint. The absorbed query and output contractions are
-//! dense batched matmuls, so the fold dequantizes `kv_b_proj` at load time and
-//! keeps it dense: `num_heads * (qk_nope_head_dim + v_head_dim) * kv_lora_rank`
-//! elements per layer. On DeepSeek-V2-Lite that is 2.1 M elements per layer, so
-//! ~113 MB in f16 across 27 layers against ~28 MB for the 4-bit original. The
-//! trade is fixed weight memory for per-token cache memory, and it only pays off
-//! past a context length where the cache saving exceeds it; the benchmark
-//! harness reports both numbers so the crossover is visible rather than assumed.
+//! mlx-community MLA checkpoint. Its packed rows are grouped along
+//! `kv_lora_rank`, the axis both contractions run over or produce, so a
+//! quantized fold keeps the checkpoint's planes and runs both contractions as
+//! batched `quantized_matmul` calls (issue #3121): a copy of `kv_b_proj`'s
+//! bytes, about 28 MB at 4 bits across DeepSeek-V2-Lite's 27 layers. An
+//! unquantized (or NVFP4 tensor-scaled) `kv_b_proj` folds dense, at
+//! `num_heads * (qk_nope_head_dim + v_head_dim) * kv_lora_rank` elements per
+//! layer, about 113 MB in f16 on V2-Lite, all of it streamed on every decode
+//! step.
 
 use std::sync::OnceLock;
 
@@ -93,6 +94,8 @@ pub mod split_kv;
 pub mod stats;
 
 #[cfg(test)]
+mod fused_decode_tests;
+#[cfg(test)]
 mod prefill_tests;
 #[cfg(test)]
 pub(crate) mod testkit;
@@ -102,7 +105,9 @@ pub use cache::{
     MLA_LATENT_CACHE_FAMILIES, MlaLatentCache, caches_mla_latent_pair,
     decompressed_bytes_per_token, latent_bytes_per_token, latent_layout_supports_mode,
 };
-pub use decode::{absorb_queries, absorbed_decode, unabsorb_output};
+pub use decode::{
+    FUSED_DECODE_MAX_KEYS, absorb_queries, absorbed_decode, fused_absorbed_decode, unabsorb_output,
+};
 pub use kv_b_split::{KvBProjGeometry, decompose_kv_b_proj};
 pub use prefill::{FoldedMask, rope_folded_attention};
 pub use split_kv::{MlaSplitPlan, absorbed_decode_split_kv};
@@ -116,6 +121,33 @@ pub const ABSORBED_ENV: &str = "MLXCEL_MLA_ABSORBED";
 /// Only consulted when [`ABSORBED_ENV`] is already on, since split-KV operates
 /// on the latent cache that only the absorbed path maintains.
 pub const SPLIT_KV_ENV: &str = "MLXCEL_MLA_SPLIT_KV";
+
+/// Environment variable that turns off the fused absorbed decode kernel
+/// (issue #3121). Default on: unset, or any value other than an off spelling,
+/// leaves the kernel selected wherever [`fused_decode_enabled`] can run it.
+pub const FUSED_DECODE_ENV: &str = "MLXCEL_MLA_FUSED_DECODE";
+
+/// Pure parse of a default-on switch: only `0`, `false`, `off` or `no` (any
+/// case) turn it off.
+#[must_use]
+pub fn parse_disabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("0" | "false" | "off" | "no")
+    )
+}
+
+/// Whether absorbed single-query decode may use the fused Metal kernel, read
+/// once per process: the kernel has a port on this device and
+/// [`FUSED_DECODE_ENV`] does not turn it off.
+#[must_use]
+pub fn fused_decode_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !parse_disabled(std::env::var(FUSED_DECODE_ENV).ok().as_deref())
+            && crate::ffi::mla_absorbed_decode_fused_available()
+    })
+}
 
 /// Pure parse of an on/off environment value.
 ///

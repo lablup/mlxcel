@@ -611,6 +611,15 @@ bool fused_gelu_tanh_f32_matches_eager_bits();
 // `fused_gelu_tanh_f32_available()` first or route to the compiled chain.
 std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x);
 
+// Fused absorbed-MLA single-query decode attention (#3121), Metal only.
+bool mla_absorbed_decode_fused_available();
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv,
+    const MlxArray& kpe,
+    float scale);
+
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
 // gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype (#2548)
 // Used by: Gemma3n MLP layers with activation_sparsity > 0
