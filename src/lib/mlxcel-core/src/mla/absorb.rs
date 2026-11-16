@@ -31,11 +31,20 @@
 //!   sum_t a[t] v[h]       = sum_r (sum_t a[t] c[t, r]) W_UV[h, e, r]
 //! ```
 //!
-//! so the fold stores `W_UK` as `[1, H, qk_nope, r]` (right operand of the
-//! query contraction) and `W_UV` transposed to `[1, H, r, v_head]` (right
-//! operand of the output contraction). The leading `1` is the batch axis MLX
-//! broadcasts against a `[B, H, L, ...]` left operand, so both applications are
-//! a single batched `matmul` with no per-head loop.
+//! A dense `kv_b_proj` folds into `W_UK` as `[1, H, qk_nope, r]` (right operand
+//! of the query contraction) and `W_UV` transposed to `[1, H, r, v_head]`
+//! (right operand of the output contraction). The leading `1` is the batch axis
+//! MLX broadcasts against a `[B, H, L, ...]` left operand, so both applications
+//! are a single batched `matmul` with no per-head loop.
+//!
+//! A quantized `kv_b_proj` folds without dequantizing (issue #3121). Its packed
+//! rows are already grouped along `r`, which is the output axis of the query
+//! contraction and the input axis of the output contraction, so the per-head row
+//! blocks `[H, qk_nope, r]` and `[H, v_head, r]` are used as they are:
+//! `q_nope @ W_UK` is a `quantized_matmul` with `transpose = false` and
+//! `o_latent @ W_UV^T` one with `transpose = true`. Both read the exact
+//! quantized weights the decompressed path's `kv_b_proj` reads, at a quarter of
+//! the bytes of the f16 fold that the decode step used to stream per token.
 //!
 //! Nothing here mutates the checkpoint on disk. This is the same class of
 //! load-time repack as `src/models/sanitize.rs`, applied to an already-loaded
@@ -45,20 +54,35 @@
 use cxx::UniquePtr;
 
 use crate::ffi::{self, MlxArray};
-use crate::layers::UnifiedLinear;
+use crate::layers::{QuantizedMultiLinear, QuantizedWeight, UnifiedLinear};
 use crate::mla::MlaGeometry;
+
+/// The two fold operands, in whichever form `kv_b_proj` arrived in.
+enum FoldWeights {
+    /// From an unquantized `kv_b_proj` (or one whose quantization the batched
+    /// quantized matmul cannot express, see [`MlaAbsorbedProjections::from_kv_b_proj`]).
+    Dense {
+        /// `W_UK` as `[1, num_heads, qk_nope_head_dim, kv_lora_rank]`.
+        w_uk: UniquePtr<MlxArray>,
+        /// `W_UV^T` as `[1, num_heads, kv_lora_rank, v_head_dim]`.
+        w_uv: UniquePtr<MlxArray>,
+    },
+    /// The quantized `kv_b_proj` row blocks, packed as the checkpoint ships them.
+    Quantized {
+        /// `W_UK` as `[num_heads, qk_nope_head_dim, kv_lora_rank / pack]`.
+        w_uk: QuantizedMultiLinear,
+        /// `W_UV` as `[num_heads, v_head_dim, kv_lora_rank / pack]`.
+        w_uv: QuantizedMultiLinear,
+    },
+}
 
 /// `kv_b_proj` folded into a query-side and an output-side operand.
 ///
-/// Both tensors are dense: the contractions are batched matmuls, and MLX has no
-/// batched quantized matmul that would keep a 3-D per-head quantized operand.
-/// [`MlaAbsorbedProjections::element_count`] is the fixed weight-memory price
-/// that buys the per-token cache reduction.
+/// A quantized `kv_b_proj` keeps its packed rows (issue #3121); an unquantized
+/// one is held dense. [`MlaAbsorbedProjections::weight_bytes`] is the fixed
+/// weight-memory price that buys the per-token cache reduction.
 pub struct MlaAbsorbedProjections {
-    /// `W_UK` as `[1, num_heads, qk_nope_head_dim, kv_lora_rank]`.
-    w_uk: UniquePtr<MlxArray>,
-    /// `W_UV^T` as `[1, num_heads, kv_lora_rank, v_head_dim]`.
-    w_uv: UniquePtr<MlxArray>,
+    weights: FoldWeights,
     geometry: MlaGeometry,
 }
 
@@ -95,6 +119,9 @@ impl MlaAbsorbedProjections {
                             .to_string(),
                     );
                 }
+                if let Some(fold) = Self::quantized_fold(weight, geometry)? {
+                    return Ok(fold);
+                }
                 let biases_ptr = weight
                     .biases
                     .as_ref()
@@ -124,6 +151,78 @@ impl MlaAbsorbedProjections {
             }
         };
         Self::from_dense(&dense, geometry)
+    }
+
+    /// Fold a quantized `kv_b_proj` by slicing its packed planes per head.
+    ///
+    /// Returns `Ok(None)` when the layer carries something a per-head
+    /// `quantized_matmul` cannot reproduce on its own (an NVFP4 tensor scale,
+    /// a runtime LoRA term, or a stored mode that disagrees with the mode the
+    /// planes imply), and the caller then folds the dequantized matrix as
+    /// before. `Err` only for a shape that does not describe the geometry.
+    fn quantized_fold(
+        weight: &QuantizedWeight,
+        geometry: MlaGeometry,
+    ) -> Result<Option<Self>, String> {
+        if weight.global_scale.is_some() || !weight.runtime_loras.is_empty() {
+            return Ok(None);
+        }
+        let mode = crate::layers::infer_quantization_mode(
+            weight.biases.is_some(),
+            weight.group_size,
+            weight.bits,
+        );
+        if mode != weight.mode {
+            return Ok(None);
+        }
+        let heads = geometry.num_heads as i32;
+        let rows_per_head = geometry.kv_b_rows_per_head() as i32;
+        let nope = geometry.qk_nope_head_dim as i32;
+        let w_shape = ffi::array_shape(&weight.weight);
+        let s_shape = ffi::array_shape(&weight.scales);
+        if w_shape.len() != 2 || s_shape.len() != 2 || w_shape[0] != heads * rows_per_head {
+            return Err(format!(
+                "mla: quantized kv_b_proj shape {w_shape:?} disagrees with geometry \
+                 [{heads}*{rows_per_head}, ..]"
+            ));
+        }
+        if s_shape[1] * weight.group_size != geometry.kv_lora_rank as i32 {
+            return Err(format!(
+                "mla: quantized kv_b_proj scales {s_shape:?} at group size {} do not cover \
+                 kv_lora_rank {}",
+                weight.group_size, geometry.kv_lora_rank
+            ));
+        }
+
+        // [H*(nope+v), cols] -> [H, nope+v, cols], then the two row blocks,
+        // made contiguous once here so no decode step copies a strided operand.
+        let split = |plane: &MlxArray| {
+            let cols = ffi::array_shape(plane)[1];
+            let p3 = ffi::reshape(plane, &[heads, rows_per_head, cols]);
+            let uk = ffi::contiguous(&ffi::slice(&p3, &[0, 0, 0], &[heads, nope, cols]), false);
+            let uv = ffi::contiguous(
+                &ffi::slice(&p3, &[0, nope, 0], &[heads, rows_per_head, cols]),
+                false,
+            );
+            ffi::eval(&uk);
+            ffi::eval(&uv);
+            (uk, uv)
+        };
+        let (w_uk, w_uv) = split(&weight.weight);
+        let (s_uk, s_uv) = split(&weight.scales);
+        let (b_uk, b_uv) = match weight.biases.as_ref() {
+            Some(b) => {
+                let (uk, uv) = split(b);
+                (Some(uk), Some(uv))
+            }
+            None => (None, None),
+        };
+        let w_uk = QuantizedMultiLinear::new(w_uk, s_uk, b_uk, weight.group_size, weight.bits)?;
+        let w_uv = QuantizedMultiLinear::new(w_uv, s_uv, b_uv, weight.group_size, weight.bits)?;
+        Ok(Some(Self {
+            weights: FoldWeights::Quantized { w_uk, w_uv },
+            geometry,
+        }))
     }
 
     /// Fold a dense `[H * (qk_nope + v_head), kv_lora_rank]` `kv_b_proj`.
@@ -165,22 +264,66 @@ impl MlaAbsorbedProjections {
         ffi::eval(&w_uk);
         ffi::eval(&w_uv);
         Ok(Self {
-            w_uk,
-            w_uv,
+            weights: FoldWeights::Dense { w_uk, w_uv },
             geometry,
         })
     }
 
-    /// `W_UK` as `[1, H, qk_nope_head_dim, kv_lora_rank]`.
+    /// Dense `W_UK` as `[1, H, qk_nope_head_dim, kv_lora_rank]`, or `None` for
+    /// a quantized fold.
     #[must_use]
-    pub fn w_uk(&self) -> &MlxArray {
-        &self.w_uk
+    pub fn w_uk(&self) -> Option<&MlxArray> {
+        match &self.weights {
+            FoldWeights::Dense { w_uk, .. } => Some(w_uk),
+            FoldWeights::Quantized { .. } => None,
+        }
     }
 
-    /// `W_UV^T` as `[1, H, kv_lora_rank, v_head_dim]`.
+    /// Dense `W_UV^T` as `[1, H, kv_lora_rank, v_head_dim]`, or `None` for a
+    /// quantized fold.
     #[must_use]
-    pub fn w_uv(&self) -> &MlxArray {
-        &self.w_uv
+    pub fn w_uv(&self) -> Option<&MlxArray> {
+        match &self.weights {
+            FoldWeights::Dense { w_uv, .. } => Some(w_uv),
+            FoldWeights::Quantized { .. } => None,
+        }
+    }
+
+    /// Whether the fold kept `kv_b_proj`'s quantized planes.
+    #[must_use]
+    pub const fn is_quantized(&self) -> bool {
+        matches!(self.weights, FoldWeights::Quantized { .. })
+    }
+
+    /// `q_nope @ W_UK`: `[B, H, L, qk_nope] -> [B, H, L, kv_lora_rank]`.
+    #[must_use]
+    pub fn absorb(&self, q_nope: &MlxArray) -> UniquePtr<MlxArray> {
+        match &self.weights {
+            FoldWeights::Dense { w_uk, .. } => ffi::matmul(q_nope, w_uk),
+            FoldWeights::Quantized { w_uk, .. } => w_uk.forward_no_transpose(q_nope),
+        }
+    }
+
+    /// `o_latent @ W_UV^T`: `[B, H, L, kv_lora_rank] -> [B, H, L, v_head_dim]`.
+    #[must_use]
+    pub fn unabsorb(&self, o_latent: &MlxArray) -> UniquePtr<MlxArray> {
+        match &self.weights {
+            FoldWeights::Dense { w_uv, .. } => ffi::matmul(o_latent, w_uv),
+            FoldWeights::Quantized { w_uv, .. } => w_uv.forward(o_latent),
+        }
+    }
+
+    /// Up-project a latent `[B, 1, S, kv_lora_rank]` into
+    /// `(k_nope [B, H, S, qk_nope], v [B, H, S, v_head_dim])`.
+    #[must_use]
+    pub fn expand(&self, ckv: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        match &self.weights {
+            FoldWeights::Dense { w_uk, w_uv } => {
+                let w_uk_t = ffi::swap_axes(w_uk, -1, -2);
+                (ffi::matmul(ckv, &w_uk_t), ffi::matmul(ckv, w_uv))
+            }
+            FoldWeights::Quantized { w_uk, w_uv } => (w_uk.forward(ckv), w_uv.forward(ckv)),
+        }
     }
 
     /// The geometry this fold was built for.
@@ -189,15 +332,31 @@ impl MlaAbsorbedProjections {
         self.geometry
     }
 
-    /// Dense elements held by the fold, for one layer.
+    /// Logical weight elements held by the fold, for one layer.
     ///
     /// Equal to the element count of `kv_b_proj` itself: the fold is a
-    /// partition of its rows, not a copy of the whole with extra. Reported so
-    /// the benchmark can state the fixed weight cost against the per-token
-    /// cache saving instead of leaving it implicit.
+    /// partition of its rows, not a copy of the whole with extra.
     #[must_use]
     pub const fn element_count(&self) -> usize {
         self.geometry.num_heads * self.geometry.kv_b_rows_per_head() * self.geometry.kv_lora_rank
+    }
+
+    /// Bytes the fold holds for one layer, as stored: packed weight, scales
+    /// and biases for a quantized fold, the dense operands otherwise. Reported
+    /// so the fixed weight cost can be stated against the per-token cache
+    /// saving instead of left implicit.
+    #[must_use]
+    pub fn weight_bytes(&self) -> usize {
+        let bytes = |a: &MlxArray| ffi::array_nbytes(a);
+        match &self.weights {
+            FoldWeights::Dense { w_uk, w_uv } => bytes(w_uk) + bytes(w_uv),
+            FoldWeights::Quantized { w_uk, w_uv } => [w_uk, w_uv]
+                .iter()
+                .map(|q| {
+                    bytes(&q.weight) + bytes(&q.scales) + q.biases.as_ref().map_or(0, |b| bytes(b))
+                })
+                .sum(),
+        }
     }
 }
 
@@ -206,6 +365,7 @@ impl std::fmt::Debug for MlaAbsorbedProjections {
         f.debug_struct("MlaAbsorbedProjections")
             .field("geometry", &self.geometry)
             .field("elements", &self.element_count())
+            .field("quantized", &self.is_quantized())
             .finish()
     }
 }
