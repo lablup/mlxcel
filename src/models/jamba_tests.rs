@@ -897,3 +897,99 @@ fn jamba_forced_graph_scan_prefill_spans_blocks_and_matches_the_kernel() {
         }
     }
 }
+
+/// Issue #3057: the mixer computes `A = -exp(A_log)` once at load from a
+/// float32 copy, so an f16 `A_log` past 11.09 (where f16 `exp` overflows)
+/// keeps its value instead of becoming `-inf`. A step whose `softplus` is zero
+/// then decays by `exp(0 * A) = 1` rather than `exp(0 * -inf) = NaN`, and the
+/// prefill logits stay finite.
+#[test]
+fn jamba_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
+    use crate::models::ssm_test_support::{
+        assert_prefill_logits_finite, overflowing_f16_a_log, zero_step_dt_bias,
+    };
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let i = 2 * HIDDEN;
+    let a_log = overflowing_f16_a_log(&[i, 8]);
+    let want: Vec<f32> = to_f32(&a_log).iter().map(|v| -v.exp()).collect();
+    let mut weights = mamba_weights();
+    weights.insert("model.layers.0.mamba.A_log".into(), a_log);
+    weights.insert(
+        "model.layers.0.mamba.dt_proj.bias".into(),
+        zero_step_dt_bias(i),
+    );
+    let model =
+        JambaModel::from_weights(mamba_config(), weights).expect("Mamba Jamba fixture must load");
+
+    let super::TemporalBlock::Mamba(mixer) = &model.model.layers[0].temporal else {
+        panic!("layer 0 of the Mamba fixture is a Mamba layer");
+    };
+    assert_eq!(mlxcel_core::array_dtype(&mixer.a), dtype::FLOAT32);
+    let got = to_f32(&mixer.a);
+    assert!(
+        got.iter()
+            .zip(&want)
+            .all(|(g, w)| g.is_finite() && ((g - w) / w).abs() < 1e-6),
+        "A must equal -exp(A_log) in float32"
+    );
+    assert_prefill_logits_finite(&model, "jamba");
+}
+
+/// Issue #3057, f16 activations: with every weight in f16, `scan_a` keeps `A`
+/// in float32 (an f16 `A` past `A_log` 11.09 is `-inf`) and the graph scans
+/// round only the decay back to f16. A zero step (`softplus` of a -200 bias
+/// underflows) then decays by `exp(0 * A) = 1`, not `exp(0 * -inf) = NaN`,
+/// so prefill and decode logits stay finite on the fused and the graph scan.
+#[test]
+fn jamba_f16_model_with_an_overflowing_a_log_keeps_finite_logits() {
+    use crate::models::ssm_test_support::{ZERO_STEP_DT_BIAS, overflowing_f16_a_log};
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let i = 2 * HIDDEN;
+
+    for force_graph in [false, true] {
+        let mut weights: WeightMap = mamba_weights()
+            .into_iter()
+            .map(|(k, v)| (k, mlxcel_core::astype(&v, dtype::FLOAT16)))
+            .collect();
+        weights.insert(
+            "model.layers.0.mamba.A_log".into(),
+            overflowing_f16_a_log(&[i, 8]),
+        );
+        weights.insert(
+            "model.layers.0.mamba.dt_proj.bias".into(),
+            mlxcel_core::full_f32(&[i], ZERO_STEP_DT_BIAS, dtype::FLOAT16),
+        );
+        let model = JambaModel::from_weights(mamba_config(), weights)
+            .expect("f16 Mamba Jamba fixture must load");
+        let seq = SequenceId::from_raw(3_057_100 + force_graph as u64);
+        model.prepare_sequence_state(seq);
+
+        super::FORCE_GRAPH_SCAN.with(|f| f.set(force_graph));
+        let before = super::GRAPH_SCAN_STEPS.with(|n| n.get());
+        let prompt: Vec<i32> = (0..6).map(|t| (t * 7 + 3) % VOCAB).collect();
+        let mut steps = vec![mlxcel_core::from_slice_i32(&prompt, &[1, 6])];
+        steps.extend((0..3).map(|t| mlxcel_core::from_slice_i32(&[t + 1], &[1, 1])));
+        let logits: Vec<Vec<f32>> = steps
+            .iter()
+            .map(|x| {
+                let out = model.forward_with_sequence_id(x, Some(seq), &mut [], None);
+                assert_eq!(mlxcel_core::array_dtype(&out), dtype::FLOAT16);
+                to_f32(&out)
+            })
+            .collect();
+        let walked = super::GRAPH_SCAN_STEPS.with(|n| n.get()) - before;
+        super::FORCE_GRAPH_SCAN.with(|f| f.set(false));
+
+        if force_graph {
+            assert_eq!(walked, 9, "the forced graph scan must walk every step");
+        }
+        for (step, values) in logits.iter().enumerate() {
+            assert!(
+                values.iter().all(|v| v.is_finite()),
+                "graph scan {force_graph}, step {step}: logits must be finite"
+            );
+        }
+    }
+}

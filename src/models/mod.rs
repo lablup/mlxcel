@@ -71,6 +71,8 @@ pub(crate) mod recurrent_batch;
 mod recurrent_snapshot;
 pub mod registry;
 mod sanitize;
+#[cfg(test)]
+pub(crate) mod ssm_test_support;
 
 // Shared modules
 // `config` holds shared serde defaults and the common `QuantizationArgs`. It

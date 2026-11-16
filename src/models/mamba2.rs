@@ -310,7 +310,9 @@ fn ssm_attn(
     // Compute dt, A, dtA, dtx for full sequence
     // dt is now float32 after compute_dt promotion; A matches dt dtype for precision
     let dt = compute_dt(dt, dt_bias, time_step_limit);
-    let a = mlxcel_core::negative(&mlxcel_core::exp(a_log));
+    // `exp` on a float32 copy of `A_log`: an f16 `exp` overflows past 11.09
+    // and `0 * -inf` then turns a zero step into NaN (#3057).
+    let a = super::mamba::ssm_a_f32(a_log);
     let a = mlxcel_core::astype(&a, mlxcel_core::array_dtype(&dt));
     let a_reshaped = mlxcel_core::reshape(&a, &[1, 1, num_heads]);
     let dt_a = mlxcel_core::multiply(&dt, &a_reshaped);

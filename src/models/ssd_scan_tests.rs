@@ -150,3 +150,38 @@ fn evaluation_policy_does_not_change_the_result() {
         );
     }
 }
+
+/// Issue #3057: the scan computes `A` from a float32 copy of `A_log`. A
+/// float32 `A_log` gives exactly the `A` the loaded-dtype `exp` always gave,
+/// so float32 loads are bit-identical. A bf16 `A_log` (`MLXCEL_KEEP_BF16`)
+/// gives an `A` that differs from the bf16 `exp` only by that `exp`'s bf16
+/// rounding, and the scan reads the same values a float32 `A_log` holding the
+/// bf16 values would give, so its output is bit-identical to that scan.
+#[test]
+fn ssm_a_is_bit_identical_for_f32_and_within_bf16_rounding_for_bf16() {
+    use crate::models::mamba::ssm_a_f32;
+    use mlxcel_core::dtype::{BFLOAT16, FLOAT32};
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+
+    let values: Vec<f32> = (0..64).map(|i| -4.0 + 0.37 * i as f32).collect();
+    let a_log_f32 = mlxcel_core::from_slice_f32(&values, &[64]);
+    let old_f32 = mlxcel_core::negative(&mlxcel_core::exp(&a_log_f32));
+    assert!(identical(&ssm_a_f32(&a_log_f32), &old_f32));
+
+    let a_log_bf16 = mlxcel_core::astype(&a_log_f32, BFLOAT16);
+    let old_bf16 = mlxcel_core::negative(&mlxcel_core::exp(&a_log_bf16));
+    assert_eq!(mlxcel_core::array_dtype(&old_bf16), BFLOAT16);
+    let new = mlxcel_core::utils::array_to_vec_f32(&ssm_a_f32(&a_log_bf16));
+    let old = mlxcel_core::utils::array_to_vec_f32(&old_bf16);
+    for (n, o) in new.iter().zip(&old) {
+        // bf16 keeps 8 significant bits: rounding is within 2^-8 relative.
+        assert!(((n - o) / n).abs() <= 1.0 / 256.0, "{n} vs bf16 {o}");
+    }
+
+    let mut bf16 = inputs(BFLOAT16);
+    let (y_bf16, state_bf16) = scan(&bf16, true, 4, SsdEval::EveryChunk);
+    bf16.a_log = mlxcel_core::astype(&bf16.a_log, FLOAT32);
+    let (y_f32_a_log, state_f32_a_log) = scan(&bf16, true, 4, SsdEval::EveryChunk);
+    assert!(identical(&y_bf16, &y_f32_a_log));
+    assert!(identical(&state_bf16, &state_f32_a_log));
+}
