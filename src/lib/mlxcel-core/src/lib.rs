@@ -2249,10 +2249,10 @@ mod ffi {
         fn mamba1_scan_float_state_kernel_available() -> bool;
 
         /// Whether the fused scan can serve these inputs: it is available, the
-        /// default device is the GPU, `N <= 32`, and on CUDA all six inputs
-        /// share one floating dtype (the condition under which the CUDA kernel
-        /// is bit-identical to the graph scan, issue #1981). Callers take the
-        /// graph scan when this is false.
+        /// default device is the GPU, `N <= 32`, and on CUDA the dtypes pass
+        /// [`mamba1_graph_exact_scan_accepts_dtypes`] (the condition under
+        /// which the CUDA kernel is bit-identical to the graph scan, issues
+        /// #1981, #3125). Callers take the graph scan when this is false.
         fn mamba1_scan_kernel_accepts(
             x: &MlxArray,
             delta: &MlxArray,
@@ -2260,6 +2260,19 @@ mod ffi {
             c: &MlxArray,
             a: &MlxArray,
             d: &MlxArray,
+        ) -> bool;
+
+        /// The dtype rule of CUDA's graph-exact Mamba1 scan, on dtype codes so
+        /// it is testable on every backend: every input in `x`'s floating
+        /// dtype, except that f16 `x` may bring a float32 `a` (issue #3125),
+        /// because f16 cannot hold `-exp(A_log)`. No other mix is admitted.
+        fn mamba1_graph_exact_scan_accepts_dtypes(
+            x: i32,
+            delta: i32,
+            b: i32,
+            c: i32,
+            a: i32,
+            d: i32,
         ) -> bool;
 
         /// Mamba1 selective scan fused over the sequence (issues #2005, #1981).

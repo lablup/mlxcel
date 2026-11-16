@@ -30,7 +30,8 @@
 //!
 //! The CUDA port (#1981) instead rounds every step exactly as the graph scan
 //! does, so on CUDA the kernel is compared with MLX's own graph scan and must
-//! match it bit for bit, in f32, f16 and bf16.
+//! match it bit for bit, in f32, f16 and bf16, and for f16 activations with
+//! the float32 `A` that Mamba and Jamba keep for f16 (#3125).
 //!
 //! The tests return early wherever `mamba1_scan_kernel_available()` is false
 //! (CPU-only builds). On ROCm the graph-exact CUDA tests skip: ROCm runs the
@@ -138,6 +139,7 @@ fn run_kernel(
     dm: usize,
     n: usize,
     dtype: i32,
+    a_dtype: i32,
 ) -> (Vec<f32>, Vec<f32>) {
     let arr = |v: &[f32], shape: &[i32]| ffi::astype(&ffi::from_slice_f32(v, shape), dtype);
     let (b, l, d, n_) = (batch as i32, seq as i32, dm as i32, n as i32);
@@ -145,7 +147,7 @@ fn run_kernel(
     let dt = arr(&k.dt, &[b, l, d]);
     let bm = arr(&k.b, &[b, l, n_]);
     let cm = arr(&k.c, &[b, l, n_]);
-    let a = ffi::from_slice_f32(&k.a, &[d, n_]);
+    let a = ffi::astype(&ffi::from_slice_f32(&k.a, &[d, n_]), a_dtype);
     let dp = arr(&k.d, &[d]);
     let s0 = ffi::from_slice_f32(&k.s0, &[b, d, n_]);
     let mut y: UniquePtr<MlxArray> = UniquePtr::null();
@@ -179,7 +181,15 @@ fn f32_kernel_matches_scalar_reference() {
             for carried in [false, true] {
                 let k = make_case(batch, seq, dm, n, carried);
                 let (want_y, want_s) = reference(&k, batch, seq, dm, n, None);
-                let (y, s) = run_kernel(&k, batch, seq, dm, n, crate::dtype::FLOAT32);
+                let (y, s) = run_kernel(
+                    &k,
+                    batch,
+                    seq,
+                    dm,
+                    n,
+                    crate::dtype::FLOAT32,
+                    crate::dtype::FLOAT32,
+                );
                 let (ey, es) = (max_rel(&y, &want_y), max_rel(&s, &want_s));
                 let what = format!("n {n} seq {seq} carried {carried}");
                 assert!(ey < 1e-5, "{what}: y rel error {ey}");
@@ -206,7 +216,15 @@ fn bf16_kernel_is_no_less_accurate_than_the_graph_scan() {
     }
     let (exact_y, _) = reference(&k, batch, seq, dm, n, None);
     let (graph_y, _) = reference(&k, batch, seq, dm, n, Some(bf16_round));
-    let (kernel_y, _) = run_kernel(&k, batch, seq, dm, n, crate::dtype::BFLOAT16);
+    let (kernel_y, _) = run_kernel(
+        &k,
+        batch,
+        seq,
+        dm,
+        n,
+        crate::dtype::BFLOAT16,
+        crate::dtype::FLOAT32,
+    );
 
     let rms = |got: &[f32]| {
         (got.iter()
@@ -225,8 +243,11 @@ fn bf16_kernel_is_no_less_accurate_than_the_graph_scan() {
 
 /// The per-step graph scan Jamba runs without the kernel
 /// (`JambaMambaMixer::ssm_step`), built from the same MLX ops in the same
-/// order, all inputs in `dtype`. `carried` false passes no state, as a fresh
-/// sequence does.
+/// order, all inputs in `dtype` except `A` in `a_dtype`. A float32 `A` with
+/// f16 inputs takes Jamba's `decay_in_activation_dtype`: `delta * A` and its
+/// `exp` in float32, then the decay rounded to `dtype`. `carried` false
+/// passes no state, as a fresh sequence does.
+#[allow(clippy::too_many_arguments)]
 fn graph_scan(
     k: &Case,
     batch: usize,
@@ -234,6 +255,7 @@ fn graph_scan(
     dm: usize,
     n: usize,
     dtype: i32,
+    a_dtype: i32,
     carried: bool,
 ) -> (Vec<f32>, Vec<f32>) {
     let arr = |v: &[f32], shape: &[i32]| ffi::astype(&ffi::from_slice_f32(v, shape), dtype);
@@ -242,12 +264,17 @@ fn graph_scan(
     let delta = arr(&k.dt, &[b, l, d]);
     let bm = arr(&k.b, &[b, l, n_]);
     let cm = arr(&k.c, &[b, l, n_]);
-    let a = arr(&k.a, &[d, n_]);
+    let a = ffi::astype(&ffi::from_slice_f32(&k.a, &[d, n_]), a_dtype);
     let dp = arr(&k.d, &[d]);
 
     let delta_x = ffi::reshape(&ffi::multiply(&delta, &x), &[b, l, d, 1]);
     let new_state = ffi::multiply(&delta_x, &ffi::reshape(&bm, &[b, l, 1, n_]));
     let dt_a = ffi::exp(&ffi::multiply(&ffi::reshape(&delta, &[b, l, d, 1]), &a));
+    let dt_a = if a_dtype == dtype {
+        dt_a
+    } else {
+        ffi::astype(&dt_a, dtype)
+    };
 
     let mut state = carried.then(|| arr(&k.s0, &[b, d, n_]));
     let mut ys = Vec::with_capacity(seq);
@@ -299,28 +326,112 @@ fn cuda_kernel_is_bit_identical_to_the_graph_scan() {
                     round(&mut k.a);
                     round(&mut k.s0);
                     let what = format!("dtype {dtype} n {n} seq {seq} carried {carried}");
-                    let (want_y, want_s) = graph_scan(&k, batch, seq, dm, n, dtype, carried);
-                    let (y, s) = run_kernel(&k, batch, seq, dm, n, dtype);
-                    let diff = |got: &[f32], want: &[f32]| {
-                        got.iter()
-                            .zip(want)
-                            .filter(|(g, w)| g.to_bits() != w.to_bits())
-                            .count()
-                    };
-                    assert_eq!(y.len(), want_y.len(), "{what}: y length");
-                    assert_eq!(
-                        diff(&y, &want_y),
-                        0,
-                        "{what}: y differs from the graph scan"
-                    );
-                    assert_eq!(
-                        diff(&s, &want_s),
-                        0,
-                        "{what}: state differs from the graph scan"
-                    );
+                    let (want_y, want_s) = graph_scan(&k, batch, seq, dm, n, dtype, dtype, carried);
+                    let (y, s) = run_kernel(&k, batch, seq, dm, n, dtype, dtype);
+                    assert_bit_identical(&what, (&y, &s), (&want_y, &want_s));
                 }
             }
         }
+    }
+}
+
+fn assert_bit_identical(what: &str, got: (&[f32], &[f32]), want: (&[f32], &[f32])) {
+    let diff = |got: &[f32], want: &[f32]| {
+        got.iter()
+            .zip(want)
+            .filter(|(g, w)| g.to_bits() != w.to_bits())
+            .count()
+    };
+    assert_eq!(got.0.len(), want.0.len(), "{what}: y length");
+    assert_eq!(
+        diff(got.0, want.0),
+        0,
+        "{what}: y differs from the graph scan"
+    );
+    assert_eq!(
+        diff(got.1, want.1),
+        0,
+        "{what}: state differs from the graph scan"
+    );
+}
+
+/// Issue #3125: f16 Mamba and Jamba keep `A` in float32, since f16 cannot hold
+/// `-exp(A_log)` past `A_log` 11.09. The CUDA kernel takes that pair and must
+/// still reproduce the graph scan bit for bit, including an `A` far outside
+/// f16's range and `A` values f16 cannot represent exactly.
+#[test]
+fn cuda_kernel_is_bit_identical_to_the_graph_scan_for_f16_x_with_float32_a() {
+    if !ffi::mamba1_scan_kernel_available() || gpu_backend_kind() != GpuBackendKind::Cuda {
+        return;
+    }
+    let (batch, dm) = (2, 24);
+    let (f16, f32) = (crate::dtype::FLOAT16, crate::dtype::FLOAT32);
+    for n in [8, 16] {
+        for seq in [1, 7, 33] {
+            for carried in [false, true] {
+                let mut k = make_case(batch, seq, dm, n, carried);
+                // -exp(19.5): -inf in f16, the value that motivated float32 A.
+                k.a[1] = -(19.5f32.exp());
+                // The state is f16 on CUDA; give the graph the same values.
+                k.s0 = to_vec(&ffi::astype(
+                    &ffi::from_slice_f32(&k.s0, &[k.s0.len() as i32]),
+                    f16,
+                ));
+                let x = ffi::astype(&ffi::from_slice_f32(&k.x, &[1]), f16);
+                let a = ffi::from_slice_f32(&k.a, &[k.a.len() as i32]);
+                assert!(ffi::mamba1_scan_kernel_accepts(&x, &x, &x, &x, &a, &x));
+                let what = format!("f16 x, f32 A, n {n} seq {seq} carried {carried}");
+                let (want_y, want_s) = graph_scan(&k, batch, seq, dm, n, f16, f32, carried);
+                let (y, s) = run_kernel(&k, batch, seq, dm, n, f16, f32);
+                assert!(
+                    y.iter().chain(&s).all(|v| v.is_finite()),
+                    "{what}: output must be finite"
+                );
+                assert_bit_identical(&what, (&y, &s), (&want_y, &want_s));
+            }
+        }
+    }
+}
+
+/// The dtype rule of the graph-exact port, which needs no CUDA device: one
+/// floating dtype throughout, or f16 with a float32 `A` (#3125), and no
+/// other mix.
+#[test]
+fn graph_exact_dtype_rule_admits_only_uniform_inputs_and_f16_with_float32_a() {
+    use crate::dtype::{BFLOAT16, FLOAT16, FLOAT32, INT32};
+    let accepts =
+        |x, delta, b, c, a, d| ffi::mamba1_graph_exact_scan_accepts_dtypes(x, delta, b, c, a, d);
+    for t in [FLOAT32, FLOAT16, BFLOAT16] {
+        assert!(accepts(t, t, t, t, t, t), "uniform {t}");
+    }
+    assert!(!accepts(INT32, INT32, INT32, INT32, INT32, INT32));
+    // The admitted mix.
+    assert!(accepts(
+        FLOAT16, FLOAT16, FLOAT16, FLOAT16, FLOAT32, FLOAT16
+    ));
+    // A float32 A with bf16 or float32 elsewhere is not it.
+    assert!(!accepts(
+        BFLOAT16, BFLOAT16, BFLOAT16, BFLOAT16, FLOAT32, BFLOAT16
+    ));
+    assert!(!accepts(
+        FLOAT32, FLOAT32, FLOAT32, FLOAT32, FLOAT16, FLOAT32
+    ));
+    assert!(!accepts(
+        FLOAT16, FLOAT16, FLOAT16, FLOAT16, BFLOAT16, FLOAT16
+    ));
+    // Only A may differ, and only that way.
+    for i in 0..4 {
+        let mut other = [FLOAT16; 4];
+        other[i] = FLOAT32;
+        let [delta, b, c, d] = other;
+        assert!(
+            !accepts(FLOAT16, delta, b, c, FLOAT32, d),
+            "f16 with float32 A and float32 input {i}"
+        );
+        assert!(
+            !accepts(FLOAT16, delta, b, c, FLOAT16, d),
+            "f16 with float32 input {i}"
+        );
     }
 }
 
@@ -348,6 +459,17 @@ fn cuda_kernel_declines_mixed_dtype_inputs() {
     assert!(ffi::mamba1_scan_kernel_accepts(&x, &dt, &b, &c, &a, &d));
     let a32 = ffi::astype(&a, crate::dtype::FLOAT32);
     assert!(!ffi::mamba1_scan_kernel_accepts(&x, &dt, &b, &c, &a32, &d));
+    // f16 with a float32 A is the one admitted mix (#3125); a float32 delta
+    // next to it is not.
+    let h = |arr: &MlxArray| ffi::astype(arr, crate::dtype::FLOAT16);
+    let (xh, dth, bh, ch, dh) = (h(&x), h(&dt), h(&b), h(&c), h(&d));
+    assert!(ffi::mamba1_scan_kernel_accepts(
+        &xh, &dth, &bh, &ch, &a32, &dh
+    ));
+    let dt32 = ffi::astype(&dt, crate::dtype::FLOAT32);
+    assert!(!ffi::mamba1_scan_kernel_accepts(
+        &xh, &dt32, &bh, &ch, &a32, &dh
+    ));
     let wide = bf(&[1, 4, 64]);
     assert!(!ffi::mamba1_scan_kernel_accepts(
         &x,

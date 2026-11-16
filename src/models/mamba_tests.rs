@@ -17,6 +17,8 @@
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{dtype, generate::ModelStateSnapshot, utils::slice_axis};
 
+use crate::models::ssm_a::ssm_a_from_log;
+
 /// Simulate 50 decode steps of conv-state update and assert the stored shape
 /// stays at [B=1, k-1=3, channels=4] regardless of how many steps we run.
 ///
@@ -628,7 +630,7 @@ fn tiny_mamba_block(use_bcdt_rms: bool, mixer_rms_eps: f32) -> super::MambaBlock
         x_proj,
         dt_proj,
         out_proj,
-        a: super::ssm_a_from_log(&a_log),
+        a: ssm_a_from_log(&a_log),
         d_param,
     }
 }
@@ -732,7 +734,7 @@ fn varied_mamba_block(use_bcdt_rms: bool) -> super::MambaBlock {
             Some(varied(&[i as i32], 6, 0.2, -0.5)),
         )),
         out_proj: lin(h, i, 7),
-        a: super::ssm_a_from_log(&varied(&[i as i32, n as i32], 8, 0.5, 0.0)),
+        a: ssm_a_from_log(&varied(&[i as i32, n as i32], 8, 0.5, 0.0)),
         d_param: varied(&[i as i32], 9, 1.0, 0.0),
     }
 }
@@ -938,7 +940,7 @@ fn mamba_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
         &mlxcel_core::from_slice_f32(&[0.0, 11.0, 19.5], &[1, 3]),
         dtype::FLOAT16,
     );
-    let a = super::ssm_a_from_log(&a_log);
+    let a = ssm_a_from_log(&a_log);
     assert_eq!(mlxcel_core::array_dtype(&a), dtype::FLOAT32);
     let got = rows(&a);
     let want = [-1.0f32, -(11.0f32.exp()), -(19.5f32.exp())];
@@ -948,6 +950,42 @@ fn mamba_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
             "{got:?} vs {want:?}"
         );
     }
+}
+
+/// Issue #3125: the scan inputs an f16 Mamba builds (f16 activations and the
+/// float32 `A` that `scan_a` keeps for f16, since f16 cannot hold `A`) are
+/// ones the fused kernel accepts on every backend that has one, CUDA's
+/// graph-exact port included, where it used to refuse the float32 `A`.
+/// Mamba's own forward still takes the per-step graph scan on CUDA (see
+/// `MambaBlock::forward`), so this pins the predicate, not the path.
+#[test]
+fn mamba_f16_scan_inputs_are_accepted_by_the_fused_kernel() {
+    use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
+    if !mlxcel_core::mamba1_scan_kernel_available()
+        || !matches!(
+            gpu_backend_kind(),
+            GpuBackendKind::Metal | GpuBackendKind::Cuda | GpuBackendKind::Rocm
+        )
+    {
+        return;
+    }
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = f16_converted_model_with_overflowing_a_log();
+    let mixer = &model.layers[0].mixer;
+    let (i, n) = (mixer.intermediate_size as i32, mixer.state_size as i32);
+    let f16 = |shape: &[i32]| mlxcel_core::full_f32(shape, 0.5, dtype::FLOAT16);
+    let x = f16(&[1, 4, i]);
+    let a = mixer.scan_a(&x);
+    assert_eq!(mlxcel_core::array_dtype(&a), dtype::FLOAT32);
+    assert_eq!(mlxcel_core::array_dtype(&mixer.d_param), dtype::FLOAT16);
+    assert!(mlxcel_core::mamba1_scan_kernel_accepts(
+        &x,
+        &f16(&[1, 4, i]),
+        &f16(&[1, 4, n]),
+        &f16(&[1, 4, n]),
+        &a,
+        &mixer.d_param
+    ));
 }
 
 // The prefill's last-row projection (#3070): the hook is taken and returns the
