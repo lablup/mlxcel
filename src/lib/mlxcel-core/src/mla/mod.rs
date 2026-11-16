@@ -65,10 +65,14 @@
 //!
 //! ## Gate
 //!
-//! Off unless `MLXCEL_MLA_ABSORBED` is set to one of the tree's usual on
-//! spellings ([`absorbed_enabled`]). With it unset nothing in this module is
-//! constructed, no fold is built, and the families keep the byte-identical
-//! decompressed path.
+//! `MLXCEL_MLA_ABSORBED` is a tri-state ([`AbsorbedMode`], issue #3131). An on
+//! spelling selects the latent cache on every backend and an off spelling
+//! (`0`, `false`, `off`, `no`) keeps the decompressed path. Unset, DeepSeek V2
+//! absorbs wherever the fused absorbed-decode kernel runs (Metal, unless
+//! `MLXCEL_MLA_FUSED_DECODE` turns it off) and stays decompressed elsewhere
+//! ([`absorbed_enabled`]). When the result is decompressed nothing in this
+//! module is constructed, no fold is built, and the family runs the
+//! byte-identical decompressed path.
 //!
 //! ## Cost of the fold
 //!
@@ -113,12 +117,13 @@ pub use prefill::{FoldedMask, rope_folded_attention};
 pub use split_kv::{MlaSplitPlan, absorbed_decode_split_kv};
 pub use stats::{MlaDecodePath, MlaDispatchCounts};
 
-/// Environment variable selecting the absorbed MLA decode path. Default off.
+/// Environment variable selecting the absorbed MLA decode path. Default on
+/// where the fused kernel runs (issue #3131); see [`AbsorbedMode`].
 pub const ABSORBED_ENV: &str = "MLXCEL_MLA_ABSORBED";
 
 /// Environment variable selecting the Stage 2 split-KV decode path.
 ///
-/// Only consulted when [`ABSORBED_ENV`] is already on, since split-KV operates
+/// Only consulted when [`ABSORBED_ENV`] does not turn absorption off, since split-KV operates
 /// on the latent cache that only the absorbed path maintains.
 pub const SPLIT_KV_ENV: &str = "MLXCEL_MLA_SPLIT_KV";
 
@@ -163,11 +168,68 @@ pub fn parse_enabled(value: Option<&str>) -> bool {
     )
 }
 
-/// Whether the absorbed MLA decode path is selected, read once per process.
+/// How [`ABSORBED_ENV`] selects the DeepSeek V2 MLA cache layout.
+///
+/// Tri-state so the loader can tell the default from an explicit request. An
+/// explicit on or off forces the layout. The default follows the evidence: the
+/// switch to absorbed (issue #3131) was measured on Metal with the fused
+/// absorbed-decode kernel, so the default absorbs only where that kernel runs
+/// ([`fused_decode_enabled`]). Elsewhere absorbed decode takes the composed
+/// path, which carried about 10% short-context cost in #3102, so the default
+/// stays decompressed there until #3133 measures it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AbsorbedMode {
+    /// Unset, empty, or an unrecognized value: absorbed where the fused kernel
+    /// runs, decompressed elsewhere.
+    Default,
+    /// An on spelling (`1`, `true`, `on`, `yes`): absorbed on every backend,
+    /// reported on load.
+    On,
+    /// An off spelling (`0`, `false`, `off`, `no`): the decompressed layout.
+    Off,
+}
+
+impl AbsorbedMode {
+    /// Pure parse of the environment value.
+    ///
+    /// An unrecognized value falls back to the default rather than to off, the
+    /// same policy as [`FUSED_DECODE_ENV`]: only a deliberate spelling leaves
+    /// the default layout.
+    #[must_use]
+    pub fn parse(value: Option<&str>) -> Self {
+        if parse_disabled(value) {
+            Self::Off
+        } else if parse_enabled(value) {
+            Self::On
+        } else {
+            Self::Default
+        }
+    }
+
+    /// Whether this mode selects the absorbed (latent cache) layout, given
+    /// whether the fused absorbed-decode kernel can run in this process.
+    #[must_use]
+    pub const fn resolve(self, fused_available: bool) -> bool {
+        match self {
+            Self::Default => fused_available,
+            Self::On => true,
+            Self::Off => false,
+        }
+    }
+}
+
+/// The process's [`AbsorbedMode`], read once.
+#[must_use]
+pub fn absorbed_mode() -> AbsorbedMode {
+    static MODE: OnceLock<AbsorbedMode> = OnceLock::new();
+    *MODE.get_or_init(|| AbsorbedMode::parse(std::env::var(ABSORBED_ENV).ok().as_deref()))
+}
+
+/// Whether the absorbed MLA decode path is selected, read once per process:
+/// [`absorbed_mode`] resolved against [`fused_decode_enabled`].
 #[must_use]
 pub fn absorbed_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| parse_enabled(std::env::var(ABSORBED_ENV).ok().as_deref()))
+    absorbed_mode().resolve(fused_decode_enabled())
 }
 
 /// Whether the Stage 2 split-KV decode path is selected, read once per process.
@@ -310,7 +372,43 @@ mod tests {
     };
 
     #[test]
-    fn absorption_is_off_unless_explicitly_enabled() {
+    fn unset_or_unrecognized_values_parse_as_the_default() {
+        // An unrecognized value is the default, not off, so a typo cannot
+        // silently change the layout.
+        for v in [None, Some(""), Some("  "), Some("2"), Some("absorbed")] {
+            assert_eq!(AbsorbedMode::parse(v), AbsorbedMode::Default, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn off_and_on_spellings_parse_as_explicit_modes() {
+        for v in ["0", "false", "FALSE", "off", "Off", "no", " no "] {
+            assert_eq!(AbsorbedMode::parse(Some(v)), AbsorbedMode::Off, "{v:?}");
+        }
+        for v in ["1", "true", "TRUE", "on", "ON", "yes", " yes "] {
+            assert_eq!(AbsorbedMode::parse(Some(v)), AbsorbedMode::On, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn the_default_absorbs_only_where_the_fused_kernel_runs() {
+        // Issue #3131's resolution table: (mode, fused available) -> absorbed.
+        let table = [
+            (AbsorbedMode::Default, true, true),
+            (AbsorbedMode::Default, false, false),
+            (AbsorbedMode::On, true, true),
+            (AbsorbedMode::On, false, true),
+            (AbsorbedMode::Off, true, false),
+            (AbsorbedMode::Off, false, false),
+        ];
+        for (mode, fused, absorbed) in table {
+            assert_eq!(mode.resolve(fused), absorbed, "{mode:?} with fused={fused}");
+        }
+    }
+
+    #[test]
+    fn opt_in_parse_is_off_unless_explicitly_enabled() {
+        // `parse_enabled` still gates `MLXCEL_MLA_SPLIT_KV`, which stays opt-in.
         assert!(!parse_enabled(None));
         assert!(!parse_enabled(Some("")));
         assert!(!parse_enabled(Some("0")));
@@ -320,9 +418,9 @@ mod tests {
     }
 
     #[test]
-    fn absorption_accepts_the_usual_on_spellings() {
+    fn opt_in_parse_accepts_the_usual_on_spellings() {
         for v in ["1", "true", "TRUE", "on", "ON", "yes", " yes "] {
-            assert!(parse_enabled(Some(v)), "{v:?} should enable absorption");
+            assert!(parse_enabled(Some(v)), "{v:?} should enable the switch");
         }
     }
 

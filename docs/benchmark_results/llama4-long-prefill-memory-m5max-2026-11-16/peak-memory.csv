@@ -1,0 +1,11 @@
+stage,width,scoring,arm,peak_gb,active_after_gb,outcome
+weights loaded (embedding evaluated),9216,,main,60.74,60.74,ok
+forward with per-layer eval: largest layer stage (layer 47 MoE FFN),9216,,main,64.03,63.15,ok
+forward with per-layer eval: largest attention stage (layer 47),9216,,main,63.18,62.86,ok
+forward evaluated once through lm_head,4608,,main,64.12,63.54,ok
+forward evaluated once through lm_head,9216,,main,67.38,66.40,ok
+forward evaluated once through lm_head,16384,,branch,72.60,70.85,ok
+trace scoring,4608,whole chunk,main,85.79,70.89,ok
+trace scoring,9216,whole chunk,main,,,Metal command buffer out of memory
+trace scoring,9216,1024-row blocks,branch,71.18,67.86,ok
+trace scoring,16384,1024-row blocks,branch,75.48,72.17,ok

@@ -25,7 +25,7 @@ The 9216-token rows cross Scout's 8192 attention chunk and `original_max_positio
 
 The decode rows use `MLXCEL_TRACE_BATCH_ROWS`, whose chunk `c` starts at token `PREFILL + c * CHUNK` with `PREFILL` tokens of history. With `PREFILL = CHUNK` that is the mlx-lm plan's chunk `c + 1`, so the reference was traced with one extra chunk and its rows renumbered by one before comparing. The single-row decode arms also set `MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1` (`forward_with_sequence_id`); the B=2 arm runs `forward_batched_with_ids`, which reaches `CxxAttention::forward_batched_decode_rows` and so `Llama4Rope::apply_batched`.
 
-A 9216-wide single forward (one chunk of 9216 tokens) aborted on `main` with a Metal out-of-memory command-buffer error, so the long prefill cell uses two 4608-wide forwards.
+A 9216-wide single forward (one chunk of 9216 tokens) aborted with a Metal out-of-memory command-buffer error, so the long prefill cell uses two 4608-wide forwards. The abort was in the trace harness scoring all 9216 rows at once, not in the forward; `logit_trace` now scores in row blocks, and a single 9216-wide forward agrees with the two 4608-wide ones at 0.000% decided-position disagreement ([`llama4-long-prefill-memory-m5max-2026-11-16.md`](llama4-long-prefill-memory-m5max-2026-11-16.md), #3132).
 
 Per-cell numbers, including overall top-1 rates: `llama4-rope-m5max-2026-11-16/trace-summary.csv`.
 
