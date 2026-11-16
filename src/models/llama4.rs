@@ -19,9 +19,10 @@
 
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
 use crate::models::llama4_helpers::{
-    create_chunked_attention_mask, get_weight_copy, load_quantized_linear,
+    Llama4Rope, create_chunked_attention_mask, get_weight_copy, load_quantized_linear,
 };
 use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::rope_utils::RopeScalingSpec;
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{
     CachePool, KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
@@ -244,6 +245,11 @@ pub struct TextArgs {
 
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
+
+    /// The checkpoint's `rope_scaling` block (`llama3` on Scout and
+    /// Maverick), applied by [`Llama4Rope`] (#3120).
+    #[serde(default)]
+    pub rope_scaling: Option<RopeScalingSpec>,
 
     #[serde(default = "default_attn_temperature_tuning")]
     pub attn_temperature_tuning: i32,
@@ -587,9 +593,8 @@ pub struct CxxAttention {
     pub scale: f32,
     pub use_rope: bool,
     pub use_qk_norm: bool,
-    pub rope_dims: i32,
-    pub rope_base: f32,
-    pub rope_scale: f32,
+    /// Traditional, `rope_scaling`-aware rotation (#3120).
+    pub(crate) rope: Llama4Rope,
     pub attn_temperature_tuning: i32,
     pub floor_scale: usize,
     pub attn_scale: f32,
@@ -626,22 +631,8 @@ impl CxxAttention {
 
         // Apply RoPE if enabled
         if self.use_rope {
-            q = mlxcel_core::fast_rope(
-                &q,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
-            k = mlxcel_core::fast_rope(
-                &k,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
+            q = self.rope.apply(&q, offset);
+            k = self.rope.apply(&k, offset);
         }
 
         // Apply QK normalization if enabled
@@ -721,22 +712,8 @@ impl CxxAttention {
         let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
         let offsets: Vec<i32> = caches.iter().map(|cache| cache.offset()).collect();
-        q = mlxcel_core::fast_rope_batched(
-            &q,
-            self.rope_dims,
-            false,
-            self.rope_base,
-            self.rope_scale,
-            &offsets,
-        );
-        k = mlxcel_core::fast_rope_batched(
-            &k,
-            self.rope_dims,
-            false,
-            self.rope_base,
-            self.rope_scale,
-            &offsets,
-        );
+        q = self.rope.apply_batched(&q, &offsets);
+        k = self.rope.apply_batched(&k, &offsets);
 
         if self.use_qk_norm {
             let q_dtype = mlxcel_core::array_dtype(&q);
@@ -779,22 +756,8 @@ impl CxxAttention {
         let offset = cache.offset;
 
         if self.use_rope {
-            q = mlxcel_core::fast_rope(
-                &q,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
-            k = mlxcel_core::fast_rope(
-                &k,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
+            q = self.rope.apply(&q, offset);
+            k = self.rope.apply(&k, offset);
         }
 
         if self.use_qk_norm {
@@ -905,26 +868,12 @@ impl CxxAttention {
 
         // Apply RoPE if enabled
         if self.use_rope {
-            q = mlxcel_core::fast_rope(
-                &q,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
+            q = self.rope.apply(&q, offset);
             if check_nan("q_after_rope", &q) {
                 return q;
             }
 
-            k = mlxcel_core::fast_rope(
-                &k,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
+            k = self.rope.apply(&k, offset);
             if check_nan("k_after_rope", &k) {
                 return k;
             }
@@ -1580,6 +1529,7 @@ impl CxxAttention {
 
         // RoPE unused for dense layers (every 4th layer)
         let use_rope = !(layer_idx + 1).is_multiple_of(4);
+        let rope = Llama4Rope::from_args(args);
 
         Ok(Self {
             q_proj,
@@ -1592,9 +1542,7 @@ impl CxxAttention {
             scale: 1.0 / (args.head_dim as f32).sqrt(),
             use_rope,
             use_qk_norm: args.use_qk_norm && use_rope,
-            rope_dims: args.head_dim as i32,
-            rope_base: args.rope_theta,
-            rope_scale: 1.0,
+            rope,
             attn_temperature_tuning: args.attn_temperature_tuning,
             floor_scale: args.floor_scale,
             attn_scale: args.attn_scale,
