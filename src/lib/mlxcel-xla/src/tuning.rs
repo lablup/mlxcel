@@ -21,14 +21,23 @@
 use std::path::Path;
 
 /// ROCm lowering-tuning spec for the contraction shapes the compiler defaults
-/// lower poorly on gfx1151 (issues #2873, #2921).
+/// lower poorly on gfx1151 (issues #2873, #2921, #2956).
 ///
-/// The compiler's default tile for a `vecmat` is `reduction = [0, 4]`. For the
-/// down projection the contraction runs over the intermediate size (8192 on
-/// llama-3.2-1b), and that tile leaves the kernel at about 50 GB/s, roughly
-/// three times slower than the same shape reaches at `reduction = [0, 32]`.
-/// The wider tile is slower on short-K vecmats, so the spec matches only
-/// contractions whose reduction axis is at least 4096 elements.
+/// The compiler's default tile for a rank-1 vecmat is `thread = [8, 0]`,
+/// `workgroup = [256, 0]` for every width at or above 2048, so the launch
+/// carries N/256 workgroups of one warp each: 8 workgroups for the 2048-wide
+/// q and o projections and 32 for gate/up on llama-3.2-1b, 8 for the 3584-wide
+/// projections of a model with hidden 3584. That is less than one wave on a
+/// 20-WGP device, and the projections run at about 42 GB/s where the
+/// 128256-wide LM head reaches 225 GB/s (issue #2873). The spec gives every
+/// single-row vecmat with `128 <= N <= 8192` one output per thread and
+/// `reduction = [0, 32]`, which launches N/32 warps and measures llama's q/o at
+/// about 219 GB/s and its K = 8192 down projection at about 230. The tile does
+/// not depend on K (every output still walks the reduction serially; only the
+/// output count sets the occupancy), so the same match covers the down
+/// projections of larger models. The LM head and wider shapes keep the
+/// previous config: their activation re-read grows with N, and they already
+/// launch enough warps (see the asset for the exact predicates).
 ///
 /// The second match is the grouped-query decode score contraction, a batched
 /// `[n_kv, group, head_dim]` by `[n_kv, head_dim, keys]` f16 matmul with an f32
@@ -116,6 +125,66 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// issue #2873: the narrow single-row vecmats (q, k, v, o and the down
+    /// projection, at any hidden size) get one output per thread, so the launch
+    /// carries N/32 warps instead of N/256 and fills the device. The matcher
+    /// must stay wired from the entrypoint, must keep the batch predicate (the
+    /// ragged graph's projections are multi-row), and must stay bounded at
+    /// N <= 8192 so the LM head keeps its wider thread tile. The K axis is not
+    /// bounded: the tile is the same for every reduction length, and bounding
+    /// it at the 1b model's hidden size would leave q/o on a 7b checkpoint
+    /// (`K = 3584`) on the compiler default.
+    #[test]
+    fn tuning_spec_matches_the_narrow_single_row_vecmats() {
+        let entrypoint = ROCM_BIGK_VECMAT_TUNING
+            .split("@__kernel_config")
+            .nth(1)
+            .expect("the tuning-spec entrypoint");
+        assert!(
+            entrypoint.contains("@match_single_row_vecmat -> @apply_op_config")
+                && entrypoint.contains("@match_bigk_vecmat_wide -> @apply_op_config"),
+            "every vecmat matcher must run from the tuning-spec entrypoint"
+        );
+        let body = ROCM_BIGK_VECMAT_TUNING
+            .split("@match_single_row_vecmat")
+            .nth(1)
+            .expect("the single-row matcher")
+            .split("transform.named_sequence")
+            .next()
+            .expect("the matcher body");
+        assert!(
+            body.contains("thread = [1, 0], workgroup = [32, 0]"),
+            "the narrow matcher sets one output per thread"
+        );
+        assert!(
+            body.contains("transform.iree.match.dims_equal %batch_dims, []"),
+            "the narrow matcher keeps the ragged multi-row projections out"
+        );
+        assert!(
+            body.contains("umin = 128, umax = 8192"),
+            "the narrow matcher bounds only the output width, so the LM head keeps its config"
+        );
+        assert!(
+            !body.contains("match.dim_bounds %rhs[0]"),
+            "the narrow matcher must not bound the reduction axis"
+        );
+        let wide = ROCM_BIGK_VECMAT_TUNING
+            .split("@match_bigk_vecmat_wide")
+            .nth(1)
+            .expect("the wide matcher")
+            .split("transform.named_sequence")
+            .next()
+            .expect("the wide matcher body");
+        assert!(
+            wide.contains("thread = [8, 0], workgroup = [256, 0]"),
+            "the wide long-K fallback keeps the previous thread tile"
+        );
+        assert!(
+            wide.contains("umin = 8193"),
+            "the wide fallback starts where the narrow matcher stops"
+        );
+    }
+
     /// issues #2921, #2956: the spec must keep every contraction match wired
     /// into the entrypoint. The grouped-query score match is intentionally
     /// narrow (batch 8, group 4, head_dim 64, at least 128 keys) because only
@@ -125,14 +194,14 @@ mod tests {
     /// `bsz * n_kv`.
     #[test]
     fn tuning_spec_matches_the_gqa_decode_score_shape() {
-        assert!(ROCM_BIGK_VECMAT_TUNING.contains("@match_bigk_vecmat"));
+        assert!(ROCM_BIGK_VECMAT_TUNING.contains("@match_single_row_vecmat"));
         assert!(ROCM_BIGK_VECMAT_TUNING.contains("@match_gqa_score"));
         let entrypoint = ROCM_BIGK_VECMAT_TUNING
             .split("@__kernel_config")
             .nth(1)
             .expect("the tuning-spec entrypoint");
         assert!(
-            entrypoint.contains("@match_bigk_vecmat -> @apply_op_config")
+            entrypoint.contains("@match_single_row_vecmat -> @apply_op_config")
                 && entrypoint.contains("@match_gqa_score -> @apply_op_config")
                 && entrypoint.contains("@match_gqa_context -> @apply_op_config"),
             "every matcher must run from the tuning-spec entrypoint"
