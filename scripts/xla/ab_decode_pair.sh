@@ -176,32 +176,41 @@ WORKTREE_LOG=$(mktemp "${TMPDIR:-/tmp}/mlxcel-ab-worktrees-XXXXXX") || {
 TEMP_FILES+=("$WORKTREE_LOG")
 
 cleanup() {
-  local wt f
-  trap - EXIT INT TERM
+  local wt f rc=$? removed=0 kept=0
+  trap - EXIT INT TERM HUP
+  while IFS= read -r wt; do
+    [[ -n "$wt" ]] || continue
+    if (( KEEP_WORKTREES )); then
+      echo "kept: $wt" >&2
+      kept=$((kept + 1))
+    elif git worktree remove --force "$wt" >/dev/null 2>&1; then
+      echo "removed: $wt" >&2
+      removed=$((removed + 1))
+    else
+      echo "ab_decode_pair: could not remove the worktree: $wt" >&2
+      echo "  reclaim it with: git worktree remove --force $wt && git worktree prune" >&2
+    fi
+  done < "$WORKTREE_LOG"
+  # Prune even when nothing was recorded, so a failed `worktree add` leaves no
+  # registration behind either.
+  git worktree prune >/dev/null 2>&1 || true
   if (( KEEP_WORKTREES )); then
-    while IFS= read -r wt; do
-      [[ -n "$wt" ]] && echo "kept: $wt" >&2
-    done < "$WORKTREE_LOG"
+    echo "ab_decode_pair: kept $kept worktree(s)" >&2
   else
-    while IFS= read -r wt; do
-      [[ -n "$wt" ]] || continue
-      if git worktree remove --force "$wt" >/dev/null 2>&1; then
-        echo "removed: $wt" >&2
-      else
-        echo "ab_decode_pair: could not remove the worktree: $wt" >&2
-        echo "  remove it with: git worktree remove --force $wt" >&2
-      fi
-    done < "$WORKTREE_LOG"
-    git worktree prune >/dev/null 2>&1 || true
+    echo "ab_decode_pair: cleaned $removed worktree(s)" >&2
   fi
   for f in "${TEMP_FILES[@]}"; do
     rm -f "$f"
   done
+  # Cleanup reports; it does not decide the outcome.
+  exit "$rc"
 }
 trap cleanup EXIT
-# EXIT alone covers the normal paths; naming the signals makes an interrupt
-# during a build clean up before the shell leaves.
-trap 'exit 130' INT TERM
+# EXIT covers the normal paths. Naming the signals runs the same cleanup before
+# the shell leaves, with the conventional status for each.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # A run killed before this recording existed still leaves worktrees registered,
 # and each one is large. Do not delete them from here (a concurrent run on

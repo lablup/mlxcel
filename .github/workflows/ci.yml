@@ -625,6 +625,29 @@ jobs:
       - name: Check the port-dispatch checker rejects an unvalidated wave64 port
         run: bash scripts/ci/check_kernel_port_dispatch_test.sh
 
+  ab-harness:
+    name: ab harness cleanup
+    # Not behind the `changes` filter, like its neighbours: no toolchain, about
+    # ten seconds, and a silent defect. `scripts/xla/ab_decode_pair.sh` builds
+    # each git-ref arm in a temporary worktree of about 2 GB. The arms were
+    # resolved in a command substitution, so the worktree registration was
+    # appended inside a subshell, the EXIT trap looped over nothing, and every
+    # run leaked both worktrees until /tmp (a tmpfs on the measurement host)
+    # filled and the next run died with `No space left on device` (#3108). The
+    # same harness read its measured rounds back from fixed /tmp files without
+    # noticing a lost one, so a ten-round run could report `n=3`. The test
+    # drives the real script with a `cargo` stub and asserts that every exit
+    # path removes its worktrees and that a missing round is refused.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check the A/B harness removes its worktrees and rejects lost rounds
+        run: bash scripts/ci/ab_decode_pair_worktree_test.sh
+
   binary-assets:
     name: binary assets
     # Deliberately not behind the `changes` filter, for the same reason as
