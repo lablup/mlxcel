@@ -60,8 +60,8 @@ Jamba follows `MambaBlock::scan_a`: `A` is cast to the activation dtype, except 
 
 | Item | Value |
 |---|---|
-| Files changed | 14 (5 source, 9 test) |
-| Tests added | 9 |
+| Files changed | 13 (5 source, 8 test) |
+| Tests added | 8 |
 
 - `mamba.rs`: `ssm_a_f32` split out of `ssm_a_from_log`.
 - `ssd_scan.rs`, `mamba2.rs`: `A` from `ssm_a_f32`.

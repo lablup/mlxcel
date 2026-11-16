@@ -60,8 +60,8 @@ Jamba는 `MambaBlock::scan_a`를 따른다. `A`를 activation dtype으로 캐스
 
 | 항목 | 값 |
 |---|---|
-| 변경 파일 | 14 (소스 5, 테스트 9) |
-| 추가 테스트 | 9 |
+| 변경 파일 | 13 (소스 5, 테스트 8) |
+| 추가 테스트 | 8 |
 
 - `mamba.rs`: `ssm_a_from_log`에서 `ssm_a_f32` 분리.
 - `ssd_scan.rs`, `mamba2.rs`: `A`를 `ssm_a_f32`로 계산.
