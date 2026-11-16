@@ -1,0 +1,17 @@
+rep,model,prefill_chunk,arm,prompt_tokens,prefill_ms,decode_tok_s,peak_footprint_bytes,exit
+1,glm-4.7-flash-4bit,0,branch,22754,11245.13,61.32,24109331656,0
+1,glm-4.7-flash-4bit,0,main,22754,,,82761659424,1
+2,glm-4.7-flash-4bit,0,branch,22754,15840.18,53.31,24111068384,0
+2,glm-4.7-flash-4bit,0,main,22754,,,82752631672,1
+1,glm-4.7-flash-4bit,2048,branch,22754,12557.96,63.08,20514895024,0
+1,glm-4.7-flash-4bit,2048,main,22754,49713.06,29.10,28825039976,0
+2,glm-4.7-flash-4bit,2048,branch,22754,12302.67,63.78,20515845296,0
+2,glm-4.7-flash-4bit,2048,main,22754,35215.17,53.04,28824925312,0
+1,kimi-k3-2l-mla-synth,0,branch,2831,428.97,78.97,39686547176,0
+1,kimi-k3-2l-mla-synth,0,main,2831,513.17,82.11,41506531000,0
+2,kimi-k3-2l-mla-synth,0,branch,2831,473.76,80.02,39686858400,0
+2,kimi-k3-2l-mla-synth,0,main,2831,495.33,82.35,41507317432,0
+1,kimi-k3-2l-mla-synth,2048,branch,2831,442.73,82.65,39686088376,0
+1,kimi-k3-2l-mla-synth,2048,main,2831,738.29,84.62,41368266448,0
+2,kimi-k3-2l-mla-synth,2048,branch,2831,501.99,80.23,39687087824,0
+2,kimi-k3-2l-mla-synth,2048,main,2831,474.10,80.76,41507137256,0

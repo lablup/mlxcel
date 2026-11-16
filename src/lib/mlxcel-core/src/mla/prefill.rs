@@ -68,7 +68,9 @@ pub enum FoldedMask<'a> {
 /// Used by: DeepSeek V3 (and Kimi-VL, Kimi-K2, Youtu through it) and DeepSeek
 /// V3.2 multi-token attention in both the materializing and absorbed forms;
 /// [`crate::mla::decode::absorbed_attention`] for a multi-token absorbed step
-/// (DeepSeek V2 through `MlaLatentCache::attend`).
+/// (DeepSeek V2 through `MlaLatentCache::attend`); the multi-token MLA steps of
+/// GLM4MoeLite (and its pipeline stage and MTP drafter), KimiLinear, KimiK3
+/// and LongcatFlashNgram (#3099).
 #[must_use]
 pub fn rope_folded_attention(
     q_nope: &MlxArray,

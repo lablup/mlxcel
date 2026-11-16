@@ -1,0 +1,9 @@
+model,prefill_chunk,rep,greedy_output_vs_main
+glm-4.7-flash-4bit,2048,1,identical
+glm-4.7-flash-4bit,2048,2,identical
+glm-4.7-flash-4bit,0,1,main failed (Metal GPU timeout)
+glm-4.7-flash-4bit,0,2,main failed (Metal GPU timeout)
+kimi-k3-2l-mla-synth,2048,1,identical
+kimi-k3-2l-mla-synth,2048,2,identical
+kimi-k3-2l-mla-synth,0,1,identical
+kimi-k3-2l-mla-synth,0,2,identical

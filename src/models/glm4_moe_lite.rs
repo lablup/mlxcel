@@ -27,7 +27,7 @@ use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{KVCacheMode, SequenceId};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, slice_axis};
+use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -172,6 +172,11 @@ pub struct MlaAttention {
 }
 
 impl MlaAttention {
+    /// MLA self-attention over `x` `[B, L, hidden]`.
+    ///
+    /// `mask == None` is causal for a multi-token step (MLX's causal mode over
+    /// the live window) and unmasked for a single query; `Some` is an additive
+    /// mask broadcastable to `[B, H, L, S]`, applied as given.
     pub fn forward(
         &self,
         x: &MlxArray,
@@ -284,53 +289,99 @@ impl MlaAttention {
             mlxcel_core::mla::MlaDecodePath::Decompressed
         });
 
-        // Compute positional encoding scores: pe_scores = (q_pe * scale) @ k_pe.T
-        let scale_scalar = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
-        let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
-        let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
-        let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
-
-        // Apply causal mask to pe_scores
-        let pe_scores = if let Some(m) = mask {
-            mlxcel_core::add(&pe_scores, m)
-        } else {
-            pe_scores
-        };
-
         // MLA attention: absorbed or materializing, chosen by the cost model
         // above rather than by the query count alone.
-        let output = if absorbed {
-            // Absorbed: project Q into latent space, use kv_latent as K=V
-            let q_projected = self.embed_q.forward(&q_nope);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            let output = unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+        let output = if l > 1 {
+            // Multi-token step (issue #3099): fold the rope half into the SDPA
+            // head dim, `[q_nope | q_pe] . [k | k_pe]`, instead of building the
+            // dense `[B, H, L, S]` rope-score tensor and handing it to SDPA as
+            // an additive mask (the #3071 change DeepSeek V3 took). A maskless
+            // step is causal over the live window `update_and_fetch` returned,
+            // through MLX's bottom-right aligned causal mode; a caller mask
+            // (the MTP drafter's catch-up) is applied as given.
+            debug_assert_eq!(
+                mlxcel_core::array_shape(&kv_latent)[2],
+                cache.seq_len(),
+                "causal mode needs the live window to end at this step"
+            );
+            let folded_mask = match mask {
+                Some(m) => mlxcel_core::mla::FoldedMask::Array(m),
+                None => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_projected = self.embed_q.forward(&q_nope);
+                let output = mlxcel_core::mla::rope_folded_attention(
                     &q_projected,
+                    &q_pe,
                     &kv_latent,
+                    &k_pe,
                     &kv_latent,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
-                )
-            };
-            // Project output from latent space to v_head_dim
-            self.unembed_out.forward(&output)
-        } else {
-            // Materialize: project kv_latent to K and V
-            let k = self.embed_q.forward_no_transpose(&kv_latent);
-            let v = self.unembed_out.forward(&kv_latent);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+                    folded_mask,
+                );
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to per-head K and V.
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                mlxcel_core::mla::rope_folded_attention(
                     &q_nope,
+                    &q_pe,
                     &k,
+                    &k_pe,
                     &v,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
+                    folded_mask,
                 )
+            }
+        } else {
+            // Single-token decode keeps the rope term as an additive mask: its
+            // score row is one `[B, H, 1, S]` slice.
+            // pe_scores = (q_pe * scale) @ k_pe.T
+            let scale_scalar =
+                mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
+            let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
+            let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
+            let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
+            let pe_scores = match mask {
+                Some(m) => mlxcel_core::add(&pe_scores, m),
+                None => pe_scores,
+            };
+            let pe_mask_ptr = &*pe_scores as *const MlxArray;
+            if absorbed {
+                // Absorbed: project Q into latent space, use kv_latent as K=V
+                let q_projected = self.embed_q.forward(&q_nope);
+                // SAFETY: `pe_scores` outlives this call.
+                let output = unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_projected,
+                        &kv_latent,
+                        &kv_latent,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                };
+                // Project output from latent space to v_head_dim
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to K and V
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                // SAFETY: `pe_scores` outlives this call.
+                unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_nope,
+                        &k,
+                        &v,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                }
             }
         };
 
@@ -1041,18 +1092,11 @@ impl Glm4MoeLiteModel {
     fn hidden_pre_norm(&self, input_ids: &MlxArray, caches: &mut [KVCache]) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
 
-        let shape = mlxcel_core::array_shape(&h);
-        let seq_len = shape[1];
-
-        let mask = if seq_len > 1 {
-            let offset = caches.first().map(|c| c.seq_len()).unwrap_or(0);
-            Some(create_causal_mask(seq_len, offset))
-        } else {
-            None
-        };
-
+        // No mask array: a multi-token step runs MLX's causal mode inside the
+        // rope-folded attention, which masks the same keys as
+        // the `[seq_len, offset + seq_len]` additive mask it replaces (#3099).
         for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[i], mask.as_deref());
+            h = layer.forward(&h, &mut caches[i], None);
         }
         h
     }
@@ -1271,4 +1315,4 @@ impl LanguageModel for Glm4MoeLiteModel {
 
 #[cfg(test)]
 #[path = "glm4_moe_lite_tests.rs"]
-mod tests;
+pub(crate) mod tests;
