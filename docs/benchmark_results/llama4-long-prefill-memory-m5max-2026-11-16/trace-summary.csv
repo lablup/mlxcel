@@ -1,0 +1,2 @@
+reference,candidate,reference_args,candidate_args,positions,top1_disagree,top1_rate_pct,decided_positions,decided_disagree,decided_rate_pct,largest_gap_at_disagreement,ppl_reference,ppl_candidate
+two 4608-wide forwards,one 9216-wide forward,4608 2 8 4608,9216 1 8 0,9216,33,0.358,3651,0,0.000,0.438,11.7995,11.7967
