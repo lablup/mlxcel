@@ -25,8 +25,9 @@
 //! output token is unusable. A silent NaN would otherwise reach a user as
 //! garbage text rather than a failing build.
 //!
-//! The guarded failure mode is M5-only, so a green result off M5 says nothing
-//! about it. These tests therefore report three distinct states rather than
+//! The guarded failure mode needs MLX's NAx kernels (M5-class GPUs, gated on
+//! `hardware::mlx_nax_available`), so a green result where they do not run says
+//! nothing about it. These tests therefore report three distinct states rather than
 //! collapsing them into "pass": verified, not-applicable on this host, and
 //! applicable but unverified because the checkpoint is absent. The last one is
 //! the dangerous state, because that is a machine where the risk exists and
@@ -57,13 +58,16 @@ use mlxcel::{LanguageModel, MlxInferenceSession, SamplingConfig, initialize_runt
 /// degenerate token, or replacement characters, so the assertions cover all
 /// three rather than only checking for a literal "NaN".
 fn assert_decode_is_finite(model_name: &str, max_tokens: usize) {
-    // The eval boundary this test replaces only ever fired on M5 Max, so the NaN
-    // it prevented cannot arise elsewhere. Passing on another chip would be a
-    // vacuous green, so say plainly that nothing was verified here.
-    if !mlxcel_core::hardware::is_m5_neural_accelerator() {
+    // The NaN the removed eval boundary prevented comes from MLX's NAx GEMM
+    // kernels, so it can only arise where MLX dispatches them. Gate on MLX's own
+    // NAX flag, not the sysctl brand string: the two disagree on some hosts
+    // (#2806, #3123), and a host that runs NAx must not be reported as not
+    // applicable. Passing where NAx never runs would be a vacuous green, so say
+    // plainly that nothing was verified here.
+    if !mlxcel_core::hardware::mlx_nax_available() {
         eprintln!(
-            "{model_name}: NOT APPLICABLE on this host. The removed eval boundary was \
-             M5-only (has_neural_accelerator && macos_supports_na), so this host cannot \
+            "{model_name}: NOT APPLICABLE on this host. MLX does not dispatch its NAx \
+             kernels here (metal::is_nax_available is false), so this host cannot \
              exhibit the failure and this result verifies nothing about it."
         );
         return;
@@ -72,7 +76,7 @@ fn assert_decode_is_finite(model_name: &str, max_tokens: usize) {
     let model_dir = repo_model_dir(model_name);
     if !model_dir.join("config.json").exists() {
         eprintln!(
-            "{model_name}: NOT VERIFIED. This host is M5, so the failure this test guards \
+            "{model_name}: NOT VERIFIED. MLX runs its NAx kernels here, so the failure this test guards \
              CAN occur here, but the checkpoint is missing at {}. Fetch it to make this \
              test meaningful.",
             model_dir.display()
