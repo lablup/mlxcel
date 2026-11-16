@@ -177,3 +177,73 @@ fn without_a_checkpoint_budget_the_edit_starts_over() {
 fn store_without_checkpoints() -> Arc<PromptCacheStore> {
     store(0)
 }
+
+#[test]
+fn a_failed_rebuild_adopts_the_best_whole_snapshot() {
+    // Issue #3058: a checkpoint the model cannot rebuild must not send the
+    // request back to a cold prefill when a shorter whole snapshot matches.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    // Periodic whole snapshots every 10 tokens leave one at 20, short of
+    // turn 2's boundary at 24, that the edit can still adopt.
+    let _interval =
+        crate::server::prompt_cache::policy::override_checkpoint_interval_for_test(Some(10));
+    let store = store(1 << 20);
+    let mut sched = scheduler(store.clone());
+    for n in 1..=4 {
+        let _ = run_turn(&mut sched, &history(n));
+    }
+    assert_eq!(store.stats().state_checkpoint_entries, 4);
+
+    // Replace turn 2's checkpoint with one the model refuses to restore. It
+    // keeps its key and lineage, so the lookup still offers it over the
+    // newest boundary snapshot.
+    let ctx = cache_ctx();
+    let mut newest = history(4);
+    newest.extend(SCAFFOLD);
+    let newest_key = BatchScheduler::compose_prompt_cache_key(
+        &ctx,
+        &newest,
+        sched.rope_regime_for(newest.len()),
+    );
+    let (donor, _) = store
+        .lookup_snapshot_prefix(&newest_key, &newest)
+        .expect("turn 4's boundary snapshot");
+    let boundary = history(2);
+    let key = BatchScheduler::compose_prompt_cache_key(
+        &ctx,
+        &boundary,
+        sched.rope_regime_for(boundary.len() + SCAFFOLD.len()),
+    );
+    let broken = crate::server::prompt_cache::ModelSnapshotEntry::new(
+        boundary.clone(),
+        mlxcel_core::generate::ModelStateSnapshot::new("not-qwen3_5", boundary.len()),
+    )
+    .with_origin(crate::server::prompt_cache::SnapshotOrigin::Boundary)
+    .with_lineage(donor.lineage.clipped(boundary.len()));
+    store
+        .insert_state_checkpoint(&key, broken)
+        .expect("replace turn 2's checkpoint");
+    assert_eq!(store.stats().state_checkpoint_entries, 4);
+
+    let before = store.stats();
+    let (_, adopted) = run_turn(&mut sched, &edited(2));
+    let after = store.stats();
+    assert_eq!(
+        adopted, 20,
+        "the failed rebuild falls back to the periodic snapshot at 20, not a cold prefill"
+    );
+    assert_eq!(
+        after.state_checkpoint_hits, before.state_checkpoint_hits,
+        "a failed rebuild is not a checkpoint hit"
+    );
+    assert_eq!(
+        after.snapshot_hits,
+        before.snapshot_hits + 1,
+        "the request counts one hit"
+    );
+    assert_eq!(
+        after.state_checkpoint_evictions,
+        before.state_checkpoint_evictions + 1,
+        "the broken checkpoint was offered and then discarded"
+    );
+}
