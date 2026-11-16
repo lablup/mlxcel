@@ -243,6 +243,12 @@ plus every K/V element across one-token, nonzero-padding, and near-capacity case
 spike/openxla/.venv/bin/python spike/openxla/prefill_embeddings_check.py
 ```
 
+### Single-sequence decode ABI (issue #3060)
+
+The single-sequence `decode_step` takes its token, position and cache-len as ABI-level `i32` VM arguments instead of rank-0 `tensor<i32>` buffer views. A rank-0 buffer argument can only reach the host-side slice offsets and mask bounds through a host-visible staging resource, so the buffer-view ABI made IREE materialize a 192-byte `!stream.resource<staging>` allocation and three `stream.resource.load`s per step; passing the values in the VM call removes that staging. The graph rebuilds the tensor operands with `tensor.from_elements`, so the op sequence after the prologue is unchanged.
+
+The module exports a no-op `decode_step.scalar_inputs` entry, which `csrc/xla_iree.c` probes at load exactly like `decode_step.kv_import`. When the marker is present the shim pushes the three values with `iree_vm_list_push_value`; when it is absent (an artifact compiled without the marker, or the M-RoPE graph, whose `tensor<3xi32>` position still needs all three buffer views) it keeps the buffer-view path. An older bundle therefore keeps working without a bundle version bump. Ragged and lockstep batch decode, Gemma3n decode and the `phi4` `adapter_mode` argument keep their current ABI.
+
 ### LLaVA independent reference gate
 
 `scripts/xla/validate_llava_reference.sh` is the reproducible multimodal
