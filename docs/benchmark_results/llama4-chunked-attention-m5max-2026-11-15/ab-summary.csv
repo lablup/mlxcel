@@ -1,0 +1,9 @@
+kind,model,chunk,arm,rep,prompt_tokens,prefill_or_ttft,decode_tok_s,peak_bytes,gated_calls,load1,rc
+cli,llama-4-scout-17b-16e-instruct-4bit,0,base,1,19717,37915.18,24.68,72875536088,0,10.11,0
+cli,llama-4-scout-17b-16e-instruct-4bit,0,new,1,19717,38498.70,20.86,68409077536,0,30.01,0
+cli,llama-4-scout-17b-16e-instruct-4bit,0,new,2,19717,27729.13,24.16,68416450432,0,7.39,0
+cli,llama-4-scout-17b-16e-instruct-4bit,0,base,2,19717,27308.65,25.79,72875355960,0,2.32,0
+cli,llama-4-scout-17b-16e-instruct-4bit,2048,base,1,19717,22251.88,25.45,65863921536,0,1.58,0
+cli,llama-4-scout-17b-16e-instruct-4bit,2048,new,1,19717,21292.40,25.51,65697312640,0,4.87,0
+cli,llama-4-scout-17b-16e-instruct-4bit,2048,new,2,19717,17838.44,26.03,65694068536,0,4.62,0
+cli,llama-4-scout-17b-16e-instruct-4bit,2048,base,2,19717,27479.56,25.73,65864265624,0,8.47,0
