@@ -12,7 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Stage 1 absorbed MLA decode, composed from MLX ops (issue #907).
+//! Stage 1 absorbed MLA decode (issue #907).
+//!
+//! An unmasked single-query step runs on the fused Metal kernel
+//! ([`fused_absorbed_decode`], issue #3121) wherever it can, which evaluates
+//! both score halves, the softmax and the latent-value sum in one partial pass
+//! plus a merge. Everything else, and every backend without the kernel, takes
+//! the composed form below.
 //!
 //! The absorbed score is `scale * (q_absorbed . ckv + q_pe . kpe)`. Only the
 //! first term has the shape of a normal attention score against the cached
@@ -47,17 +53,18 @@ use crate::mla::stats::{self, MlaDecodePath};
 
 /// Fold `W_UK` into the query: `[B, H, L, qk_nope] -> [B, H, L, kv_lora_rank]`.
 ///
-/// The right operand is `[1, H, qk_nope, r]`, so MLX broadcasts the leading
-/// batch axis and contracts per head in one batched matmul.
+/// One batched contraction per head: a dense `matmul` against `[1, H, qk_nope,
+/// r]`, or a `quantized_matmul` against the packed `kv_b_proj` rows when the
+/// checkpoint is quantized (issue #3121).
 #[must_use]
 pub fn absorb_queries(q_nope: &MlxArray, proj: &MlaAbsorbedProjections) -> UniquePtr<MlxArray> {
-    ffi::matmul(q_nope, proj.w_uk())
+    proj.absorb(q_nope)
 }
 
 /// Fold `W_UV` after the attention: `[B, H, L, kv_lora_rank] -> [B, H, L, v]`.
 #[must_use]
 pub fn unabsorb_output(o_latent: &MlxArray, proj: &MlaAbsorbedProjections) -> UniquePtr<MlxArray> {
-    ffi::matmul(o_latent, proj.w_uv())
+    proj.unabsorb(o_latent)
 }
 
 /// The rope half of the score, shaped as an additive SDPA mask.
@@ -87,6 +94,75 @@ pub fn rope_score_mask(
     }
 }
 
+/// Longest latent window the fused decode kernel takes (issue #3121).
+///
+/// The kernel gives each head its own threadgroups, so every head reads the
+/// whole window, where the composed path's batched matmul reads it once for
+/// all heads. On an M5 Max at DeepSeek-V2-Lite's geometry the fused kernel
+/// measured faster at every window up to 8192 keys and slower from 16384, so
+/// longer windows keep the composed path.
+pub const FUSED_DECODE_MAX_KEYS: i32 = 8192;
+
+/// Unmasked single-query absorbed attention on the fused kernel, when it
+/// applies to this call.
+///
+/// * `q_absorbed` `[B, H, 1, kv_lora_rank]`, `q_pe` `[B, H, 1, qk_rope_head_dim]`
+/// * `ckv` `[B, 1, S, kv_lora_rank]`, `kpe` `[B, 1, S, qk_rope_head_dim]`
+///
+/// Returns `[B, H, 1, kv_lora_rank]` and records
+/// [`MlaDecodePath::AbsorbedFused`]. `None` sends the caller to its composed
+/// path: the kernel is unavailable or turned off
+/// ([`crate::mla::fused_decode_enabled`]), the window is longer than
+/// [`FUSED_DECODE_MAX_KEYS`], or a shape or dtype is outside what the kernel
+/// takes. The kernel's own shape check backs these up, and a refusal there
+/// also falls back rather than aborting the step.
+///
+/// Used by: [`absorbed_attention`] (DeepSeek V2), DeepSeek V3's single-token
+/// decode, and the shared per-row latent decode in `models::mla_batched`
+/// (DeepSeek V3, V3.2, GLM-4.7-Flash, Kimi Linear, Kimi K3).
+#[must_use]
+pub fn fused_absorbed_decode(
+    q_absorbed: &MlxArray,
+    q_pe: &MlxArray,
+    ckv: &MlxArray,
+    kpe: &MlxArray,
+    scale: f32,
+) -> Option<UniquePtr<MlxArray>> {
+    if !crate::mla::fused_decode_enabled() {
+        return None;
+    }
+    let q = ffi::array_shape(q_absorbed);
+    if q.len() != 4 || q[2] != 1 {
+        return None;
+    }
+    let p = ffi::array_shape(q_pe);
+    let k = ffi::array_shape(ckv);
+    let (rank, rope) = (*q.get(3)?, *p.get(3)?);
+    let keys = *k.get(2)?;
+    let dtype = ffi::array_dtype(q_absorbed);
+    let float_dtype = [
+        crate::dtype::FLOAT16,
+        crate::dtype::BFLOAT16,
+        crate::dtype::FLOAT32,
+    ]
+    .contains(&dtype);
+    let same_dtype = [q_pe, ckv, kpe]
+        .iter()
+        .all(|a| ffi::array_dtype(a) == dtype);
+    if !float_dtype
+        || !same_dtype
+        || rank % 32 != 0
+        || rope % 32 != 0
+        || rank > 1024
+        || !(1..=FUSED_DECODE_MAX_KEYS).contains(&keys)
+    {
+        return None;
+    }
+    let out = ffi::mla_absorbed_decode_fused(q_absorbed, q_pe, ckv, kpe, scale).ok()?;
+    stats::record(MlaDecodePath::AbsorbedFused);
+    Some(out)
+}
+
 /// Attend over the latent cache after the query-side folded projection.
 ///
 /// This is the row-local part of absorbed MLA decode. Callers that own a
@@ -113,6 +189,12 @@ pub(crate) fn absorbed_attention(
     mask: Option<&MlxArray>,
 ) -> UniquePtr<MlxArray> {
     let q_len = ffi::array_shape(q_absorbed).get(2).copied().unwrap_or(0);
+    if q_len == 1
+        && mask.is_none()
+        && let Some(out) = fused_absorbed_decode(q_absorbed, q_pe, ckv, kpe, scale)
+    {
+        return out;
+    }
     stats::record(if q_len == 1 {
         MlaDecodePath::AbsorbedComposed
     } else {
@@ -143,7 +225,8 @@ pub(crate) fn absorbed_attention(
 /// Returns `[B, H, L, v_head_dim]`, the per-head attention output in the
 /// original value space, ready for the family's `o_proj`.
 ///
-/// Records [`MlaDecodePath::AbsorbedComposed`] for a single-token step and
+/// Records [`MlaDecodePath::AbsorbedFused`] or
+/// [`MlaDecodePath::AbsorbedComposed`] for a single-token step and
 /// [`MlaDecodePath::AbsorbedPrefill`] otherwise, so a benchmark arm can prove
 /// which path it ran instead of inferring it from the flag it was given.
 #[must_use]
@@ -169,18 +252,15 @@ pub fn absorbed_decode(
 /// `(k_nope [B, H, S, qk_nope], v [B, H, S, v_head_dim])` from
 /// `ckv [B, 1, S, kv_lora_rank]`.
 ///
-/// The `W_UK` operand is transposed at call time. That is fine for prefill and
-/// for tests, and is precisely why the decode path stores its own
+/// A dense fold transposes its `W_UK` operand at call time. That is fine for
+/// prefill and for tests, and is precisely why the decode path stores its own
 /// already-transposed copy instead of doing this per step.
 #[must_use]
 pub fn expand_latent(
     ckv: &MlxArray,
     proj: &MlaAbsorbedProjections,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-    let w_uk_t = ffi::swap_axes(proj.w_uk(), -1, -2);
-    let k_nope = ffi::matmul(ckv, &w_uk_t);
-    let v = ffi::matmul(ckv, proj.w_uv());
-    (k_nope, v)
+    proj.expand(ckv)
 }
 
 #[cfg(test)]
