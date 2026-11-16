@@ -49,8 +49,20 @@ struct NemotronModel {
     int a_heads, a_kvh, a_hdim; float a_rope, a_scale;
 };
 
-static std::unordered_map<uint64_t, std::unique_ptr<NemotronModel>> g_models;
-static uint64_t g_next_handle = 1;
+// Every NemotronHModel registers here when built and frees its handle in Drop,
+// so parallel test threads and concurrent model loads insert and erase at the
+// same time. The unguarded map corrupted the heap (#3124). The registry is
+// leaked so no static destructor runs at exit while another thread holds it.
+struct Registry {
+    std::mutex mu;
+    std::unordered_map<uint64_t, std::unique_ptr<NemotronModel>> models;
+    uint64_t next_handle = 1;
+};
+
+Registry& registry() {
+    static Registry& r = *new Registry();
+    return r;
+}
 } // anonymous namespace
 
 uint64_t nemotron_register_model(
@@ -117,13 +129,24 @@ uint64_t nemotron_register_model(
     model->a_heads = a_heads; model->a_kvh = a_kvh; model->a_hdim = a_hdim;
     model->a_rope = a_rope; model->a_scale = a_scale;
 
-    uint64_t handle = g_next_handle++;
-    g_models[handle] = std::move(model);
+    auto& r = registry();
+    std::lock_guard<std::mutex> lock(r.mu);
+    uint64_t handle = r.next_handle++;
+    r.models[handle] = std::move(model);
     return handle;
 }
 
 void nemotron_free_model(uint64_t handle) {
-    g_models.erase(handle);
+    std::unique_ptr<NemotronModel> freed;
+    {
+        auto& r = registry();
+        std::lock_guard<std::mutex> lock(r.mu);
+        auto it = r.models.find(handle);
+        if (it == r.models.end()) return;
+        freed = std::move(it->second);
+        r.models.erase(it);
+    }
+    // `freed` is destroyed here, outside the lock.
 }
 
 void nemotron_decode_step(
@@ -139,7 +162,17 @@ void nemotron_decode_step(
     rust::Slice<std::unique_ptr<MlxArray>> mamba_ssm_out
 ) {
     using namespace mlx::core;
-    auto& m = *g_models.at(handle);
+    // Hold the lock only for the lookup. unordered_map never moves an element,
+    // so the reference stays valid while other handles are added or erased,
+    // and this handle cannot be freed mid-step: the Rust model owning it is
+    // borrowed for the whole call.
+    NemotronModel* model_ptr;
+    {
+        auto& r = registry();
+        std::lock_guard<std::mutex> lock(r.mu);
+        model_ptr = r.models.at(handle).get();
+    }
+    auto& m = *model_ptr;
     int num_layers = (int)m.block_types.size();
 
     // Embedding (quantized)
