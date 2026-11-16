@@ -197,7 +197,10 @@ impl ImageGenerationModel for MossImageModel {
         mlxcel_core::memory::clear_cache();
 
         // Stage 3 — the FLUX.2 VAE decoder.
-        let vae = Flux2Vae::load(&self.root.join("vae"), false)?;
+        // `Flux2Vae::load` takes the MODEL root and appends `vae/` itself; passing
+        // the vae directory here doubled it (`vae/vae`) and the decode failed
+        // only after the conditioner and the transformer had already run.
+        let vae = Flux2Vae::load(&self.root, false)?;
         let mut images = Vec::with_capacity(latents.len());
         for (index, latents) in latents.iter().enumerate() {
             let pixels = pipeline::decode_to_pixels(&vae, latents)?;
