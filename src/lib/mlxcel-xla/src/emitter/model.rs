@@ -2120,13 +2120,22 @@ impl AttnLayout {
         let seq = c.context_capacity;
         match self {
             AttnLayout::Single { cache_len, .. } => {
+                // Issue #2886: the cache global is stored in the contraction
+                // precision, so only the new row is narrowed here instead of
+                // IREE converting the whole slab on every read.
+                let narrow = |b: &mut Builder, v: Val| match b.precision().dot_elt() {
+                    Some(elt) => b.convert(&v, elt),
+                    None => v,
+                };
                 let k_upd = b.reshape(kk, vec![1, 1, nkv, d]);
+                let k_upd = narrow(b, k_upd);
                 *kcache = b.dynamic_update_slice(
                     &*kcache,
                     &k_upd,
                     &[&k.layer_idx[li], cache_len, &k.c0, &k.c0],
                 );
                 let v_upd = b.reshape(vv, vec![1, 1, nkv, d]);
+                let v_upd = narrow(b, v_upd);
                 *vcache = b.dynamic_update_slice(
                     &*vcache,
                     &v_upd,
@@ -3019,13 +3028,28 @@ pub fn emit_decode_with_native(
     // step (32 MB of device traffic and two `stream.cmd.copy` ops per step).
     // `kv_import` seeds the globals from the prefill result once per request;
     // there is no per-step cache hand-off through the ABI at all.
+    //
+    // The cache is stored in the contraction precision (issue #2886). The
+    // decode dot_generals otherwise read the cache through a `stablehlo.convert`
+    // to f16/bf16, which IREE materializes as part of the batched score and
+    // context operand's layout transpose. Storing the cache already narrowed
+    // keeps the matmul operands bit-identical (the same f32 value rounded once
+    // instead of once per read) and turns that dispatch from an f32-to-f16
+    // convert-and-transpose into an f16-only transpose of half the bytes: about
+    // 3.9 us against 5.8 us per layer and projection on gfx1151, with the
+    // measured step 5.05 ms to 4.90 ms. `kv_import` still takes the f32 prefill
+    // result and converts it once per request.
     decls.truncate(decls.len() - 2);
-    let cache_ty = Ty::f32(vec![
-        c.n_layers,
-        c.context_capacity,
-        c.cache_heads(),
-        c.cache_dim(),
-    ]);
+    let cache_elt = b.precision().dot_elt().unwrap_or("f32");
+    let cache_ty = Ty::new(
+        vec![
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim(),
+        ],
+        cache_elt,
+    );
     a.kcache = b.global_load("kcache", cache_ty.clone());
     a.vcache = b.global_load("vcache", cache_ty.clone());
     let k = emit_consts(&mut b, c);
@@ -3129,6 +3153,18 @@ pub fn emit_decode_with_native(
 
     let sig = render_signature(&decls);
     let cache_ty_s = cache_ty.render();
+    // The prefill graph returns f32 caches, so the import signature stays f32
+    // even when the decode global is narrowed; the conversion happens once here.
+    let import_ty_s = Ty::f32(cache_ty.shape.clone()).render();
+    let kv_import_body = if cache_elt == "f32" {
+        format!(
+            "    util.global.store %k, @kcache : {cache_ty_s}\n    util.global.store %v, @vcache : {cache_ty_s}\n"
+        )
+    } else {
+        format!(
+            "    %k_narrow = stablehlo.convert %k : ({import_ty_s}) -> {cache_ty_s}\n    %v_narrow = stablehlo.convert %v : ({import_ty_s}) -> {cache_ty_s}\n    util.global.store %k_narrow, @kcache : {cache_ty_s}\n    util.global.store %v_narrow, @vcache : {cache_ty_s}\n"
+        )
+    };
     // Issue #3060: the capability marker the shim probes. Its presence says the
     // decode entry takes token/pos/cache_len as ABI-level `i32` values, so the
     // shim pushes VM values instead of buffer views. An artifact without it keeps
@@ -3141,10 +3177,12 @@ pub fn emit_decode_with_native(
     b.global_store("kcache", &kcache);
     b.global_store("vcache", &vcache);
     format!(
-        "{alias}module @decode_step {{\n  util.global private mutable @kcache : {cache_ty_s}\n  util.global private mutable @vcache : {cache_ty_s}\n{native}  func.func public @main({sig}) -> {out_ty} {{\n{body}    return {l} : {out_ty}\n  }}\n  func.func public @kv_import(%k: {cache_ty_s}, %v: {cache_ty_s}) {{\n    util.global.store %k, @kcache : {cache_ty_s}\n    util.global.store %v, @vcache : {cache_ty_s}\n    return\n  }}\n{scalar_inputs_entry}}}\n",
+        "{alias}module @decode_step {{\n  util.global private mutable @kcache : {cache_ty_s}\n  util.global private mutable @vcache : {cache_ty_s}\n{native}  func.func public @main({sig}) -> {out_ty} {{\n{body}    return {l} : {out_ty}\n  }}\n  func.func public @kv_import(%k: {import_ty_s}, %v: {import_ty_s}) {{\n{kv_import_body}    return\n  }}\n{scalar_inputs_entry}}}\n",
         alias = native.map(|(alias, _)| alias).unwrap_or(""),
         native = native.map(|(_, source)| source).unwrap_or(""),
         cache_ty_s = cache_ty_s,
+        import_ty_s = import_ty_s,
+        kv_import_body = kv_import_body,
         sig = sig,
         out_ty = out_ty,
         body = b.body(),

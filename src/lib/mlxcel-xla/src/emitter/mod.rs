@@ -751,6 +751,79 @@ mod tests {
         );
     }
 
+    /// Issue #2886: the single-sequence decode stores its KV globals in the
+    /// contraction precision, so the f16/bf16 dot_generals read the cache
+    /// without a per-step whole-slab `stablehlo.convert`. The import entry keeps
+    /// the f32 prefill signature and narrows once per request.
+    #[test]
+    fn single_decode_cache_global_uses_the_contraction_precision() {
+        let c = Config::llama_3_2_1b();
+        let f32_graph = emit_decode_with(&c, true, Precision::F32);
+        let f16_graph = emit_decode_with(&c, true, Precision::F16);
+        let bf16_graph = emit_decode_with(&c, true, Precision::Bf16);
+        let shape = format!(
+            "{}x{}x{}x{}",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let f32_ty = format!("tensor<{shape}xf32>");
+        let f16_ty = format!("tensor<{shape}xf16>");
+        let bf16_ty = format!("tensor<{shape}xbf16>");
+        assert!(
+            f32_graph.contains(&format!("util.global private mutable @kcache : {f32_ty}")),
+            "f32 keeps the byte-identical f32 cache"
+        );
+        assert!(
+            f16_graph.contains(&format!("util.global private mutable @kcache : {f16_ty}"))
+                && f16_graph.contains(&format!("util.global private mutable @vcache : {f16_ty}")),
+            "f16 stores both caches narrowed"
+        );
+        assert!(
+            bf16_graph.contains(&format!("util.global private mutable @kcache : {bf16_ty}")),
+            "bf16 stores the cache in bf16"
+        );
+        for (graph, narrowed) in [(&f32_graph, false), (&f16_graph, true)] {
+            assert!(
+                graph.contains(&format!(
+                    "func.func public @kv_import(%k: {f32_ty}, %v: {f32_ty})"
+                )),
+                "the import entry must keep the f32 prefill signature"
+            );
+            assert_eq!(
+                graph.contains("%k_narrow = stablehlo.convert %k : "),
+                narrowed,
+                "the import narrows exactly when the cache is narrowed"
+            );
+        }
+        // The narrow graph no longer converts the whole cache slab into the
+        // score and context contractions; only the new `[1, 1, nkv, d]` row is
+        // narrowed, at the update site.
+        let slab_f32 = format!(
+            "tensor<{}x{}x{}xf32>",
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let slab_f16 = format!(
+            "tensor<{}x{}x{}xf16>",
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let row_f32 = format!("tensor<1x1x{}x{}xf32>", c.cache_heads(), c.cache_dim());
+        let row_f16 = format!("tensor<1x1x{}x{}xf16>", c.cache_heads(), c.cache_dim());
+        assert!(
+            !f16_graph.contains(&format!("({slab_f32}) -> {slab_f16}")),
+            "the whole-slab cache conversion must be gone"
+        );
+        assert!(
+            f16_graph.contains(&format!("({row_f32}) -> {row_f16}")),
+            "the narrow graph converts only the new cache row"
+        );
+    }
+
     fn main_signature<'a>(mlir: &'a str, graph: &str) -> &'a str {
         mlir.split("func.func public @main(")
             .nth(1)

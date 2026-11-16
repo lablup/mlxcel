@@ -86,9 +86,10 @@ pub enum Precision {
 }
 
 impl Precision {
-    /// The narrow element type to demote contraction inputs to, or `None` for
-    /// f32 (no demotion).
-    fn dot_elt(self) -> Option<&'static str> {
+    /// The narrow element type contraction inputs are demoted to, or `None` for
+    /// f32 (no demotion). Also the storage type of the single-sequence decode KV
+    /// cache (issue #2886), which is read only through the contractions.
+    pub(crate) fn dot_elt(self) -> Option<&'static str> {
         match self {
             Precision::F32 => None,
             Precision::F16 => Some("f16"),
