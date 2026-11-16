@@ -571,8 +571,10 @@ fn rotating_reference(
     }
 }
 
-/// The pair Llama 4's chunked layers spelled out: `update_and_fetch`, then the
-/// causal helper for an unmasked prefill, else the SDPA dispatcher.
+/// mlx-lm's chunked attention (`mlx_lm/models/llama4.py`,
+/// `LlamaModel.__call__`): `update_and_fetch`, then the masked SDPA under
+/// `chunk_mask = (block_pos == 0) & token_pos`, which mlx-lm rebuilds on every
+/// forward including decode. A caller mask runs as given.
 fn chunked_reference(
     cache: &mut ChunkedKVCache,
     q: &MlxArray,
@@ -580,13 +582,41 @@ fn chunked_reference(
     v: UniquePtr<MlxArray>,
     mask: Option<&MlxArray>,
 ) -> UniquePtr<MlxArray> {
+    let (start, offset, chunk) = (cache.start_position, cache.offset, cache.chunk_size);
     let (ck, cv) = cache.update_and_fetch(k, v);
-    let q_len = ffi::array_shape(q)[2];
-    if q_len > 1 && mask.is_none() {
-        crate::causal_attention(q, &ck, &cv, SCALE, 0.0, 0)
-    } else {
-        crate::layers::attention(q, &ck, &cv, SCALE, mask, 0.0, 0)
+    if let Some(mask) = mask {
+        return crate::layers::attention(q, &ck, &cv, SCALE, Some(mask), 0.0, 0);
     }
+    let mask = mlx_lm_chunk_mask(ffi::array_shape(q)[2], start, offset, chunk);
+    crate::layers::attention(q, &ck, &cv, SCALE, Some(&mask), 0.0, 0)
+}
+
+/// The additive `[L, S]` mlx-lm chunk mask for queries at absolute positions
+/// `[offset, offset + L)` over keys at `[start, offset + L)`, built on the
+/// host so it shares no code with the path under test.
+fn mlx_lm_chunk_mask(q_len: i32, start: i32, offset: i32, chunk: i32) -> UniquePtr<MlxArray> {
+    let end = offset + q_len;
+    let mut data = Vec::with_capacity((q_len * (end - start)) as usize);
+    for i in offset..end {
+        for j in start..end {
+            let visible = j <= i && j / chunk == i / chunk;
+            data.push(if visible { 0.0 } else { f32::NEG_INFINITY });
+        }
+    }
+    let mask = ffi::from_slice_f32(&data, &[q_len, end - start]);
+    ffi::astype(&mask, dtype::FLOAT16)
+}
+
+/// `update_and_fetch` plus the unmasked SDPA over the whole visible window,
+/// what the chunked decode step ran before #3105.
+fn whole_window_decode(
+    cache: &mut ChunkedKVCache,
+    q: &MlxArray,
+    k: UniquePtr<MlxArray>,
+    v: UniquePtr<MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let (ck, cv) = cache.update_and_fetch(k, v);
+    crate::layers::attention(q, &ck, &cv, SCALE, None, 0.0, 0)
 }
 
 fn rotating_state(cache: &RotatingKVCache) -> (i32, i32, Vec<f32>, Vec<f32>) {
@@ -724,7 +754,7 @@ fn rotating_multi_token_attend_clears_the_undo_log() {
 }
 
 #[test]
-fn chunked_attend_matches_update_and_fetch_plus_sdpa() {
+fn chunked_attend_matches_the_mlx_lm_chunk_mask() {
     let mut rng = Rng::new(0x0021_7205);
     let chunk = 8;
     let mut got = ChunkedKVCache::new(chunk);
@@ -734,7 +764,8 @@ fn chunked_attend_matches_update_and_fetch_plus_sdpa() {
     let (k2, v2) = (ffi::copy(&k), ffi::copy(&v));
     let a = got.attend(&q, k, v, SCALE, None);
     let b = chunked_reference(&mut want, &q, k2, v2, None);
-    assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "prefill output differs");
+    let rms = relative_rms(&to_vec_f32(&a), &to_vec_f32(&b));
+    assert!(rms < 1e-3, "prefill output differs: relative rms {rms}");
 
     // Five decode steps with the per-step front trim Llama 4 runs; the chunk
     // is exceeded at the third, so the window slides.
@@ -745,7 +776,8 @@ fn chunked_attend_matches_update_and_fetch_plus_sdpa() {
         let (k2, v2) = (ffi::copy(&k), ffi::copy(&v));
         let a = got.attend(&q, k, v, SCALE, None);
         let b = chunked_reference(&mut want, &q, k2, v2, None);
-        assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "decode step {i} differs");
+        let rms = relative_rms(&to_vec_f32(&a), &to_vec_f32(&b));
+        assert!(rms < 1e-3, "decode step {i} differs: relative rms {rms}");
         assert_eq!(
             (got.offset, got.start_position),
             (want.offset, want.start_position),
@@ -754,7 +786,7 @@ fn chunked_attend_matches_update_and_fetch_plus_sdpa() {
     }
     assert!(got.start_position > 0, "the front was trimmed");
 
-    // A masked two-token step over the trimmed window.
+    // A masked two-token step over the trimmed window runs the caller mask.
     got.maybe_trim_front();
     want.maybe_trim_front();
     let visible = got.offset - got.start_position;
@@ -764,6 +796,49 @@ fn chunked_attend_matches_update_and_fetch_plus_sdpa() {
     let a = got.attend(&q, k, v, SCALE, Some(&mask));
     let b = chunked_reference(&mut want, &q, k2, v2, Some(&mask));
     assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "masked output differs");
+}
+
+/// Issue #3105: past the first chunk the front-trimmed window still holds
+/// keys of the previous chunk, and a decode step must skip them, as mlx-lm's
+/// per-forward chunk mask does. Decodes positions 6..30 over chunks of 8
+/// (three boundaries). Before the fix the step attended over the whole
+/// window; the second comparison shows that route really differs here, so
+/// the first is not passing vacuously.
+#[test]
+fn chunked_decode_across_chunk_boundaries_attends_only_its_own_chunk() {
+    let mut rng = Rng::new(0x0310_5001);
+    let chunk = 8;
+    let mut got = ChunkedKVCache::new(chunk);
+    let mut want = ChunkedKVCache::new(chunk);
+    let mut old = ChunkedKVCache::new(chunk);
+
+    let (q, k, v) = step(&mut rng, 1, 6);
+    for cache in [&mut got, &mut want, &mut old] {
+        let _ = cache.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+    }
+    let mut old_route_differs = false;
+    for pos in 6..30 {
+        for cache in [&mut got, &mut want, &mut old] {
+            cache.maybe_trim_front();
+        }
+        let (q, k, v) = step(&mut rng, 1, 1);
+        let a = got.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+        let b = chunked_reference(&mut want, &q, ffi::copy(&k), ffi::copy(&v), None);
+        let c = whole_window_decode(&mut old, &q, k, v);
+        let (a, b, c) = (to_vec_f32(&a), to_vec_f32(&b), to_vec_f32(&c));
+        let rms = relative_rms(&a, &b);
+        assert!(
+            rms < 1e-3,
+            "decode at position {pos} differs from the mlx-lm chunk mask: relative rms {rms}"
+        );
+        if pos % chunk != chunk - 1 && relative_rms(&c, &b) > 1e-2 {
+            old_route_differs = true;
+        }
+    }
+    assert!(
+        old_route_differs,
+        "the whole-window route never differed, so the test cannot see the bug"
+    );
 }
 
 #[test]

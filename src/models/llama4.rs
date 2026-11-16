@@ -19,7 +19,7 @@
 
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
 use crate::models::llama4_helpers::{
-    chunked_causal_attention, create_chunked_attention_mask, get_weight_copy, load_quantized_linear,
+    create_chunked_attention_mask, get_weight_copy, load_quantized_linear,
 };
 use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
@@ -65,23 +65,8 @@ impl KvAttention for Llama4Cache {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         match self {
-            // An unmasked prefill step runs the chunked attention per query
-            // chunk in MLX's causal mode instead of over a dense
-            // `[L, S]` chunk mask (#3100). A decode row or a caller mask
-            // keeps the cache's own entry.
-            Llama4Cache::Chunked(c) if mask.is_none() && mlxcel_core::array_shape(q)[2] > 1 => {
-                let (start_position, offset) = (c.start_position, c.offset);
-                let (cache_k, cache_v) = c.update_and_fetch(keys, values);
-                chunked_causal_attention(
-                    q,
-                    &cache_k,
-                    &cache_v,
-                    scale,
-                    start_position,
-                    offset,
-                    c.chunk_size,
-                )
-            }
+            // `ChunkedKVCache::attend` keeps every query inside its own
+            // chunk: maskless per query chunk, decode included (#3100, #3105).
             Llama4Cache::Chunked(c) => ChunkedKVCache::attend(c, q, keys, values, scale, mask),
             Llama4Cache::Regular(c) => KVCache::attend(c, q, keys, values, scale, mask),
         }
