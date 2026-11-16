@@ -26,7 +26,7 @@ The KV cache stops scaling with head count.
 
 These come from `mlxcel_core::mla::decompressed_bytes_per_token` and `latent_bytes_per_token`, which are the same functions the benchmark harness prints, so the table cannot drift from the code.
 
-The cost is fixed weight memory. The absorbed contractions are dense batched matmuls and MLX has no batched quantized matmul that keeps a 3-D per-head quantized operand, so the fold dequantizes `kv_b_proj` at load time and holds it dense. For DeepSeek-V2-Lite that is about 113 MiB in f16 across 27 layers against about 28 MiB for the 4-bit original. The trade only pays off past the context length where the cache saving exceeds it; the harness prints both numbers so the crossover is visible.
+The cost is fixed weight memory, and how much depends on the checkpoint. A quantized `kv_b_proj` folds without dequantizing: its packed rows are regrouped per head along the rank axis, so `absorb_queries` and `unabsorb_output` run as batched `quantized_matmul` on the checkpoint's own planes (30.4 MiB on DeepSeek-V2-Lite, against 28 MiB for the 4-bit original) (#3121). An unquantized layer, an NVFP4 global scale, runtime LoRA terms or a mode mismatch keep the dense f16 fold (about 113 MiB on V2-Lite); the load line says which, as `folded 27/27 layers (27 quantized, 30.4 MiB)`.
 
 ## Default layout for DeepSeek V2
 
@@ -43,7 +43,21 @@ DeepSeek V2 caches decompressed per-head K and V unless `MLXCEL_MLA_ABSORBED=1` 
 
 The trace condition holds: every disagreement falls where the reference's top two were within 0.19 logits, so the two layouts differ only in the rounding class. The throughput condition does not: absorbed decode carries a fixed per-step cost of about 0.55 ms at 512 tokens of context, which its smaller cache read pays back only past roughly 3K tokens. A default that makes short chat-length requests 10% slower to save memory they do not need was declined, so the decompressed layout stays the default and `MLXCEL_MLA_ABSORBED=1` is the setting for long-context and memory-bound runs.
 
-What would change the decision is removing that fixed cost: the absorbed step's `absorb_queries` / `unabsorb_output` contractions run as dense batched matmuls over the f16-dequantized fold (about 113 MB read per token on V2-Lite), and its attention is composed from MLX ops because the 576-wide score and 512-wide value do not fuse. A re-measurement with the rows above as the baseline decides it.
+What would change the decision is removing that fixed cost. Issue #3121 removed most of it, and the decision is open again:
+
+- The folds now run quantized.
+- Unmasked single-query absorbed attention runs on a fused Metal kernel for windows up to 8192 keys (`MLXCEL_MLA_FUSED_DECODE`, on by default).
+
+Re-measured on the same checkpoint (2026-11-16):
+
+| measurement | decompressed (default) | absorbed | |
+|---|---|---|---|
+| decode, pp512/tg128 (median tok/s) | 205.5 | 201.4 | -2.0% |
+| decode, 2048-token prompt, tg128 | 170.1 | 180.7 | +6.2% |
+| decode, 16384-token prompt, tg128 | 73.5 | 114.4 | +56% |
+| logit trace, decided positions that disagree | reference | 0 of 393 | decode width 1 behind 1024, 4096 and 8192 |
+
+Both conditions now hold. Switching the default is a separate change and was not made here. Rows: [the #3121 benchmark results](benchmark_results/mla-absorbed-decode-cost-m5max-2026-11-16.md).
 
 No other family shares the choice: `deepseek_v3` and `deepseek_v32` absorb unconditionally, and `minicpm3` and `dots1` cache decompressed K/V with no absorbed path. Every sample and trace row is in [the benchmark results](benchmark_results/mla-v2-default-layout-m5max-2026-11-15.md).
 
