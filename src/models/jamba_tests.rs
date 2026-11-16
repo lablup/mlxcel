@@ -999,11 +999,19 @@ fn jamba_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
 /// round only the decay back to f16. A zero step (`softplus` of a -200 bias
 /// underflows) then decays by `exp(0 * A) = 1`, not `exp(0 * -inf) = NaN`,
 /// so prefill and decode logits stay finite on the fused and the graph scan.
+///
+/// The fixture's feed-forward is MoE, and MLX's CPU `GatherMM` only takes
+/// float32, so an all-f16 model aborts the process there; the test needs a
+/// GPU backend.
 #[test]
 fn jamba_f16_model_with_an_overflowing_a_log_keeps_finite_logits() {
     use crate::models::ssm_test_support::{ZERO_STEP_DT_BIAS, overflowing_f16_a_log};
     use mlxcel_core::cache::SequenceId;
     use mlxcel_core::generate::LanguageModel;
+    use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
+    if gpu_backend_kind() == GpuBackendKind::None {
+        return;
+    }
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let i = 2 * HIDDEN;
 
