@@ -22,7 +22,10 @@
 
 use std::collections::HashMap;
 
-use mlxcel_xla::{IreeLlama, decode_scalar_counters, reset_decode_scalar_counters};
+use mlxcel_xla::{
+    IreeLlama, decode_scalar_counters, reset_decode_scalar_counters,
+    set_decode_scalar_abi_for_thread,
+};
 use safetensors::{Dtype, tensor::TensorView};
 use tempfile::TempDir;
 
@@ -181,12 +184,18 @@ fn decode_steps_reuse_the_persistent_scalars() {
         1,
         "the persistent scalars must be active after the first decode"
     );
+    assert!(
+        engine.test_decode_scalar_inputs(),
+        "issue #3060: the decode graph must take token/pos/cache_len as ABI i32"
+    );
 }
 
-/// Issue #3028: a device whose allocator cannot serve the host-local,
-/// device-visible heap degrades to today's per-step allocation path instead of
-/// failing. The forced fallback must produce the same token stream as the
-/// reuse path.
+/// Issue #3028 / #3060: a device whose allocator cannot serve the host-local,
+/// device-visible heap degrades to the per-step readback path instead of
+/// failing. The token/position/cache_len inputs no longer allocate views at all
+/// (they are ABI-level `i32` values since #3060), so the forced fallback spends
+/// nothing on inputs and reads the token back through the ordinary staging
+/// transfer. It must still produce the same token stream as the reuse path.
 #[test]
 #[ignore = "requires the pinned IREE runtime and compiler"]
 fn forced_fallback_decodes_the_same_token_stream() {
@@ -216,11 +225,56 @@ fn forced_fallback_decodes_the_same_token_stream() {
     );
     assert_eq!(
         decode_scalar_counters(),
-        (9, 0),
-        "the forced fallback must allocate three input views per step and skip \
-         the persistent readback"
+        (0, 0),
+        "with ABI scalar inputs the fallback allocates no input views and reads \
+         the token back through the staging path, not the persistent d2d copy"
     );
     assert_eq!(fallback.test_decode_step_scalars_state(), -1);
+}
+
+/// Issue #3060: an artifact compiled without the `decode_step.scalar_inputs`
+/// marker keeps the buffer-view ABI. The shim must detect the marker's absence,
+/// push the three scalars as buffer views, and decode exactly the same token
+/// stream as the scalar-ABI artifact, so an older compiled bundle keeps working
+/// without a bundle version bump.
+#[test]
+#[ignore = "requires the pinned IREE runtime and compiler"]
+fn legacy_buffer_view_artifact_decodes_the_same_stream() {
+    let fixture = create_tiny_model();
+
+    let mut scalar = load_engine(&fixture);
+    assert!(
+        scalar.test_decode_scalar_inputs(),
+        "the default emitter must produce the scalar-input artifact"
+    );
+    let first = scalar
+        .prefill_first(&[1, 2, 3])
+        .expect("prefill must return its first token");
+    let scalar_tokens = decode_stream(&mut scalar, first, 4);
+
+    // Emit the legacy signature on this thread, load it, then restore the
+    // default so the rest of the test binary is unaffected.
+    set_decode_scalar_abi_for_thread(Some(false));
+    let legacy = load_engine(&fixture);
+    set_decode_scalar_abi_for_thread(None);
+    assert!(
+        !legacy.test_decode_scalar_inputs(),
+        "the legacy artifact must not export the scalar-input marker"
+    );
+
+    let mut legacy = legacy;
+    let legacy_first = legacy
+        .prefill_first(&[1, 2, 3])
+        .expect("prefill must return its first token");
+    assert_eq!(
+        legacy_first, first,
+        "both ABIs must agree on the prefill token"
+    );
+    let legacy_tokens = decode_stream(&mut legacy, legacy_first, 4);
+    assert_eq!(
+        legacy_tokens, scalar_tokens,
+        "the buffer-view fallback must decode the same token stream"
+    );
 }
 
 /// Issue #3028: a context that only prefills and then frees must not allocate
