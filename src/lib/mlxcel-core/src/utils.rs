@@ -155,25 +155,26 @@ pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
 ///
 /// Used by: decoders that materialize an explicit prefill mask instead of
 /// leaving `mask: None` for fused SDPA to apply causality itself. At this
-/// commit that is 17 non-test files under `src/models`, in five groups.
-/// Hybrid stacks whose attention cannot take MLX's causal mode (sinks) or that
-/// keep their mask for now: MiniMaxM3, RecurrentGemma, Laguna, MiMoV2.
+/// commit that is 13 non-test files under `src/models`, in five groups.
+/// Hybrid stacks that keep their mask for now: MiniMaxM3, RecurrentGemma.
 /// Sliding-window and dual-attention families that build a separate global
-/// mask per forward: Gemma3, Gemma4, DiffusionGemma. MLA, sink and
-/// custom-attention decoders that add the mask to scores by hand or need it
-/// for their sinks: DeepSeekV2, DeepSeekV3.2, GptOss, FalconOcr, the
-/// GLM4MoeLite MTP drafter, and the Qwen 3.5 speculative forward. KimiLinear,
-/// GLM4MoeLite, KimiK3 and LongcatFlashNgram fold the rope half into SDPA
-/// through `mla::rope_folded_attention` and take causal mode instead (#3099). Speculative verify blocks: Lfm2 (`forward_speculative`).
+/// mask per forward: Gemma3, Gemma4, DiffusionGemma. MLA and custom-attention
+/// decoders that add the mask to scores by hand: DeepSeekV2, DeepSeekV3.2,
+/// the GLM4MoeLite MTP drafter, and the Qwen 3.5 speculative forward.
+/// KimiLinear, GLM4MoeLite, KimiK3 and LongcatFlashNgram fold the rope half
+/// into SDPA through `mla::rope_folded_attention` and take causal mode
+/// instead (#3099). Speculative verify blocks: Lfm2 (`forward_speculative`).
 /// Files that call it only from test or diagnostic code: Gemma3n (its
 /// `xla-diagnostics` probes) and ExaoneMoe (its cache tests); Gemma4MtpTarget
 /// only names it in a comment.
 /// The hybrid, full-attention, GLM4V-family and sliding-window decoders that
 /// can take MLX's causal mode build their prefill masks through
 /// [`prefill_causal_mask`] and [`prefill_sliding_window_mask`] instead
-/// (#3051, #3072). Outside `src/models` the callers are `lib.rs`,
-/// `layers.rs`, the tensor-parallel Llama runtime (Gemma 4), and
-/// disaggregated handoff; the grep also
+/// (#3051, #3072), and so do the attention-sink decoders (GptOss, FalconOcr,
+/// MiMoV2, DeepSeekV4), whose layers, like Laguna's, run
+/// [`crate::causal_prefill_attention`] (#3098). Outside `src/models` the
+/// callers are `lib.rs`, `layers.rs`, the tensor-parallel Llama runtime
+/// (Gemma 4), and disaggregated handoff; the grep also
 /// matches `cache.rs` (calls inside its `#[cfg(test)]` module) and
 /// `drafter/qwen3_5_mtp/layer.rs` (a comment mention, not a call).
 ///
@@ -256,6 +257,10 @@ pub struct PrefillAttention {
     pub kv_heads: i32,
     pub head_dim: i32,
     pub value_dim: i32,
+    /// Whether the layers carry attention sinks, which MLX weighs when it
+    /// picks a kernel; such layers run [`crate::causal_prefill_attention`]
+    /// with their sinks (#3098).
+    pub sinks: bool,
 }
 
 impl PrefillAttention {
@@ -265,6 +270,15 @@ impl PrefillAttention {
             kv_heads: kv_heads as i32,
             head_dim: head_dim as i32,
             value_dim: head_dim as i32,
+            sinks: false,
+        }
+    }
+
+    /// The same geometry for layers with attention sinks.
+    pub fn with_sinks(self) -> Self {
+        Self {
+            sinks: true,
+            ..self
         }
     }
 
@@ -303,7 +317,9 @@ impl PrefillAttention {
 /// The causal mask a model-built prefill needs: `None` for a decode row, or
 /// when [`prefill_uses_causal_mode`] allows causal mode and MLX fuses causal
 /// SDPA at this shape, in which case the layer must route a `seq_len > 1`
-/// forward without a mask through [`crate::causal_attention`]; else
+/// forward without a mask through [`crate::causal_attention`] (or, for
+/// layers with sinks, `attention.sinks`, through
+/// [`crate::causal_prefill_attention`] with them, #3098); else
 /// [`create_causal_mask`]`(seq_len, offset)`.
 ///
 /// Where MLX would fall back for causal mode too (pre-M5 Metal at head_dim
@@ -312,7 +328,8 @@ impl PrefillAttention {
 /// layer shares it, which peaks lower than the per-layer chunked causal
 /// fallback (+4% on qwen3.8-27b at 28K tokens with 2048-token chunks). The
 /// verdict comes from MLX itself through
-/// [`crate::window_sdpa::sdpa_mode_is_fused`], memoized per shape.
+/// [`crate::prefill_sdpa::maskless_route_is_fused`], memoized per shape and
+/// asked with sinks when `attention.sinks` is set.
 /// `activation_dtype` is the hidden state's dtype.
 ///
 /// Used by: Qwen 3.5 (single model and tensor-parallel runtime), Qwen3-Next
@@ -321,7 +338,7 @@ impl PrefillAttention {
 /// Mistral4, MiniCPM3, NemotronNas, GLM4V, GLM4V-MoE, HunyuanVL, PaddleOcrVL,
 /// Ernie4.5MoeVL, and the global layers of Cohere2MoE, CohereCompass, Olmo3,
 /// Ministral3, Exaone4, ExaoneMoe, Mellum, Step3P5, AFMoE and Gemma3n
-/// (#3072).
+/// (#3072); GptOss, FalconOcr and the sink full layers of MiMoV2 (#3098).
 pub fn prefill_causal_mask(
     seq_len: i32,
     offset: i32,
@@ -334,7 +351,7 @@ pub fn prefill_causal_mask(
     }
     let causal = prefill_uses_causal_mode(seq_len, batch, false) && {
         let shape = attention.shape(batch, seq_len, offset + seq_len, activation_dtype);
-        crate::window_sdpa::sdpa_mode_is_fused(&shape, false, true)
+        crate::prefill_sdpa::maskless_route_is_fused(&shape, 0, attention.sinks)
     };
     if causal {
         None
@@ -394,12 +411,15 @@ pub enum SlidingPrefillKeys {
 ///   (`legacy_causal_window_mask` is this function's dense band).
 ///
 /// A layer handed `None` for a multi-token forward must run
-/// [`crate::maskless_prefill_attention`]. Where MLX would take its graph
+/// [`crate::maskless_prefill_attention`], or with `attention.sinks`
+/// [`crate::causal_prefill_attention`] with its sinks (#3098), which MLX
+/// then fuses with sinks the same way. Where MLX would take its graph
 /// fallback, the one shared array stays, as it does for padded, batched and
 /// speculative forwards. A non-positive `window` means no window.
 ///
 /// Used by: Cohere2, Cohere2MoE, CohereCompass, Olmo3, Ministral3, Exaone4,
-/// ExaoneMoe, Mellum, Step3P5, AFMoE, Gemma3n.
+/// ExaoneMoe, Mellum, Step3P5, AFMoE, Gemma3n; GptOss, MiMoV2 and an all-local
+/// DeepSeekV4 stack (#3098).
 pub fn prefill_sliding_window_mask(
     seq_len: i32,
     prior: i32,
@@ -421,16 +441,7 @@ pub fn prefill_sliding_window_mask(
     };
     let maskless = prefill_uses_causal_mode(seq_len, batch, false) && {
         let shape = attention.shape(batch, seq_len, k_len, activation_dtype);
-        if k_len <= window {
-            crate::window_sdpa::sdpa_mode_is_fused(&shape, false, true)
-        } else {
-            crate::window_sdpa::plan(
-                &shape,
-                window,
-                crate::window_sdpa::WindowSdpaExtras::default(),
-            )
-            .is_native()
-        }
+        crate::prefill_sdpa::maskless_route_is_fused(&shape, window, attention.sinks)
     };
     if maskless {
         None

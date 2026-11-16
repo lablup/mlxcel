@@ -505,8 +505,8 @@ impl LagunaModel {
         row: Option<usize>,
     ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
         debug_assert_eq!(caches.len(), self.layers.len(), "one cache per layer");
-        // Each attention layer builds its own prefill mask from the keys its
-        // cache returns (see `Attention::forward`); decode passes none.
+        // Each attention layer masks the keys its cache returns itself (see
+        // `Attention::forward`, #3098); decode passes no mask.
         let mut h = self.embed_tokens.forward(input_ids);
         let mut captured: Vec<Option<UniquePtr<MlxArray>>> =
             (0..capture_layer_ids.len()).map(|_| None).collect();

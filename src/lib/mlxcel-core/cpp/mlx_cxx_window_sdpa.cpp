@@ -25,7 +25,7 @@
 //
 // Every other bridge SDPA entry keeps passing `window_size = -1`; the route
 // selection (backend, softcap, sinks, extra masks, query length) lives in
-// `src/window_sdpa.rs`, which is the only caller of these two symbols.
+// `src/window_sdpa.rs` and, for the sink entry, `src/prefill_sdpa.rs`.
 
 #include "mlx_cxx_internal.h"
 #include "mlx/fast.h"
@@ -61,6 +61,32 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_causal_window(
         q.inner, k.inner, v.inner, scale, window_size, "causal", std::nullopt));
 }
 
+// Causal SDPA with attention sinks and no mask array (issue #3098): MLX's
+// `mask_mode = "causal"` over queries aligned to the suffix of the keys, plus
+// `window_size` when it is positive (`-1` is no window). It masks the same
+// keys as `create_causal_mask_with_window_full(q_len, k_len - q_len, window)`
+// passed to `fast_scaled_dot_product_attention_with_sinks`, without the
+// `[q_len, k_len]` f32 array. Sinks take the attention dtype, as on the array
+// entry. Any other `window_size` and every MLX validation error throw, which
+// the bridge turns into an `Err` on the Rust side.
+std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks_causal(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    float scale,
+    int32_t window_size,
+    const MlxArray& sinks) {
+    if (window_size == 0 || window_size < -1) {
+        throw std::invalid_argument(
+            "[fast_scaled_dot_product_attention_with_sinks_causal] window_size must "
+            "be positive or -1 for no window, got " +
+            std::to_string(window_size));
+    }
+    auto sinks_cast = sdpa_mask_for_inputs(sinks.inner, q.inner, k.inner, v.inner);
+    return std::make_unique<MlxArray>(mlx::core::fast::scaled_dot_product_attention(
+        q.inner, k.inner, v.inner, scale, window_size, "causal", std::nullopt, sinks_cast));
+}
+
 // Whether upstream MLX would run a fused attention kernel (rather than its
 // graph fallback) for an SDPA over these shapes. This is MLX's own verdict,
 // `ScaledDotProductAttention::use_fallback`, asked over lazily built zero
@@ -77,7 +103,8 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_causal_window(
 // divide by (a non-positive dimension, zero KV heads), answers false.
 //
 // `has_arr_mask` with `do_causal` is the legacy explicit-mask arm; `do_causal`
-// with a positive `window_size` is the native window arm. The answer depends
+// with a positive `window_size` is the native window arm. `has_sinks` asks
+// about the same call with attention sinks (issue #3098). The answer depends
 // on the device generation and NAX availability, which is why it is probed
 // rather than tabulated in Rust.
 bool sdpa_uses_fused_kernel(
@@ -89,7 +116,8 @@ bool sdpa_uses_fused_kernel(
     int32_t v_dtype,
     bool has_arr_mask,
     bool do_causal,
-    int32_t window_size) {
+    int32_t window_size,
+    bool has_sinks) {
 #ifdef MLXCEL_BRIDGE_METAL_BACKEND
     if (!mlx::core::metal::is_available()) {
         return false;
@@ -126,7 +154,7 @@ bool sdpa_uses_fused_kernel(
             has_mask,
             has_arr_mask,
             do_causal,
-            /* has_sinks = */ false,
+            has_sinks,
             window_size,
             /* is_training = */ false,
             /* output_logsumexp = */ false,
@@ -145,6 +173,7 @@ bool sdpa_uses_fused_kernel(
     (void)has_arr_mask;
     (void)do_causal;
     (void)window_size;
+    (void)has_sinks;
     return false;
 #endif
 }

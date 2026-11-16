@@ -23,7 +23,6 @@ use crate::models::laguna::{LayerRope, ModelArgs, QuantSpec, RouterScoreFunc};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, moe_weighted_sum};
 use mlxcel_core::cache::{KvAttention, attend_batched_rows};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_causal_mask_with_window_full};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -137,14 +136,17 @@ pub struct Attention {
 impl Attention {
     /// Attention over `x` (`[B, L, H]`) against `cache`.
     ///
-    /// A multi-token append builds its own additive mask from the key count
-    /// the cache actually returns: a plain causal band on full layers, a
-    /// causal band clipped to `sliding_window` on sliding layers. Deriving
-    /// the key axis from the returned tensor rather than from the cache
-    /// offset keeps the mask aligned with both the plain rotating cache
-    /// (which exposes `min(offset, window - 1)` prior keys) and the buffered
-    /// variant speculative rollback arms (which exposes up to `window +
-    /// buffer` prior keys). A single-token decode passes no mask.
+    /// A multi-token append masks the key count the cache actually returns:
+    /// a plain causal band on full layers, a causal band clipped to
+    /// `sliding_window` on sliding layers, through MLX's causal mode and
+    /// `window_size` where they fuse and an explicit band otherwise
+    /// ([`mlxcel_core::causal_prefill_attention`], #3098). Deriving the key
+    /// axis from the returned tensor rather than from the cache offset keeps
+    /// the band aligned with both the plain rotating cache (which exposes
+    /// `min(offset, window - 1)` prior keys) and the buffered variant
+    /// speculative rollback arms (which exposes up to `window + buffer` prior
+    /// keys); a speculative verify keeps the explicit band. A single-token
+    /// decode passes no mask.
     pub fn forward(&self, x: &MlxArray, cache: &mut LagunaCache) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
@@ -171,38 +173,30 @@ impl Attention {
 
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        let mask = if l > 1 {
-            let k_len = mlxcel_core::array_shape(&cache_k)[2];
-            let prior = (k_len - l).max(0);
-            Some(if self.is_sliding {
-                create_causal_mask_with_window_full(l, prior, Some(self.window_size))
-            } else {
-                create_causal_mask(l, prior)
-            })
-        } else {
-            None
-        };
-        let mask_ptr = mask
-            .as_ref()
-            .map(|m| m.as_ref().unwrap() as *const _)
-            .unwrap_or(std::ptr::null());
-        let attn_out = if let Some(sinks) = &self.sinks {
-            let sinks_ptr = sinks.as_ref().unwrap() as *const _;
+        let attn_out = if l > 1 {
+            // MLX's causal mode (plus `window_size` once the keys outgrow a
+            // sliding window) with this layer's sinks where that fuses, else
+            // the causal band over the keys the cache returned (#3098).
+            let window = if self.is_sliding { self.window_size } else { 0 };
+            mlxcel_core::causal_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                window,
+                self.sinks.as_deref(),
+            )
+        } else if let Some(sinks) = &self.sinks {
+            // SAFETY: `sinks` is a live per-head array owned by `self`; a null
+            // mask is the unmasked single-token decode.
             unsafe {
                 mlxcel_core::fast_scaled_dot_product_attention_with_sinks(
-                    &q, &cache_k, &cache_v, self.scale, mask_ptr, sinks_ptr,
-                )
-            }
-        } else if l > 1 {
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
                     &q,
                     &cache_k,
                     &cache_v,
                     self.scale,
-                    mask_ptr,
-                    0.0,
-                    self.window_size,
+                    std::ptr::null(),
+                    sinks.as_ref().unwrap() as *const _,
                 )
             }
         } else {

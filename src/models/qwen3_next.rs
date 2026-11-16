@@ -671,6 +671,7 @@ impl Qwen3NextAttention {
             kv_heads: self.num_kv_heads,
             head_dim: self.head_dim,
             value_dim: self.head_dim,
+            sinks: false,
         }
     }
 

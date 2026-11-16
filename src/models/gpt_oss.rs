@@ -32,7 +32,9 @@ use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceS
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -488,9 +490,21 @@ struct Attention {
     rope_mscale: f32,
     rope_dims: i32,
     rope_base: f32,
+    /// The sliding window on a sliding layer, 0 on a full-attention layer.
+    window: i32,
 }
 
 impl Attention {
+    /// The geometry the model's prefill mask choice asks MLX about (#3098).
+    fn prefill_attention(&self) -> PrefillAttention {
+        PrefillAttention::new(
+            self.num_heads as usize,
+            self.num_kv_heads as usize,
+            self.head_dim as usize,
+        )
+        .with_sinks()
+    }
+
     fn forward(
         &self,
         x: &MlxArray,
@@ -544,14 +558,29 @@ impl Attention {
         // Update KV cache
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Fast SDPA with sinks support (MLX kernel-fused path)
+        // Fast SDPA with sinks support (MLX kernel-fused path). A multi-token
+        // forward without a mask is a prefill whose model left the mask to
+        // MLX's causal mode and `window_size` (#3098).
         // Used by: GptOss
-        let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-        let sinks_ptr = self.sinks.as_ref().unwrap() as *const _;
-        let attn_out = unsafe {
-            mlxcel_core::fast_scaled_dot_product_attention_with_sinks(
-                &q, &cache_k, &cache_v, self.scale, mask_ptr, sinks_ptr,
+        let attn_out = if mask.is_none() && l > 1 {
+            mlxcel_core::causal_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window,
+                self.sinks.as_ref(),
             )
+        } else {
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            let sinks_ptr = self.sinks.as_ref().unwrap() as *const _;
+            // SAFETY: the mask is null or borrowed for the call, and `sinks`
+            // is a live per-head array owned by `self`.
+            unsafe {
+                mlxcel_core::fast_scaled_dot_product_attention_with_sinks(
+                    &q, &cache_k, &cache_v, self.scale, mask_ptr, sinks_ptr,
+                )
+            }
         };
 
         // Transpose back and reshape
@@ -719,6 +748,7 @@ impl Attention {
             rope_mscale,
             rope_dims: head_dim,
             rope_base: args.rope_theta,
+            window: 0,
         })
     }
 }
@@ -758,13 +788,22 @@ impl TransformerBlock {
     ) -> Result<Self, String> {
         let prefix = format!("model.layers.{}", layer_idx);
 
-        let self_attn = Attention::from_weights(
+        let mut self_attn = Attention::from_weights(
             weights,
             args,
             &format!("{}.self_attn", prefix),
             rope_freqs,
             rope_mscale,
         )?;
+        // The forwards mask every layer that is not `full_attention` with the
+        // sliding band, so those are the windowed ones.
+        let full = args
+            .layer_types_list()
+            .get(layer_idx)
+            .is_some_and(|kind| kind == "full_attention");
+        if !full {
+            self_attn.window = args.validated_sliding_window()?;
+        }
         let mlp = MLPBlock::from_weights(weights, args, &format!("{}.mlp", prefix))?;
 
         let input_norm_weight =
@@ -900,22 +939,39 @@ impl GptOssModel {
         // Python create_attention_mask returns None for single-token input (N=1)
         // Only create masks for multi-token prefill
         if seq_len > 1 {
+            let batch = shape[0];
+            let activation_dtype = mlxcel_core::array_dtype(&h);
+            // `None` leaves a mask to MLX's causal mode (full layers) or its
+            // causal mode and `window_size` (sliding layers), with the sinks;
+            // the shared array stays where MLX would not fuse that (#3098).
             let global_offset = caches[full_idx].as_interface().offset();
-            let full_mask = create_causal_mask(seq_len, global_offset);
+            let full_mask = prefill_causal_mask(
+                seq_len,
+                global_offset,
+                batch,
+                self.layers[full_idx].self_attn.prefill_attention(),
+                activation_dtype,
+            );
 
+            // The band sized to the keys the rotating cache returns: full
+            // width for a fresh single-pass prefill that exceeds the window,
+            // clamped otherwise. See issue #408.
             let sliding_offset = caches[swa_idx].as_interface().offset();
-            let max_cache = self.sliding_window;
-            // Full-width windowed mask for a fresh single-pass prefill that
-            // exceeds the window (RotatingKVCache keeps all prefill keys),
-            // clamped mask otherwise. See issue #408.
-            let sliding_mask =
-                create_sliding_window_prefill_mask(seq_len, sliding_offset, max_cache);
+            let sliding_mask = prefill_sliding_window_mask(
+                seq_len,
+                sliding_offset,
+                self.sliding_window,
+                batch,
+                self.layers[swa_idx].self_attn.prefill_attention(),
+                activation_dtype,
+                SlidingPrefillKeys::Rotating,
+            );
 
             for (i, layer) in self.layers.iter().enumerate() {
                 let mask = if self.layer_types[i] == "full_attention" {
-                    Some(full_mask.as_ref().unwrap() as &MlxArray)
+                    full_mask.as_deref()
                 } else {
-                    Some(sliding_mask.as_ref().unwrap() as &MlxArray)
+                    sliding_mask.as_deref()
                 };
                 h = layer.forward(&h, caches[i].as_interface(), mask);
             }
@@ -1462,24 +1518,38 @@ impl GptOssStageModel {
             ));
         }
 
-        let seq_len = mlxcel_core::array_shape(hidden.as_ref().unwrap())[1];
-        let full_mask = if seq_len > 1 {
-            self.first_layer_offset(caches, "full_attention")
-                .map(|offset| create_causal_mask(seq_len, offset))
-        } else {
-            None
-        };
-        let sliding_mask = if seq_len > 1 {
-            self.first_layer_offset(caches, "sliding_attention")
-                .map(|offset| {
-                    // See issue #408: full-width windowed mask for a fresh
-                    // >window prefill, clamped otherwise.
-                    let max_cache = self.sliding_window;
-                    create_sliding_window_prefill_mask(seq_len, offset, max_cache)
-                })
-        } else {
-            None
-        };
+        let shape = mlxcel_core::array_shape(hidden.as_ref().unwrap());
+        let (batch, seq_len) = (shape[0], shape[1]);
+        let activation_dtype = mlxcel_core::array_dtype(hidden.as_ref().unwrap());
+        // `None` leaves a layer kind's mask to MLX's causal mode and
+        // `window_size` with the sinks, as the single-model forward does
+        // (#3098).
+        let full_mask = self
+            .first_layer(caches, "full_attention")
+            .and_then(|(idx, offset)| {
+                prefill_causal_mask(
+                    seq_len,
+                    offset,
+                    batch,
+                    self.layers[idx].self_attn.prefill_attention(),
+                    activation_dtype,
+                )
+            });
+        // See issue #408: full-width windowed mask for a fresh >window
+        // prefill, clamped otherwise.
+        let sliding_mask =
+            self.first_layer(caches, "sliding_attention")
+                .and_then(|(idx, offset)| {
+                    prefill_sliding_window_mask(
+                        seq_len,
+                        offset,
+                        self.sliding_window,
+                        batch,
+                        self.layers[idx].self_attn.prefill_attention(),
+                        activation_dtype,
+                        SlidingPrefillKeys::Rotating,
+                    )
+                });
 
         for (idx, layer) in self.layers.iter().enumerate() {
             let mask = match self.layer_types[idx].as_str() {
@@ -1515,11 +1585,12 @@ impl GptOssStageModel {
         }
     }
 
-    fn first_layer_offset(&self, caches: &mut [Cache], layer_type: &str) -> Option<i32> {
+    /// The stage's first layer of `layer_type` and its cache offset.
+    fn first_layer(&self, caches: &mut [Cache], layer_type: &str) -> Option<(usize, i32)> {
         self.layer_types
             .iter()
             .position(|kind| kind == layer_type)
-            .map(|idx| caches[idx].as_interface().offset())
+            .map(|idx| (idx, caches[idx].as_interface().offset()))
     }
 }
 

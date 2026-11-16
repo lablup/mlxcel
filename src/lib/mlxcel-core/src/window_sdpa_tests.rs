@@ -1306,6 +1306,7 @@ fn fused_probe_answers_false_for_degenerate_shapes() {
             false,
             true,
             WINDOW,
+            false,
         ));
     }
     assert!(!ffi::sdpa_uses_fused_kernel(
@@ -1318,6 +1319,7 @@ fn fused_probe_answers_false_for_degenerate_shapes() {
         false,
         true,
         WINDOW,
+        false,
     ));
     assert!(!native_arm_is_fused(&eligible_shape(), 0));
 }
@@ -1341,6 +1343,7 @@ fn fused_verdict_memo_matches_the_probe_and_stays_bounded() {
             arr,
             causal,
             window,
+            false,
         )
     };
     for k_len in [96, 2048, 2559] {
