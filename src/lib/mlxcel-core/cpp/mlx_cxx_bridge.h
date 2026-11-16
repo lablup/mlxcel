@@ -2155,9 +2155,9 @@ bool mamba1_scan_kernel_available();
 bool mamba1_scan_float_state_kernel_available();
 // Whether the fused scan can serve these inputs: the kernel is available, the
 // default device is the GPU, the state width fits one warp or simdgroup
-// (n <= 32), and on CUDA all six inputs share one floating dtype (the
-// condition under which the CUDA kernel is bit-identical to the graph scan it
-// replaces).
+// (n <= 32), and on CUDA all six inputs share one floating dtype, or the
+// inputs are f16 with a float32 a (issue #3125): the conditions under which
+// the CUDA kernel is bit-identical to the graph scan it replaces.
 bool mamba1_scan_kernel_accepts(
     const MlxArray& x,
     const MlxArray& delta,
@@ -2165,6 +2165,16 @@ bool mamba1_scan_kernel_accepts(
     const MlxArray& c,
     const MlxArray& a,
     const MlxArray& d
+);
+// The dtype half of the CUDA graph-exact check in mamba1_scan_kernel_accepts,
+// on dtype codes, so the rule is testable on every backend.
+bool mamba1_graph_exact_scan_accepts_dtypes(
+    int32_t x,
+    int32_t delta,
+    int32_t b,
+    int32_t c,
+    int32_t a,
+    int32_t d
 );
 void mamba1_selective_scan(
     const MlxArray& x,

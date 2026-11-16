@@ -34,10 +34,10 @@ use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
 
-use super::mamba::ssm_a_from_log;
 use super::model_owned::ModelOwnedSequenceState;
 use super::recurrent_batch::{optional_rows_uniform, split_rows, stack_optional_rows};
 use super::recurrent_snapshot::{push_optional, restore_optional};
+use super::ssm_a::ssm_a_from_log;
 use super::switch_layers::{SwitchGLU, moe_weighted_sum};
 
 // Configuration.

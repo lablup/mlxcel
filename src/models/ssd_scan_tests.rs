@@ -159,7 +159,7 @@ fn evaluation_policy_does_not_change_the_result() {
 /// bf16 values would give, so its output is bit-identical to that scan.
 #[test]
 fn ssm_a_is_bit_identical_for_f32_and_within_bf16_rounding_for_bf16() {
-    use crate::models::mamba::ssm_a_f32;
+    use crate::models::ssm_a::ssm_a_f32;
     use mlxcel_core::dtype::{BFLOAT16, FLOAT32};
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
 

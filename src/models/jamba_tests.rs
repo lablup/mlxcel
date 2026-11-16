@@ -723,7 +723,9 @@ fn jamba_mamba_prefill_rows_match_token_by_token_decode() {
 /// Jamba prefill must not walk the per-step graph scan. That loop issues
 /// several small ops per timestep per Mamba layer, and on CUDA it was about
 /// two thirds of a 3.3k-token prefill. Checked for f32 and bf16 weights (the
-/// published checkpoints are bf16), for a prefill and the decode step after it.
+/// published checkpoints are bf16) and f16 weights (pre-Ampere CUDA loads f16,
+/// with `A` kept in float32, #3125), for a prefill and the decode step after
+/// it.
 #[test]
 fn jamba_mamba_prefill_takes_the_fused_scan_where_a_port_exists() {
     use mlxcel_core::cache::SequenceId;
@@ -738,7 +740,7 @@ fn jamba_mamba_prefill_takes_the_fused_scan_where_a_port_exists() {
     ) {
         return;
     }
-    for weight_dtype in [dtype::FLOAT32, dtype::BFLOAT16] {
+    for weight_dtype in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
         let weights: WeightMap = mamba_weights()
             .into_iter()
             .map(|(k, v)| (k, mlxcel_core::astype(&v, weight_dtype)))
@@ -895,6 +897,63 @@ fn jamba_forced_graph_scan_prefill_spans_blocks_and_matches_the_kernel() {
                 "{name}: graph scan differs from the kernel by {max_diff}"
             );
         }
+    }
+}
+
+/// Issue #3125: an f16 Jamba keeps `A` in float32, and on CUDA the graph-exact
+/// kernel now takes that pair. Greedy output must not move when it does, so
+/// its prefill and decode logits must equal the forced graph scan's bit for
+/// bit, over a prefill that spans several graph-scan blocks.
+#[test]
+fn jamba_f16_cuda_kernel_matches_the_graph_scan_bit_for_bit() {
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
+    use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
+    if gpu_backend_kind() != GpuBackendKind::Cuda || !mlxcel_core::mamba1_scan_kernel_available() {
+        return;
+    }
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let len = super::GRAPH_SCAN_BLOCK as usize * 2 + 7;
+    let prompt: Vec<i32> = (0..len as i32).map(|i| (i * 7 + 3) % VOCAB).collect();
+    let run = |forced: bool, seq: u64| {
+        let weights: WeightMap = mamba_weights()
+            .into_iter()
+            .map(|(k, v)| (k, mlxcel_core::astype(&v, dtype::FLOAT16)))
+            .collect();
+        let model = JambaModel::from_weights(mamba_config(), weights)
+            .expect("f16 Mamba Jamba fixture must load");
+        let seq = SequenceId::from_raw(seq);
+        model.prepare_sequence_state(seq);
+        super::FORCE_GRAPH_SCAN.with(|f| f.set(forced));
+        let before = super::GRAPH_SCAN_STEPS.with(|n| n.get());
+        let x = mlxcel_core::from_slice_i32(&prompt, &[1, len as i32]);
+        let prefill = to_f32(&model.forward_with_sequence_id(&x, Some(seq), &mut [], None));
+        let x = mlxcel_core::from_slice_i32(&[5], &[1, 1]);
+        let decode = to_f32(&model.forward_with_sequence_id(&x, Some(seq), &mut [], None));
+        let walked = super::GRAPH_SCAN_STEPS.with(|n| n.get()) - before;
+        super::FORCE_GRAPH_SCAN.with(|f| f.set(false));
+        (prefill, decode, walked)
+    };
+    let (graph_prefill, graph_decode, graph_walked) = run(true, 3_125_001);
+    let (kernel_prefill, kernel_decode, kernel_walked) = run(false, 3_125_002);
+    assert_eq!(
+        graph_walked,
+        len + 1,
+        "the forced run must walk the graph scan"
+    );
+    assert_eq!(kernel_walked, 0, "the f16 run must take the CUDA kernel");
+    for (name, graph, kernel) in [
+        ("prefill", &graph_prefill, &kernel_prefill),
+        ("decode", &graph_decode, &kernel_decode),
+    ] {
+        assert!(kernel.iter().all(|v| v.is_finite()), "{name}: finite");
+        let differing = graph
+            .iter()
+            .zip(kernel)
+            .filter(|(g, k)| g.to_bits() != k.to_bits())
+            .count();
+        assert_eq!(graph.len(), kernel.len(), "{name}: length");
+        assert_eq!(differing, 0, "{name}: logits differ from the graph scan");
     }
 }
 

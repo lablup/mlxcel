@@ -155,7 +155,7 @@ pub(crate) fn chunked_ssd_scan(
     let max_val = mlxcel_core::full_f32(&[1], time_step_limit.1, f32_dtype);
     let dt = mlxcel_core::clip(&dt_soft, &min_val, &max_val);
 
-    let a = super::mamba::ssm_a_f32(a_log);
+    let a = super::ssm_a::ssm_a_f32(a_log);
     let a_reshaped = mlxcel_core::reshape(&a, &[1, 1, num_heads]);
     let dt_a = mlxcel_core::multiply(&dt, &a_reshaped);
 
