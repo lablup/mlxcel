@@ -684,10 +684,14 @@ mod tests {
     /// output tensor every step. The graph must therefore take and return no
     /// cache at all, and it must export the seeding entry the shim probes for.
     /// The ragged and prefill graphs keep the full-cache ABI.
+    ///
+    /// Pinned to `Precision::F32` so the f32 global type asserted here does not
+    /// depend on `MLXCEL_XLA_PRECISION`; the narrowed (f16/bf16) global is
+    /// covered by `single_decode_cache_global_uses_the_contraction_precision`.
     #[test]
     fn single_decode_threads_kv_through_module_globals() {
         let c = Config::llama_3_2_1b();
-        let mlir = emit_decode(&c, true);
+        let mlir = emit_decode_with(&c, true, Precision::F32);
         let cache_ty = format!(
             "tensor<{}x{}x{}x{}xf32>",
             c.n_layers,
@@ -748,6 +752,260 @@ mod tests {
         assert!(
             prefill_signature.contains(&cache_ty),
             "prefill still returns the full caches: {prefill_signature}"
+        );
+    }
+
+    /// Issue #2886: the single-sequence decode stores its KV globals in the
+    /// contraction precision, so the f16/bf16 dot_generals read the cache
+    /// without a per-step whole-slab `stablehlo.convert`. The import entry keeps
+    /// the f32 prefill signature and narrows once per request.
+    #[test]
+    fn single_decode_cache_global_uses_the_contraction_precision() {
+        let c = Config::llama_3_2_1b();
+        let f32_graph = emit_decode_with(&c, true, Precision::F32);
+        let f16_graph = emit_decode_with(&c, true, Precision::F16);
+        let bf16_graph = emit_decode_with(&c, true, Precision::Bf16);
+        let shape = format!(
+            "{}x{}x{}x{}",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let f32_ty = format!("tensor<{shape}xf32>");
+        let f16_ty = format!("tensor<{shape}xf16>");
+        let bf16_ty = format!("tensor<{shape}xbf16>");
+        assert!(
+            f32_graph.contains(&format!("util.global private mutable @kcache : {f32_ty}")),
+            "f32 keeps the byte-identical f32 cache"
+        );
+        assert!(
+            f16_graph.contains(&format!("util.global private mutable @kcache : {f16_ty}"))
+                && f16_graph.contains(&format!("util.global private mutable @vcache : {f16_ty}")),
+            "f16 stores both caches narrowed"
+        );
+        assert!(
+            bf16_graph.contains(&format!("util.global private mutable @kcache : {bf16_ty}"))
+                && bf16_graph.contains(&format!("util.global private mutable @vcache : {bf16_ty}")),
+            "bf16 stores both caches in bf16"
+        );
+        // The import entry keeps the f32 prefill signature on every precision,
+        // and converts exactly once per request when the global is narrowed.
+        for (graph, narrow_ty) in [
+            (&f32_graph, None),
+            (&f16_graph, Some(&f16_ty)),
+            (&bf16_graph, Some(&bf16_ty)),
+        ] {
+            assert!(
+                graph.contains(&format!(
+                    "func.func public @kv_import(%k: {f32_ty}, %v: {f32_ty})"
+                )),
+                "the import entry must keep the f32 prefill signature"
+            );
+            match narrow_ty {
+                Some(ty) => {
+                    for (arg, dst, global) in
+                        [("k", "%k_narrow", "kcache"), ("v", "%v_narrow", "vcache")]
+                    {
+                        assert!(
+                            graph.contains(&format!(
+                                "{dst} = stablehlo.convert %{arg} : ({f32_ty}) -> {ty}"
+                            )),
+                            "the import must narrow %{arg} f32 -> {ty}"
+                        );
+                        assert!(
+                            graph.contains(&format!("util.global.store {dst}, @{global} : {ty}")),
+                            "the import must store {dst} into the narrowed @{global}"
+                        );
+                    }
+                }
+                None => {
+                    assert!(
+                        !graph.contains("stablehlo.convert %k : "),
+                        "f32 must import without a conversion"
+                    );
+                    for (arg, global) in [("%k", "kcache"), ("%v", "vcache")] {
+                        assert!(
+                            graph.contains(&format!(
+                                "util.global.store {arg}, @{global} : {f32_ty}"
+                            )),
+                            "{arg} must be stored into the f32 @{global}"
+                        );
+                    }
+                }
+            }
+        }
+        // The narrow graph no longer converts the whole cache slab into the
+        // score and context contractions; only the new `[1, 1, nkv, d]` row is
+        // narrowed, at the update site.
+        let slab_f32 = format!(
+            "tensor<{}x{}x{}xf32>",
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let slab_f16 = format!(
+            "tensor<{}x{}x{}xf16>",
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let row_f32 = format!("tensor<1x1x{}x{}xf32>", c.cache_heads(), c.cache_dim());
+        let row_f16 = format!("tensor<1x1x{}x{}xf16>", c.cache_heads(), c.cache_dim());
+        assert!(
+            !f16_graph.contains(&format!("({slab_f32}) -> {slab_f16}")),
+            "the whole-slab cache conversion must be gone"
+        );
+        assert!(
+            f16_graph.contains(&format!("({row_f32}) -> {row_f16}")),
+            "the narrow graph converts only the new cache row"
+        );
+    }
+
+    /// Issue #2886: the graph that ships on `hip`/`cuda` is the native
+    /// packed-projection form, so the narrowed cache has to hold there too. The
+    /// native block replaces the projection dispatches, not the cache, and
+    /// `kv_import` keeps its f32 signature.
+    #[test]
+    fn native_decode_keeps_the_narrowed_cache_and_the_f32_import() {
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::InOut;
+        c.packed_args = true;
+        c.native_head = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let native = Some(("#mlxcel_qmv_target = alias", "  source-block\n"));
+        let shape = format!(
+            "{}x{}x{}x{}",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let f32_ty = format!("tensor<{shape}xf32>");
+        let f16_ty = format!("tensor<{shape}xf16>");
+
+        let f16_graph = emit_decode_with_native(&c, true, Precision::F16, native);
+        assert!(
+            f16_graph.contains("flow.dispatch @custom_qmv::@qmv4_kernel["),
+            "the native projection dispatch is the graph under test"
+        );
+        assert!(
+            f16_graph.contains(&format!("util.global private mutable @kcache : {f16_ty}")),
+            "the native decode stores the cache in the contraction precision"
+        );
+        for (arg, dst, global) in [("k", "%k_narrow", "kcache"), ("v", "%v_narrow", "vcache")] {
+            assert!(
+                f16_graph.contains(&format!(
+                    "{dst} = stablehlo.convert %{arg} : ({f32_ty}) -> {f16_ty}"
+                )),
+                "the native import must narrow %{arg} once per request"
+            );
+            assert!(
+                f16_graph.contains(&format!("util.global.store {dst}, @{global} : {f16_ty}")),
+                "the native import stores the narrowed {global}"
+            );
+        }
+
+        // The f32 native graph is unchanged: f32 globals, no import conversion.
+        let f32_graph = emit_decode_with_native(&c, true, Precision::F32, native);
+        assert!(f32_graph.contains(&format!("util.global private mutable @kcache : {f32_ty}")));
+        assert!(!f32_graph.contains("stablehlo.convert %k : "));
+        assert!(f32_graph.contains(&format!("util.global.store %k, @kcache : {f32_ty}")));
+    }
+
+    /// Issue #2886 guards the other graph kinds: the ragged decode takes the
+    /// full f32 cache through the ABI, because the batch engine's slot buffers
+    /// and the prefill result are f32. The narrowing must not leak into it even
+    /// when the contractions are f16, and its per-row update stays f32.
+    #[test]
+    fn ragged_decode_keeps_the_f32_cache_abi_under_f16() {
+        let c = Config::llama_3_2_1b();
+        let bsz = 4;
+        let graph = emit_decode_ragged_with(&c, bsz, false, Precision::F16);
+        let cache_ty = format!(
+            "tensor<{}x{}x{}x{}x{}xf32>",
+            bsz,
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        for symbol in ["kcache", "vcache"] {
+            assert!(
+                graph.contains(&format!(": {cache_ty} loc(\"{symbol}\")")),
+                "ragged {symbol} keeps the f32 ABI under f16"
+            );
+        }
+        let row_f32 = format!("tensor<1x1x1x{}x{}xf32>", c.cache_heads(), c.cache_dim());
+        let row_f16 = format!("tensor<1x1x1x{}x{}xf16>", c.cache_heads(), c.cache_dim());
+        assert!(
+            !graph.contains(&format!("({row_f32}) -> {row_f16}")),
+            "the ragged cache write must not narrow the row"
+        );
+    }
+
+    /// Issue #2886: the MLA single-sequence decode shares the now-narrowed cache
+    /// global, so its write site must narrow the new row too. Without this the
+    /// `dynamic_update_slice` mixes an f16 operand with an f32 update and the
+    /// graph does not compile under an explicit f16/bf16 precision override.
+    #[test]
+    fn mla_single_decode_narrows_the_cache_row() {
+        let json = r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
+            "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
+            "kv_lora_rank":16,"q_lora_rank":24,"qk_nope_head_dim":8,
+            "qk_rope_head_dim":4,"v_head_dim":8,"rope_interleave":true,
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#;
+        let c = Config::from_json_str(json)
+            .unwrap()
+            .with_context_capacity(16)
+            .unwrap();
+        let width = c.cache_dim();
+        let cache_ty = format!(
+            "tensor<{}x{}x{}x{}x",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let f32_ty = format!("{cache_ty}f32>");
+        let f16_ty = format!("{cache_ty}f16>");
+        let g = emit_decode_with(&c, false, Precision::F16);
+        let row_f32 = format!("tensor<1x1x1x{width}xf32>");
+        let row_f16 = format!("tensor<1x1x1x{width}xf16>");
+        assert!(
+            g.contains(&format!("({row_f32}) -> {row_f16}")),
+            "MLA single decode must narrow the new cache row under f16"
+        );
+        assert!(
+            g.contains(&format!(
+                "func.func public @kv_import(%k: {f32_ty}, %v: {f32_ty})"
+            )),
+            "the MLA import keeps the f32 prefill signature"
+        );
+        assert!(
+            g.contains(&format!(
+                "%k_narrow = stablehlo.convert %k : ({f32_ty}) -> {f16_ty}"
+            )),
+            "the MLA import narrows the f32 prefill cache once per request"
+        );
+        let g_f32 = emit_decode_with(&c, false, Precision::F32);
+        assert!(
+            g_f32.contains(&format!(
+                "util.global private mutable @kcache : tensor<{}x{}x{}x{}xf32>",
+                c.n_layers,
+                c.context_capacity,
+                c.cache_heads(),
+                c.cache_dim()
+            )),
+            "f32 MLA keeps the f32 cache"
+        );
+        assert!(
+            !g_f32.contains(&format!("({row_f32}) -> {row_f16}")),
+            "f32 MLA emits no row conversion"
         );
     }
 
