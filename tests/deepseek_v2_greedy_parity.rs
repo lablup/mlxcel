@@ -23,7 +23,10 @@
 //! Two independent gates:
 //!
 //! * `deepseek_v2_greedy_parity_matches_mlx_lm` pins the generated ids against
-//!   `mlx_lm` 0.31.3 greedy decode on `models/deepseek-v2-lite-4bit`.
+//!   `mlx_lm` 0.31.3 greedy decode on `models/deepseek-v2-lite-4bit`,
+//!   teacher-forced on the reference ids so one near-tie cannot cascade, and
+//!   tolerating a different argmax only where the reference id is within
+//!   [`TIE_TOLERANCE`] of the top logit.
 //! * `deepseek_v2_prefill_is_causal` pins the property the bug violated,
 //!   without depending on any reference ids: the first prompt position's logits
 //!   must not move when later prompt tokens are added. A bidirectional prefill
@@ -48,6 +51,15 @@ const REF_GREEDY_OUT: &[i32] = &[
     8913, 13, 185, 549, 6269, 4706, 280, 7239, 317, 6016, 13, 185, 549, 19305, 280, 7239, 317, 254,
     28071, 334,
 ];
+
+/// How far below the top logit the reference id may sit and still count as a
+/// tie rather than a divergence: four f16 ULPs at the magnitude these logits
+/// reach (about 30, where one ULP is 1/64).
+const TIE_TOLERANCE: f32 = 0.0625;
+
+/// Near-ties allowed across the 20 reference steps. The measured layouts have
+/// zero (decompressed, composed absorbed) or one (fused absorbed).
+const MAX_TIES: usize = 2;
 
 fn argmax_last_token(logits: &mlxcel_core::MlxArray) -> i32 {
     let shape = mlxcel_core::array_shape(logits);
@@ -105,17 +117,42 @@ fn deepseek_v2_greedy_parity_matches_mlx_lm() {
     let prompt = mlxcel_core::from_slice_i32(INPUT_IDS, &[1, INPUT_IDS.len() as i32]);
     let mut logits = LanguageModel::forward(&model, &prompt, &mut caches, None);
 
-    let mut out = Vec::with_capacity(REF_GREEDY_OUT.len());
-    for _ in 0..REF_GREEDY_OUT.len() {
+    // Teacher-forced: every step consumes the reference id, so the step's
+    // logits are conditioned on the same text mlx-lm saw. A step passes when
+    // its argmax is the reference id, or when the reference id sits within
+    // `TIE_TOLERANCE` of the top logit (a tie the arithmetic order decides).
+    // The absorbed default (#3131) is exactly that case at step 1: the
+    // decompressed layout scores `.` 29.109 over `,` 29.094, and the fused
+    // absorbed kernel scores both 29.094, so the lower id wins the argmax.
+    // A bidirectional prefill (#991) misses by whole logits on every step.
+    let mut mismatches = Vec::new();
+    let mut ties = 0usize;
+    for (step, &expected) in REF_GREEDY_OUT.iter().enumerate() {
         let tok = argmax_last_token(&logits);
-        out.push(tok);
-        let next = mlxcel_core::from_slice_i32(&[tok], &[1, 1]);
+        if tok != expected {
+            let last = mlxcel_core::array_shape(&logits)[1] - 1;
+            let row = logit_row(&logits, last);
+            let top = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let shortfall = top - row[expected as usize];
+            if shortfall <= TIE_TOLERANCE {
+                ties += 1;
+            } else {
+                mismatches.push((step, tok, expected, shortfall));
+            }
+        }
+        let next = mlxcel_core::from_slice_i32(&[expected], &[1, 1]);
         logits = LanguageModel::forward(&model, &next, &mut caches, None);
     }
 
-    assert_eq!(
-        out, REF_GREEDY_OUT,
-        "DeepSeek-V2 greedy decode diverged from the mlx-lm reference"
+    assert!(
+        mismatches.is_empty(),
+        "DeepSeek-V2 greedy decode diverged from the mlx-lm reference at decided steps \
+         (step, got, expected, logit shortfall): {mismatches:?}"
+    );
+    assert!(
+        ties <= MAX_TIES,
+        "{ties} of {} steps were near-ties, more than the {MAX_TIES} rounding can explain",
+        REF_GREEDY_OUT.len()
     );
 }
 

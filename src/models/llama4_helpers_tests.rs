@@ -88,6 +88,7 @@ fn text_args_quantization_defaults_are_available_to_helpers() {
         attention_bias: false,
         use_qk_norm: true,
         rope_theta: 500000.0,
+        rope_scaling: None,
         attn_temperature_tuning: 0,
         floor_scale: 1,
         attn_scale: 1.0,
@@ -217,4 +218,171 @@ fn chunked_prefill_behind_a_trimmed_front_matches_dense_mask() {
 #[test]
 fn chunked_prefill_in_f16_matches_dense_mask() {
     assert_maskless_matches_dense(5, 19, mlxcel_core::dtype::FLOAT16, 5e-3);
+}
+
+// Issue #3120: Llama 4 rotates with mlx-lm's `initialize_rope(...,
+// traditional=True, scaling_config=rope_scaling)`.
+
+const ROPE_HEAD_DIM: usize = 128;
+const ROPE_THETA: f64 = 500_000.0;
+
+/// Scout's text config, reduced to what the rope reads.
+fn scout_rope_args() -> TextArgs {
+    serde_json::from_value(serde_json::json!({
+        "model_type": "llama4_text",
+        "hidden_size": 5120,
+        "num_hidden_layers": 48,
+        "intermediate_size": 8192,
+        "intermediate_size_mlp": 16384,
+        "num_attention_heads": 40,
+        "num_key_value_heads": 8,
+        "rms_norm_eps": 1e-5,
+        "vocab_size": 202048,
+        "head_dim": ROPE_HEAD_DIM,
+        "max_position_embeddings": 10485760,
+        "attention_chunk_size": 8192,
+        "interleave_moe_layer_step": 1,
+        "num_local_experts": 16,
+        "num_experts_per_tok": 1,
+        "rope_theta": ROPE_THETA,
+        "rope_scaling": {
+            "factor": 16.0,
+            "high_freq_factor": 1.0,
+            "low_freq_factor": 1.0,
+            "original_max_position_embeddings": 8192,
+            "rope_type": "llama3"
+        }
+    }))
+    .expect("Scout rope config must parse")
+}
+
+/// Host transcription of mlx-lm's `Llama3RoPE._freqs` for Scout's block, in
+/// f64, written out here rather than shared with `rope_utils` so the test does
+/// not check the table against itself.
+fn reference_llama3_divisors() -> Vec<f64> {
+    let (factor, low, high, old_ctx) = (16.0_f64, 1.0_f64, 1.0_f64, 8192.0_f64);
+    let low_wavelen = old_ctx / low;
+    let high_wavelen = old_ctx / high;
+    (0..ROPE_HEAD_DIM / 2)
+        .map(|i| {
+            let freq = ROPE_THETA.powf((2 * i) as f64 / ROPE_HEAD_DIM as f64);
+            let wavelen = 2.0 * std::f64::consts::PI * freq;
+            if wavelen > low_wavelen {
+                freq * factor
+            } else if wavelen > high_wavelen && wavelen < low_wavelen {
+                let smooth = (old_ctx / wavelen - low) / (high - low);
+                freq / ((1.0 - smooth) / factor + smooth)
+            } else {
+                freq
+            }
+        })
+        .collect()
+}
+
+/// Traditional (adjacent-pair) rotation of a row-major `[heads, seq, dims]`
+/// block whose first position is `offset`.
+fn reference_traditional_rope(x: &[f32], heads: usize, seq: usize, offset: usize) -> Vec<f32> {
+    let divisors = reference_llama3_divisors();
+    let mut out = vec![0.0_f32; x.len()];
+    for h in 0..heads {
+        for s in 0..seq {
+            let pos = (offset + s) as f64;
+            let row = (h * seq + s) * ROPE_HEAD_DIM;
+            for (i, div) in divisors.iter().enumerate() {
+                let theta = pos / div;
+                let (sin, cos) = theta.sin_cos();
+                let a = x[row + 2 * i] as f64;
+                let b = x[row + 2 * i + 1] as f64;
+                out[row + 2 * i] = (a * cos - b * sin) as f32;
+                out[row + 2 * i + 1] = (a * sin + b * cos) as f32;
+            }
+        }
+    }
+    out
+}
+
+fn rope_input(len: usize, seed: u32) -> Vec<f32> {
+    (0..len)
+        .map(|i| {
+            (((i as u32).wrapping_mul(2654435761).wrapping_add(seed)) % 2001) as f32 / 1000.0 - 1.0
+        })
+        .collect()
+}
+
+fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f32::max)
+}
+
+// f32 angles at position ~20000 carry about 2e-3 rad of rounding, so the bound
+// is loose enough for that and far below the 0.1+ gap a wrong pairing or an
+// unscaled table opens.
+const ROPE_TOL: f32 = 5e-3;
+
+#[test]
+fn llama4_rope_matches_traditional_llama3_reference_at_several_offsets() {
+    let _guard = test_guard().lock().unwrap();
+    let rope = crate::models::llama4_helpers::Llama4Rope::from_args(&scout_rope_args());
+    let (heads, seq) = (2_usize, 3_usize);
+    for (n, offset) in [0_usize, 7, 4093, 8191, 20000].into_iter().enumerate() {
+        let host = rope_input(heads * seq * ROPE_HEAD_DIM, n as u32);
+        let x = mlxcel_core::from_slice_f32(
+            &host,
+            &[1, heads as i32, seq as i32, ROPE_HEAD_DIM as i32],
+        );
+        let got = rope.apply(&x, offset as i32);
+        mlxcel_core::eval(&got);
+        let got = mlxcel_core::utils::array_to_vec_f32(&got);
+        let want = reference_traditional_rope(&host, heads, seq, offset);
+        let diff = max_abs_diff(&got, &want);
+        assert!(diff < ROPE_TOL, "offset {offset}: max |diff| {diff}");
+
+        // The rotation this replaced (split halves, unscaled theta) must fail
+        // the same reference, or the check above proves nothing.
+        if offset > 0 {
+            let old = mlxcel_core::fast_rope(
+                &x,
+                ROPE_HEAD_DIM as i32,
+                false,
+                ROPE_THETA as f32,
+                1.0,
+                offset as i32,
+            );
+            mlxcel_core::eval(&old);
+            let old = mlxcel_core::utils::array_to_vec_f32(&old);
+            assert!(
+                max_abs_diff(&old, &want) > 0.1,
+                "offset {offset}: old rope matched"
+            );
+        }
+    }
+}
+
+#[test]
+fn llama4_batched_rope_matches_traditional_llama3_reference_per_row() {
+    let _guard = test_guard().lock().unwrap();
+    let rope = crate::models::llama4_helpers::Llama4Rope::from_args(&scout_rope_args());
+    let heads = 2_usize;
+    let offsets = [3_i32, 8190, 19999];
+    let row_len = heads * ROPE_HEAD_DIM;
+    let host = rope_input(offsets.len() * row_len, 11);
+    let x = mlxcel_core::from_slice_f32(
+        &host,
+        &[offsets.len() as i32, heads as i32, 1, ROPE_HEAD_DIM as i32],
+    );
+    let got = rope.apply_batched(&x, &offsets);
+    mlxcel_core::eval(&got);
+    let got = mlxcel_core::utils::array_to_vec_f32(&got);
+    for (b, offset) in offsets.iter().enumerate() {
+        let span = b * row_len..(b + 1) * row_len;
+        let want = reference_traditional_rope(&host[span.clone()], heads, 1, *offset as usize);
+        let diff = max_abs_diff(&got[span], &want);
+        assert!(
+            diff < ROPE_TOL,
+            "row {b} at offset {offset}: max |diff| {diff}"
+        );
+    }
 }
