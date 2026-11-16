@@ -252,11 +252,20 @@ pub struct MambaBlock {
 /// both hold `exp(19.5)`. Computing `A` from a float32 copy keeps the value
 /// the checkpoint describes whatever the load-time dtype policy did to
 /// `A_log`; `MambaBlock::scan_a` decides the dtype each scan reads it in.
+/// Models that keep `A` call this once at load; it evaluates the result.
 pub(crate) fn ssm_a_from_log(a_log: &MlxArray) -> UniquePtr<MlxArray> {
-    let a_log = mlxcel_core::astype(a_log, mlxcel_core::dtype::FLOAT32);
-    let a = mlxcel_core::negative(&mlxcel_core::exp(&a_log));
+    let a = ssm_a_f32(a_log);
     mlxcel_core::eval(&a);
     a
+}
+
+/// The unevaluated graph of [`ssm_a_from_log`], for scans that take `A_log`
+/// itself (the Mamba2 SSD scans, whose decode kernels read `A_log`): `exp`
+/// runs on a float32 copy, so an f16 `A_log` past 11.09 stays finite (#3057).
+/// It adds no evaluation, so calling it per forward pass costs no sync.
+pub(crate) fn ssm_a_f32(a_log: &MlxArray) -> UniquePtr<MlxArray> {
+    let a_log = mlxcel_core::astype(a_log, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::negative(&mlxcel_core::exp(&a_log))
 }
 
 impl MambaBlock {

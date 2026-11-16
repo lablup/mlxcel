@@ -810,6 +810,15 @@ impl Glm4vTextModel {
                         &[pos_shape[0], pos_shape[1], cache_offset + seq_len],
                     );
                 }
+                if let Some(positions) = padded_tail_positions(
+                    stored_pos,
+                    entry.rope_deltas.unwrap_or(0),
+                    batch,
+                    seq_len,
+                    cache_offset,
+                ) {
+                    return positions;
+                }
                 Self::compute_position_ids_with_delta(
                     entry.rope_deltas.unwrap_or(0),
                     batch,
@@ -1040,7 +1049,58 @@ impl Glm4vTextModel {
     }
 }
 
+/// The MRoPE positions of an embedding prefill that was padded past the
+/// stored positions: the stored rows for the real tokens, then the
+/// text-continuation positions (`index + rope_deltas`) for the pad rows.
+///
+/// A tile-aligned padded prefill hands the model `seq_len` rows while the
+/// stored positions cover only the real prompt, so the stored slice alone
+/// does not fit. Falling back to `index + rope_deltas` for every row would
+/// give the real rows after an image the wrong positions; the pad rows'
+/// outputs are discarded and their K/V trimmed, so only their finiteness
+/// matters. `None` when the stored positions already cover the piece or
+/// start at or before the cache offset (decode), which keep the plain paths.
+///
+/// Used by: Glm4vTextModel, Glm4vMoeTextModel.
+pub(crate) fn padded_tail_positions(
+    stored: &MlxArray,
+    delta: i32,
+    batch: i32,
+    seq_len: i32,
+    cache_offset: i32,
+) -> Option<UniquePtr<MlxArray>> {
+    let shape = mlxcel_core::array_shape(stored);
+    if shape.len() != 3 || shape[1] != batch {
+        return None;
+    }
+    let stored_len = shape[2];
+    if !(cache_offset < stored_len && stored_len < cache_offset + seq_len) {
+        return None;
+    }
+    let real = mlxcel_core::slice(
+        stored,
+        &[0, 0, cache_offset],
+        &[shape[0], shape[1], stored_len],
+    );
+    let tail_len = cache_offset + seq_len - stored_len;
+    let tail = mlxcel_core::arange_i32(stored_len + delta, stored_len + delta + tail_len, 1);
+    let tail = mlxcel_core::reshape(&tail, &[1, 1, tail_len]);
+    let tail = mlxcel_core::broadcast_to(&tail, &[shape[0], batch, tail_len]);
+    let tail = mlxcel_core::astype(&tail, mlxcel_core::array_dtype(&real));
+    Some(mlxcel_core::concatenate(&real, &tail, 2))
+}
+
 impl mlxcel_core::generate::LanguageModel for Glm4vTextModel {
+    /// A tile-aligned padded prefill needs no padding mask: the pad tokens
+    /// follow the real ones, so a causal forward (MLX's causal mode, or the
+    /// shared causal or windowed array where MLX does not fuse it) already
+    /// hides them from every real row, and the caches the engine trims are
+    /// the caller's dense ones, with the MRoPE positions of a padded row left
+    /// to the cache offset exactly as under a padding mask (#3101).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }

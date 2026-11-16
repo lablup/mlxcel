@@ -40,6 +40,8 @@ mod last_row_logits_tests;
 #[cfg(test)]
 mod mixtral_style_batched_decode_tests;
 #[cfg(test)]
+pub(crate) mod padded_prefill_parity_tests;
+#[cfg(test)]
 pub(crate) mod popular_dense_batched_decode_tests;
 #[cfg(test)]
 pub(crate) mod qwen_vl_batched_decode_test_support;
@@ -69,6 +71,8 @@ pub(crate) mod recurrent_batch;
 mod recurrent_snapshot;
 pub mod registry;
 mod sanitize;
+#[cfg(test)]
+pub(crate) mod ssm_test_support;
 
 // Shared modules
 // `config` holds shared serde defaults and the common `QuantizationArgs`. It

@@ -19,9 +19,10 @@
 
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
 use crate::models::llama4_helpers::{
-    create_chunked_attention_mask, get_weight_copy, load_quantized_linear,
+    Llama4Rope, create_chunked_attention_mask, get_weight_copy, load_quantized_linear,
 };
 use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::rope_utils::RopeScalingSpec;
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{
     CachePool, KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
@@ -65,6 +66,8 @@ impl KvAttention for Llama4Cache {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         match self {
+            // `ChunkedKVCache::attend` keeps every query inside its own
+            // chunk: maskless per query chunk, decode included (#3100, #3105).
             Llama4Cache::Chunked(c) => ChunkedKVCache::attend(c, q, keys, values, scale, mask),
             Llama4Cache::Regular(c) => KVCache::attend(c, q, keys, values, scale, mask),
         }
@@ -242,6 +245,11 @@ pub struct TextArgs {
 
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
+
+    /// The checkpoint's `rope_scaling` block (`llama3` on Scout and
+    /// Maverick), applied by [`Llama4Rope`] (#3120).
+    #[serde(default)]
+    pub rope_scaling: Option<RopeScalingSpec>,
 
     #[serde(default = "default_attn_temperature_tuning")]
     pub attn_temperature_tuning: i32,
@@ -585,9 +593,8 @@ pub struct CxxAttention {
     pub scale: f32,
     pub use_rope: bool,
     pub use_qk_norm: bool,
-    pub rope_dims: i32,
-    pub rope_base: f32,
-    pub rope_scale: f32,
+    /// Traditional, `rope_scaling`-aware rotation (#3120).
+    pub(crate) rope: Llama4Rope,
     pub attn_temperature_tuning: i32,
     pub floor_scale: usize,
     pub attn_scale: f32,
@@ -624,22 +631,8 @@ impl CxxAttention {
 
         // Apply RoPE if enabled
         if self.use_rope {
-            q = mlxcel_core::fast_rope(
-                &q,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
-            k = mlxcel_core::fast_rope(
-                &k,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
+            q = self.rope.apply(&q, offset);
+            k = self.rope.apply(&k, offset);
         }
 
         // Apply QK normalization if enabled
@@ -719,22 +712,8 @@ impl CxxAttention {
         let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
         let offsets: Vec<i32> = caches.iter().map(|cache| cache.offset()).collect();
-        q = mlxcel_core::fast_rope_batched(
-            &q,
-            self.rope_dims,
-            false,
-            self.rope_base,
-            self.rope_scale,
-            &offsets,
-        );
-        k = mlxcel_core::fast_rope_batched(
-            &k,
-            self.rope_dims,
-            false,
-            self.rope_base,
-            self.rope_scale,
-            &offsets,
-        );
+        q = self.rope.apply_batched(&q, &offsets);
+        k = self.rope.apply_batched(&k, &offsets);
 
         if self.use_qk_norm {
             let q_dtype = mlxcel_core::array_dtype(&q);
@@ -777,22 +756,8 @@ impl CxxAttention {
         let offset = cache.offset;
 
         if self.use_rope {
-            q = mlxcel_core::fast_rope(
-                &q,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
-            k = mlxcel_core::fast_rope(
-                &k,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
+            q = self.rope.apply(&q, offset);
+            k = self.rope.apply(&k, offset);
         }
 
         if self.use_qk_norm {
@@ -903,26 +868,12 @@ impl CxxAttention {
 
         // Apply RoPE if enabled
         if self.use_rope {
-            q = mlxcel_core::fast_rope(
-                &q,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
+            q = self.rope.apply(&q, offset);
             if check_nan("q_after_rope", &q) {
                 return q;
             }
 
-            k = mlxcel_core::fast_rope(
-                &k,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                self.rope_scale,
-                offset,
-            );
+            k = self.rope.apply(&k, offset);
             if check_nan("k_after_rope", &k) {
                 return k;
             }
@@ -1163,6 +1114,31 @@ impl Llama4CxxModel {
         mlxcel_core::utils::prefill_causal_mask(seq_len, offset, batch, attention, dtype)
     }
 
+    /// The MoE (chunked) layers' prefill mask. `None` for a decode row, and
+    /// for a prefill where MLX's causal mode applies
+    /// ([`mlxcel_core::utils::prefill_uses_causal_mode`]: one row, no
+    /// speculative verify, `MLXCEL_PREFILL_CAUSAL_MODE` not `0`), where
+    /// `Llama4Cache::attend` runs the chunked attention per query chunk in
+    /// causal mode instead of over this dense `[L, S]` array (#3100).
+    /// Otherwise the array mask, the earlier dispatch. Call it after the
+    /// front trim: the mask spans the visible keys from `start_position`.
+    fn chunked_prefill_mask(
+        &self,
+        seq_len: i32,
+        batch: i32,
+        caches: &[Llama4Cache],
+    ) -> Option<UniquePtr<MlxArray>> {
+        if seq_len <= 1 || mlxcel_core::utils::prefill_uses_causal_mode(seq_len, batch, false) {
+            return None;
+        }
+        Some(create_chunked_attention_mask(
+            seq_len,
+            caches[0].start_position(),
+            caches[0].offset(),
+            self.attention_chunk_size,
+        ))
+    }
+
     /// Forward pass with iGQA (Interleaved GQA) pattern
     pub fn forward_igqa(
         &self,
@@ -1183,21 +1159,10 @@ impl Llama4CxxModel {
             }
         }
 
-        // Get start_position and offset from first cache for mask creation
-        let start_position = caches[0].start_position();
+        // The MoE (chunked) layers usually take no mask: their cache runs
+        // the chunked attention per query chunk in MLX's causal mode (#3100).
+        let chunk_mask = self.chunked_prefill_mask(seq_len, shape[0], caches);
         let offset = caches[0].offset();
-
-        // Create chunk mask for MoE layers (iGQA pattern)
-        let chunk_mask = if seq_len > 1 {
-            Some(create_chunked_attention_mask(
-                seq_len,
-                start_position,
-                offset,
-                self.attention_chunk_size,
-            ))
-        } else {
-            None
-        };
 
         // Create global mask for dense layers. A single row leaves causality
         // to MLX's causal mode where MLX fuses it (#3072); `KVCache::attend`
@@ -1207,8 +1172,7 @@ impl Llama4CxxModel {
         // Pass through transformer layers with appropriate masks
         for (idx, layer) in self.layers.iter().enumerate() {
             // MoE layers use chunked attention, dense layers use global attention
-            let use_chunked = uses_chunked_cache(idx);
-            let mask = if use_chunked {
+            let mask = if uses_chunked_cache(idx) {
                 chunk_mask.as_deref()
             } else {
                 global_mask.as_deref()
@@ -1259,25 +1223,14 @@ impl Llama4CxxModel {
             }
         }
 
-        let start_position = caches[0].start_position();
+        // Chunked layers usually take no mask (#3100), as in `forward_igqa`.
+        let chunk_mask = self.chunked_prefill_mask(seq_len, shape[0], caches);
         let offset = caches[0].offset();
-
-        let chunk_mask = if seq_len > 1 {
-            Some(create_chunked_attention_mask(
-                seq_len,
-                start_position,
-                offset,
-                self.attention_chunk_size,
-            ))
-        } else {
-            None
-        };
 
         let global_mask = self.global_prefill_mask(seq_len, offset, shape[0], &h);
 
         for (idx, layer) in self.layers.iter().enumerate() {
-            let use_chunked = uses_chunked_cache(idx);
-            let mask = if use_chunked {
+            let mask = if uses_chunked_cache(idx) {
                 chunk_mask.as_deref()
             } else {
                 global_mask.as_deref()
@@ -1576,6 +1529,7 @@ impl CxxAttention {
 
         // RoPE unused for dense layers (every 4th layer)
         let use_rope = !(layer_idx + 1).is_multiple_of(4);
+        let rope = Llama4Rope::from_args(args);
 
         Ok(Self {
             q_proj,
@@ -1588,9 +1542,7 @@ impl CxxAttention {
             scale: 1.0 / (args.head_dim as f32).sqrt(),
             use_rope,
             use_qk_norm: args.use_qk_norm && use_rope,
-            rope_dims: args.head_dim as i32,
-            rope_base: args.rope_theta,
-            rope_scale: 1.0,
+            rope,
             attn_temperature_tuning: args.attn_temperature_tuning,
             floor_scale: args.floor_scale,
             attn_scale: args.attn_scale,

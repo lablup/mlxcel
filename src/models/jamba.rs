@@ -34,6 +34,7 @@ use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
 
+use super::mamba::ssm_a_from_log;
 use super::model_owned::ModelOwnedSequenceState;
 use super::recurrent_batch::{optional_rows_uniform, split_rows, stack_optional_rows};
 use super::recurrent_snapshot::{push_optional, restore_optional};
@@ -556,6 +557,20 @@ fn graph_scan_forced() -> bool {
 /// sequential loop; per block they stay bounded by this length (#3073).
 pub(super) const GRAPH_SCAN_BLOCK: i32 = 256;
 
+/// `exp(delta * A)` in the activation dtype of `x`. `A` is float32 only for
+/// f16 activations (see `JambaMambaMixer::scan_a`); the decay lies in (0, 1],
+/// so rounding it back keeps the state, and everything after it, in the
+/// activation dtype, as `MambaBlock::ssm_step` does.
+fn decay_in_activation_dtype(delta_a: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray> {
+    let decay = mlxcel_core::exp(delta_a);
+    let dtype = mlxcel_core::array_dtype(x);
+    if mlxcel_core::array_dtype(&decay) == dtype {
+        decay
+    } else {
+        mlxcel_core::astype(&decay, dtype)
+    }
+}
+
 /// Mamba1 selective scan as a graph, the fallback when the fused kernel does
 /// not accept the inputs (mixed dtypes on CUDA, the CPU,
 /// `MLXCEL_MAMBA1_SCAN_KERNEL=0`).
@@ -603,7 +618,7 @@ pub(super) fn graph_selective_scan(
 
         // dtA = exp(delta[..., None] * A)
         let delta_exp = mlxcel_core::reshape(&delta_blk, &[batch, block_len, d_inner, 1]);
-        let dt_a = mlxcel_core::exp(&mlxcel_core::multiply(&delta_exp, a));
+        let dt_a = decay_in_activation_dtype(&mlxcel_core::multiply(&delta_exp, a), x);
 
         for i in 0..block_len {
             let new_state_t = mlxcel_core::squeeze_axis(&slice_axis(&new_state, 1, i, i + 1), 1);
@@ -665,11 +680,26 @@ struct JambaMambaMixer {
     b_layernorm: RMSNorm,
     c_layernorm: RMSNorm,
 
-    a_log: UniquePtr<MlxArray>,
+    /// `A = -exp(A_log)` in float32, from [`ssm_a_from_log`] at load (#3057).
+    a: UniquePtr<MlxArray>,
     d_param: UniquePtr<MlxArray>,
 }
 
 impl JambaMambaMixer {
+    /// `A` in the dtype the scan reads it in, as `MambaBlock::scan_a` does:
+    /// the activation dtype, which rounds a bf16 or float32 model exactly as
+    /// `exp` of its `A_log` always did, except f16, which cannot hold `A`
+    /// (`exp(A_log)` overflows past 11.09). There `A` stays float32; the fused
+    /// scan reads it as is and the graph scans round only the decay back.
+    fn scan_a(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let dtype = mlxcel_core::array_dtype(x);
+        if dtype == mlxcel_core::dtype::FLOAT16 {
+            mlxcel_core::copy(&self.a)
+        } else {
+            mlxcel_core::astype(&self.a, dtype)
+        }
+    }
+
     fn ssm_step(
         &self,
         x: &MlxArray,
@@ -766,7 +796,7 @@ impl JambaMambaMixer {
             // dtA = exp(delta[..., None] * A)
             let delta_exp =
                 mlxcel_core::reshape(&delta, &[batch, seq_len, self.intermediate_size as i32, 1]);
-            let dt_a = mlxcel_core::exp(&mlxcel_core::multiply(&delta_exp, a));
+            let dt_a = decay_in_activation_dtype(&mlxcel_core::multiply(&delta_exp, a), x);
 
             let new_state_t = mlxcel_core::squeeze_axis(&new_state, 1);
             let dt_a_t = mlxcel_core::squeeze_axis(&dt_a, 1);
@@ -858,7 +888,7 @@ impl JambaMambaMixer {
         let x_conv = silu(&conv_out);
 
         // SSM
-        let a = mlxcel_core::negative(&mlxcel_core::exp(&self.a_log));
+        let a = self.scan_a(&x_conv);
         let (y, new_ssm_state) = self.ssm_step(&x_conv, &a, ssm_state.as_deref());
 
         // Update SSM state
@@ -1454,7 +1484,7 @@ impl JambaModel {
                     dt_layernorm: RMSNorm::new(dt_norm_weight, config.rms_norm_eps),
                     b_layernorm: RMSNorm::new(b_norm_weight, config.rms_norm_eps),
                     c_layernorm: RMSNorm::new(c_norm_weight, config.rms_norm_eps),
-                    a_log,
+                    a: ssm_a_from_log(&a_log),
                     d_param,
                 })
             };

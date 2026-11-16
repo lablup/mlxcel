@@ -520,7 +520,7 @@ fn main() -> Result<()> {
         println!("# last_row\ttrue");
     }
     if let Some(rows) = batch_rows {
-        return trace_batched_chunks(
+        trace_batched_chunks(
             &model,
             &ids,
             &bos_prefix,
@@ -532,7 +532,11 @@ fn main() -> Result<()> {
             topk,
             &kv_arm,
             scalar_reference,
-        );
+        )?;
+        // The batched arm is the width-one decode shape, which is exactly
+        // where an absorbed-MLA claim has to be checked (issue #3102).
+        print_mla_stats();
+        return Ok(());
     }
     for c in 0..n_chunks {
         let start = trace_start + c * chunk_tokens;
@@ -627,10 +631,15 @@ fn main() -> Result<()> {
     // `MLXCEL_TRACE_MLA_STATS=1` prints the MLA dispatch counters to stderr so
     // an arm that claims a path can be checked against the path it took
     // (issue #2408's multi-token gate was accepted this way).
+    print_mla_stats();
+    Ok(())
+}
+
+/// Print the MLA dispatch counters when `MLXCEL_TRACE_MLA_STATS=1`.
+fn print_mla_stats() {
     if std::env::var("MLXCEL_TRACE_MLA_STATS").as_deref() == Ok("1") {
         eprintln!("# mla_paths\t{}", mlxcel_core::mla::stats::take().summary());
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

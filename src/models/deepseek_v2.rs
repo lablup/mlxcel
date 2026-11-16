@@ -1179,9 +1179,18 @@ fn report_absorption(layers: &[DecoderLayer], args: &ModelArgs) {
     };
     let before = mla::decompressed_bytes_per_token(&geometry, 2);
     let after = mla::latent_bytes_per_token(&geometry, 2);
+    // The fold's form and size, so a run can tell the packed fold (issue
+    // #3121) from the dense one without reading the code.
+    let folds: Vec<&MlaAbsorbedProjections> = layers
+        .iter()
+        .filter_map(|l| l.self_attn.absorbed.as_ref())
+        .collect();
+    let quantized = folds.iter().filter(|p| p.is_quantized()).count();
+    let fold_mib = folds.iter().map(|p| p.weight_bytes()).sum::<usize>() as f64 / (1024.0 * 1024.0);
     eprintln!(
-        "mla: absorbed decode folded {folded}/{total} layers; KV cache {before} -> {after} \
-         bytes/token/layer ({:.1}x), split-kv={}",
+        "mla: absorbed decode folded {folded}/{total} layers ({quantized} quantized, \
+         {fold_mib:.1} MiB); KV cache {before} -> {after} bytes/token/layer ({:.1}x), \
+         split-kv={}",
         before as f64 / after.max(1) as f64,
         mla::split_kv_enabled()
     );
@@ -1294,7 +1303,9 @@ fn load_mla_attention(
         UnifiedLinear::from_weights(weights, &format!("{}.kv_b_proj", prefix), group_size, bits)?;
 
     // Fold `kv_b_proj` for absorbed decode (issue #907). Only under the flag,
-    // so an unset environment does no dequantization and allocates nothing.
+    // so an unset environment allocates nothing. A quantized `kv_b_proj` keeps
+    // its packed rows (issue #3121); only an unquantized or tensor-scaled one
+    // is held dense.
     let geometry = MlaGeometry {
         num_heads: args.num_attention_heads,
         kv_lora_rank: args.kv_lora_rank,

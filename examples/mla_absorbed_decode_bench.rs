@@ -244,11 +244,14 @@ enum Arm<'a> {
 }
 
 impl Arm<'_> {
-    fn expected_path(&self) -> &'static str {
+    /// The path this arm's steps must record. Stage 1 runs on the fused
+    /// kernel (issue #3121) wherever it applies and composed otherwise, so its
+    /// arm accepts either, and the printed `paths=` field says which.
+    fn expected_paths(&self) -> &'static [&'static str] {
         match self {
-            Arm::Decompressed { .. } => "decompressed",
-            Arm::Absorbed { .. } => "absorbed_composed",
-            Arm::SplitKv { .. } => "absorbed_split_kv",
+            Arm::Decompressed { .. } => &["decompressed"],
+            Arm::Absorbed { .. } => &["absorbed_fused", "absorbed_composed"],
+            Arm::SplitKv { .. } => &["absorbed_split_kv"],
         }
     }
 }
@@ -367,10 +370,12 @@ fn run_arm(
         kv_mib,
         counts.summary()
     );
-    let expected = arm.expected_path();
-    if !counts
-        .summary()
-        .contains(&format!("{expected}={}", args.steps))
+    let expected = arm.expected_paths().join(" or ");
+    let summary = counts.summary();
+    if !arm
+        .expected_paths()
+        .iter()
+        .any(|path| summary.contains(&format!("{path}={}", args.steps)))
     {
         println!(
             "  WARNING: arm \"{label}\" expected {expected}={} but recorded {}. \

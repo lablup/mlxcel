@@ -398,6 +398,10 @@ unsafe extern "C" {
     fn xla_test_decode_d2d_readbacks_get() -> u64;
     #[cfg(feature = "test-support")]
     fn xla_test_decode_step_scalars_state(c: *const XlaCtx) -> c_int;
+    /// Test support (issue #3060): whether the loaded decode graph exports the
+    /// scalar-input marker (token/pos/cache_len as ABI-level `i32` values).
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_scalar_inputs(c: *const XlaCtx) -> c_int;
     #[cfg(feature = "test-support")]
     fn xla_test_decode_counters_reset();
     #[cfg(feature = "test-support")]
@@ -3261,6 +3265,16 @@ impl IreeLlama {
     pub fn test_decode_step_scalars_state(&self) -> i32 {
         // Safety: the state is a plain field read from a live context.
         unsafe { xla_test_decode_step_scalars_state(self.ctx) }
+    }
+
+    /// Test support (issue #3060): whether this engine's decode graph exports
+    /// the scalar-input marker, so the shim passes token/pos/cache_len as
+    /// ABI-level `i32` values rather than buffer views.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_decode_scalar_inputs(&self) -> bool {
+        // Safety: the flag is a plain field read from a live context.
+        unsafe { xla_test_decode_scalar_inputs(self.ctx) != 0 }
     }
 
     /// Test support (issue #3028): force the per-step allocation path on

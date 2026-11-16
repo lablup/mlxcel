@@ -444,14 +444,28 @@ jobs:
           # The filter must keep matching `jobs.verify.name` above. Everything
           # after it is parameter expansion rather than a pipeline, so no part
           # of this can fail the step under `set -euo pipefail`.
+          #
+          # The third field is the runner name, `-` when no runner ever took the
+          # job. A job that no runner picks up is cancelled by GitHub after 24
+          # hours in the queue, and its `started_at` is its creation time, so
+          # the elapsed time is queue time rather than run time. Runs
+          # 39829840856 through 40928671671 (2026-10-22 to 10-29) were exactly
+          # that while the self-hosted runners were offline, and each reported
+          # "1440m0s" against a 180-minute budget, which reads like a timeout.
           JOB_TIMES="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
-            --jq '.jobs[] | select(.name | startswith("fmt + clippy + test")) | "\(.started_at) \(.completed_at)"' 2>/dev/null || true)"
+            --jq '.jobs[] | select(.name | startswith("fmt + clippy + test")) | "\(.started_at) \(.completed_at) \(if (.runner_name // "") == "" then "-" else .runner_name end)"' 2>/dev/null || true)"
           FIRST_JOB="${JOB_TIMES%%$'\n'*}"
           STARTED="${FIRST_JOB%% *}"
-          ENDED="${FIRST_JOB##* }"
+          REST="${FIRST_JOB#* }"
+          ENDED="${REST%% *}"
+          RUNNER="${REST#* }"
           ELAPSED="$({ S="$(date -u -d "$STARTED" +%s)" && E="$(date -u -d "$ENDED" +%s)" && echo "$((E - S))"; } 2>/dev/null || true)"
           if [ -n "$ELAPSED" ] && [ "$ELAPSED" -gt 0 ] 2>/dev/null; then
-            DURATION_LINE="Duration of the \`verify\` job: **$((ELAPSED / 60))m$((ELAPSED % 60))s**."
+            if [ "$RUNNER" = "-" ]; then
+              DURATION_LINE="The \`verify\` job never reached a runner: it waited **$((ELAPSED / 60))m$((ELAPSED % 60))s** in the queue and no step ran, so this is neither the \`timeout-minutes\` budget nor the code. GitHub cancels a job that no runner picks up within 24 hours; check that a runner with the \`self-hosted-macos-27-arm64\` label is online."
+            else
+              DURATION_LINE="Duration of the \`verify\` job: **$((ELAPSED / 60))m$((ELAPSED % 60))s** on \`${RUNNER}\`."
+            fi
           fi
 
           BODY_FILE="$(mktemp -t nightly-verify-body.XXXXXX)"

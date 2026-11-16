@@ -163,29 +163,79 @@ read -r -a LOCK_CMD <<< "$LOCK"
 # A slash means "already-built binary", anything else means "git ref to build".
 is_binary_arg() { [[ "$1" == */* ]]; }
 
-WORKTREES=()
+# The worktree paths are recorded in a file, not in an array. The arms are
+# resolved inside a command substitution, so an array append there mutates only
+# the subshell's copy: the EXIT trap used to see an empty list and every run
+# left its two build worktrees (about 2.2 GB each) behind until /tmp filled
+# up (#3108). A file is shared with the subshell, an array is not.
+TEMP_FILES=()
+WORKTREE_LOG=$(mktemp "${TMPDIR:-/tmp}/mlxcel-ab-worktrees-XXXXXX") || {
+  echo "ab_decode_pair: cannot create the worktree record file in ${TMPDIR:-/tmp}" >&2
+  exit 1
+}
+TEMP_FILES+=("$WORKTREE_LOG")
+
 cleanup() {
-  local wt
-  if (( KEEP_WORKTREES )); then
-    for wt in "${WORKTREES[@]}"; do
+  local wt f rc=$? removed=0 kept=0
+  trap - EXIT INT TERM HUP
+  while IFS= read -r wt; do
+    [[ -n "$wt" ]] || continue
+    if (( KEEP_WORKTREES )); then
       echo "kept: $wt" >&2
-    done
-    return
-  fi
-  for wt in "${WORKTREES[@]}"; do
-    git worktree remove --force "$wt" >/dev/null 2>&1 || true
-  done
+      kept=$((kept + 1))
+    elif [[ ! -e "$wt" ]]; then
+      # A `worktree add` that failed before creating the directory records a
+      # path that has nothing to remove; the prune below clears any metadata.
+      continue
+    elif git worktree remove --force "$wt" >/dev/null 2>&1; then
+      echo "removed: $wt" >&2
+      removed=$((removed + 1))
+    else
+      echo "ab_decode_pair: could not remove the worktree: $wt" >&2
+      echo "  reclaim it with: git worktree remove --force $wt && git worktree prune" >&2
+    fi
+  done < "$WORKTREE_LOG"
+  # Prune even when nothing was recorded, so a failed `worktree add` leaves no
+  # registration behind either.
   git worktree prune >/dev/null 2>&1 || true
+  if (( KEEP_WORKTREES )); then
+    echo "ab_decode_pair: kept $kept worktree(s)" >&2
+  else
+    echo "ab_decode_pair: cleaned $removed worktree(s)" >&2
+  fi
+  for f in "${TEMP_FILES[@]}"; do
+    rm -f "$f"
+  done
+  # Cleanup reports; it does not decide the outcome.
+  exit "$rc"
 }
 trap cleanup EXIT
+# EXIT covers the normal paths. Naming the signals runs the same cleanup before
+# the shell leaves, with the conventional status for each.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# A run killed before this recording existed still leaves worktrees registered,
+# and each one is large. Do not delete them from here (a concurrent run on
+# another device would lose its build); say what is there and how to reclaim it.
+leftovers=$(git worktree list --porcelain | sed -n 's/^worktree //p' |
+  grep -F "${TMPDIR:-/tmp}/mlxcel-ab-" || true)
+if [[ -n "$leftovers" ]]; then
+  echo "ab_decode_pair: worktrees from an earlier run are still registered:" >&2
+  printf '  %s\n' $leftovers >&2
+  echo "  each holds a release build; reclaim with: git worktree remove --force <path>" >&2
+fi
 
 build_arm() {
   # $1 = ref, prints the binary path
   local ref=$1 wt
-  wt=$(mktemp -d "${TMPDIR:-/tmp}/mlxcel-ab-XXXXXX")
+  wt=$(mktemp -d "${TMPDIR:-/tmp}/mlxcel-ab-XXXXXX") || return 1
   rm -rf "$wt"
+  # Recorded before the worktree exists and before the build runs, so a failed
+  # add or a failed build still hands the path to the cleanup.
+  printf '%s\n' "$wt" >> "$WORKTREE_LOG"
   git worktree add --detach "$wt" "$ref" >&2 || return 1
-  WORKTREES+=("$wt")
   ( cd "$wt" && cargo build --release --features "$FEATURES" --bin mlxcel >&2 ) || return 1
   printf '%s/target/release/mlxcel\n' "$wt"
 }
@@ -268,7 +318,9 @@ for arm in old new; do
   fi
 done
 
-rm -f /tmp/ab_decode_pair_old.txt /tmp/ab_decode_pair_new.txt
+OLD_VALUES=$(mktemp "${TMPDIR:-/tmp}/mlxcel-ab-old-XXXXXX") || exit 1
+NEW_VALUES=$(mktemp "${TMPDIR:-/tmp}/mlxcel-ab-new-XXXXXX") || exit 1
+TEMP_FILES+=("$OLD_VALUES" "$NEW_VALUES")
 printf 'round old_tok_s new_tok_s old_ms new_ms\n'
 fails=0
 for r in $(seq 1 "$ROUNDS"); do
@@ -277,11 +329,15 @@ for r in $(seq 1 "$ROUNDS"); do
   n_tps=$(printf '%s' "$n" | awk '{print $1}'); n_ms=$(printf '%s' "$n" | awk '{print $2}')
   printf '%s %s %s %s %s\n' "$r" "$o_tps" "$n_tps" "$o_ms" "$n_ms"
   [[ "$o_tps" == NA || "$n_tps" == NA ]] && fails=$((fails + 1))
-  printf '%s\n' "$o_tps" >> /tmp/ab_decode_pair_old.txt
-  printf '%s\n' "$n_tps" >> /tmp/ab_decode_pair_new.txt
+  printf '%s\n' "$o_tps" >> "$OLD_VALUES"
+  printf '%s\n' "$n_tps" >> "$NEW_VALUES"
 done
 
-python3 - "$ROUNDS" <<'PY'
+if (( fails > 0 )); then
+  echo "ab_decode_pair: $fails of $ROUNDS rounds printed no decode rate" >&2
+fi
+
+python3 - "$ROUNDS" "$OLD_VALUES" "$NEW_VALUES" <<'PY'
 import statistics, sys
 from pathlib import Path
 
@@ -296,17 +352,30 @@ def load(path):
             pass
     return vals
 
-old = load('/tmp/ab_decode_pair_old.txt')
-new = load('/tmp/ab_decode_pair_new.txt')
+rounds = int(sys.argv[1])
+old = load(sys.argv[2])
+new = load(sys.argv[3])
 if not old or not new:
-    print("ab_decode_pair: no usable measurements")
+    print("ab_decode_pair: no usable measurements", file=sys.stderr)
     sys.exit(1)
 mo, mn = statistics.median(old), statistics.median(new)
 wins = sum(1 for o, n in zip(old, new) if n > o)
 n = min(len(old), len(new))
 print(f"old median {mo:.2f} tok/s (n={len(old)})  new median {mn:.2f} tok/s (n={len(new)})  "
       f"delta {100 * (mn - mo) / mo:+.2f}%  rounds won by new {wins}/{n}")
+# The medians above are only the figure they claim to be when every round that
+# was printed reached this file. A round whose write was lost (a full /tmp) or
+# whose run printed no rate would otherwise be dropped silently: one run
+# reported a 10-round median with n=3 and no error.
+if len(old) != rounds or len(new) != rounds:
+    print(f"ab_decode_pair: {len(old)} old and {len(new)} new rounds reached the summary, "
+          f"expected {rounds}; the run is not reportable", file=sys.stderr)
+    sys.exit(1)
 PY
+rc=$?
+if (( rc != 0 )); then
+  exit 1
+fi
 
 # --- Output equality --------------------------------------------------------
 if (( SKIP_EQUALITY )); then

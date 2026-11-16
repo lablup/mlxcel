@@ -611,6 +611,15 @@ bool fused_gelu_tanh_f32_matches_eager_bits();
 // `fused_gelu_tanh_f32_available()` first or route to the compiled chain.
 std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x);
 
+// Fused absorbed-MLA single-query decode attention (#3121), Metal only.
+bool mla_absorbed_decode_fused_available();
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv,
+    const MlxArray& kpe,
+    float scale);
+
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
 // gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype (#2548)
 // Used by: Gemma3n MLP layers with activation_sparsity > 0
@@ -1220,7 +1229,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
 );
 
 // Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
-// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
+// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, MiMoV2Flash, OpenAIPrivacyFilter
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
     const MlxArray& q,
     const MlxArray& k,
@@ -2591,8 +2600,31 @@ bool sdpa_uses_fused_kernel(
     int32_t v_dtype,
     bool has_arr_mask,
     bool do_causal,
-    int32_t window_size
+    int32_t window_size,
+    bool has_sinks
 );
+
+// Causal SDPA with attention sinks and no mask array (issue #3098):
+// `mask_mode = "causal"` plus `window_size` (positive, or -1 for none).
+// Throws on any other window and on MLX validation errors. Implementation in
+// `cpp/mlx_cxx_window_sdpa.cpp`; the caller is `src/prefill_sdpa.rs`.
+std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks_causal(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    float scale,
+    int32_t window_size,
+    const MlxArray& sinks
+);
+
+// MLX's own `metal::is_nax_available()`: whether this process runs the Neural
+// Accelerator (NAX) kernels, which `ScaledDotProductAttention::use_fallback`
+// and the GEMM dispatch read. It folds in the GPU architecture generation,
+// the running macOS version and the `MLX_METAL_GPU_ARCH` override, so it can
+// disagree with a sysctl brand-string view of the chip. Tests that pin MLX's
+// dispatch rules gate on this rather than on `hardware::get_hardware()`.
+// Metal only; false on every other backend.
+bool metal_nax_available();
 
 // Fused Sparse-V SDPA Metal kernel launcher.
 // Wraps `mlxcel::turbo::sparse_v_weighted_sum` so the cxx bridge can expose it

@@ -31,6 +31,7 @@ const ATTN: PrefillAttention = PrefillAttention {
     kv_heads: 2,
     head_dim: 64,
     value_dim: 64,
+    sinks: false,
 };
 const F32: i32 = crate::dtype::FLOAT32;
 

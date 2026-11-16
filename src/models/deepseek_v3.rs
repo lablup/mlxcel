@@ -327,15 +327,15 @@ impl DeepSeekV3Attention {
             self.qk_nope_head_dim as usize,
             self.v_head_dim as usize,
         );
-        mlxcel_core::mla::stats::record(if absorbed {
-            if l == 1 {
-                mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
-            } else {
+        // A single absorbed query records its own path below, since it is
+        // either the fused kernel or the composed fallback.
+        if !(absorbed && l == 1) {
+            mlxcel_core::mla::stats::record(if absorbed {
                 mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
-            }
-        } else {
-            mlxcel_core::mla::MlaDecodePath::Decompressed
-        });
+            } else {
+                mlxcel_core::mla::MlaDecodePath::Decompressed
+            });
+        }
 
         // MLA attention: absorbed or materializing, chosen by the cost model
         // above rather than by the query count alone.
@@ -392,7 +392,26 @@ impl DeepSeekV3Attention {
                     folded_mask,
                 )
             }
+        } else if let Some(output) = (absorbed && mask.is_none())
+            .then(|| self.embed_q.forward(&q_nope))
+            .and_then(|q_projected| {
+                // Unmasked single-token decode on the fused kernel (#3121):
+                // both score halves, the softmax and the latent sum in one
+                // pass plus a merge. `None` keeps the composed form below.
+                mlxcel_core::mla::fused_absorbed_decode(
+                    &q_projected,
+                    &q_pe,
+                    &kv_latent,
+                    &k_pe,
+                    self.scale,
+                )
+            })
+        {
+            self.unembed_out.forward(&output)
         } else {
+            if absorbed {
+                mlxcel_core::mla::stats::record(mlxcel_core::mla::MlaDecodePath::AbsorbedComposed);
+            }
             // Single-token decode keeps the rope term as an additive mask: its
             // score row is one `[B, H, 1, S]` slice, and the cost model always
             // absorbs a single query.

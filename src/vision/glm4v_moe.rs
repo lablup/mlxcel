@@ -161,6 +161,10 @@ impl Glm4vMoeModel {
 }
 
 impl LanguageModel for Glm4vMoeModel {
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        self.text_model.supports_maskless_padded_prefill()
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }

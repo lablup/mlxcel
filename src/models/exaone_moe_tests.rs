@@ -323,3 +323,30 @@ fn exaone_moe_chunked_continuation_past_the_window_matches_single_pass() {
         );
     }
 }
+
+#[test]
+fn exaone_moe_maskless_padded_prefill_matches_masked_past_the_sliding_window() {
+    use crate::models::padded_prefill_parity_tests::{
+        assert_arms_agree, assert_arms_agree_with, prompt, standard_arm,
+    };
+    use mlxcel_core::generate::LanguageModel;
+    let _guard = crate::models::padded_prefill_parity_tests::guard();
+    let args = tiny_args();
+    let model = ExaoneMoeModel::from_weights(&tiny_weights(&args), &args).unwrap();
+    assert!(model.supports_maskless_padded_prefill());
+    let vocab = args.vocab_size as i32;
+
+    // Inside the 4-token window the padding mask is exact: every arm agrees.
+    let short = prompt(4, vocab);
+    assert_arms_agree("exaone_moe inside the window", |arm| {
+        standard_arm(&model, arm, &short, 8, 3, None)
+    });
+
+    // Past the window `create_padded_prefill_mask` carries no window, so the
+    // masked arm drifts from the unpadded reference; the maskless arm uses
+    // the model's own sliding mask and matches it exactly.
+    let long = prompt(10, vocab);
+    assert_arms_agree_with("exaone_moe past the window", false, |arm| {
+        standard_arm(&model, arm, &long, 16, 3, None)
+    });
+}

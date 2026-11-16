@@ -1,0 +1,5 @@
+run_order,arm,rep,prompt_tokens,new_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,output_identical_across_reps
+1,main,1,26,256,388.44,66.93,6261.24,40.73,yes
+2,branch,1,26,256,264.28,98.38,5365.48,47.53,yes
+3,branch,2,26,256,277.64,93.65,5591.58,45.60,yes
+4,main,2,26,256,265.36,97.98,5433.24,46.93,yes

@@ -182,10 +182,20 @@ impl ChunkedKVCache {
     /// Append this step's K/V and run attention over the visible chunk.
     ///
     /// Dense storage, never pool-backed: the write goes through
-    /// [`Self::update_and_fetch`] and the attention is the causal helper for
-    /// an unmasked multi-token step, else the masked or unmasked SDPA, the
-    /// pair Llama 4's single-row forward spelled out. The caller still runs
-    /// [`Self::maybe_trim_front`] before the step, as before.
+    /// [`Self::update_and_fetch`]. A query at absolute position `p` attends
+    /// to the keys of its own `chunk_size` block (`p / chunk_size`) at
+    /// positions `<= p`, mlx-lm's `chunk_mask` (`mlx_lm/models/llama4.py`,
+    /// `LlamaModel.__call__`), which it rebuilds on every forward including
+    /// decode. The front trim keeps the last `chunk_size` keys, so past the
+    /// first chunk the visible window still holds keys of the previous chunk
+    /// that the query must skip (issue #3105; before it a decode step
+    /// attended over the whole window). An unmasked step therefore runs
+    /// [`Self::own_chunk_attention`]: for a decode step that is one slice of
+    /// the window plus the unmasked SDPA, for a multi-token step MLX's causal
+    /// mode per query chunk (#3100). A caller mask carries its own chunk
+    /// restriction (Llama 4 builds it with `create_chunked_attention_mask`)
+    /// and runs the masked SDPA over the whole visible window. The caller
+    /// still runs [`Self::maybe_trim_front`] before the step.
     ///
     /// Used by: `models::llama4::Llama4Cache::attend` (chunked layers),
     /// [`attend_batched_rows`].
@@ -197,13 +207,99 @@ impl ChunkedKVCache {
         scale: f32,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let q_len = query_len(q);
+        let (start_position, offset) = (self.start_position, self.offset);
         let (cache_k, cache_v) = self.update_and_fetch(new_keys, new_values);
-        if q_len > 1 && mask.is_none() {
-            return crate::causal_attention(q, &cache_k, &cache_v, scale, 0.0, 0);
+        if mask.is_none() {
+            return own_chunk_attention(
+                q,
+                &cache_k,
+                &cache_v,
+                scale,
+                start_position,
+                offset,
+                self.chunk_size,
+            );
         }
         crate::layers::attention(q, &cache_k, &cache_v, scale, mask, 0.0, 0)
     }
+}
+
+/// Chunk-local causal attention without a dense mask (issues #3100, #3105).
+///
+/// `q` is `[B, Hq, L, D]` for absolute positions `[offset, offset + L)`;
+/// `keys` and `values` are `[B, Hkv, S, D]` for absolute positions
+/// `[start_position, offset + L)`, what [`ChunkedKVCache::update_and_fetch`]
+/// returns. The queries split at chunk boundaries and each piece attends to
+/// its own keys: the piece's chunk start (or `start_position` when the
+/// visible window begins later) up to the piece's last query. A one-query
+/// piece runs the unmasked SDPA (the decode kernel the step ran before
+/// #3105, over a window sliced to the query's chunk); a longer piece runs
+/// MLX's causal mode, whose bottom-right alignment is what a piece with
+/// cached keys of the same chunk in front of it needs. Every batch row
+/// shares the one cache, so the split is the same for each row. Returns
+/// `[B, Hq, L, D]`.
+///
+/// Used by: [`ChunkedKVCache::attend`].
+fn own_chunk_attention(
+    q: &MlxArray,
+    keys: &MlxArray,
+    values: &MlxArray,
+    scale: f32,
+    start_position: i32,
+    offset: i32,
+    chunk_size: i32,
+) -> UniquePtr<MlxArray> {
+    let q_shape = ffi::array_shape(q);
+    let k_shape = ffi::array_shape(keys);
+    let v_shape = ffi::array_shape(values);
+    let end = offset + q_shape[2];
+    debug_assert_eq!(k_shape[2], end - start_position);
+    let attend_piece = |q: &MlxArray, k: &MlxArray, v: &MlxArray| {
+        if ffi::array_shape(q)[2] == 1 {
+            crate::layers::attention(q, k, v, scale, None, 0.0, 0)
+        } else {
+            crate::causal_attention(q, k, v, scale, 0.0, 0)
+        }
+    };
+    if chunk_size <= 0 {
+        return attend_piece(q, keys, values);
+    }
+
+    let mut pieces = Vec::new();
+    let mut q_start = offset;
+    while q_start < end {
+        let chunk_start = (q_start / chunk_size) * chunk_size;
+        let q_end = (chunk_start + chunk_size).min(end);
+        let k_start = chunk_start.max(start_position);
+        if q_start == offset && q_end == end && k_start == start_position {
+            // One piece over every visible key: no slicing.
+            return attend_piece(q, keys, values);
+        }
+        let k_range = (k_start - start_position, q_end - start_position);
+        let k_piece = ffi::slice(
+            keys,
+            &[0, 0, k_range.0, 0],
+            &[k_shape[0], k_shape[1], k_range.1, k_shape[3]],
+        );
+        let v_piece = ffi::slice(
+            values,
+            &[0, 0, k_range.0, 0],
+            &[v_shape[0], v_shape[1], k_range.1, v_shape[3]],
+        );
+        if q_start == offset && q_end == end {
+            // One query chunk (every decode step): only the keys move.
+            return attend_piece(q, &k_piece, &v_piece);
+        }
+        let q_piece = ffi::slice(
+            q,
+            &[0, 0, q_start - offset, 0],
+            &[q_shape[0], q_shape[1], q_end - offset, q_shape[3]],
+        );
+        pieces.push(attend_piece(&q_piece, &k_piece, &v_piece));
+        q_start = q_end;
+    }
+    let refs: Vec<&MlxArray> = pieces.iter().map(|p| &**p).collect();
+    crate::concatenate_many(&refs, 2)
 }
 
 impl KVCache {

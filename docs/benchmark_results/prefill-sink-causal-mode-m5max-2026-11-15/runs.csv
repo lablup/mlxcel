@@ -1,0 +1,13 @@
+model,path,arm,repetition,prompt_tokens,peak_gb,prefill_s,output_sha1
+falcon-ocr,single pass,branch,1,9067,4.70,0.59,81b8360f7a
+falcon-ocr,single pass,main,1,9067,5.11,0.79,81b8360f7a
+falcon-ocr,single pass,branch,2,9067,4.70,0.28,81b8360f7a
+falcon-ocr,single pass,main,2,9067,5.11,0.94,81b8360f7a
+gpt-oss-20b-mxfp4-q4,single pass,branch,1,19773,17.86,3.62,3bdb6d6fe9
+gpt-oss-20b-mxfp4-q4,single pass,main,1,19773,22.54,6.63,3bdb6d6fe9
+gpt-oss-20b-mxfp4-q4,2048-token chunks,branch,1,19773,13.16,3.84,3bdb6d6fe9
+gpt-oss-20b-mxfp4-q4,2048-token chunks,main,1,19773,13.42,3.96,3bdb6d6fe9
+laguna-xs.2-4bit,single pass,branch,1,28747,29.25,7.32,9c16738522
+laguna-xs.2-4bit,single pass,main,1,28747,35.84,39.03,9c16738522
+laguna-xs.2-4bit,2048-token chunks,branch,1,28747,21.99,7.49,9c16738522
+laguna-xs.2-4bit,2048-token chunks,main,1,28747,22.32,9.71,9c16738522

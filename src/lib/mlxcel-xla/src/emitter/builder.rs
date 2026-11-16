@@ -86,9 +86,10 @@ pub enum Precision {
 }
 
 impl Precision {
-    /// The narrow element type to demote contraction inputs to, or `None` for
-    /// f32 (no demotion).
-    fn dot_elt(self) -> Option<&'static str> {
+    /// The narrow element type contraction inputs are demoted to, or `None` for
+    /// f32 (no demotion). Also the storage type of the single-sequence decode KV
+    /// cache (issue #2886), which is read only through the contractions.
+    pub(crate) fn dot_elt(self) -> Option<&'static str> {
         match self {
             Precision::F32 => None,
             Precision::F16 => Some("f16"),
@@ -915,6 +916,26 @@ impl Builder {
         self.line(format!(
             "{} = stablehlo.constant dense<{}> : tensor<i32>",
             r, v
+        ));
+        Val {
+            name: r,
+            ty: Ty::scalar("i32"),
+        }
+    }
+
+    /// Rebuild a rank-0 `tensor<i32>` from an ABI-level `i32` function argument
+    /// (issue #3060): `tensor.from_elements %argN : tensor<i32>`. The single-
+    /// sequence decode receives token, pos and cache_len as bare `i32` VM
+    /// arguments so IREE does not materialize a host-visible staging resource,
+    /// but the StableHLO ops below (`dynamic_slice` offsets, the mask broadcast,
+    /// the RoPE index) take a tensor operand. Wrapping at the prologue keeps the
+    /// op sequence after it byte-identical to the buffer-argument graph and does
+    /// not reintroduce the staging resource.
+    pub fn tensor_from_elements_i32(&mut self, scalar: &Val) -> Val {
+        let r = self.fresh();
+        self.line(format!(
+            "{} = tensor.from_elements {} : tensor<i32>",
+            r, scalar.name
         ));
         Val {
             name: r,
