@@ -195,6 +195,10 @@ struct Inner {
     /// each set through `CachePool::release_detached_paged`. Held as the
     /// Send/Sync [`DetachedKvSetHolder`] so `Inner` stays `Send + Sync`.
     pending_paged_releases: Vec<DetachedKvSetHolder>,
+    /// Every checkpoint the orphan sweep asked for a donor, so tests can see
+    /// that a sweep stays inside the conversation it was run for.
+    #[cfg(test)]
+    orphan_probes: Vec<PromptCacheKeyDigest>,
 }
 
 impl Inner {
@@ -228,6 +232,8 @@ impl Inner {
             state_checkpoint_hits: 0,
             state_checkpoint_evictions: 0,
             pending_paged_releases: Vec::new(),
+            #[cfg(test)]
+            orphan_probes: Vec::new(),
         }
     }
 
@@ -249,8 +255,8 @@ impl Inner {
 
     fn stats(&self) -> PromptCacheStats {
         PromptCacheStats {
-            entries: self.entries.len() + self.snapshots.len(),
-            bytes: self.total_bytes + self.snapshot_bytes,
+            entries: self.entries.len() + self.snapshots.len() + self.state_checkpoints.len(),
+            bytes: self.total_bytes + self.snapshot_bytes + self.state_checkpoint_bytes,
             inserts: self.inserts,
             rejections_oversized: self.rejections_oversized,
             lookups: self.lookups,
@@ -300,7 +306,24 @@ impl Inner {
         Some((slot.bucket, slot.entry))
     }
 
+    /// Remove a snapshot, then drop the state checkpoints of its conversation
+    /// that it was the last possible donor for (issue #3058), so an orphan
+    /// does not hold its bytes until the next checkpoint insert.
     fn remove_snapshot(
+        &mut self,
+        digest: &PromptCacheKeyDigest,
+    ) -> Option<(BucketKey, Arc<ModelSnapshotEntry>)> {
+        let sessionless = self.snapshots.get(digest)?.sessionless.clone();
+        let (bucket, entry) = self.remove_snapshot_unswept(digest)?;
+        self.drop_orphan_state_checkpoints(&sessionless, bucket.session_key.as_deref());
+        Some((bucket, entry))
+    }
+
+    /// [`Self::remove_snapshot`] without the orphan sweep, for a caller that
+    /// is about to store a replacement in the same conversation and sweeps
+    /// once that replacement is in: sweeping in between would drop every
+    /// checkpoint whose only donor is being replaced by a longer one.
+    fn remove_snapshot_unswept(
         &mut self,
         digest: &PromptCacheKeyDigest,
     ) -> Option<(BucketKey, Arc<ModelSnapshotEntry>)> {
@@ -609,11 +632,12 @@ impl PromptCacheStore {
             .unwrap_or(false)
     }
 
-    /// Number of entries currently stored.
+    /// Number of entries currently stored: KV entries, whole snapshots, and
+    /// turn-boundary state checkpoints.
     pub fn len(&self) -> usize {
         self.inner
             .read()
-            .map(|g| g.entries.len() + g.snapshots.len())
+            .map(|g| g.entries.len() + g.snapshots.len() + g.state_checkpoints.len())
             .unwrap_or(0)
     }
 
@@ -622,11 +646,12 @@ impl PromptCacheStore {
         self.len() == 0
     }
 
-    /// Current cumulative byte footprint of all entries.
+    /// Current cumulative byte footprint of all entries, state checkpoints
+    /// included (issue #3058).
     pub fn bytes(&self) -> usize {
         self.inner
             .read()
-            .map(|g| g.total_bytes + g.snapshot_bytes)
+            .map(|g| g.total_bytes + g.snapshot_bytes + g.state_checkpoint_bytes)
             .unwrap_or(0)
     }
 
@@ -1014,27 +1039,31 @@ impl PromptCacheStore {
                 .map(|(digest, _)| *digest)
                 .collect();
             for superseded_digest in &superseded {
-                guard.remove_snapshot(superseded_digest);
+                guard.remove_snapshot_unswept(superseded_digest);
             }
             guard.snapshot_supersedes = guard
                 .snapshot_supersedes
                 .saturating_add(superseded.len() as u64);
         }
 
-        if guard.remove_snapshot(&digest).is_some() {
+        if guard.remove_snapshot_unswept(&digest).is_some() {
             guard.snapshot_evictions_lru = guard.snapshot_evictions_lru.saturating_add(1);
         }
 
         guard.snapshot_bytes = guard.snapshot_bytes.saturating_add(entry_bytes);
+        let session_key = bucket.session_key.clone();
         guard.snapshots.insert(
             digest,
             SnapshotSlot {
                 entry: Arc::new(entry),
                 bucket,
-                sessionless,
+                sessionless: sessionless.clone(),
             },
         );
         guard.snapshot_inserts = guard.snapshot_inserts.saturating_add(1);
+        // The supersede and replacement removals above skipped the orphan
+        // sweep so the new entry could take over as donor; sweep now.
+        guard.drop_orphan_state_checkpoints(&sessionless, session_key.as_deref());
 
         let metrics = Arc::clone(&self.metrics);
         metrics.record_snapshot_insert(entry_bytes);
@@ -1286,7 +1315,12 @@ impl PromptCacheStore {
     /// that is a prefix of the request and has a donor (a longer whole
     /// snapshot of the same conversation with the same lineage over the
     /// checkpoint's tokens) is reported as
-    /// [`SnapshotLookupOutcome::CheckpointHit`] (issue #3047).
+    /// [`SnapshotLookupOutcome::CheckpointHit`] (issue #3047). That outcome is
+    /// not counted as a lookup until the caller rebuilt the state and calls
+    /// [`Self::record_state_checkpoint_hit`]; when the rebuild fails, the
+    /// caller discards the checkpoint with [`Self::discard_state_checkpoint`]
+    /// and looks again with [`Self::lookup_snapshot_outcome_without_checkpoints`],
+    /// which counts itself (issue #3058).
     pub fn lookup_snapshot_outcome<F>(
         &self,
         key: &PromptCacheKey<'_>,
@@ -1297,6 +1331,23 @@ impl PromptCacheStore {
         F: Fn(&ModelStateSnapshot, usize) -> bool,
     {
         self.snapshot_lookup(key, tokens, can_truncate, true)
+    }
+
+    /// [`Self::lookup_snapshot_outcome`] without turn-boundary state
+    /// checkpoints: never a [`SnapshotLookupOutcome::CheckpointHit`]. The
+    /// scheduler retries with this when rebuilding a checkpoint failed, so
+    /// the request adopts the best shorter whole snapshot instead of starting
+    /// cold (issue #3058).
+    pub fn lookup_snapshot_outcome_without_checkpoints<F>(
+        &self,
+        key: &PromptCacheKey<'_>,
+        tokens: &[i32],
+        can_truncate: F,
+    ) -> SnapshotLookupOutcome
+    where
+        F: Fn(&ModelStateSnapshot, usize) -> bool,
+    {
+        self.snapshot_lookup(key, tokens, can_truncate, false)
     }
 
     fn snapshot_lookup<F>(
@@ -1422,7 +1473,7 @@ impl PromptCacheStore {
                 guard.best_state_checkpoint(&sessionless, key.session_key, tokens, reach)
             };
             if let Some((checkpoint, donor, matched_len)) = checkpoint {
-                let mut guard = self.inner.write().expect("prompt cache inner lock");
+                let guard = self.inner.read().expect("prompt cache inner lock");
                 let found = guard
                     .state_checkpoints
                     .get(&checkpoint)
@@ -1436,14 +1487,14 @@ impl PromptCacheStore {
                 // Both entries can have been evicted between the read and
                 // this write lock; the lookup then goes on as if neither
                 // existed.
+                // The lookup is not counted yet: the rebuild can still fail,
+                // and the caller then looks again without checkpoints. The
+                // caller counts it with `record_state_checkpoint_hit` once the
+                // rebuild succeeds (issue #3058).
                 if let Some((checkpoint, donor)) = found {
-                    guard.snapshot_lookups = guard.snapshot_lookups.saturating_add(1);
-                    guard.snapshot_hits = guard.snapshot_hits.saturating_add(1);
-                    guard.state_checkpoint_hits = guard.state_checkpoint_hits.saturating_add(1);
                     checkpoint.touch();
                     donor.touch();
                     drop(guard);
-                    self.metrics.record_snapshot_lookup(true, matched_len);
                     return SnapshotLookupOutcome::CheckpointHit {
                         checkpoint,
                         donor,
