@@ -223,6 +223,17 @@ pub fn recommend_kv_cache_mode(
                     None,
                     "This family caches the MLA (kv_latent, k_pe) pair in one KV cache with no decompressed fallback, so every quantized mode is mis-calibrated for it and is substituted back to fp16 at startup. See the MLA latent section of docs/turbo-kv-cache.md. Keep fp16.",
                 ),
+                // DeepSeek V2 sized as the latent: absorbed decode is on, and
+                // an int8 cache would decline it (`latent_layout_supports_mode`)
+                // and fall back to the decompressed per-head layout, about 4x
+                // the fp16 latent on V2-Lite (5120 against 1152 bytes per token
+                // per layer). Without absorption the kind is `MlaDecompressed`
+                // and int8 below is the right advice.
+                Medium | Long if arch_kind == MlaCompressed && model_type == "deepseek_v2" => (
+                    Fp16,
+                    None,
+                    "DeepSeek V2 caches the MLA latent here because absorbed decode is on. A quantized KV mode turns absorption off and returns to the decompressed per-head cache, which is larger than the fp16 latent. Keep fp16.",
+                ),
                 Medium | Long => (
                     Int8,
                     None,

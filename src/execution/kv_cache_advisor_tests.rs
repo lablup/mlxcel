@@ -124,11 +124,13 @@ fn pure_ssm_is_always_fp16() {
 
 #[test]
 fn mla_uses_int8_never_turbo() {
-    // `deepseek_v2` is the MLA family that keeps a decompressed fallback, so
-    // int8 there lands on ordinary per-head K/V rows and is a real
-    // recommendation. A latent-pair family is covered by
+    // `deepseek_v2` without absorption keeps the decompressed layout, so int8
+    // there lands on ordinary per-head K/V rows and is a real recommendation.
+    // The absorbed (latent) case is
+    // `absorbed_deepseek_v2_is_advised_fp16_because_int8_would_decompress`, and a
+    // latent-pair family is covered by
     // `latent_mla_families_are_advised_fp16_because_the_binary_refuses_the_rest`.
-    for kind in [KvArchKind::MlaCompressed, KvArchKind::MlaDecompressed] {
+    for kind in [KvArchKind::MlaDecompressed] {
         // Short stays fp16.
         assert_eq!(
             recommend_kv_cache_mode(kind, "deepseek_v2", KvContextRange::Short).suggested,
@@ -147,6 +149,18 @@ fn mla_uses_int8_never_turbo() {
                 assert_ne!(advice.also_consider, Some(mode));
             }
         }
+    }
+}
+
+/// DeepSeek V2 sized as the latent (absorbed decode on) must not be advised
+/// int8: an int8 cache declines absorption and falls back to the decompressed
+/// per-head layout, which is larger than the fp16 latent.
+#[test]
+fn absorbed_deepseek_v2_is_advised_fp16_because_int8_would_decompress() {
+    for range in KvContextRange::all() {
+        let advice = recommend_kv_cache_mode(KvArchKind::MlaCompressed, "deepseek_v2", range);
+        assert_eq!(advice.suggested, KVCacheMode::Fp16, "{range:?}");
+        assert_eq!(advice.also_consider, None, "{range:?}");
     }
 }
 
