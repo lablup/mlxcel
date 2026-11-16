@@ -167,8 +167,17 @@ pub fn sample(
 
 /// Decode packed latents to interleaved RGB `u8` (`round(clip(x/2+0.5, 0, 1) * 255)`).
 pub fn decode_to_pixels(vae: &Flux2Vae, latents: &MlxArray) -> Result<Vec<u8>> {
+    // The published MOSS checkpoint ships the VAE **decoder alone**: 142 tensors,
+    // no `bn.*` running statistics. Its latents are therefore not batch-norm
+    // normalized, and `decode_packed_latents` — which exists to undo that
+    // normalization — refuses to run. Unpatchify and hand the result straight to
+    // the decoder, which still applies the config's `scaling_factor`/`shift_factor`.
+    let unpacked = crate::imagegen::latent::unpatchify_latents(&mlxcel_core::astype(
+        latents,
+        vae.dtype(),
+    ))?;
     let decoded = vae
-        .decode_packed_latents(&mlxcel_core::astype(latents, vae.dtype()))
+        .decode(&unpacked)
         .context("MOSS-Image VAE decode")?;
     let dt = mlxcel_core::array_dtype(&decoded);
     let unit = mlxcel_core::add(
