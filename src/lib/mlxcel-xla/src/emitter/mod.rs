@@ -824,6 +824,47 @@ mod tests {
         );
     }
 
+    /// Issue #2886: the MLA single-sequence decode shares the now-narrowed cache
+    /// global, so its write site must narrow the new row too. Without this the
+    /// `dynamic_update_slice` mixes an f16 operand with an f32 update and the
+    /// graph does not compile under an explicit f16/bf16 precision override.
+    #[test]
+    fn mla_single_decode_narrows_the_cache_row() {
+        let json = r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
+            "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
+            "kv_lora_rank":16,"q_lora_rank":24,"qk_nope_head_dim":8,
+            "qk_rope_head_dim":4,"v_head_dim":8,"rope_interleave":true,
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#;
+        let c = Config::from_json_str(json)
+            .unwrap()
+            .with_context_capacity(16)
+            .unwrap();
+        let width = c.cache_dim();
+        let g = emit_decode_with(&c, false, Precision::F16);
+        let row_f32 = format!("tensor<1x1x1x{width}xf32>");
+        let row_f16 = format!("tensor<1x1x1x{width}xf16>");
+        assert!(
+            g.contains(&format!("({row_f32}) -> {row_f16}")),
+            "MLA single decode must narrow the new cache row under f16"
+        );
+        let g_f32 = emit_decode_with(&c, false, Precision::F32);
+        assert!(
+            g_f32.contains(&format!(
+                "util.global private mutable @kcache : tensor<{}x{}x{}x{}xf32>",
+                c.n_layers,
+                c.context_capacity,
+                c.cache_heads(),
+                c.cache_dim()
+            )),
+            "f32 MLA keeps the f32 cache"
+        );
+        assert!(
+            !g_f32.contains(&format!("({row_f32}) -> {row_f16}")),
+            "f32 MLA emits no row conversion"
+        );
+    }
+
     fn main_signature<'a>(mlir: &'a str, graph: &str) -> &'a str {
         mlir.split("func.func public @main(")
             .nth(1)

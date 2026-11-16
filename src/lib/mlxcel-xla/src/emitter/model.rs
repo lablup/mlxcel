@@ -2123,19 +2123,15 @@ impl AttnLayout {
                 // Issue #2886: the cache global is stored in the contraction
                 // precision, so only the new row is narrowed here instead of
                 // IREE converting the whole slab on every read.
-                let narrow = |b: &mut Builder, v: Val| match b.precision().dot_elt() {
-                    Some(elt) => b.convert(&v, elt),
-                    None => v,
-                };
                 let k_upd = b.reshape(kk, vec![1, 1, nkv, d]);
-                let k_upd = narrow(b, k_upd);
+                let k_upd = narrow_cache_row(b, k_upd);
                 *kcache = b.dynamic_update_slice(
                     &*kcache,
                     &k_upd,
                     &[&k.layer_idx[li], cache_len, &k.c0, &k.c0],
                 );
                 let v_upd = b.reshape(vv, vec![1, 1, nkv, d]);
-                let v_upd = narrow(b, v_upd);
+                let v_upd = narrow_cache_row(b, v_upd);
                 *vcache = b.dynamic_update_slice(
                     &*vcache,
                     &v_upd,
@@ -2380,6 +2376,17 @@ fn apply_scale_and_softcap(b: &mut Builder, c: &Config, k: &Consts, scores: Val)
     }
 }
 
+/// Narrow a freshly written single-decode cache row to the cache global's
+/// element type (issue #2886). The ordinary K/V path and the MLA latent/PE path
+/// both write into the single-sequence decode global, so both go through here;
+/// it is a no-op under `Precision::F32`, where the cache stays f32.
+fn narrow_cache_row(b: &mut Builder, v: Val) -> Val {
+    match b.precision().dot_elt() {
+        Some(elt) => b.convert(&v, elt),
+        None => v,
+    }
+}
+
 fn mla_rms_norm(
     b: &mut Builder,
     x: &Val,
@@ -2579,17 +2586,22 @@ fn emit_mla_attention(
     let cache_width = m.cache_dim();
     let (latent_slab, pe_slab) = match layout {
         AttnLayout::Single { cache_len, .. } => {
+            // Issue #2886: the single-decode cache global is stored in the
+            // contraction precision, so the row written here must be narrowed to
+            // match it, the same way `write_read_kv` narrows the ordinary K/V row.
             let zeros_pe = b.broadcast(&k.zero, &[], vec![m.qk_rope_head_dim]);
             let latent_row = b.concatenate(&latent, &zeros_pe, 0);
             let zeros_latent = b.broadcast(&k.zero, &[], vec![m.kv_lora_rank]);
             let pe_row = b.concatenate(&zeros_latent, &k_pe, 0);
             let latent_update = b.reshape(&latent_row, vec![1, 1, 1, cache_width]);
+            let latent_update = narrow_cache_row(b, latent_update);
             *kcache = b.dynamic_update_slice(
                 kcache,
                 &latent_update,
                 &[&k.layer_idx[li], cache_len, &k.c0, &k.c0],
             );
             let pe_update = b.reshape(&pe_row, vec![1, 1, 1, cache_width]);
+            let pe_update = narrow_cache_row(b, pe_update);
             *vcache = b.dynamic_update_slice(
                 vcache,
                 &pe_update,
