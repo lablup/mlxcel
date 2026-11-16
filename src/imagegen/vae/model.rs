@@ -173,11 +173,14 @@ pub(super) fn detect_conv_layout(
     weights: &WeightMap,
     config: &Flux2VaeConfig,
 ) -> Result<ConvLayout> {
-    let top = *config
-        .block_out_channels
-        .last()
-        .expect("validated non-empty");
-    let first = config.block_out_channels[0];
+    // The DECODER's widths, not the encoder's: a checkpoint that narrows it
+    // (`decoder_block_out_channels`, as MOSS-Image's 96/192/384/384 over the
+    // 128/256/512/512 encoder) puts the decoder's own channels on
+    // `decoder.conv_in` and `decoder.conv_out`, and probing with the encoder's
+    // numbers rejected a perfectly good MLX-layout checkpoint.
+    let decoder = config.decoder_channels();
+    let top = *decoder.last().expect("validated non-empty");
+    let first = decoder[0];
     // (key, out, in, kernel) of convs whose in-channels differ from the kernel.
     let probes = [
         ("decoder.conv_in.weight", top, config.latent_channels, 3),
