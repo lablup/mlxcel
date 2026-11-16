@@ -1921,6 +1921,14 @@ mod ffi {
             window_size: i32,
         ) -> bool;
 
+        /// MLX's own `metal::is_nax_available()`: whether this process runs
+        /// the Neural Accelerator kernels that `use_fallback` and the GEMM
+        /// dispatch read. It folds in the GPU generation, the macOS version
+        /// and `MLX_METAL_GPU_ARCH`, so it can disagree with the sysctl view
+        /// in `hardware::get_hardware()`; tests that pin MLX's dispatch rules
+        /// gate on this one. `false` off Metal.
+        fn metal_nax_available() -> bool;
+
         /// Fused QKV projection + reshape + transpose + RoPE
         /// Reduces ~5 FFI calls (projection, reshape, transpose, rope) to 1
         #[allow(clippy::too_many_arguments)]

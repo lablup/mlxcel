@@ -34,6 +34,15 @@
 #include <algorithm>
 #include <exception>
 
+#ifdef MLXCEL_BRIDGE_METAL_BACKEND
+// Defined in mlx/backend/metal/device.cpp and declared only in an internal
+// upstream header, so it is declared here at global scope (declaring it
+// inside `namespace mlx_cxx` would create `mlx_cxx::mlx::core::metal`).
+namespace mlx::core::metal {
+bool is_nax_available();
+}  // namespace mlx::core::metal
+#endif
+
 namespace mlx_cxx {
 
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_causal_window(
@@ -136,6 +145,21 @@ bool sdpa_uses_fused_kernel(
     (void)has_arr_mask;
     (void)do_causal;
     (void)window_size;
+    return false;
+#endif
+}
+
+bool metal_nax_available() {
+#ifdef MLXCEL_BRIDGE_METAL_BACKEND
+    if (!mlx::core::metal::is_available()) {
+        return false;
+    }
+    try {
+        return mlx::core::metal::is_nax_available();
+    } catch (const std::exception&) {
+        return false;
+    }
+#else
     return false;
 #endif
 }
