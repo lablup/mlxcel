@@ -26,9 +26,14 @@
 //!   windowed.
 //! - **MLA / compressed KV** (DeepSeek): V3/V3.2 cache a low-rank latent
 //!   (`kv_lora_rank + qk_rope_head_dim`) shared across heads — far smaller than
-//!   the per-head formula (*overcount*). V2 caches the *decompressed* K/V
-//!   (`num_heads × (qk_nope + qk_rope + v_head_dim)`), which can be *larger*
-//!   than `2 × num_kv_heads × head_dim` (*undercount* — dangerous for a budget).
+//!   the per-head formula (*overcount*). So do the other families that always
+//!   cache the latent pair (`mla::caches_mla_latent_pair`). V2 follows the
+//!   runtime: it caches the latent where absorbed decode is selected
+//!   (`mla::absorbed_enabled`, the Metal default since #3131) and the KV cache
+//!   is FP16, and the *decompressed* K/V
+//!   (`num_heads × (qk_nope + qk_rope + v_head_dim)`) otherwise, which can be
+//!   *larger* than `2 × num_kv_heads × head_dim` (*undercount*, dangerous for a
+//!   budget).
 //! - **Hybrid attention+SSM** (Jamba, NemotronH, RecurrentGemma, Qwen3-Next):
 //!   only the attention layers hold a context-proportional KV cache; the
 //!   recurrent/Mamba layers carry an O(1) state, negligible for budgeting. The
@@ -59,9 +64,11 @@ pub enum KvArchKind {
     Standard,
     /// Some or all attention layers bound their KV to a sliding window.
     SlidingWindow,
-    /// DeepSeek V3/V3.2 — KV cached as a compressed low-rank latent.
+    /// KV cached as a compressed low-rank latent: DeepSeek V3/V3.2, the
+    /// latent-pair families, and DeepSeek V2 where it absorbs
+    /// ([`deepseek_v2_caches_latent`]).
     MlaCompressed,
-    /// DeepSeek V2 — KV cached decompressed (per-head).
+    /// DeepSeek V2 where it does not absorb: KV cached decompressed (per-head).
     MlaDecompressed,
     /// Attention + recurrent/SSM layers; only attention layers hold KV.
     Hybrid,
@@ -329,8 +336,34 @@ fn nemotron_h_block_codes(text: &Value, mt: &str) -> Option<Vec<&'static str>> {
         .collect()
 }
 
+/// Whether DeepSeek V2 caches the `(kv_latent, k_pe)` latent rather than the
+/// decompressed per-head K/V, given whether absorbed decode is selected and
+/// whether the KV cache is int8.
+///
+/// Mirrors the runtime: the loader folds `kv_b_proj` exactly when
+/// `mla::absorbed_enabled()` holds, and each cache is then wrapped as a latent
+/// cache only if `MlaLatentCache::supports` accepts it, which requires an FP16
+/// cache (`latent_layout_supports_mode`). The other decline,
+/// a paged-backed cache, cannot reach `deepseek_v2`: the family does not opt
+/// into the paged decode backend.
+#[must_use]
+pub const fn deepseek_v2_latent_layout(absorbed: bool, int8_kv: bool) -> bool {
+    absorbed && !int8_kv
+}
+
+/// [`deepseek_v2_latent_layout`] for this process: absorbed decode as the
+/// loader resolves it (`MLXCEL_MLA_ABSORBED` and the fused kernel's
+/// availability, read once).
+#[must_use]
+pub fn deepseek_v2_caches_latent(int8_kv: bool) -> bool {
+    deepseek_v2_latent_layout(mlxcel_core::mla::absorbed_enabled(), int8_kv)
+}
+
 /// Classify a model's config into KV layer groups and an architecture kind.
-fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)> {
+///
+/// `v2_latent` says whether DeepSeek V2 caches the latent in this run
+/// ([`deepseek_v2_caches_latent`]); no other family reads it.
+fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGroup>, KvArchKind)> {
     let mt = model_type.to_ascii_lowercase();
     // A transformers-saved Nemotron-H config describes its stack only through
     // the block-name array, with no layer count: the model takes the count
@@ -350,12 +383,17 @@ fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)
 
     // 2. MLA / compressed KV (DeepSeek). `kv_lora_rank` is the tell. MLA sizes
     //    its cache from explicit latent/rope/v dims, so it needs the head count
-    //    but NOT `head_dim` (a config may omit it). V3/V3.2 cache the compressed
-    //    latent + rope (shared across heads); V2 caches decompressed per-head.
+    //    but NOT `head_dim` (a config may omit it). V3/V3.2 and the latent-pair
+    //    families cache the compressed latent + rope (shared across heads); V2
+    //    does too when it absorbs, and caches decompressed per-head otherwise.
     if let Some(kv_lora_rank) = get_u64(text, &["kv_lora_rank"]) {
         let num_heads = get_u64(text, NUM_HEADS_KEYS).unwrap_or(1).max(1);
         let rope = get_u64(text, &["qk_rope_head_dim"]).unwrap_or(64);
-        if mt.contains("v3") || mt.contains("v32") {
+        if mt.contains("v3")
+            || mt.contains("v32")
+            || mlxcel_core::mla::caches_mla_latent_pair(&mt)
+            || (mt == "deepseek_v2" && v2_latent)
+        {
             // Cached form: (kv_latent[kv_lora_rank] , k_pe[qk_rope_head_dim]).
             let elems = kv_lora_rank.saturating_add(rope);
             return Some((
@@ -585,7 +623,14 @@ pub fn estimate_kv_arch_from_config(
     int8_kv: bool,
     batch: u64,
 ) -> Option<KvArchEstimate> {
-    estimate_kv_arch_inner(config, ctx_len, int8_kv, batch, true)
+    estimate_kv_arch_inner(
+        config,
+        ctx_len,
+        int8_kv,
+        batch,
+        true,
+        deepseek_v2_caches_latent(int8_kv),
+    )
 }
 
 /// [`estimate_kv_arch_from_config`] with every sliding-window cap lifted, so
@@ -604,7 +649,14 @@ pub fn estimate_kv_arch_unwindowed_from_config(
     int8_kv: bool,
     batch: u64,
 ) -> Option<KvArchEstimate> {
-    estimate_kv_arch_inner(config, ctx_len, int8_kv, batch, false)
+    estimate_kv_arch_inner(
+        config,
+        ctx_len,
+        int8_kv,
+        batch,
+        false,
+        deepseek_v2_caches_latent(int8_kv),
+    )
 }
 
 fn estimate_kv_arch_inner(
@@ -613,6 +665,7 @@ fn estimate_kv_arch_inner(
     int8_kv: bool,
     batch: u64,
     apply_windows: bool,
+    v2_latent: bool,
 ) -> Option<KvArchEstimate> {
     // VLMs nest the decoder under `text_config`; `model_type` may live at the
     // top level (the VLM type) or inside `text_config` (the decoder type).
@@ -621,7 +674,7 @@ fn estimate_kv_arch_inner(
         .or_else(|| get_str(config, "model_type"))
         .unwrap_or("");
 
-    let (mut groups, kind) = classify(text, model_type)?;
+    let (mut groups, kind) = classify(text, model_type, v2_latent)?;
     // The detail line describes the architecture, so it keeps the windows even
     // when the byte figure below ignores them.
     let detail = detail_line(&groups, kind);
@@ -851,9 +904,8 @@ mod tests {
         assert!(e.total_bytes < naive / 10);
     }
 
-    #[test]
-    fn mla_v2_uses_decompressed_per_head() {
-        let cfg = json!({
+    fn deepseek_v2_lite_cfg() -> Value {
+        json!({
             "model_type": "deepseek_v2",
             "num_hidden_layers": 4,
             "num_attention_heads": 16,
@@ -861,12 +913,79 @@ mod tests {
             "qk_rope_head_dim": 64,
             "qk_nope_head_dim": 128,
             "v_head_dim": 128,
-        });
-        let e = est(&cfg, 2048);
+        })
+    }
+
+    fn est_v2(cfg: &Value, ctx: u64, int8_kv: bool, absorbed: bool) -> KvArchEstimate {
+        let latent = deepseek_v2_latent_layout(absorbed, int8_kv);
+        estimate_kv_arch_inner(cfg, ctx, int8_kv, 1, true, latent).expect("estimate")
+    }
+
+    #[test]
+    fn mla_v2_uses_decompressed_per_head_without_absorption() {
+        let e = est_v2(&deepseek_v2_lite_cfg(), 2048, false, false);
         assert_eq!(e.kind, KvArchKind::MlaDecompressed);
         // num_heads × (qk_nope + qk_rope + v_head_dim) = 16 × (128+64+128).
         let elems = 16 * (128 + 64 + 128);
         assert_eq!(e.total_bytes, 4 * elems * 2048 * FP16);
+    }
+
+    #[test]
+    fn mla_v2_sizes_the_latent_when_absorbed() {
+        let e = est_v2(&deepseek_v2_lite_cfg(), 2048, false, true);
+        assert_eq!(e.kind, KvArchKind::MlaCompressed);
+        // kv_lora_rank + qk_rope_head_dim = 576 elems, 1152 bytes per token per
+        // layer: the figure the loader reports and `mla::latent_bytes_per_token`
+        // computes, against 10240 decompressed (8.9x).
+        let elems = 512 + 64;
+        assert_eq!(e.total_bytes, 4 * elems * 2048 * FP16);
+        assert_eq!(e.marginal_bytes_per_token, 4 * 1152);
+    }
+
+    #[test]
+    fn mla_v2_int8_kv_declines_the_latent_and_sizes_decompressed() {
+        // The runtime keeps an int8 cache decompressed even with absorption on
+        // (`latent_layout_supports_mode` accepts only FP16).
+        let e = est_v2(&deepseek_v2_lite_cfg(), 2048, true, true);
+        assert_eq!(e.kind, KvArchKind::MlaDecompressed);
+        let elems = 16 * (128 + 64 + 128);
+        assert_eq!(e.total_bytes, 4 * elems * 2048);
+    }
+
+    #[test]
+    fn mla_v2_latent_layout_rule() {
+        assert!(deepseek_v2_latent_layout(true, false));
+        assert!(!deepseek_v2_latent_layout(true, true));
+        assert!(!deepseek_v2_latent_layout(false, false));
+        assert!(!deepseek_v2_latent_layout(false, true));
+    }
+
+    #[test]
+    fn public_estimate_follows_the_process_absorption_decision() {
+        let e = est(&deepseek_v2_lite_cfg(), 2048);
+        let expected = if mlxcel_core::mla::absorbed_enabled() {
+            KvArchKind::MlaCompressed
+        } else {
+            KvArchKind::MlaDecompressed
+        };
+        assert_eq!(e.kind, expected);
+        // An int8 cache never takes the latent, whatever the process decided.
+        let int8 =
+            estimate_kv_arch_from_config(&deepseek_v2_lite_cfg(), 2048, true, 1).expect("estimate");
+        assert_eq!(int8.kind, KvArchKind::MlaDecompressed);
+    }
+
+    #[test]
+    fn latent_pair_families_size_the_latent() {
+        for family in ["glm4_moe_lite", "kimi_linear", "kimi_k2"] {
+            let mut cfg = deepseek_v2_lite_cfg();
+            cfg["model_type"] = json!(family);
+            // Absorption is a V2-only switch; these families always cache the
+            // latent pair.
+            let e = est_v2(&cfg, 2048, false, false);
+            assert_eq!(e.kind, KvArchKind::MlaCompressed, "{family}");
+            assert_eq!(e.total_bytes, 4 * (512 + 64) * 2048 * FP16, "{family}");
+        }
     }
 
     #[test]
