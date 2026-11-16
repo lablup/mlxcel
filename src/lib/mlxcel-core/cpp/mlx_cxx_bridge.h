@@ -1220,7 +1220,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
 );
 
 // Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
-// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
+// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, MiMoV2Flash, OpenAIPrivacyFilter
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
     const MlxArray& q,
     const MlxArray& k,
@@ -2591,7 +2591,21 @@ bool sdpa_uses_fused_kernel(
     int32_t v_dtype,
     bool has_arr_mask,
     bool do_causal,
-    int32_t window_size
+    int32_t window_size,
+    bool has_sinks
+);
+
+// Causal SDPA with attention sinks and no mask array (issue #3098):
+// `mask_mode = "causal"` plus `window_size` (positive, or -1 for none).
+// Throws on any other window and on MLX validation errors. Implementation in
+// `cpp/mlx_cxx_window_sdpa.cpp`; the caller is `src/prefill_sdpa.rs`.
+std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks_causal(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    float scale,
+    int32_t window_size,
+    const MlxArray& sinks
 );
 
 // MLX's own `metal::is_nax_available()`: whether this process runs the Neural

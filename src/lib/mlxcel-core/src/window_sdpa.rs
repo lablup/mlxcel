@@ -339,7 +339,8 @@ enum ProbedArm {
 }
 
 thread_local! {
-    static FUSED_MEMO: RefCell<HashMap<(WindowSdpaShape, ProbedArm), bool>> =
+    /// Keyed by shape, arm and whether the call carries attention sinks.
+    static FUSED_MEMO: RefCell<HashMap<(WindowSdpaShape, ProbedArm, bool), bool>> =
         RefCell::new(HashMap::new());
 }
 
@@ -348,7 +349,13 @@ thread_local! {
 /// availability, device generation, NAX, `MLX_ENABLE_TF32`) is fixed for the
 /// process.
 fn memoized_fused_verdict(shape: &WindowSdpaShape, arm: ProbedArm) -> bool {
-    let key = (*shape, arm);
+    memoized_fused_verdict_with_sinks(shape, arm, false)
+}
+
+/// [`memoized_fused_verdict`] for a call that carries attention sinks
+/// (`sinks`), which MLX weighs in its kernel choice (issue #3098).
+fn memoized_fused_verdict_with_sinks(shape: &WindowSdpaShape, arm: ProbedArm, sinks: bool) -> bool {
+    let key = (*shape, arm, sinks);
     if let Some(hit) = FUSED_MEMO.with(|memo| memo.borrow().get(&key).copied()) {
         return hit;
     }
@@ -368,6 +375,7 @@ fn memoized_fused_verdict(shape: &WindowSdpaShape, arm: ProbedArm) -> bool {
         has_arr_mask,
         do_causal,
         window,
+        sinks,
     );
     FUSED_MEMO.with(|memo| {
         let mut memo = memo.borrow_mut();
@@ -416,6 +424,19 @@ pub fn sdpa_mode_is_fused(shape: &WindowSdpaShape, has_arr_mask: bool, do_causal
         (false, false) => ProbedArm::Unmasked,
     };
     memoized_fused_verdict(shape, arm)
+}
+
+/// MLX's verdict on whether a sink-carrying causal SDPA over `shape` runs a
+/// fused kernel without a mask array: causal mode for a non-positive
+/// `window`, causal mode plus that `window_size` otherwise (issue #3098).
+/// Memoized like [`native_arm_is_fused`], under its own key.
+pub fn sinks_causal_arm_is_fused(shape: &WindowSdpaShape, window: i32) -> bool {
+    let arm = if window > 0 {
+        ProbedArm::NativeWindow(window)
+    } else {
+        ProbedArm::Causal
+    };
+    memoized_fused_verdict_with_sinks(shape, arm, true)
 }
 
 /// Decide the route under an explicit mode, backend and fused probe, so the

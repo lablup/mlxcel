@@ -1594,7 +1594,7 @@ mod ffi {
         ) -> UniquePtr<MlxArray>;
 
         /// Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
-        /// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
+        /// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, MiMoV2Flash, OpenAIPrivacyFilter
         #[allow(clippy::too_many_arguments)]
         unsafe fn fast_scaled_dot_product_attention_with_sinks(
             q: &MlxArray,
@@ -1919,6 +1919,7 @@ mod ffi {
             has_arr_mask: bool,
             do_causal: bool,
             window_size: i32,
+            has_sinks: bool,
         ) -> bool;
 
         /// MLX's own `metal::is_nax_available()`: whether this process runs
@@ -1928,6 +1929,23 @@ mod ffi {
         /// in `hardware::get_hardware()`; tests that pin MLX's dispatch rules
         /// gate on this one. `false` off Metal.
         fn metal_nax_available() -> bool;
+
+        /// Causal SDPA with attention sinks and no mask array (issue #3098):
+        /// MLX's `mask_mode = "causal"` over queries aligned to the suffix of
+        /// the keys, with `window_size` when positive (`-1` is no window).
+        /// Masks the same keys as `create_causal_mask_with_window_full(q_len,
+        /// k_len - q_len, window)` on the array sink entry. Any other window
+        /// and any MLX validation error is an `Err`. Call it through
+        /// `prefill_sdpa::causal_prefill_attention`, which picks the route.
+        #[rust_name = "ffi_fast_scaled_dot_product_attention_with_sinks_causal"]
+        fn fast_scaled_dot_product_attention_with_sinks_causal(
+            q: &MlxArray,
+            k: &MlxArray,
+            v: &MlxArray,
+            scale: f32,
+            window_size: i32,
+            sinks: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         /// Fused QKV projection + reshape + transpose + RoPE
         /// Reduces ~5 FFI calls (projection, reshape, transpose, rope) to 1
@@ -4398,6 +4416,15 @@ pub mod window_sdpa;
 #[cfg(test)]
 #[path = "window_sdpa_tests.rs"]
 mod window_sdpa_tests;
+
+// Causal and sliding-window prefill attention for layers that may carry
+// attention sinks (issue #3098): MLX's causal mode and `window_size` with
+// sinks where they fuse, the explicit band elsewhere.
+pub mod prefill_sdpa;
+pub use prefill_sdpa::causal_prefill_attention;
+#[cfg(test)]
+#[path = "prefill_sdpa_tests.rs"]
+mod prefill_sdpa_tests;
 
 // Weight loading utilities
 pub mod weights;

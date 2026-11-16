@@ -87,9 +87,19 @@ pub(crate) struct V4Attention {
     o_lora_rank: i32,
     rms_norm_eps: f32,
     scale: f32,
+    /// The local rotating cache's sliding window.
+    window: i32,
 }
 
 impl V4Attention {
+    /// The local SDPA geometry the model's prefill mask choice asks MLX
+    /// about: every query head over the one shared KV head, with sinks
+    /// (#3098).
+    pub(crate) fn prefill_attention(&self) -> mlxcel_core::utils::PrefillAttention {
+        mlxcel_core::utils::PrefillAttention::new(self.n_heads as usize, 1, self.head_dim as usize)
+            .with_sinks()
+    }
+
     pub(crate) fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -196,6 +206,7 @@ impl V4Attention {
             o_lora_rank: args.o_lora_rank as i32,
             rms_norm_eps: args.rms_norm_eps,
             scale: (head_dim as f32).powf(-0.5),
+            window: args.validated_sliding_window()?,
         })
     }
 
@@ -231,6 +242,17 @@ impl V4Attention {
         let sinks = mlxcel_core::astype(&self.attn_sink, mlxcel_core::array_dtype(&q));
 
         let out = match self.kind {
+            // A prefill the model left to MLX: only an all-local stack does
+            // that, since the compressed and sparse layers extend the local
+            // mask (#3098).
+            AttnKind::Local if l > 1 && mask.is_none() => mlxcel_core::causal_prefill_attention(
+                &q,
+                &kv,
+                &kv,
+                self.scale,
+                self.window,
+                Some(&sinks),
+            ),
             AttnKind::Local => self.dense_sdpa(&q, &kv, aligned_mask.as_deref(), &sinks),
             AttnKind::Compressed => {
                 let compressor = self.compressor.as_ref().expect("compressed layer");
