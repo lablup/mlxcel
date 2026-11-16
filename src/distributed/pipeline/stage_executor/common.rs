@@ -155,20 +155,6 @@ impl<L: TransformerStageLayer> TransformerStageModel<L> {
         self.execute_hidden(hidden, caches, mask, last_pos)
     }
 
-    /// [`Self::execute_last_row`] for a family that builds its attention mask
-    /// from the embedded hidden states and the caches.
-    pub fn execute_with_computed_mask_last_row(
-        &self,
-        input: StageExecutionInput<'_>,
-        caches: &mut [KVCache],
-        build_mask: impl FnOnce(&MlxArray, &[KVCache]) -> Option<UniquePtr<MlxArray>>,
-        last_pos: Option<usize>,
-    ) -> Result<StageExecutionOutput> {
-        let hidden = self.prepare_hidden(input)?;
-        let computed_mask = build_mask(hidden.as_ref().unwrap(), caches);
-        self.execute_hidden(hidden, caches, computed_mask.as_deref(), last_pos)
-    }
-
     fn prepare_hidden(&self, input: StageExecutionInput<'_>) -> Result<UniquePtr<MlxArray>> {
         Ok(match input {
             StageExecutionInput::TokenIds(input_ids) => self

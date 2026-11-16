@@ -28,7 +28,7 @@ use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
+use mlxcel_core::utils::{silu, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -544,6 +544,11 @@ impl KimiMLAAttention {
         self.o_proj.forward(&output)
     }
 
+    /// MLA self-attention over `x` `[B, L, hidden]`.
+    ///
+    /// `mask == None` is causal for a multi-token step (MLX's causal mode over
+    /// the live window) and unmasked for a single query; `Some` is an additive
+    /// mask broadcastable to `[B, H, L, S]`, applied as given.
     fn forward(
         &self,
         x: &MlxArray,
@@ -612,7 +617,58 @@ impl KimiMLAAttention {
             mlxcel_core::mla::MlaDecodePath::Decompressed
         });
 
-        // PE scoring: (q_pe * scale) @ k_pe^T -> [B, H, L, S]
+        if l > 1 {
+            // Multi-token step (issue #3099): fold the positional half into the
+            // SDPA head dim, `[q_nope | q_pe] . [k | k_pe]`, through
+            // `rope_folded_attention` instead of materializing the
+            // `[B, H, L, S]` nope, positional, summed and softmax score
+            // tensors by hand. A maskless step is causal over the live window
+            // `update_and_fetch` returned, through MLX's bottom-right aligned
+            // causal mode; a caller mask is applied as given.
+            debug_assert_eq!(
+                mlxcel_core::array_shape(&cached_latent)[2],
+                cache.seq_len(),
+                "causal mode needs the live window to end at this step"
+            );
+            let folded_mask = match mask {
+                Some(m) => mlxcel_core::mla::FoldedMask::Array(m),
+                None => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            let output = if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_latent = self.embed_q.forward(&q_nope, true); // [B, H, L, kv_lora_rank]
+                let attn_out = mlxcel_core::mla::rope_folded_attention(
+                    &q_latent,
+                    &q_pe,
+                    &cached_latent,
+                    &cached_k_pe,
+                    &cached_latent,
+                    self.scale,
+                    folded_mask,
+                );
+                self.unembed_out.forward(&attn_out, true) // [B, H, L, v_head_dim]
+            } else {
+                // Materialize: expand KV from latent to full dimension.
+                let k = self.embed_q.forward(&cached_latent, false); // [B, H, S, qk_nope_head_dim]
+                let v = self.unembed_out.forward(&cached_latent, true); // [B, H, S, v_head_dim]
+                mlxcel_core::mla::rope_folded_attention(
+                    &q_nope,
+                    &q_pe,
+                    &k,
+                    &cached_k_pe,
+                    &v,
+                    self.scale,
+                    folded_mask,
+                )
+            };
+            let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+            let output = mlxcel_core::reshape(&output, &[b, l, -1]);
+            return self.o_proj.forward(&output);
+        }
+
+        // Single-token decode keeps the manual form: its score row is one
+        // `[B, H, 1, S]` slice.
+        // PE scoring: (q_pe * scale) @ k_pe^T -> [B, H, 1, S]
         let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
         let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_arr);
         let k_pe_t = mlxcel_core::swap_axes(&cached_k_pe, -1, -2);
@@ -1316,7 +1372,6 @@ pub struct KimiLinearModel {
     pub lm_head: Option<UnifiedLinear>,
     pub tie_word_embeddings: bool,
     _ssm_layer_idx: usize,
-    attn_layer_idx: usize,
     sequence_state: ModelOwnedSequenceState<KimiLinearCache>,
     eos_token_ids: Vec<i32>,
 }
@@ -1347,23 +1402,13 @@ impl KimiLinearModel {
         );
 
         let mut h = self.embed_tokens.forward(input_ids);
-        let shape = mlxcel_core::array_shape(&h);
-        let l = shape[1];
 
-        // Create masks
-        let attn_mask = if l > 1 && !caches.is_empty() {
-            let offset = caches[self.attn_layer_idx].offset();
-            Some(create_causal_mask(l, offset))
-        } else {
-            None
-        };
-
-        // SSM mask: for prefill, all-true boolean; for generation, None
-        // (SSM layers process all tokens; mask is for variable-length batches)
-        let ssm_mask: Option<UniquePtr<MlxArray>> = None;
-
+        // No mask arrays. A multi-token MLA step runs MLX's causal mode inside
+        // the rope-folded attention, over the live window the layer's cache
+        // returns (#3099); the KDA layers process every token, and their mask
+        // only exists for variable-length batches.
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
-            h = layer.forward(&h, attn_mask.as_deref(), ssm_mask.as_deref(), cache);
+            h = layer.forward(&h, None, None, cache);
         }
         let h = mlxcel_core::generate::select_row(h, row);
 
@@ -1801,10 +1846,6 @@ impl KimiLinearModel {
         } else {
             0
         };
-        let attn_layer_idx = (0..config.num_hidden_layers)
-            .find(|i| !config.is_linear_layer(*i))
-            .unwrap_or(0);
-
         let internal_caches = make_kimi_caches_from_layers(&layers);
         let eos_token_ids = super::parse_optional_eos_token_ids(&config.eos_token_id);
 
@@ -1815,7 +1856,6 @@ impl KimiLinearModel {
             lm_head,
             tie_word_embeddings: config.tie_word_embeddings,
             _ssm_layer_idx: ssm_layer_idx,
-            attn_layer_idx,
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
             eos_token_ids,
         })

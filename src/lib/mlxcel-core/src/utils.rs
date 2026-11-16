@@ -155,16 +155,16 @@ pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
 ///
 /// Used by: decoders that materialize an explicit prefill mask instead of
 /// leaving `mask: None` for fused SDPA to apply causality itself. At this
-/// commit that is 21 non-test files under `src/models`, in five groups.
-/// Hybrid stacks whose attention cannot take MLX's causal mode (MLA scores or
-/// sinks) or that keep their mask for now: KimiLinear, MiniMaxM3,
-/// RecurrentGemma, Laguna, MiMoV2. Sliding-window and dual-attention families
-/// that build a separate global mask per forward: Gemma3, Gemma4,
-/// DiffusionGemma. MLA, sink and custom-attention decoders
-/// that add the mask to scores by hand or need it for their sinks:
-/// DeepSeekV2, DeepSeekV3.2, GptOss, FalconOcr, LongcatFlashNgram,
-/// GLM4MoeLite (and its MTP drafter), KimiK3, and the Qwen 3.5 speculative
-/// forward. Speculative verify blocks: Lfm2 (`forward_speculative`).
+/// commit that is 17 non-test files under `src/models`, in five groups.
+/// Hybrid stacks whose attention cannot take MLX's causal mode (sinks) or that
+/// keep their mask for now: MiniMaxM3, RecurrentGemma, Laguna, MiMoV2.
+/// Sliding-window and dual-attention families that build a separate global
+/// mask per forward: Gemma3, Gemma4, DiffusionGemma. MLA, sink and
+/// custom-attention decoders that add the mask to scores by hand or need it
+/// for their sinks: DeepSeekV2, DeepSeekV3.2, GptOss, FalconOcr, the
+/// GLM4MoeLite MTP drafter, and the Qwen 3.5 speculative forward. KimiLinear,
+/// GLM4MoeLite, KimiK3 and LongcatFlashNgram fold the rope half into SDPA
+/// through `mla::rope_folded_attention` and take causal mode instead (#3099). Speculative verify blocks: Lfm2 (`forward_speculative`).
 /// Files that call it only from test or diagnostic code: Gemma3n (its
 /// `xla-diagnostics` probes) and ExaoneMoe (its cache tests); Gemma4MtpTarget
 /// only names it in a comment.
@@ -172,8 +172,8 @@ pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
 /// can take MLX's causal mode build their prefill masks through
 /// [`prefill_causal_mask`] and [`prefill_sliding_window_mask`] instead
 /// (#3051, #3072). Outside `src/models` the callers are `lib.rs`,
-/// `layers.rs`, the tensor-parallel Llama runtime (Gemma 4), the GLM4 pipeline
-/// stage executor (GLM4MoeLite), and disaggregated handoff; the grep also
+/// `layers.rs`, the tensor-parallel Llama runtime (Gemma 4), and
+/// disaggregated handoff; the grep also
 /// matches `cache.rs` (calls inside its `#[cfg(test)]` module) and
 /// `drafter/qwen3_5_mtp/layer.rs` (a comment mention, not a call).
 ///

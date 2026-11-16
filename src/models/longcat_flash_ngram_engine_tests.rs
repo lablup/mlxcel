@@ -278,6 +278,37 @@ fn assert_incremental_matches_full(model_type: &str) {
     );
 }
 
+/// The full-sequence forward runs the rope-folded causal-mode prefill (#3099);
+/// feeding the same tokens one at a time runs the single-query path, which
+/// keeps the pre-#3099 additive rope-score form. Every position must agree.
+fn assert_prefill_matches_single_token_path(model_type: &str) {
+    let model = tiny_model(model_type);
+    let _ = model.make_caches();
+    let full = model.forward(&ids(&TOKENS), &mut [], None);
+
+    let _ = model.make_caches();
+    let mut worst = 0.0f32;
+    for (pos, token) in TOKENS.iter().enumerate() {
+        let out = model.forward(&ids(&[*token]), &mut [], None);
+        worst = worst.max(max_abs_diff(&row(&out, 0), &row(&full, pos as i32)));
+    }
+    assert!(
+        worst <= 1e-4,
+        "{model_type}: rope-folded prefill diverged from the single-token path: \
+         max abs diff {worst}"
+    );
+}
+
+#[test]
+fn longcat_flash_rope_folded_prefill_matches_single_token_path() {
+    assert_prefill_matches_single_token_path("longcat_flash");
+}
+
+#[test]
+fn longcat_flash_ngram_rope_folded_prefill_matches_single_token_path() {
+    assert_prefill_matches_single_token_path("longcat_flash_ngram");
+}
+
 #[test]
 fn longcat_flash_incremental_logits_match_full_forward() {
     assert_incremental_matches_full("longcat_flash");
