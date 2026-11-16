@@ -154,8 +154,7 @@ pub fn fused_absorbed_decode(
         || rank % 32 != 0
         || rope % 32 != 0
         || rank > 1024
-        || keys < 1
-        || keys > FUSED_DECODE_MAX_KEYS
+        || !(1..=FUSED_DECODE_MAX_KEYS).contains(&keys)
     {
         return None;
     }
