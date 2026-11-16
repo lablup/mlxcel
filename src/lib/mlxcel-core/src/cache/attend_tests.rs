@@ -841,6 +841,44 @@ fn chunked_decode_across_chunk_boundaries_attends_only_its_own_chunk() {
     );
 }
 
+/// The decode window of a chunked layer past its first chunk is a mid-buffer
+/// slice of the cache. On CUDA, MLX hands a one-row f16 decode over 256 or
+/// more keys to cuDNN after rebasing a "KV cache slice" to its buffer's start,
+/// and that test used to accept a slice that does not begin there, so cuDNN
+/// attended to the keys at the front of the buffer instead (Llama 4 Scout
+/// decoded garbage after a prompt past 8192 tokens, #3133). The chunk here is
+/// large enough that the own-chunk window reaches 256 keys after a prefill
+/// that crosses the boundary; the shapes of #3105's test above never do.
+#[test]
+fn chunked_decode_over_a_long_mid_buffer_window_matches_the_chunk_mask() {
+    let mut rng = Rng::new(0x0313_3001);
+    let chunk = 512;
+    let f16 = |a: UniquePtr<MlxArray>| ffi::astype(&a, dtype::FLOAT16);
+    let mut got = ChunkedKVCache::new(chunk);
+    let mut want = ChunkedKVCache::new(chunk);
+
+    // An 800-token prefill crosses the boundary at 512, so the next query's
+    // window is keys 512..=800 of a buffer the trim left starting at 289.
+    let (q, k, v) = step(&mut rng, 1, 800);
+    let (q, k, v) = (f16(q), f16(k), f16(v));
+    let _ = got.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+    let _ = chunked_reference(&mut want, &q, k, v, None);
+    for pos in 800..804 {
+        got.maybe_trim_front();
+        want.maybe_trim_front();
+        let (q, k, v) = step(&mut rng, 1, 1);
+        let (q, k, v) = (f16(q), f16(k), f16(v));
+        let a = got.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+        let b = chunked_reference(&mut want, &q, k, v, None);
+        assert!(pos + 1 - chunk >= 256, "the window must reach cuDNN's 256");
+        let rms = relative_rms(&to_vec_f32(&a), &to_vec_f32(&b));
+        assert!(
+            rms < 1e-2,
+            "decode at position {pos} differs from the mlx-lm chunk mask: relative rms {rms}"
+        );
+    }
+}
+
 #[test]
 fn batched_rows_over_rotating_caches_match_per_row_attend() {
     let mut rng = Rng::new(0x0021_7206);
