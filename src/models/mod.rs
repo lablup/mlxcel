@@ -108,6 +108,9 @@ pub mod gated_delta;
 // piece (#3073).
 pub(crate) mod mla_batched;
 pub(crate) mod ssd_scan;
+// `ssm_a` computes the SSM transition `A = -exp(A_log)` in float32 for the
+// Mamba1, Jamba and Mamba2 families (#3046, #3057, #3125).
+pub(crate) mod ssm_a;
 // `rope_overrides` carries llama-server b10621's `--rope-scaling`,
 // `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` from the server
 // CLI down to the RoPE seams in `rope_utils` and `dynamic_ntk_rope` (#1450).

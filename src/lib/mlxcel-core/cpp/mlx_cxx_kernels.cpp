@@ -2625,7 +2625,9 @@ namespace {
     // `cg::reduce` over the 32 lanes with lanes past N contributing 0, since
     // gemv's n_per_thread is 1 for K = N < 64, then rounded to T). With
     // uniform-dtype inputs the result is bit-identical to the graph scan
-    // (`mamba1_scan_parity_tests` checks this on CUDA).
+    // (`mamba1_scan_parity_tests` checks this on CUDA). The one mixed case is
+    // f16 activations with a float32 `A` (TA = float, issue #3125), which
+    // `mamba1_decay` below reproduces.
     static const char* MAMBA1_SCAN_CUDA_HEADER = R"(
 #include "mlx/backend/cuda/device/unary_ops.cuh"
 
@@ -2652,6 +2654,26 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
     return __hadd_rn(a, b);
   }
 }
+// dtA = exp(delta * A) in T. With A in T it is the graph's multiply then its
+// `exp`, both in T. f16 activations keep A in float32, since f16 cannot hold
+// -exp(A_log) (issues #3046, #3125), and the graph scans then run three ops
+// (`decay_in_activation_dtype` in jamba.rs, `MambaBlock::ssm_step` in
+// mamba.rs): `multiply` promotes delta to float32 (exact) and rounds the
+// float32 product once, `exp` runs on float32, and `astype` rounds the decay
+// to f16 (MLX's CastOp is `static_cast`, round to nearest even). The same
+// three steps here, in the same order, give the same bits; everything after
+// the decay stays in T as before.
+template <typename T, typename TA>
+__device__ __forceinline__ T mamba1_decay(T dt, TA a) {
+  if constexpr (cuda::std::is_same_v<T, TA>) {
+    return Exp{}(mamba1_mul(dt, a));
+  } else {
+    static_assert(
+        cuda::std::is_same_v<T, __half> && cuda::std::is_same_v<TA, float>,
+        "the only mixed case mamba1_scan_kernel_accepts admits is f16 x, float32 A");
+    return static_cast<T>(Exp{}(__fmul_rn(static_cast<float>(dt), a)));
+  }
+}
 } // namespace mlx::core::cu
 )";
 
@@ -2670,7 +2692,7 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
         const bool active = lane < N;
 
         T s = static_cast<T>(0.0f);
-        T a = static_cast<T>(0.0f);
+        TA a = static_cast<TA>(0.0f);
         if (active) {
             s = state_in[((size_t)b * Dm + d) * N + lane];
             a = A[d * N + lane];
@@ -2685,7 +2707,7 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
             if (active) {
                 // new_state = (delta * x) * B;  dtA = exp(delta * A)
                 const T input = mamba1_mul(mamba1_mul(dt, xv), Bm[row * N + lane]);
-                const T decay = Exp{}(mamba1_mul(dt, a));
+                const T decay = mamba1_decay(dt, a);
                 // state = state * dtA + new_state
                 s = mamba1_add(mamba1_mul(s, decay), input);
                 contrib = static_cast<float>(s) * static_cast<float>(Cm[row * N + lane]);
@@ -2862,6 +2884,43 @@ bool mamba1_scan_float_state_kernel_available() {
         mlxcel::has_kernel_port(mamba1_scan_ports());
 }
 
+// The graph-exact (CUDA) variant reproduces the graph scan only for these
+// dtypes: every input in x's floating dtype, except that f16 activations may
+// bring A in float32 (issue #3125), the dtype `scan_a` keeps it in for f16
+// because f16 cannot hold -exp(A_log). `mamba1_decay` in the CUDA source
+// reproduces how the graph scan handles that pair; no other mix is admitted.
+static bool mamba1_graph_exact_dtypes_ok(
+    mlx::core::Dtype x,
+    mlx::core::Dtype delta,
+    mlx::core::Dtype b,
+    mlx::core::Dtype c,
+    mlx::core::Dtype a,
+    mlx::core::Dtype d
+) {
+    using namespace mlx::core;
+    if (!issubdtype(x, floating)) {
+        return false;
+    }
+    for (Dtype other : {delta, b, c, d}) {
+        if (other != x) {
+            return false;
+        }
+    }
+    return a == x || (x == float16 && a == float32);
+}
+
+bool mamba1_graph_exact_scan_accepts_dtypes(
+    int32_t x,
+    int32_t delta,
+    int32_t b,
+    int32_t c,
+    int32_t a,
+    int32_t d
+) {
+    return mamba1_graph_exact_dtypes_ok(
+        to_dtype(x), to_dtype(delta), to_dtype(b), to_dtype(c), to_dtype(a), to_dtype(d));
+}
+
 bool mamba1_scan_kernel_accepts(
     const MlxArray& x,
     const MlxArray& delta,
@@ -2884,20 +2943,18 @@ bool mamba1_scan_kernel_accepts(
         return false;
     }
     // The float32-state variant casts whatever it is given. The graph-exact
-    // variant is exact only when every input already has the activation dtype.
+    // variant is exact only for the dtypes `mamba1_graph_exact_dtypes_ok`
+    // admits.
     if (!mlxcel::has_kernel_port(mamba1_scan_graph_exact_ports())) {
         return true;
     }
-    auto t = x.inner.dtype();
-    if (!issubdtype(t, floating)) {
-        return false;
-    }
-    for (const MlxArray* other : {&delta, &b, &c, &a, &d}) {
-        if (other->inner.dtype() != t) {
-            return false;
-        }
-    }
-    return true;
+    return mamba1_graph_exact_dtypes_ok(
+        x.inner.dtype(),
+        delta.inner.dtype(),
+        b.inner.dtype(),
+        c.inner.dtype(),
+        a.inner.dtype(),
+        d.inner.dtype());
 }
 
 void mamba1_selective_scan(
@@ -2922,9 +2979,13 @@ void mamba1_selective_scan(
     // The float32-state variant carries the state in float32. The graph-exact
     // variant rounds everything, the state included, to T like the graph scan;
     // the caller's float32 zeros for a fresh sequence cast exactly, and a
-    // carried state is already T.
+    // carried state is already T. It reads A in T, except the float32 A that
+    // f16 activations bring (issue #3125), which it reads as is.
     const bool graph_exact = mlxcel::has_kernel_port(mamba1_scan_graph_exact_ports());
     const Dtype state_t = graph_exact ? t : float32;
+    const Dtype a_t = !graph_exact ? float32
+        : (t == float16 && a.inner.dtype() == float32) ? float32
+                                                       : t;
     const mlxcel::KernelPorts& ports =
         graph_exact ? mamba1_scan_graph_exact_ports() : mamba1_scan_ports();
 
@@ -2933,12 +2994,17 @@ void mamba1_selective_scan(
         {"N", n},
         {"Dm", dm},
     };
+    // Only the CUDA source names A's dtype; the Metal and ROCm sources and
+    // their cache keys stay as they were.
+    if (graph_exact) {
+        template_args.emplace_back("TA", a_t);
+    }
     std::vector<array> inputs = {
         x.inner,
         astype(delta.inner, t),
         astype(b.inner, t),
         astype(c.inner, t),
-        astype(a.inner, state_t),
+        astype(a.inner, a_t),
         astype(d.inner, t),
         astype(state_in.inner, state_t),
     };
