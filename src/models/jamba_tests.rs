@@ -897,3 +897,40 @@ fn jamba_forced_graph_scan_prefill_spans_blocks_and_matches_the_kernel() {
         }
     }
 }
+
+/// Issue #3057: the mixer computes `A = -exp(A_log)` once at load from a
+/// float32 copy, so an f16 `A_log` past 11.09 (where f16 `exp` overflows)
+/// keeps its value instead of becoming `-inf`. A step whose `softplus` is zero
+/// then decays by `exp(0 * A) = 1` rather than `exp(0 * -inf) = NaN`, and the
+/// prefill logits stay finite.
+#[test]
+fn jamba_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
+    use crate::models::ssm_test_support::{
+        assert_prefill_logits_finite, overflowing_f16_a_log, zero_step_dt_bias,
+    };
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let i = 2 * HIDDEN;
+    let a_log = overflowing_f16_a_log(&[i, 8]);
+    let want: Vec<f32> = to_f32(&a_log).iter().map(|v| -v.exp()).collect();
+    let mut weights = mamba_weights();
+    weights.insert("model.layers.0.mamba.A_log".into(), a_log);
+    weights.insert(
+        "model.layers.0.mamba.dt_proj.bias".into(),
+        zero_step_dt_bias(i),
+    );
+    let model =
+        JambaModel::from_weights(mamba_config(), weights).expect("Mamba Jamba fixture must load");
+
+    let super::TemporalBlock::Mamba(mixer) = &model.model.layers[0].temporal else {
+        panic!("layer 0 of the Mamba fixture is a Mamba layer");
+    };
+    assert_eq!(mlxcel_core::array_dtype(&mixer.a), dtype::FLOAT32);
+    let got = to_f32(&mixer.a);
+    assert!(
+        got.iter()
+            .zip(&want)
+            .all(|(g, w)| g.is_finite() && ((g - w) / w).abs() < 1e-6),
+        "A must equal -exp(A_log) in float32"
+    );
+    assert_prefill_logits_finite(&model, "jamba");
+}
