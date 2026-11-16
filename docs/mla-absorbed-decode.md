@@ -30,9 +30,9 @@ The cost is fixed weight memory, and how much depends on the checkpoint. A quant
 
 ## Default layout for DeepSeek V2
 
-DeepSeek V2 caches decompressed per-head K and V unless `MLXCEL_MLA_ABSORBED=1` is set. Issue #3102 measured both layouts on deepseek-v2-lite-chat-4bit-mlx on an M5 Max (2026-11-15) with the rule that the latent layout becomes the default only if it holds decode throughput within a few percent and the teacher-forced trace shows no material disagreement:
+DeepSeek V2 caches the MLA latent by default wherever the fused absorbed-decode kernel runs (#3131), and decompressed per-head K and V elsewhere or under `MLXCEL_MLA_ABSORBED=0`. The default followed two rounds of measurement. Issue #3102 measured both layouts on deepseek-v2-lite-chat-4bit-mlx on an M5 Max (2026-11-15) with the rule that the latent layout becomes the default only if it holds decode throughput within a few percent and the teacher-forced trace shows no material disagreement:
 
-| measurement | decompressed (default) | absorbed | |
+| measurement | decompressed (then default) | absorbed | |
 |---|---|---|---|
 | decode, pp512/tg128 (median tok/s) | 200.6 | 180.7 | -9.9% |
 | decode, 2048-token prompt, tg128 | 168.1 | 161.9 | -3.7% |
@@ -41,7 +41,7 @@ DeepSeek V2 caches decompressed per-head K and V unless `MLXCEL_MLA_ABSORBED=1` 
 | peak, same prompt, single pass | 48.55 GB | 41.02 GB | -7.53 GB |
 | logit trace, decided positions that disagree | reference | 0 of 3,653 | prefill width 2048 and decode width 1 |
 
-The trace condition holds: every disagreement falls where the reference's top two were within 0.19 logits, so the two layouts differ only in the rounding class. The throughput condition does not: absorbed decode carries a fixed per-step cost of about 0.55 ms at 512 tokens of context, which its smaller cache read pays back only past roughly 3K tokens. A default that makes short chat-length requests 10% slower to save memory they do not need was declined, so the decompressed layout stays the default and `MLXCEL_MLA_ABSORBED=1` is the setting for long-context and memory-bound runs.
+The trace condition holds: every disagreement falls where the reference's top two were within 0.19 logits, so the two layouts differ only in the rounding class. The throughput condition does not: absorbed decode carries a fixed per-step cost of about 0.55 ms at 512 tokens of context, which its smaller cache read pays back only past roughly 3K tokens. A default that made short chat-length requests 10% slower to save memory they did not need was declined at that point, and the decompressed layout stayed the default.
 
 What would change the decision is removing that fixed cost. Issue #3121 removed most of it, and the decision is open again:
 
@@ -50,14 +50,23 @@ What would change the decision is removing that fixed cost. Issue #3121 removed 
 
 Re-measured on the same checkpoint (2026-11-16):
 
-| measurement | decompressed (default) | absorbed | |
+| measurement | decompressed (then default) | absorbed | |
 |---|---|---|---|
 | decode, pp512/tg128 (median tok/s) | 205.5 | 201.4 | -2.0% |
 | decode, 2048-token prompt, tg128 | 170.1 | 180.7 | +6.2% |
 | decode, 16384-token prompt, tg128 | 73.5 | 114.4 | +56% |
 | logit trace, decided positions that disagree | reference | 0 of 393 | decode width 1 behind 1024, 4096 and 8192 |
 
-Both conditions now hold. Switching the default is a separate change and was not made here. Rows: [the #3121 benchmark results](benchmark_results/mla-absorbed-decode-cost-m5max-2026-11-16.md).
+Both conditions now hold, and issue #3131 made absorbed decode the default on Metal, where they were measured. Re-measured on the switched binary (2026-11-16, shared host, so absolute rates run low; arms interleaved):
+
+| measurement | `MLXCEL_MLA_ABSORBED=0` | default (absorbed) | |
+|---|---|---|---|
+| decode, pp512/tg128 (median of 6) | 171.3 | 168.5 | -1.7% |
+| decode, 2048-token prompt, tg128 (median of 4) | 150.9 | 153.5 | +1.8% |
+| decode, 16384-token prompt, tg128 | 71.4 | 105.8 | +48% |
+| logit trace, decided positions that disagree | reference | 0 of 315 | decode width 1 behind 1024 and 4096 |
+
+`MLXCEL_MLA_ABSORBED=0` keeps the decompressed layout for anyone who measures their own workload differently. The same run validated the fused kernel on an always-absorbed family end to end: on kimi-vl-a3b-thinking-4bit (`deepseek_v3` decoder) the `absorbed_fused` counter covers every decode step behind 1024 and 4096 tokens, the trace against `MLXCEL_MLA_FUSED_DECODE=0` disagrees at 0 of 242 decided positions, and decode is 7% faster at both 512 and 2048 tokens. Rows: [the #3121 benchmark results](benchmark_results/mla-absorbed-decode-cost-m5max-2026-11-16.md) and [the #3131 results](benchmark_results/mla-absorbed-default-m5max-2026-11-16.md).
 
 No other family shares the choice: `deepseek_v3` and `deepseek_v32` absorb unconditionally, and `minicpm3` and `dots1` cache decompressed K/V with no absorbed path. Every sample and trace row is in [the benchmark results](benchmark_results/mla-v2-default-layout-m5max-2026-11-15.md).
 
@@ -65,18 +74,18 @@ No other family shares the choice: `deepseek_v3` and `deepseek_v32` absorb uncon
 
 | Variable | Effect |
 |---|---|
-| `MLXCEL_MLA_ABSORBED=1` | Cache `(ckv, kpe)` and run absorbed decode (Stage 1). Default off; on DeepSeek V2 it trades about 10% short-context decode for a much smaller cache and faster long-context decode (see above). |
-| `MLXCEL_MLA_SPLIT_KV=1` | Additionally cut the latent range into chunks and merge the partial states (Stage 2). Implies the above; ignored without it. |
+| `MLXCEL_MLA_ABSORBED` | Cache `(ckv, kpe)` and run absorbed decode (Stage 1). On by default where the fused kernel runs (#3131); `1`, `true`, `on` or `yes` force it on every backend, and `0`, `false`, `off` or `no` restore the decompressed per-head K/V cache. |
+| `MLXCEL_MLA_SPLIT_KV=1` | Additionally cut the latent range into chunks and merge the partial states (Stage 2). Off by default; ignored under `MLXCEL_MLA_ABSORBED=0`. |
 
-Both accept `1`, `true`, `on`, `yes` in any case. Anything else, including an unset variable, is off, so a typo degrades to the decompressed path rather than silently enabling one nobody asked for.
+`MLXCEL_MLA_ABSORBED` is a tri-state (`mlxcel_core::mla::AbsorbedMode`): an on spelling (`1`, `true`, `on`, `yes`) forces absorbed decode, an off spelling forces the decompressed layout, and unset, empty or unrecognized is the default. The default absorbs only where the fused absorbed-decode kernel runs, which today means Metal with `MLXCEL_MLA_FUSED_DECODE` not turned off. The switch was measured only there; on CUDA and ROCm absorbed decode takes the composed path, which carried the roughly 10% short-context cost #3102 measured, so non-Metal backends keep the decompressed layout by default until #3133 measures them. A typo keeps the default layout instead of changing it. `MLXCEL_MLA_SPLIT_KV` stays opt-in and accepts only the on spellings.
 
-With `MLXCEL_MLA_ABSORBED` unset, no fold is built, no weight is dequantized, and the family runs the pre-existing decompressed path unchanged.
+Under `MLXCEL_MLA_ABSORBED=0`, no fold is built, no weight is dequantized, and the family runs the pre-existing decompressed path unchanged. Absorbed decode still declines per cache, keeping the decompressed path, for any non-FP16 KV cache mode and for paged-backed caches.
 
 ## Where it applies
 
 | Family | Before this work | Now |
 |---|---|---|
-| `deepseek_v2` | Decompressed cache | Decompressed by default, absorbed under the flag (default kept by measurement, #3102) |
+| `deepseek_v2` | Decompressed cache | Absorbed by default on Metal (#3131), decompressed by default elsewhere; `MLXCEL_MLA_ABSORBED` forces either |
 | `deepseek_v3` | Already absorbed (`embed_q` / `unembed_out` decomposition in `sanitize_weights`) | Unchanged |
 | `deepseek_v32` | Already absorbed, same decomposition | Unchanged |
 | `minicpm3` | Decompressed cache | Unchanged, still decompressed |
@@ -134,7 +143,7 @@ It measures one MLA attention block per decode step over three arms and prints t
 
 Every row ends in a `paths=` field from `mlxcel_core::mla::stats`, taken and reset around the measured region, and the harness prints a `WARNING` on any row whose counters disagree with the arm's label. **Do not report a row whose `paths=` field does not name its own arm.** Issue #899 shipped a fused decode path that never activated and whose before/after benchmark compared the fallback against itself; that null looked clean and was nearly accepted.
 
-For a real checkpoint, `MLXCEL_MLA_ABSORBED=1 mlxcel generate -m models/<deepseek> ...` prints one stderr line at load stating how many layers folded and the bytes/token before and after. A run whose line reads `0/27 layers` is running the fallback. The line goes to stderr, not stdout, so it never mixes with the generated text, and it does not depend on `RUST_LOG`.
+For a real checkpoint, `MLXCEL_MLA_ABSORBED=1 mlxcel generate -m models/<deepseek> ...` (the explicit on spelling; the default reports the same line through `tracing` at info level, `RUST_LOG=info`) prints one stderr line at load stating how many layers folded and the bytes/token before and after. A run whose line reads `0/27 layers` is running the fallback, and a decline is printed to stderr under the default as well. The line goes to stderr, not stdout, so it never mixes with the generated text, and it does not depend on `RUST_LOG`.
 
 ## Related
 

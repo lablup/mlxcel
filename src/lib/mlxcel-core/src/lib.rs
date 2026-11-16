@@ -4625,7 +4625,8 @@ pub mod bench_rotation;
 pub mod paged_v2;
 
 // Matrix-absorbed MLA decode over a compressed-latent KV cache (issue #907).
-// Default off; selected by `MLXCEL_MLA_ABSORBED=1` at family load time. Public
+// DeepSeek V2's default where the fused kernel runs since #3131;
+// `MLXCEL_MLA_ABSORBED` forces either layout, read at family load time. Public
 // so the DeepSeek-family model code in the `mlxcel` crate and the benchmark
 // harness under `examples/` can build the fold, wrap the latent cache, and
 // drive both decode paths directly. Stage 2 reuses issue #898's merge kernel
