@@ -4652,6 +4652,11 @@ mod ffi_gelu_topk_tests;
 #[path = "array_evaluated_bytes_tests.rs"]
 mod array_evaluated_bytes_tests;
 
+// The NemotronH decode-handle registry under concurrent register/free (#3124).
+#[cfg(test)]
+#[path = "nemotron_registry_tests.rs"]
+mod nemotron_registry_tests;
+
 // Affine 1-bit quantization (issue #1370): fused Metal qmv / qmm parity against
 // a host f64 oracle, the dequantize reference, load validation and layer
 // routing.
