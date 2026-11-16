@@ -903,8 +903,17 @@ fn softcapped_over_window_prefill_keeps_the_mask_route() {
 }
 
 /// MLX's dispatch verdict on the pinned commit: head dim 128 reaches the full
-/// attention kernel with a window; head dim 256 does so on a pre-NAX GPU only
-/// for a fresh half-precision prefill of 2048 rows or more.
+/// attention kernel with a window. Head dim 256 does so on a pre-NAX GPU only
+/// for a fresh half-precision prefill of 2048 rows or more, and on a NAX GPU
+/// for any half-precision causal prefill of 1024 rows or more (the headdim-split
+/// rule in `use_fallback`), continuation chunks included.
+///
+/// The branch is chosen by MLX's own `metal::is_nax_available()`, the flag
+/// `use_fallback` actually reads, and not by `hardware::get_hardware()`, which
+/// derives the chip from the sysctl brand string. The two disagreed on two of
+/// the nightly runners (issue #2806): MLX ran the NAX rules there while the
+/// sysctl view reported no Neural Accelerator, so the pre-NAX expectations
+/// failed on every run those hosts picked up and passed on the others.
 #[test]
 fn fused_probe_matches_the_pinned_dispatch_rules() {
     if !metal_or_skip() {
@@ -930,10 +939,15 @@ fn fused_probe_matches_the_pinned_dispatch_rules() {
         ),
         "queries longer than the keys have no fused window kernel"
     );
+    let nax = ffi::metal_nax_available();
     let hw = crate::hardware::get_hardware();
-    if hw.has_neural_accelerator && hw.macos_supports_na {
-        return;
-    }
+    let context = format!(
+        "MLX NAX {nax}, GPU architecture {:?}, sysctl view {:?} with Neural Accelerator {} and macOS NA support {}",
+        ffi::gpu_architecture(0),
+        hw.silicon_gen,
+        hw.has_neural_accelerator,
+        hw.macos_supports_na,
+    );
     let gemma = WindowSdpaShape {
         q_heads: 4,
         kv_heads: 1,
@@ -941,39 +955,45 @@ fn fused_probe_matches_the_pinned_dispatch_rules() {
         value_dim: 256,
         ..eligible_shape()
     };
-    assert!(
-        !native_arm_is_fused(
-            &WindowSdpaShape {
-                q_len: 1024,
-                k_len: 1024,
-                ..gemma
-            },
-            512
-        ),
-        "D=256 below 2048 rows is the graph fallback on a pre-NAX GPU"
-    );
-    assert!(
+    let d256 = |q_len: i32, k_len: i32| {
         native_arm_is_fused(
             &WindowSdpaShape {
-                q_len: 2048,
-                k_len: 2048,
+                q_len,
+                k_len,
                 ..gemma
             },
-            512
-        ),
-        "a fresh 2048-row half-precision D=256 prefill is fused on a pre-NAX GPU"
+            512,
+        )
+    };
+    assert!(
+        !d256(512, 512),
+        "D=256 below 1024 rows is the graph fallback on every GPU ({context})"
+    );
+    assert_eq!(
+        d256(1024, 1024),
+        nax,
+        "a 1024-row D=256 prefill is fused exactly when MLX runs NAX ({context})"
     );
     assert!(
-        !native_arm_is_fused(
-            &WindowSdpaShape {
-                q_len: 2048,
-                k_len: 2559,
-                ..gemma
-            },
-            512
-        ),
-        "a D=256 continuation chunk is the graph fallback on a pre-NAX GPU"
+        d256(2048, 2048),
+        "a fresh 2048-row half-precision D=256 prefill is fused on every GPU ({context})"
     );
+    assert_eq!(
+        d256(2048, 2559),
+        nax,
+        "a D=256 continuation chunk is fused exactly when MLX runs NAX ({context})"
+    );
+}
+
+/// The probe for MLX's NAX flag answers on every backend without panicking,
+/// and off Metal it is always `false`, so a CPU-only or CUDA run never takes
+/// the NAX branch of the dispatch-rule test above.
+#[test]
+fn metal_nax_probe_is_false_off_metal() {
+    let nax = ffi::metal_nax_available();
+    if gpu_backend_kind() != GpuBackendKind::Metal {
+        assert!(!nax, "MLX's NAX flag is a Metal-only fact");
+    }
 }
 
 // ── The rotating cache carries the window ──

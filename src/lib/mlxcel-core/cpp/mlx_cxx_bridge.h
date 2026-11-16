@@ -2594,6 +2594,15 @@ bool sdpa_uses_fused_kernel(
     int32_t window_size
 );
 
+// MLX's own `metal::is_nax_available()`: whether this process runs the Neural
+// Accelerator (NAX) kernels, which `ScaledDotProductAttention::use_fallback`
+// and the GEMM dispatch read. It folds in the GPU architecture generation,
+// the running macOS version and the `MLX_METAL_GPU_ARCH` override, so it can
+// disagree with a sysctl brand-string view of the chip. Tests that pin MLX's
+// dispatch rules gate on this rather than on `hardware::get_hardware()`.
+// Metal only; false on every other backend.
+bool metal_nax_available();
+
 // Fused Sparse-V SDPA Metal kernel launcher.
 // Wraps `mlxcel::turbo::sparse_v_weighted_sum` so the cxx bridge can expose it
 // via the `turbo_sparse_v_weighted_sum` FFI symbol. Implementation lives in
