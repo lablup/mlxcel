@@ -183,6 +183,10 @@ cleanup() {
     if (( KEEP_WORKTREES )); then
       echo "kept: $wt" >&2
       kept=$((kept + 1))
+    elif [[ ! -e "$wt" ]]; then
+      # A `worktree add` that failed before creating the directory records a
+      # path that has nothing to remove; the prune below clears any metadata.
+      continue
     elif git worktree remove --force "$wt" >/dev/null 2>&1; then
       echo "removed: $wt" >&2
       removed=$((removed + 1))
