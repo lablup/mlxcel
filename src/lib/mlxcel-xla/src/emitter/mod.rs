@@ -684,10 +684,14 @@ mod tests {
     /// output tensor every step. The graph must therefore take and return no
     /// cache at all, and it must export the seeding entry the shim probes for.
     /// The ragged and prefill graphs keep the full-cache ABI.
+    ///
+    /// Pinned to `Precision::F32` so the f32 global type asserted here does not
+    /// depend on `MLXCEL_XLA_PRECISION`; the narrowed (f16/bf16) global is
+    /// covered by `single_decode_cache_global_uses_the_contraction_precision`.
     #[test]
     fn single_decode_threads_kv_through_module_globals() {
         let c = Config::llama_3_2_1b();
-        let mlir = emit_decode(&c, true);
+        let mlir = emit_decode_with(&c, true, Precision::F32);
         let cache_ty = format!(
             "tensor<{}x{}x{}x{}xf32>",
             c.n_layers,
