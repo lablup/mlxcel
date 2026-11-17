@@ -99,6 +99,140 @@ pub(crate) fn rocm_tuning_spec_flag() -> Result<String, String> {
 mod tests {
     use super::*;
 
+    /// issue #2873: the assertions above are textual, and the failure mode this
+    /// asset can produce silently is a matcher that still parses but no longer
+    /// matches: the graph compiles on the compiler default and only the
+    /// throughput changes. This compiles the single-sequence decode graph the
+    /// `hip` backend emits and reads the selected lowering configs back out of
+    /// the executable dump, so the narrow tile is observed on the projections it
+    /// was measured for and a wide output is observed keeping its own config.
+    ///
+    /// Ignored by default because it needs the version-matched ROCm-capable
+    /// `iree-compile`. Run it after an edit to the asset or the emitter:
+    /// `MLXCEL_XLA_IREE_COMPILE=<iree-compile> cargo test -p mlxcel-xla --lib
+    /// tuning::tests::the_spec_reaches -- --ignored`.
+    #[test]
+    #[ignore = "requires MLXCEL_XLA_IREE_COMPILE pointing at an iree-compile with the ROCm target"]
+    fn the_spec_reaches_the_shapes_the_decode_graph_emits() {
+        use crate::emitter::{
+            Config, Precision, ProjectionLayout, emit_decode_with_native,
+            target_flags_with_rocm_target,
+        };
+        use std::process::Command;
+
+        let compiler =
+            std::env::var("MLXCEL_XLA_IREE_COMPILE").expect("set MLXCEL_XLA_IREE_COMPILE");
+        let dir =
+            std::env::temp_dir().join(format!("mlxcel-rocm-tuning-apply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the scratch directory");
+        let spec = rocm_tuning_spec_flag_in(&dir).expect("write the spec");
+
+        // The graph the `hip` engine compiles for a single-sequence decode: the
+        // `InOut` layout with f16-resident projections. The other layouts and
+        // precisions emit rank-2 contractions that this spec deliberately leaves
+        // alone, so they cannot observe the matcher.
+        let mut config = Config::llama_3_2_1b();
+        config.projection_layout = ProjectionLayout::InOut;
+        let graph = emit_decode_with_native(&config, false, Precision::F16, None);
+        let input = dir.join("decode.mlir");
+        std::fs::write(&input, &graph).expect("write the decode graph");
+        let dumped = dir.join("configurations");
+        std::fs::create_dir_all(&dumped).expect("create the dump directory");
+
+        // Cross-compiling is enough to observe the selected configs, so the
+        // matcher test pins the measured architecture unless the caller names
+        // another one.
+        let rocm_target =
+            std::env::var("MLXCEL_XLA_ROCM_TARGET").unwrap_or_else(|_| "gfx1151".to_string());
+        let mut cmd = Command::new(&compiler);
+        cmd.arg("--iree-input-type=stablehlo");
+        for flag in
+            target_flags_with_rocm_target("hip", Some(&rocm_target)).expect("hip target flags")
+        {
+            cmd.arg(flag);
+        }
+        let out = cmd
+            .arg(spec)
+            .arg("--iree-dispatch-creation-enable-aggressive-fusion")
+            .arg(format!(
+                "--iree-hal-dump-executable-configurations-to={}",
+                dumped.display()
+            ))
+            .arg(&input)
+            .arg("-o")
+            .arg(dir.join("decode.vmfb"))
+            .output()
+            .expect("run iree-compile");
+        assert!(
+            out.status.success(),
+            "iree-compile failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for entry in std::fs::read_dir(&dumped).expect("read the dump directory") {
+            let text = std::fs::read_to_string(entry.expect("dump entry").path())
+                .expect("read a dumped configuration");
+            let export = text
+                .split("hal.executable.export public @")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .expect("an export name");
+            if !export.contains("_vecmat_") {
+                continue;
+            }
+            let start = text
+                .find("lowering_config = #iree_gpu.lowering_config")
+                .expect("a lowering config on the vecmat dispatch");
+            let rest = &text[start..];
+            let config = &rest[..rest.find("}>").expect("a closed lowering config") + 2];
+            seen.push((export.to_string(), config.to_string()));
+        }
+        assert!(
+            !seen.is_empty(),
+            "the decode graph carried no vecmat dispatch to observe"
+        );
+
+        let narrow = "lowering_config = #iree_gpu.lowering_config<{reduction = [0, 32], thread = [1, 0], workgroup = [32, 0]}";
+        let (mut narrow_hits, mut others) = (0usize, 0usize);
+        for (export, config) in &seen {
+            // The dispatch name is `vecmat_<N>x<K>...`, N first (the weight's
+            // output axis), which is the axis the narrow matcher bounds.
+            let n: usize = export
+                .split("_vecmat_")
+                .nth(1)
+                .and_then(|rest| rest.split('x').next())
+                .expect("an output width in the dispatch name")
+                .parse()
+                .expect("a numeric output width");
+            if (128..=8192).contains(&n) {
+                assert!(
+                    config.starts_with(narrow),
+                    "{export} (N = {n}) lost the narrow tile: {config}"
+                );
+                narrow_hits += 1;
+            } else {
+                assert!(
+                    !config.starts_with(narrow),
+                    "{export} (N = {n}) picked up the narrow tile the N bound excludes: {config}"
+                );
+                others += 1;
+            }
+        }
+        assert!(
+            narrow_hits > 0,
+            "no narrow vecmat was observed, so the matcher did not apply at all"
+        );
+        assert!(
+            others > 0,
+            "the wide LM head was not in the dump, so the N bound is unobserved"
+        );
+        // Reached only when every observation held; a failed run keeps the dump
+        // and the emitted graph in the scratch directory for inspection.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn tuning_spec_flag_is_content_addressed() {
         let dir =
