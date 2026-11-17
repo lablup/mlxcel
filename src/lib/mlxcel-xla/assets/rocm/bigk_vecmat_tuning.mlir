@@ -1,4 +1,4 @@
-// ROCm lowering tuning spec (issues #2873, #2921).
+// ROCm lowering tuning spec (issues #2873, #2921, #2956).
 //
 // Applied to the model graphs on the hip backend. Four contraction classes get
 // a lowering config that the compiler defaults handle poorly on gfx1151; every
@@ -6,21 +6,21 @@
 //
 // 1. Narrow single-row contractions (`match_single_row_vecmat`). The compiler
 //    default gives a rank-1 vecmat `thread = [8, 0]`, `workgroup = [256, 0]`
-//    for every width at or above 2048, so the launch has N/256 workgroups of one warp each: 8 for
-//    the 2048-wide q and o and 32 for gate/up on llama-3.2-1b, 8 for the
-//    3584-wide q, o and down projections of a model with hidden 3584. On a
-//    20-WGP device that is less than one wave, and the serial K reduction
-//    cannot hide memory latency, so llama's q/o run at about 42 GB/s where the
-//    128256-wide LM head reaches 225 GB/s. One output per thread raises the
-//    launch to N/32 warps and, with `reduction = [0, 32]`, measures llama's
-//    q/o at about 219 GB/s and its K = 8192 down projection at about 230
-//    (issue #2873). The tile does not depend on the reduction length: every
-//    output still walks K serially and only the output count decides the
-//    occupancy, so the match is any K with 128 <= N <= 8192, a rank-1 by
-//    rank-2 contraction with f16 operands and an f32 accumulator and no batch
-//    dims. The N bound keeps the LM head (128256 wide on llama) out, where the
-//    activation re-read would grow with N, and the N >= 128 bound keeps
-//    very narrow projections on the compiler default.
+//    for every width at or above 2048, so the launch has N/256 workgroups of
+//    one warp each: 8 for the 2048-wide q and o and 32 for gate/up on
+//    llama-3.2-1b, 14 for the 3584-wide q, o and down projections of a model
+//    with hidden 3584. On a 20-WGP device that is less than one wave, and the
+//    serial K reduction cannot hide memory latency, so llama's q/o run at
+//    about 42 GB/s where the 128256-wide LM head reaches 228 GB/s. One output
+//    per thread raises the launch to N/32 warps and, with
+//    `reduction = [0, 32]`, measures llama's q/o at about 219 GB/s and its
+//    K = 8192 down projection at about 230 (issue #2873). The tile does not
+//    depend on the reduction length: every output still walks K serially and
+//    only the output count decides the occupancy, so the match is any K with
+//    128 <= N <= 8192, a rank-1 by rank-2 contraction with f16 operands and an
+//    f32 accumulator and no batch dims. The N bound keeps the LM head (128256
+//    wide on llama) out, where the activation re-read would grow with N, and
+//    the N >= 128 bound keeps very narrow projections on the compiler default.
 //
 // 2. Wide long-K single-row contractions (`match_bigk_vecmat_wide`). The
 //    previous long-K config for N >= 8193 and K >= 4096, where the default

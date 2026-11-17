@@ -26,18 +26,20 @@ use std::path::Path;
 /// The compiler's default tile for a rank-1 vecmat is `thread = [8, 0]`,
 /// `workgroup = [256, 0]` for every width at or above 2048, so the launch
 /// carries N/256 workgroups of one warp each: 8 workgroups for the 2048-wide
-/// q and o projections and 32 for gate/up on llama-3.2-1b, 8 for the 3584-wide
-/// projections of a model with hidden 3584. That is less than one wave on a
-/// 20-WGP device, and the projections run at about 42 GB/s where the
-/// 128256-wide LM head reaches 225 GB/s (issue #2873). The spec gives every
+/// q and o projections and 32 for gate/up on llama-3.2-1b, 14 for the
+/// 3584-wide projections of a model with hidden 3584. That is less than one
+/// wave on a 20-WGP device, and the projections run at about 42 GB/s where the
+/// 128256-wide LM head reaches 228 GB/s (issue #2873). The spec gives every
 /// single-row vecmat with `128 <= N <= 8192` one output per thread and
 /// `reduction = [0, 32]`, which launches N/32 warps and measures llama's q/o at
 /// about 219 GB/s and its K = 8192 down projection at about 230. The tile does
 /// not depend on K (every output still walks the reduction serially; only the
 /// output count sets the occupancy), so the same match covers the down
-/// projections of larger models. The LM head and wider shapes keep the
-/// previous config: their activation re-read grows with N, and they already
-/// launch enough warps (see the asset for the exact predicates).
+/// projections of larger models. The LM head and other wide shapes keep the
+/// config they had before: the compiler default unless N >= 8193 and
+/// K >= 4096, where the previous `thread = [8, 0]` config still applies. Their
+/// activation re-read grows with N, and they already launch enough warps (see
+/// the asset for the exact predicates).
 ///
 /// The second match is the grouped-query decode score contraction, a batched
 /// `[n_kv, group, head_dim]` by `[n_kv, head_dim, keys]` f16 matmul with an f32
@@ -134,6 +136,14 @@ mod tests {
     /// bounded: the tile is the same for every reduction length, and bounding
     /// it at the 1b model's hidden size would leave q/o on a 7b checkpoint
     /// (`K = 3584`) on the compiler default.
+    ///
+    /// The wide fallback's two predicates are pinned as well: it must keep its
+    /// K >= 4096 gate (without it the wide tile would reach every LM head,
+    /// including llama's K = 2048 one that is deliberately left on the compiler
+    /// default) and start exactly where the narrow matcher stops, N >= 8193, so
+    /// the two predicates are disjoint. Because they are disjoint their order
+    /// in `transform.foreach_match` cannot change the result, so it is not
+    /// asserted.
     #[test]
     fn tuning_spec_matches_the_narrow_single_row_vecmats() {
         let entrypoint = ROCM_BIGK_VECMAT_TUNING
@@ -161,7 +171,7 @@ mod tests {
             "the narrow matcher keeps the ragged multi-row projections out"
         );
         assert!(
-            body.contains("umin = 128, umax = 8192"),
+            body.contains("transform.iree.match.dim_bounds %rhs[1], umin = 128, umax = 8192"),
             "the narrow matcher bounds only the output width, so the LM head keeps its config"
         );
         assert!(
@@ -180,7 +190,15 @@ mod tests {
             "the wide long-K fallback keeps the previous thread tile"
         );
         assert!(
-            wide.contains("umin = 8193"),
+            wide.contains("transform.iree.match.dims_equal %batch_dims, []"),
+            "the wide matcher keeps the ragged multi-row projections out"
+        );
+        assert!(
+            wide.contains("transform.iree.match.dim_bounds %rhs[0], umin = 4096, none"),
+            "the wide fallback stays gated on the reduction axis, so the K = 2048 LM head keeps the compiler default"
+        );
+        assert!(
+            wide.contains("transform.iree.match.dim_bounds %rhs[1], umin = 8193, none"),
             "the wide fallback starts where the narrow matcher stops"
         );
     }
