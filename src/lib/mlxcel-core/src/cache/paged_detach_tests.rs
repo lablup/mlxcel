@@ -110,6 +110,9 @@ fn default_layout() -> PagedKvLayout {
 /// `cache.rs`, so it may touch the private `paged_pool` / `active` fields)
 /// because the live forward/scheduler wiring of `write_prefill` is #121 and is
 /// out of scope for #120. `k`/`v` are `[1, n_kv_heads, n_new, head_dim]`.
+///
+/// Also advances the sequence's stub cache offset for `layer_idx` to mirror
+/// what `write_paged` / `update_and_fetch_paged` does in production (#3140).
 fn write_prefill_for(
     pool: &mut CachePool,
     id: SequenceId,
@@ -120,17 +123,30 @@ fn write_prefill_for(
     let block_pool = pool
         .paged_pool
         .as_ref()
-        .ok_or_else(|| "paged backend not initialized".to_string())?;
-    let state = pool
+        .ok_or_else(|| "paged backend not initialized".to_string())?
+        .clone();
+    let state_rc = pool
         .active
         .get(&id)
         .ok_or_else(|| format!("sequence {id} not found"))?
         .paged
         .as_ref()
-        .ok_or_else(|| format!("sequence {id} is not paged"))?;
+        .ok_or_else(|| format!("sequence {id} is not paged"))?
+        .clone();
     block_pool
         .borrow_mut()
-        .write_prefill(&mut state.borrow_mut(), layer_idx, k, v)
+        .write_prefill(&mut state_rc.borrow_mut(), layer_idx, k, v)?;
+
+    let k_shape = crate::ffi::array_shape(k);
+    let n_new = if k_shape.len() >= 3 { k_shape[2] } else { 0 };
+    if let Some(cache) = pool
+        .active
+        .get_mut(&id)
+        .and_then(|seq| seq.caches.get_mut(layer_idx))
+    {
+        cache.offset += n_new;
+    }
+    Ok(())
 }
 
 /// Deterministic `[1, H, n_tokens, D]` FP32 prefill block whose per-token
@@ -1855,6 +1871,49 @@ fn trim_detached_paged_to_rejects_bad_targets() {
             .len,
         12
     );
+}
+
+#[test]
+fn trim_detached_paged_to_with_real_pool_backed_sequence_updates_offset() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let bytes_per_block = block_size * n_kv_heads as usize * head_dim as usize * 2;
+    let layout = PagedKvLayout::uniform(2, block_size, bytes_per_block).unwrap();
+    let model = DenseNaturalStubModel::new(2);
+    let mut pool = CachePool::new(4);
+
+    let seed = pool
+        .allocate_with_layout(&model, Some(SequenceStateLayout::paged_kv_cache(layout)))
+        .unwrap();
+
+    let seq_len = 12i32;
+    let k0 = prefill_block(1000.0, n_kv_heads, seq_len, head_dim);
+    let v0 = prefill_block(5000.0, n_kv_heads, seq_len, head_dim);
+    let k1 = prefill_block(2000.0, n_kv_heads, seq_len, head_dim);
+    let v1 = prefill_block(6000.0, n_kv_heads, seq_len, head_dim);
+    {
+        let caches = pool.get_caches_mut(seed).unwrap();
+        assert!(caches[0].is_paged_backed());
+        assert!(caches[1].is_paged_backed());
+        let _ = caches[0].update_and_fetch_paged(&k0, &v0);
+        let _ = caches[1].update_and_fetch_paged(&k1, &v1);
+    }
+
+    let mut set = pool.detach_paged(seed).unwrap();
+    assert_eq!(set.seq_len(), seq_len as usize);
+    for handle in &set.caches {
+        assert_eq!(handle.offset, seq_len);
+    }
+
+    let target_tokens = 8usize;
+    pool.trim_detached_paged_to(&mut set, target_tokens).unwrap();
+    assert_eq!(set.seq_len(), target_tokens);
+    for handle in &set.caches {
+        assert_eq!(handle.offset, target_tokens as i32);
+    }
+
+    pool.release_detached_paged(set);
 }
 
 // ---------------------------------------------------------------------------

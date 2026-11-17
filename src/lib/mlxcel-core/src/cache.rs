@@ -3299,7 +3299,7 @@ impl KVCache {
     /// a non-empty write. The model `forward` signature returns a plain tuple,
     /// so there is no `Result` to thread these through; a misuse is a hard bug,
     /// not a recoverable condition.
-    fn update_and_fetch_paged(
+    pub(crate) fn update_and_fetch_paged(
         &mut self,
         new_keys: &MlxArray,
         new_values: &MlxArray,
