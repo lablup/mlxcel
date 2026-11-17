@@ -18,6 +18,7 @@
 
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::utils::create_causal_mask;
 use mlxcel_core::weights::WeightMap;
 
@@ -521,4 +522,156 @@ fn qwen3_next_linear_layers_report_no_kv_storage() {
         .map(|layer| (layer % 4 == 3).then_some(KVCacheMode::Int8))
         .collect();
     assert_eq!(model.kv_cache_storage_modes(), Some(expected));
+}
+
+fn host_f32(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
+    let as_f32 = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&as_f32);
+    mlxcel_core::array_to_raw_bytes(&as_f32)
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+fn relative_l2(out: &[f32], reference: &[f32]) -> f64 {
+    assert_eq!(out.len(), reference.len());
+    let (mut diff, mut norm) = (0.0f64, 0.0f64);
+    for (a, b) in out.iter().zip(reference) {
+        diff += (*a as f64 - *b as f64).powi(2);
+        norm += (*b as f64).powi(2);
+    }
+    (diff / norm.max(f64::MIN_POSITIVE)).sqrt()
+}
+
+/// A block-float expert plane as mlx-lm exports it (`mxfp4` at group 32,
+/// `nvfp4` at group 16): `uint8` scales and no `.biases`. This type's own
+/// variant is affine and asked for `.biases`, so every such Qwen3.5 MoE
+/// export failed to load with `Missing biases`. The plane now loads, and its
+/// f32 forward matches a host f64 product over the weights MLX's own
+/// `dequantize` gives for the plane. (A dense forward over those weights is
+/// no reference: `dequantize` returns bf16, so that product rounds the
+/// activations to bf16 and is off by about 2e-3.)
+#[test]
+fn qwen3_next_switch_linear_loads_a_block_float_expert_plane() {
+    let _device = mlxcel_core::streams::lock_default_device();
+    let (experts, out, input) = (3i32, 64i32, 64i32);
+    let count = (experts * out * input) as usize;
+    let x_host = deterministic_values(4102, 2 * input as usize, 1.0);
+    let routing = [0u32, 2, 1, 0];
+    for (mode, group_size) in [("mxfp4", 32), ("nvfp4", 16)] {
+        let source = mlxcel_core::from_slice_f32(
+            &deterministic_values(4101, count, 0.5),
+            &[experts, out, input],
+        );
+        let quantized = mlxcel_core::quantize_weights_with_mode(&source, group_size, 4, mode);
+        assert!(!mlxcel_core::quantized_weights_has_biases(&quantized));
+        let packed = mlxcel_core::quantized_weights_w(&quantized);
+        let scales = mlxcel_core::quantized_weights_scales(&quantized);
+        // SAFETY: `packed` and `scales` are live arrays from the quantize call
+        // above; a null `biases` pointer is what `dequantize` takes for the
+        // bias-free block-float modes.
+        let decoded = unsafe {
+            mlxcel_core::dequantize(&packed, &scales, std::ptr::null(), group_size, 4, mode)
+        };
+        let decoded = host_f32(&decoded);
+
+        let mut weights = WeightMap::new();
+        weights.insert(format!("{PREFIX}.weight"), packed);
+        weights.insert(format!("{PREFIX}.scales"), scales);
+        let layer = SwitchLinear::from_weights(&weights, &config_with(group_size, 4), PREFIX)
+            .unwrap_or_else(|err| panic!("{mode} expert plane must load: {err}"));
+        assert!(matches!(layer, SwitchLinear::BlockFloat(_)), "{mode}");
+        assert!(
+            layer.quantized_parts().is_none(),
+            "{mode}: the affine-only fused kernel must not take a block-float plane"
+        );
+
+        // Two tokens, two experts each: slot `b` reads token `b / 2`.
+        let (out, input) = (out as usize, input as usize);
+        let mut reference = Vec::with_capacity(routing.len() * out);
+        for (slot, &expert) in routing.iter().enumerate() {
+            let x = &x_host[(slot / 2) * input..][..input];
+            for row in 0..out {
+                let w = &decoded[(expert as usize * out + row) * input..][..input];
+                let dot: f64 = x.iter().zip(w).map(|(a, b)| *a as f64 * *b as f64).sum();
+                reference.push(dot as f32);
+            }
+        }
+        let x = mlxcel_core::from_slice_f32(&x_host, &[2, 1, 1, input as i32]);
+        let indices = mlxcel_core::from_slice_u32(&routing, &[2, 2]);
+        let got = host_f32(&layer.forward(&x, &indices, false));
+        let error = relative_l2(&got, &reference);
+        assert!(error < 1e-5, "{mode}: relative L2 {error}");
+    }
+}
+
+/// An affine expert plane that lost its `.biases` has float scales, not
+/// `uint8`, and is still refused rather than routed to the block-float loader.
+#[test]
+fn qwen3_next_switch_linear_still_refuses_an_affine_plane_without_biases() {
+    let mut weights = WeightMap::new();
+    insert_stacked_quantized_expert_plane(
+        &mut weights,
+        PREFIX,
+        EXPERTS,
+        OUT,
+        PACKED_IN,
+        NUM_GROUPS,
+    );
+    weights.remove(&format!("{PREFIX}.biases"));
+    let err = match SwitchLinear::from_weights(&weights, &config_with(GROUP_SIZE, BITS), PREFIX) {
+        Ok(_) => panic!("an affine plane without biases must not load"),
+        Err(err) => err,
+    };
+    assert!(err.contains("Missing biases"), "got: {err}");
+}
+
+/// mlx-lm keeps a MoE router (`mlp.gate`, `mlp.shared_expert_gate`) at 8-bit
+/// affine, group 64, whatever the rest of the export uses, and records it as a
+/// per-layer `quantization` entry this family does not read. Under a
+/// block-float default (mxfp4 at group 32) the declared pair failed the bits
+/// check. The router plane's own shapes give its pair.
+#[test]
+fn qwen3_next_router_gate_loads_its_own_affine_layout() {
+    let _device = mlxcel_core::streams::lock_default_device();
+    let (experts, hidden) = (8i32, 64i32);
+    let source = mlxcel_core::from_slice_f32(
+        &deterministic_values(4103, (experts * hidden) as usize, 0.5),
+        &[experts, hidden],
+    );
+    let quantized = mlxcel_core::quantize_weights_with_mode(&source, 64, 8, "affine");
+    let (packed, scales, biases) = (
+        mlxcel_core::quantized_weights_w(&quantized),
+        mlxcel_core::quantized_weights_scales(&quantized),
+        mlxcel_core::quantized_weights_biases(&quantized),
+    );
+    // SAFETY: all three planes are live arrays from the quantize call above.
+    let decoded = unsafe { mlxcel_core::dequantize(&packed, &scales, &*biases, 64, 8, "affine") };
+    let mut weights = WeightMap::new();
+    weights.insert("gate.weight".into(), packed);
+    weights.insert("gate.scales".into(), scales);
+    weights.insert("gate.biases".into(), biases);
+
+    // The bug: the checkpoint default (mxfp4 at group 32) does not describe
+    // this plane.
+    assert!(UnifiedLinear::from_weights(&weights, "gate", 32, 4).is_err());
+
+    let gate = super::gate_linear_from_weights(&weights, "gate", hidden, 32, 4)
+        .expect("the router plane loads with its own layout");
+    let q = gate.quantized_weight().expect("the router stays quantized");
+    assert_eq!((q.group_size, q.bits, q.mode.as_str()), (64, 8, "affine"));
+
+    let x = mlxcel_core::from_slice_f32(
+        &deterministic_values(4104, 2 * hidden as usize, 1.0),
+        &[1, 2, hidden],
+    );
+    let got = host_f32(&gate.forward(&x));
+    let want = host_f32(&mlxcel_core::matmul(&x, &mlxcel_core::transpose(&decoded)));
+    let error = relative_l2(&got, &want);
+    assert!(error < 1e-4, "relative L2 {error}");
+
+    // A plane the declared pair does describe takes the ordinary route.
+    let gate = super::gate_linear_from_weights(&weights, "gate", hidden, 64, 8)
+        .expect("a matching declared pair loads unchanged");
+    assert_eq!(gate.quantized_weight().map(|q| q.bits), Some(8));
 }
