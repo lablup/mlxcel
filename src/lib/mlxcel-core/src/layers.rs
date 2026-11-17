@@ -69,6 +69,12 @@ pub struct QuantizedWeight {
 /// incompatible"). `None` sends the caller to its projection-by-projection
 /// forwards, which carry each projection's own layout.
 ///
+/// The fused kernel also has no argument for [`QuantizedWeight::global_scale`],
+/// the per-tensor scale a ModelOpt NVFP4 checkpoint carries beside its block
+/// scales. A projection with one is not fused either: the kernel would run it
+/// unscaled and return wrong numbers without an error, while
+/// [`UnifiedLinear::forward`] applies the scale.
+///
 /// Used by: the Gemma 1, Gemma 2 and Gemma 3 MLPs.
 #[must_use]
 pub fn fused_mlp_quantized_weights<'a>(
@@ -88,7 +94,10 @@ pub fn fused_mlp_quantized_weights<'a>(
     let same_layout = |other: &QuantizedWeight| {
         gate.group_size == other.group_size && gate.bits == other.bits && gate.mode == other.mode
     };
-    (same_layout(up) && same_layout(down)).then_some((gate, up, down))
+    let unscaled = [gate, up, down]
+        .iter()
+        .all(|weight| weight.global_scale.is_none());
+    (unscaled && same_layout(up) && same_layout(down)).then_some((gate, up, down))
 }
 
 impl QuantizedWeight {
@@ -6618,6 +6627,45 @@ mod tests {
         // A projection that is not quantized at all leaves nothing to fuse.
         let dense = UnifiedLinear::Regular(Linear::new(seeded(&[128, 64], 17), None));
         assert!(fused_mlp_quantized_weights(&gate, &dense, &down).is_none());
+    }
+
+    #[test]
+    fn a_fused_mlp_takes_no_projection_with_a_tensor_scale() {
+        // The fused kernel has no argument for a per-tensor scale, so one on
+        // any of the three projections sends the MLP to its separate forwards.
+        let (gate_dense, down_dense) = (seeded(&[128, 64], 11), seeded(&[64, 128], 13));
+        let plain = |dense: &MlxArray| UnifiedLinear::new(quantized_4bit(dense), None);
+        let scaled = |dense: &MlxArray| {
+            let mut weight = quantized_4bit(dense);
+            weight.global_scale = Some(ffi::from_slice_f32(&[0.5], &[1]));
+            UnifiedLinear::new(weight, None)
+        };
+        assert!(
+            fused_mlp_quantized_weights(
+                &plain(&gate_dense),
+                &plain(&gate_dense),
+                &plain(&down_dense)
+            )
+            .is_some()
+        );
+        for position in 0..3 {
+            let pick = |index: usize, dense: &MlxArray| {
+                if index == position {
+                    scaled(dense)
+                } else {
+                    plain(dense)
+                }
+            };
+            let (gate, up, down) = (
+                pick(0, &gate_dense),
+                pick(1, &gate_dense),
+                pick(2, &down_dense),
+            );
+            assert!(
+                fused_mlp_quantized_weights(&gate, &up, &down).is_none(),
+                "scaled projection {position}"
+            );
+        }
     }
 
     /// Issues #1994 and #2001: with matching f16 or bf16 scales and input and
