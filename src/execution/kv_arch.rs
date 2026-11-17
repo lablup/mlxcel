@@ -29,8 +29,8 @@
 //!   the per-head formula (*overcount*). So do the other families that always
 //!   cache the latent pair (`mla::caches_mla_latent_pair`). V2 follows the
 //!   runtime: it caches the latent where absorbed decode is selected
-//!   (`mla::absorbed_enabled`, the Metal default since #3131) and the KV cache
-//!   is FP16, and the *decompressed* K/V
+//!   (`mla::absorbed_enabled`, the Metal default since #3131 and the CUDA
+//!   default since #3133) and the KV cache is FP16, and the *decompressed* K/V
 //!   (`num_heads × (qk_nope + qk_rope + v_head_dim)`) otherwise, which can be
 //!   *larger* than `2 × num_kv_heads × head_dim` (*undercount*, dangerous for a
 //!   budget).
@@ -352,8 +352,8 @@ pub const fn deepseek_v2_latent_layout(absorbed: bool, int8_kv: bool) -> bool {
 }
 
 /// [`deepseek_v2_latent_layout`] for this process: absorbed decode as the
-/// loader resolves it (`MLXCEL_MLA_ABSORBED` and the fused kernel's
-/// availability, read once).
+/// loader resolves it (`MLXCEL_MLA_ABSORBED` and `mla::default_absorbs`, read
+/// once).
 #[must_use]
 pub fn deepseek_v2_caches_latent(int8_kv: bool) -> bool {
     deepseek_v2_latent_layout(mlxcel_core::mla::absorbed_enabled(), int8_kv)

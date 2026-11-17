@@ -41,7 +41,7 @@ The V2 rows reproduce #3121's absorbed-fused rows exactly, now without setting t
 
 ## Backend condition
 
-These measurements are Metal-only, with the fused kernel. The default therefore resolves to absorbed only where that kernel runs (`mla::fused_decode_enabled()`: a Metal port and `MLXCEL_MLA_FUSED_DECODE` not off). CUDA and ROCm keep the decompressed layout by default until #3133 measures them; `MLXCEL_MLA_ABSORBED=1` still forces absorbed there.
+These measurements are Metal-only, with the fused kernel. The default therefore resolves to absorbed only where that kernel runs (`mla::fused_decode_enabled()`: a Metal port and `MLXCEL_MLA_FUSED_DECODE` not off). CUDA and ROCm keep the decompressed layout by default until #3133 measures them; `MLXCEL_MLA_ABSORBED=1` still forces absorbed there. Update: #3133 measured CUDA and switched its default to absorbed ([GB10 results](mla-cuda-validation-gb10-2026-11-17.md)); ROCm is still unmeasured.
 
 ## Correctness on the other `deepseek_v2` decoder
 

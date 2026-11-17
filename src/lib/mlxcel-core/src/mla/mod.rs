@@ -69,7 +69,8 @@
 //! spelling selects the latent cache on every backend and an off spelling
 //! (`0`, `false`, `off`, `no`) keeps the decompressed path. Unset, DeepSeek V2
 //! absorbs wherever the fused absorbed-decode kernel runs (Metal, unless
-//! `MLXCEL_MLA_FUSED_DECODE` turns it off) and stays decompressed elsewhere
+//! `MLXCEL_MLA_FUSED_DECODE` turns it off) and on CUDA, where the composed
+//! path was measured (#3133), and stays decompressed elsewhere
 //! ([`absorbed_enabled`]). When the result is decompressed nothing in this
 //! module is constructed, no fold is built, and the family runs the
 //! byte-identical decompressed path.
@@ -118,7 +119,8 @@ pub use split_kv::{MlaSplitPlan, absorbed_decode_split_kv};
 pub use stats::{MlaDecodePath, MlaDispatchCounts};
 
 /// Environment variable selecting the absorbed MLA decode path. Default on
-/// where the fused kernel runs (issue #3131); see [`AbsorbedMode`].
+/// where the fused kernel runs (issue #3131) and on CUDA (issue #3133); see
+/// [`AbsorbedMode`].
 pub const ABSORBED_ENV: &str = "MLXCEL_MLA_ABSORBED";
 
 /// Environment variable selecting the Stage 2 split-KV decode path.
@@ -173,14 +175,16 @@ pub fn parse_enabled(value: Option<&str>) -> bool {
 /// Tri-state so the loader can tell the default from an explicit request. An
 /// explicit on or off forces the layout. The default follows the evidence: the
 /// switch to absorbed (issue #3131) was measured on Metal with the fused
-/// absorbed-decode kernel, so the default absorbs only where that kernel runs
+/// absorbed-decode kernel, so the default absorbs where that kernel runs
 /// ([`fused_decode_enabled`]). Elsewhere absorbed decode takes the composed
-/// path, which carried about 10% short-context cost in #3102, so the default
-/// stays decompressed there until #3133 measures it.
+/// path, which carried about 10% short-context cost on Metal in #3102. On CUDA
+/// (GB10, #3133) the composed path decodes level with the decompressed one at
+/// pp512 and 2.4x faster behind 16K, so CUDA absorbs too
+/// ([`COMPOSED_DEFAULT_MEASURED`]). ROCm is unmeasured and stays decompressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AbsorbedMode {
     /// Unset, empty, or an unrecognized value: absorbed where the fused kernel
-    /// runs, decompressed elsewhere.
+    /// runs or the composed path was measured, decompressed elsewhere.
     Default,
     /// An on spelling (`1`, `true`, `on`, `yes`): absorbed on every backend,
     /// reported on load.
@@ -207,15 +211,29 @@ impl AbsorbedMode {
     }
 
     /// Whether this mode selects the absorbed (latent cache) layout, given
-    /// whether the fused absorbed-decode kernel can run in this process.
+    /// whether the default absorbs in this process ([`default_absorbs`]).
     #[must_use]
-    pub const fn resolve(self, fused_available: bool) -> bool {
+    pub const fn resolve(self, default_absorbs: bool) -> bool {
         match self {
-            Self::Default => fused_available,
+            Self::Default => default_absorbs,
             Self::On => true,
             Self::Off => false,
         }
     }
+}
+
+/// Whether this build's backend was measured to run the composed absorbed
+/// decode path at the default's bar (#3102: decode within a few percent of
+/// the decompressed layout at pp512, no material trace disagreement). True on
+/// CUDA after the GB10 measurement in #3133; ROCm has not been measured.
+pub const COMPOSED_DEFAULT_MEASURED: bool = cfg!(feature = "cuda");
+
+/// Whether the unset [`AbsorbedMode::Default`] selects the absorbed layout in
+/// this process: the fused kernel runs ([`fused_decode_enabled`]) or the
+/// backend's composed path was measured ([`COMPOSED_DEFAULT_MEASURED`]).
+#[must_use]
+pub fn default_absorbs() -> bool {
+    COMPOSED_DEFAULT_MEASURED || fused_decode_enabled()
 }
 
 /// The process's [`AbsorbedMode`], read once.
@@ -226,10 +244,10 @@ pub fn absorbed_mode() -> AbsorbedMode {
 }
 
 /// Whether the absorbed MLA decode path is selected, read once per process:
-/// [`absorbed_mode`] resolved against [`fused_decode_enabled`].
+/// [`absorbed_mode`] resolved against [`default_absorbs`].
 #[must_use]
 pub fn absorbed_enabled() -> bool {
-    absorbed_mode().resolve(fused_decode_enabled())
+    absorbed_mode().resolve(default_absorbs())
 }
 
 /// Whether the Stage 2 split-KV decode path is selected, read once per process.
@@ -391,8 +409,8 @@ mod tests {
     }
 
     #[test]
-    fn the_default_absorbs_only_where_the_fused_kernel_runs() {
-        // Issue #3131's resolution table: (mode, fused available) -> absorbed.
+    fn the_default_follows_default_absorbs_and_explicit_modes_force() {
+        // Issue #3131's resolution table: (mode, default absorbs) -> absorbed.
         let table = [
             (AbsorbedMode::Default, true, true),
             (AbsorbedMode::Default, false, false),
@@ -401,9 +419,24 @@ mod tests {
             (AbsorbedMode::Off, true, false),
             (AbsorbedMode::Off, false, false),
         ];
-        for (mode, fused, absorbed) in table {
-            assert_eq!(mode.resolve(fused), absorbed, "{mode:?} with fused={fused}");
+        for (mode, default, absorbed) in table {
+            assert_eq!(
+                mode.resolve(default),
+                absorbed,
+                "{mode:?} with default={default}"
+            );
         }
+    }
+
+    #[test]
+    fn the_default_absorbs_on_cuda_or_where_the_fused_kernel_runs() {
+        // #3133: CUDA's composed path met the bar; ROCm is unmeasured, so on a
+        // non-CUDA build the default still needs the fused kernel.
+        assert_eq!(COMPOSED_DEFAULT_MEASURED, cfg!(feature = "cuda"));
+        assert_eq!(
+            default_absorbs(),
+            cfg!(feature = "cuda") || fused_decode_enabled()
+        );
     }
 
     #[test]

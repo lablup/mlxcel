@@ -1154,7 +1154,7 @@ impl DeepSeekV2Model {
 
 /// State the absorbed-decode decision, once per load.
 ///
-/// Absorbed decode is the default where the fused kernel runs (issue #3131), so the success line only goes
+/// Absorbed decode is the default where the fused kernel runs (issue #3131) and on CUDA (#3133), so the success line only goes
 /// to stderr when `MLXCEL_MLA_ABSORBED` explicitly asks for it; under the
 /// default it is a `tracing` info line and a plain run prints nothing extra.
 /// A decline always goes to stderr: a run that wanted the latent cache and did
@@ -1309,7 +1309,7 @@ fn load_mla_attention(
         UnifiedLinear::from_weights(weights, &format!("{}.kv_b_proj", prefix), group_size, bits)?;
 
     // Fold `kv_b_proj` for absorbed decode (issue #907), the default wherever
-    // the fused kernel runs since issue #3131. `MLXCEL_MLA_ABSORBED=0` skips the fold, so the decompressed
+    // the fused kernel runs since issue #3131 and on CUDA since #3133. `MLXCEL_MLA_ABSORBED=0` skips the fold, so the decompressed
     // layout allocates nothing extra. A quantized `kv_b_proj` keeps
     // its packed rows (issue #3121); only an unquantized or tensor-scaled one
     // is held dense.
