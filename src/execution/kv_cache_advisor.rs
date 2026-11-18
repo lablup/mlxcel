@@ -223,9 +223,11 @@ pub fn recommend_kv_cache_mode(
                     None,
                     "This family caches the MLA (kv_latent, k_pe) pair in one KV cache with no decompressed fallback, so every quantized mode is mis-calibrated for it and is substituted back to fp16 at startup. See the MLA latent section of docs/turbo-kv-cache.md. Keep fp16.",
                 ),
-                // DeepSeek V2 sized as the latent: absorbed decode is on, and
-                // an int8 cache would decline it (`latent_layout_supports_mode`)
-                // and fall back to the decompressed per-head layout, about 4x
+                // DeepSeek V2 sized as the latent: absorbed decode is on and
+                // the run's KV mode is fp16 (a quantized run classifies as
+                // `MlaDecompressed`, #3153). An int8 cache would decline it
+                // (`latent_layout_supports_mode`) and fall back to the
+                // decompressed per-head layout, about 4x
                 // the fp16 latent on V2-Lite (5120 against 1152 bytes per token
                 // per layer). Without absorption the kind is `MlaDecompressed`
                 // and int8 below is the right advice.
@@ -294,8 +296,13 @@ pub fn recommend_kv_cache_mode(
 /// path panics on non-power-of-two head dims via
 /// `TurboQuantParams::new`; this guard prevents that panic from reaching a
 /// user-initiated benchmark run.
+///
+/// `kv_mode` is the KV cache mode the run resolves to. It only matters for
+/// families whose cache layout depends on it: DeepSeek V2 caches the absorbed
+/// latent under FP16 and decompressed per-head K/V under any other mode, so
+/// the advice is classified against the cache the run really builds (#3153).
 #[must_use]
-pub fn advise_kv_cache_modes(model_path: &Path) -> Vec<KvCacheModeAdvice> {
+pub fn advise_kv_cache_modes(model_path: &Path, kv_mode: KVCacheMode) -> Vec<KvCacheModeAdvice> {
     let config_str = match std::fs::read_to_string(model_path.join("config.json")) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -304,14 +311,17 @@ pub fn advise_kv_cache_modes(model_path: &Path) -> Vec<KvCacheModeAdvice> {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    advise_kv_cache_modes_from_config(&config)
+    advise_kv_cache_modes_from_config(&config, kv_mode)
 }
 
 /// Pure-data core of [`advise_kv_cache_modes`], operating on an already-parsed
 /// config value. Separated so unit tests can drive it without touching the
 /// filesystem.
-fn advise_kv_cache_modes_from_config(config: &serde_json::Value) -> Vec<KvCacheModeAdvice> {
-    let Some((arch_kind, model_type)) = arch_and_type_from_config(config) else {
+fn advise_kv_cache_modes_from_config(
+    config: &serde_json::Value,
+    kv_mode: KVCacheMode,
+) -> Vec<KvCacheModeAdvice> {
+    let Some((arch_kind, model_type)) = arch_and_type_from_config(config, kv_mode) else {
         return Vec::new();
     };
     // Turbo modes require a power-of-two head dimension. When the config lets
@@ -331,12 +341,23 @@ fn advise_kv_cache_modes_from_config(config: &serde_json::Value) -> Vec<KvCacheM
         .collect()
 }
 
-fn arch_and_type_from_config(config: &serde_json::Value) -> Option<(KvArchKind, String)> {
+fn arch_and_type_from_config(
+    config: &serde_json::Value,
+    kv_mode: KVCacheMode,
+) -> Option<(KvArchKind, String)> {
     // Reuse the architecture classifier so the advisor and the memory
-    // estimator never disagree on what family a model is. Batch/dtype/ctx do
-    // not affect the detected `kind`, so the defaults are arbitrary here.
-    let estimate = estimate_kv_arch_from_config(config, DEFAULT_CTX_LEN, false, 1)?;
-    Some((estimate.kind, read_model_type(config)))
+    // estimator never disagree on what family a model is. Batch and ctx do not
+    // affect the detected `kind`. The mode can: it decides whether DeepSeek V2
+    // is `MlaCompressed` (FP16, absorbed) or `MlaDecompressed`.
+    //
+    // Classify against the mode the run resolves to, not the one requested: a
+    // quantized request on an absorbing DeepSeek V2 resolves back to fp16
+    // (and keeps the latent), so the advice must be the latent's (#3153).
+    let model_type = read_model_type(config);
+    let (kv_mode, _) =
+        mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model(kv_mode, &model_type);
+    let estimate = estimate_kv_arch_from_config(config, DEFAULT_CTX_LEN, kv_mode, 1)?;
+    Some((estimate.kind, model_type))
 }
 
 /// Read the canonical lowercase `model_type` string, matching the allowlist's

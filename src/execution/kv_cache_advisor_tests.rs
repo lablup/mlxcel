@@ -230,7 +230,7 @@ fn recommendation_is_always_an_allowed_kv_cache_mode() {
 #[test]
 fn advise_returns_empty_for_missing_config() {
     let tmp = tempfile::tempdir().unwrap();
-    assert!(advise_kv_cache_modes(tmp.path()).is_empty());
+    assert!(advise_kv_cache_modes(tmp.path(), KVCacheMode::Fp16).is_empty());
 }
 
 #[test]
@@ -242,7 +242,7 @@ fn advise_classifies_standard_config_for_all_ranges() {
         "num_key_value_heads": 8,
         "head_dim": 128
     });
-    let (kind, mt) = arch_and_type_from_config(&cfg).unwrap();
+    let (kind, mt) = arch_and_type_from_config(&cfg, KVCacheMode::Fp16).unwrap();
     assert_eq!(kind, KvArchKind::Standard);
     assert_eq!(mt, "llama");
 
@@ -277,12 +277,12 @@ fn openai_era_naming_produces_advice() {
     });
 
     for (name, cfg) in [("gpt2", gpt2), ("gpt_bigcode", gpt_bigcode)] {
-        let (kind, mt) =
-            arch_and_type_from_config(&cfg).unwrap_or_else(|| panic!("{name} should classify"));
+        let (kind, mt) = arch_and_type_from_config(&cfg, KVCacheMode::Fp16)
+            .unwrap_or_else(|| panic!("{name} should classify"));
         assert_eq!(kind, KvArchKind::Standard, "{name} kind");
         assert_eq!(mt, name, "{name} model_type");
 
-        let advices = advise_kv_cache_modes_from_config(&cfg);
+        let advices = advise_kv_cache_modes_from_config(&cfg, KVCacheMode::Fp16);
         assert_eq!(advices.len(), 3, "{name} advice count");
         // head_dim is 64 (gpt2) / 128 (gpt_bigcode), both powers of two, so
         // the Turbo guard does not downgrade the long-context suggestion.
@@ -364,7 +364,7 @@ fn non_power_of_two_head_dim_withholds_turbo() {
     assert_eq!(read_head_dim(&cfg), Some(80));
     assert!(!80u64.is_power_of_two());
 
-    let advices = advise_kv_cache_modes_from_config(&cfg);
+    let advices = advise_kv_cache_modes_from_config(&cfg, KVCacheMode::Fp16);
     assert_eq!(advices.len(), 3);
 
     // None should suggest or offer a Walsh-Hadamard Turbo mode.
@@ -404,7 +404,7 @@ fn alternate_naming_non_power_of_two_head_dim_withholds_turbo() {
     assert_eq!(read_head_dim(&cfg), Some(112));
     assert!(!112u64.is_power_of_two());
 
-    let advices = advise_kv_cache_modes_from_config(&cfg);
+    let advices = advise_kv_cache_modes_from_config(&cfg, KVCacheMode::Fp16);
     assert!(!advices.is_empty());
     for advice in &advices {
         assert!(
@@ -434,7 +434,7 @@ fn alternate_naming_power_of_two_head_dim_keeps_turbo() {
     assert_eq!(read_head_dim(&cfg), Some(128));
     assert!(128u64.is_power_of_two());
 
-    let advices = advise_kv_cache_modes_from_config(&cfg);
+    let advices = advise_kv_cache_modes_from_config(&cfg, KVCacheMode::Fp16);
     assert_eq!(advices.len(), 3);
     // olmo is not on the symmetric allowlist; pow2 head dim keeps the
     // Walsh-Hadamard turbo4-delegated at long context.
@@ -454,10 +454,62 @@ fn power_of_two_head_dim_keeps_turbo() {
     assert_eq!(read_head_dim(&cfg), Some(128));
     assert!(128u64.is_power_of_two());
 
-    let advices = advise_kv_cache_modes_from_config(&cfg);
+    let advices = advise_kv_cache_modes_from_config(&cfg, KVCacheMode::Fp16);
     assert!(advices.len() >= 2);
     // Pow2 head dim keeps Turbo eligible: long (non-allowlisted) leads with the
     // Walsh-Hadamard turbo4-delegated rather than being downgraded to int8.
     assert_eq!(advices[2].suggested, KVCacheMode::Turbo4Delegated);
     assert_eq!(advices[2].also_consider, Some(KVCacheMode::Turbo4Asym));
+}
+
+/// DeepSeek V2-Lite reduced to the fields the classifier reads.
+fn deepseek_v2_lite_config() -> serde_json::Value {
+    serde_json::json!({
+        "model_type": "deepseek_v2",
+        "num_hidden_layers": 27,
+        "num_attention_heads": 16,
+        "kv_lora_rank": 512,
+        "qk_rope_head_dim": 64,
+        "qk_nope_head_dim": 128,
+        "v_head_dim": 128,
+    })
+}
+
+/// Without absorbed decode a run in a Turbo mode builds decompressed per-head
+/// K/V for DeepSeek V2, so the advice is classified as `MlaDecompressed` and
+/// the medium/long buckets advise int8 (#3153). With absorbed decode on, the
+/// quantized request resolves back to the fp16 latent at startup, so the advice
+/// is the latent's: fp16 in every bucket, never a mode that would grow the
+/// cache.
+#[test]
+fn deepseek_v2_under_a_turbo_mode_is_advised_by_its_resolved_layout() {
+    let cfg = deepseek_v2_lite_config();
+    let (kind, mt) = arch_and_type_from_config(&cfg, KVCacheMode::Turbo4Asym).unwrap();
+    assert_eq!(mt, "deepseek_v2");
+    let advices = advise_kv_cache_modes_from_config(&cfg, KVCacheMode::Turbo4Asym);
+    assert_eq!(advices.len(), 3);
+    if mlxcel_core::mla::absorbed_enabled() {
+        assert_eq!(kind, KvArchKind::MlaCompressed);
+        for advice in &advices {
+            assert_eq!(advice.arch_kind, KvArchKind::MlaCompressed);
+            assert_eq!(advice.suggested, KVCacheMode::Fp16);
+        }
+    } else {
+        assert_eq!(kind, KvArchKind::MlaDecompressed);
+        for advice in &advices {
+            assert_eq!(advice.arch_kind, KvArchKind::MlaDecompressed);
+        }
+        assert_eq!(advices[0].suggested, KVCacheMode::Fp16);
+        assert_eq!(advices[1].suggested, KVCacheMode::Int8);
+        assert_eq!(advices[2].suggested, KVCacheMode::Int8);
+    }
+
+    // FP16 follows the process absorption decision.
+    let (fp16_kind, _) = arch_and_type_from_config(&cfg, KVCacheMode::Fp16).unwrap();
+    let expected = if mlxcel_core::mla::absorbed_enabled() {
+        KvArchKind::MlaCompressed
+    } else {
+        KvArchKind::MlaDecompressed
+    };
+    assert_eq!(fp16_kind, expected);
 }

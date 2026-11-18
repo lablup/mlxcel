@@ -438,6 +438,30 @@ mod tests {
     }
 
     #[test]
+    fn supports_declines_a_paged_backed_fp16_cache() {
+        // The mode check passes (FP16), so the paged decline is the one that
+        // must fire: the pool's single head dim cannot hold the asymmetric
+        // latent split. `kv_arch` relies on `deepseek_v2` never reaching this
+        // branch (the family does not opt into the paged backend), so the
+        // runtime side of that contract is pinned here (#3153).
+        use crate::cache::{PagedBlockPool, PagedKvLayout, PagedSequenceState};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let layout = PagedKvLayout::uniform(1, 16, 16 * 2 * 576 * 2).expect("valid layout");
+        let pool = Rc::new(RefCell::new(PagedBlockPool::new(layout.clone())));
+        let state = Rc::new(RefCell::new(PagedSequenceState::new(&layout)));
+        let mut cache = KVCache::new_paged(pool, state, 0);
+        assert_eq!(cache.mode, KVCacheMode::Fp16);
+        assert!(cache.is_paged_backed());
+
+        let err = MlaLatentCache::supports(&cache, LITE).unwrap_err();
+        assert!(err.contains("paged-backed"), "{err}");
+        assert!(!err.contains("FP16 KV cache"), "{err}");
+        assert!(MlaLatentCache::wrap(&mut cache, LITE).is_err());
+    }
+
+    #[test]
     fn a_latent_cache_stays_trimmable_for_speculative_decode() {
         // Speculative decode gates on `can_trim_prompt_cache` and then rejects
         // the tokens the draft got wrong with `trim`. Both operate on the
