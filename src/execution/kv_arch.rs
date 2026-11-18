@@ -30,7 +30,7 @@
 //!   cache the latent pair (`mla::caches_mla_latent_pair`). V2 follows the
 //!   runtime: it caches the latent where absorbed decode is selected
 //!   (`mla::absorbed_enabled`, the default on Metal since #3131 and on CUDA
-//!   since #3133) and the KV cache is FP16, and the *decompressed* K/V
+//!   and ROCm since #3133) and the KV cache is FP16, and the *decompressed* K/V
 //!   (`num_heads × (qk_nope + qk_rope + v_head_dim)`) otherwise, which can be
 //!   *larger* than `2 × num_kv_heads × head_dim` (*undercount*, dangerous for a
 //!   budget).

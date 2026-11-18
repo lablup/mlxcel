@@ -69,10 +69,10 @@
 //! spelling selects the latent cache on every backend and an off spelling
 //! (`0`, `false`, `off`, `no`) keeps the decompressed path. Unset, DeepSeek V2
 //! absorbs wherever the fused absorbed-decode kernel runs (Metal, unless
-//! `MLXCEL_MLA_FUSED_DECODE` turns it off) and on CUDA, whose composed path
-//! measured level with the decompressed one (issue #3133), and stays
-//! decompressed elsewhere ([`default_absorbs`], [`absorbed_enabled`]). When
-//! the result is decompressed nothing in this
+//! `MLXCEL_MLA_FUSED_DECODE` turns it off) and on CUDA and ROCm, whose
+//! composed paths measured level with or ahead of the decompressed one (issue
+//! #3133), and stays decompressed elsewhere ([`default_absorbs`],
+//! [`absorbed_enabled`]). When the result is decompressed nothing in this
 //! module is constructed, no fold is built, and the family runs the
 //! byte-identical decompressed path.
 //!
@@ -179,8 +179,8 @@ pub fn parse_enabled(value: Option<&str>) -> bool {
 /// ([`default_absorbs`]): the switch to absorbed (issue #3131) was measured on
 /// Metal with the fused absorbed-decode kernel, and the composed path, which
 /// carried about 10% short-context cost on Metal in #3102, measured level with
-/// the decompressed path on CUDA (issue #3133). ROCm and the CPU backend are
-/// unmeasured and stay decompressed.
+/// or ahead of the decompressed path on CUDA and ROCm (issue #3133). The CPU
+/// backend stays decompressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AbsorbedMode {
     /// Unset, empty, or an unrecognized value: absorbed where
@@ -227,15 +227,18 @@ impl AbsorbedMode {
 /// can run and which GPU backend MLX resolved.
 ///
 /// The fused kernel decides wherever it runs. Without it, absorbed decode
-/// takes the composed path, which is the default only on CUDA: on GB10 it
+/// takes the composed path, which is the default on CUDA and ROCm. On GB10 it
 /// decoded within run-to-run noise of the decompressed path at 512 tokens and
-/// ahead of it from 2048 (about 2.4x at 16K), with no decided disagreement on
-/// the teacher-forced trace (issue #3133). On Metal with the kernel turned off
-/// it is the composed path #3102 measured at about -10% at 512, and ROCm and
-/// the CPU backend are unmeasured, so they keep the decompressed layout.
+/// ahead of it from 2048 (about 2.4x at 16K). On `gfx1151` it decoded 3.4%
+/// behind at 512 (median 41.28 against 42.72 tok/s over five runs per arm),
+/// 17% ahead behind 2048 and 65% ahead behind 16K, and cut the phase peak
+/// behind 16K from 16.06 to 12.39 GB. Both hosts showed no decided disagreement on the teacher-forced
+/// trace (issue #3133). On Metal with the kernel turned off it is the composed
+/// path #3102 measured at about -10% at 512, and the CPU backend is unmeasured,
+/// so both keep the decompressed layout.
 #[must_use]
 pub const fn default_absorbs_on(fused_available: bool, backend: GpuBackendKind) -> bool {
-    fused_available || matches!(backend, GpuBackendKind::Cuda)
+    fused_available || matches!(backend, GpuBackendKind::Cuda | GpuBackendKind::Rocm)
 }
 
 /// Whether an unset [`ABSORBED_ENV`] selects the absorbed layout in this
@@ -419,16 +422,17 @@ mod tests {
     }
 
     #[test]
-    fn the_default_absorbs_where_the_fused_kernel_runs_and_on_cuda() {
+    fn the_default_absorbs_where_the_fused_kernel_runs_and_on_cuda_and_rocm() {
         // (fused available, backend) -> the default absorbs. The kernel
-        // decides wherever it runs (#3131); without it only CUDA, where the
-        // composed path was measured (#3133), absorbs.
+        // decides wherever it runs (#3131); without it, CUDA and ROCm, where
+        // the composed path was measured (#3133), absorb.
         let table = [
             (true, GpuBackendKind::Metal, true),
             (false, GpuBackendKind::Metal, false),
             (false, GpuBackendKind::Cuda, true),
             (true, GpuBackendKind::Cuda, true),
-            (false, GpuBackendKind::Rocm, false),
+            (false, GpuBackendKind::Rocm, true),
+            (true, GpuBackendKind::Rocm, true),
             (false, GpuBackendKind::None, false),
         ];
         for (fused, backend, absorbs) in table {

@@ -1,0 +1,6 @@
+model,shape,reference,candidate,decided_disagree,decided_positions,top1_disagree,positions,ppl_reference,ppl_candidate,mla_paths_candidate,note
+deepseek-v2-lite-chat-4bit-mlx,decode width 1 behind 1024,MLXCEL_MLA_ABSORBED=0,MLXCEL_MLA_ABSORBED=1,0,208,6,512,14.6489,14.6297,absorbed_composed=13824 decompressed=216,all disagreements where the reference top-two gap was under 0.25
+deepseek-v2-lite-chat-4bit-mlx,decode width 1 behind 4096,MLXCEL_MLA_ABSORBED=0,MLXCEL_MLA_ABSORBED=1,0,105,3,256,12.9619,12.9590,absorbed_composed=6912 decompressed=216,all disagreements where the reference top-two gap was under 0.234
+deepseek-v2-lite-chat-4bit-mlx,decode width 1 behind 1024,MLXCEL_MLA_ABSORBED=0,unset,0,208,0,512,14.6489,14.6489,decompressed=14040,byte-identical on the measured commit; the unset default still resolved to decompressed there
+deepseek-v2-lite-chat-4bit-mlx,decode width 1 behind 4096,MLXCEL_MLA_ABSORBED=0,unset,0,105,0,256,12.9619,12.9619,decompressed=7020,byte-identical on the measured commit
+kimi-vl-a3b-thinking-4bit,decode width 1 behind 1024,single arm,MLXCEL_MLA_ABSORBED unset,NA,NA,NA,NA,NA,17.9719,absorbed_composed=13824 absorbed_fused=0,single-arm check of the composed path; Metal composed reference 18.04

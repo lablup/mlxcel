@@ -1,0 +1,17 @@
+model,tree,commit,prefill_chunk,rep,bench_prompt_tokens,mlx_phase_peak_gb,bench_prefill_tok_s,generate_prompt_tokens,generate_prefill_ms,generate_prefill_tok_s,greedy_text_md5,note
+glm-4.7-flash-4bit,pre3114,b21825cf,2048,1,28000,25.26,NA,22754,919185.99,24.75,ef011275,peak from the warmup prefill; the measured second pass did not finish inside the 40-minute bound
+glm-4.7-flash-4bit,pre3114,b21825cf,2048,4,28000,25.22,NA,NA,NA,NA,NA,peak from the warmup prefill; the measured second pass did not finish inside the 40-minute bound
+glm-4.7-flash-4bit,branch,HEAD,2048,2,28000,20.53,60.26,22754,306977.91,74.12,ef011275,ok
+glm-4.7-flash-4bit,branch,HEAD,2048,3,28000,20.53,59.55,22754,312317.94,72.86,ef011275,ok
+glm-4.7-flash-4bit,pre3114,b21825cf,0,1,NA,NA,NA,NA,NA,NA,NA,failed allocating 62720000000 bytes
+glm-4.7-flash-4bit,pre3114,b21825cf,0,4,NA,NA,NA,NA,NA,NA,NA,failed allocating 62720000000 bytes
+glm-4.7-flash-4bit,branch,HEAD,0,2,28000,21.13,64.36,22754,303848.23,74.89,ef011275,ok
+glm-4.7-flash-4bit,branch,HEAD,0,3,28000,21.13,65.34,22754,304954.84,74.61,ef011275,ok
+gpt-oss-20b-mxfp4-q4,pre3119,3efb3fb2,2048,1,28000,26.21,289.37,19773,60945.55,324.44,b54a2d8f,ok
+gpt-oss-20b-mxfp4-q4,pre3119,3efb3fb2,2048,4,28000,26.21,288.73,19773,60965.49,324.33,b54a2d8f,ok
+gpt-oss-20b-mxfp4-q4,branch,HEAD,2048,2,28000,26.21,289.06,19773,60777.86,325.33,b54a2d8f,ok
+gpt-oss-20b-mxfp4-q4,branch,HEAD,2048,3,28000,26.43,288.85,19773,61205.21,323.06,b54a2d8f,ok
+gpt-oss-20b-mxfp4-q4,pre3119,3efb3fb2,0,1,NA,NA,NA,NA,NA,NA,NA,failed allocating 100352000000 bytes
+gpt-oss-20b-mxfp4-q4,pre3119,3efb3fb2,0,4,NA,NA,NA,NA,NA,NA,NA,failed allocating 100352000000 bytes
+gpt-oss-20b-mxfp4-q4,branch,HEAD,0,2,NA,NA,NA,NA,NA,NA,NA,failed allocating 100352000000 bytes
+gpt-oss-20b-mxfp4-q4,branch,HEAD,0,3,NA,NA,NA,NA,NA,NA,NA,failed allocating 100352000000 bytes
