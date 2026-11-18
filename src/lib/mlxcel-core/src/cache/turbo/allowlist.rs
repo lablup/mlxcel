@@ -344,6 +344,38 @@ mod tests {
         }
     }
 
+    /// The Kimi-VL and Youtu `model_type`s load `DeepSeekV3Attention`, which
+    /// always caches the `(kv_latent, k_pe)` pair, so every quantized mode must
+    /// resolve to fp16 with a warning, whatever the absorbed-MLA state (#3159).
+    #[test]
+    fn kimi_vl_and_youtu_families_resolve_every_quantized_mode_to_fp16() {
+        for family in ["kimi_vl", "kimi_k25", "youtu", "youtu_llm", "youtu_vl"] {
+            for absorbed in [false, true] {
+                for requested in [
+                    KVCacheMode::Int8,
+                    KVCacheMode::Turbo4Asym,
+                    KVCacheMode::Turbo3Asym,
+                    KVCacheMode::Turbo4,
+                    KVCacheMode::Turbo4Delegated,
+                ] {
+                    let (effective, warning) =
+                        resolve_kv_cache_mode_for_model_with(requested, family, absorbed);
+                    assert_eq!(
+                        effective,
+                        KVCacheMode::Fp16,
+                        "{family} absorbed={absorbed} requested {requested} and got {effective}"
+                    );
+                    let warning = warning.expect("a substituted mode must explain itself");
+                    assert!(warning.contains(family), "{warning}");
+                }
+                let (effective, warning) =
+                    resolve_kv_cache_mode_for_model_with(KVCacheMode::Fp16, family, absorbed);
+                assert_eq!(effective, KVCacheMode::Fp16);
+                assert!(warning.is_none(), "{family}");
+            }
+        }
+    }
+
     /// Rule 1 must beat rule 2: `Turbo4Asym` is not a safe landing place for a
     /// latent family, because its "V" slot is the RoPE key stream.
     #[test]

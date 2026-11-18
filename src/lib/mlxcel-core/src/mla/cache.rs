@@ -120,6 +120,18 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     // that detection routes to `DeepSeekV3Model` (#2384).
     "kimi_k2",
     "joyai_llm_flash",
+    // `kimi_vl` and `kimi_k25` wrap `DeepSeekV3Model` as the text decoder
+    // (`src/vision/kimi_vl.rs`), so every layer runs `DeepSeekV3Attention`,
+    // which always caches `(kv_latent, k_pe)` (#3159).
+    "kimi_vl",
+    "kimi_k25",
+    // `youtu` and `youtu_llm` load `YoutuLanguageModel`
+    // (`src/loading/nonstandard.rs`) and `youtu_vl` loads the Youtu VLM text
+    // decoder; both hold `self_attn: DeepSeekV3Attention` per layer
+    // (`src/models/youtu_vl_lm.rs`), so the same latent pair is cached (#3159).
+    "youtu",
+    "youtu_llm",
+    "youtu_vl",
     // `deepseek_v32` and the `deepseek_v3.2` spelling of the same
     // `config.json` value both resolve to `DeepSeekV32Model`
     // (`src/models/detection.rs`), and `glm_moe_dsa` wraps that model
