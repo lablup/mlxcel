@@ -18,7 +18,7 @@ On CUDA, a one-row decode over 256 or more keys (`kv_cache_step`) is sent to cuD
 
 The trigger condition explains why earlier checks missed it:
 - The window must reach 256 keys, so the prompt must extend at least 256 tokens past a chunk boundary (8448 tokens for Scout). An 8720-token prompt produced a 529-key window (`MLXCEL_SDPA_PLAN_DEBUG=1` showed `k_len=529 decode=1`).
-- A decode that crosses 8192 after an 8001-token prefill stayed correct (0/100 decided disagreements), because the new chunk's window was still below 256 keys for the steps traced.
+- A decode that crosses 8192 after an 8001-token prefill showed 0/100 decided disagreements, because the trace ended at position 8448, just as the new chunk's window reached 256 keys. Its last three steps are the defect's onset: NLL 13.1 vs 4.3, 23.2 vs 10.2 and 12.4 vs 5.5 against the reference, at positions the decided filter did not count.
 - A single-pass 9216-token forward against two 4608 chunks agreed (0/3642), because that comparison runs prefill only, where the decode dispatch is not involved.
 - Metal does not use this overlay.
 
@@ -41,7 +41,7 @@ Validation on GB10 (sm_121, CUDA 13.0):
 | Check | Before | After |
 |---|---|---|
 | Scout, 8720-token prompt, `--temp 0`, `MLXCEL_PREFILL_CHUNK=0` and default | garbage | correct answer (item 275 in bin 6206, weight 136), identical in both modes |
-| Teacher-forced decode, 300 positions after the 8720 prefill, vs `MLXCEL_SDPA_DETERMINISTIC=1` | first step NLL 21.5 vs 2.85, then non-finite | 0/149 decided disagreements, mean NLL 1.853 vs 1.854 |
+| Teacher-forced decode, 300 positions after the 8720 prefill, vs one 9216-wide prefill forward over the same text | first step NLL 21.5 vs 2.85, then non-finite | 0/149 decided disagreements, mean NLL 1.853 vs 1.854 |
 | New regression test | fails, relative rms 1.12 | passes |
 
 Scout throughput after the fix on the 8720-token prompt: prefill 633 tok/s single pass and 451 tok/s with default chunking, decode 10.9 and 11.5 tok/s. There is no meaningful "before" number because the old output was wrong. All `cache::attend` tests pass on CUDA; PR CI passed (20 checks, 12 skipped by path filter).

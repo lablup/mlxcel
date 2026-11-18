@@ -30,7 +30,7 @@ The cost is fixed weight memory, and how much depends on the checkpoint. A quant
 
 ## Default layout for DeepSeek V2
 
-DeepSeek V2 caches the MLA latent by default wherever the fused absorbed-decode kernel runs (#3131), and decompressed per-head K and V elsewhere or under `MLXCEL_MLA_ABSORBED=0`. The default followed two rounds of measurement. Issue #3102 measured both layouts on deepseek-v2-lite-chat-4bit-mlx on an M5 Max (2026-11-15) with the rule that the latent layout becomes the default only if it holds decode throughput within a few percent and the teacher-forced trace shows no material disagreement:
+DeepSeek V2 caches the MLA latent by default wherever the fused absorbed-decode kernel runs (#3131) and on CUDA (#3133), and decompressed per-head K and V elsewhere or under `MLXCEL_MLA_ABSORBED=0`. The default followed two rounds of measurement. Issue #3102 measured both layouts on deepseek-v2-lite-chat-4bit-mlx on an M5 Max (2026-11-15) with the rule that the latent layout becomes the default only if it holds decode throughput within a few percent and the teacher-forced trace shows no material disagreement:
 
 | measurement | decompressed (then default) | absorbed | |
 |---|---|---|---|
@@ -68,16 +68,29 @@ Both conditions now hold, and issue #3131 made absorbed decode the default on Me
 
 `MLXCEL_MLA_ABSORBED=0` keeps the decompressed layout for anyone who measures their own workload differently. The same run validated the fused kernel on an always-absorbed family end to end: on kimi-vl-a3b-thinking-4bit (`deepseek_v3` decoder) the `absorbed_fused` counter covers every decode step behind 1024 and 4096 tokens, the trace against `MLXCEL_MLA_FUSED_DECODE=0` disagrees at 0 of 242 decided positions, and decode is 7% faster at both 512 and 2048 tokens. Rows: [the #3121 benchmark results](benchmark_results/mla-absorbed-decode-cost-m5max-2026-11-16.md) and [the #3131 results](benchmark_results/mla-absorbed-default-m5max-2026-11-16.md).
 
+CUDA has no fused kernel, so absorbed decode there takes the composed path. Issue #3133 measured it on GB10 (sm_121, CUDA 13.0) against the same two conditions, ABBA order with five runs per arm at 512 tokens:
+
+| measurement | `MLXCEL_MLA_ABSORBED=0` | `MLXCEL_MLA_ABSORBED=1` (composed) | |
+|---|---|---|---|
+| decode, pp512/tg128 (median of 5) | 96.05 | 98.52 | +2.6% |
+| decode, pp512/tg128, 160 warmup tokens (median of 5) | 98.63 | 98.92 | +0.3% |
+| decode, pp512/tg512 (median of 3) | 93.47 | 94.43 | +1.0% |
+| decode, 2048-token prompt, tg128 (2 runs) | 83.8 / 79.1 | 98.7 / 96.9 | about +20% |
+| decode, 16384-token prompt, tg128 (2 runs) | 30.1 / 30.4 | 72.0 / 73.7 | about 2.4x |
+| logit trace, decided positions that disagree | reference | 0 of 208 and 0 of 106 | decode width 1 behind 1024 and 4096 |
+
+Run-to-run spread within an arm is 4 to 8% at 512 tokens and the medians never put the composed path behind, so both conditions hold and the default absorbs on CUDA too. On Metal with `MLXCEL_MLA_FUSED_DECODE=0` the composed path is the one #3102 measured at about -10%, so that configuration keeps the decompressed default; ROCm and the CPU backend are unmeasured and keep it as well. Rows: [the #3133 results](benchmark_results/mla-and-prefill-memory-cuda-gb10-2026-11-18.md).
+
 No other family shares the choice: `deepseek_v3` and `deepseek_v32` absorb unconditionally, and `minicpm3` and `dots1` cache decompressed K/V with no absorbed path. Every sample and trace row is in [the benchmark results](benchmark_results/mla-v2-default-layout-m5max-2026-11-15.md).
 
 ## Flags
 
 | Variable | Effect |
 |---|---|
-| `MLXCEL_MLA_ABSORBED` | Cache `(ckv, kpe)` and run absorbed decode (Stage 1). On by default where the fused kernel runs (#3131); `1`, `true`, `on` or `yes` force it on every backend, and `0`, `false`, `off` or `no` restore the decompressed per-head K/V cache. |
+| `MLXCEL_MLA_ABSORBED` | Cache `(ckv, kpe)` and run absorbed decode (Stage 1). On by default where the fused kernel runs (#3131) and on CUDA (#3133); `1`, `true`, `on` or `yes` force it on every backend, and `0`, `false`, `off` or `no` restore the decompressed per-head K/V cache. |
 | `MLXCEL_MLA_SPLIT_KV=1` | Additionally cut the latent range into chunks and merge the partial states (Stage 2). Off by default; ignored under `MLXCEL_MLA_ABSORBED=0`. |
 
-`MLXCEL_MLA_ABSORBED` is a tri-state (`mlxcel_core::mla::AbsorbedMode`): an on spelling (`1`, `true`, `on`, `yes`) forces absorbed decode, an off spelling forces the decompressed layout, and unset, empty or unrecognized is the default. The default absorbs only where the fused absorbed-decode kernel runs, which today means Metal with `MLXCEL_MLA_FUSED_DECODE` not turned off. The switch was measured only there; on CUDA and ROCm absorbed decode takes the composed path, which carried the roughly 10% short-context cost #3102 measured, so non-Metal backends keep the decompressed layout by default until #3133 measures them. A typo keeps the default layout instead of changing it. `MLXCEL_MLA_SPLIT_KV` stays opt-in and accepts only the on spellings.
+`MLXCEL_MLA_ABSORBED` is a tri-state (`mlxcel_core::mla::AbsorbedMode`): an on spelling (`1`, `true`, `on`, `yes`) forces absorbed decode, an off spelling forces the decompressed layout, and unset, empty or unrecognized is the default. The default (`mlxcel_core::mla::default_absorbs`) absorbs where the fused absorbed-decode kernel runs, which today means Metal with `MLXCEL_MLA_FUSED_DECODE` not turned off, and on CUDA, where #3133 measured the composed path level with the decompressed one. Elsewhere absorbed decode takes the composed path without that evidence (Metal with the kernel off carried the roughly 10% short-context cost #3102 measured; ROCm is unmeasured), so those keep the decompressed layout by default. A typo keeps the default layout instead of changing it. `MLXCEL_MLA_SPLIT_KV` stays opt-in and accepts only the on spellings.
 
 Under `MLXCEL_MLA_ABSORBED=0`, no fold is built, no weight is dequantized, and the family runs the pre-existing decompressed path unchanged. Absorbed decode still declines per cache, keeping the decompressed path, for any non-FP16 KV cache mode and for paged-backed caches.
 
@@ -85,7 +98,7 @@ Under `MLXCEL_MLA_ABSORBED=0`, no fold is built, no weight is dequantized, and t
 
 | Family | Before this work | Now |
 |---|---|---|
-| `deepseek_v2` | Decompressed cache | Absorbed by default on Metal (#3131), decompressed by default elsewhere; `MLXCEL_MLA_ABSORBED` forces either |
+| `deepseek_v2` | Decompressed cache | Absorbed by default on Metal (#3131) and CUDA (#3133), decompressed by default elsewhere; `MLXCEL_MLA_ABSORBED` forces either |
 | `deepseek_v3` | Already absorbed (`embed_q` / `unembed_out` decomposition in `sanitize_weights`) | Unchanged |
 | `deepseek_v32` | Already absorbed, same decomposition | Unchanged |
 | `minicpm3` | Decompressed cache | Unchanged, still decompressed |
