@@ -225,8 +225,9 @@ pub fn recommend_kv_cache_mode(
                 ),
                 // DeepSeek V2 sized as the latent: absorbed decode is on and
                 // the run's KV mode is fp16 (a quantized run classifies as
-                // `MlaDecompressed`, #3153). An int8 cache would decline it (`latent_layout_supports_mode`)
-                // and fall back to the decompressed per-head layout, about 4x
+                // `MlaDecompressed`, #3153). An int8 cache would decline it
+                // (`latent_layout_supports_mode`) and fall back to the
+                // decompressed per-head layout, about 4x
                 // the fp16 latent on V2-Lite (5120 against 1152 bytes per token
                 // per layer). Without absorption the kind is `MlaDecompressed`
                 // and int8 below is the right advice.
@@ -348,8 +349,15 @@ fn arch_and_type_from_config(
     // estimator never disagree on what family a model is. Batch and ctx do not
     // affect the detected `kind`. The mode can: it decides whether DeepSeek V2
     // is `MlaCompressed` (FP16, absorbed) or `MlaDecompressed`.
+    //
+    // Classify against the mode the run resolves to, not the one requested: a
+    // quantized request on an absorbing DeepSeek V2 resolves back to fp16
+    // (and keeps the latent), so the advice must be the latent's (#3153).
+    let model_type = read_model_type(config);
+    let (kv_mode, _) =
+        mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model(kv_mode, &model_type);
     let estimate = estimate_kv_arch_from_config(config, DEFAULT_CTX_LEN, kv_mode, 1)?;
-    Some((estimate.kind, read_model_type(config)))
+    Some((estimate.kind, model_type))
 }
 
 /// Read the canonical lowercase `model_type` string, matching the allowlist's

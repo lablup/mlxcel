@@ -475,25 +475,34 @@ fn deepseek_v2_lite_config() -> serde_json::Value {
     })
 }
 
-/// A run in a Turbo mode builds decompressed per-head K/V for DeepSeek V2 on
-/// every host (`MlaLatentCache::supports` declines it), so the advice is
-/// classified as `MlaDecompressed` and the medium/long buckets advise int8
-/// rather than "keep fp16 to stay absorbed" (#3153).
+/// Without absorbed decode a run in a Turbo mode builds decompressed per-head
+/// K/V for DeepSeek V2, so the advice is classified as `MlaDecompressed` and
+/// the medium/long buckets advise int8 (#3153). With absorbed decode on, the
+/// quantized request resolves back to the fp16 latent at startup, so the advice
+/// is the latent's: fp16 in every bucket, never a mode that would grow the
+/// cache.
 #[test]
-fn deepseek_v2_under_a_turbo_mode_is_advised_as_decompressed() {
+fn deepseek_v2_under_a_turbo_mode_is_advised_by_its_resolved_layout() {
     let cfg = deepseek_v2_lite_config();
     let (kind, mt) = arch_and_type_from_config(&cfg, KVCacheMode::Turbo4Asym).unwrap();
-    assert_eq!(kind, KvArchKind::MlaDecompressed);
     assert_eq!(mt, "deepseek_v2");
-
     let advices = advise_kv_cache_modes_from_config(&cfg, KVCacheMode::Turbo4Asym);
     assert_eq!(advices.len(), 3);
-    for advice in &advices {
-        assert_eq!(advice.arch_kind, KvArchKind::MlaDecompressed);
+    if mlxcel_core::mla::absorbed_enabled() {
+        assert_eq!(kind, KvArchKind::MlaCompressed);
+        for advice in &advices {
+            assert_eq!(advice.arch_kind, KvArchKind::MlaCompressed);
+            assert_eq!(advice.suggested, KVCacheMode::Fp16);
+        }
+    } else {
+        assert_eq!(kind, KvArchKind::MlaDecompressed);
+        for advice in &advices {
+            assert_eq!(advice.arch_kind, KvArchKind::MlaDecompressed);
+        }
+        assert_eq!(advices[0].suggested, KVCacheMode::Fp16);
+        assert_eq!(advices[1].suggested, KVCacheMode::Int8);
+        assert_eq!(advices[2].suggested, KVCacheMode::Int8);
     }
-    assert_eq!(advices[0].suggested, KVCacheMode::Fp16);
-    assert_eq!(advices[1].suggested, KVCacheMode::Int8);
-    assert_eq!(advices[2].suggested, KVCacheMode::Int8);
 
     // FP16 follows the process absorption decision.
     let (fp16_kind, _) = arch_and_type_from_config(&cfg, KVCacheMode::Fp16).unwrap();

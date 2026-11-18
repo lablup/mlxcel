@@ -3408,11 +3408,7 @@ fn validate_settings_endpoint_exposure(
 /// `--kv-skip-last-layer` the last layer stays FP16; sizing every layer at the
 /// base mode keeps the estimate on the larger side (#3153).
 fn prompt_cache_sizing_kv_mode(config: &ServerConfig) -> mlxcel_core::cache::KVCacheMode {
-    if config.batch_kv_quant.is_enabled() {
-        config.batch_kv_quant.base_mode()
-    } else {
-        config.kv_cache_mode
-    }
+    crate::server::kv_mode_for_batch(config.kv_cache_mode, &config.batch_kv_quant)
 }
 
 /// Size the cross-request prompt-prefix cache for this model and build its

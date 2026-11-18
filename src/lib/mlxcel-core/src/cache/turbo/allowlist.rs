@@ -166,7 +166,7 @@ pub fn symmetric_turbo_warning_message(model_type: &str) -> String {
 /// Returns the effective mode and, when it differs from the request, one
 /// operator-facing line explaining the substitution.
 ///
-/// Two rules apply, in this order:
+/// Three rules apply, in this order:
 ///
 /// 1. **MLA latent families.** A family in
 ///    [`crate::mla::MLA_LATENT_CACHE_FAMILIES`] stores a `(kv_latent, k_pe)`
@@ -176,7 +176,10 @@ pub fn symmetric_turbo_warning_message(model_type: &str) -> String {
 ///    the rule `deepseek_v2` has always applied per cache through
 ///    [`crate::mla::MlaLatentCache::supports`]; the four families that have no
 ///    decompressed fallback need it applied per model instead.
-/// 2. **Symmetric Turbo4 allowlist.** [`KVCacheMode::Turbo4`] on a family that
+/// 2. **DeepSeek V2 under absorbed decode.** See
+///    [`resolve_kv_cache_mode_for_model_with`]: a non-FP16 request resolves to
+///    fp16 while absorbed MLA is on, because the alternative is a larger cache.
+/// 3. **Symmetric Turbo4 allowlist.** [`KVCacheMode::Turbo4`] on a family that
 ///    is not in [`ALLOWED_SYMMETRIC_TURBO_FAMILIES`] resolves to
 ///    [`KVCacheMode::Turbo4Asym`], carrying
 ///    [`symmetric_turbo_warning_message`]. This is the fallback the CLI banner
@@ -196,6 +199,29 @@ pub fn resolve_kv_cache_mode_for_model(
     requested: KVCacheMode,
     model_type: &str,
 ) -> (KVCacheMode, Option<String>) {
+    resolve_kv_cache_mode_for_model_with(requested, model_type, crate::mla::absorbed_enabled())
+}
+
+/// [`resolve_kv_cache_mode_for_model`] with the absorbed-MLA decision passed in
+/// rather than read from the process environment, so the conditional
+/// `deepseek_v2` rule can be tested for both states.
+///
+/// The `deepseek_v2` rule: when absorbed MLA decode is on and the requested
+/// mode cannot hold a latent, `MlaLatentCache::supports` would decline every
+/// cache and the run would store the decompressed per-head K/V instead, which
+/// is larger than the fp16 latent it replaces (5120 against 1152 bytes per
+/// token per layer for int8 on V2-Lite), slower to decode and lossy. The
+/// request is substituted with fp16 so a memory-saving flag does not grow the
+/// cache. With absorption off the decompressed layout is the default, so the
+/// quantized mode is kept.
+///
+/// Used by: [`resolve_kv_cache_mode_for_model`].
+#[must_use]
+pub fn resolve_kv_cache_mode_for_model_with(
+    requested: KVCacheMode,
+    model_type: &str,
+    absorbed: bool,
+) -> (KVCacheMode, Option<String>) {
     if crate::mla::caches_mla_latent_pair(model_type)
         && let Err(reason) = crate::mla::latent_layout_supports_mode(requested)
     {
@@ -204,6 +230,20 @@ pub fn resolve_kv_cache_mode_for_model(
             Some(format!(
                 "warning: --kv-cache-mode {requested} is not supported on this model family \
                  (model_type=\"{model_type}\"): {reason}.\n\tUsing fp16 for this model's KV caches."
+            )),
+        );
+    }
+    if model_type == "deepseek_v2"
+        && absorbed
+        && crate::mla::latent_layout_supports_mode(requested).is_err()
+    {
+        return (
+            KVCacheMode::Fp16,
+            Some(format!(
+                "warning: --kv-cache-mode {requested} would disable absorbed MLA decode for this \
+                 model (model_type=\"deepseek_v2\") and store the larger decompressed per-head \
+                 KV cache instead of the latent, so the fp16 latent cache is used instead.\n\t\
+                 Set MLXCEL_MLA_ABSORBED=0 to keep the decompressed quantized layout."
             )),
         );
     }
@@ -322,21 +362,52 @@ mod tests {
         assert!(warning.is_none());
     }
 
-    /// `deepseek_v2` asks `MlaLatentCache::supports` per cache and falls back to
-    /// the decompressed per-head layout when the mode is quantized, so a
-    /// family-level override would remove a configuration that works.
+    /// `deepseek_v2` is not a latent family: with absorption off it keeps a
+    /// quantized mode on the decompressed per-head layout, so the rule is
+    /// conditional on absorbed decode and never a family-wide override.
     #[test]
     fn deepseek_v2_is_not_treated_as_a_latent_family() {
-        let (effective, _) =
-            resolve_kv_cache_mode_for_model(KVCacheMode::Turbo4Asym, "deepseek_v2");
+        assert!(!crate::mla::caches_mla_latent_pair("deepseek_v2"));
+        let (effective, warning) =
+            resolve_kv_cache_mode_for_model_with(KVCacheMode::Turbo4Asym, "deepseek_v2", false);
         assert_eq!(effective, KVCacheMode::Turbo4Asym);
+        assert!(warning.is_none());
+        let (effective, warning) =
+            resolve_kv_cache_mode_for_model_with(KVCacheMode::Int8, "deepseek_v2", false);
+        assert_eq!(effective, KVCacheMode::Int8);
+        assert!(warning.is_none());
+    }
+
+    /// With absorbed decode on, a quantized request would swap the fp16 latent
+    /// for the larger decompressed cache, so it resolves to fp16 with a warning.
+    #[test]
+    fn deepseek_v2_absorbed_resolves_quantized_modes_to_fp16() {
+        for requested in [
+            KVCacheMode::Int8,
+            KVCacheMode::Turbo4Asym,
+            KVCacheMode::Turbo4,
+            KVCacheMode::Turbo3Asym,
+            KVCacheMode::Turbo4Delegated,
+        ] {
+            let (effective, warning) =
+                resolve_kv_cache_mode_for_model_with(requested, "deepseek_v2", true);
+            assert_eq!(effective, KVCacheMode::Fp16, "{requested}");
+            let warning = warning.expect("a substituted mode must explain itself");
+            assert!(warning.contains("MLXCEL_MLA_ABSORBED=0"), "{warning}");
+            assert!(warning.contains("decompressed"), "{warning}");
+        }
+        let (effective, warning) =
+            resolve_kv_cache_mode_for_model_with(KVCacheMode::Fp16, "deepseek_v2", true);
+        assert_eq!(effective, KVCacheMode::Fp16);
+        assert!(warning.is_none());
     }
 
     /// The fallback the CLI banner has always promised, now performed.
     #[test]
     fn non_allowlisted_turbo4_falls_back_to_asym() {
         for family in ["llama", "qwen2", "gemma3", "deepseek_v2"] {
-            let (effective, warning) = resolve_kv_cache_mode_for_model(KVCacheMode::Turbo4, family);
+            let (effective, warning) =
+                resolve_kv_cache_mode_for_model_with(KVCacheMode::Turbo4, family, false);
             assert_eq!(effective, KVCacheMode::Turbo4Asym, "{family}");
             assert!(warning.expect("must warn").contains(family));
         }

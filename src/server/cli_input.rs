@@ -978,35 +978,21 @@ impl ServerStartupInput {
                 &self.model_path,
             );
         startup_notices.extend(kv_mode_warning.map(StartupNotice::warn));
-        if batch_kv_quant.is_enabled() {
-            let requested_batch_mode = batch_kv_quant.base_mode();
-            // The resolver's own warning is deliberately discarded here. It is
-            // phrased for `--kv-cache-mode`, so an operator who passed
-            // `--kv-bits 4 --kv-quant-scheme turboquant` would be told that
-            // `--kv-cache-mode fp16+turbo4` was refused: a flag they never
-            // passed, on a line nearly identical to the one below. The line
-            // below names the flag that was actually set.
-            let (batch_effective, _) = crate::cli::turbo_args::resolve_effective_kv_cache_mode(
-                requested_batch_mode,
-                &self.model_path,
-            );
-            // `!=` rather than `== Fp16`. Fp16 is the only landing place a
-            // `--kv-bits` request can have today (rule 2 of
-            // `resolve_kv_cache_mode_for_model` fires only on a `Turbo4`
-            // request and `base_mode` never returns one), but the condition
-            // that matters is "the batch table asked for a mode this family
-            // cannot hold", not which mode it was moved to. Written this way,
-            // a future rule that substitutes something other than Fp16 still
-            // disables the batch table instead of silently keeping it.
-            if batch_effective != requested_batch_mode {
-                startup_notices.push(StartupNotice::warn(format!(
-                    "warning: disabling batched KV quantization (--kv-bits {}) for this model \
-                     family; it selects a {requested_batch_mode} KV cache, which this family \
-                     cannot hold. Serving its KV caches at fp16",
-                    self.kv_bits
-                )));
-                batch_kv_quant.bits = 0;
-            }
+        // The resolver's own warning is deliberately discarded inside the
+        // helper. It is phrased for `--kv-cache-mode`, so an operator who passed
+        // `--kv-bits 4 --kv-quant-scheme turboquant` would be told that
+        // `--kv-cache-mode fp16+turbo4` was refused: a flag they never
+        // passed, on a line nearly identical to the one below. The line
+        // below names the flag that was actually set.
+        if let Some(requested_batch_mode) =
+            disable_batch_kv_quant_for_family(&mut batch_kv_quant, &self.model_path)
+        {
+            startup_notices.push(StartupNotice::warn(format!(
+                "warning: disabling batched KV quantization (--kv-bits {}) for this model \
+                 family; it selects a {requested_batch_mode} KV cache, which this family \
+                 cannot hold. Serving its KV caches at fp16",
+                self.kv_bits
+            )));
         }
 
         // H1: validate `--max-kv-size` bounds before we lower
@@ -1377,6 +1363,73 @@ pub use crate::cli::turbo_args::{
 };
 
 // ── — batched KV-cache quantization knobs ─────────────────────────
+
+/// Take batch KV quantization off a model family that cannot hold the cache
+/// mode it selects (issue #1350).
+///
+/// Returns the batch base mode that was refused when the table was disabled
+/// (`bits` reset to 0), `None` when it was already off or the family can hold
+/// it. The condition is `!=` rather than `== Fp16`: Fp16 is the only landing
+/// place a `--kv-bits` request can have today (rule 2 of
+/// `resolve_kv_cache_mode_for_model` fires only on a `Turbo4` request and
+/// `base_mode` never returns one), but what matters is "the batch table asked
+/// for a mode this family cannot hold", so a future rule that substitutes
+/// something other than Fp16 still disables the table.
+///
+/// Used by: [`ServerStartupInput::into_startup_config`] and
+/// [`effective_serve_kv_cache_mode`].
+pub fn disable_batch_kv_quant_for_family(
+    batch_kv_quant: &mut BatchKvQuantConfig,
+    model_path: &Path,
+) -> Option<mlxcel_core::cache::KVCacheMode> {
+    if !batch_kv_quant.is_enabled() {
+        return None;
+    }
+    let requested = batch_kv_quant.base_mode();
+    let (effective, _) =
+        crate::cli::turbo_args::resolve_effective_kv_cache_mode(requested, model_path);
+    if effective != requested {
+        batch_kv_quant.bits = 0;
+        return Some(requested);
+    }
+    None
+}
+
+/// The KV cache mode the scheduler builds each sequence's cache in: the
+/// batch table's base mode when it is enabled, `kv_cache_mode` otherwise.
+///
+/// Used by: `server::startup::prompt_cache_sizing_kv_mode` and
+/// [`effective_serve_kv_cache_mode`].
+#[must_use]
+pub fn kv_mode_for_batch(
+    kv_cache_mode: mlxcel_core::cache::KVCacheMode,
+    batch_kv_quant: &BatchKvQuantConfig,
+) -> mlxcel_core::cache::KVCacheMode {
+    if batch_kv_quant.is_enabled() {
+        batch_kv_quant.base_mode()
+    } else {
+        kv_cache_mode
+    }
+}
+
+/// The KV cache mode `serve` will really build for a model, given the
+/// requested `--kv-cache-mode` and the resolved batch table. Applies the same
+/// family resolution and "disable if the family cannot hold it" rule as
+/// startup, so `--estimate-memory` sizes what the server allocates.
+///
+/// Used by: `commands::serve::serve_preflight_kv_mode`.
+#[must_use]
+pub fn effective_serve_kv_cache_mode(
+    requested: mlxcel_core::cache::KVCacheMode,
+    batch_kv_quant: BatchKvQuantConfig,
+    model_path: &Path,
+) -> mlxcel_core::cache::KVCacheMode {
+    let (kv_cache_mode, _) =
+        crate::cli::turbo_args::resolve_effective_kv_cache_mode(requested, model_path);
+    let mut batch = batch_kv_quant;
+    let _ = disable_batch_kv_quant_for_family(&mut batch, model_path);
+    kv_mode_for_batch(kv_cache_mode, &batch)
+}
 
 /// Resolve the [`BatchKvQuantConfig`] from the raw CLI string fields.
 ///

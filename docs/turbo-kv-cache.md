@@ -257,13 +257,19 @@ widths, so no quantized mode is calibrated for what they contain:
 
 Any non-`fp16` mode requested for one of these families resolves to `fp16` with
 one warning naming the family and the requested mode. `deepseek_v2` is not in
-this set: it asks `MlaLatentCache::supports` per cache and falls back to the
-decompressed per-head K/V layout when the mode is quantized, so a quantized mode
-there lands on ordinary per-head rows and keeps working. The memory estimate
-(`mlxcel inspect`, the `--estimate-memory` preflights, `--recommend-quant` and
-the server's prompt-cache store budget) sizes that same decompressed layout for
-any non-`fp16` mode, which on V2-Lite is 10240 bytes per token per layer
-against 1152 for the absorbed FP16 latent (#3153).
+this set: it asks `MlaLatentCache::supports` per cache, and with absorbed decode
+off a quantized mode lands on ordinary per-head K/V rows and keeps working. With
+absorbed decode on (the default on Metal, CUDA and ROCm) the same request would
+decline the latent and store the decompressed cache, which is larger than the
+fp16 latent it replaces (5120 bytes per token per layer for int8 and about 7.2
+KB for turbo4-asym on V2-Lite, against 1152), slower to decode and lossy. The
+resolver therefore substitutes `fp16` with a warning, and `--kv-bits` /
+`--kv-quant-scheme` are disabled the same way. Set `MLXCEL_MLA_ABSORBED=0` to
+keep the decompressed quantized layout. The memory estimate (`mlxcel inspect`,
+the `--estimate-memory` preflights, `--recommend-quant` and the server's
+prompt-cache store budget) sizes the mode the run resolves to, which with
+absorption off is 10240 bytes per token per layer on V2-Lite for any non-`fp16`
+mode (#3153). A quantized latent cache is future work.
 
 Making a Turbo mode work on the latent layout is a new calibration and a new
 kernel (a 512-wide codebook for the latent with `k_pe` left at FP16), not a
