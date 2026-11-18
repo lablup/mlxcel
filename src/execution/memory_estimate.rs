@@ -64,6 +64,7 @@
 
 use std::path::Path;
 
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::hardware::{HardwareCapabilities, KvCacheParams, get_hardware};
 use mlxcel_core::weights::weight_footprint_bytes;
 use serde::Serialize;
@@ -411,8 +412,13 @@ pub struct MemoryEstimate {
     pub batch: u64,
     /// Quantization hint the caller passed in.
     pub quant: QuantHint,
-    /// True when KV bytes were computed with `int8_kv = true`.
+    /// True when KV bytes were computed for [`KVCacheMode::Int8`]. Kept
+    /// alongside [`Self::kv_mode`] for the banner's dtype label.
     pub kv_dtype_int8: bool,
+    /// KV cache mode the estimate was sized for. Besides the element width it
+    /// decides whether DeepSeek V2 caches the absorbed latent (FP16 only) or
+    /// the decompressed per-head K/V (every other mode, #3153).
+    pub kv_mode: KVCacheMode,
 }
 
 /// JSON payload emitted by `mlxcel inspect --json`.
@@ -477,8 +483,8 @@ impl InspectReport {
     ) -> Self {
         let kv_bytes_per_token = if matches!(est.kv_source, KvSource::Config) {
             InspectKvBytesPerToken {
-                fp16: Some(kv_cache_bytes_per_token(model_dir, false, 1)),
-                int8: Some(kv_cache_bytes_per_token(model_dir, true, 1)),
+                fp16: Some(kv_cache_bytes_per_token(model_dir, KVCacheMode::Fp16, 1)),
+                int8: Some(kv_cache_bytes_per_token(model_dir, KVCacheMode::Int8, 1)),
                 turbo4: None,
             }
         } else {
@@ -553,7 +559,7 @@ impl MemoryEstimate {
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Compute the unified memory budget for loading `model_dir` at the
-/// given `ctx_len` / `batch` / `quant` / `kv_dtype_int8` configuration.
+/// given `ctx_len` / `batch` / `quant` / `kv_mode` configuration.
 ///
 /// This is the single entry point consumed by `mlxcel inspect`, the
 /// `--estimate-memory` preflight on `generate` / `serve`, and the
@@ -578,7 +584,7 @@ pub fn estimate_total_memory(
     ctx_len: u64,
     batch: u64,
     quant: QuantHint,
-    kv_dtype_int8: bool,
+    kv_mode: KVCacheMode,
 ) -> MemoryEstimate {
     // ── Weights ──────────────────────────────────────────────────────────────
     let (weights_bytes, weights_source) = resolve_weight_bytes(model_dir);
@@ -588,8 +594,7 @@ pub fn estimate_total_memory(
     // (DeepSeek), hybrid attention+SSM (Jamba / NemotronH / …), and pure-SSM
     // (Mamba) models; `kv_arch` parses the architecture and sums per-group.
     let (kv_cache_bytes, kv_source, kv_detail) =
-        match crate::execution::kv_arch::estimate_kv_arch(model_dir, ctx_len, kv_dtype_int8, batch)
-        {
+        match crate::execution::kv_arch::estimate_kv_arch(model_dir, ctx_len, kv_mode, batch) {
             Some(a) => (a.total_bytes, KvSource::Config, a.detail),
             None => (
                 0,
@@ -668,7 +673,8 @@ pub fn estimate_total_memory(
         ctx_len,
         batch,
         quant,
-        kv_dtype_int8,
+        kv_dtype_int8: kv_mode == KVCacheMode::Int8,
+        kv_mode,
     }
 }
 
@@ -1133,16 +1139,17 @@ pub fn kv_cache_params_from_path(
     })
 }
 
-/// Compute KV bytes per token at the same dtype as [`estimate_total_memory`].
+/// Compute KV bytes per token for `kv_mode`, as [`estimate_total_memory`]
+/// sizes it.
 ///
 /// Used by `mlxcel inspect` to show the per-token rate alongside the
 /// at-ctx total. Returns 0 when the architecture is unavailable.
 #[must_use]
-pub fn kv_cache_bytes_per_token(model_dir: &Path, int8_kv: bool, batch: u64) -> u64 {
+pub fn kv_cache_bytes_per_token(model_dir: &Path, kv_mode: KVCacheMode, batch: u64) -> u64 {
     // Steady-state marginal rate: full-context layers grow per token, while
     // sliding-window / SSM layers stop growing once their window saturates and
     // so contribute 0. `ctx_len` is irrelevant to the marginal figure.
-    crate::execution::kv_arch::estimate_kv_arch(model_dir, 1, int8_kv, batch)
+    crate::execution::kv_arch::estimate_kv_arch(model_dir, 1, kv_mode, batch)
         .map(|a| a.marginal_bytes_per_token)
         .unwrap_or(0)
 }
@@ -1429,12 +1436,24 @@ pub fn paged_block_bytes(
     if num_layers == 0 || block_size == 0 {
         return None;
     }
-    let per_token_all_layers = kv_cache_bytes_per_token(model_dir, kv_dtype_int8, 1);
+    let per_token_all_layers =
+        kv_cache_bytes_per_token(model_dir, paged_pool_kv_mode(kv_dtype_int8), 1);
     let per_layer_per_token = per_token_all_layers / num_layers as u64;
     if per_layer_per_token == 0 {
         return None;
     }
     Some(per_layer_per_token.saturating_mul(block_size as u64))
+}
+
+/// The KV cache mode a paged-pool helper sizes for. The pool stores FP16 or
+/// INT8 blocks only and serves dense non-MLA families (`deepseek_v2` does not
+/// opt into it), so its byte helpers keep a dtype flag rather than a mode.
+fn paged_pool_kv_mode(kv_dtype_int8: bool) -> KVCacheMode {
+    if kv_dtype_int8 {
+        KVCacheMode::Int8
+    } else {
+        KVCacheMode::Fp16
+    }
 }
 
 /// Unified-memory headroom (bytes) available for the paged KV pool under the
@@ -1500,7 +1519,7 @@ pub fn resolve_paged_block_budget(
                 DEFAULT_CTX_LEN,
                 batch.max(1),
                 QuantHint::Default,
-                kv_dtype_int8,
+                paged_pool_kv_mode(kv_dtype_int8),
             );
             auto_kv_budget_bytes(&est)
         }
@@ -1747,7 +1766,7 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
         est.kv_detail,
     );
     if let KvSource::Config = est.kv_source {
-        let per_tok = kv_cache_bytes_per_token(model_dir, est.kv_dtype_int8, est.batch);
+        let per_tok = kv_cache_bytes_per_token(model_dir, est.kv_mode, est.batch);
         if per_tok > 0 {
             let _ = writeln!(
                 out,
@@ -2129,6 +2148,7 @@ mod tests {
             batch: 1,
             quant: QuantHint::Default,
             kv_dtype_int8: false,
+            kv_mode: KVCacheMode::Fp16,
         }
     }
 
@@ -2177,7 +2197,7 @@ mod tests {
         write_config(tmp.path(), &cfg);
         write_safetensors_index(tmp.path(), 2_415_919_104);
 
-        let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+        let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, KVCacheMode::Fp16);
         let report = InspectReport::from_estimate(
             tmp.path(),
             &est,
@@ -2202,11 +2222,11 @@ mod tests {
         assert_eq!(report.weights_source, "safetensors_header");
         assert_eq!(
             report.kv_bytes_per_token.fp16,
-            Some(kv_cache_bytes_per_token(tmp.path(), false, 1))
+            Some(kv_cache_bytes_per_token(tmp.path(), KVCacheMode::Fp16, 1))
         );
         assert_eq!(
             report.kv_bytes_per_token.int8,
-            Some(kv_cache_bytes_per_token(tmp.path(), true, 1))
+            Some(kv_cache_bytes_per_token(tmp.path(), KVCacheMode::Int8, 1))
         );
         assert_eq!(report.kv_bytes_per_token.turbo4, None);
         assert!(format_estimate(tmp.path(), &est).contains(&format_bytes(report.total_bytes)));
@@ -2277,6 +2297,7 @@ mod tests {
             batch: 2,
             quant: QuantHint::Int8,
             kv_dtype_int8: true,
+            kv_mode: KVCacheMode::Int8,
         };
         let report =
             InspectReport::from_estimate(tmp.path(), &est, "int8".to_string(), None, None, None);
@@ -2305,7 +2326,7 @@ mod tests {
         // 7 B FP16 ≈ 14 GB.
         write_safetensors_index(tmp.path(), 14_000_000_000);
 
-        let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+        let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, KVCacheMode::Fp16);
         assert_eq!(est.weights_source, WeightsSource::ExactSafetensors);
         assert_eq!(est.weights_bytes, 14_000_000_000);
         assert_eq!(est.kv_source, KvSource::Config);
@@ -2325,7 +2346,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
 
-        let est = estimate_total_memory(tmp.path(), 4096, 1, QuantHint::Default, false);
+        let est = estimate_total_memory(tmp.path(), 4096, 1, QuantHint::Default, KVCacheMode::Fp16);
         assert_eq!(est.weights_source, WeightsSource::AnalyticalConfig);
         assert!(est.weights_bytes > 0);
     }
@@ -2334,7 +2355,7 @@ mod tests {
     fn estimate_falls_back_to_seven_billion_with_no_config() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let est = estimate_total_memory(tmp.path(), 4096, 1, QuantHint::Default, false);
+        let est = estimate_total_memory(tmp.path(), 4096, 1, QuantHint::Default, KVCacheMode::Fp16);
         assert_eq!(est.weights_source, WeightsSource::Fallback);
         assert_eq!(est.kv_source, KvSource::Unavailable);
         assert_eq!(est.kv_cache_bytes, 0);
@@ -2342,13 +2363,67 @@ mod tests {
         assert_eq!(est.weights_bytes, 14_000_000_000);
     }
 
+    /// #3153: the estimate takes the KV cache mode, so a DeepSeek V2 run in a
+    /// Turbo mode (which declines the absorbed latent at runtime) is sized as
+    /// the decompressed per-head K/V, and the banner's per-token line follows
+    /// the same mode as the total.
+    #[test]
+    fn deepseek_v2_turbo_mode_sizes_the_decompressed_cache() {
+        let _env = crate::test_support::env_lock::env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = serde_json::json!({
+            "model_type": "deepseek_v2",
+            "hidden_size": 2048,
+            "num_hidden_layers": 27,
+            "num_attention_heads": 16,
+            "kv_lora_rank": 512,
+            "qk_rope_head_dim": 64,
+            "qk_nope_head_dim": 128,
+            "v_head_dim": 128,
+            "vocab_size": 102400,
+        });
+        write_config(tmp.path(), &cfg);
+
+        let ctx = 32768;
+        let turbo = estimate_total_memory(
+            tmp.path(),
+            ctx,
+            1,
+            QuantHint::Default,
+            KVCacheMode::Turbo4Asym,
+        );
+        // 27 layers x 10240 bytes per token per layer (16 heads x 320 x fp16).
+        assert_eq!(turbo.kv_cache_bytes, 27 * 10240 * ctx);
+        assert_eq!(turbo.kv_mode, KVCacheMode::Turbo4Asym);
+        assert!(!turbo.kv_dtype_int8);
+        assert_eq!(
+            kv_cache_bytes_per_token(tmp.path(), KVCacheMode::Turbo4Asym, 1),
+            27 * 10240
+        );
+        let banner = format_estimate(tmp.path(), &turbo);
+        assert!(
+            banner.contains(&format_bytes(27 * 10240)),
+            "per-token line must follow the estimate's mode: {banner}"
+        );
+
+        let fp16 = estimate_total_memory(tmp.path(), ctx, 1, QuantHint::Default, KVCacheMode::Fp16);
+        if mlxcel_core::mla::absorbed_enabled() {
+            // 972.0 MiB at 32768 tokens, against 8.44 GiB decompressed.
+            assert_eq!(fp16.kv_cache_bytes, 27 * 1152 * ctx);
+        } else {
+            assert_eq!(fp16.kv_cache_bytes, turbo.kv_cache_bytes);
+        }
+    }
+
     #[test]
     fn int8_kv_halves_kv_bytes() {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
 
-        let fp16 = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
-        let int8 = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, true);
+        let fp16 =
+            estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, KVCacheMode::Fp16);
+        let int8 =
+            estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, KVCacheMode::Int8);
         assert!(int8.kv_dtype_int8);
         assert_eq!(int8.kv_cache_bytes * 2, fp16.kv_cache_bytes);
     }
@@ -2358,8 +2433,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
 
-        let batch1 = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
-        let batch4 = estimate_total_memory(tmp.path(), 8192, 4, QuantHint::Default, false);
+        let batch1 =
+            estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, KVCacheMode::Fp16);
+        let batch4 =
+            estimate_total_memory(tmp.path(), 8192, 4, QuantHint::Default, KVCacheMode::Fp16);
 
         assert_eq!(batch4.batch, 4);
         assert_eq!(batch4.kv_cache_bytes, batch1.kv_cache_bytes * 4);
@@ -2430,7 +2507,8 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             write_config(tmp.path(), &cfg);
 
-            let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+            let est =
+                estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, KVCacheMode::Fp16);
             assert_eq!(est.kv_source, KvSource::Config, "{name} kv source");
             assert_eq!(est.kv_cache_bytes, expected_kv, "{name} kv bytes");
             assert!(
@@ -2462,7 +2540,8 @@ mod tests {
             assert_eq!(params.num_kv_heads, expected_kv_heads, "{name} kv heads");
             assert_eq!(params.head_dim, expected_head_dim, "{name} head dim");
 
-            let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+            let est =
+                estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, KVCacheMode::Fp16);
             assert_eq!(
                 kv_cache_bytes_from_params(&params),
                 est.kv_cache_bytes,
@@ -2490,7 +2569,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
 
-        let est = estimate_total_memory(tmp.path(), 1024, 1, QuantHint::Default, false);
+        let est = estimate_total_memory(tmp.path(), 1024, 1, QuantHint::Default, KVCacheMode::Fp16);
         assert_eq!(est.available_bytes, 512 * 1024 * 1024);
     }
 
@@ -2505,7 +2584,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
 
-        let est = estimate_total_memory(tmp.path(), 1024, 1, QuantHint::Default, false);
+        let est = estimate_total_memory(tmp.path(), 1024, 1, QuantHint::Default, KVCacheMode::Fp16);
         assert_eq!(est.available_bytes, 512 * 1024 * 1024);
     }
 
@@ -2576,7 +2655,7 @@ mod tests {
         // 100 TB safetensors header — should never fit on a real host.
         write_safetensors_index(tmp.path(), 100u64 * 1024u64 * 1024u64 * 1024u64 * 1024u64);
 
-        let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+        let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, KVCacheMode::Fp16);
         assert!(
             !est.fits,
             "total {} should exceed available",
@@ -2590,7 +2669,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
 
-        let est = estimate_total_memory(tmp.path(), 1024, 1, QuantHint::Default, false);
+        let est = estimate_total_memory(tmp.path(), 1024, 1, QuantHint::Default, KVCacheMode::Fp16);
         if est.fits {
             assert_eq!(est.overflow_bytes(), 0);
         } else {
@@ -2603,8 +2682,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
 
-        let per_tok_fp16 = kv_cache_bytes_per_token(tmp.path(), false, 1);
-        let per_tok_int8 = kv_cache_bytes_per_token(tmp.path(), true, 1);
+        let per_tok_fp16 = kv_cache_bytes_per_token(tmp.path(), KVCacheMode::Fp16, 1);
+        let per_tok_int8 = kv_cache_bytes_per_token(tmp.path(), KVCacheMode::Int8, 1);
         assert!(per_tok_fp16 > 0);
         assert_eq!(per_tok_int8 * 2, per_tok_fp16);
     }
@@ -2614,7 +2693,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
 
-        let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+        let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, KVCacheMode::Fp16);
         let out = format_estimate(tmp.path(), &est);
         for needle in [
             "Memory Estimate",
@@ -2704,7 +2783,7 @@ mod tests {
         let _env = crate::test_support::env_lock::env_lock();
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
-        let est = estimate_total_memory(tmp.path(), 8192, 4, QuantHint::Default, false);
+        let est = estimate_total_memory(tmp.path(), 8192, 4, QuantHint::Default, KVCacheMode::Fp16);
         assert!(
             est.activation_bytes > 0,
             "a config with hidden_size must yield a nonzero activation reserve"
@@ -2722,8 +2801,8 @@ mod tests {
     fn activation_grows_with_batch_through_the_full_estimate() {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
-        let b1 = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
-        let b8 = estimate_total_memory(tmp.path(), 8192, 8, QuantHint::Default, false);
+        let b1 = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, KVCacheMode::Fp16);
+        let b8 = estimate_total_memory(tmp.path(), 8192, 8, QuantHint::Default, KVCacheMode::Fp16);
         // The old flat headroom was batch-blind; the activation term now makes
         // the reserve grow with batch.
         assert!(b8.activation_bytes > b1.activation_bytes);
@@ -3038,6 +3117,7 @@ mod tests {
             batch: 1,
             quant: QuantHint::Default,
             kv_dtype_int8: false,
+            kv_mode: KVCacheMode::Fp16,
         };
         // (25e9 − 1e9) / 1.2 − 10e9 = 20e9 − 10e9 = 10e9.
         let budget = auto_kv_budget_bytes(&est);
@@ -3070,6 +3150,7 @@ mod tests {
             batch: 1,
             quant: QuantHint::Default,
             kv_dtype_int8: false,
+            kv_mode: KVCacheMode::Fp16,
         };
         assert_eq!(auto_kv_budget_bytes(&est), 0);
     }

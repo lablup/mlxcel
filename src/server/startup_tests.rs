@@ -2836,3 +2836,38 @@ fn the_text_loader_points_a_kokoro_checkpoint_at_the_speech_route() {
     assert!(error.contains("/v1/audio/speech"), "{error}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// The prompt-cache stores are sized for the mode the scheduler really builds
+/// (#3153): the batch KV-quant base mode when `--kv-bits` is on, the
+/// `--kv-cache-mode` / `--cache-type-*` mode otherwise.
+#[test]
+fn prompt_cache_sizing_uses_the_mode_the_scheduler_builds() {
+    use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
+
+    let mut config = crate::server::ServerConfig::default();
+    assert_eq!(
+        super::prompt_cache_sizing_kv_mode(&config),
+        KVCacheMode::Fp16
+    );
+
+    config.kv_cache_mode = KVCacheMode::Turbo4Asym;
+    assert_eq!(
+        super::prompt_cache_sizing_kv_mode(&config),
+        KVCacheMode::Turbo4Asym
+    );
+
+    config.kv_cache_mode = KVCacheMode::Fp16;
+    config.batch_kv_quant =
+        BatchKvQuantConfig::new(KvQuantScheme::TurboQuant, 4, 64, false).expect("valid config");
+    assert_eq!(
+        super::prompt_cache_sizing_kv_mode(&config),
+        KVCacheMode::Turbo4Asym
+    );
+
+    config.batch_kv_quant =
+        BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, false).expect("valid config");
+    assert_eq!(
+        super::prompt_cache_sizing_kv_mode(&config),
+        KVCacheMode::Int8
+    );
+}

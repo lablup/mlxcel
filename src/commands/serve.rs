@@ -51,7 +51,6 @@ use mlxcel::server::{
     env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
     resolve_parallel_context_size, start_server,
 };
-use mlxcel_core::cache::KVCacheMode;
 
 /// Run the `mlxcel serve` subcommand.
 ///
@@ -427,12 +426,16 @@ fn run_serve_memory_preflight(
     // logging exists.
     let (kv_cache_mode, _) =
         mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, model_path);
-    let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
-
     let ctx_len = serve_preflight_ctx_len(args);
     let batch = serve_preflight_batch(args);
 
-    let estimate = estimate_total_memory(model_path, ctx_len, batch, QuantHint::Default, kv_int8);
+    let estimate = estimate_total_memory(
+        model_path,
+        ctx_len,
+        batch,
+        QuantHint::Default,
+        kv_cache_mode,
+    );
 
     let banner = format_estimate(model_path, &estimate);
     println!("{banner}");

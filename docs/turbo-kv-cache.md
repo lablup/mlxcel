@@ -259,7 +259,11 @@ Any non-`fp16` mode requested for one of these families resolves to `fp16` with
 one warning naming the family and the requested mode. `deepseek_v2` is not in
 this set: it asks `MlaLatentCache::supports` per cache and falls back to the
 decompressed per-head K/V layout when the mode is quantized, so a quantized mode
-there lands on ordinary per-head rows and keeps working.
+there lands on ordinary per-head rows and keeps working. The memory estimate
+(`mlxcel inspect`, the `--estimate-memory` preflights, `--recommend-quant` and
+the server's prompt-cache store budget) sizes that same decompressed layout for
+any non-`fp16` mode, which on V2-Lite is 10240 bytes per token per layer
+against 1152 for the absorbed FP16 latent (#3153).
 
 Making a Turbo mode work on the latent layout is a new calibration and a new
 kernel (a 512-wide codebook for the latent with `k_pe` left at FP16), not a

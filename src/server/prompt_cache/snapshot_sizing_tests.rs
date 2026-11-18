@@ -39,6 +39,7 @@ fn qwen38_27b_default_holds_multiple_representative_snapshots() {
         131_072,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(64 * 1024 * 1024 * 1024),
+        KVCacheMode::Fp16,
     )
     .expect("qwen3-next recommendation");
 
@@ -74,6 +75,7 @@ fn available_memory_clamps_implicit_raise_but_not_below_fallback() {
         8192,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(8 * 1024 * 1024 * 1024),
+        KVCacheMode::Fp16,
     )
     .expect("qwen3-next recommendation");
 
@@ -118,6 +120,7 @@ fn gemma4_vlm_checkpoint_gets_a_boundary_snapshot_sized_default() {
         262_144,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(100 * 1024 * 1024 * 1024),
+        KVCacheMode::Fp16,
     )
     .expect("gemma4 VLM checkpoints must get the model-aware default");
 
@@ -142,6 +145,7 @@ fn a_tight_ceiling_still_holds_one_entry_when_memory_allows() {
         8192,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(24 * 1024 * 1024 * 1024),
+        KVCacheMode::Fp16,
     )
     .expect("recommendation");
     assert_eq!(rec.capacity_bytes, rec.entry_bytes);
@@ -152,6 +156,7 @@ fn a_tight_ceiling_still_holds_one_entry_when_memory_allows() {
         8192,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(12 * 1024 * 1024 * 1024),
+        KVCacheMode::Fp16,
     )
     .expect("recommendation");
     assert_eq!(rec.capacity_bytes, 3 * 1024 * 1024 * 1024);
@@ -165,6 +170,7 @@ fn a_model_that_exhausts_memory_keeps_the_fallback() {
         8192,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(0),
+        KVCacheMode::Fp16,
     )
     .expect("recommendation");
     assert_eq!(rec.available_ceiling_bytes, Some(0));
@@ -198,6 +204,7 @@ fn qwen35_vlm_checkpoint_counts_its_recurrent_state() {
         131_072,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(64 * 1024 * 1024 * 1024),
+        KVCacheMode::Fp16,
     )
     .expect("qwen3.5 VLM recommendation");
     assert_eq!(rec.fixed_state_bytes, 78_446_592);
@@ -220,6 +227,7 @@ fn an_unset_context_size_sizes_for_the_representative_window() {
         0,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(100 * 1024 * 1024 * 1024),
+        KVCacheMode::Fp16,
     )
     .expect("recommendation");
     assert_eq!(
@@ -245,6 +253,7 @@ fn dense_kv_store_default_holds_a_long_conversation() {
         0,
         PromptCacheConfig::DEFAULT_CAPACITY_BYTES,
         Some(100 * 1024 * 1024 * 1024),
+        KVCacheMode::Fp16,
     )
     .expect("dense models get a KV-store recommendation");
     assert_eq!(rec.entry_bytes, 128 * 1024 * 8192);
@@ -260,6 +269,7 @@ fn kv_store_default_skips_snapshot_only_families() {
             0,
             PromptCacheConfig::DEFAULT_CAPACITY_BYTES,
             Some(100 * 1024 * 1024 * 1024),
+            KVCacheMode::Fp16,
         )
         .is_none()
     );
@@ -281,6 +291,7 @@ fn standard_attention_keeps_legacy_default() {
             8192,
             PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
             Some(64 * 1024 * 1024 * 1024),
+            KVCacheMode::Fp16,
         )
         .is_none()
     );
@@ -429,6 +440,7 @@ fn attention_cache_families_take_the_model_aware_path() {
             0,
             PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
             Some(100 * 1024 * 1024 * 1024),
+            KVCacheMode::Fp16,
         )
         .unwrap_or_else(|| panic!("{spelling} must get the model-aware snapshot default"));
         // Unwindowed: a boundary snapshot holds every layer at full length.
@@ -446,6 +458,7 @@ fn attention_cache_families_take_the_model_aware_path() {
                 0,
                 PromptCacheConfig::DEFAULT_CAPACITY_BYTES,
                 Some(100 * 1024 * 1024 * 1024),
+                KVCacheMode::Fp16,
             )
             .is_none(),
             "{spelling}"
@@ -462,6 +475,7 @@ fn llama4_scout_entry_matches_the_measured_per_token_footprint() {
         0,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(100 * 1024 * 1024 * 1024),
+        KVCacheMode::Fp16,
     )
     .expect("recommendation");
     let estimated_per_token = rec.entry_bytes as f64 / rec.representative_tokens as f64;
@@ -533,6 +547,7 @@ fn per_token_estimates_match_real_checkpoint_boundary_snapshots() {
             0,
             PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
             Some(100 * 1024 * 1024 * 1024),
+            KVCacheMode::Fp16,
         )
         .expect("recommendation");
         let estimated_per_token = rec.entry_bytes as f64 / rec.representative_tokens as f64;
@@ -577,6 +592,7 @@ fn qwen4_exp_counts_recurrent_state_and_qsa_index() {
         8192,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(256 * 1024 * 1024 * 1024),
+        KVCacheMode::Fp16,
     )
     .expect("qwen4_exp gets a model-aware default");
 
@@ -622,6 +638,7 @@ fn keep_previous_turn_raises_the_implicit_target_by_half() {
         131_072,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         memory,
+        KVCacheMode::Fp16,
     )
     .expect("default recommendation");
     let kept = recommend_model_snapshot_capacity_from_config_with_entries(
@@ -630,6 +647,7 @@ fn keep_previous_turn_raises_the_implicit_target_by_half() {
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         memory,
         model_aware_snapshot_target_entries(true),
+        KVCacheMode::Fp16,
     )
     .expect("keep-previous-turn recommendation");
 
@@ -646,6 +664,7 @@ fn keep_previous_turn_raises_the_implicit_target_by_half() {
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
         Some(16 * 1024 * 1024 * 1024),
         9,
+        KVCacheMode::Fp16,
     )
     .expect("tight recommendation");
     assert_eq!(tight.capacity_bytes, 4 * 1024 * 1024 * 1024);
@@ -719,4 +738,55 @@ fn attention_only_families_get_no_state_checkpoint_budget() {
     assert!(
         recommend_state_checkpoint_capacity_from_config(&llama4_scout_config(), None).is_none()
     );
+}
+
+/// DeepSeek V2-Lite reduced to the fields the estimator reads: 27 layers,
+/// 1152 latent bytes per token per layer against 10240 decompressed.
+fn deepseek_v2_lite_config() -> Value {
+    json!({
+        "model_type": "deepseek_v2",
+        "num_hidden_layers": 27,
+        "num_attention_heads": 16,
+        "kv_lora_rank": 512,
+        "qk_rope_head_dim": 64,
+        "qk_nope_head_dim": 128,
+        "v_head_dim": 128,
+    })
+}
+
+/// #3153: a Turbo KV mode declines the absorbed latent at runtime, so a KV
+/// store entry is the decompressed per-head K/V. Sizing it as the latent left
+/// the store about 8.9x short of what the scheduler parks.
+#[test]
+fn deepseek_v2_kv_store_entry_follows_the_kv_cache_mode() {
+    let cfg = deepseek_v2_lite_config();
+    let budget = Some(100 * 1024 * 1024 * 1024);
+    let rec = |mode| {
+        recommend_model_kv_store_capacity_from_config(
+            &cfg,
+            0,
+            PromptCacheConfig::DEFAULT_CAPACITY_BYTES,
+            budget,
+            mode,
+        )
+        .expect("deepseek_v2 donates into the KV store")
+    };
+    let tokens = MODEL_AWARE_SNAPSHOT_CONTEXT_TOKENS as usize;
+    let decompressed = 27 * 10240 * tokens;
+    let latent = 27 * 1152 * tokens;
+
+    let turbo = rec(KVCacheMode::Turbo4Asym);
+    assert_eq!(turbo.entry_bytes, decompressed);
+    assert_eq!(turbo.capacity_bytes, 6 * decompressed);
+
+    let fp16 = rec(KVCacheMode::Fp16);
+    if mlxcel_core::mla::absorbed_enabled() {
+        assert_eq!(fp16.entry_bytes, latent);
+        assert!(turbo.entry_bytes > fp16.entry_bytes);
+    } else {
+        assert_eq!(fp16.entry_bytes, turbo.entry_bytes);
+    }
+
+    // INT8 also declines the latent, at half the element width.
+    assert_eq!(rec(KVCacheMode::Int8).entry_bytes, decompressed / 2);
 }
