@@ -503,14 +503,22 @@ mod tests {
         assert_eq!(view.seq_len(), 4);
     }
 
-    /// The four families that always cache a latent pair, and the one that
-    /// does not. `deepseek_v2` has a decompressed fallback, so a quantized
-    /// mode there lands on ordinary per-head K/V rows and must keep working.
+    /// Every family in `MLA_LATENT_CACHE_FAMILIES` always caches a latent
+    /// pair, and `deepseek_v2` does not. `deepseek_v2` has a decompressed
+    /// fallback, so a quantized mode there lands on ordinary per-head K/V rows
+    /// and must keep working.
     #[test]
     fn only_the_fallback_less_families_are_latent_families() {
         for family in [
             "glm4_moe_lite",
             "deepseek_v3",
+            "kimi_k2",
+            "joyai_llm_flash",
+            "kimi_vl",
+            "kimi_k25",
+            "youtu",
+            "youtu_llm",
+            "youtu_vl",
             "deepseek_v32",
             "deepseek_v3.2",
             "glm_moe_dsa",
@@ -521,6 +529,7 @@ mod tests {
         ] {
             assert!(caches_mla_latent_pair(family), "{family}");
         }
+        assert_eq!(MLA_LATENT_CACHE_FAMILIES.len(), 16);
         assert!(!caches_mla_latent_pair("deepseek_v2"));
         assert!(!caches_mla_latent_pair("llama"));
         assert!(!caches_mla_latent_pair(""));
