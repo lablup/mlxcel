@@ -190,9 +190,9 @@ None. The spec changes compiler inputs, not tensors or the runtime ABI.
 ### Statistics
 | Item | Value |
 |------|-------|
-| Files changed | 4 |
-| Lines added | +305 |
-| Lines deleted | -27 |
+| Files changed | 6 code and docs (the two report files not counted) |
+| Lines added | +308 |
+| Lines deleted | -29 |
 | Tests added | 2 (one compiler-backed and `#[ignore]`d) |
 
 ### Changes by Category
