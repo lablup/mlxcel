@@ -70,8 +70,9 @@
 //! (`0`, `false`, `off`, `no`) keeps the decompressed path. Unset, DeepSeek V2
 //! absorbs wherever the fused absorbed-decode kernel runs (Metal, unless
 //! `MLXCEL_MLA_FUSED_DECODE` turns it off) and on CUDA and ROCm, whose
-//! composed paths measured level with or ahead of the decompressed one (issue
-//! #3133), and stays decompressed elsewhere ([`default_absorbs`],
+//! composed paths measured within a few percent at 512 tokens and ahead of the
+//! decompressed one at longer prompts (issue #3133), and stays decompressed
+//! elsewhere ([`default_absorbs`],
 //! [`absorbed_enabled`]). When the result is decompressed nothing in this
 //! module is constructed, no fold is built, and the family runs the
 //! byte-identical decompressed path.
@@ -178,9 +179,9 @@ pub fn parse_enabled(value: Option<&str>) -> bool {
 /// explicit on or off forces the layout. The default follows the evidence
 /// ([`default_absorbs`]): the switch to absorbed (issue #3131) was measured on
 /// Metal with the fused absorbed-decode kernel, and the composed path, which
-/// carried about 10% short-context cost on Metal in #3102, measured level with
-/// or ahead of the decompressed path on CUDA and ROCm (issue #3133). The CPU
-/// backend stays decompressed.
+/// carried about 10% short-context cost on Metal in #3102, measured within a
+/// few percent of the decompressed path at 512 tokens and ahead of it from 2K
+/// on CUDA and ROCm (issue #3133). The CPU backend stays decompressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AbsorbedMode {
     /// Unset, empty, or an unrecognized value: absorbed where

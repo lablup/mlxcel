@@ -30,7 +30,7 @@ The cost is fixed weight memory, and how much depends on the checkpoint. A quant
 
 ## Default layout for DeepSeek V2
 
-DeepSeek V2 caches the MLA latent by default wherever the fused absorbed-decode kernel runs (#3131) and on CUDA (#3133), and decompressed per-head K and V elsewhere or under `MLXCEL_MLA_ABSORBED=0`. The default followed two rounds of measurement. Issue #3102 measured both layouts on deepseek-v2-lite-chat-4bit-mlx on an M5 Max (2026-11-15) with the rule that the latent layout becomes the default only if it holds decode throughput within a few percent and the teacher-forced trace shows no material disagreement:
+DeepSeek V2 caches the MLA latent by default wherever the fused absorbed-decode kernel runs (#3131) and on CUDA and ROCm (#3133), and decompressed per-head K and V elsewhere or under `MLXCEL_MLA_ABSORBED=0`. The default followed two rounds of measurement. Issue #3102 measured both layouts on deepseek-v2-lite-chat-4bit-mlx on an M5 Max (2026-11-15) with the rule that the latent layout becomes the default only if it holds decode throughput within a few percent and the teacher-forced trace shows no material disagreement:
 
 | measurement | decompressed (then default) | absorbed | |
 |---|---|---|---|
@@ -102,7 +102,7 @@ No other family shares the choice: `deepseek_v3` and `deepseek_v32` absorb uncon
 | `MLXCEL_MLA_ABSORBED` | Cache `(ckv, kpe)` and run absorbed decode (Stage 1). On by default where the fused kernel runs (#3131) and on CUDA and ROCm (#3133); `1`, `true`, `on` or `yes` force it on every backend, and `0`, `false`, `off` or `no` restore the decompressed per-head K/V cache. |
 | `MLXCEL_MLA_SPLIT_KV=1` | Additionally cut the latent range into chunks and merge the partial states (Stage 2). Off by default; ignored under `MLXCEL_MLA_ABSORBED=0`. |
 
-`MLXCEL_MLA_ABSORBED` is a tri-state (`mlxcel_core::mla::AbsorbedMode`): an on spelling (`1`, `true`, `on`, `yes`) forces absorbed decode, an off spelling forces the decompressed layout, and unset, empty or unrecognized is the default. The default (`mlxcel_core::mla::default_absorbs`) absorbs where the fused absorbed-decode kernel runs, which today means Metal with `MLXCEL_MLA_FUSED_DECODE` not turned off, and on CUDA and ROCm, where #3133 measured the composed path level with or ahead of the decompressed one. Elsewhere absorbed decode takes the composed path without that evidence: Metal with the kernel off carried the roughly 10% short-context cost #3102 measured, and the CPU backend is unmeasured, so both keep the decompressed layout by default. A typo keeps the default layout instead of changing it. `MLXCEL_MLA_SPLIT_KV` stays opt-in and accepts only the on spellings.
+`MLXCEL_MLA_ABSORBED` is a tri-state (`mlxcel_core::mla::AbsorbedMode`): an on spelling (`1`, `true`, `on`, `yes`) forces absorbed decode, an off spelling forces the decompressed layout, and unset, empty or unrecognized is the default. The default (`mlxcel_core::mla::default_absorbs`) absorbs where the fused absorbed-decode kernel runs, which today means Metal with `MLXCEL_MLA_FUSED_DECODE` not turned off, and on CUDA and ROCm, where #3133 measured the composed path within a few percent of the decompressed one at 512 tokens and ahead of it from 2K. Elsewhere absorbed decode takes the composed path without that evidence: Metal with the kernel off carried the roughly 10% short-context cost #3102 measured, and the CPU backend is unmeasured, so both keep the decompressed layout by default. A typo keeps the default layout instead of changing it. `MLXCEL_MLA_SPLIT_KV` stays opt-in and accepts only the on spellings.
 
 Under `MLXCEL_MLA_ABSORBED=0`, no fold is built, no weight is dequantized, and the family runs the pre-existing decompressed path unchanged. Absorbed decode still declines per cache, keeping the decompressed path, for any non-FP16 KV cache mode and for paged-backed caches.
 
@@ -110,7 +110,7 @@ Under `MLXCEL_MLA_ABSORBED=0`, no fold is built, no weight is dequantized, and t
 
 | Family | Before this work | Now |
 |---|---|---|
-| `deepseek_v2` | Decompressed cache | Absorbed by default on Metal (#3131) and CUDA (#3133), decompressed by default elsewhere; `MLXCEL_MLA_ABSORBED` forces either |
+| `deepseek_v2` | Decompressed cache | Absorbed by default on Metal (#3131) and on CUDA and ROCm (#3133), decompressed by default elsewhere; `MLXCEL_MLA_ABSORBED` forces either |
 | `deepseek_v3` | Already absorbed (`embed_q` / `unembed_out` decomposition in `sanitize_weights`) | Unchanged |
 | `deepseek_v32` | Already absorbed, same decomposition | Unchanged |
 | `minicpm3` | Decompressed cache | Unchanged, still decompressed |

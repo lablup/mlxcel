@@ -7,6 +7,7 @@ Per-run rows: [`decode.csv`](mla-and-prefill-memory-rocm-gfx1151-2026-11-18/deco
 ## Setup
 
 - **Host:** AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`, 20 WGP, wave32), HIP 7.15.26333, ROCm clang 23.0.0git, 30 GiB unified memory, 32 cores, Linux 6.18.12. Every GPU run held the host's ROCm guard lock (`scripts/rocm_gpu_guard.sh --hold`), no build ran during a throughput run, and A/B arms ran in ABBA order with 60 s idle before each run.
+- **Versions:** MLX pin `fc344c98`, MLX ROCm overlay commit `75915908` (`src/lib/mlxcelverse/overlays/rocm/UPSTREAM`), backend `rocm-7.15`.
 - **Binary:** release build with `--features rocm` from `c27b86f4`. #3149 (`7f8b6c95`) landed after the measurement and changes only the default-resolution rule; both arms here are forced with `MLXCEL_MLA_ABSORBED`, so its two code paths are the ones measured. The section 5 baselines are `b21825cf` (parent of #3114) and `3efb3fb2` (parent of #3119), each in its own worktree.
 - **Models:** `deepseek-v2-lite-chat-4bit-mlx`, `kimi-vl-a3b-thinking-4bit`, `glm-4.7-flash-4bit`, `gpt-oss-20b-mxfp4-q4`.
 - **Correctness:** teacher-forced traces from `examples/logit_trace`, judged by decided-position disagreement (reference top-1 margin of at least 2 logits), never by byte identity or perplexity alone.
@@ -45,12 +46,12 @@ The 512-token cell is the least certain at two runs: the decompressed arm spread
 |---|---|---|---|---|
 | glm-4.7-flash-4bit (`b21825cf` vs branch) | 2048 chunks | 25.26 GB | 20.53 GB | 24.75 to 74.12 |
 | glm-4.7-flash-4bit | single pass | failed, 62.72 GB allocation | 21.13 GB | 24.75 to 74.89 |
-| gpt-oss-20b-mxfp4-q4 (`3efb3fb2` vs branch) | 2048 chunks | 26.21 GB | 26.21 GB | 324.4 to 325.3 |
+| gpt-oss-20b-mxfp4-q4 (`3efb3fb2` vs branch) | 2048 chunks | 26.21 GB | 26.21 to 26.43 GB | 324.4 to 325.3 |
 | gpt-oss-20b-mxfp4-q4 | single pass | failed, 100.35 GB allocation | failed identically | none |
 
-GLM after #3114 fits a 28K single pass in 21.13 GB on this 30 GiB host, where the old tree asks for a 62.72 GB mask array and fails; with 2048-token chunks the new tree peaks 4.7 GB lower and prefills 3.0x faster (306.9 and 312.3 s against 919.2 s). The before arm's chunked bench cell never produced a throughput figure: the warmup prefill peaked at 25.22 to 25.26 GB and the measured second pass did not finish inside a 40-minute bound, which is why its throughput comes from the single `generate` pass.
+GLM after #3114 fits a 28K single pass in 21.13 GB on this 30 GiB host, where the old tree asks for a 62.72 GB allocation and fails; with 2048-token chunks the new tree peaks 4.7 GB lower and prefills 3.0x faster (306.9 and 312.3 s against 919.2 s). The before arm's chunked bench cell never produced a throughput figure: the warmup prefill peaked at 25.22 to 25.26 GB and the measured second pass did not finish inside a 40-minute bound, which is why its throughput comes from the single `generate` pass.
 
-gpt-oss is unchanged on ROCm by design: #3119's sink prefill takes MLX's causal mode only where `maskless_route_is_fused` says MLX fuses it, and a 19,773-token single pass asks for a 100.35 GB allocation in both trees. The chunked peak (26.21 GB) is also far above CUDA's 14.52 GB, so ROCm keeps a larger per-chunk buffer here; that is a pre-existing property of the backend, not a change in either tree. Greedy text is identical across trees on both models (the ledger echo at temperature 0 digests to `ef011275` on GLM and `b54a2d8f` on gpt-oss in every run). Metal reference: GLM 2048 chunks 28.82 to 20.51 GB, single pass failed to 24.11 GB; gpt-oss single pass 22.54 to 17.86 GB.
+gpt-oss is unchanged on ROCm by design: #3119's sink prefill takes MLX's causal mode only where `maskless_route_is_fused` says MLX fuses it, and a 19,773-token single pass asks for a 100.35 GB allocation in both trees. The chunked peak (26.21 GB on both arms, 26.43 GB on one branch run) is also far above CUDA's 14.52 GB, so ROCm keeps a larger per-chunk buffer here; that is a pre-existing property of the backend, not a change in either tree. Greedy text is identical across trees on both models (the ledger echo at temperature 0 digests to `ef011275` on GLM and `b54a2d8f` on gpt-oss in every run). Metal reference: GLM 2048 chunks 28.82 to 20.51 GB, single pass failed to 24.11 GB; gpt-oss single pass 22.54 to 17.86 GB.
 
 ## 6. Llama 4 Scout past the 8192 chunk (#3117, #3126)
 
@@ -58,7 +59,7 @@ Not run on this host. Llama 4 Scout is a 61 GB checkpoint and the host has 30 Gi
 
 ## 7. KV sizing follows the runtime layout
 
-`kv_arch` reads `mla::absorbed_enabled()` since #3137, so the sizing follows the ROCm default change with no further code; the prompt-cache snapshot sizing and the KV cache advisor read the same estimate. `mlxcel inspect -m models/deepseek-v2-lite-chat-4bit-mlx --max-tokens 32768` on the switched binary:
+`kv_arch` reads `mla::absorbed_enabled()` since #3137, so the sizing follows the ROCm default change with no further code; the prompt-cache snapshot sizing and the KV cache advisor read the same estimate. `mlxcel inspect -m models/deepseek-v2-lite-chat-4bit-mlx --max-tokens 32768` on a build of this change (the throughput and trace arms above use the `c27b86f4` build):
 
 | setting | KV cache | layout | total estimate |
 |---|---|---|---|
@@ -69,7 +70,7 @@ The totals differ from the CUDA record (11.12 and 20.10 GiB) because ROCm adds t
 
 ## Gate
 
-PENDING
+The full gate did not run on this host. `make verify-rocm-held` was stopped by the harness's memory guard on this 30 GiB machine, so this record carries no local full-gate result. The narrow runs used here, all under `scripts/rocm_gpu_guard.sh --hold`, were `cargo test -p mlxcel-core --features rocm --lib mla::` (61 passed, 0 failed) and `cargo test -p mlxcel --features rocm --lib execution::kv_arch::tests` (35 passed, 0 failed). The default resolution was checked with the branch binary (section 7). Hosted CI carries the rest of the suite.
 
 ## Commands
 
