@@ -1388,7 +1388,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use mlxcel_core::cache::KVCacheMode;
-    use mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model;
+    use mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model_with;
 
     use super::*;
 
@@ -1751,8 +1751,17 @@ mod tests {
         }
     }
 
+    /// `kv_modes` is a host-independent capability table (`mlxcel arch --json`
+    /// and the published registry snapshots), so it is checked against the
+    /// family rules with absorbed MLA decode off. The one conditional rule,
+    /// `deepseek_v2` resolving a quantized request to fp16 while absorbed
+    /// decode is on (#3153), depends on the host and `MLXCEL_MLA_ABSORBED`;
+    /// with `MLXCEL_MLA_ABSORBED=0` the family holds int8 and turbo4, which is
+    /// what it advertises.
     #[test]
     fn kv_modes_do_not_advertise_runtime_fp16_downgrades() {
+        let resolve_kv_cache_mode_for_model =
+            |mode, key: &str| resolve_kv_cache_mode_for_model_with(mode, key, false);
         for model_type in ALL_MODEL_TYPES {
             let family = model_type.capabilities();
             for config_key in family.model_types {
