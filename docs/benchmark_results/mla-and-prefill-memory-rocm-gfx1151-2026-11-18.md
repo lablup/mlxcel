@@ -70,7 +70,7 @@ The totals differ from the CUDA record (11.12 and 20.10 GiB) because ROCm adds t
 
 ## Gate
 
-The full gate did not run on this host. `make verify-rocm-held` was stopped by the harness's memory guard on this 30 GiB machine, so this record carries no local full-gate result. The narrow runs used here, all under `scripts/rocm_gpu_guard.sh --hold`, were `cargo test -p mlxcel-core --features rocm --lib mla::` (61 passed, 0 failed) and `cargo test -p mlxcel --features rocm --lib execution::kv_arch::tests` (35 passed, 0 failed). The default resolution was checked with the branch binary (section 7). Hosted CI carries the rest of the suite.
+`make verify-rocm-held ROCM_JOBS="-j 3"` on this branch (one commit on `7f8b6c95`): every prerequisite passed, including `verify-env-var-docs`, `verify-fmt`, the workspace clippy with `-D warnings` and the ROCm smoke build/link/generate, and the workspace test run finished with 192 test binaries, 15,954 passed, 0 failed and 524 ignored. The job cap was lowered from the gate's default 6 because the first attempt ran the 30 GiB host out of memory while building the test binaries. Narrow runs along the way, all under `scripts/rocm_gpu_guard.sh --hold`: `cargo test -p mlxcel-core --features rocm --lib mla::` (61 passed, 0 failed) and the default-resolution checks of section 7 on the branch binary.
 
 ## Commands
 
