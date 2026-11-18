@@ -1797,6 +1797,10 @@ mod tests {
             ModelType::KimiLinear,
             ModelType::KimiK3,
             ModelType::KimiK3VLM,
+            ModelType::KimiVL,
+            ModelType::KimiK25,
+            ModelType::YoutuLLM,
+            ModelType::YoutuVLM,
             ModelType::LongcatFlashNgram,
         ] {
             assert_eq!(

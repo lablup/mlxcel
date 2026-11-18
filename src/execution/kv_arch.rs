@@ -981,6 +981,40 @@ mod tests {
         assert!(e.total_bytes < naive / 10);
     }
 
+    /// A vendor Youtu-LLM export labels itself `youtu`, which neither contains
+    /// `v3` nor used to be a latent-pair family, so it was sized as decompressed
+    /// per-head K/V. `DeepSeekV3Attention` caches the latent pair (#3159).
+    #[test]
+    fn youtu_family_sizes_the_latent_pair() {
+        for (top, text_mt) in [
+            ("youtu", None),
+            ("youtu_llm", None),
+            ("youtu_vl", None),
+            ("youtu_vl", Some("youtu_vl")),
+            ("kimi_vl", None),
+            ("kimi_k25", None),
+        ] {
+            let mut cfg = json!({
+                "model_type": top,
+                "num_hidden_layers": 4,
+                "num_attention_heads": 16,
+                "kv_lora_rank": 512,
+                "qk_rope_head_dim": 64,
+                "qk_nope_head_dim": 128,
+                "v_head_dim": 128,
+            });
+            if let Some(mt) = text_mt {
+                // Upstream's youtu_vl `TextConfig` defaults to `youtu_vl`.
+                let inner = cfg.clone();
+                cfg = json!({"model_type": top, "text_config": inner});
+                cfg["text_config"]["model_type"] = json!(mt);
+            }
+            let e = est(&cfg, 2048);
+            assert_eq!(e.kind, KvArchKind::MlaCompressed, "{top} {text_mt:?}");
+            assert_eq!(e.total_bytes, 4 * (512 + 64) * 2048 * FP16, "{top}");
+        }
+    }
+
     fn deepseek_v2_lite_cfg() -> Value {
         json!({
             "model_type": "deepseek_v2",

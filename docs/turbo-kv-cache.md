@@ -235,15 +235,17 @@ to 29 percent, and nothing downstream said so.
 
 ## MLA latent caches are FP16 only
 
-`glm4_moe_lite`, `deepseek_v3`, `deepseek_v32` (also spelled `deepseek_v3.2`),
-`glm_moe_dsa`, `kimi_linear`, `kimi_k3` and `longcat_flash_ngram` store an MLA
-`(kv_latent, k_pe)` pair in one `KVCache`: the "K" slot holds the
-`kv_lora_rank`-wide latent (512 in the shipping checkpoints) and the "V" slot
-holds the `qk_rope_head_dim`-wide RoPE key stream (64). `deepseek_v32`,
-`deepseek_v3.2` and `glm_moe_dsa` concatenate the `index_head_dim`-wide DSA
-indexer key onto the same "K" slot, so theirs is 640 wide at the default
-`index_head_dim` of 128. Neither slot is a per-head K/V row at any of those
-widths, so no quantized mode is calibrated for what they contain:
+`glm4_moe_lite`, `deepseek_v3`, `kimi_k2`, `joyai_llm_flash`, `kimi_vl`,
+`kimi_k25`, `youtu`, `youtu_llm`, `youtu_vl`, `deepseek_v32` (also spelled
+`deepseek_v3.2`), `glm_moe_dsa`, `kimi_linear`, `kimi_k3`, `longcat_flash` and
+`longcat_flash_ngram` store an MLA `(kv_latent, k_pe)` pair in one `KVCache`:
+the "K" slot holds the `kv_lora_rank`-wide latent (512 in the shipping
+checkpoints) and the "V" slot holds the `qk_rope_head_dim`-wide RoPE key
+stream (64). `deepseek_v32`, `deepseek_v3.2` and `glm_moe_dsa` concatenate the
+`index_head_dim`-wide DSA indexer key onto the same "K" slot, so theirs is 640
+wide at the default `index_head_dim` of 128. Neither slot is a per-head K/V row
+at any of those widths, so no quantized mode is calibrated for what they
+contain:
 
 - Symmetric `turbo4` builds its sign vectors and codebook from the "V" width and
   applies them to the "K" slot as well, reading 448 floats past the end of a
