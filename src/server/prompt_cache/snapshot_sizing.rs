@@ -23,14 +23,13 @@
 
 use std::path::Path;
 
-use mlxcel_core::cache::KVCacheMode;
 use serde_json::Value;
 
 use crate::execution::config_fields::{
     HEAD_DIM_KEYS, HIDDEN_SIZE_KEYS, LAYER_COUNT_KEYS, NUM_HEADS_KEYS, get_u64, text_config,
 };
 use crate::execution::kv_arch::{
-    KvArchKind, estimate_kv_arch_from_config, estimate_kv_arch_unwindowed_from_config,
+    KvArchKind, KvSizing, estimate_kv_arch_from_config, estimate_kv_arch_unwindowed_from_config,
 };
 use crate::execution::memory_estimate::{QuantHint, estimate_total_memory};
 
@@ -88,8 +87,9 @@ pub fn recommend_model_snapshot_capacity(
     context_size: usize,
     current_capacity_bytes: usize,
     target_entries: u64,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
+    let kv_mode: KvSizing = kv_mode.into();
     let config = read_config(model_dir)?;
     recommend_model_snapshot_capacity_from_config_with_entries(
         &config,
@@ -123,8 +123,9 @@ pub fn recommend_model_kv_store_capacity(
     model_dir: &Path,
     context_size: usize,
     current_capacity_bytes: usize,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
+    let kv_mode: KvSizing = kv_mode.into();
     let config = read_config(model_dir)?;
     recommend_model_kv_store_capacity_from_config(
         &config,
@@ -141,7 +142,7 @@ pub fn recommend_model_kv_store_capacity_from_config(
     context_size: usize,
     current_capacity_bytes: usize,
     available_memory_bytes: Option<u64>,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
     let representative_tokens = representative_tokens(context_size);
     let arch = estimate_kv_arch_from_config(config, representative_tokens, kv_mode, 1)?;
@@ -190,8 +191,9 @@ fn read_config(model_dir: &Path) -> Option<Value> {
 fn memory_left_after_model(
     model_dir: &Path,
     representative_tokens: u64,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<u64> {
+    let kv_mode: KvSizing = kv_mode.into();
     let estimate = estimate_total_memory(
         model_dir,
         representative_tokens,
@@ -248,8 +250,9 @@ pub fn recommend_model_snapshot_capacity_from_config(
     context_size: usize,
     current_capacity_bytes: usize,
     available_memory_bytes: Option<u64>,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
+    let kv_mode: KvSizing = kv_mode.into();
     recommend_model_snapshot_capacity_from_config_with_entries(
         config,
         context_size,
@@ -269,7 +272,7 @@ pub fn recommend_model_snapshot_capacity_from_config_with_entries(
     current_capacity_bytes: usize,
     available_memory_bytes: Option<u64>,
     target_entries: u64,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
     let representative_tokens = representative_tokens(context_size);
     // Unwindowed on purpose: the history-boundary snapshot is captured right
@@ -408,8 +411,9 @@ pub const MODEL_AWARE_STATE_CHECKPOINT_AVAILABLE_MEMORY_DENOMINATOR: u64 = 8;
 pub fn recommend_state_checkpoint_capacity(
     model_dir: &Path,
     context_size: usize,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
+    let kv_mode: KvSizing = kv_mode.into();
     let config = read_config(model_dir)?;
     recommend_state_checkpoint_capacity_from_config(
         &config,

@@ -102,6 +102,38 @@ struct KvGroup {
     window: Option<u64>,
 }
 
+/// How the KV cache is sized: the cache mode plus whether one layer stays FP16.
+///
+/// `--kv-bits 8` with `--kv-skip-last-layer` (the default) builds the last
+/// layer at FP16 and the rest INT8 (`BatchKvQuantConfig::resolve_layer_modes`),
+/// which a bare [`KVCacheMode`] cannot express. Every estimator takes
+/// `impl Into<KvSizing>`, so a caller that has only a mode passes it unchanged
+/// (#3153).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvSizing {
+    /// The mode the layers are built in.
+    pub mode: KVCacheMode,
+    /// True when the last layer stays FP16 while the others use `mode`.
+    pub fp16_last_layer: bool,
+}
+
+impl KvSizing {
+    /// Every layer in `mode`.
+    #[must_use]
+    pub const fn uniform(mode: KVCacheMode) -> Self {
+        Self {
+            mode,
+            fp16_last_layer: false,
+        }
+    }
+}
+
+impl From<KVCacheMode> for KvSizing {
+    fn from(mode: KVCacheMode) -> Self {
+        Self::uniform(mode)
+    }
+}
+
 /// Architecture-aware KV estimate produced by [`estimate_kv_arch`].
 #[derive(Debug, Clone)]
 pub struct KvArchEstimate {
@@ -554,6 +586,30 @@ fn sum_groups(groups: &[KvGroup], ctx: u64, int8: bool, batch: u64) -> (u64, u64
     (total, marginal)
 }
 
+/// Extra bytes one FP16 layer costs over an INT8 one, taking the widest layer
+/// of the stack: `(at ctx_len, per additional token)`.
+fn fp16_last_layer_extra(groups: &[KvGroup], ctx: u64, batch: u64) -> (u64, u64) {
+    let rounded_ctx = round_ctx(ctx);
+    let widen = elem_bytes(false).saturating_sub(elem_bytes(true));
+    let mut total = 0u64;
+    let mut marginal = 0u64;
+    for g in groups.iter().filter(|g| g.layers > 0) {
+        let effective = match g.window {
+            Some(w) => rounded_ctx.min(round_ctx(w)),
+            None => rounded_ctx,
+        };
+        let per_token = g
+            .elems_per_token
+            .saturating_mul(widen)
+            .saturating_mul(batch);
+        total = total.max(per_token.saturating_mul(effective));
+        if g.window.is_none() {
+            marginal = marginal.max(per_token);
+        }
+    }
+    (total, marginal)
+}
+
 /// Build the human-readable architecture detail line.
 fn detail_line(groups: &[KvGroup], kind: KvArchKind) -> String {
     match kind {
@@ -604,7 +660,7 @@ fn detail_line(groups: &[KvGroup], kind: KvArchKind) -> String {
 pub fn estimate_kv_arch(
     model_dir: &Path,
     ctx_len: u64,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<KvSizing>,
     batch: u64,
 ) -> Option<KvArchEstimate> {
     let config_str = std::fs::read_to_string(model_dir.join("config.json")).ok()?;
@@ -615,7 +671,7 @@ pub fn estimate_kv_arch(
     // way (#2445).
     let config_str = crate::models::sanitize_config_json(&config_str);
     let config: Value = serde_json::from_str(&config_str).ok()?;
-    estimate_kv_arch_from_config(&config, ctx_len, kv_mode, batch)
+    estimate_kv_arch_from_config(&config, ctx_len, kv_mode.into(), batch)
 }
 
 /// [`estimate_kv_arch`] against an already-parsed config value. Split out for
@@ -624,16 +680,17 @@ pub fn estimate_kv_arch(
 pub fn estimate_kv_arch_from_config(
     config: &Value,
     ctx_len: u64,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<KvSizing>,
     batch: u64,
 ) -> Option<KvArchEstimate> {
+    let kv_mode = kv_mode.into();
     estimate_kv_arch_inner(
         config,
         ctx_len,
         kv_mode,
         batch,
         true,
-        deepseek_v2_caches_latent(kv_mode),
+        deepseek_v2_caches_latent(kv_mode.mode),
     )
 }
 
@@ -650,23 +707,24 @@ pub fn estimate_kv_arch_from_config(
 pub fn estimate_kv_arch_unwindowed_from_config(
     config: &Value,
     ctx_len: u64,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<KvSizing>,
     batch: u64,
 ) -> Option<KvArchEstimate> {
+    let kv_mode = kv_mode.into();
     estimate_kv_arch_inner(
         config,
         ctx_len,
         kv_mode,
         batch,
         false,
-        deepseek_v2_caches_latent(kv_mode),
+        deepseek_v2_caches_latent(kv_mode.mode),
     )
 }
 
 fn estimate_kv_arch_inner(
     config: &Value,
     ctx_len: u64,
-    kv_mode: KVCacheMode,
+    sizing: KvSizing,
     batch: u64,
     apply_windows: bool,
     v2_latent: bool,
@@ -689,8 +747,17 @@ fn estimate_kv_arch_inner(
     }
     // Only INT8 narrows the element; the Turbo modes keep the FP16 width here,
     // which overestimates their packed V side (the safe direction).
-    let int8 = kv_mode == KVCacheMode::Int8;
-    let (total_bytes, marginal_bytes_per_token) = sum_groups(&groups, ctx_len, int8, batch);
+    let int8 = sizing.mode == KVCacheMode::Int8;
+    let (mut total_bytes, mut marginal_bytes_per_token) = sum_groups(&groups, ctx_len, int8, batch);
+    if int8 && sizing.fp16_last_layer {
+        // The last layer stays FP16 (`--kv-skip-last-layer`), one byte wider
+        // per element. The stack's order is not kept here, so charge the
+        // widest layer: exact for a uniform stack, and for a sliding/hybrid
+        // one it rounds up (the last layer may be a narrower or non-KV one).
+        let (total_extra, marginal_extra) = fp16_last_layer_extra(&groups, ctx_len, batch);
+        total_bytes = total_bytes.saturating_add(total_extra);
+        marginal_bytes_per_token = marginal_bytes_per_token.saturating_add(marginal_extra);
+    }
     Some(KvArchEstimate {
         total_bytes,
         marginal_bytes_per_token,
@@ -928,7 +995,7 @@ mod tests {
 
     fn est_v2(cfg: &Value, ctx: u64, mode: KVCacheMode, absorbed: bool) -> KvArchEstimate {
         let latent = deepseek_v2_latent_layout(absorbed, mode);
-        estimate_kv_arch_inner(cfg, ctx, mode, 1, true, latent).expect("estimate")
+        estimate_kv_arch_inner(cfg, ctx, mode.into(), 1, true, latent).expect("estimate")
     }
 
     /// Every mode `MlaLatentCache::supports` refuses, so `DeepseekV2::forward`

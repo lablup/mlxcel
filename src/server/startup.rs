@@ -3401,13 +3401,12 @@ fn validate_settings_endpoint_exposure(
     )
 }
 
-/// The KV cache mode the scheduler builds each sequence's cache in, which is
-/// what the prompt-cache stores receive: the `--kv-bits` /
-/// `--kv-quant-scheme` base mode when batch KV quantization is on, the
-/// `--kv-cache-mode` / `--cache-type-*` mode otherwise. With
-/// `--kv-skip-last-layer` the last layer stays FP16; sizing every layer at the
-/// base mode keeps the estimate on the larger side (#3153).
-fn prompt_cache_sizing_kv_mode(config: &ServerConfig) -> mlxcel_core::cache::KVCacheMode {
+/// The KV cache the scheduler builds each sequence in, which is what the
+/// prompt-cache stores receive: the `--kv-bits` / `--kv-quant-scheme` base mode
+/// when batch KV quantization is on, the `--kv-cache-mode` / `--cache-type-*`
+/// mode otherwise. With `--kv-skip-last-layer` the last layer stays FP16, which
+/// the returned sizing carries so INT8 is not undercounted (#3153).
+fn prompt_cache_sizing_kv_mode(config: &ServerConfig) -> crate::execution::kv_arch::KvSizing {
     crate::server::kv_mode_for_batch(config.kv_cache_mode, &config.batch_kv_quant)
 }
 
@@ -3501,7 +3500,8 @@ pub(super) fn resolve_prompt_cache_store(
             representative_tokens = rec.representative_tokens,
             target_entries = rec.target_entries,
             available_ceiling_bytes = rec.available_ceiling_bytes,
-            kv_cache_mode = %kv_mode,
+            kv_cache_mode = %kv_mode.mode,
+            kv_fp16_last_layer = kv_mode.fp16_last_layer,
             architecture = %rec.architecture,
             "Applied model-aware prompt-cache KV store capacity default"
         );

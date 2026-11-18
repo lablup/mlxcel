@@ -1395,8 +1395,14 @@ pub fn disable_batch_kv_quant_for_family(
     None
 }
 
-/// The KV cache mode the scheduler builds each sequence's cache in: the
-/// batch table's base mode when it is enabled, `kv_cache_mode` otherwise.
+/// The KV cache the scheduler builds each sequence in, as the estimators size
+/// it: the batch table's base mode when it is enabled, `kv_cache_mode`
+/// otherwise.
+///
+/// A quantized base mode with `--kv-skip-last-layer` keeps the last layer at
+/// FP16 (`BatchKvQuantConfig::resolve_layer_modes`), which the returned
+/// [`KvSizing`] carries so INT8 is not sized below what is built. Turbo modes
+/// stay at the FP16 width in the estimator, which overestimates them.
 ///
 /// Used by: `server::startup::prompt_cache_sizing_kv_mode` and
 /// [`effective_serve_kv_cache_mode`].
@@ -1404,18 +1410,23 @@ pub fn disable_batch_kv_quant_for_family(
 pub fn kv_mode_for_batch(
     kv_cache_mode: mlxcel_core::cache::KVCacheMode,
     batch_kv_quant: &BatchKvQuantConfig,
-) -> mlxcel_core::cache::KVCacheMode {
+) -> crate::execution::kv_arch::KvSizing {
     if batch_kv_quant.is_enabled() {
-        batch_kv_quant.base_mode()
+        let mode = batch_kv_quant.base_mode();
+        crate::execution::kv_arch::KvSizing {
+            mode,
+            fp16_last_layer: batch_kv_quant.skip_last_layer
+                && mode != mlxcel_core::cache::KVCacheMode::Fp16,
+        }
     } else {
-        kv_cache_mode
+        kv_cache_mode.into()
     }
 }
 
-/// The KV cache mode `serve` will really build for a model, given the
-/// requested `--kv-cache-mode` and the resolved batch table. Applies the same
-/// family resolution and "disable if the family cannot hold it" rule as
-/// startup, so `--estimate-memory` sizes what the server allocates.
+/// The KV cache `serve` will really build for a model, given the requested
+/// `--kv-cache-mode` and the resolved batch table. Applies the same family
+/// resolution and "disable if the family cannot hold it" rule as startup, so
+/// `--estimate-memory` sizes what the server allocates.
 ///
 /// Used by: `commands::serve::serve_preflight_kv_mode`.
 #[must_use]
@@ -1423,7 +1434,7 @@ pub fn effective_serve_kv_cache_mode(
     requested: mlxcel_core::cache::KVCacheMode,
     batch_kv_quant: BatchKvQuantConfig,
     model_path: &Path,
-) -> mlxcel_core::cache::KVCacheMode {
+) -> crate::execution::kv_arch::KvSizing {
     let (kv_cache_mode, _) =
         crate::cli::turbo_args::resolve_effective_kv_cache_mode(requested, model_path);
     let mut batch = batch_kv_quant;

@@ -2846,13 +2846,13 @@ fn prompt_cache_sizing_uses_the_mode_the_scheduler_builds() {
 
     let mut config = crate::server::ServerConfig::default();
     assert_eq!(
-        super::prompt_cache_sizing_kv_mode(&config),
+        super::prompt_cache_sizing_kv_mode(&config).mode,
         KVCacheMode::Fp16
     );
 
     config.kv_cache_mode = KVCacheMode::Turbo4Asym;
     assert_eq!(
-        super::prompt_cache_sizing_kv_mode(&config),
+        super::prompt_cache_sizing_kv_mode(&config).mode,
         KVCacheMode::Turbo4Asym
     );
 
@@ -2860,14 +2860,20 @@ fn prompt_cache_sizing_uses_the_mode_the_scheduler_builds() {
     config.batch_kv_quant =
         BatchKvQuantConfig::new(KvQuantScheme::TurboQuant, 4, 64, false).expect("valid config");
     assert_eq!(
-        super::prompt_cache_sizing_kv_mode(&config),
+        super::prompt_cache_sizing_kv_mode(&config).mode,
         KVCacheMode::Turbo4Asym
     );
 
     config.batch_kv_quant =
         BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, false).expect("valid config");
     assert_eq!(
-        super::prompt_cache_sizing_kv_mode(&config),
+        super::prompt_cache_sizing_kv_mode(&config).mode,
         KVCacheMode::Int8
     );
+    // The default keeps the last layer FP16, which the sizing carries.
+    config.batch_kv_quant =
+        BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, true).expect("valid config");
+    let sizing = super::prompt_cache_sizing_kv_mode(&config);
+    assert_eq!(sizing.mode, KVCacheMode::Int8);
+    assert!(sizing.fp16_last_layer);
 }

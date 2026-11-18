@@ -584,8 +584,10 @@ pub fn estimate_total_memory(
     ctx_len: u64,
     batch: u64,
     quant: QuantHint,
-    kv_mode: KVCacheMode,
+    kv_mode: impl Into<crate::execution::kv_arch::KvSizing>,
 ) -> MemoryEstimate {
+    let kv_sizing = kv_mode.into();
+    let kv_mode = kv_sizing.mode;
     // ── Weights ──────────────────────────────────────────────────────────────
     let (weights_bytes, weights_source) = resolve_weight_bytes(model_dir);
 
@@ -594,7 +596,7 @@ pub fn estimate_total_memory(
     // (DeepSeek), hybrid attention+SSM (Jamba / NemotronH / …), and pure-SSM
     // (Mamba) models; `kv_arch` parses the architecture and sums per-group.
     let (kv_cache_bytes, kv_source, kv_detail) =
-        match crate::execution::kv_arch::estimate_kv_arch(model_dir, ctx_len, kv_mode, batch) {
+        match crate::execution::kv_arch::estimate_kv_arch(model_dir, ctx_len, kv_sizing, batch) {
             Some(a) => (a.total_bytes, KvSource::Config, a.detail),
             None => (
                 0,

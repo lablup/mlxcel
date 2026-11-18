@@ -16,6 +16,7 @@
 
 use super::*;
 use crate::server::prompt_cache::PromptCacheConfig;
+use mlxcel_core::cache::KVCacheMode;
 use serde_json::json;
 
 #[test]

@@ -456,20 +456,32 @@ fn serve_preflight_kv_mode_follows_batch_kv_quant() {
 
     let mut args = sample_args();
     assert_eq!(
-        super::serve_preflight_kv_mode(&args, dir.path()).unwrap(),
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
         KVCacheMode::Fp16
     );
 
     args.batch_quant.kv_bits = 8;
     assert_eq!(
-        super::serve_preflight_kv_mode(&args, dir.path()).unwrap(),
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
         KVCacheMode::Int8
+    );
+    // `--kv-skip-last-layer` defaults on, so the last layer is sized FP16.
+    assert!(
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .fp16_last_layer
     );
 
     args.batch_quant.kv_bits = 4;
     args.batch_quant.kv_quant_scheme = Some("turboquant".to_string());
     assert_eq!(
-        super::serve_preflight_kv_mode(&args, dir.path()).unwrap(),
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
         KVCacheMode::Turbo4Asym
     );
 
@@ -477,7 +489,9 @@ fn serve_preflight_kv_mode_follows_batch_kv_quant() {
     let mut args = sample_args();
     args.turbo.kv_cache_mode = Some("int8".to_string());
     assert_eq!(
-        super::serve_preflight_kv_mode(&args, dir.path()).unwrap(),
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
         KVCacheMode::Int8
     );
 }
@@ -500,7 +514,9 @@ fn serve_preflight_kv_mode_on_deepseek_v2_follows_the_absorption_decision() {
         KVCacheMode::Int8
     };
     assert_eq!(
-        super::serve_preflight_kv_mode(&args, dir.path()).unwrap(),
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
         expected
     );
 
@@ -512,7 +528,9 @@ fn serve_preflight_kv_mode_on_deepseek_v2_follows_the_absorption_decision() {
         KVCacheMode::Turbo4Asym
     };
     assert_eq!(
-        super::serve_preflight_kv_mode(&args, dir.path()).unwrap(),
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
         expected
     );
 }
@@ -531,14 +549,18 @@ fn serve_preflight_kv_mode_disables_batch_table_for_latent_families() {
     let mut args = sample_args();
     args.batch_quant.kv_bits = 8;
     assert_eq!(
-        super::serve_preflight_kv_mode(&args, dir.path()).unwrap(),
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
         KVCacheMode::Fp16
     );
 
     args.batch_quant.kv_bits = 4;
     args.batch_quant.kv_quant_scheme = Some("turboquant".to_string());
     assert_eq!(
-        super::serve_preflight_kv_mode(&args, dir.path()).unwrap(),
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
         KVCacheMode::Fp16
     );
 }

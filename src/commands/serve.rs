@@ -440,7 +440,7 @@ fn run_serve_memory_preflight(
 fn serve_preflight_kv_mode(
     args: &crate::ServeArgs,
     model_path: &std::path::Path,
-) -> anyhow::Result<mlxcel_core::cache::KVCacheMode> {
+) -> anyhow::Result<mlxcel::execution::kv_arch::KvSizing> {
     let requested = resolve_kv_cache_mode(
         args.turbo.cache_type_k.as_deref(),
         args.turbo.cache_type_v.as_deref(),
