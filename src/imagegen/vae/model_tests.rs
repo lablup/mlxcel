@@ -486,3 +486,86 @@ fn ernie_image_turbo_vae_matches_upstream() {
     eprintln!("default dtype {dt}: decode rel-RMS vs upstream f32 = {err}");
     assert!(err < 5e-3, "default dtype decode rel-RMS {err}");
 }
+
+/// A decoder narrower than the encoder must be probed with its own widths.
+///
+/// MOSS-Image ships 96/192/384/384 over the 128/256/512/512 encoder; probing
+/// with the encoder's numbers rejects a perfectly good MLX-layout checkpoint.
+#[test]
+fn the_conv_layout_probe_uses_the_decoder_widths() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let config = Flux2VaeConfig {
+        latent_channels: 4,
+        out_channels: 3,
+        block_out_channels: vec![8, 16, 32, 32],
+        decoder_block_out_channels: Some(vec![4, 8, 12, 16]),
+        norm_num_groups: 2,
+        ..tiny_config()
+    };
+    config.validate().unwrap();
+    // Torch `(out, in, k, k)`: decoder top = 16, decoder first = 4.
+    let mut torch = WeightMap::new();
+    torch.insert(
+        "decoder.conv_in.weight".to_string(),
+        mlxcel_core::zeros(&[16, 4, 3, 3], dtype::FLOAT32),
+    );
+    torch.insert(
+        "decoder.conv_out.weight".to_string(),
+        mlxcel_core::zeros(&[3, 4, 3, 3], dtype::FLOAT32),
+    );
+    assert_eq!(
+        detect_conv_layout(&torch, &config).unwrap(),
+        ConvLayout::Torch
+    );
+    // MLX `(out, k, k, in)`.
+    let mut mlx = WeightMap::new();
+    mlx.insert(
+        "decoder.conv_in.weight".to_string(),
+        mlxcel_core::zeros(&[16, 3, 3, 4], dtype::FLOAT32),
+    );
+    mlx.insert(
+        "decoder.conv_out.weight".to_string(),
+        mlxcel_core::zeros(&[3, 3, 3, 4], dtype::FLOAT32),
+    );
+    assert_eq!(detect_conv_layout(&mlx, &config).unwrap(), ConvLayout::Mlx);
+}
+
+/// `Flux2Vae::load` takes the MODEL root and appends `vae/` itself.
+///
+/// Passing the vae directory used to double it (`vae/vae`) and the failure
+/// surfaced only after the conditioner and transformer had already run.
+#[test]
+fn flux2_vae_load_takes_the_model_root_and_appends_vae() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let vae_dir = root.join("vae");
+    std::fs::create_dir_all(&vae_dir).unwrap();
+    std::fs::copy(
+        fixture("vae_tiny.safetensors"),
+        vae_dir.join("vae_tiny.safetensors"),
+    )
+    .unwrap();
+    std::fs::write(
+        vae_dir.join("config.json"),
+        r#"{
+            "in_channels": 3,
+            "out_channels": 3,
+            "latent_channels": 4,
+            "block_out_channels": [4, 4, 8, 8],
+            "layers_per_block": 2,
+            "norm_num_groups": 2,
+            "mid_block_add_attention": true,
+            "scaling_factor": 1.0,
+            "shift_factor": 0.0
+        }"#,
+    )
+    .unwrap();
+    let (_, refs) = load_fixture("vae_tiny.safetensors");
+    let vae = Flux2Vae::load(root, false).expect("load takes the model root");
+    assert!(vae.decode_packed_latents(&refs["packed"]).is_ok());
+    assert!(
+        Flux2Vae::load(&vae_dir, false).is_err(),
+        "passing the vae directory must not silently double it"
+    );
+}

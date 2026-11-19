@@ -72,6 +72,25 @@ fn a_mis_shaped_projection_is_an_error_not_an_abort() {
 }
 
 #[test]
+fn the_head_modulation_splits_by_row_not_by_half_row() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    // Two ROWS of four values. Splitting the last axis into two would produce
+    // [1, 2, 2] and the wrong numbers; the forward pass needs row slices.
+    let head = mlxcel_core::from_slice_f32(&[0., 1., 2., 3., 4., 5., 6., 7.], &[1, 2, 4]);
+    let [shift, scale] = split_head_modulation(&head, 4);
+    assert_eq!(mlxcel_core::array_shape(&shift), vec![1, 1, 4]);
+    assert_eq!(mlxcel_core::array_shape(&scale), vec![1, 1, 4]);
+    assert_eq!(
+        mlxcel_core::utils::array_to_vec_f32(&shift),
+        vec![0., 1., 2., 3.]
+    );
+    assert_eq!(
+        mlxcel_core::utils::array_to_vec_f32(&scale),
+        vec![4., 5., 6., 7.]
+    );
+}
+
+#[test]
 fn a_norm_of_the_wrong_width_is_refused() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let mut w = WeightMap::new();

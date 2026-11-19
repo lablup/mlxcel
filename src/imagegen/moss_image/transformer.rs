@@ -644,15 +644,8 @@ impl MossTransformer {
         }
         let image = mlxcel_core::slice(&x, &[0, 0, 0], &[1, n_img, self.config.dim]);
         let normed = self.final_norm_video.forward(&image);
-        // The head modulation carries two ROWS (`[1, 2, dim]`), not two halves of
-        // one row: splitting the last axis here yields `[1, 2, dim / 2]` and the
-        // broadcast against `[1, n_img, dim]` aborts with
-        // `Shapes (1,1024,3072) and (1,2,1536) cannot be broadcast`.
         let dim = self.config.dim;
-        let [shift, scale]: [UniquePtr<MlxArray>; 2] = std::array::from_fn(|i| {
-            let i = i as i32;
-            mlxcel_core::slice(&head_mod, &[0, i, 0], &[1, i + 1, dim])
-        });
+        let [shift, scale] = split_head_modulation(&head_mod, dim);
         let out = modulate(&normed, &shift, &scale);
         let out = self.final_linear_video.forward(&out);
         Ok(mlxcel_core::reshape(
@@ -667,6 +660,18 @@ fn split_blocks(mods: &MlxArray, dim: i32) -> [UniquePtr<MlxArray>; 6] {
     std::array::from_fn(|i| {
         let i = i as i32;
         mlxcel_core::slice(mods, &[0, i, 0], &[1, i + 1, dim])
+    })
+}
+
+/// The final head modulation's two ROWS (`[1, 2, dim]`) as `[shift, scale]`.
+///
+/// These are two rows, not two halves of one row: splitting the last axis
+/// yields `[1, 2, dim / 2]` and the broadcast against `[1, n_img, dim]` aborts
+/// with `Shapes (1,1024,3072) and (1,2,1536) cannot be broadcast`.
+fn split_head_modulation(head_mod: &MlxArray, dim: i32) -> [UniquePtr<MlxArray>; 2] {
+    std::array::from_fn(|i| {
+        let i = i as i32;
+        mlxcel_core::slice(head_mod, &[0, i, 0], &[1, i + 1, dim])
     })
 }
 
