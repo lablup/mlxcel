@@ -524,7 +524,7 @@ pub(crate) fn mtp_prefill_suffix_start(
 ///   round-cost model that predicts them.
 /// - Batch-capable targets (the 31B + bf16 assistant): **on from Apple GPU
 ///   generation 15** ([`AppleSiliconGen::wide_quantized_projections`], which
-///   is M3, M4 and M5), classic decode below it.
+///   is M3 and every later enumerated generation), classic decode below it.
 ///
 /// The batch-capable half keyed on `has_neural_accelerator` (M5 only) until
 /// #1217 measured M3 Ultra on this pairing for the first time and found 1.95x
