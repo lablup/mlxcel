@@ -72,6 +72,11 @@ impl MossImageModel {
         let config = TransformerConfig::from_dir(&transformer_dir)?;
         let vae = Flux2VaeConfig::from_dir(&root.join("vae"))?;
         vae.validate().context("MOSS-Image VAE config")?;
+        ensure!(
+            vae.out_channels == 3,
+            "MOSS-Image VAE must decode RGB (out_channels 3), got {}",
+            vae.out_channels
+        );
         if vae.latent_channels * 4 != config.latent_channels {
             bail!(
                 "MOSS-Image VAE latent_channels {} (x4 packed) does not match the transformer's {}",
@@ -123,6 +128,7 @@ impl MossImageModel {
         let encoder = TextEncoder::load(
             &self.root.join("text_encoder"),
             &self.root.join("tokenizer"),
+            self.config.text_dim,
         )?;
         let positive = encoder.encode(&req.prompt)?;
         let negative = if guidance != 1.0 {
@@ -165,7 +171,7 @@ impl ImageGenerationModel for MossImageModel {
         mlxcel_core::memory::clear_cache();
 
         // Stage 2 — the transformer.
-        let weights = load_weights_from_dir(&self.root.join("transformer"))
+        let weights = load_weights_from_dir(self.root.join("transformer"))
             .map_err(|e| anyhow!("MOSS-Image transformer weights: {e}"))?;
         let weights = if self.exported {
             weights

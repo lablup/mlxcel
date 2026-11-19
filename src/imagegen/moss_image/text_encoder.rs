@@ -53,7 +53,11 @@ pub struct TextEncoder {
 
 impl TextEncoder {
     /// Load `<root>/text_encoder` (the language backbone) and `<root>/tokenizer`.
-    pub fn load(text_encoder_dir: &Path, tokenizer_dir: &Path) -> Result<Self> {
+    ///
+    /// `text_dim` is the width the transformer's `text_embedder` expects; a
+    /// conditioner of another width is refused here rather than failing inside
+    /// the first matmul.
+    pub fn load(text_encoder_dir: &Path, tokenizer_dir: &Path, text_dim: i32) -> Result<Self> {
         // The exported MLX tier nests its quantization block under
         // `moss_image_mlx.quantization`; the language loader reads
         // `text_config.quantization`, so hand it over explicitly.
@@ -61,9 +65,13 @@ impl TextEncoder {
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
             .and_then(|v| v.get("moss_image_mlx")?.get("quantization").cloned());
-        let (model, _config) =
-            Qwen35Model::load_with_quantization(text_encoder_dir, exported.as_ref())
-                .map_err(|e| anyhow!("MOSS-Image text encoder: {e}"))?;
+        let (model, config) = Qwen35Model::load_text_backbone(text_encoder_dir, exported.as_ref())
+            .map_err(|e| anyhow!("MOSS-Image text encoder: {e}"))?;
+        ensure!(
+            i32::try_from(config.hidden_size).ok() == Some(text_dim),
+            "MOSS-Image text encoder hidden_size {} does not match the transformer's text_dim {text_dim}",
+            config.hidden_size
+        );
         let tokenizer = load_tokenizer(tokenizer_dir).context("MOSS-Image tokenizer")?;
         Ok(Self {
             model,
@@ -88,7 +96,7 @@ impl TextEncoder {
         let ids = self.token_ids(prompt)?;
         ensure!(!ids.is_empty(), "MOSS-Image prompt tokenized to nothing");
         let ids = mlxcel_core::from_slice_i32(&ids, &[1, ids.len() as i32]);
-        Ok(self.model.forward_prefill_hidden_for_sequence(&ids, None))
+        Ok(self.model.forward_prefill_hidden(&ids))
     }
 }
 

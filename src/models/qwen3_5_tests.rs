@@ -24,8 +24,8 @@
 
 use super::qwen3_5::{
     MRopePositionSource, Qwen35Config, Qwen35Model, Qwen35UnsupportedConfig,
-    compact_attention_rows, eos_token_ids_from_config, mrope_position_source, sanitize_weights,
-    validate_qwen35_wrapper_config,
+    compact_attention_rows, eos_token_ids_from_config, mrope_position_source,
+    restore_text_model_prefix, sanitize_weights, validate_qwen35_wrapper_config,
 };
 use super::qwen3_next::Qwen3NextCache;
 use mlxcel_core::cache::SequenceId;
@@ -1228,4 +1228,68 @@ fn eos_ids_come_from_the_config_when_declared() {
     // An absent or unusable value keeps the stock pair.
     let config = config_with(serde_json::json!({ "eos_token_id": null }));
     assert_eq!(eos_token_ids_from_config(&config), vec![248046, 248044]);
+}
+
+#[test]
+fn a_normal_checkpoint_without_lm_head_still_fails_to_load() {
+    // PR #3107 lets the MOSS-Image conditioner load head-free; the ordinary
+    // text path must keep refusing a checkpoint that lost its head.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let (mut weights, config) = two_layer_weights_and_config(8);
+    assert!(!config.tie_word_embeddings);
+    weights.remove("lm_head.weight");
+    assert!(Qwen35Model::from_weights(&weights, &config).is_err());
+    assert!(Qwen35Model::from_weights_impl(&weights, &config, true).is_ok());
+}
+
+#[test]
+fn the_bare_text_backbone_layout_gets_its_model_prefix_back() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let tensor = || mlxcel_core::from_slice_f32(&[0.0], &[1]);
+    let mut bare = WeightMap::new();
+    for key in [
+        "embed_tokens.weight",
+        "layers.0.mlp.up_proj.weight",
+        "norm.weight",
+        "lm_head.weight",
+    ] {
+        bare.insert(key.to_string(), tensor());
+    }
+    let restored = restore_text_model_prefix(bare);
+    let mut keys: Vec<_> = restored.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "lm_head.weight",
+            "model.embed_tokens.weight",
+            "model.layers.0.mlp.up_proj.weight",
+            "model.norm.weight",
+        ]
+    );
+
+    // An already wrapped checkpoint is left alone.
+    let mut wrapped = WeightMap::new();
+    wrapped.insert("model.norm.weight".to_string(), tensor());
+    wrapped.insert("layers.extra".to_string(), tensor());
+    let kept = restore_text_model_prefix(wrapped);
+    assert!(kept.contains_key("layers.extra"));
+    assert!(kept.contains_key("model.norm.weight"));
+}
+
+#[test]
+fn prefill_hidden_encodes_every_prompt_from_a_fresh_state() {
+    // The MOSS-Image conditioner encodes the positive and then the negative
+    // prompt with one model; the second encode must not see the first's
+    // tokens through a persistent cache.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = two_layer_model();
+    let first = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+    let other = mlxcel_core::from_slice_i32(&[4, 5], &[1, 2]);
+    let alone = model.forward_prefill_hidden(&first);
+    mlxcel_core::eval(&alone);
+    let _ = model.forward_prefill_hidden(&other);
+    let again = model.forward_prefill_hidden(&first);
+    assert_eq!(mlxcel_core::array_shape(&again), vec![1, 3, 8]);
+    assert_allclose(&again, &alone);
 }

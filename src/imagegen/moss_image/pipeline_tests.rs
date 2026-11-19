@@ -52,3 +52,9 @@ fn timesteps_are_sigmas_scaled_by_the_grid() {
     let sigmas = vec![1.0, 0.5, 0.0];
     assert_eq!(timesteps_for(&sigmas), vec![1000.0, 500.0]);
 }
+
+#[test]
+fn zero_steps_yield_an_empty_schedule_instead_of_underflowing() {
+    assert!(torch_linspace(1.0, 0.0, 0).is_empty());
+    assert_eq!(sigmas_for(0, 5.0), vec![0.0]);
+}

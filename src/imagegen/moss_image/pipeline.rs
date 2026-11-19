@@ -35,6 +35,9 @@ use crate::imagegen::vae::Flux2Vae;
 /// `start`, the second down from `end`, each value one rounded product.
 #[must_use]
 pub fn torch_linspace(start: f32, end: f32, steps: u32) -> Vec<f32> {
+    if steps == 0 {
+        return Vec::new();
+    }
     if steps == 1 {
         return vec![start];
     }
@@ -172,14 +175,9 @@ pub fn decode_to_pixels(vae: &Flux2Vae, latents: &MlxArray) -> Result<Vec<u8>> {
     // normalized, and `decode_packed_latents` — which exists to undo that
     // normalization — refuses to run. Unpatchify and hand the result straight to
     // the decoder, which still applies the config's `scaling_factor`/`shift_factor`.
-    let unpacked = crate::imagegen::latent::unpatchify_latents(&mlxcel_core::astype(
-        latents,
-        vae.dtype(),
-    ))?;
-    let decoded = vae
-        .decode(&unpacked)
-        .context("MOSS-Image VAE decode")?;
-    let dt = mlxcel_core::array_dtype(&decoded);
+    let unpacked =
+        crate::imagegen::latent::unpatchify_latents(&mlxcel_core::astype(latents, vae.dtype()))?;
+    let decoded = vae.decode(&unpacked).context("MOSS-Image VAE decode")?;
     let unit = mlxcel_core::add(
         &mlxcel_core::divide(&decoded, &scalar_like(2.0, &decoded)),
         &scalar_like(0.5, &decoded),
@@ -189,7 +187,6 @@ pub fn decode_to_pixels(vae: &Flux2Vae, latents: &MlxArray) -> Result<Vec<u8>> {
     let nhwc = mlxcel_core::astype(&nhwc, dtype::FLOAT32);
     let scaled = mlxcel_core::multiply(&nhwc, &scalar_like(255.0, &nhwc));
     let bytes = mlxcel_core::astype(&mlxcel_core::round(&scaled), dtype::UINT8);
-    let _ = dt;
     mlxcel_core::try_array_to_raw_bytes(&bytes).context("MOSS-Image VAE decode")
 }
 

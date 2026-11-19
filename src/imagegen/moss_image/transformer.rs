@@ -39,7 +39,9 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
 use super::config::TransformerConfig;
-use crate::imagegen::mage_flow::layers::{Dense, LinearQuant, rms_norm, scalar_like, split_last};
+use crate::imagegen::mage_flow::layers::{
+    Dense, LinearQuant, modulate, rms_norm, scalar_like, split_last,
+};
 use crate::imagegen::quant::QuantSpec;
 
 /// The reference's norm epsilon, on every RMSNorm in the transformer.
@@ -74,12 +76,76 @@ fn situ(hidden: &MlxArray, gate: &MlxArray) -> UniquePtr<MlxArray> {
     )
 }
 
-/// `x * (1 + scale) + shift`, the reference's adaLN modulation.
-fn modulate(x: &MlxArray, scale: &MlxArray, shift: &MlxArray) -> UniquePtr<MlxArray> {
-    mlxcel_core::add(
-        &mlxcel_core::multiply(x, &mlxcel_core::add(&scalar_like(1.0, scale), scale)),
-        shift,
-    )
+/// The logical `[out, in]` of the projection at `prefix`.
+///
+/// A quantized projection (`<prefix>.scales` present) packs `in` into
+/// `in * bits / 32` u32 words; the row count is `out` in both layouts.
+fn linear_dims(w: &WeightMap, prefix: &str, quant: Option<LinearQuant>) -> Result<(i32, i32)> {
+    let key = format!("{prefix}.weight");
+    let weight = w
+        .get(&key)
+        .with_context(|| format!("MOSS-Image weight not found: {key}"))?;
+    let shape = mlxcel_core::array_shape(weight);
+    ensure!(
+        shape.len() == 2,
+        "MOSS-Image weight {key} must be 2-D, got {shape:?}"
+    );
+    let packed = w.contains_key(&format!("{prefix}.scales"));
+    let inn = match (packed, quant) {
+        (false, _) => shape[1],
+        (true, Some(q)) if q.bits > 0 => shape[1] * 32 / q.bits,
+        (true, _) => {
+            anyhow::bail!(
+                "MOSS-Image weight {prefix} is quantized but the checkpoint has no quantization metadata"
+            )
+        }
+    };
+    Ok((shape[0], inn))
+}
+
+/// Refuse a projection whose logical shape is not `[out, inn]`.
+///
+/// Every width checked here is one the forward pass relies on (a reshape, a
+/// residual add, a concatenation), so a checkpoint the check rejects could not
+/// have run: MLX would abort the process on the first mismatched op instead of
+/// returning an error.
+fn expect_linear(
+    w: &WeightMap,
+    prefix: &str,
+    quant: Option<LinearQuant>,
+    out: i32,
+    inn: i32,
+) -> Result<()> {
+    let actual = linear_dims(w, prefix, quant)?;
+    ensure!(
+        actual == (out, inn),
+        "MOSS-Image weight {prefix} has logical shape [{}, {}], expected [{out}, {inn}]",
+        actual.0,
+        actual.1
+    );
+    Ok(())
+}
+
+/// Refuse an RMSNorm weight that is not `[width]`.
+fn expect_norm(w: &WeightMap, key: &str, width: i32) -> Result<()> {
+    let weight = w
+        .get(key)
+        .with_context(|| format!("MOSS-Image weight not found: {key}"))?;
+    let shape = mlxcel_core::array_shape(weight);
+    ensure!(
+        shape == [width],
+        "MOSS-Image weight {key} has shape {shape:?}, expected [{width}]"
+    );
+    Ok(())
+}
+
+/// Check the norms and projections of one block (`TextBlock` or `Block`)
+/// against the residual width `dim` and the per-head width `head_dim`.
+fn expect_block_norms(w: &WeightMap, prefix: &str, dim: i32, head_dim: i32) -> Result<()> {
+    expect_norm(w, &format!("{prefix}.norm1.weight"), dim)?;
+    expect_norm(w, &format!("{prefix}.norm2.weight"), dim)?;
+    expect_norm(w, &format!("{prefix}.q_norm.weight"), head_dim)?;
+    expect_norm(w, &format!("{prefix}.k_norm.weight"), head_dim)
 }
 
 /// `(sin, cos)` for the 4-axis RoPE, each `[1, n, 1, head_dim]`.
@@ -239,12 +305,18 @@ impl TextBlock {
         w: &WeightMap,
         prefix: &str,
         quant: Option<LinearQuant>,
-        heads: i32,
-        dt: i32,
+        dim: i32,
+        head_dim: i32,
     ) -> Result<Self> {
         let dense = |name: &str| Dense::load(w, &format!("{prefix}.{name}"), quant);
         let norm = |name: &str| rms_norm(w, &format!("{prefix}.{name}.weight"), NORM_EPS);
-        let _ = (heads, dt);
+        expect_block_norms(w, prefix, dim, head_dim)?;
+        expect_linear(w, &format!("{prefix}.qkv"), quant, 3 * dim, dim)?;
+        expect_linear(w, &format!("{prefix}.proj"), quant, dim, dim)?;
+        let (ffn, _) = linear_dims(w, &format!("{prefix}.ffn_up"), quant)?;
+        expect_linear(w, &format!("{prefix}.ffn_up"), quant, ffn, dim)?;
+        expect_linear(w, &format!("{prefix}.ffn_gate"), quant, ffn, dim)?;
+        expect_linear(w, &format!("{prefix}.ffn_down"), quant, dim, ffn)?;
         Ok(Self {
             norm1: norm("norm1")?,
             norm2: norm("norm2")?,
@@ -292,13 +364,14 @@ impl TextProjection {
         w: &WeightMap,
         prefix: &str,
         quant: Option<LinearQuant>,
-        heads: i32,
-        dt: i32,
+        config: &TransformerConfig,
     ) -> Result<Self> {
+        let (dim, head_dim) = (config.dim, config.head_dim());
+        expect_linear(w, &format!("{prefix}.proj"), quant, dim, config.text_dim)?;
         Ok(Self {
             proj: Dense::load(w, &format!("{prefix}.proj"), quant)?,
             blocks: (0..2)
-                .map(|i| TextBlock::load(w, &format!("{prefix}.blocks.{i}"), quant, heads, dt))
+                .map(|i| TextBlock::load(w, &format!("{prefix}.blocks.{i}"), quant, dim, head_dim))
                 .collect::<Result<Vec<_>>>()?,
         })
     }
@@ -332,9 +405,38 @@ struct Block {
 }
 
 impl Block {
-    fn load(w: &WeightMap, prefix: &str, quant: Option<LinearQuant>) -> Result<Self> {
+    fn load(
+        w: &WeightMap,
+        prefix: &str,
+        quant: Option<LinearQuant>,
+        dim: i32,
+        head_dim: i32,
+    ) -> Result<Self> {
         let dense = |name: &str| Dense::load(w, &format!("{prefix}.{name}"), quant);
         let norm = |name: &str| rms_norm(w, &format!("{prefix}.{name}.weight"), NORM_EPS);
+        expect_block_norms(w, prefix, dim, head_dim)?;
+        for name in ["q", "k", "v", "o"] {
+            expect_linear(w, &format!("{prefix}.proj.{name}"), quant, dim, dim)?;
+        }
+        let (up_gate, _) = linear_dims(w, &format!("{prefix}.proj.ffn_up_gate"), quant)?;
+        ensure!(
+            up_gate % 2 == 0,
+            "MOSS-Image weight {prefix}.proj.ffn_up_gate has an odd output width {up_gate}"
+        );
+        expect_linear(
+            w,
+            &format!("{prefix}.proj.ffn_up_gate"),
+            quant,
+            up_gate,
+            dim,
+        )?;
+        expect_linear(
+            w,
+            &format!("{prefix}.proj.ffn_down"),
+            quant,
+            dim,
+            up_gate / 2,
+        )?;
         Ok(Self {
             norm1: norm("norm1")?,
             norm2: norm("norm2")?,
@@ -359,13 +461,13 @@ impl Block {
         heads: i32,
     ) -> UniquePtr<MlxArray> {
         let [shift_a, scale_a, gate_a, shift_f, scale_f, gate_f] = mods;
-        let y = modulate(&self.norm1.forward(x), scale_a, shift_a);
+        let y = modulate(&self.norm1.forward(x), shift_a, scale_a);
         let q = head_norm(&self.q_norm, &self.q.forward(&y), heads);
         let k = head_norm(&self.k_norm, &self.k.forward(&y), heads);
         let v = self.v.forward(&y);
         let attn = attention(&q, &k, &v, sin, cos, heads);
         let x = mlxcel_core::add(x, &mlxcel_core::multiply(&self.o.forward(&attn), gate_a));
-        let y = modulate(&self.norm2.forward(&x), scale_f, shift_f);
+        let y = modulate(&self.norm2.forward(&x), shift_f, scale_f);
         let parts = split_last(&self.ffn_up_gate.forward(&y), 2);
         mlxcel_core::add(
             &x,
@@ -405,17 +507,30 @@ impl MossTransformer {
             .get("video_embedder.weight")
             .map(|t| mlxcel_core::array_dtype(t))
             .context("MOSS-Image weight not found: video_embedder.weight")?;
-        let heads = config.num_heads;
+        let (dim, head_dim) = (config.dim, config.head_dim());
+        expect_linear(w, "video_embedder", quant, dim, config.latent_channels)?;
+        let (time_hidden, _) = linear_dims(w, "time_embedding.0", quant)?;
+        expect_linear(w, "time_embedding.0", quant, time_hidden, config.freq_dim)?;
+        let (time_out, _) = linear_dims(w, "time_embedding.1", quant)?;
+        expect_linear(w, "time_embedding.1", quant, time_out, time_hidden)?;
+        expect_linear(w, "shared_block_modulation", quant, 6 * dim, time_out)?;
+        expect_linear(w, "video_head_modulation", quant, 2 * dim, time_out)?;
+        expect_norm(w, "final_norm_video.weight", dim)?;
+        expect_linear(w, "final_linear_video", quant, config.latent_channels, dim)?;
         let mut layers = Vec::with_capacity(config.num_layers as usize);
         for i in 0..config.num_layers {
-            layers.push(Block::load(w, &format!("layers.{i}"), quant)?);
+            layers.push(Block::load(
+                w,
+                &format!("layers.{i}"),
+                quant,
+                dim,
+                head_dim,
+            )?);
         }
         let time_dense = |name: &str| Dense::load(w, name, quant);
         Ok(Self {
-            config,
-            dt,
             video_embedder: time_dense("video_embedder")?,
-            text_embedder: TextProjection::load(w, "text_embedder", quant, heads, dt)?,
+            text_embedder: TextProjection::load(w, "text_embedder", quant, &config)?,
             time_embedding: [
                 time_dense("time_embedding.0")?,
                 time_dense("time_embedding.1")?,
@@ -425,6 +540,8 @@ impl MossTransformer {
             final_norm_video: rms_norm(w, "final_norm_video.weight", NORM_EPS)?,
             final_linear_video: time_dense("final_linear_video")?,
             video_head_modulation: time_dense("video_head_modulation")?,
+            config,
+            dt,
         })
     }
 
@@ -536,7 +653,7 @@ impl MossTransformer {
             let i = i as i32;
             mlxcel_core::slice(&head_mod, &[0, i, 0], &[1, i + 1, dim])
         });
-        let out = modulate(&normed, &scale, &shift);
+        let out = modulate(&normed, &shift, &scale);
         let out = self.final_linear_video.forward(&out);
         Ok(mlxcel_core::reshape(
             &mlxcel_core::transpose_axes(&out, &[0, 2, 1]),
@@ -593,3 +710,7 @@ pub fn load_transformer(
     };
     MossTransformer::load(weights, config, quant)
 }
+
+#[cfg(test)]
+#[path = "transformer_tests.rs"]
+mod tests;

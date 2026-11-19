@@ -561,69 +561,29 @@ The tests read `models/mlx/llada-image-turbo` and `models/mlx/llada-image` (`MLX
 
 ## MOSS-Image (`moss_image`)
 
-`src/imagegen/moss_image/` ports `felix-ab/moss-image-mlx` (itself an
-operation-by-operation mirror of OpenMOSS's `pipeline_moss_image.py`) for the
-OpenMOSS MOSS-Image SFT checkpoint, a 5B bilingual text-rendering DiT with
-JSON layout control. It loads the published MLX tiers
-(`VisualInference/MOSS-Image-SFT-MLX-8bit`, `-compact`, and the Base variant)
-and the original Diffusers tree.
+`src/imagegen/moss_image/` ports `felix-ab/moss-image-mlx` (itself an operation-by-operation mirror of OpenMOSS's `pipeline_moss_image.py`) for the OpenMOSS MOSS-Image SFT checkpoint, a 5B bilingual text-rendering DiT with JSON layout control. It loads the published MLX tiers (`VisualInference/MOSS-Image-SFT-MLX-8bit`, `-compact`, and the Base variant) and the original Diffusers tree.
 
-Components: the Qwen3.5-9B language backbone as the prompt conditioner
-(`text_encoder/`, through mlxcel's Qwen3.5 loader; the checkpoint's vision
-tower is skipped), the 42-block, 3072-wide single-stream transformer with one
-shared adaLN modulation per timestep, a 4-axis RoPE (row, time, height,
-width) over a joint image-then-text sequence, per-head RMS-normalised q/k and
-SiTU-gated feed-forwards, and the FLUX.2 VAE decoder (`vae/`, through the
-shared `Flux2Vae`; the distilled decoder's 96/192/384/384 widths come from
-`decoder_block_out_channels`).
+Components: the Qwen3.5-9B language backbone as the prompt conditioner (`text_encoder/`, through mlxcel's Qwen3.5 loader; the checkpoint's vision tower is skipped), the 42-block, 3072-wide single-stream transformer with one shared adaLN modulation per timestep, a 4-axis RoPE (row, time, height, width) over a joint image-then-text sequence, per-head RMS-normalised q/k and SiTU-gated feed-forwards, and the FLUX.2 VAE decoder (`vae/`, through the shared `Flux2Vae`; the distilled decoder's 96/192/384/384 widths come from `decoder_block_out_channels`).
 
 | Checkpoint | Steps / guidance | Schedule |
 |------------|------------------|----------|
 | SFT MLX 8-bit / compact, Base MLX 8-bit | 50 / 3.0 | flow-match Euler on sigmas snapped to the 1000-step training grid, shift 5, f32 latents; the negative branch skips block 22 |
 
-- **Modes.** Text-to-image only. The checkpoint has no editing task, so a
-  request with `task: edit` is refused before anything loads.
-- **Sizes.** Width and height are positive multiples of 16 between 256 and
-  2048; the official size is 1024x1024.
-- **Prompt.** The chat template renders to
-  `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n`
-  (one user message, generation prompt, `enable_thinking=True`), and the
-  conditioner's **final-norm** hidden states are the transformer's context,
-  truncated at 4096 tokens.
-- **Layout prompts.** A JSON layout (`[y_min, x_min, y_max, x_max]` boxes,
-  canvas centre as origin) is part of the prompt, not a separate option.
-- **Memory.** The three stages load and free in turn — conditioner, then
-  transformer, then VAE decoder — so a request peaks at the largest stage
-  rather than their sum: about 9.3 GB at the 8-bit tier and 7.4 GB at the
-  compact tier for a 1024x1024 image. `n > 1` samples every image before the
-  VAE loads, to keep that staging.
+- **Modes.** Text-to-image only. The checkpoint has no editing task, so a request with `task: edit` is refused before anything loads.
+- **Sizes.** Width and height are positive multiples of 16 between 256 and 2048; the official size is 1024x1024.
+- **Prompt.** The chat template renders to `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n` (one user message, generation prompt, `enable_thinking=True`), and the conditioner's **final-norm** hidden states are the transformer's context, truncated at 4096 tokens.
+- **Layout prompts.** A JSON layout (`[y_min, x_min, y_max, x_max]` boxes, canvas centre as origin) is part of the prompt, not a separate option.
+- **Memory.** The three stages load and free in turn (conditioner, then transformer, then VAE decoder) so a request peaks at the largest stage rather than their sum: about 9.3 GB at the 8-bit tier and 7.4 GB at the compact tier for a 1024x1024 image. `n > 1` samples every image before the VAE loads, to keep that staging.
+- **VAE decode.** The published checkpoint ships the FLUX.2 VAE decoder alone, with no `bn.*` statistics, so the sampled latents are unpatchified and decoded directly instead of going through `Flux2Vae::decode_packed_latents` (which undoes FLUX.2's batch-norm normalization).
 
 ### MOSS-Image deviations from the reference
 
-- **Noise.** The reference draws the initial latents from a torch CPU
-  generator so the official seeds reproduce bit for bit. This port draws from
-  MLX's generator with the same seed: the distribution and all downstream
-  math agree, but a given seed does not reproduce the reference's exact
-  image.
-- **No `precise` mode.** The reference's optional fp32 residual stream is not
-  implemented; the port runs in the checkpoint dtype, which is the mode the
-  published 8-bit and compact tiers were validated in by the reference port.
+- **Noise.** The reference draws the initial latents from a torch CPU generator so the official seeds reproduce bit for bit. This port draws from MLX's generator with the same seed: the distribution and all downstream math agree, but a given seed does not reproduce the reference's exact image.
+- **No `precise` mode.** The reference's optional fp32 residual stream is not implemented; the port runs in the checkpoint dtype, which is the mode the published 8-bit and compact tiers were validated in by the reference port.
 
-### MOSS-Image parity
+### MOSS-Image verification
 
-Not yet measured. The implementation host has no Metal toolchain, so every
-test in this module ran on MLX's CPU backend (config, schedule, probe and
-template only — the model paths need a Metal-capable host). The parity run
-belongs on one of the Apple Silicon model hosts, against `moss-image-mlx`
-0.2.0 on the same checkpoint and seeds:
-
-```bash
-MLX_ENABLE_TF32=0 MLXCEL_MOSS_IMAGE_DIR=<checkpoint> \
-    <lib test binary> --ignored imagegen::moss_image
-```
-
-Until that run exists, treat the family as **unverified end to end**, not as
-a port with a measured parity number.
+No numeric parity against the reference has been measured, and no checkpoint-gated test exists in this module yet. The contributor rendered `VisualInference/MOSS-Image-SFT-MLX-compact` end to end through `mlxcel-server --image-model` on an M4 (512x512, 12 steps, CFG 3.0 renders legible prompt text). The unit tests cover the config, the schedule, the probe, the chat template, the RoPE table, and the load-time weight shape checks, which turn a mis-shaped or mismatched checkpoint into an error before any MLX op runs.
 
 ## Verification
 

@@ -171,7 +171,7 @@ pub fn validate_size(width: u32, height: u32) -> Result<()> {
     if width < MIN_SIDE || height < MIN_SIDE || width > MAX_SIDE || height > MAX_SIDE {
         bail!("MOSS-Image size {width}x{height} is outside {MIN_SIDE}..={MAX_SIDE}");
     }
-    if width % DOWNSAMPLE != 0 || height % DOWNSAMPLE != 0 {
+    if !width.is_multiple_of(DOWNSAMPLE) || !height.is_multiple_of(DOWNSAMPLE) {
         bail!("MOSS-Image width and height must be multiples of {DOWNSAMPLE}");
     }
     Ok(())
