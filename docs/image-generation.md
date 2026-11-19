@@ -583,7 +583,7 @@ Components: the Qwen3.5-9B language backbone as the prompt conditioner (`text_en
 
 ### MOSS-Image verification
 
-No numeric parity against the reference has been measured, and no checkpoint-gated test exists in this module yet. The contributor rendered `VisualInference/MOSS-Image-SFT-MLX-compact` end to end through `mlxcel-server --image-model` on an M4 (512x512, 12 steps, CFG 3.0 renders legible prompt text). The unit tests cover the config, the schedule, the probe, the chat template, the RoPE table, and the load-time weight shape checks, which turn a mis-shaped or mismatched checkpoint into an error before any MLX op runs.
+No numeric parity against the reference has been measured, and no checkpoint-gated test exists in this module yet. The contributor rendered `VisualInference/MOSS-Image-SFT-MLX-compact` end to end through `mlxcel-server --image-model` on an M4 (512x512, 12 steps, CFG 3.0 renders legible prompt text). The same checkpoint also renders on ROCm (gfx1151, `mlxcel generate-image`, 512x512, 12 steps, CFG 3.0, about 2 minutes including load); with the same seed, the decode before the batch-norm denormalization fix gave a washed-out image (pixel std 37.6) and the fixed decode gives full contrast (pixel std 64.4) with the prompt text spelled correctly. The unit tests cover the config, the schedule, the probe, the chat template, the RoPE table, and the load-time weight shape checks, which turn a mis-shaped or mismatched checkpoint into an error before any MLX op runs.
 
 ## Verification
 

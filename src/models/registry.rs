@@ -612,8 +612,8 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         drafters: NO_DRAFTERS,
         kv_modes: KV_FP16,
     },
-    // Rendered end to end on Metal (Apple M4) only, with no numeric parity
-    // against the reference, so every backend is partial.
+    // Rendered end to end on Metal (Apple M4) and ROCm (gfx1151), with no
+    // numeric parity against the reference, so every backend is partial.
     StandaloneArchitectureFamily {
         id: "moss_image",
         display_name: "MOSS-Image",
