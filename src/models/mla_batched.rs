@@ -21,8 +21,11 @@ use mlxcel_core::layers::KVCache;
 use mlxcel_core::mla::{LatentWindow, MlaGeometry, MlaLatentCache};
 use mlxcel_core::{MlxArray, UniquePtr};
 
-pub(crate) type MlaRowSelector<'a> =
-    dyn Fn(usize, &MlxArray, &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) + 'a;
+/// A family's per-row key selection: takes row `row`'s live window as stored
+/// and returns the window the attention reads, in either storage form. DeepSeek
+/// V3.2 drops the indexer-key columns and gathers the top-k rows, packed when
+/// the window is quantized (#3163).
+pub(crate) type MlaRowSelector<'a> = dyn Fn(usize, LatentWindow) -> LatentWindow + 'a;
 
 /// The [`MlaGeometry`] of a latent-pair attention layer from its `i32` fields.
 pub(crate) fn mla_geometry(
@@ -56,10 +59,16 @@ pub(crate) fn mla_geometry(
 /// layout for its whole life because the answer depends only on its mode and
 /// geometry.
 ///
-/// `quantized_latent` is the caller's opt in: only the `DeepSeekV3Attention`
-/// callers (the families in `mla::QUANTIZED_LATENT_FAMILIES`) pass `true`. A
-/// caller that passes `false` never gets the latent view, whatever the cache
+/// `quantized_latent` is the caller's opt in: only the attention
+/// implementations that read a [`LatentWindow::Quantized`] back
+/// (`DeepSeekV3Attention`, and the DeepSeek V3.2 MLA since #3163) pass `true`.
+/// A caller that passes `false` never gets the latent view, whatever the cache
 /// mode, so a family outside the list keeps its per-token path.
+///
+/// `kv_latent` may be wider than `geometry.kv_lora_rank`: DeepSeek V3.2
+/// appends the DSA indexer key to it. The view is asked for that stored width
+/// (`MlaLatentCache::supports_with_key_width`), which on an `int8` cache has
+/// to be a whole number of affine groups like the rank.
 pub(crate) fn store_latent_step(
     cache: &mut KVCache,
     geometry: MlaGeometry,
@@ -69,10 +78,13 @@ pub(crate) fn store_latent_step(
     quantized_latent: bool,
 ) -> LatentWindow {
     if quantized_latent && cache.mode.latent_affine_bits().is_some() {
-        match MlaLatentCache::supports(cache, geometry) {
+        let key_width = mlxcel_core::array_shape(&kv_latent)
+            .get(3)
+            .map_or(0, |&width| usize::try_from(width).unwrap_or(0));
+        match MlaLatentCache::supports_with_key_width(cache, geometry, key_width) {
             Ok(()) => {
-                return MlaLatentCache::wrap(cache, geometry)
-                    .expect("supports() was checked immediately before this wrap")
+                return MlaLatentCache::wrap_with_key_width(cache, geometry, key_width)
+                    .expect("supports_with_key_width() was checked immediately before this wrap")
                     .update_and_fetch(kv_latent, k_pe);
             }
             Err(reason) => warn_latent_view_declined(family, cache.mode, &reason),
@@ -147,11 +159,12 @@ pub(crate) fn validate_mla_decode_batch(
 /// the fused kernel's quantized variant where it applies (Metal, up to
 /// `FUSED_DECODE_QUANTIZED_MAX_KEYS` keys, #3156), the #3155 composed
 /// quantized decode otherwise. `select` (DeepSeek V3.2's sparse key
-/// selection) reads a dense window, so a quantized row with a selector is a
-/// wiring error and panics naming `family`.
+/// selection) is applied to the row's window first, in whichever form it is
+/// stored, and the attention reads the window it returns (#3163).
 ///
 /// `quantized_latent` opts the caller in to the quantized latent view; see
-/// [`store_latent_step`]. Only `DeepSeekV3Attention` passes `true`.
+/// [`store_latent_step`]. `DeepSeekV3Attention` and the DeepSeek V3.2 MLA pass
+/// `true`.
 ///
 /// Used by: `DeepSeekV3Attention` (DeepSeek V3, Kimi, Youtu), DeepSeek V3.2
 /// MLA, GLM-4.7-Flash MLA, Kimi Linear and Kimi K3.
@@ -196,32 +209,27 @@ pub(crate) fn mla_latent_decode_rows(
         let q_pe_row = row4(q_pe, row);
         let kv_row = row4(kv_latent, row);
         let k_pe_row = row4(k_pe, row);
-        let (kv_all, k_pe_all) =
-            match store_latent_step(cache, geometry, kv_row, k_pe_row, family, quantized_latent) {
-                LatentWindow::Dense { ckv, kpe } => (ckv, kpe),
-                LatentWindow::Quantized {
-                    ckv_q,
-                    scales,
-                    biases,
-                    kpe,
-                    bits,
-                    group_size,
-                } => {
-                    assert!(
-                        select.is_none(),
-                        "{family}: mla_latent_decode_rows row {row} holds a quantized latent, \
-                     which a key selector cannot read; this family must keep an fp16 latent"
-                    );
-                    outputs.push(mlxcel_core::mla::quantized_absorbed_attention(
-                        &q_row, &q_pe_row, &ckv_q, &scales, &biases, &kpe, bits, group_size, scale,
-                        None,
-                    ));
-                    continue;
-                }
-            };
-        let (kv_selected, k_pe_selected) = match select {
-            Some(select) => select(row, &kv_all, &k_pe_all),
-            None => (kv_all, k_pe_all),
+        let window = store_latent_step(cache, geometry, kv_row, k_pe_row, family, quantized_latent);
+        let window = match select {
+            Some(select) => select(row, window),
+            None => window,
+        };
+        let (kv_selected, k_pe_selected) = match window {
+            LatentWindow::Dense { ckv, kpe } => (ckv, kpe),
+            LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } => {
+                outputs.push(mlxcel_core::mla::quantized_absorbed_attention(
+                    &q_row, &q_pe_row, &ckv_q, &scales, &biases, &kpe, bits, group_size, scale,
+                    None,
+                ));
+                continue;
+            }
         };
 
         // Unmasked single-query rows take the fused kernel where it applies

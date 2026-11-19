@@ -36,15 +36,23 @@
 #[path = "deepseek_v32_indexer.rs"]
 mod indexer;
 
+#[path = "deepseek_v32_latent.rs"]
+mod latent;
+
 #[cfg(test)]
 #[path = "deepseek_v32_tests.rs"]
 pub(crate) mod deepseek_v32_tests;
+
+#[cfg(test)]
+#[path = "deepseek_v32_latent_tests.rs"]
+mod latent_tests;
 
 use crate::distributed::pipeline::{LayerFilter, StageExecutionOutput};
 use crate::models::switch_layers::validate_expert_quantization_params;
 use indexer::Indexer;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::mla::LatentWindow;
 use mlxcel_core::utils::{silu, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -267,6 +275,14 @@ impl ModelArgs {
     }
 }
 
+/// Whether `MLXCEL_DSA_DENSE` forces the dense fallback, in which case no
+/// indexer is loaded and the cached key slot is the latent alone.
+///
+/// Used by: `execution::kv_arch` (the DSA key-slot width).
+pub(crate) fn dsa_dense_fallback_forced() -> bool {
+    std::env::var_os(indexer::DENSE_FALLBACK_ENV).is_some()
+}
+
 // MLA Attention (LoRA-style).
 fn yarn_get_mscale(scale: f32, mscale: f32) -> f32 {
     if scale <= 1.0 {
@@ -303,6 +319,10 @@ struct MLAAttention {
     q_head_dim: i32,
     scale: f32,
     rope_base: f32,
+    /// Decoder layer index, read from the weight prefix. Labels the
+    /// `MLXCEL_TRACE_DSA_TOPK` selection trace; `-1` when the prefix names no
+    /// layer.
+    layer: i32,
 }
 
 impl MLAAttention {
@@ -377,11 +397,50 @@ impl MLAAttention {
         let kv_latent = mlxcel_core::expand_dims(&kv_latent, 1);
 
         // Cache stores (kv_latent [+ indexer key], k_pe) for memory efficiency.
+        // An `int8` cache stores the whole key slot as the affine group-64
+        // triple and hands back a quantized window; the fresh rows are
+        // quantized before this step reads them, so a prefill reads what later
+        // decode steps read (#3163).
         let cache_keys = match &indexer_new {
             Some((idx_key, _, _)) => mlxcel_core::concatenate(&kv_latent, idx_key, -1),
             None => kv_latent,
         };
-        let (cache_keys, k_pe) = cache.update_and_fetch(cache_keys, k_pe);
+        let window = crate::models::mla_batched::store_latent_step(
+            cache,
+            self.geometry(),
+            cache_keys,
+            k_pe,
+            "deepseek_v32",
+            true,
+        );
+
+        // Cost-model gate (issue #2408): one query is always absorbed, and a
+        // multi-token step behind a long enough cache can be cheaper absorbed
+        // than up-projecting the whole window. A cold prefill stays on the
+        // materializing side. Computed once so nothing below gates on `l`.
+        let absorbed = mlxcel_core::mla::use_absorbed_mla(
+            l as usize,
+            cache.seq_len() as usize,
+            self.kv_lora_rank as usize,
+            self.qk_nope_head_dim as usize,
+            self.v_head_dim as usize,
+        );
+
+        // One absorbed query over a quantized window: the indexer reads its
+        // own columns, the latent stays packed, and the top-k rows are
+        // gathered from the packed triple (`latent.rs`). The attention records
+        // its own path (fused or composed). Every other step over a quantized
+        // window dequantizes it once and runs the fp16 code below.
+        let (cache_keys, k_pe) = match window {
+            window @ mlxcel_core::mla::LatentWindow::Quantized { .. } if absorbed && l == 1 => {
+                let q_projected = self.embed_q.forward(&q_nope);
+                let index_query = indexer_new.as_ref().map(|(_, q, w)| (&**q, &**w));
+                let output = self.quantized_decode(window, &q_projected, &q_pe, index_query, mask);
+                let output = self.unembed_out.forward(&output);
+                return self.project_attention_output(&output, b, l);
+            }
+            window => window.into_dense(),
+        };
 
         // Slice the cached indexer key back off the shared buffer.
         let (kv_latent, indexer_keys) = match &self.indexer {
@@ -420,18 +479,12 @@ impl MLAAttention {
             }
             _ => None,
         };
+        if l == 1
+            && let Some(indices) = &topk_indices
+        {
+            latent::trace_topk(self.layer, mlxcel_core::array_shape(&kv_latent)[2], indices);
+        }
 
-        // Cost-model gate (issue #2408): one query is always absorbed, and a
-        // multi-token step behind a long enough cache can be cheaper absorbed
-        // than up-projecting the whole window. A cold prefill stays on the
-        // materializing side. Computed once so nothing below gates on `l`.
-        let absorbed = mlxcel_core::mla::use_absorbed_mla(
-            l as usize,
-            cache.seq_len() as usize,
-            self.kv_lora_rank as usize,
-            self.qk_nope_head_dim as usize,
-            self.v_head_dim as usize,
-        );
         mlxcel_core::mla::stats::record(if absorbed {
             if l == 1 {
                 mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
@@ -571,10 +624,13 @@ impl MLAAttention {
             }
         };
 
-        // Transpose back and reshape
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
-        let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
+        self.project_attention_output(&output, b, l)
+    }
 
+    /// `[B, H, L, v_head_dim]` attention output to `[B, L, hidden]`.
+    fn project_attention_output(&self, output: &MlxArray, b: i32, l: i32) -> UniquePtr<MlxArray> {
+        let output = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
         self.o_proj.forward(&output)
     }
 
@@ -634,34 +690,51 @@ impl MLAAttention {
             mlxcel_core::copy(&latent)
         };
 
-        let selector = |row: usize, cache_keys: &MlxArray, cached_k_pe: &MlxArray| {
-            let latent = slice_axis(cache_keys, -1, 0, self.kv_lora_rank);
-            let Some(indexer) = &self.indexer else {
-                return (latent, mlxcel_core::copy(cached_k_pe));
+        // Each row's window is `[kv_latent | indexer key]`. A dense window is
+        // sliced and gathered as before; a quantized one keeps the latent
+        // packed and gathers the packed rows (`latent.rs`, #3163).
+        let selector = |row: usize, window: LatentWindow| -> LatentWindow {
+            let (cache_keys, cached_k_pe) = match window {
+                LatentWindow::Dense { ckv, kpe } => (ckv, kpe),
+                quantized => {
+                    let index_query = self
+                        .indexer
+                        .as_ref()
+                        .map(|_| (&*index_queries[row], &*index_weights[row]));
+                    return self.select_quantized_window(quantized, index_query, None).0;
+                }
             };
-            let index_keys = slice_axis(cache_keys, -1, self.kv_lora_rank, -1);
+            let latent = slice_axis(&cache_keys, -1, 0, self.kv_lora_rank);
+            let Some(indexer) = &self.indexer else {
+                return LatentWindow::Dense {
+                    ckv: latent,
+                    kpe: cached_k_pe,
+                };
+            };
+            let index_keys = slice_axis(&cache_keys, -1, self.kv_lora_rank, -1);
             match indexer.top_indices(&index_queries[row], &index_keys, &index_weights[row], None) {
-                Some(indices) => gather_topk_kv(
-                    &latent,
-                    cached_k_pe,
-                    &indices,
-                    self.kv_lora_rank,
-                    self.qk_rope_head_dim,
-                ),
-                None => (latent, mlxcel_core::copy(cached_k_pe)),
+                Some(indices) => {
+                    latent::trace_topk(self.layer, mlxcel_core::array_shape(&latent)[2], &indices);
+                    let (ckv, kpe) = gather_topk_kv(
+                        &latent,
+                        &cached_k_pe,
+                        &indices,
+                        self.kv_lora_rank,
+                        self.qk_rope_head_dim,
+                    );
+                    LatentWindow::Dense { ckv, kpe }
+                }
+                None => LatentWindow::Dense {
+                    ckv: latent,
+                    kpe: cached_k_pe,
+                },
             }
         };
         let q_latent = self.embed_q.forward(&q_nope);
         let output = crate::models::mla_batched::mla_latent_decode_rows(
             "deepseek_v32",
-            false,
-            crate::models::mla_batched::mla_geometry(
-                self.num_heads,
-                self.kv_lora_rank,
-                self.qk_nope_head_dim,
-                self.qk_rope_head_dim,
-                self.v_head_dim,
-            ),
+            true,
+            self.geometry(),
             &q_latent,
             &q_pe,
             &cache_input,
@@ -1365,7 +1438,19 @@ fn load_mla_attention(
         q_head_dim,
         scale,
         rope_base: args.rope_theta,
+        layer: layer_index_from_prefix(prefix),
     })
+}
+
+/// The `N` of a `...layers.N...` weight prefix, or `-1`.
+fn layer_index_from_prefix(prefix: &str) -> i32 {
+    let mut parts = prefix.split('.');
+    while let Some(part) = parts.next() {
+        if part == "layers" {
+            return parts.next().and_then(|n| n.parse().ok()).unwrap_or(-1);
+        }
+    }
+    -1
 }
 
 fn load_dense_mlp(

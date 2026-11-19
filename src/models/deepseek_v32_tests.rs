@@ -43,7 +43,7 @@ fn tiny_deepseek_config() -> ModelArgs {
     serde_json::from_str(json).expect("parse tiny deepseek config")
 }
 
-fn f32_weight(shape: &[i32]) -> UniquePtr<MlxArray> {
+pub(super) fn f32_weight(shape: &[i32]) -> UniquePtr<MlxArray> {
     let n: i32 = shape.iter().product();
     let data: Vec<f32> = (0..n).map(|i| 0.01 * (i as f32 + 1.0)).collect();
     mlxcel_core::from_slice_f32(&data, shape)
@@ -252,7 +252,11 @@ fn tiny_mla_config(index_topk: i32) -> ModelArgs {
 /// Synthetic (non-quantized) MLA attention weights for `{prefix}.*`, with
 /// `kv_b_proj` in checkpoint form (sanitize decomposes it into
 /// `embed_q` / `unembed_out`).
-fn synthetic_mla_weights(args: &ModelArgs, prefix: &str, with_indexer: bool) -> WeightMap {
+pub(super) fn synthetic_mla_weights(
+    args: &ModelArgs,
+    prefix: &str,
+    with_indexer: bool,
+) -> WeightMap {
     let hidden = args.hidden_size as i32;
     let q_lora = args.q_lora_rank as i32;
     let kv_lora = args.kv_lora_rank as i32;

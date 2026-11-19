@@ -73,6 +73,7 @@ use crate::mla::MlaGeometry;
 use crate::mla::MlaSplitPlan;
 use crate::mla::absorb::MlaAbsorbedProjections;
 use crate::mla::decode::{absorb_queries, absorbed_attention, unabsorb_output};
+use crate::mla::latent_keys::check_stored_key_width;
 use crate::mla::quant_latent::{
     LatentWindow, check_quantizable, quantize_latent_rows, quantized_absorbed_attention,
 };
@@ -111,11 +112,10 @@ pub const fn decompressed_bytes_per_token(
 ///
 /// The "K" slot is not one fixed width across the list. `kv_lora_rank` is 512
 /// in the shipping checkpoints of every family here, and it is the serde
-/// default wherever one is declared. On top of that, `deepseek_v32`,
-/// `deepseek_v3.2` and `glm_moe_dsa` concatenate the `index_head_dim`-wide DSA
-/// indexer key onto the same slot before caching it
-/// (`src/models/deepseek_v32.rs`), which makes it 640 wide at the default
-/// `index_head_dim` of 128. A codebook and a sign vector calibrated from the
+/// default wherever one is declared. On top of that, the DSA families
+/// ([`crate::mla::DSA_INDEXER_KEY_FAMILIES`]) concatenate the
+/// `index_head_dim`-wide indexer key onto the same slot before caching it,
+/// which makes it 640 wide at the default `index_head_dim` of 128. A codebook and a sign vector calibrated from the
 /// 64-wide "V" slot are wrong for any of those widths.
 ///
 /// `deepseek_v2` is deliberately **absent**. It goes through
@@ -151,10 +151,8 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     // `config.json` value both resolve to `DeepSeekV32Model`
     // (`src/models/detection.rs`), and `glm_moe_dsa` wraps that model
     // wholesale (`src/models/glm_moe_dsa.rs`). All three share the single
-    // unconditional `cache.update_and_fetch(cache_keys, k_pe)` in
-    // `src/models/deepseek_v32.rs` and consult neither
-    // [`MlaLatentCache::supports`] nor the cache's mode, so they have no
-    // decompressed fallback to land on.
+    // unconditional `[kv_latent | indexer key]` write in
+    // `src/models/deepseek_v32.rs`, with no decompressed fallback.
     "deepseek_v32",
     "deepseek_v3.2",
     "glm_moe_dsa",
@@ -247,6 +245,8 @@ pub fn latent_layout_supports_mode(mode: KVCacheMode) -> Result<(), String> {
 pub struct MlaLatentCache<'a> {
     inner: &'a mut KVCache,
     geometry: MlaGeometry,
+    /// "K" slot width: `kv_lora_rank` plus any DSA sidecar (issue #3163).
+    key_width: usize,
 }
 
 impl<'a> MlaLatentCache<'a> {
@@ -263,9 +263,24 @@ impl<'a> MlaLatentCache<'a> {
     /// it on every step, and the cache never ends up holding a mix of latent
     /// and decompressed rows.
     pub fn supports(cache: &KVCache, geometry: MlaGeometry) -> Result<(), String> {
+        Self::supports_with_key_width(cache, geometry, geometry.kv_lora_rank)
+    }
+
+    /// [`Self::supports`] for a "K" slot `stored_key_width` wide whose first
+    /// `kv_lora_rank` elements are the latent: the DSA families cache the
+    /// indexer key beside it (`mla::latent_keys`, issue #3163), and an `int8`
+    /// cache needs that width to be whole groups too.
+    ///
+    /// Used by: `mlxcel::models::mla_batched::store_latent_step`.
+    pub fn supports_with_key_width(
+        cache: &KVCache,
+        geometry: MlaGeometry,
+        stored_key_width: usize,
+    ) -> Result<(), String> {
         geometry.check()?;
         latent_layout_supports_mode(cache.mode)?;
         check_quantizable(&geometry, cache.mode)?;
+        check_stored_key_width(geometry.kv_lora_rank, stored_key_width, cache.mode)?;
         if cache.is_paged_backed() {
             return Err(
                 "mla: absorbed decode cannot use a paged-backed cache; the pool's \
@@ -279,10 +294,23 @@ impl<'a> MlaLatentCache<'a> {
 
     /// View `cache` as a latent cache, or explain why it cannot be.
     pub fn wrap(cache: &'a mut KVCache, geometry: MlaGeometry) -> Result<Self, String> {
-        Self::supports(cache, geometry)?;
+        Self::wrap_with_key_width(cache, geometry, geometry.kv_lora_rank)
+    }
+
+    /// [`Self::wrap`] for a "K" slot `stored_key_width` wide
+    /// ([`Self::supports_with_key_width`]). [`Self::update_and_fetch`] takes
+    /// and returns rows of that width; the `attend` entries read the whole
+    /// slot as the latent, so a caller with a sidecar reads the window itself.
+    pub fn wrap_with_key_width(
+        cache: &'a mut KVCache,
+        geometry: MlaGeometry,
+        stored_key_width: usize,
+    ) -> Result<Self, String> {
+        Self::supports_with_key_width(cache, geometry, stored_key_width)?;
         Ok(Self {
             inner: cache,
             geometry,
+            key_width: stored_key_width,
         })
     }
 
@@ -307,9 +335,9 @@ impl<'a> MlaLatentCache<'a> {
     /// Append one step's latent and rope rows, and read the whole live window
     /// back.
     ///
-    /// `ckv` is `[B, 1, L, kv_lora_rank]` and `kpe` is `[B, 1, L,
-    /// qk_rope_head_dim]`, both already normalized and rotated respectively by
-    /// the caller. On an `int8` cache the fresh rows are quantized
+    /// `ckv` is `[B, 1, L, kv_lora_rank]` (the wrapped key width, with a
+    /// sidecar) and `kpe` is `[B, 1, L, qk_rope_head_dim]`, both already
+    /// normalized and rotated respectively by the caller. On an `int8` cache the fresh rows are quantized
     /// before anything reads them, so a prefill and the decode steps after it
     /// see the same stored values.
     pub fn update_and_fetch(
@@ -448,12 +476,12 @@ impl<'a> MlaLatentCache<'a> {
     pub const fn bytes_per_token(&self, bytes_per_element: usize) -> usize {
         match self.inner.mode.latent_affine_bits() {
             Some(bits) => crate::mla::quant_latent::quantized_latent_bytes_per_token(
-                self.geometry.kv_lora_rank,
+                self.key_width,
                 self.geometry.qk_rope_head_dim,
                 bits as usize,
                 crate::cache::latent_quant::LATENT_QUANT_GROUP_SIZE as usize,
             ),
-            None => latent_bytes_per_token(&self.geometry, bytes_per_element),
+            None => (self.key_width + self.geometry.qk_rope_head_dim) * bytes_per_element,
         }
     }
 }

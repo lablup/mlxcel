@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Fused decode kernel for the int8 MLA latent on Metal** (#3156). With `--kv-cache-mode int8` on `deepseek_v2`, an unmasked single-token decode step over a window of up to 2048 keys now runs on a quantized variant of the fused absorbed-decode kernel, which reads the packed latent in-kernel, instead of the composed `quantized_matmul` path. On an M3 Ultra, DeepSeek-V2-Lite int8 decode is 5.9% faster behind a 512-token prompt (148.4 against 140.2 tok/s) and 1.5% faster behind 1792; longer windows keep the composed path, which measured faster from about 2048 keys, so decode behind 2048 and 16384 tokens is unchanged. The teacher-forced trace shows no decided-position disagreement against the composed int8 path or the fp16 latent, and every top-1 disagreement falls where the reference's top two were within 0.11 logits. `MLXCEL_MLA_FUSED_DECODE=0` turns off both kernel variants. fp16 latent output is unchanged bit for bit. CUDA and ROCm have no port and keep the composed path. See `docs/benchmark_results/mla-fused-quantized-decode-m3ultra-2026-11-19.md`.
 - **`MLXCEL_TRACE_MLA_STATS=1` on `mlxcel generate` and `mlxcel-bench-decode`** (#3155). Both print the MLA attention dispatch counters to stderr when the run ends, as `examples/logit_trace` already did.
 
+### Fixed
+
+- **KV cache size estimate on DeepSeek V3.2 and GLM-5** (#3163). `deepseek_v32`, `deepseek_v3.2` and `glm_moe_dsa` cache the DSA indexer key (`index_head_dim`, 128) in the same slot as the MLA latent, so the slot is 640 wide, not 512. `mlxcel inspect`, the `--estimate-memory` preflights, the prompt-cache store budget and `--recommend-quant` sized these families at 1152 bytes per token per layer and now size them at the 1408 the fp16 cache holds. A checkpoint with no indexer weights stores the latent alone and is now over-estimated by that key; `MLXCEL_DSA_DENSE` drops it from the estimate as it drops it from the cache.
+
 ## [v0.9.0-beta.1] - 2026-11-19
 
 ### Added

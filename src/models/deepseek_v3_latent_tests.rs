@@ -221,33 +221,57 @@ fn batched_int8_rows_match_sequential_and_track_the_fp16_latent() {
     assert!(err < INT8_TOL, "int8 vs fp16 latent batch: {err}");
 }
 
-/// The shared batched helper refuses a key selector over a quantized row: the
-/// selector reads a dense window, and only DeepSeek V3.2 passes one.
+/// The shared batched helper hands a key selector the row's window as it is
+/// stored and attends over what the selector returns (#3163): a selector that
+/// keeps one of two quantized rows gives the decode over that row alone.
 #[test]
-#[should_panic(expected = "holds a quantized latent")]
-fn a_key_selector_over_a_quantized_row_panics_naming_the_family() {
+fn a_key_selector_is_applied_to_a_quantized_row_before_it_is_attended() {
+    use mlxcel_core::mla::LatentWindow;
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let geometry = crate::models::mla_batched::mla_geometry(2, 64, 8, 8, 8);
     let q_latent = mlxcel_core::from_slice_f32(&ramp(2 * 64), &[1, 2, 1, 64]);
     let q_pe = mlxcel_core::from_slice_f32(&ramp(2 * 8), &[1, 2, 1, 8]);
-    let kv = mlxcel_core::from_slice_f32(&ramp(64), &[1, 1, 1, 64]);
-    let k_pe = mlxcel_core::from_slice_f32(&ramp(8), &[1, 1, 1, 8]);
-    let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
-    let mut caches = [&mut cache];
-    let select = |_row: usize, ckv: &mlxcel_core::MlxArray, kpe: &mlxcel_core::MlxArray| {
-        (mlxcel_core::copy(ckv), mlxcel_core::copy(kpe))
+    let row = |salt: usize, width: usize| {
+        let all = ramp(salt + width);
+        mlxcel_core::from_slice_f32(&all[salt..], &[1, 1, 1, width as i32])
     };
-    let _ = crate::models::mla_batched::mla_latent_decode_rows(
-        "deepseek_v32",
-        true,
-        geometry,
-        &q_latent,
-        &q_pe,
-        &kv,
-        &k_pe,
-        &mut caches,
-        1.0,
-        Some(&select),
+    let decode = |steps: &[usize], select: Option<&crate::models::mla_batched::MlaRowSelector>| {
+        let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
+        let mut out = Vec::new();
+        for &salt in steps {
+            let mut caches = [&mut cache];
+            out = values(&crate::models::mla_batched::mla_latent_decode_rows(
+                "DeepSeekV3Attention",
+                true,
+                geometry,
+                &q_latent,
+                &q_pe,
+                &row(salt, 64),
+                &row(salt + 5, 8),
+                &mut caches,
+                1.0,
+                select,
+            ));
+        }
+        out
+    };
+    let seen_quantized = std::cell::Cell::new(false);
+    let keep_last = |_row: usize, window: LatentWindow| {
+        seen_quantized.set(window.is_quantized());
+        let last = window.seq_len() - 1;
+        window.gather_rows(&mlxcel_core::from_slice_i32(&[last], &[1, 1, 1, 1]))
+    };
+    let selected = decode(&[3, 40], Some(&keep_last));
+    assert!(
+        seen_quantized.get(),
+        "the selector must see the stored form"
+    );
+    let alone = decode(&[40], None);
+    let both = decode(&[3, 40], None);
+    assert!(max_rel_error(&selected, &alone) < 1e-5);
+    assert!(
+        max_rel_error(&selected, &both) > 1e-3,
+        "the selection must matter"
     );
 }
 
