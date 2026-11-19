@@ -252,7 +252,7 @@ fn a_key_selector_over_a_quantized_row_panics_naming_the_family() {
 }
 
 /// An int8 cache of a family that has not opted in (`glm4_moe_lite`,
-/// `kimi_linear`, `kimi_k3`, `deepseek_v32`) keeps the per-token path: no latent
+/// `deepseek_v32`) keeps the per-token path: no latent
 /// view, a dense window, and rows stored as the cache's own int8 per-token
 /// layout. The opted-in caller gets the quantized window from the same cache
 /// mode, so the flag alone separates the two.

@@ -158,9 +158,10 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     "deepseek_v32",
     "deepseek_v3.2",
     "glm_moe_dsa",
+    // Kimi Linear and Kimi K3 (which reuses Kimi Linear's absorbed MLA)
+    // cache the pair in model-owned MLA layers and write it through the
+    // latent view (#3162).
     "kimi_linear",
-    // Kimi K3 reuses Kimi Linear's absorbed MLA and the same unconditional
-    // `update_and_fetch(kv_latent, k_pe)` (`src/models/kimi_k3.rs`).
     "kimi_k3",
     // Both LongCat `model_type`s load `LongcatFlashNgramModel`, whose MLA
     // stores `update_and_fetch(kv_latent, k_pe)` on every step

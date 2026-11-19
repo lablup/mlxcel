@@ -129,7 +129,7 @@ fn kimi_mla_multi_token_prefill_keeps_the_last_query_row_finite() {
 }
 
 /// Byte-reproducible values in `[-scale, scale]`.
-fn noise(seed: u64, n: usize, scale: f32) -> Vec<f32> {
+pub(super) fn noise(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     let mut state = seed | 1;
     (0..n)
         .map(|_| {
@@ -291,7 +291,7 @@ fn kimi_linear_multi_linear_rejects_quantization_params_that_would_abort_quantiz
 /// `is_linear_layer` is always false) and MoE stacking is inert (`num_experts`
 /// 0), so `sanitize_weights` only exercises the `kv_b_proj` decomposition this
 /// test targets.
-fn mla_config(kv_lora_rank: usize) -> KimiLinearConfig {
+pub(super) fn mla_config(kv_lora_rank: usize) -> KimiLinearConfig {
     KimiLinearConfig {
         model_type: "kimi_linear".to_string(),
         vocab_size: 32,
@@ -332,14 +332,14 @@ fn mla_config(kv_lora_rank: usize) -> KimiLinearConfig {
     }
 }
 
-fn hybrid_batching_config() -> KimiLinearConfig {
+pub(super) fn hybrid_batching_config() -> KimiLinearConfig {
     let mut config = mla_config(8);
     config.num_hidden_layers = 2;
     config.linear_attn_config.kda_layers = vec![1];
     config
 }
 
-fn hybrid_batching_weights(config: &KimiLinearConfig) -> WeightMap {
+pub(super) fn hybrid_batching_weights(config: &KimiLinearConfig) -> WeightMap {
     let mut weights = WeightMap::new();
     let mut seed = 2_572u32;
     let mut put = |name: String, shape: &[i32]| {
