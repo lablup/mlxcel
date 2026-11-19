@@ -69,6 +69,35 @@ fn text_only_vision_config<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|e| anyhow::anyhow!("Failed to parse {label}: {e}"))
 }
 
+/// `full_config` with `vision_config.in_chans` dropped when `in_channels` is
+/// also present, else `full_config` itself.
+///
+/// A `transformers` re-export (NVIDIA's ModelOpt checkpoints among them)
+/// writes both `in_channels` and its older name `in_chans`. The Qwen vision
+/// structs take either through a serde alias, and serde rejects the pair as a
+/// duplicate field. One name alone is left as it is.
+///
+/// Used by: [`qwen_vision_config`] and the Qwen2-VL / Qwen2.5-VL IREE host
+/// preprocessor loaders
+fn without_duplicate_in_chans(
+    full_config: &serde_json::Value,
+) -> std::borrow::Cow<'_, serde_json::Value> {
+    let has_both = full_config.get("vision_config").is_some_and(|vision| {
+        vision.get("in_channels").is_some() && vision.get("in_chans").is_some()
+    });
+    if !has_both {
+        return std::borrow::Cow::Borrowed(full_config);
+    }
+    let mut config = full_config.clone();
+    if let Some(vision) = config
+        .get_mut("vision_config")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        vision.remove("in_chans");
+    }
+    std::borrow::Cow::Owned(config)
+}
+
 /// Parse the vision config when a tower is being loaded, else the text-only
 /// stand-in of [`text_only_vision_config`].
 fn qwen_vision_config<T: serde::de::DeserializeOwned>(
@@ -76,6 +105,8 @@ fn qwen_vision_config<T: serde::de::DeserializeOwned>(
     has_vision: bool,
     label: &str,
 ) -> Result<T> {
+    let full_config = without_duplicate_in_chans(full_config);
+    let full_config = full_config.as_ref();
     if has_vision {
         parse_required_vlm_subconfig(full_config, "vision_config", label)
     } else {
@@ -187,9 +218,12 @@ pub(crate) fn load_qwen2_vl_iree_host_preprocessor(
             actual: "unqualified qwen2_vl config without vision_config".to_string(),
         });
     }
-    let mut vision_config: Qwen2VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen2VL vision config")
-            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let mut vision_config: Qwen2VLVisionConfig = parse_required_vlm_subconfig(
+        without_duplicate_in_chans(&full_config).as_ref(),
+        "vision_config",
+        "Qwen2VL vision config",
+    )
+    .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
     let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
         let canonical = name.strip_prefix("language_model.").unwrap_or(name);
@@ -300,6 +334,31 @@ fn remap_qwen2_5_vl_native_keys(raw_weights: WeightMap) -> WeightMap {
     weights
 }
 
+/// Bring a Qwen2.5-VL checkpoint's weights to the names and formats the
+/// loader reads: the native-key remap, the tied embedding, and for an NVIDIA
+/// ModelOpt NVFP4 export the repack of each `{weight, weight_scale,
+/// weight_scale_2}` triplet to MLX native NVFP4, as the text-only and Qwen3.5
+/// VLM routes do. Without the repack the packed `uint8` codes reach the
+/// linear loaders as they are.
+///
+/// Returns the weights and whether the checkpoint was a ModelOpt NVFP4 one
+/// (declared in `quantization_config` or in `hf_quant_config.json`), so the
+/// caller can give the text config that layout.
+fn prepare_qwen2_5_vl_weights(
+    raw_weights: WeightMap,
+    full_config: &serde_json::Value,
+    model_path: &Path,
+) -> Result<(WeightMap, bool)> {
+    let mut weights = remap_qwen2_5_vl_native_keys(strip_language_model_prefix(raw_weights));
+    models::sanitize_tied_embeddings(&mut weights, full_config);
+    let modelopt_nvfp4 = models::is_modelopt_nvfp4_text_checkpoint(Some(full_config), model_path);
+    if modelopt_nvfp4 {
+        models::sanitize_modelopt_nvfp4_weights(&mut weights, Some(full_config))
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+    Ok((weights, modelopt_nvfp4))
+}
+
 /// Load the Qwen2.5-VL processor and text embedding table while keeping its
 /// windowed vision tower and merger resident in IREE.
 #[cfg(feature = "xla-iree")]
@@ -325,9 +384,12 @@ pub(crate) fn load_qwen2_5_vl_iree_host_preprocessor(
                 .to_string(),
         });
     }
-    let mut vision_config: Qwen25VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen2.5VL vision config")
-            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let mut vision_config: Qwen25VLVisionConfig = parse_required_vlm_subconfig(
+        without_duplicate_in_chans(&full_config).as_ref(),
+        "vision_config",
+        "Qwen2.5VL vision config",
+    )
+    .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
     let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
         let canonical = name.strip_prefix("language_model.").unwrap_or(name);
@@ -699,7 +761,7 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)?;
     let has_vision = models::vlm_has_vision(&full_config, model_path);
 
-    let text_config: models::qwen2_vl::Qwen2VLConfig =
+    let mut text_config: models::qwen2_vl::Qwen2VLConfig =
         parse_vlm_config(&config_str, "Qwen2.5VL text config")?;
 
     let mut vision_config: Qwen25VLVisionConfig =
@@ -707,11 +769,14 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
 
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
-    let mut weights = remap_qwen2_5_vl_native_keys(strip_language_model_prefix(
+    let (mut weights, modelopt_nvfp4) = prepare_qwen2_5_vl_weights(
         load_vlm_weights_common(model_path, None)?,
-    ));
-    models::sanitize_tied_embeddings(&mut weights, &full_config);
-
+        &full_config,
+        model_path,
+    )?;
+    if modelopt_nvfp4 {
+        text_config.declare_modelopt_nvfp4_layout();
+    }
     // A raw `transformers` export keeps `Conv3d`'s native filter layout, which
     // the encoder would reshape without complaint and then read scrambled.
     if normalize_patch_embed_layout(&mut weights, "vision_tower", vision_config.in_channels) {
