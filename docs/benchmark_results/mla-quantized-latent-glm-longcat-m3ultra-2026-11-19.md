@@ -2,29 +2,46 @@
 
 Issue #3161, Phase 2 of epic #3158. #3155 stored the absorbed MLA latent as MLX affine group-64 int8 with fp16 `k_pe` (672 bytes per token per layer at rank 512, rope 64, against 1152 for the fp16 latent), and #3160 moved the `DeepSeekV3Attention` families onto it. GLM-4.7-Flash (`glm4_moe_lite`) and LongCat (`longcat_flash`, `longcat_flash_ngram`, both loaded by `LongcatFlashNgramModel`) cached their latent pair through `KVCache::update_and_fetch` and had every quantized request substituted with fp16. This change writes that pair through `mla::MlaLatentCache` (`mla_batched::store_latent_step`) in both models, including GLM's batched decode and its MTP verify and rollback, and lets LongCat's model-owned caches take the per-layer mode table. Only int8 exists.
 
-**Outcome:** GLM-4.7-Flash fails the gate as measured and keeps fp16, but the measured int8 arm had a dtype defect fixed in review (its context pass ran in f32 under the bf16 model; see "Defect in the measured int8 arm"), so the gate has to be re-measured on the fixed build. Its teacher-forced trace shows 2 decided-position disagreements behind 1024 tokens and 2 behind 4096, against a gate of zero, so `glm4_moe_lite` is not added to `mla::QUANTIZED_LATENT_FAMILIES` and `--kv-cache-mode int8` still resolves to fp16 with the substitution warning. The ported write path stays in the code behind that list (a per-layer flag read from it) and is covered by the unit tests. LongCat is not measured: the LongCat-Flash-Lite checkpoint (`longcat_flash_ngram`, 38.6 GB) was still downloading at about 0.5 MB/s when this run ended, and no other LongCat checkpoint is on the host. With no trace, LongCat is not added to the list either: its port is in place, off by default behind the same list, and covered by unit tests on tiny models of both types. Neither family's user-visible behavior changes in this PR, apart from LongCat's sizing (below).
+**Outcome:** GLM-4.7-Flash fails the gate and keeps fp16. On the build with the review's dtype fix (`4feb8419`, see "Defect in the first int8 arm"), the teacher-forced trace shows 1 decided-position disagreement behind 1024 tokens (of 193, reference top-two gap 2.75) and 0 behind 4096 (of 95), against a gate of zero at both lengths. That 1 equals the decided count between the two int8 kernels on the same stored rows (fused against composed: 1, at gap 6.5), and the composed int8 arm has 0 decided disagreements against fp16. So the failing position is within the int8 kernel-choice noise, but the gate is zero and it is not met. `glm4_moe_lite` is not added to `mla::QUANTIZED_LATENT_FAMILIES`, and `--kv-cache-mode int8` still resolves to fp16 with the substitution warning. The ported write path stays in the code behind that list (a per-layer flag read from it) and is covered by the unit tests. LongCat is not measured: the LongCat-Flash-Lite checkpoint (`longcat_flash_ngram`, 38.6 GB) was still downloading at about 0.5 MB/s when this run ended, and no other LongCat checkpoint is on the host. With no trace, LongCat is not added to the list either: its port is in place, off by default behind the same list, and covered by unit tests on tiny models of both types. Neither family's user-visible behavior changes in this PR, apart from LongCat's sizing (below).
 
 ## Setup
 
-- **Host:** Mac Studio, Apple M3 Ultra, 512 GB, macOS 26.6.2, Metal. Two sibling units shared the host and the GPU lock: load average 4.5 to 8.4 during the GLM traces and 3.2 to 5.8 during the GLM decode sweep (`uptime` at each start and end, in the run logs).
+- **Host:** Mac Studio, Apple M3 Ultra, 512 GB, macOS 26.6.2, Metal. Two sibling units shared the host and the GPU lock: load average 3.2 to 4.5 during the gate traces on the fixed build, 4.5 to 8.4 during the first traces and 3.2 to 5.8 during the GLM decode sweep (`uptime` at each start and end, in the run logs).
 - **Models:** `glm-4.7-flash-4bit` (`glm4_moe_lite`, 47 layers, 20 heads, `kv_lora_rank` 512, `qk_rope_head_dim` 64, `qk_nope_head_dim` 192, `v_head_dim` 256, 4-bit affine weights).
-- **Binary:** release build (`--features metal,accelerate`) of this branch on top of `3f5679a4`, with `glm4_moe_lite` in `QUANTIZED_LATENT_FAMILIES` for the GLM measurements; it was removed after the trace and the production check below uses the rebuilt binary.
+- **Binary:** release builds (`--features metal,accelerate`) of this branch with `glm4_moe_lite` temporarily in `QUANTIZED_LATENT_FAMILIES`: the gate below on `4feb8419` (with the dtype fix), the first trace, the decode sweep and the int8 generate check on the pre-fix code (`4598cba1` with the family listed). The production check uses a build with the family unlisted.
 - **Isolation:** every GPU run held the shared GPU lock (`lockf -k .mlxcel-gpu.lock`). The decode sweep ran under `scripts/with_indexers_paused.sh`, with the two arms interleaved round by round inside one lock per model.
 - **Arms:** `fp16 latent` (default) and `int8 latent` (`--kv-cache-mode int8`; `MLXCEL_TRACE_KV_CACHE_MODE=int8` for the trace harness). The trace harness (`examples/logit_trace`) now hands the requested mode to a model that reports a mode table and still reads the handed caches, as `DirectEngine` does; before this change GLM's int8 arm silently ran fp16.
 - **Corpus:** `docs/architecture.md`, `docs/benchmarks.md` and `docs/turbo-kv-cache.md` at `3c0d74ec`, concatenated (167,657 bytes). Shapes: `64 8 8 1024` (8 chunks of 64 traced positions behind a 1024-token context) and `64 4 8 4096`, with `MLXCEL_TRACE_BATCH_ROWS=1 MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1`, so every traced position is a one-token decode step.
 
-## GLM-4.7-Flash: teacher-forced trace (`--decided 2`)
+## GLM-4.7-Flash: teacher-forced trace on the fixed build (`--decided 2`)
 
 | shape | decided disagree | top-1 disagree | largest reference top-two gap at a disagreement | flips above 0.11 | ppl reference / candidate | ppl delta | path counter (int8) |
 |---|---|---|---|---|---|---|---|
-| behind 1024 | **2 / 193** | 48 / 512 | 4.000 | 29 | 21.4881 / 19.7229 | -8.215% | decompressed=376 absorbed_fused=24064 |
-| behind 4096 | **2 / 95** | 32 / 256 | 4.000 | 22 | 53.6498 / 46.4779 | -13.368% | decompressed=188 absorbed_composed=12032 |
+| behind 1024 | **1 / 193** | 40 / 512 | 2.750 | 18 | 21.4881 / 20.8288 | -3.068% | decompressed=376 absorbed_fused=24064 |
+| behind 4096 | 0 / 95 | 25 / 256 | 1.000 | 15 | 53.6498 / 53.4191 | -0.430% | decompressed=188 absorbed_composed=12032 |
 
-The decided disagreements are at reference top-two gaps of 2.0 and 4.0 at both lengths. The flips above the 0.11-logit near-tie bar, by reference gap: behind 1024, 0.25, 0.375, 22 at 0.5, 0.625, 0.75, 1.5, 2.0 and 4.0; behind 4096, 0.125 (twice), 0.25, 0.375, 9 at 0.5, 0.625, 5 at 1.0, 1.032, 2.0 and 4.0. GLM's logits sit around 100 to 130 in bf16, so they are spaced 0.5 apart there and most gaps land on multiples of 0.125 to 0.5; a 0.11 bar is below that resolution for this checkpoint, which is why so many flips exceed it. The decided count is the gate, and it fails.
+Flips above the 0.11-logit near-tie bar, by reference gap: behind 1024, 0.375, 16 at 0.5 and 2.75; behind 4096, 0.125, 0.375, 12 at 0.5 and 1.0. GLM's logits sit around 100 to 130 in bf16, so they are spaced 0.5 apart there; a 0.11 bar is below that resolution for this checkpoint, which is why most flips exceed it. Logit delta on the reference's choice: p50 0.5, p90 4.0, p99 17.0 behind 1024; p50 0.5, p90 2.125, p99 17.0 behind 4096. The `decompressed` counter is the context pass (one per layer per chunk forward); every traced decode step reads the int8 latent absorbed (`absorbed_fused` behind 1024, `absorbed_composed` behind 4096 where the window is past the fused variant's 2048 keys).
 
-The `decompressed` counter is the prefill (one per layer per chunk forward); every traced decode step reads the int8 latent absorbed (`absorbed_fused` behind 1024, `absorbed_composed` behind 4096 where the window is past the fused variant's 2048 keys).
+### Kernel-noise floor on the fixed build (behind 1024)
 
-### Noise floors
+| comparison | top-1 disagree | decided disagree | flips above 0.11 (gaps) | ppl | path counters (reference / candidate) |
+|---|---|---|---|---|---|
+| int8 composed (`MLXCEL_MLA_FUSED_DECODE=0`) against int8 fused | 27 / 512 | **1** (gap 6.5) | 14 (0.125, 11 at 0.5, 1.0, 6.5) | 21.0364 / 20.8288 | composed / fused |
+| fp16 against int8 composed | 43 / 512 | 0 (largest gap 0.5) | 20 (0.375, 19 at 0.5) | 21.4881 / 21.0364 (-2.102%) | composed / composed |
+| fp16 against fp16 with `MLXCEL_MLA_FUSED_DECODE=0` | 0 / 512 | 0 | 0 | identical | composed / composed |
+
+The only two-kernel comparison available is the int8 pair, which reads the same stored rows: it disagrees at one decided position, the same count as fp16 against the shipped (fused) int8 arm. The fp16 latent has no second kernel on this trace (both arms record `absorbed_composed`), so the fp16 row compares a path with itself and is not a noise floor. Stated plainly: the shipped int8 arm's decided count (1) is at, not below, the int8 fused-against-composed decided count (1), and it is above the zero the gate requires.
+
+## First measurement, before the dtype fix
+
+The rows below were taken on the int8 arm with the defect described next; they are superseded by the tables above and kept for the record.
+
+| shape | decided disagree | top-1 disagree | largest gap at a disagreement | flips above 0.11 | ppl reference / candidate | ppl delta | path counter (int8) |
+|---|---|---|---|---|---|---|---|
+| behind 1024 | 2 / 193 | 48 / 512 | 4.000 | 29 | 21.4881 / 19.7229 | -8.215% | decompressed=376 absorbed_fused=24064 |
+| behind 4096 | 2 / 95 | 32 / 256 | 4.000 | 22 | 53.6498 / 46.4779 | -13.368% | decompressed=188 absorbed_composed=12032 |
+
+### Noise floors (before the fix)
 
 Path counters below are the ones each run printed (`# mla_paths` in its stderr). GLM's fp16 latent never reaches the fp16 fused kernel on this trace: the scalar forward has no fused dispatch, and the batched-row run at one row recorded `absorbed_composed` too.
 
@@ -39,16 +56,16 @@ Path counters below are the ones each run printed (`# mla_paths` in its stderr).
 
 There is no fp16 kernel noise floor on this checkpoint: the first three rows compare a path with itself, so their zeros say nothing about how GLM responds to a different kernel. The only two-kernel comparison is the int8 pair, and it reads the same stored rows: at GLM's geometry (20 heads, rank 512, rope 64, bf16 queries, 1088 keys) the fused and composed int8 kernels agree within 2e-3 of the largest output element, one or two bf16 units in the last place (synthetic check run during review). That one-ulp perturbation of the attention output already moves 33 positions, one of them decided at gap 8.75, so on this checkpoint the zero-decided gate sits below the spread from kernel choice alone. Logit deltas on the reference's choice tell the same story: fp16 against int8 is p50 0.5, p90 4.25, p99 14.25 (one bf16 unit at these magnitudes is 0.5), and int8 fused against int8 composed is p50 0.5, p90 1.75, p99 8.0.
 
-### Defect in the measured int8 arm (found in review, not yet re-measured)
+### Defect in the first int8 arm (found in review, fixed in `4feb8419`)
 
 The int8 arm above ran its multi-token steps in f32. `LatentWindow::into_dense` returns the dequantized window in the cache's fp16 sidecar dtype; GLM-4.7-Flash runs in bf16, so the context pass mixed bf16 queries with fp16 keys, MLX promoted the attention to f32, and the promotion carried through `o_proj` into the residual stream. Every later layer of the 1024- and 4096-token context pass, and the latents it stored, were computed in f32 on the int8 arm and in bf16 on the fp16 arm. The int8 prefill-width trace shows it directly: its logits are not on the bf16 grid (logit-delta p50 0.354 where every bf16 comparison is 0.5), and its forward took 76 to 91 ms per chunk against 62 to 76 ms for fp16. Decode steps were unaffected (both quantized kernels return the query dtype), so the `decompressed` counts are the context pass and no decode step dequantized.
 
-The fix casts the dequantized window to the queries' dtype in GLM and LongCat (`mla_batched::dense_latent_window`); fp16 windows are untouched. The numbers in this document predate the fix, so the GLM gate has to be re-measured before it can be read as quantization error. A second asymmetry stays and is not a defect of the int8 path: GLM's fp16 single-sequence decode computes the rope score in bf16 and adds it to the SDPA input as a bf16 mask, while both int8 kernels compute the score in f32. That plausibly accounts for part of the lower int8 perplexity on the decode traces, which the prefill-width trace (-1.4%, now also explained by the f32 promotion) cannot.
+The fix casts the dequantized window to the queries' dtype in GLM and LongCat (`mla_batched::dense_latent_window`); fp16 windows are untouched. The first measurement predates the fix; the gate tables at the top of this document were re-measured on `4feb8419`. The fix moved the decided count from 2 to 1 behind 1024 and from 2 to 0 behind 4096, and the perplexity deltas from -8.2% and -13.4% to -3.1% and -0.4%. A second asymmetry stays and is not a defect of the int8 path: GLM's fp16 single-sequence decode computes the rope score in bf16 and adds it to the SDPA input as a bf16 mask, while both int8 kernels compute the score in f32. That plausibly accounts for part of the lower int8 perplexity on the decode traces, which the prefill-width trace (-1.4%, now also explained by the f32 promotion) cannot.
 
 
 ## GLM-4.7-Flash: decode throughput (`mlxcel-bench-decode`, 128 tokens, 16 warmup, median tok/s)
 
-Measured on the port with `glm4_moe_lite` listed, before it was removed; it is what a later re-enable would start from.
+Measured on the port with `glm4_moe_lite` listed, before the dtype fix and before the family was removed. The fix touches only multi-token steps over a quantized window, so the single-token decode rows here are not affected by it; prefill, which runs on bf16 now instead of f32, was not re-measured.
 
 | prompt | fp16 latent | int8 latent | int8 vs fp16 | fp16 path counter | int8 path counter |
 |---|---|---|---|---|---|

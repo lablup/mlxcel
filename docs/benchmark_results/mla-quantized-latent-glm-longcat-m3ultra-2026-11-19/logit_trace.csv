@@ -1,9 +1,14 @@
-model,model_type,shape,reference_arm,candidate_arm,positions,top1_disagree,decided_positions,decided_disagree,largest_gap_at_disagreement,flips_above_0.11,ppl_reference,ppl_candidate,ppl_delta_pct,candidate_path_counter
-glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,int8,512,48,193,2,4.000,29,21.4881,19.7229,-8.215,decompressed=376 absorbed_fused=24064
-glm-4.7-flash-4bit,glm4_moe_lite,behind 4096,fp16,int8,256,32,95,2,4.000,22,53.6498,46.4779,-13.368,decompressed=188 absorbed_composed=12032
-glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16 (scalar reference),fp16 (batched rows),512,0,193,0,none,0,21.4881,21.4881,0.000,decompressed=376 absorbed_composed=24064
-glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,fp16 MLXCEL_MLA_FUSED_DECODE=0,512,0,193,0,none,0,21.4881,21.4881,0.000,decompressed=376 absorbed_composed=24064
-glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,int8 (scalar reference),int8 (batched rows),512,0,194,0,none,0,19.7229,19.7229,0.000,decompressed=376 absorbed_fused=24064
-glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,int8 composed (MLXCEL_MLA_FUSED_DECODE=0),int8 fused,512,33,194,1,8.750,20,19.5795,19.7229,0.732,decompressed=376 absorbed_fused=24064
-glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,int8 composed (MLXCEL_MLA_FUSED_DECODE=0),512,47,193,3,4.000,27,21.4881,19.5795,-8.882,decompressed=376 absorbed_composed=24064
-glm-4.7-flash-4bit,glm4_moe_lite,1024-token prefill width (no batch rows),fp16,int8,512,29,247,0,0.500,4,15.3259,15.1106,-1.405,prefill only
+build,model,model_type,shape,reference_arm,candidate_arm,positions,top1_disagree,decided_positions,decided_disagree,largest_gap_at_disagreement,flips_above_0.11,ppl_reference,ppl_candidate,ppl_delta_pct,candidate_path_counter
+fixed 4feb8419,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,int8,512,40,193,1,2.750,18,21.4881,20.8288,-3.068,decompressed=376 absorbed_fused=24064
+fixed 4feb8419,glm-4.7-flash-4bit,glm4_moe_lite,behind 4096,fp16,int8,256,25,95,0,1.000,15,53.6498,53.4191,-0.430,decompressed=188 absorbed_composed=12032
+fixed 4feb8419,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,int8 composed (MLXCEL_MLA_FUSED_DECODE=0),int8 fused,512,27,192,1,6.500,14,21.0364,20.8288,-0.987,decompressed=376 absorbed_fused=24064
+fixed 4feb8419,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,int8 composed (MLXCEL_MLA_FUSED_DECODE=0),512,43,193,0,0.500,20,21.4881,21.0364,-2.102,decompressed=376 absorbed_composed=24064
+fixed 4feb8419,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,fp16 MLXCEL_MLA_FUSED_DECODE=0,512,0,193,0,none,0,21.4881,21.4881,0.000,decompressed=376 absorbed_composed=24064
+pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,int8,512,48,193,2,4.000,29,21.4881,19.7229,-8.215,decompressed=376 absorbed_fused=24064
+pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,behind 4096,fp16,int8,256,32,95,2,4.000,22,53.6498,46.4779,-13.368,decompressed=188 absorbed_composed=12032
+pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16 (scalar reference),fp16 (batched rows),512,0,193,0,none,0,21.4881,21.4881,0.000,decompressed=376 absorbed_composed=24064
+pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,fp16 MLXCEL_MLA_FUSED_DECODE=0,512,0,193,0,none,0,21.4881,21.4881,0.000,decompressed=376 absorbed_composed=24064
+pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,int8 (scalar reference),int8 (batched rows),512,0,194,0,none,0,19.7229,19.7229,0.000,decompressed=376 absorbed_fused=24064
+pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,int8 composed (MLXCEL_MLA_FUSED_DECODE=0),int8 fused,512,33,194,1,8.750,20,19.5795,19.7229,0.732,decompressed=376 absorbed_fused=24064
+pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,int8 composed (MLXCEL_MLA_FUSED_DECODE=0),512,47,193,3,4.000,27,21.4881,19.5795,-8.882,decompressed=376 absorbed_composed=24064
+pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,1024-token prefill width (no batch rows),fp16,int8,512,29,247,0,0.500,4,15.3259,15.1106,-1.405,prefill only
