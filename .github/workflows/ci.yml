@@ -570,6 +570,35 @@ jobs:
       - name: Check the dtype-key checker rejects a shrunk or moved scope
         run: bash scripts/ci/check_kernel_dtype_keys_test.sh
 
+  used-by:
+    name: used-by annotations
+    # Deliberately not behind the `changes` filter, like `crate-versions` and
+    # `kernel-dtype-keys`: it needs no toolchain and runs in seconds, and it has
+    # to fire on both halves of a break. A model PR that adds a call to a shared
+    # helper breaks it, and so does a comment-only edit to an annotation, so the
+    # only path filter that would not miss one of them is every Rust file.
+    # The `Used by:` annotations on the top-level `pub fn`s of
+    # mlxcel-core's utils.rs and layers.rs record which models call a shared
+    # helper, and a wrong one reads as an answer: issue #1110 was filed against
+    # a `create_causal_mask` roster naming six families that had stopped
+    # calling it. The check resolves the real callers through `use`
+    # declarations and fails when a function with more than a dozen caller
+    # files leaves one unaccounted for, by name or through the regenerating
+    # grep the annotation carries (issue #1141). The second step is the
+    # checker's own negative coverage on a synthetic workspace, the pre-#1121
+    # roster included.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check the Used by annotations account for every caller
+        run: python3 scripts/ci/check_used_by.py
+      - name: Check the used-by checker rejects a stale or absent annotation
+        run: bash scripts/ci/check_used_by_test.sh
+
   env-var-docs:
     name: env var docs
     # Deliberately not behind the `changes` filter, like `crate-versions` and
