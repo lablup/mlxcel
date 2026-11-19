@@ -531,3 +531,35 @@ fn deepseek_v2_under_a_turbo_mode_is_advised_by_its_resolved_layout() {
     };
     assert_eq!(fp16_kind, expected);
 }
+
+/// DeepSeek-VL2 nests the same decoder under `language_config` with no
+/// `model_type`, so it is advised exactly as `deepseek_v2` for every mode.
+#[test]
+fn deepseek_vl2_is_advised_as_its_deepseek_v2_decoder() {
+    let v2 = deepseek_v2_lite_config();
+    let mut language = v2.clone();
+    language
+        .as_object_mut()
+        .expect("object")
+        .remove("model_type");
+    let vl2 = serde_json::json!({ "model_type": "deepseek_vl_v2", "language_config": language });
+    for mode in [
+        KVCacheMode::Fp16,
+        KVCacheMode::Int8,
+        KVCacheMode::Turbo4Asym,
+    ] {
+        let (vl2_kind, vl2_mt) = arch_and_type_from_config(&vl2, mode).unwrap();
+        let (v2_kind, _) = arch_and_type_from_config(&v2, mode).unwrap();
+        assert_eq!(vl2_mt, "deepseek_v2", "{mode}");
+        assert_eq!(vl2_kind, v2_kind, "{mode}");
+        let vl2_advice: Vec<_> = advise_kv_cache_modes_from_config(&vl2, mode)
+            .into_iter()
+            .map(|a| a.suggested)
+            .collect();
+        let v2_advice: Vec<_> = advise_kv_cache_modes_from_config(&v2, mode)
+            .into_iter()
+            .map(|a| a.suggested)
+            .collect();
+        assert_eq!(vl2_advice, v2_advice, "{mode}");
+    }
+}

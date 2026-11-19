@@ -239,7 +239,7 @@ An absorbed MLA cache does not hold per-head K/V rows. It holds the shared laten
 
 ### DeepSeek V2: fp16 or an affine int8 latent
 
-`deepseek_v2` (and the `deepseek_v2` decoder inside DeepSeek-VL2) reads its cache through `mla::MlaLatentCache`. Under absorbed decode, which is the default on Metal, CUDA and ROCm, that cache holds:
+`deepseek_v2` (and the `deepseek_v2` decoder inside DeepSeek-VL2) reads its cache through `mla::MlaLatentCache`. DeepSeek-VL2 keeps that decoder under `language_config`, so the mode resolver, the memory estimate and the advisor read it as `deepseek_v2` and every rule in this section applies to it unchanged. Under absorbed decode, which is the default on Metal, CUDA and ROCm, that cache holds:
 
 | Mode | Latent `ckv` | `k_pe` | Bytes per token per layer (V2-Lite) |
 |------|--------------|--------|-------------------------------------|

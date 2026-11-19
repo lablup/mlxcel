@@ -518,15 +518,32 @@ pub fn model_stores_quantized_latent(mode: KVCacheMode, model_path: &Path) -> bo
             .is_some_and(|model_type| mlxcel_core::mla::stores_latent_through_view(&model_type))
 }
 
-/// Read the raw `model_type` string from a model directory's `config.json`.
+/// Read the `model_type` the KV cache mode rules key on from a model
+/// directory's `config.json`.
 ///
 /// Deliberately the raw string rather than `models::detection::get_model_type`:
 /// the allowlist and the latent-family list are both keyed on the `config.json`
 /// value, and detection maps several distinct `model_type` values onto one
 /// enum variant.
+///
+/// The top-level value, except when the decoder
+/// (`execution::config_fields::kv_decoder_model_type`) stores its latent
+/// through `mla::MlaLatentCache`: that decision is made by the decoder at
+/// runtime, so a wrapper around it (DeepSeek-VL2 around `deepseek_v2`) is
+/// resolved as the decoder (issue #3155).
 fn read_config_model_type(model_path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(model_path.join("config.json")).ok()?;
     let config = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    kv_rules_model_type(&config)
+}
+
+/// [`read_config_model_type`] on a parsed config.
+pub(crate) fn kv_rules_model_type(config: &serde_json::Value) -> Option<String> {
+    if let Some(decoder) = crate::execution::config_fields::kv_decoder_model_type(config)
+        && mlxcel_core::mla::stores_latent_through_view(&decoder)
+    {
+        return Some(decoder);
+    }
     config
         .get("model_type")
         .and_then(serde_json::Value::as_str)

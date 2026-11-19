@@ -348,14 +348,28 @@ fn no_kv_cache_diagnostic_carries_collapsed_indentation() {
 
 // ── Quantized MLA latent (issue #3155) ──────────────────────────────────────
 
+/// A DeepSeek-VL2 checkpoint as shipped: the decoder under `language_config`
+/// with no `model_type` of its own.
+fn deepseek_vl2_model_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type": "deepseek_vl_v2", "language_config": {"kv_lora_rank": 512, "qk_rope_head_dim": 64, "num_attention_heads": 16, "num_hidden_layers": 4}}"#,
+    )
+    .expect("write config.json");
+    dir
+}
+
 /// `int8` on DeepSeek V2 is kept in both absorption states: it stores the
 /// affine latent under absorbed decode and per-head rows without it. The
-/// DeepSeek-VL2 wrapper runs the same decoder.
+/// DeepSeek-VL2 wrapper runs the same decoder and is resolved as it.
 #[test]
 fn int8_is_kept_on_deepseek_v2_and_stores_the_latent_when_absorbed() {
     let absorbed = mlxcel_core::mla::absorbed_enabled();
-    for family in ["deepseek_v2", "deepseek_vl_v2"] {
-        let dir = model_dir_with_type(family);
+    for (family, dir) in [
+        ("deepseek_v2", model_dir_with_type("deepseek_v2")),
+        ("deepseek_vl_v2", deepseek_vl2_model_dir()),
+    ] {
         let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
         assert_eq!(mode, KVCacheMode::Int8, "{family}");
         assert!(warning.is_none(), "{family}: {warning:?}");
@@ -368,6 +382,32 @@ fn int8_is_kept_on_deepseek_v2_and_stores_the_latent_when_absorbed() {
             KVCacheMode::Fp16,
             dir.path()
         ));
+    }
+}
+
+/// A Turbo request on DeepSeek-VL2 follows the `deepseek_v2` rule: under
+/// absorbed decode it would push the decoder onto the decompressed cache, so
+/// it resolves to the fp16 latent, and without absorption it is kept.
+#[test]
+fn turbo_on_deepseek_vl2_follows_its_deepseek_v2_decoder() {
+    let absorbed = mlxcel_core::mla::absorbed_enabled();
+    let vl2 = deepseek_vl2_model_dir();
+    let v2 = model_dir_with_type("deepseek_v2");
+    for requested in [KVCacheMode::Turbo4Asym, KVCacheMode::Turbo3Asym] {
+        let (vl2_mode, vl2_warning) = resolve_effective_kv_cache_mode(requested, vl2.path());
+        let (v2_mode, _) = resolve_effective_kv_cache_mode(requested, v2.path());
+        assert_eq!(vl2_mode, v2_mode, "{requested}");
+        let expected = if absorbed {
+            KVCacheMode::Fp16
+        } else {
+            requested
+        };
+        assert_eq!(vl2_mode, expected, "{requested}");
+        assert_eq!(
+            vl2_warning.is_some(),
+            absorbed,
+            "{requested}: {vl2_warning:?}"
+        );
     }
 }
 

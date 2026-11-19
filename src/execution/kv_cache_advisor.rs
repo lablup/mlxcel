@@ -366,13 +366,11 @@ fn arch_and_type_from_config(
 }
 
 /// Read the canonical lowercase `model_type` string, matching the allowlist's
-/// lookup contract. VLMs may nest it under `text_config`.
+/// lookup contract. VLMs may nest it under `text_config`; DeepSeek-VL2 is
+/// read as its `deepseek_v2` decoder, the same type `kv_arch` sizes it as.
 fn read_model_type(config: &serde_json::Value) -> String {
-    let text = config.get("text_config").unwrap_or(config);
-    text.get("model_type")
-        .and_then(|v| v.as_str())
-        .or_else(|| config.get("model_type").and_then(|v| v.as_str()))
-        .unwrap_or("")
+    config_fields::kv_decoder_model_type(config)
+        .unwrap_or_default()
         .to_ascii_lowercase()
 }
 

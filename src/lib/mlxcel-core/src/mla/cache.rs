@@ -184,20 +184,20 @@ pub fn caches_mla_latent_pair(model_type: &str) -> bool {
         .any(|&family| needle == family)
 }
 
-/// Whether `model_type` names a family whose decoder stores its latent through
-/// [`MlaLatentCache`], and can therefore hold an affine-quantized latent.
+/// Whether the decoder `model_type` names a family that stores its latent
+/// through [`MlaLatentCache`], and can therefore hold an affine-quantized
+/// latent.
 ///
-/// `deepseek_v2`, and the DeepSeek-VL2 wrappers whose text decoder is the same
-/// model. Exact match, for the reason [`caches_mla_latent_pair`] gives.
+/// `deepseek_v2` only. A wrapper whose decoder is that model (DeepSeek-VL2) is
+/// resolved to its decoder type by the caller
+/// (`mlxcel::execution::config_fields::kv_decoder_model_type`), not listed
+/// here. Exact match, for the reason [`caches_mla_latent_pair`] gives.
 ///
-/// Used by: `mlxcel::cli::turbo_args::model_stores_quantized_latent` (the
-/// `--kv-group-size` check and the `generate` banner).
+/// Used by: `mlxcel::cli::turbo_args` (mode resolution, the `--kv-group-size`
+/// check and the `generate` banner).
 #[must_use]
 pub fn stores_latent_through_view(model_type: &str) -> bool {
-    matches!(
-        model_type.trim().to_ascii_lowercase().as_str(),
-        "deepseek_v2" | "deepseek_vl_v2" | "deepseek_vl2"
-    )
+    model_type.trim().eq_ignore_ascii_case("deepseek_v2")
 }
 
 /// The rule: an MLA latent cache holds FP16, or the latent affine-quantized

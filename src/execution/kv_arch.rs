@@ -445,29 +445,30 @@ fn classify(
     if let Some(kv_lora_rank) = get_u64(text, &["kv_lora_rank"]) {
         let num_heads = get_u64(text, NUM_HEADS_KEYS).unwrap_or(1).max(1);
         let rope = get_u64(text, &["qk_rope_head_dim"]).unwrap_or(64);
+        // DeepSeek V2 under `int8` stores the latent as an affine group-64
+        // triple and `k_pe` as FP16 (issue #3155). A rank that is not a whole
+        // number of groups is declined by `MlaLatentCache::supports`, and the
+        // run then keeps decompressed per-head K/V, so it is sized that way.
+        let group = mlxcel_core::cache::latent_quant::LATENT_QUANT_GROUP_SIZE as u64;
+        let rank_quantizable = kv_lora_rank > 0 && kv_lora_rank.is_multiple_of(group);
+        let v2_caches_latent =
+            mt == "deepseek_v2" && v2_latent && (v2_latent_bits.is_none() || rank_quantizable);
         if mt.contains("v3")
             || mt.contains("v32")
             || mlxcel_core::mla::caches_mla_latent_pair(&mt)
-            || (mt == "deepseek_v2" && v2_latent)
+            || v2_caches_latent
         {
-            // Cached form: (kv_latent[kv_lora_rank] , k_pe[qk_rope_head_dim]).
+            // Cached form: (kv_latent[kv_lora_rank] , k_pe[qk_rope_head_dim]),
+            // which the quantized latent does not store at one element width.
             let elems = kv_lora_rank.saturating_add(rope);
-            // DeepSeek V2 under `int8` stores the latent as an affine
-            // group-64 triple and `k_pe` as FP16 (issue #3155), which
-            // is not `elems` elements of one width.
-            let group = mlxcel_core::cache::latent_quant::LATENT_QUANT_GROUP_SIZE as u64;
-            let fixed_bytes_per_token = v2_latent_bits
-                .filter(|_| {
-                    mt == "deepseek_v2" && kv_lora_rank > 0 && kv_lora_rank.is_multiple_of(group)
-                })
-                .map(|bits| {
-                    mlxcel_core::mla::quantized_latent_bytes_per_token(
-                        kv_lora_rank as usize,
-                        rope as usize,
-                        bits as usize,
-                        group as usize,
-                    ) as u64
-                });
+            let fixed_bytes_per_token = v2_latent_bits.filter(|_| v2_caches_latent).map(|bits| {
+                mlxcel_core::mla::quantized_latent_bytes_per_token(
+                    kv_lora_rank as usize,
+                    rope as usize,
+                    bits as usize,
+                    group as usize,
+                ) as u64
+            });
             return Some((
                 vec![KvGroup {
                     layers: num_layers,
@@ -783,15 +784,15 @@ fn estimate_kv_arch_inner(
     apply_windows: bool,
     v2_latent: bool,
 ) -> Option<KvArchEstimate> {
-    // VLMs nest the decoder under `text_config`; `model_type` may live at the
-    // top level (the VLM type) or inside `text_config` (the decoder type).
-    let text = config.get("text_config").unwrap_or(config);
-    let model_type = get_str(text, "model_type")
-        .or_else(|| get_str(config, "model_type"))
-        .unwrap_or("");
+    // VLMs nest the decoder under `text_config` (DeepSeek-VL2: under
+    // `language_config`); `model_type` may live at the top level (the VLM
+    // type) or inside the decoder section (the decoder type).
+    let text = crate::execution::config_fields::kv_decoder_config(config);
+    let model_type = crate::execution::config_fields::kv_decoder_model_type(config);
+    let model_type = model_type.as_deref().unwrap_or("");
 
     let v2_latent_bits = sizing.mode.latent_affine_bits().map(|bits| bits as u64);
-    let (mut groups, kind) = classify(text, model_type, v2_latent, v2_latent_bits)?;
+    let (mut groups, kind) = classify(&text, model_type, v2_latent, v2_latent_bits)?;
     // The detail line describes the architecture, so it keeps the windows even
     // when the byte figure below ignores them.
     let detail = detail_line(&groups, kind);
@@ -1159,14 +1160,42 @@ mod tests {
     }
 
     #[test]
-    fn a_rank_that_is_not_whole_groups_keeps_the_element_rate() {
+    fn a_rank_that_is_not_whole_groups_sizes_decompressed_int8() {
         // The runtime declines the quantized latent for such a rank
-        // (`MlaLatentCache::supports`) and `kv_arch` does not claim the
-        // affine rate for it.
+        // (`MlaLatentCache::supports`) and stores per-head INT8 K/V, so
+        // `kv_arch` sizes that layout rather than the latent.
         let mut cfg = deepseek_v2_lite_cfg();
         cfg["kv_lora_rank"] = json!(96);
         let e = est_v2(&cfg, 2048, KVCacheMode::Int8, true);
+        assert_eq!(e.kind, KvArchKind::MlaDecompressed, "{}", e.detail);
         assert!(!e.detail.contains("affine-quantized"), "{}", e.detail);
+        assert_eq!(e.marginal_bytes_per_token, 4 * 16 * (128 + 64 + 128));
+        // FP16 still caches the fp16 latent at that rank.
+        let fp16 = est_v2(&cfg, 2048, KVCacheMode::Fp16, true);
+        assert_eq!(fp16.kind, KvArchKind::MlaCompressed);
+    }
+
+    /// DeepSeek-VL2 wraps a DeepSeek V2 decoder under `language_config`, which
+    /// omits `model_type`. It is sized as that decoder, so it takes the same
+    /// latent, quantized-latent and decompressed rates as `deepseek_v2`.
+    #[test]
+    fn deepseek_vl2_is_sized_as_its_deepseek_v2_decoder() {
+        let mut language = deepseek_v2_lite_cfg();
+        language
+            .as_object_mut()
+            .expect("object")
+            .remove("model_type");
+        let cfg = json!({ "model_type": "deepseek_vl_v2", "language_config": language });
+        let fp16 = est_v2(&cfg, 2048, KVCacheMode::Fp16, true);
+        assert_eq!(fp16.kind, KvArchKind::MlaCompressed);
+        assert_eq!(fp16.marginal_bytes_per_token, 4 * 1152);
+        let int8 = est_v2(&cfg, 2048, KVCacheMode::Int8, true);
+        assert_eq!(int8.kind, KvArchKind::MlaCompressed);
+        assert_eq!(int8.marginal_bytes_per_token, 4 * 672);
+        let turbo = est_v2(&cfg, 2048, KVCacheMode::Turbo4Asym, true);
+        assert_eq!(turbo.kind, KvArchKind::MlaDecompressed);
+        let int8_off = est_v2(&cfg, 2048, KVCacheMode::Int8, false);
+        assert_eq!(int8_off.kind, KvArchKind::MlaDecompressed);
     }
 
     #[test]

@@ -66,8 +66,9 @@
 use clap::Parser;
 use mlxcel_core::cache::KVCache;
 use mlxcel_core::mla::{
-    MlaAbsorbedProjections, MlaGeometry, MlaLatentCache, MlaSplitPlan, absorbed_decode,
-    absorbed_decode_split_kv, decompressed_bytes_per_token, latent_bytes_per_token, stats,
+    LatentWindow, MlaAbsorbedProjections, MlaGeometry, MlaLatentCache, MlaSplitPlan,
+    absorbed_decode, absorbed_decode_split_kv, decompressed_bytes_per_token,
+    latent_bytes_per_token, stats,
 };
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -322,14 +323,20 @@ fn run_arm(
             }
             Arm::Absorbed { proj } => {
                 let mut view = MlaLatentCache::wrap(cache, geometry).expect("fp16 non-paged cache");
-                let (ckv, kpe) = view
-                    .update_and_fetch(mlxcel_core::copy(&new_latent), mlxcel_core::copy(&new_kpe));
+                let (ckv, kpe) =
+                    dense_window(view.update_and_fetch(
+                        mlxcel_core::copy(&new_latent),
+                        mlxcel_core::copy(&new_kpe),
+                    ));
                 absorbed_decode(&q_nope, &q_pe, &ckv, &kpe, proj, scale, None)
             }
             Arm::SplitKv { proj } => {
                 let mut view = MlaLatentCache::wrap(cache, geometry).expect("fp16 non-paged cache");
-                let (ckv, kpe) = view
-                    .update_and_fetch(mlxcel_core::copy(&new_latent), mlxcel_core::copy(&new_kpe));
+                let (ckv, kpe) =
+                    dense_window(view.update_and_fetch(
+                        mlxcel_core::copy(&new_latent),
+                        mlxcel_core::copy(&new_kpe),
+                    ));
                 let kv_len = view.seq_len();
                 let plan = MlaSplitPlan::heuristic(
                     batch as usize,
@@ -383,6 +390,19 @@ fn run_arm(
             args.steps,
             counts.summary()
         );
+    }
+}
+
+/// The FP16 latent window this bench builds its caches for.
+///
+/// Every arm wraps an FP16 cache, so a quantized window means the cache was
+/// built in the wrong mode and the measurement would not be what it claims.
+fn dense_window(window: LatentWindow) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    match window {
+        LatentWindow::Dense { ckv, kpe } => (ckv, kpe),
+        LatentWindow::Quantized { bits, .. } => {
+            panic!("mla_absorbed_decode_bench expects an fp16 latent cache, got a {bits}-bit one")
+        }
     }
 }
 
