@@ -26,9 +26,14 @@
 //!   windowed.
 //! - **MLA / compressed KV** (DeepSeek): V3/V3.2 cache a low-rank latent
 //!   (`kv_lora_rank + qk_rope_head_dim`) shared across heads — far smaller than
-//!   the per-head formula (*overcount*). V2 caches the *decompressed* K/V
-//!   (`num_heads × (qk_nope + qk_rope + v_head_dim)`), which can be *larger*
-//!   than `2 × num_kv_heads × head_dim` (*undercount* — dangerous for a budget).
+//!   the per-head formula (*overcount*). So do the other families that always
+//!   cache the latent pair (`mla::caches_mla_latent_pair`). V2 follows the
+//!   runtime: it caches the latent where absorbed decode is selected
+//!   (`mla::absorbed_enabled`, the default on Metal since #3131 and on CUDA
+//!   and ROCm since #3133) and the KV cache is FP16, and the *decompressed* K/V
+//!   (`num_heads × (qk_nope + qk_rope + v_head_dim)`) otherwise, which can be
+//!   *larger* than `2 × num_kv_heads × head_dim` (*undercount*, dangerous for a
+//!   budget).
 //! - **Hybrid attention+SSM** (Jamba, NemotronH, RecurrentGemma, Qwen3-Next):
 //!   only the attention layers hold a context-proportional KV cache; the
 //!   recurrent/Mamba layers carry an O(1) state, negligible for budgeting. The
@@ -44,6 +49,7 @@
 
 use std::path::Path;
 
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::hardware::KV_CACHE_ALLOC_STEP;
 use serde_json::Value;
 
@@ -59,9 +65,11 @@ pub enum KvArchKind {
     Standard,
     /// Some or all attention layers bound their KV to a sliding window.
     SlidingWindow,
-    /// DeepSeek V3/V3.2 — KV cached as a compressed low-rank latent.
+    /// KV cached as a compressed low-rank latent: DeepSeek V3/V3.2, the
+    /// latent-pair families, and DeepSeek V2 where it absorbs
+    /// ([`deepseek_v2_caches_latent`]).
     MlaCompressed,
-    /// DeepSeek V2 — KV cached decompressed (per-head).
+    /// DeepSeek V2 where it does not absorb: KV cached decompressed (per-head).
     MlaDecompressed,
     /// Attention + recurrent/SSM layers; only attention layers hold KV.
     Hybrid,
@@ -92,6 +100,38 @@ struct KvGroup {
     elems_per_token: u64,
     /// Sliding-window cap in tokens; `None` for full-context layers.
     window: Option<u64>,
+}
+
+/// How the KV cache is sized: the cache mode plus whether one layer stays FP16.
+///
+/// `--kv-bits 8` with `--kv-skip-last-layer` (the default) builds the last
+/// layer at FP16 and the rest INT8 (`BatchKvQuantConfig::resolve_layer_modes`),
+/// which a bare [`KVCacheMode`] cannot express. Every estimator takes
+/// `impl Into<KvSizing>`, so a caller that has only a mode passes it unchanged
+/// (#3153).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvSizing {
+    /// The mode the layers are built in.
+    pub mode: KVCacheMode,
+    /// True when the last layer stays FP16 while the others use `mode`.
+    pub fp16_last_layer: bool,
+}
+
+impl KvSizing {
+    /// Every layer in `mode`.
+    #[must_use]
+    pub const fn uniform(mode: KVCacheMode) -> Self {
+        Self {
+            mode,
+            fp16_last_layer: false,
+        }
+    }
+}
+
+impl From<KVCacheMode> for KvSizing {
+    fn from(mode: KVCacheMode) -> Self {
+        Self::uniform(mode)
+    }
 }
 
 /// Architecture-aware KV estimate produced by [`estimate_kv_arch`].
@@ -329,8 +369,37 @@ fn nemotron_h_block_codes(text: &Value, mt: &str) -> Option<Vec<&'static str>> {
         .collect()
 }
 
+/// Whether DeepSeek V2 caches the `(kv_latent, k_pe)` latent rather than the
+/// decompressed per-head K/V, given whether absorbed decode is selected and
+/// the KV cache mode the run builds.
+///
+/// Mirrors the runtime: the loader folds `kv_b_proj` exactly when
+/// `mla::absorbed_enabled()` holds, and each cache is then wrapped as a latent
+/// cache only if `MlaLatentCache::supports` accepts it. That check declines
+/// every mode `mla::latent_layout_supports_mode` refuses (today all but FP16:
+/// INT8 and every Turbo mode), and the model then keeps decompressed per-head
+/// K/V. Calling the shared rule rather than comparing to FP16 keeps the
+/// estimate in step when a mode is added. The other decline, a paged-backed
+/// cache, cannot reach `deepseek_v2`: the family does not opt into the paged
+/// decode backend.
+#[must_use]
+pub fn deepseek_v2_latent_layout(absorbed: bool, mode: KVCacheMode) -> bool {
+    absorbed && mlxcel_core::mla::latent_layout_supports_mode(mode).is_ok()
+}
+
+/// [`deepseek_v2_latent_layout`] for this process: absorbed decode as the
+/// loader resolves it (`MLXCEL_MLA_ABSORBED` and the fused kernel's
+/// availability, read once).
+#[must_use]
+pub fn deepseek_v2_caches_latent(mode: KVCacheMode) -> bool {
+    deepseek_v2_latent_layout(mlxcel_core::mla::absorbed_enabled(), mode)
+}
+
 /// Classify a model's config into KV layer groups and an architecture kind.
-fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)> {
+///
+/// `v2_latent` says whether DeepSeek V2 caches the latent in this run
+/// ([`deepseek_v2_caches_latent`]); no other family reads it.
+fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGroup>, KvArchKind)> {
     let mt = model_type.to_ascii_lowercase();
     // A transformers-saved Nemotron-H config describes its stack only through
     // the block-name array, with no layer count: the model takes the count
@@ -350,12 +419,17 @@ fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)
 
     // 2. MLA / compressed KV (DeepSeek). `kv_lora_rank` is the tell. MLA sizes
     //    its cache from explicit latent/rope/v dims, so it needs the head count
-    //    but NOT `head_dim` (a config may omit it). V3/V3.2 cache the compressed
-    //    latent + rope (shared across heads); V2 caches decompressed per-head.
+    //    but NOT `head_dim` (a config may omit it). V3/V3.2 and the latent-pair
+    //    families cache the compressed latent + rope (shared across heads); V2
+    //    does too when it absorbs, and caches decompressed per-head otherwise.
     if let Some(kv_lora_rank) = get_u64(text, &["kv_lora_rank"]) {
         let num_heads = get_u64(text, NUM_HEADS_KEYS).unwrap_or(1).max(1);
         let rope = get_u64(text, &["qk_rope_head_dim"]).unwrap_or(64);
-        if mt.contains("v3") || mt.contains("v32") {
+        if mt.contains("v3")
+            || mt.contains("v32")
+            || mlxcel_core::mla::caches_mla_latent_pair(&mt)
+            || (mt == "deepseek_v2" && v2_latent)
+        {
             // Cached form: (kv_latent[kv_lora_rank] , k_pe[qk_rope_head_dim]).
             let elems = kv_lora_rank.saturating_add(rope);
             return Some((
@@ -512,6 +586,30 @@ fn sum_groups(groups: &[KvGroup], ctx: u64, int8: bool, batch: u64) -> (u64, u64
     (total, marginal)
 }
 
+/// Extra bytes one FP16 layer costs over an INT8 one, taking the widest layer
+/// of the stack: `(at ctx_len, per additional token)`.
+fn fp16_last_layer_extra(groups: &[KvGroup], ctx: u64, batch: u64) -> (u64, u64) {
+    let rounded_ctx = round_ctx(ctx);
+    let widen = elem_bytes(false).saturating_sub(elem_bytes(true));
+    let mut total = 0u64;
+    let mut marginal = 0u64;
+    for g in groups.iter().filter(|g| g.layers > 0) {
+        let effective = match g.window {
+            Some(w) => rounded_ctx.min(round_ctx(w)),
+            None => rounded_ctx,
+        };
+        let per_token = g
+            .elems_per_token
+            .saturating_mul(widen)
+            .saturating_mul(batch);
+        total = total.max(per_token.saturating_mul(effective));
+        if g.window.is_none() {
+            marginal = marginal.max(per_token);
+        }
+    }
+    (total, marginal)
+}
+
 /// Build the human-readable architecture detail line.
 fn detail_line(groups: &[KvGroup], kind: KvArchKind) -> String {
     match kind {
@@ -554,7 +652,7 @@ fn detail_line(groups: &[KvGroup], kind: KvArchKind) -> String {
 }
 
 /// Architecture-aware KV-cache estimate for `model_dir` at the given
-/// context / dtype / batch. Returns `None` only when `config.json` is missing
+/// context / KV cache mode / batch. Returns `None` only when `config.json` is missing
 /// the basic architecture fields (the caller then reports KV as unavailable).
 ///
 /// Pure: reads `model_dir/config.json` only; no MLX state is touched.
@@ -562,7 +660,7 @@ fn detail_line(groups: &[KvGroup], kind: KvArchKind) -> String {
 pub fn estimate_kv_arch(
     model_dir: &Path,
     ctx_len: u64,
-    int8_kv: bool,
+    kv_mode: impl Into<KvSizing>,
     batch: u64,
 ) -> Option<KvArchEstimate> {
     let config_str = std::fs::read_to_string(model_dir.join("config.json")).ok()?;
@@ -573,7 +671,7 @@ pub fn estimate_kv_arch(
     // way (#2445).
     let config_str = crate::models::sanitize_config_json(&config_str);
     let config: Value = serde_json::from_str(&config_str).ok()?;
-    estimate_kv_arch_from_config(&config, ctx_len, int8_kv, batch)
+    estimate_kv_arch_from_config(&config, ctx_len, kv_mode.into(), batch)
 }
 
 /// [`estimate_kv_arch`] against an already-parsed config value. Split out for
@@ -582,10 +680,18 @@ pub fn estimate_kv_arch(
 pub fn estimate_kv_arch_from_config(
     config: &Value,
     ctx_len: u64,
-    int8_kv: bool,
+    kv_mode: impl Into<KvSizing>,
     batch: u64,
 ) -> Option<KvArchEstimate> {
-    estimate_kv_arch_inner(config, ctx_len, int8_kv, batch, true)
+    let kv_mode = kv_mode.into();
+    estimate_kv_arch_inner(
+        config,
+        ctx_len,
+        kv_mode,
+        batch,
+        true,
+        deepseek_v2_caches_latent(kv_mode.mode),
+    )
 }
 
 /// [`estimate_kv_arch_from_config`] with every sliding-window cap lifted, so
@@ -601,18 +707,27 @@ pub fn estimate_kv_arch_from_config(
 pub fn estimate_kv_arch_unwindowed_from_config(
     config: &Value,
     ctx_len: u64,
-    int8_kv: bool,
+    kv_mode: impl Into<KvSizing>,
     batch: u64,
 ) -> Option<KvArchEstimate> {
-    estimate_kv_arch_inner(config, ctx_len, int8_kv, batch, false)
+    let kv_mode = kv_mode.into();
+    estimate_kv_arch_inner(
+        config,
+        ctx_len,
+        kv_mode,
+        batch,
+        false,
+        deepseek_v2_caches_latent(kv_mode.mode),
+    )
 }
 
 fn estimate_kv_arch_inner(
     config: &Value,
     ctx_len: u64,
-    int8_kv: bool,
+    sizing: KvSizing,
     batch: u64,
     apply_windows: bool,
+    v2_latent: bool,
 ) -> Option<KvArchEstimate> {
     // VLMs nest the decoder under `text_config`; `model_type` may live at the
     // top level (the VLM type) or inside `text_config` (the decoder type).
@@ -621,7 +736,7 @@ fn estimate_kv_arch_inner(
         .or_else(|| get_str(config, "model_type"))
         .unwrap_or("");
 
-    let (mut groups, kind) = classify(text, model_type)?;
+    let (mut groups, kind) = classify(text, model_type, v2_latent)?;
     // The detail line describes the architecture, so it keeps the windows even
     // when the byte figure below ignores them.
     let detail = detail_line(&groups, kind);
@@ -630,7 +745,19 @@ fn estimate_kv_arch_inner(
             group.window = None;
         }
     }
-    let (total_bytes, marginal_bytes_per_token) = sum_groups(&groups, ctx_len, int8_kv, batch);
+    // Only INT8 narrows the element; the Turbo modes keep the FP16 width here,
+    // which overestimates their packed V side (the safe direction).
+    let int8 = sizing.mode == KVCacheMode::Int8;
+    let (mut total_bytes, mut marginal_bytes_per_token) = sum_groups(&groups, ctx_len, int8, batch);
+    if int8 && sizing.fp16_last_layer {
+        // The last layer stays FP16 (`--kv-skip-last-layer`), one byte wider
+        // per element. The stack's order is not kept here, so charge the
+        // widest layer: exact for a uniform stack, and for a sliding/hybrid
+        // one it rounds up (the last layer may be a narrower or non-KV one).
+        let (total_extra, marginal_extra) = fp16_last_layer_extra(&groups, ctx_len, batch);
+        total_bytes = total_bytes.saturating_add(total_extra);
+        marginal_bytes_per_token = marginal_bytes_per_token.saturating_add(marginal_extra);
+    }
     Some(KvArchEstimate {
         total_bytes,
         marginal_bytes_per_token,
@@ -647,7 +774,7 @@ mod tests {
     const FP16: u64 = 2;
 
     fn est(cfg: &Value, ctx: u64) -> KvArchEstimate {
-        estimate_kv_arch_from_config(cfg, ctx, false, 1).expect("estimate")
+        estimate_kv_arch_from_config(cfg, ctx, KVCacheMode::Fp16, 1).expect("estimate")
     }
 
     #[test]
@@ -714,7 +841,8 @@ mod tests {
             "num_hidden_layers": 34,
             "sliding_window": 1024,
         });
-        let e = estimate_kv_arch_unwindowed_from_config(&cfg, 8192, false, 1).expect("estimate");
+        let e = estimate_kv_arch_unwindowed_from_config(&cfg, 8192, KVCacheMode::Fp16, 1)
+            .expect("estimate");
         // HF Gemma3TextConfig defaults: num_attention_heads=8,
         // num_key_value_heads=4, head_dim=256. Snapshot sizing strips the
         // sliding window (#1978), so every one of the 34 layers contributes
@@ -733,7 +861,8 @@ mod tests {
             "num_attention_heads": 16,
             "sliding_window": 1024,
         });
-        let e = estimate_kv_arch_unwindowed_from_config(&cfg, 8192, false, 1).expect("estimate");
+        let e = estimate_kv_arch_unwindowed_from_config(&cfg, 8192, KVCacheMode::Fp16, 1)
+            .expect("estimate");
         // num_attention_heads=16 is explicit and is kept; num_key_value_heads
         // is still absent so it takes the Gemma 3 default (4), independently
         // of num_attention_heads, and head_dim falls back to the Gemma 3
@@ -818,7 +947,8 @@ mod tests {
     #[test]
     fn unwindowed_estimate_sizes_every_layer_at_the_full_context() {
         let cfg = gemma4_31b_text();
-        let e = estimate_kv_arch_unwindowed_from_config(&cfg, 3328, false, 1).expect("estimate");
+        let e = estimate_kv_arch_unwindowed_from_config(&cfg, 3328, KVCacheMode::Fp16, 1)
+            .expect("estimate");
         // Per token: 50 x 16 x 256 x 2 + 10 x 4 x 512 x 2 elements, bf16.
         let per_token = (50 * 2 * 16 * 256 + 10 * 2 * 4 * 512) * FP16;
         assert_eq!(per_token, 901_120);
@@ -851,9 +981,42 @@ mod tests {
         assert!(e.total_bytes < naive / 10);
     }
 
+    /// A vendor Youtu-LLM export labels itself `youtu`, which neither contains
+    /// `v3` nor used to be a latent-pair family, so it was sized as decompressed
+    /// per-head K/V. `DeepSeekV3Attention` caches the latent pair (#3159).
     #[test]
-    fn mla_v2_uses_decompressed_per_head() {
-        let cfg = json!({
+    fn youtu_family_sizes_the_latent_pair() {
+        for (top, text_mt) in [
+            ("youtu", None),
+            ("youtu_llm", None),
+            ("youtu_vl", None),
+            ("youtu_vl", Some("youtu_vl")),
+            ("kimi_vl", None),
+            ("kimi_k25", None),
+        ] {
+            let mut cfg = json!({
+                "model_type": top,
+                "num_hidden_layers": 4,
+                "num_attention_heads": 16,
+                "kv_lora_rank": 512,
+                "qk_rope_head_dim": 64,
+                "qk_nope_head_dim": 128,
+                "v_head_dim": 128,
+            });
+            if let Some(mt) = text_mt {
+                // Upstream's youtu_vl `TextConfig` defaults to `youtu_vl`.
+                let inner = cfg.clone();
+                cfg = json!({"model_type": top, "text_config": inner});
+                cfg["text_config"]["model_type"] = json!(mt);
+            }
+            let e = est(&cfg, 2048);
+            assert_eq!(e.kind, KvArchKind::MlaCompressed, "{top} {text_mt:?}");
+            assert_eq!(e.total_bytes, 4 * (512 + 64) * 2048 * FP16, "{top}");
+        }
+    }
+
+    fn deepseek_v2_lite_cfg() -> Value {
+        json!({
             "model_type": "deepseek_v2",
             "num_hidden_layers": 4,
             "num_attention_heads": 16,
@@ -861,12 +1024,120 @@ mod tests {
             "qk_rope_head_dim": 64,
             "qk_nope_head_dim": 128,
             "v_head_dim": 128,
-        });
-        let e = est(&cfg, 2048);
+        })
+    }
+
+    fn est_v2(cfg: &Value, ctx: u64, mode: KVCacheMode, absorbed: bool) -> KvArchEstimate {
+        let latent = deepseek_v2_latent_layout(absorbed, mode);
+        estimate_kv_arch_inner(cfg, ctx, mode.into(), 1, true, latent).expect("estimate")
+    }
+
+    /// Every mode `MlaLatentCache::supports` refuses, so `DeepseekV2::forward`
+    /// keeps decompressed per-head K/V for it even with absorption on.
+    const V2_DECLINING_MODES: [KVCacheMode; 5] = [
+        KVCacheMode::Int8,
+        KVCacheMode::Turbo4Asym,
+        KVCacheMode::Turbo3Asym,
+        KVCacheMode::Turbo4,
+        KVCacheMode::Turbo4Delegated,
+    ];
+
+    #[test]
+    fn mla_v2_uses_decompressed_per_head_without_absorption() {
+        let e = est_v2(&deepseek_v2_lite_cfg(), 2048, KVCacheMode::Fp16, false);
         assert_eq!(e.kind, KvArchKind::MlaDecompressed);
         // num_heads × (qk_nope + qk_rope + v_head_dim) = 16 × (128+64+128).
         let elems = 16 * (128 + 64 + 128);
         assert_eq!(e.total_bytes, 4 * elems * 2048 * FP16);
+        assert_eq!(e.marginal_bytes_per_token, 4 * 10240);
+    }
+
+    #[test]
+    fn mla_v2_sizes_the_latent_when_absorbed() {
+        let e = est_v2(&deepseek_v2_lite_cfg(), 2048, KVCacheMode::Fp16, true);
+        assert_eq!(e.kind, KvArchKind::MlaCompressed);
+        // kv_lora_rank + qk_rope_head_dim = 576 elems, 1152 bytes per token per
+        // layer: the figure the loader reports and `mla::latent_bytes_per_token`
+        // computes, against 10240 decompressed (8.9x).
+        let elems = 512 + 64;
+        assert_eq!(e.total_bytes, 4 * elems * 2048 * FP16);
+        assert_eq!(e.marginal_bytes_per_token, 4 * 1152);
+    }
+
+    #[test]
+    fn mla_v2_int8_kv_declines_the_latent_and_sizes_decompressed() {
+        // The runtime keeps an int8 cache decompressed even with absorption on
+        // (`latent_layout_supports_mode` accepts only FP16).
+        let e = est_v2(&deepseek_v2_lite_cfg(), 2048, KVCacheMode::Int8, true);
+        assert_eq!(e.kind, KvArchKind::MlaDecompressed);
+        let elems = 16 * (128 + 64 + 128);
+        assert_eq!(e.total_bytes, 4 * elems * 2048);
+    }
+
+    #[test]
+    fn mla_v2_every_non_fp16_mode_declines_the_latent() {
+        // #3153: a Turbo cache was sized as the 576-element latent while the
+        // run stored the 5120-element decompressed rows (8.9x undercount).
+        for mode in V2_DECLINING_MODES {
+            let e = est_v2(&deepseek_v2_lite_cfg(), 2048, mode, true);
+            assert_eq!(e.kind, KvArchKind::MlaDecompressed, "{mode}");
+            // Turbo keeps the FP16 element width (overestimates, safe); INT8
+            // halves it.
+            let eb = if mode == KVCacheMode::Int8 { 1 } else { FP16 };
+            assert_eq!(e.marginal_bytes_per_token, 4 * 5120 * eb, "{mode}");
+        }
+    }
+
+    #[test]
+    fn mla_v2_latent_layout_rule() {
+        assert!(deepseek_v2_latent_layout(true, KVCacheMode::Fp16));
+        assert!(!deepseek_v2_latent_layout(false, KVCacheMode::Fp16));
+        for mode in V2_DECLINING_MODES {
+            assert!(!deepseek_v2_latent_layout(true, mode), "{mode}");
+            assert!(!deepseek_v2_latent_layout(false, mode), "{mode}");
+        }
+    }
+
+    #[test]
+    fn public_estimate_follows_the_process_absorption_decision() {
+        let e = est(&deepseek_v2_lite_cfg(), 2048);
+        let absorbed = mlxcel_core::mla::absorbed_enabled();
+        let expected = if absorbed {
+            KvArchKind::MlaCompressed
+        } else {
+            KvArchKind::MlaDecompressed
+        };
+        assert_eq!(e.kind, expected);
+        // A declining mode never takes the latent, whatever the process
+        // decided.
+        for mode in V2_DECLINING_MODES {
+            let declined = estimate_kv_arch_from_config(&deepseek_v2_lite_cfg(), 2048, mode, 1)
+                .expect("estimate");
+            assert_eq!(declined.kind, KvArchKind::MlaDecompressed, "{mode}");
+        }
+        // Without absorption FP16 and a Turbo mode build the same decompressed
+        // cache, so they size the same; with it, Turbo is the larger.
+        let turbo =
+            estimate_kv_arch_from_config(&deepseek_v2_lite_cfg(), 2048, KVCacheMode::Turbo4Asym, 1)
+                .expect("estimate");
+        if absorbed {
+            assert!(turbo.total_bytes > e.total_bytes);
+        } else {
+            assert_eq!(turbo.total_bytes, e.total_bytes);
+        }
+    }
+
+    #[test]
+    fn latent_pair_families_size_the_latent() {
+        for family in ["glm4_moe_lite", "kimi_linear", "kimi_k2"] {
+            let mut cfg = deepseek_v2_lite_cfg();
+            cfg["model_type"] = json!(family);
+            // Absorption is a V2-only switch; these families always cache the
+            // latent pair.
+            let e = est_v2(&cfg, 2048, KVCacheMode::Fp16, false);
+            assert_eq!(e.kind, KvArchKind::MlaCompressed, "{family}");
+            assert_eq!(e.total_bytes, 4 * (512 + 64) * 2048 * FP16, "{family}");
+        }
     }
 
     #[test]
@@ -935,7 +1206,7 @@ mod tests {
                 "layer_types": ["mamba", "attention", "moe", "attention"]}"#,
         )
         .unwrap();
-        let e = estimate_kv_arch(dir.path(), 2048, false, 1).expect("estimate");
+        let e = estimate_kv_arch(dir.path(), 2048, KVCacheMode::Fp16, 1).expect("estimate");
         assert_eq!(e.kind, KvArchKind::Hybrid);
         assert_eq!(e.total_bytes, 2 * (2 * 8 * 64) * 2048 * FP16);
     }
@@ -1059,8 +1330,8 @@ mod tests {
             "sliding_window": 1024,
             "sliding_window_pattern": 4,
         });
-        let fp16 = estimate_kv_arch_from_config(&cfg, 8192, false, 1).unwrap();
-        let int8 = estimate_kv_arch_from_config(&cfg, 8192, true, 1).unwrap();
+        let fp16 = estimate_kv_arch_from_config(&cfg, 8192, KVCacheMode::Fp16, 1).unwrap();
+        let int8 = estimate_kv_arch_from_config(&cfg, 8192, KVCacheMode::Int8, 1).unwrap();
         assert_eq!(int8.total_bytes * 2, fp16.total_bytes);
     }
 
@@ -1072,8 +1343,8 @@ mod tests {
             "num_key_value_heads": 2,
             "head_dim": 128,
         });
-        let b1 = estimate_kv_arch_from_config(&cfg, 4096, false, 1).unwrap();
-        let b4 = estimate_kv_arch_from_config(&cfg, 4096, false, 4).unwrap();
+        let b1 = estimate_kv_arch_from_config(&cfg, 4096, KVCacheMode::Fp16, 1).unwrap();
+        let b4 = estimate_kv_arch_from_config(&cfg, 4096, KVCacheMode::Fp16, 4).unwrap();
         assert_eq!(b4.total_bytes, b1.total_bytes * 4);
     }
 
@@ -1097,7 +1368,7 @@ mod tests {
     #[test]
     fn missing_architecture_fields_returns_none() {
         let cfg = json!({ "vocab_size": 32000 });
-        assert!(estimate_kv_arch_from_config(&cfg, 4096, false, 1).is_none());
+        assert!(estimate_kv_arch_from_config(&cfg, 4096, KVCacheMode::Fp16, 1).is_none());
     }
 
     // ── OpenAI-era field naming: GPT-2 / GPT-BigCode (#927) ──────────────────

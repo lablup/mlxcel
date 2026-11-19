@@ -32,12 +32,29 @@ fn loopback(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
-/// Reserve a loopback TCP port. The socket is dropped before the port is
-/// handed back; the coordinator's connect retry covers the small window
-/// before the peer rebinds it.
-fn reserve_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    listener.local_addr().expect("local addr").port()
+/// Reserve `N` distinct loopback TCP ports.
+///
+/// Every listener stays bound until all `N` ports are known, so the kernel
+/// cannot hand out the same ephemeral port twice. Two back-to-back
+/// single-port reservations could, and `plan_cluster` then deduplicated the
+/// two static peers into one ("resolved 1 peer(s) but --pp-auto requested 2
+/// stages", #3147). The sockets are dropped before the ports are returned;
+/// the coordinator's connect retry covers the small window before a peer
+/// rebinds one.
+fn reserve_ports<const N: usize>() -> [u16; N] {
+    let listeners: Vec<std::net::TcpListener> = (0..N)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port"))
+        .collect();
+    std::array::from_fn(|i| listeners[i].local_addr().expect("local addr").port())
+}
+
+#[test]
+fn reserve_ports_hands_out_distinct_ports() {
+    for _ in 0..64 {
+        let ports: [u16; 8] = reserve_ports();
+        let distinct: std::collections::HashSet<u16> = ports.iter().copied().collect();
+        assert_eq!(distinct.len(), ports.len(), "repeated port in {ports:?}");
+    }
 }
 
 /// A checkpoint directory without weights: a `config.json` with
@@ -234,8 +251,9 @@ fn model_identity_changes_with_config_or_weight_files() {
 async fn peer_commits_exactly_one_assignment() {
     let dir = temp_model_dir(4, 100);
     let auth = test_auth();
-    let peers = [loopback(reserve_port()), loopback(reserve_port())];
-    let plan = plan_for(&peers, loopback(reserve_port()));
+    let [peer_a, peer_b, control_port] = reserve_ports();
+    let peers = [loopback(peer_a), loopback(peer_b)];
+    let plan = plan_for(&peers, loopback(control_port));
     let control = plan.cluster.find_node("coordinator").unwrap().address;
     let handles: Vec<_> = peers
         .iter()
@@ -289,8 +307,9 @@ async fn peer_refuses_model_mismatch_with_typed_error() {
     let peer_model = temp_model_dir(4, 100);
     let coordinator_model = temp_model_dir(4, 200);
     let auth = test_auth();
-    let peers = [loopback(reserve_port()), loopback(reserve_port())];
-    let plan = plan_for(&peers, loopback(reserve_port()));
+    let [peer_a, peer_b, control_port] = reserve_ports();
+    let peers = [loopback(peer_a), loopback(peer_b)];
+    let plan = plan_for(&peers, loopback(control_port));
     let control = plan.cluster.find_node("coordinator").unwrap().address;
     let handles: Vec<_> = peers
         .iter()
@@ -332,9 +351,10 @@ async fn peer_refuses_model_mismatch_with_typed_error() {
 async fn peer_refuses_version_mismatch() {
     let dir = temp_model_dir(4, 100);
     let auth = test_auth();
-    let peer_addr = loopback(reserve_port());
-    let other = loopback(reserve_port());
-    let plan = plan_for(&[peer_addr, other], loopback(reserve_port()));
+    let [peer_port, other_port, control_port] = reserve_ports();
+    let peer_addr = loopback(peer_port);
+    let other = loopback(other_port);
+    let plan = plan_for(&[peer_addr, other], loopback(control_port));
     let control = plan.cluster.find_node("coordinator").unwrap().address;
     let (node_id, stage_index) = {
         let node = plan
@@ -384,8 +404,9 @@ async fn peer_refuses_version_mismatch() {
 async fn peer_discards_offer_without_commit() {
     let dir = temp_model_dir(4, 100);
     let auth = test_auth();
-    let peers = [loopback(reserve_port()), loopback(reserve_port())];
-    let plan = plan_for(&peers, loopback(reserve_port()));
+    let [peer_a, peer_b, control_port] = reserve_ports();
+    let peers = [loopback(peer_a), loopback(peer_b)];
+    let plan = plan_for(&peers, loopback(control_port));
     let control = plan.cluster.find_node("coordinator").unwrap().address;
     let handles: Vec<_> = peers
         .iter()
@@ -457,8 +478,9 @@ async fn peer_ignores_coordinator_with_wrong_secret() {
     let dir = temp_model_dir(4, 100);
     let auth = test_auth();
     let wrong = test_auth();
-    let peers = [loopback(reserve_port()), loopback(reserve_port())];
-    let plan = plan_for(&peers, loopback(reserve_port()));
+    let [peer_a, peer_b, control_port] = reserve_ports();
+    let peers = [loopback(peer_a), loopback(peer_b)];
+    let plan = plan_for(&peers, loopback(control_port));
     let control = plan.cluster.find_node("coordinator").unwrap().address;
     let handles: Vec<_> = peers
         .iter()
@@ -489,9 +511,10 @@ async fn peer_ignores_coordinator_with_wrong_secret() {
 async fn coordinator_names_peers_that_did_not_commit() {
     let dir = temp_model_dir(4, 100);
     let auth = test_auth();
-    let live = loopback(reserve_port());
-    let dead = loopback(reserve_port());
-    let plan = plan_for(&[live, dead], loopback(reserve_port()));
+    let [live_port, dead_port, control_port] = reserve_ports();
+    let live = loopback(live_port);
+    let dead = loopback(dead_port);
+    let plan = plan_for(&[live, dead], loopback(control_port));
     let control = plan.cluster.find_node("coordinator").unwrap().address;
     let dead_id = plan
         .cluster
@@ -554,8 +577,8 @@ async fn coordinator_names_peers_that_did_not_commit() {
 async fn peer_substitutes_bound_identity_for_unspecified_coordinator() {
     let dir = temp_model_dir(4, 100);
     let auth = test_auth();
-    let peers = [loopback(reserve_port()), loopback(reserve_port())];
-    let control_port = reserve_port();
+    let [peer_a, peer_b, control_port] = reserve_ports();
+    let peers = [loopback(peer_a), loopback(peer_b)];
     let unspecified_control = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), control_port);
     let plan = plan_for(&peers, unspecified_control);
     let handles: Vec<_> = peers
@@ -598,9 +621,10 @@ async fn peer_waits_for_commit_beyond_frame_io_timeout() {
     // the 10 s per-frame bound, or such a bring-up fails on the early peer.
     let dir = temp_model_dir(4, 100);
     let auth = test_auth();
-    let peer_addr = loopback(reserve_port());
-    let other = loopback(reserve_port());
-    let plan = plan_for(&[peer_addr, other], loopback(reserve_port()));
+    let [peer_port, other_port, control_port] = reserve_ports();
+    let peer_addr = loopback(peer_port);
+    let other = loopback(other_port);
+    let plan = plan_for(&[peer_addr, other], loopback(control_port));
     let control = plan.cluster.find_node("coordinator").unwrap().address;
     let node = plan
         .cluster
@@ -700,9 +724,10 @@ async fn offer_and_commit(
 async fn peer_discards_committed_assignment_on_abort_and_activates_on_the_next() {
     let dir = temp_model_dir(4, 100);
     let auth = test_auth();
-    let peer_addr = loopback(reserve_port());
-    let other = loopback(reserve_port());
-    let plan = plan_for(&[peer_addr, other], loopback(reserve_port()));
+    let [peer_port, other_port, control_port] = reserve_ports();
+    let peer_addr = loopback(peer_port);
+    let other = loopback(other_port);
+    let plan = plan_for(&[peer_addr, other], loopback(control_port));
     let control = plan.cluster.find_node("coordinator").unwrap().address;
     let node = plan
         .cluster
@@ -756,9 +781,10 @@ async fn peer_discards_committed_assignment_on_abort_and_activates_on_the_next()
 async fn coordinator_aborts_committed_peers_when_another_commit_fails() {
     let dir = temp_model_dir(4, 100);
     let auth = test_auth();
-    let real = loopback(reserve_port());
-    let scripted = loopback(reserve_port());
-    let plan = plan_for(&[real, scripted], loopback(reserve_port()));
+    let [real_port, scripted_port, control_port] = reserve_ports();
+    let real = loopback(real_port);
+    let scripted = loopback(scripted_port);
+    let plan = plan_for(&[real, scripted], loopback(control_port));
     let control = plan.cluster.find_node("coordinator").unwrap().address;
     let node_id_at = |addr: SocketAddr| {
         plan.cluster
@@ -910,8 +936,9 @@ async fn coordinator_retries_while_peer_pending_pool_is_full() {
     // retries until its deadline instead of failing the bring-up.
     let dir = temp_model_dir(4, 100);
     let auth = test_auth();
-    let peers = [loopback(reserve_port()), loopback(reserve_port())];
-    let plan = plan_for(&peers, loopback(reserve_port()));
+    let [peer_a, peer_b, control_port] = reserve_ports();
+    let peers = [loopback(peer_a), loopback(peer_b)];
+    let plan = plan_for(&peers, loopback(control_port));
     let control = plan.cluster.find_node("coordinator").unwrap().address;
     let handles: Vec<_> = peers
         .iter()

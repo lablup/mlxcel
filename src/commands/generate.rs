@@ -381,16 +381,19 @@ fn run_memory_preflight(
     // announced by `run_generate`, so resolve quietly here.
     let (kv_cache_mode, _) =
         mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, &args.model.model);
-    let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
-
     // Size the KV cache for the tokens that can actually enter the cache:
     // rendered prompt tokens plus the requested decode budget. This still runs
     // before model load, but after tokenizer/template processing has made the
     // prompt length knowable.
     let ctx_len = memory_preflight_ctx_len(prompt_token_count, args.generation.max_tokens);
 
-    let estimate =
-        estimate_total_memory(&args.model.model, ctx_len, 1, QuantHint::Default, kv_int8);
+    let estimate = estimate_total_memory(
+        &args.model.model,
+        ctx_len,
+        1,
+        QuantHint::Default,
+        kv_cache_mode,
+    );
 
     let banner = format_estimate(&args.model.model, &estimate);
     println!("{banner}");
@@ -3102,14 +3105,14 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // Quantization recommendation and BF16 warning (before loading the model).
     let hw = mlxcel_core::hardware::get_hardware();
     if args.generation.recommend_quant {
-        let advice = advise_quantization(&args.model.model, hw, None);
+        let advice = advise_quantization(&args.model.model, hw, None, kv_cache_mode);
         print_quant_advice(&advice, hw);
         return Ok(());
     }
 
     // BF16 warning on M5 hardware (even without --recommend-quant).
     if hw.has_neural_accelerator {
-        let advice = advise_quantization(&args.model.model, hw, None);
+        let advice = advise_quantization(&args.model.model, hw, None, kv_cache_mode);
         if advice.model_uses_bfloat16 {
             eprintln!(
                 "WARNING: This model uses BFloat16 weights, which are not supported by \
