@@ -90,6 +90,15 @@ mod delegated_parity_diag;
 #[path = "cache/delegated_parity_diag_tests.rs"]
 mod delegated_parity_diag_tests;
 mod detach;
+mod first_fill;
+#[cfg(test)]
+#[path = "cache/first_fill_tests.rs"]
+mod first_fill_tests;
+mod fp16_growth;
+#[cfg(test)]
+#[path = "cache/fp16_growth_tests.rs"]
+mod fp16_growth_tests;
+pub use first_fill::{FIRST_FILL_REWIND_SLACK, FullFirstFillScope};
 #[cfg(test)]
 #[path = "cache/kv_trim_tests.rs"]
 mod kv_trim_tests;
@@ -1028,46 +1037,11 @@ impl KVCache {
             return;
         }
 
-        if self.keys.is_none() || (prev + new_seq_len) > self.buffer_seq_len() {
-            let b = key_shape[0];
-            let n_kv_heads = key_shape[1];
-            let k_head_dim = key_shape[3];
-            let val_shape = ffi::array_shape(&new_values);
-            let v_head_dim = val_shape[3];
-
-            let n_steps = (self.step + new_seq_len - 1) / self.step;
-            let buf_size = n_steps * self.step;
-
-            let k_dtype = ffi::array_dtype(&new_keys);
-            let v_dtype = ffi::array_dtype(&new_values);
-            let new_k = ffi::zeros(&[b, n_kv_heads, buf_size, k_head_dim], k_dtype);
-            let new_v = ffi::zeros(&[b, n_kv_heads, buf_size, v_head_dim], v_dtype);
-
-            if self.keys.is_some() {
-                // Normalize the buffer to the live prefix before extending.
-                // The buffer can be longer than `prev`: a logical `trim`
-                // keeps the old capacity (issue #1209), and a partial growth
-                // chunk leaves a non-step-aligned length. Either way the
-                // slots past `prev` are dead and must not survive the
-                // concatenate.
-                if prev != self.buffer_seq_len() {
-                    self.keys = Some(ffi::slice(
-                        self.keys.as_ref().unwrap(),
-                        &[0, 0, 0, 0],
-                        &[b, n_kv_heads, prev, k_head_dim],
-                    ));
-                    self.values = Some(ffi::slice(
-                        self.values.as_ref().unwrap(),
-                        &[0, 0, 0, 0],
-                        &[b, n_kv_heads, prev, v_head_dim],
-                    ));
-                }
-                self.keys = Some(concatenate(self.keys.as_ref().unwrap(), &new_k, 2));
-                self.values = Some(concatenate(self.values.as_ref().unwrap(), &new_v, 2));
-            } else {
-                self.keys = Some(new_k);
-                self.values = Some(new_v);
-            }
+        // A multi-token growth of an existing buffer (a chunked-prefill piece)
+        // also releases the superseded buffer before the graph runs; see
+        // `cache/fp16_growth.rs` (issues #3084, #3092).
+        if self.fp16_append_needs_growth(new_seq_len) {
+            self.grow_fp16_buffers(&new_keys, &new_values);
         }
 
         self.offset += new_seq_len;
@@ -4400,7 +4374,10 @@ pub fn cache_window(family: &str, window: usize, has_sliding_layer: bool) -> Res
 /// in practice. The constructor enforces it with a clear error message
 /// rather than silently accepting an invalid configuration.
 ///
-/// Used by: Gemma3, Gemma4, Ministral3, GPT-OSS, RecurrentGemma, Exaone
+/// Used by: AFMoE, DeepSeek V4, Exaone4, Exaone MoE, Gemma3 (and its backbone
+/// and embedding variants), Gemma4 (MTP target and verify rows included),
+/// GPT-OSS, IQuestLoopCoder, Laguna, Llama4, Mellum, Ministral3, MiMo V2
+/// Flash, Muse Glimmer, OpenAI privacy filter, RecurrentGemma, Step3.5
 pub struct RotatingKVCache {
     pub keys: Option<UniquePtr<MlxArray>>,
     pub values: Option<UniquePtr<MlxArray>>,
@@ -4488,10 +4465,12 @@ impl RotatingKVCacheSnapshotState {
     ///   not happened yet.
     /// * **Over-window prefill.** `update_concat` deliberately stores more
     ///   than `max_size` entries for one step after a prefill longer than the
-    ///   window, keeping `idx == offset`. That buffer is temporary: the next
-    ///   single-token update re-slices it from the back and pins `idx` to
-    ///   `max_size`. Trimming into that state would desynchronize `idx` from
-    ///   the physical layout, so `offset <= max_size` is required as well.
+    ///   window (on a first fill past the rewind slack, the newest `max_size +
+    ///   FIRST_FILL_REWIND_SLACK` with `idx` at that length, #3062). That
+    ///   buffer is temporary: the next single-token update re-slices it from
+    ///   the back and pins `idx` to `max_size`. Trimming into that state would
+    ///   desynchronize `idx` from the physical layout, so `offset <= max_size`
+    ///   is required as well.
     ///
     /// Buffered speculative mode (`buffer_size > 0`) keeps its own compaction
     /// invariants and is excluded outright. Exact snapshots may retain that
@@ -5005,9 +4984,18 @@ impl RotatingKVCache {
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         if self.keys.is_none() {
             self.offset += new_seq_len;
-            self.idx = new_seq_len;
-            self.keys = Some(ffi::contiguous(&new_keys, false));
-            self.values = Some(ffi::contiguous(&new_values, false));
+            // A fill past the window stores only its newest positions as a
+            // fresh buffer, so every sliding layer stops holding its whole
+            // prompt until decode; attention still gets every key (#3062).
+            if let Some(keep) = self.first_fill_keep(new_seq_len) {
+                self.idx = keep;
+                self.keys = Some(Self::first_fill_tail(&new_keys, keep));
+                self.values = Some(Self::first_fill_tail(&new_values, keep));
+            } else {
+                self.idx = new_seq_len;
+                self.keys = Some(ffi::contiguous(&new_keys, false));
+                self.values = Some(ffi::contiguous(&new_values, false));
+            }
             return (new_keys, new_values);
         }
 
@@ -5374,11 +5362,21 @@ impl RotatingKVCache {
         // First update: just install (Same shape semantics as Fp16 path.)
         if self.keys.is_none() {
             self.offset += new_seq_len;
-            self.idx = new_seq_len;
-            self.keys = Some(ffi::contiguous(&new_keys_f16, false));
-            self.v_packed = Some(ffi::contiguous(&v_packed_new, false));
-            self.v_norms = Some(ffi::contiguous(&v_norms_new, false));
-            self.v_rescale = Some(ffi::contiguous(&v_rescale_new, false));
+            // Window-only first fill, as in `update_concat` (#3062). The V
+            // sidecars are quantized per token, so they slice like the keys.
+            if let Some(keep) = self.first_fill_keep(new_seq_len) {
+                self.idx = keep;
+                self.keys = Some(Self::first_fill_tail(&new_keys_f16, keep));
+                self.v_packed = Some(Self::first_fill_tail(&v_packed_new, keep));
+                self.v_norms = Some(Self::first_fill_tail(&v_norms_new, keep));
+                self.v_rescale = Some(Self::first_fill_tail(&v_rescale_new, keep));
+            } else {
+                self.idx = new_seq_len;
+                self.keys = Some(ffi::contiguous(&new_keys_f16, false));
+                self.v_packed = Some(ffi::contiguous(&v_packed_new, false));
+                self.v_norms = Some(ffi::contiguous(&v_norms_new, false));
+                self.v_rescale = Some(ffi::contiguous(&v_rescale_new, false));
+            }
             // Build fp16 V output by dequantizing the packed slice we just stored.
             let params = self
                 .turbo_params

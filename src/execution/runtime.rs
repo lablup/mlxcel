@@ -222,19 +222,18 @@ pub fn initialize_runtime() -> RuntimeSetup {
     // and on every backend that implies `gpu::is_available()`, so MLX already
     // defaults to the GPU there. Not pinning the GPU also keeps this call out
     // of the way of the leak assertion in `mlx_test_guard`.
-    // This is the one in-tree default-device mover that does not hold
-    // `mlxcel_core::streams::lock_default_device()`: in production it runs
-    // once at startup, before any generation worker could be racing it, and
-    // on a GPU host in the test binaries it is inert (`device.uses_gpu()` is
-    // true there, so this branch never executes). Any new mover added
-    // elsewhere must take that lock; this one is the sole exception, and only
-    // because of where and when it runs. Avoid assigning the same CPU value:
-    // `initialize_runtime` is also called repeatedly by tests, and MLX stores
-    // its default device in a plain, non-atomic global. A CPU-only build starts
-    // on the CPU already, and a second initialization after a CPU override is
-    // already there too, so neither case needs another process-global write.
+    // This is the one in-tree mover of the process default. It runs once at
+    // startup, before any generation worker starts, and on a GPU host in the
+    // test binaries it is inert (`device.uses_gpu()` is true there, so this
+    // branch never executes). Test code moves only its own thread's default
+    // with `DefaultDeviceGuard`. Skip the write when the CPU is already the
+    // default: `initialize_runtime` is also called repeatedly by tests, and a
+    // CPU-only build starts on the CPU already.
     if !device.uses_gpu() && mlxcel_core::default_device_is_gpu() {
-        mlxcel_core::set_default_device(false);
+        // The default device is per thread (core overlay `mlx/device.cpp`),
+        // so the CPU choice has to be the process default: generation, audio,
+        // embedding and image workers run on threads spawned after this.
+        mlxcel_core::set_process_default_device(false);
     }
 
     // Footgun guard: a default `cargo build --release` on Linux omits the `cuda`
@@ -356,10 +355,11 @@ fn resolve_wired_limit() -> Option<usize> {
 /// Resolve the MLX allocator soft limit from MLXCEL_MEMORY_LIMIT (issue #55).
 ///
 /// Returns the limit actually applied to MLX, or `None` when the env var
-/// is unset / explicitly disabled. This is the hook the capstone preflight
-/// (#56) drives when a model is too large to fit comfortably — calling
-/// `mlxcel_core::memory::set_memory_limit` makes MLX raise an exception
-/// during evaluation instead of thrashing the system allocator.
+/// is unset / explicitly disabled. The limit is soft, and stays soft by
+/// decision (#3045): past it MLX's evaluation waits for in-flight command
+/// buffers and its allocator releases cached buffers, but no allocation is
+/// refused, so a single large transient still exceeds it. The prefill chunk,
+/// not this limit, bounds the prefill peak.
 fn resolve_memory_limit() -> Option<usize> {
     let raw = std::env::var(MEMORY_LIMIT_ENV).ok();
     let bytes = match raw.as_deref() {

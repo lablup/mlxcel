@@ -258,3 +258,95 @@ fn rejects_a_sliding_window_a_rotating_cache_cannot_take() {
         assert!(err.contains(&format!("got {window}")), "{err}");
     }
 }
+
+#[test]
+fn exaone_moe_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    // Seven tokens: past the fixture's window of four in a single pass, while
+    // the harness's 3 + 4 chunked split stays inside what the dense caches of
+    // the trait path support (the continuation mask is sized for a rotating
+    // cache and stops matching the dense keys once the prior offset reaches
+    // the window).
+    crate::models::last_row_logits_harness::assert_last_row_logits(
+        || {
+            let args = tiny_args();
+            ExaoneMoeModel::from_weights(&tiny_weights(&args), &args).unwrap()
+        },
+        &[3, 1, 4, 1, 5, 9, 2],
+    );
+}
+
+/// Issue #3093: a chunked-prefill continuation whose prior offset is at or past
+/// the sliding window must match the single-pass prefill. The trait path runs on
+/// dense `KVCache`s, which keep every key, so the sliding mask has to span all
+/// of them; a mask sized for a rotating cache made MLX abort in
+/// `broadcast_shapes` once the offset reached the window (4 in the fixture).
+#[test]
+fn exaone_moe_chunked_continuation_past_the_window_matches_single_pass() {
+    use mlxcel_core::generate::LanguageModel;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let args = tiny_args();
+    assert_eq!(args.sliding_window, 4, "fixture window changed");
+    let model = ExaoneMoeModel::from_weights(&tiny_weights(&args), &args).unwrap();
+    let tokens = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 7];
+    let ids = |t: &[i32]| mlxcel_core::from_slice_i32(t, &[1, t.len() as i32]);
+
+    let mut caches = LanguageModel::make_caches(&model);
+    let full = LanguageModel::forward(&model, &ids(&tokens), &mut caches, None);
+    mlxcel_core::eval(&full);
+
+    // Each entry lists the end of every piece. Continuation offsets 5 and 6
+    // are past the window, 4 is at it, and 8 is past it for a third piece.
+    for splits in [vec![5, 11], vec![4, 11], vec![4, 8, 11], vec![6, 8, 11]] {
+        let mut caches = LanguageModel::make_caches(&model);
+        let mut start = 0usize;
+        let mut last = None;
+        for end in splits.iter().copied() {
+            last = Some(LanguageModel::forward(
+                &model,
+                &ids(&tokens[start..end]),
+                &mut caches,
+                None,
+            ));
+            start = end;
+        }
+        // Every row of the last piece against the same rows of the single pass.
+        let last = last.unwrap();
+        let rows = mlxcel_core::array_shape(&last)[1];
+        let n = tokens.len() as i32;
+        let expected = mlxcel_core::utils::slice_axis(&full, 1, n - rows, n);
+        let close = mlxcel_core::allclose(&last, &expected, 1e-4, 1e-4);
+        mlxcel_core::eval(&close);
+        assert!(
+            mlxcel_core::item_bool(&close),
+            "chunked prefill {splits:?} diverged from the single pass"
+        );
+    }
+}
+
+#[test]
+fn exaone_moe_maskless_padded_prefill_matches_masked_past_the_sliding_window() {
+    use crate::models::padded_prefill_parity_tests::{
+        assert_arms_agree, assert_arms_agree_with, prompt, standard_arm,
+    };
+    use mlxcel_core::generate::LanguageModel;
+    let _guard = crate::models::padded_prefill_parity_tests::guard();
+    let args = tiny_args();
+    let model = ExaoneMoeModel::from_weights(&tiny_weights(&args), &args).unwrap();
+    assert!(model.supports_maskless_padded_prefill());
+    let vocab = args.vocab_size as i32;
+
+    // Inside the 4-token window the padding mask is exact: every arm agrees.
+    let short = prompt(4, vocab);
+    assert_arms_agree("exaone_moe inside the window", |arm| {
+        standard_arm(&model, arm, &short, 8, 3, None)
+    });
+
+    // Past the window `create_padded_prefill_mask` carries no window, so the
+    // masked arm drifts from the unpadded reference; the maskless arm uses
+    // the model's own sliding mask and matches it exactly.
+    let long = prompt(10, vocab);
+    assert_arms_agree_with("exaone_moe past the window", false, |arm| {
+        standard_arm(&model, arm, &long, 16, 3, None)
+    });
+}

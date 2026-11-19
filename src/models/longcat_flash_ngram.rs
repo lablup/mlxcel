@@ -30,7 +30,7 @@ use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{
     Embedding, KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear,
 };
-use mlxcel_core::utils::{create_causal_mask, slice_axis, stack_arrays};
+use mlxcel_core::utils::{slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -283,51 +283,98 @@ impl LongcatFlashMLA {
             mlxcel_core::mla::MlaDecodePath::Decompressed
         });
 
-        // Compute PE scores: (q_pe * scale) @ k_pe^T
-        let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
-        let scaled_q_pe = mlxcel_core::multiply(&q_pe, &scale_arr);
-        let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
-        let mut pe_scores = mlxcel_core::matmul(&scaled_q_pe, &k_pe_t);
-
-        // Apply causal mask to pe_scores (additive: 0 for attend, -inf for don't attend)
-        if let Some(m) = mask {
-            pe_scores = mlxcel_core::add(&pe_scores, m);
-        }
-
         // MLA attention: absorbed or materializing, chosen by the cost model
         // above rather than by the query count alone.
-        let output = if absorbed {
-            // Absorbed: project Q into latent space, use kv_latent as K=V
-            let q_projected = self.embed_q.forward(&q_nope);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            let output = unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+        let output = if l > 1 {
+            // Multi-token step (issue #3099): fold the rope half into the SDPA
+            // head dim, `[q_nope | q_pe] . [k | k_pe]`, instead of building the
+            // dense `[B, H, L, S]` rope-score tensor and handing it to SDPA as
+            // an additive mask. A maskless step is causal over the live window
+            // `update_and_fetch` returned, through MLX's bottom-right aligned
+            // causal mode; a caller mask is applied as given.
+            debug_assert_eq!(
+                mlxcel_core::array_shape(&kv_latent)[2],
+                cache.live_len(),
+                "causal mode needs the live window to end at this step"
+            );
+            let folded_mask = match mask {
+                Some(m) => mlxcel_core::mla::FoldedMask::Array(m),
+                None => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_projected = self.embed_q.forward(&q_nope);
+                let output = mlxcel_core::mla::rope_folded_attention(
                     &q_projected,
+                    &q_pe,
                     &kv_latent,
+                    &k_pe,
                     &kv_latent,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
-                )
-            };
-            // Project output from latent space to v_head_dim
-            self.unembed_out.forward(&output)
-        } else {
-            // Materialize: project kv_latent to K and V
-            let k = self.embed_q.forward_no_transpose(&kv_latent);
-            let v = self.unembed_out.forward(&kv_latent);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+                    folded_mask,
+                );
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to per-head K and V.
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                mlxcel_core::mla::rope_folded_attention(
                     &q_nope,
+                    &q_pe,
                     &k,
+                    &k_pe,
                     &v,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
+                    folded_mask,
                 )
+            }
+        } else {
+            // Single-token decode keeps the rope term as an additive mask: its
+            // score row is one `[B, H, 1, S]` slice.
+            // PE scores: (q_pe * scale) @ k_pe^T
+            let scale_arr =
+                mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
+            let scaled_q_pe = mlxcel_core::multiply(&q_pe, &scale_arr);
+            let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
+            let mut pe_scores = mlxcel_core::matmul(&scaled_q_pe, &k_pe_t);
+            // Additive caller mask: 0 for attend, -inf for don't attend.
+            if let Some(m) = mask {
+                pe_scores = mlxcel_core::add(&pe_scores, m);
+            }
+            let pe_mask_ptr = &*pe_scores as *const MlxArray;
+            if absorbed {
+                // Absorbed: project Q into latent space, use kv_latent as K=V
+                let q_projected = self.embed_q.forward(&q_nope);
+                // SAFETY: `pe_scores` outlives this call.
+                let output = unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_projected,
+                        &kv_latent,
+                        &kv_latent,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                };
+                // Project output from latent space to v_head_dim
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to K and V
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                // SAFETY: `pe_scores` outlives this call.
+                unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_nope,
+                        &k,
+                        &v,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                }
             }
         };
 
@@ -1010,12 +1057,17 @@ impl LongcatFlashNgramModel {
 }
 
 impl LongcatFlashNgramModel {
-    /// Internal forward pass with proper cache management
+    /// Internal forward pass with proper cache management.
+    ///
+    /// `row == None` projects every position; `Some(row)` projects only that
+    /// position (`[B, 1, vocab]`, the prefill's sampled row, #3070). The
+    /// caches and the n-gram tail advance over every position either way.
     fn internal_forward(
         &self,
         input_ids: &MlxArray,
         caches: &mut [[KVCache; 2]],
         ngram_context: &mut Option<UniquePtr<MlxArray>>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         // Compute embeddings
         let h = if let Some(ref ngram) = self.ngram_embeddings {
@@ -1024,25 +1076,17 @@ impl LongcatFlashNgramModel {
             self.embed_tokens.as_ref().unwrap().forward(input_ids)
         };
 
-        // Causal mask from the first sub-layer cache of the first layer,
-        // sized by its live window rather than the monotonic `offset` so it
-        // matches the K/V `update_and_fetch` returns (#421).
-        let h_shape = mlxcel_core::array_shape(&h);
-        let seq_len = h_shape[h_shape.len() - 2];
-        let live_len = caches.first().map_or(0, |c| c[0].live_len());
-        let mask = if seq_len > 1 {
-            Some(create_causal_mask(seq_len, live_len))
-        } else {
-            None
-        };
-
-        // Forward through layers
-        let mask_ref = mask.as_ref().map(|m| m.as_ref().unwrap());
+        // No mask array: a multi-token step runs MLX's causal mode inside the
+        // rope-folded attention, bottom-right aligned over the live window
+        // `update_and_fetch` returns, which masks the same keys as
+        // the `[seq_len, live_len + seq_len]` additive mask did (#421, #3099).
         let mut hidden = h;
         for (i, layer) in self.layers.iter().enumerate() {
             let [ref mut c0, ref mut c1] = caches[i];
-            hidden = layer.forward(&hidden, mask_ref, &mut [c0, c1]);
+            hidden = layer.forward(&hidden, None, &mut [c0, c1]);
         }
+
+        let hidden = mlxcel_core::generate::select_row(hidden, row);
 
         // Final norm and LM head
         let normed = self.norm.forward(&hidden);
@@ -1066,7 +1110,28 @@ impl LanguageModel for LongcatFlashNgramModel {
             caches,
             ngram_context,
         } = &mut *state;
-        self.internal_forward(input_ids, caches, ngram_context)
+        self.internal_forward(input_ids, caches, ngram_context, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        let mut state = self.state.borrow_mut();
+        let LongcatState {
+            caches,
+            ngram_context,
+        } = &mut *state;
+        Some(self.internal_forward(input_ids, caches, ngram_context, Some(last_pos)))
     }
 
     fn num_layers(&self) -> usize {

@@ -736,6 +736,18 @@ impl Phi3SmallModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         // Embed tokens with mup scaling
         let mut h = self.embed_tokens.forward(input_ids);
         if self.mup_embedding_multiplier != 1.0 {
@@ -746,6 +758,7 @@ impl Phi3SmallModel {
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm
         let h = self.final_layernorm.forward(&h);
@@ -858,6 +871,22 @@ impl LanguageModel for Phi3SmallModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         Phi3SmallModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows(input_ids, caches, mask, Some(last_pos)))
     }
 
     fn batched_decode_kind(&self) -> BatchedDecodeKind {

@@ -188,6 +188,22 @@ and date; it has no `-m` and no `--runs`.
 # 128 GB host 1.209 yields a ~90 GB budget.
 BENCH_MEM_OVERHEAD_FACTOR=1.209 ./scripts/bench_decode.sh all --cooldown 30 --big-cooldown 30
 
+# Paired A/B of two builds of the OpenXLA / IREE backend on one HAL device.
+# The two arms run interleaved, medians are reported with the number of rounds
+# the new arm won, and the greedy text has to match. --old takes a git ref
+# (built in a temporary worktree) or a path to an already-built binary; --new
+# defaults to the working tree. Three cases are refused rather than measured:
+# two arms holding the same bytes, a zero prefill window (whole-run accounting,
+# #3042), and differing text. `--help` lists the device, capacity and quant
+# flags. The script applies the matching setup-*.sh env when it is not exported.
+# A ref arm builds in its own temporary worktree of about 2 GB; the script
+# removes those worktrees on every exit path, including an interrupt, and says
+# which ones it removed. --keep-worktrees leaves them for inspection. The
+# summary line reports the median over every round it measured and refuses to
+# print one when a round is missing.
+./scripts/xla/ab_decode_pair.sh --model models/llama-3.2-1b-instruct-4bit \
+    --device hip --old origin/main --tokens 128 --rounds 6
+
 # Speculative / MTP sweep. Prints a Markdown table on stdout and writes no CSV;
 # transcribe it into benchmarks/{backend}_{hw}_spec_{date}.csv.
 ./target/release/speculative_bench --sweep --max-tokens 128
@@ -454,16 +470,26 @@ in `docs/benchmark_results/fused-norm-rope-<hw>-<date>.md`.
 
 ## Fused tanh-GELU f32: the same measure-then-keep gate
 
-The fused `gelu_tanh_f32` Metal kernel from issue #2780's family lands under the
-same policy: it keeps its wiring only if it beats the graph it replaced at op
-level. `examples/fused_gelu_tanh_microbench.rs` produces that evidence. It loads
-no model and times the eager chain, the `compile_shapeless` chain and the fused
-kernel on the three shapes the tanh-switched encoders feed.
+The fused `gelu_tanh_f32` kernel (Metal port #2857, CUDA port #2780) lands under
+the same policy: it keeps its wiring only if it beats the graph it replaced at
+op level. `examples/fused_gelu_tanh_microbench.rs` produces that evidence. It
+loads no model and times the eager chain, the `compile_shapeless` chain and the
+fused kernel on the three shapes the tanh-switched encoders feed.
 
 ```bash
 caffeinate -i cargo run --release --features metal,accelerate \
     --example fused_gelu_tanh_microbench
+# CUDA host: quiet GPU, PTX cache warm (the first call compiles the kernel)
+cargo run --release --features cuda --example fused_gelu_tanh_microbench
 ```
+
+On CUDA the op-level figure is not the whole claim: #2780 was filed because the
+`compile_shapeless` chain ran as more than one kernel there, so the issue's
+acceptance is the end-to-end image prefill of the tanh-switched families against
+their erf arm, within the null floor, measured as in the
+[GELU erf-vs-tanh record](benchmark_results/versions/v0.8.0.md#gelu-erf-vs-tanh-2026-10-23).
+The GB10 measurement is
+[fused-gelu-tanh-f32-cuda-gb10-2026-11-11](benchmark_results/fused-gelu-tanh-f32-cuda-gb10-2026-11-11.md).
 
 The harness interleaves its trials and reports the per-arm minimum, because
 background load only ever adds time and a single non-interleaved pass on a
@@ -623,7 +649,7 @@ writes its own trace, which is what lets process-global switches like
 
 For native batched decode, set `MLXCEL_TRACE_BATCH_ROWS=N`. The harness assigns fresh sequence ids, prefills N independent corpus rows with distinct context lengths, advances every traced position through a width-one `forward_batched_with_ids` call, and emits only row zero. This makes `N=1` and `N=4` directly comparable while exercising the serving decode shape. Combined with `MLXCEL_TRACE_IMAGE`, row zero runs the actual image embedding prefill (including its MRoPE delta) and the remaining rows use text-only prefixes, covering the mixed Qwen-VL serving shape.
 
-Set `MLXCEL_TRACE_MLA_STATS=1` to print the `mlxcel_core::mla::stats` dispatch counters to stderr after the trace (`# mla_paths path=count ...`). A trace whose arm claims the absorbed MLA path must show a nonzero `absorbed_composed` or `absorbed_prefill`; the same rule as the benchmark harness's `paths=` field. With a nonzero `PREFILL`, `CHUNK_TOKENS` is the traced forward width, so `CHUNK_TOKENS=4 PREFILL=1024` is the speculative-verify shape and `CHUNK_TOKENS=16 PREFILL=1024` is a wider verify block. Each chunk's stderr line reports the traced forward's wall time separately from the context pass, which turns the same run into a multi-token continuation measurement.
+Set `MLXCEL_TRACE_MLA_STATS=1` to print the `mlxcel_core::mla::stats` dispatch counters to stderr after the trace (`# mla_paths path=count ...`). A trace whose arm claims the absorbed MLA path must show a nonzero `absorbed_fused`, `absorbed_composed` or `absorbed_prefill`; the same rule as the benchmark harness's `paths=` field. With a nonzero `PREFILL`, `CHUNK_TOKENS` is the traced forward width, so `CHUNK_TOKENS=4 PREFILL=1024` is the speculative-verify shape and `CHUNK_TOKENS=16 PREFILL=1024` is a wider verify block. Each chunk's stderr line reports the traced forward's wall time separately from the context pass, which turns the same run into a multi-token continuation measurement.
 
 For tensor-parallel decode, also set `MLXCEL_TRACE_TP_SIZE=N`. The harness then uses the production TP loader for both the B=1 and B=4 arms, rather than tracing a single-device model with only the batch width changed. The TP selector supports the standard text arm and cannot be combined with `MLXCEL_TRACE_LORA`.
 

@@ -465,10 +465,24 @@ impl Attention {
         #[cfg(test)]
         diagnostics::capture_layer_tensor(_layer_index, "attention.sinks", sinks);
         let sinks_ptr = sinks as *const _;
-        let attn = unsafe {
-            mlxcel_core::fast_scaled_dot_product_attention_with_sinks(
-                &q, &cache_k, &cache_v, self.scale, mask_ptr, sinks_ptr,
+        let attn = if mask.is_none() && l > 1 {
+            // A text-only prefill the model left to MLX's causal mode (#3098).
+            mlxcel_core::causal_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                0,
+                Some(sinks),
             )
+        } else {
+            // SAFETY: the mask is null or borrowed for the call, and `sinks`
+            // is a live per-head array owned by `self`.
+            unsafe {
+                mlxcel_core::fast_scaled_dot_product_attention_with_sinks(
+                    &q, &cache_k, &cache_v, self.scale, mask_ptr, sinks_ptr,
+                )
+            }
         };
         #[cfg(test)]
         diagnostics::capture_layer_tensor(_layer_index, "attention.sdpa", &attn);
@@ -627,6 +641,21 @@ impl FalconOcrTextModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, seq_id, caches, mask, None)
+    }
+
+    /// [`Self::forward_impl`] projecting every position (`row == None`) or
+    /// only position `row` (`[B, 1, vocab]`, the prefill's sampled row,
+    /// #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = match input_embeddings {
             Some(embeds) => mlxcel_core::copy(embeds),
             None => self.embed(input_ids),
@@ -669,10 +698,28 @@ impl FalconOcrTextModel {
             .as_ref()
             .map(|(c, s)| (c.as_ref().unwrap(), s.as_ref().unwrap()));
 
-        // A prefill with no supplied mask (text-only prompt) still needs an
-        // explicit array: the sink SDPA entry point has no "causal" mode.
-        let fallback_mask =
-            (l > 1 && mask.is_none()).then(|| mlxcel_core::utils::create_causal_mask(l, offset));
+        // A prefill with no supplied mask (text-only prompt) is plain causal:
+        // MLX's causal mode with the sinks where that fuses, else one shared
+        // explicit array (#3098). The KV cache holds `n_heads` heads, since K
+        // and V are expanded before the rotary.
+        let fallback_mask = match (mask, self.layers.first()) {
+            (None, Some(layer)) if l > 1 => {
+                let attention = &layer.attention;
+                mlxcel_core::utils::prefill_causal_mask(
+                    l,
+                    offset,
+                    shape[0],
+                    mlxcel_core::utils::PrefillAttention::new(
+                        attention.n_heads as usize,
+                        attention.n_heads as usize,
+                        attention.head_dim as usize,
+                    )
+                    .with_sinks(),
+                    mlxcel_core::array_dtype(&h),
+                )
+            }
+            _ => None,
+        };
         let mask = mask.or_else(|| fallback_mask.as_ref().map(|m| m.as_ref().unwrap()));
 
         #[cfg(test)]
@@ -688,6 +735,7 @@ impl FalconOcrTextModel {
         for (layer_index, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
             h = layer.forward(&h, cache, mask, &cos_1d, &sin_1d, golden_ref, layer_index);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         #[cfg(test)]
         diagnostics::capture_model_tensor("final_norm", &h);
@@ -737,6 +785,25 @@ impl LanguageModel for FalconOcrTextModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_impl(input_ids, input_embeddings, seq_id, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.forward_rows(
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+            Some(last_pos),
+        ))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

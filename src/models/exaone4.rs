@@ -22,7 +22,9 @@
 //! - Output-norm architecture: h = x + norm(attn_out), out = h + norm(mlp_out)
 
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -155,8 +157,18 @@ impl Attention {
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Scaled dot-product attention (handles GQA expansion internally)
-        let attn_out = if l > 1 {
+        // Scaled dot-product attention (handles GQA expansion internally). A
+        // mask-less multi-token forward is a single-row prefill whose model
+        // left the mask to MLX's causal mode or native window route (#3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
+        } else if l > 1 {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -574,6 +586,19 @@ impl ExaOne4Model {
         mask_local: Option<&MlxArray>,
         mask_global: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask_local, mask_global, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Cache],
+        mask_local: Option<&MlxArray>,
+        mask_global: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         // Embed tokens
         let mut h = self.embed_tokens.forward(input_ids);
 
@@ -586,6 +611,7 @@ impl ExaOne4Model {
             };
             h = layer.forward(&h, caches[i].as_interface(), mask);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm
         let h = self.norm.forward(&h);
@@ -796,6 +822,16 @@ impl ExaOne4Model {
         input_ids: &MlxArray,
         caches: &mut [Cache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(input_ids, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] for every position or for `row` alone.
+    fn forward_rows_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Cache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         let seq_len = shape[1];
 
@@ -814,28 +850,45 @@ impl ExaOne4Model {
         let local_offset = caches[local_idx].as_interface().offset();
         let global_offset = caches[global_idx].as_interface().offset();
 
-        // Create masks (cast to bfloat16 to match model weights dtype for SDPA)
-        let mask_local = if self.sliding_window.is_some() {
-            let max_cache = self.sliding_window.map(|w| w as i32).unwrap_or(i32::MAX);
+        // Create masks (cast to bfloat16 to match model weights dtype for
+        // SDPA). Each is `None` for a decode row and where a single row can
+        // take MLX's causal mode or native window route instead and MLX fuses
+        // it (#3072); the attention layer runs `maskless_prefill_attention`.
+        let attn = &self.layers[global_idx].self_attn;
+        let attention = PrefillAttention::new(
+            attn.num_heads as usize,
+            attn.num_kv_heads as usize,
+            attn.head_dim as usize,
+        );
+        let dtype = mlxcel_core::array_dtype(&self.norm.weight);
+        let batch = shape[0];
+        let to_bf16 =
+            |mask: UniquePtr<MlxArray>| mlxcel_core::astype(&mask, mlxcel_core::dtype::BFLOAT16);
+        let mask_local = self.sliding_window.and_then(|w| {
             // Full-width windowed mask for a fresh single-pass prefill that
             // exceeds the window (RotatingKVCache keeps all prefill keys),
             // clamped mask otherwise. See issue #408.
-            let mask = create_sliding_window_prefill_mask(seq_len, local_offset, max_cache);
-            Some(mlxcel_core::astype(&mask, mlxcel_core::dtype::BFLOAT16))
-        } else {
-            None
-        };
+            prefill_sliding_window_mask(
+                seq_len,
+                local_offset,
+                w as i32,
+                batch,
+                attention,
+                dtype,
+                SlidingPrefillKeys::Rotating,
+            )
+            .map(to_bf16)
+        });
 
-        let mask_global = Some(mlxcel_core::astype(
-            &create_causal_mask(seq_len, global_offset),
-            mlxcel_core::dtype::BFLOAT16,
-        ));
+        let mask_global =
+            prefill_causal_mask(seq_len, global_offset, batch, attention, dtype).map(to_bf16);
 
-        self.forward(
+        self.forward_rows(
             input_ids,
             caches,
             mask_local.as_ref().map(|m| m.as_ref().unwrap()),
             mask_global.as_ref().map(|m| m.as_ref().unwrap()),
+            row,
         )
     }
 }
@@ -978,6 +1031,28 @@ impl mlxcel_core::generate::LanguageModel for ExaOne4Wrapper {
             || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
+    }
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.fresh_caches(),
+            |caches| {
+                self.model
+                    .forward_rows_with_caches(input_ids, caches, Some(last_pos))
+            },
+        ))
     }
     fn sync_sequence_storage(
         &self,

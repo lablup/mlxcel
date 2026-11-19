@@ -4,6 +4,7 @@
 #include "mlx_cxx_internal.h"
 #include "../../mlxcelverse/kernels/gpu_backend.h"
 #include "../../mlxcelverse/kernels/gelu_tanh_f32.h"
+#include "../../mlxcelverse/kernels/mla_absorbed_decode.h"
 
 #include "mlx/primitives.h"
 // Backend-agnostic CUDA availability probe; non-CUDA builds link the stub.
@@ -28,6 +29,13 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+// Defined by the core overlay (mlxcelverse/overlays/core/mlx/device.cpp, and
+// its ROCm copy) on every backend; global scope for the reason given below.
+namespace mlx::core {
+struct Device;
+void mlxcel_set_process_default_device(const Device& d);
+} // namespace mlx::core
 
 #ifdef MLXCEL_BRIDGE_METAL_BACKEND
 // Defined by the mlx/backend/metal/quantized.cpp overlay (issue #1187).
@@ -1990,11 +1998,11 @@ std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x) {
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Real Metal custom kernel for `fused_gelu_tanh_f32` (#2857): the
-// tanh-GELU as one 1-D elementwise JIT Metal kernel instead of the compiled
-// graph above. Flattens any shape to 1-D for the launch and reshapes back;
-// f32, bfloat16 and float16 are upcast inside the kernel and rounded back at
-// the store. Throws when there is no port on this backend. Rust-side callers
+// Custom kernel for `fused_gelu_tanh_f32` (Metal #2857, CUDA #2780): the
+// tanh-GELU as one 1-D elementwise JIT kernel instead of the compiled graph
+// above. Flattens any shape to 1-D for the launch and reshapes back; f32,
+// bfloat16 and float16 are upcast inside the kernel and rounded back at the
+// store. Throws when there is no port on this backend (ROCm). Rust-side callers
 // gate on `fused_gelu_tanh_f32_available()` first or route to the compiled chain.
 std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x) {
     return std::make_unique<MlxArray>(mlxcel::turbo::fused_gelu_tanh_f32(x.inner));
@@ -2002,6 +2010,27 @@ std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x) {
 
 bool fused_gelu_tanh_f32_available() {
     return mlxcel::turbo::fused_gelu_tanh_f32_available();
+}
+
+bool fused_gelu_tanh_f32_matches_eager_bits() {
+    return mlxcel::turbo::fused_gelu_tanh_f32_matches_eager_bits();
+}
+
+// Fused absorbed-MLA single-query decode attention (#3121), Metal only.
+// Throws off-Metal or on a shape outside the kernel's contract; Rust callers
+// gate on `mla_absorbed_decode_fused_available()` first.
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv,
+    const MlxArray& kpe,
+    float scale) {
+    return std::make_unique<MlxArray>(mlxcel::turbo::mla_absorbed_decode(
+        q_abs.inner, q_pe.inner, ckv.inner, kpe.inner, scale));
+}
+
+bool mla_absorbed_decode_fused_available() {
+    return mlxcel::turbo::mla_absorbed_decode_available();
 }
 
 // Compiled GeGLU: gelu(gate) * x
@@ -4372,7 +4401,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
 }
 
 // Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
-// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
+// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, MiMoV2Flash, OpenAIPrivacyFilter
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
     const MlxArray& q,
     const MlxArray& k,
@@ -4955,6 +4984,11 @@ void synchronize_default() {
 
 void set_default_device(bool gpu) {
     mlx::core::set_default_device(gpu ? mlx::core::Device::gpu : mlx::core::Device::cpu);
+}
+
+void set_process_default_device(bool gpu) {
+    mlx::core::mlxcel_set_process_default_device(
+        gpu ? mlx::core::Device::gpu : mlx::core::Device::cpu);
 }
 
 size_t set_wired_limit(size_t limit) {

@@ -488,6 +488,21 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, forward_last_logits(input_ids, caches, mask, last_pos))
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        input_embeddings: Option<&mlxcel_core::MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [mlxcel_core::layers::KVCache],
+        mask: Option<&mlxcel_core::MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<mlxcel_core::MlxArray>> {
+        delegate_language_model!(
+            self,
+            last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
+        )
+    }
+
     fn forward_last_logits_with_sequence_id(
         &self,
         input_ids: &mlxcel_core::MlxArray,
@@ -700,6 +715,25 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(
             self,
             restore_sequence_state_truncated(seq_id, snapshot, target_len)
+        )
+    }
+
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        delegate_language_model!(self, state_checkpoint_from_snapshot(snapshot))
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        delegate_language_model!(
+            self,
+            restore_sequence_state_from_checkpoint(seq_id, checkpoint, donor)
         )
     }
 

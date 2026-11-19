@@ -2112,3 +2112,76 @@ fn deepseek_v4_config_rejects_an_unusable_sliding_window() {
         assert!(err.contains(&format!("got {window}")), "{err}");
     }
 }
+
+/// The prefill's sampled row is projected alone (#3070): the hook answers,
+/// and each last-logits entry point returns the full forward's row as
+/// `[1, 1, vocab]`.
+///
+/// This does not use the shared harness because its chunked check splits the
+/// prompt in half, and a DeepSeek-V4 chunk boundary that completes a
+/// compression window is not a single pass by reference behavior (see
+/// `tiny_model_chunked_prefill_matches_single_pass`). The chunked check here
+/// uses that test's 16 + 2 split and tolerance.
+#[test]
+fn deepseek_v4_last_row_logits_match_the_full_forward() {
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::{LanguageModel, logits_at_position};
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let args = tiny_args();
+    let make = || {
+        DeepSeekV4Model::from_weights(&tiny_weight_map(&args), &args).expect("tiny model builds")
+    };
+    let prompt: Vec<i32> = (0..18).map(|v| (v * 3 + 1) % 31).collect();
+    let input = mlxcel_core::from_slice_i32(&prompt, &[1, 18]);
+    let vocab = args.vocab_size as i32;
+
+    let reference = make();
+    let full = reference.forward_with_sequence_id(&input, None, &mut [], None);
+    let row_of = |pos: usize| array_to_vec_f32(&logits_at_position(&full, pos));
+    let check = |row: &mlxcel_core::MlxArray, pos: usize, tol: f32, what: &str| {
+        assert_eq!(mlxcel_core::array_shape(row), vec![1, 1, vocab], "{what}");
+        assert_close(&array_to_vec_f32(row), &row_of(pos), tol, what);
+    };
+
+    let model = make();
+    let row = model
+        .last_row_logits(&input, None, None, &mut [], None, 17)
+        .expect("DeepSeek-V4 implements last_row_logits");
+    check(&row, 17, 1e-4, "last_row_logits");
+
+    let model = make();
+    let row = model.forward_last_logits(&input, &mut [], None, 17);
+    check(&row, 17, 1e-4, "forward_last_logits");
+
+    // The engine's entry points under a prepared id, at a mid position. The
+    // embeddings entry runs the text forward for this text-only family.
+    let seq = SequenceId::from_raw(307_400);
+    let model = make();
+    model.prepare_sequence_state(seq);
+    let row = model
+        .try_forward_last_logits_with_sequence_id(&input, Some(seq), &mut [], None, 5)
+        .expect("in-process prefill forward succeeds");
+    check(&row, 5, 1e-4, "try_forward_last_logits_with_sequence_id");
+    let model = make();
+    model.prepare_sequence_state(seq);
+    let ignored = mlxcel_core::zeros(&[1, 18, 8], mlxcel_core::dtype::FLOAT32);
+    let row = model.forward_last_logits_with_embeddings_and_sequence_id(
+        &input,
+        Some(&ignored),
+        Some(seq),
+        &mut [],
+        None,
+        5,
+    );
+    check(&row, 5, 1e-4, "embeddings entry point");
+
+    let model = make();
+    model.prepare_sequence_state(seq);
+    let chunk_a = mlxcel_core::from_slice_i32(&prompt[..16], &[1, 16]);
+    let head = model.forward_last_logits_with_sequence_id(&chunk_a, Some(seq), &mut [], None, 15);
+    mlxcel_core::eval(&head);
+    let chunk_b = mlxcel_core::from_slice_i32(&prompt[16..], &[1, 2]);
+    let tail = model.forward_last_logits_with_sequence_id(&chunk_b, Some(seq), &mut [], None, 1);
+    check(&tail, 17, 5e-3, "second piece of a chunked prefill");
+}

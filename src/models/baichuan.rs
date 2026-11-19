@@ -433,7 +433,11 @@ impl BaichuanDecoderLayer {
 fn conv_state_token(u: &MlxArray, l: i32) -> UniquePtr<MlxArray> {
     let last = mlxcel_core::utils::slice_axis(u, 2, l - 1, l);
     if l > 1 {
-        mlxcel_core::contiguous(&last, false)
+        // The time axis is 2 of `[B, H, L, D]`, not axis 1, so this cannot use
+        // `materialized_state_tail`; schedule the fresh buffer on a long prefill.
+        let token = mlxcel_core::contiguous(&last, false);
+        mlxcel_core::utils::schedule_prefill_state(&token, l);
+        token
     } else {
         last
     }
@@ -551,6 +555,19 @@ impl BaichuanModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input_ids, caches, mask, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         // Embed tokens
         let mut h = self.embed_tokens.forward(input_ids);
 
@@ -565,6 +582,7 @@ impl BaichuanModel {
                 }
             },
         );
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm
         let h = self.norm.forward(&h);
@@ -692,6 +710,22 @@ impl LanguageModel for BaichuanModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, caches, mask, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows_for_sequence(input_ids, caches, mask, seq_id, Some(last_pos)))
     }
 
     /// Per-row dispatch with each row's own `SequenceId`, so every row

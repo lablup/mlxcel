@@ -35,7 +35,9 @@
 //! Its fused module name is 234 characters, short enough to stay one path
 //! component but long enough that the overlay's old `<name>.txt.tmp<pid>_<tick>`
 //! temporary passed NAME_MAX, so the entry was never written and every process
-//! compiled it again.
+//! compiled it again. The fused tanh-GELU custom kernel (#2780), a
+//! `cuda_kernel` keyed on the dtype alone, runs on the same input so that its
+//! entry is checked and the second process compiles nothing for it either.
 //!
 //! Entries sit in the cache root's `sm<cc>-nvrtc<version>` subdirectory
 //! (#2539). Later child phases damage entries and require the cache to heal:
@@ -80,10 +82,24 @@ fn launch_compiled_tanh_gelu() -> Vec<f32> {
     mlxcel_core::utils::array_to_vec_f32(&out)
 }
 
+/// The fused tanh-GELU custom kernel (#2780) on the same bf16 input as the
+/// compiled chain. Its module is keyed on the dtype alone, so this one launch
+/// is the entry every later shape of bf16 input reuses.
+fn launch_fused_tanh_gelu() -> Vec<f32> {
+    let x = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&values(DIN, -6.0, 0.1875), &[DIN]),
+        dtype::BFLOAT16,
+    );
+    let out = mlxcel_core::utils::fused_gelu_tanh_f32(&x);
+    mlxcel_core::eval(&out);
+    mlxcel_core::utils::array_to_vec_f32(&out)
+}
+
 /// Every kernel this test checks, in a fixed order.
 fn launch_all() -> Vec<f32> {
     let mut out = launch_fused_moe_pair();
     out.extend(launch_compiled_tanh_gelu());
+    out.extend(launch_fused_tanh_gelu());
     out
 }
 
@@ -142,7 +158,11 @@ fn custom_kernels_are_compiled_once_per_cache_dir() {
 
     let parent_out = launch_all();
 
-    for kernel in ["moe_gateup_kernel_cu", "moe_down_kernel_cu"] {
+    for kernel in [
+        "moe_gateup_kernel_cu",
+        "moe_down_kernel_cu",
+        "mlxcel_fused_gelu_tanh_f32",
+    ] {
         let ptx = cache_entry(cache.path(), kernel).unwrap_or_else(|| {
             panic!("custom kernel {kernel} left no disk cache entry (issue #2492)")
         });

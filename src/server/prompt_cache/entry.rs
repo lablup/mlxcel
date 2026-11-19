@@ -26,6 +26,7 @@ use mlxcel_core::cache::{DetachedCacheSet, DetachedPagedCacheSet};
 use mlxcel_core::generate::ModelStateSnapshot;
 
 use super::block_hash::ApcBlockHash;
+use super::lineage::SnapshotLineage;
 
 /// A detached KV-cache set, one variant per decode-storage backend.
 ///
@@ -423,6 +424,10 @@ pub struct ModelSnapshotEntry {
     pub size_bytes: usize,
     /// Which producer stored this entry. See [`SnapshotOrigin`].
     pub origin: SnapshotOrigin,
+    /// Which sequences computed this entry's rows (issue #3047). A
+    /// turn-boundary state checkpoint is rebuilt only over a longer snapshot
+    /// whose lineage agrees with its own over the checkpoint's length.
+    pub lineage: SnapshotLineage,
 }
 
 impl ModelSnapshotEntry {
@@ -434,6 +439,7 @@ impl ModelSnapshotEntry {
             last_used: Mutex::new(Instant::now()),
             size_bytes,
             origin: SnapshotOrigin::Completion,
+            lineage: SnapshotLineage::default(),
         }
     }
 
@@ -445,6 +451,13 @@ impl ModelSnapshotEntry {
     #[must_use]
     pub fn with_origin(mut self, origin: SnapshotOrigin) -> Self {
         self.origin = origin;
+        self
+    }
+
+    /// Record which sequences computed this entry's rows (issue #3047).
+    #[must_use]
+    pub fn with_lineage(mut self, lineage: SnapshotLineage) -> Self {
+        self.lineage = lineage;
         self
     }
 
@@ -487,6 +500,7 @@ impl ModelSnapshotEntry {
             last_used: Mutex::new(Instant::now()),
             size_bytes,
             origin: SnapshotOrigin::Completion,
+            lineage: SnapshotLineage::default(),
         }
     }
 }

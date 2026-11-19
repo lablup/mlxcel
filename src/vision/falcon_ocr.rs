@@ -127,6 +127,28 @@ impl LanguageModel for FalconOcrVlModel {
         self.text_model.forward(input_ids, caches, mask)
     }
 
+    // The prefill's sampled row only (#3070): the forwards here add nothing
+    // to the text model's, so its last-row projection is this wrapper's.
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.text_model,
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn forward_with_sequence_id(
         &self,
         input_ids: &MlxArray,

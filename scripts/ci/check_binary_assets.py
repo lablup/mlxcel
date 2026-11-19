@@ -503,6 +503,19 @@ DECLARED = (
             "the evidence."
         ),
     ),
+    Rule(
+        pattern="spike/cuda-oxide-fused-norm/artifacts/fused_add_rms_norm.sm_121.cubin",
+        max_bytes=80 * 1024,
+        why=(
+            "Committed consumer artifact for the cuda-oxide fused residual-add + "
+            "RMSNorm kernel (#2832): one module, five dtype entry points. The "
+            "five manifests and the evidence report pin its SHA-256 and ABI "
+            "layout, and it was validated bit for bit against the existing "
+            "fused CUDA kernel on GB10; reproducing it needs LLVM 21, CUDA 13.0 "
+            "and the pinned cuda-oxide compiler, so the verified bytes ship "
+            "with the evidence."
+        ),
+    ),
 )
 
 

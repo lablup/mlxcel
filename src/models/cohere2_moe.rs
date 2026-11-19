@@ -36,7 +36,9 @@ use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_deco
 use mlxcel_core::layers::{
     FusedQKVLinear, KVCache, LayerNorm, RMSNorm, UnifiedEmbedding, UnifiedLinear,
 };
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -424,7 +426,17 @@ impl Cohere2MoeAttention {
 
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        let attn_out = if l > 1 {
+        let attn_out = if l > 1 && mask.is_none() {
+            // A prefill whose model left the mask to MLX's causal mode or its
+            // native `window_size` route (#3072).
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
+        } else if l > 1 {
             // Prefill: slice K/V to the mask's key axis. A full mask keeps every
             // key, a clamped sliding mask drops the oldest (mirrors
             // `src/models/cohere2.rs`).
@@ -837,10 +849,14 @@ pub struct Cohere2MoeModel {
 }
 
 impl Cohere2MoeModel {
+    /// Layers, final norm, LM head and logit scale over `h`, projecting every
+    /// position (`row == None`) or only position `row` (`[B, 1, vocab]`, the
+    /// prefill's sampled row, #3070). The scale applies to the projected rows.
     fn run_layers(
         &self,
         mut h: UniquePtr<MlxArray>,
         caches: &mut [KVCache],
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(&h);
         let l = shape[1] as usize;
@@ -851,12 +867,33 @@ impl Cohere2MoeModel {
         let (full_mask, sliding_mask) = if l > 1 {
             let ga_live_len = caches[self.ga_idx].live_len();
             let swa_live_len = caches[self.swa_idx].live_len();
-            let full = Some(create_causal_mask(l as i32, ga_live_len));
-            let sliding = Some(create_sliding_window_prefill_mask_dense(
+            // Each is `None` where MLX's own causal or native window masking
+            // applies and fuses (#3072).
+            let dtype = mlxcel_core::array_dtype(&h);
+            let geometry = |idx: usize| {
+                let attn = &self.layers[idx].self_attn;
+                PrefillAttention::new(
+                    attn.num_heads as usize,
+                    attn.num_kv_heads as usize,
+                    attn.head_dim as usize,
+                )
+            };
+            let full = prefill_causal_mask(
+                l as i32,
+                ga_live_len,
+                shape[0],
+                geometry(self.ga_idx),
+                dtype,
+            );
+            let sliding = prefill_sliding_window_mask(
                 l as i32,
                 swa_live_len,
                 self.sliding_cache_window,
-            ));
+                shape[0],
+                geometry(self.swa_idx),
+                dtype,
+                SlidingPrefillKeys::Dense,
+            );
             (full, sliding)
         } else {
             (None, None)
@@ -870,6 +907,7 @@ impl Cohere2MoeModel {
             };
             h = layer.forward(&h, &mut caches[i], mask);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
         let logits = self.lm_head.forward(&h);
@@ -886,7 +924,7 @@ impl Cohere2MoeModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
-        self.run_layers(h, caches)
+        self.run_layers(h, caches, None)
     }
 
     pub fn forward_batched_impl(
@@ -928,7 +966,7 @@ impl Cohere2MoeModel {
         } else {
             self.embed_tokens.forward(input_ids)
         };
-        self.run_layers(h, caches)
+        self.run_layers(h, caches, None)
     }
 
     /// Load model from a directory containing safetensors files and config.json.
@@ -1104,6 +1142,15 @@ impl mlxcel_core::batched_decode::SplitAttention for Cohere2MoeAttention {
 }
 
 impl LanguageModel for Cohere2MoeModel {
+    /// A tile-aligned padded prefill needs no padding mask: the pad tokens
+    /// follow the real ones, so a causal forward (MLX's causal mode, or the
+    /// shared causal or windowed array where MLX does not fuse it) already
+    /// hides them from every real row, and the caches the engine trims are
+    /// the caller's dense ones (#3101).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }
@@ -1133,6 +1180,22 @@ impl LanguageModel for Cohere2MoeModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_with_embeddings_impl(input_ids, input_embeddings, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let h = match input_embeddings {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
+        Some(self.run_layers(h, caches, Some(last_pos)))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

@@ -203,6 +203,7 @@ fn turn_ctx(history: Option<&[i32]>) -> PromptCacheRequestContext {
         history_prefix_tokens: history.map(<[i32]>::to_vec),
         root_prompt: None,
         root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
     }
 }
 
@@ -349,12 +350,12 @@ fn cache_hit_reproduces_miss_exactly_from_a_plan_split_point() {
             miss_forwarded, 40,
             "chunk {chunk}: the cold run forwards the whole prompt"
         );
-        let mut expected: Vec<std::ops::Range<usize>> = std::iter::once(0..24).collect();
-        expected.extend(if chunk == 8 {
-            vec![24..32, 32..40]
+        // The segment before the boundary is chunked too (#3045).
+        let expected: Vec<std::ops::Range<usize>> = if chunk == 8 {
+            vec![0..8, 8..16, 16..24, 24..32, 32..40]
         } else {
-            std::iter::once(24..40).collect()
-        });
+            vec![0..24, 24..40]
+        };
         assert_eq!(miss_plan.ranges(), expected, "chunk {chunk}");
 
         // Turn 1 in the served session stores the boundary snapshot...
@@ -491,12 +492,13 @@ fn only_real_chunks_count_and_emit_prompt_progress() {
     assert_eq!(run.chunks_counted, 5);
     assert_eq!(run.progress_frames, vec![0, 8, 16, 24, 32, 40]);
 
-    // Chunked with a boundary: the segment is skipped, each chunk counts.
+    // Chunked with a boundary: the segment is chunked too (#3045), and every
+    // piece, the one ending on the boundary included, counts.
     let mut sched = plan_scheduler(test_store(), 8);
     let run = run_turn_observed(&mut sched, &turn, Some(&history), 2);
-    assert_eq!(run.plan.ranges(), vec![0..24, 24..32, 32..40]);
-    assert_eq!(run.chunks_counted, 2);
-    assert_eq!(run.progress_frames, vec![0, 32, 40]);
+    assert_eq!(run.plan.ranges(), vec![0..8, 8..16, 16..24, 24..32, 32..40]);
+    assert_eq!(run.chunks_counted, 5);
+    assert_eq!(run.progress_frames, vec![0, 8, 16, 24, 32, 40]);
 }
 
 /// #2885 Part B: with the system-prompt root on, chat A stores a root
@@ -525,7 +527,15 @@ fn new_chat_adopts_the_system_root_and_reproduces_its_cold_run() {
         let miss = run_turn_with_ctx(&mut cold, &chat_b, ctx(&chat_b, 24, 11), 4);
         assert_eq!(miss.result.cached_tokens, 0, "chunk {chunk}");
         assert_eq!(miss.plan.splits().as_slice(), &[11, 24], "chunk {chunk}");
-        assert_eq!(miss.plan.ranges()[..2], [0..11, 11..24], "chunk {chunk}");
+        if chunk == 8 {
+            assert_eq!(
+                miss.plan.ranges()[..4],
+                [0..8, 8..11, 11..19, 19..24],
+                "chunk {chunk}"
+            );
+        } else {
+            assert_eq!(miss.plan.ranges()[..2], [0..11, 11..24], "chunk {chunk}");
+        }
 
         // Chat A stores the root and its history boundary.
         let store = test_store();

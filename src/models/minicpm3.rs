@@ -23,7 +23,7 @@
 use mlxcel_core::cache::attend_batched;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, repeat_kv, silu, slice_axis};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, repeat_kv, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -254,7 +254,11 @@ impl MLAAttention {
         let (keys, values) = cache.update_and_fetch(keys, values);
 
         // Scaled dot product attention
-        let output = if l > 1 {
+        let output = if l > 1 && mask.is_none() {
+            // Single-row prefill whose causality MLX's causal mode supplies
+            // (`prefill_causal_mask`, #3072).
+            mlxcel_core::maskless_prefill_attention(&queries, &keys, &values, self.scale, 0)
+        } else if l > 1 {
             // Prefill: use mask
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
@@ -394,6 +398,18 @@ impl MiniCPM3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         // Embed with scaling
         let h = self.embed_tokens.forward(input_ids);
         let mut h = mlxcel_core::multiply_scalar(&h, self.scale_emb);
@@ -401,10 +417,20 @@ impl MiniCPM3Model {
         let shape = mlxcel_core::array_shape(&h);
         let seq_len = shape[1];
 
-        // Create causal mask if needed
+        // Create causal mask if needed. A single row leaves causality to MLX's
+        // causal mode where MLX fuses it (#3072); the concatenated query and
+        // key heads are wider than the value heads, so this usually keeps the
+        // array.
         let mask = if seq_len > 1 {
             let offset = caches.first().map(|c| c.seq_len()).unwrap_or(0);
-            Some(create_causal_mask(seq_len, offset))
+            self.layers.first().and_then(|layer| {
+                let attn = &layer.self_attn;
+                let attention =
+                    PrefillAttention::new(attn.num_heads, attn.num_heads, attn.q_head_dim)
+                        .with_value_dim(attn.v_head_dim);
+                let dtype = mlxcel_core::array_dtype(&h);
+                prefill_causal_mask(seq_len, offset, shape[0], attention, dtype)
+            })
         } else {
             mask.map(mlxcel_core::copy)
         };
@@ -413,6 +439,7 @@ impl MiniCPM3Model {
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, mask.as_deref(), cache);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm
         let h = self.norm.forward(&h);
@@ -651,6 +678,15 @@ fn load_mla_attention(
 
 // LanguageModel trait implementation.
 impl LanguageModel for MiniCPM3Model {
+    /// A tile-aligned padded prefill needs no padding mask: the pad tokens
+    /// follow the real ones, so a causal forward (MLX's causal mode, or the
+    /// shared causal or windowed array where MLX does not fuse it) already
+    /// hides them from every real row, and the caches the engine trims are
+    /// the caller's dense ones (#3072).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }
@@ -662,6 +698,22 @@ impl LanguageModel for MiniCPM3Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         MiniCPM3Model::forward(self, input_ids, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows(input_ids, caches, mask, Some(last_pos)))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
@@ -752,6 +804,8 @@ mod tests {
         put(&mut weights, &format!("{p}.mlp.down_proj.weight"), &[8, 8]);
         MiniCPM3Model::from_weights(&weights, &args).expect("tiny MiniCPM3 loads")
     }
+
+    crate::models::last_row_logits_harness::last_row_case!(minicpm3_last_row_logits, tiny_model);
 
     #[test]
     fn minicpm3_batched_decode_harness_covers_ragged_single_and_empty() {

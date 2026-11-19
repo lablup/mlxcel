@@ -24,7 +24,7 @@ use crate::models::switch_layers::validate_expert_quantization_params;
 use crate::models::switch_layers::{EXPERT_PLANE_LEAVES, stack_expert_leaf};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, slice_axis};
+use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -327,78 +327,136 @@ impl DeepSeekV3Attention {
             self.qk_nope_head_dim as usize,
             self.v_head_dim as usize,
         );
-        mlxcel_core::mla::stats::record(if absorbed {
-            if l == 1 {
-                mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
-            } else {
+        // A single absorbed query records its own path below, since it is
+        // either the fused kernel or the composed fallback.
+        if !(absorbed && l == 1) {
+            mlxcel_core::mla::stats::record(if absorbed {
                 mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
-            }
-        } else {
-            mlxcel_core::mla::MlaDecodePath::Decompressed
-        });
-
-        // Compute positional encoding scores: pe_scores = (q_pe * scale) @ k_pe.T
-        let scale_scalar = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
-        let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
-        let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
-        let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
-
-        // Apply causal mask to pe_scores (for prefill).
-        //
-        // The MLA attention below receives `pe_scores` as its additive SDPA
-        // mask, so causality exists ONLY if it is baked in here. The standard
-        // generation paths (CLI text prefill and the VLM embeddings prefill)
-        // call the model with `mask == None`, expecting the model to apply its
-        // own causal mask, exactly like the reference
-        // `create_attention_mask(h, cache[0])` in mlx-lm deepseek_v3.py /
-        // mlx-vlm kimi_vl/language.py. Without this fallback a multi-token
-        // prefill was fully bidirectional: every layer above the first wrote
-        // future-contaminated K/V into the cache, corrupting the whole
-        // generation (issue #525 round 3).
-        let pe_scores = if let Some(m) = mask {
-            // mask has 0 for attend, -inf for blocked
-            mlxcel_core::add(&pe_scores, m)
-        } else if l > 1 {
-            let causal = create_causal_mask(l, live_before);
-            mlxcel_core::add(&pe_scores, &causal)
-        } else {
-            pe_scores
-        };
+            } else {
+                mlxcel_core::mla::MlaDecodePath::Decompressed
+            });
+        }
 
         // MLA attention: absorbed or materializing, chosen by the cost model
         // above rather than by the query count alone.
-        let output = if absorbed {
-            // Absorbed: project Q into latent space, use kv_latent as K=V
-            let q_projected = self.embed_q.forward(&q_nope);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            let output = unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+        let output = if l > 1 {
+            // Multi-token step (issue #3071): fold the rope half into the SDPA
+            // head dim, `[q_nope | q_pe] . [k | k_pe]`, instead of building the
+            // dense `[B, H, L, S]` rope-score tensor and handing it to SDPA as
+            // an additive mask. That tensor grew with the query length times
+            // the whole cache in every layer and existed before SDPA ran, so
+            // the attention chunk gate could not bound it.
+            //
+            // Causality is still the model's job. The standard generation
+            // paths (CLI text prefill and the VLM embeddings prefill) call the
+            // model with `mask == None`, expecting the model to apply its own
+            // causal mask, exactly like the reference
+            // `create_attention_mask(h, cache[0])` in mlx-lm deepseek_v3.py /
+            // mlx-vlm kimi_vl/language.py (issue #525 round 3). A maskless
+            // step therefore runs MLX's bottom-right aligned causal mode over
+            // the `live_before + l` live keys; a caller mask (padded prefill)
+            // is applied as given.
+            debug_assert_eq!(
+                mlxcel_core::array_shape(&kv_latent)[2],
+                live_before + l,
+                "causal mode needs the live window to end at this step"
+            );
+            let folded_mask = match mask {
+                Some(m) => mlxcel_core::mla::FoldedMask::Array(m),
+                None => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_projected = self.embed_q.forward(&q_nope);
+                let output = mlxcel_core::mla::rope_folded_attention(
                     &q_projected,
+                    &q_pe,
                     &kv_latent,
+                    &k_pe,
                     &kv_latent,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
-                )
-            };
-            // Project output from latent space to v_head_dim
-            self.unembed_out.forward(&output)
-        } else {
-            // Materialize: project kv_latent to K and V
-            let k = self.embed_q.forward_no_transpose(&kv_latent);
-            let v = self.unembed_out.forward(&kv_latent);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+                    folded_mask,
+                );
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to per-head K and V.
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                mlxcel_core::mla::rope_folded_attention(
                     &q_nope,
+                    &q_pe,
                     &k,
+                    &k_pe,
                     &v,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
+                    folded_mask,
                 )
+            }
+        } else if let Some(output) = (absorbed && mask.is_none())
+            .then(|| self.embed_q.forward(&q_nope))
+            .and_then(|q_projected| {
+                // Unmasked single-token decode on the fused kernel (#3121):
+                // both score halves, the softmax and the latent sum in one
+                // pass plus a merge. `None` keeps the composed form below.
+                mlxcel_core::mla::fused_absorbed_decode(
+                    &q_projected,
+                    &q_pe,
+                    &kv_latent,
+                    &k_pe,
+                    self.scale,
+                )
+            })
+        {
+            self.unembed_out.forward(&output)
+        } else {
+            if absorbed {
+                mlxcel_core::mla::stats::record(mlxcel_core::mla::MlaDecodePath::AbsorbedComposed);
+            }
+            // Single-token decode keeps the rope term as an additive mask: its
+            // score row is one `[B, H, 1, S]` slice, and the cost model always
+            // absorbs a single query.
+            // pe_scores = (q_pe * scale) @ k_pe.T
+            let scale_scalar =
+                mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
+            let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
+            let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
+            let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
+            let pe_scores = match mask {
+                // mask has 0 for attend, -inf for blocked
+                Some(m) => mlxcel_core::add(&pe_scores, m),
+                None => pe_scores,
+            };
+            let pe_mask_ptr = &*pe_scores as *const MlxArray;
+            if absorbed {
+                let q_projected = self.embed_q.forward(&q_nope);
+                // SAFETY: `pe_scores` outlives this call.
+                let output = unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_projected,
+                        &kv_latent,
+                        &kv_latent,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                };
+                self.unembed_out.forward(&output)
+            } else {
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                // SAFETY: `pe_scores` outlives this call.
+                unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_nope,
+                        &k,
+                        &v,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                }
             }
         };
 
@@ -1062,22 +1120,60 @@ impl DeepSeekV3Model {
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
-        _mask: Option<&MlxArray>,
+        mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(input_ids);
+        self.forward_rows(input_ids, None, caches, mask, None)
+    }
+
+    /// The single-sequence forward, from token ids or from precomputed
+    /// embeddings, projecting every position (`row == None`) or only position
+    /// `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    ///
+    /// Used by: `forward_impl`, `forward_impl_with_embeddings`,
+    /// `last_row_logits_impl`
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = match input_embeddings {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
 
         // Preserve any caller-provided mask (for padded prefill) but let the
         // attention stack use its implicit causal path for standard prefill.
-        let mask = _mask.map(mlxcel_core::copy);
+        let mask = mask.map(mlxcel_core::copy);
 
         // Pass through layers
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask.as_deref());
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm and lm_head
         let h = self.norm.forward(&h);
         self.lm_head.forward(&h)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only, from token ids or
+    /// from precomputed embeddings: the last-row counterpart of
+    /// [`Self::forward_impl_with_embeddings`].
+    ///
+    /// Used by: `LanguageModel::last_row_logits` for `DeepSeekV3Model` and
+    /// `vision::kimi_vl::KimiVLModel`.
+    pub fn last_row_logits_impl(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, Some(last_pos))
     }
 
     /// Text-embedding lookup, exposed so a VLM wrapper can build merged
@@ -1100,18 +1196,7 @@ impl DeepSeekV3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = match input_embeddings {
-            Some(embeds) => mlxcel_core::copy(embeds),
-            None => self.embed_tokens.forward(input_ids),
-        };
-
-        let mask = mask.map(mlxcel_core::copy);
-        for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[i], mask.as_deref());
-        }
-
-        let h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        self.forward_rows(input_ids, input_embeddings, caches, mask, None)
     }
 
     pub fn make_caches_impl(&self) -> Vec<KVCache> {
@@ -1460,6 +1545,23 @@ impl LanguageModel for DeepSeekV3Model {
         self.forward_impl(input_ids, caches, mask)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // The trait-level embeddings forward is the default, which ignores
+        // embeddings: decline so that behavior stays the default's.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.last_row_logits_impl(input_ids, None, caches, mask, last_pos))
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         self.make_caches_impl()
     }
@@ -1485,7 +1587,7 @@ impl LanguageModel for DeepSeekV3Model {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Build a minimal DeepSeekV3Config for testing weight sanitization.
@@ -2396,6 +2498,25 @@ mod tests {
         assert!(
             err.contains("scales but no biases"),
             "the wording must match the other four MLA sanitizers, got: {err}"
+        );
+    }
+    /// One dense direct-q MLA layer over an 11-token vocabulary.
+    ///
+    /// Used by: the last-row logits cases here and the Kimi-VL wrapper case in
+    /// `vision::encoders::kimi_vl_tests`
+    pub(crate) fn tiny_dense_model() -> DeepSeekV3Model {
+        let cfg = test_config_dense_direct_q();
+        let weights = DeepSeekV3Model::sanitize_weights(tiny_dense_model_weights(&cfg), &cfg)
+            .expect("sanitize must succeed");
+        DeepSeekV3Model::from_weights(&weights, &cfg).expect("tiny model must load")
+    }
+
+    #[test]
+    fn deepseek_v3_last_row_logits_match_the_full_forward() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        crate::models::last_row_logits_harness::assert_last_row_logits(
+            tiny_dense_model,
+            crate::models::last_row_logits_harness::TOKENS,
         );
     }
 }

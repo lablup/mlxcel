@@ -1214,6 +1214,7 @@ fn compose_prompt_cache_key_folds_request_multimodal_digest() {
         history_prefix_tokens: None,
         root_prompt: None,
         root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
     };
     let image_a = PromptCacheRequestContext {
         mm_digest: multimodal_digest_from_vecs(&[b"IMAGE-A".to_vec()], &[]),

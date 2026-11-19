@@ -165,6 +165,28 @@ impl MiniCPMV46VLModel {
 }
 
 impl LanguageModel for MiniCPMV46VLModel {
+    // The wrapper's single-sequence forwards add nothing to the text model's,
+    // so the prefill takes the text model's last-row projection (#3070).
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.text_model,
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
         self.text_model.batched_decode_kind()
     }
@@ -311,6 +333,30 @@ impl LanguageModel for MiniCPMV46VLModel {
             &self.text_model,
             seq_id,
             snapshot,
+        )
+    }
+
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        mlxcel_core::generate::LanguageModel::state_checkpoint_from_snapshot(
+            &self.text_model,
+            snapshot,
+        )
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        mlxcel_core::generate::LanguageModel::restore_sequence_state_from_checkpoint(
+            &self.text_model,
+            seq_id,
+            checkpoint,
+            donor,
         )
     }
 

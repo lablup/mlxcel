@@ -346,15 +346,28 @@ impl BatchScheduler {
             };
             let caps = PrefillCaps::for_model(self.engine.model(), should_align_prefill())
                 .with_input(input);
-            let pad = PrefillPlan::next_piece_at(
-                total,
-                seq.prefill_start_offset,
-                self.snapshot_splits(seq),
-                seq.prefill_offset,
-                self.prefill_chunk_for_tick(),
-                caps,
-            )
-            .map_or(0, |piece| piece.pad_excess());
+            let splits = self.snapshot_splits(seq);
+            let next_piece = |cursor: usize| {
+                PrefillPlan::next_piece_at(
+                    total,
+                    seq.prefill_start_offset,
+                    splits,
+                    cursor,
+                    self.prefill_chunk_for_tick(),
+                    caps,
+                )
+            };
+            // A piece that ends on a snapshot boundary runs in the same tick
+            // as the piece after it (`run_prefill_pieces`), so that piece's
+            // padding is written before the next reservation too (#3045).
+            let pad = next_piece(seq.prefill_offset).map_or(0, |piece| {
+                let follow = if splits.contains(piece.range.end) {
+                    next_piece(piece.range.end).map_or(0, |next| next.pad_excess())
+                } else {
+                    0
+                };
+                piece.pad_excess() + follow
+            });
             self.engine
                 .pool()
                 .paged_blocks_to_append(seq.seq_id, remaining + pad)

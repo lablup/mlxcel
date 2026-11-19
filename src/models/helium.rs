@@ -426,6 +426,7 @@ impl ModelArgs {
             // YaRN's original-context fallback, which a scaling-free Helium
             // never reaches.
             max_position_embeddings: Some(self.max_position_embeddings),
+            quantization_config: None,
             quantization: self
                 .quantization
                 .as_ref()
@@ -935,6 +936,21 @@ impl LanguageModel for HeliumModel {
     ) -> UniquePtr<MlxArray> {
         self.inner
             .forward_with_embeddings_impl(input_ids, input_embeddings, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(
+            self.inner
+                .last_logits(input_ids, input_embeddings, caches, mask, last_pos),
+        )
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

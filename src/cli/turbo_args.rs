@@ -438,12 +438,14 @@ fn apply_optional_string_env_fallback(
 /// which model is being loaded. Two rules need the model, and both were
 /// documented long before anything performed them (issue #1350):
 ///
-/// * The MLA-latent families (`glm4_moe_lite`, `deepseek_v3`, `kimi_linear`,
-///   `kimi_k3`, `longcat_flash_ngram`) pack a `(kv_latent, k_pe)` pair into one
-///   cache, so
-///   no quantized mode is calibrated for what they store. Symmetric `turbo4`
-///   made the K quantizer read past its sign vectors and every generated token
-///   came out `!`; the asymmetric modes quietly compressed the RoPE key stream
+/// * The MLA-latent families (`glm4_moe_lite`, `deepseek_v3`, `kimi_k2`,
+///   `joyai_llm_flash`, `kimi_vl`, `kimi_k25`, `youtu`, `youtu_llm`,
+///   `youtu_vl`, `deepseek_v32`, `deepseek_v3.2`, `glm_moe_dsa`,
+///   `kimi_linear`, `kimi_k3`, `longcat_flash`, `longcat_flash_ngram`) pack a
+///   `(kv_latent, k_pe)` pair into one cache, so no quantized mode is
+///   calibrated for what they store. Symmetric `turbo4` made the K quantizer
+///   read past its sign vectors and every generated token came out `!`; the
+///   asymmetric modes quietly compressed the RoPE key stream
 ///   instead of a value. They resolve to `fp16`.
 /// * `turbo4` on a family outside `ALLOWED_SYMMETRIC_TURBO_FAMILIES` resolves
 ///   to `fp16+turbo4`, which is the fallback the CLI banner has always

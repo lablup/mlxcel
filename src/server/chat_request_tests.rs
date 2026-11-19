@@ -3404,6 +3404,56 @@ async fn named_tool_choice_changes_rendered_prompt_and_template_sig() {
 }
 
 // ---------------------------------------------------------------------------
+// Image prompts sized from the header
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_image_prompt_is_sized_for_the_upright_picture() {
+    use super::planned_image_size;
+    use crate::multimodal::image_orientation::test_pictures::{
+        distinct_pixels, png_with_orientation, stored_for,
+    };
+    use crate::server::media::ImageInputLimits;
+
+    let limits = ImageInputLimits::default();
+    let upright = distinct_pixels();
+    assert_eq!(upright.dimensions(), (6, 4));
+    for tag in 1..=8u8 {
+        // Stored 6 x 4 for tags 1 to 4 and 4 x 6 for the quarter turns; the
+        // worker decodes every one of them to 6 x 4.
+        let bytes = png_with_orientation(&stored_for(tag, &upright), u16::from(tag));
+        assert_eq!(
+            planned_image_size(0, &bytes, limits).unwrap(),
+            (6, 4),
+            "tag {tag}"
+        );
+    }
+
+    // The limits are the decoder's: they apply to the stored pixels.
+    let narrow = ImageInputLimits {
+        max_width: 5,
+        max_height: 8,
+        ..limits
+    };
+    let quarter_turned = png_with_orientation(&stored_for(6, &upright), 6);
+    assert_eq!(
+        planned_image_size(3, &quarter_turned, narrow).unwrap(),
+        (6, 4)
+    );
+    let error = planned_image_size(3, &png_with_orientation(&upright, 1), narrow)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "image 3: 6x4 exceeds the configured image limits (5x8)"
+    );
+    let error = planned_image_size(7, b"not a picture", limits)
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("image 7: unreadable image"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
 // Kimi K3 native chat format refusal (#1338, #1743 security review)
 // ---------------------------------------------------------------------------
 

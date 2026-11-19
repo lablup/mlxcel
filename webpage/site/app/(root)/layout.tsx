@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "mlxcel | High-Performance LLM Inference on Apple Silicon",
   description:
-    "Run 60+ LLM and VLM models natively on Apple Silicon with Metal acceleration. Rust-powered, zero Python dependencies, OpenAI-compatible API.",
+    "Run 100+ LLM and VLM models natively on Apple Silicon with Metal acceleration. Rust-powered, zero Python dependencies, OpenAI-compatible API.",
   keywords: [
     "LLM",
     "VLM",
@@ -43,7 +43,7 @@ export const metadata: Metadata = {
     siteName: "mlxcel",
     title: "mlxcel | High-Performance LLM Inference on Apple Silicon",
     description:
-      "Run 60+ LLM and VLM models natively on Apple Silicon with Metal acceleration. Rust-powered, zero Python dependencies, OpenAI-compatible API.",
+      "Run 100+ LLM and VLM models natively on Apple Silicon with Metal acceleration. Rust-powered, zero Python dependencies, OpenAI-compatible API.",
     images: [
       {
         url: "https://mlxcel.ai/og-image.png",
@@ -57,7 +57,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "mlxcel | High-Performance LLM Inference on Apple Silicon",
     description:
-      "Run 60+ LLM and VLM models natively on Apple Silicon with Metal acceleration. Rust-powered, zero Python dependencies, OpenAI-compatible API.",
+      "Run 100+ LLM and VLM models natively on Apple Silicon with Metal acceleration. Rust-powered, zero Python dependencies, OpenAI-compatible API.",
     images: ["https://mlxcel.ai/og-image.png"],
     creator: "@lablupinc",
   },

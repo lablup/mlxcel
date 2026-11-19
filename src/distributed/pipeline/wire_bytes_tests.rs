@@ -87,6 +87,7 @@ fn stage_protocol_messages_round_trip_through_json() {
         micro_batch_id: 2,
         input_ids: vec![9, 8, 7],
         attention_mask: None,
+        last_pos: None,
     };
     let json = serde_json::to_vec(&command).unwrap();
     match serde_json::from_slice::<RemoteStageCommand>(&json).unwrap() {

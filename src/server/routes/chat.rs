@@ -152,6 +152,7 @@ pub(crate) fn build_prompt_cache_request_context(
         history_prefix_tokens: None,
         root_prompt: renders.root.map(str::to_string),
         root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
     })
 }
 
@@ -233,6 +234,7 @@ pub(crate) fn build_raw_prompt_cache_context(
         history_prefix_tokens: None,
         root_prompt: None,
         root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
     })
 }
 

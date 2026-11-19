@@ -283,6 +283,30 @@ impl LanguageModel for GlmMoeDsaModel {
         self.inner.forward(input_ids, caches, mask)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.inner,
+            input_ids,
+            None,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn forward_batched(
         &self,
         input_ids: &MlxArray,
@@ -434,9 +458,8 @@ mod tests {
         assert!(!mapped.indexer_rope_interleave);
     }
 
-    #[test]
-    fn glm_moe_dsa_wrapper_delegates_the_real_batched_forward() {
-        let _runtime = crate::initialize_runtime();
+    /// A zero-layer wrapper with tied embeddings over an 8-token vocabulary.
+    fn tiny_wrapper() -> GlmMoeDsaModel {
         let mut args = sample_args();
         args.vocab_size = 8;
         args.hidden_size = 4;
@@ -454,7 +477,13 @@ mod tests {
             "model.norm.weight".to_string(),
             mlxcel_core::ones(&[4], mlxcel_core::dtype::FLOAT32),
         );
-        let model = GlmMoeDsaModel::from_weights(&weights, &args).expect("tiny wrapper loads");
+        GlmMoeDsaModel::from_weights(&weights, &args).expect("tiny wrapper loads")
+    }
+
+    #[test]
+    fn glm_moe_dsa_wrapper_delegates_the_real_batched_forward() {
+        let _runtime = crate::initialize_runtime();
+        let model = tiny_wrapper();
         assert_eq!(
             model.batched_decode_kind(),
             mlxcel_core::generate::BatchedDecodeKind::Native
@@ -478,5 +507,13 @@ mod tests {
         assert!(mlxcel_core::item_bool(&mlxcel_core::allclose(
             &got, &want, 0.0, 0.0
         )));
+    }
+    #[test]
+    fn glm_moe_dsa_last_row_logits_match_the_full_forward() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        crate::models::last_row_logits_harness::assert_last_row_logits(
+            tiny_wrapper,
+            &[3, 1, 4, 1, 5, 7, 2, 6, 5, 3, 7],
+        );
     }
 }

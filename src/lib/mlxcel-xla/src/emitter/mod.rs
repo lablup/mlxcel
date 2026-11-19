@@ -176,6 +176,11 @@ pub(crate) use builder::{
     Precision, ProjectionLayout, check_packed_supported, precision_env_override, quant_in_graph,
     resolve_precision, resolve_precision_checked, target_flags_with_rocm_target,
 };
+/// Test support only (issue #3060): toggle the single-sequence decode scalar ABI
+/// per thread so the device gate can compile and run both the scalar and the
+/// legacy buffer-view variants.
+#[cfg(feature = "test-support")]
+pub(crate) use model::set_decode_scalar_abi_for_thread;
 #[allow(unused_imports)]
 pub(crate) use model::{
     PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
@@ -671,6 +676,411 @@ mod tests {
         assert!(!mlir.contains("['bq']"));
         assert!(!mlir.contains("['bk']"));
         assert!(!mlir.contains("['bv']"));
+    }
+
+    /// Issue #3043: the single-token decode graph holds its KV cache in two
+    /// module-level mutable globals instead of the argument list, so IREE
+    /// updates the cache in place and stops copying the full cache into a fresh
+    /// output tensor every step. The graph must therefore take and return no
+    /// cache at all, and it must export the seeding entry the shim probes for.
+    /// The ragged and prefill graphs keep the full-cache ABI.
+    ///
+    /// Pinned to `Precision::F32` so the f32 global type asserted here does not
+    /// depend on `MLXCEL_XLA_PRECISION`; the narrowed (f16/bf16) global is
+    /// covered by `single_decode_cache_global_uses_the_contraction_precision`.
+    #[test]
+    fn single_decode_threads_kv_through_module_globals() {
+        let c = Config::llama_3_2_1b();
+        let mlir = emit_decode_with(&c, true, Precision::F32);
+        let cache_ty = format!(
+            "tensor<{}x{}x{}x{}xf32>",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        assert!(
+            mlir.contains(&format!("util.global private mutable @kcache : {cache_ty}")),
+            "decode must declare the K global: {cache_ty}"
+        );
+        assert!(
+            mlir.contains(&format!("util.global private mutable @vcache : {cache_ty}")),
+            "decode must declare the V global: {cache_ty}"
+        );
+        for symbol in ["kcache", "vcache"] {
+            assert!(
+                !mlir.contains(&format!("loc(\"{symbol}\")")),
+                "the cache must not stay an argument: {symbol}"
+            );
+            assert!(
+                mlir.contains(&format!("util.global.load @{symbol} : {cache_ty}")),
+                "the step must read {symbol} from its global"
+            );
+        }
+        assert!(
+            mlir.contains(&format!("func.func public @kv_import(%k: {cache_ty}")),
+            "the shim seeds the globals through @kv_import"
+        );
+        // One output (the sampled token), not the two full caches.
+        let main_signature = mlir
+            .split("func.func public @main(")
+            .nth(1)
+            .expect("decode main function")
+            .split("{\n")
+            .next()
+            .expect("signature text");
+        assert!(
+            main_signature.contains(") -> tensor<i32>"),
+            "decode returns the token only: {main_signature}"
+        );
+
+        // The other graph kinds keep the full-cache ABI: the ragged decode takes
+        // the caches as arguments, and prefill still returns them.
+        let ragged = emit_decode_ragged(&c, 4, false);
+        assert!(
+            ragged.contains("loc(\"kcache\")"),
+            "ragged decode keeps the full-cache argument ABI"
+        );
+        let prefill = emit_prefill(&c, false);
+        let prefill_signature = prefill
+            .split("func.func public @main(")
+            .nth(1)
+            .expect("prefill main function")
+            .split("{\n")
+            .next()
+            .expect("signature text");
+        assert!(
+            prefill_signature.contains(&cache_ty),
+            "prefill still returns the full caches: {prefill_signature}"
+        );
+    }
+
+    /// Issue #2886: the single-sequence decode stores its KV globals in the
+    /// contraction precision, so the f16/bf16 dot_generals read the cache
+    /// without a per-step whole-slab `stablehlo.convert`. The import entry keeps
+    /// the f32 prefill signature and narrows once per request.
+    #[test]
+    fn single_decode_cache_global_uses_the_contraction_precision() {
+        let c = Config::llama_3_2_1b();
+        let f32_graph = emit_decode_with(&c, true, Precision::F32);
+        let f16_graph = emit_decode_with(&c, true, Precision::F16);
+        let bf16_graph = emit_decode_with(&c, true, Precision::Bf16);
+        let shape = format!(
+            "{}x{}x{}x{}",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let f32_ty = format!("tensor<{shape}xf32>");
+        let f16_ty = format!("tensor<{shape}xf16>");
+        let bf16_ty = format!("tensor<{shape}xbf16>");
+        assert!(
+            f32_graph.contains(&format!("util.global private mutable @kcache : {f32_ty}")),
+            "f32 keeps the byte-identical f32 cache"
+        );
+        assert!(
+            f16_graph.contains(&format!("util.global private mutable @kcache : {f16_ty}"))
+                && f16_graph.contains(&format!("util.global private mutable @vcache : {f16_ty}")),
+            "f16 stores both caches narrowed"
+        );
+        assert!(
+            bf16_graph.contains(&format!("util.global private mutable @kcache : {bf16_ty}"))
+                && bf16_graph.contains(&format!("util.global private mutable @vcache : {bf16_ty}")),
+            "bf16 stores both caches in bf16"
+        );
+        // The import entry keeps the f32 prefill signature on every precision,
+        // and converts exactly once per request when the global is narrowed.
+        for (graph, narrow_ty) in [
+            (&f32_graph, None),
+            (&f16_graph, Some(&f16_ty)),
+            (&bf16_graph, Some(&bf16_ty)),
+        ] {
+            assert!(
+                graph.contains(&format!(
+                    "func.func public @kv_import(%k: {f32_ty}, %v: {f32_ty})"
+                )),
+                "the import entry must keep the f32 prefill signature"
+            );
+            match narrow_ty {
+                Some(ty) => {
+                    for (arg, dst, global) in
+                        [("k", "%k_narrow", "kcache"), ("v", "%v_narrow", "vcache")]
+                    {
+                        assert!(
+                            graph.contains(&format!(
+                                "{dst} = stablehlo.convert %{arg} : ({f32_ty}) -> {ty}"
+                            )),
+                            "the import must narrow %{arg} f32 -> {ty}"
+                        );
+                        assert!(
+                            graph.contains(&format!("util.global.store {dst}, @{global} : {ty}")),
+                            "the import must store {dst} into the narrowed @{global}"
+                        );
+                    }
+                }
+                None => {
+                    assert!(
+                        !graph.contains("stablehlo.convert %k : "),
+                        "f32 must import without a conversion"
+                    );
+                    for (arg, global) in [("%k", "kcache"), ("%v", "vcache")] {
+                        assert!(
+                            graph.contains(&format!(
+                                "util.global.store {arg}, @{global} : {f32_ty}"
+                            )),
+                            "{arg} must be stored into the f32 @{global}"
+                        );
+                    }
+                }
+            }
+        }
+        // The narrow graph no longer converts the whole cache slab into the
+        // score and context contractions; only the new `[1, 1, nkv, d]` row is
+        // narrowed, at the update site.
+        let slab_f32 = format!(
+            "tensor<{}x{}x{}xf32>",
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let slab_f16 = format!(
+            "tensor<{}x{}x{}xf16>",
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let row_f32 = format!("tensor<1x1x{}x{}xf32>", c.cache_heads(), c.cache_dim());
+        let row_f16 = format!("tensor<1x1x{}x{}xf16>", c.cache_heads(), c.cache_dim());
+        assert!(
+            !f16_graph.contains(&format!("({slab_f32}) -> {slab_f16}")),
+            "the whole-slab cache conversion must be gone"
+        );
+        assert!(
+            f16_graph.contains(&format!("({row_f32}) -> {row_f16}")),
+            "the narrow graph converts only the new cache row"
+        );
+    }
+
+    /// Issue #2886: the graph that ships on `hip`/`cuda` is the native
+    /// packed-projection form, so the narrowed cache has to hold there too. The
+    /// native block replaces the projection dispatches, not the cache, and
+    /// `kv_import` keeps its f32 signature.
+    #[test]
+    fn native_decode_keeps_the_narrowed_cache_and_the_f32_import() {
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::InOut;
+        c.packed_args = true;
+        c.native_head = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let native = Some(("#mlxcel_qmv_target = alias", "  source-block\n"));
+        let shape = format!(
+            "{}x{}x{}x{}",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let f32_ty = format!("tensor<{shape}xf32>");
+        let f16_ty = format!("tensor<{shape}xf16>");
+
+        let f16_graph = emit_decode_with_native(&c, true, Precision::F16, native);
+        assert!(
+            f16_graph.contains("flow.dispatch @custom_qmv::@qmv4_kernel["),
+            "the native projection dispatch is the graph under test"
+        );
+        assert!(
+            f16_graph.contains(&format!("util.global private mutable @kcache : {f16_ty}")),
+            "the native decode stores the cache in the contraction precision"
+        );
+        for (arg, dst, global) in [("k", "%k_narrow", "kcache"), ("v", "%v_narrow", "vcache")] {
+            assert!(
+                f16_graph.contains(&format!(
+                    "{dst} = stablehlo.convert %{arg} : ({f32_ty}) -> {f16_ty}"
+                )),
+                "the native import must narrow %{arg} once per request"
+            );
+            assert!(
+                f16_graph.contains(&format!("util.global.store {dst}, @{global} : {f16_ty}")),
+                "the native import stores the narrowed {global}"
+            );
+        }
+
+        // The f32 native graph is unchanged: f32 globals, no import conversion.
+        let f32_graph = emit_decode_with_native(&c, true, Precision::F32, native);
+        assert!(f32_graph.contains(&format!("util.global private mutable @kcache : {f32_ty}")));
+        assert!(!f32_graph.contains("stablehlo.convert %k : "));
+        assert!(f32_graph.contains(&format!("util.global.store %k, @kcache : {f32_ty}")));
+    }
+
+    /// Issue #2886 guards the other graph kinds: the ragged decode takes the
+    /// full f32 cache through the ABI, because the batch engine's slot buffers
+    /// and the prefill result are f32. The narrowing must not leak into it even
+    /// when the contractions are f16, and its per-row update stays f32.
+    #[test]
+    fn ragged_decode_keeps_the_f32_cache_abi_under_f16() {
+        let c = Config::llama_3_2_1b();
+        let bsz = 4;
+        let graph = emit_decode_ragged_with(&c, bsz, false, Precision::F16);
+        let cache_ty = format!(
+            "tensor<{}x{}x{}x{}x{}xf32>",
+            bsz,
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        for symbol in ["kcache", "vcache"] {
+            assert!(
+                graph.contains(&format!(": {cache_ty} loc(\"{symbol}\")")),
+                "ragged {symbol} keeps the f32 ABI under f16"
+            );
+        }
+        let row_f32 = format!("tensor<1x1x1x{}x{}xf32>", c.cache_heads(), c.cache_dim());
+        let row_f16 = format!("tensor<1x1x1x{}x{}xf16>", c.cache_heads(), c.cache_dim());
+        assert!(
+            !graph.contains(&format!("({row_f32}) -> {row_f16}")),
+            "the ragged cache write must not narrow the row"
+        );
+    }
+
+    /// Issue #2886: the MLA single-sequence decode shares the now-narrowed cache
+    /// global, so its write site must narrow the new row too. Without this the
+    /// `dynamic_update_slice` mixes an f16 operand with an f32 update and the
+    /// graph does not compile under an explicit f16/bf16 precision override.
+    #[test]
+    fn mla_single_decode_narrows_the_cache_row() {
+        let json = r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
+            "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
+            "kv_lora_rank":16,"q_lora_rank":24,"qk_nope_head_dim":8,
+            "qk_rope_head_dim":4,"v_head_dim":8,"rope_interleave":true,
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#;
+        let c = Config::from_json_str(json)
+            .unwrap()
+            .with_context_capacity(16)
+            .unwrap();
+        let width = c.cache_dim();
+        let cache_ty = format!(
+            "tensor<{}x{}x{}x{}x",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let f32_ty = format!("{cache_ty}f32>");
+        let f16_ty = format!("{cache_ty}f16>");
+        let g = emit_decode_with(&c, false, Precision::F16);
+        let row_f32 = format!("tensor<1x1x1x{width}xf32>");
+        let row_f16 = format!("tensor<1x1x1x{width}xf16>");
+        assert!(
+            g.contains(&format!("({row_f32}) -> {row_f16}")),
+            "MLA single decode must narrow the new cache row under f16"
+        );
+        assert!(
+            g.contains(&format!(
+                "func.func public @kv_import(%k: {f32_ty}, %v: {f32_ty})"
+            )),
+            "the MLA import keeps the f32 prefill signature"
+        );
+        assert!(
+            g.contains(&format!(
+                "%k_narrow = stablehlo.convert %k : ({f32_ty}) -> {f16_ty}"
+            )),
+            "the MLA import narrows the f32 prefill cache once per request"
+        );
+        let g_f32 = emit_decode_with(&c, false, Precision::F32);
+        assert!(
+            g_f32.contains(&format!(
+                "util.global private mutable @kcache : tensor<{}x{}x{}x{}xf32>",
+                c.n_layers,
+                c.context_capacity,
+                c.cache_heads(),
+                c.cache_dim()
+            )),
+            "f32 MLA keeps the f32 cache"
+        );
+        assert!(
+            !g_f32.contains(&format!("({row_f32}) -> {row_f16}")),
+            "f32 MLA emits no row conversion"
+        );
+    }
+
+    fn main_signature<'a>(mlir: &'a str, graph: &str) -> &'a str {
+        mlir.split("func.func public @main(")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{graph} main function"))
+            .split("{\n")
+            .next()
+            .unwrap_or_else(|| panic!("{graph} signature text"))
+    }
+
+    /// Issue #3060: the single-sequence decode takes token, position and
+    /// cache_len as ABI-level `i32` arguments instead of rank-0 `tensor<i32>`
+    /// buffer views, so IREE stops materializing a host-visible staging resource
+    /// to bring them to the host. The prologue rebuilds the tensor operands, and
+    /// the module exports the capability marker the shim probes. Every other
+    /// graph keeps its current signature, and M-RoPE keeps its tensor position.
+    #[test]
+    fn single_decode_takes_its_scalars_as_abi_i32_arguments() {
+        let c = Config::llama_3_2_1b();
+        let mlir = emit_decode(&c, true);
+        let sig = main_signature(&mlir, "decode");
+        for (arg, loc) in [
+            ("token", "token"),
+            ("pos", "pos"),
+            ("cache_len", "cache_len"),
+        ] {
+            assert!(
+                sig.contains(&format!(": i32 loc(\"{loc}\")")),
+                "decode must pass {arg} as a bare i32: {sig}"
+            );
+            assert!(
+                !sig.contains(&format!("tensor<i32> loc(\"{loc}\")")),
+                "{loc} must not stay a rank-0 tensor argument: {sig}"
+            );
+        }
+        // The body still consumes rank-0 tensors: the prologue rebuilds one per
+        // ABI scalar, so the op sequence after it is unchanged.
+        let from_elements = mlir.matches("= tensor.from_elements %arg").count();
+        assert_eq!(
+            from_elements, 3,
+            "each ABI scalar must be rebuilt with tensor.from_elements"
+        );
+        assert!(
+            mlir.contains("func.func public @scalar_inputs()"),
+            "the shim probes this marker to choose the scalar push path"
+        );
+
+        // M-RoPE carries a tensor<3xi32> position, so that decode path keeps the
+        // whole buffer-argument ABI and does not export the marker.
+        let mrope = emit_decode(&mrope_qwen(MropeLayout::Interleaved), true);
+        let mrope_sig = main_signature(&mrope, "mrope decode");
+        assert!(mrope_sig.contains("tensor<i32> loc(\"token\")"));
+        assert!(mrope_sig.contains("tensor<3xi32> loc(\"pos\")"));
+        assert!(mrope_sig.contains("tensor<i32> loc(\"cache_len\")"));
+        assert!(!mrope.contains("@scalar_inputs"));
+
+        // Ragged / lockstep batch decode and prefill keep their signatures.
+        let ragged = emit_decode_ragged(&c, 4, false);
+        let ragged_sig = main_signature(&ragged, "ragged decode");
+        assert!(ragged_sig.contains("tensor<4xi32> loc(\"token\")"));
+        assert!(ragged_sig.contains("tensor<4xi32> loc(\"cache_len\")"));
+        assert!(!ragged.contains("@scalar_inputs"));
+
+        let batched = emit_decode_batched(&c, 4, false);
+        let batched_sig = main_signature(&batched, "batched decode");
+        assert!(batched_sig.contains("tensor<4xi32> loc(\"token\")"));
+        assert!(!batched.contains("@scalar_inputs"));
+
+        let prefill = emit_prefill(&c, false);
+        let prefill_sig = main_signature(&prefill, "prefill");
+        assert!(prefill_sig.contains("tensor<") && prefill_sig.contains("loc(\"tokens\")"));
+        assert!(prefill_sig.contains("loc(\"positions\")"));
+        assert!(!prefill.contains("@scalar_inputs"));
     }
 
     /// The shared attention core (issue #494) keeps a family's attention / MLP
@@ -1561,7 +1971,7 @@ mod tests {
     // ======================================================================
 
     /// issue #2889: the native decode graph keeps the projections packed and
-    /// dispatches the HIP GEMV; the f16 path stays the default. issue #2891:
+    /// dispatches the native GEMV; the f16 path stays the default. issue #2891:
     /// the packed LM head joins the same dispatch, with its grid rounded to the
     /// rows one workgroup reduces.
     #[test]
@@ -1655,6 +2065,38 @@ mod tests {
                 && fallback.contains("tensor<2048x128256xf16>"),
             "the fallback declares the packed head and reads the f16 operand"
         );
+    }
+
+    /// issue #2905: the emitter is device-agnostic, so the CUDA decode graph is
+    /// the hip one with only the target alias and the embedded object swapped.
+    /// Every dispatch, grid and operand type is shared.
+    #[test]
+    fn native_decode_graph_is_the_same_on_cuda_apart_from_the_embedded_object() {
+        use super::builder::Precision;
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::InOut;
+        c.packed_args = true;
+        c.native_head = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let object = b"object";
+        let (hip_alias, hip_source) = crate::native_qmv::module_parts(object, "gfx1151");
+        let (cuda_alias, cuda_source) = crate::native_qmv::cuda_module_parts(object);
+        let hip =
+            emit_decode_with_native(&c, true, Precision::F16, Some((&hip_alias, &hip_source)));
+        let cuda =
+            emit_decode_with_native(&c, true, Precision::F16, Some((&cuda_alias, &cuda_source)));
+        assert!(cuda.starts_with(
+            "#mlxcel_qmv_target = #hal.executable.target<\"cuda\", \"cuda-nvptx-fb\">"
+        ));
+        assert_eq!(
+            cuda,
+            hip.replace(&hip_alias, &cuda_alias)
+                .replace("qmv4-gfx1151.hsaco", "qmv4_compute80.ptx")
+        );
+        assert_eq!(cuda.matches("flow.dispatch @custom_qmv").count(), 65);
     }
 
     /// issue #2922: the ragged batch engine keeps the projections packed and

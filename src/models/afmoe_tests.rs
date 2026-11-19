@@ -1001,3 +1001,15 @@ fn model_owned_batched_multistep() {
         AfmoeModel::from_weights(&filled_weights(&args), &args).unwrap()
     });
 }
+
+#[test]
+fn afmoe_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::last_row_logits_moe_tests::assert_last_row_logits_under_sequence_ids(
+        || {
+            let args = small_args();
+            AfmoeModel::from_weights(&filled_weights(&args), &args).expect("the model builds")
+        },
+        crate::models::last_row_logits_harness::TOKENS,
+    );
+}

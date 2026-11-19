@@ -33,11 +33,11 @@ const DENSE_THROUGH: usize = 19;
 /// Decode steps after the restore, as in the acceptance criterion.
 const DECODE_STEPS: usize = 16;
 
-fn ids(tokens: &[i32]) -> UniquePtr<MlxArray> {
+pub(super) fn ids(tokens: &[i32]) -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32])
 }
 
-fn tokens(len: usize) -> Vec<i32> {
+pub(super) fn tokens(len: usize) -> Vec<i32> {
     let prompt = fixture("model")["prompt"]
         .as_array()
         .expect("prompt")
@@ -66,13 +66,13 @@ fn raw_bytes(array: &MlxArray) -> Vec<u8> {
 }
 
 /// Whether two logit tensors match bit for bit, including their dtype.
-fn identical(a: &MlxArray, b: &MlxArray) -> bool {
+pub(super) fn identical(a: &MlxArray, b: &MlxArray) -> bool {
     mlxcel_core::array_dtype(a) == mlxcel_core::array_dtype(b)
         && mlxcel_core::array_shape(a) == mlxcel_core::array_shape(b)
         && raw_bytes(a) == raw_bytes(b)
 }
 
-fn float_values(array: &MlxArray) -> Vec<f32> {
+pub(super) fn float_values(array: &MlxArray) -> Vec<f32> {
     let array = mlxcel_core::astype(array, dtype::FLOAT32);
     mlxcel_core::eval(&array);
     mlxcel_core::array_to_raw_bytes(&array)
@@ -81,11 +81,11 @@ fn float_values(array: &MlxArray) -> Vec<f32> {
         .collect()
 }
 
-fn decode_tokens() -> Vec<i32> {
+pub(super) fn decode_tokens() -> Vec<i32> {
     (0..DECODE_STEPS as i32).map(|i| (i * 7) % 29 + 2).collect()
 }
 
-fn decode_all(
+pub(super) fn decode_all(
     model: &Qwen4ExpModel,
     caches: &mut [Qwen4ExpCache],
     probes: &[i32],
@@ -96,7 +96,7 @@ fn decode_all(
         .collect()
 }
 
-fn cold_caches(model: &Qwen4ExpModel, prompt: &[i32]) -> Vec<Qwen4ExpCache> {
+pub(super) fn cold_caches(model: &Qwen4ExpModel, prompt: &[i32]) -> Vec<Qwen4ExpCache> {
     let mut caches = model.make_internal_caches();
     let _ = model.forward_hidden(&ids(prompt), None, &mut caches, None);
     caches

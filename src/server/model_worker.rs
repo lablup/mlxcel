@@ -1683,7 +1683,12 @@ fn decode_request_image_with_limits(
 ) -> image::ImageResult<DynamicImage> {
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     reader.limits(limits.image_decode_limits());
-    reader.decode()
+    let mut image = reader.decode()?;
+    // Upright by the EXIF orientation: mlx-vlm's and transformers' `load_image`
+    // hand these models the picture that way, and a phone stores a portrait
+    // photo on its side.
+    crate::multimodal::image_orientation::turn_upright(&mut image, bytes);
+    Ok(image)
 }
 
 fn is_image_limit_error(err: &ImageError) -> bool {

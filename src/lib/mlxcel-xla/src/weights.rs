@@ -502,18 +502,73 @@ pub(crate) fn transpose_projection(buf: &[f32], out: usize, in_: usize) -> Vec<f
     );
     const BLOCK: usize = 32;
     let mut t = vec![0.0f32; buf.len()];
-    for ob in (0..out).step_by(BLOCK) {
-        let o_end = (ob + BLOCK).min(out);
-        for ib in (0..in_).step_by(BLOCK) {
-            let i_end = (ib + BLOCK).min(in_);
-            for o in ob..o_end {
-                for i in ib..i_end {
-                    t[i * out + o] = buf[o * in_ + i];
+    // Bands of whole `[in]` rows of the result, so each thread owns a disjoint
+    // slice of `t` and reads `buf` only.
+    fill_rows_parallel(
+        &mut t,
+        out,
+        conversion_threads(buf.len()),
+        |first_in, band| {
+            let band_in = band.len() / out.max(1);
+            for ob in (0..out).step_by(BLOCK) {
+                let o_end = (ob + BLOCK).min(out);
+                for ib in (0..band_in).step_by(BLOCK) {
+                    let i_end = (ib + BLOCK).min(band_in);
+                    for o in ob..o_end {
+                        for i in ib..i_end {
+                            band[i * out + o] = buf[o * in_ + first_in + i];
+                        }
+                    }
                 }
             }
-        }
-    }
+        },
+    );
     t
+}
+
+/// Elements below which a load-time conversion stays on the calling thread: on
+/// the norms, biases and other small tensors a thread costs more than it saves.
+const PARALLEL_MIN_ELEMENTS: usize = 1 << 20;
+
+/// Upper bound on load-time conversion threads (issue #2961). The conversions
+/// are memory-bound, so they stop scaling well before a large core count.
+const PARALLEL_MAX_THREADS: usize = 16;
+
+/// Threads to convert a tensor of `elements` values with.
+fn conversion_threads(elements: usize) -> usize {
+    if elements < PARALLEL_MIN_ELEMENTS {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(PARALLEL_MAX_THREADS)
+}
+
+/// Fill `out` in bands of whole `row_len`-element rows, one scoped thread per
+/// band (issue #2961).
+///
+/// `fill(first_row, band)` receives the index of the band's first row and must
+/// compute every element from its position alone. Each element is then written
+/// by exactly one thread with the same arithmetic as the serial loop, so the
+/// result is bit-identical for every thread count.
+fn fill_rows_parallel<T: Send>(
+    out: &mut [T],
+    row_len: usize,
+    threads: usize,
+    fill: impl Fn(usize, &mut [T]) + Sync,
+) {
+    let rows = out.len().checked_div(row_len).unwrap_or(0);
+    if threads <= 1 || rows <= 1 {
+        fill(0, out);
+        return;
+    }
+    let band_rows = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (band, chunk) in out.chunks_mut(band_rows * row_len).enumerate() {
+            let fill = &fill;
+            scope.spawn(move || fill(band * band_rows, chunk));
+        }
+    });
 }
 
 /// bf16 little-endian bytes -> f32 (bf16 is the high 16 bits of f32).
@@ -532,7 +587,10 @@ pub(crate) use crate::float::{f32_to_f16_bits, half_to_f32, round_bf16_f32};
 /// than arithmetic-bound (an 8B-param checkpoint otherwise spends minutes in
 /// per-element `powi`).
 pub(crate) fn f16_to_f32(bytes: &[u8]) -> Vec<f32> {
-    let table: Vec<f32> = (0..=u16::MAX).map(half_to_f32).collect();
+    // Built once per process rather than once per call: a quantized checkpoint
+    // widens two f16 buffers (scales, biases) per projection (issue #2961).
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| (0..=u16::MAX).map(half_to_f32).collect());
     bytes
         .chunks_exact(2)
         .map(|c| table[u16::from_le_bytes([c[0], c[1]]) as usize])
@@ -552,7 +610,19 @@ pub(crate) fn f32_le_to_f32(bytes: &[u8]) -> Vec<f32> {
 /// the in-graph demotion). The `u16` values are native-endian; the shim copies the
 /// raw bytes, so on a little-endian host they land as the f16 buffer IREE expects.
 pub(crate) fn pack_f16(data: &[f32]) -> Vec<u16> {
-    data.iter().map(|&x| f32_to_f16_bits(x)).collect()
+    let mut packed = vec![0u16; data.len()];
+    fill_rows_parallel(
+        &mut packed,
+        1,
+        conversion_threads(data.len()),
+        |first, band| {
+            let source = &data[first..first + band.len()];
+            for (dst, &x) in band.iter_mut().zip(source) {
+                *dst = f32_to_f16_bits(x);
+            }
+        },
+    );
+    packed
 }
 
 /// Dequantize one MLX affine-quantized weight to row-major `[out, in]` f32.
@@ -667,21 +737,34 @@ fn dequantize_affine_with_metadata(
     }
     let mask: u32 = (1u32 << bits) - 1;
     let mut w = vec![0f32; out * in_];
-    for o in 0..out {
-        let row = &packed[o * in_packed * 4..(o + 1) * in_packed * 4];
-        let grow = o * n_groups;
-        let wrow = o * in_;
-        for p in 0..in_packed {
-            let u =
-                u32::from_le_bytes([row[p * 4], row[p * 4 + 1], row[p * 4 + 2], row[p * 4 + 3]]);
-            for j in 0..per_u32 {
-                let i = p * per_u32 + j;
-                let q = ((u >> (bits * j)) & mask) as f32;
-                let g = i / group_size;
-                w[wrow + i] = q * scales[grow + g] + biases[grow + g];
+    // Rows are independent, so bands of rows convert on separate threads with
+    // the serial loop's arithmetic (issue #2961).
+    fill_rows_parallel(
+        &mut w,
+        in_,
+        conversion_threads(out * in_),
+        |first_row, band| {
+            for (r, wrow) in band.chunks_exact_mut(in_).enumerate() {
+                let o = first_row + r;
+                let row = &packed[o * in_packed * 4..(o + 1) * in_packed * 4];
+                let grow = o * n_groups;
+                for p in 0..in_packed {
+                    let u = u32::from_le_bytes([
+                        row[p * 4],
+                        row[p * 4 + 1],
+                        row[p * 4 + 2],
+                        row[p * 4 + 3],
+                    ]);
+                    for j in 0..per_u32 {
+                        let i = p * per_u32 + j;
+                        let q = ((u >> (bits * j)) & mask) as f32;
+                        let g = i / group_size;
+                        wrow[i] = q * scales[grow + g] + biases[grow + g];
+                    }
+                }
             }
-        }
-    }
+        },
+    );
     Ok(w)
 }
 
@@ -1570,6 +1653,110 @@ mod tests {
                 assert_eq!(t[i * out + o], buf[o * in_ + i]);
             }
         }
+    }
+
+    /// issue #2961: banding rows over threads never changes which element a
+    /// row index maps to, for band counts that do and do not divide the rows.
+    #[test]
+    fn fill_rows_parallel_matches_the_serial_fill_for_every_thread_count() {
+        let (rows, row_len) = (37usize, 5usize);
+        let fill = |first_row: usize, band: &mut [u32]| {
+            for (r, row) in band.chunks_exact_mut(row_len).enumerate() {
+                for (c, slot) in row.iter_mut().enumerate() {
+                    *slot = ((first_row + r) * 1000 + c) as u32;
+                }
+            }
+        };
+        let mut serial = vec![0u32; rows * row_len];
+        fill(0, &mut serial);
+        for threads in [1, 2, 3, 7, 16, 37, 64] {
+            let mut banded = vec![u32::MAX; rows * row_len];
+            fill_rows_parallel(&mut banded, row_len, threads, fill);
+            assert_eq!(banded, serial, "threads = {threads}");
+        }
+        // Degenerate shapes take the serial path instead of dividing by zero.
+        let mut empty: Vec<u32> = Vec::new();
+        fill_rows_parallel(&mut empty, 0, 8, |_, band| assert!(band.is_empty()));
+    }
+
+    /// Small tensors stay on the calling thread; large ones are capped.
+    #[test]
+    fn conversion_threads_is_serial_below_the_threshold_and_capped_above() {
+        assert_eq!(conversion_threads(0), 1);
+        assert_eq!(conversion_threads(PARALLEL_MIN_ELEMENTS - 1), 1);
+        let large = conversion_threads(PARALLEL_MIN_ELEMENTS);
+        assert!((1..=PARALLEL_MAX_THREADS).contains(&large));
+    }
+
+    /// issue #2961: at a size that takes the threaded path, the three load-time
+    /// conversions return exactly what a serial element-by-element reference
+    /// computes. 1024 x 1088 is above the threshold and not a multiple of the
+    /// transpose block or of a typical band count.
+    #[test]
+    fn threaded_conversions_are_bit_identical_to_the_serial_reference() {
+        let (out, in_packed, bits, group) = (1024usize, 136usize, 4usize, 64usize);
+        let in_ = in_packed * (32 / bits);
+        assert!(out * in_ >= PARALLEL_MIN_ELEMENTS);
+        let n_groups = in_ / group;
+        // A fixed LCG, so the test needs no RNG dependency and is reproducible.
+        let mut state = 0x2961_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        let packed: Vec<u8> = (0..out * in_packed)
+            .flat_map(|_| next().to_le_bytes())
+            .collect();
+        // Finite f16 scales and biases with varied exponents and signs.
+        let half = |value: u32| {
+            let bits = (value as u16) & 0x7FFF;
+            let exponent = 10 + (bits >> 10) % 8;
+            (((value >> 16) as u16 & 0x8000) | (exponent << 10) | (bits & 0x03FF)).to_le_bytes()
+        };
+        let scales: Vec<u8> = (0..out * n_groups).flat_map(|_| half(next())).collect();
+        let biases: Vec<u8> = (0..out * n_groups).flat_map(|_| half(next())).collect();
+
+        let w = dequantize_affine(
+            &packed, &scales, &biases, out, in_packed, bits, group, false,
+        )
+        .unwrap();
+        let s = f16_to_f32(&scales);
+        let b = f16_to_f32(&biases);
+        let mut reference = vec![0f32; out * in_];
+        for o in 0..out {
+            for i in 0..in_ {
+                let word = (o * in_packed + i / 8) * 4;
+                let u = u32::from_le_bytes(packed[word..word + 4].try_into().unwrap());
+                let q = ((u >> (4 * (i % 8))) & 0xF) as f32;
+                reference[o * in_ + i] =
+                    q * s[o * n_groups + i / group] + b[o * n_groups + i / group];
+            }
+        }
+        assert!(
+            w.iter()
+                .zip(&reference)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "dequantize_affine differs from the serial reference"
+        );
+
+        let packed_f16 = pack_f16(&w);
+        assert!(
+            packed_f16
+                .iter()
+                .zip(&reference)
+                .all(|(&a, &b)| a == f32_to_f16_bits(b)),
+            "pack_f16 differs from the serial reference"
+        );
+
+        let t = transpose_projection(&w, out, in_);
+        for o in (0..out).step_by(7) {
+            for i in 0..in_ {
+                assert_eq!(t[i * out + o].to_bits(), reference[o * in_ + i].to_bits());
+            }
+        }
+        assert_eq!(t.len(), reference.len());
     }
 
     /// f16 widening is exact against `f32 as` for representative values: zero, one,

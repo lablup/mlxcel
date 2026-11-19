@@ -106,9 +106,10 @@ fn deepseek_v2_switch_linear_rejects_quantization_params_that_would_abort_gather
 // and one without, compared through the full block including `o_proj`.
 //
 // The flag itself cannot be toggled inside one process (`absorbed_enabled` is a
-// `OnceLock`), so the test sets the folded field directly. That is the same
-// state the loader produces when the flag is on, and it is reachable because
-// this test module is compiled inside `deepseek_v2`.
+// `OnceLock`), so the test sets the folded field directly. Both states are
+// what the loader produces (absorbed by default, decompressed under
+// `MLXCEL_MLA_ABSORBED=0` or off Metal), and they are reachable because this test module
+// is compiled inside `deepseek_v2`.
 
 use super::{KVCache, MLAAttention, ModelArgs, load_mla_attention};
 use mlxcel_core::mla::{MlaAbsorbedProjections, MlaGeometry};
@@ -254,7 +255,9 @@ fn expanded_and_absorbed_mla_batched_decode_match_ragged_rows() {
     let _runtime = crate::initialize_runtime();
     let args = mla_test_args();
     let weights = mla_test_weights(&args, 0x2560);
-    let baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load baseline");
+    // The expanded (decompressed) arm: clear the fold the default loads (#3131).
+    let mut baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load baseline");
+    baseline.absorbed = None;
     assert_ragged_batched_attention_matches_rows(&baseline);
 
     let geometry = MlaGeometry {
@@ -357,9 +360,8 @@ fn absorbed_decode_preserves_each_row_layout_in_a_mixed_storage_batch() {
     );
 }
 
-#[test]
-fn deepseek_v2_batched_decode_harness_covers_ragged_single_and_empty() {
-    let _runtime = crate::initialize_runtime();
+/// One dense MLA layer over a 16-token vocabulary.
+fn tiny_harness_model() -> super::DeepSeekV2Model {
     let mut args = mla_test_args();
     args.vocab_size = 16;
     args.intermediate_size = 64;
@@ -394,7 +396,13 @@ fn deepseek_v2_batched_decode_harness_covers_ragged_single_and_empty() {
             0.1,
         );
     }
-    let model = super::DeepSeekV2Model::from_weights(&weights, &args).expect("tiny model loads");
+    super::DeepSeekV2Model::from_weights(&weights, &args).expect("tiny model loads")
+}
+
+#[test]
+fn deepseek_v2_batched_decode_harness_covers_ragged_single_and_empty() {
+    let _runtime = crate::initialize_runtime();
+    let model = tiny_harness_model();
     crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
         &model,
         &[&[1], &[2, 3], &[4, 5, 6]],
@@ -421,11 +429,17 @@ fn absorbed_mla_attention_matches_the_decompressed_block_step_for_step() {
         v_head_dim: args.v_head_dim,
     };
 
-    let baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load baseline");
-    assert!(
-        baseline.absorbed.is_none(),
-        "the loader must not fold when MLXCEL_MLA_ABSORBED is unset"
+    // The loader folds exactly when the process-wide mode absorbs: by default
+    // where the fused kernel runs (issue #3131), always under an on spelling,
+    // never under an off spelling. The baseline then drops the fold, which is
+    // the state `=0` produces.
+    let mut baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load baseline");
+    assert_eq!(
+        baseline.absorbed.is_some(),
+        mlxcel_core::mla::absorbed_enabled(),
+        "the loader must fold exactly when mla::absorbed_enabled() holds"
     );
+    baseline.absorbed = None;
 
     let mut absorbed = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load absorbed");
     absorbed.absorbed =
@@ -475,7 +489,10 @@ fn absorbed_attention_leaves_a_much_smaller_cache_behind() {
         qk_rope_head_dim: args.qk_rope_head_dim,
         v_head_dim: args.v_head_dim,
     };
-    let baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).unwrap();
+    // Absorbed is the loader's default on Metal (#3131); clear the fold to get the
+    // decompressed layout `MLXCEL_MLA_ABSORBED=0` produces.
+    let mut baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).unwrap();
+    baseline.absorbed = None;
     let mut absorbed = load_mla_attention(&weights, &args, ATTN_PREFIX).unwrap();
     absorbed.absorbed =
         Some(MlaAbsorbedProjections::from_kv_b_proj(&absorbed.kv_b_proj, geometry).unwrap());
@@ -496,5 +513,14 @@ fn absorbed_attention_leaves_a_much_smaller_cache_behind() {
         "decompressed cache {} bytes vs latent {} bytes; absorption did not take",
         base_cache.nbytes(),
         latent_cache.nbytes()
+    );
+}
+
+#[test]
+fn deepseek_v2_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::last_row_logits_harness::assert_last_row_logits(
+        tiny_harness_model,
+        crate::models::last_row_logits_harness::TOKENS,
     );
 }

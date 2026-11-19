@@ -77,6 +77,12 @@ pub struct ActivationMessage {
     /// not set it (the in-process worker, an older peer, the reverse path).
     #[serde(default)]
     pub reply_nonce: Option<u64>,
+    /// Position of the sequence the request samples (a prefill's last prompt
+    /// row), set by the coordinator so the final stage projects only that row
+    /// through the LM head (#3074). `None` asks for every position, which is
+    /// also what a sender that predates the field produces.
+    #[serde(default)]
+    pub last_pos: Option<u32>,
 }
 
 impl ActivationMessage {
@@ -103,6 +109,7 @@ impl ActivationMessage {
             seq_len,
             timestamp_ns: timestamp_nanos(),
             reply_nonce: None,
+            last_pos: None,
         }
     }
 
@@ -110,6 +117,12 @@ impl ActivationMessage {
     /// [`Self::reply_nonce`].
     pub fn with_reply_nonce(mut self, nonce: Option<u64>) -> Self {
         self.reply_nonce = nonce;
+        self
+    }
+
+    /// Carry (or clear) the sampled-row position; see [`Self::last_pos`].
+    pub fn with_last_pos(mut self, last_pos: Option<u32>) -> Self {
+        self.last_pos = last_pos;
         self
     }
 
@@ -134,6 +147,7 @@ impl ActivationMessage {
             seq_len,
             timestamp_ns: timestamp_nanos(),
             reply_nonce: None,
+            last_pos: None,
         }
     }
 

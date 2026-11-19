@@ -3018,3 +3018,114 @@ fn image_only_names_each_conflicting_flag() {
         assert!(message.contains(flag), "{flag}: {message}");
     }
 }
+
+/// Bytes the scheduler's per-layer modes hold for `groups` of
+/// `(layers, elems_per_token, window)` at `ctx`, batch 1: FP16 layers 2 bytes
+/// per element, INT8 layers 1. The last layer is the last group's.
+fn runtime_kv_bytes(
+    modes: &[mlxcel_core::cache::KVCacheMode],
+    layers: &[(u64, Option<u64>)],
+    ctx: u64,
+) -> u64 {
+    assert_eq!(modes.len(), layers.len());
+    modes
+        .iter()
+        .zip(layers)
+        .map(|(mode, (elems, window))| {
+            let eb = if *mode == mlxcel_core::cache::KVCacheMode::Int8 {
+                1
+            } else {
+                2
+            };
+            elems * window.map_or(ctx, |w| ctx.min(w)) * eb
+        })
+        .sum()
+}
+
+/// `--kv-bits 8` keeps the last layer FP16 under `--kv-skip-last-layer`, so
+/// the serve preflight and prompt-cache sizing must charge that layer at FP16
+/// width: at least what the runtime layer modes hold, below the all-FP16
+/// figure, and all INT8 when the skip is off (#3153).
+#[test]
+fn int8_sizing_charges_the_fp16_last_layer() {
+    use crate::execution::kv_arch::estimate_kv_arch_from_config;
+    use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
+
+    let ctx = 8192;
+    let size = |cfg: &serde_json::Value, skip: bool| {
+        let batch = BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, skip).unwrap();
+        let sizing = super::kv_mode_for_batch(KVCacheMode::Fp16, &batch);
+        assert_eq!(sizing.mode, KVCacheMode::Int8);
+        assert_eq!(sizing.fp16_last_layer, skip);
+        estimate_kv_arch_from_config(cfg, ctx, sizing, 1)
+            .unwrap()
+            .total_bytes
+    };
+    let fp16 = |cfg: &serde_json::Value| {
+        estimate_kv_arch_from_config(cfg, ctx, KVCacheMode::Fp16, 1)
+            .unwrap()
+            .total_bytes
+    };
+    let modes = |skip: bool, n: usize| {
+        BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, skip)
+            .unwrap()
+            .resolve_layer_modes(n)
+    };
+
+    // Dense llama: 8 layers, 2 kv heads x 128 head_dim.
+    let llama = serde_json::json!({
+        "model_type": "llama",
+        "num_hidden_layers": 8,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "head_dim": 128,
+    });
+    let dense_layers = vec![(2 * 2 * 128, None); 8];
+    let skip = size(&llama, true);
+    assert!(skip >= runtime_kv_bytes(&modes(true, 8), &dense_layers, ctx));
+    assert!(skip < fp16(&llama));
+    assert_eq!(skip, runtime_kv_bytes(&modes(true, 8), &dense_layers, ctx));
+    let all_int8 = size(&llama, false);
+    assert_eq!(
+        all_int8,
+        runtime_kv_bytes(&modes(false, 8), &dense_layers, ctx)
+    );
+    assert_eq!(all_int8 * 2, fp16(&llama));
+    assert!(all_int8 < skip);
+
+    // Gemma 4 style stack: 5 sliding layers (window 1024) then a global one,
+    // which is the last layer the runtime keeps at FP16.
+    let gemma = serde_json::json!({
+        "model_type": "gemma4",
+        "text_config": {
+            "model_type": "gemma4_text",
+            "num_hidden_layers": 6,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 16,
+            "num_global_key_value_heads": 4,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "sliding_window": 1024,
+            "layer_types": [
+                "sliding_attention", "sliding_attention", "sliding_attention",
+                "sliding_attention", "sliding_attention", "full_attention"
+            ],
+        },
+    });
+    let mut gemma_layers = vec![(2 * 16 * 256, Some(1024)); 5];
+    gemma_layers.push((2 * 4 * 512, None));
+    let skip = size(&gemma, true);
+    assert!(skip >= runtime_kv_bytes(&modes(true, 6), &gemma_layers, ctx));
+    assert!(skip < fp16(&gemma));
+    let all_int8 = size(&gemma, false);
+    assert_eq!(
+        all_int8,
+        runtime_kv_bytes(&modes(false, 6), &gemma_layers, ctx)
+    );
+    assert!(all_int8 < skip);
+
+    // Skipping has nothing to skip when the table is off or a Turbo mode.
+    let off = BatchKvQuantConfig::default();
+    let sizing = super::kv_mode_for_batch(KVCacheMode::Fp16, &off);
+    assert!(!sizing.fp16_last_layer);
+}

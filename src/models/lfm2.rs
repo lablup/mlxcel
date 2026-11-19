@@ -46,7 +46,8 @@ use mlxcel_core::cache::{
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{
-    create_bidirectional_padding_mask, create_causal_mask, slice_axis, stack_arrays,
+    PrefillAttention, create_bidirectional_padding_mask, prefill_causal_mask, slice_axis,
+    stack_arrays,
 };
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -609,13 +610,11 @@ impl ShortConv {
         };
 
         // Persist the last `L_cache - 1` time steps as the next conv state.
-        // `contiguous` forces a fresh buffer so the cached slice does not retain
-        // the full padded allocation (mirrors the Mamba conv-state handling).
+        // The tail is a fresh buffer, scheduled now on a long prefill so the full
+        // padded allocation is not held until the caches are evaluated.
         // The non-causal mixer never decodes, so it keeps the state untouched.
         if self.causal {
-            let plen = mlxcel_core::array_shape(&padded)[1];
-            let tail = slice_axis(&padded, 1, plen - n_keep, plen);
-            *conv_state = Some(mlxcel_core::contiguous(&tail, false));
+            *conv_state = Some(mlxcel_core::utils::materialized_state_tail(&padded, n_keep));
         }
 
         // Depthwise Conv1d (groups == hidden). Match the conv weight dtype to
@@ -1090,6 +1089,36 @@ impl Lfm2Model {
         self.config.num_hidden_layers
     }
 
+    /// The attention layers' prefill mask for `seq_len` rows of `h` after
+    /// `offset` keys: `None` for a decode row, or where a single row can take
+    /// MLX's causal mode (`prefill_causal_mask`, #3072), which the attention
+    /// layer runs for a mask-less multi-token forward.
+    ///
+    /// Used by: `forward_embeds_rows_with_caches`, `forward_speculative_with`.
+    pub(crate) fn prefill_attn_mask(
+        &self,
+        seq_len: i32,
+        offset: i32,
+        batch: i32,
+        h: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let attention = self.layers.iter().find_map(|layer| match &layer.mixer {
+            Mixer::Attention(attn) => Some(PrefillAttention::new(
+                attn.num_heads as usize,
+                attn.num_kv_heads as usize,
+                attn.head_dim as usize,
+            )),
+            Mixer::Conv(_) => None,
+        })?;
+        prefill_causal_mask(
+            seq_len,
+            offset,
+            batch,
+            attention,
+            mlxcel_core::array_dtype(h),
+        )
+    }
+
     pub fn make_caches(&self) -> Vec<Lfm2LayerCache> {
         self.layers
             .iter()
@@ -1104,7 +1133,7 @@ impl Lfm2Model {
         caches: &mut [Lfm2LayerCache],
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(inputs);
-        self.forward_embeds_with_caches(&h, caches)
+        self.forward_embeds_rows_with_caches(&h, caches, None)
     }
 
     fn batch_states_uniform(&self, rows: &[Vec<Lfm2LayerCache>]) -> bool {
@@ -1213,6 +1242,19 @@ impl Lfm2Model {
         input_embeds: &MlxArray,
         caches: &mut [Lfm2LayerCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_embeds_rows_with_caches(input_embeds, caches, None)
+    }
+
+    /// [`Self::forward_embeds_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). Every layer, conv state included, runs over the
+    /// whole input either way.
+    fn forward_embeds_rows_with_caches(
+        &self,
+        input_embeds: &MlxArray,
+        caches: &mut [Lfm2LayerCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = mlxcel_core::copy(input_embeds);
 
         let shape = mlxcel_core::array_shape(&h);
@@ -1226,11 +1268,7 @@ impl Lfm2Model {
             .find(|c| matches!(c, Lfm2LayerCache::Attention(_)))
             .map(|c| c.offset())
             .unwrap_or(0);
-        let attn_mask = if seq_len > 1 {
-            Some(create_causal_mask(seq_len, attn_offset))
-        } else {
-            None
-        };
+        let attn_mask = self.prefill_attn_mask(seq_len, attn_offset, shape[0], &h);
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             let mask = if layer.is_attention() {
@@ -1240,6 +1278,7 @@ impl Lfm2Model {
             };
             h = layer.forward(&h, cache, mask, None);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.embedding_norm.forward(&h);
         self.embed_tokens.as_linear(&h)
@@ -1650,6 +1689,30 @@ impl LanguageModel for Lfm2Model {
                 None => self.forward_with_caches(input_ids, internal),
             },
         )
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || Lfm2Model::make_caches(self),
+            |internal| match input_embeddings {
+                Some(embeds) => {
+                    self.forward_embeds_rows_with_caches(embeds, internal, Some(last_pos))
+                }
+                None => {
+                    let h = self.embed_tokens.forward(input_ids);
+                    self.forward_embeds_rows_with_caches(&h, internal, Some(last_pos))
+                }
+            },
+        ))
     }
 
     fn supports_snapshot_reuse(&self) -> bool {

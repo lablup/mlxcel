@@ -241,7 +241,7 @@ Which one is wrong varies, and the checkpoint's own declaration is what settles 
 
 ### A prompt-token count cannot prove the model saw the image
 
-The sweep rejects a row whose prompt never grew past its plain-text template (`FAIL:image_not_applied`), which catches an image that was dropped before tokenization. It cannot catch an image that was tokenized and then ignored. `granite-vision-3.2-2b-4bit` under mlxcel logs 1485 image tokens, measures a 1543-token prompt, and answers "I can't provide a description of the image as I can't see it" (lablup/mlxcel#1683, reproduced on M1 Ultra and M5 Max).
+The sweep rejects a row whose prompt never grew past its plain-text template (`FAIL:image_not_applied`), which catches an image that was dropped before tokenization. A length check cannot catch an image that was tokenized and then ignored; since lablup/mlxcel#2134 the mlx-vlm sweep (`scripts/bench_mlxlm.py`) reads the generated text for that and records `FAIL:image_ignored` when the answer contains a refusal phrase such as "can't see". The mlxcel sweep (`scripts/bench_decode.sh`) does not capture generated text, so it has no such check. `granite-vision-3.2-2b-4bit` under mlxcel logs 1485 image tokens, measures a 1543-token prompt, and answers "I can't provide a description of the image as I can't see it" (lablup/mlxcel#1683, reproduced on M1 Ultra and M5 Max).
 
 Which side is blind varies by model, so neither runtime can be assumed correct: `llava-next-mistral-7b-4bit` is the mirror case, with mlxcel expanding the image to 590 tokens while mlx-vlm reports 7 and is caught by the guard.
 

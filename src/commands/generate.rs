@@ -381,16 +381,19 @@ fn run_memory_preflight(
     // announced by `run_generate`, so resolve quietly here.
     let (kv_cache_mode, _) =
         mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, &args.model.model);
-    let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
-
     // Size the KV cache for the tokens that can actually enter the cache:
     // rendered prompt tokens plus the requested decode budget. This still runs
     // before model load, but after tokenizer/template processing has made the
     // prompt length knowable.
     let ctx_len = memory_preflight_ctx_len(prompt_token_count, args.generation.max_tokens);
 
-    let estimate =
-        estimate_total_memory(&args.model.model, ctx_len, 1, QuantHint::Default, kv_int8);
+    let estimate = estimate_total_memory(
+        &args.model.model,
+        ctx_len,
+        1,
+        QuantHint::Default,
+        kv_cache_mode,
+    );
 
     let banner = format_estimate(&args.model.model, &estimate);
     println!("{banner}");
@@ -1640,6 +1643,32 @@ fn xla_required_positions(
         .saturating_add(image_expansion)
 }
 
+/// One `MLXCEL_PRINT_TOKEN_IDS` line: `[<label> (<count>): <id> <id> ...]`.
+fn token_ids_line(label: &str, ids: &[i32]) -> String {
+    format!(
+        "[{label} ({}): {}]",
+        ids.len(),
+        ids.iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+/// `MLXCEL_PRINT_TOKEN_IDS`: dump the prompt and generated ids to stderr so two
+/// runs (classic versus `--draft-model`, fused MoE on versus off, one OpenXLA
+/// weight path versus another) can be compared on ids rather than on decoded
+/// text, which can round-trip two different id sequences to the same string.
+///
+/// Used by: the MLX tail of `run_generate` and its OpenXLA branch, which
+/// returns before that tail.
+fn print_token_ids_if_requested(prompt_tokens: &[i32], generated_tokens: &[i32]) {
+    if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
+        eprintln!("{}", token_ids_line("prompt ids", prompt_tokens));
+        eprintln!("{}", token_ids_line("token ids", generated_tokens));
+    }
+}
+
 /// The worst-case image expansion to include in an OpenXLA sizing hint.
 #[cfg(feature = "xla-backend")]
 fn xla_image_expansion(model_path: &Path, image_count: usize) -> usize {
@@ -1679,6 +1708,10 @@ fn generate_xla(
         Some(required_positions),
     )?;
     let start_time = Instant::now();
+    // The plain text path reports its two phases from the session's own
+    // windows. Every other XLA path keeps the whole-run accounting, which
+    // folds prefill into decode, so this stays optional.
+    let mut xla_timing: Option<mlxcel_xla::GreedyTiming> = None;
     let tokens = match &mut session {
         mlxcel::Session::Xla(s) => {
             let capacity = s.context_capacity();
@@ -1838,8 +1871,11 @@ fn generate_xla(
                     anyhow::bail!("OpenXLA audio execution requires the xla-iree feature");
                 }
             } else if image_paths.is_empty() {
-                s.generate_greedy(prompt_tokens, max_tokens, &eos)
-                    .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?
+                let (tokens, timing) = s
+                    .generate_streaming_greedy_timed(prompt_tokens, max_tokens, &eos, |_| true)
+                    .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?;
+                xla_timing = Some(timing);
+                tokens
             } else {
                 ensure!(
                     s.supports_images(),
@@ -1856,6 +1892,32 @@ fn generate_xla(
     };
     let total_time = start_time.elapsed();
     let generated_len = tokens.len();
+    if let Some(timing) = xla_timing {
+        // The OpenXLA session's decode window already contains the first
+        // generated token (it comes out of `decode_step` on the last prompt
+        // token), so all generated tokens belong to the decode numerator. Its
+        // prefill window seeds the prompt prefix, one token short of the
+        // prompt.
+        let prefill_tokens = prompt_tokens.len().saturating_sub(1);
+        return Ok((
+            tokens,
+            GenerationStats {
+                prompt_tokens: prompt_tokens.len(),
+                generated_tokens: generated_len,
+                prefill_time_ms: timing.prefill_ms,
+                decode_time_ms: timing.decode_ms,
+                prefill_tok_per_sec: if timing.prefill_ms > 0.0 {
+                    prefill_tokens as f64 / (timing.prefill_ms / 1000.0)
+                } else {
+                    0.0
+                },
+                decode_tok_per_sec: mlxcel_core::generate::decode_tok_per_sec(
+                    generated_len,
+                    timing.decode_ms,
+                ),
+            },
+        ));
+    }
     Ok((
         tokens,
         generation_stats_from_duration(prompt_tokens.len(), generated_len, total_time),
@@ -3043,14 +3105,14 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // Quantization recommendation and BF16 warning (before loading the model).
     let hw = mlxcel_core::hardware::get_hardware();
     if args.generation.recommend_quant {
-        let advice = advise_quantization(&args.model.model, hw, None);
+        let advice = advise_quantization(&args.model.model, hw, None, kv_cache_mode);
         print_quant_advice(&advice, hw);
         return Ok(());
     }
 
     // BF16 warning on M5 hardware (even without --recommend-quant).
     if hw.has_neural_accelerator {
-        let advice = advise_quantization(&args.model.model, hw, None);
+        let advice = advise_quantization(&args.model.model, hw, None, kv_cache_mode);
         if advice.model_uses_bfloat16 {
             eprintln!(
                 "WARNING: This model uses BFloat16 weights, which are not supported by \
@@ -3332,6 +3394,10 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             kv_cache_mode,
             token_bias,
         )?;
+        // This branch returns before the shared tail below, so it prints the
+        // ids itself; without this the diagnostic was silently ignored on the
+        // OpenXLA backend.
+        print_token_ids_if_requested(&prompt_tokens, &generated_tokens);
         let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
         let visible = filter_reasoning_for_display(
             &tokenizer,
@@ -3498,30 +3564,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         }
         generation
     };
-    // `MLXCEL_PRINT_TOKEN_IDS`: dump the generated ids to stderr so two runs
-    // (classic versus `--draft-model`, fused MoE on versus off) can be
-    // compared on ids rather than on decoded text, which can round-trip two
-    // different id sequences to the same string.
-    if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
-        eprintln!(
-            "[prompt ids ({}): {}]",
-            prompt_tokens.len(),
-            prompt_tokens
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        eprintln!(
-            "[token ids ({}): {}]",
-            generated_tokens.len(),
-            generated_tokens
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-    }
+    print_token_ids_if_requested(&prompt_tokens, &generated_tokens);
     let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
     let visible = filter_reasoning_for_display(
         &tokenizer,

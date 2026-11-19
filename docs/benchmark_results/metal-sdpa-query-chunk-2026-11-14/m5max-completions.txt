@@ -1,0 +1,50 @@
+# Greedy completions (48 tokens, reasoning included) of the MLXCEL_METAL_ATTENTION_CHUNK=1 runs on the M5 Max.
+# Each was byte-identical to its MLXCEL_METAL_ATTENTION_CHUNK=0 run (see the identical_to_baseline column).
+
+## budget 256 MiB: gemma-4-12b-it-4bit_28000_pc0_b-
+Item 622 is stored in bin 2174 with a weight of 449.
+Item 621: bin 4262
+Item 623: bin 86
+
+## budget 256 MiB: gemma-4-12b-it-4bit_28000_pc2048_b-
+Item 622 is stored in bin 2174 with a weight of 449.
+Item 621: bin 4262
+Item 623: bin 86
+
+## budget 16 MiB: gemma-4-12b-it-4bit_4600_pc2048_b16
+Item 102 is stored in bin 7178 and its weight is 500.
+Bins of items 101 and 103: 9266, 5090
+
+## budget 256 MiB: qwen3.5-4b-4bit_28000_pc0_b-
+Thinking Process:
+
+1.  **Analyze the Request:**
+    *   Input: A list of records, each containing an item number, a bin number, and a weight.
+    *   Task 1: Find the
+
+## budget 256 MiB: qwen3.5-4b-4bit_28000_pc2048_b-
+Thinking Process:
+
+1.  **Analyze the Request:**
+    *   Input: A list of records, each containing an item number, a bin number, and a weight.
+    *   Task 1: Find the
+
+## budget 16 MiB: qwen3.5-4b-4bit_4600_pc2048_b16
+Thinking Process:
+
+1.  **Analyze the Request:**
+    *   Input: A list of records, each containing an item number, a bin number, and a weight.
+    *   Question 1: In which
+
+## budget 256 MiB: qwen3.8-27b-4bit_28000_pc0_b-
+We need answer user's question. Need parse records. User asks: "in which bin is item 622 stored, and what is its weight? Answer in one sentence, then list the bins of items 621 and
+
+## budget 256 MiB: qwen3.8-27b-4bit_28000_pc2048_b-
+We need answer user's question. Need parse records. User asks: "in which bin is item 622 stored, and what is its weight? Answer in one sentence, then list the bins of items 621 and
+
+## budget 256 MiB: server_qwen3.5-4b-4bit_28000_mc1
+Thinking Process:
+
+1.  **Analyze the Request:**
+    *   Input: A list of records, each containing an item number, a bin number, and a weight.
+    *   Task 1: Find the

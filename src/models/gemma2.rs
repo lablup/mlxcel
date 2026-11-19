@@ -324,11 +324,12 @@ pub struct MLP {
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         // GeGLU: gelu(gate_proj(x)) * up_proj(x), then down_proj
-        // Quantized path: fused compiled quantized MLP
-        if let (Some(gate_qw), Some(up_qw), Some(down_qw)) = (
-            self.gate_proj.quantized_weight(),
-            self.up_proj.quantized_weight(),
-            self.down_proj.quantized_weight(),
+        // Quantized path: fused compiled quantized MLP, when the three
+        // projections share one quantization layout.
+        if let Some((gate_qw, up_qw, down_qw)) = mlxcel_core::layers::fused_mlp_quantized_weights(
+            &self.gate_proj,
+            &self.up_proj,
+            &self.down_proj,
         ) {
             return unsafe {
                 mlxcel_core::compiled_gelu_approx_mlp_forward(
@@ -549,6 +550,19 @@ impl Gemma2Model {
         let hidden_size = mlxcel_core::array_shape(&h)[2];
         let scale = (hidden_size as f32).sqrt();
         h = mlxcel_core::multiply_scalar(&h, scale);
+
+        // A softcapped prefill with no caller mask builds its causal mask
+        // once here and shares it, instead of `causal_attention` building the
+        // same mask in every layer (#3072).
+        let seq_len = mlxcel_core::array_shape(&h)[1];
+        let shared_mask = if mask.is_none() {
+            let softcap = self.layers.first().map_or(0.0, |l| l.self_attn.softcapping);
+            let offset = caches.first().map_or(0, |c| c.live_len());
+            mlxcel_core::utils::softcap_prefill_causal_mask(seq_len, offset, softcap)
+        } else {
+            None
+        };
+        let mask = mask.or(shared_mask.as_deref());
 
         let n = self.layers.len();
         for (i, layer) in self.layers.iter().enumerate() {

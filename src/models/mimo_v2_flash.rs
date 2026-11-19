@@ -90,7 +90,10 @@ use crate::models::switch_layers::{SwitchGLU, group_mask_scores};
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask, slice_axis};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+    slice_axis,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -728,9 +731,26 @@ pub struct Attention {
     pub value_scale: Option<f32>,
     /// Learned per-head logit appended to the softmax denominator.
     pub sinks: Option<UniquePtr<MlxArray>>,
+    /// The sliding window on a sliding layer, 0 on a full-attention layer.
+    pub window: i32,
 }
 
 impl Attention {
+    /// The geometry the model's prefill mask choice asks MLX about (#3098).
+    fn prefill_attention(&self) -> PrefillAttention {
+        let attention = PrefillAttention::new(
+            self.num_heads as usize,
+            self.num_kv_heads as usize,
+            self.head_dim as usize,
+        )
+        .with_value_dim(self.v_head_dim as usize);
+        if self.sinks.is_some() {
+            attention.with_sinks()
+        } else {
+            attention
+        }
+    }
+
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
@@ -766,6 +786,18 @@ impl Attention {
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
         let attn_out = match &self.sinks {
+            // A prefill whose model left the mask to MLX: causal mode, plus
+            // `window_size` on a sliding layer, with the sinks (#3098).
+            sinks if l > 1 && mask.is_none() && (sinks.is_some() || self.window > 0) => {
+                mlxcel_core::causal_prefill_attention(
+                    &q,
+                    &cache_k,
+                    &cache_v,
+                    self.scale,
+                    self.window,
+                    sinks.as_deref(),
+                )
+            }
             Some(sinks) => {
                 let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
                 // SAFETY: `sinks` is a live per-head array owned by `self`, and
@@ -875,6 +907,13 @@ impl Attention {
             rope_base,
             value_scale: args.attention_value_scale,
             sinks,
+            window: if is_sliding {
+                i32::try_from(args.sliding_window_size).map_err(|_| {
+                    format!("MiMo v2 Flash {prefix}: sliding window does not fit in i32")
+                })?
+            } else {
+                0
+            },
         })
     }
 }
@@ -1218,6 +1257,18 @@ impl MiMoV2FlashModel {
         embeddings: &MlxArray,
         caches: &mut [Cache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_prepared_rows(embeddings, caches, None)
+    }
+
+    /// [`Self::forward_prepared`] projecting every position (`row == None`)
+    /// or only position `row` (`[B, 1, vocab]`, the prefill's sampled row,
+    /// #3070). The caches advance over every position either way.
+    fn forward_prepared_rows(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [Cache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(embeddings)[1];
         let mut h = mlxcel_core::copy(embeddings);
 
@@ -1225,6 +1276,8 @@ impl MiMoV2FlashModel {
         // monotonic offset, so a trimmed cache does not produce a mask wider
         // than the K/V it returns.
         let (full_mask, sliding_mask) = if seq_len > 1 {
+            let batch = mlxcel_core::array_shape(embeddings)[0];
+            let activation_dtype = mlxcel_core::array_dtype(embeddings);
             let full_live = self
                 .full_attention_index
                 .map(|i| caches[i].as_interface().live_len())
@@ -1234,14 +1287,34 @@ impl MiMoV2FlashModel {
                 .map(|i| caches[i].as_interface().live_len())
                 .unwrap_or(0);
             (
-                // A sink-aware full layer needs an explicit causal mask, since
-                // the sink kernel has no maskless causal mode. Without sinks,
+                // Only a sink-aware full layer takes a mask: it runs MLX's
+                // causal mode with its sinks where that fuses (`None`) and the
+                // shared array elsewhere (#3098). Without sinks,
                 // `Attention::forward` takes `causal_attention`, so the dense
                 // `[seq, seq]` mask is never materialized.
-                (self.full_attention_index.is_some() && self.full_attention_sinks)
-                    .then(|| create_causal_mask(seq_len, full_live)),
-                self.sliding_index.map(|_| {
-                    create_sliding_window_prefill_mask(seq_len, sliding_live, self.sliding_window)
+                self.full_attention_index
+                    .filter(|_| self.full_attention_sinks)
+                    .and_then(|i| {
+                        prefill_causal_mask(
+                            seq_len,
+                            full_live,
+                            batch,
+                            self.layers[i].self_attn.prefill_attention(),
+                            activation_dtype,
+                        )
+                    }),
+                // `None` leaves the sliding band to MLX's causal mode and
+                // `window_size`, with the sinks where the layers have them.
+                self.sliding_index.and_then(|i| {
+                    prefill_sliding_window_mask(
+                        seq_len,
+                        sliding_live,
+                        self.sliding_window,
+                        batch,
+                        self.layers[i].self_attn.prefill_attention(),
+                        activation_dtype,
+                        SlidingPrefillKeys::Rotating,
+                    )
                 }),
             )
         } else {
@@ -1257,6 +1330,7 @@ impl MiMoV2FlashModel {
             h = layer.forward(&h, caches[i].as_interface(), mask);
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         match &self.lm_head {
             Some(head) => head.forward(&h),
@@ -1312,6 +1386,31 @@ impl MiMoV2FlashModel {
         embeddings: &MlxArray,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_prepared_rows_with_sequence_id(embeddings, seq_id, None)
+    }
+
+    /// [`Self::forward_prepared_embeddings_with_sequence_id`] returning only
+    /// position `last_pos` as `[B, 1, vocab]`: the row is sliced before the
+    /// final norm and the LM head, so a prefill never materializes
+    /// `[B, L, vocab]` (#3070).
+    ///
+    /// Used by: `MimoV2VlModel::last_row_logits` (embeddings prefill) and
+    /// this model's own `last_row_logits`
+    pub fn last_row_logits_prepared_embeddings_with_sequence_id(
+        &self,
+        embeddings: &MlxArray,
+        seq_id: Option<SequenceId>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_prepared_rows_with_sequence_id(embeddings, seq_id, Some(last_pos))
+    }
+
+    fn forward_prepared_rows_with_sequence_id(
+        &self,
+        embeddings: &MlxArray,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(embeddings)[1];
         if seq_id.is_none() && seq_len > 1 {
             self.sequence_state
@@ -1320,7 +1419,7 @@ impl MiMoV2FlashModel {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
-            |caches| self.forward_prepared(embeddings, caches),
+            |caches| self.forward_prepared_rows(embeddings, caches, row),
         )
     }
 
@@ -1447,6 +1546,25 @@ impl LanguageModel for MiMoV2FlashModel {
     ) -> UniquePtr<MlxArray> {
         // Text-only family: there is no image-embedding prefill path.
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Text-only family: `forward_with_embeddings_and_sequence_id` ignores
+        // the embeddings too, so both branches are the token forward.
+        let embeddings = self.embed_tokens.forward(input_ids);
+        Some(self.last_row_logits_prepared_embeddings_with_sequence_id(
+            &embeddings,
+            seq_id,
+            last_pos,
+        ))
     }
 
     fn reset_runtime_state(&self) {

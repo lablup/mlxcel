@@ -117,7 +117,20 @@ impl FamilyStageExecutor for NemotronHStageExecutor {
         &self,
         input: StageExecutionInput<'_>,
         caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> Result<StageExecutionOutput> {
+        self.execute_last_row(input, caches, mask, None)
+    }
+
+    /// The final stage slices the hidden state at `last_pos` before the final
+    /// norm and LM head, so the head runs on one row (#3081). A non-final
+    /// stage ignores `last_pos`.
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput> {
         ensure!(
             caches.len() == self.num_local_cache_layers,
@@ -157,12 +170,13 @@ impl FamilyStageExecutor for NemotronHStageExecutor {
             }
         };
 
-        let out = self.model.forward_stage(
+        let out = self.model.forward_stage_last_row(
             raw_input,
             self.filter.layer_range.clone(),
             self.filter.has_embedding,
             self.filter.has_lm_head,
             &mut internal_caches,
+            last_pos,
         );
 
         PointerOwnedCacheStore::sync_external_offsets(
@@ -176,5 +190,37 @@ impl FamilyStageExecutor for NemotronHStageExecutor {
         } else {
             Ok(StageExecutionOutput::HiddenStates(out))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::distributed::pipeline::stage_executor::last_row_test_support::assert_last_row_matches_full;
+    use crate::models::nemotron_h::tests::{TINY_LAYERS, tiny_model};
+
+    /// The final stage slices the hidden row before `norm_f` and the head and
+    /// returns the full forward's row (#3081).
+    #[test]
+    fn last_row_matches_the_full_forward_row() {
+        assert_last_row_matches_full(
+            |filter| {
+                let model = tiny_model();
+                let num_local_cache_layers = filter
+                    .layer_range
+                    .clone()
+                    .filter(|&abs| model.layer_needs_cache(abs))
+                    .count();
+                Box::new(NemotronHStageExecutor {
+                    model,
+                    filter: filter.clone(),
+                    num_local_cache_layers,
+                    cache_store: PointerOwnedCacheStore::default(),
+                })
+            },
+            TINY_LAYERS,
+            16,
+            1e-4,
+        );
     }
 }

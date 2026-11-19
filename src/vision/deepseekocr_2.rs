@@ -149,6 +149,25 @@ impl LanguageModel for DeepSeekOcr2VlModel {
         self.text_model
             .forward_with_sequence_id(input_ids, seq_id, caches, mask)
     }
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.text_model,
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
 
     fn make_caches(&self) -> Vec<KVCache> {
         self.text_model.make_caches()

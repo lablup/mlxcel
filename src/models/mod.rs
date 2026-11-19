@@ -24,7 +24,23 @@ pub(crate) mod batched_decode_harness;
 #[cfg(test)]
 pub(crate) mod deepstack_state_test_support;
 #[cfg(test)]
+mod last_row_logits_coverage_tests;
+#[cfg(test)]
+pub(crate) mod last_row_logits_harness;
+#[cfg(test)]
+mod last_row_logits_moe2_tests;
+#[cfg(test)]
+mod last_row_logits_moe_tests;
+#[cfg(test)]
+mod last_row_logits_stateful2_tests;
+#[cfg(test)]
+mod last_row_logits_stateful_tests;
+#[cfg(test)]
+mod last_row_logits_tests;
+#[cfg(test)]
 mod mixtral_style_batched_decode_tests;
+#[cfg(test)]
+pub(crate) mod padded_prefill_parity_tests;
 #[cfg(test)]
 pub(crate) mod popular_dense_batched_decode_tests;
 #[cfg(test)]
@@ -55,6 +71,8 @@ pub(crate) mod recurrent_batch;
 mod recurrent_snapshot;
 pub mod registry;
 mod sanitize;
+#[cfg(test)]
+pub(crate) mod ssm_test_support;
 
 // Shared modules
 // `config` holds shared serde defaults and the common `QuantizationArgs`. It
@@ -85,7 +103,14 @@ pub mod fp8_ct;
 // loaders, so the config merge and the weight pre-pass are one call each.
 pub mod fp8_checkpoint;
 pub mod gated_delta;
+// `ssd_scan` is the float32-hardened chunked Mamba2 SSD scan shared by the
+// hybrid families, so its working set is bounded by a chunk, not the prefill
+// piece (#3073).
 pub(crate) mod mla_batched;
+pub(crate) mod ssd_scan;
+// `ssm_a` computes the SSM transition `A = -exp(A_log)` in float32 for the
+// Mamba1, Jamba and Mamba2 families (#3046, #3057, #3125).
+pub(crate) mod ssm_a;
 // `rope_overrides` carries llama-server b10621's `--rope-scaling`,
 // `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` from the server
 // CLI down to the RoPE seams in `rope_utils` and `dynamic_ntk_rope` (#1450).
@@ -435,9 +460,10 @@ pub use qwen4_exp::Qwen4ExpModel;
 pub use recurrent_gemma::GriffinModel;
 pub use rwkv7::Rwkv7;
 pub(crate) use sanitize::{
-    Gemma4WeightBacking, config_has_quantization_metadata, load_gemma4_text_weights_with_backing,
-    load_gemma4_unified_weights_with_backing, load_gemma4_vlm_weights_with_backing,
-    sanitize_gemma4_nvfp4_weights, strip_gemma4_kv_shared_weights,
+    Gemma4WeightBacking, config_has_quantization_metadata, is_modelopt_nvfp4_text_checkpoint,
+    load_gemma4_text_weights_with_backing, load_gemma4_unified_weights_with_backing,
+    load_gemma4_vlm_weights_with_backing, sanitize_gemma4_nvfp4_weights,
+    sanitize_modelopt_nvfp4_weights, strip_gemma4_kv_shared_weights,
 };
 // The only consumer outside `sanitize` is the diagnostics-gated Molmo2 vision
 // reference loader, so an unconditional re-export is dead in a default build
@@ -1761,6 +1787,10 @@ mod qwen_vl_position_tests;
 #[cfg(test)]
 #[path = "qwen3_5_tests.rs"]
 pub(crate) mod qwen3_5_tests;
+
+#[cfg(test)]
+#[path = "qwen3_5_checkpoint_tests.rs"]
+mod qwen3_5_checkpoint_tests;
 
 #[cfg(test)]
 #[path = "apertus_tests.rs"]

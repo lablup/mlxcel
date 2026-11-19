@@ -13,7 +13,78 @@
 // limitations under the License.
 
 use super::{NemotronHConfig, NemotronLayerCache, NemotronMambaCache, nemotron_h_ssm_attn};
-use mlxcel_core::{dtype, generate::ModelStateSnapshot, layers::KVCache};
+use mlxcel_core::weights::WeightMap;
+use mlxcel_core::{MlxArray, UniquePtr, dtype, generate::ModelStateSnapshot, layers::KVCache};
+
+/// Layers of the [`tiny_model`] fixture: an attention block, then an MLP block.
+pub(crate) const TINY_LAYERS: usize = 2;
+
+fn ramp(shape: &[i32], scale: f32) -> UniquePtr<MlxArray> {
+    let n: i32 = shape.iter().product();
+    let data: Vec<f32> = (0..n)
+        .map(|i| ((i * 7 % 13) as f32 - 6.0) * scale)
+        .collect();
+    mlxcel_core::from_slice_f32(&data, shape)
+}
+
+/// A two-layer Nemotron-H (attention, then MLP) with synthetic weights, for
+/// the pipeline stage-executor tests.
+pub(crate) fn tiny_model() -> super::NemotronHModel {
+    let mut config: NemotronHConfig = serde_json::from_value(serde_json::json!({
+        "model_type": "nemotron_h",
+        "vocab_size": 16,
+        "hidden_size": 8,
+        "intermediate_size": 16,
+        "num_hidden_layers": TINY_LAYERS,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "mamba_num_heads": 1,
+        "mamba_head_dim": 4,
+        "ssm_state_size": 4,
+        "conv_kernel": 4,
+        "n_groups": 1,
+        "hybrid_override_pattern": "*-",
+    }))
+    .expect("tiny Nemotron-H config parses");
+    config.post_init().expect("tiny config is valid");
+    let block_types: Vec<super::BlockType> = config
+        .hybrid_override_pattern
+        .clone()
+        .expect("pattern is set")
+        .iter()
+        .map(|name| super::BlockType::from_str(name))
+        .collect();
+    let ones = mlxcel_core::ones(&[8], dtype::FLOAT32);
+    let mut w = WeightMap::new();
+    let mut put = |k: &str, v: UniquePtr<MlxArray>| {
+        w.insert(k.to_string(), v);
+    };
+    put("backbone.embeddings.weight", ramp(&[16, 8], 0.1));
+    put("lm_head.weight", ramp(&[16, 8], 0.05));
+    put("backbone.norm_f.weight", mlxcel_core::copy(&ones));
+    for layer in 0..TINY_LAYERS {
+        put(
+            &format!("backbone.layers.{layer}.norm.weight"),
+            mlxcel_core::copy(&ones),
+        );
+    }
+    for (i, proj) in ["q_proj", "k_proj", "v_proj", "o_proj"].iter().enumerate() {
+        put(
+            &format!("backbone.layers.0.mixer.{proj}.weight"),
+            ramp(&[8, 8], 0.03 * (i as f32 + 1.0)),
+        );
+    }
+    put(
+        "backbone.layers.1.mixer.up_proj.weight",
+        ramp(&[16, 8], 0.02),
+    );
+    put(
+        "backbone.layers.1.mixer.down_proj.weight",
+        ramp(&[8, 16], 0.02),
+    );
+    let w = super::NemotronHModel::sanitize_weights(w, &config);
+    super::NemotronHModel::from_weights(config, w, block_types).expect("tiny Nemotron-H must build")
+}
 
 // ---------------------------------------------------------------------------
 // NemotronMambaCache state management
@@ -1695,5 +1766,52 @@ fn nemotron_h_fresh_and_mixed_recurrent_states_match_solo_rows() {
                 assert!(mlxcel_core::item_f32(&delta) <= 1e-5);
             }
         }
+    }
+}
+
+/// Issue #3057: the Nemotron-H SSD scan runs `exp` on a float32 copy of
+/// `A_log`, so an f16 `A_log` past 11.09 (where f16 `exp` overflows) still
+/// gives a finite `A`. A step whose `softplus` is zero then decays by
+/// `exp(0 * A) = 1` instead of `exp(0 * -inf) = NaN`, so the output and the
+/// carried state stay finite.
+#[test]
+fn nemotron_h_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
+    use crate::models::ssm_test_support::{overflowing_f16_a_log, zero_step_dt_bias};
+    use mlxcel_core::utils::array_to_vec_f32;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+
+    const SEQ_LEN: i32 = 4;
+    const HEADS: i32 = 2;
+    const HEAD_DIM: i32 = 2;
+    const STATE_DIM: i32 = 3;
+    let f16 = |a: UniquePtr<MlxArray>| mlxcel_core::astype(&a, dtype::FLOAT16);
+    let x = f16(ramp(&[1, SEQ_LEN, HEADS, HEAD_DIM], 0.05));
+    let b = f16(ramp(&[1, SEQ_LEN, 1, STATE_DIM], 0.04));
+    let c = f16(ramp(&[1, SEQ_LEN, 1, STATE_DIM], 0.03));
+    let dt = f16(ramp(&[1, SEQ_LEN, HEADS], 0.1));
+    let d = f16(ramp(&[HEADS], 0.2));
+    let prior_state = ramp(&[1, HEADS, HEAD_DIM, STATE_DIM], 0.01);
+
+    let (y, state) = nemotron_h_ssm_attn(
+        &x,
+        &overflowing_f16_a_log(&[HEADS]),
+        &b,
+        &c,
+        &d,
+        &dt,
+        &zero_step_dt_bias(HEADS),
+        Some(&prior_state),
+        (0.0, f32::INFINITY),
+        2,
+    );
+    assert_eq!(mlxcel_core::array_dtype(&y), dtype::FLOAT16);
+    for (name, values) in [
+        ("output", array_to_vec_f32(&y)),
+        ("state", array_to_vec_f32(&state)),
+    ] {
+        assert!(
+            values.iter().all(|v| v.is_finite()),
+            "{name} must be finite: {values:?}"
+        );
     }
 }

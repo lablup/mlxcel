@@ -7,7 +7,7 @@ name = "mlxcel"
 version = "0.1.0"
 description = "Python client for the mlxcel OpenAI-compatible inference server"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [
     { name = "Lablup Inc." },
@@ -19,9 +19,9 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
@@ -53,24 +53,24 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py311"
 src = ["src", "tests", "examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W"]
 ignore = [
-    "UP006",  # keep typing.List etc. usable on 3.9 where needed
-    "UP007",  # keep Optional[...] / Union[...] for 3.9 runtime compatibility
-    "UP035",  # allow typing imports under requires-python 3.9
+    "UP006",  # keep typing.List etc. (existing style, not rewritten)
+    "UP007",  # keep Optional[...] / Union[...] (existing style)
+    "UP035",  # allow typing imports (existing style)
     "UP037",  # keep quoted self-referential annotations
-    "UP045",  # keep Optional[...] over X | None for 3.9 clarity
+    "UP045",  # keep Optional[...] over X | None (existing style)
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/fake_server.py" = ["B008"]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.11"
 strict = true
 warn_unused_configs = true
 disallow_untyped_defs = true

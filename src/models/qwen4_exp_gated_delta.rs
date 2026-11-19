@@ -271,13 +271,10 @@ impl Qwen4ExpGatedDeltaNet {
 
         let mut cache = cache;
         if let Some(c) = cache.as_deref_mut() {
-            let conv_len = mlxcel_core::array_shape(&conv_input)[1];
-            let tail = mlxcel_core::slice(
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
                 &conv_input,
-                &[0, conv_len - n_keep, 0],
-                &[b, conv_len, self.conv_dim],
-            );
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+                n_keep,
+            ));
         }
 
         super::trace::record("gdn qkv", &qkv);

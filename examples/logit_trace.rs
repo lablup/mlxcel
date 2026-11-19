@@ -167,6 +167,13 @@ use mlxcel_core::{
 };
 use std::io::Write;
 
+/// Rows scored at once by [`emit_rows_to`]. The f32 copy, the log-softmax
+/// and the partition's scratch over the vocabulary scale with this, not with
+/// the chunk: scoring a whole 4608-row Llama 4 Scout chunk (202,048-entry
+/// vocabulary) at once raised the peak 22.3 GB above the forward's, which at
+/// 9216 rows aborted the trace (#3132).
+const SCORE_BLOCK_ROWS: i32 = 1024;
+
 /// Read an evaluated array as `f32`, whatever it was stored as.
 fn to_f32_vec(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
     let a = astype(arr, mlxcel_core::dtype::FLOAT32);
@@ -520,7 +527,7 @@ fn main() -> Result<()> {
         println!("# last_row\ttrue");
     }
     if let Some(rows) = batch_rows {
-        return trace_batched_chunks(
+        trace_batched_chunks(
             &model,
             &ids,
             &bos_prefix,
@@ -532,7 +539,11 @@ fn main() -> Result<()> {
             topk,
             &kv_arm,
             scalar_reference,
-        );
+        )?;
+        // The batched arm is the width-one decode shape, which is exactly
+        // where an absorbed-MLA claim has to be checked (issue #3102).
+        print_mla_stats();
+        return Ok(());
     }
     for c in 0..n_chunks {
         let start = trace_start + c * chunk_tokens;
@@ -627,10 +638,15 @@ fn main() -> Result<()> {
     // `MLXCEL_TRACE_MLA_STATS=1` prints the MLA dispatch counters to stderr so
     // an arm that claims a path can be checked against the path it took
     // (issue #2408's multi-token gate was accepted this way).
+    print_mla_stats();
+    Ok(())
+}
+
+/// Print the MLA dispatch counters when `MLXCEL_TRACE_MLA_STATS=1`.
+fn print_mla_stats() {
     if std::env::var("MLXCEL_TRACE_MLA_STATS").as_deref() == Ok("1") {
         eprintln!("# mla_paths\t{}", mlxcel_core::mla::stats::take().summary());
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -805,6 +821,31 @@ fn emit_rows_to<W: Write>(
     targets: &[i32],
     topk: usize,
 ) -> Result<()> {
+    emit_rows_blocked(
+        writer,
+        c,
+        position_offset,
+        logits,
+        row_offset,
+        targets,
+        topk,
+        SCORE_BLOCK_ROWS,
+    )
+}
+
+/// [`emit_rows_to`] scoring `block` rows at a time.
+#[allow(clippy::too_many_arguments)]
+fn emit_rows_blocked<W: Write>(
+    writer: &mut W,
+    c: usize,
+    position_offset: usize,
+    logits: &mlxcel_core::MlxArray,
+    row_offset: i32,
+    targets: &[i32],
+    topk: usize,
+    block: i32,
+) -> Result<()> {
+    anyhow::ensure!(block > 0, "score block must be positive, got {block}");
     let shape = mlxcel_core::array_shape(logits);
     let n = targets.len() as i32;
     anyhow::ensure!(
@@ -817,23 +858,38 @@ fn emit_rows_to<W: Write>(
         "vocabulary {vocab} is smaller than topk {topk}"
     );
 
-    let rows = mlxcel_core::slice(logits, &[0, row_offset, 0], &[1, row_offset + n, vocab]);
-    let rows = astype(&rows, mlxcel_core::dtype::FLOAT32);
+    // Score in blocks of rows. Every step below is per row, so a block gives
+    // the same numbers as the whole chunk at a bounded peak.
+    let mut nll = Vec::with_capacity(n as usize);
+    let mut head_ids = Vec::with_capacity(n as usize * topk);
+    let mut head_logits = Vec::with_capacity(n as usize * topk);
+    let mut r0 = 0i32;
+    while r0 < n {
+        let r1 = (r0 + block).min(n);
+        let rows = mlxcel_core::slice(
+            logits,
+            &[0, row_offset + r0, 0],
+            &[1, row_offset + r1, vocab],
+        );
+        let rows = astype(&rows, mlxcel_core::dtype::FLOAT32);
 
-    // Per-position NLL of the corpus token, so a trace also carries
-    // everything `examples/perplexity` reports and the two never
-    // disagree about the same run.
-    let lp = log_softmax(&rows, -1);
-    let target_arr = from_slice_i32(targets, &[1, n, 1]);
-    let nll = to_f32_vec(&take_along_axis(&lp, &target_arr, -1));
+        // Per-position NLL of the corpus token, so a trace also carries
+        // everything `examples/perplexity` reports and the two never
+        // disagree about the same run.
+        let lp = log_softmax(&rows, -1);
+        let target_arr = from_slice_i32(&targets[r0 as usize..r1 as usize], &[1, r1 - r0, 1]);
+        nll.extend(to_f32_vec(&take_along_axis(&lp, &target_arr, -1)));
+        drop(lp);
 
-    // Top-k by partition rather than sort: the vocabulary is large and
-    // only the head is wanted. The k entries come back unordered and are
-    // sorted host-side, where k is single digits.
-    let part = argpartition(&rows, vocab - topk as i32, -1);
-    let head = mlxcel_core::slice(&part, &[0, 0, vocab - topk as i32], &[1, n, vocab]);
-    let head_ids = to_i32_vec(&head);
-    let head_logits = to_f32_vec(&take_along_axis(&rows, &head, -1));
+        // Top-k by partition rather than sort: the vocabulary is large and
+        // only the head is wanted. The k entries come back unordered and are
+        // sorted host-side, where k is single digits.
+        let part = argpartition(&rows, vocab - topk as i32, -1);
+        let head = mlxcel_core::slice(&part, &[0, 0, vocab - topk as i32], &[1, r1 - r0, vocab]);
+        head_ids.extend(to_i32_vec(&head));
+        head_logits.extend(to_f32_vec(&take_along_axis(&rows, &head, -1)));
+        r0 = r1;
+    }
 
     for (j, target) in targets.iter().enumerate() {
         let position = position_offset + j;
@@ -865,7 +921,7 @@ fn emit_rows_to<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchedTraceRow, batched_trace_rows, emit_rows_to, parse_trace_tp_size,
+        BatchedTraceRow, batched_trace_rows, emit_rows_blocked, emit_rows_to, parse_trace_tp_size,
         validate_scalar_reference,
     };
 
@@ -898,6 +954,31 @@ mod tests {
             assert!(validate_scalar_reference(true, rows, has_image_arm).is_err());
         }
         validate_scalar_reference(false, Some(4), true).unwrap();
+    }
+
+    /// Scoring a chunk in row blocks writes the same trace as scoring it at
+    /// once, whatever the block size and however it splits the rows (#3132).
+    #[test]
+    fn blocked_scoring_matches_whole_chunk_scoring() {
+        let (rows, vocab) = (7usize, 33usize);
+        let values: Vec<f32> = (0..rows * vocab)
+            .map(|i| ((i * 37 + 11) % 101) as f32 * 0.173 - 8.0)
+            .collect();
+        let logits = mlxcel_core::from_slice_f32(&values, &[1, rows as i32, vocab as i32]);
+        let targets: Vec<i32> = (0..rows as i32 - 1).map(|j| (j * 5) % 33).collect();
+        let trace = |block: i32| {
+            let mut out = Vec::new();
+            emit_rows_blocked(&mut out, 2, 9, &logits, 1, &targets, 4, block).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let whole = trace(i32::MAX);
+        assert_eq!(whole.lines().count(), targets.len());
+        for block in [1, 2, 4, 6, 1024] {
+            assert_eq!(trace(block), whole, "block {block}");
+        }
+        let mut default = Vec::new();
+        emit_rows_to(&mut default, 2, 9, &logits, 1, &targets, 4).unwrap();
+        assert_eq!(String::from_utf8(default).unwrap(), whole);
     }
 
     #[test]

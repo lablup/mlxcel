@@ -86,9 +86,10 @@ pub enum Precision {
 }
 
 impl Precision {
-    /// The narrow element type to demote contraction inputs to, or `None` for
-    /// f32 (no demotion).
-    fn dot_elt(self) -> Option<&'static str> {
+    /// The narrow element type contraction inputs are demoted to, or `None` for
+    /// f32 (no demotion). Also the storage type of the single-sequence decode KV
+    /// cache (issue #2886), which is read only through the contractions.
+    pub(crate) fn dot_elt(self) -> Option<&'static str> {
         match self {
             Precision::F32 => None,
             Precision::F16 => Some("f16"),
@@ -922,6 +923,26 @@ impl Builder {
         }
     }
 
+    /// Rebuild a rank-0 `tensor<i32>` from an ABI-level `i32` function argument
+    /// (issue #3060): `tensor.from_elements %argN : tensor<i32>`. The single-
+    /// sequence decode receives token, pos and cache_len as bare `i32` VM
+    /// arguments so IREE does not materialize a host-visible staging resource,
+    /// but the StableHLO ops below (`dynamic_slice` offsets, the mask broadcast,
+    /// the RoPE index) take a tensor operand. Wrapping at the prologue keeps the
+    /// op sequence after it byte-identical to the buffer-argument graph and does
+    /// not reintroduce the staging resource.
+    pub fn tensor_from_elements_i32(&mut self, scalar: &Val) -> Val {
+        let r = self.fresh();
+        self.line(format!(
+            "{} = tensor.from_elements {} : tensor<i32>",
+            r, scalar.name
+        ));
+        Val {
+            name: r,
+            ty: Ty::scalar("i32"),
+        }
+    }
+
     pub fn const_i1(&mut self, value: bool) -> Val {
         let r = self.fresh();
         self.line(format!(
@@ -992,6 +1013,30 @@ impl Builder {
             ty.render()
         ));
         Val { name: r, ty }
+    }
+
+    /// Load a module-level `util.global` into an SSA value. The decode graph
+    /// holds its KV cache this way (issue #3043) so the step updates it in
+    /// place instead of copying the whole cache into a fresh output tensor.
+    pub(crate) fn global_load(&mut self, symbol: &str, ty: Ty) -> Val {
+        let r = self.fresh();
+        self.line(format!(
+            "{} = util.global.load @{} : {}",
+            r,
+            symbol,
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
+    /// Store an SSA value back into a module-level `util.global`.
+    pub(crate) fn global_store(&mut self, symbol: &str, x: &Val) {
+        self.line(format!(
+            "util.global.store {}, @{} : {}",
+            x.name,
+            symbol,
+            x.ty.render()
+        ));
     }
 
     pub fn broadcast(&mut self, x: &Val, dims: &[usize], out_shape: Vec<usize>) -> Val {
@@ -2055,8 +2100,8 @@ impl Builder {
     /// Emit the native packed-weight GEMV (issue #2889).
     ///
     /// `y[n] = sum_k x[k] * (q[n,k] * scale[n,k/group] + bias[n,k/group])`,
-    /// computed by the HIP kernel embedded in the module as an external
-    /// executable. Activations are narrowed to f16 (matching the `dot_general`
+    /// computed by the device kernel embedded in the module as an external
+    /// executable (`csrc/qmv4.hip` on hip, `csrc/qmv4.cu` on cuda). Activations are narrowed to f16 (matching the `dot_general`
     /// operand demotion this replaces) and the kernel accumulates in f32.
     ///
     /// The kernel gives each output row one warp and each workgroup

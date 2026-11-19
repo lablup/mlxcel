@@ -34,15 +34,15 @@ cat > index.html << 'EOF'
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>mlxcel - High-Performance LLM Inference on Apple Silicon</title>
-  <meta name="description" content="Run 60+ LLM and VLM models natively on Apple Silicon with Metal acceleration. Rust-powered, zero Python dependencies, OpenAI-compatible API.">
+  <title>mlxcel | High-Performance LLM Inference on Apple Silicon</title>
+  <meta name="description" content="Run 100+ LLM and VLM models natively on Apple Silicon with Metal acceleration. Rust-powered, zero Python dependencies, OpenAI-compatible API.">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://mlxcel.ai">
   <meta property="og:site_name" content="mlxcel">
-  <meta property="og:title" content="mlxcel - High-Performance LLM Inference on Apple Silicon">
-  <meta property="og:description" content="Run 60+ LLM and VLM models natively on Apple Silicon with Metal acceleration. Rust-powered, zero Python dependencies, OpenAI-compatible API.">
+  <meta property="og:title" content="mlxcel | High-Performance LLM Inference on Apple Silicon">
+  <meta property="og:description" content="Run 100+ LLM and VLM models natively on Apple Silicon with Metal acceleration. Rust-powered, zero Python dependencies, OpenAI-compatible API.">
   <meta property="og:image" content="https://mlxcel.ai/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -51,8 +51,8 @@ cat > index.html << 'EOF'
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="mlxcel - High-Performance LLM Inference on Apple Silicon">
-  <meta name="twitter:description" content="Run 60+ LLM and VLM models natively on Apple Silicon. Rust-powered, Metal-accelerated, OpenAI-compatible API.">
+  <meta name="twitter:title" content="mlxcel | High-Performance LLM Inference on Apple Silicon">
+  <meta name="twitter:description" content="Run 100+ LLM and VLM models natively on Apple Silicon. Rust-powered, Metal-accelerated, OpenAI-compatible API.">
   <meta name="twitter:image" content="https://mlxcel.ai/og-image.png">
   <meta name="twitter:creator" content="@lablupinc">
 

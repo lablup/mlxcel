@@ -391,6 +391,22 @@ impl MllamaTextModel {
         mask: Option<&MlxArray>,
         cross: Option<CrossAttentionInput<'_>>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeds, caches, mask, cross, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    /// Self-attention and cross-attention layers run over the whole input
+    /// either way.
+    pub(crate) fn forward_rows(
+        &self,
+        input_ids: Option<&MlxArray>,
+        input_embeds: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        cross: Option<CrossAttentionInput<'_>>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = match (input_embeds, input_ids) {
             (Some(embeds), _) => mlxcel_core::copy(embeds),
             (None, Some(ids)) => self.embed_tokens.forward(ids),
@@ -421,6 +437,7 @@ impl MllamaTextModel {
                 ),
             };
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
         self.lm_head.forward(&h)

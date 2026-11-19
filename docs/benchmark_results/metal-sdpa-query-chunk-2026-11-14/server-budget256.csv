@@ -1,0 +1,5 @@
+run,prompt_tokens,ttft_s,total_s,peak_footprint_bytes
+server_qwen3.5-4b-4bit_28000_mc0,28707,18.904,19.318,66654849904
+server_qwen3.5-4b-4bit_28000_mc1,28707,18.864,19.281,44589370248
+server_qwen3.8-27b-4bit_28000_mc0,28749,87.537,89.038,114208747208
+server_qwen3.8-27b-4bit_28000_mc1,28749,89.089,90.588,78646816504

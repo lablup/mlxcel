@@ -1495,8 +1495,9 @@ fn mtp_prefill_chunks_match_classic_last_logits_and_capture_final_seed() {
 }
 
 /// #2160: the row-wise MTP prefill reproduces the classic scheduler's
-/// partition: the history-boundary segment as one forward, then chunks from
-/// the boundary, with no split when the boundary is outside the suffix.
+/// partition: the history-boundary segment in chunks that end on the
+/// boundary (#3045), then chunks from the boundary, with no split when the
+/// boundary is outside the suffix.
 #[test]
 fn mtp_prefill_ranges_mirror_classic_history_boundary_split() {
     assert_eq!(mtp_prefill_ranges(0, 40, 512, None), vec![0..40]);
@@ -1504,11 +1505,11 @@ fn mtp_prefill_ranges_mirror_classic_history_boundary_split() {
         mtp_prefill_ranges(0, 40, 512, Some(34)),
         vec![0..34, 34..40]
     );
-    // The segment is one forward even past the chunk size; the suffix chunks
-    // start at the boundary.
+    // The segment is chunked up to the boundary; the suffix chunks start at
+    // the boundary.
     assert_eq!(
         mtp_prefill_ranges(0, 1300, 512, Some(700)),
-        vec![0..700, 700..1212, 1212..1300]
+        vec![0..512, 512..700, 700..1212, 1212..1300]
     );
     // An adopted prefix already past the boundary, or a boundary covering the
     // whole prompt, splits nothing.

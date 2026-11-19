@@ -71,6 +71,18 @@ pub struct PromptCacheConfig {
     pub snapshot_max_entries: usize,
     /// Time-to-live for snapshot entries since their last successful restore.
     pub snapshot_ttl: Duration,
+    /// Keep each session's most recent restore source out of the
+    /// session-chain supersede rule, so a request that edits or compacts the
+    /// last turn resumes where that turn started. See
+    /// [`keep_previous_turn_enabled`]; startup copies the switch in here.
+    pub keep_previous_turn: bool,
+    /// Byte budget for turn-boundary state checkpoints (issue #3047): the
+    /// recurrent state of a hybrid model at each history boundary, rebuilt
+    /// into a whole state over a longer snapshot of the same conversation.
+    /// Held apart from [`Self::snapshot_capacity_bytes`] with its own LRU.
+    /// `0` turns checkpoints off; startup sizes it per model, see
+    /// [`state_checkpoint_capacity_override`].
+    pub state_checkpoint_capacity_bytes: usize,
 }
 
 /// Operator kill switch for the history-boundary snapshot (issue #1143).
@@ -281,6 +293,90 @@ pub(crate) fn parse_checkpoint_interval(value: Option<&str>) -> Option<usize> {
     }
 }
 
+/// Opt-in switch that keeps the previous turn's restore point (#2885 Part B).
+///
+/// The session-chain supersede rule keeps one boundary and one completion
+/// snapshot per conversation. Turn N restores from turn N-1's snapshot, and
+/// inserting turn N's own snapshot supersedes it, so a request that replaces
+/// or compacts turn N's user message finds no snapshot before the edit: turn
+/// N's history boundary ends after that message. With this switch on, the
+/// store remembers, per session, the snapshot the latest turn restored from
+/// and exempts it from the supersede rule until a later turn restores from
+/// something else. A conversation then holds one more snapshot, and such an
+/// edit resumes where the previous turn started instead of at the
+/// system-prompt root.
+///
+/// `MLXCEL_PROMPT_CACHE_KEEP_PREVIOUS_TURN`: `1`, `on` or `true` turns it on;
+/// anything else, including unset, leaves it off. Ignored when the history
+/// boundary is disabled ([`boundary_snapshot_disabled`]). Read once per
+/// process.
+///
+/// Used by: `server::startup::resolve_prompt_cache_store`
+pub fn keep_previous_turn_enabled() -> bool {
+    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        !boundary_snapshot_disabled()
+            && parse_switch(
+                std::env::var("MLXCEL_PROMPT_CACHE_KEEP_PREVIOUS_TURN")
+                    .ok()
+                    .as_deref(),
+            )
+    })
+}
+
+/// Operator override for the turn-boundary state checkpoint budget (issue
+/// #3047).
+///
+/// Hybrid families (Qwen 3.5, Qwen3-Next, Qwen4-Exp) store, at every history
+/// boundary, only the state a longer snapshot cannot give back: the recurrent
+/// and convolution state. A request that edits an earlier turn rebuilds the
+/// whole state there from that checkpoint and the conversation's newest
+/// snapshot, cut back. Startup sizes the budget from the model's recurrent
+/// state when this is unset.
+///
+/// `MLXCEL_PROMPT_CACHE_STATE_CHECKPOINT_CAPACITY_BYTES`: a byte count, where
+/// `0` turns checkpoints off. Unset or unparsable leaves the model-aware
+/// default (an unparsable value is logged). Read once per process.
+///
+/// Used by: `server::startup::resolve_prompt_cache_store`
+pub fn state_checkpoint_capacity_override() -> Option<usize> {
+    static VALUE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        parse_state_checkpoint_capacity(
+            std::env::var("MLXCEL_PROMPT_CACHE_STATE_CHECKPOINT_CAPACITY_BYTES")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// Parse [`state_checkpoint_capacity_override`]'s value.
+pub(crate) fn parse_state_checkpoint_capacity(value: Option<&str>) -> Option<usize> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match raw.parse::<usize>() {
+        Ok(bytes) => Some(bytes),
+        Err(_) => {
+            tracing::warn!(
+                "MLXCEL_PROMPT_CACHE_STATE_CHECKPOINT_CAPACITY_BYTES={raw:?} is not a byte count; the model-aware default applies"
+            );
+            None
+        }
+    }
+}
+
+/// Parse an on/off environment switch: `1`, `on` or `true` (any case) is on.
+pub(crate) fn parse_switch(value: Option<&str>) -> bool {
+    value.is_some_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "on" | "true"
+        )
+    })
+}
+
 /// Operator kill switch for the background prompt-cache warm-up (issue #1144).
 ///
 /// Separate from [`boundary_snapshot_disabled`] on purpose. The boundary
@@ -384,7 +480,25 @@ impl PromptCacheConfig {
             snapshot_capacity_bytes_explicit: false,
             snapshot_max_entries: Self::DEFAULT_SNAPSHOT_MAX_ENTRIES,
             snapshot_ttl: Duration::from_secs(Self::DEFAULT_SNAPSHOT_TTL_SECONDS),
+            keep_previous_turn: false,
+            state_checkpoint_capacity_bytes: 0,
         }
+    }
+
+    /// Builder-style: keep each session's previous-turn restore source; see
+    /// [`Self::keep_previous_turn`].
+    #[must_use]
+    pub fn with_keep_previous_turn(mut self, keep: bool) -> Self {
+        self.keep_previous_turn = keep;
+        self
+    }
+
+    /// Builder-style: set the turn-boundary state checkpoint budget; see
+    /// [`Self::state_checkpoint_capacity_bytes`].
+    #[must_use]
+    pub fn with_state_checkpoint_capacity_bytes(mut self, capacity_bytes: usize) -> Self {
+        self.state_checkpoint_capacity_bytes = capacity_bytes;
+        self
     }
 
     /// Builder-style: attach APC configuration. Returns `self` so callers can
@@ -456,6 +570,8 @@ impl Default for PromptCacheConfig {
             snapshot_capacity_bytes_explicit: false,
             snapshot_max_entries: Self::DEFAULT_SNAPSHOT_MAX_ENTRIES,
             snapshot_ttl: Duration::from_secs(Self::DEFAULT_SNAPSHOT_TTL_SECONDS),
+            keep_previous_turn: false,
+            state_checkpoint_capacity_bytes: 0,
         }
     }
 }
@@ -510,6 +626,18 @@ pub struct PromptCacheStats {
     /// lost a snapshot to the snapshot LRU cap. A non-zero value means the
     /// store could not retain one live snapshot per producer chain.
     pub snapshot_self_evictions: u64,
+    /// Live turn-boundary state checkpoints (issue #3047).
+    pub state_checkpoint_entries: usize,
+    /// Bytes across live state checkpoints.
+    pub state_checkpoint_bytes: usize,
+    /// Lifetime count of state checkpoint inserts.
+    pub state_checkpoint_inserts: u64,
+    /// Lifetime count of snapshot lookups served by rebuilding a checkpoint
+    /// over a longer snapshot.
+    pub state_checkpoint_hits: u64,
+    /// Lifetime count of state checkpoints evicted by their own LRU or TTL,
+    /// or dropped because no snapshot of their conversation can rebuild them.
+    pub state_checkpoint_evictions: u64,
 }
 
 impl fmt::Display for PromptCacheStats {
@@ -584,5 +712,18 @@ mod system_root_tests {
         }
         assert_eq!(parse_checkpoint_interval(Some("256")), Some(256));
         assert_eq!(parse_checkpoint_interval(Some("8192")), Some(8192));
+    }
+
+    #[test]
+    fn state_checkpoint_capacity_parses_bytes_and_ignores_garbage() {
+        use super::parse_state_checkpoint_capacity;
+        for unset in [None, Some(""), Some("  "), Some("lots"), Some("-1")] {
+            assert_eq!(parse_state_checkpoint_capacity(unset), None, "{unset:?}");
+        }
+        assert_eq!(parse_state_checkpoint_capacity(Some("0")), Some(0));
+        assert_eq!(
+            parse_state_checkpoint_capacity(Some(" 1073741824 ")),
+            Some(1 << 30)
+        );
     }
 }

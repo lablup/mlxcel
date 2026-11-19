@@ -641,37 +641,48 @@ impl BatchScheduler {
         // A cohort can only straddle a table threshold when chunking is off or
         // its chunk exceeds the threshold, since any longer prompt takes the
         // chunked path instead. See `mlxcel_core::prefill_span`.
+        // A sliding-window cache keeps only the window plus
+        // `FIRST_FILL_REWIND_SLACK` positions of a first fill (#3062). A row
+        // shorter than the cohort is rewound by the whole length difference
+        // below, so a cohort with such a row stores its first fills in full.
+        let max_pad = seqs
+            .iter()
+            .map(|s| padded_len - s.prompt_tokens.len())
+            .max()
+            .unwrap_or(0);
         // Single batched forward pass: [B, padded_len] → [B, padded_len, vocab]
-        let raw_logits =
-            match self
-                .engine
+        let cohort_logits = {
+            let _full_first_fill = (max_pad > mlxcel_core::cache::FIRST_FILL_REWIND_SLACK as usize)
+                .then(mlxcel_core::cache::FullFirstFillScope::enter);
+            self.engine
                 .prefill_cohort(&batch_ids, &input, stacked_mask.as_deref())
-            {
-                Ok(logits) => logits,
-                Err(EngineError::Forward(msg)) => {
-                    // #2727: the model failed the cohort's forward before any
-                    // row advanced; the per-row fallback would only run the
-                    // same forward once more per row. Fail every row with the
-                    // model's message instead.
-                    tracing::warn!(
-                        rows = seqs.len(),
-                        error = %msg,
-                        "batched prefill forward failed; failing its rows"
-                    );
-                    for seq in seqs {
-                        self.abort_sequence(seq, &msg);
-                    }
-                    return;
+        };
+        let raw_logits = match cohort_logits {
+            Ok(logits) => logits,
+            Err(EngineError::Forward(msg)) => {
+                // #2727: the model failed the cohort's forward before any
+                // row advanced; the per-row fallback would only run the
+                // same forward once more per row. Fail every row with the
+                // model's message instead.
+                tracing::warn!(
+                    rows = seqs.len(),
+                    error = %msg,
+                    "batched prefill forward failed; failing its rows"
+                );
+                for seq in seqs {
+                    self.abort_sequence(seq, &msg);
                 }
-                Err(err) => {
-                    tracing::warn!("batched prefill: {err}, falling back");
-                    // Re-queue all sequences for sequential processing.
-                    for seq in seqs {
-                        self.execute_full_prefill(seq);
-                    }
-                    return;
+                return;
+            }
+            Err(err) => {
+                tracing::warn!("batched prefill: {err}, falling back");
+                // Re-queue all sequences for sequential processing.
+                for seq in seqs {
+                    self.execute_full_prefill(seq);
                 }
-            };
+                return;
+            }
+        };
 
         // #822: force-evaluate the cohort's prefill graph through the fallible
         // boundary. This single eval covers the whole batch, so an MLX C++ throw
@@ -1034,6 +1045,10 @@ impl BatchScheduler {
             self.release_sequence_caches(seq.seq_id);
             return;
         }
+
+        // The sequence goes on to decode: store its prompt-boundary state now,
+        // before a decode step writes the reply into it (#3040).
+        self.insert_prompt_end_snapshot(&seq);
 
         self.prepare_turbo4_delegated_for_sequence_decode(seq.seq_id);
 

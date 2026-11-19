@@ -821,6 +821,47 @@ fn mla_q_lora_and_output_gate() {
     assert_eq!(cache.offset, 5);
 }
 
+/// Without a mask array the multi-token MLA step takes the rope-folded
+/// causal-mode path (#3099) and still matches the unabsorbed reference that
+/// adds the causal mask to its scores by hand, for a cold three-token prefill
+/// and a warm two-token chunk on the absorbed side.
+#[test]
+fn mla_causal_mode_prefill_and_chunk_match_the_reference() {
+    let config = tiny_text_config();
+    let weights = sanitized(&config);
+    let prefix = "model.layers.1.self_attn";
+    let attn =
+        KimiK3MLAAttention::from_weights(&weights, &config, prefix).expect("MLA layer loads");
+    let raw = stripped_raw(&config);
+
+    let x = noise_arr(&[1, 5, HIDDEN as i32], 37, 2.0);
+    let expected = read(&mla_reference(&raw, prefix, &x));
+
+    let mut cache = KVCache::new();
+    let prefill = mlxcel_core::slice(&x, &[0, 0, 0], &[1, 3, HIDDEN as i32]);
+    let out = attn.forward(&prefill, None, &mut cache);
+    assert_close(
+        &out,
+        &expected[..3 * HIDDEN],
+        1e-4,
+        "causal-mode MLA prefill vs unabsorbed",
+    );
+
+    assert!(
+        mlxcel_core::mla::use_absorbed_mla(2, 5, KV_LORA, QK_NOPE, V_HEAD),
+        "the warm chunk must select the absorbed path"
+    );
+    let chunk = mlxcel_core::slice(&x, &[0, 3, 0], &[1, 5, HIDDEN as i32]);
+    let out = attn.forward(&chunk, None, &mut cache);
+    assert_close(
+        &out,
+        &expected[3 * HIDDEN..],
+        1e-4,
+        "causal-mode absorbed MLA chunk vs unabsorbed",
+    );
+    assert_eq!(cache.offset, 5);
+}
+
 // Latent MoE.
 
 #[test]
@@ -1855,4 +1896,39 @@ fn kimi_k3_sequence_state_isolates_prepared_sequences() {
             .with_existing_sequence_state(SequenceId::from_raw(1), |_| {})
             .is_err()
     );
+}
+
+crate::models::last_row_logits_harness::last_row_case!(kimi_k3_last_row_logits, || {
+    let config = tiny_text_config();
+    KimiK3Model::from_weights(&sanitized(&config), &config).expect("tiny model loads")
+});
+
+/// The VLM wrapper's embeddings prefill goes through
+/// `forward_rows_for_sequence`: its sampled row equals the row of the full
+/// embeddings forward (#3070).
+#[test]
+fn kimi_k3_last_row_from_embeddings_matches_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let make = || {
+        let config = tiny_text_config();
+        KimiK3Model::from_weights(&sanitized(&config), &config).expect("tiny model loads")
+    };
+    let ids = mlxcel_core::from_slice_i32(&[3, 1, 4, 1, 5, 9, 2], &[1, 7]);
+
+    let reference = make();
+    let embeds = reference.embed_tokens.forward(&ids);
+    let full = reference.forward_for_sequence_with_embeddings(&ids, Some(&embeds), None);
+    for pos in [2usize, 6] {
+        let model = make();
+        let row = model.forward_rows_for_sequence(&ids, Some(&embeds), None, Some(pos));
+        assert_eq!(
+            mlxcel_core::array_shape(&row),
+            vec![1, 1, VOCAB as i32],
+            "last-row logits must be [1, 1, vocab]"
+        );
+        let expected = mlxcel_core::generate::logits_at_position(&full, pos);
+        let close = mlxcel_core::allclose(&row, &expected, 1e-4, 1e-4);
+        mlxcel_core::eval(&close);
+        assert!(mlxcel_core::item_bool(&close), "row {pos} differs");
+    }
 }

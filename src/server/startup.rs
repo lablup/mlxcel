@@ -3401,6 +3401,15 @@ fn validate_settings_endpoint_exposure(
     )
 }
 
+/// The KV cache the scheduler builds each sequence in, which is what the
+/// prompt-cache stores receive: the `--kv-bits` / `--kv-quant-scheme` base mode
+/// when batch KV quantization is on, the `--kv-cache-mode` / `--cache-type-*`
+/// mode otherwise. With `--kv-skip-last-layer` the last layer stays FP16, which
+/// the returned sizing carries so INT8 is not undercounted (#3153).
+fn prompt_cache_sizing_kv_mode(config: &ServerConfig) -> crate::execution::kv_arch::KvSizing {
+    crate::server::kv_mode_for_batch(config.kv_cache_mode, &config.batch_kv_quant)
+}
+
 /// Size the cross-request prompt-prefix cache for this model and build its
 /// store, or `None` when the policy disables it.
 ///
@@ -3414,12 +3423,22 @@ pub(super) fn resolve_prompt_cache_store(
     model_path: &Path,
     batch_metrics: &Arc<BatchMetrics>,
 ) -> Option<Arc<crate::server::prompt_cache::PromptCacheStore>> {
+    // Copied before sizing so the default budget can make room for the extra
+    // snapshot per conversation the switch keeps (#3035).
+    if crate::server::prompt_cache::keep_previous_turn_enabled() {
+        config.prompt_cache.keep_previous_turn = true;
+    }
+    let kv_mode = prompt_cache_sizing_kv_mode(config);
     if config.prompt_cache.is_enabled()
         && !config.prompt_cache.snapshot_capacity_bytes_explicit
         && let Some(rec) = crate::server::prompt_cache::recommend_model_snapshot_capacity(
             model_path,
             config.context_size,
             config.prompt_cache.snapshot_capacity_bytes,
+            crate::server::prompt_cache::model_aware_snapshot_target_entries(
+                config.prompt_cache.keep_previous_turn,
+            ),
+            kv_mode,
         )
         && rec.capacity_bytes > config.prompt_cache.snapshot_capacity_bytes
     {
@@ -3438,12 +3457,39 @@ pub(super) fn resolve_prompt_cache_store(
         config.prompt_cache.snapshot_capacity_bytes = rec.capacity_bytes;
     }
 
+    // Turn-boundary state checkpoints (#3047): an operator byte count wins,
+    // otherwise the hybrid families get a budget sized from their recurrent
+    // state. Families without recurrent state store none either way.
+    if config.prompt_cache.is_enabled() {
+        match crate::server::prompt_cache::state_checkpoint_capacity_override() {
+            Some(bytes) => config.prompt_cache.state_checkpoint_capacity_bytes = bytes,
+            None => {
+                if let Some(rec) = crate::server::prompt_cache::recommend_state_checkpoint_capacity(
+                    model_path,
+                    config.context_size,
+                    kv_mode,
+                ) {
+                    tracing::info!(
+                        state_checkpoint_capacity_bytes = rec.capacity_bytes,
+                        representative_checkpoint_bytes = rec.entry_bytes,
+                        target_entries = rec.target_entries,
+                        available_ceiling_bytes = rec.available_ceiling_bytes,
+                        architecture = %rec.architecture,
+                        "Applied model-aware prompt-cache state checkpoint capacity default"
+                    );
+                    config.prompt_cache.state_checkpoint_capacity_bytes = rec.capacity_bytes;
+                }
+            }
+        }
+    }
+
     if config.prompt_cache.is_enabled()
         && !config.prompt_cache.capacity_bytes_explicit
         && let Some(rec) = crate::server::prompt_cache::recommend_model_kv_store_capacity(
             model_path,
             config.context_size,
             config.prompt_cache.capacity_bytes,
+            kv_mode,
         )
         && rec.capacity_bytes > config.prompt_cache.capacity_bytes
     {
@@ -3454,6 +3500,8 @@ pub(super) fn resolve_prompt_cache_store(
             representative_tokens = rec.representative_tokens,
             target_entries = rec.target_entries,
             available_ceiling_bytes = rec.available_ceiling_bytes,
+            kv_cache_mode = %kv_mode.mode,
+            kv_fp16_last_layer = kv_mode.fp16_last_layer,
             architecture = %rec.architecture,
             "Applied model-aware prompt-cache KV store capacity default"
         );
@@ -3497,6 +3545,7 @@ pub(super) fn resolve_prompt_cache_store(
             snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
             snapshot_max_entries = config.prompt_cache.snapshot_max_entries,
             snapshot_ttl_seconds = config.prompt_cache.snapshot_ttl.as_secs(),
+            state_checkpoint_capacity_bytes = config.prompt_cache.state_checkpoint_capacity_bytes,
             min_prefix_tokens = config.prompt_cache.min_prefix_tokens,
             apc_enabled = config.prompt_cache.apc.enabled,
             apc_block_size = config.prompt_cache.apc.block_size,

@@ -251,6 +251,27 @@ impl LanguageModel for MuseGlimmerVlmModel {
         )
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Both single-sequence forwards delegate to the text model unchanged.
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.text,
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn release_sequence_state(&self, caches: &mut [KVCache]) {
         LanguageModel::release_sequence_state(&self.text, caches);
     }

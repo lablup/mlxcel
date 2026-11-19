@@ -74,7 +74,7 @@ use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_s
 use mlxcel_core::cache::{BatchedAttentionMetadata, CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, slice_axis};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -83,6 +83,7 @@ use std::path::Path;
 use super::mamba2::Mamba2Cache;
 use super::model_owned::ModelOwnedSequenceState;
 use super::recurrent_snapshot::{push_optional, restore_optional};
+use super::ssd_scan::{SSD_CHUNK_SIZE, SSD_SCHEDULE_TOKENS, SsdEval, chunked_ssd_scan};
 
 // Per-norm offsets (folded into the stored weight at construction time).
 // Exposed to `plamo2_tests` so the exact PLaMo 2 offset values stay pinned.
@@ -216,44 +217,6 @@ impl ModelArgs {
     }
 }
 
-// SSD-SSM helpers (adapted from `super::falcon_h1`).
-
-/// Repeat an array along `axis` by `repeats` (broadcast then reshape).
-fn repeat_axis(x: &MlxArray, repeats: i32, axis: i32) -> UniquePtr<MlxArray> {
-    let shape = mlxcel_core::array_shape(x);
-    let ndim = shape.len() as i32;
-    let axis = if axis < 0 { ndim + axis } else { axis };
-
-    let mut new_shape: Vec<i32> = shape.iter().take(axis as usize + 1).copied().collect();
-    new_shape.push(1);
-    new_shape.extend(shape.iter().skip(axis as usize + 1));
-    let x_exp = mlxcel_core::reshape(x, &new_shape);
-
-    new_shape[axis as usize + 1] = repeats;
-    let x_broad = mlxcel_core::broadcast_to(&x_exp, &new_shape);
-
-    let mut final_shape: Vec<i32> = shape.clone();
-    final_shape[axis as usize] *= repeats;
-    mlxcel_core::reshape(&x_broad, &final_shape)
-}
-
-/// Segmented cumulative sum used by the SSD surrogate-attention decay.
-fn segsum(x: &MlxArray) -> UniquePtr<MlxArray> {
-    let shape = mlxcel_core::array_shape(x);
-    let l = shape[shape.len() - 1];
-
-    let mut new_shape = shape.clone();
-    new_shape.push(1);
-    let x_exp = mlxcel_core::reshape(x, &new_shape);
-
-    let last_idx = new_shape.len() - 1;
-    new_shape[last_idx] = l;
-    let x_rep = mlxcel_core::broadcast_to(&x_exp, &new_shape);
-
-    let x_tril = mlxcel_core::tril(&x_rep, -1);
-    mlxcel_core::cumsum(&x_tril, -2, false, true)
-}
-
 // PLaMo 2 Mamba mixer.
 
 struct Plamo2Mamba {
@@ -307,13 +270,13 @@ impl Plamo2Mamba {
         };
 
         // Persist the trailing `k - 1` time steps as the next conv state.
-        // `contiguous` forces a fresh buffer so the cached slice does not retain
-        // the full `padded_input` allocation (a per-token memory leak otherwise).
+        // The tail is a fresh buffer, scheduled now on a long prefill so the full
+        // padded_input is not held until the caches are evaluated.
         if let Some(c) = cache {
-            let padded_shape = mlxcel_core::array_shape(&padded_input);
-            let len = padded_shape[1] as usize;
-            let tail = slice_axis(&padded_input, 1, (len - (k - 1)) as i32, len as i32);
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
+                &padded_input,
+                (k - 1) as i32,
+            ));
         }
 
         // Match the conv weight dtype to the (possibly bf16/f16) activations.
@@ -398,12 +361,16 @@ impl Plamo2Mamba {
         let gated = mlxcel_core::compiled_swiglu_activation(&z_flat, &y);
         let result = self.out_proj.forward(&gated);
 
-        // Materialize at a clean dtype boundary ONLY on M5 Max (Metal GPU
-        // Family 4): there the lazy float32/float16 SSM graph can fuse into NaN
-        // within one Metal command buffer. On every other chip this per-layer
-        // sync is pure decode-throughput loss (it blocks cross-layer
-        // pipelining), so skip it. CLAUDE.md "Apple Silicon precision".
-        if mlxcel_core::hardware::is_m5_neural_accelerator() {
+        // Materialize at a clean dtype boundary ONLY where MLX dispatches its
+        // NAx GEMM kernels: on M5 Max those kernels can fuse the lazy
+        // float32/float16 SSM graph into NaN within one Metal command buffer.
+        // The gate is MLX's own NAX flag rather than the sysctl brand string
+        // (`is_m5_neural_accelerator`), because the failure belongs to the
+        // kernel MLX picks, and the two views disagree on some hosts (#2806,
+        // #3123); gating on the brand string left the boundary off on hosts
+        // that run NAx. Elsewhere this per-layer sync is pure decode-throughput
+        // loss (it blocks cross-layer pipelining), so skip it.
+        if mlxcel_core::hardware::mlx_nax_available() {
             mlxcel_core::eval(&result);
         }
         result
@@ -451,107 +418,26 @@ impl Plamo2Mamba {
             ],
         );
 
-        let num_heads = self.num_heads as i32;
-        let n_groups = self.n_groups as i32;
-        let state_dim = self.ssm_state_size as i32;
-        let head_dim = self.head_dim as i32;
-        let repeats = num_heads / n_groups;
-
-        // dt = clip(softplus(dt + dt_bias), limit) in float32.
-        let dt_f32 = mlxcel_core::astype(dt, mlxcel_core::dtype::FLOAT32);
-        let dt_bias_f32 = mlxcel_core::astype(&self.dt_bias, mlxcel_core::dtype::FLOAT32);
-        let dt_biased = mlxcel_core::add(&dt_f32, &dt_bias_f32);
-        let dt_soft = mlxcel_core::softplus(&dt_biased);
-        let min_val =
-            mlxcel_core::full_f32(&[1], self.time_step_limit.0, mlxcel_core::dtype::FLOAT32);
-        let max_val =
-            mlxcel_core::full_f32(&[1], self.time_step_limit.1, mlxcel_core::dtype::FLOAT32);
-        let dt = mlxcel_core::clip(&dt_soft, &min_val, &max_val);
-
-        // A = -exp(A_log).
-        let a = mlxcel_core::negative(&mlxcel_core::exp(&self.a_log));
-        let a = mlxcel_core::astype(&a, mlxcel_core::array_dtype(&dt));
-        let a_reshaped = mlxcel_core::reshape(&a, &[1, 1, num_heads]);
-        let dt_a = mlxcel_core::multiply(&dt, &a_reshaped);
-
-        let dt_exp = mlxcel_core::reshape(&dt, &[batch, seq_len, num_heads, 1]);
-        let x_f32 = mlxcel_core::astype(&x, mlxcel_core::dtype::FLOAT32);
-        let dtx = mlxcel_core::multiply(&dt_exp, &x_f32);
-
-        let b_f32 = mlxcel_core::astype(&b, mlxcel_core::dtype::FLOAT32);
-        let c_f32 = mlxcel_core::astype(&c, mlxcel_core::dtype::FLOAT32);
-
-        // CB = C.swapaxes(1, 2) @ B.transpose(0, 2, 3, 1), repeated per head.
-        let b_t = mlxcel_core::transpose_axes(&b_f32, &[0, 2, 3, 1]);
-        let c_t = mlxcel_core::swap_axes(&c_f32, 1, 2);
-        let cb = mlxcel_core::matmul(&c_t, &b_t);
-        let cb = repeat_axis(&cb, repeats, 1);
-
-        // decay = exp(segsum(dtA.swapaxes(1, 2)));  surrogate = tril(CB * decay).
-        let dt_a_t = mlxcel_core::swap_axes(&dt_a, 1, 2);
-        let seg = segsum(&dt_a_t);
-        let decay = mlxcel_core::exp(&seg);
-        let attn_matrix = mlxcel_core::multiply(&cb, &decay);
-        let attn_matrix = mlxcel_core::tril(&attn_matrix, 0);
-
-        let dtx_t = mlxcel_core::swap_axes(&dtx, 1, 2);
-        let y = mlxcel_core::matmul(&attn_matrix, &dtx_t);
-        let y = mlxcel_core::swap_axes(&y, 1, 2);
-
-        // next_state from this chunk.
-        let decay_shape = mlxcel_core::array_shape(&decay);
-        let decay_last = slice_axis(&decay, 2, decay_shape[2] - 1, decay_shape[2]);
-        let decay_t = mlxcel_core::transpose_axes(&decay_last, &[0, 3, 1, 2]);
-
-        let b_rep = repeat_axis(&b_t, repeats, 1);
-        let b_sw = mlxcel_core::swap_axes(&b_rep, 2, 3);
-
-        let dtx_decay = mlxcel_core::multiply(&dtx, &decay_t);
-        let dtx_decay_t = mlxcel_core::swap_axes(&dtx_decay, 1, 2);
-        let dtx_decay_t = mlxcel_core::swap_axes(&dtx_decay_t, 2, 3);
-        let mut next_state = mlxcel_core::matmul(&dtx_decay_t, &b_sw);
-
-        // Carry the previous recurrent state forward.
-        let y = if let Some(prev_state) = state {
-            let dta_cumsum = mlxcel_core::cumsum(&dt_a, -2, false, true);
-            let exp_dta_cumsum = mlxcel_core::exp(&dta_cumsum);
-
-            let exp_shape = mlxcel_core::array_shape(&exp_dta_cumsum);
-            let last_exp = slice_axis(&exp_dta_cumsum, 1, exp_shape[1] - 1, exp_shape[1]);
-            let last_exp = mlxcel_core::reshape(&last_exp, &[batch, num_heads, 1, 1]);
-            let state_contrib = mlxcel_core::multiply(&last_exp, prev_state);
-            next_state = mlxcel_core::add(&next_state, &state_contrib);
-
-            let c_reshaped =
-                mlxcel_core::reshape(&c_f32, &[batch, seq_len, n_groups, 1, state_dim, 1]);
-            let state_reshaped = mlxcel_core::reshape(
-                prev_state,
-                &[batch, 1, n_groups, repeats, head_dim, state_dim],
-            );
-            let y_prev = mlxcel_core::matmul(&state_reshaped, &c_reshaped);
-            let y_prev = mlxcel_core::squeeze_axis(&y_prev, -1);
-            let y_prev = mlxcel_core::reshape(&y_prev, &[batch, seq_len, num_heads, head_dim]);
-
-            let mut exp_shape_y = mlxcel_core::array_shape(&exp_dta_cumsum);
-            exp_shape_y.push(1);
-            let exp_dta_exp = mlxcel_core::reshape(&exp_dta_cumsum, &exp_shape_y);
-            let y_prev_scaled = mlxcel_core::multiply(&exp_dta_exp, &y_prev);
-            mlxcel_core::add(&y, &y_prev_scaled)
-        } else {
-            y
-        };
-
-        // y = y + x * D (float32 throughout to avoid mixed-dtype NaN).
-        let d_f32 = mlxcel_core::astype(&self.d_param, mlxcel_core::dtype::FLOAT32);
-        let d_reshaped = mlxcel_core::reshape(&d_f32, &[1, 1, num_heads, 1]);
-        let d_contrib = mlxcel_core::multiply(&x_f32, &d_reshaped);
-        let y = mlxcel_core::add(&y, &d_contrib);
-
-        let y = mlxcel_core::astype(&y, mlxcel_core::array_dtype(hidden_states));
-
+        // Chunked over `SSD_CHUNK_SIZE` tokens, so the quadratic surrogate
+        // attention is bounded by the chunk rather than the prefill piece
+        // (#3073). The scan schedules its own output once more than
+        // `SSD_SCHEDULE_TOKENS` tokens have accumulated; the evaluation of the
+        // result below is the one this family always had.
+        let (y, next_state) = chunked_ssd_scan(
+            &x,
+            &self.a_log,
+            &b,
+            &c,
+            &self.d_param,
+            dt,
+            &self.dt_bias,
+            state,
+            self.time_step_limit,
+            SSD_CHUNK_SIZE,
+            SsdEval::ScheduleEvery(SSD_SCHEDULE_TOKENS),
+        );
         mlxcel_core::eval(&y);
         mlxcel_core::eval(&next_state);
-
         (y, next_state)
     }
 
@@ -750,11 +636,17 @@ impl Plamo2Attention {
 
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-        let attn_out = unsafe {
-            mlxcel_core::layers::attention_from_ptr(
-                &q, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
-            )
+        // A mask-less multi-token forward is a single-row prefill whose
+        // causality MLX's causal mode supplies (`prefill_causal_mask`, #3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(&q, &cache_k, &cache_v, self.scale, 0)
+        } else {
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    &q, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
+                )
+            }
         };
 
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
@@ -1002,6 +894,19 @@ impl Plamo2Model {
         inputs: &MlxArray,
         caches: &mut [Plamo2LayerCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(inputs, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). Every layer still runs over all rows, so the
+    /// recurrent and KV state advance exactly as in the full forward.
+    fn forward_rows_with_caches(
+        &self,
+        inputs: &MlxArray,
+        caches: &mut [Plamo2LayerCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(inputs);
 
         let shape = mlxcel_core::array_shape(&h);
@@ -1009,17 +914,28 @@ impl Plamo2Model {
 
         // Single causal mask anchored on the first attention layer's offset.
         // Mamba layers stay causal via conv left-padding + the SSD `tril`, so
-        // they need no mask on the single-sequence path.
+        // they need no mask on the single-sequence path. A single row leaves
+        // causality to MLX's causal mode where MLX fuses it (#3072).
         let attn_offset = caches
             .iter()
             .find(|c| matches!(c, Plamo2LayerCache::Attention(_)))
             .map(|c| c.offset())
             .unwrap_or(0);
-        let attn_mask = if seq_len > 1 {
-            Some(create_causal_mask(seq_len, attn_offset))
-        } else {
-            None
-        };
+        let attn_mask = self
+            .layers
+            .iter()
+            .find_map(|layer| match &layer.mixer {
+                Plamo2Mixer::Attention(attn) => Some(PrefillAttention::new(
+                    attn.num_heads as usize,
+                    attn.num_kv_heads as usize,
+                    attn.head_dim as usize,
+                )),
+                _ => None,
+            })
+            .and_then(|attention| {
+                let dtype = mlxcel_core::array_dtype(&h);
+                prefill_causal_mask(seq_len, attn_offset, shape[0], attention, dtype)
+            });
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             let mask = if layer.is_attention() {
@@ -1030,6 +946,7 @@ impl Plamo2Model {
             h = layer.forward(&h, cache, mask);
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
 
         // Tied embeddings unless an explicit `lm_head` was loaded. No logit
@@ -1452,6 +1369,26 @@ impl LanguageModel for Plamo2Model {
             || Plamo2Model::make_caches(self),
             |internal| self.forward_with_caches(input_ids, internal),
         )
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || Plamo2Model::make_caches(self),
+            |internal| self.forward_rows_with_caches(input_ids, internal, Some(last_pos)),
+        ))
     }
 
     fn supports_snapshot_reuse(&self) -> bool {

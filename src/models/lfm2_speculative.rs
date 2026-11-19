@@ -126,6 +126,28 @@ impl Lfm2Model {
         capture_layer_ids: &[usize],
         capture_conv_rollback: bool,
     ) -> VerifyOutput {
+        self.forward_speculative_with(
+            input_ids,
+            caches,
+            capture_layer_ids,
+            capture_conv_rollback,
+            false,
+        )
+    }
+
+    /// [`Self::forward_speculative`], with `prefill` set for a prompt prefill.
+    /// Only a prefill may leave its causal mask to MLX's causal mode
+    /// ([`Lfm2Model::prefill_attn_mask`], #3072), as the generation prefill
+    /// does: a verify block and the exactness probe keep the array mask, so the
+    /// probe still measures the kernels the verify forward runs.
+    fn forward_speculative_with(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Lfm2LayerCache],
+        capture_layer_ids: &[usize],
+        capture_conv_rollback: bool,
+        prefill: bool,
+    ) -> VerifyOutput {
         let h0 = self.embed_tokens.forward(input_ids);
         let shape = mlxcel_core::array_shape(&h0);
         let seq_len = shape[1];
@@ -135,7 +157,9 @@ impl Lfm2Model {
             .find(|c| matches!(c, Lfm2LayerCache::Attention(_)))
             .map(|c| c.offset())
             .unwrap_or(0);
-        let attn_mask = if seq_len > 1 {
+        let attn_mask = if prefill {
+            self.prefill_attn_mask(seq_len, attn_offset, shape[0], &h0)
+        } else if seq_len > 1 {
             Some(create_causal_mask(seq_len, attn_offset))
         } else {
             None
@@ -238,9 +262,7 @@ impl Lfm2Model {
                             mlxcel_core::concatenate(&zeros, &committed, 1)
                         }
                     };
-                    let plen = n_keep + n;
-                    let tail = slice_axis(&padded, 1, plen - n_keep, plen);
-                    *state = Some(mlxcel_core::contiguous(&tail, false));
+                    *state = Some(mlxcel_core::utils::materialized_state_tail(&padded, n_keep));
                 }
             }
         }
@@ -359,7 +381,7 @@ impl SpeculativeTarget for Lfm2Model {
         caches: &mut [Self::Cache],
         capture_layer_ids: &[usize],
     ) -> Self::VerifyOut {
-        self.forward_speculative(verify_input, caches, capture_layer_ids, false)
+        self.forward_speculative_with(verify_input, caches, capture_layer_ids, false, true)
     }
 
     fn rollback_partial(

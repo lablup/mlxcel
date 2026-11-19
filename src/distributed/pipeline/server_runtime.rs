@@ -49,6 +49,19 @@ fn is_unavailable(err: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<PipelineUnavailable>().is_some())
 }
 
+/// The row a prefill samples out of what the final stage returned: a stage
+/// that honored the last-row request answers `[1, 1, vocab]`, which is that
+/// row; one that answered every position (an older peer, or a family without
+/// the hook) is sliced at `last_pos` (#3074).
+fn select_prefill_row(logits: UniquePtr<MlxArray>, last_pos: usize) -> UniquePtr<MlxArray> {
+    let positions = mlxcel_core::array_shape(&logits)
+        .get(1)
+        .copied()
+        .unwrap_or(1);
+    let pos = if positions == 1 { 0 } else { last_pos };
+    mlxcel_core::generate::logits_at_position(&logits, pos)
+}
+
 pub struct PipelineServerModel {
     num_layers: usize,
     eos_token_ids: Vec<i32>,
@@ -96,6 +109,24 @@ impl PipelineServerModel {
             adapter_path,
         )?;
         Ok(Self::new(num_layers, eos_token_ids, Box::new(runtime)))
+    }
+
+    /// Log a failed stage forward and return the client-safe message the
+    /// engine answers the request with: refusals by the availability gate at
+    /// debug, anything else at warn (#2727, #2782).
+    fn log_forward_failure(&self, seq_id: SequenceId, err: &anyhow::Error) -> String {
+        if is_unavailable(err) {
+            tracing::debug!(
+                seq_id = %seq_id,
+                "pipeline forward refused while a stage is silent: {err:#}"
+            );
+        } else {
+            tracing::warn!(
+                seq_id = %seq_id,
+                "pipeline forward failed; failing the request: {err:#}"
+            );
+        }
+        PIPELINE_FORWARD_FAILED.to_string()
     }
 
     pub fn load_remote(
@@ -222,41 +253,49 @@ impl LanguageModel for PipelineServerModel {
         let seq_id = seq_id.expect("pipeline server model requires a sequence id");
         self.runtime
             .forward_sequence(seq_id, input_ids, mask)
-            .map_err(|err| {
-                if is_unavailable(&err) {
-                    tracing::debug!(
-                        seq_id = %seq_id,
-                        "pipeline forward refused while a stage is silent: {err:#}"
-                    );
-                } else {
-                    tracing::warn!(
-                        seq_id = %seq_id,
-                        "pipeline forward failed; failing the request: {err:#}"
-                    );
-                }
-                PIPELINE_FORWARD_FAILED.to_string()
-            })
+            .map_err(|err| self.log_forward_failure(seq_id, &err))
     }
 
-    /// [`Self::try_forward_with_sequence_id`] followed by the last-position
-    /// slice. A stage may legitimately return the last position only
-    /// (`[1, 1, vocab]`, which the runtime's shape check accepts), in which
-    /// case that position is the one to sample from.
+    /// Prefill forward that asks the final stage for the sampled row only
+    /// (#3074): the stage slices its hidden state to `last_pos` before the
+    /// final norm and LM head, so the projection and the logits frame back
+    /// to the coordinator are one row instead of the whole prompt. A stage
+    /// without the hook (an older peer, or a family that has not overridden
+    /// `execute_last_row`) may still answer every position, in which case the
+    /// requested row is sliced here; a one-row answer is that row. Failure
+    /// handling matches [`Self::try_forward_with_sequence_id`].
     fn try_forward_last_logits_with_sequence_id(
         &self,
         input_ids: &MlxArray,
         seq_id: Option<SequenceId>,
-        caches: &mut [KVCache],
+        _caches: &mut [KVCache],
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> Result<UniquePtr<MlxArray>, String> {
-        let logits = self.try_forward_with_sequence_id(input_ids, seq_id, caches, mask)?;
-        let positions = mlxcel_core::array_shape(&logits)
-            .get(1)
-            .copied()
-            .unwrap_or(1);
-        let pos = if positions == 1 { 0 } else { last_pos };
-        Ok(mlxcel_core::generate::logits_at_position(&logits, pos))
+        let seq_id = seq_id.expect("pipeline server model requires a sequence id");
+        let logits = self
+            .runtime
+            .forward_sequence_last_row(seq_id, input_ids, mask, last_pos)
+            .map_err(|err| self.log_forward_failure(seq_id, &err))?;
+        Ok(select_prefill_row(logits, last_pos))
+    }
+
+    /// Infallible counterpart of
+    /// [`Self::try_forward_last_logits_with_sequence_id`].
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let seq_id = seq_id.expect("pipeline server model requires a sequence id");
+        let logits = self
+            .runtime
+            .forward_sequence_last_row(seq_id, input_ids, mask, last_pos)
+            .unwrap_or_else(|err| panic!("pipeline forward failed for sequence {seq_id}: {err}"));
+        select_prefill_row(logits, last_pos)
     }
 
     fn forward_with_embeddings_and_sequence_id(

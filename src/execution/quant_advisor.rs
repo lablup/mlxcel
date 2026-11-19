@@ -20,6 +20,7 @@
 
 use std::path::Path;
 
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::hardware::{HardwareCapabilities, QuantRecommendation, recommend_quantization};
 
 use crate::execution::config_fields;
@@ -212,13 +213,16 @@ pub struct QuantAdvice {
 ///
 /// The KV cache headroom passed to [`recommend_quantization`] is derived from
 /// the model architecture when it can be extracted from `config.json`. The
-/// default context length is 8192 tokens; `int8_kv` defaults to `false`.
+/// default context length is 8192 tokens, sized for `kv_mode` (the KV cache
+/// mode the run resolves to), which also selects the DeepSeek V2 layout the
+/// KV-cache-mode advice classifies against.
 /// When architecture fields are unavailable the function falls back to the
 /// built-in 2 GiB constant (`kv_cache_headroom_bytes = None`).
 pub fn advise_quantization(
     model_path: &Path,
     hw: &HardwareCapabilities,
     model_params_override: Option<f64>,
+    kv_mode: KVCacheMode,
 ) -> QuantAdvice {
     let estimated_params = estimate_model_params_billions(model_path);
 
@@ -235,7 +239,7 @@ pub fn advise_quantization(
         crate::execution::memory_estimate::DEFAULT_CTX_LEN,
         1,
         crate::execution::memory_estimate::QuantHint::Default,
-        false,
+        kv_mode,
     );
 
     // The legacy `QuantAdvice` exposes `exact_weight_bytes: Option<u64>`,
@@ -276,7 +280,7 @@ pub fn advise_quantization(
     // Advisory KV-cache-mode suggestions (issue #327). Reads only `config.json`
     // and returns data; it does not touch the weight-loading path, so it cannot
     // reintroduce the #289 bf16 to f16 quantized-weight promotion.
-    let kv_cache_advice = advise_kv_cache_modes(model_path);
+    let kv_cache_advice = advise_kv_cache_modes(model_path, kv_mode);
 
     QuantAdvice {
         recommendation,
@@ -294,27 +298,27 @@ pub fn advise_quantization(
 /// `num_key_value_heads`, `hidden_size`, `num_attention_heads`) cannot be
 /// extracted.
 ///
-/// `ctx_len` is the requested context length (tokens); `int8_kv` controls
-/// whether 1-byte (INT8) or 2-byte (FP16) KV storage is assumed.
+/// `ctx_len` is the requested context length (tokens); `kv_mode` is the KV
+/// cache mode, which sets the element width and the DeepSeek V2 layout.
 pub fn estimate_kv_cache_bytes_from_path(
     model_path: &Path,
     ctx_len: u64,
-    int8_kv: bool,
+    kv_mode: KVCacheMode,
 ) -> Option<u64> {
     let config_path = model_path.join("config.json");
     let config_str = std::fs::read_to_string(&config_path).ok()?;
     let config: serde_json::Value = serde_json::from_str(&config_str).ok()?;
-    estimate_kv_cache_bytes_from_config(&config, ctx_len, int8_kv)
+    estimate_kv_cache_bytes_from_config(&config, ctx_len, kv_mode)
 }
 
 fn estimate_kv_cache_bytes_from_config(
     config: &serde_json::Value,
     ctx_len: u64,
-    int8_kv: bool,
+    kv_mode: KVCacheMode,
 ) -> Option<u64> {
     // Delegate to the architecture-aware estimator so this advisor utility and
     // the unified `estimate_total_memory` path never diverge on KV sizing.
-    crate::execution::kv_arch::estimate_kv_arch_from_config(config, ctx_len, int8_kv, 1)
+    crate::execution::kv_arch::estimate_kv_arch_from_config(config, ctx_len, kv_mode, 1)
         .map(|a| a.total_bytes)
 }
 
@@ -446,7 +450,7 @@ mod tests {
             }
         });
 
-        let bytes = estimate_kv_cache_bytes_from_config(&config, 256, false).unwrap();
+        let bytes = estimate_kv_cache_bytes_from_config(&config, 256, KVCacheMode::Fp16).unwrap();
         assert_eq!(bytes, 35 * 2 * 256 * 2 * 256);
     }
 
@@ -488,7 +492,7 @@ mod tests {
 
         // Pass a temp dir — override_params bypasses config.json read.
         let tmp = std::env::temp_dir();
-        let advice = advise_quantization(&tmp, &hw, Some(7.0));
+        let advice = advise_quantization(&tmp, &hw, Some(7.0), KVCacheMode::Fp16);
 
         // With 7B model on 32 GB M5 with NA: expect INT8.
         assert_eq!(
@@ -515,7 +519,7 @@ mod tests {
         };
 
         let tmp = tempfile::tempdir().unwrap();
-        let advice = advise_quantization(tmp.path(), &hw, None);
+        let advice = advise_quantization(tmp.path(), &hw, None, KVCacheMode::Fp16);
         assert_eq!(advice.exact_weight_bytes, None);
     }
 
@@ -543,7 +547,7 @@ mod tests {
         f.write_all(index_json.as_bytes()).unwrap();
         std::fs::File::create(tmp.path().join("x.safetensors")).unwrap();
 
-        let advice = advise_quantization(tmp.path(), &hw, None);
+        let advice = advise_quantization(tmp.path(), &hw, None, KVCacheMode::Fp16);
         assert_eq!(advice.exact_weight_bytes, Some(14_000_000_000));
     }
 

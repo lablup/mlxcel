@@ -50,7 +50,7 @@ use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
+use mlxcel_core::utils::{silu, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -821,8 +821,10 @@ impl KimiK3DeltaAttention {
             &self.conv_decode_weight,
             in_dtype,
         ));
-        let tail = mlxcel_core::slice(&padded, &[0, 1, 0], &[b, self.kernel_size, channels]);
-        (out, mlxcel_core::contiguous(&tail, false))
+        (
+            out,
+            mlxcel_core::utils::materialized_state_tail(&padded, self.kernel_size - 1),
+        )
     }
 
     /// Everything after the conv: q/k norm, gate, recurrence, output gate,
@@ -1126,18 +1128,14 @@ impl KimiK3MLAAttention {
             &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale, None,
         );
         let output = self.unembed_out.forward(&output, true);
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
-        let output = mlxcel_core::reshape(&output, &[b, 1, -1]);
-        let output = match &self.g_proj {
-            Some(g_proj) => {
-                let gate = mlxcel_core::sigmoid(&g_proj.forward(x));
-                mlxcel_core::multiply(&output, &gate)
-            }
-            None => output,
-        };
-        self.o_proj.forward(&output)
+        self.project_output(x, &output, b, 1)
     }
 
+    /// MLA self-attention over `x` `[B, L, hidden]`.
+    ///
+    /// `mask == None` is causal for a multi-token step (MLX's causal mode over
+    /// the live window) and unmasked for a single query; `Some` is an additive
+    /// mask broadcastable to `[B, H, L, S]`, applied as given.
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
@@ -1203,6 +1201,55 @@ impl KimiK3MLAAttention {
             mlxcel_core::mla::MlaDecodePath::Decompressed
         });
 
+        if l > 1 {
+            // Multi-token step (issue #3099): fold the rope half into the SDPA
+            // head dim, `[q_nope | q_pe] . [k | k_pe]`, through
+            // `rope_folded_attention` instead of materializing the
+            // `[B, H, L, S]` nope, rope, summed and softmax score tensors by
+            // hand. A maskless step is causal over the live window
+            // `update_and_fetch` returned, through MLX's bottom-right aligned
+            // causal mode; a caller mask is applied as given.
+            debug_assert_eq!(
+                mlxcel_core::array_shape(&cached_latent)[2],
+                cache.seq_len(),
+                "causal mode needs the live window to end at this step"
+            );
+            let folded_mask = match mask {
+                Some(m) => mlxcel_core::mla::FoldedMask::Array(m),
+                None => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            let output = if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_lat = self.embed_q.forward(&q_nope, true);
+                let attn = mlxcel_core::mla::rope_folded_attention(
+                    &q_lat,
+                    &q_pe,
+                    &cached_latent,
+                    &cached_k_pe,
+                    &cached_latent,
+                    self.scale,
+                    folded_mask,
+                );
+                self.unembed_out.forward(&attn, true) // [B, H, L, v_head]
+            } else {
+                // Materialize: expand the latent to per-head k / v.
+                let k = self.embed_q.forward(&cached_latent, false); // [B, H, S, nope]
+                let v = self.unembed_out.forward(&cached_latent, true); // [B, H, S, v_head]
+                mlxcel_core::mla::rope_folded_attention(
+                    &q_nope,
+                    &q_pe,
+                    &k,
+                    &cached_k_pe,
+                    &v,
+                    self.scale,
+                    folded_mask,
+                )
+            };
+            return self.project_output(x, &output, b, l);
+        }
+
+        // Single-token decode keeps the manual form: its score row is one
+        // `[B, H, 1, S]` slice.
         // pe_scores = (q_pe * scale) @ k_pe^T -> [B, H, L, S]; the mask is
         // additive (0 / -inf) and is added in the scores dtype.
         let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
@@ -1235,8 +1282,19 @@ impl KimiK3MLAAttention {
             let probs = mlxcel_core::softmax(&scores, -1);
             mlxcel_core::matmul(&probs, &v) // [B, H, L, v_head]
         };
+        self.project_output(x, &output, b, l)
+    }
 
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+    /// `[B, H, L, v_head]` attention output to `[B, L, hidden]`: head merge,
+    /// the optional sigmoid output gate on `x`, and `o_proj`.
+    fn project_output(
+        &self,
+        x: &MlxArray,
+        output: &MlxArray,
+        b: i32,
+        l: i32,
+    ) -> UniquePtr<MlxArray> {
+        let output = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
         let output = match &self.g_proj {
             Some(g_proj) => {
@@ -1884,7 +1942,7 @@ impl KimiK3Model {
         caches: &mut [KimiK3LayerCache],
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
-        self.forward_hidden(h, caches)
+        self.forward_hidden(h, caches, None)
     }
 
     /// The dtype the decoder runs in: that of the embedding table.
@@ -1909,13 +1967,18 @@ impl KimiK3Model {
         } else {
             mlxcel_core::astype(inputs_embeds, self.act_dtype)
         };
-        self.forward_hidden(h, caches)
+        self.forward_hidden(h, caches, None)
     }
 
+    /// The layer stack, final norm and LM head over input embeddings `h`,
+    /// projecting every position (`row == None`) or only position `row`
+    /// (`[B, 1, vocab]`, the prefill's sampled row, #3070). The layers and
+    /// the output Attention Residual mix run over the whole input either way.
     fn forward_hidden(
         &self,
         h: UniquePtr<MlxArray>,
         caches: &mut [KimiK3LayerCache],
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         assert_eq!(
             caches.len(),
@@ -1923,22 +1986,15 @@ impl KimiK3Model {
             "kimi_k3: cache cardinality must match layer count"
         );
 
-        let l = mlxcel_core::array_shape(&h)[1];
-
-        // Every cache advances by the same token count, so any layer's offset
-        // is the sequence position; the additive mask is [L, L + offset].
-        let attn_mask = if l > 1 {
-            let offset = caches.first().map_or(0, KimiK3LayerCache::offset);
-            Some(create_causal_mask(l, offset))
-        } else {
-            None
-        };
-
-        let (h, blocks) = self.run_layers(h, attn_mask.as_deref(), caches);
+        // No mask array: a multi-token MLA step runs MLX's causal mode inside
+        // the rope-folded attention, over the live window its cache returns,
+        // which masks the same keys as the additive `[L, L + offset]` mask (#3099).
+        let (h, blocks) = self.run_layers(h, None, caches);
         let h = match &self.output_attn_res {
             Some((w, eps)) => attn_res_mix(&blocks, &h, w, *eps),
             None => h,
         };
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
 
         if let Some(lm_head) = &self.lm_head {
@@ -2299,15 +2355,37 @@ impl KimiK3Model {
         inputs_embeds: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input_ids, inputs_embeds, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence_with_embeddings`] projecting every
+    /// position (`row == None`) or only position `row` (`[B, 1, vocab]`, the
+    /// prefill's sampled row, #3070), against the same sequence state.
+    ///
+    /// Used by: [`Self::forward_for_sequence_with_embeddings`], this model's
+    /// `LanguageModel::last_row_logits` and `vision::kimi_k3_vl`'s.
+    pub(crate) fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input_ids)[1];
         if seq_id.is_none() && seq_len > 1 {
             self.sequence_state
                 .replace_internal(self.make_layer_caches());
         }
 
-        let run = |internal: &mut [KimiK3LayerCache]| match inputs_embeds {
-            Some(embeds) => self.forward_with_input_embeddings(embeds, internal),
-            None => self.forward(input_ids, internal),
+        let run = |internal: &mut [KimiK3LayerCache]| {
+            let h = match inputs_embeds {
+                Some(embeds) if mlxcel_core::array_dtype(embeds) == self.act_dtype => {
+                    mlxcel_core::copy(embeds)
+                }
+                Some(embeds) => mlxcel_core::astype(embeds, self.act_dtype),
+                None => self.embed_tokens.forward(input_ids),
+            };
+            self.forward_hidden(h, internal, row)
         };
         if let Some(seq_id) = seq_id {
             self.sequence_state
@@ -2436,6 +2514,23 @@ impl LanguageModel for KimiK3Model {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // The trait's embeddings forward is the default, which ignores them:
+        // decline so that path keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows_for_sequence(input_ids, None, seq_id, Some(last_pos)))
     }
 
     fn forward_batched(

@@ -188,6 +188,14 @@ pub struct PromptCacheRequestContext {
     /// stable prefix of the live prompt tokens that ends strictly before the
     /// history boundary. `None` when no root snapshot applies to this request.
     pub root_prefix_tokens: Option<Vec<i32>>,
+
+    /// Which sequences computed the rows this request's sequence adopted
+    /// from the prompt cache (issue #3047). Empty at the route; the scheduler
+    /// sets it when the request restores a snapshot, and every snapshot the
+    /// sequence stores extends it with the sequence's own id. A turn-boundary
+    /// state checkpoint is only rebuilt over a snapshot whose lineage agrees
+    /// with its own.
+    pub snapshot_lineage: crate::server::prompt_cache::SnapshotLineage,
 }
 
 /// Bridge between server request params and `mlxcel-core` `SamplingConfig`.

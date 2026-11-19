@@ -199,6 +199,145 @@ fn stage_worker_loop_retains_request_scoped_caches_across_runs() {
     );
 }
 
+/// Final stage over rank-3 logits `[1, seq, 3]` whose row `i` is `[i, i, i]`.
+/// `honors_last_row` selects between an executor that overrides
+/// `execute_last_row` (projects one row) and one that keeps the trait default
+/// (full forward, row sliced afterwards); both must hand back the one row.
+struct RowLogitsFinal {
+    stage: StageAssignment,
+    filter: LayerFilter,
+    honors_last_row: bool,
+    seen_last_pos: std::sync::Arc<std::sync::Mutex<Vec<Option<usize>>>>,
+}
+
+impl RowLogitsFinal {
+    fn new(honors_last_row: bool) -> Self {
+        let stage = StageAssignment {
+            stage_index: 1,
+            device_id: "stage-1".to_string(),
+            layer_range: 1..2,
+            has_embedding: false,
+            has_lm_head: true,
+            estimated_memory_bytes: 0,
+        };
+        let filter = LayerFilter::from_stage(&stage);
+        Self {
+            stage,
+            filter,
+            honors_last_row,
+            seen_last_pos: Default::default(),
+        }
+    }
+
+    fn rows(seq: i32) -> UniquePtr<MlxArray> {
+        let values: Vec<f32> = (0..seq).flat_map(|i| [i as f32; 3]).collect();
+        mlxcel_core::from_slice_f32(&values, &[1, seq, 3])
+    }
+}
+
+impl StageExecutor for RowLogitsFinal {
+    fn stage_assignment(&self) -> &StageAssignment {
+        &self.stage
+    }
+
+    fn layer_filter(&self) -> &LayerFilter {
+        &self.filter
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        Vec::new()
+    }
+
+    fn release_caches(&self, _caches: &[KVCache]) {}
+
+    fn execute(
+        &self,
+        input: StageExecutionInput<'_>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> Result<StageExecutionOutput> {
+        let StageExecutionInput::HiddenStates(hidden) = input else {
+            bail!("final executor expects hidden states")
+        };
+        Ok(StageExecutionOutput::Logits(Self::rows(
+            mlxcel_core::array_shape(hidden)[1],
+        )))
+    }
+
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        self.seen_last_pos.lock().unwrap().push(last_pos);
+        if !self.honors_last_row {
+            // The trait default: full forward, slice afterwards.
+            let output = self.execute(input, caches, mask)?;
+            return Ok(match (output, last_pos) {
+                (StageExecutionOutput::Logits(logits), Some(pos)) => StageExecutionOutput::Logits(
+                    mlxcel_core::generate::logits_at_position(&logits, pos),
+                ),
+                (output, _) => output,
+            });
+        }
+        let StageExecutionInput::HiddenStates(hidden) = input else {
+            bail!("final executor expects hidden states")
+        };
+        let seq = mlxcel_core::array_shape(hidden)[1];
+        let logits = Self::rows(seq);
+        Ok(StageExecutionOutput::Logits(match last_pos {
+            Some(pos) => mlxcel_core::generate::logits_at_position(&logits, pos),
+            None => logits,
+        }))
+    }
+}
+
+/// #3074: the coordinator's `last_pos` rides the in-process activation to the
+/// final stage, which answers one `[1, 1, vocab]` row equal to that row of
+/// the full output; without it every position comes back.
+#[test]
+fn stage_worker_loop_carries_last_pos_to_the_final_stage() {
+    for honors in [true, false] {
+        let config = PipelineConfig::new(2, 1).unwrap();
+        let final_stage = RowLogitsFinal::new(honors);
+        let seen = final_stage.seen_last_pos.clone();
+        let executors: Vec<Box<dyn StageExecutor>> = vec![
+            Box::new(FakeStageExecutor::new(0, FakeStageKind::Entry)),
+            Box::new(final_stage),
+        ];
+        let mut loop_runtime =
+            InProcessStageWorkerLoop::new(config, executors, ChannelConfig::default()).unwrap();
+
+        let ids = mlxcel_core::from_slice_i32(&[5, 6, 7, 8], &[1, 4]);
+        let all = loop_runtime
+            .run_to_completion(vec![PipelineWorkerInput::new(
+                RequestId::from_string("full".to_string()).unwrap(),
+                mlxcel_core::copy(&ids),
+            )])
+            .unwrap();
+        assert_eq!(mlxcel_core::array_shape(&all[0].logits), vec![1, 4, 3]);
+
+        let one = loop_runtime
+            .run_to_completion(vec![
+                PipelineWorkerInput::new(RequestId::from_string("row".to_string()).unwrap(), ids)
+                    .with_last_pos(2),
+            ])
+            .unwrap();
+        assert_eq!(
+            mlxcel_core::array_shape(&one[0].logits),
+            vec![1, 1, 3],
+            "honors_last_row={honors}"
+        );
+        assert_close(
+            one[0].logits.as_ref().unwrap(),
+            &mlxcel_core::from_slice_f32(&[2.0, 2.0, 2.0], &[1, 1, 3]),
+        );
+        assert_eq!(seen.lock().unwrap().as_slice(), &[None, Some(2)]);
+    }
+}
+
 fn assert_close(actual: &MlxArray, expected: &UniquePtr<MlxArray>) {
     let close = mlxcel_core::allclose(actual, expected.as_ref().unwrap(), 1e-5, 1e-5);
     assert!(mlxcel_core::item_bool(&close));

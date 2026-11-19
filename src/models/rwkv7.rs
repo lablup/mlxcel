@@ -925,6 +925,19 @@ impl Rwkv7Model {
     }
 
     fn forward(&self, x: &MlxArray, caches: &mut [Rwkv7Cache]) -> UniquePtr<MlxArray> {
+        self.forward_rows(x, caches, None)
+    }
+
+    /// [`Self::forward`] normalizing every position (`row == None`) or only
+    /// position `row` (`[B, 1, hidden]`, the prefill's sampled row, #3070).
+    /// Every layer still runs over all rows, so the recurrent state advances
+    /// exactly as in the full forward.
+    fn forward_rows(
+        &self,
+        x: &MlxArray,
+        caches: &mut [Rwkv7Cache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         assert_eq!(
             caches.len(),
             self.layers.len(),
@@ -946,6 +959,7 @@ impl Rwkv7Model {
             v_first = Some(new_v_first);
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         self.norm.forward(&h)
     }
 }
@@ -1014,6 +1028,17 @@ impl Rwkv7 {
         input_ids: &MlxArray,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input_ids, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`).
+    fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input_ids)[1];
         if seq_id.is_none() && seq_len > 1 {
             self.sequence_state
@@ -1023,12 +1048,13 @@ impl Rwkv7 {
         let h = if let Some(seq_id) = seq_id {
             self.sequence_state
                 .with_existing_sequence_state(seq_id, |internal| {
-                    self.model.forward(input_ids, internal)
+                    self.model.forward_rows(input_ids, internal, row)
                 })
                 .unwrap_or_else(|err| panic!("RWKV7 {err}"))
         } else {
-            self.sequence_state
-                .with_sequence_state(None, |internal| self.model.forward(input_ids, internal))
+            self.sequence_state.with_sequence_state(None, |internal| {
+                self.model.forward_rows(input_ids, internal, row)
+            })
         };
 
         if let Some(ref lm_head) = self.lm_head {
@@ -1307,6 +1333,22 @@ impl LanguageModel for Rwkv7 {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows_for_sequence(input_ids, seq_id, Some(last_pos)))
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
@@ -1625,4 +1667,7 @@ mod tests {
 
         assert!(err.contains("missing model-owned sequence state"));
     }
+
+    // The prefill's last-row projection (#3070).
+    crate::models::last_row_logits_harness::last_row_case!(rwkv7_last_row_logits, batching_rwkv7);
 }

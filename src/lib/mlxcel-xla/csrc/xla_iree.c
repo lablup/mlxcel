@@ -122,6 +122,23 @@ typedef struct xla_ctx {
   iree_hal_buffer_view_t** weights;  // resident weights, uploaded once
   iree_hal_buffer_view_t* kcache;    // threaded KV (set by prefill, advanced by decode)
   iree_hal_buffer_view_t* vcache;
+  // issue #3043: the single-sequence decode graph may hold its KV cache in two
+  // module-level mutable globals instead of the argument list, so the step
+  // updates it in place and IREE stops copying the whole 16 MB cache into a
+  // fresh output tensor every step. `kv_globals` is set by probing for the
+  // `decode_step.kv_import` entry after the bundle loads; `kv_import_pending`
+  // means the shim-side kcache/vcache changed (prefill, or a prefill variant)
+  // and must be pushed into the globals before the next decode.
+  int32_t kv_globals;
+  int32_t kv_import_pending;
+  // issue #3060: the 1-D decode graph may take token/pos/cache_len as ABI-level
+  // `i32` values instead of rank-0 `tensor<i32>` buffer views. `scalar_inputs`
+  // is set by probing for the `decode_step.scalar_inputs` entry after the bundle
+  // loads; the shim then pushes VM values and skips the three buffer views, so
+  // IREE no longer materializes a host-visible 192-byte staging resource per
+  // step. An artifact without the marker (an older bundle, or M-RoPE's tensor
+  // position) keeps the buffer-view path unchanged.
+  int32_t scalar_inputs;
   // Persistent single-sequence decode scalars. The decode loop used to allocate
   // a device-local buffer for each of token/positions/cache_len and a fresh
   // readback staging buffer every step; each host-visible staging allocation is
@@ -246,6 +263,11 @@ uint64_t xla_test_decode_d2d_readbacks_get(void) {
 }
 int32_t xla_test_decode_step_scalars_state(const xla_ctx* c) {
   return c ? c->step_scalars_state : -1;
+}
+// Issue #3060: whether this context's decode graph exports the scalar-input
+// marker and therefore takes token/pos/cache_len as ABI-level `i32` values.
+int32_t xla_test_decode_scalar_inputs(const xla_ctx* c) {
+  return c ? c->scalar_inputs : 0;
 }
 void xla_test_decode_counters_reset(void) {
   xla_test_decode_scalar_alloc_calls = 0;
@@ -833,6 +855,39 @@ static iree_status_t xla_append_bundle(xla_ctx* c, const char* prefill_vmfb,
         c->session, iree_make_cstring_view(diagnostic_entry), &probe));
     iree_runtime_call_deinitialize(&probe);
   }
+  // issue #3043: a decode graph that keeps its KV cache in module globals
+  // exports `decode_step.kv_import` to seed them from the prefill result. Its
+  // absence (Gemma3n's fixed-schedule CUDA decode, an older compiled cache)
+  // keeps the full-cache argument ABI, which still works unchanged.
+  c->kv_globals = 0;
+  c->kv_import_pending = 0;
+  // issue #3060: a decode graph whose token/pos/cache_len are ABI-level `i32`
+  // scalars exports `decode_step.scalar_inputs` as a no-op capability marker.
+  // Probing it exactly like `kv_import` keeps an older compiled bundle on the
+  // buffer-view path without versioning the bundle.
+  c->scalar_inputs = 0;
+  {
+    iree_runtime_call_t probe;
+    iree_status_t s = iree_runtime_call_initialize_by_name(
+        c->session, iree_make_cstring_view("decode_step.scalar_inputs"), &probe);
+    if (iree_status_is_ok(s)) {
+      c->scalar_inputs = 1;
+      iree_runtime_call_deinitialize(&probe);
+    } else {
+      iree_status_ignore(s);
+    }
+  }
+  {
+    iree_runtime_call_t probe;
+    iree_status_t s = iree_runtime_call_initialize_by_name(
+        c->session, iree_make_cstring_view("decode_step.kv_import"), &probe);
+    if (iree_status_is_ok(s)) {
+      c->kv_globals = 1;
+      iree_runtime_call_deinitialize(&probe);
+    } else {
+      iree_status_ignore(s);
+    }
+  }
   return iree_ok_status();
 }
 
@@ -1305,6 +1360,7 @@ int xla_llama_prefill(xla_ctx* c, int32_t adapter_mode,
   if (c->vcache) iree_hal_buffer_view_release(c->vcache);
   c->kcache = kc;
   c->vcache = vc;
+  c->kv_import_pending = 1;
 
   XLA_CHECK(xla_read_token(c, token_out, out_token));
 
@@ -1319,6 +1375,42 @@ int xla_llama_prefill(xla_ctx* c, int32_t adapter_mode,
 
 // Shared decode implementation. `position_mode` is an explicit ABI contract,
 // never inferred from the position buffer rank.
+// Seed the decode graph's KV globals from the shim-side rank-4 cache (issue
+// #3043). Runs once per prefill (or prefill variant) rather than per step: each
+// decode invocation then advances the globals in place.
+//
+// The copy is one 32 MB device-to-device pass, against a prefill that costs
+// hundreds of milliseconds, so it is paid at a boundary where it does not
+// matter. `kv_import_pending` is what keeps it there: a decode never re-imports,
+// so a second request that reuses the same session's cache keeps advancing the
+// resident globals.
+static int xla_kv_import_globals(xla_ctx* c) {
+  if (!c->kv_globals || !c->kv_import_pending) return 0;
+  iree_runtime_call_t call;
+  iree_status_t status = iree_runtime_call_initialize_by_name(
+      c->session, iree_make_cstring_view("decode_step.kv_import"), &call);
+  if (iree_status_is_ok(status)) {
+    status = iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_runtime_call_invoke(&call, 0);
+  }
+  if (iree_status_is_ok(status)) {
+    iree_runtime_call_deinitialize(&call);
+    c->kv_import_pending = 0;
+    return 0;
+  }
+  iree_runtime_call_deinitialize(&call);
+  fprintf(stderr,
+          "xla_llama_decode: seeding the decode KV globals from the prefill "
+          "cache failed\n");
+  iree_status_ignore(status);
+  return 1;
+}
+
 static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
                                  int32_t token,
                                  const int32_t* positions,
@@ -1337,6 +1429,16 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
     return 1;
   }
   int32_t position_count = position_mode == 1 ? 3 : 1;
+  // The scalar-input ABI covers the 1-D decode only: an M-RoPE graph carries a
+  // tensor<3xi32> position and therefore does not export the marker. Treat a
+  // mismatch as a contract error rather than pushing the wrong value type.
+  if (c->scalar_inputs && position_mode != 0) {
+    fprintf(stderr,
+            "xla_llama_decode: scalar-input decode graph with M-RoPE "
+            "positions (mode=%d)\n",
+            position_mode);
+    return 1;
+  }
   for (int32_t axis = 0; axis < position_count; ++axis) {
     if (positions[axis] < 0) {
       fprintf(stderr, "xla_llama_decode: position axis %d is negative (%d)\n",
@@ -1357,6 +1459,7 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
     }
   }
   iree_runtime_call_t call;
+  if (xla_kv_import_globals(c) != 0) return 1;
   XLA_CHECK(iree_runtime_call_initialize_by_name(
       c->session, iree_make_cstring_view("decode_step.main"), &call));
   for (int32_t i = 0; i < c->n_weights; i++) {
@@ -1369,55 +1472,99 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
   iree_hal_buffer_view_t* tok_bv = NULL;
   iree_hal_buffer_view_t* pos_bv = NULL;
   iree_hal_buffer_view_t* len_bv = NULL;
-  // Steady-state decode writes the three scalars into buffers allocated and
-  // mapped once, instead of allocating a fresh pinned staging buffer per input
-  // (see xla_step_scalars_ensure). Fall back to per-step allocation when the
-  // device cannot serve that heap.
-  bool owns_scalars = true;
-  if (xla_step_scalars_ensure(c, position_count) == 1) {
-    owns_scalars = false;
-    *(int32_t*)c->step_token_map.contents.data = token;
-    *(int32_t*)c->step_len_map.contents.data = cache_len;
-    memcpy(c->step_pos_map.contents.data, positions,
-           (size_t)position_count * sizeof(int32_t));
-    tok_bv = c->step_token;
-    pos_bv = c->step_pos;
-    len_bv = c->step_len;
+  // True only when the buffer-view fallback allocated per-step input views that
+  // this call now owns and must release.
+  bool owns_scalars = false;
+  if (c->scalar_inputs) {
+    // Issue #3060: the graph takes token/pos/cache_len as ABI-level `i32`
+    // values, so push them into the VM call after the weights and adapter mode.
+    // No staging allocation, no buffer views: the 192-byte host-visible
+    // resource IREE materialized per invocation is gone. The persistent
+    // decode_result slot is still allocated (xla_step_scalars_ensure) because
+    // the token readback stays device-to-device.
+    (void)xla_step_scalars_ensure(c, position_count);
+    iree_vm_value_t token_value = iree_vm_value_make_i32(token);
+    iree_vm_value_t pos_value = iree_vm_value_make_i32(positions[0]);
+    iree_vm_value_t len_value = iree_vm_value_make_i32(cache_len);
+    XLA_CHECK(iree_vm_list_push_value(iree_runtime_call_inputs(&call),
+                                      &token_value));
+    XLA_CHECK(
+        iree_vm_list_push_value(iree_runtime_call_inputs(&call), &pos_value));
+    XLA_CHECK(
+        iree_vm_list_push_value(iree_runtime_call_inputs(&call), &len_value));
   } else {
+    // Buffer-view ABI (an artifact without the marker, or M-RoPE whose position
+    // stays a `tensor<3xi32>`). Steady-state decode writes the three scalars
+    // into buffers allocated and mapped once, instead of allocating a fresh
+    // pinned staging buffer per input (see xla_step_scalars_ensure). Fall back
+    // to per-step allocation when the device cannot serve that heap.
+    owns_scalars = true;
+    if (xla_step_scalars_ensure(c, position_count) == 1) {
+      owns_scalars = false;
+      *(int32_t*)c->step_token_map.contents.data = token;
+      *(int32_t*)c->step_len_map.contents.data = cache_len;
+      memcpy(c->step_pos_map.contents.data, positions,
+             (size_t)position_count * sizeof(int32_t));
+      tok_bv = c->step_token;
+      pos_bv = c->step_pos;
+      len_bv = c->step_len;
+    } else {
 #ifdef MLXCEL_XLA_TEST_SUPPORT
-    // One per input view. Counted here rather than inside xla_alloc_bv so the
-    // prefill and ragged allocations do not distort it.
-    xla_test_decode_scalar_alloc_calls += 3;
+      // One per input view. Counted here rather than inside xla_alloc_bv so the
+      // prefill and ragged allocations do not distort it.
+      xla_test_decode_scalar_alloc_calls += 3;
 #endif
-    XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &token,
-                           sizeof(int32_t), &tok_bv));
-    iree_hal_dim_t position_shape[1] = {3};
-    XLA_CHECK(xla_alloc_bv(c, position_mode == 1 ? 1 : 0,
-                           position_mode == 1 ? position_shape : NULL,
-                           IREE_HAL_ELEMENT_TYPE_INT_32, positions,
-                           (iree_host_size_t)position_count * sizeof(int32_t),
-                           &pos_bv));
-    XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &cache_len,
-                           sizeof(int32_t), &len_bv));
+      XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &token,
+                             sizeof(int32_t), &tok_bv));
+      iree_hal_dim_t position_shape[1] = {3};
+      XLA_CHECK(xla_alloc_bv(c, position_mode == 1 ? 1 : 0,
+                             position_mode == 1 ? position_shape : NULL,
+                             IREE_HAL_ELEMENT_TYPE_INT_32, positions,
+                             (iree_host_size_t)position_count * sizeof(int32_t),
+                             &pos_bv));
+      XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32,
+                             &cache_len, sizeof(int32_t), &len_bv));
+    }
+    XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
+    XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
+    XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
   }
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache));
+  // issue #3043: with the cache in module globals the step takes and returns no
+  // cache at all; the global is read and written in place by the invocation, so
+  // there is no 32 MB input-to-output copy and no per-step cache adoption.
+  if (!c->kv_globals) {
+    XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache));
+    XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache));
+  }
 
   XLA_CHECK(iree_runtime_call_invoke(&call, 0));
 
   iree_hal_buffer_view_t* token_out = NULL;
-  iree_hal_buffer_view_t* kc = NULL;
-  iree_hal_buffer_view_t* vc = NULL;
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &token_out));
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
-  if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+  if (!c->kv_globals) {
+    iree_hal_buffer_view_t* kc = NULL;
+    iree_hal_buffer_view_t* vc = NULL;
+    XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
+    XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
+    if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+      iree_hal_buffer_view_release(token_out);
+      iree_hal_buffer_view_release(kc);
+      iree_hal_buffer_view_release(vc);
+      if (owns_scalars) {
+        iree_hal_buffer_view_release(tok_bv);
+        iree_hal_buffer_view_release(pos_bv);
+        iree_hal_buffer_view_release(len_bv);
+      }
+      if (mode_bv) iree_hal_buffer_view_release(mode_bv);
+      iree_runtime_call_deinitialize(&call);
+      return 1;
+    }
+    iree_hal_buffer_view_t* old_k = c->kcache;
+    iree_hal_buffer_view_t* old_v = c->vcache;
+    c->kcache = kc;
+    c->vcache = vc;
+    XLA_CHECK(xla_read_token_decode(c, token_out, out_token));
     iree_hal_buffer_view_release(token_out);
-    iree_hal_buffer_view_release(kc);
-    iree_hal_buffer_view_release(vc);
     if (owns_scalars) {
       iree_hal_buffer_view_release(tok_bv);
       iree_hal_buffer_view_release(pos_bv);
@@ -1425,12 +1572,12 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
     }
     if (mode_bv) iree_hal_buffer_view_release(mode_bv);
     iree_runtime_call_deinitialize(&call);
-    return 1;
+    // The old KV was an input to this call; the call held a ref during invoke
+    // and dropped it at deinitialize, so release our own ref now.
+    iree_hal_buffer_view_release(old_k);
+    iree_hal_buffer_view_release(old_v);
+    return 0;
   }
-  iree_hal_buffer_view_t* old_k = c->kcache;
-  iree_hal_buffer_view_t* old_v = c->vcache;
-  c->kcache = kc;
-  c->vcache = vc;
 
   XLA_CHECK(xla_read_token_decode(c, token_out, out_token));
 
@@ -1442,10 +1589,6 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
   }
   if (mode_bv) iree_hal_buffer_view_release(mode_bv);
   iree_runtime_call_deinitialize(&call);
-  // The old KV was an input to this call; the call held a ref during invoke and
-  // dropped it at deinitialize, so release our own ref now.
-  iree_hal_buffer_view_release(old_k);
-  iree_hal_buffer_view_release(old_v);
   return 0;
 }
 
@@ -2033,6 +2176,7 @@ static int xla_llama_prefill_embeddings_impl(
     iree_hal_buffer_view_t* old_v = c->vcache;
     c->kcache = kc;
     c->vcache = vc;
+    c->kv_import_pending = 1;
     kc = NULL;
     vc = NULL;
     if (old_k) iree_hal_buffer_view_release(old_k);
@@ -2313,6 +2457,7 @@ static int xla_llama_prefill_embeddings_deepstack_impl(
     iree_hal_buffer_view_t* old_v = c->vcache;
     c->kcache = kc;
     c->vcache = vc;
+    c->kv_import_pending = 1;
     kc = NULL;
     vc = NULL;
     if (old_k) iree_hal_buffer_view_release(old_k);

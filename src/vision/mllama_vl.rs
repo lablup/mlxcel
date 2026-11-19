@@ -261,6 +261,21 @@ impl MllamaVLModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.run_text_rows(input_ids, input_embeds, caches, mask, seq_id, None)
+    }
+
+    /// [`Self::run_text`] projecting every position (`row == None`) or only
+    /// position `row` (the prefill's sampled row, #3070), against the same
+    /// per-sequence image state.
+    fn run_text_rows(
+        &self,
+        input_ids: &MlxArray,
+        input_embeds: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         self.image_state.with_entry_mut(seq_id, |entry| {
             let cross = entry.map(|state| {
                 let MllamaImageState {
@@ -270,7 +285,7 @@ impl MllamaVLModel {
                 CrossAttentionInput::new(cross_states, cross_kv.as_mut_slice())
             });
             self.text_model
-                .forward(Some(input_ids), input_embeds, caches, mask, cross)
+                .forward_rows(Some(input_ids), input_embeds, caches, mask, cross, row)
         })
     }
 
@@ -441,6 +456,25 @@ impl LanguageModel for MllamaVLModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.run_text(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.run_text_rows(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            seq_id,
+            Some(last_pos),
+        ))
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {

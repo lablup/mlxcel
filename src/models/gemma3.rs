@@ -465,11 +465,12 @@ pub struct MLP {
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         // GeGLU: gelu(gate_proj(x)) * up_proj(x), then down_proj
-        // Quantized path: fused compiled quantized MLP
-        if let (Some(gate_qw), Some(up_qw), Some(down_qw)) = (
-            self.gate_proj.quantized_weight(),
-            self.up_proj.quantized_weight(),
-            self.down_proj.quantized_weight(),
+        // Quantized path: fused compiled quantized MLP, when the three
+        // projections share one quantization layout.
+        if let Some((gate_qw, up_qw, down_qw)) = mlxcel_core::layers::fused_mlp_quantized_weights(
+            &self.gate_proj,
+            &self.up_proj,
+            &self.down_proj,
         ) {
             return unsafe {
                 mlxcel_core::compiled_gelu_approx_mlp_forward(
@@ -1368,7 +1369,7 @@ impl Gemma3StageModel {
         Self::from_filtered_weights(&weights, &args, filter, stage_index)
     }
 
-    fn from_filtered_weights(
+    pub(crate) fn from_filtered_weights(
         weights: &WeightMap,
         args: &ModelArgs,
         filter: &LayerFilter,
@@ -1444,6 +1445,7 @@ impl Gemma3StageModel {
         &self,
         input_ids: &MlxArray,
         caches: &mut [Cache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         let mut hidden = self
             .embed_tokens
@@ -1453,24 +1455,28 @@ impl Gemma3StageModel {
             })?
             .forward(input_ids);
         hidden = mlxcel_core::multiply_scalar(&hidden, (self.hidden_size as f32).sqrt());
-        self.execute_hidden(hidden, caches)
+        self.execute_hidden(hidden, caches, last_pos)
     }
 
     pub(crate) fn execute_from_hidden_states(
         &self,
         hidden: UniquePtr<MlxArray>,
         caches: &mut [Cache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if self.filter.has_embedding {
             return Err("entry stage expects token IDs, not hidden states".to_string());
         }
-        self.execute_hidden(hidden, caches)
+        self.execute_hidden(hidden, caches, last_pos)
     }
 
+    /// `last_pos` asks the final stage to project only that hidden row through
+    /// the norm and LM head (#3081); a non-final stage ignores it.
     fn execute_hidden(
         &self,
         mut hidden: UniquePtr<MlxArray>,
         caches: &mut [Cache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if caches.len() != self.layers.len() {
             return Err(format!(
@@ -1527,6 +1533,12 @@ impl Gemma3StageModel {
 
         match (&self.norm, &self.lm_head) {
             (Some(norm), Some(lm_head)) => {
+                let hidden = match last_pos {
+                    Some(pos) => {
+                        mlxcel_core::generate::logits_at_position(hidden.as_ref().unwrap(), pos)
+                    }
+                    None => hidden,
+                };
                 let hidden = norm.forward(hidden.as_ref().unwrap());
                 Ok(StageExecutionOutput::Logits(lm_head.forward(&hidden)))
             }
@@ -2256,4 +2268,4 @@ pub(super) mod gemma3_tests;
 
 #[cfg(test)]
 #[path = "gemma3_stage_tests.rs"]
-mod gemma3_stage_tests;
+pub(crate) mod gemma3_stage_tests;

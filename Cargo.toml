@@ -29,7 +29,7 @@ resolver = "2"
 
 [package]
 name = "mlxcel"
-version = "0.8.1"
+version = "0.9.0-beta.1"
 edition = "2024"
 description = "High-performance LLM/VLM/VLA inference on Apple Silicon and CUDA GPUs"
 repository = "https://github.com/lablup/mlxcel"
@@ -323,7 +323,7 @@ indicatif = "0.18"
 async-stream = "0.3"
 fancy-regex = "0.20.0"
 toml = "1"
-rust-embed = { version = "=8.13.0", features = ["debug-embed"], optional = true }
+rust-embed = { version = "=8.14.0", features = ["debug-embed"], optional = true }
 mime_guess = { version = "2.0.5", optional = true }
 # Audio devices for the `voicechat-mic` example feature only.
 cpal = { version = "0.18.2", optional = true }
@@ -459,6 +459,12 @@ required-features = ["xla-iree", "test-utils"]
 # discovered only under both features and runs as `-- --ignored`.
 [[test]]
 name = "xla_decode_scalar_reuse"
+required-features = ["xla-iree", "test-utils"]
+
+# Greedy-run phase accounting gate (#3041). Real IREE execution, so it is
+# discovered only under both features and runs as `-- --ignored`.
+[[test]]
+name = "xla_greedy_timing"
 required-features = ["xla-iree", "test-utils"]
 
 [[test]]

@@ -120,6 +120,18 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     // that detection routes to `DeepSeekV3Model` (#2384).
     "kimi_k2",
     "joyai_llm_flash",
+    // `kimi_vl` and `kimi_k25` wrap `DeepSeekV3Model` as the text decoder
+    // (`src/vision/kimi_vl.rs`), so every layer runs `DeepSeekV3Attention`,
+    // which always caches `(kv_latent, k_pe)` (#3159).
+    "kimi_vl",
+    "kimi_k25",
+    // `youtu` and `youtu_llm` load `YoutuLanguageModel`
+    // (`src/loading/nonstandard.rs`) and `youtu_vl` loads the Youtu VLM text
+    // decoder; both hold `self_attn: DeepSeekV3Attention` per layer
+    // (`src/models/youtu_vl_lm.rs`), so the same latent pair is cached (#3159).
+    "youtu",
+    "youtu_llm",
+    "youtu_vl",
     // `deepseek_v32` and the `deepseek_v3.2` spelling of the same
     // `config.json` value both resolve to `DeepSeekV32Model`
     // (`src/models/detection.rs`), and `glm_moe_dsa` wraps that model
@@ -438,6 +450,30 @@ mod tests {
     }
 
     #[test]
+    fn supports_declines_a_paged_backed_fp16_cache() {
+        // The mode check passes (FP16), so the paged decline is the one that
+        // must fire: the pool's single head dim cannot hold the asymmetric
+        // latent split. `kv_arch` relies on `deepseek_v2` never reaching this
+        // branch (the family does not opt into the paged backend), so the
+        // runtime side of that contract is pinned here (#3153).
+        use crate::cache::{PagedBlockPool, PagedKvLayout, PagedSequenceState};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let layout = PagedKvLayout::uniform(1, 16, 16 * 2 * 576 * 2).expect("valid layout");
+        let pool = Rc::new(RefCell::new(PagedBlockPool::new(layout.clone())));
+        let state = Rc::new(RefCell::new(PagedSequenceState::new(&layout)));
+        let mut cache = KVCache::new_paged(pool, state, 0);
+        assert_eq!(cache.mode, KVCacheMode::Fp16);
+        assert!(cache.is_paged_backed());
+
+        let err = MlaLatentCache::supports(&cache, LITE).unwrap_err();
+        assert!(err.contains("paged-backed"), "{err}");
+        assert!(!err.contains("FP16 KV cache"), "{err}");
+        assert!(MlaLatentCache::wrap(&mut cache, LITE).is_err());
+    }
+
+    #[test]
     fn a_latent_cache_stays_trimmable_for_speculative_decode() {
         // Speculative decode gates on `can_trim_prompt_cache` and then rejects
         // the tokens the draft got wrong with `trim`. Both operate on the
@@ -467,14 +503,22 @@ mod tests {
         assert_eq!(view.seq_len(), 4);
     }
 
-    /// The four families that always cache a latent pair, and the one that
-    /// does not. `deepseek_v2` has a decompressed fallback, so a quantized
-    /// mode there lands on ordinary per-head K/V rows and must keep working.
+    /// Every family in `MLA_LATENT_CACHE_FAMILIES` always caches a latent
+    /// pair, and `deepseek_v2` does not. `deepseek_v2` has a decompressed
+    /// fallback, so a quantized mode there lands on ordinary per-head K/V rows
+    /// and must keep working.
     #[test]
     fn only_the_fallback_less_families_are_latent_families() {
         for family in [
             "glm4_moe_lite",
             "deepseek_v3",
+            "kimi_k2",
+            "joyai_llm_flash",
+            "kimi_vl",
+            "kimi_k25",
+            "youtu",
+            "youtu_llm",
+            "youtu_vl",
             "deepseek_v32",
             "deepseek_v3.2",
             "glm_moe_dsa",
@@ -485,6 +529,7 @@ mod tests {
         ] {
             assert!(caches_mla_latent_pair(family), "{family}");
         }
+        assert_eq!(MLA_LATENT_CACHE_FAMILIES.len(), 16);
         assert!(!caches_mla_latent_pair("deepseek_v2"));
         assert!(!caches_mla_latent_pair("llama"));
         assert!(!caches_mla_latent_pair(""));

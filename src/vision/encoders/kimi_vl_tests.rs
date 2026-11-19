@@ -520,3 +520,49 @@ fn video_t1_equals_image_with_frame0_temporal_folded_into_bias() {
         assert_close(*a, *b, "t=1 video == image + frame0 temporal");
     }
 }
+
+/// A Kimi-VL wrapper over the tiny MoonViT tower above and a tiny DeepSeek-V3
+/// text model. The projector is never run here, so its width need not match
+/// the text model's.
+fn tiny_kimi_vl() -> crate::vision::kimi_vl::KimiVLModel {
+    use crate::vision::kimi_vl::{KimiVLModel, KimiVLMultiModalProjector};
+    use crate::vision::processors::kimi_vl::KimiVLProcessor;
+
+    let cfg = tiny_config();
+    let p = "vision_tower";
+    let vision_model =
+        KimiVLVisionModel::from_weights(&tiny_encoder_weights(p, &[0.0; 4]), &cfg, p).unwrap();
+
+    let mut wm = WeightMap::new();
+    insert(&mut wm, "pn.weight", &[1.0; 4], &[4]);
+    insert(&mut wm, "pn.bias", &[0.0; 4], &[4]);
+    insert(&mut wm, "l1.weight", &[0.05; 256], &[16, 16]);
+    insert(&mut wm, "l1.bias", &[0.0; 16], &[16]);
+    insert(&mut wm, "l2.weight", &[0.05; 128], &[8, 16]);
+    insert(&mut wm, "l2.bias", &[0.0; 8], &[8]);
+    let projector = KimiVLMultiModalProjector::from_weights(&wm, "pn", "l1", "l2", 16, 64, 4)
+        .expect("build projector");
+
+    KimiVLModel {
+        text_model: crate::models::deepseek_v3::tests::tiny_dense_model(),
+        vision_model,
+        projector,
+        processor: KimiVLProcessor::new(1, [2, 2], 16),
+        media_placeholder_token_id: 10,
+        spatial_merge_size: 2,
+        eos_token_ids: vec![1],
+    }
+}
+
+/// Kimi-VL's text and embeddings prefills both reach the DeepSeek-V3 last-row
+/// projection instead of the trait default's full-logits slice (#3070).
+#[test]
+fn kimi_vl_last_row_logits_match_the_full_forward() {
+    use crate::models::last_row_logits_harness::{
+        TOKENS, assert_last_row_logits, assert_last_row_logits_with_embeddings,
+    };
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    assert_last_row_logits(tiny_kimi_vl, TOKENS);
+    assert_last_row_logits_with_embeddings(tiny_kimi_vl, TOKENS);
+}

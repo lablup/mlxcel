@@ -1,0 +1,25 @@
+run,order,arm,model,prefill_chunk,prompt_tokens,prefill_ms,peak_footprint_bytes,exit,output_md5
+first sweep,fix first,fix,gemma-3-4b-it-4bit,0,28706,4434.60,7026412856,0,f32ef0514c27f20a7a7f477088eead43
+first sweep,fix first,main,gemma-3-4b-it-4bit,0,28706,4330.75,15139720384,0,f32ef0514c27f20a7a7f477088eead43
+first sweep,main first,main,gemma-3-4b-it-4bit,0,28706,5251.69,15140031728,0,f32ef0514c27f20a7a7f477088eead43
+first sweep,main first,fix,gemma-3-4b-it-4bit,0,28706,6107.53,7026085152,0,f32ef0514c27f20a7a7f477088eead43
+first sweep,fix first,fix,gemma-3-4b-it-4bit,2048,28706,4200.56,5251026328,0,f32ef0514c27f20a7a7f477088eead43
+first sweep,fix first,main,gemma-3-4b-it-4bit,2048,28706,4262.68,5250911640,0,f32ef0514c27f20a7a7f477088eead43
+first sweep,main first,main,gemma-3-4b-it-4bit,2048,28706,6882.27,5251730912,0,f32ef0514c27f20a7a7f477088eead43
+first sweep,main first,fix,gemma-3-4b-it-4bit,2048,28706,4097.99,5251845600,0,f32ef0514c27f20a7a7f477088eead43
+first sweep,fix first,fix,gemma-4-12b-it-4bit,0,28710,39080.82,18673615648,0,f62b7416f1920d2a2b8dce042c13b294
+first sweep,fix first,main,gemma-4-12b-it-4bit,0,28710,36191.28,27379680032,0,f62b7416f1920d2a2b8dce042c13b294
+first sweep,main first,main,gemma-4-12b-it-4bit,0,28710,33218.19,27379106520,0,f62b7416f1920d2a2b8dce042c13b294
+first sweep,main first,fix,gemma-4-12b-it-4bit,0,28710,32738.76,18674041368,0,f62b7416f1920d2a2b8dce042c13b294
+first sweep,fix first,fix,gemma-4-12b-it-4bit,2048,28710,22830.38,14171292232,0,f62b7416f1920d2a2b8dce042c13b294
+first sweep,fix first,main,gemma-4-12b-it-4bit,2048,28710,21472.54,14170620752,0,f62b7416f1920d2a2b8dce042c13b294
+first sweep,main first,main,gemma-4-12b-it-4bit,2048,28710,32128.98,14171538304,0,f62b7416f1920d2a2b8dce042c13b294
+first sweep,main first,fix,gemma-4-12b-it-4bit,2048,28710,34796.76,14171308856,0,f62b7416f1920d2a2b8dce042c13b294
+single-pass timing repeat,fix first,fix,gemma-3-4b-it-4bit,0,28706,4144.86,7026150640,0,f32ef0514c27f20a7a7f477088eead43
+single-pass timing repeat,fix first,main,gemma-3-4b-it-4bit,0,28706,4194.22,15140113648,0,f32ef0514c27f20a7a7f477088eead43
+single-pass timing repeat,main first,main,gemma-3-4b-it-4bit,0,28706,4010.47,15139818736,0,f32ef0514c27f20a7a7f477088eead43
+single-pass timing repeat,main first,fix,gemma-3-4b-it-4bit,0,28706,4009.51,7025757448,0,f32ef0514c27f20a7a7f477088eead43
+single-pass timing repeat,fix first,fix,gemma-4-12b-it-4bit,0,28710,20548.51,18673779536,0,f62b7416f1920d2a2b8dce042c13b294
+single-pass timing repeat,fix first,main,gemma-4-12b-it-4bit,0,28710,20405.01,27378467376,0,f62b7416f1920d2a2b8dce042c13b294
+single-pass timing repeat,main first,main,gemma-4-12b-it-4bit,0,28710,20759.92,27379172176,0,f62b7416f1920d2a2b8dce042c13b294
+single-pass timing repeat,main first,fix,gemma-4-12b-it-4bit,0,28710,20671.03,18673599312,0,f62b7416f1920d2a2b8dce042c13b294

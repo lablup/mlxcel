@@ -386,6 +386,47 @@ fn count_i32_token(input_ids: &MlxArray, token_id: i32) -> Result<usize, String>
         .count())
 }
 
+impl Gemma3nVLModel {
+    /// `forward_with_embeddings_and_sequence_id` projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). The per-sequence `per_layer_inputs` are consumed
+    /// the same way in both cases.
+    fn forward_rows_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        if let Some(embeds) = input_embeddings {
+            // VLM prefill: resolve the request's projected per_layer_inputs
+            // from the per-`SequenceId` map (server flow) or the fallback
+            // slot (CLI / bench). An absent tensor at this point is an
+            // internal invariant violation: `get_input_embeddings` must
+            // have populated the fallback slot before this consumer ran.
+            let pli = self
+                .take_per_layer_inputs(seq_id)
+                .expect("gemma3n VLM prefill: per_layer_inputs missing for this sequence");
+            // M5 tile-aligned prefill pads the token stream and
+            // merged embeddings to an NA tile length. The projected
+            // per-layer tensor is produced before that generic padding step,
+            // so align it here before Gemma3n's per-layer blend.
+            let aligned_pli = Self::align_per_layer_inputs_to_embeddings(&pli, embeds);
+            let pli_ref = aligned_pli
+                .as_ref()
+                .map_or_else(|| pli.as_ref().unwrap(), |array| array.as_ref().unwrap());
+            self.text_model
+                .language_model
+                .forward_rows_with_inputs(embeds, pli_ref, caches, row)
+        } else {
+            self.text_model
+                .language_model
+                .forward_rows(input_ids, caches, row)
+        }
+    }
+}
+
 impl LanguageModel for Gemma3nVLModel {
     fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
         self.text_model.batched_decode_kind()
@@ -427,29 +468,27 @@ impl LanguageModel for Gemma3nVLModel {
         caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        if let Some(embeds) = input_embeddings {
-            // VLM prefill: resolve the request's projected per_layer_inputs
-            // from the per-`SequenceId` map (server flow) or the fallback
-            // slot (CLI / bench). An absent tensor at this point is an
-            // internal invariant violation: `get_input_embeddings` must
-            // have populated the fallback slot before this consumer ran.
-            let pli = self
-                .take_per_layer_inputs(seq_id)
-                .expect("gemma3n VLM prefill: per_layer_inputs missing for this sequence");
-            // M5 tile-aligned prefill pads the token stream and
-            // merged embeddings to an NA tile length. The projected
-            // per-layer tensor is produced before that generic padding step,
-            // so align it here before Gemma3n's per-layer blend.
-            let aligned_pli = Self::align_per_layer_inputs_to_embeddings(&pli, embeds);
-            let pli_ref = aligned_pli
-                .as_ref()
-                .map_or_else(|| pli.as_ref().unwrap(), |array| array.as_ref().unwrap());
-            self.text_model
-                .language_model
-                .forward_with_inputs(embeds, pli_ref, caches)
-        } else {
-            self.text_model.language_model.forward(input_ids, caches)
-        }
+        self.forward_rows_with_embeddings(input_ids, input_embeddings, seq_id, caches, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Text and embeddings prefill both end in the language model's row
+        // projection, so the final softcap touches the sampled row only.
+        Some(self.forward_rows_with_embeddings(
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            Some(last_pos),
+        ))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

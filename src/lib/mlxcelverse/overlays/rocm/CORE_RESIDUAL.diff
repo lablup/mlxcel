@@ -15,7 +15,7 @@
 # replace: an overlay that silently drops part of an upstream change shows up
 # here as a new hunk, even if it was wrong before the bump.
 #
-# pin: 9f806b3606eaa9f7c807238f6bd465185cd94d6d
+# pin: fc344c986c4169d99f76b5d95ae6b4a58a359a63
 # fork: 75915908dfe5028335d318b10340313744fd3a8d
 # fork_upstream_merge_base: 39886de461d4f014cd60a3a68ad42fd8d776754a
 # overlay-sha256: b52b05433752bfccc1a728ba37ce12572db68b1040eea4c5ff87d03f653e86ee CMakeLists.txt
@@ -26,7 +26,7 @@
 # overlay-sha256: 28759d52cd6ec6f55a6ba85ae6e594e24c042fc55bfe139ac1856e556ee42e10 mlx/backend/common/compiled.h
 # overlay-sha256: 611dc5085fc0d9bf380ad783e6fd13d9247deccdb384f46703c0c3631bac7b54 mlx/backend/gpu/primitives.cpp
 # overlay-sha256: 849838a3e3354496e7c4e571b98491e7c80f94f4b84fe9e642093f332069fc8a mlx/compile.cpp
-# overlay-sha256: 67e68d6e70df6271ed2f54d75957c4762653b6a32fa6c666ea3b014c5d425acd mlx/device.cpp
+# overlay-sha256: 01ba46c9da6975a969244b627da653242e0610350d6741cccd5d4e31bcbf9137 mlx/device.cpp
 # overlay-sha256: f59907ff5aa3d975d221f23251d130e10a1bc24774ce45a82811b1f736381670 mlx/fast.cpp
 # overlay-sha256: de553936d1369d93ba235dcf27d1b8d1e723970b1a4227bd5f0009511073277d mlx/fast.h
 # overlay-sha256: 83292e0d6c2fffbcc375543b2b96e10e512e9343a9d1c9aec9b3c1e1fc5a6c9f mlx/fast_primitives.h
@@ -37,6 +37,7 @@
 # note mlx/allocator.h: LOCAL_FIXES.md item 47 (owned ROCm asynchronous Data allocation friendship).
 # note mlx/backend/common/compiled.cpp: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's negative_strides tracking and the fork's constant-input skipping.
 # note mlx/backend/gpu/primitives.cpp: LOCAL_FIXES.md items 24 and 50: DynamicSliceUpdate copies through copy_gpu (donates only when is_donatable holds) and drops the fork's graph_active() forced donation; AsStrided donates its contiguous copy as upstream does since 9f806b36, and only the ROCm device-header include is still local.
+# note mlx/device.cpp: LOCAL_FIXES.md item 75: per-thread default device and mlxcel_set_process_default_device, shared with overlays/core/mlx/device.cpp.
 # note mlx/fast.cpp: LOCAL_FIXES.md item 5: retain window/array mask composition while keeping the fork's four-dimensional repeated-head GQA fallback.
 # note mlx/fast.h: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's precompiled_cuda_kernel and the fork's hip_kernel.
 # note mlx/fast_primitives.h: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's compile_options and the fork's output_input_aliases on fast::CustomKernel.
@@ -165,6 +166,101 @@
  
    auto out_offset =
        compute_dynamic_offset(start_indices, out.strides(), axes_, s);
+--- a/mlx/device.cpp
++++ b/mlx/device.cpp
+@@ -1,6 +1,12 @@
+ // Copyright © 2023-2026 Apple Inc.
++// mlxcel: the per-thread default-device block below is shared with
++// overlays/core/mlx/device.cpp; keep the two identical apart from
++// `initial_default_device`.
+ 
++#include <atomic>
++#include <optional>
+ #include <stdexcept>
++#include <string>
+ 
+ #include "mlx/backend/cpu/device_info.h"
+ #include "mlx/backend/gpu/device_info.h"
+@@ -12,7 +18,10 @@
+ 
+ namespace mlx::core {
+ 
+-Device& mutable_default_device() {
++// mlxcel: begin per-thread default device.
++namespace {
++
++Device initial_default_device() {
+   Device::DeviceType default_type = Device::cpu;
+   if (gpu::is_available()) {
+     default_type = Device::gpu;
+@@ -22,8 +31,39 @@
+     default_type = Device::gpu; // ROCm devices use the generic gpu type
+   }
+ #endif
+-  static Device default_device{default_type};
+-  return default_device;
++  return Device{default_type};
++}
++
++// The process default, packed as (type << 16) | index; -1 until set.
++std::atomic<int> process_default_device{-1};
++
++Device process_default() {
++  int packed = process_default_device.load(std::memory_order_acquire);
++  if (packed < 0) {
++    return initial_default_device();
++  }
++  return Device{
++      static_cast<Device::DeviceType>(packed >> 16), packed & 0xffff};
++}
++
++void check_settable(const Device& d, const char* caller) {
++  if (!gpu::is_available() && d == Device::gpu) {
++    throw std::invalid_argument(
++        std::string("[") + caller +
++        "] Cannot set gpu device without gpu backend.");
++  }
++}
++
++thread_local std::optional<Device> thread_default_device;
++
++} // namespace
++
++Device& mutable_default_device() {
++  // The returned reference is the calling thread's own slot, refreshed from
++  // the override or the process default on every call.
++  static thread_local Device view{Device::cpu};
++  view = thread_default_device.value_or(process_default());
++  return view;
+ }
+ 
+ const Device& default_device() {
+@@ -31,12 +71,20 @@
+ }
+ 
+ void set_default_device(const Device& d) {
+-  if (!gpu::is_available() && d == Device::gpu) {
+-    throw std::invalid_argument(
+-        "[set_default_device] Cannot set gpu device without gpu backend.");
+-  }
+-  mutable_default_device() = d;
++  check_settable(d, "set_default_device");
++  thread_default_device = d;
+ }
++
++// Sets the default for every thread that has not set its own, and clears the
++// calling thread's override so it follows the new default as well.
++MLX_API void mlxcel_set_process_default_device(const Device& d) {
++  check_settable(d, "mlxcel_set_process_default_device");
++  process_default_device.store(
++      (static_cast<int>(d.type) << 16) | (d.index & 0xffff),
++      std::memory_order_release);
++  thread_default_device.reset();
++}
++// mlxcel: end per-thread default device.
+ 
+ bool is_available(const Device& d) {
+   switch (d.type) {
 --- a/mlx/fast.cpp
 +++ b/mlx/fast.cpp
 @@ -874,8 +874,6 @@

@@ -14,15 +14,15 @@ use crate::models::qwen3_vl_moe::tests::{set_qwen3_moe_state, tiny_qwen3_vl_moe_
 use crate::vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
 use crate::vision::processors::qwen2_vl::Qwen2VLProcessor;
 
-fn qwen_processor() -> Qwen2VLProcessor {
+pub(super) fn qwen_processor() -> Qwen2VLProcessor {
     Qwen2VLProcessor::new(1, 1, 1)
 }
 
-fn qwen3_processor() -> Qwen2VLProcessor {
+pub(super) fn qwen3_processor() -> Qwen2VLProcessor {
     Qwen2VLProcessor::new_with_norm(1, 1, 1, [0.5; 3], [0.5; 3])
 }
 
-fn unused_qwen3_vision_encoder() -> Qwen3VLVisionEncoder {
+pub(super) fn unused_qwen3_vision_encoder() -> Qwen3VLVisionEncoder {
     let config: Qwen3VLVisionConfig = serde_json::from_value(serde_json::json!({
         "depth": 0,
         "hidden_size": 4,
@@ -62,7 +62,7 @@ fn unused_qwen3_vision_encoder() -> Qwen3VLVisionEncoder {
         .expect("unused Qwen3 vision tower is still a valid object")
 }
 
-fn unused_qwen3_audio_encoder() -> Qwen3OmniAudioEncoder {
+pub(super) fn unused_qwen3_audio_encoder() -> Qwen3OmniAudioEncoder {
     let config: Qwen3OmniAudioConfig = serde_json::from_value(serde_json::json!({
         "d_model": 4,
         "encoder_layers": 0,

@@ -310,7 +310,9 @@ fn ssm_attn(
     // Compute dt, A, dtA, dtx for full sequence
     // dt is now float32 after compute_dt promotion; A matches dt dtype for precision
     let dt = compute_dt(dt, dt_bias, time_step_limit);
-    let a = mlxcel_core::negative(&mlxcel_core::exp(a_log));
+    // `exp` on a float32 copy of `A_log`: an f16 `exp` overflows past 11.09
+    // and `0 * -inf` then turns a zero step into NaN (#3057).
+    let a = super::ssm_a::ssm_a_f32(a_log);
     let a = mlxcel_core::astype(&a, mlxcel_core::array_dtype(&dt));
     let a_reshaped = mlxcel_core::reshape(&a, &[1, 1, num_heads]);
     let dt_a = mlxcel_core::multiply(&dt, &a_reshaped);
@@ -501,16 +503,14 @@ impl Mamba2Block {
         };
 
         // Update conv cache.
-        // Wrap slice in contiguous() to force MLX to materialize a fresh,
-        // independent buffer. Without this, the slice is a lazy view that
-        // retains a reference to the full padded_input allocation, causing a
-        // memory leak proportional to the sequence length.
+        // The tail is a fresh buffer, scheduled now on a long prefill so the full
+        // padded_input is not held until the caches are evaluated.
         if let Some(c) = cache {
             let n_keep = k - 1;
-            let padded_shape = mlxcel_core::array_shape(&padded_input);
-            let len = padded_shape[1] as usize;
-            let tail = slice_axis(&padded_input, 1, (len - n_keep) as i32, len as i32);
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
+                &padded_input,
+                n_keep as i32,
+            ));
         }
 
         // Depthwise conv1d
@@ -589,6 +589,9 @@ impl Mamba2Block {
             256, // chunk step size matching Python mlx-lm
         );
 
+        // The final state is not consumed by `y`, so on a long prefill it would
+        // hold the scan's full-length inputs until the caches are evaluated.
+        mlxcel_core::utils::schedule_prefill_state(&new_state, seq_len);
         if let Some(c) = cache {
             c.ssm_state = Some(new_state);
         }
@@ -683,12 +686,26 @@ impl Mamba2Model {
         x: &MlxArray,
         caches: &mut [Mamba2Cache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(x, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). Every layer still runs over all rows, so the
+    /// recurrent and KV state advance exactly as in the full forward.
+    fn forward_rows_with_caches(
+        &self,
+        x: &MlxArray,
+        caches: &mut [Mamba2Cache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = self.embeddings.forward(x);
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, Some(cache));
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm_f.forward(&h);
 
         if let Some(ref head) = self.lm_head {
@@ -1145,6 +1162,26 @@ impl LanguageModel for Mamba2Model {
             || Mamba2Model::make_caches(self),
             |internal| self.forward_with_caches(input_ids, internal),
         )
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || Mamba2Model::make_caches(self),
+            |internal| self.forward_rows_with_caches(input_ids, internal, Some(last_pos)),
+        ))
     }
 
     fn supports_snapshot_reuse(&self) -> bool {

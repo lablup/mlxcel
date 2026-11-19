@@ -383,7 +383,7 @@ struct MLAAttention {
 
     /// `kv_b_proj` folded into the query and output paths (issue #907).
     ///
-    /// `Some` only when `MLXCEL_MLA_ABSORBED` is on and the fold succeeded. The
+    /// `Some` when [`mla::absorbed_enabled`] holds and the fold succeeded. The
     /// original `kv_b_proj` above stays loaded either way: prefill up-projects
     /// through it so the absorbed prefill is the same arithmetic on the same
     /// quantized weight the decompressed path uses, which keeps prefill parity
@@ -479,7 +479,10 @@ impl MLAAttention {
         let queries = concatenate(&q_nope, &q_pe, -1);
         let keys = concatenate(&k_nope, &k_pe, -1);
 
-        // Update cache
+        // Update cache. A multi-token step that outgrows the buffer releases
+        // the superseded per-head K/V buffer inside the shared FP16 growth
+        // rather than parking it in MLX's allocator cache for the rest of the
+        // prefill piece (issues #3084, #3092).
         let (keys, values) = cache.update_and_fetch(keys, values);
 
         // Scaled dot product attention.
@@ -997,13 +1000,31 @@ impl DeepSeekV2Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(input_ids);
+        self.forward_rows(input_ids, None, caches, mask, None)
+    }
+
+    /// The single-sequence forward, from token ids or from precomputed
+    /// embeddings, projecting every position (`row == None`) or only position
+    /// `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = match inputs_embeds {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
 
         let mask = mask.map(mlxcel_core::copy);
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, mask.as_deref(), cache);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
 
@@ -1056,17 +1077,24 @@ impl DeepSeekV2Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = mlxcel_core::copy(inputs_embeds);
-        let mask = mask.map(mlxcel_core::copy);
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
-            h = layer.forward(&h, mask.as_deref(), cache);
-        }
-        let h = self.norm.forward(&h);
-        if let Some(ref head) = self.lm_head {
-            head.forward(&h)
-        } else {
-            self.embed_tokens.as_linear(&h)
-        }
+        // `input_ids` is unused when embeddings are given.
+        self.forward_rows(inputs_embeds, Some(inputs_embeds), caches, mask, None)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only, from token ids or
+    /// from precomputed embeddings.
+    ///
+    /// Used by: `LanguageModel::last_row_logits` for `DeepSeekV2Model` and
+    /// `vision::deepseek_vl2::DeepSeekVl2VlModel`
+    pub fn last_row_logits_impl(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, inputs_embeds, caches, mask, Some(last_pos))
     }
 
     /// Raw token-embedding lookup, exposed for VLM feature splicing.
@@ -1124,19 +1152,20 @@ impl DeepSeekV2Model {
     }
 }
 
-/// State the absorbed-decode decision on stderr, once per load.
+/// State the absorbed-decode decision, once per load.
 ///
-/// Silent unless `MLXCEL_MLA_ABSORBED` is set, so the default path prints
-/// nothing. When it is set, this is the only place that says whether the fold
-/// actually took, so it uses `eprintln!` rather than `tracing`: the report must
-/// show without `RUST_LOG`, and stderr keeps it out of the generated text on
-/// stdout. A run whose flag is on but whose output says `0/27 layers` is
-/// visibly running the fallback, which is how issue #899's silent null is
-/// avoided here.
+/// Absorbed decode is the default where the fused kernel runs (issue #3131), so the success line only goes
+/// to stderr when `MLXCEL_MLA_ABSORBED` explicitly asks for it; under the
+/// default it is a `tracing` info line and a plain run prints nothing extra.
+/// A decline always goes to stderr: a run that wanted the latent cache and did
+/// not get it is visibly running the fallback, which is how issue #899's silent
+/// null is avoided here. `eprintln!` rather than `tracing` for those, so the
+/// report shows without `RUST_LOG` and stays out of the generated text.
 fn report_absorption(layers: &[DecoderLayer], args: &ModelArgs) {
     if !mla::absorbed_enabled() {
         return;
     }
+    let mode = mla::absorbed_mode();
     let total = layers.len();
     let folded = layers
         .iter()
@@ -1151,12 +1180,26 @@ fn report_absorption(layers: &[DecoderLayer], args: &ModelArgs) {
     };
     let before = mla::decompressed_bytes_per_token(&geometry, 2);
     let after = mla::latent_bytes_per_token(&geometry, 2);
-    eprintln!(
-        "mla: absorbed decode folded {folded}/{total} layers; KV cache {before} -> {after} \
-         bytes/token/layer ({:.1}x), split-kv={}",
+    // The fold's form and size, so a run can tell the packed fold (issue
+    // #3121) from the dense one without reading the code.
+    let folds: Vec<&MlaAbsorbedProjections> = layers
+        .iter()
+        .filter_map(|l| l.self_attn.absorbed.as_ref())
+        .collect();
+    let quantized = folds.iter().filter(|p| p.is_quantized()).count();
+    let fold_mib = folds.iter().map(|p| p.weight_bytes()).sum::<usize>() as f64 / (1024.0 * 1024.0);
+    let line = format!(
+        "mla: absorbed decode folded {folded}/{total} layers ({quantized} quantized, \
+         {fold_mib:.1} MiB); KV cache {before} -> {after} bytes/token/layer ({:.1}x), \
+         split-kv={}",
         before as f64 / after.max(1) as f64,
         mla::split_kv_enabled()
     );
+    if mode == mla::AbsorbedMode::On || folded != total {
+        eprintln!("{line}");
+    } else {
+        tracing::info!("{line}");
+    }
     if folded != total {
         let reason = layers
             .iter()
@@ -1265,8 +1308,11 @@ fn load_mla_attention(
     let kv_b_proj =
         UnifiedLinear::from_weights(weights, &format!("{}.kv_b_proj", prefix), group_size, bits)?;
 
-    // Fold `kv_b_proj` for absorbed decode (issue #907). Only under the flag,
-    // so an unset environment does no dequantization and allocates nothing.
+    // Fold `kv_b_proj` for absorbed decode (issue #907), the default wherever
+    // the fused kernel runs since issue #3131. `MLXCEL_MLA_ABSORBED=0` skips the fold, so the decompressed
+    // layout allocates nothing extra. A quantized `kv_b_proj` keeps
+    // its packed rows (issue #3121); only an unquantized or tensor-scaled one
+    // is held dense.
     let geometry = MlaGeometry {
         num_heads: args.num_attention_heads,
         kv_lora_rank: args.kv_lora_rank,
@@ -1465,6 +1511,22 @@ impl LanguageModel for DeepSeekV2Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         DeepSeekV2Model::forward(self, input_ids, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.last_row_logits_impl(input_ids, None, caches, mask, last_pos))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

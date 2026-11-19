@@ -207,6 +207,11 @@ impl Attention {
                     0,
                 )
             }
+        } else if l > 1 {
+            // A mask-less multi-token forward is a single-row prefill whose
+            // causality MLX's causal mode supplies (`prefill_causal_mask`,
+            // #3072).
+            mlxcel_core::maskless_prefill_attention(&q, &k, &v, self.scale, 0)
         } else {
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -442,6 +447,27 @@ impl Glm4vMoeTextModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input_ids, input_embeddings, caches, mask, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the row a
+    /// prefill samples, #3070). The per-sequence position handling and every
+    /// decoder layer run over all positions either way; only the final norm
+    /// and the LM head see the selected row.
+    ///
+    /// Used by: [`Self::forward_for_sequence`], and
+    /// `LanguageModel::last_row_logits` of `Glm4vMoeTextModel` and of the
+    /// GLM-4V-MoE wrapper.
+    pub(crate) fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
@@ -465,6 +491,15 @@ impl Glm4vMoeTextModel {
                         &[0, 0, cache_offset],
                         &[pos_shape[0], pos_shape[1], cache_offset + seq_len],
                     );
+                }
+                if let Some(positions) = crate::models::glm4v::padded_tail_positions(
+                    stored_pos,
+                    entry.rope_deltas.unwrap_or(0),
+                    batch,
+                    seq_len,
+                    cache_offset,
+                ) {
+                    return positions;
                 }
                 Self::compute_position_ids_with_delta(
                     entry.rope_deltas.unwrap_or(0),
@@ -494,8 +529,27 @@ impl Glm4vMoeTextModel {
         let mask = if mask.is_some() {
             mask
         } else if seq_len > 1 {
-            auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
-            Some(auto_mask.as_ref().unwrap() as &MlxArray)
+            // A single row takes MLX's causal mode instead of the array
+            // where MLX fuses it (`prefill_causal_mask`, #3072); the attention
+            // layer routes a mask-less multi-token forward through
+            // `maskless_prefill_attention`, whose bottom-right alignment
+            // matches the `live_len` offset.
+            auto_mask = self.layers.first().and_then(|layer| {
+                let attn = &layer.attn;
+                let attention = mlxcel_core::utils::PrefillAttention::new(
+                    attn.num_heads as usize,
+                    attn.num_kv_heads as usize,
+                    attn.head_dim as usize,
+                );
+                mlxcel_core::utils::prefill_causal_mask(
+                    seq_len,
+                    caches[0].live_len(),
+                    batch,
+                    attention,
+                    mlxcel_core::array_dtype(&h),
+                )
+            });
+            auto_mask.as_deref()
         } else {
             // Decode width. The one query row sits at logical position
             // `live_len`, so every key column is permitted: the mask would be
@@ -510,6 +564,7 @@ impl Glm4vMoeTextModel {
             h = layer.forward(&h, &mut caches[i], mask, &cos_f, &sin_f);
         }
 
+        h = mlxcel_core::generate::select_row(h, row);
         h = self.norm.forward(&h);
         self.lm_head.forward(&h)
     }
@@ -679,6 +734,16 @@ impl Glm4vMoeTextModel {
 }
 
 impl mlxcel_core::generate::LanguageModel for Glm4vMoeTextModel {
+    /// A tile-aligned padded prefill needs no padding mask: the pad tokens
+    /// follow the real ones, so a causal forward (MLX's causal mode, or the
+    /// shared causal or windowed array where MLX does not fuse it) already
+    /// hides them from every real row, and the caches the engine trims are
+    /// the caller's dense ones, with the MRoPE positions of a padded row left
+    /// to the cache offset exactly as under a padding mask (#3101).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }
@@ -721,6 +786,25 @@ impl mlxcel_core::generate::LanguageModel for Glm4vMoeTextModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.forward_rows_for_sequence(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            seq_id,
+            Some(last_pos),
+        ))
     }
 
     fn forward_batched_with_ids(

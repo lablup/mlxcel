@@ -501,6 +501,28 @@ fn decode_request_images_keeps_valid_images_and_rejects_all_invalid_input() {
 }
 
 #[test]
+fn decode_request_images_turns_a_picture_upright_by_its_exif_orientation() {
+    use crate::multimodal::image_orientation::test_pictures::{
+        distinct_pixels, jpeg_with_orientation, png_with_orientation, stored_for,
+    };
+
+    // A portrait photo as a phone stores it: the sensor's rows, and tag 6.
+    let upright = distinct_pixels();
+    let stored = stored_for(6, &upright);
+    assert_eq!(stored.dimensions(), (4, 6));
+    let decoded = decode_request_images(&[
+        png_with_orientation(&stored, 6),
+        png_with_orientation(&upright, 1),
+        jpeg_with_orientation(&stored, 6),
+    ])
+    .unwrap();
+    assert_eq!(decoded.len(), 3);
+    assert_eq!(decoded[0].to_rgb8(), upright);
+    assert_eq!(decoded[1].to_rgb8(), upright);
+    assert_eq!((decoded[2].width(), decoded[2].height()), (6, 4));
+}
+
+#[test]
 fn decode_request_images_rejects_decompression_bomb_header() {
     let limits = ImageInputLimits {
         max_width: 4096,

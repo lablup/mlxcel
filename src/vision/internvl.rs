@@ -211,6 +211,28 @@ impl InternVLChatVLM {
 // runtime to inject pre-merged inputs. EOS ids are overridden so the server
 // stop path uses InternVL's Qwen2 stop tokens rather than the Llama defaults.
 impl LanguageModel for InternVLChatVLM {
+    // The wrapper's single-sequence forwards add nothing to the text model's,
+    // so the prefill takes the text model's last-row projection (#3070).
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.text_model,
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
         self.text_model.batched_decode_kind()
     }

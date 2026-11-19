@@ -40,7 +40,9 @@ use mlxcel_core::cache::{
 };
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -345,8 +347,18 @@ impl Attention {
         // Update KV cache and get sliced views.
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Scaled dot-product attention (handles GQA expansion internally).
-        let attn_out = if l > 1 {
+        // Scaled dot-product attention (handles GQA expansion internally). A
+        // mask-less multi-token forward is a single-row prefill whose model
+        // left the mask to MLX's causal mode or native window route (#3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
+        } else if l > 1 {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -852,6 +864,19 @@ impl MellumModel {
         mask_full: Option<&MlxArray>,
         mask_sliding: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask_full, mask_sliding, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Cache],
+        mask_full: Option<&MlxArray>,
+        mask_sliding: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
 
         for (i, layer) in self.layers.iter().enumerate() {
@@ -862,6 +887,7 @@ impl MellumModel {
             };
             h = layer.forward(&h, caches[i].as_interface(), mask);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
         if let Some(head) = &self.lm_head {
@@ -876,13 +902,23 @@ impl MellumModel {
         input_ids: &MlxArray,
         caches: &mut [Cache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(input_ids, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] for every position or for `row` alone.
+    fn forward_rows_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Cache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         let seq_len = shape[1];
 
         // Decode (seq_len == 1) needs no explicit mask; the fused SDPA handles
         // single-token causal/windowed attention via `window_size`.
         if seq_len == 1 {
-            return self.forward(input_ids, caches, None, None);
+            return self.forward_rows(input_ids, caches, None, None, row);
         }
 
         // Prefill: build a full causal mask and a windowed mask, keyed off the
@@ -894,23 +930,41 @@ impl MellumModel {
             .unwrap_or(0);
         let sliding_idx = self.layers.iter().position(|l| l.self_attn.is_sliding);
 
+        // Each mask is `None` where a single row can take MLX's causal mode
+        // or native window route instead and MLX fuses it (#3072).
+        let attn = &self.layers[full_idx].self_attn;
+        let attention = PrefillAttention::new(
+            attn.num_heads as usize,
+            attn.num_kv_heads as usize,
+            attn.head_dim as usize,
+        );
+        let dtype = mlxcel_core::array_dtype(&self.norm.weight);
+        let batch = shape[0];
         let full_offset = caches[full_idx].as_interface().offset();
-        let mask_full = Some(create_causal_mask(seq_len, full_offset));
+        let mask_full = prefill_causal_mask(seq_len, full_offset, batch, attention, dtype);
 
-        let mask_sliding = sliding_idx.map(|idx| {
+        let mask_sliding = sliding_idx.and_then(|idx| {
             // Full-width windowed mask for a fresh single-pass prefill that
             // exceeds the window (the RotatingKVCache keeps all prefill keys),
             // clamped mask otherwise. See issue #408.
             let sliding_offset = caches[idx].as_interface().offset();
-            let max_cache = self.sliding_window;
-            create_sliding_window_prefill_mask(seq_len, sliding_offset, max_cache)
+            prefill_sliding_window_mask(
+                seq_len,
+                sliding_offset,
+                self.sliding_window,
+                batch,
+                attention,
+                dtype,
+                SlidingPrefillKeys::Rotating,
+            )
         });
 
-        self.forward(
+        self.forward_rows(
             input_ids,
             caches,
             mask_full.as_ref().map(|m| m.as_ref().unwrap()),
             mask_sliding.as_ref().map(|m| m.as_ref().unwrap()),
+            row,
         )
     }
 
@@ -1214,6 +1268,28 @@ impl mlxcel_core::generate::LanguageModel for MellumWrapper {
             || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
+    }
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.fresh_caches(),
+            |caches| {
+                self.model
+                    .forward_rows_with_caches(input_ids, caches, Some(last_pos))
+            },
+        ))
     }
     fn sync_sequence_storage(
         &self,

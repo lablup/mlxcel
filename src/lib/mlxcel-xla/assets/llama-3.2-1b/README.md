@@ -11,7 +11,9 @@ token id (`tensor<i32>`) rather than `[V]` logits (the Phase 2b sampling pattern
   token id and the seeded KV cache. Used by the single-sequence session
   ([`IreeLlama`](../../src/iree.rs)).
 - `decode.mlir` — single-token step. Inputs: 146 weights, `token`, `pos`,
-  `cache_len`, `kcache`, `vcache`. Returns the next token id and the advanced KV.
+  `cache_len`. The KV cache lives in the module globals `@kcache` / `@vcache`
+  (updated in place, #3048) and is seeded from the prefill result through
+  `decode_step.kv_import`. Returns the next token id.
 
 Both are token-exact (48/48) against the HF temp-0 reference in
 `spike/openxla/artifacts/results.json`.

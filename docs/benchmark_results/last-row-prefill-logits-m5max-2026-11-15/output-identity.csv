@@ -1,0 +1,11 @@
+model,mode,prompt_tokens,generated_tokens,distinct_outputs,identical
+exaone-4.0-1.2b-4bit,2048,28706,48,1,yes
+exaone-4.0-1.2b-4bit,single,28706,48,1,yes
+gemma-3n-e2b-it-4bit,2048,28706,5,1,yes
+gemma-3n-e2b-it-4bit,single,28706,5,1,yes
+gpt-oss-20b-mxfp4-q4,2048,19773,48,1,yes
+gpt-oss-20b-mxfp4-q4,single,19773,48,1,yes
+qwen2.5-vl-3b-instruct-4bit,2048,27679,48,1,yes
+qwen2.5-vl-3b-instruct-4bit,single,27679,48,1,yes
+kimi-vl-a3b-thinking-4bit,2048,19723,48,1,yes
+kimi-vl-a3b-thinking-4bit,single,19723,48,1,yes

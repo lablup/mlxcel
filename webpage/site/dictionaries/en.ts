@@ -12,7 +12,7 @@ export const en = {
     title_suffix: "Native on Apple Silicon,",
     title_accent: "Blazing Fast",
     description:
-      "Run 60+ LLM and VLM models natively on your Mac with Metal acceleration. No Python, no containers, just pure Rust speed.",
+      "Run 100+ LLM and VLM models natively on your Mac with Metal acceleration. No Python, no containers, just pure Rust speed.",
     description_secondary:
       "From Llama to DeepSeek, Qwen to Gemma, with an OpenAI-compatible API server built in.",
     supporting_note: "Zero Python dependencies",
@@ -36,7 +36,7 @@ export const en = {
       },
       {
         meta: "Models",
-        title: "60+ model architectures",
+        title: "100+ model architectures",
         description:
           "Transformer, MoE, SSM, Hybrid. Llama, Qwen, Gemma, DeepSeek, Mixtral, Mamba, RWKV, Jamba and many more. Text and vision models supported.",
       },
@@ -118,7 +118,7 @@ export const en = {
       {
         label: "Models",
         alt: "mlxcel supported model list",
-        title: "60+ architectures and growing",
+        title: "100+ architectures and growing",
         description:
           "Transformer, MoE, SSM, Hybrid architectures. From 0.5B to 200B+ parameters. Continuously expanding model support.",
       },
@@ -146,7 +146,7 @@ export const en = {
         step: "Step 3",
         title: "Integrate and\nscale up",
         description:
-          "Connect via the API server to your existing tools, IDEs, and workflows. Same interface for all 60+ model architectures.",
+          "Connect via the API server to your existing tools, IDEs, and workflows. Same interface for all 100+ model architectures.",
       },
     ],
     mesh_badges: [

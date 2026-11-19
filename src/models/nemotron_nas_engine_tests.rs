@@ -214,7 +214,7 @@ pub(crate) const PROMPT: [i32; 6] = [3, 17, 9, 25, 4, 30];
 fn nemotron_nas_direct_engine_run_completes() {
     let model = tiny_model();
     assert!(!model.supports_batching());
-    assert!(!model.supports_padded_prefill());
+    assert!(model.supports_padded_prefill());
     let tokens = DirectEngine::new(&model, 0)
         .run(&PROMPT, 8, &SamplingConfig::greedy())
         .expect("DirectEngine::run on NemotronNAS");
@@ -364,3 +364,5 @@ fn nemotron_nas_int8_greedy_run_matches_fp16_first_token() {
         "Int8 prefill logits must be finite"
     );
 }
+
+crate::models::last_row_logits_harness::last_row_case!(nemotron_nas_last_row_logits, tiny_model);

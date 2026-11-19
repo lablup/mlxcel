@@ -677,6 +677,18 @@ pub struct BatchScheduler {
     /// removed from the map on finish / error.
     prompt_cache_seq_ctx: std::collections::HashMap<SequenceId, PromptCacheRequestContext>,
 
+    /// Sequences whose completion snapshot was taken at the prompt boundary
+    /// when their prefill finished (issue #3040), so the finish stores no
+    /// decode-written tail for them. Cleared at donate and at release.
+    prompt_cache_prompt_end_stored: std::collections::HashSet<SequenceId>,
+
+    /// Lineage of the rows a sequence adopted from the prompt cache (issue
+    /// #3047), set by `try_adopt_cached_prefix` and moved into the sequence's
+    /// [`PromptCacheRequestContext::snapshot_lineage`] at admission. Cleared at
+    /// release, so a request that fails between the two leaves nothing.
+    prompt_cache_adopted_lineage:
+        std::collections::HashMap<SequenceId, crate::server::prompt_cache::SnapshotLineage>,
+
     /// Pending background prompt-cache warm-ups (issue #1144).
     ///
     /// Each entry is the next turn's expected history prefix for a conversation
@@ -1062,6 +1074,7 @@ mod paged_layout;
 mod planned_prefill;
 mod prefill;
 mod prompt_cache;
+mod prompt_end_snapshot;
 pub(crate) mod prompt_lookup;
 mod queued_adoption;
 mod request_memory;
@@ -1135,6 +1148,10 @@ mod scheduler_dflash_routing_tests;
 #[cfg(test)]
 #[path = "../scheduler_completion_snapshot_tests.rs"]
 mod scheduler_completion_snapshot_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_state_checkpoint_tests.rs"]
+mod scheduler_state_checkpoint_tests;
 
 #[cfg(test)]
 #[path = "../scheduler_model_owned_pad_trim_tests.rs"]

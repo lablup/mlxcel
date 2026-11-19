@@ -78,6 +78,18 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).forward_last_logits(input_ids, caches, mask, last_pos)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        (**self).last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
+    }
+
     fn forward_with_embeddings(
         &self,
         input_ids: &MlxArray,
@@ -183,6 +195,22 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         target_len: usize,
     ) -> Result<(), String> {
         (**self).restore_sequence_state_truncated(seq_id, snapshot, target_len)
+    }
+
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &ModelStateSnapshot,
+    ) -> Option<ModelStateSnapshot> {
+        (**self).state_checkpoint_from_snapshot(snapshot)
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &ModelStateSnapshot,
+        donor: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        (**self).restore_sequence_state_from_checkpoint(seq_id, checkpoint, donor)
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {

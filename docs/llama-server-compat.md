@@ -535,6 +535,10 @@ Refused: loopback, the unspecified address and the rest of `0.0.0.0/8`, multicas
 
 The existing byte and decode limits are unchanged and still apply: `--max-image-payload-size`, `--max-images`, the decoder's width, height and allocation caps, the audio per-clip and per-request ceilings, and the 10-second fetch timeout. For base64 `data:` images in JSON requests, the HTTP body extractor is sized from the configured image budget rather than Axum's 2 MiB default: `--max-image-payload-size * --max-images` is expanded by base64's 4/3 envelope and a small JSON/data-URL overhead. A request whose JSON body exceeds that derived ceiling is rejected before parsing with an OpenAI-shaped `413` error object. The derived extractor ceiling is clamped at 2 GiB so extreme image-limit settings cannot turn buffered JSON parsing into an unbounded allocation path; per-image decoding still enforces the exact configured image payload, count, dimension and allocation limits after the body has parsed.
 
+### Pictures are turned upright by their EXIF orientation
+
+A camera stores the sensor's rows and records how the device was held in the EXIF `Orientation` tag. Every picture a request or a command carries (JPEG, PNG `eXIf`, WebP) is decoded and then turned by that tag before a processor sees it, so a portrait photo from a phone reaches the model upright. mlx-vlm's and transformers' `load_image` do the same with `PIL.ImageOps.exif_transpose`, which is how the checkpoints were measured. A picture without the tag, or with one that cannot be read, is used as stored. The width, height and allocation limits above apply to the stored pixels; a quarter turn then swaps width and height, and that upright size is what the preprocessors and `--image-min-tokens` / `--image-max-tokens` see.
+
 ## Audio transcription
 
 `POST /v1/audio/transcriptions` and its `/audio/transcriptions` alias are the only audio routes b10621 mounts, and the only ones this section governs. `/v1/audio/speech` and `/v1/audio/translations` are mlxcel's own and are documented in [`audio-api.md`](audio-api.md).
@@ -636,7 +640,7 @@ Families that implement YaRN outside the shared path (DeepSeek V2 / V3.2 / V4, g
 
 ### Which architectures honor the override
 
-The override reaches the six families that resolve their rotation through `src/models/rope_utils.rs`: Llama 3.x (and through it Qwen2 / Qwen2.5, Helium, the `mllama` text decoder, and every VLM whose text backbone is one of those), Qwen3, Qwen3-MoE, Apertus, Gemma 3, and InternLM2 / InternLM3. Other families compute their frequencies inline and would ignore it.
+The override reaches the seven families that resolve their rotation through `src/models/rope_utils.rs`: Llama 3.x (and through it Qwen2 / Qwen2.5, Helium, the `mllama` text decoder, and every VLM whose text backbone is one of those), Qwen3, Qwen3-MoE, Apertus, Gemma 3, Llama 4 (text and VLM), and InternLM2 / InternLM3. Other families compute their frequencies inline and would ignore it.
 
 They are not listed anywhere in the code, because a hand-maintained list of honoring architectures goes stale the moment a family is ported. Each seam that consumes the override increments a counter instead, and the model worker refuses to serve when an override was requested and the counter is still zero after the checkpoint loads, naming the checkpoint and the flag. A family that wires itself into `rope_utils` starts being accepted with no list to update; one that does not is reported rather than silently ignored.
 

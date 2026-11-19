@@ -235,15 +235,17 @@ to 29 percent, and nothing downstream said so.
 
 ## MLA latent caches are FP16 only
 
-`glm4_moe_lite`, `deepseek_v3`, `deepseek_v32` (also spelled `deepseek_v3.2`),
-`glm_moe_dsa`, `kimi_linear`, `kimi_k3` and `longcat_flash_ngram` store an MLA
-`(kv_latent, k_pe)` pair in one `KVCache`: the "K" slot holds the
-`kv_lora_rank`-wide latent (512 in the shipping checkpoints) and the "V" slot
-holds the `qk_rope_head_dim`-wide RoPE key stream (64). `deepseek_v32`,
-`deepseek_v3.2` and `glm_moe_dsa` concatenate the `index_head_dim`-wide DSA
-indexer key onto the same "K" slot, so theirs is 640 wide at the default
-`index_head_dim` of 128. Neither slot is a per-head K/V row at any of those
-widths, so no quantized mode is calibrated for what they contain:
+`glm4_moe_lite`, `deepseek_v3`, `kimi_k2`, `joyai_llm_flash`, `kimi_vl`,
+`kimi_k25`, `youtu`, `youtu_llm`, `youtu_vl`, `deepseek_v32` (also spelled
+`deepseek_v3.2`), `glm_moe_dsa`, `kimi_linear`, `kimi_k3`, `longcat_flash` and
+`longcat_flash_ngram` store an MLA `(kv_latent, k_pe)` pair in one `KVCache`:
+the "K" slot holds the `kv_lora_rank`-wide latent (512 in the shipping
+checkpoints) and the "V" slot holds the `qk_rope_head_dim`-wide RoPE key
+stream (64). `deepseek_v32`, `deepseek_v3.2` and `glm_moe_dsa` concatenate the
+`index_head_dim`-wide DSA indexer key onto the same "K" slot, so theirs is 640
+wide at the default `index_head_dim` of 128. Neither slot is a per-head K/V row
+at any of those widths, so no quantized mode is calibrated for what they
+contain:
 
 - Symmetric `turbo4` builds its sign vectors and codebook from the "V" width and
   applies them to the "K" slot as well, reading 448 floats past the end of a
@@ -257,9 +259,19 @@ widths, so no quantized mode is calibrated for what they contain:
 
 Any non-`fp16` mode requested for one of these families resolves to `fp16` with
 one warning naming the family and the requested mode. `deepseek_v2` is not in
-this set: it asks `MlaLatentCache::supports` per cache and falls back to the
-decompressed per-head K/V layout when the mode is quantized, so a quantized mode
-there lands on ordinary per-head rows and keeps working.
+this set: it asks `MlaLatentCache::supports` per cache, and with absorbed decode
+off a quantized mode lands on ordinary per-head K/V rows and keeps working. With
+absorbed decode on (the default on Metal, CUDA and ROCm) the same request would
+decline the latent and store the decompressed cache, which is larger than the
+fp16 latent it replaces (5120 bytes per token per layer for int8 and about 7.2
+KB for turbo4-asym on V2-Lite, against 1152), slower to decode and lossy. The
+resolver therefore substitutes `fp16` with a warning, and `--kv-bits` /
+`--kv-quant-scheme` are disabled the same way. Set `MLXCEL_MLA_ABSORBED=0` to
+keep the decompressed quantized layout. The memory estimate (`mlxcel inspect`,
+the `--estimate-memory` preflights, `--recommend-quant` and the server's
+prompt-cache store budget) sizes the mode the run resolves to, which with
+absorption off is 10240 bytes per token per layer on V2-Lite for any non-`fp16`
+mode (#3153). A quantized latent cache is future work.
 
 Making a Turbo mode work on the latent layout is a new calibration and a new
 kernel (a 512-wide codebook for the latent with `k_pe` left at FP16), not a

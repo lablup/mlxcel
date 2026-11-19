@@ -77,7 +77,7 @@ pub use pipeline::SurgeryPipeline;
 /// stateless across `apply` calls — any per-load state belongs in
 /// the [`WeightMap`] itself.
 ///
-/// Used by: SurgeryPipeline, future concrete ops (A5–A9 — Scale, Add,
+/// Used by: SurgeryPipeline, concrete ops (A5–A9 — Scale, Add,
 /// Prune, Replace, Interpolate)
 pub trait SurgeryOp: Send + Sync {
     /// Apply this operation to the in-memory weight map.
