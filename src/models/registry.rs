@@ -612,6 +612,27 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         drafters: NO_DRAFTERS,
         kv_modes: KV_FP16,
     },
+    // Rendered end to end on Metal (Apple M4) only, with no numeric parity
+    // against the reference, so every backend is partial.
+    StandaloneArchitectureFamily {
+        id: "moss_image",
+        display_name: "MOSS-Image",
+        category: "image generation",
+        model_types: &["moss_image"],
+        aliases: &["moss-image", "moss-image-sft"],
+        runtimes: IMAGE_GENERATE,
+        modalities_in: TEXT,
+        output: OutputKind::Image,
+        backends: BackendSupport {
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Partial,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
 ];
 
 const TENSOR_PARALLEL_MODEL_TYPES: &[ModelType] = &[
