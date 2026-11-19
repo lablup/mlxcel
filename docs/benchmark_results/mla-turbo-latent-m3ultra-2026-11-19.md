@@ -21,7 +21,7 @@ Multi-token steps and the cold prefill dequantize the window, inverse-rotate it,
 
 ## Teacher-forced trace (`examples/logit_trace`, `--decided 2`)
 
-Reference is the fp16 latent. The corpus is the #3155 one (`docs/architecture.md`, `docs/benchmarks.md`, `docs/turbo-kv-cache.md` from `3c0d74ec` concatenated, 50338 tokens). Width-one decode with `MLXCEL_TRACE_BATCH_ROWS=1` and `MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1`. The fp16 reference perplexities (14.6613 and 12.9589) and a same-binary int8 rerun behind 1024 (12 / 512, gap 0.078, ppl 14.7041) match #3155 exactly, so the rows below are comparable with the recorded int4 affine rows.
+Reference is the fp16 latent. The corpus is the #3155 one (`docs/architecture.md`, `docs/benchmarks.md`, `docs/turbo-kv-cache.md` from `3c0d74ec` concatenated, 50338 tokens). Width-one decode with `MLXCEL_TRACE_BATCH_ROWS=1` and `MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1`. The fp16 reference perplexities (14.6613 and 12.9589) and a same-binary int8 rerun behind 1024 (12 / 512, gap 0.078, ppl 14.7041) match #3155 exactly, so the rows below are comparable with the recorded int4 affine rows. The int8 row behind 4096 was not rerun here; it is quoted from #3155, as are the int4 affine rows.
 
 | candidate | shape | decided disagree | top-1 disagree | flips at gap > 0.11 | flips at gap > 0.5 | largest gap at a disagreement | ppl reference / candidate | ppl delta |
 |---|---|---|---|---|---|---|---|---|
