@@ -62,7 +62,20 @@ pub const fn quantized_latent_bytes_per_token(
     bits: usize,
     group_size: usize,
 ) -> usize {
-    kv_lora_rank * bits / 8 + 2 * 2 * (kv_lora_rank / group_size) + 2 * qk_rope_head_dim
+    // Saturating: `execution::kv_arch` feeds this from an untrusted
+    // `config.json`, where a wrapped product would undercount the cache (the
+    // unsafe direction for every budget built on it). A zero group size has no
+    // meaningful rate and saturates for the same reason.
+    if group_size == 0 {
+        return usize::MAX;
+    }
+    let packed = match kv_lora_rank.checked_mul(bits) {
+        Some(bit_count) => bit_count / 8,
+        None => return usize::MAX,
+    };
+    packed
+        .saturating_add((kv_lora_rank / group_size).saturating_mul(4))
+        .saturating_add(qk_rope_head_dim.saturating_mul(2))
 }
 
 /// Whether a latent of this geometry can be stored at `mode`'s bit width.

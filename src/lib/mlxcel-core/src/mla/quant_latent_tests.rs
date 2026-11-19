@@ -449,3 +449,18 @@ fn composed_decode_reads_the_bit_width_from_the_window() {
     let err = max_rel_error(&got, &fp16_reference);
     assert!(err < INT4_TOL, "4-bit decode off the fp16 latent by {err}");
 }
+
+#[test]
+fn quantized_bytes_per_token_saturates_instead_of_wrapping() {
+    // `kv_arch` passes `config.json` values straight in; a wrapped product
+    // would undercount the cache.
+    assert_eq!(
+        quantized_latent_bytes_per_token(usize::MAX / 2, 64, 8, 64),
+        usize::MAX
+    );
+    assert_eq!(
+        quantized_latent_bytes_per_token(512, usize::MAX, 8, 64),
+        usize::MAX
+    );
+    assert_eq!(quantized_latent_bytes_per_token(512, 64, 8, 0), usize::MAX);
+}

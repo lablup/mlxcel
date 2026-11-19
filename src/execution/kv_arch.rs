@@ -1175,6 +1175,19 @@ mod tests {
         assert_eq!(fp16.kind, KvArchKind::MlaCompressed);
     }
 
+    #[test]
+    fn a_hostile_rank_saturates_the_quantized_latent_rate() {
+        // `kv_lora_rank` comes from an untrusted `config.json`. A whole-group
+        // rank large enough to overflow the byte product must saturate (an
+        // overestimate) rather than wrap to a small rate or panic.
+        let mut cfg = deepseek_v2_lite_cfg();
+        cfg["kv_lora_rank"] = json!(1u64 << 62);
+        let e = est_v2(&cfg, 2048, KVCacheMode::Int8, true);
+        assert_eq!(e.kind, KvArchKind::MlaCompressed, "{}", e.detail);
+        assert_eq!(e.marginal_bytes_per_token, u64::MAX);
+        assert_eq!(e.total_bytes, u64::MAX);
+    }
+
     /// DeepSeek-VL2 wraps a DeepSeek V2 decoder under `language_config`, which
     /// omits `model_type`. It is sized as that decoder, so it takes the same
     /// latent, quantized-latent and decompressed rates as `deepseek_v2`.
