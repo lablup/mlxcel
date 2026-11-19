@@ -219,7 +219,7 @@ fn fused_quantized_decode_enabled() -> bool {
 /// kernel's own check backs these up, and a refusal there falls back too.
 ///
 /// Used by: `mla::quant_latent::quantized_absorbed_attention` (DeepSeek V2
-/// under `--kv-cache-mode int8`).
+/// and the `DeepSeekV3Attention` families under `--kv-cache-mode int8`).
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn fused_absorbed_decode_quantized(

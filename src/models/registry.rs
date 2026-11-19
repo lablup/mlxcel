@@ -192,6 +192,9 @@ const TEXT_IMAGE_VIDEO_AUDIO: &[Modality] = &[
 ];
 
 const KV_FP16: &[KvMode] = &[KvMode::Fp16];
+/// The `DeepSeekV3Attention` families: an affine int8 latent with fp16 rope keys,
+/// no Turbo mode (`mla::QUANTIZED_LATENT_FAMILIES`, #3160).
+const KV_INT8: &[KvMode] = &[KvMode::Fp16, KvMode::Int8];
 const KV_TURBO: &[KvMode] = &[KvMode::Fp16, KvMode::Int8, KvMode::Turbo4];
 const NO_DRAFTERS: &[Drafter] = &[];
 const MTP: &[Drafter] = &[Drafter::Mtp];
@@ -928,6 +931,8 @@ impl ModelType {
             drafters,
             kv_modes: if supports_turbo_kv(self) {
                 KV_TURBO
+            } else if stores_quantized_latent(self) {
+                KV_INT8
             } else {
                 KV_FP16
             },
@@ -1324,6 +1329,19 @@ fn is_vlm_registry_type(model_type: ModelType) -> bool {
             | "Muse VLM"
             | "Step VLM"
             | "Other VLM"
+    )
+}
+
+/// Families whose runtime accepts `int8` through the quantized MLA latent
+/// (`mlxcel_core::mla::QUANTIZED_LATENT_FAMILIES`), without a Turbo mode.
+fn stores_quantized_latent(model_type: ModelType) -> bool {
+    matches!(
+        model_type,
+        ModelType::DeepSeekV3
+            | ModelType::KimiVL
+            | ModelType::KimiK25
+            | ModelType::YoutuLLM
+            | ModelType::YoutuVLM
     )
 }
 
@@ -1791,17 +1809,12 @@ mod tests {
     #[test]
     fn mla_latent_cache_families_report_fp16_only_kv_modes() {
         for model_type in [
-            ModelType::DeepSeekV3,
             ModelType::DeepSeekV32,
             ModelType::Glm4MoeLite,
             ModelType::GlmMoeDsa,
             ModelType::KimiLinear,
             ModelType::KimiK3,
             ModelType::KimiK3VLM,
-            ModelType::KimiVL,
-            ModelType::KimiK25,
-            ModelType::YoutuLLM,
-            ModelType::YoutuVLM,
             ModelType::LongcatFlashNgram,
         ] {
             assert_eq!(
@@ -1809,6 +1822,29 @@ mod tests {
                 KV_FP16,
                 "{model_type:?} should not advertise quantized KV cache modes"
             );
+        }
+    }
+
+    /// The `DeepSeekV3Attention` families accept `int8` (the affine latent) and
+    /// no Turbo mode, and every one of their config keys is in
+    /// `mla::QUANTIZED_LATENT_FAMILIES` so the advertised list matches runtime.
+    #[test]
+    fn quantized_latent_families_report_fp16_and_int8_kv_modes() {
+        for model_type in [
+            ModelType::DeepSeekV3,
+            ModelType::KimiVL,
+            ModelType::KimiK25,
+            ModelType::YoutuLLM,
+            ModelType::YoutuVLM,
+        ] {
+            let family = family(model_type);
+            assert_eq!(family.kv_modes, KV_INT8, "{model_type:?}");
+            for key in family.model_types {
+                assert!(
+                    mlxcel_core::mla::stores_quantized_latent_pair(key),
+                    "{model_type:?} key {key} is not a quantized latent family"
+                );
+            }
         }
     }
 

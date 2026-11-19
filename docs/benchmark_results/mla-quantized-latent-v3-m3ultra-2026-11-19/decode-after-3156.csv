@@ -1,0 +1,25 @@
+round,arm,model,prompt_tokens,flags,decode_ms,decode_tok_s,prefill_tok_s,measured_phase_peak_gb,mla_paths
+1,fp16-latent,Kimi-VL-A3B-Thinking-4bit,512,"",799.49,158.85,1372.56,9.70,decompressed=54 absorbed_fused=3834
+1,int8-latent,Kimi-VL-A3B-Thinking-4bit,512,"--kv-cache-mode int8",891.63,142.44,1368.59,9.71,decompressed=54 absorbed_fused=3834
+2,fp16-latent,Kimi-VL-A3B-Thinking-4bit,512,"",802.66,158.22,1372.49,9.70,decompressed=54 absorbed_fused=3834
+2,int8-latent,Kimi-VL-A3B-Thinking-4bit,512,"--kv-cache-mode int8",886.84,143.20,1368.81,9.71,decompressed=54 absorbed_fused=3834
+3,fp16-latent,Kimi-VL-A3B-Thinking-4bit,512,"",801.11,158.53,1375.02,9.70,decompressed=54 absorbed_fused=3834
+3,int8-latent,Kimi-VL-A3B-Thinking-4bit,512,"--kv-cache-mode int8",888.40,142.95,1369.09,9.71,decompressed=54 absorbed_fused=3834
+1,fp16-latent,Kimi-VL-A3B-Thinking-4bit,2048,"",895.31,141.85,1374.24,10.02,decompressed=54 absorbed_fused=3834
+1,int8-latent,Kimi-VL-A3B-Thinking-4bit,2048,"--kv-cache-mode int8",1036.67,122.51,1372.53,9.82,decompressed=54 absorbed_composed=3834
+2,fp16-latent,Kimi-VL-A3B-Thinking-4bit,2048,"",893.41,142.15,1372.75,10.02,decompressed=54 absorbed_fused=3834
+2,int8-latent,Kimi-VL-A3B-Thinking-4bit,2048,"--kv-cache-mode int8",1035.78,122.61,1372.92,9.82,decompressed=54 absorbed_composed=3834
+3,fp16-latent,Kimi-VL-A3B-Thinking-4bit,2048,"",898.98,141.27,1372.88,10.02,decompressed=54 absorbed_fused=3834
+3,int8-latent,Kimi-VL-A3B-Thinking-4bit,2048,"--kv-cache-mode int8",1031.64,123.10,1372.15,9.82,decompressed=54 absorbed_composed=3834
+1,fp16-latent,moonlight-16b-a3b-instruct-4bit,512,"",798.39,159.07,1373.21,9.70,decompressed=54 absorbed_fused=3834
+1,int8-latent,moonlight-16b-a3b-instruct-4bit,512,"--kv-cache-mode int8",891.91,142.39,1372.02,9.71,decompressed=54 absorbed_fused=3834
+2,fp16-latent,moonlight-16b-a3b-instruct-4bit,512,"",794.22,159.91,1375.47,9.70,decompressed=54 absorbed_fused=3834
+2,int8-latent,moonlight-16b-a3b-instruct-4bit,512,"--kv-cache-mode int8",890.28,142.65,1370.77,9.71,decompressed=54 absorbed_fused=3834
+3,fp16-latent,moonlight-16b-a3b-instruct-4bit,512,"",802.71,158.21,1375.18,9.70,decompressed=54 absorbed_fused=3834
+3,int8-latent,moonlight-16b-a3b-instruct-4bit,512,"--kv-cache-mode int8",891.57,142.45,1369.14,9.71,decompressed=54 absorbed_fused=3834
+1,fp16-latent,moonlight-16b-a3b-instruct-4bit,2048,"",894.35,142.00,1373.91,10.02,decompressed=54 absorbed_fused=3834
+1,int8-latent,moonlight-16b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",1032.76,122.97,1373.27,9.82,decompressed=54 absorbed_composed=3834
+2,fp16-latent,moonlight-16b-a3b-instruct-4bit,2048,"",898.60,141.33,1373.80,10.02,decompressed=54 absorbed_fused=3834
+2,int8-latent,moonlight-16b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",1035.35,122.66,1373.10,9.82,decompressed=54 absorbed_composed=3834
+3,fp16-latent,moonlight-16b-a3b-instruct-4bit,2048,"",895.63,141.80,1373.76,10.02,decompressed=54 absorbed_fused=3834
+3,int8-latent,moonlight-16b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",1030.23,123.27,1373.08,9.82,decompressed=54 absorbed_composed=3834

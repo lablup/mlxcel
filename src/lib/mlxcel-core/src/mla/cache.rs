@@ -122,9 +122,10 @@ pub const fn decompressed_bytes_per_token(
 /// [`MlaLatentCache`], which stores the latent quantized under `int8`
 /// (issue #3155), and it falls back to the decompressed per-head K/V layout
 /// when [`MlaLatentCache::supports`] declines (`src/models/deepseek_v2.rs`).
-/// The families listed here call `KVCache::update_and_fetch` directly, so
-/// they hold FP16 only until each is moved onto the latent view
-/// (#3160-#3163).
+/// The families in [`crate::mla::QUANTIZED_LATENT_FAMILIES`] write their
+/// pair through the view and hold FP16 or the affine `int8` latent (#3160);
+/// the rest call `KVCache::update_and_fetch` directly and hold FP16 only
+/// until each is moved onto it (#3161-#3163).
 ///
 /// Used by: [`caches_mla_latent_pair`].
 pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
@@ -223,9 +224,9 @@ pub fn stores_latent_through_view(model_type: &str) -> bool {
 /// Stated once here so [`MlaLatentCache::supports`] and the model-level mode
 /// resolver cannot drift apart. Returns the operator-facing reason on refusal.
 ///
-/// This is the rule for a cache read through [`MlaLatentCache`]. The
-/// latent-pair families in [`MLA_LATENT_CACHE_FAMILIES`] do not use the view
-/// yet and hold FP16 only; the resolver applies that narrower rule to them.
+/// This is the rule for a cache read through [`MlaLatentCache`]. A
+/// latent-pair family that does not use the view yet holds FP16 only;
+/// [`crate::mla::latent_pair_supports_mode`] applies that narrower rule.
 ///
 /// Used by: [`MlaLatentCache::supports`],
 /// `cache::turbo::allowlist::resolve_kv_cache_mode_for_model`.
