@@ -1,0 +1,223 @@
+diff --git a/src/lib/mlxcel-core/src/cache/latent_quant.rs b/src/lib/mlxcel-core/src/cache/latent_quant.rs
+index 7c44e105..0dfb3972 100644
+--- a/src/lib/mlxcel-core/src/cache/latent_quant.rs
++++ b/src/lib/mlxcel-core/src/cache/latent_quant.rs
+@@ -180,6 +180,17 @@ impl KVCache {
+         write_slot(&mut self.val_scales, &rows.biases, prev, live_len);
+     }
+ 
++    /// MEASUREMENT HOOK (#3157): the window without the mode check.
++    pub(crate) fn latent_rows_window_raw(&self) -> Option<QuantizedLatentRows> {
++        let live_len = self.buffer_idx();
++        Some(QuantizedLatentRows {
++            packed: seq_prefix(self.keys.as_ref()?, live_len),
++            scales: seq_prefix(self.key_scales.as_ref()?, live_len),
++            biases: seq_prefix(self.val_scales.as_ref()?, live_len),
++            kpe: seq_prefix(self.values.as_ref()?, live_len),
++        })
++    }
++
+     /// The live window of a quantized latent cache, or `None` when the cache
+     /// holds none.
+     pub(crate) fn latent_quantized_window(&self) -> Option<QuantizedLatentRows> {
+diff --git a/src/lib/mlxcel-core/src/mla/cache.rs b/src/lib/mlxcel-core/src/mla/cache.rs
+index b66846d8..83d9e330 100644
+--- a/src/lib/mlxcel-core/src/mla/cache.rs
++++ b/src/lib/mlxcel-core/src/mla/cache.rs
+@@ -314,6 +314,17 @@ impl<'a> MlaLatentCache<'a> {
+         ckv: UniquePtr<MlxArray>,
+         kpe: UniquePtr<MlxArray>,
+     ) -> LatentWindow {
++        if self.inner.mode == KVCacheMode::Fp16
++            && let Some(p) = crate::mla::turbo_latent_hook::proto()
++        {
++            return crate::mla::turbo_latent_hook::update_dense(
++                self.inner,
++                p,
++                self.geometry.kv_lora_rank,
++                ckv,
++                kpe,
++            );
++        }
+         let Some(bits) = self.inner.mode.latent_affine_bits() else {
+             let (ckv, kpe) = self.inner.update_and_fetch(ckv, kpe);
+             return LatentWindow::Dense { ckv, kpe };
+@@ -358,6 +369,22 @@ impl<'a> MlaLatentCache<'a> {
+     ) -> UniquePtr<MlxArray> {
+         let q_shape = crate::ffi::array_shape(q_absorbed);
+         let single_query = q_shape.len() == 4 && q_shape[2] == 1;
++        if single_query
++            && self.inner.mode == KVCacheMode::Fp16
++            && let Some(p) = crate::mla::turbo_latent_hook::proto()
++        {
++            return crate::mla::turbo_latent_hook::attend_single(
++                self.inner,
++                p,
++                self.geometry.kv_lora_rank,
++                q_absorbed,
++                q_pe,
++                ckv,
++                kpe,
++                scale,
++                mask,
++            );
++        }
+         let (ckv_all, kpe_all) = match self.update_and_fetch(ckv, kpe) {
+             LatentWindow::Dense { ckv, kpe } => (ckv, kpe),
+             LatentWindow::Quantized {
+diff --git a/src/lib/mlxcel-core/src/mla/turbo_latent_hook.rs b/src/lib/mlxcel-core/src/mla/turbo_latent_hook.rs
+new file mode 100644
+index 00000000..6941ecf1
+--- /dev/null
++++ b/src/lib/mlxcel-core/src/mla/turbo_latent_hook.rs
+@@ -0,0 +1,150 @@
++//! MEASUREMENT HOOK for issue #3157. Not part of the shipped tree: it routes an
++//! fp16 latent cache through the prototype codecs when
++//! `MLXCEL_MLA_LATENT_PROTOTYPE` is `turbo4`, `wht-int4` or `wht-int8`.
++
++use std::cell::RefCell;
++use std::collections::HashMap;
++use std::rc::Rc;
++use std::sync::OnceLock;
++
++use cxx::UniquePtr;
++
++use crate::cache::KVCache;
++use crate::cache::latent_quant::{LATENT_QUANT_GROUP_SIZE, QuantizedLatentRows};
++use crate::dtype;
++use crate::ffi::{self, MlxArray};
++use crate::mla::quant_latent::LatentWindow;
++use crate::mla::turbo_latent::{RotatedAffine, TurboLatentCodec, TurboLatentRows};
++
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub(crate) enum Proto {
++    Turbo4,
++    WhtAffine(i32),
++}
++
++pub(crate) fn proto() -> Option<Proto> {
++    static P: OnceLock<Option<Proto>> = OnceLock::new();
++    *P.get_or_init(
++        || match std::env::var("MLXCEL_MLA_LATENT_PROTOTYPE").ok().as_deref() {
++            Some("turbo4") => Some(Proto::Turbo4),
++            Some("wht-int4") => Some(Proto::WhtAffine(4)),
++            Some("wht-int8") => Some(Proto::WhtAffine(8)),
++            _ => None,
++        },
++    )
++}
++
++thread_local! {
++    static CODECS: RefCell<HashMap<(usize, u32), Rc<TurboLatentCodec>>> = RefCell::new(HashMap::new());
++}
++
++fn codec(rank: usize, seed: u32) -> Rc<TurboLatentCodec> {
++    CODECS.with(|c| {
++        c.borrow_mut()
++            .entry((rank, seed))
++            .or_insert_with(|| Rc::new(TurboLatentCodec::new(rank, seed)))
++            .clone()
++    })
++}
++
++fn store(
++    cache: &mut KVCache,
++    p: Proto,
++    rank: usize,
++    ckv: &MlxArray,
++    kpe: UniquePtr<MlxArray>,
++) -> (Rc<TurboLatentCodec>, QuantizedLatentRows) {
++    let c = codec(rank, cache.turbo_seed);
++    let rows = match p {
++        Proto::Turbo4 => {
++            let t = c.quantize(ckv);
++            let dup = ffi::astype(&t.rescale, dtype::FLOAT16);
++            QuantizedLatentRows {
++                packed: t.packed,
++                scales: t.rescale,
++                biases: dup,
++                kpe: ffi::astype(&kpe, dtype::FLOAT16),
++            }
++        }
++        Proto::WhtAffine(bits) => RotatedAffine { codec: &c, bits }.quantize(ckv, kpe),
++    };
++    cache.update_latent_quantized(rows);
++    let w = cache.latent_rows_window_raw().expect("stored above");
++    (c, w)
++}
++
++pub(crate) fn update_dense(
++    cache: &mut KVCache,
++    p: Proto,
++    rank: usize,
++    ckv: UniquePtr<MlxArray>,
++    kpe: UniquePtr<MlxArray>,
++) -> LatentWindow {
++    let (c, w) = store(cache, p, rank, &ckv, kpe);
++    let dense = match p {
++        Proto::Turbo4 => c.dequantize(
++            &TurboLatentRows {
++                packed: w.packed,
++                rescale: w.scales,
++            },
++            dtype::FLOAT16,
++        ),
++        Proto::WhtAffine(bits) => {
++            let kpe_c = ffi::astype(&w.kpe, dtype::FLOAT16);
++            let (rot, _) = LatentWindow::from_rows(
++                QuantizedLatentRows {
++                    packed: w.packed,
++                    scales: w.scales,
++                    biases: w.biases,
++                    kpe: kpe_c,
++                },
++                bits,
++            )
++            .into_dense();
++            c.inverse_rotate(&rot, dtype::FLOAT16)
++        }
++    };
++    LatentWindow::Dense {
++        ckv: dense,
++        kpe: w.kpe,
++    }
++}
++
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn attend_single(
++    cache: &mut KVCache,
++    p: Proto,
++    rank: usize,
++    q: &MlxArray,
++    q_pe: &MlxArray,
++    ckv: UniquePtr<MlxArray>,
++    kpe: UniquePtr<MlxArray>,
++    scale: f32,
++    mask: Option<&MlxArray>,
++) -> UniquePtr<MlxArray> {
++    let (c, w) = store(cache, p, rank, &ckv, kpe);
++    match p {
++        Proto::Turbo4 => {
++            let kpe = w.kpe;
++            c.absorbed_attention(
++                q,
++                q_pe,
++                &TurboLatentRows {
++                    packed: w.packed,
++                    rescale: w.scales,
++                },
++                &kpe,
++                scale,
++                mask,
++            )
++        }
++        Proto::WhtAffine(bits) => RotatedAffine { codec: &c, bits }.absorbed_attention(
++            q,
++            q_pe,
++            &w,
++            LATENT_QUANT_GROUP_SIZE,
++            scale,
++            mask,
++        ),
++    }
++}
