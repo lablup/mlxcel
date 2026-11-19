@@ -190,6 +190,9 @@ fn absorbed_deepseek_v2_is_advised_int8_for_its_quantized_latent() {
 #[test]
 fn latent_mla_families_are_advised_fp16_because_the_binary_refuses_the_rest() {
     for &family in mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES {
+        if mlxcel_core::mla::stores_quantized_latent_pair(family) {
+            continue;
+        }
         for kind in [KvArchKind::MlaCompressed, KvArchKind::MlaDecompressed] {
             for range in KvContextRange::all() {
                 let advice = recommend_kv_cache_mode(kind, family, range);
@@ -199,6 +202,34 @@ fn latent_mla_families_are_advised_fp16_because_the_binary_refuses_the_rest() {
                     "{family}/{kind:?}/{range:?} advised a mode the binary refuses"
                 );
                 assert_eq!(advice.also_consider, None, "{family}/{kind:?}/{range:?}");
+            }
+        }
+    }
+}
+
+/// The `DeepSeekV3Attention` families keep int8 as the affine latent (#3160),
+/// so they are advised it at medium and long context, and the advice is a mode
+/// the resolver keeps for them.
+#[test]
+fn quantized_latent_pair_families_are_advised_int8_at_medium_and_long() {
+    for &family in mlxcel_core::mla::QUANTIZED_LATENT_FAMILIES {
+        for kind in [KvArchKind::MlaCompressed, KvArchKind::MlaDecompressed] {
+            let short = recommend_kv_cache_mode(kind, family, KvContextRange::Short);
+            assert_eq!(short.suggested, KVCacheMode::Fp16, "{family}/{kind:?}");
+            for range in [KvContextRange::Medium, KvContextRange::Long] {
+                let advice = recommend_kv_cache_mode(kind, family, range);
+                assert_eq!(advice.suggested, KVCacheMode::Int8, "{family}/{range:?}");
+                assert_eq!(advice.also_consider, None, "{family}/{range:?}");
+                assert!(advice.rationale.contains("672"), "{}", advice.rationale);
+                for absorbed in [false, true] {
+                    let (resolved, _) =
+                        mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model_with(
+                            advice.suggested,
+                            family,
+                            absorbed,
+                        );
+                    assert_eq!(resolved, advice.suggested, "{family}/{range:?}");
+                }
             }
         }
     }

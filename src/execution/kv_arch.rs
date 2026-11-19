@@ -412,8 +412,9 @@ pub fn deepseek_v2_caches_latent(mode: KVCacheMode) -> bool {
 ///
 /// `v2_latent` says whether DeepSeek V2 caches the latent in this run
 /// ([`deepseek_v2_caches_latent`]) and `v2_latent_bits` the affine bit width
-/// it stores it at, if any ([`KVCacheMode::latent_affine_bits`]); no other
-/// family reads either.
+/// the mode stores a latent at, if any ([`KVCacheMode::latent_affine_bits`]).
+/// `v2_latent` is read by V2 only; the bit width is also read by the families
+/// in `mla::QUANTIZED_LATENT_FAMILIES`, whose int8 cache is the affine latent.
 fn classify(
     text: &Value,
     model_type: &str,
@@ -453,6 +454,11 @@ fn classify(
         let rank_quantizable = kv_lora_rank > 0 && kv_lora_rank.is_multiple_of(group);
         let v2_caches_latent =
             mt == "deepseek_v2" && v2_latent && (v2_latent_bits.is_none() || rank_quantizable);
+        // The `DeepSeekV3Attention` families store the same affine latent in
+        // every absorption state (issue #3160). A rank the codec cannot group
+        // falls back to per-token rows at the element width, sized below.
+        let pair_quantized =
+            mlxcel_core::mla::stores_quantized_latent_pair(&mt) && rank_quantizable;
         if mt.contains("v3")
             || mt.contains("v32")
             || mlxcel_core::mla::caches_mla_latent_pair(&mt)
@@ -461,14 +467,16 @@ fn classify(
             // Cached form: (kv_latent[kv_lora_rank] , k_pe[qk_rope_head_dim]),
             // which the quantized latent does not store at one element width.
             let elems = kv_lora_rank.saturating_add(rope);
-            let fixed_bytes_per_token = v2_latent_bits.filter(|_| v2_caches_latent).map(|bits| {
-                mlxcel_core::mla::quantized_latent_bytes_per_token(
-                    kv_lora_rank as usize,
-                    rope as usize,
-                    bits as usize,
-                    group as usize,
-                ) as u64
-            });
+            let fixed_bytes_per_token = v2_latent_bits
+                .filter(|_| v2_caches_latent || pair_quantized)
+                .map(|bits| {
+                    mlxcel_core::mla::quantized_latent_bytes_per_token(
+                        kv_lora_rank as usize,
+                        rope as usize,
+                        bits as usize,
+                        group as usize,
+                    ) as u64
+                });
             return Some((
                 vec![KvGroup {
                     layers: num_layers,
@@ -822,6 +830,10 @@ fn estimate_kv_arch_inner(
         detail,
     })
 }
+
+#[cfg(test)]
+#[path = "kv_arch_latent_pair_tests.rs"]
+mod latent_pair_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1213,10 +1225,11 @@ mod tests {
 
     #[test]
     fn latent_pair_families_do_not_take_the_quantized_latent_rate() {
-        // Only `deepseek_v2` stores the affine latent in this change; the
-        // latent-pair families resolve int8 to fp16 at startup.
+        // A latent-pair family outside `mla::QUANTIZED_LATENT_FAMILIES` still
+        // resolves int8 to fp16 at startup (the `deepseek_v3` families take
+        // the rate since #3160, `kv_arch_latent_pair_tests`).
         let mut cfg = deepseek_v2_lite_cfg();
-        cfg["model_type"] = json!("deepseek_v3");
+        cfg["model_type"] = json!("glm4_moe_lite");
         let e = estimate_kv_arch_inner(&cfg, 2048, KVCacheMode::Int8.into(), 1, true, true)
             .expect("estimate");
         assert_eq!(e.marginal_bytes_per_token, 4 * 576);

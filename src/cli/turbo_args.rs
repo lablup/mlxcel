@@ -504,18 +504,21 @@ pub fn resolve_and_announce_kv_cache_mode(
 }
 
 /// Whether a cache built in `mode` for the model at `model_path` stores an
-/// affine-quantized MLA latent: `int8` on a family whose decoder
-/// reads its latent through `mla::MlaLatentCache`, with absorbed decode on
-/// (issue #3155).
+/// affine-quantized MLA latent: `int8` on DeepSeek V2 (or a wrapper around
+/// it) with absorbed decode on (issue #3155), or `int8` on a latent-pair
+/// family in `mla::QUANTIZED_LATENT_FAMILIES`, which caches the latent in
+/// every absorption state (issue #3160).
 ///
 /// Used by: `server::cli_input` (the `--kv-group-size` check) and the
 /// `generate` KV cache banner.
 #[must_use]
 pub fn model_stores_quantized_latent(mode: KVCacheMode, model_path: &Path) -> bool {
     mode.latent_affine_bits().is_some()
-        && mlxcel_core::mla::absorbed_enabled()
-        && read_config_model_type(model_path)
-            .is_some_and(|model_type| mlxcel_core::mla::stores_latent_through_view(&model_type))
+        && read_config_model_type(model_path).is_some_and(|model_type| {
+            mlxcel_core::mla::stores_quantized_latent_pair(&model_type)
+                || (mlxcel_core::mla::absorbed_enabled()
+                    && mlxcel_core::mla::stores_latent_through_view(&model_type))
+        })
 }
 
 /// Read the `model_type` the KV cache mode rules key on from a model

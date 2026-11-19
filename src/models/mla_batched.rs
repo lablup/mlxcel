@@ -14,11 +14,77 @@
 
 //! Shared per-row cache step for latent MLA decode.
 
+use std::sync::Once;
+
 use mlxcel_core::layers::KVCache;
+use mlxcel_core::mla::{LatentWindow, MlaGeometry, MlaLatentCache};
 use mlxcel_core::{MlxArray, UniquePtr};
 
 pub(crate) type MlaRowSelector<'a> =
     dyn Fn(usize, &MlxArray, &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) + 'a;
+
+/// The [`MlaGeometry`] of a latent-pair attention layer from its `i32` fields.
+pub(crate) fn mla_geometry(
+    num_heads: i32,
+    kv_lora_rank: i32,
+    qk_nope_head_dim: i32,
+    qk_rope_head_dim: i32,
+    v_head_dim: i32,
+) -> MlaGeometry {
+    let dim = |value: i32| usize::try_from(value).unwrap_or(0);
+    MlaGeometry {
+        num_heads: dim(num_heads),
+        kv_lora_rank: dim(kv_lora_rank),
+        qk_nope_head_dim: dim(qk_nope_head_dim),
+        qk_rope_head_dim: dim(qk_rope_head_dim),
+        v_head_dim: dim(v_head_dim),
+    }
+}
+
+/// Append one step's `(kv_latent, k_pe)` rows to a latent-pair cache and read
+/// the live window back.
+///
+/// An fp16 cache is updated exactly as before, through
+/// `KVCache::update_and_fetch`, so its numerics and its paged backing (if a
+/// family ever has one) are untouched. An `int8` cache goes through
+/// [`MlaLatentCache::update_and_fetch`], which stores the latent as the
+/// affine group-64 triple and returns [`LatentWindow::Quantized`] (#3155,
+/// #3160). If the view declines the cache (a `kv_lora_rank` that is not a
+/// whole number of groups, or a paged backing), the step falls back to the
+/// cache's own per-token update and warns once: the cache keeps one layout for
+/// its whole life because the answer depends only on its mode and geometry.
+pub(crate) fn store_latent_step(
+    cache: &mut KVCache,
+    geometry: MlaGeometry,
+    kv_latent: UniquePtr<MlxArray>,
+    k_pe: UniquePtr<MlxArray>,
+    family: &str,
+) -> LatentWindow {
+    if cache.mode.latent_affine_bits().is_some() {
+        match MlaLatentCache::supports(cache, geometry) {
+            Ok(()) => {
+                return MlaLatentCache::wrap(cache, geometry)
+                    .expect("supports() was checked immediately before this wrap")
+                    .update_and_fetch(kv_latent, k_pe);
+            }
+            Err(reason) => warn_latent_view_declined(family, cache.mode, &reason),
+        }
+    }
+    let (ckv, kpe) = cache.update_and_fetch(kv_latent, k_pe);
+    LatentWindow::Dense { ckv, kpe }
+}
+
+fn warn_latent_view_declined(family: &str, mode: mlxcel_core::cache::KVCacheMode, reason: &str) {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            family,
+            %mode,
+            reason,
+            "MLA latent view declined this cache; storing per-token {mode} rows instead of the affine latent"
+        );
+    });
+}
 
 /// Validate the common serving decode contract before a family indexes a
 /// sequence-owned cache row. Keeping this here gives every MLA failure the
@@ -62,10 +128,20 @@ pub(crate) fn validate_mla_decode_batch(
 /// The projections on either side of this helper remain batched. Only the
 /// sequence-owned cache update and ragged score/softmax step run per row.
 ///
-/// Used by: `DeepSeekV3Attention` (DeepSeek V3, Youtu), DeepSeek V3.2 MLA,
-/// GLM-4.7-Flash MLA.
+/// Each row's cache is written through [`store_latent_step`]. A row whose
+/// window comes back [`LatentWindow::Quantized`] (an `int8` cache of a family
+/// in `mla::QUANTIZED_LATENT_FAMILIES`) takes the #3155 composed quantized
+/// decode, `mla::quantized_absorbed_attention`; the fused kernel reads an fp16
+/// latent and is not tried there. `select` (DeepSeek V3.2's sparse key
+/// selection) reads a dense window, so a quantized row with a selector is a
+/// wiring error and panics naming `family`.
+///
+/// Used by: `DeepSeekV3Attention` (DeepSeek V3, Kimi, Youtu), DeepSeek V3.2
+/// MLA, GLM-4.7-Flash MLA, Kimi Linear and Kimi K3.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mla_latent_decode_rows(
+    family: &str,
+    geometry: MlaGeometry,
     q_latent: &MlxArray,
     q_pe: &MlxArray,
     kv_latent: &MlxArray,
@@ -102,7 +178,29 @@ pub(crate) fn mla_latent_decode_rows(
         let q_pe_row = row4(q_pe, row);
         let kv_row = row4(kv_latent, row);
         let k_pe_row = row4(k_pe, row);
-        let (kv_all, k_pe_all) = cache.update_and_fetch(kv_row, k_pe_row);
+        let (kv_all, k_pe_all) = match store_latent_step(cache, geometry, kv_row, k_pe_row, family)
+        {
+            LatentWindow::Dense { ckv, kpe } => (ckv, kpe),
+            LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } => {
+                assert!(
+                    select.is_none(),
+                    "{family}: mla_latent_decode_rows row {row} holds a quantized latent, \
+                     which a key selector cannot read; this family must keep an fp16 latent"
+                );
+                outputs.push(mlxcel_core::mla::quantized_absorbed_attention(
+                    &q_row, &q_pe_row, &ckv_q, &scales, &biases, &kpe, bits, group_size, scale,
+                    None,
+                ));
+                continue;
+            }
+        };
         let (kv_selected, k_pe_selected) = match select {
             Some(select) => select(row, &kv_all, &k_pe_all),
             None => (kv_all, k_pe_all),

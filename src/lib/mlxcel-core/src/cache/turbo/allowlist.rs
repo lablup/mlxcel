@@ -170,13 +170,15 @@ pub fn symmetric_turbo_warning_message(model_type: &str) -> String {
 ///
 /// 1. **MLA latent-pair families.** A family in
 ///    [`crate::mla::MLA_LATENT_CACHE_FAMILIES`] stores a `(kv_latent, k_pe)`
-///    pair in one cache through `KVCache::update_and_fetch`, which holds FP16
-///    only: every Turbo mode is mis-calibrated for the pair (see
-///    [`crate::mla::latent_layout_supports_mode`]), per-token `int8` applied
-///    there quantizes the latent with one scale per 512-wide row, and the
-///    affine `int8` latent is stored through `mla::MlaLatentCache`, which
-///    these families do not use yet (#3160-#3163). Any non-FP16 request
-///    resolves to [`KVCacheMode::Fp16`].
+///    pair in one cache on every step, and every Turbo mode is mis-calibrated
+///    for the pair (see [`crate::mla::latent_layout_supports_mode`]). A family
+///    in [`crate::mla::QUANTIZED_LATENT_FAMILIES`] writes the pair through
+///    `mla::MlaLatentCache`, so `int8` is kept and stores the affine latent
+///    (issue #3160). The others still call `KVCache::update_and_fetch`
+///    directly, where per-token `int8` would quantize the latent with one
+///    scale per 512-wide row, so they hold FP16 only (#3161-#3163). A refused
+///    request resolves to [`KVCacheMode::Fp16`]
+///    ([`crate::mla::latent_pair_supports_mode`] states the rule).
 /// 2. **DeepSeek V2 under absorbed decode.** See
 ///    [`resolve_kv_cache_mode_for_model_with`]: `int8` is kept and stores the
 ///    latent quantized, and a Turbo request resolves to fp16.
@@ -228,18 +230,24 @@ pub fn resolve_kv_cache_mode_for_model_with(
     model_type: &str,
     absorbed: bool,
 ) -> (KVCacheMode, Option<String>) {
-    if crate::mla::caches_mla_latent_pair(model_type) && requested != KVCacheMode::Fp16 {
-        let reason = match crate::mla::latent_layout_supports_mode(requested) {
-            Err(reason) => reason,
-            Ok(()) => "mla: this family stores its latent pair as fp16; the quantized latent \
-                       is available on deepseek_v2 only"
-                .to_string(),
+    if crate::mla::caches_mla_latent_pair(model_type)
+        && let Err(reason) = crate::mla::latent_pair_supports_mode(model_type, requested)
+    {
+        // A family that stores its latent through the quantizing view refuses
+        // only the Turbo modes, so the warning names the mode it does take
+        // rather than implying every quantized mode is refused.
+        let hint = if crate::mla::stores_quantized_latent_pair(model_type) {
+            "\n\tThis family stores its MLA latent as fp16 or int8; use --kv-cache-mode int8 \
+             for a quantized latent."
+        } else {
+            ""
         };
         return (
             KVCacheMode::Fp16,
             Some(format!(
                 "warning: --kv-cache-mode {requested} is not supported on this model family \
-                 (model_type=\"{model_type}\"): {reason}.\n\tUsing fp16 for this model's KV caches."
+                 (model_type=\"{model_type}\"): {reason}.{hint}\n\tUsing fp16 for this model's \
+                 KV caches."
             )),
         );
     }
@@ -329,12 +337,14 @@ mod tests {
         assert!(msg.starts_with("warning:"));
     }
 
-    /// Every non-FP16 mode is refused on a family that always caches an MLA
-    /// latent pair. This is the rule that keeps `glm4-flash` off the K
-    /// quantizer that reads past its 64-entry sign vectors.
+    /// Every Turbo mode is refused on a family that always caches an MLA
+    /// latent pair, and so is `int8` on one that does not store its latent
+    /// through the quantizing view. This is the rule that keeps `glm4-flash`
+    /// off the K quantizer that reads past its 64-entry sign vectors.
     #[test]
-    fn latent_family_resolves_every_quantized_mode_to_fp16() {
+    fn latent_family_resolves_every_refused_mode_to_fp16() {
         for &family in crate::mla::MLA_LATENT_CACHE_FAMILIES {
+            let int8_refused = !crate::mla::stores_quantized_latent_pair(family);
             for requested in [
                 KVCacheMode::Int8,
                 KVCacheMode::Turbo4Asym,
@@ -342,6 +352,9 @@ mod tests {
                 KVCacheMode::Turbo4,
                 KVCacheMode::Turbo4Delegated,
             ] {
+                if requested == KVCacheMode::Int8 && !int8_refused {
+                    continue;
+                }
                 let (effective, warning) = resolve_kv_cache_mode_for_model(requested, family);
                 assert_eq!(
                     effective,
@@ -355,15 +368,31 @@ mod tests {
         }
     }
 
-    /// The Kimi-VL and Youtu `model_type`s load `DeepSeekV3Attention`, which
-    /// always caches the `(kv_latent, k_pe)` pair, so every quantized mode must
-    /// resolve to fp16 with a warning, whatever the absorbed-MLA state (#3159).
+    /// The eight `DeepSeekV3Attention` `model_type`s write their latent
+    /// through `MlaLatentCache`, so `int8` is kept with no warning and every
+    /// Turbo mode resolves to fp16 with a warning that names int8, whatever
+    /// the absorbed-MLA state (#3160).
     #[test]
-    fn kimi_vl_and_youtu_families_resolve_every_quantized_mode_to_fp16() {
-        for family in ["kimi_vl", "kimi_k25", "youtu", "youtu_llm", "youtu_vl"] {
+    fn deepseek_v3_attention_families_keep_int8_and_refuse_turbo() {
+        let families = [
+            "deepseek_v3",
+            "kimi_k2",
+            "joyai_llm_flash",
+            "kimi_vl",
+            "kimi_k25",
+            "youtu",
+            "youtu_llm",
+            "youtu_vl",
+        ];
+        for family in families {
             for absorbed in [false, true] {
+                for requested in [KVCacheMode::Fp16, KVCacheMode::Int8] {
+                    let (effective, warning) =
+                        resolve_kv_cache_mode_for_model_with(requested, family, absorbed);
+                    assert_eq!(effective, requested, "{family} absorbed={absorbed}");
+                    assert!(warning.is_none(), "{family}: {warning:?}");
+                }
                 for requested in [
-                    KVCacheMode::Int8,
                     KVCacheMode::Turbo4Asym,
                     KVCacheMode::Turbo3Asym,
                     KVCacheMode::Turbo4,
@@ -371,18 +400,11 @@ mod tests {
                 ] {
                     let (effective, warning) =
                         resolve_kv_cache_mode_for_model_with(requested, family, absorbed);
-                    assert_eq!(
-                        effective,
-                        KVCacheMode::Fp16,
-                        "{family} absorbed={absorbed} requested {requested} and got {effective}"
-                    );
+                    assert_eq!(effective, KVCacheMode::Fp16, "{family} {requested}");
                     let warning = warning.expect("a substituted mode must explain itself");
                     assert!(warning.contains(family), "{warning}");
+                    assert!(warning.contains("--kv-cache-mode int8"), "{warning}");
                 }
-                let (effective, warning) =
-                    resolve_kv_cache_mode_for_model_with(KVCacheMode::Fp16, family, absorbed);
-                assert_eq!(effective, KVCacheMode::Fp16);
-                assert!(warning.is_none(), "{family}");
             }
         }
     }
@@ -454,18 +476,19 @@ mod tests {
         }
     }
 
-    /// The latent-pair families hold fp16 only until they move onto the latent
-    /// view, so `int8` is still substituted there, with a reason that says
-    /// where the quantized latent is available.
+    /// A latent-pair family that still writes `KVCache::update_and_fetch`
+    /// directly keeps fp16 under `int8`, with a reason that says where the
+    /// quantized latent is available and no int8 hint.
     #[test]
-    fn latent_pair_families_still_resolve_int8_to_fp16() {
-        for family in ["deepseek_v3", "glm4_moe_lite", "kimi_k3", "youtu_vl"] {
+    fn other_latent_pair_families_still_resolve_int8_to_fp16() {
+        for family in ["glm4_moe_lite", "deepseek_v32", "kimi_k3", "longcat_flash"] {
             for absorbed in [false, true] {
                 let (effective, warning) =
                     resolve_kv_cache_mode_for_model_with(KVCacheMode::Int8, family, absorbed);
                 assert_eq!(effective, KVCacheMode::Fp16, "{family}");
                 let warning = warning.expect("must warn");
-                assert!(warning.contains("deepseek_v2 only"), "{warning}");
+                assert!(warning.contains("deepseek_v2 and on"), "{warning}");
+                assert!(!warning.contains("use --kv-cache-mode int8"), "{warning}");
             }
         }
     }

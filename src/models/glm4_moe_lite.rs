@@ -445,8 +445,23 @@ impl MlaAttention {
             &offsets,
         );
         let q_latent = self.embed_q.forward(&q_nope);
+        let geometry = crate::models::mla_batched::mla_geometry(
+            self.num_heads,
+            self.kv_lora_rank,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        );
         let output = crate::models::mla_batched::mla_latent_decode_rows(
-            &q_latent, &q_pe, &latent, &k_pe, caches, self.scale, None,
+            "glm4_moe_lite",
+            geometry,
+            &q_latent,
+            &q_pe,
+            &latent,
+            &k_pe,
+            caches,
+            self.scale,
+            None,
         );
         let output = self.unembed_out.forward(&output);
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);

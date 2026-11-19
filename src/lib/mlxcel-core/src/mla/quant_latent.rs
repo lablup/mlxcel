@@ -299,10 +299,12 @@ fn rope_scores_by_row(
 /// neither is tried here; the caller reaches this function by matching on
 /// [`LatentWindow::Quantized`] before either could read the window.
 ///
-/// Used by: [`crate::mla::cache::MlaLatentCache::attend_preprojected`].
+/// Used by: [`crate::mla::cache::MlaLatentCache::attend_preprojected`] and
+/// the latent-pair families that read the window themselves
+/// (`mlxcel::models::deepseek_v3`, `mlxcel::models::mla_batched`, issue #3160).
 #[must_use]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn quantized_absorbed_attention(
+pub fn quantized_absorbed_attention(
     q_absorbed: &MlxArray,
     q_pe: &MlxArray,
     ckv_q: &MlxArray,

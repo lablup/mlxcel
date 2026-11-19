@@ -245,6 +245,17 @@ impl DeepSeekV3Attention {
         self
     }
 
+    /// The layer's MLA shape, for the latent cache view.
+    fn geometry(&self) -> mlxcel_core::mla::MlaGeometry {
+        crate::models::mla_batched::mla_geometry(
+            self.num_heads,
+            self.kv_lora_rank,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        )
+    }
+
     pub fn forward(
         &self,
         x: &MlxArray,
@@ -313,8 +324,17 @@ impl DeepSeekV3Attention {
         // Expand kv_latent for caching: [B, L, kv_lora_rank] → [B, 1, L, kv_lora_rank]
         let kv_latent = mlxcel_core::expand_dims(&kv_latent, 1);
 
-        // Cache stores (kv_latent, k_pe) for memory efficiency
-        let (kv_latent, k_pe) = cache.update_and_fetch(kv_latent, k_pe);
+        // Cache stores (kv_latent, k_pe) for memory efficiency. An `int8`
+        // cache stores the latent as the affine group-64 triple and hands back
+        // a quantized window; the fresh chunk is quantized before this step
+        // reads it, so a prefill reads what later decode steps read (#3160).
+        let window = crate::models::mla_batched::store_latent_step(
+            cache,
+            self.geometry(),
+            kv_latent,
+            k_pe,
+            "DeepSeekV3Attention",
+        );
 
         // Cost-model gate (issue #2408): one query is always absorbed, and a
         // multi-token step behind a long enough cache can be cheaper absorbed
@@ -336,6 +356,37 @@ impl DeepSeekV3Attention {
                 mlxcel_core::mla::MlaDecodePath::Decompressed
             });
         }
+
+        // A quantized window's one absorbed query runs the #3155 composed
+        // decode on the packed rows (it records `AbsorbedComposed`); the fused
+        // kernel reads an fp16 latent and is not tried. Every other step over a
+        // quantized window dequantizes it once and runs the fp16 code below.
+        let (kv_latent, k_pe) = match window {
+            mlxcel_core::mla::LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } if absorbed && l == 1 => {
+                let q_projected = self.embed_q.forward(&q_nope);
+                let output = mlxcel_core::mla::quantized_absorbed_attention(
+                    &q_projected,
+                    &q_pe,
+                    &ckv_q,
+                    &scales,
+                    &biases,
+                    &kpe,
+                    bits,
+                    group_size,
+                    self.scale,
+                    mask,
+                );
+                return self.project_attention_output(&self.unembed_out.forward(&output), b, l);
+            }
+            window => window.into_dense(),
+        };
 
         // MLA attention: absorbed or materializing, chosen by the cost model
         // above rather than by the query count alone.
@@ -460,11 +511,13 @@ impl DeepSeekV3Attention {
             }
         };
 
-        // Transpose back and reshape
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
-        let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
+        self.project_attention_output(&output, b, l)
+    }
 
-        // Output projection
+    /// `[B, H, L, v_head_dim]` attention output to `[B, L, hidden]`.
+    fn project_attention_output(&self, output: &MlxArray, b: i32, l: i32) -> UniquePtr<MlxArray> {
+        let output = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
         self.o_proj.forward(&output)
     }
 
@@ -525,7 +578,15 @@ impl DeepSeekV3Attention {
         );
         let q_latent = self.embed_q.forward(&q_nope);
         let output = crate::models::mla_batched::mla_latent_decode_rows(
-            &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale, None,
+            "DeepSeekV3Attention",
+            self.geometry(),
+            &q_latent,
+            &q_pe,
+            &kv_latent,
+            &k_pe,
+            caches,
+            self.scale,
+            None,
         );
         let output = self.unembed_out.forward(&output);
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
@@ -1587,6 +1648,10 @@ impl LanguageModel for DeepSeekV3Model {
 }
 
 #[cfg(test)]
+#[path = "deepseek_v3_latent_tests.rs"]
+mod latent_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
@@ -1640,7 +1705,7 @@ pub(crate) mod tests {
     // and aborted (the reported `(1,91,12288)` vs `(1,91,6,1)` crash).
 
     /// Deterministic, varied, finite fill so quantization scales stay non-degenerate.
-    fn ramp(n: usize) -> Vec<f32> {
+    pub(super) fn ramp(n: usize) -> Vec<f32> {
         (0..n)
             .map(|i| (((i * 37 + 11) % 97) as f32 - 48.0) * 0.01)
             .collect()
@@ -1920,7 +1985,7 @@ pub(crate) mod tests {
     /// Minimal config for a 2-layer dense backbone with a direct q projection
     /// (`q_lora_rank: None`), the exact shape of the Kimi-VL / Moonlight text
     /// config.
-    fn test_config_dense_direct_q() -> DeepSeekV3Config {
+    pub(super) fn test_config_dense_direct_q() -> DeepSeekV3Config {
         DeepSeekV3Config {
             model_type: "deepseek_v3".to_string(),
             vocab_size: 11,
@@ -1964,7 +2029,11 @@ pub(crate) mod tests {
     }
 
     /// Insert the full unquantized weight set for one direct-q decoder layer.
-    fn insert_dense_layer_weights(weights: &mut WeightMap, cfg: &DeepSeekV3Config, l: usize) {
+    pub(super) fn insert_dense_layer_weights(
+        weights: &mut WeightMap,
+        cfg: &DeepSeekV3Config,
+        l: usize,
+    ) {
         let p = format!("model.layers.{l}");
         let hidden = cfg.hidden_size as i32;
         let heads = cfg.num_attention_heads as i32;
@@ -2023,7 +2092,7 @@ pub(crate) mod tests {
         );
     }
 
-    fn tiny_dense_model_weights(cfg: &DeepSeekV3Config) -> WeightMap {
+    pub(super) fn tiny_dense_model_weights(cfg: &DeepSeekV3Config) -> WeightMap {
         let mut weights = WeightMap::new();
         let hidden = cfg.hidden_size as i32;
         let vocab = cfg.vocab_size as i32;

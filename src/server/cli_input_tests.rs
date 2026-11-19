@@ -3143,8 +3143,9 @@ fn kv_quant_model_dir(model_type: &str) -> tempfile::TempDir {
 
 /// `--kv-bits 8` is held on DeepSeek V2 in both absorption states (the affine
 /// MLA latent under absorbed decode, per-head int8 without it, issue #3155),
-/// and the serve preflight sizes that mode. A latent-pair family still has it
-/// taken off, and `--kv-quant-scheme turboquant` is still taken off V2 while
+/// and the serve preflight sizes that mode. It is also held on `deepseek_v3`,
+/// whose int8 cache stores the affine latent (issue #3160). A latent-pair
+/// family outside that list still has it taken off, and `--kv-quant-scheme turboquant` is still taken off V2 while
 /// it absorbs. `--kv-bits 4` uniform stays a startup error: 4-bit failed the
 /// quality gate, so no mode backs it.
 #[test]
@@ -3169,6 +3170,14 @@ fn kv_bits_8_is_held_on_deepseek_v2() {
     let mut batch = uniform8();
     assert_eq!(
         super::disable_batch_kv_quant_for_family(&mut batch, v3.path()),
+        None
+    );
+    assert_eq!(batch.base_mode(), KVCacheMode::Int8);
+
+    let glm = kv_quant_model_dir("glm4_moe_lite");
+    let mut batch = uniform8();
+    assert_eq!(
+        super::disable_batch_kv_quant_for_family(&mut batch, glm.path()),
         Some(KVCacheMode::Int8)
     );
     assert!(!batch.is_enabled());

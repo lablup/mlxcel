@@ -98,6 +98,7 @@ pub mod absorb;
 pub mod cache;
 pub mod decode;
 pub mod kv_b_split;
+pub mod latent_pair;
 pub mod prefill;
 pub mod quant_latent;
 pub mod split_kv;
@@ -120,8 +121,13 @@ pub use decode::{
     FUSED_DECODE_MAX_KEYS, absorb_queries, absorbed_decode, fused_absorbed_decode, unabsorb_output,
 };
 pub use kv_b_split::{KvBProjGeometry, decompose_kv_b_proj};
+pub use latent_pair::{
+    QUANTIZED_LATENT_FAMILIES, latent_pair_supports_mode, stores_quantized_latent_pair,
+};
 pub use prefill::{FoldedMask, rope_folded_attention};
-pub use quant_latent::{LatentWindow, quantized_latent_bytes_per_token};
+pub use quant_latent::{
+    LatentWindow, quantized_absorbed_attention, quantized_latent_bytes_per_token,
+};
 pub use split_kv::{MlaSplitPlan, absorbed_decode_split_kv};
 pub use stats::{MlaDecodePath, MlaDispatchCounts};
 
