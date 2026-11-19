@@ -482,7 +482,11 @@ impl MLAAttention {
         if l == 1
             && let Some(indices) = &topk_indices
         {
-            latent::trace_topk(self.layer, mlxcel_core::array_shape(&kv_latent)[2], indices);
+            latent::trace_topk(
+                self.layer,
+                || mlxcel_core::array_shape(&kv_latent)[2],
+                indices,
+            );
         }
 
         mlxcel_core::mla::stats::record(if absorbed {
@@ -714,7 +718,11 @@ impl MLAAttention {
             let index_keys = slice_axis(&cache_keys, -1, self.kv_lora_rank, -1);
             match indexer.top_indices(&index_queries[row], &index_keys, &index_weights[row], None) {
                 Some(indices) => {
-                    latent::trace_topk(self.layer, mlxcel_core::array_shape(&latent)[2], &indices);
+                    latent::trace_topk(
+                        self.layer,
+                        || mlxcel_core::array_shape(&latent)[2],
+                        &indices,
+                    );
                     let (ckv, kpe) = gather_topk_kv(
                         &latent,
                         &cached_k_pe,
@@ -1596,10 +1604,25 @@ fn load_stacked_switch_linear(
         return Ok(Some(SwitchLinear::Regular { weight }));
     }
     validate_expert_quantization_params(&stacked, group_size, bits)?;
+    // The scales and biases must be per-expert planes too: a mismatched
+    // leading dimension would otherwise surface as an MLX error inside the
+    // first `gather_qmm` instead of a load error naming the tensor.
+    let plane = |suffix: &str| -> Result<UniquePtr<MlxArray>, String> {
+        let key = format!("{stacked}.{suffix}");
+        let array = get_weight_copy(weights, &key)?;
+        let leading = mlxcel_core::array_shape(&array).first().copied();
+        if leading != planes {
+            return Err(format!(
+                "{key}: stacked expert plane has leading dimension {leading:?}, expected \
+                 n_routed_experts {num_experts}"
+            ));
+        }
+        Ok(array)
+    };
     Ok(Some(SwitchLinear::Quantized {
         weight,
-        scales: get_weight_copy(weights, &format!("{stacked}.scales"))?,
-        biases: get_weight_copy(weights, &format!("{stacked}.biases"))?,
+        scales: plane("scales")?,
+        biases: plane("biases")?,
         group_size,
         bits,
     }))

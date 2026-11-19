@@ -732,6 +732,22 @@ fn deepseek_v32_switch_linear_loads_the_pre_stacked_switch_mlp_plane() {
             Err(e) => e,
         };
         assert!(err.contains("switch_mlp.gate_proj.weight"), "{err}");
+        if quantized {
+            // A scales plane with fewer experts than the weight plane is
+            // refused at load, naming the tensor.
+            let key = format!("model.layers.0.mlp.switch_mlp.{QUANT_WEIGHT_NAME}.scales");
+            let short = mlxcel_core::utils::slice_axis(&stacked[&key], 0, 0, 1);
+            let mut bad = WeightMap::new();
+            for (name, array) in stacked.iter() {
+                bad.insert(name.clone(), mlxcel_core::copy(array));
+            }
+            bad.insert(key.clone(), short);
+            let err = match load(&bad, QUANT_EXPERTS) {
+                Ok(_) => panic!("a scales plane with the wrong expert count must be refused"),
+                Err(e) => e,
+            };
+            assert!(err.contains(&key), "{err}");
+        }
     }
 }
 

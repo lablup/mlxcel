@@ -107,7 +107,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         rows = compare(load(args.reference), load(args.candidate))
-    except (OSError, TraceError) as err:
+    except (OSError, UnicodeDecodeError, TraceError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
 

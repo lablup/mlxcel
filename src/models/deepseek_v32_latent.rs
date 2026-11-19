@@ -75,12 +75,15 @@ fn topk_trace() -> Option<&'static Mutex<BufWriter<File>>> {
 
 /// Record one decode step's selection for `layer` when the trace is on.
 ///
-/// `indices` is `[B, 1, 1, K]`; row zero is written. Evaluates the indices,
-/// which a traced run pays for and an untraced run never reaches.
-pub(super) fn trace_topk(layer: i32, kv_len: i32, indices: &MlxArray) {
+/// `indices` is `[B, 1, 1, K]`; row zero is written. `kv_len` is called only
+/// when the trace is on, so an untraced decode step pays for no shape query.
+/// Evaluates the indices, which a traced run pays for and an untraced run
+/// never reaches.
+pub(super) fn trace_topk(layer: i32, kv_len: impl FnOnce() -> i32, indices: &MlxArray) {
     let Some(sink) = topk_trace() else {
         return;
     };
+    let kv_len = kv_len();
     let shape = mlxcel_core::array_shape(indices);
     let k = shape.last().copied().unwrap_or(0);
     let row = mlxcel_core::slice(indices, &[0, 0, 0, 0], &[1, 1, 1, k]);
@@ -139,7 +142,7 @@ impl MLAAttention {
         let latent = window.narrow_keys(0, rank);
         match indices {
             Some(indices) => {
-                trace_topk(self.layer, latent.seq_len(), &indices);
+                trace_topk(self.layer, || latent.seq_len(), &indices);
                 (latent.gather_rows(&indices), true)
             }
             None => (latent, false),
