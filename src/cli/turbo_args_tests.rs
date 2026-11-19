@@ -465,3 +465,45 @@ fn int4_is_rejected_on_both_flag_surfaces() {
     assert!(resolve_kv_cache_mode(None, None, Some("int4")).is_err());
     assert!(resolve_kv_cache_mode(Some("int4"), Some("int4"), None).is_err());
 }
+
+/// A DSA config whose `[kv_latent | indexer key]` slot is not a whole number
+/// of affine groups keeps fp16 from startup; the shipping 512 + 128 geometry
+/// and the config defaults pass, and the rule reads nothing for fp16 or for a
+/// family with no indexer key (#3163).
+#[test]
+fn a_dsa_key_slot_the_codec_cannot_group_is_refused_at_startup() {
+    use serde_json::json;
+    let cfg = |rank: u64, index: u64| json!({ "kv_lora_rank": rank, "index_head_dim": index });
+    let int8 = KVCacheMode::Int8;
+    for family in ["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"] {
+        assert!(super::dsa_key_slot_refusal(&cfg(512, 128), family, int8).is_none());
+        assert!(super::dsa_key_slot_refusal(&json!({}), family, int8).is_none());
+        let reason = super::dsa_key_slot_refusal(&cfg(512, 100), family, int8)
+            .expect("a 612-wide slot is not a whole number of groups");
+        assert!(reason.contains("612"), "{reason}");
+        assert!(super::dsa_key_slot_refusal(&cfg(500, 140), family, int8).is_some());
+        assert!(super::dsa_key_slot_refusal(&cfg(512, 100), family, KVCacheMode::Fp16).is_none());
+    }
+    assert!(super::dsa_key_slot_refusal(&cfg(512, 100), "deepseek_v3", int8).is_none());
+}
+
+/// End to end on a model directory: `int8` on a DSA model resolves to fp16
+/// with a warning and stores no quantized latent, since the families missed
+/// the top-k overlap gate of #3163 and are not quantized-latent families.
+#[test]
+fn int8_on_a_dsa_model_still_resolves_to_fp16() {
+    for family in ["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"] {
+        let dir = model_dir_with_type(family);
+        let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
+        assert_eq!(mode, KVCacheMode::Fp16, "{family}");
+        let warning = warning.expect("the substitution must be explained");
+        assert!(
+            warning.contains(family) && warning.contains("Using fp16"),
+            "{warning}"
+        );
+        assert!(!super::model_stores_quantized_latent(
+            KVCacheMode::Int8,
+            dir.path()
+        ));
+    }
+}

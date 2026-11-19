@@ -26,7 +26,8 @@
 //!   windowed.
 //! - **MLA / compressed KV** (DeepSeek): V3/V3.2 cache a low-rank latent
 //!   (`kv_lora_rank + qk_rope_head_dim`) shared across heads — far smaller than
-//!   the per-head formula (*overcount*). So do the other families that always
+//!   the per-head formula (*overcount*). V3.2 and GLM-5 also cache the
+//!   `index_head_dim`-wide DSA indexer key in the latent's slot. So do the other families that always
 //!   cache the latent pair (`mla::caches_mla_latent_pair`). V2 follows the
 //!   runtime: it caches the latent where absorbed decode is selected
 //!   (`mla::absorbed_enabled`, the default on Metal since #3131 and on CUDA
@@ -475,21 +476,39 @@ fn classify(
         // The `DeepSeekV3Attention` families store the same affine latent in
         // every absorption state (issue #3160). A rank the codec cannot group
         // falls back to per-token rows at the element width, sized below.
-        let pair_quantized =
-            mlxcel_core::mla::stores_quantized_latent_pair(&mt) && rank_quantizable;
+        //
+        // The DSA families cache the indexer key in the same slot as the
+        // latent, `[kv_latent | indexer key]` (`src/models/deepseek_v32.rs`),
+        // so the slot is `kv_lora_rank + index_head_dim` wide in every mode
+        // (issue #3163). A checkpoint with no indexer weights stores the
+        // latent alone, which `config.json` does not say, so this is the
+        // upper bound for it; `MLXCEL_DSA_DENSE` drops the indexer and its key.
+        let index_key = if mlxcel_core::mla::caches_dsa_indexer_key(&mt)
+            && !crate::models::deepseek_v32::dsa_dense_fallback_forced()
+        {
+            get_u64(text, &["index_head_dim"])
+                .unwrap_or(crate::models::deepseek_v32::default_index_head_dim() as u64)
+        } else {
+            0
+        };
+        let key_width = kv_lora_rank.saturating_add(index_key);
+        let pair_quantized = mlxcel_core::mla::stores_quantized_latent_pair(&mt)
+            && rank_quantizable
+            && key_width.is_multiple_of(group);
         if mt.contains("v3")
             || mt.contains("v32")
             || mlxcel_core::mla::caches_mla_latent_pair(&mt)
             || v2_caches_latent
         {
-            // Cached form: (kv_latent[kv_lora_rank] , k_pe[qk_rope_head_dim]),
-            // which the quantized latent does not store at one element width.
-            let elems = kv_lora_rank.saturating_add(rope);
+            // Cached form: (kv_latent[kv_lora_rank] (+ the DSA indexer key),
+            // k_pe[qk_rope_head_dim]), which the quantized latent does not
+            // store at one element width.
+            let elems = key_width.saturating_add(rope);
             let fixed_bytes_per_token = v2_latent_bits
                 .filter(|_| v2_caches_latent || pair_quantized)
                 .map(|bits| {
                     mlxcel_core::mla::quantized_latent_bytes_per_token(
-                        kv_lora_rank as usize,
+                        key_width as usize,
                         rope as usize,
                         bits as usize,
                         group as usize,
@@ -855,6 +874,10 @@ fn estimate_kv_arch_inner(
 #[cfg(test)]
 #[path = "kv_arch_latent_pair_tests.rs"]
 mod latent_pair_tests;
+
+#[cfg(test)]
+#[path = "kv_arch_dsa_tests.rs"]
+mod dsa_tests;
 
 #[cfg(test)]
 mod tests {
