@@ -36,15 +36,16 @@ use crate::mla::latent_layout_supports_mode;
 /// The eight types that run `DeepSeekV3Attention`: `DeepSeekV3Model`
 /// (`deepseek_v3`, and the `kimi_k2` / `joyai_llm_flash` checkpoints detection
 /// routes to it), the Kimi-VL and Kimi K2.5 wrappers whose text decoder is
-/// that model, and the Youtu decoders whose layers hold that attention (#3160).
-/// Every entry is also in [`crate::mla::MLA_LATENT_CACHE_FAMILIES`].
+/// that model, and the Youtu decoders whose layers hold that attention (#3160);
+/// both LongCat types, which load `LongcatFlashNgramModel` (#3161; measured on
+/// LongCat-Flash-Lite). Every entry is also in
+/// [`crate::mla::MLA_LATENT_CACHE_FAMILIES`].
 ///
-/// `glm4_moe_lite` and both LongCat types write through the view too (#3161)
-/// but are not listed, so they keep fp16: GLM-4.7-Flash's teacher-forced
-/// trace showed decided-position disagreements against the fp16 latent, and
-/// no LongCat checkpoint has been traced yet
+/// `glm4_moe_lite` writes through the view too (#3161) but is not listed, so
+/// it keeps fp16: GLM-4.7-Flash's teacher-forced trace showed a
+/// decided-position disagreement against the fp16 latent
 /// (`docs/benchmark_results/mla-quantized-latent-glm-longcat-m3ultra-2026-11-19.md`).
-/// Listing one switches its int8 latent on.
+/// Listing it switches its int8 latent on.
 ///
 /// Used by: [`latent_pair_supports_mode`], [`stores_quantized_latent_pair`].
 pub static QUANTIZED_LATENT_FAMILIES: &[&str] = &[
@@ -56,6 +57,8 @@ pub static QUANTIZED_LATENT_FAMILIES: &[&str] = &[
     "youtu",
     "youtu_llm",
     "youtu_vl",
+    "longcat_flash",
+    "longcat_flash_ngram",
 ];
 
 /// Whether `model_type` is a latent-pair family that stores its latent through
@@ -122,8 +125,8 @@ mod tests {
         assert!(!stores_quantized_latent_pair("deepseek_v2"));
         assert!(!stores_quantized_latent_pair("deepseek_v32"));
         assert!(!stores_quantized_latent_pair("glm4_moe_lite"));
-        assert!(!stores_quantized_latent_pair("longcat_flash"));
-        assert!(!stores_quantized_latent_pair("longcat_flash_ngram"));
+        assert!(stores_quantized_latent_pair("longcat_flash"));
+        assert!(stores_quantized_latent_pair("LongCat_Flash_Ngram"));
         assert!(!stores_quantized_latent_pair("deepseek_v3_vl"));
     }
 

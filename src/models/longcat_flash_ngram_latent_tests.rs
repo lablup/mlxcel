@@ -80,34 +80,30 @@ fn teacher_forced(model: &LongcatFlashNgramModel, prefill: usize) -> Vec<Vec<f32
         .collect()
 }
 
-/// The production model follows the allowlist: LongCat is not a quantized
-/// latent family, so an injected `int8` table is reported and built as fp16,
-/// and an `int8` engine run is the fp16 run.
+/// The production model follows the allowlist: both LongCat types are
+/// quantized-latent families (#3161), so a model built from its config opts
+/// in at load, keeps an injected `int8` table, and an `int8` engine run stores
+/// the affine latent.
 #[test]
-fn production_longcat_resolves_int8_to_fp16() {
+fn production_longcat_keeps_the_int8_latent() {
     let greedy = SamplingConfig::greedy();
     for family in FAMILIES {
-        assert!(!mlxcel_core::mla::stores_quantized_latent_pair(family));
+        assert!(mlxcel_core::mla::stores_quantized_latent_pair(family));
         let model = tiny_model_with_rank(family, QUANTIZABLE_RANK);
-        assert!(!model.quantized_latent.get(), "{family}");
+        assert!(model.quantized_latent.get(), "{family}");
         let n = model.num_layers();
         model.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; n]);
         assert_eq!(
             model.kv_cache_layer_modes(),
-            Some(vec![KVCacheMode::Fp16; n])
+            Some(vec![KVCacheMode::Int8; n])
         );
 
-        let fp16_model = tiny_model_with_rank(family, QUANTIZABLE_RANK);
-        let fp16 = DirectEngine::new(&fp16_model, 0)
-            .run(&TOKENS[..6], 6, &greedy)
-            .expect("fp16 run");
         let int8_model = tiny_model_with_rank(family, QUANTIZABLE_RANK);
-        let int8 = DirectEngine::new(&int8_model, 0)
+        DirectEngine::new(&int8_model, 0)
             .with_kv_cache_mode(KVCacheMode::Int8)
             .run(&TOKENS[..6], 6, &greedy)
             .expect("int8 run");
-        assert!(!holds_quantized_latent(&int8_model), "{family}");
-        assert_eq!(int8, fp16, "{family}");
+        assert!(holds_quantized_latent(&int8_model), "{family}");
     }
 }
 

@@ -83,13 +83,13 @@ fn deepseek_v3_int8_latent_with_an_fp16_last_layer() {
 }
 
 /// A LongCat decoder layer holds two MLA attentions, each with its own latent
-/// cache (#3161), so its rate is twice that of a one-cache latent-pair family
-/// with the same geometry, at either mode. Before #3161 the estimate counted
-/// one cache per layer and undersized LongCat by half.
+/// cache (#3161), so its rate is twice that of a one-cache quantized-latent
+/// family with the same geometry, at either mode. Before #3161 the estimate
+/// counted one cache per layer and undersized LongCat by half.
 #[test]
 fn longcat_counts_two_latent_caches_per_layer() {
     for mode in [KVCacheMode::Fp16, KVCacheMode::Int8] {
-        let one_cache = estimate_kv_arch_from_config(&v3_text("kimi_k3"), 2048, mode, 1)
+        let one_cache = estimate_kv_arch_from_config(&v3_text("deepseek_v3"), 2048, mode, 1)
             .expect("estimate")
             .marginal_bytes_per_token;
         for family in ["longcat_flash", "longcat_flash_ngram"] {
@@ -103,6 +103,9 @@ fn longcat_counts_two_latent_caches_per_layer() {
     cfg["num_layers"] = cfg["num_hidden_layers"].take();
     let fp16 = estimate_kv_arch_from_config(&cfg, 2048, KVCacheMode::Fp16, 1).expect("estimate");
     assert_eq!(fp16.marginal_bytes_per_token, 2 * 4 * 1152);
+    // Both caches hold the affine latent under int8 (672 bytes per row).
+    let int8 = estimate_kv_arch_from_config(&cfg, 2048, KVCacheMode::Int8, 1).expect("estimate");
+    assert_eq!(int8.marginal_bytes_per_token, 2 * 4 * 672);
 }
 
 /// A family that still writes the cache directly gets no affine rate, and a

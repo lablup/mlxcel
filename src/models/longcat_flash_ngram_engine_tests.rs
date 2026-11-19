@@ -416,3 +416,24 @@ crate::models::last_row_logits_harness::last_row_case!(longcat_flash_last_row_lo
 crate::models::last_row_logits_harness::last_row_case!(longcat_flash_ngram_last_row_logits, || {
     tiny_model("longcat_flash_ngram")
 });
+
+/// A forward of 64 or more positions takes `SwitchGLU`'s sorted path. The MoE
+/// used to hand it `[B, L, hidden]`, which threw in that path's reshape on
+/// the first 64-token prefill of a real checkpoint (#3161); every position of
+/// such a forward must match the single-token path.
+#[test]
+fn a_64_token_prefill_takes_the_sorted_expert_path_and_matches_decode() {
+    let tokens: Vec<i32> = (0..64).map(|i| (i * 7 + 3) % VOCAB).collect();
+    for model_type in ["longcat_flash", "longcat_flash_ngram"] {
+        let model = tiny_model(model_type);
+        let _ = model.make_caches();
+        let full = model.forward(&ids(&tokens), &mut [], None);
+        let _ = model.make_caches();
+        let mut worst = 0.0f32;
+        for (pos, token) in tokens.iter().enumerate() {
+            let out = model.forward(&ids(&[*token]), &mut [], None);
+            worst = worst.max(max_abs_diff(&row(&out, 0), &row(&full, pos as i32)));
+        }
+        assert!(worst <= 1e-3, "{model_type}: max abs diff {worst}");
+    }
+}

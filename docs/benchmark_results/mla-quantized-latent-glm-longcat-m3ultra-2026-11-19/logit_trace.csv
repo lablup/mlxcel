@@ -12,3 +12,8 @@ pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,int8 (scalar refer
 pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,int8 composed (MLXCEL_MLA_FUSED_DECODE=0),int8 fused,512,33,194,1,8.750,20,19.5795,19.7229,0.732,decompressed=376 absorbed_fused=24064
 pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,int8 composed (MLXCEL_MLA_FUSED_DECODE=0),512,47,193,3,4.000,27,21.4881,19.5795,-8.882,decompressed=376 absorbed_composed=24064
 pre-fix 4598cba1,glm-4.7-flash-4bit,glm4_moe_lite,1024-token prefill width (no batch rows),fp16,int8,512,29,247,0,0.500,4,15.3259,15.1106,-1.405,prefill only
+ddd01a49 + loader and MoE fixes,longcat-flash-lite-4bit,longcat_flash_ngram,behind 1024,fp16,int8,512,15,239,0,0.375,9,14.1036,14.0010,-0.727,decompressed=224 absorbed_fused=14336
+ddd01a49 + loader and MoE fixes,longcat-flash-lite-4bit,longcat_flash_ngram,behind 4096,fp16,int8,256,9,121,0,0.250,5,9.9146,9.7928,-1.228,decompressed=112 absorbed_composed=7168
+ddd01a49 + loader and MoE fixes,longcat-flash-lite-4bit,longcat_flash_ngram,behind 1024,int8 composed,int8,512,11,238,0,0.875,8,13.9708,14.0010,0.217,decompressed=224 absorbed_fused=14336
+ddd01a49 + loader and MoE fixes,longcat-flash-lite-4bit,longcat_flash_ngram,behind 1024,fp16,int8 composed,512,18,239,0,0.625,11,14.1036,13.9708,-0.942,decompressed=224 absorbed_composed=14336
+ddd01a49 + loader and MoE fixes,longcat-flash-lite-4bit,longcat_flash_ngram,behind 1024,fp16,fp16 fused off,512,0,239,0,,0,14.1036,14.1036,0.000,decompressed=224 absorbed_composed=14336

@@ -28,9 +28,7 @@ use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
-use mlxcel_core::layers::{
-    Embedding, KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear,
-};
+use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -677,8 +675,22 @@ impl LongcatFlashMoE {
         let zero_f = mlxcel_core::zeros_like(&topk_weights);
         let regular_weights = mlxcel_core::where_cond(&mask, &zero_f, &topk_weights);
 
-        // Run SwitchGLU for regular experts
-        let regular_outputs = self.switch_mlp.forward(x, &clamped_indices);
+        // Run SwitchGLU for regular experts. It takes `[tokens, hidden]` and
+        // `[tokens, k]`: handed `[B, L, ..]` it read `B` as the token count and
+        // `L` as `k`, which broadcast by accident below 64 positions and threw
+        // in the sorted path's reshape at 64 or more (#3161).
+        let x_shape = mlxcel_core::array_shape(x);
+        let hidden = x_shape[x_shape.len() - 1];
+        let k = *mlxcel_core::array_shape(&clamped_indices)
+            .last()
+            .expect("router indices have a top-k axis");
+        let flat = self.switch_mlp.forward(
+            &mlxcel_core::reshape(x, &[-1, hidden]),
+            &mlxcel_core::reshape(&clamped_indices, &[-1, k]),
+        );
+        let mut out_shape = x_shape[..x_shape.len() - 1].to_vec();
+        out_shape.extend([k, hidden]);
+        let regular_outputs = mlxcel_core::reshape(&flat, &out_shape);
 
         // Weight and sum expert outputs
         let weights_exp = mlxcel_core::expand_dims(&regular_weights, -1);
@@ -978,15 +990,26 @@ impl NgramEmbedding {
         let num_embedders = k * (n - 1);
         let _emb_dim = args.hidden_size / num_embedders;
 
-        let word_emb_w = get_weight_copy(weights, &format!("{prefix}.word_embeddings.weight"))?;
-        let word_embeddings = UnifiedEmbedding::Regular(Embedding::new(word_emb_w));
+        // `from_weights` detects a quantized table by its `.scales` key: the
+        // MLX 4-bit checkpoints quantize the word and n-gram tables, whose
+        // packed U32 rows a plain `Embedding` would hand back as 1/8-wide
+        // integers (#3161).
+        let word_embeddings = UnifiedEmbedding::from_weights(
+            weights,
+            &format!("{prefix}.word_embeddings"),
+            gs,
+            bits,
+        )?;
 
         let mut embedders = Vec::with_capacity(num_embedders);
         for i in 0..num_embedders {
             let emb_vocab_size = m + i * 2 + 1;
-            let emb_key = format!("{prefix}.embedders.{i}.weight");
-            let emb_w = get_weight_copy(weights, &emb_key)?;
-            let embedding = UnifiedEmbedding::Regular(Embedding::new(emb_w));
+            let embedding = UnifiedEmbedding::from_weights(
+                weights,
+                &format!("{prefix}.embedders.{i}"),
+                gs,
+                bits,
+            )?;
             let post_proj = UnifiedLinear::from_weights(
                 weights,
                 &format!("{prefix}.post_projs.{i}"),
@@ -1059,11 +1082,10 @@ pub struct LongcatFlashNgramModel {
     /// injects modes per sequence (`DirectEngine`) does not repeat it.
     kv_mode_warned: Cell<bool>,
     /// Whether an injected `int8` layer keeps the affine int8 latent. Read
-    /// from `mla::stores_quantized_latent_pair` at load, so it is on only
-    /// while LongCat is in `mla::QUANTIZED_LATENT_FAMILIES`. It is not yet:
-    /// no LongCat checkpoint has passed the #3161 quality gate, so `int8`
-    /// resolves to FP16 like any other refused mode. Tests turn it on to
-    /// exercise the ported path.
+    /// from `mla::stores_quantized_latent_pair` at load, so it follows
+    /// `mla::QUANTIZED_LATENT_FAMILIES`, which lists both LongCat types since
+    /// LongCat-Flash-Lite passed the #3161 quality gate. Off, `int8` resolves
+    /// to FP16 like any other refused mode.
     pub(crate) quantized_latent: Cell<bool>,
 }
 
@@ -1106,8 +1128,8 @@ impl LongcatFlashNgramModel {
             let ngram = NgramEmbedding::from_weights(weights, args, "model.ngram_embeddings")?;
             (Some(ngram), None)
         } else {
-            let emb_w = get_weight_copy(weights, "model.embed_tokens.weight")?;
-            (None, Some(UnifiedEmbedding::Regular(Embedding::new(emb_w))))
+            let embed = UnifiedEmbedding::from_weights(weights, "model.embed_tokens", gs, bits)?;
+            (None, Some(embed))
         };
 
         // Layers
@@ -1440,13 +1462,12 @@ pub fn sanitize_weights(
     weights.retain(|k, _| !k.starts_with("model.mtp"));
 
     // For ngram model: rename embed_tokens → ngram_embeddings.word_embeddings
-    if args.is_ngram_model()
-        && let Some(w) = weights.remove("model.embed_tokens.weight")
-    {
-        weights.insert(
-            "model.ngram_embeddings.word_embeddings.weight".to_string(),
-            w,
-        );
+    if args.is_ngram_model() {
+        for part in ["weight", "scales", "biases"] {
+            if let Some(w) = weights.remove(&format!("model.embed_tokens.{part}")) {
+                weights.insert(format!("model.ngram_embeddings.word_embeddings.{part}"), w);
+            }
+        }
     }
 
     Ok(weights)
