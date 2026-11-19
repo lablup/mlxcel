@@ -22,7 +22,8 @@
 //! harness's `make_caches()` does not hold. A family that reads the caches the
 //! harness hands it (DeepSeek V2, whose `int8` mode stores the MLA
 //! latent quantized, issue #3155) gets the same table through
-//! [`KvArm::make_caches`], the way the engine sets it on its pool caches.
+//! [`KvArm::make_caches`], the way the engine sets it on its pool caches;
+//! every model gets it there, since a model-owned family ignores those caches.
 //!
 //! `MLXCEL_TRACE_PREFILL_CHUNK=N` runs the context pass as consecutive
 //! forwards of at most `N` tokens, the way the generator prefills a long
@@ -46,8 +47,7 @@ pub struct KvArm {
     pub decode_step: bool,
     /// Largest context forward, in tokens; `None` is one forward.
     context_chunk: Option<usize>,
-    /// Per-layer modes for the harness's own caches, set by [`Self::install`]
-    /// when the model does not own its KV caches.
+    /// Per-layer modes for the harness's own caches, set by [`Self::install`].
     external_modes: Option<Vec<KVCacheMode>>,
 }
 
@@ -91,10 +91,14 @@ impl KvArm {
         let requested = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
         let modes = mlxcel_core::cache::turbo::resolve_layer_modes(mode, n_layers, requested);
         model.set_kv_cache_layer_modes(modes.clone());
+        // The harness's own caches take the same table, as `DirectEngine`
+        // sets it on its pool caches whatever the model holds: a model that
+        // reads the caches it is handed needs it, and a model-owned family
+        // ignores them. GLM-4.7-Flash does both (its table feeds the MTP slot
+        // while decode reads the handed caches), so gating this on the model
+        // reporting no table traced it on FP16 caches (#3161).
+        self.external_modes = Some(modes.clone());
         let Some(applied) = model.kv_cache_layer_modes() else {
-            // The model reads the caches it is handed, so the harness builds
-            // them in the resolved modes instead.
-            self.external_modes = Some(modes);
             return Ok(());
         };
         ensure!(

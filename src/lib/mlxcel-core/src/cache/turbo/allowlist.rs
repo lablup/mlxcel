@@ -476,12 +476,35 @@ mod tests {
         }
     }
 
+    /// Both LongCat types write their latent through `MlaLatentCache`
+    /// (#3161): `int8` is kept with no warning and every Turbo mode resolves
+    /// to fp16 with a warning that names int8.
+    #[test]
+    fn longcat_keeps_int8_and_refuses_turbo() {
+        for family in ["longcat_flash", "longcat_flash_ngram"] {
+            for absorbed in [false, true] {
+                let (effective, warning) =
+                    resolve_kv_cache_mode_for_model_with(KVCacheMode::Int8, family, absorbed);
+                assert_eq!(effective, KVCacheMode::Int8, "{family} absorbed={absorbed}");
+                assert!(warning.is_none(), "{family}: {warning:?}");
+                let (effective, warning) =
+                    resolve_kv_cache_mode_for_model_with(KVCacheMode::Turbo4Asym, family, absorbed);
+                assert_eq!(effective, KVCacheMode::Fp16, "{family}");
+                let warning = warning.expect("a substituted mode must explain itself");
+                assert!(warning.contains("--kv-cache-mode int8"), "{warning}");
+            }
+        }
+    }
+
     /// A latent-pair family that still writes `KVCache::update_and_fetch`
     /// directly keeps fp16 under `int8`, with a reason that says where the
     /// quantized latent is available and no int8 hint.
     #[test]
     fn other_latent_pair_families_still_resolve_int8_to_fp16() {
-        for family in ["glm4_moe_lite", "deepseek_v32", "longcat_flash"] {
+        let others = crate::mla::MLA_LATENT_CACHE_FAMILIES
+            .iter()
+            .filter(|family| !crate::mla::stores_quantized_latent_pair(family));
+        for &family in others {
             for absorbed in [false, true] {
                 let (effective, warning) =
                     resolve_kv_cache_mode_for_model_with(KVCacheMode::Int8, family, absorbed);

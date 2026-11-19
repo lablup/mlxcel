@@ -411,9 +411,9 @@ fn turbo_on_deepseek_vl2_follows_its_deepseek_v2_decoder() {
 }
 
 /// A non-MLA family keeps per-token int8, a `DeepSeekV3Attention` family keeps
-/// int8 as the affine latent in every absorption state (#3160), and a
-/// latent-pair family that does not read its cache through the latent view yet
-/// keeps fp16.
+/// int8 as the affine latent in every absorption state (#3160), as does
+/// LongCat (#3161), and a latent-pair family that does not read its cache
+/// through the latent view yet keeps fp16.
 #[test]
 fn only_latent_view_families_store_a_quantized_latent() {
     let llama = model_dir_with_type("llama");
@@ -431,6 +431,8 @@ fn only_latent_view_families_store_a_quantized_latent() {
         "youtu_vl",
         "kimi_linear",
         "kimi_k3",
+        "longcat_flash",
+        "longcat_flash_ngram",
     ] {
         let dir = model_dir_with_type(family);
         let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
@@ -446,7 +448,10 @@ fn only_latent_view_families_store_a_quantized_latent() {
         ));
     }
 
-    for family in ["glm4_moe_lite", "deepseek_v32"] {
+    let others = mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES
+        .iter()
+        .filter(|family| !mlxcel_core::mla::stores_quantized_latent_pair(family));
+    for &family in others {
         let dir = model_dir_with_type(family);
         let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
         assert_eq!(mode, KVCacheMode::Fp16, "{family}");

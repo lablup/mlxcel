@@ -1,0 +1,7 @@
+model,model_type,prompt_tokens,rounds,fp16_tok_s_median,int8_tok_s_median,int8_vs_fp16_pct,fp16_rounds,int8_rounds,fp16_path_counter,int8_path_counter
+glm-4.7-flash-4bit,glm4_moe_lite,512,3,82.23,81.74,-0.6,82.23;82.26;82.00,81.93;81.74;81.51,absorbed_composed=6674,absorbed_fused=6674
+glm-4.7-flash-4bit,glm4_moe_lite,2048,3,79.60,70.58,-11.3,79.60;79.44;79.63,70.58;70.40;70.79,absorbed_composed=6674,absorbed_composed=6674
+glm-4.7-flash-4bit,glm4_moe_lite,16384,2,60.28,36.62,-39.3,60.20;60.36,36.84;36.40,absorbed_composed=6674,absorbed_composed=6674
+longcat-flash-lite-4bit,longcat_flash_ngram,512,3,125.52,135.53,+8.0,125.52;125.54;125.51,135.53;135.18;135.62,absorbed_composed=3976,absorbed_fused=3976
+longcat-flash-lite-4bit,longcat_flash_ngram,2048,3,127.40,107.59,-15.5,127.40;127.74;127.16,106.97;107.59;107.85,absorbed_composed=3976,absorbed_composed=3976
+longcat-flash-lite-4bit,longcat_flash_ngram,16384,2,99.20,50.39,-49.2,99.28;99.12,50.51;50.28,absorbed_composed=3976,absorbed_composed=3976

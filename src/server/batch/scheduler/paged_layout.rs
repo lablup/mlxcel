@@ -116,8 +116,8 @@ impl BatchScheduler {
 
     pub(super) fn log_effective_kv_cache_application(&self) {
         // A model-owned family reports the mode each cache actually stores:
-        // one that serves FP16 only (LongCat) reports FP16 rather than the
-        // request, a sliding-window layer whose `RotatingKVCache` falls back
+        // one that refuses a mode (LongCat under Turbo) reports FP16 rather
+        // than the request, a sliding-window layer whose `RotatingKVCache` falls back
         // to FP16 storage is not counted as applied (issue #2783), and a
         // layer with no KV cache (linear attention, SSM, recurrent, conv) is
         // counted apart as stateless (issue #2790). Only a dense model, whose

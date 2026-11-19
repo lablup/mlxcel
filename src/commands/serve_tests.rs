@@ -535,32 +535,39 @@ fn serve_preflight_kv_mode_on_deepseek_v2_follows_the_absorption_decision() {
     );
 }
 
-/// A latent family cannot hold the batch table's mode, so startup disables it
-/// and serves fp16; the preflight must agree.
+/// A latent family that cannot hold the batch table's mode has it disabled at
+/// startup and serves fp16; the preflight must agree. Every latent family
+/// refuses the Turbo table, and only the families outside
+/// `mla::QUANTIZED_LATENT_FAMILIES` refuse `--kv-bits 8`.
 #[test]
 fn serve_preflight_kv_mode_disables_batch_table_for_latent_families() {
     use mlxcel_core::cache::KVCacheMode;
-    let family = mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES
-        .first()
-        .copied()
-        .expect("at least one latent family");
-    let dir = model_dir_with_type(family);
+    for &family in mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES {
+        let dir = model_dir_with_type(family);
 
-    let mut args = sample_args();
-    args.batch_quant.kv_bits = 8;
-    assert_eq!(
-        super::serve_preflight_kv_mode(&args, dir.path())
-            .unwrap()
-            .mode,
-        KVCacheMode::Fp16
-    );
+        let mut args = sample_args();
+        args.batch_quant.kv_bits = 8;
+        let expected = if mlxcel_core::mla::stores_quantized_latent_pair(family) {
+            KVCacheMode::Int8
+        } else {
+            KVCacheMode::Fp16
+        };
+        assert_eq!(
+            super::serve_preflight_kv_mode(&args, dir.path())
+                .unwrap()
+                .mode,
+            expected,
+            "{family}"
+        );
 
-    args.batch_quant.kv_bits = 4;
-    args.batch_quant.kv_quant_scheme = Some("turboquant".to_string());
-    assert_eq!(
-        super::serve_preflight_kv_mode(&args, dir.path())
-            .unwrap()
-            .mode,
-        KVCacheMode::Fp16
-    );
+        args.batch_quant.kv_bits = 4;
+        args.batch_quant.kv_quant_scheme = Some("turboquant".to_string());
+        assert_eq!(
+            super::serve_preflight_kv_mode(&args, dir.path())
+                .unwrap()
+                .mode,
+            KVCacheMode::Fp16,
+            "{family}"
+        );
+    }
 }

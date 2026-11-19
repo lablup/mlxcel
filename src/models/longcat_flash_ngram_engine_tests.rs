@@ -43,6 +43,11 @@ const ROUTED: i32 = 2;
 const ZERO: i32 = 1;
 
 fn tiny_config(model_type: &str) -> LongcatFlashNgramConfig {
+    tiny_config_with_rank(model_type, KV_LORA)
+}
+
+/// [`tiny_config`] at latent rank `kv_lora`.
+pub(super) fn tiny_config_with_rank(model_type: &str, kv_lora: i32) -> LongcatFlashNgramConfig {
     let json = format!(
         r#"{{
             "model_type": "{model_type}",
@@ -56,7 +61,7 @@ fn tiny_config(model_type: &str) -> LongcatFlashNgramConfig {
             "vocab_size": {VOCAB},
             "max_position_embeddings": 256,
             "num_attention_heads": {HEADS},
-            "kv_lora_rank": {KV_LORA},
+            "kv_lora_rank": {kv_lora},
             "q_lora_rank": {Q_LORA},
             "qk_rope_head_dim": {ROPE},
             "qk_nope_head_dim": {NOPE},
@@ -94,7 +99,30 @@ fn pseudo_random(seed: u64, n: usize, scale: f32) -> Vec<f32> {
 /// fixed order so every run builds the same model (#1265). The model is
 /// built through `sanitize_weights` exactly as `load` does.
 fn tiny_model(model_type: &str) -> LongcatFlashNgramModel {
-    let args = tiny_config(model_type);
+    tiny_model_with_rank(model_type, KV_LORA)
+}
+
+/// [`tiny_model`] at latent rank `kv_lora` (64 is one affine group, the
+/// smallest rank the int8 latent stores, #3161).
+pub(super) fn tiny_model_with_rank(model_type: &str, kv_lora: i32) -> LongcatFlashNgramModel {
+    tiny_model_with_rank_in(model_type, kv_lora, mlxcel_core::dtype::FLOAT32)
+}
+
+/// [`tiny_model_with_rank`] with every weight stored in `dtype`, so the
+/// activations run in it.
+pub(super) fn tiny_model_with_rank_in(
+    model_type: &str,
+    kv_lora: i32,
+    dtype: i32,
+) -> LongcatFlashNgramModel {
+    let args = tiny_config_with_rank(model_type, kv_lora);
+    let weights = tiny_weights(&args, kv_lora, dtype);
+    let weights = sanitize_weights(weights, &args).expect("sanitize tiny longcat weights");
+    LongcatFlashNgramModel::from_weights(&weights, &args).expect("build tiny longcat")
+}
+
+/// Checkpoint-layout tiny weights for `args`, stored in `dtype`.
+fn tiny_weights(args: &LongcatFlashNgramConfig, kv_lora: i32, dtype: i32) -> WeightMap {
     let mut weights = WeightMap::new();
     let mut seed = 101u64;
     let mut put = |name: String, shape: &[i32], scale: f32| {
@@ -134,12 +162,12 @@ fn tiny_model(model_type: &str) -> LongcatFlashNgramModel {
             );
             put(
                 format!("{a}.kv_a_proj_with_mqa.weight"),
-                &[KV_LORA + ROPE, HIDDEN],
+                &[kv_lora + ROPE, HIDDEN],
                 0.5,
             );
             put(
                 format!("{a}.kv_b_proj.weight"),
-                &[HEADS * (NOPE + V_DIM), KV_LORA],
+                &[HEADS * (NOPE + V_DIM), kv_lora],
                 0.5,
             );
             put(format!("{a}.o_proj.weight"), &[HIDDEN, HEADS * V_DIM], 0.4);
@@ -178,7 +206,7 @@ fn tiny_model(model_type: &str) -> LongcatFlashNgramModel {
         for i in 0..2 {
             let p = format!("model.layers.{l}");
             norm_names.push((format!("{p}.self_attn.{i}.q_a_layernorm.weight"), Q_LORA));
-            norm_names.push((format!("{p}.self_attn.{i}.kv_a_layernorm.weight"), KV_LORA));
+            norm_names.push((format!("{p}.self_attn.{i}.kv_a_layernorm.weight"), kv_lora));
             norm_names.push((format!("{p}.input_layernorm.{i}.weight"), HIDDEN));
             norm_names.push((format!("{p}.post_attention_layernorm.{i}.weight"), HIDDEN));
         }
@@ -194,16 +222,20 @@ fn tiny_model(model_type: &str) -> LongcatFlashNgramModel {
         weights.insert(name, mlxcel_core::add(&w, &one));
     }
 
-    let weights = sanitize_weights(weights, &args).expect("sanitize tiny longcat weights");
-    LongcatFlashNgramModel::from_weights(&weights, &args).expect("build tiny longcat")
+    let names: Vec<String> = weights.keys().cloned().collect();
+    for name in names {
+        let w = weights.remove(&name).expect("weight present");
+        weights.insert(name, mlxcel_core::astype(&w, dtype));
+    }
+    weights
 }
 
-fn ids(tokens: &[i32]) -> UniquePtr<MlxArray> {
+pub(super) fn ids(tokens: &[i32]) -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32])
 }
 
 /// Logits of sequence position `pos` of a `[1, L, V]` forward output.
-fn row(logits: &MlxArray, pos: i32) -> Vec<f32> {
+pub(super) fn row(logits: &MlxArray, pos: i32) -> Vec<f32> {
     let r = slice_axis(logits, 1, pos, pos + 1);
     let r = mlxcel_core::astype(&r, mlxcel_core::dtype::FLOAT32);
     mlxcel_core::eval(&r);
@@ -243,7 +275,7 @@ fn recompute_greedy(model: &LongcatFlashNgramModel, prompt: &[i32], steps: usize
     out
 }
 
-const TOKENS: [i32; 11] = [3, 17, 9, 25, 4, 30, 12, 7, 21, 1, 14];
+pub(super) const TOKENS: [i32; 11] = [3, 17, 9, 25, 4, 30, 12, 7, 21, 1, 14];
 
 /// Prefill 3 tokens, then a 2-token chunk, then single-token steps, and
 /// compare every new position against one full-sequence forward. The chunk
@@ -379,48 +411,8 @@ fn longcat_flash_refuses_padded_prefill() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// `--kv-cache-mode` on the latent caches (#2766)
-// ---------------------------------------------------------------------------
-
-/// Both LongCat variants serve FP16 KV only: their MLA caches hold a latent
-/// pair, which no quantized mode supports. A quantized request is refused
-/// and the model reports FP16 for every layer, so `logit_trace` and the
-/// server's startup line report what the caches really hold.
-fn assert_reports_fp16_only(model_type: &str) {
-    use mlxcel_core::cache::KVCacheMode;
-
-    let model = tiny_model(model_type);
-    let n = model.num_layers();
-    model.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; n]);
-    assert_eq!(
-        model.kv_cache_layer_modes(),
-        Some(vec![KVCacheMode::Fp16; n]),
-        "{model_type} must report the FP16 it actually stores"
-    );
-    assert!(mlxcel_core::mla::caches_mla_latent_pair(model_type));
-
-    // The refused request changes nothing: the same greedy run either way.
-    let greedy = SamplingConfig::greedy();
-    let fp16 = DirectEngine::new(&tiny_model(model_type), 0)
-        .run(&TOKENS[..6], 6, &greedy)
-        .expect("fp16 run");
-    let int8 = DirectEngine::new(&model, 0)
-        .with_kv_cache_mode(KVCacheMode::Int8)
-        .run(&TOKENS[..6], 6, &greedy)
-        .expect("int8 request run");
-    assert_eq!(int8, fp16);
-}
-
-#[test]
-fn longcat_flash_reports_fp16_only_kv() {
-    assert_reports_fp16_only("longcat_flash");
-}
-
-#[test]
-fn longcat_flash_ngram_reports_fp16_only_kv() {
-    assert_reports_fp16_only("longcat_flash_ngram");
-}
+// `--kv-cache-mode` on the latent caches (#2766, #3161) is covered in
+// `longcat_flash_ngram_latent_tests.rs`.
 
 // The prefill projects only the sampled row while the model-owned caches and
 // the n-gram tail still advance over every position (#3070).
@@ -430,3 +422,57 @@ crate::models::last_row_logits_harness::last_row_case!(longcat_flash_last_row_lo
 crate::models::last_row_logits_harness::last_row_case!(longcat_flash_ngram_last_row_logits, || {
     tiny_model("longcat_flash_ngram")
 });
+
+/// A forward of 64 or more positions takes `SwitchGLU`'s sorted path. The MoE
+/// used to hand it `[B, L, hidden]`, which threw in that path's reshape on
+/// the first 64-token prefill of a real checkpoint (#3161); every position of
+/// such a forward must match the single-token path.
+#[test]
+fn a_64_token_prefill_takes_the_sorted_expert_path_and_matches_decode() {
+    let tokens: Vec<i32> = (0..64).map(|i| (i * 7 + 3) % VOCAB).collect();
+    for model_type in ["longcat_flash", "longcat_flash_ngram"] {
+        let model = tiny_model(model_type);
+        let _ = model.make_caches();
+        let full = model.forward(&ids(&tokens), &mut [], None);
+        let _ = model.make_caches();
+        let mut worst = 0.0f32;
+        for (pos, token) in tokens.iter().enumerate() {
+            let out = model.forward(&ids(&[*token]), &mut [], None);
+            worst = worst.max(max_abs_diff(&row(&out, 0), &row(&full, pos as i32)));
+        }
+        assert!(worst <= 1e-3, "{model_type}: max abs diff {worst}");
+    }
+}
+
+/// A checkpoint whose `embedders.0` table is one row short of the
+/// `m + 1` the config claims must fail to load: the gather behind the
+/// lookup does not range-check a positive index (#3161).
+#[test]
+fn longcat_flash_ngram_short_embedder_table_fails_to_load() {
+    let args = tiny_config("longcat_flash_ngram");
+    let mut weights = tiny_weights(&args, KV_LORA, mlxcel_core::dtype::FLOAT32);
+    let key = "model.ngram_embeddings.embedders.0.weight";
+    let table = weights.remove(key).expect("embedder 0 present");
+    let shape = mlxcel_core::array_shape(&table);
+    let short = slice_axis(&table, 0, 0, shape[0] - 1);
+    weights.insert(key.to_string(), short);
+    let weights = sanitize_weights(weights, &args).expect("sanitize tiny longcat weights");
+    let err = LongcatFlashNgramModel::from_weights(&weights, &args)
+        .err()
+        .expect("a short embedder table must be refused");
+    assert!(err.contains("embedders.0"), "{err}");
+}
+
+/// `emb_neighbor_num: 1` made `k * (n - 1)` zero and the embedding width a
+/// divide by zero; it must be an error, not a panic.
+#[test]
+fn longcat_flash_ngram_neighbor_num_one_fails_to_load() {
+    let mut args = tiny_config("longcat_flash_ngram");
+    let weights = tiny_weights(&args, KV_LORA, mlxcel_core::dtype::FLOAT32);
+    let weights = sanitize_weights(weights, &args).expect("sanitize tiny longcat weights");
+    args.emb_neighbor_num = 1;
+    let err = LongcatFlashNgramModel::from_weights(&weights, &args)
+        .err()
+        .expect("emb_neighbor_num 1 must be refused");
+    assert!(err.contains("emb_neighbor_num"), "{err}");
+}

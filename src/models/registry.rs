@@ -193,8 +193,8 @@ const TEXT_IMAGE_VIDEO_AUDIO: &[Modality] = &[
 
 const KV_FP16: &[KvMode] = &[KvMode::Fp16];
 /// The quantized-latent families (`DeepSeekV3Attention`, #3160; Kimi Linear and
-/// Kimi K3, #3162): an affine int8 latent with fp16 rope keys, no Turbo mode
-/// (`mla::QUANTIZED_LATENT_FAMILIES`).
+/// Kimi K3, #3162; LongCat, #3161): an affine int8 latent with fp16 rope keys,
+/// no Turbo mode (`mla::QUANTIZED_LATENT_FAMILIES`).
 const KV_INT8: &[KvMode] = &[KvMode::Fp16, KvMode::Int8];
 const KV_TURBO: &[KvMode] = &[KvMode::Fp16, KvMode::Int8, KvMode::Turbo4];
 const NO_DRAFTERS: &[Drafter] = &[];
@@ -1346,6 +1346,8 @@ fn stores_quantized_latent(model_type: ModelType) -> bool {
             | ModelType::KimiLinear
             | ModelType::KimiK3
             | ModelType::KimiK3VLM
+            | ModelType::LongcatFlash
+            | ModelType::LongcatFlashNgram
     )
 }
 
@@ -1816,7 +1818,6 @@ mod tests {
             ModelType::DeepSeekV32,
             ModelType::Glm4MoeLite,
             ModelType::GlmMoeDsa,
-            ModelType::LongcatFlashNgram,
         ] {
             assert_eq!(
                 family(model_type).kv_modes,
@@ -1840,6 +1841,8 @@ mod tests {
             ModelType::KimiLinear,
             ModelType::KimiK3,
             ModelType::KimiK3VLM,
+            ModelType::LongcatFlash,
+            ModelType::LongcatFlashNgram,
         ] {
             let family = family(model_type);
             assert_eq!(family.kv_modes, KV_INT8, "{model_type:?}");
@@ -1869,11 +1872,13 @@ mod tests {
                 "{model_type:?} honors --kv-cache-mode in its model-owned caches"
             );
         }
+        // LongCat's model-owned caches hold the affine int8 latent and no
+        // Turbo mode (#3161).
         for model_type in [ModelType::LongcatFlash, ModelType::LongcatFlashNgram] {
             assert_eq!(
                 family(model_type).kv_modes,
-                KV_FP16,
-                "{model_type:?} must stay FP16 only"
+                KV_INT8,
+                "{model_type:?} holds fp16 or the int8 latent only"
             );
         }
     }

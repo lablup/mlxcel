@@ -63,9 +63,12 @@ pub(crate) fn mla_geometry(
 /// implementations that read a [`LatentWindow::Quantized`] back pass `true`
 /// (`DeepSeekV3Attention`, #3160; the Kimi Linear and Kimi K3 MLA layers,
 /// #3162; and the DeepSeek V3.2 MLA, #3163, whose types still resolve to fp16
-/// because they are outside `mla::QUANTIZED_LATENT_FAMILIES`). A caller that
-/// passes `false` never gets the latent view, whatever the cache mode, so a
-/// family outside the list keeps its per-token path.
+/// because they are outside `mla::QUANTIZED_LATENT_FAMILIES`). GLM-4.7-Flash
+/// passes its per-layer flag, which follows that list (#3161). LongCat MLA
+/// passes `true` because its model-owned caches are built in an `int8` mode
+/// only when the model opted in (`LongcatFlashNgramModel`'s mode table). A
+/// caller that passes `false` never gets the latent view, whatever the cache
+/// mode, so a family outside the list keeps its per-token path.
 ///
 /// `kv_latent` may be wider than `geometry.kv_lora_rank`: DeepSeek V3.2
 /// appends the DSA indexer key to it. The view is asked for that stored width
@@ -115,20 +118,30 @@ fn warn_latent_view_declined(family: &str, mode: mlxcel_core::cache::KVCacheMode
 
 /// The dense latent pair of `window`, in the activation dtype `dtype`.
 ///
-/// A quantized window dequantizes to FP16 (its `k_pe` is stored FP16), and a
-/// bf16 checkpoint's query is bf16. MLX promotes a bf16 and FP16 pair to
-/// float32, so a multi-token step over the dequantized window would return
-/// float32 and carry it into the residual stream and into every later
-/// layer's state: on Kimi Linear the KDA recurrent state then stays float32
-/// for the rest of the sequence and every decode step runs in float32. A
-/// dense window already holds the activation dtype, so the cast is a no-op.
+/// A [`LatentWindow::Dense`] window is returned exactly as the cache handed it
+/// back: it already holds the activation dtype, so an fp16 cache's numerics
+/// are untouched. A quantized window dequantizes once
+/// ([`LatentWindow::into_dense`] returns it in the cache's FP16 sidecar dtype,
+/// and its `k_pe` is stored FP16) and is cast to `dtype` when that differs.
+/// Under a bf16 checkpoint the FP16 window would otherwise meet bf16 queries,
+/// MLX would promote the attention to float32, and the promotion would carry
+/// through `o_proj` into the residual stream and every later layer, on the
+/// `int8` arm alone. On Kimi Linear the KDA recurrent state would then stay
+/// float32 for the rest of the sequence and every decode step would run in
+/// float32 (#3162); on GLM-4.7-Flash and LongCat every later layer and the
+/// logits of a multi-token step would run in float32 (#3161).
 ///
-/// Used by: the Kimi Linear and Kimi K3 MLA forwards (#3162).
+/// Used by: the Kimi Linear, Kimi K3, GLM-4.7-Flash and LongCat MLA
+/// multi-token steps.
 pub(crate) fn dense_latent_in(
     window: LatentWindow,
     dtype: i32,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let quantized = window.is_quantized();
     let (ckv, kpe) = window.into_dense();
+    if !quantized {
+        return (ckv, kpe);
+    }
     let cast = |a: UniquePtr<MlxArray>| {
         if mlxcel_core::array_dtype(&a) == dtype {
             a
@@ -214,8 +227,7 @@ pub(crate) fn validate_mla_decode_batch(
 ///
 /// `quantized_latent` opts the caller in to the quantized latent view; see
 /// [`store_latent_step`]. `DeepSeekV3Attention`, Kimi Linear, Kimi K3 and the
-/// DeepSeek V3.2 MLA pass
-/// `true`.
+/// DeepSeek V3.2 MLA pass `true`, GLM-4.7-Flash its per-layer flag.
 ///
 /// Used by: `DeepSeekV3Attention` (DeepSeek V3, Kimi, Youtu), DeepSeek V3.2
 /// MLA, GLM-4.7-Flash MLA, Kimi Linear and Kimi K3.

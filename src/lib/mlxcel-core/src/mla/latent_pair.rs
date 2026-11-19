@@ -39,8 +39,16 @@ use crate::mla::latent_layout_supports_mode;
 /// that model, and the Youtu decoders whose layers hold that attention
 /// (#3160). Then the two hybrid KDA + MLA families, Kimi Linear and Kimi K3,
 /// whose model-owned MLA caches take the layer mode table and write through
-/// the same view (#3162); their KDA layers hold no KV. Every entry is also in
+/// the same view (#3162); their KDA layers hold no KV. Then both LongCat
+/// types, which load `LongcatFlashNgramModel` (#3161; measured on
+/// LongCat-Flash-Lite). Every entry is also in
 /// [`crate::mla::MLA_LATENT_CACHE_FAMILIES`].
+///
+/// `glm4_moe_lite` writes through the view too (#3161) but is not listed, so
+/// it keeps fp16: GLM-4.7-Flash's teacher-forced trace showed a
+/// decided-position disagreement against the fp16 latent
+/// (`docs/benchmark_results/mla-quantized-latent-glm-longcat-m3ultra-2026-11-19.md`).
+/// Listing it switches its int8 latent on.
 ///
 /// Used by: [`latent_pair_supports_mode`], [`stores_quantized_latent_pair`].
 pub static QUANTIZED_LATENT_FAMILIES: &[&str] = &[
@@ -54,6 +62,8 @@ pub static QUANTIZED_LATENT_FAMILIES: &[&str] = &[
     "youtu_vl",
     "kimi_linear",
     "kimi_k3",
+    "longcat_flash",
+    "longcat_flash_ngram",
 ];
 
 /// Whether `model_type` is a latent-pair family that stores its latent through
@@ -119,7 +129,11 @@ mod tests {
         assert!(stores_quantized_latent_pair("  Kimi_VL "));
         assert!(!stores_quantized_latent_pair("deepseek_v2"));
         assert!(!stores_quantized_latent_pair("deepseek_v32"));
+        assert!(!stores_quantized_latent_pair("deepseek_v3.2"));
+        assert!(!stores_quantized_latent_pair("glm_moe_dsa"));
         assert!(!stores_quantized_latent_pair("glm4_moe_lite"));
+        assert!(stores_quantized_latent_pair("longcat_flash"));
+        assert!(stores_quantized_latent_pair("LongCat_Flash_Ngram"));
         assert!(!stores_quantized_latent_pair("deepseek_v3_vl"));
         assert!(stores_quantized_latent_pair("kimi_linear"));
         assert!(stores_quantized_latent_pair("kimi_k3"));
