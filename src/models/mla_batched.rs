@@ -143,9 +143,10 @@ pub(crate) fn validate_mla_decode_batch(
 ///
 /// Each row's cache is written through [`store_latent_step`]. A row whose
 /// window comes back [`LatentWindow::Quantized`] (an `int8` cache of a family
-/// in `mla::QUANTIZED_LATENT_FAMILIES`) takes the #3155 composed quantized
-/// decode, `mla::quantized_absorbed_attention`; the fused kernel reads an fp16
-/// latent and is not tried there. `select` (DeepSeek V3.2's sparse key
+/// in `mla::QUANTIZED_LATENT_FAMILIES`) takes `mla::quantized_absorbed_attention`:
+/// the fused kernel's quantized variant where it applies (Metal, up to
+/// `FUSED_DECODE_QUANTIZED_MAX_KEYS` keys, #3156), the #3155 composed
+/// quantized decode otherwise. `select` (DeepSeek V3.2's sparse key
 /// selection) reads a dense window, so a quantized row with a selector is a
 /// wiring error and panics naming `family`.
 ///

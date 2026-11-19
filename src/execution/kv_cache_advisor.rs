@@ -225,7 +225,7 @@ pub fn recommend_kv_cache_mode(
                 Medium | Long if stores_quantized_latent_pair(model_type) => (
                     Int8,
                     None,
-                    "This family caches the MLA (kv_latent, k_pe) pair, and int8 stores that latent as affine group-64 8-bit with fp16 rope keys, about 1.7x smaller than the fp16 latent (672 against 1152 bytes per token per layer at kv_lora_rank 512). It decodes on the composed path rather than the fused kernel, so benchmark decode speed first. The Turbo modes are mis-calibrated for the latent pair and are substituted with fp16.",
+                    "This family caches the MLA (kv_latent, k_pe) pair, and int8 stores that latent as affine group-64 8-bit with fp16 rope keys, about 1.7x smaller than the fp16 latent (672 against 1152 bytes per token per layer at kv_lora_rank 512). It decodes slower than the fp16 latent (on Metal a fused kernel reads it up to 2048 keys, the composed path beyond), so benchmark decode speed first. The Turbo modes are mis-calibrated for the latent pair and are substituted with fp16.",
                 ),
                 // Any other family that always caches the `(kv_latent, k_pe)`
                 // pair has no decompressed fallback, so every quantized mode
@@ -249,7 +249,7 @@ pub fn recommend_kv_cache_mode(
                 Medium | Long if arch_kind == MlaCompressed && model_type == "deepseek_v2" => (
                     Int8,
                     None,
-                    "DeepSeek V2 caches the MLA latent here because absorbed decode is on. int8 stores that latent as affine group-64 8-bit with fp16 rope keys, about 1.7x smaller than the fp16 latent (672 against 1152 bytes per token per layer on V2-Lite), and keeps absorbed decode. It decodes on the composed path rather than the fused kernel, so benchmark decode speed first. The Turbo modes would turn absorption off and are substituted with fp16.",
+                    "DeepSeek V2 caches the MLA latent here because absorbed decode is on. int8 stores that latent as affine group-64 8-bit with fp16 rope keys, about 1.7x smaller than the fp16 latent (672 against 1152 bytes per token per layer on V2-Lite), and keeps absorbed decode. It decodes slower than the fp16 latent (on Metal a fused kernel reads it up to 2048 keys, the composed path beyond), so benchmark decode speed first. The Turbo modes would turn absorption off and are substituted with fp16.",
                 ),
                 Medium | Long => (
                     Int8,

@@ -358,9 +358,12 @@ impl DeepSeekV3Attention {
             });
         }
 
-        // A quantized window's one absorbed query runs the #3155 composed
-        // decode on the packed rows (it records `AbsorbedComposed`); the fused
-        // kernel reads an fp16 latent and is not tried. Every other step over a
+        // A quantized window's one absorbed query goes to
+        // `quantized_absorbed_attention`, which runs the fused kernel's
+        // quantized variant where it applies (Metal, unmasked, up to
+        // `FUSED_DECODE_QUANTIZED_MAX_KEYS` keys, #3156; records
+        // `AbsorbedFused`) and the #3155 composed decode on the packed rows
+        // otherwise (records `AbsorbedComposed`). Every other step over a
         // quantized window dequantizes it once and runs the fp16 code below.
         let (kv_latent, k_pe) = match window {
             mlxcel_core::mla::LatentWindow::Quantized {

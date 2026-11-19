@@ -2,7 +2,7 @@
 
 Issue #3160, Phase 2 of epic #3158. #3155 stored the absorbed MLA latent as MLX affine group-64 int8 with fp16 `k_pe` on DeepSeek V2 (672 bytes per token per layer at rank 512, rope 64, against 1152 for the fp16 latent). The `DeepSeekV3Attention` families cached their latent pair through `KVCache::update_and_fetch` directly and had every quantized request substituted with fp16. This change writes that pair through `mla::MlaLatentCache` in the single-sequence forward and the shared batched decode helper, so `--kv-cache-mode int8` and `--kv-bits 8` keep the int8 latent on `deepseek_v3`, `kimi_k2`, `joyai_llm_flash`, `kimi_vl`, `kimi_k25`, `youtu`, `youtu_llm` and `youtu_vl`. Only int8 exists; 4-bit failed the #3155 gate and is not a mode.
 
-**Outcome:** zero decided-position disagreements on both checkpoints behind 1024 and 4096 tokens. One top-1 flip per checkpoint behind 1024 is outside the 0.11-logit near-tie bar #3155 used: 0.117 on Moonlight and 0.180 on Kimi-VL, the latter well beyond the 0.109 fp16 fused-versus-composed noise floor; every other flip is inside the bar. This remains an open item. See "Near-tie bar" below.
+**Outcome:** zero decided-position disagreements on both checkpoints behind 1024 and 4096 tokens. The sections from Setup to Not measured were measured before #3156 merged, when every int8 decode step ran the composed path. With #3156 merged (the code this change ships on), an unmasked int8 decode step over a window of up to 2048 keys runs the fused kernel's quantized variant instead; see [After #3156 merged](#after-3156-merged-2026-11-19) for the re-measured rows behind 1024 and at 512 and 2048 tokens. On that code the trace behind 1024 still has no decided disagreement; Moonlight has two top-1 flips outside the 0.11-logit near-tie bar #3155 used (0.117 and 0.328) and Kimi-VL none (largest 0.094). Before #3156 it was one per checkpoint (0.117 on Moonlight, 0.180 on Kimi-VL). See "Near-tie bar" below.
 
 ## Setup
 
@@ -12,7 +12,7 @@ Issue #3160, Phase 2 of epic #3158. #3155 stored the absorbed MLA latent as MLX 
 - **Isolation:** every GPU run held the shared GPU lock (`lockf -k .mlxcel-gpu.lock`). The decode sweep ran under `scripts/with_indexers_paused.sh`, with the two arms interleaved round by round inside one lock per model.
 - **Arms:** `fp16 latent` (default: absorbed, fused Metal kernel up to 8192 keys, composed beyond) and `int8 latent` (`--kv-cache-mode int8`; `MLXCEL_TRACE_KV_CACHE_MODE=int8` for the trace harness).
 
-## Teacher-forced trace (`examples/logit_trace`, `--decided 2`)
+## Teacher-forced trace (`examples/logit_trace`, `--decided 2`), before #3156
 
 Reference is the fp16 latent of the same checkpoint. The corpus is the #3155 corpus: `docs/architecture.md`, `docs/benchmarks.md` and `docs/turbo-kv-cache.md` from `3c0d74ec` concatenated. Width-one decode with `MLXCEL_TRACE_BATCH_ROWS=1` and `MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1`.
 
@@ -29,9 +29,9 @@ Reference is the fp16 latent of the same checkpoint. The corpus is the #3155 cor
 
 ### Near-tie bar
 
-#3155 gated on zero decided disagreements and every top-1 flip within 0.11 logits of the reference's top two. The decided gate passes everywhere. Behind 1024, Moonlight has one flip at 0.117 and Kimi-VL one at 0.180; the other 19 flips across the two traces are at or under 0.109, and nothing exceeds the bar behind 4096. For scale, the fp16 latent's own kernel choice (fused against composed, `MLXCEL_MLA_FUSED_DECODE=0`, same binary) flips 1 / 512 positions on Moonlight (largest gap 0.023) and 6 / 512 on Kimi-VL (largest 0.109), so the two out-of-bar flips are beyond the fp16 kernel noise floor. Whether 0.18 is acceptable for these families is a decision for the issue, not settled here.
+#3155 gated on zero decided disagreements and every top-1 flip within 0.11 logits of the reference's top two. The decided gate passes everywhere. Behind 1024, Moonlight has one flip at 0.117 and Kimi-VL one at 0.180; the other 19 flips across the two traces are at or under 0.109, and nothing exceeds the bar behind 4096. For scale, the fp16 latent's own kernel choice (fused against composed, `MLXCEL_MLA_FUSED_DECODE=0`, same binary) flips 1 / 512 positions on Moonlight (largest gap 0.023) and 6 / 512 on Kimi-VL (largest 0.109), so the two out-of-bar flips are beyond the fp16 kernel noise floor. Whether 0.18 is acceptable for these families is a decision for the issue, not settled here. These figures are for the pre-#3156 composed int8 path. On the merged code (fused int8 behind 1024) Moonlight's out-of-bar flips are at 0.117 and 0.328 and Kimi-VL has none; see [After #3156 merged](#after-3156-merged-2026-11-19).
 
-## Decode throughput (`mlxcel-bench-decode`, 128 tokens, 16 warmup, median tok/s)
+## Decode throughput (`mlxcel-bench-decode`, 128 tokens, 16 warmup, median tok/s), before #3156
 
 | model | prompt | fp16 latent | int8 latent | int8 vs fp16 |
 |---|---|---|---|---|
@@ -42,7 +42,7 @@ Reference is the fp16 latent of the same checkpoint. The corpus is the #3155 cor
 | Kimi-VL | 2048 (3 rounds) | 144.74 | 123.36 | -14.8% |
 | Kimi-VL | 16384 (2 rounds) | 107.59 | 69.05 | -35.8% |
 
-Round-to-round spread is under 1% for every arm. Moonlight's context is 8192, so the bench clamps a 16384-token request to 8064 tokens (128 reserved for generation); at that length the fp16 latent still decodes on the fused kernel. Kimi-VL runs the same backbone to 16384 tokens, where the fp16 latent is on the composed path too, and the gap matches the V2-Lite figure from #3155 (-35.7%). The int8 latent decodes on the composed `quantized_matmul` path at every length; a fused kernel that reads it is #3156. Prefill throughput is within 0.6% between arms (1369 to 1380 tok/s at 512 and 2048, 1265 at 8064, 1124 to 1127 at 16384). The 16384-token measured-phase peak on Kimi-VL is 11.31 GB for int8 against 11.52 GB for fp16.
+Round-to-round spread is under 1% for every arm. Moonlight's context is 8192, so the bench clamps a 16384-token request to 8064 tokens (128 reserved for generation); at that length the fp16 latent still decodes on the fused kernel. Kimi-VL runs the same backbone to 16384 tokens, where the fp16 latent is on the composed path too, and the gap matches the V2-Lite figure from #3155 (-35.7%). In this pre-#3156 sweep the int8 latent decodes on the composed `quantized_matmul` path at every length. With #3156 merged, the 512-token row moves onto the fused kernel; the rows behind 2048 and longer keep the composed path (see [After #3156 merged](#after-3156-merged-2026-11-19)). Prefill throughput is within 0.6% between arms (1369 to 1380 tok/s at 512 and 2048, 1265 at 8064, 1124 to 1127 at 16384). The 16384-token measured-phase peak on Kimi-VL is 11.31 GB for int8 against 11.52 GB for fp16.
 
 ## Cache size and sizing
 
@@ -64,6 +64,38 @@ Round-to-round spread is under 1% for every arm. Moonlight's context is 8192, so
 
 - **CUDA (GB10) and ROCm (gfx1151):** neither host is reachable from this one. The path is the #3155 composed decode (`quantize_weights`, `quantized_matmul`, `dequantize`), which has no Metal-only call, but no trace or throughput row exists for those backends.
 - **`kimi_k2`, `joyai_llm_flash`, `kimi_k25`, the Youtu types:** no checkpoint on this host. They run the same `DeepSeekV3Attention` and are covered by the unit tests (`models::deepseek_v3::latent_tests`, the rule 1 and sizing tests).
+
+## After #3156 merged (2026-11-19)
+
+#3156 (PR #3173) merged into main and into this branch (`9af1ce46`, a merge of `a00629a6`). `mla::quantized_absorbed_attention`, which `DeepSeekV3Attention` and the batched decode helper call for a quantized window, now tries `mla::decode::fused_absorbed_decode_quantized` first: Metal, one unmasked query, 8-bit, group 64, a power-of-two rank from 64 to 1024 and a rope width that is a multiple of 32 (both checkpoints qualify at rank 512, rope 64), up to `FUSED_DECODE_QUANTIZED_MAX_KEYS` = 2048 keys. Longer windows fall back to the composed path. Re-measured with a release build (`--features metal,accelerate`) of `9af1ce46` on the same host; load average 1.5 to 1.9 during the traces and 1.2 to 1.5 during the decode sweep, which ran under `scripts/with_indexers_paused.sh` with the arms interleaved round by round inside one lock per model.
+
+**Trace behind 1024** (same corpus, commands and reference as above):
+
+| model | decided disagree | top-1 disagree | largest reference top-two gap at a disagreement | flips above 0.11 | ppl reference / candidate | ppl delta | path counter (int8) |
+|---|---|---|---|---|---|---|---|
+| Moonlight (`deepseek_v3`) | 0 / 192 | 7 / 512 | 0.328 | 2 (0.117, 0.328) | 18.6816 / 18.8238 | +0.761% | decompressed=216 absorbed_fused=13824 |
+| Kimi-VL (`kimi_vl`) | 0 / 188 | 12 / 512 | 0.094 | 0 | 17.8839 / 18.0607 | +0.988% | decompressed=216 absorbed_fused=13824 |
+
+- Every int8 decode step behind 1024 now records `absorbed_fused` (`absorbed_composed=0`); the window there never exceeds 1536 keys.
+- Every flip put the reference's choice at rank 2, except one Kimi-VL flip at rank 3. Logit delta on the reference's choice: p50 0.031 / 0.047, p99 0.34 / 0.95, max 0.66 / 2.78 (Moonlight / Kimi-VL).
+- Against the pre-#3156 int8 trace (composed int8 as reference, fused int8 as candidate): 0 decided disagreements on both checkpoints, 7 / 512 top-1 flips on each, largest gap 0.094 on Moonlight and 0.469 on Kimi-VL (two flips above 0.11 there). The kernel change moves which near-tie positions flip; it adds no decided disagreement.
+- **fp16 is unchanged:** the fp16 trace behind 1024 from `9af1ce46` is byte-identical to the one recorded above on both checkpoints, and its counter is still `absorbed_fused=13824`.
+- Behind 4096 the decode window is longer than 2048 keys, so the int8 arm keeps the composed path and the 4096 rows above still describe it. They were not re-run.
+
+**Decode throughput** (3 rounds per arm, ABAB interleaved):
+
+| model | prompt | fp16 latent | int8 latent | int8 vs fp16 | int8 path counter | int8 vs the pre-#3156 int8 row |
+|---|---|---|---|---|---|---|
+| Moonlight | 512 | 159.07 | 142.45 | -10.4% | absorbed_fused=3834 | +5.7% (134.81) |
+| Moonlight | 2048 | 141.80 | 122.97 | -13.3% | absorbed_composed=3834 | -0.2% (123.18) |
+| Kimi-VL | 512 | 158.53 | 142.95 | -9.8% | absorbed_fused=3834 | +6.5% (134.17) |
+| Kimi-VL | 2048 | 141.85 | 122.61 | -13.6% | absorbed_composed=3834 | -0.6% (123.36) |
+
+- Round-to-round spread is under 1.1% for every arm. The fp16 arm reads 1.8% to 2.0% below the earlier sweep at 512 tokens and 1.9% to 2.0% below at 2048 with identical code and counters, so the int8 against fp16 ratio is the comparable figure: it narrows from -16.7% / -17.1% to -10.4% / -9.8% at 512 and moves from -14.8% to -13.3% / -13.6% at 2048, where the int8 arm itself is unchanged within 0.6%.
+- Behind 2048 tokens every int8 decode step is composed: the measured pass starts above 2048 keys. The 8064 and 16384 rows above are composed for the same reason and were not re-run.
+- Prefill is within 0.5% between arms (1368 to 1375 tok/s).
+
+Rows: [decode-after-3156.csv](mla-quantized-latent-v3-m3ultra-2026-11-19/decode-after-3156.csv) and [logit_trace-after-3156.csv](mla-quantized-latent-v3-m3ultra-2026-11-19/logit_trace-after-3156.csv).
 
 ## Commands
 
