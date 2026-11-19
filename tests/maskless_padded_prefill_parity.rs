@@ -31,8 +31,16 @@
 //! `n + pad`-row forward (a different quantized-matmul width).
 //!
 //! The checkpoints come from `MLXCEL_MODELS_DIR` (default `models`), and each
-//! gate skips when its checkpoint is absent. The Mistral 4 gate also needs
-//! `MLXCEL_TEST_MISTRAL4=1`: its only checkpoint is a 119B MoE.
+//! gate skips when its checkpoint is absent. Two gates are also opt-in because
+//! one model alone nearly fills a 128 GB host: the Mistral 4 gate needs
+//! `MLXCEL_TEST_MISTRAL4=1` (its only checkpoint is a 119B MoE), and the
+//! GLM-4.5V gate needs `MLXCEL_TEST_GLM4V_MOE=1` (glm-4.5v-4bit is 58 GB on
+//! disk and took a GB10's available memory from 101 GB to 13 GB, #3147).
+//!
+//! Every gate runs in one process, so each releases MLX's buffer cache when
+//! its model is dropped ([`ReleaseOnDrop`]). Without that the freed weights of
+//! one model stayed cached while the next loaded, and the kernel OOM killer
+//! stopped the binary on a 121 GB GB10 (#3147).
 
 use mlxcel::models::{
     Cohere2Model, Gemma3nModel, MiniCPM3Model, Mistral4Model, NemotronNASModel, OLMo3Model,
@@ -50,6 +58,27 @@ const BOUND: f64 = 2e-2;
 /// Relative RMS bound between the maskless and padding-mask arms, which run
 /// the same padded width and so differ only by the mask itself.
 const CROSS_BOUND: f64 = 1e-4;
+
+/// Clears MLX's buffer cache on drop. Each gate binds one first, so it drops
+/// after the gate's model (locals drop in reverse order), on success and on
+/// panic alike, and the next gate's load does not stack on the freed weights.
+struct ReleaseOnDrop;
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        mlxcel_core::memory::clear_cache();
+    }
+}
+
+/// Whether an opt-in gate's environment variable is `1`; prints the skip.
+fn opted_in(var: &str, who: &str) -> bool {
+    if std::env::var(var).as_deref() == Ok("1") {
+        true
+    } else {
+        eprintln!("skipping the {who} gate: set {var}=1");
+        false
+    }
+}
 
 fn checkpoint(name: &str) -> Option<PathBuf> {
     let root = std::env::var("MLXCEL_MODELS_DIR").unwrap_or_else(|_| "models".to_string());
@@ -180,6 +209,7 @@ fn assert_maskless_padded_prefill_matches_within<M: LanguageModel>(
 
 #[test]
 fn cohere2_maskless_padded_prefill_matches_unpadded() {
+    let _release = ReleaseOnDrop;
     let Some(dir) = checkpoint("c4ai-command-r7b-12-2024-4bit") else {
         return;
     };
@@ -189,6 +219,7 @@ fn cohere2_maskless_padded_prefill_matches_unpadded() {
 
 #[test]
 fn olmo3_maskless_padded_prefill_matches_unpadded() {
+    let _release = ReleaseOnDrop;
     let Some(dir) = checkpoint("olmo-3.1-32b-think-4bit") else {
         return;
     };
@@ -198,6 +229,7 @@ fn olmo3_maskless_padded_prefill_matches_unpadded() {
 
 #[test]
 fn minicpm3_maskless_padded_prefill_matches_unpadded() {
+    let _release = ReleaseOnDrop;
     let Some(dir) = checkpoint("minicpm3-4b-4bit") else {
         return;
     };
@@ -207,6 +239,7 @@ fn minicpm3_maskless_padded_prefill_matches_unpadded() {
 
 #[test]
 fn gemma3n_maskless_padded_prefill_matches_unpadded() {
+    let _release = ReleaseOnDrop;
     let Some(dir) = checkpoint("gemma-3n-e2b-it-4bit") else {
         return;
     };
@@ -216,8 +249,8 @@ fn gemma3n_maskless_padded_prefill_matches_unpadded() {
 
 #[test]
 fn mistral4_maskless_padded_prefill_matches_unpadded() {
-    if std::env::var("MLXCEL_TEST_MISTRAL4").as_deref() != Ok("1") {
-        eprintln!("skipping the Mistral 4 gate: set MLXCEL_TEST_MISTRAL4=1");
+    let _release = ReleaseOnDrop;
+    if !opted_in("MLXCEL_TEST_MISTRAL4", "Mistral 4") {
         return;
     }
     let Some(dir) = checkpoint("mistral-small-4-119b-2603-4bit") else {
@@ -240,11 +273,16 @@ fn loaded_gate(name: &str, who: &str, bound: f64) {
 
 #[test]
 fn glm4v_maskless_padded_prefill_matches_unpadded() {
+    let _release = ReleaseOnDrop;
     loaded_gate("glm-4.1v-9b-thinking-4bit", "glm4v", BOUND);
 }
 
 #[test]
 fn glm4v_moe_maskless_padded_prefill_matches_unpadded() {
+    let _release = ReleaseOnDrop;
+    if !opted_in("MLXCEL_TEST_GLM4V_MOE", "GLM-4.5V") {
+        return;
+    }
     // The MoE drifts 2.5e-2 from the unpadded forward at the padded width (a
     // different expert-gather batch) on the padding-mask arm exactly as on the
     // maskless one, so only the cross comparison isolates the opt-in.
@@ -253,6 +291,7 @@ fn glm4v_moe_maskless_padded_prefill_matches_unpadded() {
 
 #[test]
 fn nemotron_nas_maskless_padded_prefill_matches_unpadded() {
+    let _release = ReleaseOnDrop;
     let Some(dir) = checkpoint("llama-3_3-nemotron-super-49b-4bit") else {
         return;
     };

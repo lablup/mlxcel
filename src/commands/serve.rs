@@ -51,7 +51,6 @@ use mlxcel::server::{
     env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
     resolve_parallel_context_size, start_server,
 };
-use mlxcel_core::cache::KVCacheMode;
 
 /// Run the `mlxcel serve` subcommand.
 ///
@@ -410,34 +409,54 @@ fn run_serve_memory_preflight(
         return Ok(());
     }
 
+    // Estimate against the mode the caches will really be built with (issue
+    // #1350, #3153), not the one requested. See `serve_preflight_kv_mode`.
+    let kv_cache_mode = serve_preflight_kv_mode(args, model_path)?;
+    let ctx_len = serve_preflight_ctx_len(args);
+    let batch = serve_preflight_batch(args);
+
+    let estimate = estimate_total_memory(
+        model_path,
+        ctx_len,
+        batch,
+        QuantHint::Default,
+        kv_cache_mode,
+    );
+
+    let banner = format_estimate(model_path, &estimate);
+    println!("{banner}");
+
+    enforce_preflight(&estimate, args.force_memory, SERVE_PREFLIGHT_REMEDIATION)
+}
+
+/// The KV cache mode the server will build for this run, for sizing.
+///
+/// `--kv-bits` / `--kv-quant-scheme` are a second route to a quantized cache
+/// and the scheduler prefers that table over `--kv-cache-mode`, so it is
+/// resolved here too, with the startup family rules (`run_serve` resolved
+/// `-m` to a concrete directory, so the `model_type` lookup is a file read).
+/// Resolving quietly: `into_startup_config` reports substitutions once
+/// logging exists.
+fn serve_preflight_kv_mode(
+    args: &crate::ServeArgs,
+    model_path: &std::path::Path,
+) -> anyhow::Result<mlxcel::execution::kv_arch::KvSizing> {
     let requested = resolve_kv_cache_mode(
         args.turbo.cache_type_k.as_deref(),
         args.turbo.cache_type_v.as_deref(),
         args.turbo.kv_cache_mode.as_deref(),
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
-    // Estimate against the mode the caches will really be built with (issue
-    // #1350), not the one requested. `--estimate-memory --kv-cache-mode int8`
-    // on an MLA latent family resolves back to fp16 at startup, so sizing an
-    // int8 cache here under-counts the KV budget, and this preflight can abort
-    // the server outright when the total exceeds the available memory.
-    // `run_serve` resolved `-m` to a concrete directory before calling us, so
-    // the `model_type` lookup is a plain file read. Resolving quietly:
-    // `into_startup_config` performs the same substitution and reports it once
-    // logging exists.
-    let (kv_cache_mode, _) =
-        mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, model_path);
-    let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
-
-    let ctx_len = serve_preflight_ctx_len(args);
-    let batch = serve_preflight_batch(args);
-
-    let estimate = estimate_total_memory(model_path, ctx_len, batch, QuantHint::Default, kv_int8);
-
-    let banner = format_estimate(model_path, &estimate);
-    println!("{banner}");
-
-    enforce_preflight(&estimate, args.force_memory, SERVE_PREFLIGHT_REMEDIATION)
+    let batch = mlxcel::server::cli_input::resolve_batch_kv_quant_config(
+        args.batch_quant.kv_bits,
+        args.batch_quant.kv_group_size,
+        args.batch_quant.kv_quant_scheme.as_deref(),
+        args.batch_quant.kv_skip_last_layer,
+    )
+    .map_err(|e| anyhow::anyhow!("batch KV cache quant error: {e}"))?;
+    Ok(mlxcel::server::effective_serve_kv_cache_mode(
+        requested, batch, model_path,
+    ))
 }
 
 fn serve_preflight_ctx_len(args: &crate::ServeArgs) -> u64 {

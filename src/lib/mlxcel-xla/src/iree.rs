@@ -1480,10 +1480,12 @@ fn compile_bundle(
     }
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
-    // issue #2873: the ROCm lowering tuning spec for long-K single-row
-    // contractions and, since issue #2921, for the grouped-query decode score
-    // contraction. Gemma3n has its own emitters (some with native qmv) and was
-    // not measured with it, so it stays on the compiler defaults.
+    // issue #2873: the ROCm lowering tuning spec for the narrow single-row
+    // vecmats (any K, 128 <= N <= 8192), the wide long-K fallback (N >= 8193,
+    // K >= 4096) and, since issues #2921 and #2956, the grouped-query decode
+    // score and context contractions. Gemma3n has its own emitters (some with
+    // native qmv) and was not measured with it, so it stays on the compiler
+    // defaults.
     if device == "hip" && matches!(cfg, RuntimeConfig::Dense(_)) {
         flags.push(rocm_tuning_spec_flag()?);
     }
