@@ -481,7 +481,10 @@ mod tests {
     /// quantized latent is available and no int8 hint.
     #[test]
     fn other_latent_pair_families_still_resolve_int8_to_fp16() {
-        for family in ["glm4_moe_lite", "deepseek_v32", "kimi_k3", "longcat_flash"] {
+        let others = crate::mla::MLA_LATENT_CACHE_FAMILIES
+            .iter()
+            .filter(|family| !crate::mla::stores_quantized_latent_pair(family));
+        for &family in others {
             for absorbed in [false, true] {
                 let (effective, warning) =
                     resolve_kv_cache_mode_for_model_with(KVCacheMode::Int8, family, absorbed);

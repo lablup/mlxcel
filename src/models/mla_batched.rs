@@ -56,9 +56,12 @@ pub(crate) fn mla_geometry(
 /// layout for its whole life because the answer depends only on its mode and
 /// geometry.
 ///
-/// `quantized_latent` is the caller's opt in: only the `DeepSeekV3Attention`
-/// callers (the families in `mla::QUANTIZED_LATENT_FAMILIES`) pass `true`. A
-/// caller that passes `false` never gets the latent view, whatever the cache
+/// `quantized_latent` is the caller's opt in: the `DeepSeekV3Attention`
+/// callers (the families in `mla::QUANTIZED_LATENT_FAMILIES`) pass `true`, and
+/// GLM-4.7-Flash passes its per-layer flag, which follows that list. LongCat
+/// MLA passes `true` because its model-owned caches are built in an `int8`
+/// mode only when the model opted in (`LongcatFlashNgramModel`'s mode table).
+/// A caller that passes `false` never gets the latent view, whatever the cache
 /// mode, so a family outside the list keeps its per-token path.
 pub(crate) fn store_latent_step(
     cache: &mut KVCache,
@@ -151,7 +154,8 @@ pub(crate) fn validate_mla_decode_batch(
 /// wiring error and panics naming `family`.
 ///
 /// `quantized_latent` opts the caller in to the quantized latent view; see
-/// [`store_latent_step`]. Only `DeepSeekV3Attention` passes `true`.
+/// [`store_latent_step`]. `DeepSeekV3Attention` passes `true`, GLM-4.7-Flash
+/// its per-layer flag.
 ///
 /// Used by: `DeepSeekV3Attention` (DeepSeek V3, Kimi, Youtu), DeepSeek V3.2
 /// MLA, GLM-4.7-Flash MLA, Kimi Linear and Kimi K3.

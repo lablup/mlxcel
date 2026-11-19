@@ -441,7 +441,10 @@ fn only_latent_view_families_store_a_quantized_latent() {
         ));
     }
 
-    for family in ["glm4_moe_lite", "kimi_k3"] {
+    let others = mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES
+        .iter()
+        .filter(|family| !mlxcel_core::mla::stores_quantized_latent_pair(family));
+    for &family in others {
         let dir = model_dir_with_type(family);
         let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
         assert_eq!(mode, KVCacheMode::Fp16, "{family}");

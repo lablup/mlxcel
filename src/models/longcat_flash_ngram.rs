@@ -23,6 +23,7 @@
 //!
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/longcat_flash.py, longcat_flash_ngram.py
 
+use crate::models::model_owned::KvCacheLayerModes;
 use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::dtype;
@@ -259,8 +260,24 @@ impl LongcatFlashMLA {
         // Expand kv_latent to [B, 1, L, kv_lora_rank] for cache
         let kv_latent = mlxcel_core::expand_dims(&kv_latent, 1);
 
-        // Cache stores (kv_latent, k_pe)
-        let (kv_latent, k_pe) = cache.update_and_fetch(kv_latent, k_pe);
+        // Cache stores (kv_latent, k_pe). An `int8` cache stores the latent as
+        // the affine group-64 triple and hands back a quantized window; the
+        // fresh chunk is quantized before this step reads it, so a prefill
+        // reads what later decode steps read (#3161).
+        let window = crate::models::mla_batched::store_latent_step(
+            cache,
+            crate::models::mla_batched::mla_geometry(
+                self.num_heads,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            ),
+            kv_latent,
+            k_pe,
+            "longcat_flash",
+            true,
+        );
 
         // Cost-model gate (issue #2408): one query is always absorbed, and a
         // multi-token step behind a long enough cache can be cheaper absorbed
@@ -273,6 +290,38 @@ impl LongcatFlashMLA {
             self.qk_nope_head_dim as usize,
             self.v_head_dim as usize,
         );
+
+        // A quantized window's one absorbed query goes to
+        // `quantized_absorbed_attention` (the fused kernel's quantized variant
+        // where it applies, #3156, the #3155 composed decode otherwise), which
+        // records its own path. Every other step over a quantized window
+        // dequantizes it once and runs the fp16 code below.
+        let (kv_latent, k_pe) = match window {
+            mlxcel_core::mla::LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } if absorbed && l == 1 => {
+                let q_projected = self.embed_q.forward(&q_nope);
+                let output = mlxcel_core::mla::quantized_absorbed_attention(
+                    &q_projected,
+                    &q_pe,
+                    &ckv_q,
+                    &scales,
+                    &biases,
+                    &kpe,
+                    bits,
+                    group_size,
+                    self.scale,
+                    mask,
+                );
+                return self.project_attention_output(&self.unembed_out.forward(&output), b, l);
+            }
+            window => window.into_dense(),
+        };
         mlxcel_core::mla::stats::record(if absorbed {
             if l == 1 {
                 mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
@@ -378,9 +427,13 @@ impl LongcatFlashMLA {
             }
         };
 
-        let attn_out = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
-        let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.v_head_dim]);
+        self.project_attention_output(&output, b, l)
+    }
 
+    /// `[B, H, L, v_head_dim]` attention output to `[B, L, hidden]`.
+    fn project_attention_output(&self, output: &MlxArray, b: i32, l: i32) -> UniquePtr<MlxArray> {
+        let attn_out = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
+        let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.v_head_dim]);
         self.o_proj.forward(&attn_out)
     }
 
@@ -965,10 +1018,15 @@ struct LongcatState {
 }
 
 impl LongcatState {
-    fn new(num_layers: usize) -> Self {
+    /// Fresh state whose layer `i` pair is built in `mode_for_layer(i)`; both
+    /// sub-layer attentions of a layer share its mode.
+    fn new(num_layers: usize, mode_for_layer: impl Fn(usize) -> KVCacheMode) -> Self {
         Self {
             caches: (0..num_layers)
-                .map(|_| [KVCache::new(), KVCache::new()])
+                .map(|i| {
+                    let mode = mode_for_layer(i);
+                    [KVCache::new_with_mode(mode), KVCache::new_with_mode(mode)]
+                })
                 .collect(),
             ngram_context: None,
         }
@@ -988,12 +1046,33 @@ pub struct LongcatFlashNgramModel {
     num_layers: usize,
     _is_ngram: bool,
     state: RefCell<LongcatState>,
-    /// Set once the FP16-only warning has been logged, so a client that
+    /// The per-layer KV cache modes the state's caches are built in: the
+    /// injected table with every mode the latent pair cannot hold replaced by
+    /// FP16 (#3161). Unset until a table is injected, which builds FP16.
+    kv_cache_layer_modes: KvCacheLayerModes,
+    /// Set once the refused-mode warning has been logged, so a client that
     /// injects modes per sequence (`DirectEngine`) does not repeat it.
     kv_mode_warned: Cell<bool>,
+    /// Whether an injected `int8` layer keeps the affine int8 latent. Read
+    /// from `mla::stores_quantized_latent_pair` at load, so it is on only
+    /// while LongCat is in `mla::QUANTIZED_LATENT_FAMILIES`. It is not yet:
+    /// no LongCat checkpoint has passed the #3161 quality gate, so `int8`
+    /// resolves to FP16 like any other refused mode. Tests turn it on to
+    /// exercise the ported path.
+    pub(crate) quantized_latent: Cell<bool>,
 }
 
 impl LongcatFlashNgramModel {
+    /// The `config.json` `model_type` this instance was built from, the key
+    /// the latent-pair mode rules match on.
+    fn model_type(&self) -> &'static str {
+        if self._is_ngram {
+            "longcat_flash_ngram"
+        } else {
+            "longcat_flash"
+        }
+    }
+
     pub fn load(model_path: &str) -> Result<(Self, usize), String> {
         let path = Path::new(model_path);
         let config_path = path.join("config.json");
@@ -1050,8 +1129,16 @@ impl LongcatFlashNgramModel {
             lm_head,
             num_layers: args.num_layers,
             _is_ngram: args.is_ngram_model(),
-            state: RefCell::new(LongcatState::new(args.num_layers)),
+            state: RefCell::new(LongcatState::new(args.num_layers, |_| KVCacheMode::Fp16)),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
             kv_mode_warned: Cell::new(false),
+            quantized_latent: Cell::new(mlxcel_core::mla::stores_quantized_latent_pair(
+                if args.is_ngram_model() {
+                    "longcat_flash_ngram"
+                } else {
+                    "longcat_flash"
+                },
+            )),
         })
     }
 }
@@ -1163,32 +1250,62 @@ impl LanguageModel for LongcatFlashNgramModel {
     }
 
     fn reset_runtime_state(&self) {
-        *self.state.borrow_mut() = LongcatState::new(self.num_layers);
+        *self.state.borrow_mut() = LongcatState::new(self.num_layers, |i| {
+            self.kv_cache_layer_modes.mode_for_layer(i)
+        });
     }
 
-    /// The caches hold FP16 only, so a quantized table is refused with one
-    /// warning and `kv_cache_layer_modes` reports FP16.
+    /// Record the per-layer table the latent pair can hold and rebuild the
+    /// model-owned caches in it.
     ///
     /// Each layer's MLA attention stores the `(kv_latent, k_pe)` pair through
-    /// one `KVCache::update_and_fetch`: the "K" slot is `kv_lora_rank` wide and
-    /// the "V" slot is the RoPE key, so neither is a per-head K/V row. That is
-    /// the latent layout `mlxcel_core::mla::latent_layout_supports_mode`
-    /// restricts to FP16 (a Turbo codebook calibrated from one slot would be
-    /// applied to the other, and an asymmetric mode would quantize the RoPE
-    /// key while leaving the latent exact), and the mode resolver already
-    /// maps both LongCat `model_type`s to FP16 on that rule.
+    /// `mla_batched::store_latent_step`, so an `int8` layer keeps the affine
+    /// group-64 latent with fp16 rope keys when the model opted in
+    /// (`quantized_latent`, #3161). A mode
+    /// `mlxcel_core::mla::latent_pair_supports_mode` refuses (every Turbo
+    /// mode, whose codebook calibrated from one slot would be applied to the
+    /// other, and `int8` while LongCat is not a quantized latent family) is
+    /// replaced by FP16 with one warning; the mode resolver already maps such
+    /// requests to FP16 on that rule, so this is the backstop for a caller
+    /// that injects a table directly.
     fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
-        if modes.iter().any(|mode| *mode != KVCacheMode::Fp16) && !self.kv_mode_warned.replace(true)
-        {
-            tracing::warn!(
-                "longcat_flash serves FP16 KV only (its MLA caches hold a latent pair); the \
-                 requested per-layer KV cache modes are ignored"
-            );
-        }
+        let model_type = self.model_type();
+        let opted_in = self.quantized_latent.get();
+        let kept: Vec<KVCacheMode> = modes
+            .into_iter()
+            .map(|mode| {
+                let refusal = if opted_in && mode.latent_affine_bits().is_some() {
+                    None
+                } else {
+                    mlxcel_core::mla::latent_pair_supports_mode(model_type, mode).err()
+                };
+                match refusal {
+                    None => mode,
+                    Some(reason) => {
+                        if !self.kv_mode_warned.replace(true) {
+                            tracing::warn!(
+                                %mode,
+                                "{model_type}: {reason}; layers requesting this KV cache mode \
+                                 use fp16"
+                            );
+                        }
+                        KVCacheMode::Fp16
+                    }
+                }
+            })
+            .collect();
+        self.kv_cache_layer_modes.set(kept);
+        self.reset_runtime_state();
     }
 
+    /// The modes the model-owned caches are built in, FP16 for every layer
+    /// until a table is injected.
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
-        Some(vec![KVCacheMode::Fp16; self.num_layers])
+        Some(
+            (0..self.num_layers)
+                .map(|i| self.kv_cache_layer_modes.mode_for_layer(i))
+                .collect(),
+        )
     }
 }
 
@@ -1333,6 +1450,10 @@ pub fn sanitize_weights(
 #[cfg(test)]
 #[path = "longcat_flash_ngram_engine_tests.rs"]
 mod engine_tests;
+
+#[cfg(test)]
+#[path = "longcat_flash_ngram_latent_tests.rs"]
+mod latent_tests;
 
 #[cfg(test)]
 mod tests {

@@ -3174,13 +3174,21 @@ fn kv_bits_8_is_held_on_deepseek_v2() {
     );
     assert_eq!(batch.base_mode(), KVCacheMode::Int8);
 
-    let glm = kv_quant_model_dir("glm4_moe_lite");
-    let mut batch = uniform8();
-    assert_eq!(
-        super::disable_batch_kv_quant_for_family(&mut batch, glm.path()),
-        Some(KVCacheMode::Int8)
-    );
-    assert!(!batch.is_enabled());
+    // Every family in `mla::QUANTIZED_LATENT_FAMILIES` holds it too; the
+    // other latent-pair families, GLM-4.7-Flash and LongCat among them
+    // (issue #3161), still have it taken off.
+    for &family in mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES {
+        let dir = kv_quant_model_dir(family);
+        let mut batch = uniform8();
+        let refused = super::disable_batch_kv_quant_for_family(&mut batch, dir.path());
+        if mlxcel_core::mla::stores_quantized_latent_pair(family) {
+            assert_eq!(refused, None, "{family}");
+            assert_eq!(batch.base_mode(), KVCacheMode::Int8, "{family}");
+        } else {
+            assert_eq!(refused, Some(KVCacheMode::Int8), "{family}");
+            assert!(!batch.is_enabled(), "{family}");
+        }
+    }
 
     let mut turbo = BatchKvQuantConfig::new(KvQuantScheme::TurboQuant, 4, 64, true).unwrap();
     let refused = super::disable_batch_kv_quant_for_family(&mut turbo, v2.path());

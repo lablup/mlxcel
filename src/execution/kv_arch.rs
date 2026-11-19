@@ -477,9 +477,16 @@ fn classify(
                         group as usize,
                     ) as u64
                 });
+            // A LongCat decoder layer holds two MLA attentions, each with its
+            // own latent cache (`models::longcat_flash_ngram`, #3161).
+            let caches_per_layer = if mt.starts_with("longcat_flash") {
+                2
+            } else {
+                1
+            };
             return Some((
                 vec![KvGroup {
-                    layers: num_layers,
+                    layers: num_layers.saturating_mul(caches_per_layer),
                     elems_per_token: elems,
                     window: None,
                     fixed_bytes_per_token,
@@ -1228,8 +1235,14 @@ mod tests {
         // A latent-pair family outside `mla::QUANTIZED_LATENT_FAMILIES` still
         // resolves int8 to fp16 at startup (the `deepseek_v3` families take
         // the rate since #3160, `kv_arch_latent_pair_tests`).
+        let Some(family) = mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES
+            .iter()
+            .find(|family| !mlxcel_core::mla::stores_quantized_latent_pair(family))
+        else {
+            return;
+        };
         let mut cfg = deepseek_v2_lite_cfg();
-        cfg["model_type"] = json!("glm4_moe_lite");
+        cfg["model_type"] = json!(family);
         let e = estimate_kv_arch_inner(&cfg, 2048, KVCacheMode::Int8.into(), 1, true, true)
             .expect("estimate");
         assert_eq!(e.marginal_bytes_per_token, 4 * 576);

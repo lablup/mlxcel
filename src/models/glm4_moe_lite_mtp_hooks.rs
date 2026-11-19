@@ -147,11 +147,44 @@ impl MlaAttention {
         );
 
         let kv_latent = mlxcel_core::expand_dims(&kv_latent, 1);
-        let (kv_latent, k_pe) = cache.update_and_fetch(kv_latent, k_pe);
+        // The same cache write the decode step makes: an `int8` cache stores
+        // the block's latent rows quantized and hands back a quantized window
+        // (#3161), which the per-row reads below slice exactly as the fp16
+        // window is sliced.
+        let window = crate::models::mla_batched::store_latent_step(
+            cache,
+            self.geometry(),
+            kv_latent,
+            k_pe,
+            "glm4_moe_lite",
+            self.quantized_latent,
+        );
+        let q_projected = self.embed_q.forward(&q_nope);
+        let (kv_latent, k_pe) = match window {
+            mlxcel_core::mla::LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } => {
+                let output = self.verify_rows_quantized(
+                    &q_projected,
+                    &q_pe,
+                    [&ckv_q, &scales, &biases, &kpe],
+                    bits,
+                    group_size,
+                    offset,
+                    l,
+                );
+                return self.project_attention_output(&self.unembed_out.forward(&output), b, l);
+            }
+            window => window.into_dense(),
+        };
 
         let scale_scalar = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
         let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
-        let q_projected = self.embed_q.forward(&q_nope);
 
         let mut rows: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(l as usize);
         for i in 0..l {
@@ -208,20 +241,74 @@ impl MlaAttention {
             };
             rows.push(out_i);
         }
-        let refs: Vec<&MlxArray> = rows
-            .iter()
-            .map(|r| r.as_ref().expect("attention row"))
-            .collect();
-        let output = if refs.len() == 1 {
-            mlxcel_core::copy(refs[0])
-        } else {
-            mlxcel_core::concatenate_many(&refs, 2)
-        };
-        let output = self.unembed_out.forward(&output);
+        let output = concat_rows(&rows);
+        self.project_attention_output(&self.unembed_out.forward(&output), b, l)
+    }
 
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
-        let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
-        self.o_proj.forward(&output)
+    /// The verify block's per-row absorbed attention over a quantized latent
+    /// window (#3161): row `i` reads the first `offset + i + 1` packed rows
+    /// through `quantized_absorbed_attention`, the call the single-token
+    /// decode step makes over a window of that length, so the verify row runs
+    /// the same kernel (fused or composed) on the same stored values as the
+    /// chain and the exactness probe can still clear the pairing. The query
+    /// rows are materialized for the reason [`Self::forward_verify`] gives.
+    /// `window` is `[ckv_q, scales, biases, kpe]` as
+    /// `mla::LatentWindow::Quantized` holds them. Returns `[B, H, L, rank]`.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_rows_quantized(
+        &self,
+        q_projected: &MlxArray,
+        q_pe: &MlxArray,
+        window: [&MlxArray; 4],
+        bits: i32,
+        group_size: i32,
+        offset: i32,
+        l: i32,
+    ) -> UniquePtr<MlxArray> {
+        let b = mlxcel_core::array_shape(q_pe)[0];
+        let row_of = |tensor: &MlxArray, i: i32| {
+            let shape = mlxcel_core::array_shape(tensor);
+            mlxcel_core::contiguous(
+                &mlxcel_core::slice(tensor, &[0, 0, i, 0], &[b, shape[1], i + 1, shape[3]]),
+                false,
+            )
+        };
+        let prefix = |tensor: &MlxArray, visible: i32| {
+            let width = mlxcel_core::array_shape(tensor)[3];
+            mlxcel_core::slice(tensor, &[0, 0, 0, 0], &[b, 1, visible, width])
+        };
+        let [ckv_q, scales, biases, kpe] = window;
+        let rows: Vec<UniquePtr<MlxArray>> = (0..l)
+            .map(|i| {
+                let visible = offset + i + 1;
+                mlxcel_core::mla::quantized_absorbed_attention(
+                    &row_of(q_projected, i),
+                    &row_of(q_pe, i),
+                    &prefix(ckv_q, visible),
+                    &prefix(scales, visible),
+                    &prefix(biases, visible),
+                    &prefix(kpe, visible),
+                    bits,
+                    group_size,
+                    self.scale,
+                    None,
+                )
+            })
+            .collect();
+        concat_rows(&rows)
+    }
+}
+
+/// Stack per-row `[B, H, 1, D]` attention outputs along the query axis.
+fn concat_rows(rows: &[UniquePtr<MlxArray>]) -> UniquePtr<MlxArray> {
+    let refs: Vec<&MlxArray> = rows
+        .iter()
+        .map(|r| r.as_ref().expect("attention row"))
+        .collect();
+    if refs.len() == 1 {
+        mlxcel_core::copy(refs[0])
+    } else {
+        mlxcel_core::concatenate_many(&refs, 2)
     }
 }
 
@@ -318,6 +405,10 @@ impl Glm4MoeLiteModel {
 
     /// Drop the last `rejected` entries of every layer cache in the
     /// sequence's MTP slot. Returns the entries actually trimmed on layer 0.
+    ///
+    /// An `int8` slot holds the affine latent in the cache's per-token slots
+    /// (`cache::latent_quant`), so the same `trim` drops the packed rows, their
+    /// scales and biases, and the rope keys together (#3161).
     ///
     /// Used by: `Glm4MoeLiteMtpTargetAdapter::verify_finalize`.
     pub(crate) fn rollback_speculative_cache_for_sequence(
