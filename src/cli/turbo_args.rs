@@ -497,7 +497,10 @@ pub fn resolve_effective_kv_cache_mode(
 /// `index_head_dim`-wide indexer key beside the latent, and the affine `int8`
 /// latent stores that whole slot in groups of 64 (issue #3163). A config whose
 /// `kv_lora_rank` or `kv_lora_rank + index_head_dim` is not a multiple of 64
-/// keeps fp16 from startup; the shipping geometry (512 + 128) passes.
+/// keeps fp16 from startup; the shipping geometry (512 + 128) passes. The DSA
+/// types are not quantized-latent families today (the #3163 overlap gate), so
+/// the resolver already returns fp16 for them and this rule only takes effect
+/// once they are listed.
 fn dsa_key_slot_refusal(
     config: &serde_json::Value,
     model_type: &str,

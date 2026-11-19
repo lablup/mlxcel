@@ -481,3 +481,24 @@ fn a_dsa_key_slot_the_codec_cannot_group_is_refused_at_startup() {
     }
     assert!(super::dsa_key_slot_refusal(&cfg(512, 100), "deepseek_v3", int8).is_none());
 }
+
+/// End to end on a model directory: `int8` on a DSA model resolves to fp16
+/// with a warning and stores no quantized latent, since the families missed
+/// the top-k overlap gate of #3163 and are not quantized-latent families.
+#[test]
+fn int8_on_a_dsa_model_still_resolves_to_fp16() {
+    for family in ["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"] {
+        let dir = model_dir_with_type(family);
+        let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
+        assert_eq!(mode, KVCacheMode::Fp16, "{family}");
+        let warning = warning.expect("the substitution must be explained");
+        assert!(
+            warning.contains(family) && warning.contains("Using fp16"),
+            "{warning}"
+        );
+        assert!(!super::model_stores_quantized_latent(
+            KVCacheMode::Int8,
+            dir.path()
+        ));
+    }
+}

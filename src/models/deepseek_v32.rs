@@ -856,12 +856,19 @@ impl MoEGate {
         let scores = mlxcel_core::add(&scores, &self.e_score_correction_bias);
 
         // Group-based expert masking (zero out non-selected groups)
+        // `group_mask_scores` takes `[tokens, num_experts]`; the scores here
+        // are `[B, L, num_experts]`, which it skipped with a warning, so every
+        // token routed as if the model declared no groups (issue #3163).
         let scores = if self.n_group > 1 {
-            super::switch_layers::group_mask_scores(
-                &scores,
+            let shape = mlxcel_core::array_shape(&scores);
+            let n_experts = shape.last().copied().unwrap_or(1);
+            let flat = mlxcel_core::reshape(&scores, &[-1, n_experts]);
+            let masked = super::switch_layers::group_mask_scores(
+                &flat,
                 self.n_group as i32,
                 self.topk_group as i32,
-            )
+            );
+            mlxcel_core::reshape(&masked, &shape)
         } else {
             scores
         };
@@ -962,7 +969,9 @@ impl SwitchGLU {
         let gate = silu(&gate);
         let up = self.up_proj.forward(&x_expanded, indices);
         let h = mlxcel_core::multiply(&gate, &up);
-        self.down_proj.forward(&h, indices)
+        // `[.., k, 1, hidden]` to `[.., k, hidden]`, as mlx-lm's `SwitchGLU`
+        // does: `moe_weighted_sum` broadcasts the `[.., k]` scores over it.
+        mlxcel_core::squeeze_axis(&self.down_proj.forward(&h, indices), -2)
     }
 }
 
@@ -1553,6 +1562,49 @@ fn load_switch_glu(
     })
 }
 
+/// The expert plane when the checkpoint stores it already stacked along the
+/// expert axis, as mlx-lm's `sanitize` writes it and the mlx-community
+/// conversions ship it: `{mlp}.switch_mlp.{proj}.{weight,scales,biases}` with
+/// a leading `num_experts` dimension (issue #3163; DeepSeek-V3.2-4bit could
+/// not be loaded without this). `prefix` is the per-expert `{mlp}.experts`
+/// prefix; `None` when the checkpoint has no stacked plane there.
+fn load_stacked_switch_linear(
+    weights: &WeightMap,
+    num_experts: usize,
+    prefix: &str,
+    weight_name: &str,
+    group_size: i32,
+    bits: i32,
+) -> Result<Option<SwitchLinear>, String> {
+    let Some(mlp) = prefix.strip_suffix(".experts") else {
+        return Ok(None);
+    };
+    let stacked = format!("{mlp}.switch_mlp.{weight_name}");
+    let weight_key = format!("{stacked}.weight");
+    if !weights.contains_key(&weight_key) {
+        return Ok(None);
+    }
+    let weight = get_weight_copy(weights, &weight_key)?;
+    let planes = mlxcel_core::array_shape(&weight).first().copied();
+    if planes != i32::try_from(num_experts).ok() {
+        return Err(format!(
+            "{weight_key}: stacked expert plane has leading dimension {planes:?}, expected \
+             n_routed_experts {num_experts}"
+        ));
+    }
+    if !weights.contains_key(&format!("{stacked}.scales")) {
+        return Ok(Some(SwitchLinear::Regular { weight }));
+    }
+    validate_expert_quantization_params(&stacked, group_size, bits)?;
+    Ok(Some(SwitchLinear::Quantized {
+        weight,
+        scales: get_weight_copy(weights, &format!("{stacked}.scales"))?,
+        biases: get_weight_copy(weights, &format!("{stacked}.biases"))?,
+        group_size,
+        bits,
+    }))
+}
+
 fn load_switch_linear(
     weights: &WeightMap,
     num_experts: usize,
@@ -1561,6 +1613,12 @@ fn load_switch_linear(
     group_size: i32,
     bits: i32,
 ) -> Result<SwitchLinear, String> {
+    if let Some(stacked) =
+        load_stacked_switch_linear(weights, num_experts, prefix, weight_name, group_size, bits)?
+    {
+        return Ok(stacked);
+    }
+
     let mut expert_weights = Vec::with_capacity(num_experts);
 
     // Check if first expert has scales (quantized vs non-quantized)

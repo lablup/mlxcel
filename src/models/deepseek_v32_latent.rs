@@ -32,6 +32,13 @@
 //! A multi-token step dequantizes the window once and runs the fp16 code in
 //! `deepseek_v32.rs`, so prefill reads the values decode reads.
 //!
+//! The mode resolver does not hand these families an `int8` cache: on
+//! DeepSeek-V3.2-4bit the trace gate passed and the top-k overlap gate did not
+//! (`docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md`),
+//! so they are not in `mla::QUANTIZED_LATENT_FAMILIES` and this path is reached
+//! only by a harness that sets the cache mode itself
+//! (`MLXCEL_TRACE_KV_CACHE_MODE=int8`).
+//!
 //! This file also holds the selection trace (`MLXCEL_TRACE_DSA_TOPK`) that the
 //! top-k overlap gate of #3163 is measured with.
 

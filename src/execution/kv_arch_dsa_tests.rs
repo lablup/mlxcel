@@ -50,6 +50,28 @@ fn dsa_fp16_slot_counts_the_indexer_key() {
     }
 }
 
+/// The DSA families are not quantized-latent families (the top-k overlap gate
+/// of #3163 was missed), so an `int8` request is not sized at the affine rate
+/// of 808 bytes: the run resolves it to fp16 at startup.
+#[test]
+fn dsa_int8_request_gets_no_affine_rate() {
+    for family in ["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"] {
+        let e = estimate_kv_arch_from_config(&dsa_text(family), 2048, KVCacheMode::Int8, 1)
+            .expect("estimate");
+        assert_ne!(e.marginal_bytes_per_token, 4 * 808, "{family}");
+        assert!(
+            !e.detail.contains("affine-quantized"),
+            "{family}: {}",
+            e.detail
+        );
+    }
+    // The rate the slot would cost, for the day the families are enabled.
+    assert_eq!(
+        mlxcel_core::mla::quantized_latent_bytes_per_token(640, 64, 8, 64),
+        808
+    );
+}
+
 /// `index_head_dim` is read from the config when it is there.
 #[test]
 fn dsa_slot_follows_a_declared_index_head_dim() {

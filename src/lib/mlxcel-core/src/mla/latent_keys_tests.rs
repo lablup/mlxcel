@@ -97,6 +97,37 @@ fn dsa_families_are_latent_pair_families() {
     assert!(!caches_dsa_indexer_key("glm4_moe_lite"));
 }
 
+/// The DSA families are not in `QUANTIZED_LATENT_FAMILIES`: on DeepSeek-V3.2
+/// the int8 slot passed the trace gate and missed the top-k overlap gate
+/// (`docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md`),
+/// so every quantized request still resolves to fp16 with a warning.
+#[test]
+fn dsa_families_still_resolve_every_quantized_mode_to_fp16() {
+    use crate::cache::turbo::resolve_kv_cache_mode_for_model_with;
+    for &family in DSA_INDEXER_KEY_FAMILIES {
+        assert!(
+            !crate::mla::stores_quantized_latent_pair(family),
+            "{family}"
+        );
+        for absorbed in [false, true] {
+            for requested in [
+                KVCacheMode::Int8,
+                KVCacheMode::Turbo4Asym,
+                KVCacheMode::Turbo4,
+            ] {
+                let (effective, warning) =
+                    resolve_kv_cache_mode_for_model_with(requested, family, absorbed);
+                assert_eq!(effective, KVCacheMode::Fp16, "{family} {requested}");
+                assert!(warning.is_some(), "{family} {requested}");
+            }
+            let (effective, warning) =
+                resolve_kv_cache_mode_for_model_with(KVCacheMode::Fp16, family, absorbed);
+            assert_eq!(effective, KVCacheMode::Fp16);
+            assert!(warning.is_none(), "{family}: {warning:?}");
+        }
+    }
+}
+
 #[test]
 fn the_view_stores_a_sidecar_width_and_refuses_one_it_cannot_group() {
     let _guard = serial();
