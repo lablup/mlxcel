@@ -20,7 +20,7 @@ Implementation entry points:
 | User-facing mode | Effective cache mode | Notes |
 |------------------|----------------------|-------|
 | `fp16` | `KVCacheMode::Fp16` | Default and baseline. |
-| `int8` | `KVCacheMode::Int8` | Per-token INT8 absmax quantization. |
+| `int8` | `KVCacheMode::Int8` | Per-token INT8 absmax quantization. On DeepSeek V2 under absorbed MLA decode it stores the MLA latent as affine group-64 8-bit instead (see [MLA latent caches](#mla-latent-caches)). |
 | `fp16+turbo4` / `turbo4-asym` | `KVCacheMode::Turbo4Asym` | FP16 K, 4-bit TurboQuant V. Safest TurboQuant starting point. |
 | `turbo4` / `turbo4-sym` | `KVCacheMode::Turbo4` | 4-bit TurboQuant K and V. K-side quantization is quality-sensitive; use only on validated/allowlisted families. |
 | `turbo4-delegated` | `KVCacheMode::Turbo4Delegated` | Hot/cold split on the V side with packed cold storage. Validate speed on target hardware. |
@@ -233,49 +233,39 @@ The failure this table prevents is the one lablup/mlxcel#1769 and the pin bump i
 lablup/mlxcel#1772 already cost once: `E8M0` rounding saturated block maxima by up
 to 29 percent, and nothing downstream said so.
 
-## MLA latent caches are FP16 only
+## MLA latent caches
 
-`glm4_moe_lite`, `deepseek_v3`, `kimi_k2`, `joyai_llm_flash`, `kimi_vl`,
-`kimi_k25`, `youtu`, `youtu_llm`, `youtu_vl`, `deepseek_v32` (also spelled
-`deepseek_v3.2`), `glm_moe_dsa`, `kimi_linear`, `kimi_k3`, `longcat_flash` and
-`longcat_flash_ngram` store an MLA `(kv_latent, k_pe)` pair in one `KVCache`:
-the "K" slot holds the `kv_lora_rank`-wide latent (512 in the shipping
-checkpoints) and the "V" slot holds the `qk_rope_head_dim`-wide RoPE key
-stream (64). `deepseek_v32`, `deepseek_v3.2` and `glm_moe_dsa` concatenate the
-`index_head_dim`-wide DSA indexer key onto the same "K" slot, so theirs is 640
-wide at the default `index_head_dim` of 128. Neither slot is a per-head K/V row
-at any of those widths, so no quantized mode is calibrated for what they
-contain:
+An absorbed MLA cache does not hold per-head K/V rows. It holds the shared latent `ckv` (`kv_lora_rank` wide, 512 in the shipping checkpoints) and the RoPE key stream `k_pe` (`qk_rope_head_dim` wide, 64). Which KV modes such a cache accepts depends on how the family reads it.
 
-- Symmetric `turbo4` builds its sign vectors and codebook from the "V" width and
-  applies them to the "K" slot as well, reading 448 floats past the end of a
-  64-entry sign vector (576 on the indexer-carrying families). On `glm4-flash`
-  every generated token came out `!`.
-- The asymmetric modes (`fp16+turbo4`, `fp16+turbo3`, `turbo4-delegated`)
-  quantize only the "V" slot, which here is `k_pe`. They therefore compress a
-  **key** and leave the latent exact, which is the reverse of the "FP16 K,
-  4-bit V" contract in the mode table above. Output stayed finite, which is why
-  this went unnoticed.
+### DeepSeek V2: fp16 or an affine int8 latent
 
-Any non-`fp16` mode requested for one of these families resolves to `fp16` with
-one warning naming the family and the requested mode. `deepseek_v2` is not in
-this set: it asks `MlaLatentCache::supports` per cache, and with absorbed decode
-off a quantized mode lands on ordinary per-head K/V rows and keeps working. With
-absorbed decode on (the default on Metal, CUDA and ROCm) the same request would
-decline the latent and store the decompressed cache, which is larger than the
-fp16 latent it replaces (5120 bytes per token per layer for int8 and about 7.2
-KB for turbo4-asym on V2-Lite, against 1152), slower to decode and lossy. The
-resolver therefore substitutes `fp16` with a warning, and `--kv-bits` /
-`--kv-quant-scheme` are disabled the same way. Set `MLXCEL_MLA_ABSORBED=0` to
-keep the decompressed quantized layout. The memory estimate (`mlxcel inspect`,
-the `--estimate-memory` preflights, `--recommend-quant` and the server's
-prompt-cache store budget) sizes the mode the run resolves to, which with
-absorption off is 10240 bytes per token per layer on V2-Lite for any non-`fp16`
-mode (#3153). A quantized latent cache is future work.
+`deepseek_v2` (and the `deepseek_v2` decoder inside DeepSeek-VL2) reads its cache through `mla::MlaLatentCache`. Under absorbed decode, which is the default on Metal, CUDA and ROCm, that cache holds:
 
-Making a Turbo mode work on the latent layout is a new calibration and a new
-kernel (a 512-wide codebook for the latent with `k_pe` left at FP16), not a
-configuration change.
+| Mode | Latent `ckv` | `k_pe` | Bytes per token per layer (V2-Lite) |
+|------|--------------|--------|-------------------------------------|
+| `fp16` (default) | fp16 | fp16 | 1152 |
+| `int8` | MLX affine group-64 8-bit, fp16 scale and bias per group | fp16 | 672 (512 + 32 + 128) |
+
+`--kv-cache-mode int8`, `--cache-type-k int8 --cache-type-v int8` and `--kv-bits 8` (uniform) all select the int8 latent. This is a different codec from per-token int8: one absmax scale for a 512-wide row that every query head reads is too coarse, and it would force a full-window dequantize on every decode step. The affine triple is what `quantized_matmul` consumes, so a decode step computes both the latent score and the latent-value sum on the packed rows without dequantizing the window. `k_pe` stays fp16 for RoPE precision. A multi-token step and a cold prefill dequantize the window once per step and run the same code as the fp16 latent, after the fresh rows were stored quantized, so prefill and decode read the same values. The group size is fixed at 64; `--kv-group-size` with another value fails server startup for such a model. `--kv-skip-last-layer` (the `--kv-bits` default) keeps the last layer as an fp16 latent.
+
+Decode runs on the composed path (`absorbed_composed` in `MLXCEL_TRACE_MLA_STATS=1`), not the fused Metal kernel, which reads an fp16 latent; a fused kernel for the quantized latent is #3156. Measured on an M3 Ultra with DeepSeek-V2-Lite ([results](benchmark_results/mla-quantized-latent-m3ultra-2026-11-19.md)): the teacher-forced trace against the fp16 latent shows no disagreement on decided positions behind 1024 and 4096 tokens, and decode is 13 to 15% slower than the fp16 latent behind 512 and 2048 tokens and 36% slower behind 16384, while staying 1.15x to 2.8x faster than the decompressed per-head int8 cache it replaces.
+
+A 4-bit affine latent (416 bytes per token per layer) was implemented and measured in the same change and is not offered. It also showed no decided-position disagreement, but it flipped the top-1 token at 8.8% and 5.5% of positions with reference top-two gaps up to 0.86 logits, against the gate of 0.11, so `int4` is not a KV cache mode and `--kv-bits 4` with the uniform scheme stays a startup error.
+
+The Turbo modes do not fit the latent, for the reasons listed under the latent-pair families below, and a Turbo request on an absorbing `deepseek_v2` would decline the latent and store the decompressed per-head cache, which is larger than the fp16 latent (about 7.2 KB per token per layer for turbo4-asym on V2-Lite against 1152). The resolver therefore substitutes `fp16` with a warning that names `int8` as the quantized latent mode, and `--kv-quant-scheme turboquant` is disabled the same way. A WHT-rotated latent codec is #3157.
+
+With `MLXCEL_MLA_ABSORBED=0` there is no latent: `deepseek_v2` caches decompressed per-head K/V, `int8` is per-token absmax there (5120 bytes per token per layer on V2-Lite) and the Turbo modes apply to ordinary rows. The memory estimate (`mlxcel inspect`, the `--estimate-memory` preflights, `--recommend-quant` and the server's prompt-cache store budget) sizes the layout the run resolves to in every case (#3153, #3155).
+
+### Latent-pair families: fp16 only
+
+`glm4_moe_lite`, `deepseek_v3`, `kimi_k2`, `joyai_llm_flash`, `kimi_vl`, `kimi_k25`, `youtu`, `youtu_llm`, `youtu_vl`, `deepseek_v32` (also spelled `deepseek_v3.2`), `glm_moe_dsa`, `kimi_linear`, `kimi_k3`, `longcat_flash` and `longcat_flash_ngram` store the `(kv_latent, k_pe)` pair in one `KVCache` directly: the "K" slot holds the latent and the "V" slot holds `k_pe`. `deepseek_v32`, `deepseek_v3.2` and `glm_moe_dsa` concatenate the `index_head_dim`-wide DSA indexer key onto the same "K" slot, so theirs is 640 wide at the default `index_head_dim` of 128. Neither slot is a per-head K/V row at any of those widths, so no per-token quantized mode is calibrated for what they contain:
+
+- Symmetric `turbo4` builds its sign vectors and codebook from the "V" width and applies them to the "K" slot as well, reading 448 floats past the end of a 64-entry sign vector (576 on the indexer-carrying families). On `glm4-flash` every generated token came out `!`.
+- The asymmetric modes (`fp16+turbo4`, `fp16+turbo3`, `turbo4-delegated`) quantize only the "V" slot, which here is `k_pe`. They therefore compress a **key** and leave the latent exact, which is the reverse of the "FP16 K, 4-bit V" contract in the mode table above. Output stayed finite, which is why this went unnoticed.
+
+Any non-`fp16` mode requested for one of these families resolves to `fp16` with one warning naming the family and the requested mode, and `--kv-bits` / `--kv-quant-scheme` are disabled the same way.
+
+**Decision (#3155):** the affine int8 latent ships for `deepseek_v2` only. These families bypass `MlaLatentCache` and call `KVCache::update_and_fetch` from their own attention code (`src/models/deepseek_v3.rs`, `src/models/mla_batched.rs`, `src/models/deepseek_v32.rs` and the Kimi, GLM and LongCat models), so moving each one onto the latent view, and deciding what the indexer-carrying 640-wide slot stores, is per-family work with its own quality gate. They keep the fp16 substitution until then. The follow-ups are #3160, #3161, #3162 and #3163, under epic #3158.
 
 ## Paged cache and server batching
 
@@ -566,7 +556,9 @@ The conservative rules the advisor applies:
 | Standard / sliding-window / hybrid, medium | `int8` | `turbo4-delegated` | int8 is the fastest quantized mode (~2x); turbo4-delegated for ~4x V at a similar speed. |
 | Standard / sliding-window / hybrid, long, allowlisted | `turbo4` | `turbo4-delegated` | Family passed the PPL gate; turbo4 is max compression, delegated is the faster fallback. |
 | Standard / sliding-window / hybrid, long, not allowlisted | `turbo4-delegated` | `fp16+turbo4` | Fastest ~4x V compression; fp16+turbo4 is the exact-K alternative. Symmetric `turbo4` withheld off the allowlist. |
-| MLA (DeepSeek), medium or long | `int8` | - | The latent dimension is not a power of two, so the Turbo Walsh-Hadamard V path does not apply; per-token INT8 has no head-dim constraint. |
+| MLA (DeepSeek V2 without absorbed decode), medium or long | `int8` | - | The cache holds decompressed per-head rows whose dimension is not a power of two, so the Turbo Walsh-Hadamard V path does not apply; per-token INT8 has no head-dim constraint. |
+| MLA (DeepSeek V2 under absorbed decode), medium or long | `int8` | - | Stores the MLA latent as affine group-64 8-bit, about 1.7x smaller than the fp16 latent, and keeps absorbed decode (#3155). |
+| MLA latent-pair families (DeepSeek V3 and the rest of the list above) | `fp16` | - | Every quantized mode is substituted back to fp16 at startup. |
 | Pure SSM (Mamba/Mamba2) | `fp16` | - | No context-proportional KV cache, so Turbo modes save almost nothing. |
 | Non-power-of-two head dim (e.g. Phi-2 at head_dim 80) | `int8` (medium/long), `fp16` (short) | - | The Turbo Walsh-Hadamard transform requires a power-of-two head dimension; the advisor downgrades any Turbo suggestion to `int8` or `fp16` for these families, matching the MLA treatment. |
 
@@ -603,5 +595,6 @@ require local model checkouts.
   have different bottlenecks from the developer benchmark machines.
 - Experimental environment-variable paths are useful for A/B testing but should
   not appear in user-facing recommendations without fresh benchmark data.
-- No TurboQuant or INT8 mode is available on the MLA latent families listed
-  above; they serve at FP16 whatever is requested.
+- No TurboQuant or INT8 mode is available on the MLA latent-pair families
+  listed above; they serve at FP16 whatever is requested. `deepseek_v2` under
+  absorbed decode holds `fp16` or the affine `int8` latent, and no Turbo mode.
