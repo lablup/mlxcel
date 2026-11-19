@@ -129,18 +129,31 @@ fn profile_rejects_model_kv_substitution_and_read_only_distributed_geometry() {
         model_path: temp.path().to_path_buf(),
         ..Default::default()
     };
+    // DeepSeek V3 stores its MLA latent as fp16 or int8 (#3172), so a Turbo
+    // mode is the one it would still substitute with fp16.
     assert!(
-        profile(serde_json::json!({"kv_cache_mode":"int8"}))
+        profile(serde_json::json!({"kv_cache_mode":"turbo4-asym"}))
             .apply(&mut startup, &Default::default())
             .is_err()
     );
-    startup.kv_cache_mode = KVCacheMode::Int8;
+    startup.kv_cache_mode = KVCacheMode::Turbo4Asym;
     assert!(
         profile(serde_json::json!({"ctx_size":8192}))
             .apply(&mut startup, &Default::default())
             .is_err(),
         "context-only profile revalidates inherited unsafe KV policy"
     );
+    let mut startup = ServerStartupConfig {
+        model_path: temp.path().to_path_buf(),
+        ..Default::default()
+    };
+    assert!(
+        profile(serde_json::json!({"kv_cache_mode":"int8"}))
+            .apply(&mut startup, &Default::default())
+            .is_ok(),
+        "int8 keeps the quantized MLA latent on DeepSeek V3"
+    );
+    assert_eq!(startup.kv_cache_mode, KVCacheMode::Int8);
     let mut startup = ServerStartupConfig {
         tp_size: 2,
         ..Default::default()
