@@ -239,6 +239,7 @@ fn a_key_selector_over_a_quantized_row_panics_naming_the_family() {
     };
     let _ = crate::models::mla_batched::mla_latent_decode_rows(
         "deepseek_v32",
+        true,
         geometry,
         &q_latent,
         &q_pe,
@@ -248,6 +249,33 @@ fn a_key_selector_over_a_quantized_row_panics_naming_the_family() {
         1.0,
         Some(&select),
     );
+}
+
+/// An int8 cache of a family that has not opted in (`glm4_moe_lite`,
+/// `kimi_linear`, `kimi_k3`, `deepseek_v32`) keeps the per-token path: no latent
+/// view, a dense window, and rows stored as the cache's own int8 per-token
+/// layout. The opted-in caller gets the quantized window from the same cache
+/// mode, so the flag alone separates the two.
+#[test]
+fn an_int8_cache_of_a_family_that_did_not_opt_in_keeps_the_per_token_path() {
+    use mlxcel_core::mla::LatentWindow;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let geometry = crate::models::mla_batched::mla_geometry(2, 64, 8, 8, 8);
+    let step = |opt_in: bool| {
+        let kv = mlxcel_core::from_slice_f32(&ramp(64), &[1, 1, 1, 64]);
+        let k_pe = mlxcel_core::from_slice_f32(&ramp(8), &[1, 1, 1, 8]);
+        let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
+        crate::models::mla_batched::store_latent_step(
+            &mut cache,
+            geometry,
+            kv,
+            k_pe,
+            "glm4_moe_lite",
+            opt_in,
+        )
+    };
+    assert!(matches!(step(false), LatentWindow::Dense { .. }));
+    assert!(matches!(step(true), LatentWindow::Quantized { .. }));
 }
 
 /// A parked and restored quantized latent (the prompt-cache store and the

@@ -334,6 +334,7 @@ impl DeepSeekV3Attention {
             kv_latent,
             k_pe,
             "DeepSeekV3Attention",
+            true,
         );
 
         // Cost-model gate (issue #2408): one query is always absorbed, and a
@@ -579,6 +580,7 @@ impl DeepSeekV3Attention {
         let q_latent = self.embed_q.forward(&q_nope);
         let output = crate::models::mla_batched::mla_latent_decode_rows(
             "DeepSeekV3Attention",
+            true,
             self.geometry(),
             &q_latent,
             &q_pe,

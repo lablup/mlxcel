@@ -454,6 +454,7 @@ impl MlaAttention {
         );
         let output = crate::models::mla_batched::mla_latent_decode_rows(
             "glm4_moe_lite",
+            false,
             geometry,
             &q_latent,
             &q_pe,

@@ -2,7 +2,7 @@
 
 Issue #3160, Phase 2 of epic #3158. #3155 stored the absorbed MLA latent as MLX affine group-64 int8 with fp16 `k_pe` on DeepSeek V2 (672 bytes per token per layer at rank 512, rope 64, against 1152 for the fp16 latent). The `DeepSeekV3Attention` families cached their latent pair through `KVCache::update_and_fetch` directly and had every quantized request substituted with fp16. This change writes that pair through `mla::MlaLatentCache` in the single-sequence forward and the shared batched decode helper, so `--kv-cache-mode int8` and `--kv-bits 8` keep the int8 latent on `deepseek_v3`, `kimi_k2`, `joyai_llm_flash`, `kimi_vl`, `kimi_k25`, `youtu`, `youtu_llm` and `youtu_vl`. Only int8 exists; 4-bit failed the #3155 gate and is not a mode.
 
-**Outcome:** zero decided-position disagreements on both checkpoints behind 1024 and 4096 tokens. One top-1 flip per checkpoint behind 1024 sits just outside the 0.11-logit near-tie bar #3155 used (0.117 on Moonlight, 0.180 on Kimi-VL); every other flip is inside it. See "Near-tie bar" below.
+**Outcome:** zero decided-position disagreements on both checkpoints behind 1024 and 4096 tokens. One top-1 flip per checkpoint behind 1024 is outside the 0.11-logit near-tie bar #3155 used: 0.117 on Moonlight and 0.180 on Kimi-VL, the latter well beyond the 0.109 fp16 fused-versus-composed noise floor; every other flip is inside the bar. This remains an open item. See "Near-tie bar" below.
 
 ## Setup
 

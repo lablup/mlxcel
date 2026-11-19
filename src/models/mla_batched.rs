@@ -14,7 +14,8 @@
 
 //! Shared per-row cache step for latent MLA decode.
 
-use std::sync::Once;
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::mla::{LatentWindow, MlaGeometry, MlaLatentCache};
@@ -51,16 +52,23 @@ pub(crate) fn mla_geometry(
 /// affine group-64 triple and returns [`LatentWindow::Quantized`] (#3155,
 /// #3160). If the view declines the cache (a `kv_lora_rank` that is not a
 /// whole number of groups, or a paged backing), the step falls back to the
-/// cache's own per-token update and warns once: the cache keeps one layout for
-/// its whole life because the answer depends only on its mode and geometry.
+/// cache's own per-token update and warns once per family: the cache keeps one
+/// layout for its whole life because the answer depends only on its mode and
+/// geometry.
+///
+/// `quantized_latent` is the caller's opt in: only the `DeepSeekV3Attention`
+/// callers (the families in `mla::QUANTIZED_LATENT_FAMILIES`) pass `true`. A
+/// caller that passes `false` never gets the latent view, whatever the cache
+/// mode, so a family outside the list keeps its per-token path.
 pub(crate) fn store_latent_step(
     cache: &mut KVCache,
     geometry: MlaGeometry,
     kv_latent: UniquePtr<MlxArray>,
     k_pe: UniquePtr<MlxArray>,
     family: &str,
+    quantized_latent: bool,
 ) -> LatentWindow {
-    if cache.mode.latent_affine_bits().is_some() {
+    if quantized_latent && cache.mode.latent_affine_bits().is_some() {
         match MlaLatentCache::supports(cache, geometry) {
             Ok(()) => {
                 return MlaLatentCache::wrap(cache, geometry)
@@ -75,15 +83,20 @@ pub(crate) fn store_latent_step(
 }
 
 fn warn_latent_view_declined(family: &str, mode: mlxcel_core::cache::KVCacheMode, reason: &str) {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let first = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut seen| seen.insert(family.to_string()))
+        .unwrap_or(false);
+    if first {
         tracing::warn!(
             family,
             %mode,
             reason,
             "MLA latent view declined this cache; storing per-token {mode} rows instead of the affine latent"
         );
-    });
+    }
 }
 
 /// Validate the common serving decode contract before a family indexes a
@@ -136,11 +149,15 @@ pub(crate) fn validate_mla_decode_batch(
 /// selection) reads a dense window, so a quantized row with a selector is a
 /// wiring error and panics naming `family`.
 ///
+/// `quantized_latent` opts the caller in to the quantized latent view; see
+/// [`store_latent_step`]. Only `DeepSeekV3Attention` passes `true`.
+///
 /// Used by: `DeepSeekV3Attention` (DeepSeek V3, Kimi, Youtu), DeepSeek V3.2
 /// MLA, GLM-4.7-Flash MLA, Kimi Linear and Kimi K3.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mla_latent_decode_rows(
     family: &str,
+    quantized_latent: bool,
     geometry: MlaGeometry,
     q_latent: &MlxArray,
     q_pe: &MlxArray,
@@ -178,29 +195,29 @@ pub(crate) fn mla_latent_decode_rows(
         let q_pe_row = row4(q_pe, row);
         let kv_row = row4(kv_latent, row);
         let k_pe_row = row4(k_pe, row);
-        let (kv_all, k_pe_all) = match store_latent_step(cache, geometry, kv_row, k_pe_row, family)
-        {
-            LatentWindow::Dense { ckv, kpe } => (ckv, kpe),
-            LatentWindow::Quantized {
-                ckv_q,
-                scales,
-                biases,
-                kpe,
-                bits,
-                group_size,
-            } => {
-                assert!(
-                    select.is_none(),
-                    "{family}: mla_latent_decode_rows row {row} holds a quantized latent, \
+        let (kv_all, k_pe_all) =
+            match store_latent_step(cache, geometry, kv_row, k_pe_row, family, quantized_latent) {
+                LatentWindow::Dense { ckv, kpe } => (ckv, kpe),
+                LatentWindow::Quantized {
+                    ckv_q,
+                    scales,
+                    biases,
+                    kpe,
+                    bits,
+                    group_size,
+                } => {
+                    assert!(
+                        select.is_none(),
+                        "{family}: mla_latent_decode_rows row {row} holds a quantized latent, \
                      which a key selector cannot read; this family must keep an fp16 latent"
-                );
-                outputs.push(mlxcel_core::mla::quantized_absorbed_attention(
-                    &q_row, &q_pe_row, &ckv_q, &scales, &biases, &kpe, bits, group_size, scale,
-                    None,
-                ));
-                continue;
-            }
-        };
+                    );
+                    outputs.push(mlxcel_core::mla::quantized_absorbed_attention(
+                        &q_row, &q_pe_row, &ckv_q, &scales, &biases, &kpe, bits, group_size, scale,
+                        None,
+                    ));
+                    continue;
+                }
+            };
         let (kv_selected, k_pe_selected) = match select {
             Some(select) => select(row, &kv_all, &k_pe_all),
             None => (kv_all, k_pe_all),

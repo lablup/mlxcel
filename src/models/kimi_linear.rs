@@ -544,6 +544,7 @@ impl KimiMLAAttention {
         );
         let output = super::mla_batched::mla_latent_decode_rows(
             "kimi_linear",
+            false,
             geometry,
             &q_latent,
             &q_pe,

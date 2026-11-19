@@ -1132,7 +1132,8 @@ impl KimiK3MLAAttention {
             self.v_head_dim,
         );
         let output = super::mla_batched::mla_latent_decode_rows(
-            "kimi_k3", geometry, &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale, None,
+            "kimi_k3", false, geometry, &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale,
+            None,
         );
         let output = self.unembed_out.forward(&output, true);
         self.project_output(x, &output, b, 1)
