@@ -100,6 +100,19 @@ struct KvGroup {
     elems_per_token: u64,
     /// Sliding-window cap in tokens; `None` for full-context layers.
     window: Option<u64>,
+    /// Bytes per token per layer when the group's storage is not
+    /// `elems_per_token` elements of one width: an affine-quantized MLA
+    /// latent (packed latent, group scales and biases, FP16 rope stream).
+    /// `None` for every element-width group.
+    fixed_bytes_per_token: Option<u64>,
+}
+
+impl KvGroup {
+    /// Bytes one token costs in one layer of this group.
+    fn bytes_per_token(&self, int8: bool) -> u64 {
+        self.fixed_bytes_per_token
+            .unwrap_or_else(|| self.elems_per_token.saturating_mul(elem_bytes(int8)))
+    }
 }
 
 /// How the KV cache is sized: the cache mode plus whether one layer stays FP16.
@@ -376,9 +389,9 @@ fn nemotron_h_block_codes(text: &Value, mt: &str) -> Option<Vec<&'static str>> {
 /// Mirrors the runtime: the loader folds `kv_b_proj` exactly when
 /// `mla::absorbed_enabled()` holds, and each cache is then wrapped as a latent
 /// cache only if `MlaLatentCache::supports` accepts it. That check declines
-/// every mode `mla::latent_layout_supports_mode` refuses (today all but FP16:
-/// INT8 and every Turbo mode), and the model then keeps decompressed per-head
-/// K/V. Calling the shared rule rather than comparing to FP16 keeps the
+/// every mode `mla::latent_layout_supports_mode` refuses (every Turbo mode;
+/// FP16 is held as is and `int8` stores the latent affine-quantized, issue
+/// #3155), and the model then keeps decompressed per-head K/V. Calling the shared rule rather than comparing to FP16 keeps the
 /// estimate in step when a mode is added. The other decline, a paged-backed
 /// cache, cannot reach `deepseek_v2`: the family does not opt into the paged
 /// decode backend.
@@ -398,8 +411,15 @@ pub fn deepseek_v2_caches_latent(mode: KVCacheMode) -> bool {
 /// Classify a model's config into KV layer groups and an architecture kind.
 ///
 /// `v2_latent` says whether DeepSeek V2 caches the latent in this run
-/// ([`deepseek_v2_caches_latent`]); no other family reads it.
-fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGroup>, KvArchKind)> {
+/// ([`deepseek_v2_caches_latent`]) and `v2_latent_bits` the affine bit width
+/// it stores it at, if any ([`KVCacheMode::latent_affine_bits`]); no other
+/// family reads either.
+fn classify(
+    text: &Value,
+    model_type: &str,
+    v2_latent: bool,
+    v2_latent_bits: Option<u64>,
+) -> Option<(Vec<KvGroup>, KvArchKind)> {
     let mt = model_type.to_ascii_lowercase();
     // A transformers-saved Nemotron-H config describes its stack only through
     // the block-name array, with no layer count: the model takes the count
@@ -432,11 +452,28 @@ fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGr
         {
             // Cached form: (kv_latent[kv_lora_rank] , k_pe[qk_rope_head_dim]).
             let elems = kv_lora_rank.saturating_add(rope);
+            // DeepSeek V2 under `int8` stores the latent as an affine
+            // group-64 triple and `k_pe` as FP16 (issue #3155), which
+            // is not `elems` elements of one width.
+            let group = mlxcel_core::cache::latent_quant::LATENT_QUANT_GROUP_SIZE as u64;
+            let fixed_bytes_per_token = v2_latent_bits
+                .filter(|_| {
+                    mt == "deepseek_v2" && kv_lora_rank > 0 && kv_lora_rank.is_multiple_of(group)
+                })
+                .map(|bits| {
+                    mlxcel_core::mla::quantized_latent_bytes_per_token(
+                        kv_lora_rank as usize,
+                        rope as usize,
+                        bits as usize,
+                        group as usize,
+                    ) as u64
+                });
             return Some((
                 vec![KvGroup {
                     layers: num_layers,
                     elems_per_token: elems,
                     window: None,
+                    fixed_bytes_per_token,
                 }],
                 KvArchKind::MlaCompressed,
             ));
@@ -452,6 +489,7 @@ fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGr
                 layers: num_layers,
                 elems_per_token: elems,
                 window: None,
+                fixed_bytes_per_token: None,
             }],
             KvArchKind::MlaDecompressed,
         ));
@@ -474,6 +512,7 @@ fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGr
                 layers: n_attn,
                 elems_per_token: standard_elems(&dims),
                 window,
+                fixed_bytes_per_token: None,
             }],
             KvArchKind::Hybrid,
         ));
@@ -506,6 +545,7 @@ fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGr
                     layers: global,
                     elems_per_token: global_elems,
                     window: None,
+                    fixed_bytes_per_token: None,
                 });
             }
             if sliding > 0 {
@@ -513,6 +553,7 @@ fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGr
                     layers: sliding,
                     elems_per_token: elems,
                     window: Some(window),
+                    fixed_bytes_per_token: None,
                 });
             }
             if !groups.is_empty() {
@@ -533,6 +574,7 @@ fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGr
                 layers: global,
                 elems_per_token: elems,
                 window: None,
+                fixed_bytes_per_token: None,
             });
         }
         if sliding > 0 {
@@ -540,6 +582,7 @@ fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGr
                 layers: sliding,
                 elems_per_token: elems,
                 window: Some(window),
+                fixed_bytes_per_token: None,
             });
         }
         let kind = if sliding > 0 {
@@ -556,6 +599,7 @@ fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGr
             layers: num_layers,
             elems_per_token: standard_elems(&dims),
             window: None,
+            fixed_bytes_per_token: None,
         }],
         KvArchKind::Standard,
     ))
@@ -563,7 +607,6 @@ fn classify(text: &Value, model_type: &str, v2_latent: bool) -> Option<(Vec<KvGr
 
 /// Compute the total bytes and steady-state marginal rate for a set of groups.
 fn sum_groups(groups: &[KvGroup], ctx: u64, int8: bool, batch: u64) -> (u64, u64) {
-    let eb = elem_bytes(int8);
     let rounded_ctx = round_ctx(ctx);
     let mut total = 0u64;
     let mut marginal = 0u64;
@@ -573,13 +616,12 @@ fn sum_groups(groups: &[KvGroup], ctx: u64, int8: bool, batch: u64) -> (u64, u64
             None => rounded_ctx,
         };
         let per_layer_at_ctx = g
-            .elems_per_token
+            .bytes_per_token(int8)
             .saturating_mul(effective)
-            .saturating_mul(eb)
             .saturating_mul(batch);
         total = total.saturating_add(per_layer_at_ctx.saturating_mul(g.layers));
         if g.window.is_none() {
-            let per_layer_per_token = g.elems_per_token.saturating_mul(eb).saturating_mul(batch);
+            let per_layer_per_token = g.bytes_per_token(int8).saturating_mul(batch);
             marginal = marginal.saturating_add(per_layer_per_token.saturating_mul(g.layers));
         }
     }
@@ -590,7 +632,6 @@ fn sum_groups(groups: &[KvGroup], ctx: u64, int8: bool, batch: u64) -> (u64, u64
 /// of the stack: `(at ctx_len, per additional token)`.
 fn fp16_last_layer_extra(groups: &[KvGroup], ctx: u64, batch: u64) -> (u64, u64) {
     let rounded_ctx = round_ctx(ctx);
-    let widen = elem_bytes(false).saturating_sub(elem_bytes(true));
     let mut total = 0u64;
     let mut marginal = 0u64;
     for g in groups.iter().filter(|g| g.layers > 0) {
@@ -598,9 +639,13 @@ fn fp16_last_layer_extra(groups: &[KvGroup], ctx: u64, batch: u64) -> (u64, u64)
             Some(w) => rounded_ctx.min(round_ctx(w)),
             None => rounded_ctx,
         };
+        // An FP16 layer against the quantized one: one byte per element for
+        // per-head INT8, the FP16 latent against the affine triple for a
+        // quantized MLA latent.
         let per_token = g
             .elems_per_token
-            .saturating_mul(widen)
+            .saturating_mul(elem_bytes(false))
+            .saturating_sub(g.bytes_per_token(true))
             .saturating_mul(batch);
         total = total.max(per_token.saturating_mul(effective));
         if g.window.is_none() {
@@ -616,7 +661,16 @@ fn detail_line(groups: &[KvGroup], kind: KvArchKind) -> String {
         KvArchKind::PureSsm => "pure SSM — no KV cache".to_string(),
         KvArchKind::MlaCompressed => {
             let elems = groups.first().map(|g| g.elems_per_token).unwrap_or(0);
-            format!("MLA compressed latent ({elems} elems/token/layer, shared across heads)")
+            match groups.first().and_then(|g| g.fixed_bytes_per_token) {
+                Some(bytes) => format!(
+                    "MLA compressed latent, affine-quantized ({bytes} bytes/token/layer, shared across heads)"
+                ),
+                None => {
+                    format!(
+                        "MLA compressed latent ({elems} elems/token/layer, shared across heads)"
+                    )
+                }
+            }
         }
         KvArchKind::MlaDecompressed => {
             "MLA decompressed per-head K/V (DeepSeek-V2 style)".to_string()
@@ -736,7 +790,8 @@ fn estimate_kv_arch_inner(
         .or_else(|| get_str(config, "model_type"))
         .unwrap_or("");
 
-    let (mut groups, kind) = classify(text, model_type, v2_latent)?;
+    let v2_latent_bits = sizing.mode.latent_affine_bits().map(|bits| bits as u64);
+    let (mut groups, kind) = classify(text, model_type, v2_latent, v2_latent_bits)?;
     // The detail line describes the architecture, so it keeps the windows even
     // when the byte figure below ignores them.
     let detail = detail_line(&groups, kind);
@@ -745,8 +800,9 @@ fn estimate_kv_arch_inner(
             group.window = None;
         }
     }
-    // Only INT8 narrows the element; the Turbo modes keep the FP16 width here,
-    // which overestimates their packed V side (the safe direction).
+    // Only INT8 narrows the storage; the Turbo modes keep the FP16 width here,
+    // which overestimates their packed V side (the safe direction). A
+    // quantized MLA latent carries its own rate (`fixed_bytes_per_token`).
     let int8 = sizing.mode == KVCacheMode::Int8;
     let (mut total_bytes, mut marginal_bytes_per_token) = sum_groups(&groups, ctx_len, int8, batch);
     if int8 && sizing.fp16_last_layer {
@@ -1034,8 +1090,7 @@ mod tests {
 
     /// Every mode `MlaLatentCache::supports` refuses, so `DeepseekV2::forward`
     /// keeps decompressed per-head K/V for it even with absorption on.
-    const V2_DECLINING_MODES: [KVCacheMode; 5] = [
-        KVCacheMode::Int8,
+    const V2_DECLINING_MODES: [KVCacheMode; 4] = [
         KVCacheMode::Turbo4Asym,
         KVCacheMode::Turbo3Asym,
         KVCacheMode::Turbo4,
@@ -1065,33 +1120,85 @@ mod tests {
     }
 
     #[test]
-    fn mla_v2_int8_kv_declines_the_latent_and_sizes_decompressed() {
-        // The runtime keeps an int8 cache decompressed even with absorption on
-        // (`latent_layout_supports_mode` accepts only FP16).
+    fn mla_v2_quantized_latent_uses_the_affine_rate_when_absorbed() {
+        // #3155: packed latent + group scales and biases + FP16 rope stream,
+        // 672 bytes per token per layer on V2-Lite, the rate the runtime
+        // caches allocate (`mla::quant_latent_tests`).
         let e = est_v2(&deepseek_v2_lite_cfg(), 2048, KVCacheMode::Int8, true);
+        assert_eq!(e.kind, KvArchKind::MlaCompressed);
+        assert_eq!(e.marginal_bytes_per_token, 4 * 672);
+        assert_eq!(e.total_bytes, 4 * 672 * 2048);
+        assert!(e.detail.contains("affine-quantized"), "{}", e.detail);
+        assert_eq!(
+            mlxcel_core::mla::quantized_latent_bytes_per_token(512, 64, 8, 64),
+            672
+        );
+    }
+
+    #[test]
+    fn mla_v2_quantized_latent_with_an_fp16_last_layer() {
+        // `--kv-bits 8` with `--kv-skip-last-layer`: three quantized latent
+        // layers and one FP16 latent layer (1152 bytes per token).
+        let sizing = KvSizing {
+            mode: KVCacheMode::Int8,
+            fp16_last_layer: true,
+        };
+        let e = estimate_kv_arch_inner(&deepseek_v2_lite_cfg(), 2048, sizing, 1, true, true)
+            .expect("estimate");
+        assert_eq!(e.marginal_bytes_per_token, 3 * 672 + 1152);
+        assert_eq!(e.total_bytes, (3 * 672 + 1152) * 2048);
+    }
+
+    #[test]
+    fn mla_v2_int8_without_absorption_sizes_decompressed_int8() {
+        // No latent to quantize: per-head INT8.
+        let e = est_v2(&deepseek_v2_lite_cfg(), 2048, KVCacheMode::Int8, false);
         assert_eq!(e.kind, KvArchKind::MlaDecompressed);
         let elems = 16 * (128 + 64 + 128);
         assert_eq!(e.total_bytes, 4 * elems * 2048);
     }
 
     #[test]
-    fn mla_v2_every_non_fp16_mode_declines_the_latent() {
+    fn a_rank_that_is_not_whole_groups_keeps_the_element_rate() {
+        // The runtime declines the quantized latent for such a rank
+        // (`MlaLatentCache::supports`) and `kv_arch` does not claim the
+        // affine rate for it.
+        let mut cfg = deepseek_v2_lite_cfg();
+        cfg["kv_lora_rank"] = json!(96);
+        let e = est_v2(&cfg, 2048, KVCacheMode::Int8, true);
+        assert!(!e.detail.contains("affine-quantized"), "{}", e.detail);
+    }
+
+    #[test]
+    fn latent_pair_families_do_not_take_the_quantized_latent_rate() {
+        // Only `deepseek_v2` stores the affine latent in this change; the
+        // latent-pair families resolve int8 to fp16 at startup.
+        let mut cfg = deepseek_v2_lite_cfg();
+        cfg["model_type"] = json!("deepseek_v3");
+        let e = estimate_kv_arch_inner(&cfg, 2048, KVCacheMode::Int8.into(), 1, true, true)
+            .expect("estimate");
+        assert_eq!(e.marginal_bytes_per_token, 4 * 576);
+        assert!(!e.detail.contains("affine-quantized"), "{}", e.detail);
+    }
+
+    #[test]
+    fn mla_v2_every_turbo_mode_declines_the_latent() {
         // #3153: a Turbo cache was sized as the 576-element latent while the
         // run stored the 5120-element decompressed rows (8.9x undercount).
+        // Turbo keeps the FP16 element width (overestimates, safe).
         for mode in V2_DECLINING_MODES {
             let e = est_v2(&deepseek_v2_lite_cfg(), 2048, mode, true);
             assert_eq!(e.kind, KvArchKind::MlaDecompressed, "{mode}");
-            // Turbo keeps the FP16 element width (overestimates, safe); INT8
-            // halves it.
-            let eb = if mode == KVCacheMode::Int8 { 1 } else { FP16 };
-            assert_eq!(e.marginal_bytes_per_token, 4 * 5120 * eb, "{mode}");
+            assert_eq!(e.marginal_bytes_per_token, 4 * 5120 * FP16, "{mode}");
         }
     }
 
     #[test]
     fn mla_v2_latent_layout_rule() {
-        assert!(deepseek_v2_latent_layout(true, KVCacheMode::Fp16));
-        assert!(!deepseek_v2_latent_layout(false, KVCacheMode::Fp16));
+        for mode in [KVCacheMode::Fp16, KVCacheMode::Int8] {
+            assert!(deepseek_v2_latent_layout(true, mode), "{mode}");
+            assert!(!deepseek_v2_latent_layout(false, mode), "{mode}");
+        }
         for mode in V2_DECLINING_MODES {
             assert!(!deepseek_v2_latent_layout(true, mode), "{mode}");
             assert!(!deepseek_v2_latent_layout(false, mode), "{mode}");

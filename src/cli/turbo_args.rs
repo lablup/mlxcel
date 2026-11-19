@@ -52,6 +52,9 @@ pub struct TurboKvCacheArgs {
     ///   fp16 / f16         Standard half-precision storage (default, no overhead).
     ///   int8               Per-token INT8 absmax quantization. ~50% KV memory
     ///                      savings with small per-token quantization error.
+    ///                      On DeepSeek V2 under absorbed MLA decode it stores
+    ///                      the latent as affine group-64 8-bit instead (672
+    ///                      against 1152 bytes per token per layer on V2-Lite).
     ///   fp16+turbo4        Asymmetric Fp16-K + Turbo4-V (alias: turbo4-asym).
     ///                      K side stays FP16; V side uses 4-bit PolarQuant
     ///                      with Walsh-Hadamard rotation. ~26% net KV savings
@@ -498,6 +501,21 @@ pub fn resolve_and_announce_kv_cache_mode(
         );
     }
     effective
+}
+
+/// Whether a cache built in `mode` for the model at `model_path` stores an
+/// affine-quantized MLA latent: `int8` on a family whose decoder
+/// reads its latent through `mla::MlaLatentCache`, with absorbed decode on
+/// (issue #3155).
+///
+/// Used by: `server::cli_input` (the `--kv-group-size` check) and the
+/// `generate` KV cache banner.
+#[must_use]
+pub fn model_stores_quantized_latent(mode: KVCacheMode, model_path: &Path) -> bool {
+    mode.latent_affine_bits().is_some()
+        && mlxcel_core::mla::absorbed_enabled()
+        && read_config_model_type(model_path)
+            .is_some_and(|model_type| mlxcel_core::mla::stores_latent_through_view(&model_type))
 }
 
 /// Read the raw `model_type` string from a model directory's `config.json`.

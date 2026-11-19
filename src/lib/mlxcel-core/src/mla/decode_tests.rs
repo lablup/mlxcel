@@ -191,19 +191,23 @@ fn latent_cache_round_trips_the_two_asymmetric_streams() {
     let mut view = MlaLatentCache::wrap(&mut cache, geometry).unwrap();
 
     let prefill = MlaFixture::new(geometry, 1, 1, 5, 0x77);
-    let (ckv_all, kpe_all) = view.update_and_fetch(
-        prefill.ckv_array(dtype::FLOAT16),
-        prefill.kpe_array(dtype::FLOAT16),
-    );
+    let (ckv_all, kpe_all) = view
+        .update_and_fetch(
+            prefill.ckv_array(dtype::FLOAT16),
+            prefill.kpe_array(dtype::FLOAT16),
+        )
+        .into_dense();
     assert_eq!(crate::ffi::array_shape(&ckv_all), vec![1, 1, 5, 32]);
     assert_eq!(crate::ffi::array_shape(&kpe_all), vec![1, 1, 5, 8]);
     assert_eq!(view.seq_len(), 5);
 
     let step = MlaFixture::new(geometry, 1, 1, 1, 0x78);
-    let (ckv_all, kpe_all) = view.update_and_fetch(
-        step.ckv_array(dtype::FLOAT16),
-        step.kpe_array(dtype::FLOAT16),
-    );
+    let (ckv_all, kpe_all) = view
+        .update_and_fetch(
+            step.ckv_array(dtype::FLOAT16),
+            step.kpe_array(dtype::FLOAT16),
+        )
+        .into_dense();
     assert_eq!(crate::ffi::array_shape(&ckv_all), vec![1, 1, 6, 32]);
     assert_eq!(crate::ffi::array_shape(&kpe_all), vec![1, 1, 6, 8]);
     assert_eq!(view.seq_len(), 6);

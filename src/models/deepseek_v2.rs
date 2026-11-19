@@ -585,7 +585,10 @@ impl MLAAttention {
             };
             view.attend(q_nope, &q_pe, ckv, k_pe, proj, self.scale, mask)
         } else {
-            let (ckv_all, kpe_all) = view.update_and_fetch(ckv, k_pe);
+            // A quantized latent (`int8`, issue #3155) is dequantized
+            // once here, after the fresh chunk was stored quantized, so this
+            // prefill reads the same values the decode steps will.
+            let (ckv_all, kpe_all) = view.update_and_fetch(ckv, k_pe).into_dense();
             let kv_len = view.seq_len();
             // The cost model declined absorption for this step, so the
             // per-head K/V are materialized and the dense SDPA below runs.

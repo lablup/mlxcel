@@ -3129,3 +3129,93 @@ fn int8_sizing_charges_the_fp16_last_layer() {
     let sizing = super::kv_mode_for_batch(KVCacheMode::Fp16, &off);
     assert!(!sizing.fp16_last_layer);
 }
+
+/// A model directory whose `config.json` carries only `model_type`.
+fn kv_quant_model_dir(model_type: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        format!("{{\"model_type\": \"{model_type}\"}}"),
+    )
+    .expect("write config.json");
+    dir
+}
+
+/// `--kv-bits 8` is held on DeepSeek V2 in both absorption states (the affine
+/// MLA latent under absorbed decode, per-head int8 without it, issue #3155),
+/// and the serve preflight sizes that mode. A latent-pair family still has it
+/// taken off, and `--kv-quant-scheme turboquant` is still taken off V2 while
+/// it absorbs. `--kv-bits 4` uniform stays a startup error: 4-bit failed the
+/// quality gate, so no mode backs it.
+#[test]
+fn kv_bits_8_is_held_on_deepseek_v2() {
+    use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
+
+    let uniform8 = || BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, true).unwrap();
+    let absorbed = mlxcel_core::mla::absorbed_enabled();
+
+    let v2 = kv_quant_model_dir("deepseek_v2");
+    let mut batch = uniform8();
+    assert_eq!(
+        super::disable_batch_kv_quant_for_family(&mut batch, v2.path()),
+        None
+    );
+    assert_eq!(batch.base_mode(), KVCacheMode::Int8);
+    let sizing = super::effective_serve_kv_cache_mode(KVCacheMode::Fp16, uniform8(), v2.path());
+    assert_eq!(sizing.mode, KVCacheMode::Int8);
+    assert!(sizing.fp16_last_layer);
+
+    let v3 = kv_quant_model_dir("deepseek_v3");
+    let mut batch = uniform8();
+    assert_eq!(
+        super::disable_batch_kv_quant_for_family(&mut batch, v3.path()),
+        Some(KVCacheMode::Int8)
+    );
+    assert!(!batch.is_enabled());
+
+    let mut turbo = BatchKvQuantConfig::new(KvQuantScheme::TurboQuant, 4, 64, true).unwrap();
+    let refused = super::disable_batch_kv_quant_for_family(&mut turbo, v2.path());
+    assert_eq!(refused.is_some(), absorbed);
+    assert_eq!(turbo.is_enabled(), !absorbed);
+
+    let err = BatchKvQuantConfig::new(KvQuantScheme::Uniform, 4, 64, true).unwrap_err();
+    assert!(err.contains("--kv-bits 4"), "{err}");
+}
+
+/// An absorbed MLA latent is grouped in 64s only, so a different
+/// `--kv-group-size` fails startup for such a model rather than being accepted
+/// and ignored. Models that do not store a quantized latent are unaffected.
+#[test]
+fn kv_group_size_other_than_64_is_rejected_for_a_quantized_latent() {
+    let v2 = kv_quant_model_dir("deepseek_v2");
+    let mut input = sample_input();
+    input.model_path = v2.path().to_path_buf();
+    input.kv_bits = 8;
+    input.kv_group_size = 32;
+    let result = input.into_startup_config();
+    if mlxcel_core::mla::absorbed_enabled() {
+        let err = result.expect_err("group size 32 must fail startup");
+        let text = err.to_string();
+        assert!(text.contains("--kv-group-size 32"), "{text}");
+        assert!(text.contains("groups of 64"), "{text}");
+    } else {
+        result.expect("per-head int8 does not read the group size");
+    }
+
+    let mut input = sample_input();
+    input.model_path = v2.path().to_path_buf();
+    input.kv_bits = 8;
+    input.kv_group_size = 64;
+    input
+        .into_startup_config()
+        .expect("group size 64 is the latent's own");
+
+    let llama = kv_quant_model_dir("llama");
+    let mut input = sample_input();
+    input.model_path = llama.path().to_path_buf();
+    input.kv_bits = 8;
+    input.kv_group_size = 32;
+    input
+        .into_startup_config()
+        .expect("per-head int8 does not read the group size");
+}

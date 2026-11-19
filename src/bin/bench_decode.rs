@@ -736,5 +736,7 @@ fn main() -> Result<()> {
     io::stdout().flush()?;
 
     mlxcel_core::clear_memory_cache();
+    // `MLXCEL_TRACE_MLA_STATS=1`: which MLA attention path each step took.
+    mlxcel_core::mla::stats::report_if_requested();
     Ok(())
 }

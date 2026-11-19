@@ -168,17 +168,18 @@ pub fn symmetric_turbo_warning_message(model_type: &str) -> String {
 ///
 /// Three rules apply, in this order:
 ///
-/// 1. **MLA latent families.** A family in
+/// 1. **MLA latent-pair families.** A family in
 ///    [`crate::mla::MLA_LATENT_CACHE_FAMILIES`] stores a `(kv_latent, k_pe)`
-///    pair in one cache, so every quantized mode is mis-calibrated for it (see
-///    [`crate::mla::latent_layout_supports_mode`] for what each mode gets
-///    wrong). Any non-FP16 request resolves to [`KVCacheMode::Fp16`]. This is
-///    the rule `deepseek_v2` has always applied per cache through
-///    [`crate::mla::MlaLatentCache::supports`]; the four families that have no
-///    decompressed fallback need it applied per model instead.
+///    pair in one cache through `KVCache::update_and_fetch`, which holds FP16
+///    only: every Turbo mode is mis-calibrated for the pair (see
+///    [`crate::mla::latent_layout_supports_mode`]), per-token `int8` applied
+///    there quantizes the latent with one scale per 512-wide row, and the
+///    affine `int8` latent is stored through `mla::MlaLatentCache`, which
+///    these families do not use yet (#3160-#3163). Any non-FP16 request
+///    resolves to [`KVCacheMode::Fp16`].
 /// 2. **DeepSeek V2 under absorbed decode.** See
-///    [`resolve_kv_cache_mode_for_model_with`]: a non-FP16 request resolves to
-///    fp16 while absorbed MLA is on, because the alternative is a larger cache.
+///    [`resolve_kv_cache_mode_for_model_with`]: `int8` is kept and stores the
+///    latent quantized, and a Turbo request resolves to fp16.
 /// 3. **Symmetric Turbo4 allowlist.** [`KVCacheMode::Turbo4`] on a family that
 ///    is not in [`ALLOWED_SYMMETRIC_TURBO_FAMILIES`] resolves to
 ///    [`KVCacheMode::Turbo4Asym`], carrying
@@ -186,10 +187,10 @@ pub fn symmetric_turbo_warning_message(model_type: &str) -> String {
 ///    has always described.
 ///
 /// Rule 1 runs first because it is a correctness bound, not a quality one: for
-/// a latent family the Turbo4Asym that rule 2 would pick still quantizes
-/// `k_pe`. An empty or unknown `model_type` matches neither rule and passes
-/// through unchanged, which keeps a model whose `config.json` could not be read
-/// on exactly its previous behaviour.
+/// a latent family the Turbo4Asym that rule 3 would pick still quantizes
+/// `k_pe`. An empty or unknown `model_type` matches no rule and passes through
+/// unchanged, which keeps a model whose `config.json` could not be read on
+/// exactly its previous behaviour.
 ///
 /// Used by: `mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode`, which
 /// is the shared entry point for the CLI, the chat REPL, the server and the
@@ -206,13 +207,18 @@ pub fn resolve_kv_cache_mode_for_model(
 /// rather than read from the process environment, so the conditional
 /// `deepseek_v2` rule can be tested for both states.
 ///
-/// The `deepseek_v2` rule: when absorbed MLA decode is on and the requested
-/// mode cannot hold a latent, `MlaLatentCache::supports` would decline every
-/// cache and the run would store the decompressed per-head K/V instead, which
-/// is larger than the fp16 latent it replaces (5120 against 1152 bytes per
-/// token per layer for int8 on V2-Lite), slower to decode and lossy. The
-/// request is substituted with fp16 so a memory-saving flag does not grow the
-/// cache. With absorption off the decompressed layout is the default, so the
+/// The `deepseek_v2` rule, when absorbed MLA decode is on:
+///
+/// * `int8` is kept. The cache stores the latent as an affine group-64 triple
+///   (672 bytes per token per layer on V2-Lite against 1152 for the fp16
+///   latent, issue #3155).
+/// * A Turbo mode would make `MlaLatentCache::supports` decline every cache,
+///   and the run would store the decompressed per-head K/V instead, which is
+///   larger than the fp16 latent it replaces, slower to decode and lossy. The
+///   request is substituted with fp16 so a memory-saving flag does not grow
+///   the cache.
+///
+/// With absorption off the decompressed layout is the default, so a per-head
 /// quantized mode is kept.
 ///
 /// Used by: [`resolve_kv_cache_mode_for_model`].
@@ -222,9 +228,13 @@ pub fn resolve_kv_cache_mode_for_model_with(
     model_type: &str,
     absorbed: bool,
 ) -> (KVCacheMode, Option<String>) {
-    if crate::mla::caches_mla_latent_pair(model_type)
-        && let Err(reason) = crate::mla::latent_layout_supports_mode(requested)
-    {
+    if crate::mla::caches_mla_latent_pair(model_type) && requested != KVCacheMode::Fp16 {
+        let reason = match crate::mla::latent_layout_supports_mode(requested) {
+            Err(reason) => reason,
+            Ok(()) => "mla: this family stores its latent pair as fp16; the quantized latent \
+                       is available on deepseek_v2 only"
+                .to_string(),
+        };
         return (
             KVCacheMode::Fp16,
             Some(format!(
@@ -243,7 +253,8 @@ pub fn resolve_kv_cache_mode_for_model_with(
                 "warning: --kv-cache-mode {requested} would disable absorbed MLA decode for this \
                  model (model_type=\"deepseek_v2\") and store the larger decompressed per-head \
                  KV cache instead of the latent, so the fp16 latent cache is used instead.\n\t\
-                 Set MLXCEL_MLA_ABSORBED=0 to keep the decompressed quantized layout."
+                 Use --kv-cache-mode int8 for a quantized latent, or set MLXCEL_MLA_ABSORBED=0 \
+                 to keep the decompressed quantized layout."
             )),
         );
     }
@@ -410,12 +421,24 @@ mod tests {
         assert!(warning.is_none());
     }
 
-    /// With absorbed decode on, a quantized request would swap the fp16 latent
-    /// for the larger decompressed cache, so it resolves to fp16 with a warning.
+    /// With absorbed decode on, `int8` stores the latent quantized and is kept
+    /// without a warning (issue #3155).
     #[test]
-    fn deepseek_v2_absorbed_resolves_quantized_modes_to_fp16() {
+    fn deepseek_v2_absorbed_keeps_the_quantized_latent_mode() {
+        for requested in [KVCacheMode::Fp16, KVCacheMode::Int8] {
+            let (effective, warning) =
+                resolve_kv_cache_mode_for_model_with(requested, "deepseek_v2", true);
+            assert_eq!(effective, requested);
+            assert!(warning.is_none(), "{requested}: {warning:?}");
+        }
+    }
+
+    /// With absorbed decode on, a Turbo request would swap the fp16 latent for
+    /// the larger decompressed cache, so it resolves to fp16 with a warning
+    /// that names the quantized latent mode.
+    #[test]
+    fn deepseek_v2_absorbed_resolves_turbo_modes_to_fp16() {
         for requested in [
-            KVCacheMode::Int8,
             KVCacheMode::Turbo4Asym,
             KVCacheMode::Turbo4,
             KVCacheMode::Turbo3Asym,
@@ -427,11 +450,24 @@ mod tests {
             let warning = warning.expect("a substituted mode must explain itself");
             assert!(warning.contains("MLXCEL_MLA_ABSORBED=0"), "{warning}");
             assert!(warning.contains("decompressed"), "{warning}");
+            assert!(warning.contains("--kv-cache-mode int8"), "{warning}");
         }
-        let (effective, warning) =
-            resolve_kv_cache_mode_for_model_with(KVCacheMode::Fp16, "deepseek_v2", true);
-        assert_eq!(effective, KVCacheMode::Fp16);
-        assert!(warning.is_none());
+    }
+
+    /// The latent-pair families hold fp16 only until they move onto the latent
+    /// view, so `int8` is still substituted there, with a reason that says
+    /// where the quantized latent is available.
+    #[test]
+    fn latent_pair_families_still_resolve_int8_to_fp16() {
+        for family in ["deepseek_v3", "glm4_moe_lite", "kimi_k3", "youtu_vl"] {
+            for absorbed in [false, true] {
+                let (effective, warning) =
+                    resolve_kv_cache_mode_for_model_with(KVCacheMode::Int8, family, absorbed);
+                assert_eq!(effective, KVCacheMode::Fp16, "{family}");
+                let warning = warning.expect("must warn");
+                assert!(warning.contains("deepseek_v2 only"), "{warning}");
+            }
+        }
     }
 
     /// The fallback the CLI banner has always promised, now performed.

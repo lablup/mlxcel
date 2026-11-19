@@ -345,3 +345,61 @@ fn no_kv_cache_diagnostic_carries_collapsed_indentation() {
         }
     }
 }
+
+// ── Quantized MLA latent (issue #3155) ──────────────────────────────────────
+
+/// `int8` on DeepSeek V2 is kept in both absorption states: it stores the
+/// affine latent under absorbed decode and per-head rows without it. The
+/// DeepSeek-VL2 wrapper runs the same decoder.
+#[test]
+fn int8_is_kept_on_deepseek_v2_and_stores_the_latent_when_absorbed() {
+    let absorbed = mlxcel_core::mla::absorbed_enabled();
+    for family in ["deepseek_v2", "deepseek_vl_v2"] {
+        let dir = model_dir_with_type(family);
+        let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
+        assert_eq!(mode, KVCacheMode::Int8, "{family}");
+        assert!(warning.is_none(), "{family}: {warning:?}");
+        assert_eq!(
+            super::model_stores_quantized_latent(KVCacheMode::Int8, dir.path()),
+            absorbed,
+            "{family}"
+        );
+        assert!(!super::model_stores_quantized_latent(
+            KVCacheMode::Fp16,
+            dir.path()
+        ));
+    }
+}
+
+/// A non-MLA family keeps per-token int8, and a latent-pair family that does
+/// not read its cache through the latent view yet keeps fp16.
+#[test]
+fn only_deepseek_v2_stores_a_quantized_latent() {
+    let llama = model_dir_with_type("llama");
+    let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, llama.path());
+    assert_eq!(mode, KVCacheMode::Int8);
+    assert!(warning.is_none());
+    assert!(!super::model_stores_quantized_latent(
+        KVCacheMode::Int8,
+        llama.path()
+    ));
+
+    for family in ["deepseek_v3", "kimi_k3"] {
+        let dir = model_dir_with_type(family);
+        let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
+        assert_eq!(mode, KVCacheMode::Fp16, "{family}");
+        assert!(warning.is_some(), "{family}");
+        assert!(!super::model_stores_quantized_latent(
+            KVCacheMode::Int8,
+            dir.path()
+        ));
+    }
+}
+
+/// 4-bit failed the #3155 quality gate, so `int4` is not a KV cache mode on
+/// either flag surface.
+#[test]
+fn int4_is_rejected_on_both_flag_surfaces() {
+    assert!(resolve_kv_cache_mode(None, None, Some("int4")).is_err());
+    assert!(resolve_kv_cache_mode(Some("int4"), Some("int4"), None).is_err());
+}

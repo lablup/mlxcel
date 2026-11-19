@@ -274,7 +274,7 @@ fn main() -> Result<()> {
         .unwrap_or(0);
     let gemma4_mode = gemma4::Mode::from_env()?;
     let audio_arm = audio::AudioArm::from_env()?;
-    let kv_arm = kv_mode::KvArm::from_env()?;
+    let mut kv_arm = kv_mode::KvArm::from_env()?;
     anyhow::ensure!(
         !kv_arm.decode_step || (prefill > 0 && gemma4_mode.is_none()),
         "MLXCEL_TRACE_DECODE_STEP needs a nonzero prefill and no Gemma 4 mode"
@@ -570,7 +570,7 @@ fn main() -> Result<()> {
         if !contiguous || c == 0 {
             model.reset_runtime_state();
         }
-        let mut caches = model.make_caches();
+        let mut caches = kv_arm.make_caches(&model);
         // Optional context pass. Its rows are discarded; it exists so the
         // traced forward runs at the chunk's width against a realistic
         // context rather than against nothing. A chunk with no history (chunk
@@ -679,7 +679,7 @@ fn trace_batched_chunks(
         for (row_idx, row) in rows.iter().enumerate() {
             let mut prefix = bos_prefix.to_vec();
             prefix.extend_from_slice(&ids[row.prefix_from..row.start]);
-            let mut row_caches = model.make_caches();
+            let mut row_caches = kv_arm.make_caches(model);
             model.prepare_sequence_state(seq_ids[row_idx]);
             model.bind_qwen_vl_mrope_state_to_sequence(seq_ids[row_idx]);
             if !prefix.is_empty() {
