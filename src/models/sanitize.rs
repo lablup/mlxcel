@@ -1215,8 +1215,10 @@ pub(crate) fn sanitize_gemma4_nvfp4_weights(
 }
 
 /// Normalize ModelOpt NVFP4 keys and repack the `{weight, weight_scale,
-/// weight_scale_2}` triplets for the running backend. A no-op for a checkpoint
-/// without `weight_scale_2` keys.
+/// weight_scale_2}` triplets for the running backend. A compressed-tensors
+/// NVFP4 checkpoint's `{weight_packed, weight_scale, weight_global_scale}`
+/// linears are first read as such triplets. A no-op for a checkpoint with
+/// neither.
 ///
 /// Used by: [`sanitize_gemma4_nvfp4_weights`], [`load_text_weights`] for
 /// every other text family whose config declares ModelOpt NVFP4 (issue #2351),
@@ -1226,8 +1228,117 @@ pub(crate) fn sanitize_modelopt_nvfp4_weights(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
 ) -> Result<(), String> {
+    compressed_tensors_nvfp4_to_modelopt_triplets(weights)?;
     normalize_nvfp4_keys(weights);
     repack_nvfp4_weights_to_quantized(weights, config)
+}
+
+/// The `format` a compressed-tensors (llm-compressor) checkpoint declares for
+/// packed NVFP4 weights.
+const COMPRESSED_TENSORS_NVFP4_FORMAT: &str = "nvfp4-pack-quantized";
+
+/// Rewrite compressed-tensors NVFP4 linears into ModelOpt's triplet, in place,
+/// so the one repack below serves both producers. A no-op for a checkpoint
+/// without `weight_packed` + `weight_global_scale` pairs.
+///
+/// The two layouts hold the same bytes under other names: compressed-tensors'
+/// own ModelOpt converter (`entrypoints/convert/converters/modelopt_nvfp4.py`)
+/// maps `weight` to `weight_packed` unchanged, keeps `weight_scale`, and
+/// writes `weight_global_scale = 1 / weight_scale_2` and
+/// `input_global_scale = 1 / input_scale`. This is that mapping backwards:
+///
+/// * `{p}.weight_packed` becomes `{p}.weight` (two E2M1 codes per byte);
+/// * `{p}.weight_scale` stays (one E4M3 scale per 16 elements);
+/// * `{p}.weight_global_scale` becomes `{p}.weight_scale_2`, inverted;
+/// * `{p}.input_global_scale` is dropped: it scales quantized activations,
+///   which this runtime does not use (ModelOpt's `input_scale` is dropped by
+///   the repack for the same reason).
+///
+/// Only a `weight_packed` with a `weight_global_scale` beside it is touched:
+/// compressed-tensors' integer `pack-quantized` format also names its plane
+/// `weight_packed` but has no global scale. A global scale that is not one
+/// finite non-zero number fails the load, since the layer cannot be decoded.
+///
+/// Used by: [`sanitize_modelopt_nvfp4_weights`]
+fn compressed_tensors_nvfp4_to_modelopt_triplets(
+    weights: &mut mlxcel_core::weights::WeightMap,
+) -> Result<(), String> {
+    let mut prefixes: Vec<String> = weights
+        .keys()
+        .filter_map(|key| key.strip_suffix(".weight_global_scale"))
+        .filter(|prefix| weights.contains_key(&format!("{prefix}.weight_packed")))
+        .map(str::to_string)
+        .collect();
+    if prefixes.is_empty() {
+        return Ok(());
+    }
+    prefixes.sort();
+    for prefix in &prefixes {
+        let weight_key = format!("{prefix}.weight");
+        if weights.contains_key(&weight_key) {
+            return Err(format!(
+                "compressed-tensors NVFP4 layer {prefix} has both weight and weight_packed"
+            ));
+        }
+        let global_key = format!("{prefix}.weight_global_scale");
+        let global = weights
+            .remove(&global_key)
+            .expect("collected from the map above");
+        mlxcel_core::eval(&global);
+        let value = (mlxcel_core::array_size(&global) == 1).then(|| {
+            mlxcel_core::item_f32(&mlxcel_core::astype(&global, mlxcel_core::dtype::FLOAT32))
+        });
+        let Some(value) = value.filter(|v| v.is_finite() && *v != 0.0) else {
+            return Err(format!(
+                "compressed-tensors NVFP4 layer {prefix}: weight_global_scale must be one \
+                 finite non-zero number, got {value:?} (shape {:?})",
+                mlxcel_core::array_shape(&global)
+            ));
+        };
+        weights.insert(
+            format!("{prefix}.weight_scale_2"),
+            mlxcel_core::from_slice_f32(&[1.0 / value], &[1]),
+        );
+        let packed = weights
+            .remove(&format!("{prefix}.weight_packed"))
+            .expect("filtered on this key above");
+        weights.insert(weight_key, packed);
+        weights.remove(&format!("{prefix}.input_global_scale"));
+    }
+    eprintln!(
+        "Read {} compressed-tensors NVFP4 linears as ModelOpt NVFP4 triplets",
+        prefixes.len()
+    );
+    Ok(())
+}
+
+/// The ModelOpt-shaped declaration of a compressed-tensors NVFP4 checkpoint,
+/// or `None` when `quantization_config` is not one.
+///
+/// compressed-tensors writes `quant_method: "compressed-tensors"` and `format:
+/// "nvfp4-pack-quantized"` with the same `config_groups` shape ModelOpt uses,
+/// so the groups are carried over and
+/// [`crate::models::gemma4::is_modelopt_nvfp4`] stays the one judge of them
+/// (4-bit float weights at group size 16 in every group).
+///
+/// Used by: [`modelopt_quantization_config`], [`modelopt_nvfp4_group_size`]
+fn compressed_tensors_nvfp4_as_modelopt(quantization_config: &Value) -> Option<Value> {
+    let text = |key: &str| {
+        quantization_config
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+    };
+    if text("quant_method").as_deref() != Some("compressed-tensors")
+        || text("format").as_deref() != Some(COMPRESSED_TENSORS_NVFP4_FORMAT)
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "quant_method": "modelopt",
+        "quant_algo": "NVFP4",
+        "config_groups": quantization_config.get("config_groups").cloned().unwrap_or(Value::Null),
+    }))
 }
 
 /// The ModelOpt quantization settings a text checkpoint declares, in the
@@ -1239,7 +1350,10 @@ pub(crate) fn sanitize_modelopt_nvfp4_weights(
 /// also reads (`{"producer": {"name": "modelopt"}, "quantization":
 /// {"quant_algo": "NVFP4", "group_size": 16}}`). The second shape is rewritten
 /// into the first so [`crate::models::gemma4::is_modelopt_nvfp4`] stays the one
-/// detector.
+/// detector. A compressed-tensors `nvfp4-pack-quantized` declaration in
+/// `config.json` is rewritten the same way
+/// ([`compressed_tensors_nvfp4_as_modelopt`]): it is the same weight format
+/// under other tensor names.
 fn modelopt_quantization_config(
     config: Option<&Value>,
     model_dir: &std::path::Path,
@@ -1248,13 +1362,18 @@ fn modelopt_quantization_config(
         let null = Value::Null;
         let text_config = config.get("text_config").unwrap_or(&null);
         for root in [config, text_config] {
-            if let Some(qc) = root.get("quantization_config")
-                && qc
-                    .get("quant_method")
-                    .and_then(Value::as_str)
-                    .is_some_and(|m| m.trim().eq_ignore_ascii_case("modelopt"))
+            let Some(qc) = root.get("quantization_config") else {
+                continue;
+            };
+            if qc
+                .get("quant_method")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.trim().eq_ignore_ascii_case("modelopt"))
             {
                 return Some(qc.clone());
+            }
+            if let Some(as_modelopt) = compressed_tensors_nvfp4_as_modelopt(qc) {
+                return Some(as_modelopt);
             }
         }
     }
@@ -1278,8 +1397,9 @@ fn modelopt_quantization_config(
     }))
 }
 
-/// Whether a non-Gemma text checkpoint is a ModelOpt NVFP4 export whose
-/// triplets its loader must repack (issue #2351).
+/// Whether a non-Gemma text checkpoint is a ModelOpt NVFP4 export, or a
+/// compressed-tensors NVFP4 one, whose triplets its loader must repack (issue
+/// #2351).
 ///
 /// Used by: [`load_text_weights`], and the Qwen3.5 VLM loader's
 /// `split_qwen3_5_vlm_weights`
@@ -1303,10 +1423,10 @@ pub(crate) fn is_modelopt_nvfp4_text_checkpoint(
 /// Qwen3-MoE and Llama/Qwen2.5
 pub(crate) fn modelopt_nvfp4_group_size(quantization_config: Option<&Value>) -> Option<i32> {
     let qc = quantization_config?;
-    if !crate::models::gemma4::is_modelopt_nvfp4(qc) {
-        return None;
-    }
-    Some(NVFP4_SOURCE_GROUP_SIZE as i32)
+    let declared = crate::models::gemma4::is_modelopt_nvfp4(qc)
+        || compressed_tensors_nvfp4_as_modelopt(qc)
+            .is_some_and(|as_modelopt| crate::models::gemma4::is_modelopt_nvfp4(&as_modelopt));
+    declared.then_some(NVFP4_SOURCE_GROUP_SIZE as i32)
 }
 
 /// Drop k_proj / v_proj / k_norm weight entries that belong to KV-shared
@@ -2039,8 +2159,18 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     let is_gemma4 = parsed_config.as_ref().is_some_and(is_gemma4_model_config);
     // Gemma 4 repacks its ModelOpt triplets through its own sanitizer below;
     // every other text family takes the same repack here (issue #2351).
-    let is_modelopt_nvfp4 =
-        !is_gemma4 && is_modelopt_nvfp4_text_checkpoint(parsed_config.as_ref(), model_dir);
+    // Laguna stacks its compressed-tensors NVFP4 expert planes in its own
+    // sanitizer (`laguna_sanitize`, issue #1347), which reads them under their
+    // `weight_packed` names, so the shared repack must not rename them first.
+    let laguna_compressed_tensors = parsed_config.as_ref().is_some_and(|config| {
+        config.get("model_type").and_then(Value::as_str) == Some("laguna")
+            && config
+                .get("quantization_config")
+                .is_some_and(|qc| compressed_tensors_nvfp4_as_modelopt(qc).is_some())
+    });
+    let is_modelopt_nvfp4 = !is_gemma4
+        && !laguna_compressed_tensors
+        && is_modelopt_nvfp4_text_checkpoint(parsed_config.as_ref(), model_dir);
     let keep_gemma3n_bf16 = parsed_config.as_ref().is_some_and(is_gemma3n_model_config);
     // BitNet runs in its native bf16: its squared-ReLU activation overflows the
     // f16 max (65504), so the usual bf16->f16 Apple-Silicon conversion produces
