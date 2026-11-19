@@ -1781,8 +1781,12 @@ pub struct ReconciledQuant {
 ///          [`QuantizedMultiLinear::from_weights`], which never reach the
 ///          reconciler; every family-local MoE expert loader through
 ///          `crate::models::switch_layers::validate_expert_quantization_params`
-///          (issue #958); plus the family-level early diagnostics in BailingMoe,
-///          GptNeoX, Helium and GptOss
+///          (issue #958); plus family-level early diagnostics and config
+///          validators, BailingMoe, GptNeoX, Helium and GptOss among them.
+///          The files that call it directly are too many to enumerate by name
+///          without going stale. Regenerate the exact list with
+///          `grep -rln '\bvalidate_quantization_params(' src --include='*.rs'
+///          | grep -v 'tests\.rs$'`.
 pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), String> {
     if !(1..=32).contains(&bits) {
         return Err(format!(
@@ -2318,7 +2322,12 @@ const MAX_QUANT_GROUP_SIZE: i32 = 1 << 20;
 ///          `unembed_out`), BailingMoe weight validation, `kimi_linear`'s
 ///          private `MultiLinear` in the consuming crate, and `kimi_k3`'s
 ///          expert-plane probe (`expert_quantization`), plus the consuming
-///          crate's quantization-aware vision learned-parameter loaders
+///          crate's quantization-aware vision learned-parameter loaders and
+///          further family-level weight validators. The files that call it
+///          directly are too many to enumerate by name without going stale.
+///          Regenerate the exact list with
+///          `grep -rln '\binfer_quantization_mode(' src --include='*.rs'
+///          | grep -v 'tests\.rs$'`.
 pub fn infer_quantization_mode(has_biases: bool, group_size: i32, bits: i32) -> &'static str {
     if has_biases {
         "affine"
@@ -2594,7 +2603,12 @@ pub struct QuantizedTensorShapes<'a> {
 /// Used by: BailingMoe weight validation (token table, dense projections,
 ///          stacked experts) and the shared `validate_embedding_table` guard
 ///          (BailingMoe, Gpt2, GptBigCode, GptNeoX, Mamba, Mamba2), plus the
-///          consuming crate's quantized vision embedding/table loaders
+///          consuming crate's quantized vision embedding/table loaders and
+///          further family-level weight validators. The files that call it
+///          directly are too many to enumerate by name without going stale.
+///          Regenerate the exact list with
+///          `grep -rln '\bvalidate_quantized_packing(' src --include='*.rs'
+///          | grep -v 'tests\.rs$'`.
 pub fn validate_quantized_packing(
     label: &str,
     shapes: &QuantizedTensorShapes<'_>,
@@ -5182,7 +5196,25 @@ pub fn metal4_causal_attention(
 
 /// Unified attention dispatch with transparent Metal 4 and softcap fallback.
 ///
-/// Used by: Llama3, Qwen3, Gemma2, Gemma3 and other standard SDPA call sites
+/// Used by: almost every attention call site, most of them indirectly. A
+/// decoder family usually reaches it without naming it, through the cache
+/// `attend` methods (`cache/attend.rs`), through [`attention_from_ptr`] below
+/// (for the decoders that keep their mask as a raw pointer), or through
+/// `causal_attention` in `lib.rs`. The files that call it directly are those
+/// cache paths, the drafters, the MLA decode and prefill paths
+/// (`mla/decode.rs`, `mla/prefill.rs`), `prefill_sdpa.rs`, `window_sdpa.rs`,
+/// the image-generation blocks, the encoder-only models (BERT, ModernBERT,
+/// EmbeddingGemma2), Gemma4, LLaDA2-MoE, Qwen3-Next, Qwen4-Exp, and several
+/// vision encoders and detectors.
+///
+/// Not used by Llama3, Qwen3, Gemma2 or Gemma3 directly: the first, second
+/// and fourth call `cache.attend`, and Gemma2 calls [`attention_from_ptr`] and
+/// `causal_attention`. A change here still reaches all four.
+///
+/// The direct caller set is too large to enumerate by name without going
+/// stale, so the groups above are a summary. Regenerate the exact list with
+/// `grep -rln 'layers::attention(' src --include='*.rs' | grep -v 'tests\.rs$'`
+/// (the two MLA files import it by name and are not in that list).
 pub fn attention(
     q: &MlxArray,
     k: &MlxArray,
@@ -5852,7 +5884,12 @@ pub(crate) fn chunked_causal_attention(
 
 /// Pointer-friendly attention wrapper for existing model call sites.
 ///
-/// Used by: Model attention call sites that still store masks as raw pointers
+/// Used by: Model attention call sites that still store masks as raw pointers.
+/// That is decoders under `src/models`, vision encoders and a connector under
+/// `src/vision`, the Qwen3-Omni MoE audio stack and the cache attend paths.
+/// The caller set is too large to enumerate by name without going stale.
+/// Regenerate the exact list with
+/// `grep -rln '\battention_from_ptr(' src --include='*.rs' | grep -v 'tests\.rs$'`.
 ///
 /// # Safety
 ///

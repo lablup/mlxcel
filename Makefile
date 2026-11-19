@@ -164,7 +164,7 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '(clean|fmt|install)' | grep -v '^bench' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Maintenance Targets:$(RESET)"
-	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-env-var-docs|verify-binary-assets|verify-windows-paths|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-used-by|verify-env-var-docs|verify-binary-assets|verify-windows-paths|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Variables:$(RESET)"
 	@echo "  $(CYAN)MODEL$(RESET)    Path to model directory (default: ./models/default)"
@@ -857,7 +857,7 @@ verify-rocm-smoke: ## ROCm smoke: build, link and generate on the GPU, asserting
 # "does a real forward pass still run on this device" answer even while the
 # suite is red.
 .PHONY: verify-rocm
-verify-rocm: verify-versions verify-kernel-dtype-keys verify-env-var-docs verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-python-tooling verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
+verify-rocm: verify-versions verify-kernel-dtype-keys verify-used-by verify-env-var-docs verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-python-tooling verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
 	@echo "$(GREEN)[verify-rocm] OK$(RESET)"
 
 # The gate for a shared gfx1151 host (issue #2244). Build everything the gate
@@ -890,6 +890,22 @@ verify-kernel-dtype-keys: ## Assert every CUDA and HIP JIT kernel launch keys it
 	@echo "$(CYAN)[verify] kernel dtype cache keys...$(RESET)"
 	@python3 scripts/ci/check_kernel_dtype_keys.py
 	@bash scripts/ci/check_kernel_dtype_keys_test.sh
+
+# The `Used by:` annotations on the top-level `pub fn`s of mlxcel-core's
+# utils.rs and layers.rs are held to the call sites (issue #1141): a function
+# with more than a dozen caller files must account for every one of them, by
+# name or through the regenerating grep the annotation carries, and a recorded
+# count or a "Not used by" claim must be true. Callers are resolved through
+# `use` declarations, not matched as substrings. check_used_by_test.sh is the
+# checker's own negative coverage on a synthetic workspace: an absent
+# annotation, the pre-#1121 `create_causal_mask` roster verbatim, a roster that
+# lost a caller, a drifted count and the `softcap` look-alikes, each of which
+# must be judged the right way.
+.PHONY: verify-used-by
+verify-used-by: ## Assert the `Used by:` annotations on the shared core helpers account for their callers (issue #1141)
+	@echo "$(CYAN)[verify] Used by: annotations...$(RESET)"
+	@python3 scripts/ci/check_used_by.py
+	@bash scripts/ci/check_used_by_test.sh
 
 # Every MLXCEL_* string literal under src/**/*.rs must appear on
 # docs/environment-variables.md or carry a reasoned ALLOWLIST entry in the
@@ -1120,7 +1136,7 @@ bump-version: ## Release: set every version-tracking crate to VERSION and sync C
 	@$(MAKE) --no-print-directory verify-versions
 
 .PHONY: verify
-verify: verify-versions verify-kernel-dtype-keys verify-env-var-docs verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-cuda-runtime-dir verify-python-tooling verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
+verify: verify-versions verify-kernel-dtype-keys verify-used-by verify-env-var-docs verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-cuda-runtime-dir verify-python-tooling verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
 	@echo "$(GREEN)[verify] OK: matches the nightly-verify GitHub Actions job$(RESET)"
 
 .PHONY: verify-clean
