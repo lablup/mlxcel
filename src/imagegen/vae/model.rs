@@ -39,7 +39,7 @@ impl Decoder {
     fn load(weights: &WeightMap, config: &Flux2VaeConfig) -> Result<Self> {
         let eps = Flux2VaeConfig::NORM_EPS;
         let groups = config.norm_num_groups;
-        let channels = &config.block_out_channels;
+        let channels = config.decoder_channels();
         let top = channels[channels.len() - 1];
         let reversed: Vec<i32> = channels.iter().rev().copied().collect();
         let up_blocks = reversed
@@ -173,11 +173,14 @@ pub(super) fn detect_conv_layout(
     weights: &WeightMap,
     config: &Flux2VaeConfig,
 ) -> Result<ConvLayout> {
-    let top = *config
-        .block_out_channels
-        .last()
-        .expect("validated non-empty");
-    let first = config.block_out_channels[0];
+    // The DECODER's widths, not the encoder's: a checkpoint that narrows it
+    // (`decoder_block_out_channels`, as MOSS-Image's 96/192/384/384 over the
+    // 128/256/512/512 encoder) puts the decoder's own channels on
+    // `decoder.conv_in` and `decoder.conv_out`, and probing with the encoder's
+    // numbers rejected a perfectly good MLX-layout checkpoint.
+    let decoder = config.decoder_channels();
+    let top = *decoder.last().expect("validated non-empty");
+    let first = decoder[0];
     // (key, out, in, kernel) of convs whose in-channels differ from the kernel.
     let probes = [
         ("decoder.conv_in.weight", top, config.latent_channels, 3),
@@ -219,14 +222,36 @@ pub(crate) fn probe_conv_layout(
     Ok(ConvLayout::Torch)
 }
 
+/// Batch-norm statistics stored without their `bn.` module prefix, and the
+/// names the loader reads them under.
+///
+/// `moss-image-mlx` exports the FLUX.2 VAE decoder alone and keeps the
+/// statistics as top-level `running_mean` / `running_var` (its `VAEDecoder`
+/// owns them directly). They are the same tensors as Diffusers'
+/// `bn.running_mean` / `bn.running_var`, and dropping them would decode
+/// latents that were never denormalized.
+const BARE_BATCH_NORM_STATS: [(&str, &str); 2] = [
+    ("running_mean", "bn.running_mean"),
+    ("running_var", "bn.running_var"),
+];
+
 /// Keep only the tensors the VAE reads, cast floats to `compute_dtype`, and put
-/// conv weights in MLX layout.
+/// conv weights in MLX layout. Bare batch-norm statistics
+/// ([`BARE_BATCH_NORM_STATS`]) are read as `bn.*` when the checkpoint has no
+/// `bn.*` copy of its own.
 pub(super) fn prepare_weights(
-    raw: WeightMap,
+    mut raw: WeightMap,
     config: &Flux2VaeConfig,
     include_encoder: bool,
     compute_dtype: i32,
 ) -> Result<WeightMap> {
+    for (bare, prefixed) in BARE_BATCH_NORM_STATS {
+        if !raw.contains_key(prefixed)
+            && let Some(value) = raw.remove(bare)
+        {
+            raw.insert(prefixed.to_string(), value);
+        }
+    }
     let mut prefixes = vec!["decoder.", "post_quant_conv.", "bn."];
     if include_encoder {
         prefixes.extend(["encoder.", "quant_conv."]);

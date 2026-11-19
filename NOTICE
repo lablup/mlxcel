@@ -25,6 +25,35 @@ NOTICE file, as required by Apache License 2.0 Section 4(d):
     (https://github.com/TheTom/turboquant_plus).
 
 
+moss-image-mlx
+--------------
+
+Portions of the MOSS-Image implementation under src/imagegen/moss_image/ are
+derived from moss-image-mlx (https://github.com/felix-ab/moss-image-mlx),
+Copyright 2026 Felix Brener, licensed under the Apache License, Version 2.0.
+That project is an independent MLX implementation of MOSS-Image and
+reproduces the inference behaviour of the software and models listed in its
+NOTICE. The following notice is carried forward verbatim from the
+moss-image-mlx NOTICE file, as required by Apache License 2.0 Section 4(d):
+
+    moss-image-mlx
+    Copyright 2026 Felix Brener. Licensed under the Apache License, Version 2.0.
+
+    This project is an independent MLX implementation of MOSS-Image. It is not affiliated with or endorsed by OpenMOSS.
+
+    It reproduces the inference behaviour of software and models released by others:
+    - MOSS-Image (model weights and pipeline_moss_image.py), Copyright OpenMOSS, Apache License 2.0.
+      https://github.com/OpenMOSS/MOSS-Image
+    - Qwen3.5-9B (the text encoder weights MOSS-Image ships), Copyright Alibaba Cloud (Qwen team), Apache License 2.0.
+    - FLUX.2 VAE with the FLUX.2 small decoder (the autoencoder MOSS-Image ships), Copyright Black Forest Labs,
+      Apache License 2.0. https://huggingface.co/black-forest-labs/FLUX.2-small-decoder
+    - MOSS-Image SFT destripe LoRA (downloaded by --turbo, pinned revision), by nynxz, Apache License 2.0.
+      https://huggingface.co/nynxz/MOSS-Image
+    - mlx-lm (used as a dependency for the Qwen3.5 backbone), Copyright Apple Inc., MIT License.
+
+    torch_randn.py and the strip-decoding VAE are adapted from felix-ab/flux3-mlx (Apache License 2.0).
+
+
 mlx-lm, mlx-vlm, and mlx-audio
 ------------------------------
 
