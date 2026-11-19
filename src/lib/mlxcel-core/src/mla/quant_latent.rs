@@ -103,7 +103,8 @@ pub(crate) fn check_quantizable(geometry: &MlaGeometry, mode: KVCacheMode) -> Re
 /// The live window an MLA latent cache hands back after an update.
 ///
 /// The contract the quantized-latent follow-ups build on (#3156 fused kernel,
-/// #3157 Turbo latent, #3160-#3163 latent-pair families): a consumer matches on
+/// #3160-#3163 latent-pair families; the #3157 Turbo latent was measured on it
+/// and not adopted, `mla::turbo_latent`): a consumer matches on
 /// the variant and reads the codec parameters from the window, never from the
 /// model family.
 pub enum LatentWindow {
@@ -271,7 +272,7 @@ fn latent_qmm(
 /// Same operations in the same dtypes as `rope_score_mask`: the query is
 /// scaled in its own dtype, multiplied against `kpe^T`, and the additive mask
 /// is applied to the `[B, H, 1, S]` result.
-fn rope_scores_by_row(
+pub(crate) fn rope_scores_by_row(
     q_pe: &MlxArray,
     kpe: &MlxArray,
     scale: f32,
