@@ -25,6 +25,13 @@
 //! [`KvArm::make_caches`], the way the engine sets it on its pool caches;
 //! every model gets it there, since a model-owned family ignores those caches.
 //!
+//! `MLXCEL_TRACE_PREFILL_CHUNK=N` runs the context pass as consecutive
+//! forwards of at most `N` tokens, the way the generator prefills a long
+//! prompt (`prefill_plan`), instead of one forward over the whole context. A
+//! single forward scores `heads * context^2` pairs, which at 16384 tokens on
+//! a 128-head model (DeepSeek V3.2) is tens of gigabytes per temporary; both
+//! arms of a comparison must use the same value (#3163).
+//!
 //! `MLXCEL_TRACE_DECODE_STEP=1` feeds the last context token through its own
 //! single-token forward. A decode step is what grows a sliding
 //! `RotatingKVCache` ahead of `offset`, the state the next multi-token append
@@ -38,6 +45,8 @@ use mlxcel_core::layers::KVCache;
 pub struct KvArm {
     pub mode: Option<KVCacheMode>,
     pub decode_step: bool,
+    /// Largest context forward, in tokens; `None` is one forward.
+    context_chunk: Option<usize>,
     /// Per-layer modes for the harness's own caches, set by [`Self::install`].
     external_modes: Option<Vec<KVCacheMode>>,
 }
@@ -57,9 +66,17 @@ impl KvArm {
             Ok("1") => true,
             _ => anyhow::bail!("MLXCEL_TRACE_DECODE_STEP must be 0 or 1"),
         };
+        let context_chunk = match std::env::var("MLXCEL_TRACE_PREFILL_CHUNK") {
+            Err(_) => None,
+            Ok(value) => match value.parse::<usize>() {
+                Ok(tokens) if tokens > 0 => Some(tokens),
+                _ => anyhow::bail!("MLXCEL_TRACE_PREFILL_CHUNK must be a positive integer"),
+            },
+        };
         Ok(Self {
             mode,
             decode_step,
+            context_chunk,
             external_modes: None,
         })
     }
@@ -127,6 +144,12 @@ impl KvArm {
             }
         }
         caches
+    }
+
+    /// The context pass's multi-token part as the forwards to run, in order:
+    /// one piece, or `MLXCEL_TRACE_PREFILL_CHUNK`-token pieces.
+    pub fn context_pieces<'a>(&self, context: &'a [i32]) -> std::slice::Chunks<'a, i32> {
+        context.chunks(self.context_chunk.unwrap_or(context.len()).max(1))
     }
 
     /// Where the context pass splits: everything before is one forward, the

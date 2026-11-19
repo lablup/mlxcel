@@ -192,8 +192,9 @@ const TEXT_IMAGE_VIDEO_AUDIO: &[Modality] = &[
 ];
 
 const KV_FP16: &[KvMode] = &[KvMode::Fp16];
-/// The quantized-latent families: an affine int8 latent with fp16 rope keys,
-/// no Turbo mode (`mla::QUANTIZED_LATENT_FAMILIES`, #3160, #3161).
+/// The quantized-latent families (`DeepSeekV3Attention`, #3160; Kimi Linear and
+/// Kimi K3, #3162; LongCat, #3161): an affine int8 latent with fp16 rope keys,
+/// no Turbo mode (`mla::QUANTIZED_LATENT_FAMILIES`).
 const KV_INT8: &[KvMode] = &[KvMode::Fp16, KvMode::Int8];
 const KV_TURBO: &[KvMode] = &[KvMode::Fp16, KvMode::Int8, KvMode::Turbo4];
 const NO_DRAFTERS: &[Drafter] = &[];
@@ -1342,6 +1343,9 @@ fn stores_quantized_latent(model_type: ModelType) -> bool {
             | ModelType::KimiK25
             | ModelType::YoutuLLM
             | ModelType::YoutuVLM
+            | ModelType::KimiLinear
+            | ModelType::KimiK3
+            | ModelType::KimiK3VLM
             | ModelType::LongcatFlash
             | ModelType::LongcatFlashNgram
     )
@@ -1814,9 +1818,6 @@ mod tests {
             ModelType::DeepSeekV32,
             ModelType::Glm4MoeLite,
             ModelType::GlmMoeDsa,
-            ModelType::KimiLinear,
-            ModelType::KimiK3,
-            ModelType::KimiK3VLM,
         ] {
             assert_eq!(
                 family(model_type).kv_modes,
@@ -1837,6 +1838,9 @@ mod tests {
             ModelType::KimiK25,
             ModelType::YoutuLLM,
             ModelType::YoutuVLM,
+            ModelType::KimiLinear,
+            ModelType::KimiK3,
+            ModelType::KimiK3VLM,
             ModelType::LongcatFlash,
             ModelType::LongcatFlashNgram,
         ] {

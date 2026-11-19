@@ -26,7 +26,8 @@
 //!   windowed.
 //! - **MLA / compressed KV** (DeepSeek): V3/V3.2 cache a low-rank latent
 //!   (`kv_lora_rank + qk_rope_head_dim`) shared across heads — far smaller than
-//!   the per-head formula (*overcount*). So do the other families that always
+//!   the per-head formula (*overcount*). V3.2 and GLM-5 also cache the
+//!   `index_head_dim`-wide DSA indexer key in the latent's slot. So do the other families that always
 //!   cache the latent pair (`mla::caches_mla_latent_pair`). V2 follows the
 //!   runtime: it caches the latent where absorbed decode is selected
 //!   (`mla::absorbed_enabled`, the default on Metal since #3131 and on CUDA
@@ -300,6 +301,24 @@ fn count_attention_layers(text: &Value, num_layers: u64) -> Option<u64> {
     None
 }
 
+/// The MLA layer count of a Kimi Linear / Kimi K3 stack, whose
+/// `linear_attn_config.kda_layers` lists the 1-indexed KDA layers; every other
+/// layer is MLA. KDA layers hold recurrent state, no KV, so only the MLA
+/// layers take the latent rate (#3162). Entries outside `1..=num_layers` and
+/// repeats are ignored. Returns `None` when the config has no such list.
+fn kda_hybrid_mla_layers(text: &Value, num_layers: u64) -> Option<u64> {
+    let kda = text
+        .get("linear_attn_config")?
+        .get("kda_layers")?
+        .as_array()?;
+    let kda: std::collections::HashSet<u64> = kda
+        .iter()
+        .filter_map(Value::as_u64)
+        .filter(|layer| (1..=num_layers).contains(layer))
+        .collect();
+    Some(num_layers.saturating_sub(kda.len() as u64))
+}
+
 /// HF `Gemma3TextConfig` defaults for the fields a real `text_config` often
 /// omits (gemma-3-4b-it-4bit carries only `hidden_size`, `intermediate_size`,
 /// `num_hidden_layers`, `sliding_window`). Without these, [`attn_dims`] falls
@@ -457,36 +476,59 @@ fn classify(
         // The `DeepSeekV3Attention` families store the same affine latent in
         // every absorption state (issue #3160). A rank the codec cannot group
         // falls back to per-token rows at the element width, sized below.
-        let pair_quantized =
-            mlxcel_core::mla::stores_quantized_latent_pair(&mt) && rank_quantizable;
+        //
+        // The DSA families cache the indexer key in the same slot as the
+        // latent, `[kv_latent | indexer key]` (`src/models/deepseek_v32.rs`),
+        // so the slot is `kv_lora_rank + index_head_dim` wide in every mode
+        // (issue #3163). A checkpoint with no indexer weights stores the
+        // latent alone, which `config.json` does not say, so this is the
+        // upper bound for it; `MLXCEL_DSA_DENSE` drops the indexer and its key.
+        let index_key = if mlxcel_core::mla::caches_dsa_indexer_key(&mt)
+            && !crate::models::deepseek_v32::dsa_dense_fallback_forced()
+        {
+            get_u64(text, &["index_head_dim"])
+                .unwrap_or(crate::models::deepseek_v32::default_index_head_dim() as u64)
+        } else {
+            0
+        };
+        let key_width = kv_lora_rank.saturating_add(index_key);
+        let pair_quantized = mlxcel_core::mla::stores_quantized_latent_pair(&mt)
+            && rank_quantizable
+            && key_width.is_multiple_of(group);
         if mt.contains("v3")
             || mt.contains("v32")
             || mlxcel_core::mla::caches_mla_latent_pair(&mt)
             || v2_caches_latent
         {
-            // Cached form: (kv_latent[kv_lora_rank] , k_pe[qk_rope_head_dim]),
-            // which the quantized latent does not store at one element width.
-            let elems = kv_lora_rank.saturating_add(rope);
+            // Cached form: (kv_latent[kv_lora_rank] (+ the DSA indexer key),
+            // k_pe[qk_rope_head_dim]), which the quantized latent does not
+            // store at one element width.
+            let elems = key_width.saturating_add(rope);
             let fixed_bytes_per_token = v2_latent_bits
                 .filter(|_| v2_caches_latent || pair_quantized)
                 .map(|bits| {
                     mlxcel_core::mla::quantized_latent_bytes_per_token(
-                        kv_lora_rank as usize,
+                        key_width as usize,
                         rope as usize,
                         bits as usize,
                         group as usize,
                     ) as u64
                 });
-            // A LongCat decoder layer holds two MLA attentions, each with its
-            // own latent cache (`models::longcat_flash_ngram`, #3161).
+            // A KDA hybrid (Kimi Linear, Kimi K3) caches the latent in its
+            // MLA layers only. A LongCat decoder layer holds two MLA
+            // attentions, each with its own latent cache
+            // (`models::longcat_flash_ngram`, #3161).
             let caches_per_layer = if mt.starts_with("longcat_flash") {
                 2
             } else {
                 1
             };
+            let layers = kda_hybrid_mla_layers(text, num_layers)
+                .unwrap_or(num_layers)
+                .saturating_mul(caches_per_layer);
             return Some((
                 vec![KvGroup {
-                    layers: num_layers.saturating_mul(caches_per_layer),
+                    layers,
                     elems_per_token: elems,
                     window: None,
                     fixed_bytes_per_token,
@@ -841,6 +883,10 @@ fn estimate_kv_arch_inner(
 #[cfg(test)]
 #[path = "kv_arch_latent_pair_tests.rs"]
 mod latent_pair_tests;
+
+#[cfg(test)]
+#[path = "kv_arch_dsa_tests.rs"]
+mod dsa_tests;
 
 #[cfg(test)]
 mod tests {

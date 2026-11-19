@@ -36,8 +36,11 @@ use crate::mla::latent_layout_supports_mode;
 /// The eight types that run `DeepSeekV3Attention`: `DeepSeekV3Model`
 /// (`deepseek_v3`, and the `kimi_k2` / `joyai_llm_flash` checkpoints detection
 /// routes to it), the Kimi-VL and Kimi K2.5 wrappers whose text decoder is
-/// that model, and the Youtu decoders whose layers hold that attention (#3160);
-/// both LongCat types, which load `LongcatFlashNgramModel` (#3161; measured on
+/// that model, and the Youtu decoders whose layers hold that attention
+/// (#3160). Then the two hybrid KDA + MLA families, Kimi Linear and Kimi K3,
+/// whose model-owned MLA caches take the layer mode table and write through
+/// the same view (#3162); their KDA layers hold no KV. Then both LongCat
+/// types, which load `LongcatFlashNgramModel` (#3161; measured on
 /// LongCat-Flash-Lite). Every entry is also in
 /// [`crate::mla::MLA_LATENT_CACHE_FAMILIES`].
 ///
@@ -57,6 +60,8 @@ pub static QUANTIZED_LATENT_FAMILIES: &[&str] = &[
     "youtu",
     "youtu_llm",
     "youtu_vl",
+    "kimi_linear",
+    "kimi_k3",
     "longcat_flash",
     "longcat_flash_ngram",
 ];
@@ -124,10 +129,14 @@ mod tests {
         assert!(stores_quantized_latent_pair("  Kimi_VL "));
         assert!(!stores_quantized_latent_pair("deepseek_v2"));
         assert!(!stores_quantized_latent_pair("deepseek_v32"));
+        assert!(!stores_quantized_latent_pair("deepseek_v3.2"));
+        assert!(!stores_quantized_latent_pair("glm_moe_dsa"));
         assert!(!stores_quantized_latent_pair("glm4_moe_lite"));
         assert!(stores_quantized_latent_pair("longcat_flash"));
         assert!(stores_quantized_latent_pair("LongCat_Flash_Ngram"));
         assert!(!stores_quantized_latent_pair("deepseek_v3_vl"));
+        assert!(stores_quantized_latent_pair("kimi_linear"));
+        assert!(stores_quantized_latent_pair("kimi_k3"));
     }
 
     #[test]

@@ -471,10 +471,59 @@ pub fn resolve_effective_kv_cache_mode(
     requested: KVCacheMode,
     model_path: &Path,
 ) -> (KVCacheMode, Option<String>) {
-    let Some(model_type) = read_config_model_type(model_path) else {
+    let Some(config) = read_config(model_path) else {
         return (requested, None);
     };
-    resolve_kv_cache_mode_for_model(requested, &model_type)
+    let Some(model_type) = kv_rules_model_type(&config) else {
+        return (requested, None);
+    };
+    let (effective, warning) = resolve_kv_cache_mode_for_model(requested, &model_type);
+    if let Some(reason) = dsa_key_slot_refusal(&config, &model_type, effective) {
+        return (
+            KVCacheMode::Fp16,
+            Some(format!(
+                "warning: --kv-cache-mode {requested} is not supported on this model \
+                 (model_type=\"{model_type}\"): {reason}.\n\tUsing fp16 for this model's KV caches."
+            )),
+        );
+    }
+    (effective, warning)
+}
+
+/// Why a DSA model cannot store its `[kv_latent | indexer key]` slot at
+/// `mode`, or `None` when it can or the rule does not apply.
+///
+/// `deepseek_v32`, `deepseek_v3.2` and `glm_moe_dsa` cache the
+/// `index_head_dim`-wide indexer key beside the latent, and the affine `int8`
+/// latent stores that whole slot in groups of 64 (issue #3163). A config whose
+/// `kv_lora_rank` or `kv_lora_rank + index_head_dim` is not a multiple of 64
+/// keeps fp16 from startup; the shipping geometry (512 + 128) passes. The DSA
+/// types are not quantized-latent families today (the #3163 overlap gate), so
+/// the resolver already returns fp16 for them and this rule only takes effect
+/// once they are listed.
+fn dsa_key_slot_refusal(
+    config: &serde_json::Value,
+    model_type: &str,
+    mode: KVCacheMode,
+) -> Option<String> {
+    if mode.latent_affine_bits().is_none() || !mlxcel_core::mla::caches_dsa_indexer_key(model_type)
+    {
+        return None;
+    }
+    let dim = |key: &str, default: usize| {
+        config
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .map_or(default, |value| {
+                usize::try_from(value).unwrap_or(usize::MAX)
+            })
+    };
+    let rank = dim("kv_lora_rank", 512);
+    let index_key = dim(
+        "index_head_dim",
+        crate::models::deepseek_v32::default_index_head_dim(),
+    );
+    mlxcel_core::mla::check_stored_key_width(rank, rank.saturating_add(index_key), mode).err()
 }
 
 /// Apply [`resolve_effective_kv_cache_mode`] and report the substitution once
@@ -535,9 +584,14 @@ pub fn model_stores_quantized_latent(mode: KVCacheMode, model_path: &Path) -> bo
 /// runtime, so a wrapper around it (DeepSeek-VL2 around `deepseek_v2`) is
 /// resolved as the decoder (issue #3155).
 fn read_config_model_type(model_path: &Path) -> Option<String> {
+    kv_rules_model_type(&read_config(model_path)?)
+}
+
+/// A model directory's parsed `config.json`, or `None` when it is missing or
+/// unparsable.
+fn read_config(model_path: &Path) -> Option<serde_json::Value> {
     let content = std::fs::read_to_string(model_path.join("config.json")).ok()?;
-    let config = serde_json::from_str::<serde_json::Value>(&content).ok()?;
-    kv_rules_model_type(&config)
+    serde_json::from_str(&content).ok()
 }
 
 /// [`read_config_model_type`] on a parsed config.

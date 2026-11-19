@@ -329,10 +329,9 @@ impl MlaAttention {
             }
             // A multi-token step reads the window dequantized, in the
             // queries' dtype so a bf16 model stays bf16 (#3161).
-            window => crate::models::mla_batched::dense_latent_window(
-                window,
-                mlxcel_core::array_dtype(&q_pe),
-            ),
+            window => {
+                crate::models::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe))
+            }
         };
         mlxcel_core::mla::stats::record(if absorbed {
             if l == 1 {
