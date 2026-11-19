@@ -23,6 +23,7 @@
 //!
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/longcat_flash.py, longcat_flash_ngram.py
 
+use crate::models::gpt2::validate_embedding_table;
 use crate::models::model_owned::KvCacheLayerModes;
 use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::cache::KVCacheMode;
@@ -681,9 +682,9 @@ impl LongcatFlashMoE {
         // in the sorted path's reshape at 64 or more (#3161).
         let x_shape = mlxcel_core::array_shape(x);
         let hidden = x_shape[x_shape.len() - 1];
-        let k = *mlxcel_core::array_shape(&clamped_indices)
-            .last()
-            .expect("router indices have a top-k axis");
+        // The router slices its indices to `[..., :top_k]`, so `top_k` is the
+        // last axis; reading the configured value leaves no panic path.
+        let k = self.router.top_k as i32;
         let flat = self.switch_mlp.forward(
             &mlxcel_core::reshape(x, &[-1, hidden]),
             &mlxcel_core::reshape(&clamped_indices, &[-1, k]),
@@ -854,6 +855,60 @@ struct NgramEmbedding {
 }
 
 impl NgramEmbedding {
+    /// Check the config fields the n-gram arithmetic divides by, multiplies
+    /// and casts to INT32, returning `(m, num_embedders)`. A checkpoint config
+    /// is untrusted, so every case that would otherwise underflow, divide by
+    /// zero, overflow or truncate is an `Err` here, before any of it runs.
+    fn validate_config(args: &LongcatFlashNgramConfig) -> Result<(usize, usize), String> {
+        let k = args.emb_split_num;
+        let n = args.emb_neighbor_num;
+        if n < 2 {
+            return Err(format!(
+                "config emb_neighbor_num ({n}) must be at least 2 for an n-gram model"
+            ));
+        }
+        if k == 0 {
+            return Err("config emb_split_num must be at least 1".to_string());
+        }
+        let num_embedders = k.checked_mul(n - 1).ok_or_else(|| {
+            format!("config emb_split_num ({k}) * (emb_neighbor_num ({n}) - 1) overflows")
+        })?;
+        if args.hidden_size == 0 || !args.hidden_size.is_multiple_of(num_embedders) {
+            return Err(format!(
+                "config hidden_size ({}) must be a positive multiple of \
+                 emb_split_num * (emb_neighbor_num - 1) ({num_embedders})",
+                args.hidden_size
+            ));
+        }
+        if i32::try_from(args.vocab_size).is_err() {
+            return Err(format!(
+                "config vocab_size ({}) exceeds i32::MAX",
+                args.vocab_size
+            ));
+        }
+        let m = args
+            .ngram_vocab_size_ratio
+            .checked_mul(args.vocab_size)
+            .ok_or_else(|| {
+                format!(
+                    "config ngram_vocab_size_ratio ({}) * vocab_size ({}) overflows",
+                    args.ngram_vocab_size_ratio, args.vocab_size
+                )
+            })?;
+        // The largest embedder vocab is cast to INT32 in `forward`.
+        let largest = (num_embedders - 1)
+            .checked_mul(2)
+            .and_then(|extra| m.checked_add(extra))
+            .and_then(|v| v.checked_add(1));
+        if largest.is_none_or(|v| i32::try_from(v).is_err()) {
+            return Err(format!(
+                "config ngram_vocab_size_ratio * vocab_size ({m}) plus the n-gram embedder \
+                 offsets exceeds i32::MAX"
+            ));
+        }
+        Ok((m, num_embedders))
+    }
+
     fn compute_vocab_mods(
         n: usize,
         k: usize,
@@ -984,11 +1039,10 @@ impl NgramEmbedding {
     ) -> Result<Self, String> {
         let gs = args.group_size();
         let bits = args.bits();
-        let m = args.ngram_vocab_size_ratio * args.vocab_size;
+        let (m, num_embedders) = Self::validate_config(args)?;
         let k = args.emb_split_num;
         let n = args.emb_neighbor_num;
-        let num_embedders = k * (n - 1);
-        let _emb_dim = args.hidden_size / num_embedders;
+        let emb_dim = args.hidden_size / num_embedders;
 
         // `from_weights` detects a quantized table by its `.scales` key: the
         // MLX 4-bit checkpoints quantize the word and n-gram tables, whose
@@ -1000,6 +1054,16 @@ impl NgramEmbedding {
             gs,
             bits,
         )?;
+        // The gathers do not range-check a positive index, so a table shorter
+        // or narrower than the config claims must fail here, not on a prompt.
+        validate_embedding_table(
+            &word_embeddings,
+            &format!("{prefix}.word_embeddings"),
+            args.vocab_size,
+            "vocab_size",
+            args.hidden_size,
+            "hidden_size",
+        )?;
 
         let mut embedders = Vec::with_capacity(num_embedders);
         for i in 0..num_embedders {
@@ -1009,6 +1073,14 @@ impl NgramEmbedding {
                 &format!("{prefix}.embedders.{i}"),
                 gs,
                 bits,
+            )?;
+            validate_embedding_table(
+                &embedding,
+                &format!("{prefix}.embedders.{i}"),
+                emb_vocab_size,
+                "ngram_vocab_size_ratio * vocab_size + 2 * i + 1",
+                emb_dim,
+                "hidden_size / (emb_split_num * (emb_neighbor_num - 1))",
             )?;
             let post_proj = UnifiedLinear::from_weights(
                 weights,
@@ -1129,6 +1201,14 @@ impl LongcatFlashNgramModel {
             (Some(ngram), None)
         } else {
             let embed = UnifiedEmbedding::from_weights(weights, "model.embed_tokens", gs, bits)?;
+            validate_embedding_table(
+                &embed,
+                "model.embed_tokens",
+                args.vocab_size,
+                "vocab_size",
+                args.hidden_size,
+                "hidden_size",
+            )?;
             (None, Some(embed))
         };
 

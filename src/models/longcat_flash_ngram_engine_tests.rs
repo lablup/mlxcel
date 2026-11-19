@@ -116,6 +116,13 @@ pub(super) fn tiny_model_with_rank_in(
     dtype: i32,
 ) -> LongcatFlashNgramModel {
     let args = tiny_config_with_rank(model_type, kv_lora);
+    let weights = tiny_weights(&args, kv_lora, dtype);
+    let weights = sanitize_weights(weights, &args).expect("sanitize tiny longcat weights");
+    LongcatFlashNgramModel::from_weights(&weights, &args).expect("build tiny longcat")
+}
+
+/// Checkpoint-layout tiny weights for `args`, stored in `dtype`.
+fn tiny_weights(args: &LongcatFlashNgramConfig, kv_lora: i32, dtype: i32) -> WeightMap {
     let mut weights = WeightMap::new();
     let mut seed = 101u64;
     let mut put = |name: String, shape: &[i32], scale: f32| {
@@ -220,8 +227,7 @@ pub(super) fn tiny_model_with_rank_in(
         let w = weights.remove(&name).expect("weight present");
         weights.insert(name, mlxcel_core::astype(&w, dtype));
     }
-    let weights = sanitize_weights(weights, &args).expect("sanitize tiny longcat weights");
-    LongcatFlashNgramModel::from_weights(&weights, &args).expect("build tiny longcat")
+    weights
 }
 
 pub(super) fn ids(tokens: &[i32]) -> UniquePtr<MlxArray> {
@@ -436,4 +442,37 @@ fn a_64_token_prefill_takes_the_sorted_expert_path_and_matches_decode() {
         }
         assert!(worst <= 1e-3, "{model_type}: max abs diff {worst}");
     }
+}
+
+/// A checkpoint whose `embedders.0` table is one row short of the
+/// `m + 1` the config claims must fail to load: the gather behind the
+/// lookup does not range-check a positive index (#3161).
+#[test]
+fn longcat_flash_ngram_short_embedder_table_fails_to_load() {
+    let args = tiny_config("longcat_flash_ngram");
+    let mut weights = tiny_weights(&args, KV_LORA, mlxcel_core::dtype::FLOAT32);
+    let key = "model.ngram_embeddings.embedders.0.weight";
+    let table = weights.remove(key).expect("embedder 0 present");
+    let shape = mlxcel_core::array_shape(&table);
+    let short = slice_axis(&table, 0, 0, shape[0] - 1);
+    weights.insert(key.to_string(), short);
+    let weights = sanitize_weights(weights, &args).expect("sanitize tiny longcat weights");
+    let err = LongcatFlashNgramModel::from_weights(&weights, &args)
+        .err()
+        .expect("a short embedder table must be refused");
+    assert!(err.contains("embedders.0"), "{err}");
+}
+
+/// `emb_neighbor_num: 1` made `k * (n - 1)` zero and the embedding width a
+/// divide by zero; it must be an error, not a panic.
+#[test]
+fn longcat_flash_ngram_neighbor_num_one_fails_to_load() {
+    let mut args = tiny_config("longcat_flash_ngram");
+    let weights = tiny_weights(&args, KV_LORA, mlxcel_core::dtype::FLOAT32);
+    let weights = sanitize_weights(weights, &args).expect("sanitize tiny longcat weights");
+    args.emb_neighbor_num = 1;
+    let err = LongcatFlashNgramModel::from_weights(&weights, &args)
+        .err()
+        .expect("emb_neighbor_num 1 must be refused");
+    assert!(err.contains("emb_neighbor_num"), "{err}");
 }
