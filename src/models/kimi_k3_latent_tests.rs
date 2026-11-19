@@ -239,3 +239,68 @@ fn batched_int8_decode_matches_single_row_decode() {
         })
         .expect("the prepared sequence exists");
 }
+
+/// Only the MLA indices (1 and 3) of the table decide the cache mode: int8 on
+/// the KDA indices alone builds fp16 MLA caches, and int8 on the MLA indices
+/// alone builds int8 caches whatever the KDA indices hold.
+#[test]
+fn a_table_differing_on_the_kda_indices_alone_does_not_change_the_mla_caches() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let fp16 = KVCacheMode::Fp16;
+    let int8 = KVCacheMode::Int8;
+    let kda_only = model(None);
+    kda_only.set_kv_cache_layer_modes(vec![int8, fp16, int8, fp16]);
+    assert_eq!(
+        kda_only.kv_cache_storage_modes(),
+        Some(vec![None, Some(fp16), None, Some(fp16)])
+    );
+    let caches = kda_only.make_layer_caches();
+    for layer in [1, 3] {
+        assert_eq!(attn_cache(&caches[layer]).mode, fp16);
+    }
+
+    let mla_only = model(None);
+    mla_only.set_kv_cache_layer_modes(vec![fp16, int8, fp16, int8]);
+    assert_eq!(
+        mla_only.kv_cache_storage_modes(),
+        Some(vec![None, Some(int8), None, Some(int8)])
+    );
+    let caches = mla_only.make_layer_caches();
+    for layer in [1, 3] {
+        assert_eq!(attn_cache(&caches[layer]).mode, int8);
+    }
+}
+
+/// A bf16 layer over an int8 latent keeps bf16 activations: the dequantized
+/// window is FP16 and bf16 against FP16 promotes to float32 in MLX, so
+/// `mla_batched::dense_latent_in` casts it back (#3162). The Kimi Linear
+/// regression test covers the same cast; this pins the K3 forward's call.
+#[test]
+fn a_bf16_layer_keeps_bf16_over_an_int8_latent() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let bf16 = mlxcel_core::dtype::BFLOAT16;
+    let config = config();
+    let prefix = "model.layers.1.self_attn";
+    let weights: mlxcel_core::weights::WeightMap = sanitized(&config)
+        .iter()
+        .filter(|(name, _)| name.starts_with(prefix))
+        .map(|(name, w)| (name.clone(), mlxcel_core::astype(w, bf16)))
+        .collect();
+    let attn =
+        KimiK3MLAAttention::from_weights(&weights, &config, prefix).expect("bf16 MLA layer loads");
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
+    let x = mlxcel_core::astype(&noise_arr(&[1, 5, HIDDEN], 43, 2.0), bf16);
+    let prefill = attn.forward(&x, None, &mut cache);
+    assert_eq!(
+        mlxcel_core::array_dtype(&prefill),
+        bf16,
+        "prefill output dtype"
+    );
+    let step = mlxcel_core::slice(&x, &[0, 0, 0], &[1, 1, HIDDEN]);
+    let decode = attn.forward(&step, None, &mut cache);
+    assert_eq!(
+        mlxcel_core::array_dtype(&decode),
+        bf16,
+        "decode output dtype"
+    );
+}

@@ -391,3 +391,33 @@ fn a_bf16_layer_keeps_bf16_over_an_int8_latent() {
         "decode output dtype"
     );
 }
+
+/// Only the MLA index of the table decides the cache mode: a table that
+/// differs from fp16 on the KDA index alone builds fp16 MLA caches and no
+/// quantized latent, and a table that is int8 on the MLA index alone builds an
+/// int8 cache whatever the KDA index holds.
+#[test]
+fn a_table_differing_on_the_kda_index_alone_does_not_change_the_mla_cache() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let kda_only = model(64, None);
+    kda_only.set_kv_cache_layer_modes(vec![KVCacheMode::Int8, KVCacheMode::Fp16]);
+    assert_eq!(
+        kda_only.kv_cache_storage_modes(),
+        Some(vec![None, Some(KVCacheMode::Fp16)])
+    );
+    assert_eq!(
+        mla_cache(&kda_only.make_kimi_caches()).mode,
+        KVCacheMode::Fp16
+    );
+
+    let mla_only = model(64, None);
+    mla_only.set_kv_cache_layer_modes(vec![KVCacheMode::Fp16, KVCacheMode::Int8]);
+    assert_eq!(
+        mla_only.kv_cache_storage_modes(),
+        Some(vec![None, Some(KVCacheMode::Int8)])
+    );
+    assert_eq!(
+        mla_cache(&mla_only.make_kimi_caches()).mode,
+        KVCacheMode::Int8
+    );
+}
