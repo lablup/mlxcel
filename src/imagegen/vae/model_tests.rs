@@ -304,6 +304,37 @@ fn a_vae_without_batch_norm_cannot_decode_packed_latents_but_can_decode() {
     assert!(err.contains("bn.*"), "{err}");
 }
 
+/// `moss-image-mlx` exports the decoder alone with the batch-norm statistics as
+/// top-level `running_mean` / `running_var`. They must be read as `bn.*`, so the
+/// packed decode still denormalizes and matches upstream.
+#[test]
+fn bare_batch_norm_statistics_are_read_as_bn() {
+    let (mut weights, refs) = load_fixture("vae_tiny.safetensors");
+    weights.retain(|k, _| !k.starts_with("encoder.") && !k.starts_with("quant_conv."));
+    for name in ["running_mean", "running_var"] {
+        let value = weights.remove(&format!("bn.{name}")).unwrap();
+        weights.insert(name.to_string(), value);
+    }
+    let vae = tiny_vae(weights, false, dtype::FLOAT32).unwrap();
+    let out = vae.decode_packed_latents(&refs["packed"]).unwrap();
+    let err = rel_rms(&out, &refs["decode_packed"]);
+    assert!(err < F32_TOL, "decode_packed_latents rel-RMS {err}");
+}
+
+/// A checkpoint that carries both spellings keeps its `bn.*` copy.
+#[test]
+fn prefixed_batch_norm_statistics_win_over_bare_ones() {
+    let (mut weights, refs) = load_fixture("vae_tiny.safetensors");
+    weights.insert(
+        "running_mean".to_string(),
+        mlxcel_core::full_f32(&[16], 100.0, dtype::FLOAT32),
+    );
+    let vae = tiny_vae(weights, false, dtype::FLOAT32).unwrap();
+    let out = vae.decode_packed_latents(&refs["packed"]).unwrap();
+    let err = rel_rms(&out, &refs["decode_packed"]);
+    assert!(err < F32_TOL, "decode_packed_latents rel-RMS {err}");
+}
+
 #[test]
 fn a_vae_without_post_quant_conv_skips_that_stage() {
     // Z-Image's FLUX.1 AutoencoderKL layout: no post_quant_conv, no bn.

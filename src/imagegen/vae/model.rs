@@ -222,14 +222,36 @@ pub(crate) fn probe_conv_layout(
     Ok(ConvLayout::Torch)
 }
 
+/// Batch-norm statistics stored without their `bn.` module prefix, and the
+/// names the loader reads them under.
+///
+/// `moss-image-mlx` exports the FLUX.2 VAE decoder alone and keeps the
+/// statistics as top-level `running_mean` / `running_var` (its `VAEDecoder`
+/// owns them directly). They are the same tensors as Diffusers'
+/// `bn.running_mean` / `bn.running_var`, and dropping them would decode
+/// latents that were never denormalized.
+const BARE_BATCH_NORM_STATS: [(&str, &str); 2] = [
+    ("running_mean", "bn.running_mean"),
+    ("running_var", "bn.running_var"),
+];
+
 /// Keep only the tensors the VAE reads, cast floats to `compute_dtype`, and put
-/// conv weights in MLX layout.
+/// conv weights in MLX layout. Bare batch-norm statistics
+/// ([`BARE_BATCH_NORM_STATS`]) are read as `bn.*` when the checkpoint has no
+/// `bn.*` copy of its own.
 pub(super) fn prepare_weights(
-    raw: WeightMap,
+    mut raw: WeightMap,
     config: &Flux2VaeConfig,
     include_encoder: bool,
     compute_dtype: i32,
 ) -> Result<WeightMap> {
+    for (bare, prefixed) in BARE_BATCH_NORM_STATS {
+        if !raw.contains_key(prefixed)
+            && let Some(value) = raw.remove(bare)
+        {
+            raw.insert(prefixed.to_string(), value);
+        }
+    }
     let mut prefixes = vec!["decoder.", "post_quant_conv.", "bn."];
     if include_encoder {
         prefixes.extend(["encoder.", "quant_conv."]);

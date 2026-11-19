@@ -574,7 +574,7 @@ Components: the Qwen3.5-9B language backbone as the prompt conditioner (`text_en
 - **Prompt.** The chat template renders to `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n` (one user message, generation prompt, `enable_thinking=True`), and the conditioner's **final-norm** hidden states are the transformer's context, truncated at 4096 tokens.
 - **Layout prompts.** A JSON layout (`[y_min, x_min, y_max, x_max]` boxes, canvas centre as origin) is part of the prompt, not a separate option.
 - **Memory.** The three stages load and free in turn (conditioner, then transformer, then VAE decoder) so a request peaks at the largest stage rather than their sum: about 9.3 GB at the 8-bit tier and 7.4 GB at the compact tier for a 1024x1024 image. `n > 1` samples every image before the VAE loads, to keep that staging.
-- **VAE decode.** The published checkpoint ships the FLUX.2 VAE decoder alone, with no `bn.*` statistics, so the sampled latents are unpatchified and decoded directly instead of going through `Flux2Vae::decode_packed_latents` (which undoes FLUX.2's batch-norm normalization).
+- **VAE decode.** As in the reference, the sampled latents are batch-norm denormalized, unpatchified and decoded (`Flux2Vae::decode_packed_latents`). The published MLX tiers ship the FLUX.2 VAE decoder alone and store its statistics as top-level `running_mean` / `running_var` rather than `bn.*`; the VAE loader reads either spelling, and a decoder with neither is refused.
 
 ### MOSS-Image deviations from the reference
 
