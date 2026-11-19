@@ -56,10 +56,11 @@ pub(crate) fn mla_geometry(
 /// layout for its whole life because the answer depends only on its mode and
 /// geometry.
 ///
-/// `quantized_latent` is the caller's opt in: only the `DeepSeekV3Attention`
-/// callers (the families in `mla::QUANTIZED_LATENT_FAMILIES`) pass `true`. A
-/// caller that passes `false` never gets the latent view, whatever the cache
-/// mode, so a family outside the list keeps its per-token path.
+/// `quantized_latent` is the caller's opt in: only the families in
+/// `mla::QUANTIZED_LATENT_FAMILIES` pass `true` (`DeepSeekV3Attention`, #3160,
+/// and the Kimi Linear and Kimi K3 MLA layers, #3162). A caller that passes
+/// `false` never gets the latent view, whatever the cache mode, so a family
+/// outside the list keeps its per-token path.
 pub(crate) fn store_latent_step(
     cache: &mut KVCache,
     geometry: MlaGeometry,
@@ -96,6 +97,28 @@ fn warn_latent_view_declined(family: &str, mode: mlxcel_core::cache::KVCacheMode
             reason,
             "MLA latent view declined this cache; storing per-token {mode} rows instead of the affine latent"
         );
+    }
+}
+
+/// The mode a model-owned latent-pair cache is built in for a requested
+/// layer `mode`: fp16 and the affine int8 latent pass through, and anything
+/// the latent layout refuses (every Turbo mode) is built fp16.
+///
+/// The resolver already substitutes those modes before a table reaches the
+/// model (`cache::turbo::allowlist`, rule 1); this keeps a table injected some
+/// other way from building a Turbo cache whose codebook would be applied to
+/// the latent pair, and gives the storage report the same answer as the
+/// builder.
+///
+/// Used by: the Kimi Linear and Kimi K3 cache builders and their
+/// `kv_cache_storage_modes` (#3162).
+pub(crate) fn latent_pair_cache_mode(
+    mode: mlxcel_core::cache::KVCacheMode,
+) -> mlxcel_core::cache::KVCacheMode {
+    if mlxcel_core::mla::latent_layout_supports_mode(mode).is_ok() {
+        mode
+    } else {
+        mlxcel_core::cache::KVCacheMode::Fp16
     }
 }
 
@@ -151,7 +174,8 @@ pub(crate) fn validate_mla_decode_batch(
 /// wiring error and panics naming `family`.
 ///
 /// `quantized_latent` opts the caller in to the quantized latent view; see
-/// [`store_latent_step`]. Only `DeepSeekV3Attention` passes `true`.
+/// [`store_latent_step`]. `DeepSeekV3Attention`, Kimi Linear and Kimi K3 pass
+/// `true`.
 ///
 /// Used by: `DeepSeekV3Attention` (DeepSeek V3, Kimi, Youtu), DeepSeek V3.2
 /// MLA, GLM-4.7-Flash MLA, Kimi Linear and Kimi K3.
