@@ -29,7 +29,7 @@ use crate::execution::config_fields::{
     HEAD_DIM_KEYS, HIDDEN_SIZE_KEYS, LAYER_COUNT_KEYS, NUM_HEADS_KEYS, get_u64, text_config,
 };
 use crate::execution::kv_arch::{
-    KvArchKind, estimate_kv_arch_from_config, estimate_kv_arch_unwindowed_from_config,
+    KvArchKind, KvSizing, estimate_kv_arch_from_config, estimate_kv_arch_unwindowed_from_config,
 };
 use crate::execution::memory_estimate::{QuantHint, estimate_total_memory};
 
@@ -87,14 +87,17 @@ pub fn recommend_model_snapshot_capacity(
     context_size: usize,
     current_capacity_bytes: usize,
     target_entries: u64,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
+    let kv_mode: KvSizing = kv_mode.into();
     let config = read_config(model_dir)?;
     recommend_model_snapshot_capacity_from_config_with_entries(
         &config,
         context_size,
         current_capacity_bytes,
-        memory_left_after_model(model_dir, representative_tokens(context_size)),
+        memory_left_after_model(model_dir, representative_tokens(context_size), kv_mode),
         target_entries,
+        kv_mode,
     )
 }
 
@@ -111,18 +114,25 @@ pub fn recommend_model_snapshot_capacity(
 ///
 /// Returns `None` for snapshot-only families, which never donate into this
 /// store, and for families without a KV cache.
+///
+/// `kv_mode` is the mode the scheduler builds each sequence's cache in: it
+/// sets the element width, and for DeepSeek V2 whether an entry is the
+/// absorbed latent (FP16) or the decompressed per-head K/V (#3153).
 #[must_use]
 pub fn recommend_model_kv_store_capacity(
     model_dir: &Path,
     context_size: usize,
     current_capacity_bytes: usize,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
+    let kv_mode: KvSizing = kv_mode.into();
     let config = read_config(model_dir)?;
     recommend_model_kv_store_capacity_from_config(
         &config,
         context_size,
         current_capacity_bytes,
-        memory_left_after_model(model_dir, representative_tokens(context_size)),
+        memory_left_after_model(model_dir, representative_tokens(context_size), kv_mode),
+        kv_mode,
     )
 }
 
@@ -132,9 +142,10 @@ pub fn recommend_model_kv_store_capacity_from_config(
     context_size: usize,
     current_capacity_bytes: usize,
     available_memory_bytes: Option<u64>,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
     let representative_tokens = representative_tokens(context_size);
-    let arch = estimate_kv_arch_from_config(config, representative_tokens, false, 1)?;
+    let arch = estimate_kv_arch_from_config(config, representative_tokens, kv_mode, 1)?;
     let fixed_state_bytes = recurrent_fixed_state_bytes(config, representative_tokens);
     if matches!(arch.kind, KvArchKind::PureSsm)
         || snapshot_family_is_model_aware(config, arch.kind, fixed_state_bytes)
@@ -177,13 +188,18 @@ fn read_config(model_dir: &Path) -> Option<Value> {
 /// already occupy. An unknown budget (`0`) stays `None`; a known one that the
 /// model exhausts stays `Some(0)`, which keeps the compiled-in fallback
 /// instead of lifting the ceiling.
-fn memory_left_after_model(model_dir: &Path, representative_tokens: u64) -> Option<u64> {
+fn memory_left_after_model(
+    model_dir: &Path,
+    representative_tokens: u64,
+    kv_mode: impl Into<KvSizing>,
+) -> Option<u64> {
+    let kv_mode: KvSizing = kv_mode.into();
     let estimate = estimate_total_memory(
         model_dir,
         representative_tokens,
         1,
         QuantHint::Default,
-        false,
+        kv_mode,
     );
     (estimate.available_bytes > 0).then(|| estimate.slack_bytes())
 }
@@ -234,13 +250,16 @@ pub fn recommend_model_snapshot_capacity_from_config(
     context_size: usize,
     current_capacity_bytes: usize,
     available_memory_bytes: Option<u64>,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
+    let kv_mode: KvSizing = kv_mode.into();
     recommend_model_snapshot_capacity_from_config_with_entries(
         config,
         context_size,
         current_capacity_bytes,
         available_memory_bytes,
         MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES,
+        kv_mode,
     )
 }
 
@@ -253,6 +272,7 @@ pub fn recommend_model_snapshot_capacity_from_config_with_entries(
     current_capacity_bytes: usize,
     available_memory_bytes: Option<u64>,
     target_entries: u64,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
     let representative_tokens = representative_tokens(context_size);
     // Unwindowed on purpose: the history-boundary snapshot is captured right
@@ -261,7 +281,7 @@ pub fn recommend_model_snapshot_capacity_from_config_with_entries(
     // (Gemma 4 31B: 2.97 GB at 3289 tokens, where the window-capped figure
     // predicts about a third of that). Sizing from the capped figure left the
     // store unable to hold a single entry.
-    let arch = estimate_kv_arch_unwindowed_from_config(config, representative_tokens, false, 1)?;
+    let arch = estimate_kv_arch_unwindowed_from_config(config, representative_tokens, kv_mode, 1)?;
     let fixed_state_bytes = recurrent_fixed_state_bytes(config, representative_tokens);
     if !snapshot_family_is_model_aware(config, arch.kind, fixed_state_bytes) {
         return None;
@@ -391,11 +411,13 @@ pub const MODEL_AWARE_STATE_CHECKPOINT_AVAILABLE_MEMORY_DENOMINATOR: u64 = 8;
 pub fn recommend_state_checkpoint_capacity(
     model_dir: &Path,
     context_size: usize,
+    kv_mode: impl Into<KvSizing>,
 ) -> Option<SnapshotCapacityRecommendation> {
+    let kv_mode: KvSizing = kv_mode.into();
     let config = read_config(model_dir)?;
     recommend_state_checkpoint_capacity_from_config(
         &config,
-        memory_left_after_model(model_dir, representative_tokens(context_size)),
+        memory_left_after_model(model_dir, representative_tokens(context_size), kv_mode),
     )
 }
 

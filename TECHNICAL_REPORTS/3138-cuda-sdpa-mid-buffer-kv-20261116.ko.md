@@ -18,7 +18,7 @@ CUDA에서 key가 256개(`kv_cache_step`) 이상인 1행 디코드는 `use_cudnn
 
 발동 조건이 기존 확인을 빠져나간 이유를 설명합니다.
 - 윈도우가 key 256개에 닿아야 하므로 프롬프트가 청크 경계보다 256 토큰 이상 길어야 합니다(Scout는 8448). 8720 토큰 프롬프트는 529 key 윈도우를 만들었습니다(`MLXCEL_SDPA_PLAN_DEBUG=1`에서 `k_len=529 decode=1`).
-- 8001 토큰 prefill 후 8192를 넘어가는 디코드는 정상이었습니다(decided 0/100). 추적한 구간에서 새 청크의 윈도우가 256 key 미만이었기 때문입니다.
+- 8001 토큰 prefill 후 8192를 넘어가는 디코드는 decided 0/100이었습니다. 추적이 8448 위치에서, 새 청크의 윈도우가 막 256 key에 닿을 때 끝났기 때문입니다. 마지막 세 스텝이 결함의 시작점으로, 참조 대비 NLL이 13.1 vs 4.3, 23.2 vs 10.2, 12.4 vs 5.5였고, decided 필터에 들지 않는 위치였습니다.
 - 9216 토큰 단일 forward와 4608 두 청크 비교도 일치했습니다(0/3642). prefill만 돌리므로 디코드 디스패치를 타지 않습니다.
 - Metal은 이 오버레이를 쓰지 않습니다.
 
@@ -41,7 +41,7 @@ GB10(sm_121, CUDA 13.0) 검증:
 | 확인 | 수정 전 | 수정 후 |
 |---|---|---|
 | Scout, 8720 토큰 프롬프트, `--temp 0`, `MLXCEL_PREFILL_CHUNK=0`과 기본값 | 쓰레기 | 정답(item 275, bin 6206, weight 136), 두 모드 동일 |
-| 8720 prefill 후 300 위치 teacher-forced 디코드, `MLXCEL_SDPA_DETERMINISTIC=1` 대비 | 첫 스텝 NLL 21.5 vs 2.85, 이후 non-finite | decided 0/149, 평균 NLL 1.853 vs 1.854 |
+| 8720 prefill 후 300 위치 teacher-forced 디코드, 같은 텍스트의 9216 폭 단일 prefill forward 대비 | 첫 스텝 NLL 21.5 vs 2.85, 이후 non-finite | decided 0/149, 평균 NLL 1.853 vs 1.854 |
 | 새 회귀 테스트 | 실패, relative rms 1.12 | 통과 |
 
 수정 후 8720 토큰 프롬프트에서 Scout 처리량은 prefill 단일 패스 633 tok/s, 기본 청크 451 tok/s, 디코드 10.9 / 11.5 tok/s입니다. 수정 전 출력이 틀렸으므로 의미 있는 비교 기준은 없습니다. CUDA에서 `cache::attend` 테스트는 모두 통과했고, PR CI도 통과했습니다(20개 통과, 12개 path filter로 skip).

@@ -160,9 +160,9 @@ The decode KV globals change from `tensor<n_layers x capacity x heads x dim x f3
 ### Statistics
 | Item | Value |
 |------|-------|
-| Files changed | 6 |
-| Lines added | +156 |
-| Lines deleted | -24 |
+| Files changed | 5 (the two report files not counted) |
+| Lines added | +342 |
+| Lines deleted | -12 |
 | Tests added | 4 |
 
 ### Changes by Category
