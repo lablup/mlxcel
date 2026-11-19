@@ -1124,8 +1124,16 @@ impl KimiK3MLAAttention {
         let k_pe = mlxcel_core::reshape(&k_pe, &[b, 1, 1, self.qk_rope_head_dim]);
         let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
         let kv_latent = mlxcel_core::expand_dims(&self.kv_a_layernorm.forward(&compressed), 1);
+        let geometry = super::mla_batched::mla_geometry(
+            self.num_heads,
+            self.kv_lora_rank,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        );
         let output = super::mla_batched::mla_latent_decode_rows(
-            &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale, None,
+            "kimi_k3", false, geometry, &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale,
+            None,
         );
         let output = self.unembed_out.forward(&output, true);
         self.project_output(x, &output, b, 1)

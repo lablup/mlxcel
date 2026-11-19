@@ -98,7 +98,9 @@ pub mod absorb;
 pub mod cache;
 pub mod decode;
 pub mod kv_b_split;
+pub mod latent_pair;
 pub mod prefill;
+pub mod quant_latent;
 pub mod split_kv;
 pub mod stats;
 
@@ -108,17 +110,27 @@ mod fused_decode_tests;
 mod prefill_tests;
 #[cfg(test)]
 pub(crate) mod testkit;
+#[cfg(test)]
+mod turbo_latent;
 
 pub use absorb::MlaAbsorbedProjections;
 pub use cache::{
     MLA_LATENT_CACHE_FAMILIES, MlaLatentCache, caches_mla_latent_pair,
     decompressed_bytes_per_token, latent_bytes_per_token, latent_layout_supports_mode,
+    stores_latent_through_view,
 };
 pub use decode::{
-    FUSED_DECODE_MAX_KEYS, absorb_queries, absorbed_decode, fused_absorbed_decode, unabsorb_output,
+    FUSED_DECODE_MAX_KEYS, FUSED_DECODE_QUANTIZED_MAX_KEYS, absorb_queries, absorbed_decode,
+    fused_absorbed_decode, fused_absorbed_decode_quantized, unabsorb_output,
 };
 pub use kv_b_split::{KvBProjGeometry, decompose_kv_b_proj};
+pub use latent_pair::{
+    QUANTIZED_LATENT_FAMILIES, latent_pair_supports_mode, stores_quantized_latent_pair,
+};
 pub use prefill::{FoldedMask, rope_folded_attention};
+pub use quant_latent::{
+    LatentWindow, quantized_absorbed_attention, quantized_latent_bytes_per_token,
+};
 pub use split_kv::{MlaSplitPlan, absorbed_decode_split_kv};
 pub use stats::{MlaDecodePath, MlaDispatchCounts};
 

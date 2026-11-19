@@ -620,6 +620,19 @@ std::unique_ptr<MlxArray> mla_absorbed_decode_fused(
     const MlxArray& kpe,
     float scale);
 
+// The fused decode kernel over an affine-quantized latent window (#3156).
+bool mla_absorbed_decode_fused_quantized_available();
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused_quantized(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv_q,
+    const MlxArray& scales,
+    const MlxArray& biases,
+    const MlxArray& kpe,
+    float scale,
+    int32_t group_size,
+    int32_t bits);
+
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
 // gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype (#2548)
 // Used by: Gemma3n MLP layers with activation_sparsity > 0

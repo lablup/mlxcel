@@ -2988,7 +2988,10 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         }
     }
 
-    run_generate_once(args)
+    let result = run_generate_once(args);
+    // `MLXCEL_TRACE_MLA_STATS=1`: which MLA attention path each step took.
+    mlxcel_core::mla::stats::report_if_requested();
+    result
 }
 
 /// One-shot (`-p`-supplied) text generation: the historical `generate` flow.
@@ -3329,7 +3332,17 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
 
     match kv_cache_mode {
         KVCacheMode::Int8 => {
-            println!("KV cache mode: int8 (per-token absmax quantization){kv_cache_mode_suffix}");
+            // The same flag selects two codecs: the affine group-64 latent on
+            // an absorbed MLA cache (issue #3155), per-token absmax elsewhere.
+            let codec = if mlxcel::cli::turbo_args::model_stores_quantized_latent(
+                kv_cache_mode,
+                std::path::Path::new(&args.model.model),
+            ) {
+                "affine group-64 MLA latent, fp16 rope keys"
+            } else {
+                "per-token absmax quantization"
+            };
+            println!("KV cache mode: int8 ({codec}){kv_cache_mode_suffix}");
         }
         KVCacheMode::Turbo4Asym => {
             println!(

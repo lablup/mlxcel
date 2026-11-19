@@ -19,20 +19,27 @@
 //! resolved per layer with the same boundary rule
 //! (`MLXCEL_KV_BOUNDARY_V_LAYERS`) and injected into the model's own caches, so it
 //! reaches the model-owned families (Gemma 3, Gemma 4) whose caches the
-//! harness's `make_caches()` does not hold.
+//! harness's `make_caches()` does not hold. A family that reads the caches the
+//! harness hands it (DeepSeek V2, whose `int8` mode stores the MLA
+//! latent quantized, issue #3155) gets the same table through
+//! [`KvArm::make_caches`], the way the engine sets it on its pool caches.
 //!
 //! `MLXCEL_TRACE_DECODE_STEP=1` feeds the last context token through its own
 //! single-token forward. A decode step is what grows a sliding
 //! `RotatingKVCache` ahead of `offset`, the state the next multi-token append
 //! must read through `visible_len()`; a context pass alone never reaches it.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use mlxcel::{LanguageModel, LoadedModel};
 use mlxcel_core::cache::KVCacheMode;
+use mlxcel_core::layers::KVCache;
 
 /// The storage arm selected by the environment.
 pub struct KvArm {
     pub mode: Option<KVCacheMode>,
     pub decode_step: bool,
+    /// Per-layer modes for the harness's own caches, set by [`Self::install`]
+    /// when the model does not own its KV caches.
+    external_modes: Option<Vec<KVCacheMode>>,
 }
 
 impl KvArm {
@@ -50,11 +57,15 @@ impl KvArm {
             Ok("1") => true,
             _ => anyhow::bail!("MLXCEL_TRACE_DECODE_STEP must be 0 or 1"),
         };
-        Ok(Self { mode, decode_step })
+        Ok(Self {
+            mode,
+            decode_step,
+            external_modes: None,
+        })
     }
 
     /// Inject the resolved per-layer modes into the model's own caches.
-    pub fn install(&self, model: &LoadedModel) -> Result<()> {
+    pub fn install(&mut self, model: &LoadedModel) -> Result<()> {
         let Some(mode) = self.mode else {
             return Ok(());
         };
@@ -63,9 +74,12 @@ impl KvArm {
         let requested = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
         let modes = mlxcel_core::cache::turbo::resolve_layer_modes(mode, n_layers, requested);
         model.set_kv_cache_layer_modes(modes.clone());
-        let applied = model.kv_cache_layer_modes().context(
-            "this model does not own its KV caches, so the storage mode cannot reach them",
-        )?;
+        let Some(applied) = model.kv_cache_layer_modes() else {
+            // The model reads the caches it is handed, so the harness builds
+            // them in the resolved modes instead.
+            self.external_modes = Some(modes);
+            return Ok(());
+        };
         ensure!(
             applied == modes,
             "the model kept KV cache modes {applied:?}, not the requested {modes:?}"
@@ -97,6 +111,18 @@ impl KvArm {
             );
         }
         Ok(())
+    }
+
+    /// Fresh caches for one sequence, in the installed storage modes when the
+    /// model reads external caches.
+    pub fn make_caches(&self, model: &LoadedModel) -> Vec<KVCache> {
+        let mut caches = model.make_caches();
+        if let Some(modes) = &self.external_modes {
+            for (cache, mode) in caches.iter_mut().zip(modes) {
+                cache.mode = *mode;
+            }
+        }
+        caches
     }
 
     /// Where the context pass splits: everything before is one forward, the

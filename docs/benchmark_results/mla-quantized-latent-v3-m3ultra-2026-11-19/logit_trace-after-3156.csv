@@ -1,0 +1,5 @@
+model,shape,reference,candidate,positions,top1_disagree,decided_positions,decided_disagree,largest_gap_at_disagreement,disagreements_over_0.11,ppl_reference,ppl_candidate,mla_paths_candidate
+moonlight-16b-a3b-instruct-4bit,decode1k,fp16 latent (absorbed fused),int8 latent (fused quantized),512,7,192,0,0.328,2,18.6816,18.8238,decompressed=216 absorbed_fused=13824
+Kimi-VL-A3B-Thinking-4bit,decode1k,fp16 latent (absorbed fused),int8 latent (fused quantized),512,12,188,0,0.094,0,17.8839,18.0607,decompressed=216 absorbed_fused=13824
+moonlight-16b-a3b-instruct-4bit,decode1k,int8 latent (composed; pre-#3156 binary),int8 latent (fused quantized),512,7,192,0,0.094,0,18.8579,18.8238,decompressed=216 absorbed_fused=13824
+Kimi-VL-A3B-Thinking-4bit,decode1k,int8 latent (composed; pre-#3156 binary),int8 latent (fused quantized),512,7,190,0,0.469,2,18.0216,18.0607,decompressed=216 absorbed_fused=13824

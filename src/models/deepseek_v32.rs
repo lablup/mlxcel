@@ -653,6 +653,15 @@ impl MLAAttention {
         };
         let q_latent = self.embed_q.forward(&q_nope);
         let output = crate::models::mla_batched::mla_latent_decode_rows(
+            "deepseek_v32",
+            false,
+            crate::models::mla_batched::mla_geometry(
+                self.num_heads,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            ),
             &q_latent,
             &q_pe,
             &cache_input,

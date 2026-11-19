@@ -371,10 +371,12 @@ impl DetachedKVCache {
             self.keys = trim_axis_seq(&self.keys, 0);
             self.values = trim_axis_seq(&self.values, 0);
 
-            // INT8 scale sidecars carry a width-1 head-axis (axis 3).
-            if self.mode == KVCacheMode::Int8 {
-                self.key_scales = trim_axis_seq(&self.key_scales, 1);
-                self.val_scales = trim_axis_seq(&self.val_scales, 1);
+            // Scale sidecars keep their own last-axis width: 1 for per-head
+            // INT8, one entry per group for a quantized MLA latent
+            // (`cache/latent_quant.rs`, issue #3155).
+            if self.mode.uses_scale_sidecars() {
+                self.key_scales = trim_axis_seq(&self.key_scales, 0);
+                self.val_scales = trim_axis_seq(&self.val_scales, 0);
             }
 
             // Turbo4* V sidecars (per-token packed + norms + rescale).

@@ -125,7 +125,7 @@ mod step3p7;
 mod youtu_vl_loader;
 
 pub(crate) use cohere_compass::load_cohere_compass_vlm;
-pub(crate) use deepseek_vl2::load_deepseek_vl2_vlm;
+pub(crate) use deepseek_vl2::{deepseek_vl2_language_config, load_deepseek_vl2_vlm};
 pub(crate) use deepseekocr::{
     load_deepseekocr_2_vlm, load_deepseekocr_vlm, load_unlimited_ocr_vlm,
 };

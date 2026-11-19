@@ -55,6 +55,9 @@ pub struct BatchKvQuantArgs {
     /// `--kv-quant-scheme turboquant` for 4-bit batched KV cache or
     /// `--kv-bits 8` for uniform 8-bit.
     ///
+    /// On DeepSeek V2 under absorbed MLA decode, `--kv-bits 8` stores the MLA
+    /// latent as affine group-64 8-bit rather than per-head INT8.
+    ///
     /// Also read from `LLAMA_ARG_KV_BITS`.
     #[arg(
         long = "kv-bits",
@@ -68,7 +71,9 @@ pub struct BatchKvQuantArgs {
     ///
     /// Default: 64 (`mlxcel_core::cache::DEFAULT_KV_GROUP_SIZE`). Ignored
     /// when `--kv-quant-scheme turboquant` is in effect. Must divide every
-    /// model's V `head_dim` at runtime.
+    /// model's V `head_dim` at runtime. An absorbed MLA latent (DeepSeek V2)
+    /// is grouped in 64s only, so any other value is refused for such a
+    /// model.
     ///
     /// Also read from `LLAMA_ARG_KV_GROUP_SIZE`.
     #[arg(

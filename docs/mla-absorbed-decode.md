@@ -46,7 +46,7 @@ The trace condition holds: every disagreement falls where the reference's top tw
 What would change the decision is removing that fixed cost. Issue #3121 removed most of it, and the decision is open again:
 
 - The folds now run quantized.
-- Unmasked single-query absorbed attention runs on a fused Metal kernel for windows up to 8192 keys (`MLXCEL_MLA_FUSED_DECODE`, on by default).
+- Unmasked single-query absorbed attention runs on a fused Metal kernel for windows up to 8192 keys (`MLXCEL_MLA_FUSED_DECODE`, on by default). An int8 latent window takes the kernel's quantized variant up to 2048 keys (#3156, see the quantized latent section).
 
 Re-measured on the same checkpoint (2026-11-16):
 
@@ -104,7 +104,7 @@ No other family shares the choice: `deepseek_v3` and `deepseek_v32` absorb uncon
 
 `MLXCEL_MLA_ABSORBED` is a tri-state (`mlxcel_core::mla::AbsorbedMode`): an on spelling (`1`, `true`, `on`, `yes`) forces absorbed decode, an off spelling forces the decompressed layout, and unset, empty or unrecognized is the default. The default (`mlxcel_core::mla::default_absorbs`) absorbs where the fused absorbed-decode kernel runs, which today means Metal with `MLXCEL_MLA_FUSED_DECODE` not turned off, and on CUDA and ROCm, where #3133 measured the composed path within a few percent of the decompressed one at 512 tokens and ahead of it from 2K. Elsewhere absorbed decode takes the composed path without that evidence: Metal with the kernel off carried the roughly 10% short-context cost #3102 measured, and the CPU backend is unmeasured, so both keep the decompressed layout by default. A typo keeps the default layout instead of changing it. `MLXCEL_MLA_SPLIT_KV` stays opt-in and accepts only the on spellings.
 
-Under `MLXCEL_MLA_ABSORBED=0`, no fold is built, no weight is dequantized, and the family runs the pre-existing decompressed path unchanged. Absorbed decode still declines per cache, keeping the decompressed path, for any non-FP16 KV cache mode and for paged-backed caches. With absorption on, the `deepseek_v2` mode resolver substitutes fp16 for a quantized KV request and warns, because the decompressed quantized layout is larger than the fp16 latent (about 5120 bytes per token per layer for int8 and 7.2 KB for turbo4-asym on V2-Lite, against 1152); `MLXCEL_MLA_ABSORBED=0` keeps the quantized decompressed layout. The memory estimate (`mlxcel inspect`, `--estimate-memory`, `--recommend-quant`, the prompt-cache store budget) sizes the layout the run resolves to (#3153). A quantized latent cache is future work (#3158).
+Under `MLXCEL_MLA_ABSORBED=0`, no fold is built, no weight is dequantized, and the family runs the pre-existing decompressed path unchanged. Absorbed decode still declines per cache, keeping the decompressed path, for a Turbo KV cache mode and for paged-backed caches. With absorption on, `--kv-cache-mode int8` (or `--kv-bits 8`) stores the latent itself quantized (#3155, see below), and the `deepseek_v2` mode resolver substitutes fp16 for a Turbo request and warns, because the decompressed quantized layout is larger than the fp16 latent (about 7.2 KB per token per layer for turbo4-asym on V2-Lite, against 1152); `MLXCEL_MLA_ABSORBED=0` keeps the quantized decompressed layout. The memory estimate (`mlxcel inspect`, `--estimate-memory`, `--recommend-quant`, the prompt-cache store budget) sizes the layout the run resolves to (#3153, #3155).
 
 ## Where it applies
 
@@ -131,9 +131,29 @@ The FP16 update path already reads each side's head dimension from its own shape
 
 The slot assignment matches what `src/models/deepseek_v3.rs` has always done, so V2 folded onto the shared type and V3's existing code describe the same buffer.
 
+### Quantized latent (`int8`)
+
+Under `--kv-cache-mode int8` the same cache stores the latent as the MLX affine triple `quantize_weights` produces, reusing the four per-token buffers a per-head INT8 cache has, so `trim`, `trim_front`, `gather_positions`, detach/adopt and the prompt-cache store move the rows and their scales together (#3155):
+
+| Slot | Holds | Shape | dtype |
+|---|---|---|---|
+| `keys` | packed `ckv` | `[B, 1, L, kv_lora_rank * 8 / 32]` | uint32 |
+| `values` | `kpe` | `[B, 1, L, qk_rope_head_dim]` | fp16 |
+| `key_scales` | affine group scales | `[B, 1, L, kv_lora_rank / 64]` | fp16 |
+| `val_scales` | affine group biases | `[B, 1, L, kv_lora_rank / 64]` | fp16 |
+
+That is 672 bytes per token per layer on V2-Lite against 1152 for the fp16 latent. `MlaLatentCache::update_and_fetch` returns a `LatentWindow`, either `Dense { ckv, kpe }` or `Quantized { ckv_q, scales, biases, kpe, bits, group_size }`, and a reader takes the codec parameters from the window. A single-query step runs both contractions on the packed rows:
+
+```text
+scores   = scale * quantized_matmul(q_absorbed, ckv_q, transpose = true) + scale * q_pe @ kpe^T
+o_latent = quantized_matmul(softmax(scores), ckv_q, transpose = false)
+```
+
+in f32, recorded as `absorbed_composed`. On Metal an unmasked single-query step over a window of up to 2048 keys runs on a second variant of the fused kernel instead (#3156, `mla::decode::fused_absorbed_decode_quantized`, recorded as `absorbed_fused`). It is the same kernel body with a different latent read: the packed codes are read as bytes and each group's scale and bias are factored out of the score and the value sum, so the window is not dequantized. `MLXCEL_MLA_FUSED_DECODE=0` turns it off together with the fp16 kernel. The limit is lower than the fp16 kernel's 8192 (`FUSED_DECODE_QUANTIZED_MAX_KEYS`) because the composed quantized path is the faster one on longer windows: on an M3 Ultra int8 decode on the kernel is 5.9% faster than the composed path behind 512 tokens, even near 2048 and 4.6% slower behind 3840, with no decided-position disagreement in the trace against either the composed int8 path or the fp16 latent ([mla-fused-quantized-decode-m3ultra-2026-11-19](benchmark_results/mla-fused-quantized-decode-m3ultra-2026-11-19.md)). A 4-bit window, a group size other than 64, a rank that is not a power of two from 64 to 1024, a masked step and every other backend keep the composed path. The dense fused kernel and split-KV read an fp16 latent and are not tried on a quantized window. A multi-token step and a cold prefill dequantize the live window once per step and run the fp16 code unchanged, after the fresh chunk was stored quantized. Only `quantize_weights`, `quantized_matmul` and `dequantize` are used, so the path runs on every backend the quantized weight path runs on. A `kv_lora_rank` that is not a multiple of 64 declines the quantized latent and keeps the decompressed path. Quality and speed: [mla-quantized-latent-m3ultra-2026-11-19](benchmark_results/mla-quantized-latent-m3ultra-2026-11-19.md). A 4-bit latent failed the same gate and is not offered, and so did a Turbo-4 codec on the WHT-rotated latent ([mla-turbo-latent-m3ultra-2026-11-19](benchmark_results/mla-turbo-latent-m3ultra-2026-11-19.md), #3157).
+
 Declined, with a message, falling back to the decompressed path:
 
-- Any non-FP16 KV cache mode (`int8`, `fp16+turbo4`, `turbo4`, `fp16+turbo3`, `turbo4-delegated`). Their per-token quantization is calibrated for a per-head K/V row, not for a 512-wide latent whose reconstruction error is amplified by every query head that reads it.
+- Any Turbo KV cache mode (`fp16+turbo4`, `turbo4`, `fp16+turbo3`, `turbo4-delegated`). Their per-token quantization is calibrated for a per-head K/V row, not for a 512-wide latent whose reconstruction error is amplified by every query head that reads it.
 - Paged backing. The pool allocates `[num_blocks, page_size, Hkv, head_dim]` with one head dimension for both sides, which the asymmetric `(512, 64)` split cannot fill.
 
 The decline is decided per cache, and the answer is fixed for a cache's lifetime, so a run that declines on the first step declines on every step and a cache never mixes the two layouts.

@@ -416,8 +416,9 @@ pub struct MemoryEstimate {
     /// alongside [`Self::kv_mode`] for the banner's dtype label.
     pub kv_dtype_int8: bool,
     /// KV cache mode the estimate was sized for. Besides the element width it
-    /// decides whether DeepSeek V2 caches the absorbed latent (FP16 only) or
-    /// the decompressed per-head K/V (every other mode, #3153).
+    /// decides whether DeepSeek V2 caches the absorbed latent (FP16, or
+    /// affine-quantized under `int8`, #3155) or the decompressed
+    /// per-head K/V (every Turbo mode, #3153).
     pub kv_mode: KVCacheMode,
 }
 

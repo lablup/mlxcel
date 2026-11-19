@@ -788,6 +788,14 @@ fn deepseek_v2_kv_store_entry_follows_the_kv_cache_mode() {
         assert_eq!(fp16.entry_bytes, turbo.entry_bytes);
     }
 
-    // INT8 also declines the latent, at half the element width.
-    assert_eq!(rec(KVCacheMode::Int8).entry_bytes, decompressed / 2);
+    // INT8 stores the latent affine-quantized under absorbed decode (672
+    // bytes per token per layer, #3155) and per-head rows at half the element
+    // width without it.
+    let int8 = rec(KVCacheMode::Int8);
+    if mlxcel_core::mla::absorbed_enabled() {
+        assert_eq!(int8.entry_bytes, 27 * 672 * tokens);
+        assert!(int8.entry_bytes < fp16.entry_bytes);
+    } else {
+        assert_eq!(int8.entry_bytes, decompressed / 2);
+    }
 }

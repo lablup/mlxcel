@@ -100,6 +100,25 @@ pub fn record(path: MlaDecodePath) {
     counter(path).fetch_add(1, Ordering::Relaxed);
 }
 
+/// Environment variable that makes a run print the dispatch counters when it
+/// ends.
+pub const TRACE_STATS_ENV: &str = "MLXCEL_TRACE_MLA_STATS";
+
+/// Print and reset the counters on stderr as `# mla_paths\t<summary>` when
+/// [`TRACE_STATS_ENV`] is `1`. A run that took no MLA path prints nothing.
+///
+/// Used by: `mlxcel generate`, `mlxcel-bench-decode` and
+/// `examples/logit_trace`, so an arm can prove which path it ran.
+pub fn report_if_requested() {
+    if std::env::var(TRACE_STATS_ENV).as_deref() != Ok("1") {
+        return;
+    }
+    let counts = take();
+    if counts.total() > 0 {
+        eprintln!("# mla_paths\t{}", counts.summary());
+    }
+}
+
 /// Per-path call counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MlaDispatchCounts {

@@ -345,3 +345,118 @@ fn no_kv_cache_diagnostic_carries_collapsed_indentation() {
         }
     }
 }
+
+// ── Quantized MLA latent (issue #3155) ──────────────────────────────────────
+
+/// A DeepSeek-VL2 checkpoint as shipped: the decoder under `language_config`
+/// with no `model_type` of its own.
+fn deepseek_vl2_model_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type": "deepseek_vl_v2", "language_config": {"kv_lora_rank": 512, "qk_rope_head_dim": 64, "num_attention_heads": 16, "num_hidden_layers": 4}}"#,
+    )
+    .expect("write config.json");
+    dir
+}
+
+/// `int8` on DeepSeek V2 is kept in both absorption states: it stores the
+/// affine latent under absorbed decode and per-head rows without it. The
+/// DeepSeek-VL2 wrapper runs the same decoder and is resolved as it.
+#[test]
+fn int8_is_kept_on_deepseek_v2_and_stores_the_latent_when_absorbed() {
+    let absorbed = mlxcel_core::mla::absorbed_enabled();
+    for (family, dir) in [
+        ("deepseek_v2", model_dir_with_type("deepseek_v2")),
+        ("deepseek_vl_v2", deepseek_vl2_model_dir()),
+    ] {
+        let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
+        assert_eq!(mode, KVCacheMode::Int8, "{family}");
+        assert!(warning.is_none(), "{family}: {warning:?}");
+        assert_eq!(
+            super::model_stores_quantized_latent(KVCacheMode::Int8, dir.path()),
+            absorbed,
+            "{family}"
+        );
+        assert!(!super::model_stores_quantized_latent(
+            KVCacheMode::Fp16,
+            dir.path()
+        ));
+    }
+}
+
+/// A Turbo request on DeepSeek-VL2 follows the `deepseek_v2` rule: under
+/// absorbed decode it would push the decoder onto the decompressed cache, so
+/// it resolves to the fp16 latent, and without absorption it is kept.
+#[test]
+fn turbo_on_deepseek_vl2_follows_its_deepseek_v2_decoder() {
+    let absorbed = mlxcel_core::mla::absorbed_enabled();
+    let vl2 = deepseek_vl2_model_dir();
+    let v2 = model_dir_with_type("deepseek_v2");
+    for requested in [KVCacheMode::Turbo4Asym, KVCacheMode::Turbo3Asym] {
+        let (vl2_mode, vl2_warning) = resolve_effective_kv_cache_mode(requested, vl2.path());
+        let (v2_mode, _) = resolve_effective_kv_cache_mode(requested, v2.path());
+        assert_eq!(vl2_mode, v2_mode, "{requested}");
+        let expected = if absorbed {
+            KVCacheMode::Fp16
+        } else {
+            requested
+        };
+        assert_eq!(vl2_mode, expected, "{requested}");
+        assert_eq!(
+            vl2_warning.is_some(),
+            absorbed,
+            "{requested}: {vl2_warning:?}"
+        );
+    }
+}
+
+/// A non-MLA family keeps per-token int8, a `DeepSeekV3Attention` family keeps
+/// int8 as the affine latent in every absorption state (#3160), and a
+/// latent-pair family that does not read its cache through the latent view yet
+/// keeps fp16.
+#[test]
+fn only_latent_view_families_store_a_quantized_latent() {
+    let llama = model_dir_with_type("llama");
+    let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, llama.path());
+    assert_eq!(mode, KVCacheMode::Int8);
+    assert!(warning.is_none());
+    assert!(!super::model_stores_quantized_latent(
+        KVCacheMode::Int8,
+        llama.path()
+    ));
+
+    for family in ["deepseek_v3", "kimi_vl", "youtu_vl"] {
+        let dir = model_dir_with_type(family);
+        let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
+        assert_eq!(mode, KVCacheMode::Int8, "{family}");
+        assert!(warning.is_none(), "{family}: {warning:?}");
+        assert!(
+            super::model_stores_quantized_latent(KVCacheMode::Int8, dir.path()),
+            "{family}"
+        );
+        assert!(!super::model_stores_quantized_latent(
+            KVCacheMode::Fp16,
+            dir.path()
+        ));
+    }
+
+    for family in ["glm4_moe_lite", "kimi_k3"] {
+        let dir = model_dir_with_type(family);
+        let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
+        assert_eq!(mode, KVCacheMode::Fp16, "{family}");
+        assert!(warning.is_some(), "{family}");
+        assert!(!super::model_stores_quantized_latent(
+            KVCacheMode::Int8,
+            dir.path()
+        ));
+    }
+}
+
+/// 4-bit failed the #3155 quality gate, so `int4` is not a KV cache mode on
+/// either flag surface.
+#[test]
+fn int4_is_rejected_on_both_flag_surfaces() {
+    assert!(resolve_kv_cache_mode(None, None, Some("int4")).is_err());
+    assert!(resolve_kv_cache_mode(Some("int4"), Some("int4"), None).is_err());
+}
