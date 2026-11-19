@@ -57,7 +57,9 @@
 //!
 //! Every Turbo mode, and paged backing. The Turbo3/Turbo4 modes calibrate a
 //! per-token codebook from one head dimension, which fits a per-head K/V row
-//! and not a shared latent (see [`latent_layout_supports_mode`]). The paged
+//! and not a shared latent (see [`latent_layout_supports_mode`]). A Turbo-4
+//! codec applied to the rotated latent itself avoids that mismatch, and was
+//! measured and not adopted for quality (#3157, `mla::turbo_latent`). The paged
 //! pool allocates `[num_blocks, page_size, Hkv, head_dim]` tensors with one
 //! head dim for both sides, which the asymmetric `(512, 64)` split cannot
 //! fill. Both are declined at wrap time with a message rather than silently

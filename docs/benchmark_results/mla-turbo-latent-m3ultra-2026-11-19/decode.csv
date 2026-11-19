@@ -1,0 +1,33 @@
+model,arm,prompt_tokens,round,decode_tok_s,prefill_tok_s,mlx_peak_gb,mla_paths
+deepseek-v2-lite-chat-4bit-mlx,fp16 latent,512,1,170.45,1386.31,9.51,decompressed=54 absorbed_prefill=0 absorbed_composed=0 absorbed_split_kv=0 absorbed_fused=3834
+deepseek-v2-lite-chat-4bit-mlx,fp16 latent,512,2,170.08,1386.71,9.51,decompressed=54 absorbed_prefill=0 absorbed_composed=0 absorbed_split_kv=0 absorbed_fused=3834
+deepseek-v2-lite-chat-4bit-mlx,fp16 latent,512,3,169.65,1385.91,9.51,decompressed=54 absorbed_prefill=0 absorbed_composed=0 absorbed_split_kv=0 absorbed_fused=3834
+deepseek-v2-lite-chat-4bit-mlx,int8 latent,512,1,143.50,1384.09,9.52,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,int8 latent,512,2,143.72,1383.52,9.52,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,int8 latent,512,3,143.58,1383.34,9.52,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,turbo4 latent (prototype),512,1,96.86,1369.67,9.58,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,turbo4 latent (prototype),512,2,96.91,1369.69,9.58,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,turbo4 latent (prototype),512,3,96.58,1370.12,9.58,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,wht + affine int4 latent (prototype),512,1,126.91,1378.67,9.52,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,wht + affine int4 latent (prototype),512,2,126.07,1378.90,9.52,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,wht + affine int4 latent (prototype),512,3,125.02,1379.00,9.52,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,fp16 latent,2048,1,149.86,1377.34,9.66,decompressed=54 absorbed_prefill=0 absorbed_composed=0 absorbed_split_kv=0 absorbed_fused=3834
+deepseek-v2-lite-chat-4bit-mlx,fp16 latent,2048,2,151.68,1376.86,9.66,decompressed=54 absorbed_prefill=0 absorbed_composed=0 absorbed_split_kv=0 absorbed_fused=3834
+deepseek-v2-lite-chat-4bit-mlx,fp16 latent,2048,3,151.41,1376.02,9.66,decompressed=54 absorbed_prefill=0 absorbed_composed=0 absorbed_split_kv=0 absorbed_fused=3834
+deepseek-v2-lite-chat-4bit-mlx,int8 latent,2048,1,128.40,1366.62,9.64,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,int8 latent,2048,2,130.78,1375.00,9.64,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,int8 latent,2048,3,129.82,1373.52,9.64,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,turbo4 latent (prototype),2048,1,89.94,1363.96,9.70,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,turbo4 latent (prototype),2048,2,90.11,1368.01,9.70,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,turbo4 latent (prototype),2048,3,68.36,1367.34,9.70,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,wht + affine int4 latent (prototype),2048,1,117.49,1370.95,9.64,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,wht + affine int4 latent (prototype),2048,2,118.39,1373.67,9.64,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,wht + affine int4 latent (prototype),2048,3,115.72,1366.96,9.64,decompressed=54 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,fp16 latent,16384,1,109.98,1125.21,11.45,decompressed=432 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,fp16 latent,16384,2,109.19,1125.18,11.45,decompressed=432 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,int8 latent,16384,1,71.11,1127.37,11.23,decompressed=432 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,int8 latent,16384,2,71.28,1127.48,11.23,decompressed=432 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,turbo4 latent (prototype),16384,1,57.41,1119.52,11.86,decompressed=432 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,turbo4 latent (prototype),16384,2,57.53,1119.21,11.87,decompressed=432 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,wht + affine int4 latent (prototype),16384,1,72.65,1124.17,11.18,decompressed=432 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0
+deepseek-v2-lite-chat-4bit-mlx,wht + affine int4 latent (prototype),16384,2,72.54,1124.54,11.18,decompressed=432 absorbed_prefill=0 absorbed_composed=3834 absorbed_split_kv=0 absorbed_fused=0

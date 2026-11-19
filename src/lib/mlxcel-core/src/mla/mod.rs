@@ -110,6 +110,8 @@ mod fused_decode_tests;
 mod prefill_tests;
 #[cfg(test)]
 pub(crate) mod testkit;
+#[cfg(test)]
+mod turbo_latent;
 
 pub use absorb::MlaAbsorbedProjections;
 pub use cache::{
