@@ -67,15 +67,20 @@ impl AppleSiliconGen {
     /// [`AppleSiliconGen::Unknown`].
     ///
     /// Every capability predicate below is expressed in terms of this rank
-    /// rather than as a `matches!` over the enumerated variants. Apple has
-    /// shipped a new GPU generation every year, so a predicate written as
-    /// `matches!(self, M5)` silently becomes false on the next chip, which is
-    /// exactly the defect behind issue #2824: an M6-class runner reported
-    /// [`Self::has_neural_accelerator`] false while MLX's own
-    /// `is_nax_available()` reported it true, because that predicate asks the
-    /// Metal GPU generation and this one asked the enum. A rank comparison
-    /// cannot regress that way, because a newly enumerated generation is above
-    /// the threshold by construction.
+    /// rather than as a `matches!` over the enumerated variants, so adding a
+    /// generation to the enum, to `parse_silicon_gen` and to this rank is all
+    /// it takes for that generation to inherit every capability of the ones
+    /// below it. A `matches!(self, M5)` predicate would also need each
+    /// predicate edited by hand, and missing one leaves the new chip off a
+    /// path MLX takes on it.
+    ///
+    /// The rank does not help a chip that is not enumerated yet. Until the
+    /// enum is extended, a newer Apple chip parses as `Unknown` and declines
+    /// every capability, while MLX's own `is_nax_available()` reads the GPU
+    /// generation and may still dispatch NAx kernels on it. That divergence
+    /// is what issue #2824 observed on runners whose brand string the parser
+    /// did not recognise; see [`is_m5_neural_accelerator`] for which of the
+    /// two views a caller should consult.
     #[inline]
     fn rank(self) -> Option<u32> {
         match self {
@@ -1476,10 +1481,29 @@ mod tests {
         assert!(!AppleSiliconGen::Unknown.has_neural_accelerator());
     }
 
+    /// Moving the predicates onto ranks must not change any answer for the
+    /// generations that were already enumerated, or for `Unknown`. These rows
+    /// are what the `matches!` predicates returned before the change.
+    #[test]
+    fn ranked_predicates_keep_the_m1_to_m5_and_unknown_answers() {
+        // (generation, neural accelerator, wide quantized projections, Metal)
+        let rows = [
+            (AppleSiliconGen::M1, false, false, 3),
+            (AppleSiliconGen::M2, false, false, 3),
+            (AppleSiliconGen::M3, false, true, 3),
+            (AppleSiliconGen::M4, false, true, 3),
+            (AppleSiliconGen::M5, true, true, 4),
+            (AppleSiliconGen::Unknown, false, false, 3),
+        ];
+        for (r#gen, na, wide, metal) in rows {
+            assert_eq!(r#gen.has_neural_accelerator(), na, "{gen:?}");
+            assert_eq!(r#gen.wide_quantized_projections(), wide, "{gen:?}");
+            assert_eq!(r#gen.metal_version(), metal, "{gen:?}");
+        }
+    }
+
     /// The capability predicates are ordering statements, not equality tests,
     /// so every enumerated generation above a floor inherits its capability.
-    /// A `matches!(self, M5)`-shaped predicate is what made an M6-class runner
-    /// disagree with MLX over whether a Neural Accelerator was present (#2824).
     #[test]
     fn capability_predicates_are_monotonic_in_generation() {
         let ordered = [
