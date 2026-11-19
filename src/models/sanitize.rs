@@ -393,7 +393,7 @@ fn normalize_nvfp4_keys(weights: &mut mlxcel_core::weights::WeightMap) {
     }
 }
 
-const NVFP4_SOURCE_GROUP_SIZE: usize = 16;
+pub(crate) const NVFP4_SOURCE_GROUP_SIZE: usize = 16;
 const NVFP4_AFFINE_BITS: i32 = 4;
 const NVFP4_NATIVE_BITS: i32 = 4;
 const NVFP4_NATIVE_MODE: &str = "nvfp4";
