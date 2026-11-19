@@ -1,0 +1,11 @@
+model,commit,shape,reference,candidate,decided_disagree,top1_disagree,ppl_reference,ppl_candidate,candidate_paths,note
+deepseek-v2-lite-chat-4bit-mlx,5e9caf8a,"decode width 1 behind 1024, 512 rows",MLXCEL_MLA_ABSORBED=0,MLXCEL_MLA_ABSORBED=1,0/208,6/512,14.6543,14.6582,decompressed=216 absorbed_composed=13824,
+deepseek-v2-lite-chat-4bit-mlx,5e9caf8a,"decode width 1 behind 1024, 512 rows",MLXCEL_MLA_ABSORBED=0,unset (then decompressed),0,0/512,14.6543,14.6543,decompressed=14040,byte-identical
+deepseek-v2-lite-chat-4bit-mlx,5e9caf8a,"decode width 1 behind 4096, 256 rows",MLXCEL_MLA_ABSORBED=0,MLXCEL_MLA_ABSORBED=1,0/106,4/256,12.9485,12.9960,absorbed_composed=6912,
+deepseek-v2-lite-chat-4bit-mlx,5e9caf8a,"decode width 1 behind 4096, 256 rows",MLXCEL_MLA_ABSORBED=0,unset (then decompressed),0,0/256,12.9485,12.9485,decompressed only,byte-identical
+kimi-vl-a3b-thinking-4bit,5e9caf8a,"decode width 1 behind 1024, 512 rows",,default,,,,18.01,absorbed_composed=13824 absorbed_fused=0,Metal composed reference ppl 18.04
+llama-4-scout-17b-16e-instruct-4bit,5e9caf8a,"prefill, one 9216-wide forward vs two 4608 forwards",two 4608,one 9216,0/3642,22/9216,11.7992,11.8001,,Metal 0/3651
+llama-4-scout-17b-16e-instruct-4bit,5e9caf8a,"decode width 1 after an 8001-token prefill, positions 8001-8191",one 8449-wide forward,decode,0/40,0/191,nll 3.566,nll 3.565,,window under 256 keys
+llama-4-scout-17b-16e-instruct-4bit,5e9caf8a,"decode width 1 after an 8001-token prefill, positions 8192-8448",one 8449-wide forward,decode,0/60,6/257,nll 3.234,nll 3.346,,"the last three steps (window reaching 256 keys) show the defect onset: NLL 13.1 vs 4.3, 23.2 vs 10.2, 12.4 vs 5.5"
+llama-4-scout-17b-16e-instruct-4bit,5e9caf8a,"decode width 1 after an 8720-token prefill, positions 8720-8721",one 9216-wide forward,decode,1/1,2/2,nll 2.847,nll 21.486,,before #3138; the third step produced a non-finite NLL and the trace stopped
+llama-4-scout-17b-16e-instruct-4bit,5e9caf8a + #3138,"decode width 1 after an 8720-token prefill, positions 8720-9019",one 9216-wide forward,decode,0/149,1/300,nll 1.854,nll 1.853,,with the #3138 fix

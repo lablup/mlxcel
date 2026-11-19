@@ -22,7 +22,9 @@
 //!   (every released Ministral 3 checkpoint does), as mlx-lm's `YarnRoPE`
 
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -201,6 +203,10 @@ pub struct Attention {
     /// YaRN attention factor applied to q and k before rotation.
     pub rope_mscale: f32,
     pub window_size: i32,
+    /// The window a mask-less multi-token forward attends with
+    /// (`maskless_prefill_attention`, #3072): `window_size` on a sliding
+    /// layer, `0` on a full-attention one, set by the decoder layer.
+    pub prefill_window: i32,
 }
 
 impl Attention {
@@ -272,8 +278,18 @@ impl Attention {
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Scaled dot-product attention (handles GQA expansion internally)
-        let attn_out = if l > 1 {
+        // Scaled dot-product attention (handles GQA expansion internally). A
+        // mask-less multi-token forward is a single-row prefill whose model
+        // left the mask to MLX's causal mode or native window route (#3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.prefill_window,
+            )
+        } else if l > 1 {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -454,6 +470,7 @@ impl Attention {
             rope_freqs,
             rope_mscale,
             window_size: args.sliding_window.map(|w| w as i32).unwrap_or(0),
+            prefill_window: 0,
         })
     }
 }
@@ -577,7 +594,11 @@ impl TransformerBlock {
     ) -> Result<Self, String> {
         let prefix = format!("{}model.layers.{}", model_prefix, layer_idx);
 
-        let self_attn = Attention::from_weights(weights, args, &format!("{}.self_attn", prefix))?;
+        let mut self_attn =
+            Attention::from_weights(weights, args, &format!("{}.self_attn", prefix))?;
+        if use_sliding {
+            self_attn.prefill_window = self_attn.window_size;
+        }
         let mlp = MLP::from_weights(weights, args, &format!("{}.mlp", prefix))?;
 
         let input_norm_weight =
@@ -816,14 +837,32 @@ impl Ministral3Model {
         let h_shape = mlxcel_core::array_shape(&h);
         let seq_len = h_shape[1];
 
-        // Create masks
-        let fa_mask = Some(create_causal_mask(seq_len, fa_offset));
-        let swa_mask = swa_idx.map(|_| {
+        // Create masks. Each is `None` for a decode row and where a single
+        // row can take MLX's causal mode or native window route instead and
+        // MLX fuses it (#3072).
+        let attn = &self.layers[fa_idx].self_attn;
+        let attention = PrefillAttention::new(
+            attn.num_heads as usize,
+            attn.num_kv_heads as usize,
+            attn.head_dim as usize,
+        );
+        let dtype = mlxcel_core::array_dtype(&h);
+        let batch = h_shape[0];
+        let fa_mask = prefill_causal_mask(seq_len, fa_offset, batch, attention, dtype);
+        let swa_mask = swa_idx.and_then(|_| {
             // Full-width windowed mask for a fresh single-pass prefill that
             // exceeds the window (RotatingKVCache keeps all prefill keys),
             // clamped mask otherwise. See issue #408.
             let max_cache = self.sliding_window.map(|w| w as i32).unwrap_or(i32::MAX);
-            create_sliding_window_prefill_mask(seq_len, swa_offset, max_cache)
+            prefill_sliding_window_mask(
+                seq_len,
+                swa_offset,
+                max_cache,
+                batch,
+                attention,
+                dtype,
+                SlidingPrefillKeys::Rotating,
+            )
         });
 
         // Compute Llama 4 attention scale using h.shape[1] (after embedding)

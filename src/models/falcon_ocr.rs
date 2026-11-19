@@ -465,10 +465,24 @@ impl Attention {
         #[cfg(test)]
         diagnostics::capture_layer_tensor(_layer_index, "attention.sinks", sinks);
         let sinks_ptr = sinks as *const _;
-        let attn = unsafe {
-            mlxcel_core::fast_scaled_dot_product_attention_with_sinks(
-                &q, &cache_k, &cache_v, self.scale, mask_ptr, sinks_ptr,
+        let attn = if mask.is_none() && l > 1 {
+            // A text-only prefill the model left to MLX's causal mode (#3098).
+            mlxcel_core::causal_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                0,
+                Some(sinks),
             )
+        } else {
+            // SAFETY: the mask is null or borrowed for the call, and `sinks`
+            // is a live per-head array owned by `self`.
+            unsafe {
+                mlxcel_core::fast_scaled_dot_product_attention_with_sinks(
+                    &q, &cache_k, &cache_v, self.scale, mask_ptr, sinks_ptr,
+                )
+            }
         };
         #[cfg(test)]
         diagnostics::capture_layer_tensor(_layer_index, "attention.sdpa", &attn);
@@ -684,10 +698,28 @@ impl FalconOcrTextModel {
             .as_ref()
             .map(|(c, s)| (c.as_ref().unwrap(), s.as_ref().unwrap()));
 
-        // A prefill with no supplied mask (text-only prompt) still needs an
-        // explicit array: the sink SDPA entry point has no "causal" mode.
-        let fallback_mask =
-            (l > 1 && mask.is_none()).then(|| mlxcel_core::utils::create_causal_mask(l, offset));
+        // A prefill with no supplied mask (text-only prompt) is plain causal:
+        // MLX's causal mode with the sinks where that fuses, else one shared
+        // explicit array (#3098). The KV cache holds `n_heads` heads, since K
+        // and V are expanded before the rotary.
+        let fallback_mask = match (mask, self.layers.first()) {
+            (None, Some(layer)) if l > 1 => {
+                let attention = &layer.attention;
+                mlxcel_core::utils::prefill_causal_mask(
+                    l,
+                    offset,
+                    shape[0],
+                    mlxcel_core::utils::PrefillAttention::new(
+                        attention.n_heads as usize,
+                        attention.n_heads as usize,
+                        attention.head_dim as usize,
+                    )
+                    .with_sinks(),
+                    mlxcel_core::array_dtype(&h),
+                )
+            }
+            _ => None,
+        };
         let mask = mask.or_else(|| fallback_mask.as_ref().map(|m| m.as_ref().unwrap()));
 
         #[cfg(test)]

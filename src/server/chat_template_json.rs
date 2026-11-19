@@ -717,11 +717,21 @@ mod tests {
 
     #[test]
     fn non_string_object_keys_are_coerced_like_python() {
+        let one_key = |key: Value, value: &str| {
+            let mut map = std::collections::BTreeMap::new();
+            map.insert(key, Value::from(value));
+            dump(Value::from(map), &[("sort_keys", Value::from(true))])
+        };
+        assert_eq!(one_key(Value::from(1), "a"), r#"{"1": "a"}"#);
+        assert_eq!(one_key(Value::from(true), "b"), r#"{"true": "b"}"#);
+
+        // `1` and `true` are the same key, as in Python, where
+        // `json.dumps({1: "a", True: "b"})` gives `{"1": "b"}`.
         let mut map = std::collections::BTreeMap::new();
         map.insert(Value::from(1), Value::from("a"));
         map.insert(Value::from(true), Value::from("b"));
         let rendered = dump(Value::from(map), &[("sort_keys", Value::from(true))]);
-        assert_eq!(rendered, r#"{"1": "a", "true": "b"}"#);
+        assert_eq!(rendered, r#"{"1": "b"}"#);
     }
 
     #[test]

@@ -28,7 +28,7 @@ use crate::models::model_owned::KvCacheLayerModes;
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::create_causal_mask;
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{
     MlxArray, UniquePtr, add, array_shape, copy, fast_rope, multiply, reshape, transpose_axes,
@@ -329,10 +329,16 @@ impl NASAttention {
         // internally, so expanding them here only writes an n_rep-sized copy
         // of the whole live cache on every decode step (#1686).
 
-        // Scaled dot-product attention
-        let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-        let output = unsafe {
-            mlxcel_core::layers::attention_from_ptr(&q, &k, &v, self.scale, mask_ptr, 0.0, 0)
+        // Scaled dot-product attention. A mask-less multi-token forward is a
+        // single-row prefill whose causality MLX's causal mode supplies
+        // (`prefill_causal_mask`, #3072).
+        let output = if seq_len > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(&q, &k, &v, self.scale, 0)
+        } else {
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(&q, &k, &v, self.scale, mask_ptr, 0.0, 0)
+            }
         };
 
         // Transpose back and reshape
@@ -730,6 +736,19 @@ impl NemotronNASModel {
     }
 
     /// Cache slot of the first full attention block, if any.
+    /// The geometry of the first full attention block, for the prefill mask
+    /// choice (#3072).
+    fn first_attention_geometry(&self) -> Option<PrefillAttention> {
+        self.layers.iter().find_map(|layer| match &layer.self_attn {
+            AttentionSubblock::Attention(attn) => Some(PrefillAttention::new(
+                attn.n_heads,
+                attn.n_kv_heads,
+                attn.head_dim,
+            )),
+            _ => None,
+        })
+    }
+
     fn first_attention_slot(&self) -> Option<usize> {
         self.layers
             .iter()
@@ -783,11 +802,14 @@ impl NemotronNASModel {
                 .and_then(|slot| caches.get(slot))
                 .map(|c| c.live_len())
                 .unwrap_or(0);
-            if seq_len > 1 {
-                Some(create_causal_mask(seq_len, live_len))
-            } else {
-                None
-            }
+            // A single row leaves causality to MLX's causal mode where MLX
+            // fuses it (#3072). The head dim is shared by every attention
+            // block; only the KV head count varies, which MLX's fused kernel
+            // takes at any ratio.
+            self.first_attention_geometry().and_then(|attention| {
+                let dtype = mlxcel_core::array_dtype(&h);
+                prefill_causal_mask(seq_len, live_len, shape[0], attention, dtype)
+            })
         } else {
             None
         };
@@ -882,11 +904,46 @@ impl LanguageModel for NemotronNASModel {
         self.config.num_hidden_layers
     }
 
+    /// Padded prefill is exact here: there is no recurrent state, only a
+    /// plain `KVCache` per attention block, and [`Self::trim_state`] rewinds
+    /// those model-owned caches by the pad width, which the caller's own
+    /// trim could not reach (#1755, #3101).
     fn supports_padded_prefill(&self) -> bool {
-        // No recurrent state here, only a plain `KVCache` per attention
-        // block, but those caches are model-owned: pad positions would land
-        // in state the caller's trim never reaches (#1755).
-        false
+        true
+    }
+
+    /// The pad tokens follow the real ones, so the causal forward (MLX's
+    /// causal mode, or the shared array where MLX does not fuse it) hides
+    /// them from every real row, and `trim_state` drops their K/V (#3101).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
+    /// Rewind the model-owned slot by the pad width of a padded prefill. The
+    /// family cannot batch, so `seq` is the one sequence the slot holds and
+    /// both the CLI (`None`) and the scheduler (`Some`) address it. A
+    /// `replace_with_linear` block keeps a slot it never writes, so a cache
+    /// at offset 0 has no pad positions to drop.
+    fn trim_state(
+        &self,
+        _seq: Option<mlxcel_core::cache::SequenceId>,
+        excess: i32,
+    ) -> Result<(), String> {
+        if excess <= 0 {
+            return Ok(());
+        }
+        for (slot, cache) in self.caches.borrow_mut().iter_mut().enumerate() {
+            if cache.offset == 0 {
+                continue;
+            }
+            let trimmed = cache.trim(excess);
+            if trimmed != excess {
+                return Err(format!(
+                    "Nemotron-NAS pad trim, slot {slot}: dropped {trimmed} of {excess} pad positions"
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn supports_batching(&self) -> bool {

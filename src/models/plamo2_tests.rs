@@ -175,6 +175,13 @@ fn plamo2_norm_offsets_match_reference() {
 }
 
 fn batching_model() -> super::plamo2::Plamo2Model {
+    batching_model_with(|_| {})
+}
+
+/// [`batching_model`] with `edit` applied to its weights before loading.
+fn batching_model_with(
+    edit: impl FnOnce(&mut mlxcel_core::weights::WeightMap),
+) -> super::plamo2::Plamo2Model {
     use crate::models::embedding_test_support::Rng;
     use mlxcel_core::{dtype, weights::WeightMap};
     let config = serde_json::from_value(
@@ -271,6 +278,7 @@ fn batching_model() -> super::plamo2::Plamo2Model {
             );
         }
     }
+    edit(&mut weights);
     super::plamo2::Plamo2Model::from_weights(config, weights).unwrap()
 }
 
@@ -338,3 +346,26 @@ fn plamo2_fresh_and_mixed_recurrent_states_match_solo_rows() {
 // The prefill's last-row projection (#3070): the hook is taken and returns the
 // full forward's row while the recurrent state still advances over every row.
 crate::models::last_row_logits_harness::last_row_case!(plamo2_last_row_logits, batching_model);
+
+/// Issue #3057: the SSD scan computes `A` from a float32 copy of `A_log`, so
+/// an f16 `A_log` (values up to 19.5, past the 11.09 where f16 `exp`
+/// overflows) gives finite prefill logits, bit-identical to a float32 copy.
+#[test]
+fn plamo2_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
+    use crate::models::ssm_test_support::assert_f16_a_log_prefill_matches_its_f32_copy;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let build = |a_log: &mlxcel_core::MlxArray| {
+        batching_model_with(|weights| {
+            let mixer = "model.layers.layers.0.mixer";
+            weights.insert(format!("{mixer}.A_log"), mlxcel_core::copy(a_log));
+            // The 0.001 floor of this model's `time_step_limit` keeps every step
+            // positive, so no zero step can meet `-inf`. A step near 2 instead
+            // makes the decay, and so the logits, depend on the f16 rounding of `A`.
+            weights.insert(
+                format!("{mixer}.dt_bias"),
+                mlxcel_core::full_f32(&[2], 2.0, mlxcel_core::dtype::FLOAT32),
+            );
+        })
+    };
+    assert_f16_a_log_prefill_matches_its_f32_copy(build, &[2], "plamo2");
+}

@@ -1,0 +1,7 @@
+model,positions,top1_disagree,decided_positions,decided_disagree,ref_logit_delta_max,ppl_array,ppl_causal,verdict
+c4ai-command-r7b-12-2024-4bit,6144,0,5845,0,0.0000,1.1143,1.1143,"byte-identical in effect, every position agrees"
+exaone-4.0-1.2b-4bit,6144,0,4582,0,0.0000,2.0149,2.0149,"byte-identical in effect, every position agrees"
+gemma-3n-e2b-it-4bit,6144,0,5078,0,0.0000,1.4757,1.4757,"byte-identical in effect, every position agrees"
+glm-4.1v-9b-thinking-4bit,6144,0,5931,0,0.0000,1.1320,1.1320,"byte-identical in effect, every position agrees"
+lfm2-8b-a1b-4bit,6144,0,5173,0,0.0000,2.0379,2.0379,"byte-identical in effect, every position agrees"
+llama-4-scout-17b-16e-instruct-4bit,6144,0,942,0,0.0000,13.1888,13.1888,"byte-identical in effect, every position agrees"

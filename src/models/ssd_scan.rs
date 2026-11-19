@@ -106,7 +106,9 @@ fn segsum(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// `dt = clip(softplus(dt + dt_bias), time_step_limit)`, `x`, `B` and `C` are
 /// promoted to float32 before the matmuls: the dot products over the state
 /// dimension can overflow float16, and mixed float32 x float16 multiplies NaN
-/// on M5 Max (Metal GPU Family 4) NAx kernels. The output is cast back to the
+/// on M5 Max (Metal GPU Family 4) NAx kernels. `A = -exp(A_log)` runs on a
+/// float32 copy of `A_log`, because an f16 `exp` overflows past 11.09 and a
+/// zero step then computes `0 * -inf = NaN` (#3057). The output is cast back to the
 /// dtype of `x`; the returned state is float32 `[batch, heads, head_dim,
 /// state_dim]`.
 ///
@@ -153,8 +155,7 @@ pub(crate) fn chunked_ssd_scan(
     let max_val = mlxcel_core::full_f32(&[1], time_step_limit.1, f32_dtype);
     let dt = mlxcel_core::clip(&dt_soft, &min_val, &max_val);
 
-    let a = mlxcel_core::negative(&mlxcel_core::exp(a_log));
-    let a = mlxcel_core::astype(&a, f32_dtype);
+    let a = super::ssm_a::ssm_a_f32(a_log);
     let a_reshaped = mlxcel_core::reshape(&a, &[1, 1, num_heads]);
     let dt_a = mlxcel_core::multiply(&dt, &a_reshaped);
 

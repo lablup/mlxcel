@@ -1199,7 +1199,7 @@ pub(crate) struct Qwen35DecoderLayer {
 
 /// The full-attention geometry of `layers`, for the prefill mask choice
 /// (#3051); `None` when the slice holds no full-attention layer.
-fn full_attention_geometry(layers: &[Qwen35DecoderLayer]) -> Option<PrefillAttention> {
+pub(crate) fn full_attention_geometry(layers: &[Qwen35DecoderLayer]) -> Option<PrefillAttention> {
     layers.iter().find_map(|layer| match &layer.attention {
         Qwen35AttentionVariant::FullAttention(attn) => Some(attn.prefill_attention()),
         Qwen35AttentionVariant::Linear(_) => None,

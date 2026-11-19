@@ -4,6 +4,7 @@
 #include "mlx_cxx_internal.h"
 #include "../../mlxcelverse/kernels/gpu_backend.h"
 #include "../../mlxcelverse/kernels/gelu_tanh_f32.h"
+#include "../../mlxcelverse/kernels/mla_absorbed_decode.h"
 
 #include "mlx/primitives.h"
 // Backend-agnostic CUDA availability probe; non-CUDA builds link the stub.
@@ -2013,6 +2014,23 @@ bool fused_gelu_tanh_f32_available() {
 
 bool fused_gelu_tanh_f32_matches_eager_bits() {
     return mlxcel::turbo::fused_gelu_tanh_f32_matches_eager_bits();
+}
+
+// Fused absorbed-MLA single-query decode attention (#3121), Metal only.
+// Throws off-Metal or on a shape outside the kernel's contract; Rust callers
+// gate on `mla_absorbed_decode_fused_available()` first.
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv,
+    const MlxArray& kpe,
+    float scale) {
+    return std::make_unique<MlxArray>(mlxcel::turbo::mla_absorbed_decode(
+        q_abs.inner, q_pe.inner, ckv.inner, kpe.inner, scale));
+}
+
+bool mla_absorbed_decode_fused_available() {
+    return mlxcel::turbo::mla_absorbed_decode_available();
 }
 
 // Compiled GeGLU: gelu(gate) * x
@@ -4383,7 +4401,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
 }
 
 // Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
-// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
+// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, MiMoV2Flash, OpenAIPrivacyFilter
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
     const MlxArray& q,
     const MlxArray& k,

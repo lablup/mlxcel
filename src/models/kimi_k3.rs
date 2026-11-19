@@ -50,7 +50,7 @@ use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
+use mlxcel_core::utils::{silu, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -1128,18 +1128,14 @@ impl KimiK3MLAAttention {
             &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale, None,
         );
         let output = self.unembed_out.forward(&output, true);
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
-        let output = mlxcel_core::reshape(&output, &[b, 1, -1]);
-        let output = match &self.g_proj {
-            Some(g_proj) => {
-                let gate = mlxcel_core::sigmoid(&g_proj.forward(x));
-                mlxcel_core::multiply(&output, &gate)
-            }
-            None => output,
-        };
-        self.o_proj.forward(&output)
+        self.project_output(x, &output, b, 1)
     }
 
+    /// MLA self-attention over `x` `[B, L, hidden]`.
+    ///
+    /// `mask == None` is causal for a multi-token step (MLX's causal mode over
+    /// the live window) and unmasked for a single query; `Some` is an additive
+    /// mask broadcastable to `[B, H, L, S]`, applied as given.
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
@@ -1205,6 +1201,55 @@ impl KimiK3MLAAttention {
             mlxcel_core::mla::MlaDecodePath::Decompressed
         });
 
+        if l > 1 {
+            // Multi-token step (issue #3099): fold the rope half into the SDPA
+            // head dim, `[q_nope | q_pe] . [k | k_pe]`, through
+            // `rope_folded_attention` instead of materializing the
+            // `[B, H, L, S]` nope, rope, summed and softmax score tensors by
+            // hand. A maskless step is causal over the live window
+            // `update_and_fetch` returned, through MLX's bottom-right aligned
+            // causal mode; a caller mask is applied as given.
+            debug_assert_eq!(
+                mlxcel_core::array_shape(&cached_latent)[2],
+                cache.seq_len(),
+                "causal mode needs the live window to end at this step"
+            );
+            let folded_mask = match mask {
+                Some(m) => mlxcel_core::mla::FoldedMask::Array(m),
+                None => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            let output = if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_lat = self.embed_q.forward(&q_nope, true);
+                let attn = mlxcel_core::mla::rope_folded_attention(
+                    &q_lat,
+                    &q_pe,
+                    &cached_latent,
+                    &cached_k_pe,
+                    &cached_latent,
+                    self.scale,
+                    folded_mask,
+                );
+                self.unembed_out.forward(&attn, true) // [B, H, L, v_head]
+            } else {
+                // Materialize: expand the latent to per-head k / v.
+                let k = self.embed_q.forward(&cached_latent, false); // [B, H, S, nope]
+                let v = self.unembed_out.forward(&cached_latent, true); // [B, H, S, v_head]
+                mlxcel_core::mla::rope_folded_attention(
+                    &q_nope,
+                    &q_pe,
+                    &k,
+                    &cached_k_pe,
+                    &v,
+                    self.scale,
+                    folded_mask,
+                )
+            };
+            return self.project_output(x, &output, b, l);
+        }
+
+        // Single-token decode keeps the manual form: its score row is one
+        // `[B, H, 1, S]` slice.
         // pe_scores = (q_pe * scale) @ k_pe^T -> [B, H, L, S]; the mask is
         // additive (0 / -inf) and is added in the scores dtype.
         let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
@@ -1237,8 +1282,19 @@ impl KimiK3MLAAttention {
             let probs = mlxcel_core::softmax(&scores, -1);
             mlxcel_core::matmul(&probs, &v) // [B, H, L, v_head]
         };
+        self.project_output(x, &output, b, l)
+    }
 
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+    /// `[B, H, L, v_head]` attention output to `[B, L, hidden]`: head merge,
+    /// the optional sigmoid output gate on `x`, and `o_proj`.
+    fn project_output(
+        &self,
+        x: &MlxArray,
+        output: &MlxArray,
+        b: i32,
+        l: i32,
+    ) -> UniquePtr<MlxArray> {
+        let output = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
         let output = match &self.g_proj {
             Some(g_proj) => {
@@ -1930,18 +1986,10 @@ impl KimiK3Model {
             "kimi_k3: cache cardinality must match layer count"
         );
 
-        let l = mlxcel_core::array_shape(&h)[1];
-
-        // Every cache advances by the same token count, so any layer's offset
-        // is the sequence position; the additive mask is [L, L + offset].
-        let attn_mask = if l > 1 {
-            let offset = caches.first().map_or(0, KimiK3LayerCache::offset);
-            Some(create_causal_mask(l, offset))
-        } else {
-            None
-        };
-
-        let (h, blocks) = self.run_layers(h, attn_mask.as_deref(), caches);
+        // No mask array: a multi-token MLA step runs MLX's causal mode inside
+        // the rope-folded attention, over the live window its cache returns,
+        // which masks the same keys as the additive `[L, L + offset]` mask (#3099).
+        let (h, blocks) = self.run_layers(h, None, caches);
         let h = match &self.output_attn_res {
             Some((w, eps)) => attn_res_mix(&blocks, &h, w, *eps),
             None => h,

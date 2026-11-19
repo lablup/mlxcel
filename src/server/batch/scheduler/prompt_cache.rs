@@ -136,7 +136,7 @@ impl BatchScheduler {
         // The request's own prompt length picks its table, so it may only match
         // entries stored by a request on the same side of the boundary (#1358).
         let key = Self::compose_prompt_cache_key(ctx, tokens, self.rope_regime_for(tokens.len()));
-        let snapshot_outcome = if self.engine.model().supports_snapshot_reuse() {
+        let mut snapshot_outcome = if self.engine.model().supports_snapshot_reuse() {
             // The truncation capability is the model's own answer (#1145):
             // rotating-attention families can restore to the longest common
             // prefix while their sliding layers are unwrapped, and every
@@ -150,6 +150,30 @@ impl BatchScheduler {
         } else {
             SnapshotLookupOutcome::NoCandidate
         };
+        // A turn-boundary checkpoint that the model fails to rebuild is not a
+        // reason to start cold (issue #3058): look again with checkpoints
+        // excluded, so the best shorter whole snapshot is adopted instead.
+        if let SnapshotLookupOutcome::CheckpointHit {
+            checkpoint,
+            donor,
+            matched_len,
+        } = &snapshot_outcome
+        {
+            if let Some(adopted) =
+                self.adopt_state_checkpoint(checkpoint, donor, *matched_len, tokens.len())
+            {
+                return Some(adopted);
+            }
+            snapshot_outcome = store.lookup_snapshot_outcome_without_checkpoints(
+                &key,
+                tokens,
+                |snapshot, target_len| {
+                    self.engine
+                        .model()
+                        .snapshot_truncatable_to(snapshot, target_len)
+                },
+            );
+        }
         // A snapshot candidate that sits in this request's own session bucket
         // but is not a prefix of it is a structural miss, not an empty store
         // (issue #1147). Classify it so `/v1/cache/stats` can tell the two
@@ -170,14 +194,6 @@ impl BatchScheduler {
                     divergence.common_prefix_len,
                     Some(divergence.stored_len),
                 );
-        }
-        if let SnapshotLookupOutcome::CheckpointHit {
-            checkpoint,
-            donor,
-            matched_len,
-        } = snapshot_outcome
-        {
-            return self.adopt_state_checkpoint(&checkpoint, &donor, matched_len, tokens.len());
         }
         if let SnapshotLookupOutcome::Hit {
             entry: snapshot_entry,
@@ -789,11 +805,14 @@ impl BatchScheduler {
 
     /// Restore a turn-boundary state checkpoint over its donor (issue #3047):
     /// the checkpoint's recurrent state plus the donor's attention rows cut
-    /// back to `matched_len`. Returns the adopted sequence, or `None` (cold
-    /// prefill) when the model refuses the pair.
+    /// back to `matched_len`. Returns the adopted sequence, or `None` when the
+    /// model refuses the pair; the caller then retries the lookup without
+    /// checkpoints (issue #3058). The store counts the hit only here, once the
+    /// rebuild succeeded, and a checkpoint the model refuses is discarded so
+    /// later requests are not offered it again.
     fn adopt_state_checkpoint(
         &mut self,
-        checkpoint: &ModelSnapshotEntry,
+        checkpoint: &Arc<ModelSnapshotEntry>,
         donor: &ModelSnapshotEntry,
         matched_len: usize,
         prompt_len: usize,
@@ -817,7 +836,7 @@ impl BatchScheduler {
                 seq_id = %seq_id,
                 checkpoint = matched_len,
                 donor = donor.tokens.len(),
-                "prompt-cache checkpoint restore failed ({err}); falling back to cold prefill"
+                "prompt-cache checkpoint restore failed ({err}); retrying with whole snapshots only"
             );
             self.batch_observability.record_prompt_cache_reject(
                 PromptCacheRejectReason::LayoutConstraints,
@@ -825,6 +844,9 @@ impl BatchScheduler {
                 matched_len,
             );
             self.release_sequence_caches(seq_id);
+            if let Some(ref store) = self.prompt_cache {
+                store.discard_state_checkpoint(checkpoint);
+            }
             return None;
         }
         tracing::debug!(
@@ -843,6 +865,7 @@ impl BatchScheduler {
         self.batch_metrics
             .record_prompt_cache_snapshot_hit(matched_len);
         if let Some(ref store) = self.prompt_cache {
+            store.record_state_checkpoint_hit(matched_len);
             self.batch_metrics
                 .update_prompt_cache_gauges(store.bytes(), store.len());
         }
@@ -1000,8 +1023,6 @@ impl BatchScheduler {
                     "prompt-cache snapshot inserted"
                 );
                 self.batch_observability.record_prompt_cache_insert();
-                self.batch_metrics
-                    .update_prompt_cache_gauges(store.bytes(), store.len());
                 if apc_trace_enabled() {
                     tracing::info!(
                         apc_event = "store",
@@ -1016,20 +1037,36 @@ impl BatchScheduler {
                         .with_origin(origin)
                         .with_lineage(lineage);
                     let checkpoint_bytes = checkpoint.size_bytes;
-                    match store.insert_state_checkpoint(&key, checkpoint) {
-                        Ok(()) => tracing::debug!(
+                    // Checkpoints grow the resident store like whole
+                    // snapshots do, so the same guardrail applies (#3058).
+                    if !state_checkpoint_growth_allowed(
+                        snapshot_growth_gate(),
+                        &store,
+                        checkpoint_bytes,
+                    ) {
+                        tracing::debug!(
                             seq_id = %seq_id,
-                            token_len = key_tokens.len(),
                             checkpoint_bytes,
-                            "prompt-cache state checkpoint inserted"
-                        ),
-                        Err(err) => tracing::debug!(
-                            seq_id = %seq_id,
-                            checkpoint_bytes,
-                            "prompt-cache state checkpoint skipped: {err}"
-                        ),
+                            "prompt-cache state checkpoint skipped by the memory guardrail"
+                        );
+                    } else {
+                        match store.insert_state_checkpoint(&key, checkpoint) {
+                            Ok(()) => tracing::debug!(
+                                seq_id = %seq_id,
+                                token_len = key_tokens.len(),
+                                checkpoint_bytes,
+                                "prompt-cache state checkpoint inserted"
+                            ),
+                            Err(err) => tracing::debug!(
+                                seq_id = %seq_id,
+                                checkpoint_bytes,
+                                "prompt-cache state checkpoint skipped: {err}"
+                            ),
+                        }
                     }
                 }
+                self.batch_metrics
+                    .update_prompt_cache_gauges(store.bytes(), store.len());
             }
             Err(err) => {
                 // An entry that cannot fit even alone means this conversation
@@ -1788,6 +1825,21 @@ fn snapshot_growth_allowed(
     growth_bytes == 0 || gate.allows_step(growth_bytes)
 }
 
+/// Whether a turn-boundary state checkpoint of `entry_bytes` may be stored
+/// now (#3058): the checkpoint budget's growth goes through the same
+/// availability gate as a whole snapshot's, and a budget that is full only
+/// replaces checkpoints and passes.
+fn state_checkpoint_growth_allowed(
+    gate: &mlxcel_core::host_memory::AvailabilityGate,
+    store: &crate::server::prompt_cache::PromptCacheStore,
+    entry_bytes: usize,
+) -> bool {
+    snapshot_growth_allowed(
+        gate,
+        store.state_checkpoint_growth_bytes(entry_bytes) as u64,
+    )
+}
+
 /// Longest prefix a request of `prompt_len` tokens may adopt from a cache hit
 /// that matched `matched_len` of them (#1760).
 ///
@@ -1803,7 +1855,7 @@ pub(super) fn whole_prompt_reuse_cap(matched_len: usize, prompt_len: usize) -> u
 
 #[cfg(test)]
 mod snapshot_growth_tests {
-    use super::snapshot_growth_allowed;
+    use super::{snapshot_growth_allowed, state_checkpoint_growth_allowed};
     use mlxcel_core::host_memory::{AvailabilityGate, HostMemoryStatus};
     use std::time::Duration;
 
@@ -1831,5 +1883,38 @@ mod snapshot_growth_tests {
         let tight = gate(8 * GIB + GIB / 2);
         assert!(!snapshot_growth_allowed(&tight, GIB));
         assert!(snapshot_growth_allowed(&tight, 0));
+    }
+
+    /// Checkpoint growth goes through the same gate (#3058): a growing
+    /// checkpoint budget is refused below the reserve, and one with no room
+    /// to grow (here, checkpoints off) asks for no growth and passes. The
+    /// full-budget case, which reports zero growth, is pinned in the store's
+    /// own tests.
+    #[test]
+    fn state_checkpoint_growth_uses_the_snapshot_gate() {
+        use crate::server::prompt_cache::{PromptCacheConfig, PromptCacheStore};
+        let store = |capacity: usize| {
+            PromptCacheStore::with_config(
+                PromptCacheConfig::new(true, 1 << 20, 32, Duration::from_secs(600), 4)
+                    .with_state_checkpoint_capacity_bytes(capacity),
+            )
+        };
+        let entry = GIB as usize;
+        let growing = store(2 * entry);
+        assert!(state_checkpoint_growth_allowed(
+            &gate(64 * GIB),
+            &growing,
+            entry
+        ));
+        assert!(!state_checkpoint_growth_allowed(
+            &gate(8 * GIB + GIB / 2),
+            &growing,
+            entry
+        ));
+        assert!(state_checkpoint_growth_allowed(
+            &gate(8 * GIB + GIB / 2),
+            &store(0),
+            entry
+        ));
     }
 }

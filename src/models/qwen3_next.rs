@@ -45,7 +45,10 @@ use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
-use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::layers::{
+    KVCache, LOADABLE_AFFINE_BITS, RMSNorm, SUPPORTED_AFFINE_GROUP_SIZES, UnifiedEmbedding,
+    UnifiedLinear,
+};
 use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, silu, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
@@ -670,6 +673,8 @@ impl Qwen3NextAttention {
             q_heads: self.num_heads,
             kv_heads: self.num_kv_heads,
             head_dim: self.head_dim,
+            value_dim: self.head_dim,
+            sinks: false,
         }
     }
 
@@ -1279,6 +1284,11 @@ pub(crate) enum SwitchLinear {
         group_size: i32,
         bits: i32,
     },
+    /// A block-float plane (mxfp4, nvfp4 or mxfp8: `uint8` scales and no
+    /// `.biases`). The shared expert linear loads it: it infers the mode and
+    /// group size from the shapes and carries the per-expert scales such a
+    /// plane can come with.
+    BlockFloat(crate::models::switch_layers::SwitchLinear),
     Regular {
         weight: UniquePtr<MlxArray>,
     },
@@ -1292,6 +1302,7 @@ impl SwitchLinear {
         sorted: bool,
     ) -> UniquePtr<MlxArray> {
         match self {
+            Self::BlockFloat(linear) => linear.forward(x, indices, sorted),
             Self::Quantized {
                 weight,
                 scales,
@@ -1338,7 +1349,8 @@ impl SwitchLinear {
                 group_size,
                 bits,
             } => Some((weight, scales, biases, *group_size, *bits)),
-            Self::Regular { .. } => None,
+            // The fused kernel reads affine planes only.
+            Self::BlockFloat(_) | Self::Regular { .. } => None,
         }
     }
 
@@ -1363,7 +1375,21 @@ impl SwitchLinear {
             // `audio/qwen3_omni_moe/talker.rs`), so bounding the producer would
             // not have covered it.
             validate_expert_quantization_params(prefix, group_size, bits)?;
-            let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
+            // A block-float export (mlx-lm `mxfp4` / `nvfp4` / `mxfp8`) has
+            // `uint8` scales and no zero-point biases. This type's own
+            // variant is affine; hand such a plane to the shared loader. An
+            // affine plane that lost its biases has float scales and is still
+            // refused below, as before.
+            let scales_ref = weights.get(&scales_key).unwrap();
+            if !weights.contains_key(&format!("{}.biases", prefix))
+                && mlxcel_core::array_dtype(scales_ref) == dtype::UINT8
+            {
+                return crate::models::switch_layers::SwitchLinear::from_weights(
+                    weights, prefix, group_size, bits,
+                )
+                .map(Self::BlockFloat);
+            }
+            let scales = mlxcel_core::copy(scales_ref);
             let biases = weights
                 .get(&format!("{}.biases", prefix))
                 .map(|w| mlxcel_core::copy(w))
@@ -1568,6 +1594,75 @@ impl SwitchGLU {
     }
 }
 
+/// Load a MoE router or gate linear, whose plane can be quantized differently
+/// from the checkpoint's default.
+///
+/// mlx-lm keeps these at 8-bit affine whatever the rest of the model uses, and
+/// records that as a per-layer entry of `quantization`, which this family's
+/// config reader does not keep. Under an affine default of the same group size
+/// the loader's own reconciliation recovers the bits. Under a block-float
+/// default (mxfp4 at group 32, nvfp4 at 16) the group size differs as well,
+/// and the declared pair then fails the bits check.
+///
+/// An affine plane (one with `.biases`) says what it is once the input width
+/// is known: `bits = packed_words * 32 / in_features` and `group_size =
+/// in_features / groups`. When that pair is loadable and differs from the
+/// declared one, the plane is loaded as affine with it. This also covers an
+/// nvfp4 default (group 16, 4-bit), where the shared reconciliation would
+/// otherwise read an 8-bit group-64 gate as 4-bit group 128 and route on
+/// misdecoded logits. Everything else goes
+/// to `UnifiedLinear::from_weights` unchanged.
+///
+/// Used by: [`SparseMoeBlock::from_weights`]
+fn gate_linear_from_weights(
+    weights: &WeightMap,
+    prefix: &str,
+    in_features: i32,
+    group_size: i32,
+    bits: i32,
+) -> Result<UnifiedLinear, String> {
+    let plane = |leaf: &str| weights.get(&format!("{prefix}.{leaf}"));
+    if let (Some(weight), Some(scales), Some(_biases)) =
+        (plane("weight"), plane("scales"), plane("biases"))
+    {
+        let packed_words = mlxcel_core::array_shape(weight)
+            .last()
+            .copied()
+            .unwrap_or(0);
+        let groups = mlxcel_core::array_shape(scales)
+            .last()
+            .copied()
+            .unwrap_or(0);
+        // `checked_mul`: the packed width comes from the checkpoint, and an
+        // unchecked i32 multiply panics in an overflow-checked build.
+        if let Some(packed_bits) = packed_words.checked_mul(32)
+            && in_features > 0
+            && packed_words > 0
+            && groups > 0
+            && packed_bits % in_features == 0
+            && in_features % groups == 0
+        {
+            let shape_bits = packed_bits / in_features;
+            let shape_group_size = in_features / groups;
+            // The affine bounds the shared loader enforces: no affine group 16
+            // (only NVFP4 uses it), and the loadable bit widths.
+            if (shape_group_size, shape_bits) != (group_size, bits)
+                && LOADABLE_AFFINE_BITS.contains(&shape_bits)
+                && SUPPORTED_AFFINE_GROUP_SIZES.contains(&shape_group_size)
+            {
+                return UnifiedLinear::from_weights_with_mode(
+                    weights,
+                    prefix,
+                    shape_group_size,
+                    shape_bits,
+                    "affine",
+                );
+            }
+        }
+    }
+    UnifiedLinear::from_weights(weights, prefix, group_size, bits)
+}
+
 /// Sparse MoE Block with shared expert
 pub(crate) struct SparseMoeBlock {
     router: UnifiedLinear,
@@ -1661,10 +1756,13 @@ impl SparseMoeBlock {
         let group_size = config.group_size();
         let bits = config.bits();
 
+        let hidden_size = config.hidden_size as i32;
+
         Ok(Self {
-            router: UnifiedLinear::from_weights(
+            router: gate_linear_from_weights(
                 weights,
                 &format!("{}.gate", prefix),
+                hidden_size,
                 group_size,
                 bits,
             )?,
@@ -1674,9 +1772,10 @@ impl SparseMoeBlock {
                 config,
                 &format!("{}.shared_expert", prefix),
             )?,
-            shared_expert_gate: UnifiedLinear::from_weights(
+            shared_expert_gate: gate_linear_from_weights(
                 weights,
                 &format!("{}.shared_expert_gate", prefix),
+                hidden_size,
                 group_size,
                 bits,
             )?,

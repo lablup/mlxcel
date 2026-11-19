@@ -86,7 +86,9 @@ use std::path::Path;
 use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::create_sliding_window_prefill_mask;
+use mlxcel_core::utils::{
+    SlidingPrefillKeys, create_sliding_window_prefill_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -886,14 +888,30 @@ impl DeepSeekV4Model {
         // layer's rotating cache sizes the shared sliding prefill mask, the
         // same way `create_attention_mask(..., window_size=sliding_window)`
         // reads `cache[0]` in the reference. Decode needs no mask: the
-        // rotating cache returns only its window.
+        // rotating cache returns only its window. A stack of local layers
+        // only may leave the band to MLX's causal mode and `window_size`
+        // with the sinks (#3098); compressed and sparse layers extend the
+        // local mask with their pooled rows, so any of them keeps it.
         let mask = if l > 1 {
             let local_offset = caches.first().map(|c| c.local.offset).unwrap_or(0);
-            Some(create_sliding_window_prefill_mask(
-                l,
-                local_offset,
-                self.sliding_window,
-            ))
+            match self.layers.first() {
+                Some(first) if self.compress_ratios.iter().all(|&r| r == 0) => {
+                    prefill_sliding_window_mask(
+                        l,
+                        local_offset,
+                        self.sliding_window,
+                        b,
+                        first.attn.prefill_attention(),
+                        mlxcel_core::array_dtype(&h),
+                        SlidingPrefillKeys::Rotating,
+                    )
+                }
+                _ => Some(create_sliding_window_prefill_mask(
+                    l,
+                    local_offset,
+                    self.sliding_window,
+                )),
+            }
         } else {
             None
         };

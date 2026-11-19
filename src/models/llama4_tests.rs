@@ -488,6 +488,100 @@ mod snapshot_prompt_cache {
             "unexpected error: {err}"
         );
     }
+
+    /// Issue #3100: the chunked layers run their prefill per query chunk over
+    /// the cache's own keys. A prompt prefilled in one pass and the same
+    /// prompt split mid-chunk (5 + 15 tokens, the second piece starting
+    /// behind cached keys of its chunk and crossing two chunk boundaries)
+    /// must decode the same next-token logits.
+    /// A one-row prefill wider than the attention chunk hands the chunked
+    /// layers no dense `[L, S]` mask: `ChunkedKVCache::attend` splits it per
+    /// query chunk in MLX's causal mode (#3100). A Scout prefill past 8192
+    /// relies on this to stay near the weights (#3132). Batched rows keep the
+    /// array mask.
+    #[test]
+    fn a_one_row_prefill_past_the_chunk_builds_no_dense_chunk_mask() {
+        let wrapper = build_wrapper();
+        let model = &wrapper.model;
+        let caches = model.make_llama4_caches();
+        let len = 2 * CHUNK + 3;
+        assert!(model.chunked_prefill_mask(len, 1, &caches).is_none());
+        assert!(model.chunked_prefill_mask(len, 2, &caches).is_some());
+    }
+
+    #[test]
+    fn a_mid_chunk_split_prefill_matches_the_single_pass() {
+        let whole = build_wrapper();
+        let seq_whole = SequenceId::from_raw(SEQ_BASE + 16);
+        prefill(&whole, seq_whole, &ids(0..20));
+
+        let split = build_wrapper();
+        let seq_split = SequenceId::from_raw(SEQ_BASE + 17);
+        prefill(&split, seq_split, &ids(0..5));
+        let rest = ids(5..20);
+        let rest = mlxcel_core::from_slice_i32(&rest, &[1, rest.len() as i32]);
+        let _ = split.forward_with_sequence_id(&rest, Some(seq_split), &mut [], None);
+
+        for token in ids(20..23) {
+            let want = decode(&whole, seq_whole, token);
+            let got = decode(&split, seq_split, token);
+            assert_eq!(got.len(), want.len());
+            for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (g - w).abs() < 1e-4,
+                    "logit[{i}] differs between split and single-pass prefill: {g} vs {w}"
+                );
+            }
+        }
+    }
+
+    /// Issue #3105: a decode step whose context crosses a chunk boundary
+    /// attends only to its own chunk, as mlx-lm's per-forward `chunk_mask`
+    /// does. The reference is one maskless prefill of the whole sequence from
+    /// an empty cache, whose per-position logits apply that rule (#3100; the
+    /// dense-mask agreement is pinned in `llama4_helpers_tests`). Token by
+    /// token decode from a 5-token prompt runs positions 5..24 over chunks
+    /// [0, 8), [8, 16) and [16, 24), with the front trim leaving keys of the
+    /// previous chunk in the visible window from position 8 on. Before the
+    /// fix every decode position from 8 on attended over those keys too.
+    #[test]
+    fn decode_across_chunk_boundaries_matches_the_one_pass_prefill() {
+        let total = 3 * CHUNK;
+        let tokens = ids(0..total);
+        let vocab = VOCAB as usize;
+
+        let whole = build_wrapper();
+        let seq_whole = SequenceId::from_raw(SEQ_BASE + 18);
+        whole.prepare_sequence_state(seq_whole);
+        let prompt = mlxcel_core::from_slice_i32(&tokens, &[1, total]);
+        let logits = whole.forward_with_sequence_id(&prompt, Some(seq_whole), &mut [], None);
+        assert_eq!(mlxcel_core::array_shape(&logits), vec![1, total, VOCAB]);
+        let want = to_vec_f32(&logits);
+
+        let stepped = build_wrapper();
+        let seq_step = SequenceId::from_raw(SEQ_BASE + 19);
+        let prompt_len = 5;
+        prefill(&stepped, seq_step, &tokens[..prompt_len]);
+        let mut worst = (0.0f32, 0usize);
+        for (pos, &token) in tokens.iter().enumerate().skip(prompt_len) {
+            let got = decode(&stepped, seq_step, token);
+            let row = &want[pos * vocab..(pos + 1) * vocab];
+            let diff = got
+                .iter()
+                .zip(row)
+                .map(|(g, w)| (g - w).abs())
+                .fold(0.0f32, f32::max);
+            if diff > worst.0 {
+                worst = (diff, pos);
+            }
+        }
+        assert!(
+            worst.0 < 1e-4,
+            "decode at position {} differs from the one-pass prefill by {} (chunk {CHUNK})",
+            worst.1,
+            worst.0
+        );
+    }
 }
 
 // -----------------------------------------------------------------
@@ -499,7 +593,7 @@ mod snapshot_prompt_cache {
 // projected Q/K/V to `Llama4Cache::attend` (`ChunkedKVCache::attend` for an
 // iGQA chunked layer, `KVCache::attend` for a dense one). The first module
 // pins that the entry runs the same ops the block ran for FP16 storage, bit
-// for bit, prefill and front-trimmed decode alike; the second pins the
+// for bit, prefill and decode inside one chunk; the second pins the
 // batched decode of the synthetic model against single-row decode.
 mod cache_attend_entry {
     use super::super::Llama4Cache;
@@ -625,9 +719,14 @@ mod cache_attend_entry {
         }
     }
 
+    /// Inside one chunk the chunked entry is the block's route op for op.
+    /// Across a chunk boundary it deliberately is not: a decode step there
+    /// skips the previous chunk's keys (#3105), pinned against mlx-lm's chunk
+    /// mask in `mlxcel_core::cache::attend_tests` and against the one-pass
+    /// prefill in `snapshot_prompt_cache`.
     #[test]
-    fn chunked_fp16_layer_takes_the_route_the_block_ran_past_a_front_trim() {
-        let chunk = 8;
+    fn chunked_fp16_layer_takes_the_route_the_block_ran_inside_one_chunk() {
+        let chunk = 16;
         assert_entry_matches_block(
             Llama4Cache::Chunked(ChunkedKVCache::new(chunk)),
             Llama4Cache::Chunked(ChunkedKVCache::new(chunk)),

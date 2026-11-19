@@ -1,0 +1,9 @@
+cell_order,arm,prefill_chunk,rep,prompt_tokens,prefill_s,prefill_tok_s,decode48_tok_s,peak_footprint_gb,output_tail_md5
+1,default,2048,0,28705,90.77,316.22,25.07,20.20,5caff446605d
+2,absorbed,2048,0,28705,75.82,378.61,73.90,13.52,18d76fc13300
+3,absorbed,2048,1,28705,74.35,386.08,27.39,13.52,18d76fc13300
+4,default,2048,1,28705,77.28,371.45,51.36,20.20,5caff446605d
+5,default,single,0,28705,94.85,302.64,43.29,48.55,18d76fc13300
+6,absorbed,single,0,28705,89.70,320.00,32.70,41.02,5caff446605d
+7,absorbed,single,1,28705,85.93,334.03,76.29,41.03,5caff446605d
+8,default,single,1,28705,59.31,484.01,45.63,48.43,18d76fc13300

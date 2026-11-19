@@ -170,7 +170,14 @@ pub fn estimate(
         "num_attention_heads": c.num_attention_heads, "num_key_value_heads": c.num_key_value_heads,
         "hidden_size": c.hidden_size, "head_dim": head_dim, "hybrid_override_pattern": pattern,
     });
-    let classified = super::kv_arch::estimate_kv_arch_from_config(&arch, retained, false, 1)?;
+    // FP16 on purpose: this is an identity check against `expected_fp16`, and
+    // the KV cache mode only changes the layout for DeepSeek V2.
+    let classified = super::kv_arch::estimate_kv_arch_from_config(
+        &arch,
+        retained,
+        mlxcel_core::cache::KVCacheMode::Fp16,
+        1,
+    )?;
     if classified.total_bytes != expected_fp16 {
         return None;
     }

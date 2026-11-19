@@ -339,6 +339,15 @@ struct Args {
 struct ArgDecl {
     ty: Ty,
     loc: String,
+    /// Issue #3060: render this argument as an ABI-level scalar (`i32`) instead
+    /// of a rank-0 `tensor<i32>` buffer view. A rank-0 tensor argument can only
+    /// reach host-side slice offsets and mask bounds through a host-visible
+    /// staging resource, so IREE materialized a 192-byte
+    /// `!stream.resource<staging>` alloca and three `stream.resource.load`s per
+    /// single-sequence decode step. Passing the value itself in the VM call
+    /// removes that staging entirely. Only the single-sequence decode marks its
+    /// token/pos/cache_len args; every other graph keeps tensor arguments.
+    abi_scalar: bool,
 }
 
 /// Append one (type, pytree-path loc) arg, returning a handle to it. `idx` is the
@@ -346,9 +355,39 @@ struct ArgDecl {
 /// identical to the hand-written builders this replaced.
 fn take_arg(decls: &mut Vec<ArgDecl>, idx: &mut usize, ty: Ty, loc: String) -> Val {
     let val = Builder::arg(*idx, ty.clone());
-    decls.push(ArgDecl { ty, loc });
+    decls.push(ArgDecl {
+        ty,
+        loc,
+        abi_scalar: false,
+    });
     *idx += 1;
     val
+}
+
+/// Append one ABI-level `i32` scalar argument (issue #3060) and return the
+/// rank-0 `tensor<i32>` handle the body consumes. The signature renders the
+/// bare `i32`, but the StableHLO ops that take an index or a broadcast operand
+/// still want a tensor, so the prologue rebuilds one with
+/// `tensor.from_elements`. That rebuild does not reintroduce the staging
+/// resource: the value already arrives on the host-side VM argument list, which
+/// is the whole point of the ABI change. Mirroring the tensor for every
+/// downstream use keeps the op sequence after the prologue byte-identical to the
+/// buffer-argument graph.
+fn take_abi_scalar_arg(
+    b: &mut Builder,
+    decls: &mut Vec<ArgDecl>,
+    idx: &mut usize,
+    loc: String,
+) -> Val {
+    let ty = Ty::scalar("i32");
+    let arg = Builder::arg(*idx, ty.clone());
+    decls.push(ArgDecl {
+        ty,
+        loc,
+        abi_scalar: true,
+    });
+    *idx += 1;
+    b.tensor_from_elements_i32(&arg)
 }
 
 /// Take one linear-projection weight `[out, in_]`, returning an `[out, in_]` f32
@@ -920,7 +959,7 @@ fn add_proj_bias_seq(b: &mut Builder, x: Val, bias: &Option<Val>, n: usize, k: u
     }
 }
 
-fn build_arg_schema(b: &mut Builder, c: &Config) -> (Vec<ArgDecl>, Args) {
+fn build_arg_schema(b: &mut Builder, c: &Config, scalar_abi: bool) -> (Vec<ArgDecl>, Args) {
     let h = c.hidden;
     let v = c.vocab;
 
@@ -955,14 +994,32 @@ fn build_arg_schema(b: &mut Builder, c: &Config) -> (Vec<ArgDecl>, Args) {
             "adapter_mode".into(),
         )
     });
-    let token = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "token".into());
-    let pos = take_arg(
-        &mut decls,
-        &mut idx,
-        Ty::new(if c.uses_mrope() { vec![3] } else { vec![] }, "i32"),
-        "pos".into(),
-    );
-    let cache_len = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "cache_len".into());
+    // Issue #3060: the single-sequence decode passes token, position and
+    // cache_len as ABI-level `i32` values instead of rank-0 tensor arguments.
+    // M-RoPE carries a `tensor<3xi32>` position, so that path keeps all three
+    // buffer arguments (and its residual staging) and the shim's capability
+    // probe stays a single on/off signal. `phi4` adapter_mode stays a tensor
+    // argument too (out of scope).
+    let token = if scalar_abi {
+        take_abi_scalar_arg(b, &mut decls, &mut idx, "token".into())
+    } else {
+        take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "token".into())
+    };
+    let pos = if scalar_abi {
+        take_abi_scalar_arg(b, &mut decls, &mut idx, "pos".into())
+    } else {
+        take_arg(
+            &mut decls,
+            &mut idx,
+            Ty::new(if c.uses_mrope() { vec![3] } else { vec![] }, "i32"),
+            "pos".into(),
+        )
+    };
+    let cache_len = if scalar_abi {
+        take_abi_scalar_arg(b, &mut decls, &mut idx, "cache_len".into())
+    } else {
+        take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "cache_len".into())
+    };
     let kcache = take_arg(
         &mut decls,
         &mut idx,
@@ -1008,7 +1065,16 @@ fn render_signature(decls: &[ArgDecl]) -> String {
     let parts: Vec<String> = decls
         .iter()
         .enumerate()
-        .map(|(i, d)| format!("%arg{}: {} loc(\"{}\")", i, d.ty.render(), d.loc))
+        .map(|(i, d)| {
+            // Issue #3060: an ABI scalar renders as the bare element type, so
+            // IREE passes it in the VM call instead of a buffer view.
+            let ty = if d.abi_scalar {
+                d.ty.elt.to_string()
+            } else {
+                d.ty.render()
+            };
+            format!("%arg{}: {} loc(\"{}\")", i, ty, d.loc)
+        })
         .collect();
     parts.join(", ")
 }
@@ -2054,13 +2120,18 @@ impl AttnLayout {
         let seq = c.context_capacity;
         match self {
             AttnLayout::Single { cache_len, .. } => {
+                // Issue #2886: the cache global is stored in the contraction
+                // precision, so only the new row is narrowed here instead of
+                // IREE converting the whole slab on every read.
                 let k_upd = b.reshape(kk, vec![1, 1, nkv, d]);
+                let k_upd = narrow_cache_row(b, k_upd);
                 *kcache = b.dynamic_update_slice(
                     &*kcache,
                     &k_upd,
                     &[&k.layer_idx[li], cache_len, &k.c0, &k.c0],
                 );
                 let v_upd = b.reshape(vv, vec![1, 1, nkv, d]);
+                let v_upd = narrow_cache_row(b, v_upd);
                 *vcache = b.dynamic_update_slice(
                     &*vcache,
                     &v_upd,
@@ -2305,6 +2376,17 @@ fn apply_scale_and_softcap(b: &mut Builder, c: &Config, k: &Consts, scores: Val)
     }
 }
 
+/// Narrow a freshly written single-decode cache row to the cache global's
+/// element type (issue #2886). The ordinary K/V path and the MLA latent/PE path
+/// both write into the single-sequence decode global, so both go through here;
+/// it is a no-op under `Precision::F32`, where the cache stays f32.
+fn narrow_cache_row(b: &mut Builder, v: Val) -> Val {
+    match b.precision().dot_elt() {
+        Some(elt) => b.convert(&v, elt),
+        None => v,
+    }
+}
+
 fn mla_rms_norm(
     b: &mut Builder,
     x: &Val,
@@ -2504,17 +2586,22 @@ fn emit_mla_attention(
     let cache_width = m.cache_dim();
     let (latent_slab, pe_slab) = match layout {
         AttnLayout::Single { cache_len, .. } => {
+            // Issue #2886: the single-decode cache global is stored in the
+            // contraction precision, so the row written here must be narrowed to
+            // match it, the same way `write_read_kv` narrows the ordinary K/V row.
             let zeros_pe = b.broadcast(&k.zero, &[], vec![m.qk_rope_head_dim]);
             let latent_row = b.concatenate(&latent, &zeros_pe, 0);
             let zeros_latent = b.broadcast(&k.zero, &[], vec![m.kv_lora_rank]);
             let pe_row = b.concatenate(&zeros_latent, &k_pe, 0);
             let latent_update = b.reshape(&latent_row, vec![1, 1, 1, cache_width]);
+            let latent_update = narrow_cache_row(b, latent_update);
             *kcache = b.dynamic_update_slice(
                 kcache,
                 &latent_update,
                 &[&k.layer_idx[li], cache_len, &k.c0, &k.c0],
             );
             let pe_update = b.reshape(&pe_row, vec![1, 1, 1, cache_width]);
+            let pe_update = narrow_cache_row(b, pe_update);
             *vcache = b.dynamic_update_slice(
                 vcache,
                 &pe_update,
@@ -2889,6 +2976,41 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
     emit_decode_with_native(c, sample, precision, None)
 }
 
+#[cfg(feature = "test-support")]
+thread_local! {
+    /// Per-thread override for [`decode_scalar_abi_enabled`] (issue #3060). The
+    /// device gate loads one engine from a scalar-ABI artifact and one from the
+    /// legacy buffer-view artifact in the same process and compares the token
+    /// streams; a thread-local keeps the two compilations independent, because a
+    /// test thread performs both `load` calls sequentially.
+    static DECODE_SCALAR_ABI_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Issue #3060: enable (or reset, `None`) the single-sequence decode scalar-ABI
+/// override on the current thread. Test support only.
+#[cfg(feature = "test-support")]
+pub(crate) fn set_decode_scalar_abi_for_thread(enabled: Option<bool>) {
+    DECODE_SCALAR_ABI_OVERRIDE.with(|value| value.set(enabled));
+}
+
+/// Issue #3060: whether the single-sequence decode emits its token, position and
+/// cache_len arguments as ABI-level `i32` scalars. On by default; the
+/// `test-support` thread-local override lets the device gate compile the legacy
+/// buffer-view signature too, so the shim's no-marker fallback stays covered.
+fn decode_scalar_abi_enabled() -> bool {
+    #[cfg(feature = "test-support")]
+    {
+        DECODE_SCALAR_ABI_OVERRIDE
+            .with(std::cell::Cell::get)
+            .unwrap_or(true)
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        true
+    }
+}
+
 /// Emit the single-sequence decode graph, optionally with the native packed
 /// projection dispatch (issue #2889).
 ///
@@ -2906,7 +3028,11 @@ pub fn emit_decode_with_native(
         .with_precision(precision)
         .with_projection_layout(c.projection_layout)
         .with_native_proj(native.is_some());
-    let (mut decls, mut a) = build_arg_schema(&mut b, c);
+    // Issue #3060: the 1-D decode passes its three scalars in the VM call.
+    // M-RoPE keeps the tensor position and therefore the buffer-argument ABI
+    // (documented residual staging); the probe stays on/off for the whole step.
+    let scalar_abi = !c.uses_mrope() && decode_scalar_abi_enabled();
+    let (mut decls, mut a) = build_arg_schema(&mut b, c, scalar_abi);
     // The KV cache lives in two module globals instead of the argument list
     // (issue #3043). The step still emits exactly the same ops, but the cache
     // is updated in place in the persistent global buffer, so IREE no longer
@@ -2914,13 +3040,28 @@ pub fn emit_decode_with_native(
     // step (32 MB of device traffic and two `stream.cmd.copy` ops per step).
     // `kv_import` seeds the globals from the prefill result once per request;
     // there is no per-step cache hand-off through the ABI at all.
+    //
+    // The cache is stored in the contraction precision (issue #2886). The
+    // decode dot_generals otherwise read the cache through a `stablehlo.convert`
+    // to f16/bf16, which IREE materializes as part of the batched score and
+    // context operand's layout transpose. Storing the cache already narrowed
+    // keeps the matmul operands bit-identical (the same f32 value rounded once
+    // instead of once per read) and turns that dispatch from an f32-to-f16
+    // convert-and-transpose into an f16-only transpose of half the bytes: about
+    // 3.9 us against 5.8 us per layer and projection on gfx1151, with the
+    // measured step 5.05 ms to 4.90 ms. `kv_import` still takes the f32 prefill
+    // result and converts it once per request.
     decls.truncate(decls.len() - 2);
-    let cache_ty = Ty::f32(vec![
-        c.n_layers,
-        c.context_capacity,
-        c.cache_heads(),
-        c.cache_dim(),
-    ]);
+    let cache_elt = b.precision().dot_elt().unwrap_or("f32");
+    let cache_ty = Ty::new(
+        vec![
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim(),
+        ],
+        cache_elt,
+    );
     a.kcache = b.global_load("kcache", cache_ty.clone());
     a.vcache = b.global_load("vcache", cache_ty.clone());
     let k = emit_consts(&mut b, c);
@@ -3024,17 +3165,41 @@ pub fn emit_decode_with_native(
 
     let sig = render_signature(&decls);
     let cache_ty_s = cache_ty.render();
+    // The prefill graph returns f32 caches, so the import signature stays f32
+    // even when the decode global is narrowed; the conversion happens once here.
+    let import_ty_s = Ty::f32(cache_ty.shape.clone()).render();
+    let kv_import_body = if cache_elt == "f32" {
+        format!(
+            "    util.global.store %k, @kcache : {cache_ty_s}\n    util.global.store %v, @vcache : {cache_ty_s}\n"
+        )
+    } else {
+        format!(
+            "    %k_narrow = stablehlo.convert %k : ({import_ty_s}) -> {cache_ty_s}\n    %v_narrow = stablehlo.convert %v : ({import_ty_s}) -> {cache_ty_s}\n    util.global.store %k_narrow, @kcache : {cache_ty_s}\n    util.global.store %v_narrow, @vcache : {cache_ty_s}\n"
+        )
+    };
+    // Issue #3060: the capability marker the shim probes. Its presence says the
+    // decode entry takes token/pos/cache_len as ABI-level `i32` values, so the
+    // shim pushes VM values instead of buffer views. An artifact without it keeps
+    // the buffer-view path, which is why the bundle is not versioned.
+    let scalar_inputs_entry = if scalar_abi {
+        "  func.func public @scalar_inputs() {\n    return\n  }\n"
+    } else {
+        ""
+    };
     b.global_store("kcache", &kcache);
     b.global_store("vcache", &vcache);
     format!(
-        "{alias}module @decode_step {{\n  util.global private mutable @kcache : {cache_ty_s}\n  util.global private mutable @vcache : {cache_ty_s}\n{native}  func.func public @main({sig}) -> {out_ty} {{\n{body}    return {l} : {out_ty}\n  }}\n  func.func public @kv_import(%k: {cache_ty_s}, %v: {cache_ty_s}) {{\n    util.global.store %k, @kcache : {cache_ty_s}\n    util.global.store %v, @vcache : {cache_ty_s}\n    return\n  }}\n}}\n",
+        "{alias}module @decode_step {{\n  util.global private mutable @kcache : {cache_ty_s}\n  util.global private mutable @vcache : {cache_ty_s}\n{native}  func.func public @main({sig}) -> {out_ty} {{\n{body}    return {l} : {out_ty}\n  }}\n  func.func public @kv_import(%k: {import_ty_s}, %v: {import_ty_s}) {{\n{kv_import_body}    return\n  }}\n{scalar_inputs_entry}}}\n",
         alias = native.map(|(alias, _)| alias).unwrap_or(""),
         native = native.map(|(_, source)| source).unwrap_or(""),
         cache_ty_s = cache_ty_s,
+        import_ty_s = import_ty_s,
+        kv_import_body = kv_import_body,
         sig = sig,
         out_ty = out_ty,
         body = b.body(),
         l = out_val,
+        scalar_inputs_entry = scalar_inputs_entry,
     )
 }
 

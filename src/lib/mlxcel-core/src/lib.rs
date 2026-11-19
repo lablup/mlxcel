@@ -836,6 +836,23 @@ mod ffi {
         /// `GeluActivation::TanhF32` on CUDA.
         fn fused_gelu_tanh_f32(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
 
+        /// Whether the fused absorbed-MLA decode kernel runs here (#3121): a
+        /// GPU default device with a Metal port.
+        fn mla_absorbed_decode_fused_available() -> bool;
+
+        /// Absorbed single-query MLA attention in one partial pass plus a
+        /// merge (#3121). `q_abs [B, H, 1, R]`, `q_pe [B, H, 1, P]`,
+        /// `ckv [B, 1, S, R]`, `kpe [B, 1, S, P]`; returns `[B, H, 1, R]`.
+        /// Throws off-Metal or outside the shape contract, so `-> Result`.
+        /// Used by: `mla::decode::absorbed_attention`.
+        fn mla_absorbed_decode_fused(
+            q_abs: &MlxArray,
+            q_pe: &MlxArray,
+            ckv: &MlxArray,
+            kpe: &MlxArray,
+            scale: f32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Compiled GeGLU activation: gelu(gate) * x — single fused kernel
         /// Used by: legacy/tests for precise GeGLU
         fn compiled_geglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
@@ -1594,7 +1611,7 @@ mod ffi {
         ) -> UniquePtr<MlxArray>;
 
         /// Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
-        /// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
+        /// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, MiMoV2Flash, OpenAIPrivacyFilter
         #[allow(clippy::too_many_arguments)]
         unsafe fn fast_scaled_dot_product_attention_with_sinks(
             q: &MlxArray,
@@ -1919,7 +1936,33 @@ mod ffi {
             has_arr_mask: bool,
             do_causal: bool,
             window_size: i32,
+            has_sinks: bool,
         ) -> bool;
+
+        /// MLX's own `metal::is_nax_available()`: whether this process runs
+        /// the Neural Accelerator kernels that `use_fallback` and the GEMM
+        /// dispatch read. It folds in the GPU generation, the macOS version
+        /// and `MLX_METAL_GPU_ARCH`, so it can disagree with the sysctl view
+        /// in `hardware::get_hardware()`; tests that pin MLX's dispatch rules
+        /// gate on this one. `false` off Metal.
+        fn metal_nax_available() -> bool;
+
+        /// Causal SDPA with attention sinks and no mask array (issue #3098):
+        /// MLX's `mask_mode = "causal"` over queries aligned to the suffix of
+        /// the keys, with `window_size` when positive (`-1` is no window).
+        /// Masks the same keys as `create_causal_mask_with_window_full(q_len,
+        /// k_len - q_len, window)` on the array sink entry. Any other window
+        /// and any MLX validation error is an `Err`. Call it through
+        /// `prefill_sdpa::causal_prefill_attention`, which picks the route.
+        #[rust_name = "ffi_fast_scaled_dot_product_attention_with_sinks_causal"]
+        fn fast_scaled_dot_product_attention_with_sinks_causal(
+            q: &MlxArray,
+            k: &MlxArray,
+            v: &MlxArray,
+            scale: f32,
+            window_size: i32,
+            sinks: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         /// Fused QKV projection + reshape + transpose + RoPE
         /// Reduces ~5 FFI calls (projection, reshape, transpose, rope) to 1
@@ -2206,10 +2249,10 @@ mod ffi {
         fn mamba1_scan_float_state_kernel_available() -> bool;
 
         /// Whether the fused scan can serve these inputs: it is available, the
-        /// default device is the GPU, `N <= 32`, and on CUDA all six inputs
-        /// share one floating dtype (the condition under which the CUDA kernel
-        /// is bit-identical to the graph scan, issue #1981). Callers take the
-        /// graph scan when this is false.
+        /// default device is the GPU, `N <= 32`, and on CUDA the dtypes pass
+        /// [`mamba1_graph_exact_scan_accepts_dtypes`] (the condition under
+        /// which the CUDA kernel is bit-identical to the graph scan, issues
+        /// #1981, #3125). Callers take the graph scan when this is false.
         fn mamba1_scan_kernel_accepts(
             x: &MlxArray,
             delta: &MlxArray,
@@ -2217,6 +2260,19 @@ mod ffi {
             c: &MlxArray,
             a: &MlxArray,
             d: &MlxArray,
+        ) -> bool;
+
+        /// The dtype rule of CUDA's graph-exact Mamba1 scan, on dtype codes so
+        /// it is testable on every backend: every input in `x`'s floating
+        /// dtype, except that f16 `x` may bring a float32 `a` (issue #3125),
+        /// because f16 cannot hold `-exp(A_log)`. No other mix is admitted.
+        fn mamba1_graph_exact_scan_accepts_dtypes(
+            x: i32,
+            delta: i32,
+            b: i32,
+            c: i32,
+            a: i32,
+            d: i32,
         ) -> bool;
 
         /// Mamba1 selective scan fused over the sequence (issues #2005, #1981).
@@ -4332,6 +4388,37 @@ pub fn fast_scaled_dot_product_attention_causal(
     causal_attention(q, k, v, scale, 0.0, 0)
 }
 
+/// The attention a layer runs for a multi-token forward whose model left
+/// its prefill mask to MLX ([`utils::prefill_causal_mask`] or
+/// [`utils::prefill_sliding_window_mask`] returned `None`, #3072): MLX's
+/// causal mode while every key `k` returned is inside `window`, MLX's native
+/// `window_size` entry once they outgrow it (through [`causal_attention`]'s
+/// over-window branch, which keeps a window mask only where MLX would not
+/// fuse the native entry). A non-positive `window` is plain causal.
+///
+/// Passing the window only when the keys outgrow it matters: within the
+/// window, [`causal_attention`] with `window_size > 0` would build a
+/// windowed mask in every layer instead of asking for causal mode.
+///
+/// Used by: the hybrid, full-attention, GLM4V-family and sliding-window
+/// decoders that build their prefill mask through `prefill_causal_mask` or
+/// `prefill_sliding_window_mask` (#3072).
+pub fn maskless_prefill_attention(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    scale: f32,
+    window: i32,
+) -> UniquePtr<MlxArray> {
+    let k_len = ffi::array_shape(k)[2];
+    let window = if window > 0 && k_len > window {
+        window
+    } else {
+        0
+    };
+    causal_attention(q, k, v, scale, 0.0, window)
+}
+
 // High-level layer abstractions
 pub mod native_env;
 
@@ -4359,6 +4446,15 @@ pub mod window_sdpa;
 #[cfg(test)]
 #[path = "window_sdpa_tests.rs"]
 mod window_sdpa_tests;
+
+// Causal and sliding-window prefill attention for layers that may carry
+// attention sinks (issue #3098): MLX's causal mode and `window_size` with
+// sinks where they fuse, the explicit band elsewhere.
+pub mod prefill_sdpa;
+pub use prefill_sdpa::causal_prefill_attention;
+#[cfg(test)]
+#[path = "prefill_sdpa_tests.rs"]
+mod prefill_sdpa_tests;
 
 // Weight loading utilities
 pub mod weights;
@@ -4542,7 +4638,8 @@ pub mod bench_rotation;
 pub mod paged_v2;
 
 // Matrix-absorbed MLA decode over a compressed-latent KV cache (issue #907).
-// Default off; selected by `MLXCEL_MLA_ABSORBED=1` at family load time. Public
+// DeepSeek V2's default where the fused kernel runs since #3131;
+// `MLXCEL_MLA_ABSORBED` forces either layout, read at family load time. Public
 // so the DeepSeek-family model code in the `mlxcel` crate and the benchmark
 // harness under `examples/` can build the fold, wrap the latent cache, and
 // drive both decode paths directly. Stage 2 reuses issue #898's merge kernel
@@ -4568,6 +4665,11 @@ mod ffi_gelu_topk_tests;
 #[cfg(test)]
 #[path = "array_evaluated_bytes_tests.rs"]
 mod array_evaluated_bytes_tests;
+
+// The NemotronH decode-handle registry under concurrent register/free (#3124).
+#[cfg(test)]
+#[path = "nemotron_registry_tests.rs"]
+mod nemotron_registry_tests;
 
 // Affine 1-bit quantization (issue #1370): fused Metal qmv / qmm parity against
 // a host f64 oracle, the dequantize reference, load validation and layer

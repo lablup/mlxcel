@@ -2157,3 +2157,143 @@ fn load_text_weights_resolves_flagged_native_global_scales() {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+// The same through the loader: a ModelOpt NVFP4 triplet on disk becomes a
+// packed weight, block scales and a `global_scale`, and the Gemma 3 MLP built
+// from them has to apply that scale for each projection.
+#[test]
+fn a_disk_loaded_gemma3_mlp_preserves_modelopt_tensor_scales() {
+    if !backend_runs_native_nvfp4("a_disk_loaded_gemma3_mlp_preserves_modelopt_tensor_scales") {
+        return;
+    }
+    let _env_guard = env_lock();
+    let _nvfp4_env = EnvRestore::clear(NVFP4_REPACK_ENV_KEYS);
+    let prefix = "model.layers.0.mlp";
+    let config = serde_json::json!({
+        "model_type": "gemma3_text", "tie_word_embeddings": false,
+        "hidden_size": 64, "intermediate_size": 128,
+        // Explicit native metadata separates scale loss from the separate
+        // ModelOpt-only group-size/default-mode question. No public export
+        // is claimed to have exactly this synthetic config.
+        "quantization": {"group_size": 16, "bits": 4, "mode": "nvfp4"},
+        "quantization_config": {
+            "quant_method": "modelopt", "quant_algo": "NVFP4",
+            "config_groups": {"group_0": {"weights": {
+                "num_bits": 4, "type": "float", "group_size": 16
+            }}}
+        }
+    });
+    let args: crate::models::gemma3::ModelArgs = serde_json::from_value(config.clone()).unwrap();
+    let input: Vec<f32> = (0..128).map(|i| ((i % 13) as f32 - 6.0) * 0.03).collect();
+    let x = mlxcel_core::from_slice_f32(&input, &[1, 2, 64]);
+    let mut failed = Vec::new();
+    for factors in [
+        [1.0_f32, 1.0, 1.0],
+        [0.5, 1.0, 1.0],
+        [1.0, 2.0, 1.0],
+        [1.0, 1.0, 3.25],
+        [0.5, 2.0, 3.25],
+    ] {
+        let dir = temp_model_dir("gemma3_mlp_tensor_scales");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let mut tensors = Vec::new();
+        for (index, (name, out, input)) in [
+            ("gate_proj", 128_usize, 64_usize),
+            ("up_proj", 128, 64),
+            ("down_proj", 64, 128),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let base = format!("{prefix}.{name}");
+            tensors.push((
+                format!("{base}.weight"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::U8,
+                    shape: vec![out, input / 2],
+                    data: (0..out * input / 2)
+                        .map(|i| (i * 37 + index * 19) as u8)
+                        .collect(),
+                },
+            ));
+            tensors.push((
+                format!("{base}.weight_scale"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F8_E4M3,
+                    shape: vec![out, input / 16],
+                    data: (0..out * input / 16)
+                        .map(|i| [0x20, 0x28, 0x30][i % 3])
+                        .collect(),
+                },
+            ));
+            tensors.push((
+                format!("{base}.weight_scale_2"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F32,
+                    shape: vec![],
+                    data: factors[index].to_le_bytes().to_vec(),
+                },
+            ));
+        }
+        let views: Vec<_> = tensors
+            .iter()
+            .map(|(k, t)| (k.as_str(), t.clone()))
+            .collect();
+        write_safetensors(&dir.join("model.safetensors"), &views);
+        let weights = load_text_weights(&dir, None).expect("ModelOpt triplet funnel");
+        let mlp = crate::models::gemma3::MLP::from_weights(&weights, &args, prefix)
+            .expect("Gemma 3 MLP from disk-repacked tensors");
+        for (index, linear) in [&mlp.gate_proj, &mlp.up_proj, &mlp.down_proj]
+            .into_iter()
+            .enumerate()
+        {
+            let q = linear.quantized_weight().expect("native quantized plane");
+            assert_eq!((q.group_size, q.bits, q.mode.as_str()), (16, 4, "nvfp4"));
+            let scale = q.global_scale.as_ref().expect("disk sidecar survived");
+            mlxcel_core::eval(scale);
+            assert_eq!(mlxcel_core::item_f32(scale), factors[index]);
+        }
+        let gate = mlp.gate_proj.forward(&x);
+        let up = mlp.up_proj.forward(&x);
+        let activated = mlxcel_core::compiled_geglu_approx_activation(&gate, &up);
+        let expected = mlp.down_proj.forward(&activated);
+        let actual = mlp.forward(&x);
+        let mut values = Vec::new();
+        for array in [&actual, &expected] {
+            let f32_array = mlxcel_core::astype(array, dtype::FLOAT32);
+            mlxcel_core::eval(&f32_array);
+            values.push(
+                mlxcel_core::array_to_raw_bytes(&f32_array)
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(values[0].len(), values[1].len());
+        assert!(values.iter().flatten().all(|v| v.is_finite()));
+        let max_abs = values[0]
+            .iter()
+            .zip(&values[1])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!(
+            "disk-loaded MLP scales={factors:?} max_abs={max_abs:e} fixture={}",
+            dir.display()
+        );
+        if max_abs > 1e-5 {
+            failed.push((factors, max_abs));
+        }
+        drop(mlp);
+        drop(weights);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    assert!(
+        failed.is_empty(),
+        "disk-loaded tensor-scale mismatches: {failed:?}"
+    );
+}

@@ -398,6 +398,10 @@ unsafe extern "C" {
     fn xla_test_decode_d2d_readbacks_get() -> u64;
     #[cfg(feature = "test-support")]
     fn xla_test_decode_step_scalars_state(c: *const XlaCtx) -> c_int;
+    /// Test support (issue #3060): whether the loaded decode graph exports the
+    /// scalar-input marker (token/pos/cache_len as ABI-level `i32` values).
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_scalar_inputs(c: *const XlaCtx) -> c_int;
     #[cfg(feature = "test-support")]
     fn xla_test_decode_counters_reset();
     #[cfg(feature = "test-support")]
@@ -1476,10 +1480,12 @@ fn compile_bundle(
     }
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
-    // issue #2873: the ROCm lowering tuning spec for long-K single-row
-    // contractions and, since issue #2921, for the grouped-query decode score
-    // contraction. Gemma3n has its own emitters (some with native qmv) and was
-    // not measured with it, so it stays on the compiler defaults.
+    // issue #2873: the ROCm lowering tuning spec for the narrow single-row
+    // vecmats (any K, 128 <= N <= 8192), the wide long-K fallback (N >= 8193,
+    // K >= 4096) and, since issues #2921 and #2956, the grouped-query decode
+    // score and context contractions. Gemma3n has its own emitters (some with
+    // native qmv) and was not measured with it, so it stays on the compiler
+    // defaults.
     if device == "hip" && matches!(cfg, RuntimeConfig::Dense(_)) {
         flags.push(rocm_tuning_spec_flag()?);
     }
@@ -3261,6 +3267,16 @@ impl IreeLlama {
     pub fn test_decode_step_scalars_state(&self) -> i32 {
         // Safety: the state is a plain field read from a live context.
         unsafe { xla_test_decode_step_scalars_state(self.ctx) }
+    }
+
+    /// Test support (issue #3060): whether this engine's decode graph exports
+    /// the scalar-input marker, so the shim passes token/pos/cache_len as
+    /// ABI-level `i32` values rather than buffer views.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_decode_scalar_inputs(&self) -> bool {
+        // Safety: the flag is a plain field read from a live context.
+        unsafe { xla_test_decode_scalar_inputs(self.ctx) != 0 }
     }
 
     /// Test support (issue #3028): force the per-step allocation path on

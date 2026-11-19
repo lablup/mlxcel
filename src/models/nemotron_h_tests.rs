@@ -1768,3 +1768,50 @@ fn nemotron_h_fresh_and_mixed_recurrent_states_match_solo_rows() {
         }
     }
 }
+
+/// Issue #3057: the Nemotron-H SSD scan runs `exp` on a float32 copy of
+/// `A_log`, so an f16 `A_log` past 11.09 (where f16 `exp` overflows) still
+/// gives a finite `A`. A step whose `softplus` is zero then decays by
+/// `exp(0 * A) = 1` instead of `exp(0 * -inf) = NaN`, so the output and the
+/// carried state stay finite.
+#[test]
+fn nemotron_h_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
+    use crate::models::ssm_test_support::{overflowing_f16_a_log, zero_step_dt_bias};
+    use mlxcel_core::utils::array_to_vec_f32;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+
+    const SEQ_LEN: i32 = 4;
+    const HEADS: i32 = 2;
+    const HEAD_DIM: i32 = 2;
+    const STATE_DIM: i32 = 3;
+    let f16 = |a: UniquePtr<MlxArray>| mlxcel_core::astype(&a, dtype::FLOAT16);
+    let x = f16(ramp(&[1, SEQ_LEN, HEADS, HEAD_DIM], 0.05));
+    let b = f16(ramp(&[1, SEQ_LEN, 1, STATE_DIM], 0.04));
+    let c = f16(ramp(&[1, SEQ_LEN, 1, STATE_DIM], 0.03));
+    let dt = f16(ramp(&[1, SEQ_LEN, HEADS], 0.1));
+    let d = f16(ramp(&[HEADS], 0.2));
+    let prior_state = ramp(&[1, HEADS, HEAD_DIM, STATE_DIM], 0.01);
+
+    let (y, state) = nemotron_h_ssm_attn(
+        &x,
+        &overflowing_f16_a_log(&[HEADS]),
+        &b,
+        &c,
+        &d,
+        &dt,
+        &zero_step_dt_bias(HEADS),
+        Some(&prior_state),
+        (0.0, f32::INFINITY),
+        2,
+    );
+    assert_eq!(mlxcel_core::array_dtype(&y), dtype::FLOAT16);
+    for (name, values) in [
+        ("output", array_to_vec_f32(&y)),
+        ("state", array_to_vec_f32(&state)),
+    ] {
+        assert!(
+            values.iter().all(|v| v.is_finite()),
+            "{name} must be finite: {values:?}"
+        );
+    }
+}

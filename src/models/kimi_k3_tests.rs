@@ -821,6 +821,47 @@ fn mla_q_lora_and_output_gate() {
     assert_eq!(cache.offset, 5);
 }
 
+/// Without a mask array the multi-token MLA step takes the rope-folded
+/// causal-mode path (#3099) and still matches the unabsorbed reference that
+/// adds the causal mask to its scores by hand, for a cold three-token prefill
+/// and a warm two-token chunk on the absorbed side.
+#[test]
+fn mla_causal_mode_prefill_and_chunk_match_the_reference() {
+    let config = tiny_text_config();
+    let weights = sanitized(&config);
+    let prefix = "model.layers.1.self_attn";
+    let attn =
+        KimiK3MLAAttention::from_weights(&weights, &config, prefix).expect("MLA layer loads");
+    let raw = stripped_raw(&config);
+
+    let x = noise_arr(&[1, 5, HIDDEN as i32], 37, 2.0);
+    let expected = read(&mla_reference(&raw, prefix, &x));
+
+    let mut cache = KVCache::new();
+    let prefill = mlxcel_core::slice(&x, &[0, 0, 0], &[1, 3, HIDDEN as i32]);
+    let out = attn.forward(&prefill, None, &mut cache);
+    assert_close(
+        &out,
+        &expected[..3 * HIDDEN],
+        1e-4,
+        "causal-mode MLA prefill vs unabsorbed",
+    );
+
+    assert!(
+        mlxcel_core::mla::use_absorbed_mla(2, 5, KV_LORA, QK_NOPE, V_HEAD),
+        "the warm chunk must select the absorbed path"
+    );
+    let chunk = mlxcel_core::slice(&x, &[0, 3, 0], &[1, 5, HIDDEN as i32]);
+    let out = attn.forward(&chunk, None, &mut cache);
+    assert_close(
+        &out,
+        &expected[3 * HIDDEN..],
+        1e-4,
+        "causal-mode absorbed MLA chunk vs unabsorbed",
+    );
+    assert_eq!(cache.offset, 5);
+}
+
 // Latent MoE.
 
 #[test]

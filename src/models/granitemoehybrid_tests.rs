@@ -567,6 +567,15 @@ pub(crate) fn batching_model() -> super::granitemoehybrid::GraniteMoeHybridModel
 }
 
 fn batching_model_with_rope(rope: bool) -> super::granitemoehybrid::GraniteMoeHybridModel {
+    batching_model_with(rope, |_, _| {})
+}
+
+/// The batching fixture with `edit` applied to its config and weights before
+/// loading.
+fn batching_model_with(
+    rope: bool,
+    edit: impl FnOnce(&mut ModelArgs, &mut WeightMap),
+) -> super::granitemoehybrid::GraniteMoeHybridModel {
     use crate::models::embedding_test_support::Rng;
     use mlxcel_core::dtype;
     let mut config:ModelArgs=serde_json::from_value(serde_json::json!({"model_type":"granitemoehybrid","vocab_size":16,"hidden_size":8,"intermediate_size":16,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"rms_norm_eps":1e-5,"embedding_multiplier":1.3,"attention_multiplier":0.5,"logits_scaling":2.0,"residual_multiplier":0.7,"layer_types":["mamba","attention"],"mamba_n_heads":2,"mamba_d_head":4,"mamba_d_state":32,"mamba_n_groups":1,"mamba_d_conv":4})).unwrap();
@@ -690,6 +699,7 @@ fn batching_model_with_rope(rope: bool) -> super::granitemoehybrid::GraniteMoeHy
         &[8, 16],
         0.1,
     );
+    edit(&mut config, &mut weights);
     super::granitemoehybrid::GraniteMoeHybridModel::from_weights(config, weights).unwrap()
 }
 #[test]
@@ -759,4 +769,27 @@ fn granite_hybrid_nope_native_batch_multistep() {
         || batching_model_with_rope(false),
         &[0, 3],
     );
+}
+
+/// Issue #3057: the SSD scan computes `A` from a float32 copy of `A_log`, so
+/// an f16 `A_log` (values up to 19.5, past the 11.09 where f16 `exp`
+/// overflows) keeps a finite `A`. With the Hugging Face default
+/// `time_step_limit` of `(0, inf)` a step whose `softplus` is zero then decays
+/// by `exp(0 * A) = 1` instead of `exp(0 * -inf) = NaN`, so the prefill logits
+/// stay finite and match a float32 copy bit for bit.
+#[test]
+fn granitemoehybrid_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
+    use crate::models::ssm_test_support::{
+        assert_f16_a_log_prefill_matches_its_f32_copy, zero_step_dt_bias,
+    };
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let build = |a_log: &mlxcel_core::MlxArray| {
+        batching_model_with(true, |config, weights| {
+            config.time_step_limit = (0.0, f32::INFINITY);
+            let mamba = "model.layers.0.mamba";
+            weights.insert(format!("{mamba}.A_log"), mlxcel_core::copy(a_log));
+            weights.insert(format!("{mamba}.dt_bias"), zero_step_dt_bias(2));
+        })
+    };
+    assert_f16_a_log_prefill_matches_its_f32_copy(build, &[2], "granitemoehybrid");
 }

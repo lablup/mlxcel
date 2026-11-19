@@ -104,7 +104,10 @@
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask, slice_axis};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+    slice_axis,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -738,9 +741,22 @@ pub struct Attention {
     /// `false` on a full-attention layer, where upstream builds no rope at all.
     pub uses_rope: bool,
     pub rope_base: f32,
+    /// The window a mask-less multi-token forward attends with
+    /// (`maskless_prefill_attention`, #3072): the sliding window on a sliding
+    /// layer, `0` on a full-attention one, set by the decoder layer.
+    pub prefill_window: i32,
 }
 
 impl Attention {
+    /// Head counts and head dim for the prefill mask choice (#3072).
+    fn prefill_attention(&self) -> PrefillAttention {
+        PrefillAttention::new(
+            self.num_heads as usize,
+            self.num_kv_heads as usize,
+            self.head_dim as usize,
+        )
+    }
+
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
@@ -782,8 +798,16 @@ impl Attention {
 
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
+        // A mask-less multi-token forward is a single-row prefill whose model
+        // left the mask to MLX's causal mode or native window route (#3072).
         let attn_out = if l > 1 && mask.is_none() {
-            mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.prefill_window,
+            )
         } else {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
@@ -906,6 +930,7 @@ impl Attention {
             scale: 1.0 / (head_dim as f32).sqrt(),
             uses_rope,
             rope_base: args.rope_theta,
+            prefill_window: 0,
         })
     }
 }
@@ -1257,14 +1282,18 @@ impl DecoderLayer {
                 args.rms_norm_eps,
             )
         };
+        let mut self_attn = Attention::from_weights(
+            weights,
+            args,
+            &format!("{prefix}.self_attn"),
+            // Only sliding layers rotate.
+            uses_sliding,
+        )?;
+        if uses_sliding {
+            self_attn.prefill_window = i32::try_from(args.sliding_window).unwrap_or(i32::MAX);
+        }
         Ok(Self {
-            self_attn: Attention::from_weights(
-                weights,
-                args,
-                &format!("{prefix}.self_attn"),
-                // Only sliding layers rotate.
-                uses_sliding,
-            )?,
+            self_attn,
             mlp: if args.is_moe_layer(layer_idx) {
                 FeedForward::Sparse(Box::new(AfmoeMoe::from_weights(
                     weights,
@@ -1358,11 +1387,32 @@ impl AfmoeModel {
                 .sliding_index
                 .map(|i| caches[i].as_interface().live_len())
                 .unwrap_or(0);
+            // Each mask is `None` where a single row can take MLX's causal
+            // mode or native window route instead and MLX fuses it (#3072).
+            let dtype = mlxcel_core::array_dtype(&h);
+            let batch = mlxcel_core::array_shape(&h)[0];
+            let geometry = |idx: Option<usize>| {
+                self.layers
+                    .get(idx.unwrap_or(0))
+                    .map(|layer| layer.self_attn.prefill_attention())
+            };
             (
-                Some(create_causal_mask(seq_len, full_live)),
-                self.sliding_index.map(|_| {
-                    create_sliding_window_prefill_mask(seq_len, sliding_live, self.sliding_window)
+                geometry(self.full_attention_index).and_then(|attention| {
+                    prefill_causal_mask(seq_len, full_live, batch, attention, dtype)
                 }),
+                self.sliding_index
+                    .and_then(|idx| geometry(Some(idx)))
+                    .and_then(|attention| {
+                        prefill_sliding_window_mask(
+                            seq_len,
+                            sliding_live,
+                            self.sliding_window,
+                            batch,
+                            attention,
+                            dtype,
+                            SlidingPrefillKeys::Rotating,
+                        )
+                    }),
             )
         } else {
             (None, None)

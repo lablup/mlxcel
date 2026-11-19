@@ -138,12 +138,11 @@ inline int64_t kv_cache_slice_extent(const array& kv) {
   // allocation, not that it BEGINS at it: a mid-buffer window
   // `cache[..., a:b, :]` leaves every stride untouched and passes it, and
   // `unslice_kv` would then subtract a non-zero offset from the base pointer
-  // and address memory before the allocation. No mlxcel producer hands SDPA
-  // such a slice today (the dense cache and `RingSlidingKVCache::full_view`
-  // both slice from [0, 0, 0, 0]), so this guards a future one rather than a
-  // live defect, and it costs one comparison. Upstream omits it because its
-  // own `is_kv_cache_slice` was only ever reached from the one-row decode
-  // path, where the caller is mlx-lm's own cache.
+  // and address memory before the allocation. The chunked cache's decode
+  // window (`ChunkedKVCache`, Llama 4's chunk-local layers) is such a slice,
+  // so the check is load-bearing; `is_kv_cache_slice` below carries the same
+  // one. Upstream omits it because its caller is mlx-lm's own cache, which
+  // only slices from [0, 0, 0, 0].
   if (kv.offset() != 0) {
     return 0;
   }
@@ -158,9 +157,18 @@ inline int64_t kv_cache_slice_extent(const array& kv) {
 }
 
 // True when |kv| is a leading slice of a contiguous fixed-size KV cache whose
-// allocated extent is a multiple of |kv_cache_step|. Upstream's own test,
-// unchanged, so the decode path keeps the dispatch it had.
+// allocated extent is a multiple of |kv_cache_step|. Upstream's own test plus
+// the base-offset check below.
 inline bool is_kv_cache_slice(const array& kv) {
+  // mlxcel: the slice must start at the allocation's base, for the reason
+  // given in `kv_cache_slice_extent`. A chunked layer's decode window is a
+  // mid-buffer slice whose strides pass the size identity below; without this
+  // check `unslice_kv` rebased it to the buffer start and cuDNN attended to
+  // the wrong keys once the window reached `kv_cache_step` (Llama 4 Scout
+  // decoded garbage after a prompt past 8192 tokens, #3133).
+  if (kv.offset() != 0) {
+    return false;
+  }
   int64_t T_kv = kv_buffer_extent(kv);
   if (kv.size() / kv.shape(2) * T_kv != kv.buffer_size() / kv.itemsize()) {
     return false;

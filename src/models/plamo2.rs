@@ -74,7 +74,7 @@ use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_s
 use mlxcel_core::cache::{BatchedAttentionMetadata, CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, slice_axis};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -361,12 +361,16 @@ impl Plamo2Mamba {
         let gated = mlxcel_core::compiled_swiglu_activation(&z_flat, &y);
         let result = self.out_proj.forward(&gated);
 
-        // Materialize at a clean dtype boundary ONLY on M5 Max (Metal GPU
-        // Family 4): there the lazy float32/float16 SSM graph can fuse into NaN
-        // within one Metal command buffer. On every other chip this per-layer
-        // sync is pure decode-throughput loss (it blocks cross-layer
-        // pipelining), so skip it. CLAUDE.md "Apple Silicon precision".
-        if mlxcel_core::hardware::is_m5_neural_accelerator() {
+        // Materialize at a clean dtype boundary ONLY where MLX dispatches its
+        // NAx GEMM kernels: on M5 Max those kernels can fuse the lazy
+        // float32/float16 SSM graph into NaN within one Metal command buffer.
+        // The gate is MLX's own NAX flag rather than the sysctl brand string
+        // (`is_m5_neural_accelerator`), because the failure belongs to the
+        // kernel MLX picks, and the two views disagree on some hosts (#2806,
+        // #3123); gating on the brand string left the boundary off on hosts
+        // that run NAx. Elsewhere this per-layer sync is pure decode-throughput
+        // loss (it blocks cross-layer pipelining), so skip it.
+        if mlxcel_core::hardware::mlx_nax_available() {
             mlxcel_core::eval(&result);
         }
         result
@@ -632,11 +636,17 @@ impl Plamo2Attention {
 
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-        let attn_out = unsafe {
-            mlxcel_core::layers::attention_from_ptr(
-                &q, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
-            )
+        // A mask-less multi-token forward is a single-row prefill whose
+        // causality MLX's causal mode supplies (`prefill_causal_mask`, #3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(&q, &cache_k, &cache_v, self.scale, 0)
+        } else {
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    &q, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
+                )
+            }
         };
 
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
@@ -904,17 +914,28 @@ impl Plamo2Model {
 
         // Single causal mask anchored on the first attention layer's offset.
         // Mamba layers stay causal via conv left-padding + the SSD `tril`, so
-        // they need no mask on the single-sequence path.
+        // they need no mask on the single-sequence path. A single row leaves
+        // causality to MLX's causal mode where MLX fuses it (#3072).
         let attn_offset = caches
             .iter()
             .find(|c| matches!(c, Plamo2LayerCache::Attention(_)))
             .map(|c| c.offset())
             .unwrap_or(0);
-        let attn_mask = if seq_len > 1 {
-            Some(create_causal_mask(seq_len, attn_offset))
-        } else {
-            None
-        };
+        let attn_mask = self
+            .layers
+            .iter()
+            .find_map(|layer| match &layer.mixer {
+                Plamo2Mixer::Attention(attn) => Some(PrefillAttention::new(
+                    attn.num_heads as usize,
+                    attn.num_kv_heads as usize,
+                    attn.head_dim as usize,
+                )),
+                _ => None,
+            })
+            .and_then(|attention| {
+                let dtype = mlxcel_core::array_dtype(&h);
+                prefill_causal_mask(seq_len, attn_offset, shape[0], attention, dtype)
+            });
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             let mask = if layer.is_attention() {

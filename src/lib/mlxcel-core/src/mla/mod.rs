@@ -65,24 +65,34 @@
 //!
 //! ## Gate
 //!
-//! Off unless `MLXCEL_MLA_ABSORBED` is set to one of the tree's usual on
-//! spellings ([`absorbed_enabled`]). With it unset nothing in this module is
-//! constructed, no weight is dequantized, and the families keep the byte-identical
-//! decompressed path.
+//! `MLXCEL_MLA_ABSORBED` is a tri-state ([`AbsorbedMode`], issue #3131). An on
+//! spelling selects the latent cache on every backend and an off spelling
+//! (`0`, `false`, `off`, `no`) keeps the decompressed path. Unset, DeepSeek V2
+//! absorbs wherever the fused absorbed-decode kernel runs (Metal, unless
+//! `MLXCEL_MLA_FUSED_DECODE` turns it off) and on CUDA and ROCm, whose
+//! composed paths measured within a few percent at 512 tokens and ahead of the
+//! decompressed one at longer prompts (issue #3133), and stays decompressed
+//! elsewhere ([`default_absorbs`],
+//! [`absorbed_enabled`]). When the result is decompressed nothing in this
+//! module is constructed, no fold is built, and the family runs the
+//! byte-identical decompressed path.
 //!
 //! ## Cost of the fold
 //!
 //! `W_UK` and `W_UV` are slices of `kv_b_proj`, which ships quantized in every
-//! mlx-community MLA checkpoint. The absorbed query and output contractions are
-//! dense batched matmuls, so the fold dequantizes `kv_b_proj` at load time and
-//! keeps it dense: `num_heads * (qk_nope_head_dim + v_head_dim) * kv_lora_rank`
-//! elements per layer. On DeepSeek-V2-Lite that is 2.1 M elements per layer, so
-//! ~113 MB in f16 across 27 layers against ~28 MB for the 4-bit original. The
-//! trade is fixed weight memory for per-token cache memory, and it only pays off
-//! past a context length where the cache saving exceeds it; the benchmark
-//! harness reports both numbers so the crossover is visible rather than assumed.
+//! mlx-community MLA checkpoint. Its packed rows are grouped along
+//! `kv_lora_rank`, the axis both contractions run over or produce, so a
+//! quantized fold keeps the checkpoint's planes and runs both contractions as
+//! batched `quantized_matmul` calls (issue #3121): a copy of `kv_b_proj`'s
+//! bytes, about 28 MB at 4 bits across DeepSeek-V2-Lite's 27 layers. An
+//! unquantized (or NVFP4 tensor-scaled) `kv_b_proj` folds dense, at
+//! `num_heads * (qk_nope_head_dim + v_head_dim) * kv_lora_rank` elements per
+//! layer, about 113 MB in f16 on V2-Lite, all of it streamed on every decode
+//! step.
 
 use std::sync::OnceLock;
+
+use crate::hardware::{GpuBackendKind, gpu_backend_kind};
 
 pub mod absorb;
 pub mod cache;
@@ -93,6 +103,8 @@ pub mod split_kv;
 pub mod stats;
 
 #[cfg(test)]
+mod fused_decode_tests;
+#[cfg(test)]
 mod prefill_tests;
 #[cfg(test)]
 pub(crate) mod testkit;
@@ -102,20 +114,50 @@ pub use cache::{
     MLA_LATENT_CACHE_FAMILIES, MlaLatentCache, caches_mla_latent_pair,
     decompressed_bytes_per_token, latent_bytes_per_token, latent_layout_supports_mode,
 };
-pub use decode::{absorb_queries, absorbed_decode, unabsorb_output};
+pub use decode::{
+    FUSED_DECODE_MAX_KEYS, absorb_queries, absorbed_decode, fused_absorbed_decode, unabsorb_output,
+};
 pub use kv_b_split::{KvBProjGeometry, decompose_kv_b_proj};
 pub use prefill::{FoldedMask, rope_folded_attention};
 pub use split_kv::{MlaSplitPlan, absorbed_decode_split_kv};
 pub use stats::{MlaDecodePath, MlaDispatchCounts};
 
-/// Environment variable selecting the absorbed MLA decode path. Default off.
+/// Environment variable selecting the absorbed MLA decode path. Default on
+/// where the fused kernel runs (issue #3131); see [`AbsorbedMode`].
 pub const ABSORBED_ENV: &str = "MLXCEL_MLA_ABSORBED";
 
 /// Environment variable selecting the Stage 2 split-KV decode path.
 ///
-/// Only consulted when [`ABSORBED_ENV`] is already on, since split-KV operates
+/// Only consulted when [`ABSORBED_ENV`] does not turn absorption off, since split-KV operates
 /// on the latent cache that only the absorbed path maintains.
 pub const SPLIT_KV_ENV: &str = "MLXCEL_MLA_SPLIT_KV";
+
+/// Environment variable that turns off the fused absorbed decode kernel
+/// (issue #3121). Default on: unset, or any value other than an off spelling,
+/// leaves the kernel selected wherever [`fused_decode_enabled`] can run it.
+pub const FUSED_DECODE_ENV: &str = "MLXCEL_MLA_FUSED_DECODE";
+
+/// Pure parse of a default-on switch: only `0`, `false`, `off` or `no` (any
+/// case) turn it off.
+#[must_use]
+pub fn parse_disabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("0" | "false" | "off" | "no")
+    )
+}
+
+/// Whether absorbed single-query decode may use the fused Metal kernel, read
+/// once per process: the kernel has a port on this device and
+/// [`FUSED_DECODE_ENV`] does not turn it off.
+#[must_use]
+pub fn fused_decode_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !parse_disabled(std::env::var(FUSED_DECODE_ENV).ok().as_deref())
+            && crate::ffi::mla_absorbed_decode_fused_available()
+    })
+}
 
 /// Pure parse of an on/off environment value.
 ///
@@ -131,11 +173,95 @@ pub fn parse_enabled(value: Option<&str>) -> bool {
     )
 }
 
-/// Whether the absorbed MLA decode path is selected, read once per process.
+/// How [`ABSORBED_ENV`] selects the DeepSeek V2 MLA cache layout.
+///
+/// Tri-state so the loader can tell the default from an explicit request. An
+/// explicit on or off forces the layout. The default follows the evidence
+/// ([`default_absorbs`]): the switch to absorbed (issue #3131) was measured on
+/// Metal with the fused absorbed-decode kernel, and the composed path, which
+/// carried about 10% short-context cost on Metal in #3102, measured within a
+/// few percent of the decompressed path at 512 tokens and ahead of it from 2K
+/// on CUDA and ROCm (issue #3133). The CPU backend stays decompressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AbsorbedMode {
+    /// Unset, empty, or an unrecognized value: absorbed where
+    /// [`default_absorbs`] holds, decompressed elsewhere.
+    Default,
+    /// An on spelling (`1`, `true`, `on`, `yes`): absorbed on every backend,
+    /// reported on load.
+    On,
+    /// An off spelling (`0`, `false`, `off`, `no`): the decompressed layout.
+    Off,
+}
+
+impl AbsorbedMode {
+    /// Pure parse of the environment value.
+    ///
+    /// An unrecognized value falls back to the default rather than to off, the
+    /// same policy as [`FUSED_DECODE_ENV`]: only a deliberate spelling leaves
+    /// the default layout.
+    #[must_use]
+    pub fn parse(value: Option<&str>) -> Self {
+        if parse_disabled(value) {
+            Self::Off
+        } else if parse_enabled(value) {
+            Self::On
+        } else {
+            Self::Default
+        }
+    }
+
+    /// Whether this mode selects the absorbed (latent cache) layout, given
+    /// whether the default absorbs in this process ([`default_absorbs`]).
+    #[must_use]
+    pub const fn resolve(self, default_absorbs: bool) -> bool {
+        match self {
+            Self::Default => default_absorbs,
+            Self::On => true,
+            Self::Off => false,
+        }
+    }
+}
+
+/// Pure rule behind [`default_absorbs`]: whether an unset
+/// [`ABSORBED_ENV`] selects the latent cache, given whether the fused kernel
+/// can run and which GPU backend MLX resolved.
+///
+/// The fused kernel decides wherever it runs. Without it, absorbed decode
+/// takes the composed path, which is the default on CUDA and ROCm. On GB10 it
+/// decoded within run-to-run noise of the decompressed path at 512 tokens and
+/// ahead of it from 2048 (about 2.4x at 16K). On `gfx1151` it decoded 3.4%
+/// behind at 512 (median 41.28 against 42.72 tok/s over five runs per arm),
+/// 17% ahead behind 2048 and 65% ahead behind 16K, and cut the phase peak
+/// behind 16K from 16.06 to 12.39 GB. Both hosts showed no decided disagreement on the teacher-forced
+/// trace (issue #3133). On Metal with the kernel turned off it is the composed
+/// path #3102 measured at about -10% at 512, and the CPU backend is unmeasured,
+/// so both keep the decompressed layout.
+#[must_use]
+pub const fn default_absorbs_on(fused_available: bool, backend: GpuBackendKind) -> bool {
+    fused_available || matches!(backend, GpuBackendKind::Cuda | GpuBackendKind::Rocm)
+}
+
+/// Whether an unset [`ABSORBED_ENV`] selects the absorbed layout in this
+/// process: [`default_absorbs_on`] for [`fused_decode_enabled`] and the
+/// resolved GPU backend.
+#[must_use]
+pub fn default_absorbs() -> bool {
+    default_absorbs_on(fused_decode_enabled(), gpu_backend_kind())
+}
+
+/// The process's [`AbsorbedMode`], read once.
+#[must_use]
+pub fn absorbed_mode() -> AbsorbedMode {
+    static MODE: OnceLock<AbsorbedMode> = OnceLock::new();
+    *MODE.get_or_init(|| AbsorbedMode::parse(std::env::var(ABSORBED_ENV).ok().as_deref()))
+}
+
+/// Whether the absorbed MLA decode path is selected, read once per process:
+/// [`absorbed_mode`] resolved against [`default_absorbs`].
 #[must_use]
 pub fn absorbed_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| parse_enabled(std::env::var(ABSORBED_ENV).ok().as_deref()))
+    absorbed_mode().resolve(default_absorbs())
 }
 
 /// Whether the Stage 2 split-KV decode path is selected, read once per process.
@@ -278,7 +404,70 @@ mod tests {
     };
 
     #[test]
-    fn absorption_is_off_unless_explicitly_enabled() {
+    fn unset_or_unrecognized_values_parse_as_the_default() {
+        // An unrecognized value is the default, not off, so a typo cannot
+        // silently change the layout.
+        for v in [None, Some(""), Some("  "), Some("2"), Some("absorbed")] {
+            assert_eq!(AbsorbedMode::parse(v), AbsorbedMode::Default, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn off_and_on_spellings_parse_as_explicit_modes() {
+        for v in ["0", "false", "FALSE", "off", "Off", "no", " no "] {
+            assert_eq!(AbsorbedMode::parse(Some(v)), AbsorbedMode::Off, "{v:?}");
+        }
+        for v in ["1", "true", "TRUE", "on", "ON", "yes", " yes "] {
+            assert_eq!(AbsorbedMode::parse(Some(v)), AbsorbedMode::On, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn the_default_absorbs_where_the_fused_kernel_runs_and_on_cuda_and_rocm() {
+        // (fused available, backend) -> the default absorbs. The kernel
+        // decides wherever it runs (#3131); without it, CUDA and ROCm, where
+        // the composed path was measured (#3133), absorb.
+        let table = [
+            (true, GpuBackendKind::Metal, true),
+            (false, GpuBackendKind::Metal, false),
+            (false, GpuBackendKind::Cuda, true),
+            (true, GpuBackendKind::Cuda, true),
+            (false, GpuBackendKind::Rocm, true),
+            (true, GpuBackendKind::Rocm, true),
+            (false, GpuBackendKind::None, false),
+        ];
+        for (fused, backend, absorbs) in table {
+            assert_eq!(
+                default_absorbs_on(fused, backend),
+                absorbs,
+                "fused={fused} on {backend:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_modes_override_the_default() {
+        // Issue #3131's resolution table: (mode, default absorbs) -> absorbed.
+        let table = [
+            (AbsorbedMode::Default, true, true),
+            (AbsorbedMode::Default, false, false),
+            (AbsorbedMode::On, true, true),
+            (AbsorbedMode::On, false, true),
+            (AbsorbedMode::Off, true, false),
+            (AbsorbedMode::Off, false, false),
+        ];
+        for (mode, default, absorbed) in table {
+            assert_eq!(
+                mode.resolve(default),
+                absorbed,
+                "{mode:?} with default_absorbs={default}"
+            );
+        }
+    }
+
+    #[test]
+    fn opt_in_parse_is_off_unless_explicitly_enabled() {
+        // `parse_enabled` still gates `MLXCEL_MLA_SPLIT_KV`, which stays opt-in.
         assert!(!parse_enabled(None));
         assert!(!parse_enabled(Some("")));
         assert!(!parse_enabled(Some("0")));
@@ -288,9 +477,9 @@ mod tests {
     }
 
     #[test]
-    fn absorption_accepts_the_usual_on_spellings() {
+    fn opt_in_parse_accepts_the_usual_on_spellings() {
         for v in ["1", "true", "TRUE", "on", "ON", "yes", " yes "] {
-            assert!(parse_enabled(Some(v)), "{v:?} should enable absorption");
+            assert!(parse_enabled(Some(v)), "{v:?} should enable the switch");
         }
     }
 

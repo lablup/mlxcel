@@ -440,18 +440,58 @@ pub fn get_hardware() -> &'static HardwareCapabilities {
 }
 
 /// True only on M5-class Apple Silicon whose Neural Accelerator is driven by
-/// the running macOS (Metal GPU Family 4).
+/// the running macOS (Metal GPU Family 4), judged from the sysctl brand string
+/// and `kern.osproductversion`.
 ///
-/// This is the gate for M5-Max-specific numerical workarounds. The M5 Max NAx
-/// GEMM kernels can fuse a lazy float32/float16 graph into NaN within a single
-/// Metal command buffer; code that builds such graphs (the Mamba2/SSM mixers)
-/// forces an intermediate `eval` boundary, but only when this returns true. On
-/// every other chip that eval boundary is pure throughput loss, so it is
-/// skipped. See CLAUDE.md "Apple Silicon precision".
+/// This is mlxcel's view of the chip, not MLX's. MLX picks its Neural
+/// Accelerator (NAx) kernels from [`mlx_nax_available`], and the two can
+/// legitimately differ:
+///
+/// - `MLX_METAL_GPU_ARCH` overrides the GPU architecture MLX reads, so an M5
+///   host can be made to run the non-NAx kernels, and another host can be
+///   told it has an NAx generation.
+/// - A build with `MLX_METAL_NO_NAX`, or any non-Metal backend, never
+///   dispatches NAx kernels.
+/// - A chip whose brand string `parse_silicon_gen` does not recognise reads
+///   as `Unknown` here, while MLX still sees its GPU generation.
+///
+/// So code that works around the behaviour of an NAx kernel must gate on
+/// [`mlx_nax_available`]. Use this function only for decisions about the chip
+/// itself, not about what MLX dispatches. Since #3123 the SSM `eval`
+/// boundaries and the Mamba2 hybrid finite-decode test gate on
+/// [`mlx_nax_available`] instead.
 #[inline]
 pub fn is_m5_neural_accelerator() -> bool {
     let hw = get_hardware();
     hw.has_neural_accelerator && hw.macos_supports_na
+}
+
+static MLX_NAX_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+/// Whether MLX dispatches its Neural Accelerator (NAx) GEMM and SDPA kernels
+/// in this process: MLX's own `metal::is_nax_available()`, which requires
+/// macOS 26.2+ and a GPU architecture generation of at least 17 (18 for `p`
+/// parts), and reads `MLX_METAL_GPU_ARCH` when it is set.
+///
+/// This is the gate for workarounds of NAx kernel behaviour, such as the
+/// per-layer `eval` boundary in the Nemotron-H and PLaMo 2 SSM mixers against
+/// the M5 Max NAx GEMM fusing a lazy float32/float16 graph into NaN within one
+/// Metal command buffer. Keying on the flag MLX dispatches on means the
+/// workaround is on exactly where those kernels can run, whatever the brand
+/// string says (see [`is_m5_neural_accelerator`] for where the views differ).
+///
+/// Returns false off Metal: CUDA and ROCm builds, or a Metal build without a
+/// Metal device. It reports the GPU's capability, not the default device, so
+/// a CPU-device run on an NAx host still reads true; a gated `eval` there
+/// costs a sync and is never wrong.
+///
+/// MLX caches the answer in a function-local static, so it cannot change
+/// within a process. It is cached again here so per-forward callers pay one
+/// atomic load instead of an FFI crossing.
+#[must_use]
+#[inline]
+pub fn mlx_nax_available() -> bool {
+    *MLX_NAX_AVAILABLE.get_or_init(crate::ffi::metal_nax_available)
 }
 
 /// The `MLX_MAX_OPS_PER_BUFFER` default to apply for an Apple Silicon class, or
@@ -2102,6 +2142,36 @@ mod tests {
                 quant_mode_support(mode),
                 gpu_backend_kind().quant_mode_support(mode)
             );
+        }
+    }
+
+    // ── MLX NAX flag (#3123) ──────────────────────────────────────────────────
+
+    /// The cached helper reports exactly what MLX's own flag says, every call.
+    /// The SSM `eval` boundaries gate on the helper, so a stale or inverted
+    /// cache would turn the M5 Max NaN workaround off where NAx kernels run.
+    #[test]
+    fn mlx_nax_available_matches_the_mlx_flag() {
+        let raw = crate::ffi::metal_nax_available();
+        assert_eq!(mlx_nax_available(), raw);
+        assert_eq!(mlx_nax_available(), raw, "the cached value must be stable");
+        let hw = get_hardware();
+        eprintln!(
+            "MLX NAX {raw}; sysctl view {:?}, Neural Accelerator {}, macOS NA support {}, \
+             is_m5_neural_accelerator {}",
+            hw.silicon_gen,
+            hw.has_neural_accelerator,
+            hw.macos_supports_na,
+            is_m5_neural_accelerator(),
+        );
+    }
+
+    /// Off Metal (CUDA, ROCm, or no GPU backend) MLX never dispatches NAx
+    /// kernels, so the helper must read false and the models skip the eval.
+    #[test]
+    fn mlx_nax_available_is_false_off_metal() {
+        if gpu_backend_kind() != GpuBackendKind::Metal {
+            assert!(!mlx_nax_available(), "MLX's NAX flag is a Metal-only fact");
         }
     }
 }

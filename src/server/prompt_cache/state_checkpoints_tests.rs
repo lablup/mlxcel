@@ -89,8 +89,14 @@ fn run_turns(store: &PromptCacheStore, session: &str, turns: usize) {
     }
 }
 
+/// Look up `tokens` the way the scheduler does, counting a checkpoint hit as
+/// a successful rebuild.
 fn lookup(store: &PromptCacheStore, session: &str, tokens: &[i32]) -> SnapshotLookupOutcome {
-    store.lookup_snapshot_outcome(&key(session, tokens), tokens, |_, _| false)
+    let outcome = store.lookup_snapshot_outcome(&key(session, tokens), tokens, |_, _| false);
+    if let SnapshotLookupOutcome::CheckpointHit { matched_len, .. } = &outcome {
+        store.record_state_checkpoint_hit(*matched_len);
+    }
+    outcome
 }
 
 #[test]
@@ -215,7 +221,7 @@ fn checkpoints_without_a_donor_are_dropped() {
     run_turns(&store, "chat-b", 2);
     assert_eq!(store.stats().state_checkpoint_entries, 2);
     // Chat A's first turn pushes chat B's snapshot out; chat B's checkpoints
-    // can no longer be rebuilt and go with the next checkpoint insert.
+    // can no longer be rebuilt and go with it.
     run_turns(&store, SESSION, 1);
     let stats = store.stats();
     assert_eq!(stats.snapshot_entries, 1);
@@ -269,4 +275,146 @@ fn clear_drops_checkpoints() {
     let stats = store.stats();
     assert_eq!(stats.state_checkpoint_entries, 0);
     assert_eq!(stats.state_checkpoint_bytes, 0);
+}
+
+#[test]
+fn checkpoints_count_toward_the_store_footprint() {
+    // Issue #3058: `len()` and `bytes()` feed the prompt-cache gauges, so a
+    // checkpoint must show up in both.
+    let store = PromptCacheStore::with_config(config(1 << 20));
+    let tokens = history(10);
+    store
+        .insert_snapshot(&key(SESSION, &tokens), whole(&tokens, chain_lineage(1)))
+        .unwrap();
+    let (len, bytes) = (store.len(), store.bytes());
+    let entry = checkpoint(&tokens, chain_lineage(1));
+    let size = entry.size_bytes;
+    assert_eq!(store.state_checkpoint_growth_bytes(size), size);
+    store
+        .insert_state_checkpoint(&key(SESSION, &tokens), entry)
+        .unwrap();
+    assert_eq!(store.len(), len + 1);
+    assert_eq!(store.bytes(), bytes + size);
+    let stats = store.stats();
+    assert_eq!(stats.entries, store.len());
+    assert_eq!(stats.bytes, store.bytes());
+
+    // A full checkpoint budget only replaces, so it does not grow.
+    let full = PromptCacheStore::with_config(config(size));
+    full.insert_snapshot(&key(SESSION, &tokens), whole(&tokens, chain_lineage(1)))
+        .unwrap();
+    full.insert_state_checkpoint(
+        &key(SESSION, &tokens),
+        checkpoint(&tokens, chain_lineage(1)),
+    )
+    .unwrap();
+    assert_eq!(full.state_checkpoint_growth_bytes(size), 0);
+}
+
+fn other_template_key(tokens: &[i32]) -> PromptCacheKey<'_> {
+    PromptCacheKey::new_full(
+        "m",
+        None,
+        "tpl-other",
+        Some(SESSION),
+        MultimodalDigest::empty(),
+        tokens,
+    )
+}
+
+#[test]
+fn the_orphan_sweep_stays_in_the_inserted_conversation() {
+    // Issue #3058: an insert probes only the checkpoints sharing its
+    // sessionless bucket and session, never those of other conversations.
+    let store = PromptCacheStore::with_config(config(1 << 20));
+    run_turns(&store, "chat-b", 4);
+    for n in 1..=3 {
+        let tokens = history(10 * n);
+        store
+            .insert_snapshot(
+                &other_template_key(&tokens),
+                whole(&tokens, chain_lineage(n)),
+            )
+            .unwrap();
+        store
+            .insert_state_checkpoint(
+                &other_template_key(&tokens),
+                checkpoint(&tokens, chain_lineage(n)),
+            )
+            .unwrap();
+    }
+    let foreign: Vec<_> = (1..=4)
+        .map(|n| key("chat-b", &history(10 * n)).digest())
+        .chain((1..=3).map(|n| other_template_key(&history(10 * n)).digest()))
+        .collect();
+    store.inner.write().unwrap().orphan_probes.clear();
+
+    run_turns(&store, SESSION, 2);
+
+    let probes = std::mem::take(&mut store.inner.write().unwrap().orphan_probes);
+    assert!(!probes.is_empty(), "the inserted conversation is swept");
+    assert!(
+        probes.iter().all(|digest| !foreign.contains(digest)),
+        "no checkpoint of another bucket or session is probed"
+    );
+    assert_eq!(store.stats().state_checkpoint_entries, 4 + 3 + 2);
+}
+
+#[test]
+fn an_evicted_donor_takes_its_orphans_with_it() {
+    // Issue #3058: room for one whole snapshot. Evicting chat B's donor drops
+    // chat B's checkpoints at once, without waiting for a checkpoint insert.
+    let store = PromptCacheStore::with_config(config(1 << 20).with_snapshot_limits(
+        10_000,
+        64,
+        Duration::from_secs(3600),
+    ));
+    run_turns(&store, "chat-b", 2);
+    assert_eq!(store.stats().state_checkpoint_entries, 2);
+    let bytes_before = store.bytes();
+
+    let tokens = history(10);
+    store
+        .insert_snapshot(&key(SESSION, &tokens), whole(&tokens, chain_lineage(1)))
+        .unwrap();
+
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 1);
+    assert_eq!(stats.state_checkpoint_entries, 0);
+    assert_eq!(stats.state_checkpoint_bytes, 0);
+    assert_eq!(stats.state_checkpoint_evictions, 2);
+    assert_eq!(store.bytes(), bytes_before - 200);
+}
+
+#[test]
+fn a_checkpoint_hit_counts_only_once_confirmed_and_can_be_discarded() {
+    // Issue #3058: a rebuild that fails must not count as a hit, and the
+    // checkpoint that failed is not offered again.
+    let store = PromptCacheStore::with_config(config(1 << 20));
+    run_turns(&store, SESSION, 4);
+    let edited = edited_after(20, 55);
+    let before = store.stats();
+    let SnapshotLookupOutcome::CheckpointHit { checkpoint, .. } =
+        store.lookup_snapshot_outcome(&key(SESSION, &edited), &edited, |_, _| false)
+    else {
+        panic!("expected a checkpoint hit");
+    };
+    let after = store.stats();
+    assert_eq!(after.snapshot_lookups, before.snapshot_lookups);
+    assert_eq!(after.snapshot_hits, before.snapshot_hits);
+    assert_eq!(after.state_checkpoint_hits, before.state_checkpoint_hits);
+
+    assert!(store.discard_state_checkpoint(&checkpoint));
+    assert!(!store.discard_state_checkpoint(&checkpoint));
+    let stats = store.stats();
+    assert_eq!(stats.state_checkpoint_entries, 3);
+    assert_eq!(
+        stats.state_checkpoint_evictions,
+        before.state_checkpoint_evictions + 1
+    );
+    // The next shorter checkpoint is offered instead.
+    match lookup(&store, SESSION, &edited) {
+        SnapshotLookupOutcome::CheckpointHit { matched_len, .. } => assert_eq!(matched_len, 10),
+        other => panic!("expected turn 1's checkpoint, got {other:?}"),
+    }
 }

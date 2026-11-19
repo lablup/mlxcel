@@ -28,7 +28,7 @@ use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_deco
 use mlxcel_core::layers::{
     FusedQKVLinear, KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear,
 };
-use mlxcel_core::utils::{create_causal_mask, silu, slice_axis};
+use mlxcel_core::utils::{silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -37,6 +37,7 @@ use std::path::Path;
 use super::model_owned::ModelOwnedSequenceState;
 use super::recurrent_batch::{optional_rows_uniform, split_rows, stack_optional_rows};
 use super::recurrent_snapshot::{push_optional, restore_optional};
+use super::ssm_a::ssm_a_from_log;
 use super::switch_layers::{SwitchGLU, moe_weighted_sum};
 
 // Configuration.
@@ -556,6 +557,20 @@ fn graph_scan_forced() -> bool {
 /// sequential loop; per block they stay bounded by this length (#3073).
 pub(super) const GRAPH_SCAN_BLOCK: i32 = 256;
 
+/// `exp(delta * A)` in the activation dtype of `x`. `A` is float32 only for
+/// f16 activations (see `JambaMambaMixer::scan_a`); the decay lies in (0, 1],
+/// so rounding it back keeps the state, and everything after it, in the
+/// activation dtype, as `MambaBlock::ssm_step` does.
+fn decay_in_activation_dtype(delta_a: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray> {
+    let decay = mlxcel_core::exp(delta_a);
+    let dtype = mlxcel_core::array_dtype(x);
+    if mlxcel_core::array_dtype(&decay) == dtype {
+        decay
+    } else {
+        mlxcel_core::astype(&decay, dtype)
+    }
+}
+
 /// Mamba1 selective scan as a graph, the fallback when the fused kernel does
 /// not accept the inputs (mixed dtypes on CUDA, the CPU,
 /// `MLXCEL_MAMBA1_SCAN_KERNEL=0`).
@@ -603,7 +618,7 @@ pub(super) fn graph_selective_scan(
 
         // dtA = exp(delta[..., None] * A)
         let delta_exp = mlxcel_core::reshape(&delta_blk, &[batch, block_len, d_inner, 1]);
-        let dt_a = mlxcel_core::exp(&mlxcel_core::multiply(&delta_exp, a));
+        let dt_a = decay_in_activation_dtype(&mlxcel_core::multiply(&delta_exp, a), x);
 
         for i in 0..block_len {
             let new_state_t = mlxcel_core::squeeze_axis(&slice_axis(&new_state, 1, i, i + 1), 1);
@@ -665,11 +680,26 @@ struct JambaMambaMixer {
     b_layernorm: RMSNorm,
     c_layernorm: RMSNorm,
 
-    a_log: UniquePtr<MlxArray>,
+    /// `A = -exp(A_log)` in float32, from [`ssm_a_from_log`] at load (#3057).
+    a: UniquePtr<MlxArray>,
     d_param: UniquePtr<MlxArray>,
 }
 
 impl JambaMambaMixer {
+    /// `A` in the dtype the scan reads it in, as `MambaBlock::scan_a` does:
+    /// the activation dtype, which rounds a bf16 or float32 model exactly as
+    /// `exp` of its `A_log` always did, except f16, which cannot hold `A`
+    /// (`exp(A_log)` overflows past 11.09). There `A` stays float32; the fused
+    /// scan reads it as is and the graph scans round only the decay back.
+    fn scan_a(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let dtype = mlxcel_core::array_dtype(x);
+        if dtype == mlxcel_core::dtype::FLOAT16 {
+            mlxcel_core::copy(&self.a)
+        } else {
+            mlxcel_core::astype(&self.a, dtype)
+        }
+    }
+
     fn ssm_step(
         &self,
         x: &MlxArray,
@@ -766,7 +796,7 @@ impl JambaMambaMixer {
             // dtA = exp(delta[..., None] * A)
             let delta_exp =
                 mlxcel_core::reshape(&delta, &[batch, seq_len, self.intermediate_size as i32, 1]);
-            let dt_a = mlxcel_core::exp(&mlxcel_core::multiply(&delta_exp, a));
+            let dt_a = decay_in_activation_dtype(&mlxcel_core::multiply(&delta_exp, a), x);
 
             let new_state_t = mlxcel_core::squeeze_axis(&new_state, 1);
             let dt_a_t = mlxcel_core::squeeze_axis(&dt_a, 1);
@@ -858,7 +888,7 @@ impl JambaMambaMixer {
         let x_conv = silu(&conv_out);
 
         // SSM
-        let a = mlxcel_core::negative(&mlxcel_core::exp(&self.a_log));
+        let a = self.scan_a(&x_conv);
         let (y, new_ssm_state) = self.ssm_step(&x_conv, &a, ssm_state.as_deref());
 
         // Update SSM state
@@ -1225,28 +1255,12 @@ impl JambaModel {
             mlxcel_core::copy(inputs)
         };
 
-        // Build a mask anchored on the first attention layer inside this
-        // stage. If the stage has no attention layers (pure Mamba slice),
-        // no mask is required.
-        let local_attn_idx = layer_range.clone().enumerate().find_map(|(local, abs)| {
-            if self.model.layers_block_type.get(abs).map(|s| s.as_str()) == Some("attention") {
-                Some(local)
-            } else {
-                None
-            }
-        });
-        let shape = mlxcel_core::array_shape(&h);
-        let seq_len = shape[1];
-        let mask = if let Some(idx) = local_attn_idx {
-            if seq_len > 1 {
-                let offset = caches[idx].offset();
-                Some(create_causal_mask(seq_len, offset))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // No attention mask, the same dispatch as the single-process model
+        // (`JambaModelBackbone::forward`): the prefill mask would be plain
+        // bottom-right causal, so the attention layers take MLX's causal mode
+        // for a multi-token forward (#3072). A stage that built an array mask
+        // ran a different SDPA from the dense model (#2654).
+        let mask: Option<UniquePtr<MlxArray>> = None;
 
         for (local, abs) in layer_range.clone().enumerate() {
             h = self.model.layers[abs].forward(&h, mask.as_deref(), &mut caches[local]);
@@ -1470,7 +1484,7 @@ impl JambaModel {
                     dt_layernorm: RMSNorm::new(dt_norm_weight, config.rms_norm_eps),
                     b_layernorm: RMSNorm::new(b_norm_weight, config.rms_norm_eps),
                     c_layernorm: RMSNorm::new(c_norm_weight, config.rms_norm_eps),
-                    a_log,
+                    a: ssm_a_from_log(&a_log),
                     d_param,
                 })
             };
