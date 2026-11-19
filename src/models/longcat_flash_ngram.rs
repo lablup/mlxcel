@@ -320,7 +320,12 @@ impl LongcatFlashMLA {
                 );
                 return self.project_attention_output(&self.unembed_out.forward(&output), b, l);
             }
-            window => window.into_dense(),
+            // A multi-token step reads the window dequantized, in the
+            // queries' dtype so a bf16 model stays bf16 (#3161).
+            window => crate::models::mla_batched::dense_latent_window(
+                window,
+                mlxcel_core::array_dtype(&q_pe),
+            ),
         };
         mlxcel_core::mla::stats::record(if absorbed {
             if l == 1 {

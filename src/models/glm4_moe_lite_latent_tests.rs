@@ -80,6 +80,12 @@ fn args(rank: i32, rope: i32) -> ModelArgs {
 
 /// A dense `LAYERS`-deep model on byte-reproducible pseudo-random weights.
 fn model_with(rank: i32, rope: i32) -> Glm4MoeLiteModel {
+    model_in(rank, rope, mlxcel_core::dtype::FLOAT32)
+}
+
+/// [`model_with`] with every weight stored in `dtype`, so the activations run
+/// in it.
+fn model_in(rank: i32, rope: i32, dtype: i32) -> Glm4MoeLiteModel {
     let _runtime = crate::initialize_runtime();
     let mut state = 0x3161u64;
     let mut weights = WeightMap::new();
@@ -95,7 +101,10 @@ fn model_with(rank: i32, rope: i32) -> Glm4MoeLiteModel {
                 if norm { 1.0 + 0.2 * v } else { 0.5 * v }
             })
             .collect();
-        weights.insert(key, mlxcel_core::from_slice_f32(&data, shape));
+        weights.insert(
+            key,
+            mlxcel_core::astype(&mlxcel_core::from_slice_f32(&data, shape), dtype),
+        );
     };
     put("model.embed_tokens.weight".into(), &[VOCAB, HIDDEN]);
     put("model.norm.weight".into(), &[HIDDEN]);
@@ -243,6 +252,40 @@ fn int8_decode_tracks_the_fp16_latent_on_the_absorbed_path() {
             "step {step}: the int8 arm must not be the fp16 arm"
         );
         assert!(err < INT8_LOGIT_TOL, "step {step}: relative error {err}");
+    }
+}
+
+/// A bf16 model keeps bf16 activations on the int8 latent: a multi-token step
+/// reads the dequantized window in the queries' dtype, so the prefill and a
+/// multi-token continuation return logits in the fp16 arm's dtype instead of
+/// promoting the rest of the network to f32 (#3161).
+#[test]
+fn a_bf16_model_stays_bf16_over_the_int8_latent() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let mut model = model_in(RANK, ROPE, mlxcel_core::dtype::BFLOAT16);
+    for layer in &mut model.layers {
+        layer.self_attn.quantized_latent = true;
+    }
+    for mode in [KVCacheMode::Fp16, KVCacheMode::Int8] {
+        let mut caches = caches(mode);
+        let prefill = model.forward(&ids(&PROMPT), &mut caches, None);
+        let decode = model.forward(&ids(&[DECODE[0]]), &mut caches, None);
+        let continuation = model.forward(&ids(&DECODE[1..]), &mut caches, None);
+        assert_eq!(
+            caches.iter().all(KVCache::holds_quantized_latent),
+            mode == KVCacheMode::Int8
+        );
+        for (what, logits) in [
+            ("prefill", &prefill),
+            ("decode", &decode),
+            ("continuation", &continuation),
+        ] {
+            assert_eq!(
+                mlxcel_core::array_dtype(logits),
+                mlxcel_core::dtype::BFLOAT16,
+                "{mode}: {what} logits left bf16"
+            );
+        }
     }
 }
 

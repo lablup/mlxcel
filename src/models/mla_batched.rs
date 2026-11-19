@@ -85,6 +85,37 @@ pub(crate) fn store_latent_step(
     LatentWindow::Dense { ckv, kpe }
 }
 
+/// A latent window as dense `(ckv, kpe)` in the attention's compute dtype.
+///
+/// A [`LatentWindow::Dense`] window is returned exactly as the cache handed it
+/// back, so an fp16 cache's numerics are untouched. A quantized window
+/// dequantizes once ([`LatentWindow::into_dense`] returns it in the cache's
+/// fp16 sidecar dtype) and is cast to `compute_dtype`: under a bf16 model the
+/// fp16 window would otherwise meet bf16 queries, MLX would promote the
+/// attention to f32, and the promotion would carry through `o_proj` into the
+/// residual stream, so every later layer and the logits of a multi-token step
+/// would run in f32 on the int8 arm alone (#3161).
+///
+/// Used by: GLM-4.7-Flash and LongCat MLA multi-token steps.
+pub(crate) fn dense_latent_window(
+    window: LatentWindow,
+    compute_dtype: i32,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let quantized = window.is_quantized();
+    let (ckv, kpe) = window.into_dense();
+    if !quantized {
+        return (ckv, kpe);
+    }
+    let cast = |a: UniquePtr<MlxArray>| {
+        if mlxcel_core::array_dtype(&a) == compute_dtype {
+            a
+        } else {
+            mlxcel_core::astype(&a, compute_dtype)
+        }
+    };
+    (cast(ckv), cast(kpe))
+}
+
 fn warn_latent_view_declined(family: &str, mode: mlxcel_core::cache::KVCacheMode, reason: &str) {
     static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let first = WARNED

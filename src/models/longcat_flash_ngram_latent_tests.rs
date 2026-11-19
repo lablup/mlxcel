@@ -31,7 +31,7 @@ use mlxcel_core::generate::{LanguageModel, SamplingConfig};
 use mlxcel_core::mla::MlaDecodePath;
 
 use super::LongcatFlashNgramModel;
-use super::engine_tests::{TOKENS, ids, row, tiny_model_with_rank};
+use super::engine_tests::{TOKENS, ids, row, tiny_model_with_rank, tiny_model_with_rank_in};
 
 /// One affine group: the smallest rank the int8 latent stores.
 const QUANTIZABLE_RANK: i32 = 64;
@@ -251,5 +251,40 @@ fn runtime_bytes_per_token_are_two_affine_caches_per_layer() {
     for cache in state.caches.iter().flatten() {
         assert!(cache.holds_quantized_latent());
         assert_eq!(cache.bytes_per_reserved_token(), per_cache);
+    }
+}
+
+/// A bf16 model keeps bf16 activations on the int8 latent: a multi-token step
+/// reads the dequantized window in the queries' dtype, so the prefill and a
+/// multi-token continuation return logits in the fp16 arm's dtype instead of
+/// promoting the rest of the network to f32 (#3161).
+#[test]
+fn a_bf16_model_stays_bf16_over_the_int8_latent() {
+    for family in FAMILIES {
+        let model = tiny_model_with_rank_in(family, QUANTIZABLE_RANK, mlxcel_core::dtype::BFLOAT16);
+        model.quantized_latent.set(true);
+        let n = model.num_layers();
+        for mode in [KVCacheMode::Fp16, KVCacheMode::Int8] {
+            model.set_kv_cache_layer_modes(vec![mode; n]);
+            let prefill = model.forward(&ids(&TOKENS[..4]), &mut [], None);
+            let decode = model.forward(&ids(&TOKENS[4..5]), &mut [], None);
+            let continuation = model.forward(&ids(&TOKENS[5..7]), &mut [], None);
+            assert_eq!(
+                holds_quantized_latent(&model),
+                mode == KVCacheMode::Int8,
+                "{family} {mode}"
+            );
+            for (what, logits) in [
+                ("prefill", &prefill),
+                ("decode", &decode),
+                ("continuation", &continuation),
+            ] {
+                assert_eq!(
+                    mlxcel_core::array_dtype(logits),
+                    mlxcel_core::dtype::BFLOAT16,
+                    "{family} {mode}: {what} logits left bf16"
+                );
+            }
+        }
     }
 }

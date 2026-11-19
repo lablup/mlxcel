@@ -105,6 +105,16 @@ fn tiny_model(model_type: &str) -> LongcatFlashNgramModel {
 /// [`tiny_model`] at latent rank `kv_lora` (64 is one affine group, the
 /// smallest rank the int8 latent stores, #3161).
 pub(super) fn tiny_model_with_rank(model_type: &str, kv_lora: i32) -> LongcatFlashNgramModel {
+    tiny_model_with_rank_in(model_type, kv_lora, mlxcel_core::dtype::FLOAT32)
+}
+
+/// [`tiny_model_with_rank`] with every weight stored in `dtype`, so the
+/// activations run in it.
+pub(super) fn tiny_model_with_rank_in(
+    model_type: &str,
+    kv_lora: i32,
+    dtype: i32,
+) -> LongcatFlashNgramModel {
     let args = tiny_config_with_rank(model_type, kv_lora);
     let mut weights = WeightMap::new();
     let mut seed = 101u64;
@@ -205,6 +215,11 @@ pub(super) fn tiny_model_with_rank(model_type: &str, kv_lora: i32) -> LongcatFla
         weights.insert(name, mlxcel_core::add(&w, &one));
     }
 
+    let names: Vec<String> = weights.keys().cloned().collect();
+    for name in names {
+        let w = weights.remove(&name).expect("weight present");
+        weights.insert(name, mlxcel_core::astype(&w, dtype));
+    }
     let weights = sanitize_weights(weights, &args).expect("sanitize tiny longcat weights");
     LongcatFlashNgramModel::from_weights(&weights, &args).expect("build tiny longcat")
 }
