@@ -301,25 +301,7 @@ and Evidence 3 shows the plain stream itself changes with the KV mode.
   delta 2.375 unmatched, 0.75 matched). If it was measured under the default fp16 KV,
   this document does not explain it. The issue's own trigger for reopening stays: a
   reproducer that shows corrupted KV contents.
-- The commands in this document compare no K/V tensors, so its own evidence
-  never touches the cache. `examples/kv_history_divergence.rs` in this tree does
-  that comparison, and `docs/kv-contents-reproducer-spec.md` specifies what a
-  decisive answer requires. On Qwen3-0.6B-4bit, M1 Pro and a 64-token context it
-  reports zero differing KV bytes between one-token appends and block appends at
-  widths 1, 2, 4 and 8, differing bytes from width 16 up, and no argmax flip in
-  those spans. If the width-8 result holds, the rows 1 to 7 deltas in Evidence 1
-  are not explained by block width 8 alone and include the difference between the
-  reference's one-prefill history and the block's history. The statement that the
-  histories differ at rounding scale rests on logits here. That sweep holds a
-  64-token span; extending it does not weaken the picture. At `W = 16` over a
-  448-token span, 28 positions of that span carry differing bytes, `kv_rms_rel`
-  reaches 0.0455 with up to 73.97% of elements perturbed, and yet the top-1 logit
-  consumes at most 5.455% of its top-2 margin — large in the tensor, small where
-  the argmax is decided. Magnitude was never the missing piece. That puts the issue's
-  reopening trigger, a reproducer showing corrupted KV contents, live on the width
-  axis, while the reported flip itself stays unreproduced. An absolute
-  reproduction still needs the reporter: the original `Qwen3 copy` prompt text,
-  token ids, length and the M1 Ultra condition are not in the issue.
+- The commands in this document compare no K/V tensors, so its own evidence never touches the cache. `examples/kv_history_divergence.rs` does that comparison, and `docs/kv-contents-reproducer-spec.md` specifies what a decisive answer requires. On Qwen3-0.6B-4bit, M1 Pro and a 64-token context it reports zero differing KV bytes between one-token appends and block appends at widths 1, 2, 4 and 8, differing bytes from width 16 up, and no argmax flip in those spans. If the width-8 result holds, the rows 1 to 7 deltas in Evidence 1 are not explained by block width 8 alone and include the difference between the reference's one-prefill history and the block's history. The statement that the histories differ at rounding scale rests on logits here. A longer span does not change the picture: at `W = 16` over a 448-token span, all 28 traced positions (every 16th history length) carry differing bytes, `kv_rms_rel` reaches 0.0455 with up to 73.97% of elements perturbed, and the top-1 logit still consumes at most 5.455% of its top-2 margin. The divergence is large in the tensor and small where the argmax is decided. That rules out byte-identical KV at those widths but does not yet show corrupted KV contents (the issue's reopening trigger): separating rounding-equivalent from corrupted needs the per-element classification the spec describes. The reported flip stays unreproduced. An absolute reproduction still needs the reporter: the original `Qwen3 copy` prompt text, token ids, length and the M1 Ultra condition are not in the issue.
 - The quantization-amplification step (a rounding-level K difference crossing a
   quantization step becomes a full step) was not measured at the logit level. The
   Qwen3 end-to-end evidence is consistent with it (4 of 6 quantized cells flip, 0 of 2

@@ -45,12 +45,11 @@
 //!
 //! # Why the existing harness cannot express this
 //!
-//! `examples/logit_trace.rs` rebuilds `make_caches()` inside its chunk loop
-//! (logit_trace.rs:383), so a model whose caches live in that slice starts
-//! every chunk empty and never accumulates a history. The `contiguous` lever
-//! that does accumulate is gated on `gemma4_mode` (logit_trace.rs:191-192),
-//! and Gemma 4 owns its attention caches internally, so the harness cannot
-//! read them back. This example therefore drives `forward` directly and keeps
+//! `examples/logit_trace.rs` rebuilds `make_caches()` inside its chunk loop,
+//! so a model whose caches live in that slice starts every chunk empty and
+//! never accumulates a history. The `MLXCEL_TRACE_CONTIGUOUS` lever that does
+//! accumulate requires a Gemma 4 mode, and Gemma 4 owns its attention caches
+//! internally, so the harness cannot read them back. This example therefore drives `forward` directly and keeps
 //! one cache slice alive across every append.
 //!
 //! # Usage
@@ -64,21 +63,28 @@
 //! the first append (default 32), `MAX_N` the longest history to scan (default
 //! 64, rounded down to a multiple of `WIDTH`).
 //!
+//! Every `WIDTH`-th history length from `WIDTH` to `MAX_N` is one traced
+//! position, so a run traces `MAX_N / WIDTH` positions whether or not their KV
+//! differs. The model must keep its KV in the slice `make_caches()` returns;
+//! a model that owns its caches yields no readable KV and the run stops with
+//! an error instead of reporting "no divergence".
+//!
 //! Output is TSV on stdout, prefixed with `#` metadata lines. Diagnostics go
 //! to stderr.
 
 use anyhow::{Context, Result};
 use mlxcel::LanguageModel;
 use mlxcel::distributed::kv_cache_serde::serialize::extract_kv_cache_entry;
-use mlxcel_core::{array_shape, array_to_raw_bytes, astype, eval, from_slice_i32};
+use mlxcel_core::{array_shape, array_to_raw_bytes, astype, dtype, eval, from_slice_i32};
+
+/// One layer's extracted K and V: bytes, shape, and MLX dtype code.
+type LayerKv = ((Vec<u8>, Vec<i32>), (Vec<u8>, Vec<i32>), i32);
 
 /// KV bytes for every layer, plus the element layout they are encoded in.
 /// The layout is carried alongside rather than assumed: the same byte deltas
-/// mean different things for fp16, int8, or packed-nibble storage.
+/// mean different things for fp16, bf16, or int8 storage.
 struct Snapshot {
-    layers: Vec<Option<(Vec<u8>, Vec<u8>)>>,
-    dtype: String,
-    elem_bytes: usize,
+    layers: Vec<Option<LayerKv>>,
 }
 /// Absorb `context` tokens, append `n` tokens `width` at a time, then take one
 /// one-token step. Returns the stored KV and that step's logits.
@@ -106,7 +112,7 @@ fn probe(
 
     // Everything above may legitimately differ between arms. From here on the
     // two arms are identical work, so any difference is history-borne.
-    let snap = snapshot(&caches);
+    let snap = snapshot(&caches)?;
     let at = (context + blocks * width) as usize;
     let step = from_slice_i32(&ids[at..at + 1], &[1, 1]);
     let out = model.forward(&step, &mut caches, None);
@@ -118,32 +124,41 @@ fn probe(
 ///
 /// `extract_kv_cache_entry` already slices to `live_len()`, so this compares
 /// exactly the bytes attention would read, not the pre-allocated padding.
-fn snapshot(caches: &[mlxcel_core::cache::KVCache]) -> Snapshot {
-    let mut dtype = String::from("none");
-    let mut elem_bytes = 0usize;
+/// It returns `(None, None)` for modes it cannot serialize (the packed turbo
+/// modes), so those layers are `None` here.
+fn snapshot(caches: &[mlxcel_core::cache::KVCache]) -> Result<Snapshot> {
     let layers = caches
         .iter()
         .map(|c| {
             let entry = extract_kv_cache_entry(c);
             match (entry.keys, entry.values) {
                 (Some(k), Some(v)) => {
-                    if elem_bytes == 0 {
-                        let elems: i32 = k.shape.iter().copied().product();
-                        if elems > 0 {
-                            elem_bytes = k.data.len() / elems as usize;
-                            dtype = format!("{:?}", k.dtype);
-                        }
-                    }
-                    Some((k.data.clone(), v.data.clone()))
+                    anyhow::ensure!(
+                        k.dtype == v.dtype,
+                        "K dtype {} differs from V dtype {}",
+                        k.dtype,
+                        v.dtype
+                    );
+                    let dt = k.dtype;
+                    Ok(Some(((k.data, k.shape), (v.data, v.shape), dt)))
                 }
-                _ => None,
+                _ => Ok(None),
             }
         })
-        .collect();
-    Snapshot {
-        layers,
-        dtype,
-        elem_bytes,
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Snapshot { layers })
+}
+
+/// Name and element width of the KV dtypes this harness can decode. Any
+/// other code is an error: reading an unknown layout as bytes would turn a
+/// format mismatch into a fake divergence.
+fn kv_layout(code: i32) -> Result<(&'static str, usize)> {
+    match code {
+        dtype::FLOAT16 => Ok(("float16", 2)),
+        dtype::BFLOAT16 => Ok(("bfloat16", 2)),
+        dtype::FLOAT32 => Ok(("float32", 4)),
+        dtype::INT8 => Ok(("int8", 1)),
+        other => anyhow::bail!("unsupported KV dtype code {other}"),
     }
 }
 
@@ -204,13 +219,13 @@ fn main() -> Result<()> {
     let mut control_ok = true;
     // Worst observed logit delta and the narrowest margin it had to cross.
     // Reported together so the "did it have room to flip?" question is
-    // answered by measurement rather than by re-reading 16-column rows.
+    // answered by measurement rather than by re-reading 17-column rows.
     let mut worst_delta = 0f32;
     let mut worst_delta_pos = 0i32;
     let mut narrowest_margin = f32::INFINITY;
     let mut margin_consumed_count = 0usize;
     let mut positions = 0usize;
-    let mut seen_dtype: Option<(String, usize)> = None;
+    let mut seen_dtype: Option<i32> = None;
 
     for n in (width..=max_n).step_by(width as usize) {
         let (snap_inc, log_inc) = probe(&model, &ids, context, 1, n)?;
@@ -222,11 +237,18 @@ fn main() -> Result<()> {
         if log_inc != log_inc2 {
             control_ok = false;
         }
-        if seen_dtype.is_none() && snap_inc.elem_bytes > 0 {
-            seen_dtype = Some((snap_inc.dtype.clone(), snap_inc.elem_bytes));
-        }
+        anyhow::ensure!(
+            snap_inc.layers.len() == snap_blk.layers.len(),
+            "arms built {} and {} cache layers",
+            snap_inc.layers.len(),
+            snap_blk.layers.len()
+        );
+        anyhow::ensure!(
+            snap_inc.layers.iter().any(Option::is_some),
+            "no layer exposed readable KV: the model owns its caches or uses a \
+             storage mode extract_kv_cache_entry cannot serialize"
+        );
 
-        let elem_bytes = snap_inc.elem_bytes.max(1);
         let mut kv_bytes = 0usize;
         let mut kv_diff = 0usize;
         let mut kv_abs = 0f32;
@@ -234,12 +256,40 @@ fn main() -> Result<()> {
         let mut kv_sumsq = 0f64;
         let mut kv_elems = 0usize;
         let mut kv_perturbed = 0usize;
-        for (a, b) in snap_inc.layers.iter().zip(snap_blk.layers.iter()) {
-            if let (Some((ka, va)), Some((kb, vb))) = (a, b) {
+        for (li, (a, b)) in snap_inc
+            .layers
+            .iter()
+            .zip(snap_blk.layers.iter())
+            .enumerate()
+        {
+            let ((ka, va, dt), (kb, vb, dt_b)) = match (a, b) {
+                (Some((ka, va, dt)), Some((kb, vb, dt_b))) => ((ka, va, *dt), (kb, vb, *dt_b)),
+                (None, None) => continue,
+                _ => anyhow::bail!("layer {li}: KV readable in one arm only"),
+            };
+            anyhow::ensure!(dt == dt_b, "layer {li}: arms stored dtypes {dt} and {dt_b}");
+            anyhow::ensure!(
+                ka.1 == kb.1 && va.1 == vb.1,
+                "layer {li}: arms stored different KV shapes ({:?}/{:?} vs {:?}/{:?})",
+                ka.1,
+                va.1,
+                kb.1,
+                vb.1
+            );
+            match seen_dtype {
+                None => seen_dtype = Some(dt),
+                Some(prev) => anyhow::ensure!(
+                    prev == dt,
+                    "layer {li}: KV dtype {dt} differs from earlier layers ({prev})"
+                ),
+            }
+            let elem = kv_layout(dt)?;
+            {
+                let ((ka, _), (va, _), (kb, _), (vb, _)) = (ka, va, kb, vb);
                 kv_bytes += ka.len() + va.len();
                 kv_diff += count_diff(ka, kb) + count_diff(va, vb);
                 for (x, y) in [(ka, kb), (va, vb)] {
-                    let (d, p, rms, pert, tot) = max_abs_elem(x, y, elem_bytes);
+                    let (d, p, rms, pert, tot) = max_abs_elem(x, y, elem);
                     kv_abs = kv_abs.max(d);
                     kv_peak = kv_peak.max(p);
                     kv_sumsq += (rms as f64) * (rms as f64) * tot as f64;
@@ -274,7 +324,6 @@ fn main() -> Result<()> {
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
         let (ai, ab) = (argmax(&log_inc), argmax(&log_blk));
-        let _ = &ab;
         // A delta only becomes a flip when it exceeds the gap between the
         // top-1 and top-2 logits. Measuring the delta alone says how far the
         // histories drifted; the margin says whether drifting there could
@@ -326,8 +375,11 @@ fn main() -> Result<()> {
     }
 
     println!("# arm_repeats_identical\t{control_ok}");
-    match &seen_dtype {
-        Some((dt, n)) => println!("# kv_dtype\t{dt}\telem_bytes\t{n}"),
+    match seen_dtype {
+        Some(code) => {
+            let (name, n) = kv_layout(code)?;
+            println!("# kv_dtype\t{name}\telem_bytes\t{n}");
+        }
         None => println!("# kv_dtype\tnone"),
     }
     println!("# positions_with_kv_diff\t{kv_diff_positions}");
@@ -362,9 +414,9 @@ fn count_diff(a: &[u8], b: &[u8]) -> usize {
     a.iter().zip(b.iter()).filter(|(x, y)| x != y).count()
 }
 
-/// Largest absolute difference between two element runs, in float space where
-/// the width allows a float reading and in raw integer units otherwise,
-/// together with the peak magnitude seen in either arm.
+/// Largest absolute difference between two element runs, in float space for
+/// float dtypes and in integer steps for int8, together with the peak
+/// magnitude seen in either arm.
 ///
 /// The peak is what makes the delta interpretable: an absolute error is only
 /// meaningful against the scale of the values it perturbs, and that scale is a
@@ -374,7 +426,11 @@ fn count_diff(a: &[u8], b: &[u8]) -> usize {
 /// exponent and mantissa together, so one increment of the exponent field looks
 /// like a huge integer jump while representing a tiny value change. Decode
 /// first so this column means what it says.
-fn max_abs_elem(a: &[u8], b: &[u8], elem_bytes: usize) -> (f32, f32, f32, usize, usize) {
+fn max_abs_elem(
+    a: &[u8],
+    b: &[u8],
+    (name, _): (&'static str, usize),
+) -> (f32, f32, f32, usize, usize) {
     let mut worst = 0f32;
     let mut peak = 0f32;
     let mut sumsq = 0f64;
@@ -394,16 +450,21 @@ fn max_abs_elem(a: &[u8], b: &[u8], elem_bytes: usize) -> (f32, f32, f32, usize,
             }
         }
     };
-    match elem_bytes {
-        2 => {
+    match name {
+        "float16" | "bfloat16" => {
+            let decode = |c: &[u8]| {
+                let bits = u16::from_le_bytes([c[0], c[1]]);
+                if name == "bfloat16" {
+                    f32::from_bits(u32::from(bits) << 16)
+                } else {
+                    half_to_f32(bits)
+                }
+            };
             for (ca, cb) in a.chunks_exact(2).zip(b.chunks_exact(2)) {
-                take(
-                    half_to_f32(u16::from_le_bytes([ca[0], ca[1]])),
-                    half_to_f32(u16::from_le_bytes([cb[0], cb[1]])),
-                );
+                take(decode(ca), decode(cb));
             }
         }
-        4 => {
+        "float32" => {
             for (ca, cb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
                 take(
                     f32::from_le_bytes([ca[0], ca[1], ca[2], ca[3]]),
@@ -412,8 +473,9 @@ fn max_abs_elem(a: &[u8], b: &[u8], elem_bytes: usize) -> (f32, f32, f32, usize,
             }
         }
         _ => {
-            for (ca, cb) in a.chunks_exact(1).zip(b.chunks_exact(1)) {
-                take(ca[0] as f32, cb[0] as f32);
+            // int8: signed integer steps, so -1 versus 0 is one step, not 255.
+            for (&xa, &xb) in a.iter().zip(b.iter()) {
+                take(f32::from(xa as i8), f32::from(xb as i8));
             }
         }
     }
