@@ -41,7 +41,6 @@ use crate::cache::latent_quant::{LATENT_QUANT_GROUP_SIZE, QuantizedLatentRows};
 use crate::dtype;
 use crate::ffi::{self, MlxArray};
 use crate::mla::MlaGeometry;
-use crate::mla::decode::rope_score_mask;
 use crate::mla::stats::{self, MlaDecodePath};
 
 /// MLX quantization mode of the stored latent.
@@ -262,6 +261,30 @@ fn latent_qmm(
     }
 }
 
+/// `mla::decode::rope_score_mask` for one query, with the heads on the matmul's row axis
+/// so the `k_pe` window is read once rather than once per head.
+///
+/// Same operations in the same dtypes as `rope_score_mask`: the query is
+/// scaled in its own dtype, multiplied against `kpe^T`, and the additive mask
+/// is applied to the `[B, H, 1, S]` result.
+fn rope_scores_by_row(
+    q_pe: &MlxArray,
+    kpe: &MlxArray,
+    scale: f32,
+    mask: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let s = ffi::array_shape(q_pe);
+    let (b, h, d) = (s[0], s[1], s[3]);
+    let scale_scalar = ffi::full_f32(&[1], scale, ffi::array_dtype(q_pe));
+    let q = ffi::reshape(&ffi::multiply(q_pe, &scale_scalar), &[b, 1, h, d]);
+    let kpe_t = ffi::transpose_axes(kpe, &[0, 1, 3, 2]);
+    let scores = ffi::reshape(&ffi::matmul(&q, &kpe_t), &[b, h, 1, -1]);
+    match mask {
+        Some(m) => ffi::add(&scores, m),
+        None => scores,
+    }
+}
+
 /// Single-query absorbed attention against a quantized latent window.
 ///
 /// * `q_absorbed` `[B, H, 1, kv_lora_rank]`, `q_pe` `[B, H, 1, qk_rope_head_dim]`
@@ -298,8 +321,12 @@ pub(crate) fn quantized_absorbed_attention(
     // Scale the query rather than the `[B, H, 1, S]` score: same product, on
     // the smaller operand.
     let q = crate::ops::multiply_scalar(&ffi::astype(q_absorbed, dtype::FLOAT32), scale);
+    // The latent score keeps one batch entry per head. Folding the heads into
+    // its row axis measured 3% to 13% faster but changes the summation order
+    // outside the #3155 gate's near-tie bar (results doc, "Single-query decode
+    // layout"); folding the value sum measured slower.
     let latent_scores = latent_qmm(&q, ckv_q, &scales, &biases, true, bits, group_size);
-    let rope_scores = ffi::astype(&rope_score_mask(q_pe, kpe, scale, mask), dtype::FLOAT32);
+    let rope_scores = ffi::astype(&rope_scores_by_row(q_pe, kpe, scale, mask), dtype::FLOAT32);
     let probs = ffi::softmax(&ffi::add(&latent_scores, &rope_scores), -1);
     let o_latent = latent_qmm(&probs, ckv_q, &scales, &biases, false, bits, group_size);
     ffi::astype(&o_latent, out_dtype)

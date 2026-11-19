@@ -43,6 +43,21 @@ The path counter proves which path ran: every traced decode step of a quantized 
 
 Round-to-round spread is under 2% for every arm. The fp16 latent decodes on the fused kernel behind 512 and 2048 tokens and on the composed path behind 16384 (the kernel's limit is 8192 keys); the quantized latent decodes on the composed `quantized_matmul` path at every length. The fused kernel for a quantized latent is #3156. Prefill throughput is the same for all four arms (1362 to 1384 tok/s at 512 and 2048, 1125 to 1129 at 16384).
 
+## Single-query decode layout (security and performance review, 2026-11-19)
+
+`quantized_matmul` broadcasts the one latent head over the `H` query heads, so each head reads the whole packed window. Three layouts of the one-query int8 step were measured against the code above, with the same binary flags, interleaved under one lock with indexers paused (load average 1.0 to 2.3), 128 tokens after 16 warmup:
+
+| layout | 512 | 2048 | 16384 | trace behind 1024 against fp16 |
+|---|---|---|---|---|
+| as measured above | 137.3 to 138.8 | 127.5 to 128.5 | 70.5 to 71.1 | byte-identical rerun: 12 / 512 top-1, largest gap 0.078 |
+| heads folded into the score and value contractions | 135.2 to 135.6 | 107.2 to 107.4 | 38.5 | not run |
+| heads folded into the latent score only | 142.5 to 142.7 | 131.5 to 132.6 | 80.0 to 80.4 | 13 / 512 top-1, 0 decided, largest gap 0.219, ppl 14.6319 (-0.20%) |
+| heads folded into the rope score only (shipped) | not run | 129.5 to 130.1 | 71.3 | byte-identical to the measured int8 trace; behind 4096 also matches (3 / 256, gap 0.109, ppl 12.8767) |
+
+Folding the value sum moves it onto the tiled `qmm` kernel, which contracts over the window with less parallelism than the per-head split-K `qvm` and is slower at every length. Folding the latent score puts it on `qmv_wide`, which reads each packed group once for all heads: 3% faster behind 512 and 2048 and 13% behind 16384. It changes the summation order, and one top-1 flip lands at a 0.219-logit gap, outside the gate's 0.11 near-tie bar, so it is not shipped without a decision on that bar. The rope-score fold is numerically identical and ships (1% to 1.5%).
+
+The other avoidable cost on this path is the per-step f32 cast of the window's group scales and biases (`[B, 1, S, rank/64]` each). MLX's affine `quantized_matmul` promotes them to the f32 query dtype anyway, so removing it needs either f32 sidecars (704 instead of 672 bytes per token per layer) or an fp16 query, and both change what the gate measured.
+
 ## 16384-token prefill transient peak
 
 MLX allocator high-water mark for the measured pass (prefill plus 128 decode tokens), which is also the whole-run peak. Weights are 8.87 GB resident after load.
