@@ -656,19 +656,42 @@ fn qwen3_next_router_gate_loads_its_own_affine_layout() {
     // this plane.
     assert!(UnifiedLinear::from_weights(&weights, "gate", 32, 4).is_err());
 
-    let gate = super::gate_linear_from_weights(&weights, "gate", hidden, 32, 4)
-        .expect("the router plane loads with its own layout");
-    let q = gate.quantized_weight().expect("the router stays quantized");
-    assert_eq!((q.group_size, q.bits, q.mode.as_str()), (64, 8, "affine"));
+    // Under an nvfp4 default (group 16, 4-bit) the shared reconciliation does
+    // not fail: it reads the 8-bit group-64 plane as 4-bit group 128, which
+    // decodes the router to garbage. The helper must not take that pair.
+    let misread = UnifiedLinear::from_weights(&weights, "gate", 16, 4)
+        .expect("the shared reconciliation accepts the plane under an nvfp4 default");
+    let misread = misread.quantized_weight().expect("quantized");
+    assert_eq!((misread.group_size, misread.bits), (128, 4));
 
     let x = mlxcel_core::from_slice_f32(
         &deterministic_values(4104, 2 * hidden as usize, 1.0),
         &[1, 2, hidden],
     );
-    let got = host_f32(&gate.forward(&x));
     let want = host_f32(&mlxcel_core::matmul(&x, &mlxcel_core::transpose(&decoded)));
-    let error = relative_l2(&got, &want);
-    assert!(error < 1e-4, "relative L2 {error}");
+    // The mxfp4 (32, 4) and nvfp4 (16, 4) defaults.
+    for (declared_group, declared_bits) in [(32, 4), (16, 4)] {
+        let gate = super::gate_linear_from_weights(
+            &weights,
+            "gate",
+            hidden,
+            declared_group,
+            declared_bits,
+        )
+        .expect("the router plane loads with its own layout");
+        let q = gate.quantized_weight().expect("the router stays quantized");
+        assert_eq!(
+            (q.group_size, q.bits, q.mode.as_str()),
+            (64, 8, "affine"),
+            "declared ({declared_group}, {declared_bits})"
+        );
+        let got = host_f32(&gate.forward(&x));
+        let error = relative_l2(&got, &want);
+        assert!(
+            error < 1e-4,
+            "declared ({declared_group}, {declared_bits}): relative L2 {error}"
+        );
+    }
 
     // A plane the declared pair does describe takes the ordinary route.
     let gate = super::gate_linear_from_weights(&weights, "gate", hidden, 64, 8)

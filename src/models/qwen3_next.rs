@@ -45,7 +45,10 @@ use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
-use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::layers::{
+    KVCache, LOADABLE_AFFINE_BITS, RMSNorm, SUPPORTED_AFFINE_GROUP_SIZES, UnifiedEmbedding,
+    UnifiedLinear,
+};
 use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, silu, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
@@ -1604,7 +1607,10 @@ impl SwitchGLU {
 /// An affine plane (one with `.biases`) says what it is once the input width
 /// is known: `bits = packed_words * 32 / in_features` and `group_size =
 /// in_features / groups`. When that pair is loadable and differs from the
-/// declared one, the plane is loaded as affine with it. Everything else goes
+/// declared one, the plane is loaded as affine with it. This also covers an
+/// nvfp4 default (group 16, 4-bit), where the shared reconciliation would
+/// otherwise read an 8-bit group-64 gate as 4-bit group 128 and route on
+/// misdecoded logits. Everything else goes
 /// to `UnifiedLinear::from_weights` unchanged.
 ///
 /// Used by: [`SparseMoeBlock::from_weights`]
@@ -1627,17 +1633,22 @@ fn gate_linear_from_weights(
             .last()
             .copied()
             .unwrap_or(0);
-        if in_features > 0
+        // `checked_mul`: the packed width comes from the checkpoint, and an
+        // unchecked i32 multiply panics in an overflow-checked build.
+        if let Some(packed_bits) = packed_words.checked_mul(32)
+            && in_features > 0
             && packed_words > 0
             && groups > 0
-            && (packed_words * 32) % in_features == 0
+            && packed_bits % in_features == 0
             && in_features % groups == 0
         {
-            let shape_bits = packed_words * 32 / in_features;
+            let shape_bits = packed_bits / in_features;
             let shape_group_size = in_features / groups;
+            // The affine bounds the shared loader enforces: no affine group 16
+            // (only NVFP4 uses it), and the loadable bit widths.
             if (shape_group_size, shape_bits) != (group_size, bits)
-                && matches!(shape_bits, 1..=6 | 8)
-                && matches!(shape_group_size, 16 | 32 | 64 | 128)
+                && LOADABLE_AFFINE_BITS.contains(&shape_bits)
+                && SUPPORTED_AFFINE_GROUP_SIZES.contains(&shape_group_size)
             {
                 return UnifiedLinear::from_weights_with_mode(
                     weights,
