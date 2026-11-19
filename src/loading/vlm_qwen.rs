@@ -69,6 +69,35 @@ fn text_only_vision_config<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|e| anyhow::anyhow!("Failed to parse {label}: {e}"))
 }
 
+/// `full_config` with `vision_config.in_chans` dropped when `in_channels` is
+/// also present, else `full_config` itself.
+///
+/// A `transformers` re-export (NVIDIA's ModelOpt checkpoints among them)
+/// writes both `in_channels` and its older name `in_chans`. The Qwen vision
+/// structs take either through a serde alias, and serde rejects the pair as a
+/// duplicate field. One name alone is left as it is.
+///
+/// Used by: [`qwen_vision_config`] and the Qwen2-VL / Qwen2.5-VL IREE host
+/// preprocessor loaders
+fn without_duplicate_in_chans(
+    full_config: &serde_json::Value,
+) -> std::borrow::Cow<'_, serde_json::Value> {
+    let has_both = full_config.get("vision_config").is_some_and(|vision| {
+        vision.get("in_channels").is_some() && vision.get("in_chans").is_some()
+    });
+    if !has_both {
+        return std::borrow::Cow::Borrowed(full_config);
+    }
+    let mut config = full_config.clone();
+    if let Some(vision) = config
+        .get_mut("vision_config")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        vision.remove("in_chans");
+    }
+    std::borrow::Cow::Owned(config)
+}
+
 /// Parse the vision config when a tower is being loaded, else the text-only
 /// stand-in of [`text_only_vision_config`].
 fn qwen_vision_config<T: serde::de::DeserializeOwned>(
@@ -76,27 +105,8 @@ fn qwen_vision_config<T: serde::de::DeserializeOwned>(
     has_vision: bool,
     label: &str,
 ) -> Result<T> {
-    // A `transformers` re-export (NVIDIA's ModelOpt checkpoints among them)
-    // writes both `in_channels` and its older name `in_chans`. The structs
-    // take either through a serde alias, and serde rejects the pair as a
-    // duplicate field, so drop the alias when both are present.
-    let has_both = full_config.get("vision_config").is_some_and(|vision| {
-        vision.get("in_channels").is_some() && vision.get("in_chans").is_some()
-    });
-    let deduplicated;
-    let full_config = if has_both {
-        let mut config = full_config.clone();
-        if let Some(vision) = config
-            .get_mut("vision_config")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            vision.remove("in_chans");
-        }
-        deduplicated = config;
-        &deduplicated
-    } else {
-        full_config
-    };
+    let full_config = without_duplicate_in_chans(full_config);
+    let full_config = full_config.as_ref();
     if has_vision {
         parse_required_vlm_subconfig(full_config, "vision_config", label)
     } else {
@@ -208,9 +218,12 @@ pub(crate) fn load_qwen2_vl_iree_host_preprocessor(
             actual: "unqualified qwen2_vl config without vision_config".to_string(),
         });
     }
-    let mut vision_config: Qwen2VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen2VL vision config")
-            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let mut vision_config: Qwen2VLVisionConfig = parse_required_vlm_subconfig(
+        without_duplicate_in_chans(&full_config).as_ref(),
+        "vision_config",
+        "Qwen2VL vision config",
+    )
+    .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
     let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
         let canonical = name.strip_prefix("language_model.").unwrap_or(name);
@@ -371,9 +384,12 @@ pub(crate) fn load_qwen2_5_vl_iree_host_preprocessor(
                 .to_string(),
         });
     }
-    let mut vision_config: Qwen25VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen2.5VL vision config")
-            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let mut vision_config: Qwen25VLVisionConfig = parse_required_vlm_subconfig(
+        without_duplicate_in_chans(&full_config).as_ref(),
+        "vision_config",
+        "Qwen2.5VL vision config",
+    )
+    .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
     let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
         let canonical = name.strip_prefix("language_model.").unwrap_or(name);

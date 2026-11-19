@@ -22,7 +22,7 @@
 
 use super::{
     prepare_qwen2_5_vl_weights, qwen_vision_config, remap_qwen2_5_vl_native_keys,
-    rewrite_qwen2_5_vl_native_key,
+    rewrite_qwen2_5_vl_native_key, without_duplicate_in_chans,
 };
 
 #[test]
@@ -244,6 +244,14 @@ fn a_vision_config_naming_the_channel_count_twice_parses() {
             qwen_vision_config(&both, has_vision, "vision config").expect("both names");
         assert_eq!(config.in_channels, 3, "has_vision {has_vision}");
     }
+    // The IREE host-preprocessor loaders parse through the same dedupe.
+    let deduplicated = without_duplicate_in_chans(&both);
+    assert!(matches!(deduplicated, std::borrow::Cow::Owned(_)));
+    assert!(deduplicated["vision_config"].get("in_chans").is_none());
+    assert!(
+        serde_json::from_value::<Qwen25VLVisionConfig>(deduplicated["vision_config"].clone())
+            .is_ok()
+    );
 
     // Either name alone is read as before.
     for (name, channels) in [("in_chans", 1), ("in_channels", 4)] {
@@ -252,6 +260,10 @@ fn a_vision_config_naming_the_channel_count_twice_parses() {
         let config: Qwen25VLVisionConfig =
             qwen_vision_config(&full, true, "vision config").expect("one name");
         assert_eq!(config.in_channels, channels, "{name}");
+        assert!(matches!(
+            without_duplicate_in_chans(&full),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 }
 
