@@ -25,7 +25,10 @@
 //!   o_latent = quantized_matmul(p, ckv_q, transpose = false)
 //! ```
 //!
-//! The window is never dequantized on this path. A multi-token step and a
+//! On Metal an unmasked step runs the same arithmetic in the fused decode
+//! kernel instead, which reads the packed codes directly (issue #3156); the
+//! composed form above is every other backend's path and the kernel's
+//! fallback. The window is never dequantized on either path. A multi-token step and a
 //! cold prefill dequantize it once ([`LatentWindow::into_dense`]) and run the
 //! existing dense code, which therefore reads exactly the values a decode step
 //! reads.
@@ -41,6 +44,7 @@ use crate::cache::latent_quant::{LATENT_QUANT_GROUP_SIZE, QuantizedLatentRows};
 use crate::dtype;
 use crate::ffi::{self, MlxArray};
 use crate::mla::MlaGeometry;
+use crate::mla::decode::fused_absorbed_decode_quantized;
 use crate::mla::stats::{self, MlaDecodePath};
 
 /// MLX quantization mode of the stored latent.
@@ -210,7 +214,7 @@ pub(crate) fn quantize_latent_rows(
 }
 
 /// Dequantize a packed latent window to `[B, 1, S, kv_lora_rank]`.
-fn dequantize_latent(
+pub(crate) fn dequantize_latent(
     packed: &MlxArray,
     scales: &MlxArray,
     biases: &MlxArray,
@@ -291,12 +295,13 @@ pub(crate) fn rope_scores_by_row(
 /// * `q_absorbed` `[B, H, 1, kv_lora_rank]`, `q_pe` `[B, H, 1, qk_rope_head_dim]`
 /// * `mask` an optional additive `[.., 1, S]` mask
 ///
-/// Returns `[B, H, 1, kv_lora_rank]` in the query's dtype and records
-/// [`MlaDecodePath::AbsorbedComposed`]. The score, the softmax and the value
-/// sum run in f32: a long window puts most probabilities below the FP16
-/// normal range, and the value sum is where that precision is spent.
+/// Returns `[B, H, 1, kv_lora_rank]` in the query's dtype. An unmasked step
+/// runs on the fused Metal kernel's quantized variant where it applies
+/// ([`fused_absorbed_decode_quantized`], issue #3156) and records
+/// [`MlaDecodePath::AbsorbedFused`]; every other step, and every backend
+/// without the kernel, takes [`composed_quantized_attention`].
 ///
-/// The fused Metal kernel and the split-KV decode both read an FP16 latent, so
+/// The dense fused kernel and the split-KV decode both read an FP16 latent, so
 /// neither is tried here; the caller reaches this function by matching on
 /// [`LatentWindow::Quantized`] before either could read the window.
 ///
@@ -306,6 +311,40 @@ pub(crate) fn rope_scores_by_row(
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn quantized_absorbed_attention(
+    q_absorbed: &MlxArray,
+    q_pe: &MlxArray,
+    ckv_q: &MlxArray,
+    scales: &MlxArray,
+    biases: &MlxArray,
+    kpe: &MlxArray,
+    bits: i32,
+    group_size: i32,
+    scale: f32,
+    mask: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    if mask.is_none()
+        && let Some(out) = fused_absorbed_decode_quantized(
+            q_absorbed, q_pe, ckv_q, scales, biases, kpe, bits, group_size, scale,
+        )
+    {
+        return out;
+    }
+    composed_quantized_attention(
+        q_absorbed, q_pe, ckv_q, scales, biases, kpe, bits, group_size, scale, mask,
+    )
+}
+
+/// The composed form of [`quantized_absorbed_attention`], on
+/// `quantized_matmul`; records [`MlaDecodePath::AbsorbedComposed`]. The
+/// score, the softmax and the value sum run in f32: a long window puts most
+/// probabilities below the FP16 normal range, and the value sum is where that
+/// precision is spent.
+///
+/// Used by: [`quantized_absorbed_attention`], and the fused kernel's parity
+/// tests as their reference.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn composed_quantized_attention(
     q_absorbed: &MlxArray,
     q_pe: &MlxArray,
     ckv_q: &MlxArray,

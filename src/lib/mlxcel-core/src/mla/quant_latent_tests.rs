@@ -162,7 +162,12 @@ fn composed_quantized_decode_matches_dense_attention_over_the_same_rows() {
                 None,
             );
             let counts = stats::take();
-            assert_eq!(counts.absorbed_composed, 1, "{}", counts.summary());
+            // One step on one path: the fused kernel's quantized variant
+            // where it runs (#3156), the composed path elsewhere. Both are
+            // held to the same bounds below.
+            let fused = u64::from(crate::mla::fused_decode_enabled());
+            assert_eq!(counts.absorbed_fused, fused, "{}", counts.summary());
+            assert_eq!(counts.absorbed_composed, 1 - fused, "{}", counts.summary());
             assert_eq!(counts.total(), 1, "{}", counts.summary());
             assert_eq!(ffi::array_dtype(&out), dt);
             let got = to_vec_f32(&out);

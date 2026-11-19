@@ -853,6 +853,29 @@ mod ffi {
             scale: f32,
         ) -> Result<UniquePtr<MlxArray>>;
 
+        /// Whether the quantized-latent variant of the fused absorbed-MLA
+        /// decode kernel runs here (#3156): same rule as the dense one.
+        fn mla_absorbed_decode_fused_quantized_available() -> bool;
+
+        /// `mla_absorbed_decode_fused` over an affine-quantized latent window
+        /// (#3156). `ckv_q [B, 1, S, R * bits / 32]` uint32, `scales` and
+        /// `biases` `[B, 1, S, R / group_size]`, `kpe [B, 1, S, P]`; returns
+        /// `[B, H, 1, R]` in the queries' dtype. Throws off-Metal, at a bit
+        /// width other than 8 or outside the shape contract, so `-> Result`.
+        /// Used by: `mla::decode::fused_absorbed_decode_quantized`.
+        #[allow(clippy::too_many_arguments)]
+        fn mla_absorbed_decode_fused_quantized(
+            q_abs: &MlxArray,
+            q_pe: &MlxArray,
+            ckv_q: &MlxArray,
+            scales: &MlxArray,
+            biases: &MlxArray,
+            kpe: &MlxArray,
+            scale: f32,
+            group_size: i32,
+            bits: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Compiled GeGLU activation: gelu(gate) * x — single fused kernel
         /// Used by: legacy/tests for precise GeGLU
         fn compiled_geglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
