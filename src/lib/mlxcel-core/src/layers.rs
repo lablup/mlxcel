@@ -69,7 +69,13 @@ pub struct QuantizedWeight {
 /// incompatible"). `None` sends the caller to its projection-by-projection
 /// forwards, which carry each projection's own layout.
 ///
-/// Used by: the Gemma 1, Gemma 2 and Gemma 3 MLPs.
+/// The fused kernel also has no argument for [`QuantizedWeight::global_scale`],
+/// the per-tensor scale a ModelOpt NVFP4 checkpoint carries beside its block
+/// scales. A projection with one is not fused either: the kernel would run it
+/// unscaled and return wrong numbers without an error, while
+/// [`UnifiedLinear::forward`] applies the scale.
+///
+/// Used by: the Gemma 1, Gemma 2 and Gemma 3 MLPs, and [`compiled_swiglu_mlp`].
 #[must_use]
 pub fn fused_mlp_quantized_weights<'a>(
     gate: &'a UnifiedLinear,
@@ -88,7 +94,10 @@ pub fn fused_mlp_quantized_weights<'a>(
     let same_layout = |other: &QuantizedWeight| {
         gate.group_size == other.group_size && gate.bits == other.bits && gate.mode == other.mode
     };
-    (same_layout(up) && same_layout(down)).then_some((gate, up, down))
+    let unscaled = [gate, up, down]
+        .iter()
+        .all(|weight| weight.global_scale.is_none());
+    (unscaled && same_layout(up) && same_layout(down)).then_some((gate, up, down))
 }
 
 impl QuantizedWeight {
@@ -4880,10 +4889,12 @@ pub fn compiled_swiglu_mlp_fp16(
 /// - non-quantized regular weights, via `compiled_swiglu_mlp_fp16()`
 /// - quantized weights, via `compiled_moe_expert_forward()`
 ///
-/// Returns `None` for mixed projection kinds so callers can preserve their
-/// existing fallback path.
+/// Returns `None` for mixed projection kinds, and for quantized projections
+/// the fused kernel cannot run as one (see [`fused_mlp_quantized_weights`]:
+/// differing layouts, or a ModelOpt per-tensor `global_scale` the kernel has
+/// no argument for), so callers can preserve their existing fallback path.
 ///
-/// Used by: Llama3, Qwen3, SmolLM3, StableLM, Exaone4 and other SwiGLU models
+/// Used by: SmolLM3, StableLM, Exaone4 and Jamba
 pub fn compiled_swiglu_mlp(
     x: &MlxArray,
     gate_proj: &UnifiedLinear,
@@ -4898,11 +4909,11 @@ pub fn compiled_swiglu_mlp(
     {
         return None;
     }
-    if let (Some(gate_qw), Some(up_qw), Some(down_qw)) = (
-        gate_proj.quantized_weight(),
-        up_proj.quantized_weight(),
-        down_proj.quantized_weight(),
-    ) {
+    let all_quantized = gate_proj.quantized_weight().is_some()
+        && up_proj.quantized_weight().is_some()
+        && down_proj.quantized_weight().is_some();
+    if all_quantized {
+        let (gate_qw, up_qw, down_qw) = fused_mlp_quantized_weights(gate_proj, up_proj, down_proj)?;
         return Some(unsafe {
             ffi::compiled_moe_expert_forward(
                 x,
@@ -6618,6 +6629,86 @@ mod tests {
         // A projection that is not quantized at all leaves nothing to fuse.
         let dense = UnifiedLinear::Regular(Linear::new(seeded(&[128, 64], 17), None));
         assert!(fused_mlp_quantized_weights(&gate, &dense, &down).is_none());
+    }
+
+    #[test]
+    fn a_fused_mlp_takes_no_projection_with_a_tensor_scale() {
+        // The fused kernel has no argument for a per-tensor scale, so one on
+        // any of the three projections sends the MLP to its separate forwards.
+        let (gate_dense, down_dense) = (seeded(&[128, 64], 11), seeded(&[64, 128], 13));
+        let plain = |dense: &MlxArray| UnifiedLinear::new(quantized_4bit(dense), None);
+        let scaled = |dense: &MlxArray| {
+            let mut weight = quantized_4bit(dense);
+            weight.global_scale = Some(ffi::from_slice_f32(&[0.5], &[1]));
+            UnifiedLinear::new(weight, None)
+        };
+        assert!(
+            fused_mlp_quantized_weights(
+                &plain(&gate_dense),
+                &plain(&gate_dense),
+                &plain(&down_dense)
+            )
+            .is_some()
+        );
+        for position in 0..3 {
+            let pick = |index: usize, dense: &MlxArray| {
+                if index == position {
+                    scaled(dense)
+                } else {
+                    plain(dense)
+                }
+            };
+            let (gate, up, down) = (
+                pick(0, &gate_dense),
+                pick(1, &gate_dense),
+                pick(2, &down_dense),
+            );
+            assert!(
+                fused_mlp_quantized_weights(&gate, &up, &down).is_none(),
+                "scaled projection {position}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compiled_swiglu_mlp_declines_a_projection_with_a_tensor_scale() {
+        // `compiled_swiglu_mlp` feeds the same scale-less fused kernel family,
+        // so a ModelOpt per-tensor scale on any projection must send SmolLM3,
+        // StableLM, Exaone4 and Jamba to their per-projection forwards.
+        let (gate_dense, down_dense) = (seeded(&[128, 64], 11), seeded(&[64, 128], 13));
+        let x = seeded(&[1, 1, 64], 19);
+        let plain = |dense: &MlxArray| UnifiedLinear::new(quantized_4bit(dense), None);
+        let scaled = |dense: &MlxArray| {
+            let mut weight = quantized_4bit(dense);
+            weight.global_scale = Some(ffi::from_slice_f32(&[0.5], &[1]));
+            UnifiedLinear::new(weight, None)
+        };
+        let fused = compiled_swiglu_mlp(
+            &x,
+            &plain(&gate_dense),
+            &plain(&gate_dense),
+            &plain(&down_dense),
+        )
+        .expect("unscaled quantized projections stay fused");
+        assert_eq!(ffi::array_shape(&fused), vec![1, 1, 64]);
+        for position in 0..3 {
+            let pick = |index: usize, dense: &MlxArray| {
+                if index == position {
+                    scaled(dense)
+                } else {
+                    plain(dense)
+                }
+            };
+            let (gate, up, down) = (
+                pick(0, &gate_dense),
+                pick(1, &gate_dense),
+                pick(2, &down_dense),
+            );
+            assert!(
+                compiled_swiglu_mlp(&x, &gate, &up, &down).is_none(),
+                "scaled projection {position}"
+            );
+        }
     }
 
     /// Issues #1994 and #2001: with matching f16 or bf16 scales and input and

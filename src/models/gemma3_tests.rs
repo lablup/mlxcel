@@ -1248,3 +1248,129 @@ mod batched_decode_entry {
 
 #[path = "gemma3_vlm_mask_tests.rs"]
 mod vlm_external_mask;
+
+// A ModelOpt NVFP4 MLP: each projection carries a per-tensor scale beside its
+// block scales. The fused forward has no argument for it and ran all three
+// projections unscaled, with no error.
+#[test]
+fn a_gemma3_mlp_preserves_each_projection_global_scale() {
+    use mlxcel_core::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+    use mlxcel_core::weights::WeightMap;
+
+    if quant_mode_support(QuantMode::Nvfp4) != QuantModeSupport::Native {
+        eprintln!("skipping: this backend has no native NVFP4 kernel");
+        return;
+    }
+    let declared = args(
+        r#"{
+        "hidden_size": 64, "intermediate_size": 128,
+        "quantization": {"group_size": 16, "bits": 4}
+    }"#,
+    );
+    let values: Vec<f32> = (0..128).map(|i| ((i % 13) as f32 - 6.0) * 0.03).collect();
+    let x = mlxcel_core::from_slice_f32(&values, &[1, 2, 64]);
+    let mut failed = Vec::new();
+    for scales in [
+        [1.0, 1.0, 1.0],
+        [0.5, 1.0, 1.0],
+        [1.0, 2.0, 1.0],
+        [1.0, 1.0, 3.25],
+        [0.5, 2.0, 3.25],
+    ] {
+        let mut weights = WeightMap::new();
+        for (index, (name, out, input)) in [
+            ("gate_proj", 128, 64),
+            ("up_proj", 128, 64),
+            ("down_proj", 64, 128),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dense: Vec<f32> = (0..out * input)
+                .map(|i| (((i * 17 + index as i32 * 23) % 101) as f32 - 50.0) * 0.002)
+                .collect();
+            let dense = mlxcel_core::from_slice_f32(&dense, &[out, input]);
+            let packed = mlxcel_core::quantize_weights_with_mode(&dense, 16, 4, "nvfp4");
+            let prefix = format!("mlp.{name}");
+            weights.insert(
+                format!("{prefix}.weight"),
+                mlxcel_core::quantized_weights_w(&packed),
+            );
+            weights.insert(
+                format!("{prefix}.scales"),
+                mlxcel_core::quantized_weights_scales(&packed),
+            );
+            weights.insert(
+                format!("{prefix}.global_scale"),
+                mlxcel_core::from_slice_f32(&[scales[index]], &[1]),
+            );
+        }
+        let mlp =
+            super::MLP::from_weights(&weights, &declared, "mlp").expect("synthetic NVFP4 MLP");
+        let gate = mlp.gate_proj.forward(&x);
+        let up = mlp.up_proj.forward(&x);
+        let activated = mlxcel_core::compiled_geglu_approx_activation(&gate, &up);
+        let expected = mlp.down_proj.forward(&activated);
+        let actual = mlp.forward(&x);
+        let actual_values = to_vec(&actual);
+        let expected_values = to_vec(&expected);
+        assert_eq!(actual_values.len(), expected_values.len());
+        assert!(!actual_values.is_empty());
+        // f32::max ignores an isolated NaN; reject it explicitly so an invalid
+        // calculation cannot accidentally count as numerical agreement.
+        assert!(
+            actual_values
+                .iter()
+                .chain(&expected_values)
+                .all(|v| v.is_finite()),
+            "non-finite output for global scales {scales:?}"
+        );
+        let error = actual_values
+            .iter()
+            .zip(&expected_values)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!("MLP global scales {scales:?}: max_abs={error:e}");
+        if error > 1e-5 {
+            failed.push((scales, error));
+        }
+
+        // The same numbers without `UnifiedLinear`'s own scale handling: the
+        // unit-scale projections, each multiplied by its scalar on the host.
+        let unit = {
+            let mut unit = WeightMap::new();
+            for (name, tensor) in &weights {
+                let tensor = if name.ends_with(".global_scale") {
+                    mlxcel_core::from_slice_f32(&[1.0], &[1])
+                } else {
+                    mlxcel_core::copy(tensor)
+                };
+                unit.insert(name.clone(), tensor);
+            }
+            super::MLP::from_weights(&unit, &declared, "mlp").expect("unit-scale MLP")
+        };
+        let times = |array: &mlxcel_core::MlxArray, factor: f32| -> Vec<f32> {
+            to_vec(array).into_iter().map(|v| v * factor).collect()
+        };
+        let gate = mlxcel_core::from_slice_f32(
+            &times(&unit.gate_proj.forward(&x), scales[0]),
+            &[1, 2, 128],
+        );
+        let up =
+            mlxcel_core::from_slice_f32(&times(&unit.up_proj.forward(&x), scales[1]), &[1, 2, 128]);
+        let activated = mlxcel_core::compiled_geglu_approx_activation(&gate, &up);
+        let reference = times(&unit.down_proj.forward(&activated), scales[2]);
+        let largest = reference.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+        let off = actual_values
+            .iter()
+            .zip(&reference)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!("MLP global scales {scales:?}: host reference max_abs={off:e} of {largest:e}");
+        assert!(largest > 1e-5, "a degenerate reference: {largest}");
+        if off > 1e-4 * largest {
+            failed.push((scales, off));
+        }
+    }
+    assert!(failed.is_empty(), "MLP global-scale mismatches: {failed:?}");
+}
