@@ -339,7 +339,8 @@ impl<'a> MlaLatentCache<'a> {
     /// selection remains identical to [`Self::attend`].
     ///
     /// A quantized window takes [`quantized_absorbed_attention`] for one
-    /// query and is dequantized once for a multi-token step. The fused kernel
+    /// query (the fused kernel's quantized variant where it applies, #3156)
+    /// and is dequantized once for a multi-token step. The dense fused kernel
     /// and split-KV read an FP16 latent, so the match below keeps both away
     /// from a quantized window before either looks at it.
     ///

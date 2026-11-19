@@ -119,7 +119,8 @@ pub use cache::{
     stores_latent_through_view,
 };
 pub use decode::{
-    FUSED_DECODE_MAX_KEYS, absorb_queries, absorbed_decode, fused_absorbed_decode, unabsorb_output,
+    FUSED_DECODE_MAX_KEYS, FUSED_DECODE_QUANTIZED_MAX_KEYS, absorb_queries, absorbed_decode,
+    fused_absorbed_decode, fused_absorbed_decode_quantized, unabsorb_output,
 };
 pub use kv_b_split::{KvBProjGeometry, decompose_kv_b_proj};
 pub use prefill::{FoldedMask, rope_folded_attention};

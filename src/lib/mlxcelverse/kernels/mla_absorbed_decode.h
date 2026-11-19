@@ -32,8 +32,16 @@
 // combine through threadgroup memory, f32 throughout), and a merge that
 // rescales the two halves by their log-sum-exp.
 //
-// Used by: `cpp/mlx_cxx_bridge.cpp` (`mla_absorbed_decode_fused`), the
-// single-query branch of `mlxcel_core::mla::decode::absorbed_attention`.
+// A second variant of the partial pass reads an affine-quantized latent
+// window (issue #3156): the same body with the per-key latent load reading
+// the packed codes and each group's scale and bias factored out of the score
+// and the value sum, so a quantized cache is decoded without dequantizing the
+// window.
+//
+// Used by: `cpp/mlx_cxx_bridge.cpp` (`mla_absorbed_decode_fused`,
+// `mla_absorbed_decode_fused_quantized`), the single-query branch of
+// `mlxcel_core::mla::decode::absorbed_attention` and
+// `mlxcel_core::mla::decode::fused_absorbed_decode_quantized`.
 
 #include <mlx/array.h>
 
@@ -67,5 +75,42 @@ mlx::core::array mla_absorbed_decode(
     const mlx::core::array& ckv,
     const mlx::core::array& kpe,
     float scale);
+
+// Whether the quantized variant runs on this backend; same rule as
+// `mla_absorbed_decode_available()`, against its own port table.
+bool mla_absorbed_decode_quantized_available();
+
+// `mla_absorbed_decode` over an affine-quantized latent window.
+//
+// Inputs that differ from the dense variant:
+// - `ckv_q`  `[B, 1, S, R * bits / 32]` uint32: the packed latent, in the MLX
+//   `quantize` layout (element `e` in bits `[bits * (e % (32 / bits)), +bits)`
+//   of word `e / (32 / bits)`).
+// - `scales`, `biases` `[B, 1, S, R / group_size]`: one affine pair per group,
+//   an element reading back as `code * scale + bias`. One float dtype for
+//   both, independent of the queries'.
+// - `kpe` `[B, 1, S, P]`: any float dtype, independent of the queries'.
+//
+// `bits` must be 8 (a 4-bit latent is refused: it is not a cache mode). `R`
+// must be a whole number of groups and `group_size` a multiple of `R / 32`,
+// which for groups of 64 means a power-of-two rank from 64 to 1024. The four
+// window arrays may be strided views with a contiguous last axis. The score,
+// softmax and value sum run in f32.
+//
+// Output: `[B, H, 1, R]` in the queries' dtype.
+//
+// Throws when there is no port on this backend or an input is outside the
+// contract; `mla::decode::fused_absorbed_decode_quantized` checks both first
+// and treats a throw as "take the composed path".
+mlx::core::array mla_absorbed_decode_quantized(
+    const mlx::core::array& q_abs,
+    const mlx::core::array& q_pe,
+    const mlx::core::array& ckv_q,
+    const mlx::core::array& scales,
+    const mlx::core::array& biases,
+    const mlx::core::array& kpe,
+    float scale,
+    int group_size,
+    int bits);
 
 } // namespace mlxcel::turbo
