@@ -1268,7 +1268,7 @@ impl KimiK3MLAAttention {
                 let output = self.unembed_out.forward(&output, true);
                 return self.project_output(x, &output, b, l);
             }
-            window => window.into_dense(),
+            window => super::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe)),
         };
         mlxcel_core::mla::stats::record(if absorbed {
             if l == 1 {

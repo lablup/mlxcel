@@ -40,6 +40,11 @@ const HIDDEN: i32 = 32;
 /// An MLA layer on pseudo-random weights with `kv_lora_rank` `rank` (64 is
 /// one affine group) and rope width `rope`.
 fn attention(rank: usize, rope: usize) -> KimiMLAAttention {
+    attention_in(rank, rope, mlxcel_core::dtype::FLOAT32)
+}
+
+/// [`attention`] with every weight cast to `dtype`.
+fn attention_in(rank: usize, rope: usize, dtype: i32) -> KimiMLAAttention {
     let mut config = mla_config(rank);
     config.qk_rope_head_dim = Some(rope);
     let heads = config.num_attention_heads as i32;
@@ -55,7 +60,10 @@ fn attention(rank: usize, rope: usize) -> KimiMLAAttention {
         let n = shape.iter().product::<i32>() as usize;
         weights.insert(
             format!("{prefix}.{name}.weight"),
-            mlxcel_core::from_slice_f32(&noise(seed, n, scale), shape),
+            mlxcel_core::astype(
+                &mlxcel_core::from_slice_f32(&noise(seed, n, scale), shape),
+                dtype,
+            ),
         );
     };
     put("q_proj", &[heads * q_head, HIDDEN], 0.4);
@@ -65,7 +73,7 @@ fn attention(rank: usize, rope: usize) -> KimiMLAAttention {
     put("o_proj", &[HIDDEN, heads * value], 0.4);
     weights.insert(
         format!("{prefix}.kv_a_layernorm.weight"),
-        mlxcel_core::ones(&[rank], mlxcel_core::dtype::FLOAT32),
+        mlxcel_core::ones(&[rank], dtype),
     );
     KimiMLAAttention::from_weights(&weights, &config, prefix)
         .unwrap_or_else(|e| panic!("random MLA fixture must load: {e}"))
@@ -353,5 +361,33 @@ fn runtime_bytes_match_the_inspect_rate_on_the_mla_layers() {
     assert_eq!(
         e.marginal_bytes_per_token,
         cache.bytes_per_reserved_token() as u64
+    );
+}
+
+/// A bf16 layer over an int8 latent keeps bf16 activations. The window
+/// dequantizes to FP16, and bf16 against FP16 promotes to float32 in MLX, so
+/// without the cast back a prefill returned float32, which on the real
+/// checkpoint carried float32 into the KDA state and ran every later decode
+/// step in float32 (2.5x slower decode on Kimi-Linear-48B).
+#[test]
+fn a_bf16_layer_keeps_bf16_over_an_int8_latent() {
+    let bf16 = mlxcel_core::dtype::BFLOAT16;
+    let attn = attention_in(64, 64, bf16);
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
+    let prefill = attn.forward(&mlxcel_core::astype(&hidden(5), bf16), None, &mut cache);
+    assert_eq!(
+        mlxcel_core::array_dtype(&prefill),
+        bf16,
+        "prefill output dtype"
+    );
+    let step = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&noise(29, HIDDEN as usize, 1.0), &[1, 1, HIDDEN]),
+        bf16,
+    );
+    let decode = attn.forward(&step, None, &mut cache);
+    assert_eq!(
+        mlxcel_core::array_dtype(&decode),
+        bf16,
+        "decode output dtype"
     );
 }

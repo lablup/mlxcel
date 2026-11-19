@@ -100,6 +100,32 @@ fn warn_latent_view_declined(family: &str, mode: mlxcel_core::cache::KVCacheMode
     }
 }
 
+/// The dense latent pair of `window`, in the activation dtype `dtype`.
+///
+/// A quantized window dequantizes to FP16 (its `k_pe` is stored FP16), and a
+/// bf16 checkpoint's query is bf16. MLX promotes a bf16 and FP16 pair to
+/// float32, so a multi-token step over the dequantized window would return
+/// float32 and carry it into the residual stream and into every later
+/// layer's state: on Kimi Linear the KDA recurrent state then stays float32
+/// for the rest of the sequence and every decode step runs in float32. A
+/// dense window already holds the activation dtype, so the cast is a no-op.
+///
+/// Used by: the Kimi Linear and Kimi K3 MLA forwards (#3162).
+pub(crate) fn dense_latent_in(
+    window: LatentWindow,
+    dtype: i32,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let (ckv, kpe) = window.into_dense();
+    let cast = |a: UniquePtr<MlxArray>| {
+        if mlxcel_core::array_dtype(&a) == dtype {
+            a
+        } else {
+            mlxcel_core::astype(&a, dtype)
+        }
+    };
+    (cast(ckv), cast(kpe))
+}
+
 /// The mode a model-owned latent-pair cache is built in for a requested
 /// layer `mode`: fp16 and the affine int8 latent pass through, and anything
 /// the latent layout refuses (every Turbo mode) is built fp16.

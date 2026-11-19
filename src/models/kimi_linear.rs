@@ -692,7 +692,7 @@ impl KimiMLAAttention {
                 let output = mlxcel_core::reshape(&output, &[b, l, -1]);
                 return self.o_proj.forward(&output);
             }
-            window => window.into_dense(),
+            window => super::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe)),
         };
         mlxcel_core::mla::stats::record(if absorbed {
             if l == 1 {
