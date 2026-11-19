@@ -1,0 +1,33 @@
+round,arm,model,prompt_tokens,flags,decode_ms,decode_tok_s,prefill_tok_s,measured_phase_peak_gb
+1,fp16-latent,deepseek-v2-lite-chat-4bit-mlx,512,"",763.36,166.37,1382.09,9.51
+1,int8-latent,deepseek-v2-lite-chat-4bit-mlx,512,"--kv-cache-mode int8",921.59,137.81,1375.59,9.52
+1,int4-latent,deepseek-v2-lite-chat-4bit-mlx,512,"--kv-cache-mode int4",927.23,136.97,1377.99,9.51
+1,int8-decompressed,deepseek-v2-lite-chat-4bit-mlx,512,"MLXCEL_MLA_ABSORBED=0 --kv-cache-mode int8",1050.04,120.95,1366.95,9.55
+2,fp16-latent,deepseek-v2-lite-chat-4bit-mlx,512,"",776.90,163.47,1382.97,9.51
+2,int8-latent,deepseek-v2-lite-chat-4bit-mlx,512,"--kv-cache-mode int8",912.14,139.23,1378.55,9.52
+2,int4-latent,deepseek-v2-lite-chat-4bit-mlx,512,"--kv-cache-mode int4",922.48,137.67,1376.01,9.51
+2,int8-decompressed,deepseek-v2-lite-chat-4bit-mlx,512,"MLXCEL_MLA_ABSORBED=0 --kv-cache-mode int8",1049.88,120.97,1368.39,9.55
+3,fp16-latent,deepseek-v2-lite-chat-4bit-mlx,512,"",776.33,163.59,1383.99,9.51
+3,int8-latent,deepseek-v2-lite-chat-4bit-mlx,512,"--kv-cache-mode int8",914.66,138.85,1378.69,9.52
+3,int4-latent,deepseek-v2-lite-chat-4bit-mlx,512,"--kv-cache-mode int4",914.74,138.84,1375.56,9.51
+3,int8-decompressed,deepseek-v2-lite-chat-4bit-mlx,512,"MLXCEL_MLA_ABSORBED=0 --kv-cache-mode int8",1048.52,121.12,1367.90,9.55
+1,fp16-latent,deepseek-v2-lite-chat-4bit-mlx,2048,"",871.24,145.77,1375.72,9.65
+1,int8-latent,deepseek-v2-lite-chat-4bit-mlx,2048,"--kv-cache-mode int8",1000.21,126.97,1373.01,9.63
+1,int4-latent,deepseek-v2-lite-chat-4bit-mlx,2048,"--kv-cache-mode int4",978.90,129.74,1373.11,9.63
+1,int8-decompressed,deepseek-v2-lite-chat-4bit-mlx,2048,"MLXCEL_MLA_ABSORBED=0 --kv-cache-mode int8",1442.11,88.07,1362.46,10.57
+2,fp16-latent,deepseek-v2-lite-chat-4bit-mlx,2048,"",863.84,147.02,1376.69,9.65
+2,int8-latent,deepseek-v2-lite-chat-4bit-mlx,2048,"--kv-cache-mode int8",995.48,127.58,1374.78,9.63
+2,int4-latent,deepseek-v2-lite-chat-4bit-mlx,2048,"--kv-cache-mode int4",973.80,130.42,1372.10,9.63
+2,int8-decompressed,deepseek-v2-lite-chat-4bit-mlx,2048,"MLXCEL_MLA_ABSORBED=0 --kv-cache-mode int8",1431.07,88.74,1362.85,10.54
+3,fp16-latent,deepseek-v2-lite-chat-4bit-mlx,2048,"",865.79,146.69,1376.29,9.65
+3,int8-latent,deepseek-v2-lite-chat-4bit-mlx,2048,"--kv-cache-mode int8",990.64,128.20,1372.89,9.63
+3,int4-latent,deepseek-v2-lite-chat-4bit-mlx,2048,"--kv-cache-mode int4",981.87,129.34,1372.74,9.63
+3,int8-decompressed,deepseek-v2-lite-chat-4bit-mlx,2048,"MLXCEL_MLA_ABSORBED=0 --kv-cache-mode int8",1435.00,88.50,1362.83,10.57
+1,fp16-latent,deepseek-v2-lite-chat-4bit-mlx,16384,"",1159.75,109.51,1125.14,11.45
+1,int8-latent,deepseek-v2-lite-chat-4bit-mlx,16384,"--kv-cache-mode int8",1799.61,70.57,1127.43,11.23
+1,int4-latent,deepseek-v2-lite-chat-4bit-mlx,16384,"--kv-cache-mode int4",1644.52,77.23,1128.06,11.13
+1,int8-decompressed,deepseek-v2-lite-chat-4bit-mlx,16384,"MLXCEL_MLA_ABSORBED=0 --kv-cache-mode int8",5009.59,25.35,1128.82,17.04
+2,fp16-latent,deepseek-v2-lite-chat-4bit-mlx,16384,"",1151.81,110.26,1124.71,11.45
+2,int8-latent,deepseek-v2-lite-chat-4bit-mlx,16384,"--kv-cache-mode int8",1794.67,70.77,1127.40,11.23
+2,int4-latent,deepseek-v2-lite-chat-4bit-mlx,16384,"--kv-cache-mode int4",1643.08,77.29,1127.20,11.13
+2,int8-decompressed,deepseek-v2-lite-chat-4bit-mlx,16384,"MLXCEL_MLA_ABSORBED=0 --kv-cache-mode int8",4987.35,25.46,1128.33,16.86

@@ -185,6 +185,9 @@ impl KvCacheModeAdvice {
 ///   [`KVCacheMode::Int8`]. Those families have their request substituted back
 ///   to fp16 at startup (issue #1350), so advice to the contrary would name a
 ///   mode the binary refuses.
+/// - DeepSeek V2 under absorbed decode is advised [`KVCacheMode::Int8`] at
+///   medium and long context: the mode stores its MLA latent affine-quantized
+///   (issue #3155).
 #[must_use]
 pub fn recommend_kv_cache_mode(
     arch_kind: KvArchKind,
@@ -221,20 +224,21 @@ pub fn recommend_kv_cache_mode(
                 Medium | Long if caches_mla_latent_pair(model_type) => (
                     Fp16,
                     None,
-                    "This family caches the MLA (kv_latent, k_pe) pair in one KV cache with no decompressed fallback, so every quantized mode is mis-calibrated for it and is substituted back to fp16 at startup. See the MLA latent section of docs/turbo-kv-cache.md. Keep fp16.",
+                    "This family caches the MLA (kv_latent, k_pe) pair in one KV cache with no decompressed fallback, so every quantized mode is mis-calibrated for it and is substituted back to fp16 at startup. See the MLA latent caches section of docs/turbo-kv-cache.md. Keep fp16.",
                 ),
-                // DeepSeek V2 sized as the latent: absorbed decode is on and
-                // the run's KV mode is fp16 (a quantized run classifies as
-                // `MlaDecompressed`, #3153). An int8 cache would decline it
-                // (`latent_layout_supports_mode`) and fall back to the
-                // decompressed per-head layout, about 4x
-                // the fp16 latent on V2-Lite (5120 against 1152 bytes per token
-                // per layer). Without absorption the kind is `MlaDecompressed`
-                // and int8 below is the right advice.
+                // DeepSeek V2 sized as the latent: absorbed decode is on. An
+                // int8 cache stores that latent as an affine group-64 triple
+                // with fp16 rope keys (issue #3155), 672 against 1152 bytes
+                // per token per layer on V2-Lite, and keeps absorbed decode.
+                // The Turbo modes would decline the latent and are
+                // substituted with fp16 at startup, so they are never named.
+                // 4-bit is not offered: it failed the #3155 quality gate.
+                // Without absorption the kind is `MlaDecompressed` and the
+                // per-token int8 below is the advice.
                 Medium | Long if arch_kind == MlaCompressed && model_type == "deepseek_v2" => (
-                    Fp16,
+                    Int8,
                     None,
-                    "DeepSeek V2 caches the MLA latent here because absorbed decode is on. A quantized KV mode turns absorption off and returns to the decompressed per-head cache, which is larger than the fp16 latent. Keep fp16.",
+                    "DeepSeek V2 caches the MLA latent here because absorbed decode is on. int8 stores that latent as affine group-64 8-bit with fp16 rope keys, about 1.7x smaller than the fp16 latent (672 against 1152 bytes per token per layer on V2-Lite), and keeps absorbed decode. It decodes on the composed path rather than the fused kernel, so benchmark decode speed first. The Turbo modes would turn absorption off and are substituted with fp16.",
                 ),
                 Medium | Long => (
                     Int8,
@@ -299,8 +303,9 @@ pub fn recommend_kv_cache_mode(
 ///
 /// `kv_mode` is the KV cache mode the run resolves to. It only matters for
 /// families whose cache layout depends on it: DeepSeek V2 caches the absorbed
-/// latent under FP16 and decompressed per-head K/V under any other mode, so
-/// the advice is classified against the cache the run really builds (#3153).
+/// latent under FP16 and int8 and decompressed per-head K/V under a Turbo
+/// mode, so the advice is classified against the cache the run really builds
+/// (#3153).
 #[must_use]
 pub fn advise_kv_cache_modes(model_path: &Path, kv_mode: KVCacheMode) -> Vec<KvCacheModeAdvice> {
     let config_str = match std::fs::read_to_string(model_path.join("config.json")) {
@@ -348,7 +353,7 @@ fn arch_and_type_from_config(
     // Reuse the architecture classifier so the advisor and the memory
     // estimator never disagree on what family a model is. Batch and ctx do not
     // affect the detected `kind`. The mode can: it decides whether DeepSeek V2
-    // is `MlaCompressed` (FP16, absorbed) or `MlaDecompressed`.
+    // is `MlaCompressed` (FP16 or int8, absorbed) or `MlaDecompressed`.
     //
     // Classify against the mode the run resolves to, not the one requested: a
     // quantized request on an absorbing DeepSeek V2 resolves back to fp16
@@ -361,13 +366,11 @@ fn arch_and_type_from_config(
 }
 
 /// Read the canonical lowercase `model_type` string, matching the allowlist's
-/// lookup contract. VLMs may nest it under `text_config`.
+/// lookup contract. VLMs may nest it under `text_config`; DeepSeek-VL2 is
+/// read as its `deepseek_v2` decoder, the same type `kv_arch` sizes it as.
 fn read_model_type(config: &serde_json::Value) -> String {
-    let text = config.get("text_config").unwrap_or(config);
-    text.get("model_type")
-        .and_then(|v| v.as_str())
-        .or_else(|| config.get("model_type").and_then(|v| v.as_str()))
-        .unwrap_or("")
+    config_fields::kv_decoder_model_type(config)
+        .unwrap_or_default()
         .to_ascii_lowercase()
 }
 

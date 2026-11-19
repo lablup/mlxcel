@@ -98,6 +98,10 @@ mod fp16_growth;
 #[cfg(test)]
 #[path = "cache/fp16_growth_tests.rs"]
 mod fp16_growth_tests;
+pub mod latent_quant;
+#[cfg(test)]
+#[path = "cache/latent_quant_tests.rs"]
+mod latent_quant_tests;
 pub use first_fill::{FIRST_FILL_REWIND_SLACK, FullFirstFillScope};
 #[cfg(test)]
 #[path = "cache/kv_trim_tests.rs"]
@@ -263,6 +267,10 @@ pub enum KVCacheMode {
     Fp16,
     /// Per-token INT8 absmax quantization. Reduces KV cache memory by ~50%
     /// at the cost of small quantization error per token.
+    ///
+    /// On an absorbed MLA latent cache (`mla::MlaLatentCache`) the same mode
+    /// stores the shared latent as an MLX affine group-64 8-bit triple and
+    /// leaves `k_pe` FP16 instead (issue #3155, `cache/latent_quant.rs`).
     Int8,
     /// Asymmetric Fp16-K + Turbo4-V. K side stays in FP16; V side uses 4-bit
     /// PolarQuant with Walsh–Hadamard rotation for ~26% net KV memory savings
@@ -1006,6 +1014,12 @@ impl KVCache {
             self.write_paged(&new_keys, &new_values);
             return;
         }
+        // A quantized MLA latent is appended through
+        // `update_latent_quantized` only; per-head rows never join it.
+        debug_assert!(
+            !self.holds_quantized_latent(),
+            "per-head K/V written to a cache that holds a quantized MLA latent"
+        );
         match self.mode {
             KVCacheMode::Int8 => self.update_int8(new_keys, new_values),
             KVCacheMode::Turbo4Asym => self.update_turbo4_asym(new_keys, new_values),
@@ -2798,7 +2812,7 @@ impl KVCache {
                 .values
                 .as_ref()
                 .map(|v| Self::slice_keep_sink(v, keep, n, live_len));
-            if self.mode == KVCacheMode::Int8 {
+            if self.mode.uses_scale_sidecars() {
                 self.key_scales = self
                     .key_scales
                     .as_ref()
@@ -2829,14 +2843,16 @@ impl KVCache {
                     &[v_shape[0], v_shape[1], live_len, v_shape[3]],
                 ));
             }
-            // Slice INT8 scale sidecars in lockstep.
-            if self.mode == KVCacheMode::Int8 {
+            // Slice the scale sidecars in lockstep. Their last dim is read
+            // from the array: 1 for per-head INT8, one entry per group for a
+            // quantized MLA latent (`cache/latent_quant.rs`).
+            if self.mode.uses_scale_sidecars() {
                 if let Some(ref ks) = self.key_scales {
                     let ks_shape = ffi::array_shape(ks);
                     self.key_scales = Some(ffi::slice(
                         ks,
                         &[0, 0, n, 0],
-                        &[ks_shape[0], ks_shape[1], live_len, 1],
+                        &[ks_shape[0], ks_shape[1], live_len, ks_shape[3]],
                     ));
                 }
                 if let Some(ref vs) = self.val_scales {
@@ -2844,7 +2860,7 @@ impl KVCache {
                     self.val_scales = Some(ffi::slice(
                         vs,
                         &[0, 0, n, 0],
-                        &[vs_shape[0], vs_shape[1], live_len, 1],
+                        &[vs_shape[0], vs_shape[1], live_len, vs_shape[3]],
                     ));
                 }
             }

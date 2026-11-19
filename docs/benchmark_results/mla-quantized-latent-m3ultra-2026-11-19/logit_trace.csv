@@ -1,0 +1,5 @@
+model,shape,reference,candidate,positions,top1_disagree,decided_positions,decided_disagree,largest_gap_at_disagreement,ppl_reference,ppl_candidate,mla_paths_candidate
+deepseek-v2-lite-chat-4bit-mlx,decode1k,fp16 latent (absorbed fused),int8 latent,512,12,209,0,0.078,14.6613,14.7041,decompressed=216 absorbed_composed=13824
+deepseek-v2-lite-chat-4bit-mlx,decode4k,fp16 latent (absorbed fused),int8 latent,256,3,105,0,0.109,12.9589,12.8767,decompressed=108 absorbed_composed=6912
+deepseek-v2-lite-chat-4bit-mlx,decode1k,fp16 latent (absorbed fused),int4 latent (not shipped),512,45,209,0,0.859,14.6613,14.6607,decompressed=216 absorbed_composed=13824
+deepseek-v2-lite-chat-4bit-mlx,decode4k,fp16 latent (absorbed fused),int4 latent (not shipped),256,14,105,0,0.859,12.9589,13.2174,decompressed=108 absorbed_composed=6912

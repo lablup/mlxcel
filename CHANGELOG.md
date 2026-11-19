@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Quantized MLA latent cache on DeepSeek V2** (#3155). `--kv-cache-mode int8` (also `--cache-type-k int8 --cache-type-v int8` and `--kv-bits 8`) on `deepseek_v2` under absorbed decode now stores the MLA latent as affine group-64 8-bit with fp16 rope keys, 672 bytes per token per layer on DeepSeek-V2-Lite against 1152 for the fp16 latent, instead of being substituted with fp16. Decode runs absorbed on the packed rows through `quantized_matmul`; prefill dequantizes the window once per step. On an M3 Ultra the teacher-forced trace shows no decided-position disagreement against the fp16 latent behind 1024 and 4096 tokens, and decode is 13 to 15% slower than the fp16 latent behind 512 and 2048 tokens and 36% slower behind 16384 (1.15x to 2.8x faster than the decompressed int8 cache). `mlxcel inspect`, the `--estimate-memory` preflights, the prompt-cache store budget and `--recommend-quant` size and advise the new layout, and `--kv-group-size` other than 64 is refused for such a model. DeepSeek-VL2 follows the same rules through its `deepseek_v2` decoder (mode resolution, sizing and advice read `language_config`). Turbo modes on an absorbing `deepseek_v2` still resolve to fp16, and the latent-pair families (DeepSeek V3 and the rest) keep fp16 until #3160-#3163. A 4-bit latent was measured and not shipped: it flipped the top-1 token where the reference's top two were up to 0.86 logits apart. CUDA and ROCm were not measured. See `docs/benchmark_results/mla-quantized-latent-m3ultra-2026-11-19.md`.
+- **`MLXCEL_TRACE_MLA_STATS=1` on `mlxcel generate` and `mlxcel-bench-decode`** (#3155). Both print the MLA attention dispatch counters to stderr when the run ends, as `examples/logit_trace` already did.
+
 ## [v0.9.0-beta.1] - 2026-11-19
 
 ### Added

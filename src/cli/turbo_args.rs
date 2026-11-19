@@ -52,6 +52,9 @@ pub struct TurboKvCacheArgs {
     ///   fp16 / f16         Standard half-precision storage (default, no overhead).
     ///   int8               Per-token INT8 absmax quantization. ~50% KV memory
     ///                      savings with small per-token quantization error.
+    ///                      On DeepSeek V2 under absorbed MLA decode it stores
+    ///                      the latent as affine group-64 8-bit instead (672
+    ///                      against 1152 bytes per token per layer on V2-Lite).
     ///   fp16+turbo4        Asymmetric Fp16-K + Turbo4-V (alias: turbo4-asym).
     ///                      K side stays FP16; V side uses 4-bit PolarQuant
     ///                      with Walsh-Hadamard rotation. ~26% net KV savings
@@ -500,15 +503,47 @@ pub fn resolve_and_announce_kv_cache_mode(
     effective
 }
 
-/// Read the raw `model_type` string from a model directory's `config.json`.
+/// Whether a cache built in `mode` for the model at `model_path` stores an
+/// affine-quantized MLA latent: `int8` on a family whose decoder
+/// reads its latent through `mla::MlaLatentCache`, with absorbed decode on
+/// (issue #3155).
+///
+/// Used by: `server::cli_input` (the `--kv-group-size` check) and the
+/// `generate` KV cache banner.
+#[must_use]
+pub fn model_stores_quantized_latent(mode: KVCacheMode, model_path: &Path) -> bool {
+    mode.latent_affine_bits().is_some()
+        && mlxcel_core::mla::absorbed_enabled()
+        && read_config_model_type(model_path)
+            .is_some_and(|model_type| mlxcel_core::mla::stores_latent_through_view(&model_type))
+}
+
+/// Read the `model_type` the KV cache mode rules key on from a model
+/// directory's `config.json`.
 ///
 /// Deliberately the raw string rather than `models::detection::get_model_type`:
 /// the allowlist and the latent-family list are both keyed on the `config.json`
 /// value, and detection maps several distinct `model_type` values onto one
 /// enum variant.
+///
+/// The top-level value, except when the decoder
+/// (`execution::config_fields::kv_decoder_model_type`) stores its latent
+/// through `mla::MlaLatentCache`: that decision is made by the decoder at
+/// runtime, so a wrapper around it (DeepSeek-VL2 around `deepseek_v2`) is
+/// resolved as the decoder (issue #3155).
 fn read_config_model_type(model_path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(model_path.join("config.json")).ok()?;
     let config = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    kv_rules_model_type(&config)
+}
+
+/// [`read_config_model_type`] on a parsed config.
+pub(crate) fn kv_rules_model_type(config: &serde_json::Value) -> Option<String> {
+    if let Some(decoder) = crate::execution::config_fields::kv_decoder_model_type(config)
+        && mlxcel_core::mla::stores_latent_through_view(&decoder)
+    {
+        return Some(decoder);
+    }
     config
         .get("model_type")
         .and_then(serde_json::Value::as_str)

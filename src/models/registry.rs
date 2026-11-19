@@ -1091,7 +1091,8 @@ pub fn build_architecture_registry(mlxcel_version: &'static str) -> Architecture
     }
 }
 
-fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
+/// The `config.json` `model_type` strings that select `model_type`.
+pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
     match model_type {
         ModelType::Llama => &["llama", "mistral", "xverse"],
         ModelType::IQuestCoder => &["iquestcoder"],

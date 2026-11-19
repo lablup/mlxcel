@@ -971,7 +971,10 @@ impl ServerStartupInput {
         // (`BatchKvQuantConfig::base_mode` maps `--kv-quant-scheme turboquant`
         // to Turbo4Asym and `--kv-bits 8` to Int8, and the scheduler prefers
         // that table over `kv_cache_mode`), so a family that cannot hold a
-        // quantized cache has to be taken off both.
+        // quantized cache has to be taken off both. On an absorbing DeepSeek
+        // V2 `--kv-bits 8` is held: its Int8 caches store the MLA latent
+        // quantized (issue #3155), while `--kv-quant-scheme turboquant` is
+        // still taken off there.
         let (kv_cache_mode, kv_mode_warning) =
             crate::cli::turbo_args::resolve_effective_kv_cache_mode(
                 kv_cache_mode,
@@ -993,6 +996,26 @@ impl ServerStartupInput {
                  cannot hold. Serving its KV caches at fp16",
                 self.kv_bits
             )));
+        }
+        // An absorbed MLA latent is grouped in 64s only (issue #3155). A
+        // different `--kv-group-size` would be ignored by the latent codec, so
+        // it is refused here rather than accepted and not applied.
+        if batch_kv_quant.is_enabled()
+            && batch_kv_quant.group_size
+                != mlxcel_core::cache::latent_quant::LATENT_QUANT_GROUP_SIZE
+            && crate::cli::turbo_args::model_stores_quantized_latent(
+                batch_kv_quant.base_mode(),
+                &self.model_path,
+            )
+        {
+            anyhow::bail!(
+                "--kv-group-size {} is not supported for this model: --kv-bits {} stores its \
+                 absorbed MLA latent in affine groups of {}. Drop --kv-group-size or set it to {}",
+                batch_kv_quant.group_size,
+                batch_kv_quant.bits,
+                mlxcel_core::cache::latent_quant::LATENT_QUANT_GROUP_SIZE,
+                mlxcel_core::cache::latent_quant::LATENT_QUANT_GROUP_SIZE,
+            );
         }
 
         // H1: validate `--max-kv-size` bounds before we lower
@@ -1370,11 +1393,14 @@ pub use crate::cli::turbo_args::{
 /// Returns the batch base mode that was refused when the table was disabled
 /// (`bits` reset to 0), `None` when it was already off or the family can hold
 /// it. The condition is `!=` rather than `== Fp16`: Fp16 is the only landing
-/// place a `--kv-bits` request can have today (rule 2 of
+/// place a `--kv-bits` request can have today (rule 3 of
 /// `resolve_kv_cache_mode_for_model` fires only on a `Turbo4` request and
 /// `base_mode` never returns one), but what matters is "the batch table asked
 /// for a mode this family cannot hold", so a future rule that substitutes
 /// something other than Fp16 still disables the table.
+///
+/// `--kv-bits 8` on an absorbing DeepSeek V2 is held (`Int8` stores the MLA
+/// latent quantized, issue #3155), so the table stays on there.
 ///
 /// Used by: [`ServerStartupInput::into_startup_config`] and
 /// [`effective_serve_kv_cache_mode`].
