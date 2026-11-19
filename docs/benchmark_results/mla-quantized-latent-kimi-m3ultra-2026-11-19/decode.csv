@@ -1,0 +1,33 @@
+build,round,arm,model,prompt_tokens,flags,decode_ms,decode_tok_s,prefill_tok_s,measured_phase_peak_gb,mla_paths
+fixed,1,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,512,"",1006.92,126.13,2488.75,28.53,decompressed=14 absorbed_composed=994
+fixed,1,int8-latent,kimi-linear-48b-a3b-instruct-4bit,512,"--kv-cache-mode int8",987.80,128.57,2494.93,28.53,decompressed=14 absorbed_fused=994
+fixed,2,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,512,"",996.12,127.49,2515.61,28.53,decompressed=14 absorbed_composed=994
+fixed,2,int8-latent,kimi-linear-48b-a3b-instruct-4bit,512,"--kv-cache-mode int8",981.92,129.34,2505.15,28.53,decompressed=14 absorbed_fused=994
+fixed,3,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,512,"",993.17,127.87,2510.34,28.53,decompressed=14 absorbed_composed=994
+fixed,3,int8-latent,kimi-linear-48b-a3b-instruct-4bit,512,"--kv-cache-mode int8",980.31,129.55,2503.32,28.53,decompressed=14 absorbed_fused=994
+fixed,1,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"",997.12,127.37,2987.04,28.88,decompressed=14 absorbed_composed=994
+fixed,1,int8-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",1041.74,121.91,2987.16,28.86,decompressed=14 absorbed_composed=994
+fixed,2,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"",996.62,127.43,2980.88,28.88,decompressed=14 absorbed_composed=994
+fixed,2,int8-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",1045.90,121.43,2988.39,28.86,decompressed=14 absorbed_composed=994
+fixed,3,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"",995.80,127.54,2988.61,28.88,decompressed=14 absorbed_composed=994
+fixed,3,int8-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",1048.17,121.16,2986.24,28.86,decompressed=14 absorbed_composed=994
+fixed,1,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,16384,"",1095.53,115.93,2548.33,32.98,decompressed=14 absorbed_composed=994
+fixed,1,int8-latent,kimi-linear-48b-a3b-instruct-4bit,16384,"--kv-cache-mode int8",1427.59,88.96,2548.39,32.81,decompressed=14 absorbed_composed=994
+fixed,2,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,16384,"",1095.23,115.96,2544.67,32.98,decompressed=14 absorbed_composed=994
+fixed,2,int8-latent,kimi-linear-48b-a3b-instruct-4bit,16384,"--kv-cache-mode int8",1427.21,88.98,2543.47,32.81,decompressed=14 absorbed_composed=994
+before-dtype-fix,1,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,512,"",995.46,127.58,2507.24,28.53,decompressed=14 absorbed_composed=994
+before-dtype-fix,1,int8-latent,kimi-linear-48b-a3b-instruct-4bit,512,"--kv-cache-mode int8",2535.27,50.09,2147.52,35.51,decompressed=14 absorbed_fused=994
+before-dtype-fix,2,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,512,"",996.14,127.49,2505.06,28.53,decompressed=14 absorbed_composed=994
+before-dtype-fix,2,int8-latent,kimi-linear-48b-a3b-instruct-4bit,512,"--kv-cache-mode int8",2528.91,50.22,2146.23,35.51,decompressed=14 absorbed_fused=994
+before-dtype-fix,3,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,512,"",991.97,128.03,2507.63,28.53,decompressed=14 absorbed_composed=994
+before-dtype-fix,3,int8-latent,kimi-linear-48b-a3b-instruct-4bit,512,"--kv-cache-mode int8",2545.25,49.90,2146.38,35.51,decompressed=14 absorbed_fused=994
+before-dtype-fix,1,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"",999.93,127.01,2984.91,28.88,decompressed=14 absorbed_composed=994
+before-dtype-fix,1,int8-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",2606.58,48.72,2561.90,35.54,decompressed=14 absorbed_composed=994
+before-dtype-fix,2,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"",1007.61,126.04,2981.50,28.88,decompressed=14 absorbed_composed=994
+before-dtype-fix,2,int8-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",2610.67,48.65,2558.92,35.54,decompressed=14 absorbed_composed=994
+before-dtype-fix,3,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"",1015.29,125.09,2977.97,28.88,decompressed=14 absorbed_composed=994
+before-dtype-fix,3,int8-latent,kimi-linear-48b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",2629.78,48.29,2555.12,35.54,decompressed=14 absorbed_composed=994
+before-dtype-fix,1,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,16384,"",1092.24,116.27,2538.12,32.98,decompressed=14 absorbed_composed=994
+before-dtype-fix,1,int8-latent,kimi-linear-48b-a3b-instruct-4bit,16384,"--kv-cache-mode int8",2996.00,42.39,2005.58,35.80,decompressed=14 absorbed_composed=994
+before-dtype-fix,2,fp16-latent,kimi-linear-48b-a3b-instruct-4bit,16384,"",1097.29,115.74,2538.36,32.98,decompressed=14 absorbed_composed=994
+before-dtype-fix,2,int8-latent,kimi-linear-48b-a3b-instruct-4bit,16384,"--kv-cache-mode int8",2976.46,42.67,2006.21,35.80,decompressed=14 absorbed_composed=994

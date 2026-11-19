@@ -301,6 +301,24 @@ fn count_attention_layers(text: &Value, num_layers: u64) -> Option<u64> {
     None
 }
 
+/// The MLA layer count of a Kimi Linear / Kimi K3 stack, whose
+/// `linear_attn_config.kda_layers` lists the 1-indexed KDA layers; every other
+/// layer is MLA. KDA layers hold recurrent state, no KV, so only the MLA
+/// layers take the latent rate (#3162). Entries outside `1..=num_layers` and
+/// repeats are ignored. Returns `None` when the config has no such list.
+fn kda_hybrid_mla_layers(text: &Value, num_layers: u64) -> Option<u64> {
+    let kda = text
+        .get("linear_attn_config")?
+        .get("kda_layers")?
+        .as_array()?;
+    let kda: std::collections::HashSet<u64> = kda
+        .iter()
+        .filter_map(Value::as_u64)
+        .filter(|layer| (1..=num_layers).contains(layer))
+        .collect();
+    Some(num_layers.saturating_sub(kda.len() as u64))
+}
+
 /// HF `Gemma3TextConfig` defaults for the fields a real `text_config` often
 /// omits (gemma-3-4b-it-4bit carries only `hidden_size`, `intermediate_size`,
 /// `num_hidden_layers`, `sliding_window`). Without these, [`attn_dims`] falls
@@ -496,9 +514,12 @@ fn classify(
                         group as usize,
                     ) as u64
                 });
+            // A KDA hybrid (Kimi Linear, Kimi K3) caches the latent in its
+            // MLA layers only.
+            let layers = kda_hybrid_mla_layers(text, num_layers).unwrap_or(num_layers);
             return Some((
                 vec![KvGroup {
-                    layers: num_layers,
+                    layers,
                     elems_per_token: elems,
                     window: None,
                     fixed_bytes_per_token,

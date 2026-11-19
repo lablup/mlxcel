@@ -410,6 +410,15 @@ impl LanguageModel for KimiK3VLModel {
         LanguageModel::kv_cache_storage_modes(&self.text)
     }
 
+    /// The text model's MLA layers build their caches from this table (#3162).
+    fn set_kv_cache_layer_modes(&self, modes: Vec<mlxcel_core::cache::KVCacheMode>) {
+        LanguageModel::set_kv_cache_layer_modes(&self.text, modes)
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<mlxcel_core::cache::KVCacheMode>> {
+        LanguageModel::kv_cache_layer_modes(&self.text)
+    }
+
     fn sync_sequence_storage(
         &self,
         seq_id: SequenceId,

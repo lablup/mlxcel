@@ -211,7 +211,6 @@ fn asymmetric_modes_on_an_mla_latent_family_resolve_to_fp16() {
         KVCacheMode::Turbo4Asym,
         KVCacheMode::Turbo3Asym,
         KVCacheMode::Turbo4Delegated,
-        KVCacheMode::Int8,
     ] {
         let (mode, warning) = resolve_effective_kv_cache_mode(requested, dir.path());
         assert_eq!(mode, KVCacheMode::Fp16, "{requested}");
@@ -426,7 +425,13 @@ fn only_latent_view_families_store_a_quantized_latent() {
         llama.path()
     ));
 
-    for family in ["deepseek_v3", "kimi_vl", "youtu_vl"] {
+    for family in [
+        "deepseek_v3",
+        "kimi_vl",
+        "youtu_vl",
+        "kimi_linear",
+        "kimi_k3",
+    ] {
         let dir = model_dir_with_type(family);
         let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
         assert_eq!(mode, KVCacheMode::Int8, "{family}");
@@ -441,7 +446,7 @@ fn only_latent_view_families_store_a_quantized_latent() {
         ));
     }
 
-    for family in ["glm4_moe_lite", "kimi_k3"] {
+    for family in ["glm4_moe_lite", "deepseek_v32"] {
         let dir = model_dir_with_type(family);
         let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
         assert_eq!(mode, KVCacheMode::Fp16, "{family}");

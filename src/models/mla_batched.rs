@@ -60,10 +60,12 @@ pub(crate) fn mla_geometry(
 /// geometry.
 ///
 /// `quantized_latent` is the caller's opt in: only the attention
-/// implementations that read a [`LatentWindow::Quantized`] back
-/// (`DeepSeekV3Attention`, and the DeepSeek V3.2 MLA since #3163) pass `true`.
-/// A caller that passes `false` never gets the latent view, whatever the cache
-/// mode, so a family outside the list keeps its per-token path.
+/// implementations that read a [`LatentWindow::Quantized`] back pass `true`
+/// (`DeepSeekV3Attention`, #3160; the Kimi Linear and Kimi K3 MLA layers,
+/// #3162; and the DeepSeek V3.2 MLA, #3163, whose types still resolve to fp16
+/// because they are outside `mla::QUANTIZED_LATENT_FAMILIES`). A caller that
+/// passes `false` never gets the latent view, whatever the cache mode, so a
+/// family outside the list keeps its per-token path.
 ///
 /// `kv_latent` may be wider than `geometry.kv_lora_rank`: DeepSeek V3.2
 /// appends the DSA indexer key to it. The view is asked for that stored width
@@ -108,6 +110,54 @@ fn warn_latent_view_declined(family: &str, mode: mlxcel_core::cache::KVCacheMode
             reason,
             "MLA latent view declined this cache; storing per-token {mode} rows instead of the affine latent"
         );
+    }
+}
+
+/// The dense latent pair of `window`, in the activation dtype `dtype`.
+///
+/// A quantized window dequantizes to FP16 (its `k_pe` is stored FP16), and a
+/// bf16 checkpoint's query is bf16. MLX promotes a bf16 and FP16 pair to
+/// float32, so a multi-token step over the dequantized window would return
+/// float32 and carry it into the residual stream and into every later
+/// layer's state: on Kimi Linear the KDA recurrent state then stays float32
+/// for the rest of the sequence and every decode step runs in float32. A
+/// dense window already holds the activation dtype, so the cast is a no-op.
+///
+/// Used by: the Kimi Linear and Kimi K3 MLA forwards (#3162).
+pub(crate) fn dense_latent_in(
+    window: LatentWindow,
+    dtype: i32,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let (ckv, kpe) = window.into_dense();
+    let cast = |a: UniquePtr<MlxArray>| {
+        if mlxcel_core::array_dtype(&a) == dtype {
+            a
+        } else {
+            mlxcel_core::astype(&a, dtype)
+        }
+    };
+    (cast(ckv), cast(kpe))
+}
+
+/// The mode a model-owned latent-pair cache is built in for a requested
+/// layer `mode`: fp16 and the affine int8 latent pass through, and anything
+/// the latent layout refuses (every Turbo mode) is built fp16.
+///
+/// The resolver already substitutes those modes before a table reaches the
+/// model (`cache::turbo::allowlist`, rule 1); this keeps a table injected some
+/// other way from building a Turbo cache whose codebook would be applied to
+/// the latent pair, and gives the storage report the same answer as the
+/// builder.
+///
+/// Used by: the Kimi Linear and Kimi K3 cache builders and their
+/// `kv_cache_storage_modes` (#3162).
+pub(crate) fn latent_pair_cache_mode(
+    mode: mlxcel_core::cache::KVCacheMode,
+) -> mlxcel_core::cache::KVCacheMode {
+    if mlxcel_core::mla::latent_layout_supports_mode(mode).is_ok() {
+        mode
+    } else {
+        mlxcel_core::cache::KVCacheMode::Fp16
     }
 }
 
@@ -163,7 +213,8 @@ pub(crate) fn validate_mla_decode_batch(
 /// stored, and the attention reads the window it returns (#3163).
 ///
 /// `quantized_latent` opts the caller in to the quantized latent view; see
-/// [`store_latent_step`]. `DeepSeekV3Attention` and the DeepSeek V3.2 MLA pass
+/// [`store_latent_step`]. `DeepSeekV3Attention`, Kimi Linear, Kimi K3 and the
+/// DeepSeek V3.2 MLA pass
 /// `true`.
 ///
 /// Used by: `DeepSeekV3Attention` (DeepSeek V3, Kimi, Youtu), DeepSeek V3.2
