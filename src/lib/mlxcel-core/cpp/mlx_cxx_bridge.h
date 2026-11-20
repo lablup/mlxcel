@@ -931,6 +931,13 @@ std::unique_ptr<MlxArray> logical_and(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> logical_or(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> all_axis(const MlxArray& a, int32_t axis, bool keepdims);
 std::unique_ptr<MlxArray> any_axis(const MlxArray& a, int32_t axis, bool keepdims);
+// Test-only: one reduction (0 sum, 1 prod, 2 any, 3 all) over several axes.
+std::unique_ptr<MlxArray> reduce_axes_probe_for_test(
+    const MlxArray& a,
+    int32_t op,
+    rust::Slice<const int32_t> axes,
+    bool keepdims
+);
 std::unique_ptr<MlxArray> greater_equal(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> less_equal(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> not_equal(const MlxArray& a, const MlxArray& b);
