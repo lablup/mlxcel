@@ -8,8 +8,9 @@
 //   - Added output type template parameter V (separate from accumulation type U)
 //   - Kernel writes static_cast<V>(accumulated) to output, enabling fp32
 //     accumulation with bf16 output for Sum/Prod reductions
-//   - Dispatch code passes T (input type) as output type for final output,
-//     U (accumulation type) for multi-block intermediates
+//   - Dispatch code passes ReduceOutput<OP, T> as output type for final
+//     output (T for bf16 Sum/Prod, the accumulation type otherwise), U
+//     (accumulation type) for multi-block intermediates
 
 #include "mlx/backend/cuda/device.h"
 #include "mlx/backend/cuda/reduce/reduce.cuh"
@@ -120,6 +121,7 @@ void all_reduce(
       using OP = MLX_GET_TYPE(reduce_type_tag);
       using T = cuda_type_t<MLX_GET_TYPE(type_tag)>;
       using U = typename cu::ReduceResult<OP, T>::type;
+      using V = typename cu::ReduceOutput<OP, T>::type;
 
       if (blocks > 1) {
         // Multi-block: first pass accumulates into fp32 intermediate
@@ -157,26 +159,26 @@ void all_reduce(
         encoder.set_input_array(intermediate);
         encoder.set_output_array(out);
 
-        // Second pass: U intermediate -> T output (V=T for final output)
-        auto kernel_pass2 = cu::all_reduce<U, U, T, OP, N_READS>;
+        // Second pass: U intermediate -> V output
+        auto kernel_pass2 = cu::all_reduce<U, U, V, OP, N_READS>;
         encoder.add_kernel_node(
             kernel_pass2,
             blocks2,
             threads2,
             indata2,
-            gpu_ptr<T>(out),
+            gpu_ptr<V>(out),
             block_step2,
             insize2);
       } else {
-        // Single block: T input -> T output with U accumulation
+        // Single block: T input -> V output with U accumulation
         encoder.set_output_array(out);
-        auto kernel = cu::all_reduce<T, U, T, OP, N_READS>;
+        auto kernel = cu::all_reduce<T, U, V, OP, N_READS>;
         encoder.add_kernel_node(
             kernel,
             blocks,
             threads,
             indata,
-            gpu_ptr<T>(out),
+            gpu_ptr<V>(out),
             block_step,
             insize);
       }

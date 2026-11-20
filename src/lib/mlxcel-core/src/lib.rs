@@ -4715,6 +4715,12 @@ mod compiled_dtype_cast_tests;
 #[path = "conv_no_plan_tests.rs"]
 mod conv_no_plan_tests;
 
+// Reductions whose output dtype differs from the input's (a mask sum, `any`
+// and `all` over a non-bool input) return the same values as on the CPU.
+#[cfg(test)]
+#[path = "reduce_output_dtype_tests.rs"]
+mod reduce_output_dtype_tests;
+
 // CPU quantized matmul accumulates in f32 for bf16 and f16 activations (issue
 // #2248): affine transposed and plain, 3/4/6/8-bit, and MXFP4, each against a
 // host f64 reference on the CPU stream. Runs on every backend.

@@ -8,7 +8,8 @@
 //   - Added output type template parameter V (separate from accumulation type U)
 //   - Kernels write static_cast<V>(accumulated) to output, enabling fp32
 //     accumulation with bf16 output for Sum/Prod reductions
-//   - Dispatch code passes T (input type) as output type
+//   - Dispatch code passes ReduceOutput<OP, T> as output type: T for the bf16
+//     Sum/Prod this patch exists for, the accumulation type otherwise
 
 #include <numeric>
 
@@ -276,6 +277,7 @@ void row_reduce_simple(
       using OP = MLX_GET_TYPE(reduce_type_tag);
       using T = cuda_type_t<MLX_GET_TYPE(type_tag)>;
       using U = typename cu::ReduceResult<OP, T>::type;
+      using V = typename cu::ReduceOutput<OP, T>::type;
 
       constexpr int N_READS = 16 / sizeof(T);
 
@@ -288,11 +290,12 @@ void row_reduce_simple(
       int threads = warps * WARP_SIZE;
       dim3 block(threads, 1, 1);
 
-      // Pick the kernel: output type is T (input type = output dtype)
-      auto kernel = cu::row_reduce_simple<T, U, T, OP, N_READS>;
+      // Pick the kernel: the output type follows the output dtype, which is
+      // not the input dtype for sum(bool), any(float32) and the like.
+      auto kernel = cu::row_reduce_simple<T, U, V, OP, N_READS>;
       if (grid.x >= 1024) {
         grid.x = (grid.x + 1) / 2;
-        kernel = cu::row_reduce_simple<T, U, T, OP, N_READS, 2>;
+        kernel = cu::row_reduce_simple<T, U, V, OP, N_READS, 2>;
       }
 
       int size = plan.shape.back();
@@ -301,7 +304,7 @@ void row_reduce_simple(
           grid,
           block,
           gpu_ptr<T>(in),
-          gpu_ptr<T>(out),
+          gpu_ptr<V>(out),
           out.size(),
           size);
     });
@@ -327,6 +330,7 @@ void row_reduce_looped(
       using OP = MLX_GET_TYPE(reduce_type_tag);
       using T = cuda_type_t<MLX_GET_TYPE(type_tag)>;
       using U = typename cu::ReduceResult<OP, T>::type;
+      using V = typename cu::ReduceOutput<OP, T>::type;
 
       constexpr int N_READS = 16 / sizeof(T);
 
@@ -340,15 +344,15 @@ void row_reduce_looped(
       int threads = warps * WARP_SIZE;
       dim3 block(threads, 1, 1);
 
-      // Pick the kernel: output type is T (input type = output dtype)
-      auto kernel = cu::row_reduce_looped<T, U, T, OP, 1, N_READS>;
+      // Pick the kernel: the output type follows the output dtype.
+      auto kernel = cu::row_reduce_looped<T, U, V, OP, 1, N_READS>;
       dispatch_reduce_ndim(args.reduce_ndim, [&](auto reduce_ndim) {
         kernel =
-            cu::row_reduce_looped<T, U, T, OP, reduce_ndim.value, N_READS>;
+            cu::row_reduce_looped<T, U, V, OP, reduce_ndim.value, N_READS>;
       });
 
       encoder.add_kernel_node(
-          kernel, grid, block, gpu_ptr<T>(in), gpu_ptr<T>(out), args);
+          kernel, grid, block, gpu_ptr<T>(in), gpu_ptr<V>(out), args);
     });
   });
 }
