@@ -296,6 +296,13 @@ pub static EXPERIMENTAL_LATENT_NOTES: &[ExperimentalLatentNote] = &[
                mla-quantized-latent-glm-longcat-m3ultra-2026-11-19.md)",
     },
     ExperimentalLatentNote {
+        families: &["glm4_moe_lite"],
+        bits: &[4],
+        text: "GLM-4.7-Flash with an int4 latent showed 3 decided-position disagreements behind \
+               1024 tokens and 3 behind 4096, and moved perplexity by -19.5% and -16.1% \
+               (docs/benchmark_results/mla-latent-quant-option-m3ultra-2026-11-20.md)",
+    },
+    ExperimentalLatentNote {
         families: &["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"],
         bits: &[8, 4],
         text: "DeepSeek-V3.2 with an int8 key slot passed the logit trace, but the DSA indexer's \
@@ -309,6 +316,13 @@ pub static EXPERIMENTAL_LATENT_NOTES: &[ExperimentalLatentNote] = &[
                top-1 token at 8.8% and 5.5% of positions, with near-tie gaps up to 0.86 logits \
                (docs/benchmark_results/mla-quantized-latent-m3ultra-2026-11-19.md); it always \
                decodes on the composed path, never the fused Metal kernel",
+    },
+    ExperimentalLatentNote {
+        families: &[],
+        bits: &[4],
+        text: "on Moonlight-16B-A3B and LongCat-Flash-Lite a 4-bit latent also had 0 decided \
+               disagreements, with near-tie flips up to 0.84 and 1.13 logits \
+               (docs/benchmark_results/mla-latent-quant-option-m3ultra-2026-11-20.md)",
     },
 ];
 

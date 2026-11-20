@@ -3533,17 +3533,20 @@ fn main() -> anyhow::Result<()> {
     init_cli_tracing(&cli.command);
 
     // Fix `--mla-latent-quant` (or `MLXCEL_MLA_LATENT_QUANT`) for the process
-    // before any command resolves a KV cache mode, so the banner, the
-    // estimators and the caches read one value (issue #3179). Commands with no
-    // KV flags still honour the environment variable.
-    let mla_latent_quant = match &cli.command {
-        Commands::Run(args) => args.generation.turbo.mla_latent_quant,
-        Commands::Generate(args) => args.generation.turbo.mla_latent_quant,
-        Commands::Serve(args) => args.turbo.mla_latent_quant,
-        Commands::Inspect(args) => args.turbo.mla_latent_quant,
+    // before the command resolves a KV cache mode, so the banner, the
+    // estimators and the caches read one value (issue #3179). Only the
+    // commands that take the flag validate it; the others never build a KV
+    // cache, so a bad environment value does not fail them.
+    let turbo = match &cli.command {
+        Commands::Run(args) => Some(&args.generation.turbo),
+        Commands::Generate(args) => Some(&args.generation.turbo),
+        Commands::Serve(args) => Some(&args.turbo),
+        Commands::Inspect(args) => Some(&args.turbo),
         _ => None,
     };
-    mlxcel::cli::mla_latent_option::init_mla_latent_quant(mla_latent_quant)?;
+    if let Some(turbo) = turbo {
+        mlxcel::cli::mla_latent_option::init_mla_latent_quant(turbo.mla_latent_quant)?;
+    }
 
     // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
     // the first-run kernel compilation is paid once per machine, not every boot.

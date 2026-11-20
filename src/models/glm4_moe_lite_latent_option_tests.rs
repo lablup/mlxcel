@@ -16,7 +16,6 @@
 //! default gate keeps at fp16.
 
 use mlxcel_core::cache::KVCacheMode;
-use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::mla::{MlaDecodePath, MlaLatentQuant, with_mla_latent_quant};
 
 use super::{DECODE, LAYERS, PROMPT, RANK, ROPE, caches, ids, max_rel_error, model_with, row};

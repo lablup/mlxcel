@@ -91,8 +91,10 @@ fn first_announcement(line: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Print [`mla_latent_option_notices`] on stderr and through `tracing`, each
-/// line at most once per process however many entry points resolve the mode.
+/// Print [`mla_latent_option_notices`] on stderr, each line at most once per
+/// process however many entry points resolve the mode. stderr only, as the
+/// substitution warning beside it is: the CLI's `tracing` subscriber writes to
+/// stderr too, so logging the text there as well would print it twice.
 ///
 /// Used by: `cli::turbo_args::resolve_and_announce_kv_cache_mode` (the CLI
 /// generation entry points) and `mlxcel inspect`. The server carries the same
@@ -101,7 +103,6 @@ pub fn announce_mla_latent_option(requested: KVCacheMode, model_path: &Path) {
     for line in mla_latent_option_notices(requested, model_path) {
         if first_announcement(&line) {
             eprintln!("{line}");
-            tracing::warn!(option = %mla_latent_quant(), "{line}");
         }
     }
 }

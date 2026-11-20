@@ -253,6 +253,15 @@ fn the_experimental_line_quotes_the_measurement_for_the_family_and_width() {
         glm4.contains("0.86 logits") && glm4.contains("1 decided-position"),
         "{glm4}"
     );
+    // The #3179 measurements: GLM's own int4 result, and the int4 traces on
+    // Moonlight and LongCat for every family.
+    assert!(glm4.contains("3 decided-position disagreements"), "{glm4}");
+    assert!(glm4.contains("0.84 and 1.13 logits"), "{glm4}");
+    let glm8 = only("glm4_moe_lite", f, Int8);
+    assert!(!glm8.contains("3 decided-position"), "{glm8}");
+    assert_eq!(experimental_latent_notes("glm4_moe_lite", 4).len(), 4);
+    assert_eq!(experimental_latent_notes("deepseek_v3", 4).len(), 2);
+    assert_eq!(experimental_latent_notes("deepseek_v3", 8).len(), 0);
 }
 
 #[test]
