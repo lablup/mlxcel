@@ -1280,7 +1280,8 @@ pub(crate) fn stack_expert_leaf(
 /// shape checks refuse.
 ///
 /// Used by: the MoE stacking passes of Qwen3.5 (`qwen3_5::sanitize_weights`)
-/// and Qwen3-Next (`Qwen3NextModel::sanitize_weights`)
+/// and Qwen3-Next (`Qwen3NextModel::sanitize_weights`), and Gemma 4's
+/// `stack_gemma4_per_expert_planes` (`src/models/sanitize.rs`)
 pub(crate) fn drain_numbered_expert_planes(
     weights: &mut WeightMap,
     experts_root: &str,
