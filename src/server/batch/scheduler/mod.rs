@@ -682,6 +682,15 @@ pub struct BatchScheduler {
     /// decode-written tail for them. Cleared at donate and at release.
     prompt_cache_prompt_end_stored: std::collections::HashSet<SequenceId>,
 
+    /// Host-memory gate every prompt-cache snapshot and state-checkpoint
+    /// growth step goes through (#2883 step 4). Production schedulers share
+    /// one process-wide gate over `host_statistics64`. Unit-test schedulers
+    /// get a gate that reports availability as unknown, so they store what
+    /// they would store on any host: before #3146 they read the real host,
+    /// and a CI machine below the macOS reserve (`max(7 GiB, 15% of RAM)`)
+    /// silently stored nothing.
+    snapshot_growth_gate: Arc<mlxcel_core::host_memory::AvailabilityGate>,
+
     /// Lineage of the rows a sequence adopted from the prompt cache (issue
     /// #3047), set by `try_adopt_cached_prefix` and moved into the sequence's
     /// [`PromptCacheRequestContext::snapshot_lineage`] at admission. Cleared at

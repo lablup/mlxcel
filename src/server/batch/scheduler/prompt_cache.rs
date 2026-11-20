@@ -961,7 +961,14 @@ impl BatchScheduler {
         // that has since run short still must not grow it. A store at its
         // budget only replaces entries and passes.
         let growth = store.snapshot_growth_bytes(snapshot.nbytes()) as u64;
-        if !snapshot_growth_allowed(snapshot_growth_gate(), growth) {
+        if !snapshot_growth_allowed(&self.snapshot_growth_gate, growth) {
+            // Counted like every other decline (#3146): a silent skip left a
+            // host short of memory looking like a model that never donates.
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::MemoryReserve,
+                Some(seq_id.as_u64()),
+                tokens.len(),
+            );
             static GUARD_WARNED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !GUARD_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -1040,10 +1047,15 @@ impl BatchScheduler {
                     // Checkpoints grow the resident store like whole
                     // snapshots do, so the same guardrail applies (#3058).
                     if !state_checkpoint_growth_allowed(
-                        snapshot_growth_gate(),
+                        &self.snapshot_growth_gate,
                         &store,
                         checkpoint_bytes,
                     ) {
+                        self.batch_observability.record_prompt_cache_reject(
+                            PromptCacheRejectReason::MemoryReserve,
+                            Some(seq_id.as_u64()),
+                            key_tokens.len(),
+                        );
                         tracing::debug!(
                             seq_id = %seq_id,
                             checkpoint_bytes,
@@ -1809,11 +1821,30 @@ impl BatchScheduler {
     }
 }
 
-/// Process-wide availability gate for snapshot-store growth.
-fn snapshot_growth_gate() -> &'static mlxcel_core::host_memory::AvailabilityGate {
-    static GATE: std::sync::OnceLock<mlxcel_core::host_memory::AvailabilityGate> =
-        std::sync::OnceLock::new();
-    GATE.get_or_init(mlxcel_core::host_memory::AvailabilityGate::new)
+/// The availability gate a new scheduler's snapshot growth goes through.
+///
+/// Every production scheduler shares one process-wide gate over the host's
+/// memory, so approvals granted between two probes count once across them.
+/// Under `cfg(test)` it is a gate whose availability is unknown, which
+/// approves every step: a unit test must store the same snapshots on a 16 GB
+/// CI runner as on a 512 GB workstation (#3146). Tests of the guardrail
+/// itself install their own gate through
+/// [`BatchScheduler::with_snapshot_growth_gate`].
+pub(super) fn default_snapshot_growth_gate() -> Arc<mlxcel_core::host_memory::AvailabilityGate> {
+    #[cfg(not(test))]
+    {
+        static GATE: std::sync::OnceLock<Arc<mlxcel_core::host_memory::AvailabilityGate>> =
+            std::sync::OnceLock::new();
+        GATE.get_or_init(|| Arc::new(mlxcel_core::host_memory::AvailabilityGate::new()))
+            .clone()
+    }
+    #[cfg(test)]
+    {
+        Arc::new(mlxcel_core::host_memory::AvailabilityGate::with_probe(
+            mlxcel_core::host_memory::AVAILABILITY_REFRESH_INTERVAL,
+            || None,
+        ))
+    }
 }
 
 /// Whether the snapshot store may grow by `growth_bytes` now; growth of zero

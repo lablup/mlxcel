@@ -881,6 +881,9 @@ impl BatchObservability {
             prompt_cache_reject_model_owned_state: self
                 .prompt_cache_reject_reasons
                 .count(PromptCacheRejectReason::ModelOwnedState),
+            prompt_cache_reject_memory_reserve: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::MemoryReserve),
             mtp_policy: self.mtp_policy_snapshot(),
             prompt_cache_last_reject: self.prompt_cache_reject_reasons.last().map(|r| {
                 PromptCacheLastRejectSnapshot {
@@ -1002,6 +1005,11 @@ pub struct ObservabilitySnapshot {
     /// `--decode-storage-backend paged`, and it is what makes that decline
     /// visible instead of silent.
     pub prompt_cache_reject_model_owned_state: u64,
+    /// Snapshots and state checkpoints the macOS memory guardrail declined
+    /// because storing them would take the host below its memory reserve
+    /// (issue #3146). A non-zero value with `prompt_cache_inserts` at zero
+    /// means the host, not the request, kept the store empty.
+    pub prompt_cache_reject_memory_reserve: u64,
     /// Most recent prompt-cache reject/decline event, if any has happened
     /// yet.
     pub prompt_cache_last_reject: Option<PromptCacheLastRejectSnapshot>,
