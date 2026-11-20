@@ -53,6 +53,12 @@
 //! elements wide that every query head reads. [`MlaLatentCache::update_and_fetch`]
 //! returns a [`LatentWindow`] so a reader sees which form it was handed.
 //!
+//! The width is 8 bits unless `--mla-latent-quant int4` is in force
+//! ([`crate::mla::latent_option`], issue #3179), which packs the latent at 4
+//! in the same `Int8` storage; a cache that already holds rows keeps their
+//! width. A DSA key slot then stores its indexer key at 8 bits beside the
+//! 4-bit latent (`mla::latent_keys`, "Split slot").
+//!
 //! ## Modes this declines
 //!
 //! Every Turbo mode, and paged backing. The Turbo3/Turbo4 modes calibrate a
@@ -73,10 +79,11 @@ use crate::mla::MlaGeometry;
 use crate::mla::MlaSplitPlan;
 use crate::mla::absorb::MlaAbsorbedProjections;
 use crate::mla::decode::{absorb_queries, absorbed_attention, unabsorb_output};
-use crate::mla::latent_keys::check_stored_key_width;
-use crate::mla::quant_latent::{
-    LatentWindow, check_quantizable, quantize_latent_rows, quantized_absorbed_attention,
+use crate::mla::latent_keys::{
+    check_stored_key_width, quantize_key_slot_rows, quantized_key_slot_bytes_per_token,
 };
+use crate::mla::latent_option::latent_cache_bits;
+use crate::mla::quant_latent::{LatentWindow, check_quantizable, quantized_absorbed_attention};
 use crate::mla::split_kv::absorbed_attention_split_kv;
 
 /// Bytes one token of the compressed-latent cache costs, per layer.
@@ -248,6 +255,10 @@ pub struct MlaLatentCache<'a> {
     geometry: MlaGeometry,
     /// "K" slot width: `kv_lora_rank` plus any DSA sidecar (issue #3163).
     key_width: usize,
+    /// Width the latent is packed at, `None` on an fp16 cache: the width of
+    /// the rows the cache already holds, else
+    /// [`latent_cache_bits`] for its mode (issue #3179).
+    latent_bits: Option<i32>,
 }
 
 impl<'a> MlaLatentCache<'a> {
@@ -308,10 +319,14 @@ impl<'a> MlaLatentCache<'a> {
         stored_key_width: usize,
     ) -> Result<Self, String> {
         Self::supports_with_key_width(cache, geometry, stored_key_width)?;
+        let latent_bits = cache
+            .stored_latent_bits()
+            .or_else(|| latent_cache_bits(cache.mode));
         Ok(Self {
             inner: cache,
             geometry,
             key_width: stored_key_width,
+            latent_bits,
         })
     }
 
@@ -346,12 +361,13 @@ impl<'a> MlaLatentCache<'a> {
         ckv: UniquePtr<MlxArray>,
         kpe: UniquePtr<MlxArray>,
     ) -> LatentWindow {
-        let Some(bits) = self.inner.mode.latent_affine_bits() else {
+        let Some(bits) = self.latent_bits else {
             let (ckv, kpe) = self.inner.update_and_fetch(ckv, kpe);
             return LatentWindow::Dense { ckv, kpe };
         };
+        let rank = i32::try_from(self.geometry.kv_lora_rank).unwrap_or(i32::MAX);
         self.inner
-            .update_latent_quantized(quantize_latent_rows(&ckv, kpe, bits));
+            .update_latent_quantized(quantize_key_slot_rows(&ckv, kpe, rank, bits));
         let rows = self
             .inner
             .latent_quantized_window()
@@ -470,14 +486,21 @@ impl<'a> MlaLatentCache<'a> {
         unabsorb_output(&o_latent, proj)
     }
 
+    /// The width this view packs the latent at, `None` on an fp16 cache.
+    #[must_use]
+    pub const fn latent_bits(&self) -> Option<i32> {
+        self.latent_bits
+    }
+
     /// Bytes per token this cache costs: the affine-quantized rate on an
-    /// `int8` cache, else `bytes_per_element` per latent and rope
-    /// element.
+    /// `int8` cache (at the width it packs the latent, with any sidecar at 8
+    /// bits), else `bytes_per_element` per latent and rope element.
     #[must_use]
     pub const fn bytes_per_token(&self, bytes_per_element: usize) -> usize {
-        match self.inner.mode.latent_affine_bits() {
-            Some(bits) => crate::mla::quant_latent::quantized_latent_bytes_per_token(
-                self.key_width,
+        match self.latent_bits {
+            Some(bits) => quantized_key_slot_bytes_per_token(
+                self.geometry.kv_lora_rank,
+                self.key_width.saturating_sub(self.geometry.kv_lora_rank),
                 self.geometry.qk_rope_head_dim,
                 bits as usize,
                 crate::cache::latent_quant::LATENT_QUANT_GROUP_SIZE as usize,

@@ -28,6 +28,7 @@
 use crate::cache::KVCacheMode;
 use crate::mla::cache::caches_mla_latent_pair;
 use crate::mla::latent_layout_supports_mode;
+use crate::mla::latent_option::{MlaLatentQuant, effective_latent_bits, mla_latent_quant};
 
 /// Latent-pair `model_type` values whose cache stores the latent through
 /// [`crate::mla::MlaLatentCache`], so `int8` keeps an affine group-64 latent
@@ -50,7 +51,11 @@ use crate::mla::latent_layout_supports_mode;
 /// (`docs/benchmark_results/mla-quantized-latent-glm-longcat-m3ultra-2026-11-19.md`).
 /// Listing it switches its int8 latent on.
 ///
-/// Used by: [`latent_pair_supports_mode`], [`stores_quantized_latent_pair`].
+/// This is the default gate. `--mla-latent-quant` (issue #3179,
+/// [`crate::mla::latent_option`]) can store the latent quantized on a family
+/// outside the list, or keep a listed one fp16.
+///
+/// Used by: [`crate::mla::effective_latent_bits`].
 pub static QUANTIZED_LATENT_FAMILIES: &[&str] = &[
     "deepseek_v3",
     "kimi_k2",
@@ -67,39 +72,69 @@ pub static QUANTIZED_LATENT_FAMILIES: &[&str] = &[
 ];
 
 /// Whether `model_type` is a latent-pair family that stores its latent through
-/// the quantizing view. Same exact, trimmed, case-insensitive match as
-/// [`caches_mla_latent_pair`].
+/// the quantizing view under the MLA latent option in force
+/// ([`mla_latent_quant`], issue #3179). Under `auto` that is membership of
+/// [`QUANTIZED_LATENT_FAMILIES`], matched exactly, trimmed and
+/// case-insensitively as [`caches_mla_latent_pair`] does; `fp16` turns it off
+/// for every family and `int8` / `int4` turn it on for every latent-pair
+/// family.
 ///
-/// Used by: `cache::turbo::allowlist` (the rule 1 warning),
-/// `mlxcel::cli::turbo_args::model_stores_quantized_latent`,
-/// `mlxcel::execution::kv_arch` (sizing) and
-/// `mlxcel::execution::kv_cache_advisor`.
+/// Used by: `mlxcel::cli::turbo_args::model_stores_quantized_latent`,
+/// `mlxcel::execution::kv_arch` (sizing) and the load-time `quantized_latent`
+/// flags of `mlxcel::models::glm4_moe_lite` and
+/// `mlxcel::models::longcat_flash_ngram`.
 #[must_use]
 pub fn stores_quantized_latent_pair(model_type: &str) -> bool {
-    let needle = model_type.trim().to_ascii_lowercase();
-    QUANTIZED_LATENT_FAMILIES
-        .iter()
-        .any(|&family| needle == family)
+    stores_quantized_latent_pair_with(model_type, mla_latent_quant())
+}
+
+/// [`stores_quantized_latent_pair`] for an explicit option value.
+///
+/// Used by: `mlxcel::execution::kv_cache_advisor` and the registry, which
+/// describe the default gate and pass [`MlaLatentQuant::Auto`].
+#[must_use]
+pub fn stores_quantized_latent_pair_with(model_type: &str, option: MlaLatentQuant) -> bool {
+    caches_mla_latent_pair(model_type)
+        && effective_latent_bits(model_type, KVCacheMode::Int8, option).is_some()
+}
+
+/// The modes a latent-pair family's cache may hold under the MLA latent
+/// option in force; see [`latent_pair_supports_mode_with`].
+///
+/// Used by: `mlxcel::models::longcat_flash_ngram` (its mode table filter).
+pub fn latent_pair_supports_mode(model_type: &str, mode: KVCacheMode) -> Result<(), String> {
+    latent_pair_supports_mode_with(model_type, mode, mla_latent_quant())
 }
 
 /// The modes a latent-pair family's cache may hold.
 ///
-/// A family in [`QUANTIZED_LATENT_FAMILIES`] follows
-/// [`latent_layout_supports_mode`] (fp16 or the affine `int8` latent, no
+/// A family that stores its latent through the quantizing view
+/// ([`stores_quantized_latent_pair_with`]) follows
+/// [`latent_layout_supports_mode`] (fp16 or the affine `int8` storage, no
 /// Turbo mode). Any other latent-pair family holds fp16 only. A `model_type`
 /// outside [`crate::mla::MLA_LATENT_CACHE_FAMILIES`] has no latent-pair
 /// constraint and is accepted; the other resolver rules apply to it. Returns
 /// the operator-facing reason on refusal.
 ///
 /// Used by: `cache::turbo::allowlist::resolve_kv_cache_mode_for_model_with`
-/// (rule 1).
-pub fn latent_pair_supports_mode(model_type: &str, mode: KVCacheMode) -> Result<(), String> {
+/// (rule 1, with [`MlaLatentQuant::Auto`]).
+pub fn latent_pair_supports_mode_with(
+    model_type: &str,
+    mode: KVCacheMode,
+    option: MlaLatentQuant,
+) -> Result<(), String> {
     if mode == KVCacheMode::Fp16 || !caches_mla_latent_pair(model_type) {
         return Ok(());
     }
     latent_layout_supports_mode(mode)?;
-    if stores_quantized_latent_pair(model_type) {
+    if stores_quantized_latent_pair_with(model_type, option) {
         return Ok(());
+    }
+    if option == MlaLatentQuant::Fp16 {
+        return Err(format!(
+            "mla: {} fp16 keeps this family's latent pair fp16",
+            crate::mla::latent_option::MLA_LATENT_QUANT_FLAG
+        ));
     }
     Err(format!(
         "mla: this family stores its latent pair as fp16; the quantized latent is available on \

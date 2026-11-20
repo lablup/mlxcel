@@ -112,6 +112,9 @@ fn deepseek_v2_switch_linear_rejects_quantization_params_that_would_abort_gather
 // is compiled inside `deepseek_v2`.
 
 use super::{KVCache, MLAAttention, ModelArgs, load_mla_attention};
+
+#[path = "deepseek_v2_latent_option_tests.rs"]
+mod latent_option;
 use mlxcel_core::mla::{MlaAbsorbedProjections, MlaGeometry};
 use mlxcel_core::{MlxArray, UniquePtr};
 

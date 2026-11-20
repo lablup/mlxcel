@@ -284,3 +284,79 @@ fn a_bf16_model_stays_bf16_over_the_int8_latent() {
         }
     }
 }
+
+/// `--mla-latent-quant` on LongCat (issue #3179). Under `int4` a model built
+/// from its config keeps an `int8` table and both sub-layer caches of every
+/// layer pack the latent at 4 bits, read back within the 4-bit codec step of
+/// the fp16 latent; a decode step matches the dense step over the same rows
+/// dequantized and never takes the fused kernel. Under `fp16` the same model
+/// refuses the `int8` table and builds fp16 caches, though the family is on
+/// the default list.
+#[test]
+fn a_forced_latent_precision_decides_the_model_owned_caches() {
+    use crate::models::mla_latent_test_support as support;
+    use mlxcel_core::mla::{MlaLatentQuant, with_mla_latent_quant};
+
+    for family in FAMILIES {
+        let fp16 = tiny_model_with_rank(family, QUANTIZABLE_RANK);
+        let _ = fp16.make_caches();
+        mlxcel_core::eval(&fp16.forward(&ids(&TOKENS[..4]), &mut [], None));
+
+        with_mla_latent_quant(MlaLatentQuant::Int4, || {
+            let build = || {
+                let model = tiny_model_with_rank(family, QUANTIZABLE_RANK);
+                assert!(model.quantized_latent.get(), "{family}");
+                model.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; model.num_layers()]);
+                let _ = model.make_caches();
+                mlxcel_core::eval(&model.forward(&ids(&TOKENS[..4]), &mut [], None));
+                model
+            };
+            let int4 = build();
+            {
+                let state = int4.state.borrow();
+                let rate = mlxcel_core::mla::quantized_latent_bytes_per_token(512, 4, 4, 64);
+                assert_eq!(rate, 256 + 32 + 8);
+                for cache in state.caches.iter().flatten() {
+                    assert_eq!(cache.stored_latent_bits(), Some(4), "{family}");
+                }
+                let reference = fp16.state.borrow();
+                support::assert_stored_columns(
+                    &state.caches[0][0],
+                    &reference.caches[0][0],
+                    0,
+                    QUANTIZABLE_RANK,
+                    support::INT4_ROW_TOL,
+                );
+            }
+            let before = mlxcel_core::mla::stats::snapshot();
+            let got = row(&int4.forward(&ids(&[TOKENS[4]]), &mut [], None), 0);
+            let after = mlxcel_core::mla::stats::snapshot();
+            let delta = |path| after.get(path).saturating_sub(before.get(path));
+            assert_eq!(
+                delta(MlaDecodePath::AbsorbedComposed),
+                2 * int4.num_layers() as u64,
+                "{family}"
+            );
+            assert_eq!(delta(MlaDecodePath::AbsorbedFused), 0, "{family}");
+
+            let twin = build();
+            let want = row(&twin.forward(&ids(&TOKENS[4..6]), &mut [], None), 0);
+            let err = max_rel_error(&got, &want);
+            assert!(
+                err < support::SAME_ROWS_TOL,
+                "{family}: decode off its stored rows by {err}"
+            );
+        });
+
+        with_mla_latent_quant(MlaLatentQuant::Fp16, || {
+            let model = tiny_model_with_rank(family, QUANTIZABLE_RANK);
+            assert!(!model.quantized_latent.get(), "{family}");
+            let n = model.num_layers();
+            model.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; n]);
+            assert_eq!(
+                model.kv_cache_layer_modes(),
+                Some(vec![KVCacheMode::Fp16; n])
+            );
+        });
+    }
+}

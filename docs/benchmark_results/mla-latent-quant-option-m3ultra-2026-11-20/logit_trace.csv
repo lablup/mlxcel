@@ -1,0 +1,21 @@
+build,model,model_type,shape,reference_arm,candidate_arm,positions,top1_disagree,decided_positions,decided_disagree,largest_gap_at_disagreement,flips_above_0.11,ppl_reference,ppl_candidate,ppl_delta_pct,candidate_path_counter
+3bb34668,moonlight-16b-a3b-instruct-4bit,deepseek_v3,behind 1024,fp16,int8,512,7,192,0,0.328,2,18.6816,18.8238,+0.761,decompressed=216 absorbed_fused=13824
+3bb34668,moonlight-16b-a3b-instruct-4bit,deepseek_v3,behind 1024,fp16,int4,512,37,192,0,0.844,18,18.6816,19.1152,+2.321,decompressed=216 absorbed_composed=13824
+3bb34668,moonlight-16b-a3b-instruct-4bit,deepseek_v3,behind 4096,fp16,int8,256,5,58,0,0.039,0,22.9467,22.9386,-0.035,decompressed=108 absorbed_composed=6912
+3bb34668,moonlight-16b-a3b-instruct-4bit,deepseek_v3,behind 4096,fp16,int4,256,24,58,0,0.766,13,22.9467,23.2242,+1.209,decompressed=108 absorbed_composed=6912
+3bb34668,longcat-flash-lite-4bit,longcat_flash_ngram,behind 1024,fp16,int8,512,15,239,0,0.375,9,14.1036,14.0010,-0.727,decompressed=224 absorbed_fused=14336
+3bb34668,longcat-flash-lite-4bit,longcat_flash_ngram,behind 1024,fp16,int4,512,50,239,0,1.125,38,14.1036,13.8004,-2.150,decompressed=224 absorbed_composed=14336
+3bb34668,longcat-flash-lite-4bit,longcat_flash_ngram,behind 4096,fp16,int8,256,9,121,0,0.250,5,9.9146,9.7928,-1.228,decompressed=112 absorbed_composed=7168
+3bb34668,longcat-flash-lite-4bit,longcat_flash_ngram,behind 4096,fp16,int4,256,20,121,0,1.062,18,9.9146,9.5284,-3.895,decompressed=112 absorbed_composed=7168
+3bb34668,kimi-linear-48b-a3b-instruct-4bit,kimi_linear,behind 1024,fp16,int8,512,12,201,0,0.500,5,12.4213,12.4579,+0.295,decompressed=56 absorbed_fused=3584
+3bb34668,kimi-linear-48b-a3b-instruct-4bit,kimi_linear,behind 1024,fp16,int4,512,18,201,0,0.625,9,12.4213,12.3638,-0.463,decompressed=56 absorbed_composed=3584
+3bb34668,kimi-linear-48b-a3b-instruct-4bit,kimi_linear,behind 4096,fp16,int8,256,13,52,0,0.312,5,24.5971,24.4992,-0.398,decompressed=28 absorbed_composed=1792
+3bb34668,kimi-linear-48b-a3b-instruct-4bit,kimi_linear,behind 4096,fp16,int4,256,17,52,0,0.312,6,24.5971,24.6546,+0.234,decompressed=28 absorbed_composed=1792
+3bb34668,deepseek-v2-lite-chat-4bit-mlx,deepseek_v2,behind 1024,fp16,int8,512,10,209,0,0.078,0,14.6613,14.6470,-0.098,decompressed=216 absorbed_fused=13824
+3bb34668,deepseek-v2-lite-chat-4bit-mlx,deepseek_v2,behind 1024,fp16,int4,512,45,209,0,0.859,24,14.6613,14.6607,-0.004,decompressed=216 absorbed_composed=13824
+3bb34668,deepseek-v2-lite-chat-4bit-mlx,deepseek_v2,behind 4096,fp16,int8,256,3,105,0,0.109,0,12.9589,12.8767,-0.634,decompressed=108 absorbed_composed=6912
+3bb34668,deepseek-v2-lite-chat-4bit-mlx,deepseek_v2,behind 4096,fp16,int4,256,14,105,0,0.859,10,12.9589,13.2174,+1.995,decompressed=108 absorbed_composed=6912
+3bb34668,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,int8,512,40,193,1,2.750,18,21.4881,20.8288,-3.068,decompressed=376 absorbed_fused=24064
+3bb34668,glm-4.7-flash-4bit,glm4_moe_lite,behind 1024,fp16,int4,512,57,193,3,4.000,32,21.4881,17.2944,-19.516,decompressed=376 absorbed_composed=24064
+3bb34668,glm-4.7-flash-4bit,glm4_moe_lite,behind 4096,fp16,int8,256,25,95,0,1.000,15,53.6498,53.4191,-0.430,decompressed=188 absorbed_composed=12032
+3bb34668,glm-4.7-flash-4bit,glm4_moe_lite,behind 4096,fp16,int4,256,38,95,3,4.000,28,53.6498,45.0188,-16.088,decompressed=188 absorbed_composed=12032
