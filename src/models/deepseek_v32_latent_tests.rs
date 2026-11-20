@@ -33,6 +33,9 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::deepseek_v32_tests::{f32_weight, synthetic_mla_weights};
+
+#[path = "deepseek_v32_latent_option_tests.rs"]
+mod latent_option;
 use super::{DeepSeekV32Model, MLAAttention, ModelArgs, gather_topk_kv, load_mla_attention};
 
 /// Quantized decode against dense attention over the dequantized window.

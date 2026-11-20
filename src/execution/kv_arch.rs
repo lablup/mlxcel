@@ -431,9 +431,10 @@ pub fn deepseek_v2_caches_latent(mode: KVCacheMode) -> bool {
 ///
 /// `v2_latent` says whether DeepSeek V2 caches the latent in this run
 /// ([`deepseek_v2_caches_latent`]) and `v2_latent_bits` the affine bit width
-/// the mode stores a latent at, if any ([`KVCacheMode::latent_affine_bits`]).
+/// the mode stores a latent at, if any (`mla::latent_cache_bits`).
 /// `v2_latent` is read by V2 only; the bit width is also read by the families
-/// in `mla::QUANTIZED_LATENT_FAMILIES`, whose int8 cache is the affine latent.
+/// that store their latent through the quantizing view
+/// (`mla::stores_quantized_latent_pair`), whose int8 cache is the affine latent.
 fn classify(
     text: &Value,
     model_type: &str,
@@ -504,11 +505,16 @@ fn classify(
             // k_pe[qk_rope_head_dim]), which the quantized latent does not
             // store at one element width.
             let elems = key_width.saturating_add(rope);
+            // The indexer key of a DSA slot stays 8-bit when the latent is
+            // stored narrower (`--mla-latent-quant int4`, issue #3179), which
+            // `quantized_key_slot_bytes_per_token` accounts for; with no
+            // sidecar or at 8 bits it is the whole-slot rate it always was.
             let fixed_bytes_per_token = v2_latent_bits
                 .filter(|_| v2_caches_latent || pair_quantized)
                 .map(|bits| {
-                    mlxcel_core::mla::quantized_latent_bytes_per_token(
-                        key_width as usize,
+                    mlxcel_core::mla::quantized_key_slot_bytes_per_token(
+                        kv_lora_rank as usize,
+                        index_key as usize,
                         rope as usize,
                         bits as usize,
                         group as usize,
@@ -848,7 +854,9 @@ fn estimate_kv_arch_inner(
     let model_type = crate::execution::config_fields::kv_decoder_model_type(config);
     let model_type = model_type.as_deref().unwrap_or("");
 
-    let v2_latent_bits = sizing.mode.latent_affine_bits().map(|bits| bits as u64);
+    // The width the latent is packed at in this mode: 8, or 4 under
+    // `--mla-latent-quant int4` (issue #3179).
+    let v2_latent_bits = mlxcel_core::mla::latent_cache_bits(sizing.mode).map(|bits| bits as u64);
     let (mut groups, kind) = classify(&text, model_type, v2_latent, v2_latent_bits)?;
     // The detail line describes the architecture, so it keeps the windows even
     // when the byte figure below ignores them.
@@ -887,6 +895,10 @@ mod latent_pair_tests;
 #[cfg(test)]
 #[path = "kv_arch_dsa_tests.rs"]
 mod dsa_tests;
+
+#[cfg(test)]
+#[path = "kv_arch_latent_option_tests.rs"]
+mod latent_option_tests;
 
 #[cfg(test)]
 mod tests {

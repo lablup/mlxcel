@@ -1043,10 +1043,22 @@ pub(crate) fn select_block_reclaim_victim_from<'a>(
         .map(|seq| seq.seq_id)
 }
 
+/// Whether a detached dense KV set can be adopted by a sequence whose layers
+/// are built in `expected` modes.
+///
+/// Every layer's mode must match. A layer that holds an affine-quantized MLA
+/// latent must also hold it at the width this process packs a latent at
+/// (`mla::latent_cache_bits`: 8, or 4 under `--mla-latent-quant int4`): an
+/// entry saved under `int8` has the same `int8` storage mode as one saved
+/// under `int4`, and appending rows of the other width to it is not possible
+/// (issue #3179). The entry's width is read from its own buffers
+/// (`DetachedKVCache::stored_latent_bits`), so it is recorded per layer by
+/// construction.
 fn validate_dense_detached_kv_modes_against_table(
     dense: &mlxcel_core::cache::DetachedCacheSet,
     expected: &[KVCacheMode],
 ) -> Result<(), String> {
+    let expected_latent_bits = mlxcel_core::mla::latent_cache_bits(KVCacheMode::Int8);
     if expected.len() != dense.num_layers() {
         return Err(format!(
             "resolved {} KV cache layer modes for {} detached layers",
@@ -1064,6 +1076,16 @@ fn validate_dense_detached_kv_modes_against_table(
         if actual != expected_mode {
             return Err(format!(
                 "layer {idx} detached mode {actual} does not match resolved mode {expected_mode}"
+            ));
+        }
+        if let Some(stored) = detached.stored_latent_bits()
+            && Some(stored) != expected_latent_bits
+        {
+            let expected =
+                expected_latent_bits.map_or("no".to_string(), |bits| format!("{bits}-bit"));
+            return Err(format!(
+                "layer {idx} detached MLA latent is {stored}-bit and this server stores a \
+                 {expected} latent"
             ));
         }
     }

@@ -84,6 +84,7 @@
 //! regression tests).
 
 use crate::cache::KVCacheMode;
+use crate::mla::MlaLatentQuant;
 
 /// Hard-coded list of `model_type` values where symmetric `KVCacheMode::Turbo4`
 /// is known to stay within +2.0% PPL of the FP16 baseline.
@@ -202,12 +203,54 @@ pub fn resolve_kv_cache_mode_for_model(
     requested: KVCacheMode,
     model_type: &str,
 ) -> (KVCacheMode, Option<String>) {
-    resolve_kv_cache_mode_for_model_with(requested, model_type, crate::mla::absorbed_enabled())
+    resolve_kv_cache_mode_for_model_with_option(
+        requested,
+        model_type,
+        crate::mla::absorbed_enabled(),
+        crate::mla::mla_latent_quant(),
+    )
+}
+
+/// [`resolve_kv_cache_mode_for_model_with`] under an MLA latent option
+/// (`--mla-latent-quant`, issue #3179).
+///
+/// [`MlaLatentQuant::Auto`] is the three rules of
+/// [`resolve_kv_cache_mode_for_model`], unchanged. An explicit value decides
+/// the caches of a model that holds an MLA latent (a latent-pair family, or
+/// `deepseek_v2` with `absorbed`) on its own, before those rules:
+/// [`crate::mla::effective_latent_bits`] returns a width and the caches are
+/// built in [`KVCacheMode::Int8`] storage, which packs the latent at that
+/// width, or it returns none and they are built fp16. Every KV cache of those
+/// models is a latent cache, so the model-level mode is exact. No line is
+/// returned for that substitution: the operator-facing lines for an explicit
+/// value come from [`crate::mla::latent_option_notices`]. A model with no
+/// latent cache ignores the option and falls through to the three rules.
+///
+/// Used by: [`resolve_kv_cache_mode_for_model`].
+#[must_use]
+pub fn resolve_kv_cache_mode_for_model_with_option(
+    requested: KVCacheMode,
+    model_type: &str,
+    absorbed: bool,
+    option: MlaLatentQuant,
+) -> (KVCacheMode, Option<String>) {
+    let holds_latent =
+        crate::mla::caches_mla_latent_pair(model_type) || (model_type == "deepseek_v2" && absorbed);
+    if option.is_explicit() && holds_latent {
+        let storage = match crate::mla::effective_latent_bits(model_type, requested, option) {
+            Some(_) => KVCacheMode::Int8,
+            None => KVCacheMode::Fp16,
+        };
+        return (storage, None);
+    }
+    resolve_kv_cache_mode_for_model_with(requested, model_type, absorbed)
 }
 
 /// [`resolve_kv_cache_mode_for_model`] with the absorbed-MLA decision passed in
 /// rather than read from the process environment, so the conditional
-/// `deepseek_v2` rule can be tested for both states.
+/// `deepseek_v2` rule can be tested for both states, and with the MLA latent
+/// option fixed at its `auto` default, so the result describes the default
+/// gate whatever option the process runs under.
 ///
 /// The `deepseek_v2` rule, when absorbed MLA decode is on:
 ///
@@ -223,20 +266,23 @@ pub fn resolve_kv_cache_mode_for_model(
 /// With absorption off the decompressed layout is the default, so a per-head
 /// quantized mode is kept.
 ///
-/// Used by: [`resolve_kv_cache_mode_for_model`].
+/// Used by: [`resolve_kv_cache_mode_for_model_with_option`], and
+/// `mlxcel::execution::kv_cache_advisor`, which must describe the default
+/// gate and never an explicit option value.
 #[must_use]
 pub fn resolve_kv_cache_mode_for_model_with(
     requested: KVCacheMode,
     model_type: &str,
     absorbed: bool,
 ) -> (KVCacheMode, Option<String>) {
+    const AUTO: MlaLatentQuant = MlaLatentQuant::Auto;
     if crate::mla::caches_mla_latent_pair(model_type)
-        && let Err(reason) = crate::mla::latent_pair_supports_mode(model_type, requested)
+        && let Err(reason) = crate::mla::latent_pair_supports_mode_with(model_type, requested, AUTO)
     {
         // A family that stores its latent through the quantizing view refuses
         // only the Turbo modes, so the warning names the mode it does take
         // rather than implying every quantized mode is refused.
-        let hint = if crate::mla::stores_quantized_latent_pair(model_type) {
+        let hint = if crate::mla::stores_quantized_latent_pair_with(model_type, AUTO) {
             "\n\tThis family stores its MLA latent as fp16 or int8; use --kv-cache-mode int8 \
              for a quantized latent."
         } else {

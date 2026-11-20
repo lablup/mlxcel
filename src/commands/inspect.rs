@@ -94,6 +94,9 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
     // the command it is predicting. `-m` is already a concrete directory here.
     let (kv_cache_mode, _) =
         mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, &args.model);
+    // An explicit `--mla-latent-quant` changes what is sized below, so say so
+    // (stderr; `--json` output stays clean).
+    mlxcel::cli::mla_latent_option::announce_mla_latent_option(requested, &args.model);
     // The mode itself, not an int8 flag: it also decides whether DeepSeek V2
     // caches the absorbed latent (FP16 only) or decompressed K/V (#3153).
     let estimate = estimate_total_memory(

@@ -1737,6 +1737,83 @@ fn dense_detached_kv_mode_validation_declines_named_mismatch() {
     );
 }
 
+/// A detached set whose one layer holds a quantized MLA latent written under
+/// `option` (three rows at rank 64).
+fn detached_latent_set(
+    option: mlxcel_core::mla::MlaLatentQuant,
+) -> mlxcel_core::cache::DetachedCacheSet {
+    let geometry = mlxcel_core::mla::MlaGeometry {
+        num_heads: 2,
+        kv_lora_rank: 64,
+        qk_nope_head_dim: 8,
+        qk_rope_head_dim: 8,
+        v_head_dim: 8,
+    };
+    let ramp = |n: usize| -> Vec<f32> { (0..n).map(|i| (i as f32 * 0.37).sin()).collect() };
+    let mut cache =
+        mlxcel_core::cache::KVCache::new_with_mode(mlxcel_core::cache::KVCacheMode::Int8);
+    mlxcel_core::mla::with_mla_latent_quant(option, || {
+        let window = mlxcel_core::mla::MlaLatentCache::wrap(&mut cache, geometry)
+            .expect("an int8 cache at rank 64 holds a latent")
+            .update_and_fetch(
+                mlxcel_core::from_slice_f32(&ramp(3 * 64), &[1, 1, 3, 64]),
+                mlxcel_core::from_slice_f32(&ramp(3 * 8), &[1, 1, 3, 8]),
+            );
+        assert!(window.is_quantized());
+    });
+    let mut set = detached_set_with_modes(&[]);
+    set.caches.push(cache.clone_handle());
+    set
+}
+
+/// Issue #3179: a prompt-cache entry saved at one MLA latent precision is not
+/// adopted by a server that stores another. `int8` and `int4` share the
+/// `int8` storage mode, so the mode table alone cannot tell them apart; the
+/// entry's own buffers can.
+#[test]
+fn dense_detached_latent_precision_mismatch_is_declined() {
+    use mlxcel_core::mla::MlaLatentQuant::{Auto, Fp16, Int4, Int8};
+    use mlxcel_core::mla::with_mla_latent_quant;
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let validate = |saved, restoring| {
+        let dense = detached_latent_set(saved);
+        assert_eq!(
+            dense.caches[0].stored_latent_bits(),
+            Some(if saved == Int4 { 4 } else { 8 })
+        );
+        with_mla_latent_quant(restoring, || {
+            super::validate_dense_detached_kv_modes_against_table(
+                &dense,
+                &[mlxcel_core::cache::KVCacheMode::Int8],
+            )
+        })
+    };
+    // The same precision on both sides adopts, under either spelling of 8 bits.
+    validate(Int8, Int8).expect("an int8 entry restores on an int8 server");
+    validate(Auto, Int8).expect("the default int8 latent is the forced int8 latent");
+    validate(Int4, Int4).expect("an int4 entry restores on an int4 server");
+
+    let err = validate(Int8, Int4).expect_err("an int8 entry must not restore as int4");
+    assert!(
+        err.contains("layer 0") && err.contains("8-bit") && err.contains("4-bit"),
+        "the error names the layer and both widths: {err}"
+    );
+    let err = validate(Int4, Auto).expect_err("an int4 entry must not restore as int8");
+    assert!(err.contains("4-bit") && err.contains("8-bit"), "{err}");
+
+    // An fp16 latent differs in storage mode, which the mode table catches.
+    let dense = detached_latent_set(Int4);
+    let err = with_mla_latent_quant(Fp16, || {
+        super::validate_dense_detached_kv_modes_against_table(
+            &dense,
+            &[mlxcel_core::cache::KVCacheMode::Fp16],
+        )
+    })
+    .expect_err("a quantized entry must not restore on an fp16 server");
+    assert!(err.contains("int8") && err.contains("fp16"), "{err}");
+}
+
 // -------------------------------------------------------------------
 // Lookahead async_eval pipeline invalidation logic (issue #632)
 // -------------------------------------------------------------------

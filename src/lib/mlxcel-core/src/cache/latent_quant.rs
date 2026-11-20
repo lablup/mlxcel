@@ -20,7 +20,11 @@
 //! `quantized_matmul` without dequantizing the window, and `k_pe` stays FP16.
 //! The layout is bit-width generic (`bits` below); 8 is the only width a mode
 //! selects, because 4-bit failed the #3155 quality gate
-//! (`docs/benchmark_results/mla-quantized-latent-m3ultra-2026-11-19.md`). The four per-token buffers reuse the slots a per-head
+//! (`docs/benchmark_results/mla-quantized-latent-m3ultra-2026-11-19.md`).
+//! `--mla-latent-quant int4` (issue #3179, `mla::latent_option`) stores 4-bit
+//! rows in the same `Int8` storage; the width a cache holds is read back from
+//! its buffers ([`KVCache::stored_latent_bits`]), so it travels with every
+//! detach, adopt and prompt-cache entry. The four per-token buffers reuse the slots a per-head
 //! INT8 cache already has, which is what lets `trim`, `trim_front`,
 //! `gather_positions`, detach/adopt and the prompt-cache store move them
 //! together with no latent-specific code:
@@ -69,6 +73,44 @@ impl KVCacheMode {
     #[must_use]
     pub const fn uses_scale_sidecars(self) -> bool {
         matches!(self, Self::Int8)
+    }
+}
+
+/// The latent bit width of a packed key slot `words` uint32 wide with `groups`
+/// affine groups of [`LATENT_QUANT_GROUP_SIZE`]: 8 when every group is packed
+/// at 8 bits, 4 when the latent groups are packed at 4 (with or without an
+/// 8-bit sidecar after them, `mla::latent_keys`), `None` for any other shape.
+fn packed_latent_bits(words: i32, groups: i32) -> Option<i32> {
+    let per_bit = LATENT_QUANT_GROUP_SIZE / 32;
+    if groups <= 0 {
+        None
+    } else if words == groups * per_bit * 8 {
+        Some(8)
+    } else if words >= groups * per_bit * 4 && words < groups * per_bit * 8 {
+        Some(4)
+    } else {
+        None
+    }
+}
+
+/// [`packed_latent_bits`] from a cache's `keys` and `key_scales` buffers.
+fn stored_bits(keys: Option<&MlxArray>, key_scales: Option<&MlxArray>) -> Option<i32> {
+    let keys = keys.filter(|k| ffi::array_dtype(k) == dtype::UINT32)?;
+    let last = |a: &MlxArray| ffi::array_shape(a).last().copied();
+    packed_latent_bits(last(keys)?, last(key_scales?)?)
+}
+
+impl super::DetachedKVCache {
+    /// The bit width of the quantized MLA latent this detached cache holds,
+    /// or `None` when it holds none. See [`KVCache::stored_latent_bits`].
+    ///
+    /// Used by: the prompt-cache adoption check
+    /// (`mlxcel::server::batch::scheduler`).
+    #[must_use]
+    pub fn stored_latent_bits(&self) -> Option<i32> {
+        self.mode
+            .latent_affine_bits()
+            .and_then(|_| stored_bits(self.keys.as_deref(), self.key_scales.as_deref()))
     }
 }
 
@@ -135,6 +177,23 @@ impl KVCache {
                 .keys
                 .as_ref()
                 .is_some_and(|k| ffi::array_dtype(k) == dtype::UINT32)
+    }
+
+    /// The bit width of the quantized latent rows this cache holds (8, or 4
+    /// under `--mla-latent-quant int4`), or `None` when it holds none.
+    ///
+    /// Read from the buffer shapes rather than kept in a field, so the width
+    /// cannot drift from the rows across `trim`, detach, adopt or a
+    /// prompt-cache round trip.
+    ///
+    /// Used by: `mla::MlaLatentCache`, which keeps writing a cache at the
+    /// width its rows already have.
+    #[must_use]
+    pub fn stored_latent_bits(&self) -> Option<i32> {
+        if !self.holds_quantized_latent() {
+            return None;
+        }
+        stored_bits(self.keys.as_deref(), self.key_scales.as_deref())
     }
 
     /// Append one step's quantized latent rows.

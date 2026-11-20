@@ -112,6 +112,34 @@ pub struct TurboKvCacheArgs {
     #[arg(long = "kv-cache-mode", value_name = "MODE")]
     pub kv_cache_mode: Option<String>,
 
+    /// Experimental: precision of the MLA latent cache (DeepSeek V2/V3/V3.2,
+    /// Kimi, Youtu, GLM-4.7-Flash, GLM-5, LongCat).
+    ///
+    /// Accepted values:
+    ///   auto   Default. int8 stores the affine 8-bit latent on the families
+    ///          that passed the quality gate; the others keep fp16.
+    ///   fp16   Keep the latent fp16 even under --kv-cache-mode int8.
+    ///   int8   Store the latent as affine group-64 8-bit on every MLA family,
+    ///          including the ones the gate keeps at fp16 (GLM-4.7-Flash,
+    ///          DeepSeek V3.2, GLM-5).
+    ///   int4   Store the latent as affine group-64 4-bit (416 against 672
+    ///          int8 and 1152 fp16 bytes per token per layer at rank 512). It
+    ///          always decodes on the composed path, never the fused Metal
+    ///          kernel. A DSA indexer key stays int8.
+    ///
+    /// An explicit value wins over the latent precision --kv-cache-mode or
+    /// --kv-bits implies and prints the measured quality result at startup.
+    /// It is ignored, with a warning, on a model with no MLA latent cache.
+    ///
+    /// Also read from MLXCEL_MLA_LATENT_QUANT; the CLI flag wins.
+    #[arg(
+        long = "mla-latent-quant",
+        value_name = "PRECISION",
+        value_parser = crate::cli::mla_latent_option::parse_mla_latent_quant_arg,
+        verbatim_doc_comment
+    )]
+    pub mla_latent_quant: Option<mlxcel_core::mla::MlaLatentQuant>,
+
     /// Number of boundary transformer layers to keep at higher precision when
     /// a Turbo4* KV cache mode is active.
     ///
@@ -479,10 +507,18 @@ pub fn resolve_effective_kv_cache_mode(
     };
     let (effective, warning) = resolve_kv_cache_mode_for_model(requested, &model_type);
     if let Some(reason) = dsa_key_slot_refusal(&config, &model_type, effective) {
+        // Name the flag that asked for the quantized latent: an explicit
+        // `--mla-latent-quant` does, whatever `--kv-cache-mode` says (#3179).
+        let option = mlxcel_core::mla::mla_latent_quant();
+        let asked = if option.is_explicit() {
+            format!("{} {option}", mlxcel_core::mla::MLA_LATENT_QUANT_FLAG)
+        } else {
+            format!("--kv-cache-mode {requested}")
+        };
         return (
             KVCacheMode::Fp16,
             Some(format!(
-                "warning: --kv-cache-mode {requested} is not supported on this model \
+                "warning: {asked} is not supported on this model \
                  (model_type=\"{model_type}\"): {reason}.\n\tUsing fp16 for this model's KV caches."
             )),
         );
@@ -490,8 +526,15 @@ pub fn resolve_effective_kv_cache_mode(
     (effective, warning)
 }
 
-/// Why a DSA model cannot store its `[kv_latent | indexer key]` slot at
-/// `mode`, or `None` when it can or the rule does not apply.
+/// Why a model cannot store its latent key slot at `mode`, or `None` when it
+/// can or the rule does not apply.
+///
+/// Under `auto` this is the DSA rule below and nothing else. An explicit
+/// `--mla-latent-quant` (issue #3179) applies the same whole-groups check to
+/// every latent-pair family and to an absorbing DeepSeek V2, so a forced
+/// latent on a `kv_lora_rank` that is not a multiple of 64 keeps fp16 from
+/// startup instead of reaching the per-token (or, on V2, decompressed)
+/// fallback at the first cache write.
 ///
 /// `deepseek_v32`, `deepseek_v3.2` and `glm_moe_dsa` cache the
 /// `index_head_dim`-wide indexer key beside the latent, and the affine `int8`
@@ -506,8 +549,12 @@ fn dsa_key_slot_refusal(
     model_type: &str,
     mode: KVCacheMode,
 ) -> Option<String> {
-    if mode.latent_affine_bits().is_none() || !mlxcel_core::mla::caches_dsa_indexer_key(model_type)
-    {
+    let dsa = mlxcel_core::mla::caches_dsa_indexer_key(model_type);
+    let forced_pair = mlxcel_core::mla::mla_latent_quant().is_explicit()
+        && (mlxcel_core::mla::caches_mla_latent_pair(model_type)
+            || (mlxcel_core::mla::absorbed_enabled()
+                && mlxcel_core::mla::stores_latent_through_view(model_type)));
+    if mode.latent_affine_bits().is_none() || !(dsa || forced_pair) {
         return None;
     }
     let dim = |key: &str, default: usize| {
@@ -519,10 +566,14 @@ fn dsa_key_slot_refusal(
             })
     };
     let rank = dim("kv_lora_rank", 512);
-    let index_key = dim(
-        "index_head_dim",
-        crate::models::deepseek_v32::default_index_head_dim(),
-    );
+    let index_key = if dsa {
+        dim(
+            "index_head_dim",
+            crate::models::deepseek_v32::default_index_head_dim(),
+        )
+    } else {
+        0
+    };
     mlxcel_core::mla::check_stored_key_width(rank, rank.saturating_add(index_key), mode).err()
 }
 
@@ -541,6 +592,7 @@ pub fn resolve_and_announce_kv_cache_mode(
     model_path: &Path,
 ) -> KVCacheMode {
     let (effective, warning) = resolve_effective_kv_cache_mode(requested, model_path);
+    crate::cli::mla_latent_option::announce_mla_latent_option(requested, model_path);
     if let Some(warning) = warning {
         eprintln!("{warning}");
         tracing::warn!(
@@ -555,8 +607,12 @@ pub fn resolve_and_announce_kv_cache_mode(
 /// Whether a cache built in `mode` for the model at `model_path` stores an
 /// affine-quantized MLA latent: `int8` on DeepSeek V2 (or a wrapper around
 /// it) with absorbed decode on (issue #3155), or `int8` on a latent-pair
-/// family in `mla::QUANTIZED_LATENT_FAMILIES`, which caches the latent in
-/// every absorption state (issue #3160).
+/// family that stores its latent through the quantizing view
+/// (`mla::stores_quantized_latent_pair`: `mla::QUANTIZED_LATENT_FAMILIES`
+/// under the default gate, every latent-pair family under an explicit
+/// `--mla-latent-quant int8` / `int4`), which caches the latent in every
+/// absorption state (issue #3160). The width is
+/// `cli::mla_latent_option::model_latent_bits`.
 ///
 /// Used by: `server::cli_input` (the `--kv-group-size` check) and the
 /// `generate` KV cache banner.

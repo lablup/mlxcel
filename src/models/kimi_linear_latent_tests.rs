@@ -421,3 +421,53 @@ fn a_table_differing_on_the_kda_index_alone_does_not_change_the_mla_cache() {
         KVCacheMode::Int8
     );
 }
+
+/// `--mla-latent-quant int4` on the Kimi Linear MLA layer (issue #3179): the
+/// `int8` storage packs the latent at 4 bits, the rows read back within the
+/// 4-bit codec step of the fp16 latent, decode stays on the composed path,
+/// and a decode step matches the dense step over the same rows dequantized.
+/// The KDA layer holds no KV and is untouched (the model-level test above).
+#[test]
+fn a_forced_int4_latent_stores_four_bit_rows_and_decodes_composed() {
+    use crate::models::mla_latent_test_support as support;
+    use mlxcel_core::mla::{MlaLatentQuant, with_mla_latent_quant};
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let attn = attention(64, 4);
+    let mut fp16 = KVCache::new();
+    let _ = decode(&attn, &mut fp16, 5, 9, false);
+    let x = hidden(9);
+    let rows = |from: i32, to: i32| mlxcel_core::slice(&x, &[0, from, 0], &[1, to, HIDDEN]);
+
+    with_mla_latent_quant(MlaLatentQuant::Int4, || {
+        let mut int4 = KVCache::new_with_mode(KVCacheMode::Int8);
+        mlxcel_core::eval(&attn.forward(&rows(0, 5), None, &mut int4));
+        let before = mlxcel_core::mla::stats::snapshot();
+        let got: Vec<Vec<f32>> = (5..9)
+            .map(|t| values(&attn.forward(&token(&x, t), None, &mut int4)))
+            .collect();
+        let after = mlxcel_core::mla::stats::snapshot();
+        assert_eq!(
+            path_delta(&before, &after, MlaDecodePath::AbsorbedComposed),
+            4
+        );
+        assert_eq!(path_delta(&before, &after, MlaDecodePath::AbsorbedFused), 0);
+
+        assert_eq!(int4.stored_latent_bits(), Some(4));
+        assert_eq!(
+            int4.bytes_per_reserved_token(),
+            mlxcel_core::mla::quantized_latent_bytes_per_token(64, 4, 4, 64)
+        );
+        support::assert_stored_columns(&int4, &fp16, 0, 64, support::INT4_ROW_TOL);
+
+        let mut twin = KVCache::new_with_mode(KVCacheMode::Int8);
+        mlxcel_core::eval(&attn.forward(&rows(0, 7), None, &mut twin));
+        let pair = values(&attn.forward(&rows(7, 9), None, &mut twin));
+        let want = support::last_position(&pair, HIDDEN as usize);
+        let err = support::max_rel_error(&got[3], &want);
+        assert!(
+            err < support::SAME_ROWS_TOL,
+            "int4 decode off its stored rows by {err}"
+        );
+    });
+}
