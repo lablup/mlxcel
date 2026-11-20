@@ -817,6 +817,46 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
     Ok(LoadedModel::Qwen25VL(vlm))
 }
 
+/// Bring a dense Qwen3-VL checkpoint's weights to the names and formats the
+/// loader reads: the key remap, the tied embedding, and for an NVFP4 export
+/// from NVIDIA ModelOpt or compressed-tensors (llm-compressor) the repack of
+/// each quantized linear to MLX native NVFP4, as the text-only, Qwen3.5 VLM
+/// and Qwen2.5-VL routes do. Without the repack the text model does not find
+/// a compressed-tensors export's `weight` at all, and reads a ModelOpt
+/// export's packed codes as they are.
+///
+/// Returns the weights and whether the checkpoint was such an export, so the
+/// caller can give the text config that layout.
+///
+/// Only the language model may be quantized this way. The vision tower loads
+/// with the MLX `quantization` block's layout, which these exports do not
+/// have, so one with packed vision linears is refused here by name.
+fn prepare_qwen3_vl_weights(
+    raw_weights: WeightMap,
+    full_config: &serde_json::Value,
+    model_path: &Path,
+) -> Result<(WeightMap, bool)> {
+    let mut weights = remap_qwen3_vl_weights(raw_weights, false);
+    models::sanitize_tied_embeddings(&mut weights, full_config);
+    let external_nvfp4 = models::is_modelopt_nvfp4_text_checkpoint(Some(full_config), model_path);
+    if external_nvfp4 {
+        let packed_vision_linear = weights
+            .keys()
+            .filter(|key| key.starts_with("vision_tower."))
+            .filter(|key| key.ends_with(".weight_packed") || key.ends_with(".weight_scale_2"))
+            .min();
+        if let Some(key) = packed_vision_linear {
+            anyhow::bail!(
+                "Qwen3-VL: this NVFP4 export also quantizes the vision tower ({key}), which \
+                 this loader does not support; only the language model may be NVFP4"
+            );
+        }
+        models::sanitize_modelopt_nvfp4_weights(&mut weights, Some(full_config))
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+    Ok((weights, external_nvfp4))
+}
+
 /// Load a Qwen3-VL model (ViT + interleaved MRoPE + DeepStack)
 pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
@@ -832,8 +872,14 @@ pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
         qwen_vision_config(&full_config, has_vision, "Qwen3VL vision config")?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
-    let mut weights = remap_qwen3_vl_weights(load_vlm_weights_common(model_path, None)?, false);
-    models::sanitize_tied_embeddings(&mut weights, &full_config);
+    let (mut weights, external_nvfp4) = prepare_qwen3_vl_weights(
+        load_vlm_weights_common(model_path, None)?,
+        &full_config,
+        model_path,
+    )?;
+    if external_nvfp4 {
+        text_config.declare_modelopt_nvfp4_layout();
+    }
 
     let text_model = models::Qwen3VLModel::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VL text model: {}", e))?;

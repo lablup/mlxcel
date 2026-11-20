@@ -21,8 +21,8 @@
 //! out of each; it soft-skips when either checkpoint is absent.
 
 use super::{
-    prepare_qwen2_5_vl_weights, qwen_vision_config, remap_qwen2_5_vl_native_keys,
-    rewrite_qwen2_5_vl_native_key, without_duplicate_in_chans,
+    prepare_qwen2_5_vl_weights, prepare_qwen3_vl_weights, qwen_vision_config,
+    remap_qwen2_5_vl_native_keys, rewrite_qwen2_5_vl_native_key, without_duplicate_in_chans,
 };
 
 #[test]
@@ -427,4 +427,246 @@ fn the_qwen2_5_vl_route_reads_the_modelopt_sidecar_file() {
     .expect("prepare");
     assert!(modelopt_nvfp4);
     assert!(weights.contains_key("model.layers.0.mlp.gate_proj.scales"));
+}
+
+/// Who wrote an NVFP4 export: the two producers store one weight format under
+/// different tensor names and declare it differently.
+#[derive(Debug, Clone, Copy)]
+enum Nvfp4Producer {
+    ModelOpt,
+    CompressedTensors,
+}
+
+impl Nvfp4Producer {
+    fn quantization_config(self) -> serde_json::Value {
+        match self {
+            Self::ModelOpt => modelopt_quantization_config("NVFP4"),
+            Self::CompressedTensors => serde_json::json!({
+                "quant_method": "compressed-tensors",
+                "format": "nvfp4-pack-quantized",
+                "quantization_status": "compressed",
+                "config_groups": { "group_0": { "weights": {
+                    "num_bits": 4, "type": "float", "group_size": 16
+                } } }
+            }),
+        }
+    }
+
+    /// Insert one NVFP4 linear (8 x 64) under `base` with tensor scale 0.5,
+    /// under this producer's tensor names.
+    fn insert_linear(self, weights: &mut mlxcel_core::weights::WeightMap, base: &str) {
+        use mlxcel_core::dtype;
+
+        let codes: Vec<u8> = (0..8 * 32).map(|i| (i * 37 + 19) as u8).collect();
+        let block_scales: Vec<u8> = (0..8 * 4).map(|i| [0x20, 0x28, 0x30][i % 3]).collect();
+        let codes = mlxcel_core::from_bytes(&codes, &[8, 32], dtype::UINT8);
+        let block_scales = mlxcel_core::from_bytes(&block_scales, &[8, 4], dtype::UINT8);
+        weights.insert(format!("{base}.weight_scale"), block_scales);
+        match self {
+            Self::ModelOpt => {
+                weights.insert(format!("{base}.weight"), codes);
+                weights.insert(
+                    format!("{base}.weight_scale_2"),
+                    mlxcel_core::from_slice_f32(&[0.5], &[1]),
+                );
+            }
+            Self::CompressedTensors => {
+                weights.insert(format!("{base}.weight_packed"), codes);
+                weights.insert(
+                    format!("{base}.weight_global_scale"),
+                    mlxcel_core::from_slice_f32(&[2.0], &[1]),
+                );
+                weights.insert(
+                    format!("{base}.input_global_scale"),
+                    mlxcel_core::from_slice_f32(&[37.5], &[1]),
+                );
+            }
+        }
+    }
+}
+
+/// A dense Qwen3-VL checkpoint in the `transformers` key layout with one NVFP4
+/// linear in the language model, a float text tensor and a float vision
+/// tensor.
+fn nvfp4_qwen3_vl_checkpoint(producer: Nvfp4Producer) -> mlxcel_core::weights::WeightMap {
+    let mut weights = mlxcel_core::weights::WeightMap::new();
+    producer.insert_linear(&mut weights, "model.language_model.layers.0.mlp.gate_proj");
+    weights.insert(
+        "model.language_model.norm.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[1.0; 64], &[64]),
+    );
+    weights.insert(
+        "model.visual.blocks.0.attn.proj.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.25; 16], &[4, 4]),
+    );
+    weights
+}
+
+fn qwen3_vl_config(quantization_config: Option<serde_json::Value>) -> serde_json::Value {
+    let mut config = serde_json::json!({
+        "model_type": "qwen3_vl",
+        "text_config": {
+            "model_type": "qwen3_vl_text",
+            "hidden_size": 64,
+            "num_hidden_layers": 1,
+            "intermediate_size": 8,
+            "num_attention_heads": 2,
+            "vocab_size": 16
+        },
+        "vision_config": { "hidden_size": 4 }
+    });
+    if let Some(quantization_config) = quantization_config {
+        config["quantization_config"] = quantization_config;
+    }
+    config
+}
+
+/// The dense Qwen3-VL route did not repack an NVFP4 export. A
+/// compressed-tensors one (`JEILDLWLRMA/Qwen3-VL-4B-Instruct-NVFP4`) failed
+/// with `Weight not found`; a ModelOpt one would have reached the linear
+/// loaders as packed bytes. Both are now repacked as on the text-only route,
+/// to the same planes, and the loader is told so it can give the text config
+/// the layout.
+#[test]
+fn an_nvfp4_checkpoint_is_repacked_on_the_qwen3_vl_route() {
+    use mlxcel_core::dtype;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = "model.layers.0.mlp.gate_proj";
+    let mut planes = Vec::new();
+    for producer in [Nvfp4Producer::ModelOpt, Nvfp4Producer::CompressedTensors] {
+        let full_config = qwen3_vl_config(Some(producer.quantization_config()));
+        let (weights, external_nvfp4) = prepare_qwen3_vl_weights(
+            nvfp4_qwen3_vl_checkpoint(producer),
+            &full_config,
+            dir.path(),
+        )
+        .expect("prepare");
+        assert!(external_nvfp4, "{producer:?}");
+        for gone in [
+            "weight_packed",
+            "weight_global_scale",
+            "input_global_scale",
+            "weight_scale",
+            "weight_scale_2",
+        ] {
+            assert!(
+                !weights.contains_key(&format!("{base}.{gone}")),
+                "{producer:?}: {gone}"
+            );
+        }
+        assert!(
+            weights.contains_key(&format!("{base}.scales")),
+            "{producer:?}"
+        );
+        let weight = weights.get(&format!("{base}.weight")).expect("weight");
+        assert_ne!(
+            mlxcel_core::array_dtype(weight),
+            dtype::UINT8,
+            "{producer:?}: the packed bytes were left as they were"
+        );
+        // Everything else is routed as before.
+        assert!(weights.contains_key("model.norm.weight"), "{producer:?}");
+        assert!(
+            weights.contains_key("vision_tower.blocks.0.attn.proj.weight"),
+            "{producer:?}"
+        );
+
+        let mut keys: Vec<&String> = weights.keys().collect();
+        keys.sort();
+        let bytes: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|key| {
+                let array = weights.get(key.as_str()).unwrap();
+                mlxcel_core::eval(array);
+                mlxcel_core::array_to_raw_bytes(array)
+            })
+            .collect();
+        planes.push((keys.into_iter().cloned().collect::<Vec<_>>(), bytes));
+    }
+    assert_eq!(
+        planes[0], planes[1],
+        "the two producers write one weight format"
+    );
+
+    // The text config of such an export has no MLX `quantization` block; the
+    // loader gives it the repacked layout, and leaves a declared one alone.
+    let text_config = |quantization: Option<serde_json::Value>| {
+        let mut config = qwen3_vl_config(None)["text_config"].clone();
+        if let Some(quantization) = quantization {
+            config["quantization"] = quantization;
+        }
+        serde_json::from_value::<crate::models::qwen3_vl::Qwen3VLConfig>(config)
+            .expect("text config")
+    };
+    let mut undeclared = text_config(None);
+    assert!(undeclared.quantization.is_none());
+    undeclared.declare_modelopt_nvfp4_layout();
+    let layout = undeclared.quantization.as_ref().expect("layout");
+    assert_eq!((layout.group_size, layout.bits), (16, 4));
+
+    let mut declared = text_config(Some(serde_json::json!({ "group_size": 64, "bits": 8 })));
+    declared.declare_modelopt_nvfp4_layout();
+    let layout = declared.quantization.as_ref().expect("layout");
+    assert_eq!((layout.group_size, layout.bits), (64, 8));
+}
+
+#[test]
+fn the_qwen3_vl_route_repacks_only_what_the_config_declares() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = "model.layers.0.mlp.gate_proj";
+    for quantization_config in [
+        None,
+        Some(modelopt_quantization_config("FP8")),
+        Some(serde_json::json!({ "quant_method": "other" })),
+        Some(serde_json::json!({
+            "quant_method": "compressed-tensors", "format": "pack-quantized"
+        })),
+    ] {
+        for (producer, kept) in [
+            (Nvfp4Producer::ModelOpt, "weight_scale_2"),
+            (Nvfp4Producer::CompressedTensors, "weight_packed"),
+        ] {
+            let (weights, external_nvfp4) = prepare_qwen3_vl_weights(
+                nvfp4_qwen3_vl_checkpoint(producer),
+                &qwen3_vl_config(quantization_config.clone()),
+                dir.path(),
+            )
+            .expect("prepare");
+            assert!(!external_nvfp4, "{quantization_config:?}");
+            assert!(
+                weights.contains_key(&format!("{base}.{kept}")),
+                "{quantization_config:?} {producer:?}"
+            );
+            assert!(
+                !weights.contains_key(&format!("{base}.scales")),
+                "{quantization_config:?} {producer:?}"
+            );
+        }
+    }
+}
+
+/// The vision tower loads with the MLX `quantization` block's layout, which
+/// an NVFP4 export does not have. One that also packs vision linears
+/// (`Forturne/Qwen3-VL-Embedding-2B-NVFP4` does) is refused by name instead of
+/// handing the tower repacked planes it would read as dense weights.
+#[test]
+fn an_nvfp4_export_with_a_packed_vision_tower_is_refused_on_the_qwen3_vl_route() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for producer in [Nvfp4Producer::ModelOpt, Nvfp4Producer::CompressedTensors] {
+        let mut checkpoint = nvfp4_qwen3_vl_checkpoint(producer);
+        producer.insert_linear(&mut checkpoint, "model.visual.blocks.0.attn.qkv");
+        let error = match prepare_qwen3_vl_weights(
+            checkpoint,
+            &qwen3_vl_config(Some(producer.quantization_config())),
+            dir.path(),
+        ) {
+            Ok(_) => panic!("{producer:?}: a packed vision tower must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("vision_tower.blocks.0.attn.qkv") && error.contains("vision tower"),
+            "{producer:?}: {error}"
+        );
+    }
 }
