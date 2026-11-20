@@ -101,6 +101,21 @@ impl Qwen3VLConfig {
         self.head_dim
             .unwrap_or(self.hidden_size / self.num_attention_heads)
     }
+    /// Give the config the layout of an NVFP4 export's repacked linears
+    /// (ModelOpt's triplets, or compressed-tensors' under other names): 4-bit
+    /// codes in the 16-element blocks the transcode keeps.
+    ///
+    /// Such an export has no MLX `quantization` block, and without one
+    /// [`Self::group_size`] and [`Self::bits`] are 0, which the quantized
+    /// loaders refuse. A config that already has the block is left alone.
+    ///
+    /// Used by: `load_qwen3_vl` (`src/loading/vlm_qwen.rs`)
+    pub(crate) fn declare_modelopt_nvfp4_layout(&mut self) {
+        self.quantization.get_or_insert(QuantConfig {
+            group_size: crate::models::sanitize::NVFP4_SOURCE_GROUP_SIZE as i32,
+            bits: 4,
+        });
+    }
     fn group_size(&self) -> i32 {
         self.quantization
             .as_ref()
