@@ -135,8 +135,9 @@ pub use latent_keys::{
 pub use latent_option::{
     EXPERIMENTAL_LATENT_NOTES, ExperimentalLatentNote, MLA_LATENT_QUANT_ENV, MLA_LATENT_QUANT_FLAG,
     MlaLatentQuant, effective_latent_bits, experimental_latent_notes, has_mla_latent_cache,
-    init_mla_latent_quant, latent_cache_bits, latent_cache_bits_with, latent_option_notices,
-    mla_latent_quant, resolve_mla_latent_quant, set_mla_latent_quant, with_mla_latent_quant,
+    holds_mla_latent, init_mla_latent_quant, latent_cache_bits, latent_cache_bits_with,
+    latent_option_notices, mla_latent_quant, option_decides_latent, resolve_mla_latent_quant,
+    set_mla_latent_quant, with_mla_latent_quant,
 };
 pub use latent_pair::{
     QUANTIZED_LATENT_FAMILIES, latent_pair_supports_mode, latent_pair_supports_mode_with,

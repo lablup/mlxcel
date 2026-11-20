@@ -234,9 +234,7 @@ pub fn resolve_kv_cache_mode_for_model_with_option(
     absorbed: bool,
     option: MlaLatentQuant,
 ) -> (KVCacheMode, Option<String>) {
-    let holds_latent =
-        crate::mla::caches_mla_latent_pair(model_type) || (model_type == "deepseek_v2" && absorbed);
-    if option.is_explicit() && holds_latent {
+    if crate::mla::option_decides_latent(model_type, absorbed, option) {
         let storage = match crate::mla::effective_latent_bits(model_type, requested, option) {
             Some(_) => KVCacheMode::Int8,
             None => KVCacheMode::Fp16,

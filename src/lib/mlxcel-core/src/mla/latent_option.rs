@@ -33,9 +33,14 @@
 //!   [`crate::mla::latent_pair_supports_mode`] answer through it.
 //!
 //! The option is process state: [`init_mla_latent_quant`] sets it once at
-//! startup and [`mla_latent_quant`] reads it. A process that never sets it
-//! (a library user, an example binary) reads the environment variable on the
-//! first query, in the same function.
+//! startup and [`mla_latent_quant`] reads it. Every shipped binary that can
+//! load an MLA model calls the former, so a bad value is a startup error. A
+//! process that never sets it (a library user, an example binary) reads the
+//! environment variable on the first query, in the same function, and a bad
+//! value there is reported on stderr and read as `auto`.
+//!
+//! Whether an explicit value decides a model's caches at all is
+//! [`option_decides_latent`], the one statement of that rule.
 
 use std::cell::Cell;
 use std::sync::OnceLock;
@@ -134,11 +139,24 @@ pub fn resolve_mla_latent_quant(cli: Option<&str>) -> Result<MlaLatentQuant, Str
         return MlaLatentQuant::parse(value)
             .map_err(|err| format!("{MLA_LATENT_QUANT_FLAG}: {err}"));
     }
-    match std::env::var(MLA_LATENT_QUANT_ENV) {
+    option_from_env_value(std::env::var(MLA_LATENT_QUANT_ENV))
+}
+
+/// [`resolve_mla_latent_quant`]'s reading of the environment variable:
+/// unset or blank is `auto`, and an unknown value or one that is not valid
+/// UTF-8 is an error naming the variable.
+fn option_from_env_value(
+    value: Result<String, std::env::VarError>,
+) -> Result<MlaLatentQuant, String> {
+    match value {
         Ok(value) if !value.trim().is_empty() => {
             MlaLatentQuant::parse(&value).map_err(|err| format!("{MLA_LATENT_QUANT_ENV}: {err}"))
         }
-        _ => Ok(MlaLatentQuant::Auto),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(MlaLatentQuant::Auto),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{MLA_LATENT_QUANT_ENV}: the value is not valid UTF-8: expected one of {}",
+            MlaLatentQuant::VALUES.join(", ")
+        )),
     }
 }
 
@@ -170,8 +188,12 @@ pub fn init_mla_latent_quant(cli: Option<&str>) -> Result<MlaLatentQuant, String
 
 /// The option in force: the calling thread's [`with_mla_latent_quant`]
 /// override, else the process value, which a process that never called
-/// [`init_mla_latent_quant`] takes from the environment on first use (an
-/// unknown value there is reported once and read as `auto`).
+/// [`init_mla_latent_quant`] takes from the environment on first use.
+///
+/// A bad value on that lazy path cannot fail a startup that has already
+/// happened, so it is printed once on stderr as an error, not only logged,
+/// and read as `auto`. The shipped binaries never reach it: they call
+/// [`init_mla_latent_quant`], which rejects the value before anything runs.
 #[must_use]
 pub fn mla_latent_quant() -> MlaLatentQuant {
     if let Some(option) = OVERRIDE.with(Cell::get) {
@@ -179,7 +201,10 @@ pub fn mla_latent_quant() -> MlaLatentQuant {
     }
     *OPTION.get_or_init(|| {
         resolve_mla_latent_quant(None).unwrap_or_else(|err| {
-            tracing::warn!("{err}; using auto");
+            eprintln!(
+                "error: {err}; this process did not validate it at startup, so the MLA latent \
+                 caches use auto (the default quality gate)"
+            );
             MlaLatentQuant::Auto
         })
     })
@@ -209,6 +234,28 @@ pub fn with_mla_latent_quant<R>(option: MlaLatentQuant, f: impl FnOnce() -> R) -
 #[must_use]
 pub fn has_mla_latent_cache(model_type: &str) -> bool {
     caches_mla_latent_pair(model_type) || stores_latent_through_view(model_type)
+}
+
+/// Whether `model_type` holds an MLA latent cache in this run: a latent-pair
+/// family, or `deepseek_v2` while absorbed MLA decode is on (`absorbed`).
+/// Case-insensitive and trimmed, like the family lists it reads.
+#[must_use]
+pub fn holds_mla_latent(model_type: &str, absorbed: bool) -> bool {
+    caches_mla_latent_pair(model_type) || (absorbed && stores_latent_through_view(model_type))
+}
+
+/// Whether `option` decides the KV caches of `model_type` on its own: an
+/// explicit value on a model that [`holds_mla_latent`]. Every KV cache of
+/// such a model is a latent cache, so the option's answer is the model's.
+///
+/// The one statement of the rule. Used by:
+/// `cache::turbo::allowlist::resolve_kv_cache_mode_for_model_with_option`,
+/// [`latent_option_notices`], and in `mlxcel` the DSA key-slot refusal
+/// (`cli::turbo_args`) and `cli::mla_latent_option::option_decides_model`
+/// (the `--kv-bits` table).
+#[must_use]
+pub fn option_decides_latent(model_type: &str, absorbed: bool, option: MlaLatentQuant) -> bool {
+    option.is_explicit() && holds_mla_latent(model_type, absorbed)
 }
 
 /// The bit width `model_type` stores its MLA latent at when the operator
@@ -290,7 +337,7 @@ pub struct ExperimentalLatentNote {
 pub static EXPERIMENTAL_LATENT_NOTES: &[ExperimentalLatentNote] = &[
     ExperimentalLatentNote {
         families: &["glm4_moe_lite"],
-        bits: &[8, 4],
+        bits: &[8],
         text: "GLM-4.7-Flash with an int8 latent showed 1 decided-position disagreement against \
                the fp16 latent behind 1024 tokens (docs/benchmark_results/\
                mla-quantized-latent-glm-longcat-m3ultra-2026-11-19.md)",
@@ -304,9 +351,17 @@ pub static EXPERIMENTAL_LATENT_NOTES: &[ExperimentalLatentNote] = &[
     },
     ExperimentalLatentNote {
         families: &["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"],
-        bits: &[8, 4],
+        bits: &[8],
         text: "DeepSeek-V3.2 with an int8 key slot passed the logit trace, but the DSA indexer's \
                top-k overlap with fp16 fell below 0.99 on 49 of 61 layers behind 4096 tokens \
+               (docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md)",
+    },
+    ExperimentalLatentNote {
+        families: &["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"],
+        bits: &[4],
+        text: "the 4-bit latent of a DSA key slot has not been quality-measured on a real \
+               DeepSeek-V3.2 checkpoint; the int8 slot already dropped the DSA indexer's top-k \
+               overlap with fp16 below 0.99 on 49 of 61 layers behind 4096 tokens \
                (docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md)",
     },
     ExperimentalLatentNote {
@@ -363,8 +418,8 @@ pub fn latent_option_notices(
     if !option.is_explicit() {
         return Vec::new();
     }
-    let v2 = stores_latent_through_view(model_type);
-    if !has_mla_latent_cache(model_type) || (v2 && !absorbed) {
+    if !option_decides_latent(model_type, absorbed, option) {
+        let v2 = stores_latent_through_view(model_type);
         let why = if v2 {
             "absorbed MLA decode is off, so it caches decompressed per-head K/V"
         } else {

@@ -161,6 +161,10 @@ fn bench_sampling_config(
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    // These binaries take no `--mla-latent-quant` flag but load MLA models,
+    // so fix the option from `MLXCEL_MLA_LATENT_QUANT` before anything
+    // resolves a KV cache mode; a bad value is a startup error (issue #3179).
+    mlxcel::cli::mla_latent_option::init_mla_latent_quant(None)?;
     let run_cli = matches!(args.path, PathArg::Cli | PathArg::Both);
     let run_server = matches!(args.path, PathArg::Server | PathArg::Both);
     if run_cli {

@@ -109,7 +109,8 @@ pub fn announce_mla_latent_option(requested: KVCacheMode, model_path: &Path) {
 
 /// Whether an explicit `--mla-latent-quant` decides the KV caches of the
 /// model at `model_path`: the option is not `auto` and the model holds an MLA
-/// latent (a latent-pair family, or DeepSeek V2 while it absorbs).
+/// latent (a latent-pair family, or DeepSeek V2 while it absorbs), which is
+/// `mlxcel_core::mla::option_decides_latent` on the directory's `model_type`.
 ///
 /// Every KV cache of such a model is a latent cache, so the `--kv-bits` table
 /// has nothing left to decide there.
@@ -117,11 +118,14 @@ pub fn announce_mla_latent_option(requested: KVCacheMode, model_path: &Path) {
 /// Used by: `server::cli_input::disable_batch_kv_quant_for_family`.
 #[must_use]
 pub fn option_decides_model(model_path: &Path) -> bool {
-    mla_latent_quant().is_explicit()
+    let option = mla_latent_quant();
+    option.is_explicit()
         && rules_model_type(model_path).is_some_and(|model_type| {
-            mlxcel_core::mla::caches_mla_latent_pair(&model_type)
-                || (mlxcel_core::mla::absorbed_enabled()
-                    && mlxcel_core::mla::stores_latent_through_view(&model_type))
+            mlxcel_core::mla::option_decides_latent(
+                &model_type,
+                mlxcel_core::mla::absorbed_enabled(),
+                option,
+            )
         })
 }
 
@@ -135,6 +139,28 @@ pub fn model_latent_bits(mode: KVCacheMode, model_path: &Path) -> Option<i32> {
     super::turbo_args::model_stores_quantized_latent(mode, model_path)
         .then(|| mlxcel_core::mla::latent_cache_bits(mode))
         .flatten()
+}
+
+/// The `KV dtype` a memory estimate reports for a cache built in `mode` for
+/// the model at `model_path`: `fp16`, `int8`, or, when the option packs the
+/// model's MLA latent at another width inside the `int8` storage, that width
+/// and the flag that chose it (`int4 (MLA latent, --mla-latent-quant int4)`).
+///
+/// Used by: `execution::memory_estimate::format_estimate` (`mlxcel inspect`
+/// and the `--estimate-memory` preflights).
+#[must_use]
+pub fn kv_dtype_label(mode: KVCacheMode, model_path: &Path) -> String {
+    if mode != KVCacheMode::Int8 {
+        return "fp16".to_string();
+    }
+    match model_latent_bits(mode, model_path) {
+        Some(bits) if bits != 8 => format!(
+            "int{bits} (MLA latent, {} {})",
+            mlxcel_core::mla::MLA_LATENT_QUANT_FLAG,
+            mla_latent_quant()
+        ),
+        _ => "int8".to_string(),
+    }
 }
 
 /// The `generate` banner's description of an `int8` KV cache that stores an

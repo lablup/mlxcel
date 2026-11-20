@@ -550,10 +550,11 @@ fn dsa_key_slot_refusal(
     mode: KVCacheMode,
 ) -> Option<String> {
     let dsa = mlxcel_core::mla::caches_dsa_indexer_key(model_type);
-    let forced_pair = mlxcel_core::mla::mla_latent_quant().is_explicit()
-        && (mlxcel_core::mla::caches_mla_latent_pair(model_type)
-            || (mlxcel_core::mla::absorbed_enabled()
-                && mlxcel_core::mla::stores_latent_through_view(model_type)));
+    let forced_pair = mlxcel_core::mla::option_decides_latent(
+        model_type,
+        mlxcel_core::mla::absorbed_enabled(),
+        mlxcel_core::mla::mla_latent_quant(),
+    );
     if mode.latent_affine_bits().is_none() || !(dsa || forced_pair) {
         return None;
     }

@@ -3534,18 +3534,22 @@ fn main() -> anyhow::Result<()> {
 
     // Fix `--mla-latent-quant` (or `MLXCEL_MLA_LATENT_QUANT`) for the process
     // before the command resolves a KV cache mode, so the banner, the
-    // estimators and the caches read one value (issue #3179). Only the
-    // commands that take the flag validate it; the others never build a KV
-    // cache, so a bad environment value does not fail them.
-    let turbo = match &cli.command {
-        Commands::Run(args) => Some(&args.generation.turbo),
-        Commands::Generate(args) => Some(&args.generation.turbo),
-        Commands::Serve(args) => Some(&args.turbo),
-        Commands::Inspect(args) => Some(&args.turbo),
+    // estimators and the caches read one value (issue #3179). The commands
+    // that take the flag validate it, and so do `tune` and `predict`, which
+    // take no flag but load or size a model from `-m`: a bad environment
+    // value is a startup error there too. The remaining commands never build
+    // a KV cache; should one reach the option anyway, the lazy read reports a
+    // bad value on stderr.
+    let mla_latent_cli = match &cli.command {
+        Commands::Run(args) => Some(args.generation.turbo.mla_latent_quant),
+        Commands::Generate(args) => Some(args.generation.turbo.mla_latent_quant),
+        Commands::Serve(args) => Some(args.turbo.mla_latent_quant),
+        Commands::Inspect(args) => Some(args.turbo.mla_latent_quant),
+        Commands::Tune(_) | Commands::Predict(_) => Some(None),
         _ => None,
     };
-    if let Some(turbo) = turbo {
-        mlxcel::cli::mla_latent_option::init_mla_latent_quant(turbo.mla_latent_quant)?;
+    if let Some(cli_value) = mla_latent_cli {
+        mlxcel::cli::mla_latent_option::init_mla_latent_quant(cli_value)?;
     }
 
     // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so

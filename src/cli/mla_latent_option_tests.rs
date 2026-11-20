@@ -211,3 +211,40 @@ fn each_line_is_announced_once_per_process() {
         }
     });
 }
+
+/// `mlxcel inspect` and the preflights name the width the latent is stored at,
+/// not the `int8` storage that holds it (review item for #3189).
+#[test]
+fn the_kv_dtype_label_names_a_narrower_latent_and_the_flag_that_chose_it() {
+    let glm = dir_of("glm4_moe_lite");
+    let v3 = dir_of("deepseek_v3");
+    let llama = dir_of("llama");
+    with_mla_latent_quant(Int4, || {
+        for dir in [&glm, &v3] {
+            let label = kv_dtype_label(KVCacheMode::Int8, dir.path());
+            assert_eq!(label, "int4 (MLA latent, --mla-latent-quant int4)");
+        }
+        // A model the option does not decide keeps its own int8 caches.
+        assert_eq!(kv_dtype_label(KVCacheMode::Int8, llama.path()), "int8");
+        assert_eq!(kv_dtype_label(KVCacheMode::Fp16, v3.path()), "fp16");
+    });
+    for option in [Auto, Int8] {
+        with_mla_latent_quant(option, || {
+            assert_eq!(kv_dtype_label(KVCacheMode::Int8, v3.path()), "int8");
+        });
+    }
+    with_mla_latent_quant(Int4, || {
+        let estimate = crate::execution::memory_estimate::estimate_total_memory(
+            v3.path(),
+            1024,
+            1,
+            crate::execution::memory_estimate::QuantHint::Fp16,
+            KVCacheMode::Int8,
+        );
+        let banner = crate::execution::memory_estimate::format_estimate(v3.path(), &estimate);
+        assert!(
+            banner.contains("KV dtype:        int4 (MLA latent"),
+            "{banner}"
+        );
+    });
+}

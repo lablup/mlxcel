@@ -244,22 +244,30 @@ fn the_experimental_line_quotes_the_measurement_for_the_family_and_width() {
         dsa4.contains("0.86 logits") && dsa4.contains("top-k overlap"),
         "{dsa4}"
     );
+    // The int8 key slot's note is not repeated as if it described int4; the
+    // int4 note says the 4-bit slot is unmeasured on the real checkpoint.
+    assert!(dsa4.contains("not been quality-measured"), "{dsa4}");
+    assert!(!dsa4.contains("with an int8 key slot passed"), "{dsa4}");
+    assert!(!dsa.contains("not been quality-measured"), "{dsa}");
     assert!(
         dsa4.contains("indexer key stored beside the latent stays int8"),
         "{dsa4}"
     );
     let glm4 = only("glm4_moe_lite", f, Int4);
-    assert!(
-        glm4.contains("0.86 logits") && glm4.contains("1 decided-position"),
-        "{glm4}"
-    );
+    assert!(glm4.contains("0.86 logits"), "{glm4}");
+    // GLM's int8 result describes int8 only.
+    assert!(!glm4.contains("1 decided-position"), "{glm4}");
     // The #3179 measurements: GLM's own int4 result, and the int4 traces on
     // Moonlight and LongCat for every family.
     assert!(glm4.contains("3 decided-position disagreements"), "{glm4}");
+    assert!(glm4.contains("-19.5% and -16.1%"), "{glm4}");
     assert!(glm4.contains("0.84 and 1.13 logits"), "{glm4}");
     let glm8 = only("glm4_moe_lite", f, Int8);
     assert!(!glm8.contains("3 decided-position"), "{glm8}");
-    assert_eq!(experimental_latent_notes("glm4_moe_lite", 4).len(), 4);
+    assert_eq!(experimental_latent_notes("glm4_moe_lite", 4).len(), 3);
+    assert_eq!(experimental_latent_notes("glm4_moe_lite", 8).len(), 1);
+    assert_eq!(experimental_latent_notes("deepseek_v32", 4).len(), 3);
+    assert_eq!(experimental_latent_notes("deepseek_v32", 8).len(), 1);
     assert_eq!(experimental_latent_notes("deepseek_v3", 4).len(), 2);
     assert_eq!(experimental_latent_notes("deepseek_v3", 8).len(), 0);
 }
@@ -303,4 +311,72 @@ fn the_thread_override_is_scoped_and_restored() {
         std::thread::spawn(mla_latent_quant).join().unwrap()
     });
     assert_eq!(other, before);
+}
+
+/// A measurement is taken at one width, so a note keyed on two would print
+/// one width's result as if it described the other (review item for #3189).
+#[test]
+fn every_note_is_keyed_on_the_one_width_it_was_measured_at() {
+    for note in EXPERIMENTAL_LATENT_NOTES {
+        assert_eq!(note.bits.len(), 1, "{}", note.text);
+        assert!(matches!(note.bits[0], 4 | 8), "{}", note.text);
+    }
+}
+
+/// One rule, one case rule: an explicit value decides a latent-pair family
+/// and an absorbing `deepseek_v2` whatever the `config.json` casing, and
+/// nothing else (review item for #3189).
+#[test]
+fn whether_the_option_decides_a_model_ignores_case_and_follows_absorption() {
+    for spelling in ["deepseek_v2", "DeepSeek_V2", " DEEPSEEK_V2 "] {
+        assert!(holds_mla_latent(spelling, true), "{spelling:?}");
+        assert!(!holds_mla_latent(spelling, false), "{spelling:?}");
+        for option in [Fp16, Int8, Int4] {
+            assert!(
+                option_decides_latent(spelling, true, option),
+                "{spelling:?}"
+            );
+            assert!(
+                !option_decides_latent(spelling, false, option),
+                "{spelling:?}"
+            );
+        }
+        assert!(!option_decides_latent(spelling, true, Auto), "{spelling:?}");
+        // The resolver reads the same rule, so the casing reaches the cache.
+        assert_eq!(
+            resolve_kv_cache_mode_for_model_with_option(KVCacheMode::Fp16, spelling, true, Int4),
+            (KVCacheMode::Int8, None),
+            "{spelling:?}"
+        );
+        assert!(latent_option_notices(spelling, KVCacheMode::Int8, true, Int8).is_empty());
+    }
+    for spelling in ["glm4_moe_lite", "GLM4_MOE_LITE"] {
+        for absorbed in [false, true] {
+            assert!(
+                option_decides_latent(spelling, absorbed, Int4),
+                "{spelling}"
+            );
+        }
+    }
+    for option in [Auto, Fp16, Int8, Int4] {
+        assert!(!option_decides_latent("llama", true, option));
+    }
+}
+
+#[test]
+fn a_non_utf8_or_unknown_environment_value_is_an_error_naming_the_variable() {
+    use std::env::VarError;
+    assert_eq!(option_from_env_value(Err(VarError::NotPresent)), Ok(Auto));
+    assert_eq!(option_from_env_value(Ok("  ".to_string())), Ok(Auto));
+    assert_eq!(option_from_env_value(Ok(" INT4 ".to_string())), Ok(Int4));
+    let bad = option_from_env_value(Ok("q4".to_string())).unwrap_err();
+    assert!(bad.starts_with(MLA_LATENT_QUANT_ENV) && bad.contains("auto, fp16, int8, int4"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = std::ffi::OsString::from_vec(vec![b'i', b'n', b't', 0xff]);
+        let err = option_from_env_value(Err(VarError::NotUnicode(raw))).unwrap_err();
+        assert!(err.starts_with(MLA_LATENT_QUANT_ENV), "{err}");
+        assert!(err.contains("not valid UTF-8"), "{err}");
+    }
 }
