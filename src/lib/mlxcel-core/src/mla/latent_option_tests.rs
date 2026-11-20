@@ -269,7 +269,7 @@ fn a_quantized_mode_that_implies_another_precision_gets_one_line_naming_both() {
     let i = KVCacheMode::Int8;
     let lines = latent_option_notices("deepseek_v3", i, true, Fp16);
     assert_eq!(lines.len(), 1, "{lines:?}");
-    assert!(lines[0].contains("--kv-cache-mode int8") && lines[0].contains("fp16"));
+    assert!(lines[0].contains("int8 KV cache mode") && lines[0].contains("--kv-bits"));
     assert!(lines[0].contains("disagree") && lines[0].contains("stored as fp16"));
 
     // int8 mode with an int4 latent: the disagreement and the experimental line.

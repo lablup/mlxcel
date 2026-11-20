@@ -380,9 +380,10 @@ pub fn latent_option_notices(
     let precision = |bits: Option<i32>| bits.map_or("fp16".to_string(), |b| format!("int{b}"));
     if requested != KVCacheMode::Fp16 && requested.latent_affine_bits() != explicit {
         notices.push(format!(
-            "warning: --kv-cache-mode {requested} and {MLA_LATENT_QUANT_FLAG} {option} disagree \
-             on the MLA latent precision (model_type=\"{model_type}\"); the explicit \
-             {MLA_LATENT_QUANT_FLAG} wins and the latent is stored as {}.",
+            "warning: the requested {requested} KV cache mode (--kv-cache-mode or --kv-bits) and \
+             {MLA_LATENT_QUANT_FLAG} {option} disagree on the MLA latent precision \
+             (model_type=\"{model_type}\"); the explicit {MLA_LATENT_QUANT_FLAG} wins and the \
+             latent is stored as {}.",
             precision(explicit)
         ));
     }
