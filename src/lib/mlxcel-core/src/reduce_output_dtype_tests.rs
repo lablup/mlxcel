@@ -19,13 +19,22 @@
 //! reduce overlay (bf16 accumulation in fp32) took the output pointer from the
 //! input type, so each of those wrote elements of the wrong size and returned
 //! garbage: `sum(x > 0)` over the last axis of a 3 x 4 mask with 3, 0 and 2
-//! true entries per row gave `[65537, 0, 0]`. The Turbo-4 MLA latent codec
-//! counts boundaries with exactly that sum, which is how it was found.
+//! true entries per row came back as `[65537, 0, 0]` on a GB10 (the exact
+//! numbers depend on what the output buffer held), and `any` / `all` over a
+//! multi-byte input wrote past the end of their one-byte-per-element output.
+//! The Turbo-4 MLA latent codec counts boundaries with exactly that sum,
+//! which is how it was found.
 //!
 //! Each case runs on the default device and on the CPU stream and must agree
 //! exactly, values and dtype; the mask counts are also checked against a host
-//! count. The shapes reach the row, column, all-reduce (single and multi
+//! count. The shapes reach the row (simple, one and two rows per block, and
+//! looped), column (small, looped and two-pass), all-reduce (single and multi
 //! block) and empty-input kernels.
+//!
+//! Half-precision inputs are reduced natively here, which the production
+//! entry points avoid on Metal (`reduce_in_f32` in the bridge: an M5 fault
+//! with half-precision reductions). Those cases are left out of a Metal
+//! build; the overlay under test is CUDA's.
 //!
 //!   cargo test -p mlxcel-core --lib reduce_output_dtype_tests
 
@@ -71,14 +80,28 @@ fn assert_matches_cpu(
     device
 }
 
-const SHAPES: [&[i32]; 6] = [
+/// `[8, 32]` and `[24, 16]` put a one-byte input on the CUDA small column
+/// reduction (a short column whose stride is a multiple of 16 elements);
+/// `[300, 5]` takes the two-pass column reduction, `[64, 4096]` the
+/// multi-block all-reduce, and `[1025, 8]` the row reduction that handles two
+/// rows per block (1024 output rows or more).
+const SHAPES: [&[i32]; 9] = [
     &[3, 4],
+    &[8, 32],
+    &[24, 16],
     &[5, 300],
     &[300, 5],
+    &[1025, 8],
     &[64, 4096],
     &[7, 33, 65],
     &[2, 3, 4, 5],
 ];
+
+/// Whether to reduce half-precision arrays in their own dtype. Not on Metal,
+/// where the bridge routes those reductions through f32 for an M5 fault.
+fn native_half_precision_reductions() -> bool {
+    !cfg!(feature = "metal")
+}
 
 #[test]
 fn a_sum_or_product_over_a_mask_counts_on_every_axis() {
@@ -152,10 +175,15 @@ fn any_and_all_over_a_non_bool_input_return_bool() {
             dtype::FLOAT32,
             dtype::FLOAT16,
             dtype::BFLOAT16,
+            dtype::INT64,
             dtype::INT32,
             dtype::UINT8,
             dtype::BOOL,
         ] {
+            let half = input == dtype::FLOAT16 || input == dtype::BFLOAT16;
+            if half && !native_half_precision_reductions() {
+                continue;
+            }
             let x = astype(&x, input);
             let (dt, _, any) =
                 assert_matches_cpu(&format!("any({input}) all {shape:?}"), || any_all(&x));
@@ -187,8 +215,78 @@ fn any_and_all_over_a_non_bool_input_return_bool() {
     }
 }
 
+/// Several axes reduced at once. MLX merges adjacent reduced axes into one, so
+/// `[1, 2]` or `[0, 1]` take the same kernels as a single axis; reduced axes
+/// with a kept one between them (`[0, 2]`, `[1, 3]`, `[0, 2]` of four) are
+/// what reaches the looped row reduction and the column reductions over more
+/// than one axis. The per-axis FFI calls cannot ask for either, so this goes
+/// through the probe.
+///
+/// The f32 comparisons are exact on purpose: the values are multiples of 0.5
+/// with small sums, and every reduced slice holds a zero, so a product is 0
+/// in any order.
+#[test]
+fn a_reduction_over_several_axes_at_once_matches_the_cpu() {
+    let _device = lock_default_device();
+    let zero = full_f32(&[1], 0.0, dtype::FLOAT32);
+    const OPS: [(i32, &str); 4] = [(0, "sum"), (1, "prod"), (2, "any"), (3, "all")];
+    let cases: [(&[i32], &[&[i32]]); 4] = [
+        (&[7, 33, 65], &[&[1, 2], &[0, 1], &[0, 2]]),
+        (
+            &[2, 3, 4, 5],
+            &[
+                &[2, 3],
+                &[1, 2, 3],
+                &[0, 1],
+                &[0, 1, 2],
+                &[1, 3],
+                &[0, 2],
+                &[0, 3],
+            ],
+        ),
+        (
+            &[6, 5, 40, 32],
+            &[&[2, 3], &[0, 1], &[1, 2, 3], &[0, 2], &[1, 3]],
+        ),
+        (&[40, 3, 40, 4], &[&[0, 2], &[1, 3], &[0, 3]]),
+    ];
+    for (shape, axis_sets) in cases {
+        let len: i32 = shape.iter().product();
+        let values = data(len as usize);
+        let x = from_slice_f32(&values, shape);
+        let mask = greater(&x, &zero);
+        let narrow = astype(&mask, dtype::UINT8);
+        let true_count = values.iter().filter(|v| **v > 0.0).count() as f32;
+        for axes in axis_sets {
+            for keepdims in [false, true] {
+                for (input, name) in [(&mask, "bool"), (&narrow, "uint8"), (&x, "f32")] {
+                    for (op, op_name) in OPS {
+                        let label = format!("{op_name}({name}) axes {axes:?} {shape:?}");
+                        let (dt, _, got) = assert_matches_cpu(&label, || {
+                            reduce_axes_probe_for_test(input, op, axes, keepdims).unwrap()
+                        });
+                        if op >= 2 {
+                            assert_eq!(dt, dtype::BOOL, "{label}");
+                        }
+                        if op == 0 && name != "f32" {
+                            assert_ne!(dt, array_dtype(input), "{label}: MLX widens it");
+                            assert_eq!(got.iter().sum::<f32>(), true_count, "{label}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(reduce_axes_probe_for_test(&x_scalar(), 9, &[0], false).is_err());
+}
+
+fn x_scalar() -> UniquePtr<MlxArray> {
+    from_slice_f32(&[1.0], &[1])
+}
+
 /// A reduction over an empty axis writes the op's identity through the same
-/// output type: 0 for a mask sum, `false` for `any`, `true` for `all`.
+/// output type: 0 for a mask sum, 1 for a mask product, `false` for `any`,
+/// `true` for `all`.
 #[test]
 fn a_reduction_over_an_empty_axis_writes_the_identity() {
     let _device = lock_default_device();
@@ -198,6 +296,10 @@ fn a_reduction_over_an_empty_axis_writes_the_identity() {
         sum_axis(&mask, -1, false)
     });
     assert_eq!((dt, shape, sum), (dtype::INT32, vec![3], vec![0.0; 3]));
+    let (dt, _, prod) = assert_matches_cpu("prod(bool) over an empty axis", || {
+        prod_axis(&mask, -1, false)
+    });
+    assert_eq!((dt, prod), (dtype::INT32, vec![1.0; 3]));
     let (dt, _, any) =
         assert_matches_cpu("any(f32) over an empty axis", || any_axis(&x, -1, false));
     assert_eq!((dt, any), (dtype::BOOL, vec![0.0; 3]));
@@ -206,8 +308,7 @@ fn a_reduction_over_an_empty_axis_writes_the_identity() {
     assert_eq!((dt, all), (dtype::BOOL, vec![1.0; 3]));
 }
 
-/// The reductions the overlay exists for keep working: a same-dtype sum, and
-/// a bf16 sum, which accumulates in fp32 and still returns bf16.
+/// Reductions that keep their dtype are unchanged: an f32 sum and a max.
 #[test]
 fn same_dtype_reductions_are_unchanged() {
     let _device = lock_default_device();
@@ -227,18 +328,44 @@ fn same_dtype_reductions_are_unchanged() {
             });
             assert_eq!(dt, dtype::FLOAT32);
         }
-        let small = astype(&slice_first_rows(&x, shape), dtype::BFLOAT16);
-        let (dt, _, _) = assert_matches_cpu(&format!("sum(bf16) axis -1 {shape:?}"), || {
-            sum_axis_native_dtype(&small, -1, false)
-        });
-        assert_eq!(dt, dtype::BFLOAT16);
     }
 }
 
-/// The first two entries along every axis: sums of at most 16 values of 0, 1
-/// or 2, which bf16 holds exactly.
-fn slice_first_rows(x: &MlxArray, shape: &[i32]) -> UniquePtr<MlxArray> {
-    let starts = vec![0; shape.len()];
-    let stops: Vec<i32> = shape.iter().map(|d| (*d).min(2)).collect();
-    slice(x, &starts, &stops)
+/// A bf16 sum is the one reduction whose accumulation type (fp32) is not its
+/// output type. It still returns bf16, through the row and column kernels and
+/// through the fp32 intermediates of the two-pass column reduction
+/// (`[300, 5]` over axis 0) and the multi-block all-reduce (`[64, 4096]`).
+///
+/// The input is a sparse pattern of ones with at most 128 in any reduced
+/// slice, so every partial sum is a small integer, exact in bf16 and fp32
+/// alike, and the result does not depend on the order of accumulation.
+#[test]
+fn a_bf16_sum_still_returns_bf16() {
+    if !native_half_precision_reductions() {
+        return;
+    }
+    let _device = lock_default_device();
+    for shape in SHAPES {
+        let len: i32 = shape.iter().product();
+        let every = (len as usize / 128 + 1).max(3);
+        let values: Vec<f32> = (0..len as usize)
+            .map(|i| if i % every == 0 { 1.0 } else { 0.0 })
+            .collect();
+        let ones = values.iter().sum::<f32>();
+        assert!(ones <= 128.0, "{shape:?}: {ones} ones");
+        let x = astype(&from_slice_f32(&values, shape), dtype::BFLOAT16);
+        for axis in 0..shape.len() as i32 {
+            let (dt, _, sums) =
+                assert_matches_cpu(&format!("sum(bf16) axis {axis} {shape:?}"), || {
+                    sum_axis_native_dtype(&x, axis, false)
+                });
+            assert_eq!(dt, dtype::BFLOAT16, "{shape:?} axis {axis}");
+            assert_eq!(sums.iter().sum::<f32>(), ones, "{shape:?} axis {axis}");
+        }
+        let all_axes: Vec<i32> = (0..shape.len() as i32).collect();
+        let (dt, _, total) = assert_matches_cpu(&format!("sum(bf16) all {shape:?}"), || {
+            reduce_axes_probe_for_test(&x, 0, &all_axes, false).unwrap()
+        });
+        assert_eq!((dt, total), (dtype::BFLOAT16, vec![ones]), "{shape:?}");
+    }
 }

@@ -6,7 +6,7 @@
 //
 // Changes:
 //   - Added output type template parameter V (separate from accumulation type U)
-//   - Kernels write static_cast<V>(accumulated) to output, enabling fp32
+//   - Kernels write cast_to<V>(accumulated) to output, enabling fp32
 //     accumulation with bf16 output for Sum/Prod reductions
 //   - Dispatch code passes ReduceOutput<OP, T> as output type: T for the bf16
 //     Sum/Prod this patch exists for, the accumulation type otherwise

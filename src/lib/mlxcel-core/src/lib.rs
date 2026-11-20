@@ -1141,6 +1141,17 @@ mod ffi {
         /// Any along axis
         fn any_axis(a: &MlxArray, axis: i32, keepdims: bool) -> UniquePtr<MlxArray>;
 
+        /// Test-only. One reduction over several axes at once, in MLX's native
+        /// dtype: `op` 0 sum, 1 prod, 2 any, 3 all. The per-axis functions
+        /// take one axis, which never reaches a backend's multi-axis row
+        /// reduction (`reduce_output_dtype_tests.rs`). Errors on another `op`.
+        fn reduce_axes_probe_for_test(
+            a: &MlxArray,
+            op: i32,
+            axes: &[i32],
+            keepdims: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Greater than or equal comparison
         fn greater_equal(a: &MlxArray, b: &MlxArray) -> UniquePtr<MlxArray>;
 

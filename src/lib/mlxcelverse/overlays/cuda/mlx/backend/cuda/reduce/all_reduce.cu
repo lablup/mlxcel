@@ -6,7 +6,7 @@
 //
 // Changes:
 //   - Added output type template parameter V (separate from accumulation type U)
-//   - Kernel writes static_cast<V>(accumulated) to output, enabling fp32
+//   - Kernel writes cast_to<V>(accumulated) to output, enabling fp32
 //     accumulation with bf16 output for Sum/Prod reductions
 //   - Dispatch code passes ReduceOutput<OP, T> as output type for final
 //     output (T for bf16 Sum/Prod, the accumulation type otherwise), U
@@ -124,7 +124,8 @@ void all_reduce(
       using V = typename cu::ReduceOutput<OP, T>::type;
 
       if (blocks > 1) {
-        // Multi-block: first pass accumulates into fp32 intermediate
+        // Multi-block: first pass accumulates into an intermediate of the
+        // accumulation type (fp32 for bf16 Sum/Prod, out.dtype() otherwise)
         // Determine intermediate dtype from accumulation type
         Dtype intermediate_dtype = out.dtype();
         if constexpr (std::is_same_v<U, float> && !std::is_same_v<T, float>) {

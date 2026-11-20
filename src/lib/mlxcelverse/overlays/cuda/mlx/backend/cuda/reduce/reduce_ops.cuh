@@ -131,9 +131,10 @@ struct Max {
 
 // Traits to get the accumulation type of reduce op.
 //
-// For most types, accumulation type == input type. For bf16 Sum/Prod,
-// we accumulate in fp32 for numerical precision and cast back to bf16
-// when writing the final output.
+// It is not always the input type: And / Or accumulate in bool, Sum / Prod
+// over bool and the integers up to 32 bits accumulate in int32, and bf16
+// Sum / Prod accumulate in fp32 for numerical precision and are cast back to
+// bf16 when the final output is written (see ReduceOutput below).
 template <typename Op, typename T>
 struct ReduceResult;
 
@@ -188,10 +189,12 @@ struct ReduceResult<Max, T> {
 // The type a reduction writes to its output array.
 //
 // It is the accumulation type, as in upstream MLX, because that is the type
-// MLX gives the output: `bool` for And / Or whatever the input is, a 32-bit
-// integer for Sum / Prod over `bool` and the narrow integers, and the input
-// type otherwise. The one exception is the bf16 Sum / Prod above, which only
-// accumulates in fp32 and still writes bf16.
+// MLX gives the output, up to signedness: `bool` for And / Or whatever the
+// input is, a 32-bit integer for Sum / Prod over `bool` and the narrow
+// integers (MLX makes it uint32 for an unsigned input; the kernel writes the
+// same 32 bits as int32_t, as upstream does), and the input type otherwise.
+// The one exception is the bf16 Sum / Prod above, which only accumulates in
+// fp32 and still writes bf16.
 //
 // The dispatch code must take the output pointer from this trait and not from
 // the input type: for `sum(bool)` or `any(float32)` the two differ in size,
