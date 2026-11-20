@@ -524,3 +524,68 @@ fn a_flag_on_a_dense_linear_is_refused() {
         .expect_err("only expert stacks take the scale");
     assert!(err.contains(dense) && err.contains("rank 2"), "{err}");
 }
+
+/// The stacking pass Qwen3.5 and Qwen3-Next share drains every leaf of a
+/// repacked per-expert NVFP4 plane, the tensor-scale sidecar included, under
+/// either source name, so the plane loads with its `[num_experts]` output
+/// multiplier instead of being refused for a sidecar left behind.
+#[test]
+fn draining_numbered_expert_planes_keeps_the_modelopt_sidecars() {
+    let root = "model.layers.0.mlp";
+    let prefix = format!("{root}.switch_mlp.gate_proj");
+    for src_proj in ["gate_proj", "w1"] {
+        let mut weights = WeightMap::new();
+        for e in 0..EXPERTS {
+            insert_modelopt_expert_plane(
+                &mut weights,
+                &format!("{root}.experts.{e}.{src_proj}"),
+                OUT,
+                IN,
+                0.5 + e as f32,
+                e as u32,
+            );
+        }
+        weights.insert(
+            format!("{root}.gate.weight"),
+            mlxcel_core::from_slice_f32(&[0.0; 4], &[2, 2]),
+        );
+        drain_numbered_expert_planes(&mut weights, &format!("{root}.experts"), src_proj, &prefix);
+
+        assert!(
+            !weights.keys().any(|k| k.contains(".experts.")),
+            "{src_proj}: every per-expert key is drained"
+        );
+        assert!(weights.contains_key(&format!("{root}.gate.weight")));
+        let want: Vec<f32> = (0..EXPERTS).map(|e| 0.5 + e as f32).collect();
+        assert_eq!(stacked_inv_global_scale(&weights, &prefix), want);
+        for leaf in ["weight", "scales"] {
+            let stacked = weights.get(&format!("{prefix}.{leaf}")).expect(leaf);
+            assert_eq!(mlxcel_core::array_shape(stacked)[..2], [EXPERTS, OUT]);
+        }
+        assert!(!weights.contains_key(&format!("{prefix}.biases")));
+        expect_native_nvfp4_load(
+            SwitchLinear::from_weights(&weights, &prefix, 16, 4),
+            &prefix,
+            "the drained plane loads with its multiplier",
+        );
+    }
+
+    // Without an expert 0 there is nothing to stack, and nothing is taken.
+    let mut weights = WeightMap::new();
+    insert_modelopt_expert_plane(
+        &mut weights,
+        &format!("{root}.experts.1.gate_proj"),
+        OUT,
+        IN,
+        0.5,
+        1,
+    );
+    drain_numbered_expert_planes(
+        &mut weights,
+        &format!("{root}.experts"),
+        "gate_proj",
+        &prefix,
+    );
+    assert_eq!(weights.len(), 3);
+    assert!(!weights.keys().any(|k| k.starts_with(&prefix)));
+}

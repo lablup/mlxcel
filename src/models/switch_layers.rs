@@ -1266,6 +1266,53 @@ pub(crate) fn stack_expert_leaf(
     }
 }
 
+/// Drain the numbered per-expert planes `{experts_root}.{e}.{src_proj}.{leaf}`
+/// (`e` from 0 until an expert has no `weight`) out of `weights` and insert
+/// each leaf, stacked over the experts, under `{stacked_prefix}.{leaf}`. A
+/// no-op when expert 0 has no `weight`.
+///
+/// The leaves are [`EXPERT_PLANE_LEAVES`] through [`stack_expert_leaf`], so
+/// the `global_scale` sidecar the NVFP4 repack leaves beside each expert's
+/// plane (issue #2351) lands as `inv_global_scale`. A loop that stacks only
+/// `weight` / `scales` / `biases` leaves the sidecar in the map, and
+/// [`refuse_unstacked_expert_sidecars`] then refuses the load. A leaf only
+/// some experts carry stacks shorter than `weight`, which `SwitchLinear`'s
+/// shape checks refuse.
+///
+/// Used by: the MoE stacking passes of Qwen3.5 (`qwen3_5::sanitize_weights`)
+/// and Qwen3-Next (`Qwen3NextModel::sanitize_weights`)
+pub(crate) fn drain_numbered_expert_planes(
+    weights: &mut WeightMap,
+    experts_root: &str,
+    src_proj: &str,
+    stacked_prefix: &str,
+) {
+    let mut planes: [Vec<UniquePtr<MlxArray>>; EXPERT_PLANE_LEAVES.len()] = Default::default();
+    let mut expert = 0;
+    while let Some(weight) = weights.remove(&format!("{experts_root}.{expert}.{src_proj}.weight")) {
+        planes[0].push(weight);
+        for (slot, leaf) in EXPERT_PLANE_LEAVES.iter().enumerate().skip(1) {
+            if let Some(part) =
+                weights.remove(&format!("{experts_root}.{expert}.{src_proj}.{leaf}"))
+            {
+                planes[slot].push(part);
+            }
+        }
+        expert += 1;
+    }
+    for (leaf, parts) in EXPERT_PLANE_LEAVES.iter().zip(&planes) {
+        if parts.is_empty() {
+            continue;
+        }
+        let ptrs: Vec<*const MlxArray> = parts
+            .iter()
+            .map(|part| part.as_ref().expect("weight map holds no null handles") as *const MlxArray)
+            .collect();
+        let (leaf, stacked) = stack_expert_leaf(leaf, &ptrs);
+        weights.insert(format!("{stacked_prefix}.{leaf}"), stacked);
+    }
+}
+
 /// Multiply a gathered expert output by the selected experts' global scales.
 ///
 /// `out` is the `gather_qmm` result for `indices` (its leading axes equal the
