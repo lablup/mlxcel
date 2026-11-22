@@ -20,7 +20,7 @@ use super::Plamo2VlProcessor;
 use crate::vision::plamo2_vl_config::Plamo2VlProcessorConfig;
 
 fn processor() -> Plamo2VlProcessor {
-    Plamo2VlProcessor::new(&Plamo2VlProcessorConfig::default())
+    Plamo2VlProcessor::new(&Plamo2VlProcessorConfig::default()).unwrap()
 }
 
 fn solid(width: u32, height: u32, value: u8) -> image::DynamicImage {
@@ -105,4 +105,55 @@ fn pixel_values_shape_and_normalization() {
 fn empty_image_is_rejected() {
     let p = processor();
     assert!(p.preprocess_with_tiles(&[]).is_err());
+}
+
+fn config_with_ratio(ratio: f32) -> Plamo2VlProcessorConfig {
+    Plamo2VlProcessorConfig {
+        downsample_ratio: ratio,
+        ..Plamo2VlProcessorConfig::default()
+    }
+}
+
+#[test]
+fn invalid_downsample_ratios_are_rejected() {
+    for ratio in [0.0, -0.5, 1.5, f32::NAN, f32::INFINITY, f32::MIN_POSITIVE] {
+        let err = Plamo2VlProcessor::new(&config_with_ratio(ratio)).unwrap_err();
+        assert!(err.contains("downsample_ratio"), "{ratio}: {err}");
+    }
+}
+
+#[test]
+fn half_downsample_ratio_aligns_the_tile_and_quarters_the_tokens() {
+    let p = Plamo2VlProcessor::new(&config_with_ratio(0.5)).unwrap();
+    // stride = 14 * 2 = 28; 384 rounds up to 392 (14 * 28).
+    assert_eq!(p.image_size, 392);
+    assert_eq!(p.num_image_token(), 196);
+}
+
+#[test]
+fn zero_tile_width_is_rejected() {
+    let mut config = Plamo2VlProcessorConfig::default();
+    config.size.width = 0;
+    assert!(Plamo2VlProcessor::new(&config).is_err());
+}
+
+#[test]
+fn tile_budget_saturates_instead_of_overflowing() {
+    let mut p = processor();
+    p.image_size = usize::MAX / 2;
+    p.patch_size = 1;
+    // per-tile token count is astronomically large; the loop must terminate
+    // at a single-tile cap without wrapping.
+    let (max_num, counts) = p.tile_budget(&[(512, 512)]);
+    assert_eq!(max_num, 1);
+    assert_eq!(counts, vec![1]);
+}
+
+#[test]
+fn multi_image_preprocess_keeps_input_order_and_counts() {
+    let p = processor();
+    let images = [solid(1000, 300, 10), solid(384, 384, 200)];
+    let (pixels, counts) = p.preprocess_with_tiles(&images).unwrap();
+    assert_eq!(counts, vec![3, 1]);
+    assert_eq!(mlxcel_core::array_shape(&pixels), vec![4, 3, 384, 384]);
 }

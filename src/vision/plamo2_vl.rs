@@ -77,11 +77,13 @@ pub struct Plamo2VlModel {
 impl Plamo2VlModel {
     /// Merged prompt embeddings for `input_ids` `[1, T]` and the processor's
     /// `pixel_values` `[tiles, 3, 384, 384]`. The caller has already checked
-    /// that the prompt carries `tiles * 729` `<plamo:image>` tokens.
+    /// that the prompt carries `expected_rows` (`tiles * 729`) `<plamo:image>`
+    /// tokens; the projected feature rows must match it exactly.
     pub fn get_input_embeddings(
         &self,
         input_ids: &MlxArray,
         pixel_values: &MlxArray,
+        expected_rows: usize,
     ) -> Result<InputEmbeddings, String> {
         let inputs_embeds = LanguageModel::embed_tokens(&self.text_model, input_ids)
             .ok_or_else(|| "PLaMo 2 text model returned no token embeddings".to_string())?;
@@ -96,6 +98,7 @@ impl Plamo2VlModel {
         let width = *shape.last().ok_or("empty SigLIP output shape")?;
         let flat = mlxcel_core::reshape(&hidden, &[-1, width]);
         let features = self.projector.forward(&flat);
+        check_feature_rows(&mlxcel_core::array_shape(&features), expected_rows)?;
 
         Ok(merge::merge_llava(
             self.image_token_id,
@@ -103,6 +106,18 @@ impl Plamo2VlModel {
             &inputs_embeds,
             input_ids,
         ))
+    }
+}
+
+/// The projected features must supply exactly one row per `<plamo:image>`
+/// placeholder; a mismatch would scatter the wrong rows or drop some. Shapes
+/// only, so no host sync of the features is needed.
+fn check_feature_rows(features_shape: &[i32], expected_rows: usize) -> Result<(), String> {
+    match features_shape {
+        [rows, _] if usize::try_from(*rows).is_ok_and(|rows| rows == expected_rows) => Ok(()),
+        shape => Err(format!(
+            "PLaMo 2.1 VL image features have shape {shape:?} but the prompt has {expected_rows} <plamo:image> placeholders"
+        )),
     }
 }
 
@@ -289,5 +304,19 @@ impl LanguageModel for Plamo2VlModel {
 
     fn trim_state(&self, seq: Option<SequenceId>, excess: i32) -> Result<(), String> {
         self.text_model.trim_state(seq, excess)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_feature_rows;
+
+    #[test]
+    fn feature_rows_must_match_the_placeholder_count() {
+        assert!(check_feature_rows(&[2954, 2048], 2954).is_ok());
+        let err = check_feature_rows(&[2916, 2048], 2954).unwrap_err();
+        assert!(err.contains("2954"), "{err}");
+        assert!(check_feature_rows(&[2954], 2954).is_err());
+        assert!(check_feature_rows(&[-1, 2048], 0).is_err());
     }
 }

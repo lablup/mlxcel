@@ -35,6 +35,7 @@
 //!
 //! Used by: `vision::plamo2_vl::Plamo2VlModel`, `multimodal::vlm_runtime`.
 
+use image::GenericImageView;
 use image::imageops::FilterType;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -58,18 +59,39 @@ pub struct Plamo2VlProcessor {
 }
 
 impl Plamo2VlProcessor {
-    pub fn new(config: &Plamo2VlProcessorConfig) -> Self {
+    /// Build the processor from `preprocessor_config.json`. Rejects a
+    /// `downsample_ratio` outside `(0, 1]` (or non-finite), a zero tile size
+    /// and a stride that overflows, so no later size math can wrap or turn
+    /// into NaN.
+    pub fn new(config: &Plamo2VlProcessorConfig) -> Result<Self, String> {
+        let ratio = config.downsample_ratio;
+        if !(ratio.is_finite() && ratio > 0.0 && ratio <= 1.0) {
+            return Err(format!(
+                "PLaMo 2.1 VL downsample_ratio must be finite and in (0, 1], got {ratio}"
+            ));
+        }
         let mut image_size = config.size.width;
+        if image_size == 0 {
+            return Err("PLaMo 2.1 VL preprocessor size.width must be positive".to_string());
+        }
         let patch_size = config.patch_size.max(1);
-        if config.downsample_ratio != 1.0 && config.downsample_ratio > 0.0 {
+        if ratio != 1.0 {
             // Upstream rounds the tile up to `patch * (1 / ratio)`; tiles are
             // then already stride-aligned, so its per-tile zero pad is a no-op.
-            let stride = patch_size * (1.0 / config.downsample_ratio) as usize;
-            if stride > 0 {
-                image_size = image_size.div_ceil(stride) * stride;
-            }
+            let inverse = (1.0 / f64::from(ratio)).trunc();
+            let stride = (inverse < 65_536.0)
+                .then(|| patch_size.checked_mul(inverse as usize))
+                .flatten()
+                .filter(|stride| *stride > 0)
+                .ok_or_else(|| {
+                    format!("PLaMo 2.1 VL downsample_ratio {ratio} gives an unusable stride")
+                })?;
+            image_size = image_size
+                .div_ceil(stride)
+                .checked_mul(stride)
+                .ok_or_else(|| "PLaMo 2.1 VL tile size overflows".to_string())?;
         }
-        Self {
+        Ok(Self {
             image_size,
             patch_size,
             downsample_ratio: config.downsample_ratio,
@@ -78,7 +100,7 @@ impl Plamo2VlProcessor {
             rescale_factor: config.rescale_factor,
             mean: config.image_mean,
             std: config.image_std,
-        }
+        })
     }
 
     /// Image-feature tokens per tile: `(S / patch * downsample_ratio)^2`, 729
@@ -137,7 +159,9 @@ impl Plamo2VlProcessor {
                 .iter()
                 .map(|&(w, h)| self.tile_count(w, h, max_num))
                 .collect();
-            let total: usize = counts.iter().map(|tiles| 2 + tiles * per_tile).sum();
+            let total = counts.iter().fold(0usize, |acc, tiles| {
+                acc.saturating_add(tiles.saturating_mul(per_tile).saturating_add(2))
+            });
             if total < self.tile_context_length || max_num == 1 {
                 return (max_num, counts);
             }
@@ -192,8 +216,7 @@ impl Plamo2VlProcessor {
         if images.is_empty() {
             return Err("PLaMo 2.1 VL preprocessing needs at least one image".to_string());
         }
-        let rgbs: Vec<image::RgbImage> = images.iter().map(|img| img.to_rgb8()).collect();
-        let sizes: Vec<(u32, u32)> = rgbs.iter().map(|img| img.dimensions()).collect();
+        let sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
         if let Some((w, h)) = sizes.iter().find(|(w, h)| *w == 0 || *h == 0) {
             return Err(format!("PLaMo 2.1 VL cannot tile an empty {w}x{h} image"));
         }
@@ -202,8 +225,10 @@ impl Plamo2VlProcessor {
         let side = self.image_size;
         let total: usize = counts.iter().sum();
         let mut pixels = Vec::with_capacity(total * 3 * side * side);
-        for (rgb, &expected) in rgbs.iter().zip(&counts) {
-            let tiles = self.tiles(rgb, max_num);
+        for (image, &expected) in images.iter().zip(&counts) {
+            // One RGB copy alive at a time (peak memory with many images).
+            let rgb = image.to_rgb8();
+            let tiles = self.tiles(&rgb, max_num);
             debug_assert_eq!(tiles.len(), expected);
             for tile in &tiles {
                 self.append_normalized_chw(tile, &mut pixels);

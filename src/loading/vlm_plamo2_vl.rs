@@ -110,6 +110,33 @@ fn plamo2_vl_adds_bos(model_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Refuse a config whose `image_proj_hidden_size` disagrees with the
+/// checkpoint's `image_proj.linear1` output width. `linear1` is `[out, in]`
+/// plain or `[out, in * bits / 32]` packed, so dim 0 is the output width in
+/// both cases (the `.scales` shape agrees when quantized).
+///
+/// Used by: [`load_plamo2_vl`].
+fn check_image_proj_hidden_size(weights: &WeightMap, configured: Option<usize>) -> Result<()> {
+    let Some(configured) = configured else {
+        return Ok(());
+    };
+    let key = "image_proj.linear1.weight";
+    let weight = weights
+        .get(key)
+        .ok_or_else(|| anyhow::anyhow!("Weight not found: {key}"))?;
+    let shape = mlxcel_core::array_shape(weight);
+    let actual = shape
+        .first()
+        .copied()
+        .and_then(|dim| usize::try_from(dim).ok());
+    if actual != Some(configured) {
+        anyhow::bail!(
+            "PLaMo 2.1 VL config image_proj_hidden_size is {configured} but {key} has shape {shape:?}"
+        );
+    }
+    Ok(())
+}
+
 /// Load a PLaMo 2.1 VL checkpoint (SigLIP tiles + `image_proj` adapter +
 /// PLaMo 2 hybrid decoder).
 pub(crate) fn load_plamo2_vl(model_path: &Path) -> Result<LoadedModel> {
@@ -162,6 +189,7 @@ pub(crate) fn load_plamo2_vl(model_path: &Path) -> Result<LoadedModel> {
         false,
     )
     .map_err(|e| anyhow::anyhow!("Failed to load PLaMo 2.1 VL SigLIP tower: {e}"))?;
+    check_image_proj_hidden_size(&weights, vision_config.image_proj_hidden_size)?;
     let projector = Plamo2VlImageProjector::from_weights(
         &weights,
         "image_proj",
@@ -173,7 +201,8 @@ pub(crate) fn load_plamo2_vl(model_path: &Path) -> Result<LoadedModel> {
 
     let processor_config =
         Plamo2VlProcessorConfig::from_model_dir(model_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let processor = Plamo2VlProcessor::new(&processor_config);
+    let processor = Plamo2VlProcessor::new(&processor_config)
+        .map_err(|e| anyhow::anyhow!("Invalid PLaMo 2.1 VL preprocessor config: {e}"))?;
     if processor.image_size != siglip_config.image_size {
         anyhow::bail!(
             "PLaMo 2.1 VL tile size {} does not match the SigLIP tower's {}px position table",
@@ -182,6 +211,12 @@ pub(crate) fn load_plamo2_vl(model_path: &Path) -> Result<LoadedModel> {
         );
     }
     let num_image_token = processor.num_image_token();
+    let tower_rows = (siglip_config.image_size / siglip_config.patch_size.max(1)).pow(2);
+    if num_image_token != tower_rows {
+        anyhow::bail!(
+            "PLaMo 2.1 VL processor yields {num_image_token} image tokens per tile but the SigLIP tower emits {tower_rows} rows per tile; a downsample_ratio other than 1 is not supported by this port"
+        );
+    }
 
     // Hand the text model only its own tensors.
     let text_weights: WeightMap = weights
@@ -243,6 +278,22 @@ mod tests {
                 "vision_model.vision_encoder.model.post_layernorm.bias",
             ]
         );
+    }
+
+    #[test]
+    fn image_proj_hidden_size_must_match_linear1_rows() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        let mut weights = WeightMap::new();
+        // Packed 4-bit layout: dim 0 is still the output width.
+        weights.insert(
+            "image_proj.linear1.weight".to_string(),
+            mlxcel_core::zeros(&[2048, 144], mlxcel_core::dtype::UINT32),
+        );
+        assert!(check_image_proj_hidden_size(&weights, Some(2048)).is_ok());
+        assert!(check_image_proj_hidden_size(&weights, None).is_ok());
+        let err = check_image_proj_hidden_size(&weights, Some(4096)).unwrap_err();
+        assert!(err.to_string().contains("4096"), "{err}");
+        assert!(check_image_proj_hidden_size(&WeightMap::new(), Some(2048)).is_err());
     }
 
     #[test]

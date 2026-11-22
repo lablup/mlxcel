@@ -2091,7 +2091,7 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = plamo
-                .get_input_embeddings(&input_ids_arr, &pixel_values)
+                .get_input_embeddings(&input_ids_arr, &pixel_values, stats.total_image_tokens)
                 .map_err(|err| anyhow::anyhow!(err))?;
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
