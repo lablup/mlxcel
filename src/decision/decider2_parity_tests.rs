@@ -23,8 +23,11 @@
 //! accumulation order alone moves the answers: against mlx-vlm run in f32,
 //! upstream's own bf16 answers are off by up to 7.2e-3 and change by 8e-3
 //! when its bool is scored alone instead of batched with the choice, and
-//! this port's are off by up to 1.5e-2. That request therefore gets 2e-2,
-//! and its argmax labels and bool values must still agree. Prompt ids and
+//! this port's are off by up to 1.5e-2. The spread is bf16 numerics, not a
+//! port difference: with the checkpoint cast to f32, every probability and
+//! metadata number of both requests (batched and question by question)
+//! matches mlx-vlm in f32 to all 4 printed decimals. That request therefore
+//! gets 2e-2, and its argmax labels and bool values must still agree. Prompt ids and
 //! usage are exact in both. Skips when the checkpoint is
 //! absent. Run it alone under the GPU lock:
 //!
