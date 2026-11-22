@@ -137,9 +137,9 @@ impl AudioEngine for WhisperEngine {
 
 /// Convert the model's per-window segments into the wire shape the API reports.
 ///
-/// One segment is emitted per decoded 30 s window. The model reports `seek` as a
-/// mel-frame offset, so it is converted to a sample offset through the hop
-/// length, and then to a wall-clock start. Empty windows are dropped: the
+/// One segment is emitted per decoded 30 s window. `seek` stays the model's
+/// mel-frame offset, which is what OpenAI's `verbose_json` reports (3000 per
+/// 30 s window), and is converted to a wall-clock start through the hop length. Empty windows are dropped: the
 /// trailing window of a short clip is silent-padded to a full 30 s, and a
 /// segment with no text would otherwise claim transcript time that was never
 /// spoken. `end` is clamped to the real duration for the same reason, and the
@@ -156,11 +156,11 @@ fn map_window_segments(
         .filter(|segment| !segment.text.is_empty())
         .enumerate()
         .map(|(id, segment)| {
-            let seek = segment.seek * whisper_mel::WHISPER_HOP_LENGTH;
-            let start = seek as f32 / whisper_mel::WHISPER_SAMPLE_RATE as f32;
+            let start = (segment.seek * whisper_mel::WHISPER_HOP_LENGTH) as f32
+                / whisper_mel::WHISPER_SAMPLE_RATE as f32;
             TranscriptSegment {
                 id,
-                seek,
+                seek: segment.seek,
                 start,
                 end: (start + window_seconds).min(duration_seconds),
                 text: segment.text.clone(),
@@ -199,9 +199,9 @@ mod tests {
             "the last window must end at the real duration, not at the padded 90 s"
         );
         assert_eq!(
-            segments[2].seek,
-            2 * whisper_mel::WHISPER_N_FRAMES * whisper_mel::WHISPER_HOP_LENGTH,
-            "seek must be converted from mel frames to samples"
+            segments.iter().map(|s| s.seek).collect::<Vec<_>>(),
+            vec![0, 3000, 6000],
+            "seek must stay the OpenAI mel-frame offset (3000 per 30 s window), not samples"
         );
     }
 

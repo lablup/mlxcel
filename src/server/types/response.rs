@@ -705,7 +705,7 @@ pub struct AudioTranscriptionResponse {
 pub struct TranscriptionSegment {
     /// Zero-based segment index.
     pub id: usize,
-    /// Start offset in decoded samples.
+    /// Window start offset in mel frames (100 per second), as OpenAI reports it.
     pub seek: usize,
     /// Segment start in seconds.
     pub start: f32,

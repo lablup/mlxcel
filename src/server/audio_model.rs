@@ -88,7 +88,8 @@ pub struct AudioTranscribeInput {
 pub struct TranscriptSegment {
     /// Zero-based index of the window within the request.
     pub id: usize,
-    /// Window start offset in decoded samples at Whisper's sample rate.
+    /// Window start offset in mel frames (100 per second), matching the
+    /// OpenAI `verbose_json` `seek` field.
     pub seek: usize,
     /// Window start in seconds from the beginning of the source audio.
     pub start: f32,

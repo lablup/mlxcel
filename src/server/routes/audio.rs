@@ -819,10 +819,10 @@ mod tests {
 
         let segments: Vec<TranscriptionSegment> = (0..windows)
             .map(|id| {
-                let seek = id
-                    * crate::audio::whisper_mel::WHISPER_N_FRAMES
-                    * crate::audio::whisper_mel::WHISPER_HOP_LENGTH;
-                let start = seek as f32 / crate::audio::whisper_mel::WHISPER_SAMPLE_RATE as f32;
+                // `seek` is the OpenAI mel-frame offset, not a sample offset.
+                let seek = id * crate::audio::whisper_mel::WHISPER_N_FRAMES;
+                let start = (seek * crate::audio::whisper_mel::WHISPER_HOP_LENGTH) as f32
+                    / crate::audio::whisper_mel::WHISPER_SAMPLE_RATE as f32;
                 TranscriptionSegment {
                     id,
                     seek,
