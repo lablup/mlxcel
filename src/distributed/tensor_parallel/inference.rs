@@ -350,6 +350,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // config through `to_llama3_args`, which is a change to how the runtime
         // builds its config and not something deserializing a key can deliver.
         ModelType::Helium => "helium",
+        // Not "llama": the TP runtime parses `config.json` straight into
+        // `llama3::ModelArgs` and would skip `K2HorizonConfig::validate`, so a
+        // grouped-norm or MoE variant would shard and decode wrongly. The
+        // refusal comes from `runtime_kind_for`, which has no arm for it.
+        ModelType::K2Horizon => "k2_horizon",
         // TeleChat3 is not TP-enabled and this arm only keeps the dispatch table
         // total; the refusal comes from `validate_supported_runtime`, whose
         // `runtime_kind_for` match has no `ModelType::TeleChat3` arm. The

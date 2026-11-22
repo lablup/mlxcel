@@ -135,6 +135,7 @@ fn cases() -> Vec<(&'static str, ParseTheta)> {
         case!(falcon_h1::ModelArgs),
         case!(gpt_oss::ModelArgs),
         case!(helium::ModelArgs),
+        case!(k2_horizon::K2HorizonConfig),
         case!(hunyuan_moe::ModelArgs),
         case!(hunyuan_v1_dense::ModelArgs),
         case!(internlm2::ModelArgs),

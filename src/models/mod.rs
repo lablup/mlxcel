@@ -227,6 +227,7 @@ pub mod iquestloopcoder;
 pub mod iquestloopcoder_model;
 pub mod jamba;
 pub mod jina_vlm;
+pub mod k2_horizon;
 pub mod kimi_k3;
 pub mod kimi_linear;
 pub mod klear;
@@ -710,6 +711,7 @@ pub enum ModelType {
 
     // Other Transformer models
     Helium,    // Kyutai Helium (Llama-shaped dense decoder with traditional RoPE)
+    K2Horizon, // IFM K2-Horizon dense (Llama-shaped decoder with YaRN RoPE)
     TeleChat3, // TeleAI TeleChat3 (Llama-shaped dense decoder with YaRN RoPE scaling)
     MiniCPM,
     MiniCPM3,
@@ -963,6 +965,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Laguna,
     // Other Transformer models
     ModelType::Helium,
+    ModelType::K2Horizon,
     ModelType::TeleChat3,
     ModelType::MiniCPM,
     ModelType::MiniCPM3,
@@ -1332,6 +1335,7 @@ impl ModelType {
                 "Kyutai Helium (dense Llama shape, traditional RoPE)",
                 "Specialized",
             ),
+            ModelType::K2Horizon => ("IFM K2-Horizon (dense Llama shape, YaRN RoPE)", "Llama"),
             ModelType::TeleChat3 => (
                 "TeleAI TeleChat3 (dense Llama shape, YaRN RoPE)",
                 "Specialized",
@@ -1619,6 +1623,7 @@ mod metadata_tests {
             Mellum,
             Laguna,
             Helium,
+            K2Horizon,
             TeleChat3,
             MiniCPM,
             MiniCPM3,
