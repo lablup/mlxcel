@@ -82,7 +82,9 @@ impl AuxiliaryArtifactContract {
     }
 
     /// Opt into the operator-aware v3 manifest.
-    #[allow(dead_code)] // Adopted only after the corresponding operator oracle is implemented.
+    ///
+    /// Every production family adopts it with the contract built by
+    /// `operator_numeric_contract::production_operator_contract` (issue #3211).
     pub(crate) fn new_with_operator_numeric_contract(
         entry_name: impl Into<String>,
         config_identity: impl Into<String>,

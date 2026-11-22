@@ -126,6 +126,28 @@ fn add_iree_shim_sources(build: &mut cc::Build) {
     }
 }
 
+// Read back by `iree_identity::runtime_archive_identity`, which records the linked
+// IREE runtime in every operator numeric contract (issue #3211). Hash the
+// archive the consuming binary links so a runtime rebuild changes the identity
+// even when the deployed binary no longer sees the build tree.
+fn bake_runtime_archive_digest(archive: PathBuf) {
+    use sha2::{Digest, Sha256};
+    println!("cargo:rerun-if-changed={}", archive.display());
+    let Ok(bytes) = std::fs::read(&archive) else {
+        println!(
+            "cargo:warning=IREE runtime archive {} is unreadable; the runtime identity falls back to the dist layout at run time",
+            archive.display()
+        );
+        return;
+    };
+    let digest = Sha256::digest(&bytes);
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    println!("cargo:rustc-env=MLXCEL_XLA_IREE_RUNTIME_SHA256={hex}");
+}
+
 fn main() {
     // This crate's own test binaries link mlxcel-core, so they need the ROCm
     // rpath that a dependency's link args cannot give them (#1802).
@@ -182,6 +204,9 @@ fn main() {
             .define("XLA_GATE_CUDA", None)
             .compile("xla_iree");
         compile_cuda_kernels();
+        bake_runtime_archive_digest(
+            home.join("build/runtime/src/iree/runtime/libiree_runtime_unified.a"),
+        );
         println!("cargo:rustc-cfg=xla_iree_cuda");
         if let Ok(ic) = env::var("IREE_CUDA_COMPILE") {
             println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");
@@ -210,6 +235,9 @@ fn main() {
             .include(&bld_inc)
             .define("XLA_GATE_ROCM", None)
             .compile("xla_iree");
+        bake_runtime_archive_digest(
+            home.join("build/runtime/src/iree/runtime/libiree_runtime_unified.a"),
+        );
         println!("cargo:rustc-cfg=xla_iree_rocm");
         if let Ok(ic) = env::var("IREE_ROCM_COMPILE") {
             println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");
@@ -243,6 +271,9 @@ fn main() {
             .include(&src_inc)
             .include(&bld_inc)
             .compile("xla_iree");
+        bake_runtime_archive_digest(
+            home.join("build/runtime/src/iree/runtime/libiree_runtime_unified.a"),
+        );
         if let Ok(ic) = env::var("IREE_MACOS_COMPILE") {
             println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");
         }
@@ -266,6 +297,7 @@ fn main() {
     let mut build = cc::Build::new();
     add_iree_shim_sources(&mut build);
     build.include(&include).compile("xla_iree");
+    bake_runtime_archive_digest(dist.join("lib/libiree_runtime_unified.a"));
 
     // Bake the dist path so the session can find `bin/iree-compile` at runtime
     // (a runtime `IREE_DIST` env var still takes precedence). The vmfb must be

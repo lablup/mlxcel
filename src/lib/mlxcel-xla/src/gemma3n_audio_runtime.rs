@@ -29,7 +29,7 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+use crate::aux_manifest::ensure_qualified_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
@@ -39,7 +39,19 @@ use crate::emitter::{
     emit_gemma3n_audio_merge_ple, gemma3n_audio_encoder_weights, gemma3n_audio_merge_weights,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
+use crate::iree_identity::{
+    ProductionNumerics, observe_float_tensor, production_artifact_contract,
+};
+use crate::numeric_dtype_contract::NumericDType;
+use crate::operator_numeric_contract::{
+    AffineExecution, CheckpointSourceObserver, gemma3n_audio_encode_operators,
+    gemma3n_audio_merge_operators,
+};
 use crate::weights::{bf16_to_f32, dequantize_affine_bf16_sequential, f16_to_f32, f32_le_to_f32};
+
+/// Contraction precision of both Gemma3n audio graphs, bound into their
+/// operator numeric contracts (issue #3211).
+const GEMMA3N_AUDIO_PRECISION: Precision = Precision::Bf16;
 use crate::{
     GEMMA3N_AUDIO_MODALITY_FAMILY, GEMMA3N_AUDIO_SOFT_TOKENS, Gemma3nAudioInput,
     Gemma3nAudioPreparedPrefill, Gemma3nDensePle, Gemma3nPreparedPrefill, Gemma3nXlaAudioConfig,
@@ -301,10 +313,12 @@ fn decode_weight(
     spec: &Gemma3nAudioGraphWeightSpec,
     quant_bits: usize,
     quant_group: usize,
+    observer: &mut CheckpointSourceObserver,
 ) -> Result<Vec<f32>, String> {
     let tensor = tensors
         .tensor(checkpoint_name)
         .map_err(|error| format!("read {checkpoint_name}: {error}"))?;
+    observe_float_tensor(observer, tensor.dtype())?;
     let (values, shape) = match tensor.dtype() {
         Dtype::BF16 => (bf16_to_f32(tensor.data()), tensor.shape().to_vec()),
         Dtype::F16 => (f16_to_f32(tensor.data()), tensor.shape().to_vec()),
@@ -328,6 +342,7 @@ fn decode_weight(
                     biases.dtype()
                 ));
             }
+            observer.observe_affine(quant_bits, quant_group, NumericDType::Bf16)?;
             let packed = tensor.shape();
             if packed.len() != 2 {
                 return Err(format!(
@@ -383,6 +398,7 @@ fn load_weights(
     model_dir: &Path,
     specs: &[Gemma3nAudioGraphWeightSpec],
     text: &Gemma3nConfig,
+    observer: &mut CheckpointSourceObserver,
 ) -> Result<Vec<AuxiliaryWeight>, String> {
     let quant = text
         .quantization
@@ -426,6 +442,7 @@ fn load_weights(
                 spec,
                 quant.bits,
                 quant.group_size,
+                observer,
             )?;
             loaded[index] = Some(AuxiliaryWeight {
                 name: spec.name.clone(),
@@ -559,8 +576,9 @@ impl Gemma3nAudioIreeRuntime {
         report_load_timing("audio-config-and-schema-validation", load_started);
         let emit_started = std::time::Instant::now();
         let (encode_mlir, encode_layout) =
-            emit_gemma3n_audio_encode(&text, &audio, frame_bucket, clips, Precision::Bf16)?;
-        let (merge_mlir, _) = emit_gemma3n_audio_merge_ple(&text, &audio, clips, Precision::Bf16)?;
+            emit_gemma3n_audio_encode(&text, &audio, frame_bucket, clips, GEMMA3N_AUDIO_PRECISION)?;
+        let (merge_mlir, _) =
+            emit_gemma3n_audio_merge_ple(&text, &audio, clips, GEMMA3N_AUDIO_PRECISION)?;
         report_load_timing("audio-stablehlo-emission", emit_started);
         let compiler = iree_compile_bin()?;
         let mut flags = target_flags(device)?.to_vec();
@@ -595,24 +613,27 @@ impl Gemma3nAudioIreeRuntime {
             text.n_layers,
             text.hidden_per_layer_input,
         )?;
-        let encode_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
-            "audio_encode.main",
-            format!("encode:{identity}:language={language_fingerprint:016x}"),
-            generation_identity(&compiler, &flags, &encode_mlir)?,
-        )?;
-        let merge_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
-            "audio_merge_ple.main",
-            format!(
-                "merge:{identity}:context={context_capacity}:text={}:language={language_fingerprint:016x}",
-                text.compatibility_fingerprint()
-            ),
-            generation_identity(&compiler, &flags, &merge_mlir)?,
-        )?;
         let encode_weights_started = std::time::Instant::now();
+        let mut encode_observer = CheckpointSourceObserver::default();
         let encode_weights = load_weights(
             model_dir,
             &gemma3n_audio_encoder_weights(&audio, &text)?,
             &text,
+            &mut encode_observer,
+        )?;
+        let encode_operators = gemma3n_audio_encode_operators();
+        let encode_contract = production_artifact_contract(
+            "audio_encode.main",
+            format!("encode:{identity}:language={language_fingerprint:016x}"),
+            generation_identity(&compiler, &flags, &encode_mlir)?,
+            &compiler,
+            device,
+            &ProductionNumerics {
+                family: "gemma3n-audio-encode",
+                operators: &encode_operators,
+                precision: GEMMA3N_AUDIO_PRECISION,
+                weights: encode_observer.resolve(AffineExecution::Host)?,
+            },
         )?;
         report_auxiliary_weights(
             "audio-encoder-weights",
@@ -642,7 +663,30 @@ impl Gemma3nAudioIreeRuntime {
             IreeAuxiliaryModule::load(device, &encode_vmfb, &encode_contract, encode_weights)?;
         report_load_timing("audio-encoder-vmfb-loaded", encode_module_started);
         let merge_weights_started = std::time::Instant::now();
-        let merge_weights = load_weights(model_dir, &gemma3n_audio_merge_weights(&text), &text)?;
+        let mut merge_observer = CheckpointSourceObserver::default();
+        let merge_weights = load_weights(
+            model_dir,
+            &gemma3n_audio_merge_weights(&text),
+            &text,
+            &mut merge_observer,
+        )?;
+        let merge_operators = gemma3n_audio_merge_operators();
+        let merge_contract = production_artifact_contract(
+            "audio_merge_ple.main",
+            format!(
+                "merge:{identity}:context={context_capacity}:text={}:language={language_fingerprint:016x}",
+                text.compatibility_fingerprint()
+            ),
+            generation_identity(&compiler, &flags, &merge_mlir)?,
+            &compiler,
+            device,
+            &ProductionNumerics {
+                family: "gemma3n-audio-merge",
+                operators: &merge_operators,
+                precision: GEMMA3N_AUDIO_PRECISION,
+                weights: merge_observer.resolve(AffineExecution::Host)?,
+            },
+        )?;
         report_auxiliary_weights("audio-merge-weights", merge_weights_started, &merge_weights);
         let merge_compile_started = std::time::Instant::now();
         ensure_qualified_auxiliary_artifact(
@@ -948,7 +992,7 @@ impl Gemma3nAudioIreeRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aux_manifest::auxiliary_manifest_path;
+    use crate::aux_manifest::{AuxiliaryArtifactContract, auxiliary_manifest_path};
 
     fn temp_path(tag: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()

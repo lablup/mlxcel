@@ -29,18 +29,25 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+use crate::aux_manifest::ensure_qualified_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::emitter::{
-    Qwen2VlConfig, Qwen2VlHostInputs, QwenVlVisionVariant, emit_qwen2_vl_with,
+    Precision, Qwen2VlConfig, Qwen2VlHostInputs, QwenVlVisionVariant, emit_qwen2_vl_with,
     prepare_qwen2_vl_host_inputs, resolve_precision_checked,
 };
 #[cfg(feature = "diagnostics")]
 use crate::emitter::{Qwen25VlVisionDiagnosticLayout, emit_qwen2_5_vl_diagnostics};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
+use crate::iree_identity::{
+    ProductionNumerics, observe_float_tensor, production_artifact_contract,
+};
+use crate::numeric_dtype_contract::NumericDType;
+use crate::operator_numeric_contract::{
+    AffineExecution, CheckpointSourceObserver, DeclaredOperator, qwen2_vl_operators,
+};
 use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
 
 const ENTRY_NAME: &str = "qwen2_vl_vision.main";
@@ -489,6 +496,7 @@ fn quant_sibling(name: &str, suffix: &str) -> Result<String, String> {
 fn load_weights(
     model_dir: &Path,
     config: &Qwen2VlConfig,
+    observer: &mut CheckpointSourceObserver,
 ) -> Result<(Vec<AuxiliaryWeight>, String), String> {
     let specs = config.weight_specs();
     let locations = tensor_locations(model_dir)?;
@@ -548,6 +556,7 @@ fn load_weights(
             })?;
             let source_dtype = tensor.dtype();
             let source_shape = tensor.shape().to_vec();
+            observe_float_tensor(observer, source_dtype)?;
             let (values, transform) = if spec.name == "vision_tower.patch_embed.proj.weight" {
                 let expected_source = [
                     config.hidden,
@@ -626,6 +635,15 @@ fn load_weights(
                         ));
                     }
                 };
+                observer.observe_affine(
+                    bits,
+                    group_size,
+                    if scales_bf16 {
+                        NumericDType::Bf16
+                    } else {
+                        NumericDType::F16
+                    },
+                )?;
                 let values = dequantize_affine(
                     tensor.data(),
                     scales.data(),
@@ -775,6 +793,25 @@ fn qwen2_vl_target_flags(device: &str) -> Result<Vec<String>, String> {
     Ok(flags)
 }
 
+/// Operator contract inputs for one Qwen2-VL or Qwen2.5-VL vision artifact.
+/// `precision` is the value the emitter received for the same graph.
+fn qwen2_vl_numerics<'a>(
+    config: &Qwen2VlConfig,
+    operators: &'a [DeclaredOperator],
+    precision: Precision,
+    observer: &CheckpointSourceObserver,
+) -> Result<ProductionNumerics<'a>, String> {
+    Ok(ProductionNumerics {
+        family: match config.variant {
+            QwenVlVisionVariant::Qwen2 => "qwen2-vl-vision",
+            QwenVlVisionVariant::Qwen25 { .. } => "qwen2-5-vl-vision",
+        },
+        operators,
+        precision,
+        weights: observer.resolve(AffineExecution::Host)?,
+    })
+}
+
 fn compile_and_load(
     model_dir: &Path,
     device: &str,
@@ -792,8 +829,15 @@ fn compile_and_load(
     let cache = std::env::temp_dir().join("mlxcel-xla-qwen2-vl-vmfb");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let (weights, checkpoint_schema) = load_weights(model_dir, config)?;
-    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+    let mut observer = CheckpointSourceObserver::default();
+    let (weights, checkpoint_schema) = load_weights(model_dir, config, &mut observer)?;
+    let operators =
+        qwen2_vl_operators(matches!(config.variant, QwenVlVisionVariant::Qwen25 { .. }));
+    let family = match &config.variant {
+        QwenVlVisionVariant::Qwen2 => "qwen2",
+        QwenVlVisionVariant::Qwen25 { .. } => "qwen2-5",
+    };
+    let contract = production_artifact_contract(
         ENTRY_NAME,
         format!(
             "{};{};precision={precision:?};checkpoint_schema_sha256={}",
@@ -802,11 +846,10 @@ fn compile_and_load(
             sha256_hex(checkpoint_schema.as_bytes())
         ),
         compiler_generation_identity(&compiler, &flags, &mlir)?,
+        &compiler,
+        device,
+        &qwen2_vl_numerics(config, &operators, precision, &observer)?,
     )?;
-    let family = match &config.variant {
-        QwenVlVisionVariant::Qwen2 => "qwen2",
-        QwenVlVisionVariant::Qwen25 { .. } => "qwen2-5",
-    };
     let tag = format!("{family}-vl-vision-{patch_bucket}");
     let vmfb = cached_vmfb_path(&compiler, &mlir, &flags, &cache, &tag, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
@@ -833,8 +876,11 @@ fn compile_and_load_diagnostics(
     let cache = std::env::temp_dir().join("mlxcel-xla-qwen2-vl-vmfb");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let (weights, checkpoint_schema) = load_weights(model_dir, config)?;
-    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+    let mut observer = CheckpointSourceObserver::default();
+    let (weights, checkpoint_schema) = load_weights(model_dir, config, &mut observer)?;
+    let operators =
+        qwen2_vl_operators(matches!(config.variant, QwenVlVisionVariant::Qwen25 { .. }));
+    let contract = production_artifact_contract(
         ENTRY_NAME,
         format!(
             "{};{};precision={precision:?};diagnostics=window-full-restoration;checkpoint_schema_sha256={}",
@@ -843,6 +889,9 @@ fn compile_and_load_diagnostics(
             sha256_hex(checkpoint_schema.as_bytes())
         ),
         compiler_generation_identity(&compiler, &flags, &mlir)?,
+        &compiler,
+        device,
+        &qwen2_vl_numerics(config, &operators, precision, &observer)?,
     )?;
     let tag = format!("qwen2-5-vl-vision-diagnostics-{patch_bucket}");
     let vmfb = cached_vmfb_path(&compiler, &mlir, &flags, &cache, &tag, 0);

@@ -14,9 +14,13 @@
 
 //! StableHLO emitter for Molmo2's flattened-patch ViT and indexed 2D pooler.
 
-use super::builder::{Builder, Ty, Val};
+use super::builder::{Builder, Precision, Ty, Val};
 use super::molmo2_config::{Molmo2VisionConfig, Molmo2VisionWeightSpec};
 use super::numeric_ops::{silu, stable_softmax, tanh_gelu};
+
+/// Contraction precision of this graph on every device. The runtime binds the
+/// same value into the artifact's operator numeric contract (issue #3211).
+pub(crate) const MOLMO2_VISION_PRECISION: Precision = Precision::F32;
 
 const MOLMO2_VIT_PROBE_LAYER: usize = 18;
 // 591490 = 513 * checkpoint hidden width 1152 + component 514.
@@ -309,7 +313,7 @@ fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> S
         Ty::new(vec![config.static_pool_groups, config.pool_size], "i32"),
         "molmo2.image_token_pooling.signed",
     );
-    let mut builder = Builder::new();
+    let mut builder = Builder::new().with_precision(MOLMO2_VISION_PRECISION);
     let mut hidden = linear(&mut builder, &patches, &patch_weight, Some(&patch_bias));
     let patch_embedding = diagnostics.then(|| hidden.clone());
     let position = builder.broadcast(

@@ -31,15 +31,23 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+use crate::aux_manifest::ensure_qualified_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 #[cfg(feature = "diagnostics")]
 use crate::emitter::emit_vision_diagnostics;
-use crate::emitter::{LlavaVisionConfig, VisionProjector, VisionWeightSpec, emit_vision};
+use crate::emitter::{
+    LLAVA_VISION_PRECISION, LlavaVisionConfig, VisionProjector, VisionWeightSpec, emit_vision,
+};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
+use crate::iree_identity::{
+    ProductionNumerics, observe_float_tensor, production_artifact_contract,
+};
+use crate::operator_numeric_contract::{
+    AffineExecution, CheckpointSourceObserver, llava_vision_operators,
+};
 use crate::weights::{bf16_to_f32, f16_to_f32, f32_le_to_f32};
 
 const ENTRY_NAME: &str = "vision.main";
@@ -507,6 +515,7 @@ fn transpose_patch_ohwi_to_oihw(
 fn load_weights(
     model_dir: &Path,
     specs: &[VisionWeightSpec],
+    observer: &mut CheckpointSourceObserver,
 ) -> Result<(Vec<AuxiliaryWeight>, String), String> {
     let shards = resolve_weight_shards(model_dir, specs)?;
     let mut by_shard = BTreeMap::<&Path, Vec<usize>>::new();
@@ -548,6 +557,7 @@ fn load_weights(
             }
             let source_dtype = tensor.dtype();
             let source_shape = tensor.shape().to_vec();
+            observe_float_tensor(observer, source_dtype)?;
             let mut values = match source_dtype {
                 Dtype::BF16 => bf16_to_f32(tensor.data()),
                 Dtype::F16 => f16_to_f32(tensor.data()),
@@ -623,8 +633,14 @@ fn compile_and_load(
     let cache = std::env::temp_dir().join("mlxcel-xla-vision-vmfb");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let (weights, checkpoint_schema) = load_weights(model_dir, &config.weight_specs())?;
-    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+    let mut observer = CheckpointSourceObserver::default();
+    let (weights, checkpoint_schema) =
+        load_weights(model_dir, &config.weight_specs(), &mut observer)?;
+    let operators = llava_vision_operators(matches!(
+        config.projector,
+        VisionProjector::Gemma3AvgPool { .. }
+    ));
+    let contract = production_artifact_contract(
         ENTRY_NAME,
         format!(
             "{};{};checkpoint_schema_sha256={}",
@@ -633,6 +649,14 @@ fn compile_and_load(
             sha256_hex(checkpoint_schema.as_bytes())
         ),
         compiler_generation_identity(&compiler, &flags, mlir)?,
+        &compiler,
+        device,
+        &ProductionNumerics {
+            family: "llava-vision",
+            operators: &operators,
+            precision: LLAVA_VISION_PRECISION,
+            weights: observer.resolve(AffineExecution::Host)?,
+        },
     )?;
     let vmfb = cached_vmfb_path(&compiler, mlir, &flags, &cache, tag, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
@@ -887,7 +911,7 @@ impl IreeVisionDiagnosticProjector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aux_manifest::auxiliary_manifest_path;
+    use crate::aux_manifest::{AuxiliaryArtifactContract, auxiliary_manifest_path};
 
     fn temp_path(tag: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()

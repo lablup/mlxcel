@@ -61,6 +61,9 @@ serde_json = { version = "1" }
 
 [build-dependencies]
 cc = "1"
+# Digest of the linked IREE runtime archive, baked for the operator numeric
+# contract backend identity (issue #3211).
+sha2 = "0.11"
 
 [dev-dependencies]
 # Auxiliary artifact qualification is pure Rust and must remain testable

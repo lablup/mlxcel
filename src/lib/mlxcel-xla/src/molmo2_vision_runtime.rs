@@ -23,16 +23,24 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+use crate::aux_manifest::ensure_qualified_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 #[cfg(feature = "diagnostics")]
 use crate::emitter::emit_molmo2_vision_diagnostics;
-use crate::emitter::{Molmo2VisionConfig, Molmo2VisionWeightSpec, emit_molmo2_vision};
+use crate::emitter::{
+    MOLMO2_VISION_PRECISION, Molmo2VisionConfig, Molmo2VisionWeightSpec, emit_molmo2_vision,
+};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
+use crate::iree_identity::{
+    ProductionNumerics, observe_float_tensor, production_artifact_contract,
+};
 use crate::molmo2::Molmo2SafePooling;
+use crate::operator_numeric_contract::{
+    AffineExecution, CheckpointSourceObserver, molmo2_vision_operators,
+};
 use crate::weights::{bf16_to_f32, f16_to_f32, f32_le_to_f32};
 
 const ENTRY_NAME: &str = "molmo2_vision.main";
@@ -251,6 +259,7 @@ fn finite(label: &str, values: &[f32]) -> Result<(), String> {
 fn load_weights(
     model_dir: &Path,
     specs: &[Molmo2VisionWeightSpec],
+    observer: &mut CheckpointSourceObserver,
 ) -> Result<(Vec<AuxiliaryWeight>, String), String> {
     let shards = resolve_shards(model_dir, specs)?;
     let mut by_shard = BTreeMap::<&Path, Vec<usize>>::new();
@@ -282,6 +291,7 @@ fn load_weights(
                     spec.shape
                 ));
             }
+            observe_float_tensor(observer, tensor.dtype())?;
             let values = match tensor.dtype() {
                 Dtype::BF16 => bf16_to_f32(tensor.data()),
                 Dtype::F16 => f16_to_f32(tensor.data()),
@@ -444,17 +454,28 @@ fn compile_vision_module(
     let cache = std::env::temp_dir().join("mlxcel-xla-molmo2-vision-vmfb");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let (weights, checkpoint_schema) = load_weights(model_dir, &config.weight_specs())?;
+    let mut observer = CheckpointSourceObserver::default();
+    let (weights, checkpoint_schema) =
+        load_weights(model_dir, &config.weight_specs(), &mut observer)?;
     let graph_identity = diagnostic_identity
         .map(|identity| format!("{};diagnostics={identity}", config.fingerprint()))
         .unwrap_or_else(|| config.fingerprint());
-    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+    let operators = molmo2_vision_operators();
+    let contract = production_artifact_contract(
         ENTRY_NAME,
         format!(
             "{graph_identity};checkpoint_schema_sha256={}",
             sha256(checkpoint_schema.as_bytes())
         ),
         generation_identity(&compiler, &flags, mlir)?,
+        &compiler,
+        device,
+        &ProductionNumerics {
+            family: "molmo2-vision",
+            operators: &operators,
+            precision: MOLMO2_VISION_PRECISION,
+            weights: observer.resolve(AffineExecution::Host)?,
+        },
     )?;
     let vmfb = cached_vmfb_path(&compiler, mlir, &flags, &cache, tag, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {

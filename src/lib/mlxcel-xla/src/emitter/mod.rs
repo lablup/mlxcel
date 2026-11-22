@@ -173,8 +173,8 @@ pub(crate) use config::{MoeConfig, SharedExpertConfig};
 // superseded uniform-B Stage-1 graph) is re-exported for the validation harness.
 #[allow(unused_imports)]
 pub(crate) use builder::{
-    Precision, ProjectionLayout, check_packed_supported, precision_env_override, quant_in_graph,
-    resolve_precision, resolve_precision_checked, target_flags_with_rocm_target,
+    Precision, ProjectionLayout, check_packed_supported, default_precision, precision_env_override,
+    quant_in_graph, resolve_precision, resolve_precision_checked, target_flags_with_rocm_target,
 };
 /// Test support only (issue #3060): toggle the single-sequence decode scalar ABI
 /// per thread so the device gate can compile and run both the scalar and the
@@ -206,8 +206,20 @@ pub(crate) use molmo2_config::{Molmo2VisionConfig, Molmo2VisionWeightSpec};
 pub(crate) use molmo2_vision::emit_molmo2_vision;
 #[cfg(feature = "diagnostics")]
 pub(crate) use molmo2_vision::emit_molmo2_vision_diagnostics;
+// Fixed contraction precision of each vision graph, shared with the runtime's
+// operator numeric contract (issue #3211).
+#[allow(unused_imports)]
+pub(crate) use molmo_vision::MOLMO_VISION_PRECISION;
+#[allow(unused_imports)]
+pub(crate) use molmo2_vision::MOLMO2_VISION_PRECISION;
+#[allow(unused_imports)]
+pub(crate) use qwen3_vl::QWEN3_VL_VISION_PRECISION;
+#[allow(unused_imports)]
+pub(crate) use vision::LLAVA_VISION_PRECISION;
 #[allow(unused_imports)]
 pub(crate) use vision::emit_vision;
+#[allow(unused_imports)]
+pub(crate) use youtu_vl::YOUTU_VL_VISION_PRECISION;
 // The only consumer is `IreeVisionDiagnosticProjector` in `vision_runtime`, which
 // is gated on `diagnostics` alone. The `test` arm is kept deliberately: it is the
 // only thing that compiles `emit_vision_impl(config, true)` in a build that does

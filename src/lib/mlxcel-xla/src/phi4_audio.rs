@@ -29,7 +29,7 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+use crate::aux_manifest::ensure_qualified_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
@@ -39,6 +39,12 @@ use crate::emitter::{
     phi4_audio_diagnostic_specs, phi4_audio_weight_specs,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
+use crate::iree_identity::{
+    ProductionNumerics, observe_float_tensor, production_artifact_contract,
+};
+use crate::operator_numeric_contract::{
+    AffineExecution, CheckpointSourceObserver, phi4_audio_operators,
+};
 use crate::weights::{bf16_to_f32, f16_to_f32};
 
 /// Immutable upstream checkpoint revision qualified by #874.
@@ -246,6 +252,7 @@ fn decode_i32_scalar(bytes: &[u8]) -> Result<i32, String> {
 fn load_audio_weights(
     model_dir: &Path,
     config: &Phi4AudioConfig,
+    observer: &mut CheckpointSourceObserver,
 ) -> Result<Vec<AuxiliaryWeight>, String> {
     let specs = phi4_audio_weight_specs(config);
     let names = specs
@@ -282,6 +289,7 @@ fn load_audio_weights(
                     spec.shape
                 ));
             }
+            observe_float_tensor(observer, tensor.dtype())?;
             let values = match tensor.dtype() {
                 Dtype::BF16 => bf16_to_f32(tensor.data()),
                 Dtype::F16 => f16_to_f32(tensor.data()),
@@ -355,11 +363,21 @@ fn load_audio_module(
         artifact_name,
         frame_bucket,
     );
-    let weights = load_audio_weights(model_dir, config)?;
-    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+    let mut observer = CheckpointSourceObserver::default();
+    let weights = load_audio_weights(model_dir, config, &mut observer)?;
+    let operators = phi4_audio_operators();
+    let contract = production_artifact_contract(
         entry_name,
         config_identity(config, frame_bucket, precision),
         generation_identity(&compiler, &flags, graph)?,
+        &compiler,
+        device,
+        &ProductionNumerics {
+            family: "phi4mm-audio",
+            operators: &operators,
+            precision,
+            weights: observer.resolve(AffineExecution::Host)?,
+        },
     )?;
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(
@@ -719,7 +737,9 @@ impl Phi4AudioDiagnosticRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aux_manifest::{auxiliary_manifest_path, verify_auxiliary_manifest};
+    use crate::aux_manifest::{
+        AuxiliaryArtifactContract, auxiliary_manifest_path, verify_auxiliary_manifest,
+    };
 
     fn published_config() -> Phi4AudioConfig {
         Phi4AudioConfig {

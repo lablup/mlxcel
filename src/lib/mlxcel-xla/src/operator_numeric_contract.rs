@@ -22,6 +22,27 @@
 
 use crate::numeric_dtype_contract::{NumericDType, WeightExecution};
 
+mod families;
+#[cfg(test)]
+mod family_tests;
+mod production;
+#[cfg(test)]
+mod production_tests;
+
+// Consumed by the IREE runtimes; the non-IREE test build reaches them only
+// through the child test modules.
+#[cfg_attr(not(feature = "iree"), allow(unused_imports))]
+pub(crate) use families::{
+    gemma3n_audio_encode_operators, gemma3n_audio_merge_operators, llava_vision_operators,
+    molmo_vision_operators, molmo2_vision_operators, phi4_audio_operators, qwen2_vl_operators,
+    qwen3_vl_operators, youtu_vl_operators,
+};
+#[cfg_attr(not(feature = "iree"), allow(unused_imports))]
+pub(crate) use production::{
+    AffineExecution, CheckpointSourceObserver, CheckpointWeights, DeclaredOperator,
+    ProductionBackend, production_operator_contract,
+};
+
 const SCHEMA: &str = "mlxcel-xla-operator-numeric-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +77,11 @@ impl CheckpointDType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OperatorClass {
     AffineQ4Dequantize,
+    AffineQ8Dequantize,
     DenseMatmul,
+    // No production graph contracts packed weights directly: they dequantize
+    // first (host or `AffineQ*Dequantize`) and run `DenseMatmul`.
+    #[allow(dead_code)]
     Q4Matmul,
     LayerNorm,
     RmsNorm,
@@ -72,6 +97,7 @@ impl OperatorClass {
     const fn identity(self) -> &'static str {
         match self {
             Self::AffineQ4Dequantize => "affine-q4-dequantize",
+            Self::AffineQ8Dequantize => "affine-q8-dequantize",
             Self::DenseMatmul => "dense-matmul",
             Self::Q4Matmul => "q4-matmul",
             Self::LayerNorm => "layer-norm",
@@ -92,6 +118,9 @@ pub(crate) enum RoundingBoundary {
     DequantizedWeight,
     OperatorInput,
     AccumulatorResult,
+    // Only the micro-oracle projection probes round a separate bias add;
+    // production graphs fold biases into the accumulator result.
+    #[cfg_attr(not(feature = "micro-oracle"), allow(dead_code))]
     BiasAdd,
     ActivationResult,
     ResidualResult,
@@ -116,7 +145,10 @@ impl RoundingBoundary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AssociationPolicy {
     Sequential,
+    // Reference-oracle association orders; no production entry declares them.
+    #[allow(dead_code)]
     PairwiseTree,
+    #[allow(dead_code)]
     PrefixSequential,
     CudaOneBlockScan,
     BackendAlgorithm,
@@ -137,6 +169,8 @@ impl AssociationPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PackedLaneOrder {
     LeastSignificantFirst,
+    // Every MLX affine layout this crate loads packs lanes least-significant first.
+    #[allow(dead_code)]
     MostSignificantFirst,
 }
 
@@ -152,6 +186,8 @@ impl PackedLaneOrder {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AffineEvaluationOrder {
     SeparateMultiplyThenAdd,
+    // Host and in-graph dequantization both round the multiply before the add.
+    #[allow(dead_code)]
     FusedMultiplyAdd,
 }
 

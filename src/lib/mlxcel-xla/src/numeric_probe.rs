@@ -15,8 +15,6 @@
 //! In-process IREE execution for bounded operator-level numeric probes.
 
 use std::mem::size_of;
-use std::path::Path;
-use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
@@ -34,6 +32,7 @@ use crate::emitter::numeric_ops::{
     emit_silu_projection_probe, emit_softmax_probe,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
+use crate::iree_identity::{compiler_version, runtime_archive_identity};
 use crate::numeric_dtype_contract::{NumericDType, WeightExecution};
 use crate::numeric_oracle::{
     AlgorithmIdentity, ComparisonMode, NumericBackendIdentity, NumericOracleCase,
@@ -153,43 +152,6 @@ fn decode_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
         .chunks_exact(size_of::<f32>())
         .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("four-byte f32 chunk")))
         .collect())
-}
-
-fn compiler_version(compiler: &Path) -> Result<String, String> {
-    let output = Command::new(compiler)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("run {} --version: {error}", compiler.display()))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{} --version failed: {}",
-            compiler.display(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let version = String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if version.is_empty() {
-        return Err(format!(
-            "{} --version returned no identity",
-            compiler.display()
-        ));
-    }
-    Ok(version)
-}
-
-fn runtime_archive_identity(compiler: &Path) -> Result<String, String> {
-    let dist = option_env!("MLXCEL_XLA_IREE_DIST")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("IREE_DIST").map(std::path::PathBuf::from))
-        .or_else(|| compiler.parent().and_then(Path::parent).map(Path::to_owned))
-        .ok_or_else(|| format!("derive IREE dist root from {}", compiler.display()))?;
-    let runtime = dist.join("lib/libiree_runtime_unified.a");
-    let bytes =
-        std::fs::read(&runtime).map_err(|error| format!("read {}: {error}", runtime.display()))?;
-    Ok(format!("libiree-runtime-sha256-{}", sha256_hex(&bytes)))
 }
 
 fn operator_identity(
