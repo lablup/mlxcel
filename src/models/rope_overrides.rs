@@ -587,7 +587,8 @@ pub(crate) fn resolve_spec(declared: Option<&RopeScalingSpec>) -> Option<RopeSca
 // Used by: Llama 3.x text (and through it Qwen2 / Qwen2.5, Helium, Arcee, the mllama
 // text decoder, every VLM whose text backbone is Llama3Model or Qwen2Model),
 // Qwen3, Qwen3-MoE, Apertus, Gemma 3, Llama 4 (`llama4_helpers::Llama4Rope`),
-// InternLM3 / InternLM2 via dynamic_ntk_rope, and rope_utils' own table builder.
+// InternLM3 / InternLM2 via dynamic_ntk_rope, DeepSeek V3.2 / GLM-5
+// (`deepseek_v32_rope::DsaRope`), and rope_utils' own table builder.
 pub(crate) fn resolve_base(declared: f32) -> f32 {
     let Some(over) = installed() else {
         return declared;
