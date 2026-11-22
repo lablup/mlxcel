@@ -29,9 +29,11 @@
 //! "rope_type": "default"}` with a null top-level `rope_theta` on 7B). The shared
 //! lift ([`mlxcel_core::impl_rope_lifting_deserialize!`]) copies that block into
 //! the flat `rope_theta` / `rope_scaling` keys this struct reads. The block's
-//! `attention_factor` (`0.1 * ln(factor) + 1`) and `truncate: true` are not read:
+//! `attention_factor` (`0.1 * ln(factor) + 1`) and `truncate: true` are not applied:
 //! the shared YaRN path computes the same magnitude from `mscale 1` /
-//! `mscale_all_dim 0` and the same floor/ceil correction range.
+//! `mscale_all_dim 0` and the same floor/ceil correction range. A declared
+//! `attention_factor` is checked against that derivation and refused when it
+//! differs.
 //!
 //! # What is refused
 //!
@@ -45,6 +47,8 @@
 //! - `num_experts > 0` or `mova_num_experts > 0`: the MoE and MoVA variants.
 //! - a non-null `attention_gate_func`: gated attention output.
 //! - `use_sliding_window: true`.
+//! - `hidden_act` other than `silu`: the shared decoder is SwiGLU.
+//! - a YaRN `attention_factor` that differs from the shared derivation.
 //! - `rope_head_dim` different from `head_dim`: partial rotary, where HF splits
 //!   Q/K at `rope_head_dim` and rotates only the first slice.
 
@@ -53,6 +57,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::llama3::{self, EosTokenId, Llama3Model, RopeScaling};
+use super::rope_utils::yarn_get_mscale;
 
 /// K2-Horizon `config.json`, restricted to the fields the dense path reads or
 /// must screen.
@@ -68,8 +73,12 @@ pub struct K2HorizonConfig {
     pub num_attention_heads: usize,
     #[serde(default)]
     pub num_key_value_heads: Option<usize>,
-    #[serde(default)]
+    /// HF `K2HorizonConfig.head_dim` defaults to 128 when omitted, not to
+    /// `hidden_size / num_attention_heads`.
+    #[serde(default = "default_head_dim")]
     pub head_dim: Option<usize>,
+    #[serde(default = "default_hidden_act")]
+    pub hidden_act: String,
     #[serde(default = "default_rms_norm_eps")]
     pub rms_norm_eps: f32,
     pub vocab_size: usize,
@@ -122,6 +131,14 @@ mlxcel_core::impl_rope_lifting_deserialize!(K2HorizonConfig);
 fn default_model_type() -> String {
     "k2_horizon".to_string()
 }
+/// HF `K2HorizonConfig.head_dim` default.
+fn default_head_dim() -> Option<usize> {
+    Some(128)
+}
+/// HF `K2HorizonConfig.hidden_act` default.
+fn default_hidden_act() -> String {
+    "silu".to_string()
+}
 fn default_rms_norm_eps() -> f32 {
     1e-6
 }
@@ -150,7 +167,8 @@ impl K2HorizonConfig {
         self.rope_theta.unwrap_or(DEFAULT_ROPE_THETA)
     }
 
-    /// Head width: the declared `head_dim`, else `hidden_size / heads`.
+    /// Head width: the declared `head_dim`, else the HF default of 128 (an
+    /// explicit `null` falls back to `hidden_size / heads`).
     ///
     /// Only valid after [`Self::validate`], which rejects zero heads.
     pub fn resolved_head_dim(&self) -> usize {
@@ -204,7 +222,15 @@ impl K2HorizonConfig {
                     .to_string(),
             );
         }
+        if self.hidden_act != "silu" {
+            return Err(format!(
+                "K2-Horizon hidden_act ({}) is not supported: the shared decoder's MLP is \
+                 SwiGLU and only implements silu",
+                self.hidden_act
+            ));
+        }
         self.validate_geometry()?;
+        self.validate_attention_factor()?;
         if let Some(rope_head_dim) = self.rope_head_dim {
             let head_dim = self.resolved_head_dim();
             if rope_head_dim != head_dim {
@@ -234,6 +260,32 @@ impl K2HorizonConfig {
         Ok(())
     }
 
+    /// Refuse a declared YaRN `attention_factor` that the shared YaRN path
+    /// would not reproduce. The shared path derives the magnitude as
+    /// `yarn_get_mscale(factor, 1) / yarn_get_mscale(factor, 0)`, which is
+    /// `0.1 * ln(factor) + 1`.
+    fn validate_attention_factor(&self) -> Result<(), String> {
+        let Some(spec) = self.rope_scaling.as_ref() else {
+            return Ok(());
+        };
+        let (Some(declared), Some(factor)) = (spec.attention_factor, spec.factor) else {
+            return Ok(());
+        };
+        if spec.rope_type() != "yarn" {
+            return Ok(());
+        }
+        let derived = yarn_get_mscale(factor, 1.0) / yarn_get_mscale(factor, 0.0);
+        let tolerance = 1e-6 * derived.abs().max(declared.abs());
+        if !declared.is_finite() || (declared - derived).abs() > tolerance {
+            return Err(format!(
+                "K2-Horizon rope_parameters.attention_factor ({declared}) differs from the \
+                 {derived} the shared YaRN path derives from factor {factor}: a custom \
+                 attention magnitude is not supported"
+            ));
+        }
+        Ok(())
+    }
+
     /// Reject head counts and widths that would divide by zero or reach an MLX
     /// kernel with an odd rotary dimension.
     fn validate_geometry(&self) -> Result<(), String> {
@@ -253,6 +305,34 @@ impl K2HorizonConfig {
                 "K2-Horizon num_hidden_layers ({}) exceeds {MAX_NUM_HIDDEN_LAYERS}",
                 self.num_hidden_layers
             ));
+        }
+        for (name, value, ceiling) in [
+            ("hidden_size", self.hidden_size, MAX_HIDDEN_SIZE),
+            (
+                "intermediate_size",
+                self.intermediate_size,
+                MAX_INTERMEDIATE_SIZE,
+            ),
+            ("vocab_size", self.vocab_size, MAX_VOCAB_SIZE),
+            (
+                "num_attention_heads",
+                self.num_attention_heads,
+                MAX_NUM_ATTENTION_HEADS,
+            ),
+            (
+                "num_key_value_heads",
+                self.num_key_value_heads.unwrap_or(0),
+                MAX_NUM_ATTENTION_HEADS,
+            ),
+            (
+                "max_position_embeddings",
+                self.max_position_embeddings.unwrap_or(0),
+                MAX_MAX_POSITION_EMBEDDINGS,
+            ),
+        ] {
+            if value > ceiling {
+                return Err(format!("K2-Horizon {name} ({value}) exceeds {ceiling}"));
+            }
         }
         let kv_heads = self.num_key_value_heads.unwrap_or(self.num_attention_heads);
         if kv_heads == 0 || !self.num_attention_heads.is_multiple_of(kv_heads) {
@@ -274,6 +354,20 @@ impl K2HorizonConfig {
             return Err(format!(
                 "K2-Horizon head_dim ({head_dim}) must be even and between 2 and {MAX_HEAD_DIM}"
             ));
+        }
+        // The decoder casts `heads * head_dim` and `kv_heads * head_dim` to i32.
+        for (name, heads) in [
+            ("num_attention_heads", self.num_attention_heads),
+            ("num_key_value_heads", kv_heads),
+        ] {
+            let fits = heads
+                .checked_mul(head_dim)
+                .is_some_and(|width| i32::try_from(width).is_ok());
+            if !fits {
+                return Err(format!(
+                    "K2-Horizon {name} ({heads}) * head_dim ({head_dim}) does not fit in i32"
+                ));
+            }
         }
         Ok(())
     }
@@ -314,8 +408,16 @@ impl K2HorizonConfig {
 /// Ceiling on `num_hidden_layers`, so an untrusted config cannot size the
 /// layer `Vec` in [`Llama3Model::from_weights`] arbitrarily. The 32B uses 64.
 const MAX_NUM_HIDDEN_LAYERS: usize = 1024;
-/// Ceiling on the head width, so `heads * head_dim` stays inside `i32`.
+/// Ceiling on the head width. On its own it does not keep `heads * head_dim`
+/// inside `i32`; `validate_geometry` checks that product explicitly.
 const MAX_HEAD_DIM: usize = 1024;
+/// Ceilings on the other untrusted scalars, in the style of
+/// `helium.rs`. Each sits far above the 32B variant.
+const MAX_NUM_ATTENTION_HEADS: usize = 4096;
+const MAX_HIDDEN_SIZE: usize = 65_536;
+const MAX_INTERMEDIATE_SIZE: usize = 1 << 22;
+const MAX_MAX_POSITION_EMBEDDINGS: usize = 1 << 22;
+const MAX_VOCAB_SIZE: usize = 1 << 24;
 
 /// Parse and screen a K2-Horizon `config.json`.
 pub fn parse_config(config_str: &str) -> Result<K2HorizonConfig, String> {

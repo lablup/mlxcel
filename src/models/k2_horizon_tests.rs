@@ -271,3 +271,68 @@ fn turn_terminator_resolves_from_the_real_checkpoint_tokenizer() {
     }
     assert_eq!(super::resolve_turn_terminator(dir), Some(64019));
 }
+
+#[test]
+fn oversized_geometry_is_refused() {
+    // 2147483648 wraps to a negative i32 in an `as i32` cast.
+    for field in [
+        "num_attention_heads",
+        "num_key_value_heads",
+        "hidden_size",
+        "intermediate_size",
+        "vocab_size",
+        "max_position_embeddings",
+    ] {
+        let mut value = config_0_9b();
+        value[field] = json!(2_147_483_648u64);
+        let err = refusal(&value);
+        assert!(
+            err.contains(field) && err.contains("exceeds"),
+            "{field}: {err}"
+        );
+    }
+}
+
+#[test]
+fn non_silu_hidden_act_is_refused() {
+    let mut value = config_0_9b();
+    value["hidden_act"] = json!("gelu");
+    let err = refusal(&value);
+    assert!(err.contains("hidden_act (gelu)"), "{err}");
+
+    // Omitted takes the HF default, silu.
+    value.as_object_mut().unwrap().remove("hidden_act");
+    parse_config(&value.to_string()).expect("omitted hidden_act is silu");
+}
+
+#[test]
+fn omitted_head_dim_defaults_to_128_like_hf() {
+    // 1536 / 32 = 48 would be the old fallback; HF and mlx-vlm use 128.
+    let mut value = config_0_9b();
+    value.as_object_mut().unwrap().remove("head_dim");
+    value.as_object_mut().unwrap().remove("rope_head_dim");
+    let config = parse_config(&value.to_string()).expect("loads with the default head_dim");
+    assert_eq!(config.resolved_head_dim(), 128);
+
+    // The real 0.9B declares 64 and keeps it.
+    let declared = parse_config(&config_0_9b().to_string()).expect("0.9B loads");
+    assert_eq!(declared.resolved_head_dim(), 64);
+}
+
+#[test]
+fn attention_factor_must_match_the_shared_yarn_derivation() {
+    // 0.9B's value is `0.1 * ln(16) + 1`.
+    parse_config(&config_0_9b().to_string()).expect("0.9B attention_factor matches");
+
+    let mut value = config_0_9b();
+    value["rope_parameters"]["attention_factor"] = json!(1.0);
+    let err = refusal(&value);
+    assert!(err.contains("attention_factor (1)"), "{err}");
+
+    // Absent is fine: the shared path derives it.
+    value["rope_parameters"]
+        .as_object_mut()
+        .unwrap()
+        .remove("attention_factor");
+    parse_config(&value.to_string()).expect("absent attention_factor loads");
+}
