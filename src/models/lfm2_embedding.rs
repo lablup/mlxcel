@@ -142,14 +142,7 @@ impl Lfm2EmbeddingModel {
         let dense_folders = sanitize_family_weights(&mut weights);
         let prefix = head::find_projection(&weights, dense_folders)
             .with_context(|| format!("loading {}", model_dir.display()))?;
-        head::validate_projection(
-            model_dir,
-            config,
-            &weights,
-            prefix,
-            args.group_size(),
-            args.hidden_size,
-        )?;
+        head::validate_projection(model_dir, config, &weights, prefix, args.group_size())?;
 
         // A multi-vector head keeps every token and never pools, so the
         // pooling resolver (and its `--pooling` override) only applies to the

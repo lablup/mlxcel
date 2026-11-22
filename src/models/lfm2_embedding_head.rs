@@ -218,15 +218,15 @@ struct DenseConfig {
 /// the key is missing, so a missing key is refused too) and `use_residual`
 /// false, and its declared widths must match the tensors. The mlx-community
 /// conversions declare `mlx.proj_dim` in `config.json`, which is cross-checked
-/// the same way. Without either, the width is read from the weight.
+/// the same way. Without either, the width is read from the weight. A
+/// `modules.json` listing a `Pooling` module is refused.
 pub(super) fn validate_projection(
     model_dir: &Path,
     config: &Value,
     weights: &WeightMap,
     prefix: Option<&str>,
     group_size: i32,
-    hidden_size: usize,
-) -> Result<Option<usize>> {
+) -> Result<()> {
     let folders = dense_folders_on_disk(model_dir);
     if folders.len() >= 2 {
         bail!(
@@ -244,17 +244,15 @@ pub(super) fn validate_projection(
                 folder.display()
             );
         }
-        return Ok(None);
+        return Ok(());
     };
 
+    check_modules_json(model_dir)?;
+    // The projection's input width against the backbone hidden size is
+    // checked once, in `Lfm2EmbeddingModel::from_weights`, from the built
+    // linear (which also covers the quantized layouts).
     let (out_features, in_features) = linear_features(weights, prefix, group_size)
         .with_context(|| format!("LFM2 ColBERT projection `{prefix}` is not a rank-2 linear"))?;
-    if in_features as usize != hidden_size {
-        bail!(
-            "LFM2 ColBERT projection `{prefix}` takes {in_features} input features but the \
-             backbone hidden size is {hidden_size}"
-        );
-    }
 
     if let Some(folder) = folders.first() {
         let path = folder.join("config.json");
@@ -275,7 +273,37 @@ pub(super) fn validate_projection(
              `{prefix}` has {out_features} output features"
         );
     }
-    Ok(Some(out_features as usize))
+    Ok(())
+}
+
+/// Refuse a sentence-transformers `modules.json` that lists a `Pooling`
+/// module: a pooled single-vector Dense head is not a ColBERT token
+/// projection, and serving it as multi-vector would return the wrong vectors.
+/// The ColBERT layout is the `Transformer` module followed by one `Dense`.
+/// Checkpoints without a `modules.json` (the mlx-community conversions) pass.
+fn check_modules_json(model_dir: &Path) -> Result<()> {
+    let path = model_dir.join("modules.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let modules: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let pooled = modules.as_array().into_iter().flatten().any(|module| {
+        module
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.ends_with("Pooling"))
+    });
+    if pooled {
+        bail!(
+            "{} lists a Pooling module, so the Dense head is a pooled single-vector projection \
+             and not an LFM2 ColBERT token projection; refusing to load it as multi-vector",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn check_dense_config(

@@ -381,7 +381,7 @@ fn dense_config_must_describe_a_plain_projection() {
     let mut weights = WeightMap::new();
     rng.insert(&mut weights, "dense.0.weight", &[8, 4], 0.1);
     let check = |dir: &Path, config: &Value| {
-        validate_projection(dir, config, &weights, Some("dense.0"), 64, 4)
+        validate_projection(dir, config, &weights, Some("dense.0"), 64)
     };
     let identity = json!({
         "in_features": 4, "out_features": 8, "bias": false,
@@ -390,7 +390,7 @@ fn dense_config_must_describe_a_plain_projection() {
 
     let dir = temp_dir("lfm2_colbert_dense_ok");
     write_dense_config(&dir, &identity);
-    assert_eq!(check(&dir, &json!({})).unwrap(), Some(8));
+    check(&dir, &json!({})).unwrap();
     // mlx-community's `mlx.proj_dim` is cross-checked too.
     assert!(err_string(check(&dir, &json!({"mlx": {"proj_dim": 16}}))).contains("proj_dim"));
 
@@ -420,20 +420,45 @@ fn dense_config_must_describe_a_plain_projection() {
     write_dense_config(&dir, &config);
     assert!(check(&dir, &json!({})).is_err());
 
+    // A pooled single-vector Dense head lists a Pooling module; a plain
+    // Transformer + Dense `modules.json` and a missing one both load.
+    let modules = |kinds: &[&str]| {
+        let list: Vec<Value> = kinds
+            .iter()
+            .enumerate()
+            .map(|(idx, kind)| json!({"idx": idx, "name": idx.to_string(), "path": "", "type": kind}))
+            .collect();
+        std::fs::write(
+            dir.join("modules.json"),
+            serde_json::to_string(&list).unwrap(),
+        )
+        .unwrap();
+    };
+    write_dense_config(&dir, &identity);
+    modules(&[
+        "sentence_transformers.models.Transformer",
+        "pylate.models.Dense.Dense",
+    ]);
+    check(&dir, &json!({})).unwrap();
+    modules(&[
+        "sentence_transformers.models.Transformer",
+        "sentence_transformers.models.Pooling",
+        "sentence_transformers.models.Dense",
+    ]);
+    assert!(err_string(check(&dir, &json!({}))).contains("Pooling"));
+    std::fs::remove_file(dir.join("modules.json")).unwrap();
+
     // A second Dense folder, and a folder with no projection tensor.
     write_dense_config(&dir, &identity);
     std::fs::create_dir_all(dir.join("2_Dense")).unwrap();
     assert!(err_string(check(&dir, &json!({}))).contains("Dense folders"));
     std::fs::remove_dir_all(dir.join("2_Dense")).unwrap();
-    assert!(validate_projection(&dir, &json!({}), &WeightMap::new(), None, 64, 4).is_err());
+    assert!(validate_projection(&dir, &json!({}), &WeightMap::new(), None, 64).is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 
     // No folder and no tensor: the single-vector export.
     let plain = temp_dir("lfm2_colbert_plain");
-    assert_eq!(
-        validate_projection(&plain, &json!({}), &WeightMap::new(), None, 64, 4).unwrap(),
-        None
-    );
+    validate_projection(&plain, &json!({}), &WeightMap::new(), None, 64).unwrap();
     std::fs::remove_dir_all(plain).unwrap();
 }
 
