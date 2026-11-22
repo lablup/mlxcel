@@ -194,6 +194,12 @@ fn other_transformers_rope_keys_are_screened() {
     assert!(refusal(&value).contains("original_max_position_embeddings"));
     value["original_max_position_embeddings"] = json!(4096);
     parse(&value).unwrap();
+    // Top level only: the shared path would use max_position_embeddings.
+    value["rope_scaling"]
+        .as_object_mut()
+        .unwrap()
+        .remove("original_max_position_embeddings");
+    assert!(refusal(&value).contains("original_max_position_embeddings"));
 
     let mut value = afm_4_5b();
     value["rope_scaling"]["type"] = json!("linear");

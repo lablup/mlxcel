@@ -95,7 +95,9 @@ def build_model(model_dir: Path, arm: str, dtype, device, log):
             config.rope_parameters = {"rope_type": "default", "rope_theta": theta}
         else:
             config.rope_scaling = None
-    model = AutoModelForCausalLM.from_pretrained(model_dir, config=config, dtype=dtype)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, config=config, dtype=dtype, use_safetensors=True
+    )
     model.to(device)
     model.eval()
     if arm == "relu":

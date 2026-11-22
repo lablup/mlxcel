@@ -296,12 +296,14 @@ impl ArceeConfig {
         if let Some(top) = self.rope_screen.top_level_original_max_position_embeddings
             && spec
                 .original_max_position_embeddings
-                .is_some_and(|inner| (f64::from(inner) - top).abs() > 0.5)
+                .map(f64::from)
+                .or(self.max_position_embeddings.map(|n| n as f64))
+                .is_none_or(|used| (used - top).abs() > 0.5)
         {
             return Err(format!(
                 "Arcee original_max_position_embeddings ({top}) at the top level differs from \
-                 the rope_scaling block's: transformers prefers the top-level value and the \
-                 shared YaRN path reads the block's"
+                 the original context the shared YaRN path would use (the rope_scaling block's, \
+                 else max_position_embeddings): transformers prefers the top-level value"
             ));
         }
         if self.rope_screen.truncate == Some(false) {
