@@ -365,6 +365,22 @@ pub static EXPERIMENTAL_LATENT_NOTES: &[ExperimentalLatentNote] = &[
                (docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md)",
     },
     ExperimentalLatentNote {
+        families: &["hy_v4"],
+        bits: &[8],
+        text: "an int8 key slot has not been quality-measured on a real Hy4 checkpoint; on \
+               DeepSeek-V3.2, whose DSA indexer Hy4 reuses, it dropped the indexer's top-k \
+               overlap with fp16 below 0.99 on 49 of 61 layers behind 4096 tokens \
+               (docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md)",
+    },
+    ExperimentalLatentNote {
+        families: &["hy_v4"],
+        bits: &[4],
+        text: "the 4-bit latent of a Hy4 key slot has not been quality-measured on a real Hy4 \
+               checkpoint; the int8 slot already dropped the DSA indexer's top-k overlap with \
+               fp16 below 0.99 on 49 of 61 DeepSeek-V3.2 layers behind 4096 tokens \
+               (docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md)",
+    },
+    ExperimentalLatentNote {
         families: &[],
         bits: &[4],
         text: "a 4-bit latent on DeepSeek-V2-Lite had 0 decided disagreements but flipped the \

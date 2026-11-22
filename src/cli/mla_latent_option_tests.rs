@@ -77,6 +77,7 @@ fn auto_leaves_resolution_as_it_was() {
             "deepseek_v3",
             "glm4_moe_lite",
             "deepseek_v32",
+            "hy_v4",
             "deepseek_v2",
             "llama",
         ] {
@@ -95,7 +96,7 @@ fn auto_leaves_resolution_as_it_was() {
             resolve("deepseek_v2", KVCacheMode::Int8),
             (KVCacheMode::Int8, None)
         );
-        for family in ["glm4_moe_lite", "deepseek_v32"] {
+        for family in ["glm4_moe_lite", "deepseek_v32", "hy_v4"] {
             let (mode, warning) = resolve(family, KVCacheMode::Int8);
             assert_eq!(mode, KVCacheMode::Fp16, "{family}");
             assert!(
@@ -119,6 +120,7 @@ fn an_explicit_value_decides_the_mode_of_every_mla_model_directory() {
         "deepseek_v3",
         "glm4_moe_lite",
         "deepseek_v32",
+        "hy_v4",
         "kimi_linear",
         "longcat_flash",
     ] {

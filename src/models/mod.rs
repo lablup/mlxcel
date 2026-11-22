@@ -357,6 +357,8 @@ pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v4::DeepSeekV4Model;
 pub use deepseek_v32::DeepSeekV32Model;
+pub use deepseek_v32::hy_v4;
+pub use deepseek_v32::hy_v4::HyV4Model;
 pub(crate) use detection::is_sequence_classification_architecture;
 pub(crate) use detection::vlm_has_vision;
 #[cfg(feature = "webui")]
@@ -639,6 +641,9 @@ pub enum ModelType {
     DeepSeekV2,
     DeepSeekV3,
     DeepSeekV32,
+    /// Tencent Hy4 (DeepSeek-V3.2 MLA + DSA with identity hyper connections,
+    /// a gated sink attention and shared indexers).
+    HyV4,
     /// DeepSeek-V4 (HyperConnections, pooled-KV compression, HiSA, hash-routed MoE).
     DeepSeekV4,
     /// Xing4.0 (DeepSeek-V3 MLA + MoE inside a manifold hyper-connection stream).
@@ -939,6 +944,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekV2,
     ModelType::DeepSeekV3,
     ModelType::DeepSeekV32,
+    ModelType::HyV4,
     ModelType::DeepSeekV4,
     ModelType::Xing40,
     ModelType::Dots1,
@@ -1187,6 +1193,7 @@ impl ModelType {
             ModelType::DeepSeekV2 => ("DeepSeek v2", "DeepSeek"),
             ModelType::DeepSeekV3 => ("DeepSeek v3 / R1", "DeepSeek"),
             ModelType::DeepSeekV32 => ("DeepSeek v3.2", "DeepSeek"),
+            ModelType::HyV4 => ("Hy4", "Tencent"),
             ModelType::DeepSeekV4 => ("DeepSeek v4", "DeepSeek"),
             ModelType::Xing40 => (
                 "Xing4.0 (DeepSeek-V3 MoE, hyper-connection stream)",
@@ -1631,6 +1638,7 @@ mod metadata_tests {
             DeepSeekV2,
             DeepSeekV3,
             DeepSeekV32,
+            HyV4,
             DeepSeekV4,
             Xing40,
             Dots1,

@@ -176,6 +176,7 @@ fn only_the_fallback_less_families_are_latent_families() {
         "deepseek_v32",
         "deepseek_v3.2",
         "glm_moe_dsa",
+        "hy_v4",
         "kimi_linear",
         "kimi_k3",
         "longcat_flash",

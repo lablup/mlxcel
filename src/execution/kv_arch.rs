@@ -429,6 +429,20 @@ pub fn deepseek_v2_caches_latent(mode: KVCacheMode) -> bool {
     deepseek_v2_latent_layout(mlxcel_core::mla::absorbed_enabled(), mode)
 }
 
+/// How many Hy4 layers own a DSA indexer (`indexer_types[i] == "full"`), and
+/// so cache the indexer key beside the latent. Without the list the upstream
+/// default applies: layers 0 and 1, then every fourth from layer 5.
+fn hy_v4_full_indexer_layers(text: &Value, num_layers: u64) -> u64 {
+    match text.get("indexer_types").and_then(Value::as_array) {
+        Some(types) => types
+            .iter()
+            .filter(|kind| kind.as_str() == Some("full"))
+            .count() as u64,
+        None => (0..num_layers).filter(|i| *i < 2 || i % 4 == 1).count() as u64,
+    }
+    .min(num_layers)
+}
+
 /// Classify a model's config into KV layer groups and an architecture kind.
 ///
 /// `v2_latent` says whether DeepSeek V2 caches the latent in this run
@@ -496,15 +510,13 @@ fn classify(
         } else {
             0
         };
-        let key_width = kv_lora_rank.saturating_add(index_key);
-        let pair_quantized = mlxcel_core::mla::stores_quantized_latent_pair(&mt)
-            && rank_quantizable
-            && key_width.is_multiple_of(group);
-        if mt.contains("v3")
-            || mt.contains("v32")
-            || mlxcel_core::mla::caches_mla_latent_pair(&mt)
-            || v2_caches_latent
-        {
+        // One latent-pair group: `layers` caches whose "K" slot carries an
+        // `index_key`-wide indexer key beside the latent.
+        let latent_group = |layers: u64, index_key: u64| {
+            let key_width = kv_lora_rank.saturating_add(index_key);
+            let pair_quantized = mlxcel_core::mla::stores_quantized_latent_pair(&mt)
+                && rank_quantizable
+                && key_width.is_multiple_of(group);
             // Cached form: (kv_latent[kv_lora_rank] (+ the DSA indexer key),
             // k_pe[qk_rope_head_dim]), which the quantized latent does not
             // store at one element width.
@@ -524,6 +536,32 @@ fn classify(
                         group as usize,
                     ) as u64
                 });
+            KvGroup {
+                layers,
+                elems_per_token: elems,
+                window: None,
+                fixed_bytes_per_token,
+            }
+        };
+        if mt.contains("v3")
+            || mt.contains("v32")
+            || mlxcel_core::mla::caches_mla_latent_pair(&mt)
+            || v2_caches_latent
+        {
+            // Hy4 caches the indexer key on its `full` indexer layers only;
+            // a `shared` layer reuses the previous selection and caches the
+            // latent alone (`src/models/hy_v4_attention.rs`, #2354).
+            if mt == "hy_v4" {
+                let full = hy_v4_full_indexer_layers(text, num_layers);
+                let groups = [
+                    latent_group(full, index_key),
+                    latent_group(num_layers.saturating_sub(full), 0),
+                ];
+                return Some((
+                    groups.into_iter().filter(|g| g.layers > 0).collect(),
+                    KvArchKind::MlaCompressed,
+                ));
+            }
             // A KDA hybrid (Kimi Linear, Kimi K3) caches the latent in its
             // MLA layers only. A LongCat decoder layer holds two MLA
             // attentions, each with its own latent cache
@@ -537,12 +575,7 @@ fn classify(
                 .unwrap_or(num_layers)
                 .saturating_mul(caches_per_layer);
             return Some((
-                vec![KvGroup {
-                    layers,
-                    elems_per_token: elems,
-                    window: None,
-                    fixed_bytes_per_token,
-                }],
+                vec![latent_group(layers, index_key)],
                 KvArchKind::MlaCompressed,
             ));
         }

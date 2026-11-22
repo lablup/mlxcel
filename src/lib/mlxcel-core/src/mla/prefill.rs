@@ -70,7 +70,8 @@ pub enum FoldedMask<'a> {
 /// [`crate::mla::decode::absorbed_attention`] for a multi-token absorbed step
 /// (DeepSeek V2 through `MlaLatentCache::attend`); the multi-token MLA steps of
 /// GLM4MoeLite (and its pipeline stage and MTP drafter), KimiLinear, KimiK3
-/// and LongcatFlashNgram (#3099).
+/// and LongcatFlashNgram (#3099); the Hy4 multi-token step under its
+/// `no_sinks` parity arm (with sinks it folds the same way into the sink SDPA).
 #[must_use]
 pub fn rope_folded_attention(
     q_nope: &MlxArray,

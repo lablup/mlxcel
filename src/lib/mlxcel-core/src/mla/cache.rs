@@ -163,6 +163,11 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     "deepseek_v32",
     "deepseek_v3.2",
     "glm_moe_dsa",
+    // Hy4 reuses the DeepSeek V3.2 MLA and writes the same pair through
+    // `store_latent_step` in `src/models/hy_v4_attention.rs`: `[kv_latent |
+    // indexer key]` on its `full` indexer layers, the latent alone on its
+    // `shared` ones (#2354).
+    "hy_v4",
     // Kimi Linear and Kimi K3 (which reuses Kimi Linear's absorbed MLA)
     // cache the pair in model-owned MLA layers and write it through the
     // latent view (#3162).

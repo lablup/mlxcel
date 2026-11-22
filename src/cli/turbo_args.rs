@@ -471,7 +471,7 @@ fn apply_optional_string_env_fallback(
 ///
 /// * The MLA-latent families (`glm4_moe_lite`, `deepseek_v3`, `kimi_k2`,
 ///   `joyai_llm_flash`, `kimi_vl`, `kimi_k25`, `youtu`, `youtu_llm`,
-///   `youtu_vl`, `deepseek_v32`, `deepseek_v3.2`, `glm_moe_dsa`,
+///   `youtu_vl`, `deepseek_v32`, `deepseek_v3.2`, `glm_moe_dsa`, `hy_v4`,
 ///   `kimi_linear`, `kimi_k3`, `longcat_flash`, `longcat_flash_ngram`) pack a
 ///   `(kv_latent, k_pe)` pair into one cache, so no quantized mode is
 ///   calibrated for what they store. Symmetric `turbo4` made the K quantizer
@@ -536,7 +536,8 @@ pub fn resolve_effective_kv_cache_mode(
 /// startup instead of reaching the per-token (or, on V2, decompressed)
 /// fallback at the first cache write.
 ///
-/// `deepseek_v32`, `deepseek_v3.2` and `glm_moe_dsa` cache the
+/// `deepseek_v32`, `deepseek_v3.2`, `glm_moe_dsa` and `hy_v4` (on its `full`
+/// indexer layers) cache the
 /// `index_head_dim`-wide indexer key beside the latent, and the affine `int8`
 /// latent stores that whole slot in groups of 64 (issue #3163). A config whose
 /// `kv_lora_rank` or `kv_lora_rank + index_head_dim` is not a multiple of 64
