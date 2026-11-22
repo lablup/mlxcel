@@ -79,10 +79,24 @@ impl ProductionBackend {
 /// Where an affine-quantized checkpoint weight is dequantized.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AffineExecution {
-    /// The loader dequantizes to f32 and uploads dense weights.
+    /// The loader dequantizes in F32 (`weights::dequantize_affine`) and uploads
+    /// dense weights.
     Host,
+    /// The loader dequantizes with BF16 rounding after the multiply and after
+    /// the add (`weights::dequantize_affine_bf16_sequential`) and uploads the
+    /// BF16-representable values as dense F32 weights.
+    HostBf16Sequential,
     /// The weight stays packed and `Builder::dequant_affine` unpacks it in the graph.
     InGraph,
+}
+
+impl AffineExecution {
+    const fn evaluation_order(self) -> AffineEvaluationOrder {
+        match self {
+            Self::Host | Self::InGraph => AffineEvaluationOrder::SeparateMultiplyThenAdd,
+            Self::HostBf16Sequential => AffineEvaluationOrder::SeparateMultiplyThenAddBf16Rounded,
+        }
+    }
 }
 
 /// Checkpoint dtype classes observed while a family loads its tensors.
@@ -170,7 +184,7 @@ impl CheckpointSourceObserver {
         let Some(source) = self.affine else {
             return Ok(CheckpointWeights::Float(float));
         };
-        let evaluation = AffineEvaluationOrder::SeparateMultiplyThenAdd;
+        let evaluation = execution.evaluation_order();
         let dequantization = AffineDequantizationContract::new(
             source.bits,
             source.group_size,
@@ -356,7 +370,9 @@ fn operator_entry(
                 CheckpointDType::AffineU8
             },
             match execution {
-                AffineExecution::Host => WeightExecution::HostAffineDequantized,
+                AffineExecution::Host | AffineExecution::HostBf16Sequential => {
+                    WeightExecution::HostAffineDequantized
+                }
                 AffineExecution::InGraph => WeightExecution::PackedAffineInGraph,
             },
             Some(dequantization),

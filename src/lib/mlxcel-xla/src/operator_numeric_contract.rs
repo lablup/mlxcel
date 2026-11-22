@@ -186,6 +186,11 @@ impl PackedLaneOrder {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AffineEvaluationOrder {
     SeparateMultiplyThenAdd,
+    /// Multiply, round the product to BF16, add the bias, and round the sum to
+    /// BF16 again (`weights::dequantize_affine_bf16_sequential`, MLX's BF16
+    /// affine dequantization). The per-step rounding changes the dequantized
+    /// weight, so it is a distinct identity from the F32 multiply-then-add.
+    SeparateMultiplyThenAddBf16Rounded,
     // Host and in-graph dequantization both round the multiply before the add.
     #[allow(dead_code)]
     FusedMultiplyAdd,
@@ -195,6 +200,7 @@ impl AffineEvaluationOrder {
     const fn identity(self) -> &'static str {
         match self {
             Self::SeparateMultiplyThenAdd => "separate-multiply-then-add",
+            Self::SeparateMultiplyThenAddBf16Rounded => "separate-multiply-then-add-bf16-rounded",
             Self::FusedMultiplyAdd => "fused-multiply-add",
         }
     }

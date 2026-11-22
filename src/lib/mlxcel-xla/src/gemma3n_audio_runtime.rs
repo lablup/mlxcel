@@ -47,11 +47,18 @@ use crate::operator_numeric_contract::{
     AffineExecution, CheckpointSourceObserver, gemma3n_audio_encode_operators,
     gemma3n_audio_merge_operators,
 };
-use crate::weights::{bf16_to_f32, dequantize_affine_bf16_sequential, f16_to_f32, f32_le_to_f32};
+use crate::weights::{
+    bf16_to_f32, dequantize_affine, dequantize_affine_bf16_sequential, f16_to_f32, f32_le_to_f32,
+};
 
 /// Contraction precision of both Gemma3n audio graphs, bound into their
 /// operator numeric contracts (issue #3211).
 const GEMMA3N_AUDIO_PRECISION: Precision = Precision::Bf16;
+
+/// How `decode_weight` dequantizes affine checkpoint weights. The same value
+/// selects the dequantizer and is bound into the operator numeric contracts, so
+/// changing the host rounding changes the manifest digest (issue #3211).
+const GEMMA3N_AUDIO_AFFINE: AffineExecution = AffineExecution::HostBf16Sequential;
 use crate::{
     GEMMA3N_AUDIO_MODALITY_FAMILY, GEMMA3N_AUDIO_SOFT_TOKENS, Gemma3nAudioInput,
     Gemma3nAudioPreparedPrefill, Gemma3nDensePle, Gemma3nPreparedPrefill, Gemma3nXlaAudioConfig,
@@ -353,15 +360,30 @@ fn decode_weight(
             let logical_columns = packed[1]
                 .checked_mul(32 / quant_bits)
                 .ok_or_else(|| format!("{checkpoint_name} logical width overflows"))?;
-            let values = dequantize_affine_bf16_sequential(
-                tensor.data(),
-                scales.data(),
-                biases.data(),
-                packed[0],
-                packed[1],
-                quant_bits,
-                quant_group,
-            )
+            let values = match GEMMA3N_AUDIO_AFFINE {
+                AffineExecution::HostBf16Sequential => dequantize_affine_bf16_sequential(
+                    tensor.data(),
+                    scales.data(),
+                    biases.data(),
+                    packed[0],
+                    packed[1],
+                    quant_bits,
+                    quant_group,
+                ),
+                AffineExecution::Host => dequantize_affine(
+                    tensor.data(),
+                    scales.data(),
+                    biases.data(),
+                    packed[0],
+                    packed[1],
+                    quant_bits,
+                    quant_group,
+                    true,
+                ),
+                AffineExecution::InGraph => {
+                    Err("Gemma3n audio graphs take dense weights only".to_string())
+                }
+            }
             .map_err(|error| format!("dequantize {checkpoint_name}: {error}"))?;
             (values, vec![packed[0], logical_columns])
         }
@@ -632,7 +654,7 @@ impl Gemma3nAudioIreeRuntime {
                 family: "gemma3n-audio-encode",
                 operators: &encode_operators,
                 precision: GEMMA3N_AUDIO_PRECISION,
-                weights: encode_observer.resolve(AffineExecution::Host)?,
+                weights: encode_observer.resolve(GEMMA3N_AUDIO_AFFINE)?,
             },
         )?;
         report_auxiliary_weights(
@@ -684,7 +706,7 @@ impl Gemma3nAudioIreeRuntime {
                 family: "gemma3n-audio-merge",
                 operators: &merge_operators,
                 precision: GEMMA3N_AUDIO_PRECISION,
-                weights: merge_observer.resolve(AffineExecution::Host)?,
+                weights: merge_observer.resolve(GEMMA3N_AUDIO_AFFINE)?,
             },
         )?;
         report_auxiliary_weights("audio-merge-weights", merge_weights_started, &merge_weights);

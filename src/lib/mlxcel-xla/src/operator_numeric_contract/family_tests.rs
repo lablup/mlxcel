@@ -387,7 +387,7 @@ fn audio_families_pin_their_operator_sets() {
         CheckpointDType::Bf16,
         4,
         NumericDType::Bf16,
-        AffineExecution::Host,
+        AffineExecution::HostBf16Sequential,
     );
     let ops = gemma3n_audio_encode_operators();
     assert_pinned(
@@ -446,4 +446,22 @@ fn removing_an_operator_or_policy_breaks_the_pin() {
         ..removed
     });
     assert_ne!(fixed("q", &ops, Precision::F32, bf16), QWEN3);
+}
+
+#[test]
+fn host_dequantization_rounding_is_part_of_the_identity() {
+    // Gemma3n rounds each host dequantization step to BF16; switching it to
+    // the F32 multiply-then-add must change the digest even though the operator
+    // dtypes and weight execution stay the same.
+    let backend = ProductionBackend::new("iree-test", "runtime-test", CUDA);
+    let ops = gemma3n_audio_encode_operators();
+    let build = |execution| {
+        let weights = affine(CheckpointDType::Bf16, 4, NumericDType::Bf16, execution);
+        production_operator_contract("g", &ops, Precision::Bf16, weights, &backend)
+            .unwrap()
+            .canonical_identity()
+    };
+    let bf16_rounded = build(AffineExecution::HostBf16Sequential);
+    assert!(bf16_rounded.contains("evaluation=separate-multiply-then-add-bf16-rounded"));
+    assert_ne!(bf16_rounded, build(AffineExecution::Host));
 }
