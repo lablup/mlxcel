@@ -379,3 +379,54 @@ fn z1t_fresh_mixed_and_native_scalar_native_transition() {
 }
 
 crate::models::last_row_logits_harness::last_row_case!(z1t_last_row_logits, model);
+
+#[test]
+fn z1t_refuses_config_values_that_truncate_or_blow_up_state() {
+    let refused = |field: &str, value: serde_json::Value| {
+        let mut json = config_json();
+        json[field] = value;
+        let cfg: Z1tConfig = serde_json::from_value(json).unwrap();
+        cfg.validate()
+            .err()
+            .unwrap_or_else(|| panic!("{field} accepted"))
+    };
+    // 2^32 + 4 truncates to a 4-column `w_conv`; 2^32 to an empty one.
+    for ksize in [
+        (1u64 << 32) + 4,
+        1u64 << 32,
+        super::config::MAX_AFT_KSIZE as u64 + 1,
+    ] {
+        assert!(refused("aft_ksize", ksize.into()).contains("aft_ksize"));
+    }
+    // 2^32 + 6 truncates to the 6-row table, which decode would index past.
+    let err = refused("max_position_embeddings", ((1u64 << 32) + 6).into());
+    assert!(err.contains("positional table"), "{err}");
+    let err = refused(
+        "max_position_embeddings",
+        (i32::MAX as u64 / DIM as u64).into(),
+    );
+    assert!(err.contains("positional table"), "{err}");
+    config().validate().expect("test config is valid");
+}
+
+#[test]
+fn z1t_chunked_gather_is_exact_for_batched_rows() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let (in_f, out, len) = (DIM, 4 * DIM, 5usize);
+    let mut w = WeightMap::new();
+    put_sparse(&mut w, "p", in_f, out, 9);
+    let mut linear = SparseLinear::from_weights(&w, "p", in_f, out, FAN).expect("loads");
+    let x = varied(&[2, len as i32, in_f as i32], 10, 0.1);
+    let want = linear.forward(&x);
+    mlxcel_core::eval(&want);
+    // One position of both rows is `2 * out * FAN` elements: chunk by 1 and 2.
+    for cap in [1, (2 * out * FAN * 2) as i64] {
+        linear.chunk_elems = cap;
+        let got = linear.forward(&x);
+        assert_eq!(
+            mlxcel_core::array_shape(&got),
+            vec![2, len as i32, out as i32]
+        );
+        assert_eq!(max_abs_diff(&got, &want), 0.0, "cap {cap}");
+    }
+}

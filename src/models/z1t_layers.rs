@@ -26,10 +26,14 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
 use super::Z1tConfig;
 
-/// Cap on the transient `[B, chunk, out, k]` gather of one sparse projection;
-/// longer inputs are gathered in sequence-axis chunks, which is exact. Same
-/// cap (and the same `L * out` measure) as upstream `_SPARSE_CHUNK_ELEMS`.
-pub(super) const SPARSE_CHUNK_ELEMS: i64 = 8_000_000;
+/// Cap on the elements of the transient `[B, chunk, out, k]` gather of one
+/// sparse projection; longer inputs are gathered in sequence-axis chunks,
+/// which is exact. Upstream `_SPARSE_CHUNK_ELEMS` caps `L * out` at 8M, which
+/// ignores the batch and the fan-in, so a checkpoint with a large `k` would
+/// allocate `8M * k` elements per projection. Measuring the whole transient
+/// keeps the upstream chunk size for Z1T-0 (`B = 1`, `k = 4`) and bounds the
+/// rest.
+pub(super) const SPARSE_CHUNK_ELEMS: i64 = 32_000_000;
 
 fn weight(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String> {
     weights
@@ -69,6 +73,7 @@ pub(super) struct SparseLinear {
     bias: UniquePtr<MlxArray>,
     indices: UniquePtr<MlxArray>,
     out_features: i32,
+    fan_in: i32,
     pub(super) chunk_elems: i64,
 }
 
@@ -113,6 +118,7 @@ impl SparseLinear {
             bias,
             indices,
             out_features: out_features as i32,
+            fan_in: k as i32,
             chunk_elems: SPARSE_CHUNK_ELEMS,
         })
     }
@@ -127,10 +133,16 @@ impl SparseLinear {
 
     pub(super) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
-        let out = self.out_features as i64;
-        if shape.len() == 3 && shape[1] as i64 * out > self.chunk_elems {
+        // Elements of one sequence position's `[B, 1, out, k]` gather.
+        let per_token = || {
+            (shape[0] as i64)
+                .saturating_mul(self.out_features as i64)
+                .saturating_mul(self.fan_in as i64)
+        };
+        if shape.len() == 3 && (shape[1] as i64).saturating_mul(per_token()) > self.chunk_elems {
+            let per_token = per_token();
             let len = shape[1];
-            let step = (self.chunk_elems / out).max(1) as i32;
+            let step = (self.chunk_elems / per_token.max(1)).clamp(1, len as i64) as i32;
             let parts: Vec<UniquePtr<MlxArray>> = (0..len)
                 .step_by(step as usize)
                 .map(|start| {
@@ -405,6 +417,12 @@ impl AftConv {
             &cum_ek,
             &mlxcel_core::sum_axis(&ek, 1, false),
         ));
+        // A lazy running sum holds this chunk's full-length `ekv` / `ek` until
+        // the next step evaluates it; after a long prefill that pins every
+        // layer's `[L, dim]` source. Schedule it so the source is released.
+        for pooled in [&state.cum_ekv, &state.cum_ek].into_iter().flatten() {
+            mlxcel_core::utils::schedule_prefill_state(pooled, l);
+        }
         if s > 1 {
             state.win_ekv = Some(mlxcel_core::utils::materialized_state_tail(&ext_ekv, s - 1));
             state.win_ek = Some(mlxcel_core::utils::materialized_state_tail(&ext_ek, s - 1));

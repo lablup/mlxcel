@@ -56,6 +56,12 @@ pub struct Z1tConfig {
     pub eos_token_id: Option<serde_json::Value>,
 }
 
+/// Largest accepted `aft_ksize`. Each layer keeps a `ksize - 1` window of
+/// `[heads, head_dim]` rows per sequence and the mixer unrolls one tap per
+/// column, so an unbounded value from `config.json` turns a few extra MB of
+/// `w_conv` into a per-sequence state that cannot fit. Z1T-0 uses 4.
+pub(crate) const MAX_AFT_KSIZE: usize = 1024;
+
 fn default_max_positions() -> usize {
     256
 }
@@ -93,6 +99,24 @@ impl Z1tConfig {
         }
         if self.aft_ksize == 0 || self.max_position_embeddings == 0 {
             return Err("Z1T aft_ksize and max_position_embeddings must be positive".into());
+        }
+        if self.aft_ksize > MAX_AFT_KSIZE {
+            return Err(format!(
+                "Z1T aft_ksize {} exceeds the supported maximum {MAX_AFT_KSIZE}",
+                self.aft_ksize
+            ));
+        }
+        // The positional table is `[max_position_embeddings + 1, hidden_size]`
+        // (one zero row appended) and is gathered with i32 indices. A value
+        // past i32 would truncate in the shape check, let a smaller table
+        // pass, and leave decode positions indexing past its end.
+        let pe_rows = self.max_position_embeddings.checked_add(1);
+        let pe_elems = pe_rows.and_then(|rows| rows.checked_mul(self.hidden_size));
+        if pe_elems.is_none_or(|elems| elems > i32::MAX as usize) {
+            return Err(format!(
+                "Z1T max_position_embeddings {} with hidden_size {} exceeds the supported positional table size",
+                self.max_position_embeddings, self.hidden_size
+            ));
         }
         // Every derived width (qkv out 2D + heads, MLP hidden 4D) is an i32 shape.
         if self.hidden_size > (i32::MAX as usize) / 8 || self.vocab_size > i32::MAX as usize {
