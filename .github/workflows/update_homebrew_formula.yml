@@ -104,19 +104,35 @@ jobs:
           # and two sha256 lines. See lablup/homebrew-tap 9969ec4.
           #
           # The guards below assume mlxcel ships exactly one artifact, so the
-          # formula holds exactly one of each stanza. If that ever stops being
+          # formula holds exactly one url and one sha256. If that ever stops being
           # true the run fails here instead of silently editing the wrong line.
-          for stanza in version url sha256; do
+          for stanza in url sha256; do
             count=$(grep -c "^[[:space:]]*${stanza} " Formula/mlxcel.rb || true)
             if [ "$count" -ne 1 ]; then
               echo "::error::Expected exactly one \`${stanza}\` stanza in Formula/mlxcel.rb, found ${count}. Refusing to edit."
               exit 1
             fi
           done
+          count=$(grep -c '^  version "' Formula/mlxcel.rb || true)
+          if [ "$count" -gt 1 ]; then
+            echo "::error::Expected at most one \`version\` stanza in Formula/mlxcel.rb, found ${count}. Refusing to edit."
+            exit 1
+          fi
 
-          gsed -i "s|^\([[:space:]]*\)version .*|\1version \"${VERSION}\"|" Formula/mlxcel.rb
           gsed -i "s|^\([[:space:]]*\)url .*|\1url \"${mac_url}\"|" Formula/mlxcel.rb
           gsed -i "s|^\([[:space:]]*\)sha256 .*|\1sha256 \"${mac_sha}\"|" Formula/mlxcel.rb
+
+          # The formula carries a `version` stanza only when Homebrew cannot
+          # read the version from the url. `brew audit` rejects one that repeats
+          # the scanned version (lablup/homebrew-tap#5), but Homebrew reads a
+          # tag such as v0.9.0-beta.1 as 64, and there the stanza is what keeps
+          # the formula's version right. Homebrew's own Version.detect decides.
+          gsed -i '/^  version "/d' Formula/mlxcel.rb
+          detected=$(brew ruby -e 'puts Version.detect(ARGV.first)' "$mac_url")
+          if [ "$detected" != "$VERSION" ]; then
+            echo "::notice::Homebrew reads ${mac_url} as ${detected}, so the formula pins version ${VERSION}."
+            gsed -i "/^  url /a\  version \"${VERSION}\"" Formula/mlxcel.rb
+          fi
 
       - name: Validate updated formula
         run: |
@@ -125,15 +141,26 @@ jobs:
           cat Formula/mlxcel.rb
 
           # Catches malformed output before it reaches the tap: a syntax error,
-          # a duplicated or misindented stanza, or a version/sha256 that did not
+          # a duplicated or misindented stanza, or a url/sha256 that did not
           # take. `brew style` is the same check the tap is expected to pass.
           ruby -c Formula/mlxcel.rb
           brew style Formula/mlxcel.rb
 
-          grep -q "^  version \"${{ env.VERSION_NO_V }}\"$" Formula/mlxcel.rb || {
-            echo "::error::version stanza did not update to ${{ env.VERSION_NO_V }}."
+          VERSION="${{ env.VERSION_NO_V }}"
+          grep -qF "/releases/download/v${VERSION}/" Formula/mlxcel.rb || {
+            echo "::error::url does not point at v${VERSION}."
             exit 1
           }
+          detected=$(brew ruby -e 'puts Version.detect(ARGV.first)' "$mac_url")
+          pins=$(grep -c '^  version "' Formula/mlxcel.rb || true)
+          if [ "$detected" = "$VERSION" ] && [ "$pins" -ne 0 ]; then
+            echo "::error::Formula/mlxcel.rb carries a version stanza that repeats the one Homebrew reads from the url."
+            exit 1
+          fi
+          if [ "$detected" != "$VERSION" ] && ! grep -qx "  version \"${VERSION}\"" Formula/mlxcel.rb; then
+            echo "::error::Homebrew reads the url as ${detected}, and Formula/mlxcel.rb does not pin version ${VERSION}."
+            exit 1
+          fi
           grep -q "^  sha256 \"${mac_sha}\"$" Formula/mlxcel.rb || {
             echo "::error::sha256 stanza did not update to ${mac_sha}."
             exit 1
