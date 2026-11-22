@@ -270,6 +270,14 @@ fn the_experimental_line_quotes_the_measurement_for_the_family_and_width() {
     assert_eq!(experimental_latent_notes("deepseek_v32", 8).len(), 1);
     assert_eq!(experimental_latent_notes("deepseek_v3", 4).len(), 2);
     assert_eq!(experimental_latent_notes("deepseek_v3", 8).len(), 0);
+    assert_eq!(
+        experimental_latent_notes("longcat_flash_sparse", 4).len(),
+        3
+    );
+    assert_eq!(
+        experimental_latent_notes("longcat_flash_sparse", 8).len(),
+        0
+    );
 }
 
 #[test]

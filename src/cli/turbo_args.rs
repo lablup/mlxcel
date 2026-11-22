@@ -472,7 +472,8 @@ fn apply_optional_string_env_fallback(
 /// * The MLA-latent families (`glm4_moe_lite`, `deepseek_v3`, `kimi_k2`,
 ///   `joyai_llm_flash`, `kimi_vl`, `kimi_k25`, `youtu`, `youtu_llm`,
 ///   `youtu_vl`, `deepseek_v32`, `deepseek_v3.2`, `glm_moe_dsa`,
-///   `kimi_linear`, `kimi_k3`, `longcat_flash`, `longcat_flash_ngram`) pack a
+///   `kimi_linear`, `kimi_k3`, `longcat_flash`, `longcat_flash_ngram`,
+///   `longcat_flash_sparse`) pack a
 ///   `(kv_latent, k_pe)` pair into one cache, so no quantized mode is
 ///   calibrated for what they store. Symmetric `turbo4` made the K quantizer
 ///   read past its sign vectors and every generated token came out `!`; the
@@ -658,10 +659,13 @@ pub(crate) fn kv_rules_model_type(config: &serde_json::Value) -> Option<String> 
     {
         return Some(decoder);
     }
+    // A config without a top-level `model_type` (the original
+    // LongCat-Flash-Lite-Sparse one, #2362) keys on the decoder's fallback.
     config
         .get("model_type")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
+        .or_else(|| crate::execution::config_fields::kv_decoder_model_type(config))
 }
 
 #[cfg(test)]

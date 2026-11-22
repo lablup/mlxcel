@@ -47,6 +47,7 @@
 //! | `falcon_mamba`         | Falcon Mamba (HF `model_type` alias)      |
 //! | `longcat_flash`        | LongCat-Flash linear hybrid               |
 //! | `longcat_flash_ngram`  | LongCat-Flash with n-gram speculation     |
+//! | `longcat_flash_sparse` | LongCat-Flash-Lite-Sparse (LSA, n-gram)   |
 //! | `rwkv7`                | RWKV-7 recurrent                          |
 //! | `recurrent_gemma`      | Griffin (RecurrentGemma) local+recurrent  |
 //! | `z1t`                  | Z1T AFT-conv pool sums + conv window      |
@@ -111,6 +112,8 @@ pub const HYBRID_SSM_MODEL_TYPES: &[&str] = &[
     "falcon_mamba",
     "longcat_flash",
     "longcat_flash_ngram",
+    // Model-owned caches and n-gram tail, like the other LongCat types (#2362).
+    "longcat_flash_sparse",
     "rwkv7",
     "recurrent_gemma",
     // AFT-conv running pool sums and conv window (Z1T, #2364).
@@ -134,6 +137,8 @@ const HYBRID_SSM_ARCH_FRAGMENTS: &[&str] = &[
     "qwen3next",
     "falconmamba",
     "longcatflash",
+    // LongCat-Flash-Lite-Sparse's original config has no `model_type` (#2362).
+    "longcatcausallm",
     "rwkv7",
     "recurrentgemma",
     "z1t",

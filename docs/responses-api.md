@@ -23,6 +23,8 @@ Implementation source map:
 | `src/server/routes/responses_background_stream.rs` | SSE readers of that log: the streamed create and `GET ...?stream=true`. |
 | `src/server/responses_compaction.rs` | Compaction capsule, replay, selection and summarization core. |
 | `src/server/routes/responses_compact.rs` | `POST /v1/responses/compact` handler. |
+| `src/server/mcp/` | MCP server configuration, stdio JSON-RPC client, runtime and approval registry. |
+| `src/server/routes/responses_mcp.rs`, `responses_mcp_loop.rs`, `responses_mcp_round.rs` | The server-side MCP tool loop on `POST /v1/responses`. |
 
 ## Implemented endpoints
 
@@ -77,7 +79,7 @@ with client.responses.stream(
 | `model` | required | Must match the loaded model alias/path accepted by the server. |
 | `input` | supported | String or typed input item array. |
 | `instructions` | supported | Prepended as a system-style message; not inherited through `previous_response_id`. |
-| `tools` | function-only | Only `{"type":"function", ...}` is accepted. |
+| `tools` | function, `mcp` opt-in | `{"type":"function", ...}` is always accepted. `{"type":"mcp", ...}` is accepted when the server runs with `--mcp-tools`; see [MCP tools](#mcp-tools-server-side-tool-loop). |
 | `tool_choice` | supported | `auto`, `none`, `required`, or a named function. `required` and the named form are enforced, not just accepted; see [Tool choice enforcement](#tool-choice-enforcement). |
 | `parallel_tool_calls` | accepted | Forwarded to existing tool-call handling. |
 | `text.format` | supported subset | `text` and `json_schema` shapes are handled through existing structured-output code. |
@@ -87,7 +89,7 @@ with client.responses.stream(
 | `store` | supported | Defaults to `true`; `false` skips persistence. A background response needs the response store; with `false` its final object stays readable by polling for `--responses-background-ephemeral-ttl-secs`. |
 | `stream` | supported | Streams typed SSE events. |
 | `max_output_tokens` | supported | Must be greater than zero. |
-| `max_tool_calls` | supported | Soft cap on emitted function-call items. |
+| `max_tool_calls` | supported | Soft cap on emitted function-call items. In the MCP tool loop it caps the MCP calls that run; a response that asks for more ends `incomplete` with reason `max_tool_calls`. |
 | `temperature`, `top_p`, `top_logprobs` | supported subset | Mapped to chat-completions sampling fields. |
 | `metadata` | supported | Maximum 16 entries. |
 | `prompt_cache_key` | accepted | Forwarded to prompt-cache plumbing. |
@@ -115,6 +117,8 @@ Phase 1 supports these typed items:
 ```
 
 A `compaction` item is the capsule `POST /v1/responses/compact` returns; see [Conversation compaction](#conversation-compaction) for how it replays.
+
+The MCP tool loop adds four more: `mcp_approval_response` (the answer to an approval request, accepted only with `--mcp-tools`), and `mcp_list_tools`, `mcp_call` and `mcp_approval_request`, which are the loop's own output items sent back as history. A replayed `mcp_call` renders as a function call with its stored result and is never run again. See [MCP tools](#mcp-tools-server-side-tool-loop).
 
 `developer` role is treated like `system`. Reasoning input items are accepted and forwarded: the text content is buffered and attached to the parallel `reasoning` field of the following assistant turn. Chat templates that render `message.get('reasoning')` (such as Gemma 4) receive it there. The `preserve_thinking` kwarg controls whether the field survives the rolling-checkpoint strip: `false` (the default, unless the prompt cache is on) drops prior-turn reasoning along with any inline `<think>` blocks; `true` retains it.
 
@@ -212,6 +216,7 @@ Phase 1 emits events such as:
 - `response.reasoning_text.done`
 - `response.completed` (a stream stopped by a cancel call or a client disconnect also ends with this event: `response.status` is `cancelled` and `completed_at` is null, so clients must check `status`)
 - `mlx.compaction.started`, `mlx.compaction.completed` (MLX extension, only after an automatic compaction; see [Automatic compaction](#automatic-compaction))
+- `response.mcp_list_tools.in_progress` / `.completed` / `.failed`, `response.mcp_call.in_progress` / `.completed` / `.failed`, `response.mcp_call_arguments.delta` / `.done` (only in the [MCP tool loop](#mcp-tools-server-side-tool-loop))
 - failure/incomplete/error events on error paths
 
 Reasoning streams as `response.reasoning_text.delta` events inside a `reasoning` output item, ahead of the message item, and never as `output_text`. This holds when the chat template primes an open thinking block (for example a generation prompt ending in `<think>\n`), where the model writes only the close marker: the stream starts inside the reasoning item, as the non-streaming split does.
@@ -577,12 +582,158 @@ A forced `tool_choice` cannot be combined with `text.format` of type
 `json_schema`: the two constraints would each claim the whole generation, so
 the request returns 400.
 
+## MCP tools (server-side tool loop)
+
+With `--mcp-tools`, `mlxcel-server` (and `mlxcel serve`) starts the stdio [MCP](https://modelcontextprotocol.io) servers the operator configured and lets a `/v1/responses` request use their tools through OpenAI's built-in `mcp` tool. The server runs the loop itself: model turn, tool calls, tool results, next model turn, until the model answers or a bound stops it. `/v1/chat/completions` is unchanged and never runs a tool.
+
+The feature is off by default. MCP servers are child processes that run with the server's privileges, so read [Security](#security) before enabling it.
+
+### Configuration
+
+```bash
+mlxcel-server -m <model> --mcp-tools --mcp-servers-config mcp.json
+```
+
+`mcp.json` uses the Cursor-compatible format (the one llama-server accepts for the same two flags):
+
+```json
+{
+  "mcpServers": {
+    "files": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/srv/data"], "env": {"LOG_LEVEL": "warn"}}
+  }
+}
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--mcp-tools` | off | Enables the loop. Required: `--mcp-servers-config`, `--mcp-servers-json` or their `LLAMA_ARG_MCP_SERVERS_CONFIG` / `LLAMA_ARG_MCP_SERVERS_JSON` variables without it fail startup, so a variable inherited from a llama.cpp deployment never starts a process. The opt-in has no environment variable. |
+| `--mcp-servers-config <PATH>` | none | File with the server set. |
+| `--mcp-servers-json <JSON>` | none | The same document inline. Pass one of the two, not both. |
+| `--mcp-max-tool-rounds <N>` | 8 | Model turns in one response whose MCP calls are run or refused. A refused call (for example one that needs approval on a `store: false` request) still spends its round. |
+| `--mcp-tool-timeout <SECONDS>` | 30 | Limit for one tool call and for one server start. |
+| `--mcp-max-output-bytes <BYTES>` | 65536 | Text one tool call may hand to the model. |
+
+The document is parsed strictly at startup, before the model loads. Only stdio servers are accepted: an entry is `command` (required), `args`, `env`, and optionally `"type": "stdio"`. An entry with `url`, `headers`, `transport`, another `type`, or any unknown key fails startup with a message naming the server. Server names are 1 to 64 characters from `A-Z a-z 0-9 _ - .`, and at most 32 servers are accepted.
+
+Each server is started once the model has loaded, and its tools are listed. A server that fails to start or to list its tools does not stop the others or the process: it is logged at `warn`, a request that names it gets an `mcp_list_tools` item with an `error` and no tools from it, and that request starts it again. A child that exited, timed out, or sent an oversized or malformed message is killed and replaced by the next call that needs it. Calls to one server run one at a time; a call that waits longer than `--mcp-tool-timeout` for the server to finish other calls fails without being sent. At most `--max-queue-depth` tool-loop responses run at once (each holds a worker thread while it waits on tools); one more gets a 503.
+
+The loop needs a single loaded chat model on a single node. Router mode (`--models-dir`, `--models-preset`, or `--webui` without a model), `--image-model` without `-m`, and every distributed launch (`--tp-size` above 1, `--pp-layers`, `--pp-auto`, `--pp-peer`, `--distributed-config`, `--node-role` including `router`, `--peers`, `--prefill-peers`, `--decode-peers`, `--serving-bind`) refuse `--mcp-tools` at startup with a one-line message naming the conflicting flag, because those server paths do not carry the MCP runtime.
+
+### Request
+
+```bash
+curl -s http://127.0.0.1:8080/v1/responses -H 'content-type: application/json' -d '{
+  "model": "<model>",
+  "input": "How many files are in /srv/data?",
+  "tools": [{"type": "mcp", "server_label": "files", "allowed_tools": ["list_directory"], "require_approval": "never"}]
+}'
+```
+
+| `mcp` tool field | Handling |
+|------------------|----------|
+| `server_label` | Required. Must name a configured server, otherwise 400. A label may appear once per request. |
+| `allowed_tools` | Optional array of tool names, or `{"tool_names": [...]}`. Only these tools are offered to the model. Other filter keys (`read_only`) return 400. |
+| `require_approval` | `"always"`, `"never"`, or `{"never": {"tool_names": [...]}, "always": {"tool_names": [...]}}`. Omitted means `"always"`, as on OpenAI. In the object form a tool named under neither key, or under both, needs approval. |
+| `server_description` | Accepted and ignored. |
+| `server_url`, `connector_id`, `headers`, `authorization` | 400. Only servers configured at startup can be used; a stdio server takes its credentials from the `env` of its configuration entry. |
+
+The allowed tools are offered to the model as function tools, with the server's `description` and `inputSchema`. A tool is addressed by name alone, so a name that two declared servers both offer, or that is also a client `function` tool, returns 400; restrict one side with `allowed_tools`. `tool_choice` (including a named function that is an MCP tool) applies to the first model turn only; later turns use `auto`. `max_output_tokens` applies to each model turn.
+
+With `--mcp-tools` off, an `mcp` tool or an `mcp_approval_response` item returns 400 with a message naming the flags. `background: true` and `context_management` cannot be combined with `mcp` tools (400).
+
+### Output items
+
+```jsonc
+"output": [
+  {"type": "mcp_list_tools", "id": "mcpl_...", "server_label": "files", "tools": [{"name": "list_directory", "description": "...", "input_schema": {...}}]},
+  {"type": "mcp_call", "id": "mcp_...", "server_label": "files", "name": "list_directory", "arguments": "{\"path\":\"/srv/data\"}", "output": "a.txt\nb.txt", "error": null, "status": "completed"},
+  {"type": "message", "id": "msg_...", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "There are 2 files."}]}
+]
+```
+
+- `mcp_list_tools` appears once per declared server, unless the chain reached through `previous_response_id` already holds one for that label.
+- `mcp_call` reports one call. On success `output` is the tool's text and `status` is `completed`. A call that failed, was refused, or was not run has `output: null`, the reason in `error`, and `status` `failed` (or `incomplete` when a bound stopped it). `approval_request_id` is present on a call that resolved an approval.
+- A model turn that calls a client `function` tool produces a `function_call` item and ends the response, as without the loop. MCP calls of the same turn that need no approval have already run; their results are replayed when the client continues with `previous_response_id` and its `function_call_output`.
+- `usage` sums every model turn of the response. `usage.mcp` (an mlxcel extension, present only on tool-loop responses) reports what the loop did and the bounds in force: `tool_rounds`, `tool_calls`, `failed_tool_calls`, `truncated_outputs`, `max_tool_rounds`, `tool_timeout_ms`, `max_output_bytes`.
+
+Streaming sends the same items. Each `mcp_call` is `response.output_item.added`, `response.mcp_call.in_progress`, `response.mcp_call_arguments.delta`, `response.mcp_call_arguments.done`, then `response.mcp_call.completed` or `response.mcp_call.failed`, and `response.output_item.done`; a call that is not run skips `in_progress`. Each `mcp_list_tools` is `response.output_item.added`, `response.mcp_list_tools.in_progress`, `.completed` or `.failed`, and `response.output_item.done`. Message and reasoning text stream as usual in every model turn. Arguments arrive in one delta once the model turn has ended (also for `function_call` items in a tool-loop response), and `response.completed` lists exactly the items the stream completed. The non-streamed response is built from the same event sequence.
+
+### Bounds and failures
+
+| Situation | Result |
+|-----------|--------|
+| The model asks for MCP tools after `--mcp-max-tool-rounds` rounds | The calls are not run (`mcp_call` items with `status: "incomplete"` and an `error`); the response ends `status: "incomplete"`, `incomplete_details.reason: "max_tool_rounds"`. |
+| More MCP calls than the request's `max_tool_calls` (approved calls run on resume included) | Same, with reason `max_tool_calls`. |
+| One model turn asks for more than 16 MCP calls and the request sets no `max_tool_calls` | The first 16 run; the rest are not run (`mcp_call` items with `status: "incomplete"` and an `error`) and the response ends `incomplete` with reason `max_tool_calls`. The 16-call per-turn cap is fixed and applies only when the request has no `max_tool_calls`. |
+| A model turn hits `max_output_tokens` | The turn's calls are not run; `incomplete`, reason `max_output_tokens`. |
+| A tool call exceeds `--mcp-tool-timeout` | The child is killed; that `mcp_call` has `error` "MCP server did not answer within N ms". |
+| The server is still busy with other calls after `--mcp-tool-timeout` | The call is not sent; that `mcp_call` has `error` "MCP server stayed busy with other calls for N ms". |
+| The child exits, or closes its output, during a call | That `mcp_call` has `error` "MCP server exited or closed its output before answering". |
+| The child writes a line that is not JSON-RPC 2.0 | The child is killed; that `mcp_call` reports the invalid message. |
+| A result's text is longer than `--mcp-max-output-bytes` | The text is cut at the cap and marked `[output truncated at N bytes]`; `usage.mcp.truncated_outputs` counts it. |
+| One JSON-RPC message is larger than four times the cap plus 64 KiB | It is refused without being buffered, the child is killed, and that `mcp_call` reports the size limit. |
+| The tool returns `isError: true` | That `mcp_call` has the tool's text as `error`. |
+| The model's arguments are not a JSON object | The call is not sent; `error` says so. |
+
+In every row but the first three the failure belongs to one call: the model receives `Tool call failed: <error>` as that call's result and the loop continues, so the response still completes. A failed call is not retried. A client disconnect or `POST /v1/responses/{id}/cancel` stops the loop between and during steps.
+
+### Approval
+
+When a call needs approval, the response ends with an `mcp_approval_request` item instead of running it:
+
+```jsonc
+{"type": "mcp_approval_request", "id": "mcpr_...", "server_label": "files", "name": "delete_file", "arguments": "{\"path\":\"/srv/data/a.txt\"}"}
+```
+
+The client answers in a new request that chains from that response and repeats the `mcp` tool declaration:
+
+```json
+{
+  "model": "<model>",
+  "previous_response_id": "resp_...",
+  "tools": [{"type": "mcp", "server_label": "files"}],
+  "input": [{"type": "mcp_approval_response", "approval_request_id": "mcpr_...", "approve": true}]
+}
+```
+
+- On `approve: true` the server runs the call with the arguments it stored when the model produced them. The answer carries no arguments, and nothing the client sends changes what runs. The resulting `mcp_call` item has `approval_request_id` set, and the loop continues.
+- On `approve: false` nothing runs; the model is told the call was denied (with the optional `reason`) and continues.
+- An approval is single-use. An answer whose id is not a pending request of the response named by `previous_response_id`, an answer sent twice, or an answer without `previous_response_id` returns 400.
+- A response with several pending requests must have all of them answered in one request, and it cannot be continued without answering them (400).
+- The answering request must declare the `mcp` tool for the same `server_label`, and its `allowed_tools` must still allow the tool (400 otherwise).
+- When the answer cannot be collected, the call is refused, not run: with `store: false`, with the response store disabled, or on a request that uses `conversation`, a call that needs approval becomes an `mcp_call` with an `error` and the model continues without it.
+
+Pending approvals live in memory beside the response store. They do not survive a restart, and an approval whose stored response was evicted (by `--responses-store-max-entries`, the byte budget, or the TTL) can no longer be answered.
+
+### Security
+
+- **Off by default, explicit opt-in.** Nothing is started without `--mcp-tools` on the command line.
+- **Startup refusal on an open listener.** With `--mcp-tools`, startup fails when the listener is a non-loopback TCP address and no API key is configured (`--api-key`, `--api-key-file`). Loopback addresses and Unix domain sockets are accepted without a key. The check runs before any child starts and before the model loads. Every caller that can reach `/v1/responses` can make the configured servers act, so keep the listener local or authenticated, and configure only servers whose tools you would let those callers use.
+- **Keep credentials out of the command line.** `--mcp-servers-json` puts the whole document, including any `env` credentials, in the process arguments, where other local users can read it. Prefer `--mcp-servers-config` with a file readable only by the server's user. `--help` does not print the value of either `LLAMA_ARG_MCP_SERVERS_*` variable.
+- **No shell, no inherited secrets.** A server is started from its `command` and `args` directly, never through a shell. Its environment is cleared and rebuilt from a short allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `TZ`, `TERM`, and the Windows equivalents) plus the entry's own `env`. API keys, access tokens and every `MLXCEL_*` / `LLAMA_*` variable of the server are not passed on; a server that needs a credential gets it from its `env` entry.
+- **Tool output is untrusted text.** It is size-capped and handed to the model as a tool result. The server does not parse it or act on it. A tool result can still steer the model (prompt injection), which is why `require_approval` defaults to `always`.
+- **Bounded reads.** A child's stdout is read under a per-message byte cap and its stderr is drained into a 4 KiB ring, so a server cannot grow mlxcel's memory or block on a full pipe.
+- **Logs.** Tool arguments and outputs are not logged. Tool name, server label, duration and success are logged at `debug`; a failed child's stderr tail is logged at `debug` only.
+- No `/tools` endpoint, generic URL proxy, shell tool or filesystem tool is added by this feature.
+
+### Limitations
+
+- stdio servers configured at startup only. Per-request `server_url`, HTTP and SSE transports are not implemented.
+- Approval resume does not survive a restart (in-memory store).
+- `background: true` and `context_management` are refused together with `mcp` tools.
+- The Responses-specific `tool_choice` form `{"type": "mcp", ...}` is not parsed; use a named function.
+- Only tool `text` content reaches the model; image, audio and resource parts are replaced by a placeholder such as `[image content omitted]`.
+- Single-model server only (no router mode).
+
 ## Unsupported tool types
 
-Only function tools are accepted. Built-in/external tool types such as
-`web_search`, `file_search`, `computer_use_preview`, `code_interpreter`,
-`image_generation`, `mcp`, `custom`, `apply_patch`, and `function_shell` return
-400 responses. `mlxcel` does not execute external tools for the Responses API.
+Function tools are always accepted, and the built-in `mcp` tool is accepted when
+the server runs with `--mcp-tools` (see
+[MCP tools](#mcp-tools-server-side-tool-loop)); without it an `mcp` tool returns
+400 with a message naming the flags. The other built-in/external tool types
+(`web_search`, `file_search`, `computer_use_preview`, `code_interpreter`,
+`image_generation`, `custom`, `apply_patch`, and `function_shell`) return 400
+responses.
 
 ## Differences from OpenAI's full API
 
@@ -590,6 +741,6 @@ Notable gaps:
 
 - background responses are lost on restart, and their event streams are retained up to a byte budget rather than in full;
 - no input-items pagination endpoint;
-- no built-in tools or MCP connector execution;
+- no built-in tools other than `mcp`, which is limited to stdio servers configured at startup (no `server_url`, no connectors);
 - no disk-persisted response store;
 - no `input_file` ingestion or `file_id` resolution through an uploads store.

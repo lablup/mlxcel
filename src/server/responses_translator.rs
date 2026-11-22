@@ -59,13 +59,14 @@ use super::responses_store::{ResponsesStore, StoredResponse};
 use super::tool_calls::types::ToolCallParseResult;
 
 /// Maximum unsupported-tool-types catch-all label seen in error messages.
+/// `mcp` is not listed: it is a parsed tool type with its own refusal when
+/// the MCP tool loop is off (issue #1457).
 const UNSUPPORTED_TOOL_TYPES: &[&str] = &[
     "web_search",
     "file_search",
     "computer_use_preview",
     "code_interpreter",
     "image_generation",
-    "mcp",
     "custom",
     "apply_patch",
     "function_shell",
@@ -98,6 +99,12 @@ pub enum ResponsesTranslateError {
     InvalidInputPart(String),
     #[error("invalid compaction item: {0}")]
     InvalidCompaction(String),
+    /// An `mcp` tool or an `mcp_approval_response` item reached a server, or
+    /// an endpoint, that does not run the MCP tool loop (issue #1457).
+    #[error(
+        "{0} needs the server-side MCP tool loop, which is disabled on this server or not served by this endpoint. It runs on POST /v1/responses when mlxcel-server starts with --mcp-tools and --mcp-servers-config <PATH> (or --mcp-servers-json <JSON>)"
+    )]
+    McpUnavailable(&'static str),
 }
 
 /// Inbound translation result. Carries the synthetic
@@ -113,6 +120,9 @@ pub struct TranslatedRequest {
     /// `input`, capsule expanded). Kept only for a request that carries
     /// `context_management`, which automatic compaction reads (issue #2397).
     pub resolved_items: Option<Vec<ResponseInputItem>>,
+    /// Server labels whose `mcp_list_tools` item the chained history already
+    /// holds, so the tool loop does not list them again (issue #1457).
+    pub mcp_listed_servers: Vec<String>,
 }
 
 /// Flatten a Responses-API request into the chat-completions shape.
@@ -126,6 +136,22 @@ pub fn responses_request_to_chat(
     request: &CreateResponseRequest,
     responses_store: Option<&Arc<ResponsesStore>>,
     conversation_store: Option<&Arc<ConversationStore>>,
+) -> Result<TranslatedRequest, ResponsesTranslateError> {
+    responses_request_to_chat_with_mcp(request, responses_store, conversation_store, false)
+}
+
+/// [`responses_request_to_chat`] for a caller that may run the server-side
+/// MCP tool loop (issue #1457). With `mcp_enabled` an `mcp` tool declaration
+/// and an `mcp_approval_response` item are accepted; the MCP tools themselves
+/// are added to the chat request by the route, which knows the servers.
+/// Without it both are refused with a message naming the opt-in.
+///
+/// Used by: `POST /v1/responses`.
+pub fn responses_request_to_chat_with_mcp(
+    request: &CreateResponseRequest,
+    responses_store: Option<&Arc<ResponsesStore>>,
+    conversation_store: Option<&Arc<ConversationStore>>,
+    mcp_enabled: bool,
 ) -> Result<TranslatedRequest, ResponsesTranslateError> {
     if request.previous_response_id.is_some() && request.conversation.is_some() {
         return Err(ResponsesTranslateError::PreviousAndConversation);
@@ -148,7 +174,19 @@ pub fn responses_request_to_chat(
     {
         return Err(ResponsesTranslateError::MaxOutputTokensInvalid);
     }
-    reject_unsupported_tools(request.tools.as_deref())?;
+    reject_unsupported_tools(request.tools.as_deref(), mcp_enabled)?;
+    // Refused before the chained response is looked up, so the caller reads
+    // why the item is not served rather than a lookup failure.
+    if !mcp_enabled
+        && let crate::server::types::responses_request::ResponseInput::Items(items) = &request.input
+        && items
+            .iter()
+            .any(|item| matches!(item, ResponseInputItem::McpApprovalResponse { .. }))
+    {
+        return Err(ResponsesTranslateError::McpUnavailable(
+            "input item type 'mcp_approval_response'",
+        ));
+    }
 
     // Resolve prior items (history) from the chained reference.
     let mut prior_items: Vec<ResponseInputItem> = Vec::new();
@@ -189,6 +227,8 @@ pub fn responses_request_to_chat(
 
     // Append the current request's input items.
     let current_items = request.input.clone().into_items();
+    let mcp_listed_servers =
+        crate::server::responses_mcp_lowering::listed_mcp_servers(&prior_items);
     let mut canonical_input_items = current_items.clone();
     let mut all_items = prior_items;
     all_items.extend(current_items);
@@ -286,14 +326,21 @@ pub fn responses_request_to_chat(
         effective_store,
         conversation_id,
         resolved_items,
+        mcp_listed_servers,
     })
 }
 
-fn reject_unsupported_tools(tools: Option<&[ResponseTool]>) -> Result<(), ResponsesTranslateError> {
+fn reject_unsupported_tools(
+    tools: Option<&[ResponseTool]>,
+    mcp_enabled: bool,
+) -> Result<(), ResponsesTranslateError> {
     let Some(tools) = tools else {
         return Ok(());
     };
     for tool in tools {
+        if !mcp_enabled && matches!(tool, ResponseTool::Mcp(_)) {
+            return Err(ResponsesTranslateError::McpUnavailable("tool type 'mcp'"));
+        }
         if let ResponseTool::Unsupported = tool {
             // Pick the most informative label we know about; the
             // deserialiser stripped the type tag so we surface the
@@ -316,7 +363,8 @@ fn function_tools(tools: Option<&[ResponseTool]>) -> Option<Vec<Tool>> {
                 tool_type: "function".to_string(),
                 function: f.to_function_definition(),
             }),
-            ResponseTool::Unsupported => None,
+            // The route adds an MCP server's tools once it has listed them.
+            ResponseTool::Mcp(_) | ResponseTool::Unsupported => None,
         })
         .collect();
     if out.is_empty() { None } else { Some(out) }
@@ -409,6 +457,14 @@ fn image_followup_message(images: Vec<ImageUrl>) -> Message {
 /// `message.get('reasoning')` see prior thinking. A reasoning item that is not
 /// followed by an assistant turn before the next turn boundary is dropped.
 fn input_items_to_messages(items: &[ResponseInputItem]) -> Result<Vec<Message>, String> {
+    // MCP history renders as function calls and their outputs (issue #1457).
+    let lowered;
+    let items = if crate::server::responses_mcp_lowering::has_mcp_items(items) {
+        lowered = crate::server::responses_mcp_lowering::lower_mcp_items(items.to_vec());
+        lowered.as_slice()
+    } else {
+        items
+    };
     let mut out: Vec<Message> = Vec::new();
     let mut pending_tool_calls: Vec<ToolCallInMessage> = Vec::new();
     let mut pending_reasoning: Option<String> = None;
@@ -551,6 +607,12 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Result<Vec<Message>, 
                 // lowering; one reaching here would silently lose context.
                 return Err("compaction item was not expanded before rendering".to_string());
             }
+            ResponseInputItem::McpListTools { .. }
+            | ResponseInputItem::McpCall { .. }
+            | ResponseInputItem::McpApprovalRequest { .. }
+            | ResponseInputItem::McpApprovalResponse { .. } => {
+                return Err("MCP item was not lowered before rendering".to_string());
+            }
             ResponseInputItem::Reasoning { content } => {
                 // Buffer the reasoning text and attach it to the following
                 // assistant turn (issue #362) so templates that render
@@ -638,6 +700,28 @@ fn output_to_input_items(output: &ResponseOutputItem) -> Vec<ResponseInputItem> 
         ResponseOutputItem::Compaction(c) => vec![ResponseInputItem::Compaction {
             encrypted_content: c.encrypted_content.clone(),
         }],
+        // MCP items replay as themselves; the lowering pass renders them as
+        // function calls and outputs (issue #1457).
+        ResponseOutputItem::McpListTools(list) => vec![ResponseInputItem::McpListTools {
+            server_label: list.server_label.clone(),
+        }],
+        ResponseOutputItem::McpCall(call) => vec![ResponseInputItem::McpCall {
+            id: call.id.clone(),
+            server_label: call.server_label.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            output: call.output.clone(),
+            error: call.error.clone(),
+            approval_request_id: call.approval_request_id.clone(),
+        }],
+        ResponseOutputItem::McpApprovalRequest(request) => {
+            vec![ResponseInputItem::McpApprovalRequest {
+                id: request.id.clone(),
+                server_label: request.server_label.clone(),
+                name: request.name.clone(),
+                arguments: request.arguments.clone(),
+            }]
+        }
     }
 }
 
@@ -730,6 +814,7 @@ pub fn build_response_object(ctx: OutboundContext<'_>) -> ResponseObject {
         output_tokens_details: Some(ResponseOutputTokensDetails {
             reasoning_tokens: ctx.reasoning_tokens,
         }),
+        mcp: None,
     };
 
     let metadata = ctx.request.metadata.clone();
@@ -803,6 +888,7 @@ fn echo_tools(tools: &[ResponseTool]) -> Vec<serde_json::Value> {
                 "parameters": f.parameters,
                 "strict": f.strict,
             })),
+            ResponseTool::Mcp(mcp) => Some(mcp.echo()),
             ResponseTool::Unsupported => None,
         })
         .collect()

@@ -2349,7 +2349,7 @@ fn run_download(args: DownloadArgs) -> anyhow::Result<()> {
 fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInput> {
     // Native Windows is single-node only (#58): refuse distributed flags
     // before the model reference is resolved (and possibly downloaded).
-    mlxcel::server::ServerDistributedFlags {
+    let distributed_flags = mlxcel::server::ServerDistributedFlags {
         pp_auto: args.pp_auto.is_some(),
         pp_peer: args.pp_peer,
         distributed_config: args.distributed_config.is_some(),
@@ -2360,8 +2360,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         serving_bind: args.serving_bind.is_some(),
         pp_layers: args.pp_layers.is_some(),
         tp_size: args.tp_size,
-    }
-    .ensure_supported()?;
+    };
+    distributed_flags.ensure_supported()?;
     // Lines from the env fallbacks below (warnings, and the INFO line when a
     // flag takes precedence over a variable) are collected, not logged: no
     // tracing subscriber exists until `start_server` installs one, which then
@@ -2655,6 +2655,14 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .ui_compat
         .webui_enabled()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // Server-side MCP tool loop (#1457): the server set parses here, before
+    // the model reference resolves, so a bad document fails in milliseconds.
+    let mcp = mlxcel::server::mcp::resolve_mcp_startup(&args.ui_compat)
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    if mcp.is_some() {
+        mlxcel::server::mcp::validate_mcp_single_node(distributed_flags.first_requested())
+            .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    }
     let image_token_bounds = args
         .multimodal_compat
         .image_token_bounds()
@@ -2734,6 +2742,13 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         && !has_model_source;
     if webui_enabled && router_mode {
         args.models_autoload = false;
+    }
+    if mcp.is_some() && router_mode {
+        anyhow::bail!(
+            "--mcp-tools is served by a single-model server only: the server-side MCP tool loop \
+             runs beside one loaded chat model. Start mlxcel-server with a model argument, or \
+             remove --mcp-tools and the MCP server configuration"
+        );
     }
     // #2825: `--image-model` with no model source serves image generation
     // alone. A router selector would serve a front that never reaches the
@@ -2948,6 +2963,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
             || std::env::var_os("MLXCEL_DECODE_TIMEOUT").is_some(),
         api_prefix: args.api_prefix,
         webui_enabled,
+        mcp,
         sse_ping_interval: args.sse_ping_interval,
         threads_http: args.threads_http,
         reuse_port: args.reuse_port,

@@ -78,6 +78,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "KimiK3Model@src/models/kimi_k3.rs",
     "KimiLinearModel@src/models/kimi_linear.rs",
     "KlearModel@src/models/klear.rs",
+    "Kolibri1Model@src/models/kolibri1_lm.rs",
     "LagunaWrapper@src/models/laguna.rs",
     "Lfm2Model@src/models/lfm2.rs",
     "LimiteWrapper@src/models/limite_wrapper.rs",
@@ -143,6 +144,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "TensorParallelLlamaModel@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelQwen35Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelQwen3Model@src/distributed/tensor_parallel/llama_runtime.rs",
+    "Xing40Model@src/models/xing4_0.rs",
     "YoutuLanguageModel@src/models/youtu_vl_lm.rs",
     "Z1t@src/models/z1t.rs",
 ];

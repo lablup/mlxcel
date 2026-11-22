@@ -124,7 +124,7 @@ pub(crate) fn fold_dense_modules(weights: &mut WeightMap) -> usize {
 /// unwrapped past the documented prefix.
 ///
 /// Used by: `crate::models::llama_bidirec`,
-/// `crate::models::llama_nemotron_vl_embedding`.
+/// `crate::models::llama_nemotron_vl_embedding`, `crate::models::xing4_0`.
 pub(crate) fn strip_language_model_wrapper(weights: &mut WeightMap) {
     let renames: Vec<(String, String)> = weights
         .keys()
