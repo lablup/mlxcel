@@ -393,7 +393,7 @@ The snapshot-capable families are:
 
 - Recurrent and hybrid SSM: Mamba, Mamba2, Jamba, Nemotron-H, Falcon-H1,
   Granite 4 H, PLaMo 2, LFM2, Qwen3-Next, Bailing MoE Linear, Inkling.
-- Attention-cache families: Gemma 3, Gemma 4, AFMoE, Llama 4, Muse Glimmer,
+- Attention-cache families: Gemma 3, Gemma 4, AFMoE, Kolibri-1, Llama 4, Muse Glimmer,
   Qwen 3.5 / 3.6 text and MoE.
 - VLM wrappers, which forward the five snapshot hooks to their text model:
   Gemma 4 VL and Unified, Qwen 3.5 VL, LFM2-VL, Granite 4 Vision, Muse Glimmer

@@ -194,6 +194,7 @@ pub enum LoadedModel {
     /// Arcee AFM dense (`arcee`, issue #1719).
     Arcee(models::ArceeModel),
     Klear(models::KlearModel),
+    Kolibri1(models::Kolibri1Model),
     Apertus(models::ApertusModel),
     SeedOss(models::SeedOssModel),
     Granite(models::GraniteModel),
@@ -385,6 +386,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Afmoe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Arcee(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Klear(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Kolibri1(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Apertus(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::IQuestLoopCoder(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::SeedOss(inner) => LanguageModel::$method(inner, $($arg),*),

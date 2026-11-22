@@ -119,6 +119,7 @@ fn cases() -> Vec<(&'static str, ParseTheta)> {
         case!(dots1::ModelArgs),
         // Other text families.
         case!(afmoe::ModelArgs),
+        case!(kolibri1::ModelArgs),
         case!(apertus::ModelArgs),
         case!(baichuan::BaichuanConfig),
         case!(bailing_moe::ModelArgs),

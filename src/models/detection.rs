@@ -1031,6 +1031,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // cover both spellings. Without that normalization this arm would miss
         // every published checkpoint.
         "klear" => Ok(ModelType::Klear),
+        "kolibri1" => Ok(ModelType::Kolibri1),
         "apertus" => Ok(ModelType::Apertus),
         "seed_oss" => Ok(ModelType::SeedOss),
         "granite" => Ok(ModelType::Granite),

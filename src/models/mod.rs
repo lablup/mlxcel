@@ -232,6 +232,10 @@ pub mod k2_horizon;
 pub mod kimi_k3;
 pub mod kimi_linear;
 pub mod klear;
+pub mod kolibri1;
+mod kolibri1_lm;
+pub mod kolibri1_moe;
+pub mod kolibri1_weights;
 pub mod laguna;
 pub mod laguna_layers;
 pub mod laguna_sanitize;
@@ -407,6 +411,7 @@ pub use jina_vlm::{JinaVlmTextConfig, JinaVlmTextModel};
 pub use kimi_k3::KimiK3Model;
 pub use kimi_linear::KimiLinearModel;
 pub use klear::KlearModel;
+pub use kolibri1::Kolibri1Model;
 pub use laguna::{LagunaModel, LagunaWrapper};
 pub use lfm2::Lfm2Model;
 pub use limite::{LimiteModel, LimiteWrapper};
@@ -683,6 +688,10 @@ pub enum ModelType {
     /// expert is blended with the routed mixture through a learned 2-way
     /// softmax rather than added.
     Klear,
+    /// Aleph Alpha Kolibri-1 (`kolibri1`): AFMoE-shaped sliding/full hybrid
+    /// MoE without the attention gate, 384 experts top-6 routed on raw
+    /// logits plus a correction bias, and a shared expert.
+    Kolibri1,
 
     // Apertus (Swiss AI)
     Apertus,
@@ -952,6 +961,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Afmoe,
     ModelType::Arcee,
     ModelType::Klear,
+    ModelType::Kolibri1,
     // Apertus (Swiss AI)
     ModelType::Apertus,
     // ByteDance Seed-OSS
@@ -1201,6 +1211,10 @@ impl ModelType {
             ModelType::Afmoe => ("Arcee AFMoE / Trinity (sliding + full hybrid MoE)", "Arcee"),
             ModelType::Arcee => ("Arcee AFM dense (squared-ReLU MLP, YaRN RoPE)", "Arcee"),
             ModelType::Klear => ("Klear MoE (coefficient-blended shared expert)", "Klear"),
+            ModelType::Kolibri1 => (
+                "Aleph Alpha Kolibri-1 (sliding + full hybrid MoE)",
+                "Aleph Alpha",
+            ),
             ModelType::BailingMoeLinear => (
                 "Ling / Ring linear-attention MoE (GLA + full attention hybrid)",
                 "Bailing",
@@ -1632,6 +1646,7 @@ mod metadata_tests {
             Afmoe,
             Arcee,
             Klear,
+            Kolibri1,
             Apertus,
             SeedOss,
             Granite,

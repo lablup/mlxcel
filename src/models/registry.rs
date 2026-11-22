@@ -795,6 +795,7 @@ impl ModelType {
             ModelType::Afmoe => "afmoe",
             ModelType::Arcee => "arcee",
             ModelType::Klear => "klear",
+            ModelType::Kolibri1 => "kolibri1",
             ModelType::Apertus => "apertus",
             ModelType::SeedOss => "seed_oss",
             ModelType::Granite => "granite",
@@ -1032,6 +1033,7 @@ impl ModelType {
             | ModelType::BailingMoe
             | ModelType::Afmoe
             | ModelType::Klear
+            | ModelType::Kolibri1
             | ModelType::ExaOneMoe
             | ModelType::PhiMoe
             | ModelType::Phixtral
@@ -1195,6 +1197,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::Afmoe => &["afmoe"],
         ModelType::Arcee => &["arcee"],
         ModelType::Klear => &["klear"],
+        ModelType::Kolibri1 => &["kolibri1"],
         ModelType::Apertus => &["apertus"],
         ModelType::SeedOss => &["seed_oss"],
         ModelType::Granite => &["granite"],
