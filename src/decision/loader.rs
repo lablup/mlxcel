@@ -28,9 +28,8 @@
 //! 3. a constructor arm in `construct`, returning its
 //!    [`DecisionModel`](super::DecisionModel) scorer.
 //!
-//! Until the first family lands, the only variant is the `#[cfg(test)]` stub,
-//! so in a production build [`DecisionKind`] has no values and every load
-//! fails with "<path> is not a decision checkpoint".
+//! A checkpoint no arm recognizes fails with "<path> is not a decision
+//! checkpoint".
 
 use std::path::{Path, PathBuf};
 
@@ -45,6 +44,9 @@ use super::{DecisionModel, MediaKind, QuestionKind};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DecisionKind {
+    /// LiquidAI d1 (`lfm2_vl` with an `auto_map.AutoModel` ending in
+    /// `D1Model`), scored by `src/decision/d1.rs`.
+    D1,
     /// The deterministic test model in `src/decision/stub.rs`.
     #[cfg(test)]
     Stub,
@@ -55,6 +57,7 @@ impl DecisionKind {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            DecisionKind::D1 => "d1",
             #[cfg(test)]
             DecisionKind::Stub => "stub",
         }
@@ -86,6 +89,9 @@ pub fn detect_decision_kind(config: &Value) -> Result<DecisionKind> {
         .get("model_type")
         .and_then(Value::as_str)
         .unwrap_or("");
+    if super::d1::is_d1_config(config) {
+        return Ok(DecisionKind::D1);
+    }
     #[cfg(test)]
     if model_type == super::stub::STUB_MODEL_TYPE {
         return Ok(DecisionKind::Stub);
@@ -131,12 +137,9 @@ pub fn load_decision_model(model_path: &Path) -> Result<LoadedDecisionModel> {
 }
 
 /// Build the scorer for `kind` from the checkpoint at `model_dir`.
-// `model_dir` is unused while the only variant is the test stub, and in a
-// production build the match has no arms at all; the first family to land
-// reads its weights from it and this allow goes.
-#[cfg_attr(not(test), allow(unused_variables))]
 fn construct(kind: DecisionKind, model_dir: &Path) -> Result<Box<dyn DecisionModel>> {
     match kind {
+        DecisionKind::D1 => Ok(Box::new(super::d1::D1DecisionModel::load(model_dir)?)),
         #[cfg(test)]
         DecisionKind::Stub => Ok(Box::new(super::stub::StubDecisionModel::load(model_dir))),
     }

@@ -2,7 +2,32 @@
 
 A decision model answers named questions about a state with calibrated probabilities instead of generated text: route a ticket to `billing`, rate a screenshot from `low` to `high`, say whether a transcript asks for a refund. mlxcel serves them through `POST /v1/decisions`, the `--decision-model` server flag, and the offline `mlxcel decide` command. The contract is mlx-vlm's shared decision API ([`decision.py`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/decision.py), [`decide.py`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/decide.py), [`server/decisions.py`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/server/decisions.py)), including its validation messages, so a client written against mlx-vlm sees the same responses.
 
-**Current status.** The API surface (request validation, the worker, the route, the server flag, the CLI) is implemented and tested against a stub model. No decision family is ported yet: Decider-2b (#2359), Clef (#2365) and the LiquidAI d1 models (#2367) each add a loader arm and a scorer. Until one lands, `--decision-model` and `mlxcel decide` refuse every checkpoint with `<path> is not a decision checkpoint`.
+**Current status.** The API surface (request validation, the worker, the route, the server flag, the CLI) is implemented. LiquidAI d1-3B (#2367) is the first ported family, see [Supported decision models](#supported-decision-models). Decider-2b (#2359) and Clef (#2365) each add a loader arm and a scorer the same way. A checkpoint no family recognizes is refused with `<path> is not a decision checkpoint`.
+
+## Supported decision models
+
+| Family | Detection | Checkpoints | Types | Media |
+|--------|-----------|-------------|-------|-------|
+| LiquidAI d1 | `model_type` `lfm2_vl` (or `lfm2-vl`) with `auto_map.AutoModel` ending in `D1Model` | [`LiquidAI/d1-3B`](https://huggingface.co/LiquidAI/d1-3B), [`LiquidAI/d1-3B-MLX-8bit`](https://huggingface.co/LiquidAI/d1-3B-MLX-8bit) (validated), `-MLX-4bit`, `-MLX-fp16` | `choice`, `score` (2 to 10 levels), `bool` (`noul`) | `images` |
+
+### LiquidAI d1-3B
+
+d1-3B is an LFM2.5-VL-3B finetune that answers by reading next-token log-probabilities at the answer slot, ported from mlx-vlm's [`models/d1`](https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/d1). Its `config.json` keeps `model_type: lfm2_vl`, so `mlxcel generate` and `-m` still load it as an ordinary LFM2-VL chat model; only `--decision-model` and `mlxcel decide` route it to the decision scorer, by its `auto_map`. A plain LFM2-VL checkpoint passed to `--decision-model` is refused.
+
+- **Prompt.** The published System One defaults: no system turn, the state (a string as is, any other JSON value indented by two spaces with non-ASCII text kept) followed by `QUESTION:`, then the question, rendered into the LFM2 chat template up to the assistant header. One `<image>` per image precedes the state.
+- **Readout.** `bool` reads the best of the single-token `yes` / `Yes` / `YES` against `no` / `No` / `NO`. `score` reads the digit tokens `0` to `n-1`. `choice` gives each option a single-token code (the labels themselves when every label is one letter, else `A`, `B`, ..., else `00`, `01`, ... past 26 options, with a fallback pool when a code is not one unused token) and reads that code and its space-prefixed form. The per-option scores are softmaxed with no temperature and no calibration, and every number is rounded to four places.
+- **Answers.** `metadata.confidence` is the argmax probability for `choice` and `score`, and `score` also carries `metadata.legend`. A `bool` answer has no metadata.
+- **Model limits (400).** A question without `instructions` (``a question needs `instructions` ``), a score outside 2 to 10 levels, `bool` criteria with keys other than `true` and `false`, and a choice that runs out of single-token codes.
+- **Several questions.** The state and its images are read once as a shared trunk; each question continues it as its own row, in batches of similar length (longest first, no row padded past twice its length, at most 65536 padded tokens per batch, trunk included). A trunk or single prompt longer than 2048 tokens is read in 2048-token chunks. One question is a single pass. `usage.input_tokens` counts the trunk once plus every question's tokens.
+- **Images.** Each image is turned upright by its EXIF orientation, converted to RGB and, when its area exceeds 1024 x 1024 pixels, downscaled bicubic to that area before the LFM2-VL processor tiles it with the checkpoint's own resize filter. The parity fixture covers an image under the cap and one over it (`tests/fixtures/d1/reference.json`, cases `cats` and `cats_2x`).
+- **Parity.** On `LiquidAI/d1-3B-MLX-8bit` the probabilities match mlx-vlm within 2e-3 on the README text and COCO image examples (`src/decision/d1_tests.rs`). Upstream reports that bf16 inference moves probabilities by up to a few hundredths against the PyTorch reference and 4-bit conversions by more.
+
+```bash
+mlxcel decide -m LiquidAI/d1-3B-MLX-8bit --state "I was charged twice, please refund one." \
+  --questions '{"refund": {"type": "bool", "instructions": "Is the customer asking for a refund?"}}'
+mlxcel decide -m LiquidAI/d1-3B-MLX-8bit --image cats.jpg \
+  --questions '{"cats": {"type": "choice", "instructions": "How many cats are there?", "criteria": ["one", "two", "more"]}}'
+```
 
 ## Endpoints
 
@@ -120,6 +145,7 @@ The command prints the `POST /v1/decisions` response JSON, pretty-printed with n
 | `src/decision/validate.rs` | `validate_questions` (rules 1 to 8) and `validate_question_structure` (rule 4). |
 | `src/decision/answer.rs` | `Answer` constructors and the answer JSON. |
 | `src/decision/loader.rs` | `DecisionKind`, `detect_decision_kind`, `load_decision_model`. |
+| `src/decision/d1.rs`, `src/decision/d1_prompt.rs` | The LiquidAI d1 scorer (trunk/branch forward over the LFM2-VL stack) and its prompt, option codes and readout. |
 | `src/decision/cli.rs`, `src/decision/media.rs` | `mlxcel decide` input preparation, audio decoding, CLI media loading. |
 | `src/server/decision_model.rs` | `DecisionModelProvider` and `DecisionProviderError`. |
 | `src/server/decision_worker.rs` | `DecisionWorkerProvider` (bounded queue, timeout, panic boundary) and startup loading. |

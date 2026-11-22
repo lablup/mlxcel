@@ -95,6 +95,9 @@ pub(crate) use self::vlm::{
 // with pooling, so its loader goes through the same entry point rather than
 // duplicating the weight remap and the token-id resolution.
 pub(crate) use self::vlm::load_qwen3_vl;
+// LiquidAI d1 decisions (`src/decision/d1.rs`) run on the LFM2-VL stack
+// unchanged and only replace the head with an answer-slot readout.
+pub(crate) use self::vlm::load_lfm2_vl;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::{
     load_qwen2_5_vl_iree_host_preprocessor, load_qwen2_vl_iree_host_preprocessor,
