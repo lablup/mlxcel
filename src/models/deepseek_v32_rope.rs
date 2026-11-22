@@ -52,7 +52,24 @@ impl DsaRope {
     /// missing `original_max_position_embeddings` to 4096, not to
     /// `max_position_embeddings`, and the shared resolver does the same when
     /// given `None`.
-    pub(super) fn from_args(args: &ModelArgs) -> Self {
+    ///
+    /// Refuses a `qk_rope_head_dim` that is zero, odd, or wider than the
+    /// indexer head (`index_head_dim`, the narrower of the two tensors this
+    /// rotates) before the YaRN table is built, so a malformed config fails
+    /// at load instead of panicking or reading out of range in the kernel.
+    pub(super) fn from_args(args: &ModelArgs) -> Result<Self, String> {
+        let dims = args.qk_rope_head_dim;
+        if dims == 0 || !dims.is_multiple_of(2) {
+            return Err(format!(
+                "qk_rope_head_dim must be a positive even number, got {dims}"
+            ));
+        }
+        let widest = args.index_head_dim.min(args.qk_nope_head_dim + dims);
+        if dims > widest {
+            return Err(format!(
+                "qk_rope_head_dim ({dims}) exceeds the head dim it rotates ({widest}); check qk_nope_head_dim and index_head_dim"
+            ));
+        }
         let spec = args.rope_scaling.as_ref().map(|spec| {
             if spec.rope_type.as_deref() == Some("deepseek_yarn") {
                 RopeScalingSpec {
@@ -63,16 +80,15 @@ impl DsaRope {
                 spec.clone()
             }
         });
-        let dims = args.qk_rope_head_dim;
         let kind =
             RopeScalingKind::resolve(spec.as_ref(), dims, args.rope_theta, None, &args.model_type);
-        Self {
+        Ok(Self {
             kind,
             dims: dims as i32,
             // The plain rotation's base has to follow a `--rope-freq-base`
             // override the same way the table does (see `resolve_base`).
             base: crate::models::rope_overrides::resolve_base(args.rope_theta),
-        }
+        })
     }
 
     /// A per-layer handle on the same table (see [`RopeScalingKind::duplicate`]).

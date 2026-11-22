@@ -1293,7 +1293,7 @@ impl DeepSeekV32Model {
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)?;
 
-        let rope = DsaRope::from_args(args);
+        let rope = DsaRope::from_args(args)?;
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for i in 0..args.num_hidden_layers {
             let layer = load_decoder_layer(weights, args, i, &rope)?;
@@ -1374,7 +1374,7 @@ fn load_mla_attention(
     args: &ModelArgs,
     prefix: &str,
 ) -> Result<MLAAttention, String> {
-    load_mla_attention_with_rope(weights, args, prefix, &DsaRope::from_args(args))
+    load_mla_attention_with_rope(weights, args, prefix, &DsaRope::from_args(args)?)
 }
 
 /// Load one MLA block. `rope` is the model's resolved RoPE, built once per
@@ -1721,7 +1721,7 @@ impl DeepSeekV32StageModel {
             None
         };
 
-        let rope = DsaRope::from_args(args);
+        let rope = DsaRope::from_args(args)?;
         let mut layers = Vec::with_capacity(filter.num_layers());
         for layer_idx in filter.layer_range.clone() {
             layers.push(load_decoder_layer(weights, args, layer_idx, &rope)?);

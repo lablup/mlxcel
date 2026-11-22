@@ -72,7 +72,7 @@ impl Indexer {
         args: &ModelArgs,
         attn_prefix: &str,
     ) -> Result<Option<Self>, String> {
-        Self::load_with_rope(weights, args, attn_prefix, &DsaRope::from_args(args))
+        Self::load_with_rope(weights, args, attn_prefix, &DsaRope::from_args(args)?)
     }
 
     /// [`Self::load`] with the model's already-resolved RoPE.

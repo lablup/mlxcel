@@ -185,10 +185,11 @@ fn yarn_table_matches_the_upstream_formula_at_checkpoint_geometry() {
         "beta_fast": 32, "beta_slow": 1, "mscale": 1.0, "mscale_all_dim": 1.0}"#;
     let mut args = tiny_config(Some(block));
     args.qk_rope_head_dim = 64;
+    args.index_head_dim = 128;
 
     for rope_type in ["yarn", "deepseek_yarn"] {
         args.rope_scaling.as_mut().expect("block").rope_type = Some(rope_type.to_string());
-        let rope = DsaRope::from_args(&args);
+        let rope = DsaRope::from_args(&args).expect("valid rope");
         let freqs = array_to_vec_f32(rope.freqs().expect("{rope_type} must build a table"));
         assert_eq!(freqs.len(), 32);
         // (pair, upstream YarnRoPE._freqs) in float64. Pairs below 10
@@ -219,7 +220,7 @@ fn yarn_table_matches_the_upstream_formula_at_checkpoint_geometry() {
 fn absent_rope_scaling_keeps_the_plain_rope_call() {
     let _runtime = crate::initialize_runtime();
     let args = tiny_config(None);
-    let rope = DsaRope::from_args(&args);
+    let rope = DsaRope::from_args(&args).expect("valid rope");
     assert!(rope.freqs().is_none(), "no block, no table");
 
     let x = constant_rows(3 * INDEX_HEAD_DIM as usize, 1, 0.3);
@@ -246,7 +247,7 @@ fn yarn_magnitude_scales_only_the_rotated_dims() {
         r#"{{"type": "yarn", "factor": 40, "original_max_position_embeddings": {ORIGINAL_CTX},
             "mscale": 2.0, "mscale_all_dim": 1.0}}"#
     );
-    let rope = DsaRope::from_args(&tiny_config(Some(&block)));
+    let rope = DsaRope::from_args(&tiny_config(Some(&block))).expect("valid rope");
     // Upstream: yarn_get_mscale(40, 2.0) / yarn_get_mscale(40, 1.0).
     let want_mscale = 1.269_480_015_985_188_f64;
     assert!(
@@ -471,4 +472,19 @@ fn mla_queries_rotate_with_the_key_table_past_the_original_context() {
         "batched decode at {} must attend as at 1 (max diff {err})",
         far + 1
     );
+}
+
+#[test]
+fn malformed_rope_width_is_refused_before_the_table_is_built() {
+    let _runtime = crate::initialize_runtime();
+    let block = format!(
+        r#"{{"type": "yarn", "factor": 40, "original_max_position_embeddings": {ORIGINAL_CTX}}}"#
+    );
+    // Zero, odd, and wider than the indexer head (12 here).
+    for bad in [0_usize, 7, 14] {
+        let mut args = tiny_config(Some(&block));
+        args.qk_rope_head_dim = bad;
+        let err = DsaRope::from_args(&args).err().expect("must be refused");
+        assert!(err.contains("qk_rope_head_dim"), "width {bad}: {err}");
+    }
 }
