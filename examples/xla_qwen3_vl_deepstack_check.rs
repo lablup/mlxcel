@@ -144,6 +144,8 @@ fn compare_stage(
         "atol": tolerance.atol,
         "rtol": tolerance.rtol,
         "max_absolute": stats.max_absolute,
+        "reference_max_absolute": expected.iter().fold(0.0f32, |peak, value| peak.max(value.abs())),
+        "worst_excess": worst_excess(actual, expected, tolerance),
         "max_relative": stats.max_relative,
         "failures": stats.failures,
         "non_finite": stats.non_finite,
@@ -198,6 +200,34 @@ fn compare_vision_branches(
         )?;
     }
     Ok(())
+}
+
+/// The element that most exceeds `atol + rtol * |reference|`, as
+/// `{index, actual, expected, excess}`, or null when every element passes.
+fn worst_excess(actual: &[f32], expected: &[f32], tolerance: Tolerance) -> Value {
+    actual
+        .iter()
+        .zip(expected)
+        .enumerate()
+        .filter(|(_, (observed, reference))| observed.is_finite() && reference.is_finite())
+        .map(|(index, (&observed, &reference))| {
+            let excess = (observed - reference).abs()
+                - (tolerance.atol + tolerance.rtol * reference.abs());
+            (index, observed, reference, excess)
+        })
+        .filter(|candidate| candidate.3 > 0.0)
+        .max_by(|left, right| left.3.total_cmp(&right.3))
+        .map_or(Value::Null, |(index, observed, reference, excess)| {
+            json!({"index": index, "actual": observed, "expected": reference, "excess": excess})
+        })
+}
+
+/// The `count` largest logits as `(token, logit)`, highest first.
+fn top_logits(logits: &[f32], count: usize) -> Vec<(usize, f32)> {
+    let mut ranked = logits.iter().copied().enumerate().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+    ranked.truncate(count);
+    ranked
 }
 
 fn patch_size(model: &Path) -> usize {
@@ -382,10 +412,20 @@ fn main() {
             ),
         );
     }
-    for (layer, input) in [
-        (0, &iree_diagnostics.block_0_states[0]),
-        (1, &iree_diagnostics.block_hidden_states[0]),
-    ] {
+    // Blocks 0 and 1 are the gated same-input projection controls. Every later
+    // block is reported under `same_input_report` (not gated) so a chained
+    // vision drift can be split into per-block same-input error and
+    // accumulation without changing what the gate admits.
+    let same_input_blocks = std::iter::once((0, &iree_diagnostics.block_0_states[0])).chain(
+        (1..iree_diagnostics.block_hidden_states.len())
+            .map(|layer| (layer, &iree_diagnostics.block_hidden_states[layer - 1])),
+    );
+    for (layer, input) in same_input_blocks {
+        let label = if layer < 2 {
+            "same_input"
+        } else {
+            "same_input_report"
+        };
         let controls = vision_encoder
             .block_projection_controls_from_f32(layer, input, &vision_capture.grids)
             .unwrap_or_else(|error| {
@@ -400,7 +440,7 @@ fn main() {
                 &mut failures,
                 compare_stage(
                     &mut reports,
-                    &format!("vision.block_{layer}.output.same_input.{name}"),
+                    &format!("vision.block_{layer}.output.{label}.{name}"),
                     actual,
                     &mlx_f32(expected),
                     tolerance,
@@ -536,7 +576,21 @@ fn main() {
         "negative oracle accepted a zeroed actual-checkpoint DeepStack branch"
     );
 
-    let unexpanded_tokens = vec![1, model.vision_start_token_id, model.image_token_id, 2];
+    // `--token-ids` replays an actual unexpanded prompt (optionally followed by
+    // teacher-forced generated tokens) instead of the synthetic minimal prompt,
+    // so the final-position logit margin can be measured at any greedy index.
+    let unexpanded_tokens = argument("--token-ids").map_or_else(
+        || vec![1, model.vision_start_token_id, model.image_token_id, 2],
+        |ids| {
+            ids.split(',')
+                .map(|id| {
+                    id.trim()
+                        .parse::<i32>()
+                        .unwrap_or_else(|_| panic!("--token-ids entry {id:?} is not an i32"))
+                })
+                .collect()
+        },
+    );
     let prepared = production_preprocessor
         .prepare_deepstack(&unexpanded_tokens, &images)
         .unwrap_or_else(|error| panic!("prepare production DeepStack prefill: {error}"))
@@ -618,6 +672,76 @@ fn main() {
             tolerance,
         ),
     );
+    // Same-input language control: the eager language model consumes the IREE
+    // vision features (rounded to the eager embedding dtype exactly where the
+    // eager vision output is), so its drift from the IREE language graph is
+    // the language model's own rather than the vision tower's accumulation.
+    let projection_shape = vision_capture.projection.shape;
+    let iree_main = mlxcel_core::from_slice_f32(
+        &vision_capture.projection.values,
+        &[projection_shape[0] as i32, projection_shape[1] as i32],
+    );
+    let iree_branches = vision_capture
+        .projection
+        .deepstack_values
+        .iter()
+        .map(|values| {
+            mlxcel_core::from_slice_f32(
+                values,
+                &[
+                    projection_shape[0] as i32,
+                    (values.len() / projection_shape[0]) as i32,
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    let same_input_embeddings = model.get_input_embeddings_from_features(
+        &input_ids,
+        &iree_main,
+        iree_branches,
+        &vision_capture.grids,
+    );
+    let mut same_input_caches = model.text_model.make_caches();
+    let same_input_language = model.text_model.forward_deepstack_diagnostics(
+        &input_ids,
+        &same_input_embeddings.inputs_embeds,
+        &mut same_input_caches,
+        same_input_embeddings.attention_mask_4d.as_deref(),
+    );
+    for (layer, eager) in same_input_language
+        .post_injection_hidden_states
+        .iter()
+        .enumerate()
+    {
+        let target_layer = iree_language.target_layer_indices[layer];
+        let eager = mlx_f32(eager);
+        let layer_start = layer * iree_language.context_capacity * hidden_size;
+        let actual = &iree_language.post_injection_hidden_states
+            [layer_start..layer_start + sequence_len * hidden_size];
+        record_comparison(
+            &mut failures,
+            compare_stage(
+                &mut reports,
+                &format!("language.post_injection_layer_{target_layer}.iree_vision_input"),
+                actual,
+                &eager,
+                tolerance,
+            ),
+        );
+    }
+    let same_input_logits = mlx_f32(&same_input_language.logits);
+    let same_input_last = &same_input_logits[(sequence_len - 1) * vocab..sequence_len * vocab];
+    record_comparison(
+        &mut failures,
+        compare_stage(
+            &mut reports,
+            "language.final_position_logits.iree_vision_input",
+            &iree_language.logits,
+            same_input_last,
+            tolerance,
+        ),
+    );
+    let same_input_top = top_logits(same_input_last, 5);
     let same_input_control_failures = failures
         .iter()
         .filter(|failure| {
@@ -631,6 +755,8 @@ fn main() {
         .cloned()
         .collect::<Vec<_>>();
     let greedy_top1_exact = iree_top1 == eager_top1;
+    let iree_top = top_logits(&iree_language.logits, 5);
+    let eager_top = top_logits(eager_last, 5);
     let passed = same_input_control_failures.is_empty() && greedy_top1_exact;
 
     let report = json!({
@@ -650,6 +776,12 @@ fn main() {
         "final_top1": iree_top1,
         "eager_top1": eager_top1,
         "greedy_top1_exact": greedy_top1_exact,
+        "final_top5": iree_top,
+        "eager_top5": eager_top,
+        "final_top2_margin": iree_top[0].1 - iree_top[1].1,
+        "eager_top2_margin": eager_top[0].1 - eager_top[1].1,
+        "eager_iree_vision_input_top5": same_input_top,
+        "eager_iree_vision_input_top2_margin": same_input_top[0].1 - same_input_top[1].1,
         "comparisons": reports,
         "comparison_failures": failures,
         "same_input_control_failures": same_input_control_failures,
@@ -668,6 +800,25 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_logits_rank_highest_first_and_worst_excess_names_the_worst_element() {
+        assert_eq!(
+            top_logits(&[0.5, 2.0, -1.0, 1.5], 2),
+            vec![(1, 2.0), (3, 1.5)]
+        );
+        let tolerance = Tolerance {
+            atol: 0.1,
+            rtol: 0.0,
+        };
+        assert_eq!(
+            worst_excess(&[1.0, 2.0], &[1.05, 2.0], tolerance),
+            Value::Null
+        );
+        let worst = worst_excess(&[1.0, 2.5, 3.3], &[1.0, 2.0, 3.0], tolerance);
+        assert_eq!(worst["index"], 1);
+        assert_eq!(worst["expected"], 2.0);
+    }
 
     #[test]
     fn comparisons_continue_after_failure_and_persist_the_report() {
