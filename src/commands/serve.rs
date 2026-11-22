@@ -247,6 +247,10 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         .ui_compat
         .webui_enabled()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // Server-side MCP tool loop (#1457): the server set parses here, before
+    // the model reference resolves, so a bad document fails in milliseconds.
+    let mcp = mlxcel::server::mcp::resolve_mcp_startup(&args.ui_compat)
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
     let image_token_bounds = args
         .multimodal_compat
         .image_token_bounds()
@@ -322,6 +326,13 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         && !has_model_source;
     if webui_enabled && router_mode {
         args.models_autoload = false;
+    }
+    if mcp.is_some() && router_mode {
+        anyhow::bail!(
+            "--mcp-tools is served by a single-model server only: the server-side MCP tool loop \
+             runs beside one loaded chat model. Start mlxcel-server with a model argument, or \
+             remove --mcp-tools and the MCP server configuration"
+        );
     }
     // #2825: `--image-model` with no model source serves image generation
     // alone. `build_startup_input` names any conflicting flag after folding in
@@ -631,6 +642,10 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         .ui_compat
         .webui_enabled()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // Server-side MCP tool loop (#1457): the server set parses here, before
+    // the model reference resolves, so a bad document fails in milliseconds.
+    let mcp = mlxcel::server::mcp::resolve_mcp_startup(&args.ui_compat)
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
 
     // Axis B (B8): resolve --lang-bias / --lang-bias-config early so
     // errors surface before the server starts. Empty resolution = None =
@@ -828,6 +843,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
             || std::env::var_os("MLXCEL_DECODE_TIMEOUT").is_some(),
         api_prefix: args.api_prefix,
         webui_enabled,
+        mcp,
         sse_ping_interval: args.sse_ping_interval,
         threads_http: args.threads_http,
         reuse_port: args.reuse_port,
