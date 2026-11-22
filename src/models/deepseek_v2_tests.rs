@@ -450,6 +450,86 @@ fn int8_cache_stores_a_quantized_latent_and_decodes_like_its_own_row() {
     );
 }
 
+/// A bf16 layer over an int8 latent keeps bf16 activations on the decompressed
+/// multi-token step (#3177). The window dequantizes to FP16, and bf16 against
+/// FP16 promotes to float32 in MLX, so without the cast back the step returned
+/// float32 and carried it through `o_proj` into the residual stream.
+#[test]
+fn a_bf16_layer_keeps_bf16_over_an_int8_latent() {
+    let _runtime = crate::initialize_runtime();
+    let bf16 = mlxcel_core::dtype::BFLOAT16;
+    let mut args = mla_test_args();
+    args.kv_lora_rank = 64;
+    let geometry = MlaGeometry {
+        num_heads: args.num_attention_heads,
+        kv_lora_rank: args.kv_lora_rank,
+        qk_nope_head_dim: args.qk_nope_head_dim,
+        qk_rope_head_dim: args.qk_rope_head_dim,
+        v_head_dim: args.v_head_dim,
+    };
+    let weights: WeightMap = mla_test_weights(&args, 0x3177)
+        .into_iter()
+        .map(|(name, value)| (name, mlxcel_core::astype(&value, bf16)))
+        .collect();
+    let mut attn = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load absorbed");
+    attn.absorbed =
+        Some(MlaAbsorbedProjections::from_kv_b_proj(&attn.kv_b_proj, geometry).expect("fold"));
+
+    let mut state = 0x3177u64;
+    let mut hidden = |tokens: usize| {
+        mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(
+                &xorshift(&mut state, tokens * HIDDEN, 0.25),
+                &[1, tokens as i32, HIDDEN as i32],
+            ),
+            bf16,
+        )
+    };
+    let before = mlxcel_core::mla::stats::snapshot();
+    let mut cache =
+        mlxcel_core::layers::KVCache::new_with_mode(mlxcel_core::cache::KVCacheMode::Int8);
+    let prefill = attn.forward(&hidden(5), None, &mut cache);
+    mlxcel_core::eval(&prefill);
+    let after = mlxcel_core::mla::stats::snapshot();
+    assert!(cache.holds_quantized_latent());
+    assert!(
+        after
+            .get(mlxcel_core::mla::MlaDecodePath::Decompressed)
+            .saturating_sub(before.get(mlxcel_core::mla::MlaDecodePath::Decompressed))
+            >= 1,
+        "the cold prefill must take the decompressed path"
+    );
+    assert_eq!(
+        mlxcel_core::array_dtype(&prefill),
+        bf16,
+        "prefill output dtype"
+    );
+    // Behind the 5-token window the cost model absorbs a 2-token step, which
+    // dequantizes the window inside `MlaLatentCache::attend_preprojected`.
+    let before = mlxcel_core::mla::stats::snapshot();
+    let absorbed_step = attn.forward(&hidden(2), None, &mut cache);
+    mlxcel_core::eval(&absorbed_step);
+    let after = mlxcel_core::mla::stats::snapshot();
+    assert!(
+        after
+            .get(mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill)
+            .saturating_sub(before.get(mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill))
+            >= 1,
+        "the 2-token step must take the absorbed multi-token path"
+    );
+    assert_eq!(
+        mlxcel_core::array_dtype(&absorbed_step),
+        bf16,
+        "absorbed multi-token step output dtype"
+    );
+    let decode = attn.forward(&hidden(1), None, &mut cache);
+    assert_eq!(
+        mlxcel_core::array_dtype(&decode),
+        bf16,
+        "decode output dtype"
+    );
+}
+
 /// One dense MLA layer over a 16-token vocabulary.
 fn tiny_harness_model() -> super::DeepSeekV2Model {
     let mut args = mla_test_args();

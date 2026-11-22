@@ -425,3 +425,55 @@ fn a_forced_int4_latent_stores_four_bit_rows_and_decodes_composed() {
     let _ = run_layer(&attn, &cfg, &mut int8, 5, 9);
     assert_eq!(int8.stored_latent_bits(), Some(8));
 }
+
+/// A bf16 layer over an int8 latent keeps bf16 activations (#3177). The
+/// window dequantizes to FP16, and bf16 against FP16 promotes to float32 in
+/// MLX, so without the cast back a multi-token step returned float32 and
+/// carried it through `o_proj` into the residual stream.
+#[test]
+fn a_bf16_layer_keeps_bf16_over_an_int8_latent() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let bf16 = mlxcel_core::dtype::BFLOAT16;
+    let cfg = quantizable_config();
+    let mut weights = WeightMap::new();
+    insert_dense_layer_weights(&mut weights, &cfg, 0);
+    let weights = DeepSeekV3Model::sanitize_weights(weights, &cfg).expect("sanitize must succeed");
+    let weights: WeightMap = weights
+        .into_iter()
+        .map(|(name, value)| (name, mlxcel_core::astype(&value, bf16)))
+        .collect();
+    let attn = DeepSeekV3Attention::from_weights(&weights, &cfg, "model.layers.0.self_attn")
+        .expect("tiny bf16 attention must load");
+
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
+    let prefill = attn.forward(
+        &mlxcel_core::astype(&hidden_rows(&cfg, 0, 5), bf16),
+        &mut cache,
+        None,
+    );
+    assert!(cache.holds_quantized_latent());
+    assert_eq!(
+        mlxcel_core::array_dtype(&prefill),
+        bf16,
+        "prefill output dtype"
+    );
+    let decode = attn.forward(
+        &mlxcel_core::astype(&hidden_rows(&cfg, 5, 6), bf16),
+        &mut cache,
+        None,
+    );
+    assert_eq!(
+        mlxcel_core::array_dtype(&decode),
+        bf16,
+        "decode output dtype"
+    );
+
+    // The fp16 latent of the same layer was never promoted.
+    let mut fp16 = KVCache::new();
+    let prefill = attn.forward(
+        &mlxcel_core::astype(&hidden_rows(&cfg, 0, 5), bf16),
+        &mut fp16,
+        None,
+    );
+    assert_eq!(mlxcel_core::array_dtype(&prefill), bf16, "fp16 latent");
+}

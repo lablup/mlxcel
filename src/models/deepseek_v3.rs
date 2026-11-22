@@ -389,7 +389,9 @@ impl DeepSeekV3Attention {
                 );
                 return self.project_attention_output(&self.unembed_out.forward(&output), b, l);
             }
-            window => window.into_dense(),
+            // The dequantized window is FP16; cast it to the query dtype so a
+            // bf16 checkpoint's step is not promoted to float32 (#3177).
+            window => super::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe)),
         };
 
         // MLA attention: absorbed or materializing, chosen by the cost model

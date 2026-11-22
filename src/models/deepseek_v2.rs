@@ -588,7 +588,11 @@ impl MLAAttention {
             // A quantized latent (`int8`, issue #3155) is dequantized
             // once here, after the fresh chunk was stored quantized, so this
             // prefill reads the same values the decode steps will.
-            let (ckv_all, kpe_all) = view.update_and_fetch(ckv, k_pe).into_dense();
+            // The dequantized window is FP16; cast it to the query dtype so a
+            // bf16 checkpoint's step is not promoted to float32 (#3177).
+            let window = view.update_and_fetch(ckv, k_pe);
+            let (ckv_all, kpe_all) =
+                super::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe));
             let kv_len = view.seq_len();
             // The cost model declined absorption for this step, so the
             // per-head K/V are materialized and the dense SDPA below runs.
