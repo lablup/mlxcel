@@ -606,6 +606,9 @@ fn main() -> Result<()> {
     // issue #1350: benchmark the mode the shipped binaries would actually
     // build for this model, so a number reported as `turbo4` is never really
     // an fp16 or fp16+turbo4 run.
+    // `--mla-latent-quant` is fixed before the mode is resolved, so the mode
+    // benchmarked is the one the shipped binaries build under it (#3179).
+    mlxcel::cli::mla_latent_option::init_mla_latent_quant(args.turbo.mla_latent_quant)?;
     let kv_cache_mode = resolve_and_announce_kv_cache_mode(kv_cache_mode, &args.model);
 
     // Keep `--turbo-boundary-v` semantics identical to `mlxcel generate`.
@@ -736,5 +739,7 @@ fn main() -> Result<()> {
     io::stdout().flush()?;
 
     mlxcel_core::clear_memory_cache();
+    // `MLXCEL_TRACE_MLA_STATS=1`: which MLA attention path each step took.
+    mlxcel_core::mla::stats::report_if_requested();
     Ok(())
 }

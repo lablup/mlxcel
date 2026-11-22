@@ -96,6 +96,10 @@
 // metadata line records it; traces without that line left chunk 0 unanchored
 // and are not comparable with newer ones at chunk 0.
 //
+// `MLXCEL_TRACE_PREFILL_CHUNK=N` (with `MLXCEL_TRACE_BATCH_ROWS`) runs the
+// context pass in forwards of at most N tokens, as the generator prefills a
+// long prompt; see `logit_trace/kv_mode.rs`.
+//
 // `MLXCEL_TRACE_KV_CACHE_MODE` and `MLXCEL_TRACE_DECODE_STEP` select the KV
 // cache storage and end the context pass with a single-token step (see
 // `logit_trace/kv_mode.rs`); together they reach the quantized sliding-cache
@@ -274,7 +278,7 @@ fn main() -> Result<()> {
         .unwrap_or(0);
     let gemma4_mode = gemma4::Mode::from_env()?;
     let audio_arm = audio::AudioArm::from_env()?;
-    let kv_arm = kv_mode::KvArm::from_env()?;
+    let mut kv_arm = kv_mode::KvArm::from_env()?;
     anyhow::ensure!(
         !kv_arm.decode_step || (prefill > 0 && gemma4_mode.is_none()),
         "MLXCEL_TRACE_DECODE_STEP needs a nonzero prefill and no Gemma 4 mode"
@@ -570,7 +574,7 @@ fn main() -> Result<()> {
         if !contiguous || c == 0 {
             model.reset_runtime_state();
         }
-        let mut caches = model.make_caches();
+        let mut caches = kv_arm.make_caches(&model);
         // Optional context pass. Its rows are discarded; it exists so the
         // traced forward runs at the chunk's width against a realistic
         // context rather than against nothing. A chunk with no history (chunk
@@ -679,19 +683,21 @@ fn trace_batched_chunks(
         for (row_idx, row) in rows.iter().enumerate() {
             let mut prefix = bos_prefix.to_vec();
             prefix.extend_from_slice(&ids[row.prefix_from..row.start]);
-            let mut row_caches = model.make_caches();
+            let mut row_caches = kv_arm.make_caches(model);
             model.prepare_sequence_state(seq_ids[row_idx]);
             model.bind_qwen_vl_mrope_state_to_sequence(seq_ids[row_idx]);
             if !prefix.is_empty() {
                 let split = kv_arm.context_split(prefix.len());
-                let input = from_slice_i32(&prefix[..split], &[1, split as i32]);
-                let warm = model.forward_with_sequence_id(
-                    &input,
-                    Some(seq_ids[row_idx]),
-                    &mut row_caches,
-                    None,
-                );
-                eval(&warm);
+                for piece in kv_arm.context_pieces(&prefix[..split]) {
+                    let input = from_slice_i32(piece, &[1, piece.len() as i32]);
+                    let warm = model.forward_with_sequence_id(
+                        &input,
+                        Some(seq_ids[row_idx]),
+                        &mut row_caches,
+                        None,
+                    );
+                    eval(&warm);
+                }
                 if split < prefix.len() {
                     let step = from_slice_i32(&prefix[split..], &[1, 1]);
                     let warm = model.forward_with_sequence_id(

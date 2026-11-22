@@ -543,6 +543,13 @@ pub struct ServerStartupConfig {
     /// Unsupported K/V combinations are rejected at startup.
     pub kv_cache_mode: mlxcel_core::cache::KVCacheMode,
 
+    /// The MLA latent precision option in force (`--mla-latent-quant`,
+    /// `MLXCEL_MLA_LATENT_QUANT`; issue #3179). `auto` is the default gate.
+    /// An explicit value has already been applied to [`Self::kv_cache_mode`]
+    /// for a model that holds an MLA latent: that mode is `int8` storage when
+    /// the latent is quantized (at 8 or 4 bits) and fp16 otherwise.
+    pub mla_latent_quant: mlxcel_core::mla::MlaLatentQuant,
+
     /// Operator-facing lines raised before [`initialize_server_logging`]
     /// installs a tracing subscriber (#2697, #2722), so a `tracing::` macro at
     /// the point they arise is written to nothing. They come from the
@@ -863,6 +870,7 @@ impl Default for ServerStartupConfig {
             chat_template_kwargs: None,
             prompt_cache: super::prompt_cache::PromptCacheConfig::default(),
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
+            mla_latent_quant: mlxcel_core::mla::MlaLatentQuant::Auto,
             startup_notices: Vec::new(),
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
@@ -3702,6 +3710,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     tracing::info!(
         kv_cache_mode = %startup.kv_cache_mode,
         kv_bits = startup.batch_kv_quant.bits,
+        mla_latent_quant = %startup.mla_latent_quant,
         "effective KV cache mode"
     );
 

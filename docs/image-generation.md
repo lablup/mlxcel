@@ -2,7 +2,7 @@
 
 mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI-compatible `POST /v1/images/generations` and `POST /v1/images/edits` server routes. This page covers the model-independent runtime in `src/imagegen/`: the request types, the checkpoint probe, the scheduler, latent packing, the FLUX.2 VAE, the Z-Image DiT blocks, PNG output, the CLI, the server routes, and how a model issue registers a family.
 
-**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)), `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)), `ernie_image` ([ERNIE-Image](#ernie-image-ernie_image)), `mage_flow` ([Mage-Flow](#mage-flow-mage_flow)), `qwen_image` ([Qwen-Image](#qwen-image-qwen_image)), `ideogram4` ([Ideogram 4](#ideogram-4-ideogram4)), `ming_image` ([Ming-Image](#ming-image-ming_image)) and `llada_image` ([LLaDA-Image](#llada-image-llada_image)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
+**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)), `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)), `ernie_image` ([ERNIE-Image](#ernie-image-ernie_image)), `mage_flow` ([Mage-Flow](#mage-flow-mage_flow)), `qwen_image` ([Qwen-Image](#qwen-image-qwen_image)), `ideogram4` ([Ideogram 4](#ideogram-4-ideogram4)), `ming_image` ([Ming-Image](#ming-image-ming_image)), `llada_image` ([LLaDA-Image](#llada-image-llada_image)) and `moss_image` ([MOSS-Image](#moss-image-moss_image)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
 
 | Family | Checkpoints | Tasks | Default steps / guidance |
 |--------|-------------|-------|--------------------------|
@@ -15,6 +15,7 @@ mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI
 | `ideogram4` | `ideogram-ai/ideogram-4-fp8` (license-gated, per-row FP8) | generate | `V4_DEFAULT_20`: 20 / 7.0 (3.0 for the last two steps) |
 | `ming_image` | Ming-Image-0.1-Design (`inclusionAI/Ming-Image-0.1-Design` tree, or the `nativ-community` MLX 8-bit and 4-bit conversions) | generate (RGBA output) | 12 / 1.0 (guidance fixed) |
 | `llada_image` | inclusionAI LLaDA-Image-Turbo, LLaDA-Image (Diffusers bf16 tree) | generate (text or VQ prior), edit (one source image) | Turbo 4 / 1.0; base 50 / 5.0 |
+| `moss_image` | OpenMOSS MOSS-Image SFT, Base (MLX 8-bit and compact tiers, or the Diffusers tree) | generate | 50 / 3.0 |
 
 ## Probe
 
@@ -557,6 +558,32 @@ MLX_ENABLE_TF32=0 MLXCEL_LLADA_IMAGE_ORACLE_DIR=<oracle --out> \
 ```
 
 The tests read `models/mlx/llada-image-turbo` and `models/mlx/llada-image` (`MLXCEL_LLADA_IMAGE_TURBO`, `MLXCEL_LLADA_IMAGE_BASE`); `MLXCEL_LLADA_IMAGE_OUT` saves the PNGs. No fixture is committed (the oracle stores full-resolution tensors per case); without `MLXCEL_LLADA_IMAGE_ORACLE_DIR` the tests skip every case.
+
+## MOSS-Image (`moss_image`)
+
+`src/imagegen/moss_image/` ports `felix-ab/moss-image-mlx` (itself an operation-by-operation mirror of OpenMOSS's `pipeline_moss_image.py`) for the OpenMOSS MOSS-Image SFT checkpoint, a 5B bilingual text-rendering DiT with JSON layout control. It loads the published MLX tiers (`VisualInference/MOSS-Image-SFT-MLX-8bit`, `-compact`, and the Base variant) and the original Diffusers tree.
+
+Components: the Qwen3.5-9B language backbone as the prompt conditioner (`text_encoder/`, through mlxcel's Qwen3.5 loader; the checkpoint's vision tower is skipped), the 42-block, 3072-wide single-stream transformer with one shared adaLN modulation per timestep, a 4-axis RoPE (row, time, height, width) over a joint image-then-text sequence, per-head RMS-normalised q/k and SiTU-gated feed-forwards, and the FLUX.2 VAE decoder (`vae/`, through the shared `Flux2Vae`; the distilled decoder's 96/192/384/384 widths come from `decoder_block_out_channels`).
+
+| Checkpoint | Steps / guidance | Schedule |
+|------------|------------------|----------|
+| SFT MLX 8-bit / compact, Base MLX 8-bit | 50 / 3.0 | flow-match Euler on sigmas snapped to the 1000-step training grid, shift 5, f32 latents; the negative branch skips block 22 |
+
+- **Modes.** Text-to-image only. The checkpoint has no editing task, so a request with `task: edit` is refused before anything loads.
+- **Sizes.** Width and height are positive multiples of 16 between 256 and 2048; the official size is 1024x1024.
+- **Prompt.** The chat template renders to `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n` (one user message, generation prompt, `enable_thinking=True`), and the conditioner's **final-norm** hidden states are the transformer's context, truncated at 4096 tokens.
+- **Layout prompts.** A JSON layout (`[y_min, x_min, y_max, x_max]` boxes, canvas centre as origin) is part of the prompt, not a separate option.
+- **Memory.** The three stages load and free in turn (conditioner, then transformer, then VAE decoder) so a request peaks at the largest stage rather than their sum: about 9.3 GB at the 8-bit tier and 7.4 GB at the compact tier for a 1024x1024 image. `n > 1` samples every image before the VAE loads, to keep that staging.
+- **VAE decode.** As in the reference, the sampled latents are batch-norm denormalized, unpatchified and decoded (`Flux2Vae::decode_packed_latents`). The published MLX tiers ship the FLUX.2 VAE decoder alone and store its statistics as top-level `running_mean` / `running_var` rather than `bn.*`; the VAE loader reads either spelling, and a decoder with neither is refused.
+
+### MOSS-Image deviations from the reference
+
+- **Noise.** The reference draws the initial latents from a torch CPU generator so the official seeds reproduce bit for bit. This port draws from MLX's generator with the same seed: the distribution and all downstream math agree, but a given seed does not reproduce the reference's exact image.
+- **No `precise` mode.** The reference's optional fp32 residual stream is not implemented; the port runs in the checkpoint dtype, which is the mode the published 8-bit and compact tiers were validated in by the reference port.
+
+### MOSS-Image verification
+
+No numeric parity against the reference has been measured, and no checkpoint-gated test exists in this module yet. The contributor rendered `VisualInference/MOSS-Image-SFT-MLX-compact` end to end through `mlxcel-server --image-model` on an M4 (512x512, 12 steps, CFG 3.0 renders legible prompt text). The same checkpoint also renders on ROCm (gfx1151, `mlxcel generate-image`, 512x512, 12 steps, CFG 3.0, about 2 minutes including load); with the same seed, the decode before the batch-norm denormalization fix gave a washed-out image (pixel std 37.6) and the fixed decode gives full contrast (pixel std 64.4) with the prompt text spelled correctly. The unit tests cover the schedule, the probe, the chat template, the RoPE table, and the load-time weight shape checks, which turn a mis-shaped or mismatched checkpoint into an error before any MLX op runs.
 
 ## Verification
 

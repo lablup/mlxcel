@@ -976,6 +976,10 @@ fn bench_one_pairing(p: &Pairing, prompt: &str, batch: usize, max_tokens: usize)
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    // These binaries take no `--mla-latent-quant` flag but load MLA models,
+    // so fix the option from `MLXCEL_MLA_LATENT_QUANT` before anything
+    // resolves a KV cache mode; a bad value is a startup error (issue #3179).
+    mlxcel::cli::mla_latent_option::init_mla_latent_quant(None)?;
 
     // On a CUDA build, raise MLX_CUDA_GRAPH_CACHE_SIZE before any model load
     // or MLX op so a long-lived speculative sweep (many distinct draft/verify

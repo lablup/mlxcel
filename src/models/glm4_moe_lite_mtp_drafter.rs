@@ -64,6 +64,7 @@
 use std::path::Path;
 use std::time::Instant;
 
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::drafter::{
     DraftStepProfile, Drafter, DrafterError, DrafterKind, SharedKv, draft_step_profiling_enabled,
 };
@@ -105,6 +106,10 @@ pub struct Glm4MoeLiteMtpDraftModel {
 
     /// The block's own KV cache: one entry per target position consumed.
     cache: KVCache,
+    /// Mode the block's cache is built in: the target's first-layer mode,
+    /// read at `bind`, so an `int8` target keeps the drafter's MLA latent as
+    /// the same affine int8 latent (#3161). FP16 until bound.
+    cache_mode: KVCacheMode,
     /// Set by `bind`; nothing is borrowed, the flag only enforces the
     /// validate-then-bind call order every caller follows.
     bound: bool,
@@ -243,6 +248,7 @@ impl Glm4MoeLiteMtpDraftModel {
             shared_head_norm,
             lm_head,
             cache: KVCache::new(),
+            cache_mode: KVCacheMode::Fp16,
             bound: false,
             seed_token: None,
             seed_hidden: None,
@@ -280,7 +286,7 @@ impl Glm4MoeLiteMtpDraftModel {
     }
 
     fn clear_runtime_state(&mut self) {
-        self.cache = KVCache::new();
+        self.cache = KVCache::new_with_mode(self.cache_mode);
         self.seed_token = None;
         self.seed_hidden = None;
         self.next_position = 0;
@@ -384,6 +390,16 @@ impl Drafter for Glm4MoeLiteMtpDraftModel {
     /// pair the drafter with a foreign target.
     fn bind(&mut self, target: &dyn LanguageModel) -> Result<(), DrafterError> {
         self.validate_target_compat(target)?;
+        let mode = target
+            .kv_cache_layer_modes()
+            .and_then(|modes| modes.first().copied())
+            .unwrap_or(KVCacheMode::Fp16);
+        if mode != self.cache_mode {
+            self.cache_mode = mode;
+            // A bind lands before any draft step of a session, so the cache
+            // holds nothing worth keeping when the mode changes.
+            self.cache = KVCache::new_with_mode(mode);
+        }
         self.bound = true;
         Ok(())
     }

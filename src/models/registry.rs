@@ -192,6 +192,10 @@ const TEXT_IMAGE_VIDEO_AUDIO: &[Modality] = &[
 ];
 
 const KV_FP16: &[KvMode] = &[KvMode::Fp16];
+/// The quantized-latent families (`DeepSeekV3Attention`, #3160; Kimi Linear and
+/// Kimi K3, #3162; LongCat, #3161): an affine int8 latent with fp16 rope keys,
+/// no Turbo mode (`mla::QUANTIZED_LATENT_FAMILIES`).
+const KV_INT8: &[KvMode] = &[KvMode::Fp16, KvMode::Int8];
 const KV_TURBO: &[KvMode] = &[KvMode::Fp16, KvMode::Int8, KvMode::Turbo4];
 const NO_DRAFTERS: &[Drafter] = &[];
 const MTP: &[Drafter] = &[Drafter::Mtp];
@@ -609,6 +613,27 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         drafters: NO_DRAFTERS,
         kv_modes: KV_FP16,
     },
+    // Rendered end to end on Metal (Apple M4) and ROCm (gfx1151), with no
+    // numeric parity against the reference, so every backend is partial.
+    StandaloneArchitectureFamily {
+        id: "moss_image",
+        display_name: "MOSS-Image",
+        category: "image generation",
+        model_types: &["moss_image"],
+        aliases: &["moss-image", "moss-image-sft"],
+        runtimes: IMAGE_GENERATE,
+        modalities_in: TEXT,
+        output: OutputKind::Image,
+        backends: BackendSupport {
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Partial,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
 ];
 
 const TENSOR_PARALLEL_MODEL_TYPES: &[ModelType] = &[
@@ -928,6 +953,8 @@ impl ModelType {
             drafters,
             kv_modes: if supports_turbo_kv(self) {
                 KV_TURBO
+            } else if stores_quantized_latent(self) {
+                KV_INT8
             } else {
                 KV_FP16
             },
@@ -1091,7 +1118,8 @@ pub fn build_architecture_registry(mlxcel_version: &'static str) -> Architecture
     }
 }
 
-fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
+/// The `config.json` `model_type` strings that select `model_type`.
+pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
     match model_type {
         ModelType::Llama => &["llama", "mistral", "xverse"],
         ModelType::IQuestCoder => &["iquestcoder"],
@@ -1323,6 +1351,27 @@ fn is_vlm_registry_type(model_type: ModelType) -> bool {
             | "Muse VLM"
             | "Step VLM"
             | "Other VLM"
+    )
+}
+
+/// Families whose runtime accepts `int8` through the quantized MLA latent
+/// (`mlxcel_core::mla::QUANTIZED_LATENT_FAMILIES`), without a Turbo mode.
+/// This is the default gate: the advertised modes do not follow an explicit,
+/// experimental `--mla-latent-quant` (issue #3179), which can store a
+/// quantized latent on a family not listed here.
+fn stores_quantized_latent(model_type: ModelType) -> bool {
+    matches!(
+        model_type,
+        ModelType::DeepSeekV3
+            | ModelType::KimiVL
+            | ModelType::KimiK25
+            | ModelType::YoutuLLM
+            | ModelType::YoutuVLM
+            | ModelType::KimiLinear
+            | ModelType::KimiK3
+            | ModelType::KimiK3VLM
+            | ModelType::LongcatFlash
+            | ModelType::LongcatFlashNgram
     )
 }
 
@@ -1790,24 +1839,43 @@ mod tests {
     #[test]
     fn mla_latent_cache_families_report_fp16_only_kv_modes() {
         for model_type in [
-            ModelType::DeepSeekV3,
             ModelType::DeepSeekV32,
             ModelType::Glm4MoeLite,
             ModelType::GlmMoeDsa,
-            ModelType::KimiLinear,
-            ModelType::KimiK3,
-            ModelType::KimiK3VLM,
-            ModelType::KimiVL,
-            ModelType::KimiK25,
-            ModelType::YoutuLLM,
-            ModelType::YoutuVLM,
-            ModelType::LongcatFlashNgram,
         ] {
             assert_eq!(
                 family(model_type).kv_modes,
                 KV_FP16,
                 "{model_type:?} should not advertise quantized KV cache modes"
             );
+        }
+    }
+
+    /// The `DeepSeekV3Attention` families accept `int8` (the affine latent) and
+    /// no Turbo mode, and every one of their config keys is in
+    /// `mla::QUANTIZED_LATENT_FAMILIES` so the advertised list matches runtime.
+    #[test]
+    fn quantized_latent_families_report_fp16_and_int8_kv_modes() {
+        for model_type in [
+            ModelType::DeepSeekV3,
+            ModelType::KimiVL,
+            ModelType::KimiK25,
+            ModelType::YoutuLLM,
+            ModelType::YoutuVLM,
+            ModelType::KimiLinear,
+            ModelType::KimiK3,
+            ModelType::KimiK3VLM,
+            ModelType::LongcatFlash,
+            ModelType::LongcatFlashNgram,
+        ] {
+            let family = family(model_type);
+            assert_eq!(family.kv_modes, KV_INT8, "{model_type:?}");
+            for key in family.model_types {
+                assert!(
+                    mlxcel_core::mla::stores_quantized_latent_pair(key),
+                    "{model_type:?} key {key} is not a quantized latent family"
+                );
+            }
         }
     }
 
@@ -1828,11 +1896,13 @@ mod tests {
                 "{model_type:?} honors --kv-cache-mode in its model-owned caches"
             );
         }
+        // LongCat's model-owned caches hold the affine int8 latent and no
+        // Turbo mode (#3161).
         for model_type in [ModelType::LongcatFlash, ModelType::LongcatFlashNgram] {
             assert_eq!(
                 family(model_type).kv_modes,
-                KV_FP16,
-                "{model_type:?} must stay FP16 only"
+                KV_INT8,
+                "{model_type:?} holds fp16 or the int8 latent only"
             );
         }
     }

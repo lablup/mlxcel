@@ -14,7 +14,7 @@
 
 use super::sanitize::{
     load_gemma4_text_weights_with_backing, load_text_weights, load_weights_from_dir_with_filter,
-    sanitize_config_json, sanitize_tied_embeddings,
+    modelopt_nvfp4_group_size, sanitize_config_json, sanitize_tied_embeddings,
 };
 use crate::test_support::env_lock::env_lock;
 use mlxcel_core::weights::{WeightMap, WeightTransform};
@@ -2113,6 +2113,242 @@ fn other_modelopt_algorithms_are_not_repacked_as_nvfp4() {
     }
 }
 
+/// The same linear as [`write_modelopt_linear_fixture`] as compressed-tensors
+/// (llm-compressor) writes it: the packed plane under `weight_packed`, the
+/// block scales unchanged, the tensor scale as its reciprocal under
+/// `weight_global_scale`, and an activation scale this runtime does not use.
+/// `global_scale` 2.0 is the twin of the ModelOpt fixture's `weight_scale_2`
+/// of 0.5.
+fn write_compressed_tensors_linear_fixture(
+    dir: &Path,
+    format: &str,
+    weight_bits: i64,
+    global_scale: f32,
+) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&json!({
+            "model_type": "qwen2",
+            "tie_word_embeddings": false,
+            "quantization_config": {
+                "quant_method": "compressed-tensors",
+                "format": format,
+                "quantization_status": "compressed",
+                "config_groups": {"group_0": {
+                    "format": format,
+                    "targets": ["Linear"],
+                    "weights": {
+                        "num_bits": weight_bits, "type": "float", "group_size": 16,
+                        "strategy": "tensor_group", "symmetric": true
+                    },
+                    "input_activations": {
+                        "num_bits": 4, "type": "float", "group_size": 16,
+                        "strategy": "tensor_group", "dynamic": "local"
+                    }
+                }},
+                "ignore": ["lm_head"]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let base = "model.layers.0.mlp.gate_proj";
+    let one = |value: f32| OwnedTensor {
+        dtype: SafeTensorDtype::F32,
+        shape: vec![1],
+        data: value.to_le_bytes().to_vec(),
+    };
+    write_safetensors(
+        &dir.join("model.safetensors"),
+        &[
+            (
+                &format!("{base}.weight_packed"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::U8,
+                    shape: vec![8, 32],
+                    data: (0..8 * 32).map(|i| (i * 37 + 19) as u8).collect(),
+                },
+            ),
+            (
+                &format!("{base}.weight_scale"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F8_E4M3,
+                    shape: vec![8, 4],
+                    data: (0..8 * 4).map(|i| [0x20, 0x28, 0x30][i % 3]).collect(),
+                },
+            ),
+            (&format!("{base}.weight_global_scale"), one(global_scale)),
+            (&format!("{base}.input_global_scale"), one(37.5)),
+        ],
+    );
+}
+
+/// A compressed-tensors `nvfp4-pack-quantized` checkpoint holds ModelOpt's
+/// NVFP4 triplet under other names (`weight_packed`, and the tensor scale as
+/// its reciprocal in `weight_global_scale`; compressed-tensors' own ModelOpt
+/// converter is that rename). It was not recognized, so a Qwen3 export such as
+/// `mgoin/Qwen3-0.6B-NVFP4` failed with `Weight not found`. It now loads, and
+/// to the same bytes as its ModelOpt twin.
+#[test]
+fn a_compressed_tensors_nvfp4_checkpoint_loads_as_its_modelopt_twin() {
+    if !backend_runs_native_nvfp4(
+        "a_compressed_tensors_nvfp4_checkpoint_loads_as_its_modelopt_twin",
+    ) {
+        return;
+    }
+    let _env_guard = env_lock();
+    let _nvfp4_env = EnvRestore::clear(NVFP4_REPACK_ENV_KEYS);
+    let base = "model.layers.0.mlp.gate_proj";
+    let input: Vec<f32> = (0..64).map(|i| ((i % 13) as f32 - 6.0) * 0.03).collect();
+    let x = mlxcel_core::from_slice_f32(&input, &[1, 1, 64]);
+
+    let forward = |dir: &Path| {
+        let weights = load_text_weights(dir, None).unwrap();
+        for gone in [
+            "weight_packed",
+            "weight_global_scale",
+            "input_global_scale",
+            "weight_scale",
+            "weight_scale_2",
+        ] {
+            assert!(!weights.contains_key(&format!("{base}.{gone}")), "{gone}");
+        }
+        assert!(weights.contains_key(&format!("{base}.global_scale")));
+        let linear = mlxcel_core::layers::UnifiedLinear::from_weights(&weights, base, 16, 4)
+            .expect("the repacked plane loads");
+        let plane = linear.as_quantized_weight().expect("a packed plane");
+        assert_eq!(
+            (plane.mode.as_str(), plane.group_size, plane.bits),
+            ("nvfp4", 16, 4)
+        );
+        let y = linear.forward(&x);
+        mlxcel_core::eval(&y);
+        mlxcel_core::array_to_raw_bytes(&y)
+    };
+
+    let modelopt = temp_model_dir("ct_nvfp4_twin_modelopt");
+    write_modelopt_linear_fixture(&modelopt, "NVFP4");
+    let compressed = temp_model_dir("ct_nvfp4_twin_compressed");
+    write_compressed_tensors_linear_fixture(&compressed, "nvfp4-pack-quantized", 4, 2.0);
+    assert_eq!(
+        forward(&compressed),
+        forward(&modelopt),
+        "the two producers write one weight format"
+    );
+
+    // Another tensor scale is another output: the reciprocal is applied.
+    let rescaled = temp_model_dir("ct_nvfp4_twin_rescaled");
+    write_compressed_tensors_linear_fixture(&rescaled, "nvfp4-pack-quantized", 4, 4.0);
+    assert_ne!(forward(&rescaled), forward(&modelopt));
+
+    for dir in [modelopt, compressed, rescaled] {
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// Only a declared `nvfp4-pack-quantized` checkpoint with 4-bit group-16
+/// weights is read that way. Other compressed-tensors formats, and an NVFP4
+/// declaration whose weights are not 4-bit, keep their tensors as they are.
+#[test]
+fn other_compressed_tensors_declarations_are_not_read_as_nvfp4() {
+    let _env_guard = env_lock();
+    let base = "model.layers.0.mlp.gate_proj";
+    for (format, bits) in [
+        ("pack-quantized", 4),
+        ("mixed-precision", 4),
+        ("nvfp4-pack-quantized", 8),
+    ] {
+        let dir = temp_model_dir(&format!("ct_other_{format}_{bits}"));
+        write_compressed_tensors_linear_fixture(&dir, format, bits, 2.0);
+        let weights = load_text_weights(&dir, None).unwrap();
+        for kept in ["weight_packed", "weight_global_scale", "input_global_scale"] {
+            assert!(
+                weights.contains_key(&format!("{base}.{kept}")),
+                "{format} {bits}: {kept}"
+            );
+        }
+        assert!(
+            !weights.contains_key(&format!("{base}.weight")),
+            "{format} {bits}"
+        );
+        drop(weights);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// Laguna reads compressed-tensors NVFP4 planes in its own sanitizer, which
+/// stacks the per-expert `weight_packed` planes (issue #1347). The text funnel
+/// leaves them under those names for it, as it did before it knew the format.
+#[test]
+fn load_text_weights_leaves_laguna_compressed_tensors_planes_to_its_sanitizer() {
+    let _env_guard = env_lock();
+    let base = "model.layers.0.mlp.gate_proj";
+    let dir = temp_model_dir("ct_nvfp4_laguna");
+    write_compressed_tensors_linear_fixture(&dir, "nvfp4-pack-quantized", 4, 2.0);
+    let config_path = dir.join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["model_type"] = json!("laguna");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    let weights = load_text_weights(&dir, None).unwrap();
+    for kept in ["weight_packed", "weight_scale", "weight_global_scale"] {
+        assert!(weights.contains_key(&format!("{base}.{kept}")), "{kept}");
+    }
+    assert!(!weights.contains_key(&format!("{base}.weight")));
+    drop(weights);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The tensor scale is stored as a reciprocal; one that cannot be inverted
+/// leaves the layer undecodable, so the load says so.
+#[test]
+fn a_compressed_tensors_global_scale_that_cannot_be_inverted_fails_the_load() {
+    let _env_guard = env_lock();
+    for global_scale in [0.0, f32::NAN, f32::INFINITY] {
+        let dir = temp_model_dir("ct_nvfp4_bad_global_scale");
+        write_compressed_tensors_linear_fixture(&dir, "nvfp4-pack-quantized", 4, global_scale);
+        let error = match load_text_weights(&dir, None) {
+            Ok(_) => panic!("{global_scale}: the load must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("weight_global_scale") && error.contains("model.layers.0.mlp.gate_proj"),
+            "{global_scale}: {error}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// A family that reads its NVFP4 group size from `quantization_config` (Qwen3,
+/// Llama and others) gets 16 for a compressed-tensors declaration as for a
+/// ModelOpt one.
+#[test]
+fn a_compressed_tensors_nvfp4_config_declares_the_nvfp4_group_size() {
+    let declared = |format: &str, bits: i64| {
+        json!({
+            "quant_method": "compressed-tensors",
+            "format": format,
+            "config_groups": {"group_0": {"weights": {
+                "num_bits": bits, "type": "float", "group_size": 16
+            }}}
+        })
+    };
+    assert_eq!(
+        modelopt_nvfp4_group_size(Some(&declared("nvfp4-pack-quantized", 4))),
+        Some(16)
+    );
+    for other in [
+        declared("pack-quantized", 4),
+        declared("float-quantized", 8),
+        declared("nvfp4-pack-quantized", 8),
+        json!({ "quant_method": "compressed-tensors" }),
+    ] {
+        assert_eq!(modelopt_nvfp4_group_size(Some(&other)), None, "{other}");
+    }
+}
+
 /// mlx-lm's per-expert tensor scale is resolved in the funnel against the
 /// config flag, on the file's key names (issue #2351).
 #[test]
@@ -2156,4 +2392,144 @@ fn load_text_weights_resolves_flagged_native_global_scales() {
         drop(weights);
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+// The same through the loader: a ModelOpt NVFP4 triplet on disk becomes a
+// packed weight, block scales and a `global_scale`, and the Gemma 3 MLP built
+// from them has to apply that scale for each projection.
+#[test]
+fn a_disk_loaded_gemma3_mlp_preserves_modelopt_tensor_scales() {
+    if !backend_runs_native_nvfp4("a_disk_loaded_gemma3_mlp_preserves_modelopt_tensor_scales") {
+        return;
+    }
+    let _env_guard = env_lock();
+    let _nvfp4_env = EnvRestore::clear(NVFP4_REPACK_ENV_KEYS);
+    let prefix = "model.layers.0.mlp";
+    let config = serde_json::json!({
+        "model_type": "gemma3_text", "tie_word_embeddings": false,
+        "hidden_size": 64, "intermediate_size": 128,
+        // Explicit native metadata separates scale loss from the separate
+        // ModelOpt-only group-size/default-mode question. No public export
+        // is claimed to have exactly this synthetic config.
+        "quantization": {"group_size": 16, "bits": 4, "mode": "nvfp4"},
+        "quantization_config": {
+            "quant_method": "modelopt", "quant_algo": "NVFP4",
+            "config_groups": {"group_0": {"weights": {
+                "num_bits": 4, "type": "float", "group_size": 16
+            }}}
+        }
+    });
+    let args: crate::models::gemma3::ModelArgs = serde_json::from_value(config.clone()).unwrap();
+    let input: Vec<f32> = (0..128).map(|i| ((i % 13) as f32 - 6.0) * 0.03).collect();
+    let x = mlxcel_core::from_slice_f32(&input, &[1, 2, 64]);
+    let mut failed = Vec::new();
+    for factors in [
+        [1.0_f32, 1.0, 1.0],
+        [0.5, 1.0, 1.0],
+        [1.0, 2.0, 1.0],
+        [1.0, 1.0, 3.25],
+        [0.5, 2.0, 3.25],
+    ] {
+        let dir = temp_model_dir("gemma3_mlp_tensor_scales");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let mut tensors = Vec::new();
+        for (index, (name, out, input)) in [
+            ("gate_proj", 128_usize, 64_usize),
+            ("up_proj", 128, 64),
+            ("down_proj", 64, 128),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let base = format!("{prefix}.{name}");
+            tensors.push((
+                format!("{base}.weight"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::U8,
+                    shape: vec![out, input / 2],
+                    data: (0..out * input / 2)
+                        .map(|i| (i * 37 + index * 19) as u8)
+                        .collect(),
+                },
+            ));
+            tensors.push((
+                format!("{base}.weight_scale"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F8_E4M3,
+                    shape: vec![out, input / 16],
+                    data: (0..out * input / 16)
+                        .map(|i| [0x20, 0x28, 0x30][i % 3])
+                        .collect(),
+                },
+            ));
+            tensors.push((
+                format!("{base}.weight_scale_2"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F32,
+                    shape: vec![],
+                    data: factors[index].to_le_bytes().to_vec(),
+                },
+            ));
+        }
+        let views: Vec<_> = tensors
+            .iter()
+            .map(|(k, t)| (k.as_str(), t.clone()))
+            .collect();
+        write_safetensors(&dir.join("model.safetensors"), &views);
+        let weights = load_text_weights(&dir, None).expect("ModelOpt triplet funnel");
+        let mlp = crate::models::gemma3::MLP::from_weights(&weights, &args, prefix)
+            .expect("Gemma 3 MLP from disk-repacked tensors");
+        for (index, linear) in [&mlp.gate_proj, &mlp.up_proj, &mlp.down_proj]
+            .into_iter()
+            .enumerate()
+        {
+            let q = linear.quantized_weight().expect("native quantized plane");
+            assert_eq!((q.group_size, q.bits, q.mode.as_str()), (16, 4, "nvfp4"));
+            let scale = q.global_scale.as_ref().expect("disk sidecar survived");
+            mlxcel_core::eval(scale);
+            assert_eq!(mlxcel_core::item_f32(scale), factors[index]);
+        }
+        let gate = mlp.gate_proj.forward(&x);
+        let up = mlp.up_proj.forward(&x);
+        let activated = mlxcel_core::compiled_geglu_approx_activation(&gate, &up);
+        let expected = mlp.down_proj.forward(&activated);
+        let actual = mlp.forward(&x);
+        let mut values = Vec::new();
+        for array in [&actual, &expected] {
+            let f32_array = mlxcel_core::astype(array, dtype::FLOAT32);
+            mlxcel_core::eval(&f32_array);
+            values.push(
+                mlxcel_core::array_to_raw_bytes(&f32_array)
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(values[0].len(), values[1].len());
+        assert!(values.iter().flatten().all(|v| v.is_finite()));
+        let max_abs = values[0]
+            .iter()
+            .zip(&values[1])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!(
+            "disk-loaded MLP scales={factors:?} max_abs={max_abs:e} fixture={}",
+            dir.display()
+        );
+        if max_abs > 1e-5 {
+            failed.push((factors, max_abs));
+        }
+        drop(mlp);
+        drop(weights);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    assert!(
+        failed.is_empty(),
+        "disk-loaded tensor-scale mismatches: {failed:?}"
+    );
 }

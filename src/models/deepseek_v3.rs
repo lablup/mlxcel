@@ -245,6 +245,17 @@ impl DeepSeekV3Attention {
         self
     }
 
+    /// The layer's MLA shape, for the latent cache view.
+    fn geometry(&self) -> mlxcel_core::mla::MlaGeometry {
+        crate::models::mla_batched::mla_geometry(
+            self.num_heads,
+            self.kv_lora_rank,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        )
+    }
+
     pub fn forward(
         &self,
         x: &MlxArray,
@@ -313,8 +324,18 @@ impl DeepSeekV3Attention {
         // Expand kv_latent for caching: [B, L, kv_lora_rank] → [B, 1, L, kv_lora_rank]
         let kv_latent = mlxcel_core::expand_dims(&kv_latent, 1);
 
-        // Cache stores (kv_latent, k_pe) for memory efficiency
-        let (kv_latent, k_pe) = cache.update_and_fetch(kv_latent, k_pe);
+        // Cache stores (kv_latent, k_pe) for memory efficiency. An `int8`
+        // cache stores the latent as the affine group-64 triple and hands back
+        // a quantized window; the fresh chunk is quantized before this step
+        // reads it, so a prefill reads what later decode steps read (#3160).
+        let window = crate::models::mla_batched::store_latent_step(
+            cache,
+            self.geometry(),
+            kv_latent,
+            k_pe,
+            "DeepSeekV3Attention",
+            true,
+        );
 
         // Cost-model gate (issue #2408): one query is always absorbed, and a
         // multi-token step behind a long enough cache can be cheaper absorbed
@@ -336,6 +357,40 @@ impl DeepSeekV3Attention {
                 mlxcel_core::mla::MlaDecodePath::Decompressed
             });
         }
+
+        // A quantized window's one absorbed query goes to
+        // `quantized_absorbed_attention`, which runs the fused kernel's
+        // quantized variant where it applies (Metal, unmasked, up to
+        // `FUSED_DECODE_QUANTIZED_MAX_KEYS` keys, #3156; records
+        // `AbsorbedFused`) and the #3155 composed decode on the packed rows
+        // otherwise (records `AbsorbedComposed`). Every other step over a
+        // quantized window dequantizes it once and runs the fp16 code below.
+        let (kv_latent, k_pe) = match window {
+            mlxcel_core::mla::LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } if absorbed && l == 1 => {
+                let q_projected = self.embed_q.forward(&q_nope);
+                let output = mlxcel_core::mla::quantized_absorbed_attention(
+                    &q_projected,
+                    &q_pe,
+                    &ckv_q,
+                    &scales,
+                    &biases,
+                    &kpe,
+                    bits,
+                    group_size,
+                    self.scale,
+                    mask,
+                );
+                return self.project_attention_output(&self.unembed_out.forward(&output), b, l);
+            }
+            window => window.into_dense(),
+        };
 
         // MLA attention: absorbed or materializing, chosen by the cost model
         // above rather than by the query count alone.
@@ -460,11 +515,13 @@ impl DeepSeekV3Attention {
             }
         };
 
-        // Transpose back and reshape
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
-        let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
+        self.project_attention_output(&output, b, l)
+    }
 
-        // Output projection
+    /// `[B, H, L, v_head_dim]` attention output to `[B, L, hidden]`.
+    fn project_attention_output(&self, output: &MlxArray, b: i32, l: i32) -> UniquePtr<MlxArray> {
+        let output = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
         self.o_proj.forward(&output)
     }
 
@@ -525,7 +582,16 @@ impl DeepSeekV3Attention {
         );
         let q_latent = self.embed_q.forward(&q_nope);
         let output = crate::models::mla_batched::mla_latent_decode_rows(
-            &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale, None,
+            "DeepSeekV3Attention",
+            true,
+            self.geometry(),
+            &q_latent,
+            &q_pe,
+            &kv_latent,
+            &k_pe,
+            caches,
+            self.scale,
+            None,
         );
         let output = self.unembed_out.forward(&output);
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
@@ -706,9 +772,19 @@ impl MoEGate {
         // Add correction bias
         let scores = mlxcel_core::add(&scores, &self.e_score_correction_bias);
 
-        // Group-based expert masking (zero out non-selected groups)
+        // Group-based expert masking (zero out non-selected groups).
+        // `group_mask_scores` takes `[tokens, num_experts]`; the decoder hands
+        // this gate `[B, L, hidden]`, so the scores are flattened around the
+        // call, as DeepSeek V3.2's gate does. Unflattened, rank-3 scores were
+        // skipped with a warning and every token routed as if the model
+        // declared no groups (DeepSeek-V3 / R1: `n_group` 8, `topk_group` 4).
         let scores = if self.n_group > 1 {
-            super::switch_layers::group_mask_scores(&scores, self.n_group, self.topk_group)
+            let shape = mlxcel_core::array_shape(&scores);
+            let n_experts = shape.last().copied().unwrap_or(1);
+            let flat = mlxcel_core::reshape(&scores, &[-1, n_experts]);
+            let masked =
+                super::switch_layers::group_mask_scores(&flat, self.n_group, self.topk_group);
+            mlxcel_core::reshape(&masked, &shape)
         } else {
             scores
         };
@@ -1587,6 +1663,10 @@ impl LanguageModel for DeepSeekV3Model {
 }
 
 #[cfg(test)]
+#[path = "deepseek_v3_latent_tests.rs"]
+mod latent_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
@@ -1640,7 +1720,7 @@ pub(crate) mod tests {
     // and aborted (the reported `(1,91,12288)` vs `(1,91,6,1)` crash).
 
     /// Deterministic, varied, finite fill so quantization scales stay non-degenerate.
-    fn ramp(n: usize) -> Vec<f32> {
+    pub(super) fn ramp(n: usize) -> Vec<f32> {
         (0..n)
             .map(|i| (((i * 37 + 11) % 97) as f32 - 48.0) * 0.01)
             .collect()
@@ -1712,6 +1792,46 @@ pub(crate) mod tests {
             topk_group: 1,
             norm_topk_prob: true,
         }
+    }
+
+    /// Grouped routing on the `[B, L, hidden]` input the decoder passes. Two
+    /// groups of two experts with one kept: router logits 2.0, 0.0, -2.0, 1.5
+    /// give group `{0, 1}` the larger top-two sum, so both picks come from it,
+    /// where ungrouped top-2 would take `{0, 3}`. A rank-2 input must route the
+    /// same way.
+    #[test]
+    fn moe_gate_applies_grouped_routing_to_rank_3_scores() {
+        let _runtime = crate::initialize_runtime();
+        let (e, hidden) = (4i32, 6i32);
+        let weight: Vec<f32> = [2.0f32, 0.0, -2.0, 1.5]
+            .iter()
+            .flat_map(|logit| std::iter::repeat_n(logit / hidden as f32, hidden as usize))
+            .collect();
+        let gate = MoEGate {
+            weight: mlxcel_core::from_slice_f32(&weight, &[e, hidden]),
+            n_group: 2,
+            topk_group: 1,
+            ..tiny_gate(e, hidden, 2)
+        };
+        let picked_pairs = |x: &MlxArray| -> Vec<[i32; 2]> {
+            let (indices, _) = gate.forward(x);
+            let picked = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+                &indices,
+                mlxcel_core::dtype::FLOAT32,
+            ));
+            picked
+                .chunks(2)
+                .map(|t| {
+                    let mut pair = [t[0] as i32, t[1] as i32];
+                    pair.sort_unstable();
+                    pair
+                })
+                .collect()
+        };
+        let x3 = mlxcel_core::ones(&[1, 3, hidden], mlxcel_core::dtype::FLOAT32);
+        assert_eq!(picked_pairs(&x3), vec![[0, 1]; 3], "rank-3 input");
+        let x2 = mlxcel_core::ones(&[3, hidden], mlxcel_core::dtype::FLOAT32);
+        assert_eq!(picked_pairs(&x2), vec![[0, 1]; 3], "rank-2 input");
     }
 
     #[test]
@@ -1920,7 +2040,7 @@ pub(crate) mod tests {
     /// Minimal config for a 2-layer dense backbone with a direct q projection
     /// (`q_lora_rank: None`), the exact shape of the Kimi-VL / Moonlight text
     /// config.
-    fn test_config_dense_direct_q() -> DeepSeekV3Config {
+    pub(super) fn test_config_dense_direct_q() -> DeepSeekV3Config {
         DeepSeekV3Config {
             model_type: "deepseek_v3".to_string(),
             vocab_size: 11,
@@ -1964,7 +2084,11 @@ pub(crate) mod tests {
     }
 
     /// Insert the full unquantized weight set for one direct-q decoder layer.
-    fn insert_dense_layer_weights(weights: &mut WeightMap, cfg: &DeepSeekV3Config, l: usize) {
+    pub(super) fn insert_dense_layer_weights(
+        weights: &mut WeightMap,
+        cfg: &DeepSeekV3Config,
+        l: usize,
+    ) {
         let p = format!("model.layers.{l}");
         let hidden = cfg.hidden_size as i32;
         let heads = cfg.num_attention_heads as i32;
@@ -2023,7 +2147,7 @@ pub(crate) mod tests {
         );
     }
 
-    fn tiny_dense_model_weights(cfg: &DeepSeekV3Config) -> WeightMap {
+    pub(super) fn tiny_dense_model_weights(cfg: &DeepSeekV3Config) -> WeightMap {
         let mut weights = WeightMap::new();
         let hidden = cfg.hidden_size as i32;
         let vocab = cfg.vocab_size as i32;

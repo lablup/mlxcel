@@ -112,6 +112,9 @@ fn deepseek_v2_switch_linear_rejects_quantization_params_that_would_abort_gather
 // is compiled inside `deepseek_v2`.
 
 use super::{KVCache, MLAAttention, ModelArgs, load_mla_attention};
+
+#[path = "deepseek_v2_latent_option_tests.rs"]
+mod latent_option;
 use mlxcel_core::mla::{MlaAbsorbedProjections, MlaGeometry};
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -357,6 +360,93 @@ fn absorbed_decode_preserves_each_row_layout_in_a_mixed_storage_batch() {
     assert!(
         mlxcel_core::item_bool(&mlxcel_core::allclose(&got, &want, 1e-3, 1e-3)),
         "mixed latent/expanded cache rows must match their independent paths"
+    );
+}
+
+/// An int8 cache on a latent whose rank is whole affine groups stores the
+/// latent quantized (issue #3155): the cold prefill dequantizes the window it
+/// just stored, a decode step attends on the packed rows, and a batched decode
+/// step that puts such a row between two fp16-latent rows returns what each
+/// row's own forward returns.
+#[test]
+fn int8_cache_stores_a_quantized_latent_and_decodes_like_its_own_row() {
+    let _runtime = crate::initialize_runtime();
+    let mut args = mla_test_args();
+    args.kv_lora_rank = 64;
+    let weights = mla_test_weights(&args, 0x3155);
+    let geometry = MlaGeometry {
+        num_heads: args.num_attention_heads,
+        kv_lora_rank: args.kv_lora_rank,
+        qk_nope_head_dim: args.qk_nope_head_dim,
+        qk_rope_head_dim: args.qk_rope_head_dim,
+        v_head_dim: args.v_head_dim,
+    };
+    let mut attn = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load absorbed");
+    attn.absorbed =
+        Some(MlaAbsorbedProjections::from_kv_b_proj(&attn.kv_b_proj, geometry).expect("fold"));
+
+    let mut state = 0x3155u64;
+    let mut hidden = |tokens: usize| {
+        mlxcel_core::from_slice_f32(
+            &xorshift(&mut state, tokens * HIDDEN, 0.25),
+            &[1, tokens as i32, HIDDEN as i32],
+        )
+    };
+    let histories = [hidden(2), hidden(5), hidden(3)];
+    let nexts = [hidden(1), hidden(1), hidden(1)];
+    let int8 = mlxcel_core::cache::KVCacheMode::Int8;
+    let new_caches = || {
+        [
+            KVCache::new(),
+            mlxcel_core::layers::KVCache::new_with_mode(int8),
+            KVCache::new(),
+        ]
+    };
+    let mut want_caches = new_caches();
+    let mut got_caches = new_caches();
+    for caches in [&mut want_caches, &mut got_caches] {
+        for (cache, history) in caches.iter_mut().zip(&histories) {
+            let out = attn.forward(history, None, cache);
+            mlxcel_core::eval(&out);
+        }
+    }
+    for caches in [&want_caches, &got_caches] {
+        assert!(!caches[0].holds_quantized_latent());
+        assert!(caches[1].holds_quantized_latent());
+        assert_eq!(caches[1].seq_len(), 5);
+    }
+
+    let want_rows: Vec<_> = want_caches
+        .iter_mut()
+        .zip(&nexts)
+        .map(|(cache, next)| attn.forward(next, None, cache))
+        .collect();
+    let want_refs: Vec<&MlxArray> = want_rows.iter().filter_map(|row| row.as_ref()).collect();
+    let want = mlxcel_core::concatenate_many(&want_refs, 0);
+    let next_refs: Vec<&MlxArray> = nexts.iter().filter_map(|row| row.as_ref()).collect();
+    let next = mlxcel_core::concatenate_many(&next_refs, 0);
+    let got = {
+        let [a, b, c] = &mut got_caches;
+        let mut caches = [a, b, c];
+        attn.forward_batched_decode(&next, &mut caches)
+    };
+    mlxcel_core::eval(&got);
+    assert!(
+        mlxcel_core::item_bool(&mlxcel_core::allclose(&got, &want, 1e-3, 1e-3)),
+        "a quantized-latent row in a batch must match its own forward"
+    );
+    assert_eq!(got_caches[1].seq_len(), 6);
+
+    // The quantized row stays close to the same history on an fp16 latent:
+    // the difference is the 8-bit codec, not a different attention.
+    let mut fp16 = KVCache::new();
+    let out = attn.forward(&histories[1], None, &mut fp16);
+    mlxcel_core::eval(&out);
+    let fp16_out = attn.forward(&nexts[1], None, &mut fp16);
+    let int8_out = want_rows[1].as_ref().unwrap();
+    assert!(
+        mlxcel_core::item_bool(&mlxcel_core::allclose(int8_out, &fp16_out, 5e-2, 5e-2)),
+        "int8 latent decode drifted from the fp16 latent"
     );
 }
 

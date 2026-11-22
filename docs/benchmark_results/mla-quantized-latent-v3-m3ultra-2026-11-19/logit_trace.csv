@@ -1,0 +1,7 @@
+model,shape,reference,candidate,positions,top1_disagree,decided_positions,decided_disagree,largest_gap_at_disagreement,disagreements_over_0.11,ppl_reference,ppl_candidate,mla_paths_candidate
+moonlight-16b-a3b-instruct-4bit,decode1k,fp16 latent (absorbed fused),int8 latent,512,8,192,0,0.117,1,18.6816,18.8579,decompressed=216 absorbed_composed=13824
+moonlight-16b-a3b-instruct-4bit,decode4k,fp16 latent (absorbed fused),int8 latent,256,5,58,0,0.039,0,22.9467,22.9386,decompressed=108 absorbed_composed=6912
+Kimi-VL-A3B-Thinking-4bit,decode1k,fp16 latent (absorbed fused),int8 latent,512,13,188,0,0.180,1,17.8839,18.0216,decompressed=216 absorbed_composed=13824
+Kimi-VL-A3B-Thinking-4bit,decode4k,fp16 latent (absorbed fused),int8 latent,256,3,51,0,0.094,0,35.5331,35.3756,decompressed=108 absorbed_composed=6912
+moonlight-16b-a3b-instruct-4bit,decode1k,fp16 latent (absorbed fused),fp16 latent (MLXCEL_MLA_FUSED_DECODE=0),512,1,192,0,0.023,0,18.6816,18.6685,decompressed=216 absorbed_composed=13824
+Kimi-VL-A3B-Thinking-4bit,decode1k,fp16 latent (absorbed fused),fp16 latent (MLXCEL_MLA_FUSED_DECODE=0),512,6,188,0,0.109,0,17.8839,17.8910,decompressed=216 absorbed_composed=13824

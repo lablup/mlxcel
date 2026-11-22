@@ -43,7 +43,7 @@ fn tiny_deepseek_config() -> ModelArgs {
     serde_json::from_str(json).expect("parse tiny deepseek config")
 }
 
-fn f32_weight(shape: &[i32]) -> UniquePtr<MlxArray> {
+pub(super) fn f32_weight(shape: &[i32]) -> UniquePtr<MlxArray> {
     let n: i32 = shape.iter().product();
     let data: Vec<f32> = (0..n).map(|i| 0.01 * (i as f32 + 1.0)).collect();
     mlxcel_core::from_slice_f32(&data, shape)
@@ -252,7 +252,11 @@ fn tiny_mla_config(index_topk: i32) -> ModelArgs {
 /// Synthetic (non-quantized) MLA attention weights for `{prefix}.*`, with
 /// `kv_b_proj` in checkpoint form (sanitize decomposes it into
 /// `embed_q` / `unembed_out`).
-fn synthetic_mla_weights(args: &ModelArgs, prefix: &str, with_indexer: bool) -> WeightMap {
+pub(super) fn synthetic_mla_weights(
+    args: &ModelArgs,
+    prefix: &str,
+    with_indexer: bool,
+) -> WeightMap {
     let hidden = args.hidden_size as i32;
     let q_lora = args.q_lora_rank as i32;
     let kv_lora = args.kv_lora_rank as i32;
@@ -562,9 +566,9 @@ const QUANT_BITS: i32 = 4;
 const QUANT_PREFIX: &str = "model.layers.0.mlp.experts";
 const QUANT_WEIGHT_NAME: &str = "gate_proj";
 
-/// deepseek_v32 keeps the per-expert checkpoint layout
-/// (`{prefix}.{i}.{weight_name}.*`, stacked at load) rather than the pre-stacked
-/// `switch_mlp` plane, so the fixture is built expert by expert. Pass
+/// The per-expert checkpoint layout (`{prefix}.{i}.{weight_name}.*`, stacked at
+/// load), built expert by expert; the pre-stacked `switch_mlp` plane is covered
+/// by its own test below. Pass
 /// `quantized = false` to drop the `.scales` / `.biases` tensors and take the
 /// dense `gather_mm` path.
 fn deepseek_v32_expert_weights(quantized: bool) -> WeightMap {
@@ -649,6 +653,179 @@ fn deepseek_v32_switch_linear_rejects_quantization_params_that_would_abort_gathe
         Ok(_) => {}
         Err(e) => panic!("a non-quantized expert plane must load with an unset pair: {e}"),
     }
+}
+
+/// The mlx-community conversions ship the expert plane already stacked, as
+/// `{mlp}.switch_mlp.{proj}.*` with a leading expert axis (issue #3163:
+/// DeepSeek-V3.2-4bit failed to load with `Weight not found:
+/// ...mlp.experts.0.gate_proj.weight`). It must load to the same plane the
+/// per-expert layout stacks to, and a plane with the wrong expert count is
+/// refused by name.
+#[test]
+fn deepseek_v32_switch_linear_loads_the_pre_stacked_switch_mlp_plane() {
+    let _runtime = crate::initialize_runtime();
+    let values = |a: &MlxArray| mlxcel_core::utils::array_to_vec_f32(a);
+    for quantized in [true, false] {
+        let per_expert = deepseek_v32_expert_weights(quantized);
+        let mut stacked = WeightMap::new();
+        for part in ["weight", "scales", "biases"] {
+            let planes: Vec<UniquePtr<MlxArray>> = (0..QUANT_EXPERTS)
+                .filter_map(|e| {
+                    per_expert.get(&format!("{QUANT_PREFIX}.{e}.{QUANT_WEIGHT_NAME}.{part}"))
+                })
+                .map(|w| mlxcel_core::copy(w))
+                .collect();
+            if !planes.is_empty() {
+                stacked.insert(
+                    format!("model.layers.0.mlp.switch_mlp.{QUANT_WEIGHT_NAME}.{part}"),
+                    mlxcel_core::utils::stack_arrays(&planes, 0),
+                );
+            }
+        }
+        let load = |weights: &WeightMap, experts: usize| {
+            load_switch_linear(
+                weights,
+                experts,
+                QUANT_PREFIX,
+                QUANT_WEIGHT_NAME,
+                QUANT_GROUP_SIZE,
+                QUANT_BITS,
+            )
+        };
+        let want = load(&per_expert, QUANT_EXPERTS).unwrap_or_else(|e| panic!("per-expert: {e}"));
+        let got = load(&stacked, QUANT_EXPERTS).unwrap_or_else(|e| panic!("stacked: {e}"));
+        match (got, want) {
+            (
+                super::SwitchLinear::Quantized {
+                    weight,
+                    scales,
+                    biases,
+                    ..
+                },
+                super::SwitchLinear::Quantized {
+                    weight: w,
+                    scales: s,
+                    biases: b,
+                    ..
+                },
+            ) => {
+                assert!(quantized);
+                assert_eq!(
+                    mlxcel_core::array_shape(&weight),
+                    mlxcel_core::array_shape(&w)
+                );
+                assert_eq!(values(&weight), values(&w));
+                assert_eq!(values(&scales), values(&s));
+                assert_eq!(values(&biases), values(&b));
+            }
+            (
+                super::SwitchLinear::Regular { weight },
+                super::SwitchLinear::Regular { weight: w },
+            ) => {
+                assert!(!quantized);
+                assert_eq!(values(&weight), values(&w));
+            }
+            _ => panic!("the stacked plane loaded as a different kind"),
+        }
+        let err = match load(&stacked, QUANT_EXPERTS + 1) {
+            Ok(_) => panic!("a plane with the wrong expert count must be refused"),
+            Err(e) => e,
+        };
+        assert!(err.contains("switch_mlp.gate_proj.weight"), "{err}");
+        if quantized {
+            // A scales plane with fewer experts than the weight plane is
+            // refused at load, naming the tensor.
+            let key = format!("model.layers.0.mlp.switch_mlp.{QUANT_WEIGHT_NAME}.scales");
+            let short = mlxcel_core::utils::slice_axis(&stacked[&key], 0, 0, 1);
+            let mut bad = WeightMap::new();
+            for (name, array) in stacked.iter() {
+                bad.insert(name.clone(), mlxcel_core::copy(array));
+            }
+            bad.insert(key.clone(), short);
+            let err = match load(&bad, QUANT_EXPERTS) {
+                Ok(_) => panic!("a scales plane with the wrong expert count must be refused"),
+                Err(e) => e,
+            };
+            assert!(err.contains(&key), "{err}");
+        }
+    }
+}
+
+/// A routed MoE block on a `[B, L, hidden]` input, the shape every forward
+/// hands it (issue #3163; before it, DeepSeek-V3.2-4bit aborted in the first
+/// MoE layer). Two things are pinned:
+///
+/// - grouped routing is applied: with two groups of two experts and one group
+///   kept, both selected experts come from the group with the larger top-two
+///   sum, `{0, 1}`, where ungrouped top-2 would take `{0, 3}`;
+/// - the expert output is `[B, L, k, hidden]` before the weighted sum, so the
+///   block returns `[B, L, hidden]` instead of failing to broadcast.
+#[test]
+fn moe_block_applies_grouped_routing_and_returns_the_hidden_shape() {
+    let _runtime = crate::initialize_runtime();
+    let json = r#"{
+        "model_type": "deepseek_v32",
+        "vocab_size": 16,
+        "hidden_size": 6,
+        "intermediate_size": 16,
+        "moe_intermediate_size": 8,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "n_routed_experts": 4,
+        "num_experts_per_tok": 2,
+        "n_group": 2,
+        "topk_group": 1
+    }"#;
+    let args: ModelArgs = serde_json::from_str(json).expect("parse tiny MoE config");
+    let prefix = "model.layers.0.mlp";
+    let mut weights = WeightMap::new();
+    // Router logits per expert on an all-ones input: 2.0, 0.0, -2.0, 1.5.
+    let gate: Vec<f32> = [2.0f32, 0.0, -2.0, 1.5]
+        .iter()
+        .flat_map(|logit| std::iter::repeat_n(logit / 6.0, 6))
+        .collect();
+    weights.insert(
+        format!("{prefix}.gate.weight"),
+        mlxcel_core::from_slice_f32(&gate, &[4, 6]),
+    );
+    weights.insert(
+        format!("{prefix}.gate.e_score_correction_bias"),
+        mlxcel_core::zeros(&[4], mlxcel_core::dtype::FLOAT32),
+    );
+    for (proj, shape) in [
+        ("gate_proj", [4, 8, 6]),
+        ("up_proj", [4, 8, 6]),
+        ("down_proj", [4, 6, 8]),
+    ] {
+        weights.insert(
+            format!("{prefix}.switch_mlp.{proj}.weight"),
+            f32_weight(&shape),
+        );
+    }
+    let block = super::load_moe_block(&weights, &args, prefix).expect("tiny MoE block loads");
+
+    let x = mlxcel_core::ones(&[1, 3, 6], mlxcel_core::dtype::FLOAT32);
+    let (indices, scores) = block.gate.forward(&x);
+    assert_eq!(mlxcel_core::array_shape(&indices), vec![1, 3, 2]);
+    assert_eq!(mlxcel_core::array_shape(&scores), vec![1, 3, 2]);
+    let picked = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        &indices,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    for token in picked.chunks(2) {
+        let mut pair = [token[0] as i32, token[1] as i32];
+        pair.sort_unstable();
+        assert_eq!(pair, [0, 1], "grouped routing must keep one group");
+    }
+
+    let out = block.forward(&x);
+    assert_eq!(mlxcel_core::array_shape(&out), vec![1, 3, 6]);
+    assert!(
+        mlxcel_core::utils::array_to_vec_f32(&out)
+            .iter()
+            .all(|v| v.is_finite())
+    );
 }
 
 /// An affine 4-bit `kv_b_proj` for every layer in `args`.

@@ -57,6 +57,9 @@ use self::nonstandard::try_load_nonstandard_model_from_dir;
 use self::special::try_load_special_model_from_weights;
 use self::vlm::*;
 
+// The decoder config the KV cache rules read (`execution::config_fields`).
+pub(crate) use self::vlm::deepseek_vl2_language_config;
+
 // Re-exported at the crate root for the CLI's lazy `--output-audio` load.
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::load_gemma3_iree_host_preprocessor;

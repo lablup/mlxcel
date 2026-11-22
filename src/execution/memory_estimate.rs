@@ -413,11 +413,13 @@ pub struct MemoryEstimate {
     /// Quantization hint the caller passed in.
     pub quant: QuantHint,
     /// True when KV bytes were computed for [`KVCacheMode::Int8`]. Kept
-    /// alongside [`Self::kv_mode`] for the banner's dtype label.
+    /// alongside [`Self::kv_mode`] for the banner's dtype label, which names
+    /// a narrower MLA latent width when `--mla-latent-quant` chose one.
     pub kv_dtype_int8: bool,
     /// KV cache mode the estimate was sized for. Besides the element width it
-    /// decides whether DeepSeek V2 caches the absorbed latent (FP16 only) or
-    /// the decompressed per-head K/V (every other mode, #3153).
+    /// decides whether DeepSeek V2 caches the absorbed latent (FP16, or
+    /// affine-quantized under `int8`, #3155) or the decompressed
+    /// per-head K/V (every Turbo mode, #3153).
     pub kv_mode: KVCacheMode,
 }
 
@@ -1744,11 +1746,15 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
         est.ctx_len, est.batch,
     );
     let _ = writeln!(out, "  Quant hint:      {}", est.quant.label());
-    let _ = writeln!(
-        out,
-        "  KV dtype:        {}",
-        if est.kv_dtype_int8 { "int8" } else { "fp16" },
-    );
+    // Under `--mla-latent-quant int4` the int8 storage packs an MLA latent
+    // at 4 bits, so the label names the width the latent really takes
+    // (issue #3179).
+    let kv_dtype = if est.kv_dtype_int8 {
+        crate::cli::mla_latent_option::kv_dtype_label(KVCacheMode::Int8, model_dir)
+    } else {
+        "fp16".to_string()
+    };
+    let _ = writeln!(out, "  KV dtype:        {kv_dtype}");
     let _ = writeln!(out);
 
     let _ = writeln!(

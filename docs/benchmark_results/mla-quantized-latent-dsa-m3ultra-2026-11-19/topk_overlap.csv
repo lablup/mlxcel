@@ -1,0 +1,245 @@
+context,comparison,layer,steps,kv_len,mean_overlap,min_overlap
+4096,"int8 vs fp16, single-sequence forward",0,256,4097-4160,0.99791,0.99414
+4096,"int8 vs fp16, single-sequence forward",1,256,4097-4160,0.99633,0.99365
+4096,"int8 vs fp16, single-sequence forward",2,256,4097-4160,0.99680,0.99365
+4096,"int8 vs fp16, single-sequence forward",3,256,4097-4160,0.99757,0.99512
+4096,"int8 vs fp16, single-sequence forward",4,256,4097-4160,0.99598,0.99121
+4096,"int8 vs fp16, single-sequence forward",5,256,4097-4160,0.99620,0.99121
+4096,"int8 vs fp16, single-sequence forward",6,256,4097-4160,0.99356,0.98486
+4096,"int8 vs fp16, single-sequence forward",7,256,4097-4160,0.98965,0.97803
+4096,"int8 vs fp16, single-sequence forward",8,256,4097-4160,0.99569,0.98975
+4096,"int8 vs fp16, single-sequence forward",9,256,4097-4160,0.99223,0.98340
+4096,"int8 vs fp16, single-sequence forward",10,256,4097-4160,0.99244,0.98535
+4096,"int8 vs fp16, single-sequence forward",11,256,4097-4160,0.98977,0.97461
+4096,"int8 vs fp16, single-sequence forward",12,256,4097-4160,0.99553,0.99121
+4096,"int8 vs fp16, single-sequence forward",13,256,4097-4160,0.99464,0.98535
+4096,"int8 vs fp16, single-sequence forward",14,256,4097-4160,0.98842,0.97607
+4096,"int8 vs fp16, single-sequence forward",15,256,4097-4160,0.98899,0.97803
+4096,"int8 vs fp16, single-sequence forward",16,256,4097-4160,0.98940,0.97754
+4096,"int8 vs fp16, single-sequence forward",17,256,4097-4160,0.98538,0.96777
+4096,"int8 vs fp16, single-sequence forward",18,256,4097-4160,0.98670,0.97412
+4096,"int8 vs fp16, single-sequence forward",19,256,4097-4160,0.98574,0.96826
+4096,"int8 vs fp16, single-sequence forward",20,256,4097-4160,0.98356,0.95410
+4096,"int8 vs fp16, single-sequence forward",21,256,4097-4160,0.98317,0.94824
+4096,"int8 vs fp16, single-sequence forward",22,256,4097-4160,0.98463,0.96143
+4096,"int8 vs fp16, single-sequence forward",23,256,4097-4160,0.98412,0.95801
+4096,"int8 vs fp16, single-sequence forward",24,256,4097-4160,0.97808,0.94385
+4096,"int8 vs fp16, single-sequence forward",25,256,4097-4160,0.97898,0.95020
+4096,"int8 vs fp16, single-sequence forward",26,256,4097-4160,0.97586,0.95215
+4096,"int8 vs fp16, single-sequence forward",27,256,4097-4160,0.97453,0.94482
+4096,"int8 vs fp16, single-sequence forward",28,256,4097-4160,0.97350,0.93848
+4096,"int8 vs fp16, single-sequence forward",29,256,4097-4160,0.97225,0.93506
+4096,"int8 vs fp16, single-sequence forward",30,256,4097-4160,0.97103,0.93359
+4096,"int8 vs fp16, single-sequence forward",31,256,4097-4160,0.96846,0.91846
+4096,"int8 vs fp16, single-sequence forward",32,256,4097-4160,0.97056,0.93604
+4096,"int8 vs fp16, single-sequence forward",33,256,4097-4160,0.96624,0.92920
+4096,"int8 vs fp16, single-sequence forward",34,256,4097-4160,0.97096,0.94922
+4096,"int8 vs fp16, single-sequence forward",35,256,4097-4160,0.96703,0.94043
+4096,"int8 vs fp16, single-sequence forward",36,256,4097-4160,0.96760,0.93799
+4096,"int8 vs fp16, single-sequence forward",37,256,4097-4160,0.96905,0.94922
+4096,"int8 vs fp16, single-sequence forward",38,256,4097-4160,0.96761,0.93896
+4096,"int8 vs fp16, single-sequence forward",39,256,4097-4160,0.96729,0.93359
+4096,"int8 vs fp16, single-sequence forward",40,256,4097-4160,0.96914,0.93848
+4096,"int8 vs fp16, single-sequence forward",41,256,4097-4160,0.96925,0.94385
+4096,"int8 vs fp16, single-sequence forward",42,256,4097-4160,0.97191,0.94434
+4096,"int8 vs fp16, single-sequence forward",43,256,4097-4160,0.96719,0.93359
+4096,"int8 vs fp16, single-sequence forward",44,256,4097-4160,0.97936,0.96680
+4096,"int8 vs fp16, single-sequence forward",45,256,4097-4160,0.96914,0.92920
+4096,"int8 vs fp16, single-sequence forward",46,256,4097-4160,0.96625,0.91699
+4096,"int8 vs fp16, single-sequence forward",47,256,4097-4160,0.96991,0.94287
+4096,"int8 vs fp16, single-sequence forward",48,256,4097-4160,0.97192,0.93457
+4096,"int8 vs fp16, single-sequence forward",49,256,4097-4160,0.97137,0.92725
+4096,"int8 vs fp16, single-sequence forward",50,256,4097-4160,0.96807,0.93457
+4096,"int8 vs fp16, single-sequence forward",51,256,4097-4160,0.97323,0.93164
+4096,"int8 vs fp16, single-sequence forward",52,256,4097-4160,0.96849,0.94238
+4096,"int8 vs fp16, single-sequence forward",53,256,4097-4160,0.97259,0.94971
+4096,"int8 vs fp16, single-sequence forward",54,256,4097-4160,0.97678,0.96191
+4096,"int8 vs fp16, single-sequence forward",55,256,4097-4160,0.97029,0.94580
+4096,"int8 vs fp16, single-sequence forward",56,256,4097-4160,0.97631,0.95312
+4096,"int8 vs fp16, single-sequence forward",57,256,4097-4160,0.97385,0.95557
+4096,"int8 vs fp16, single-sequence forward",58,256,4097-4160,0.97924,0.96143
+4096,"int8 vs fp16, single-sequence forward",59,256,4097-4160,0.97412,0.94434
+4096,"int8 vs fp16, single-sequence forward",60,256,4097-4160,0.97661,0.96436
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",0,512,4097-4161,1.00000,1.00000
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",1,512,4097-4161,0.99900,0.99365
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",2,512,4097-4161,0.99799,0.99512
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",3,512,4097-4161,0.99902,0.99658
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",4,512,4097-4161,0.99754,0.99316
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",5,512,4097-4161,0.99737,0.98730
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",6,512,4097-4161,0.99519,0.98242
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",7,512,4097-4161,0.99172,0.97656
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",8,512,4097-4161,0.99696,0.99219
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",9,512,4097-4161,0.99503,0.97803
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",10,512,4097-4161,0.99424,0.96826
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",11,512,4097-4161,0.99282,0.96094
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",12,512,4097-4161,0.99710,0.98730
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",13,512,4097-4161,0.99611,0.98486
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",14,512,4097-4161,0.99268,0.96094
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",15,512,4097-4161,0.99359,0.96338
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",16,512,4097-4161,0.99410,0.97852
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",17,512,4097-4161,0.99165,0.96436
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",18,512,4097-4161,0.99306,0.96777
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",19,512,4097-4161,0.99249,0.97070
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",20,512,4097-4161,0.99081,0.95654
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",21,512,4097-4161,0.99071,0.93262
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",22,512,4097-4161,0.99194,0.95605
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",23,512,4097-4161,0.99226,0.92285
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",24,512,4097-4161,0.98970,0.92822
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",25,512,4097-4161,0.98972,0.89062
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",26,512,4097-4161,0.98870,0.89307
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",27,512,4097-4161,0.98953,0.92236
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",28,512,4097-4161,0.98789,0.89697
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",29,512,4097-4161,0.98748,0.92480
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",30,512,4097-4161,0.98734,0.93311
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",31,512,4097-4161,0.98721,0.94385
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",32,512,4097-4161,0.98879,0.94385
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",33,512,4097-4161,0.98538,0.92480
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",34,512,4097-4161,0.98899,0.95215
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",35,512,4097-4161,0.98623,0.94189
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",36,512,4097-4161,0.98669,0.93896
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",37,512,4097-4161,0.98884,0.96240
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",38,512,4097-4161,0.98767,0.95264
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",39,512,4097-4161,0.98712,0.95410
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",40,512,4097-4161,0.98767,0.95801
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",41,512,4097-4161,0.98879,0.96777
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",42,512,4097-4161,0.98855,0.96582
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",43,512,4097-4161,0.98770,0.94434
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",44,512,4097-4161,0.99144,0.97461
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",45,512,4097-4161,0.98719,0.95459
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",46,512,4097-4161,0.98804,0.96045
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",47,512,4097-4161,0.99000,0.96484
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",48,512,4097-4161,0.99043,0.96924
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",49,512,4097-4161,0.98917,0.96533
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",50,512,4097-4161,0.98843,0.96338
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",51,512,4097-4161,0.98985,0.97266
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",52,512,4097-4161,0.98642,0.96289
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",53,512,4097-4161,0.98822,0.96143
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",54,512,4097-4161,0.99143,0.96924
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",55,512,4097-4161,0.98843,0.95361
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",56,512,4097-4161,0.99026,0.97217
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",57,512,4097-4161,0.99088,0.96777
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",58,512,4097-4161,0.99115,0.96631
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",59,512,4097-4161,0.99025,0.95508
+4096,"fp16 fused vs fp16 composed, two-row batched decode (noise floor)",60,512,4097-4161,0.99232,0.97070
+4096,"int8 vs fp16 fused, two-row batched decode",0,512,4097-4161,0.99793,0.99414
+4096,"int8 vs fp16 fused, two-row batched decode",1,512,4097-4161,0.99636,0.99365
+4096,"int8 vs fp16 fused, two-row batched decode",2,512,4097-4161,0.99691,0.99414
+4096,"int8 vs fp16 fused, two-row batched decode",3,512,4097-4161,0.99752,0.99414
+4096,"int8 vs fp16 fused, two-row batched decode",4,512,4097-4161,0.99601,0.99023
+4096,"int8 vs fp16 fused, two-row batched decode",5,512,4097-4161,0.99616,0.99121
+4096,"int8 vs fp16 fused, two-row batched decode",6,512,4097-4161,0.99359,0.98145
+4096,"int8 vs fp16 fused, two-row batched decode",7,512,4097-4161,0.98912,0.97607
+4096,"int8 vs fp16 fused, two-row batched decode",8,512,4097-4161,0.99564,0.99072
+4096,"int8 vs fp16 fused, two-row batched decode",9,512,4097-4161,0.99222,0.98438
+4096,"int8 vs fp16 fused, two-row batched decode",10,512,4097-4161,0.99233,0.96924
+4096,"int8 vs fp16 fused, two-row batched decode",11,512,4097-4161,0.98983,0.95215
+4096,"int8 vs fp16 fused, two-row batched decode",12,512,4097-4161,0.99548,0.98779
+4096,"int8 vs fp16 fused, two-row batched decode",13,512,4097-4161,0.99447,0.97949
+4096,"int8 vs fp16 fused, two-row batched decode",14,512,4097-4161,0.98812,0.96338
+4096,"int8 vs fp16 fused, two-row batched decode",15,512,4097-4161,0.98890,0.96582
+4096,"int8 vs fp16 fused, two-row batched decode",16,512,4097-4161,0.98940,0.97754
+4096,"int8 vs fp16 fused, two-row batched decode",17,512,4097-4161,0.98529,0.96631
+4096,"int8 vs fp16 fused, two-row batched decode",18,512,4097-4161,0.98685,0.96631
+4096,"int8 vs fp16 fused, two-row batched decode",19,512,4097-4161,0.98573,0.93262
+4096,"int8 vs fp16 fused, two-row batched decode",20,512,4097-4161,0.98387,0.94141
+4096,"int8 vs fp16 fused, two-row batched decode",21,512,4097-4161,0.98311,0.93408
+4096,"int8 vs fp16 fused, two-row batched decode",22,512,4097-4161,0.98429,0.96191
+4096,"int8 vs fp16 fused, two-row batched decode",23,512,4097-4161,0.98411,0.96631
+4096,"int8 vs fp16 fused, two-row batched decode",24,512,4097-4161,0.97801,0.95166
+4096,"int8 vs fp16 fused, two-row batched decode",25,512,4097-4161,0.97919,0.96045
+4096,"int8 vs fp16 fused, two-row batched decode",26,512,4097-4161,0.97592,0.94482
+4096,"int8 vs fp16 fused, two-row batched decode",27,512,4097-4161,0.97457,0.91992
+4096,"int8 vs fp16 fused, two-row batched decode",28,512,4097-4161,0.97333,0.92041
+4096,"int8 vs fp16 fused, two-row batched decode",29,512,4097-4161,0.97194,0.92627
+4096,"int8 vs fp16 fused, two-row batched decode",30,512,4097-4161,0.97062,0.90918
+4096,"int8 vs fp16 fused, two-row batched decode",31,512,4097-4161,0.96844,0.88623
+4096,"int8 vs fp16 fused, two-row batched decode",32,512,4097-4161,0.97083,0.90820
+4096,"int8 vs fp16 fused, two-row batched decode",33,512,4097-4161,0.96588,0.82080
+4096,"int8 vs fp16 fused, two-row batched decode",34,512,4097-4161,0.97091,0.88574
+4096,"int8 vs fp16 fused, two-row batched decode",35,512,4097-4161,0.96699,0.87988
+4096,"int8 vs fp16 fused, two-row batched decode",36,512,4097-4161,0.96780,0.90576
+4096,"int8 vs fp16 fused, two-row batched decode",37,512,4097-4161,0.96898,0.91357
+4096,"int8 vs fp16 fused, two-row batched decode",38,512,4097-4161,0.96790,0.89062
+4096,"int8 vs fp16 fused, two-row batched decode",39,512,4097-4161,0.96770,0.90283
+4096,"int8 vs fp16 fused, two-row batched decode",40,512,4097-4161,0.96965,0.90137
+4096,"int8 vs fp16 fused, two-row batched decode",41,512,4097-4161,0.96947,0.92676
+4096,"int8 vs fp16 fused, two-row batched decode",42,512,4097-4161,0.97273,0.90820
+4096,"int8 vs fp16 fused, two-row batched decode",43,512,4097-4161,0.96772,0.91895
+4096,"int8 vs fp16 fused, two-row batched decode",44,512,4097-4161,0.97913,0.95850
+4096,"int8 vs fp16 fused, two-row batched decode",45,512,4097-4161,0.96983,0.91602
+4096,"int8 vs fp16 fused, two-row batched decode",46,512,4097-4161,0.96697,0.92285
+4096,"int8 vs fp16 fused, two-row batched decode",47,512,4097-4161,0.97010,0.94287
+4096,"int8 vs fp16 fused, two-row batched decode",48,512,4097-4161,0.97292,0.94629
+4096,"int8 vs fp16 fused, two-row batched decode",49,512,4097-4161,0.97226,0.93604
+4096,"int8 vs fp16 fused, two-row batched decode",50,512,4097-4161,0.96865,0.92285
+4096,"int8 vs fp16 fused, two-row batched decode",51,512,4097-4161,0.97299,0.94775
+4096,"int8 vs fp16 fused, two-row batched decode",52,512,4097-4161,0.96859,0.92480
+4096,"int8 vs fp16 fused, two-row batched decode",53,512,4097-4161,0.97317,0.94043
+4096,"int8 vs fp16 fused, two-row batched decode",54,512,4097-4161,0.97708,0.94531
+4096,"int8 vs fp16 fused, two-row batched decode",55,512,4097-4161,0.97025,0.94629
+4096,"int8 vs fp16 fused, two-row batched decode",56,512,4097-4161,0.97616,0.95020
+4096,"int8 vs fp16 fused, two-row batched decode",57,512,4097-4161,0.97420,0.95605
+4096,"int8 vs fp16 fused, two-row batched decode",58,512,4097-4161,0.97967,0.95312
+4096,"int8 vs fp16 fused, two-row batched decode",59,512,4097-4161,0.97427,0.91748
+4096,"int8 vs fp16 fused, two-row batched decode",60,512,4097-4161,0.97716,0.96387
+16384,"int8 vs fp16, single-sequence forward",0,64,16385-16448,0.99728,0.99463
+16384,"int8 vs fp16, single-sequence forward",1,64,16385-16448,0.99453,0.99219
+16384,"int8 vs fp16, single-sequence forward",2,64,16385-16448,0.99338,0.98926
+16384,"int8 vs fp16, single-sequence forward",3,64,16385-16448,0.99422,0.99121
+16384,"int8 vs fp16, single-sequence forward",4,64,16385-16448,0.99095,0.98535
+16384,"int8 vs fp16, single-sequence forward",5,64,16385-16448,0.99274,0.97656
+16384,"int8 vs fp16, single-sequence forward",6,64,16385-16448,0.98978,0.95361
+16384,"int8 vs fp16, single-sequence forward",7,64,16385-16448,0.98991,0.95654
+16384,"int8 vs fp16, single-sequence forward",8,64,16385-16448,0.98161,0.89697
+16384,"int8 vs fp16, single-sequence forward",9,64,16385-16448,0.98074,0.92578
+16384,"int8 vs fp16, single-sequence forward",10,64,16385-16448,0.97774,0.93018
+16384,"int8 vs fp16, single-sequence forward",11,64,16385-16448,0.98040,0.95020
+16384,"int8 vs fp16, single-sequence forward",12,64,16385-16448,0.96837,0.90381
+16384,"int8 vs fp16, single-sequence forward",13,64,16385-16448,0.97620,0.92920
+16384,"int8 vs fp16, single-sequence forward",14,64,16385-16448,0.96626,0.93506
+16384,"int8 vs fp16, single-sequence forward",15,64,16385-16448,0.92876,0.86865
+16384,"int8 vs fp16, single-sequence forward",16,64,16385-16448,0.94679,0.90234
+16384,"int8 vs fp16, single-sequence forward",17,64,16385-16448,0.90294,0.82031
+16384,"int8 vs fp16, single-sequence forward",18,64,16385-16448,0.97049,0.94580
+16384,"int8 vs fp16, single-sequence forward",19,64,16385-16448,0.90782,0.85059
+16384,"int8 vs fp16, single-sequence forward",20,64,16385-16448,0.88773,0.79150
+16384,"int8 vs fp16, single-sequence forward",21,64,16385-16448,0.85258,0.72559
+16384,"int8 vs fp16, single-sequence forward",22,64,16385-16448,0.92654,0.88721
+16384,"int8 vs fp16, single-sequence forward",23,64,16385-16448,0.88808,0.80127
+16384,"int8 vs fp16, single-sequence forward",24,64,16385-16448,0.87917,0.76465
+16384,"int8 vs fp16, single-sequence forward",25,64,16385-16448,0.86644,0.72266
+16384,"int8 vs fp16, single-sequence forward",26,64,16385-16448,0.88650,0.79102
+16384,"int8 vs fp16, single-sequence forward",27,64,16385-16448,0.85055,0.72852
+16384,"int8 vs fp16, single-sequence forward",28,64,16385-16448,0.88400,0.78809
+16384,"int8 vs fp16, single-sequence forward",29,64,16385-16448,0.88207,0.69287
+16384,"int8 vs fp16, single-sequence forward",30,64,16385-16448,0.81126,0.70312
+16384,"int8 vs fp16, single-sequence forward",31,64,16385-16448,0.76691,0.65039
+16384,"int8 vs fp16, single-sequence forward",32,64,16385-16448,0.79567,0.59570
+16384,"int8 vs fp16, single-sequence forward",33,64,16385-16448,0.83883,0.71729
+16384,"int8 vs fp16, single-sequence forward",34,64,16385-16448,0.79057,0.64160
+16384,"int8 vs fp16, single-sequence forward",35,64,16385-16448,0.83183,0.72607
+16384,"int8 vs fp16, single-sequence forward",36,64,16385-16448,0.90157,0.82959
+16384,"int8 vs fp16, single-sequence forward",37,64,16385-16448,0.88941,0.80371
+16384,"int8 vs fp16, single-sequence forward",38,64,16385-16448,0.86415,0.79443
+16384,"int8 vs fp16, single-sequence forward",39,64,16385-16448,0.89877,0.83740
+16384,"int8 vs fp16, single-sequence forward",40,64,16385-16448,0.90233,0.84863
+16384,"int8 vs fp16, single-sequence forward",41,64,16385-16448,0.85762,0.73486
+16384,"int8 vs fp16, single-sequence forward",42,64,16385-16448,0.88712,0.76709
+16384,"int8 vs fp16, single-sequence forward",43,64,16385-16448,0.92771,0.85645
+16384,"int8 vs fp16, single-sequence forward",44,64,16385-16448,0.95000,0.89355
+16384,"int8 vs fp16, single-sequence forward",45,64,16385-16448,0.92324,0.87500
+16384,"int8 vs fp16, single-sequence forward",46,64,16385-16448,0.80613,0.67041
+16384,"int8 vs fp16, single-sequence forward",47,64,16385-16448,0.77373,0.52051
+16384,"int8 vs fp16, single-sequence forward",48,64,16385-16448,0.80143,0.61816
+16384,"int8 vs fp16, single-sequence forward",49,64,16385-16448,0.83469,0.75049
+16384,"int8 vs fp16, single-sequence forward",50,64,16385-16448,0.74379,0.53369
+16384,"int8 vs fp16, single-sequence forward",51,64,16385-16448,0.80082,0.60986
+16384,"int8 vs fp16, single-sequence forward",52,64,16385-16448,0.93695,0.89258
+16384,"int8 vs fp16, single-sequence forward",53,64,16385-16448,0.89257,0.81201
+16384,"int8 vs fp16, single-sequence forward",54,64,16385-16448,0.89004,0.79102
+16384,"int8 vs fp16, single-sequence forward",55,64,16385-16448,0.85323,0.72754
+16384,"int8 vs fp16, single-sequence forward",56,64,16385-16448,0.91679,0.81836
+16384,"int8 vs fp16, single-sequence forward",57,64,16385-16448,0.91100,0.84717
+16384,"int8 vs fp16, single-sequence forward",58,64,16385-16448,0.94434,0.91748
+16384,"int8 vs fp16, single-sequence forward",59,64,16385-16448,0.90797,0.83691
+16384,"int8 vs fp16, single-sequence forward",60,64,16385-16448,0.94159,0.90479

@@ -2296,8 +2296,40 @@ impl Qwen35Model {
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, Qwen35Config), String> {
-        let model_dir = model_dir.as_ref();
+        Self::load_impl(model_dir.as_ref(), None)
+    }
 
+    /// Load an exported text backbone: a checkpoint saved from the inner
+    /// `Qwen3_5TextModel` (MOSS-Image's prompt conditioner) rather than the
+    /// HF causal-LM wrapper.
+    ///
+    /// Differs from [`Self::load`] in three ways, all scoped to this entry
+    /// point so a normal text checkpoint loads exactly as before:
+    /// - the bare `embed_tokens.*` / `layers.*` / `norm.*` layout gets its
+    ///   `model.` wrapper back;
+    /// - a missing `lm_head.weight` with `tie_word_embeddings=false` is
+    ///   accepted (the caller reads hidden states, never logits);
+    /// - `extra_quantization` (MOSS-Image nests it under
+    ///   `moss_image_mlx.quantization`) is used when `text_config` carries no
+    ///   `quantization` block of its own.
+    ///
+    /// Used by: `imagegen::moss_image::text_encoder::TextEncoder`.
+    pub(crate) fn load_text_backbone<P: AsRef<Path>>(
+        model_dir: P,
+        extra_quantization: Option<&serde_json::Value>,
+    ) -> Result<(Self, Qwen35Config), String> {
+        Self::load_impl(
+            model_dir.as_ref(),
+            Some(TextBackbone {
+                quantization: extra_quantization,
+            }),
+        )
+    }
+
+    fn load_impl(
+        model_dir: &Path,
+        backbone: Option<TextBackbone<'_>>,
+    ) -> Result<(Self, Qwen35Config), String> {
         tracing::info!("[Qwen3.5] Loading config...");
         let config_path = model_dir.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)
@@ -2318,6 +2350,15 @@ impl Qwen35Model {
                 .as_object_mut()
                 .unwrap()
                 .insert("quantization".to_string(), v["quantization"].clone());
+        }
+        // …or from an exported backbone's own metadata.
+        if text_config_val.get("quantization").is_none()
+            && let Some(quantization) = backbone.as_ref().and_then(|b| b.quantization)
+        {
+            text_config_val
+                .as_object_mut()
+                .ok_or_else(|| "config.json text_config must be an object".to_string())?
+                .insert("quantization".to_string(), quantization.clone());
         }
 
         // FP8 releases carry no `quantization` block at all. The vendor layout
@@ -2351,6 +2392,16 @@ impl Qwen35Model {
         tracing::info!("[Qwen3.5] Loading weights...");
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
+        // An exported backbone carries the bare layout (`embed_tokens.*`,
+        // `layers.*`, `norm.*`) where every HF checkpoint wraps those under
+        // `model.`. The loader reads the wrapped names, so restore the wrapper
+        // before anything else looks at a key.
+        let weights = if backbone.is_some() {
+            restore_text_model_prefix(weights)
+        } else {
+            weights
+        };
+
         // Reconstruct FP8 tensors before any other sanitization: the sidecars
         // are keyed off the original tensor names, and the pass replaces
         // `<name>.weight` with a packed plane plus `<name>.scales`.
@@ -2360,13 +2411,25 @@ impl Qwen35Model {
         let weights = sanitize_moe_weights(weights, &config);
 
         tracing::info!("[Qwen3.5] Building model...");
-        let model = Self::from_weights(&weights, &config)?;
+        let model = Self::from_weights_impl(&weights, &config, backbone.is_some())?;
 
         tracing::info!("[Qwen3.5] Model loaded successfully");
         Ok((model, config))
     }
 
     pub fn from_weights(weights: &WeightMap, config: &Qwen35Config) -> Result<Self, String> {
+        Self::from_weights_impl(weights, config, false)
+    }
+
+    /// [`Self::from_weights`]; `allow_missing_head` accepts a head-free
+    /// checkpoint with `tie_word_embeddings=false` (see
+    /// [`Self::load_text_backbone`]). Every other caller keeps the strict
+    /// "missing `lm_head.weight`" error.
+    pub(crate) fn from_weights_impl(
+        weights: &WeightMap,
+        config: &Qwen35Config,
+        allow_missing_head: bool,
+    ) -> Result<Self, String> {
         let group_size = config.group_size();
         let bits = config.bits();
         let qn_config = config.to_qwen3next_config();
@@ -2386,6 +2449,13 @@ impl Qwen35Model {
             .ok_or_else(|| "Missing model.norm.weight".to_string())?;
 
         let lm_head = if config.tie_word_embeddings {
+            None
+        } else if allow_missing_head && !weights.contains_key("lm_head.weight") {
+            // An exported text backbone (MOSS-Image's conditioner) keeps the
+            // language model and drops the vocabulary projection. Its caller
+            // reads hidden states only; logits, if ever asked for, fall back to
+            // the tied path.
+            tracing::info!("[Qwen3.5] text backbone has no lm_head.weight; loading head-free");
             None
         } else {
             Some(UnifiedLinear::from_weights(
@@ -3221,6 +3291,60 @@ impl Qwen35Model {
         )
     }
 
+    /// Post-final-norm hidden states of one standalone prompt, with no LM head.
+    ///
+    /// The MOSS-Image prompt conditioner consumes `Qwen3_5Model`'s
+    /// `last_hidden_state`, which is the final block output after the model's
+    /// RMSNorm. Reusing [`Self::forward_prefill_with_last_hidden`] would also
+    /// project the full `[B, L, vocab]` logits (about 2 GB at 4096 tokens)
+    /// for a result nobody reads, so this runs the same loop and stops at the
+    /// norm.
+    ///
+    /// Every call runs on fresh caches: each prompt is encoded from position 0
+    /// and leaves no state behind, so the positive and negative prompts of one
+    /// request (and consecutive requests) cannot see each other's tokens.
+    ///
+    /// Used by: `imagegen::moss_image::text_encoder::TextEncoder`.
+    pub(crate) fn forward_prefill_hidden(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        let mut caches = self.make_internal_caches();
+        self.prefill_hidden(input_ids, &mut caches)
+    }
+
+    /// The body of [`Self::forward_prefill_hidden`], in lockstep with
+    /// [`Self::forward_prefill_with_last_hidden`] minus the head.
+    fn prefill_hidden(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        let shape = mlxcel_core::array_shape(&h);
+        let seq_len = shape[1];
+        let fa_idx = self.config.full_attention_interval - 1;
+        let fa_mask = if seq_len > 1 {
+            let offset = if fa_idx < caches.len() {
+                caches[fa_idx].offset()
+            } else {
+                0
+            };
+            full_attention_geometry(&self.layers).and_then(|attention| {
+                let dtype = mlxcel_core::array_dtype(&h);
+                prefill_causal_mask(seq_len, offset, shape[0], attention, dtype)
+            })
+        } else {
+            None
+        };
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            let mask = if layer.is_linear {
+                None
+            } else {
+                fa_mask.as_deref()
+            };
+            h = layer.forward(&h, mask, cache, None);
+        }
+        self.norm.forward(&h)
+    }
+
     /// Sequence-routed [`Self::forward_speculative`].
     ///
     /// Used by: `Qwen35MtpTargetAdapter::verify_forward`.
@@ -3841,6 +3965,44 @@ impl Qwen35StageModel {
 /// degenerate tensor must not be able to trigger a shift that transposes nothing.
 fn is_raw_conv1d_layout(shape: &[i32]) -> bool {
     shape.len() >= 3 && shape[shape.len() - 1] != 1
+}
+
+/// Options of [`Qwen35Model::load_text_backbone`].
+struct TextBackbone<'a> {
+    /// Quantization block declared outside `text_config`.
+    quantization: Option<&'a serde_json::Value>,
+}
+
+/// Restore the `model.` wrapper on a bare text-model layout.
+///
+/// MOSS-Image's prompt conditioner (and any checkpoint exported from the inner
+/// `Qwen3_5TextModel` rather than the `Qwen3_5ForConditionalGeneration` wrapper)
+/// stores `embed_tokens.*`, `layers.*` and `norm.*` at the top level. `from_weights`
+/// reads the HF spelling (`model.embed_tokens`, `model.layers.N`, `model.norm`),
+/// so the bare layout has to be wrapped first. `lm_head.*` is top-level in BOTH
+/// layouts and is deliberately left alone, as is anything already wrapped.
+pub(crate) fn restore_text_model_prefix(weights: WeightMap) -> WeightMap {
+    const WRAPPED: [&str; 3] = ["embed_tokens.", "layers.", "norm."];
+    let bare = weights
+        .keys()
+        .any(|key| WRAPPED.iter().any(|prefix| key.starts_with(prefix)));
+    let already_wrapped = weights.keys().any(|key| key.starts_with("model."));
+    if !bare || already_wrapped {
+        return weights;
+    }
+    tracing::info!(
+        "[Qwen3.5] checkpoint carries the bare text-model layout; restoring the `model.` prefix"
+    );
+    weights
+        .into_iter()
+        .map(|(key, value)| {
+            if WRAPPED.iter().any(|prefix| key.starts_with(prefix)) {
+                (format!("model.{key}"), value)
+            } else {
+                (key, value)
+            }
+        })
+        .collect()
 }
 
 pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> WeightMap {

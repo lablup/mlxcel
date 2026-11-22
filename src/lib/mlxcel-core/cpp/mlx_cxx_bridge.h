@@ -620,6 +620,19 @@ std::unique_ptr<MlxArray> mla_absorbed_decode_fused(
     const MlxArray& kpe,
     float scale);
 
+// The fused decode kernel over an affine-quantized latent window (#3156).
+bool mla_absorbed_decode_fused_quantized_available();
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused_quantized(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv_q,
+    const MlxArray& scales,
+    const MlxArray& biases,
+    const MlxArray& kpe,
+    float scale,
+    int32_t group_size,
+    int32_t bits);
+
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
 // gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype (#2548)
 // Used by: Gemma3n MLP layers with activation_sparsity > 0
@@ -918,6 +931,13 @@ std::unique_ptr<MlxArray> logical_and(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> logical_or(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> all_axis(const MlxArray& a, int32_t axis, bool keepdims);
 std::unique_ptr<MlxArray> any_axis(const MlxArray& a, int32_t axis, bool keepdims);
+// Test-only: one reduction (0 sum, 1 prod, 2 any, 3 all) over several axes.
+std::unique_ptr<MlxArray> reduce_axes_probe_for_test(
+    const MlxArray& a,
+    int32_t op,
+    rust::Slice<const int32_t> axes,
+    bool keepdims
+);
 std::unique_ptr<MlxArray> greater_equal(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> less_equal(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> not_equal(const MlxArray& a, const MlxArray& b);

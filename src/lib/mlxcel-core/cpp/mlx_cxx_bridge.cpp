@@ -2033,6 +2033,29 @@ bool mla_absorbed_decode_fused_available() {
     return mlxcel::turbo::mla_absorbed_decode_available();
 }
 
+// The same kernel over an affine-quantized latent window (#3156), Metal only.
+// Throws off-Metal, at an unsupported bit width or outside the shape contract;
+// the Rust declaration is `-> Result`, so a refusal sends the caller to the
+// composed quantized path.
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused_quantized(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv_q,
+    const MlxArray& scales,
+    const MlxArray& biases,
+    const MlxArray& kpe,
+    float scale,
+    int32_t group_size,
+    int32_t bits) {
+    return std::make_unique<MlxArray>(mlxcel::turbo::mla_absorbed_decode_quantized(
+        q_abs.inner, q_pe.inner, ckv_q.inner, scales.inner, biases.inner, kpe.inner,
+        scale, group_size, bits));
+}
+
+bool mla_absorbed_decode_fused_quantized_available() {
+    return mlxcel::turbo::mla_absorbed_decode_quantized_available();
+}
+
 // Compiled GeGLU: gelu(gate) * x
 // Used by: legacy/tests for precise GeGLU
 namespace {
@@ -3389,6 +3412,31 @@ std::unique_ptr<MlxArray> all_axis(const MlxArray& a, int32_t axis, bool keepdim
 
 std::unique_ptr<MlxArray> any_axis(const MlxArray& a, int32_t axis, bool keepdims) {
     return std::make_unique<MlxArray>(mlx::core::any(a.inner, axis, keepdims));
+}
+
+// Test-only. One reduction over several axes at once, in MLX's native dtype:
+// op 0 sum, 1 prod, 2 any, 3 all. The per-axis entry points above take one
+// axis, which never reaches the backends' multi-axis row reduction.
+std::unique_ptr<MlxArray> reduce_axes_probe_for_test(
+    const MlxArray& a,
+    int32_t op,
+    rust::Slice<const int32_t> axes,
+    bool keepdims
+) {
+    std::vector<int> axes_vec(axes.begin(), axes.end());
+    switch (op) {
+        case 0:
+            return std::make_unique<MlxArray>(mlx::core::sum(a.inner, axes_vec, keepdims));
+        case 1:
+            return std::make_unique<MlxArray>(mlx::core::prod(a.inner, axes_vec, keepdims));
+        case 2:
+            return std::make_unique<MlxArray>(mlx::core::any(a.inner, axes_vec, keepdims));
+        case 3:
+            return std::make_unique<MlxArray>(mlx::core::all(a.inner, axes_vec, keepdims));
+        default:
+            throw std::invalid_argument(
+                "reduce_axes_probe_for_test: op must be 0 (sum), 1 (prod), 2 (any) or 3 (all)");
+    }
 }
 
 std::unique_ptr<MlxArray> greater_equal(const MlxArray& a, const MlxArray& b) {

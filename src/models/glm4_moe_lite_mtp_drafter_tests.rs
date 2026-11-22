@@ -273,6 +273,71 @@ fn bound_drafter() -> (Glm4MoeLiteMtpDraftModel, MockGlmTarget) {
     (drafter, target)
 }
 
+/// A target carrying an injected mode table, for the drafter's cache mode.
+struct ModedGlmTarget {
+    inner: MockGlmTarget,
+    modes: Vec<mlxcel_core::cache::KVCacheMode>,
+}
+
+impl LanguageModel for ModedGlmTarget {
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.inner.forward(input_ids, caches, mask)
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        Vec::new()
+    }
+
+    fn num_layers(&self) -> usize {
+        self.modes.len()
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        Vec::new()
+    }
+
+    fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        self.inner.embed_tokens(input_ids)
+    }
+
+    fn embed_tokens_module(&self) -> Option<UnifiedEmbedding> {
+        self.inner.embed_tokens_module()
+    }
+
+    fn lm_head_module(&self) -> Option<UnifiedLinear> {
+        self.inner.lm_head_module()
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<mlxcel_core::cache::KVCacheMode>> {
+        Some(self.modes.clone())
+    }
+}
+
+/// The drafter's own cache follows the target's mode table (#3161): an
+/// `int8` target builds it in `int8`, so its MLA latent is stored the same
+/// way, and a reset keeps the mode. An uninjected target keeps fp16.
+#[test]
+fn the_drafter_cache_follows_the_target_mode_table() {
+    use mlxcel_core::cache::KVCacheMode;
+    let (drafter, _target) = bound_drafter();
+    assert_eq!(drafter.cache.mode, KVCacheMode::Fp16);
+
+    let mut drafter = build_drafter();
+    let target = ModedGlmTarget {
+        inner: MockGlmTarget::new(HIDDEN, VOCAB),
+        modes: vec![KVCacheMode::Int8; 2],
+    };
+    drafter.bind(&target).expect("bind");
+    assert_eq!(drafter.cache.mode, KVCacheMode::Int8);
+    drafter.reset(&target).expect("reset");
+    assert_eq!(drafter.cache.mode, KVCacheMode::Int8);
+}
+
 // ── Config ────────────────────────────────────────────────────────────────
 
 #[test]

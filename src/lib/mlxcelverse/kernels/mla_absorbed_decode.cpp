@@ -28,8 +28,9 @@
 #include <vector>
 
 // Fused absorbed-MLA single-query decode attention (issue #3121). See the
-// header for the contract; this file holds the two Metal bodies and the
-// launcher.
+// header for the contract; this file holds the Metal bodies and the launchers.
+// The partial pass has two variants that share one body: a dense latent
+// window, and an affine-quantized one read in-kernel (issue #3156).
 //
 // Partial pass. Threadgroup (b, h, half) of 32 simdgroups x 32 lanes. Lane `j`
 // holds query elements `[j*DR, (j+1)*DR)` of the latent half and
@@ -59,7 +60,14 @@ namespace mlxcel::turbo {
 
 namespace {
 
-constexpr const char* MLA_DECODE_PARTIAL_SOURCE = R"(
+// The partial pass is assembled from fragments so the dense and the quantized
+// kernels are one body with two window reads (issue #3156). A variant supplies
+// `WINDOW` (per-batch-row bases), `ROW` (per-key bases and the rope row `kp`),
+// `LOAD` (fill `kv[DR]` from this lane's slice of the latent row and add the
+// latent score to `s`), `VALUE` (fold the key into `o`) and `FINISH` (after
+// the loop). The rope half, the online softmax, the exchange and the merge are
+// shared. The dense fragments concatenate to the pre-split text.
+constexpr const char* MLA_DECODE_PARTIAL_HEAD = R"(
     constexpr int BN = 32;
     constexpr int DR = R / 32;
     constexpr int DP = P / 32;
@@ -90,24 +98,28 @@ constexpr const char* MLA_DECODE_PARTIAL_SOURCE = R"(
     float m = NEG;
     float l = 0.0f;
     const int t_end = min(S, (half_idx + 1) * C);
-    const device T* ckv_b = ckv + (size_t)b * ckv_strides[0] + lane * DR;
-    const device T* kpe_b = kpe + (size_t)b * kpe_strides[0] + lane * DP;
-    for (int t = half_idx * C + sg; t < t_end; t += BN) {
-        const device T* kr = ckv_b + (size_t)t * ckv_strides[2];
-        const device T* kp = kpe_b + (size_t)t * kpe_strides[2];
-        float kv[DR];
+)";
+
+constexpr const char* MLA_DECODE_LOOP_OPEN = R"(    for (int t = half_idx * C + sg; t < t_end; t += BN) {
+)";
+
+constexpr const char* MLA_DECODE_ROPE_SCORE = R"(        float kv[DR];
         float s = 0.0f;
         for (int i = 0; i < DP; i++) { s += q_p[i] * float(kp[i]); }
-        for (int i = 0; i < DR; i++) { kv[i] = float(kr[i]); s += q_r[i] * kv[i]; }
-        s = simd_sum(s);
+)";
+
+constexpr const char* MLA_DECODE_SOFTMAX = R"(        s = simd_sum(s);
         const float m_new = max(m, s);
         const float a = fast::exp(m - m_new);
         const float p = fast::exp(s - m_new);
         l = l * a + p;
-        for (int i = 0; i < DR; i++) { o[i] = o[i] * a + p * kv[i]; }
-        m = m_new;
-    }
+)";
 
+constexpr const char* MLA_DECODE_LOOP_CLOSE = R"(        m = m_new;
+    }
+)";
+
+constexpr const char* MLA_DECODE_EXCHANGE = R"(
     if (lane == 0) { tg_m[sg] = m; tg_l[sg] = l; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const float m_lane = tg_m[lane];
@@ -130,6 +142,87 @@ constexpr const char* MLA_DECODE_PARTIAL_SOURCE = R"(
     if (sg == 0 && lane == 0) { lse[prow] = L > 0.0f ? M + log(L) : NEG; }
 )";
 
+// Dense latent: `ckv` holds the row in the queries' dtype.
+constexpr const char* MLA_DECODE_DENSE_WINDOW = R"(    const device T* ckv_b = ckv + (size_t)b * ckv_strides[0] + lane * DR;
+    const device T* kpe_b = kpe + (size_t)b * kpe_strides[0] + lane * DP;
+)";
+
+constexpr const char* MLA_DECODE_DENSE_ROW = R"(        const device T* kr = ckv_b + (size_t)t * ckv_strides[2];
+        const device T* kp = kpe_b + (size_t)t * kpe_strides[2];
+)";
+
+constexpr const char* MLA_DECODE_DENSE_LOAD = R"(        for (int i = 0; i < DR; i++) { kv[i] = float(kr[i]); s += q_r[i] * kv[i]; }
+)";
+
+constexpr const char* MLA_DECODE_DENSE_VALUE = R"(        for (int i = 0; i < DR; i++) { o[i] = o[i] * a + p * kv[i]; }
+)";
+
+// Affine-quantized 8-bit latent (MLX `quantize` layout): `ckv_q` packs four
+// codes per uint32, low byte first, so on this little-endian target byte `e`
+// of a row is element `e`, which reads back as `code * scale + bias` with one
+// pair per group `e / GS`. A lane's `DR` elements lie inside one group (the
+// launcher requires `GS % DR == 0`), so the pair factors out of both
+// contractions, the form MLX's own quantized matmul uses:
+//
+//     q . x          = scale * (q . code) + bias * sum(q)
+//     sum_t p_t x_t  = sum_t (p_t scale_t) code_t + sum_t p_t bias_t
+//
+// `kv` holds raw codes, the value sum weights them by `p * scale`, and the
+// bias term is one running scalar per lane, added once after the loop: the
+// window is never dequantized and a key costs the dense kernel's work plus
+// two scalars. `scales` and `biases` are indexed, not held as pointers,
+// because MLX passes an array of fewer than eight elements in the `constant`
+// address space. `kpe` has its own element type `TK`: the cache stores it
+// fp16 whatever the queries are.
+constexpr const char* MLA_DECODE_QUANT_WINDOW = R"(
+    const device uchar* ckv_b =
+        (const device uchar*)ckv_q + (size_t)b * ckv_q_strides[0] * 4 + lane * DR;
+    const size_t scl_b = (size_t)b * scales_strides[0] + lane * DR / GS;
+    const size_t bia_b = (size_t)b * biases_strides[0] + lane * DR / GS;
+    const device TK* kpe_b = kpe + (size_t)b * kpe_strides[0] + lane * DP;
+    float q_sum = 0.0f;
+    for (int i = 0; i < DR; i++) { q_sum += q_r[i]; }
+    float o_bias = 0.0f;
+)";
+
+constexpr const char* MLA_DECODE_QUANT_ROW = R"(
+        const device uchar* kr = ckv_b + (size_t)t * ckv_q_strides[2] * 4;
+        const float g_scale = float(scales[scl_b + (size_t)t * scales_strides[2]]);
+        const float g_bias = float(biases[bia_b + (size_t)t * biases_strides[2]]);
+        const device TK* kp = kpe_b + (size_t)t * kpe_strides[2];
+)";
+
+constexpr const char* MLA_DECODE_QUANT_LOAD = R"(
+        float dot = 0.0f;
+        for (int i = 0; i < DR; i++) { kv[i] = float(kr[i]); dot += q_r[i] * kv[i]; }
+        s += g_scale * dot + g_bias * q_sum;
+)";
+
+constexpr const char* MLA_DECODE_QUANT_VALUE = R"(
+        const float pg = p * g_scale;
+        for (int i = 0; i < DR; i++) { o[i] = o[i] * a + pg * kv[i]; }
+        o_bias = o_bias * a + p * g_bias;
+)";
+
+constexpr const char* MLA_DECODE_QUANT_FINISH = R"(
+    for (int i = 0; i < DR; i++) { o[i] += o_bias; }
+)";
+
+struct PartialVariant {
+    const char *window, *row, *load, *value, *finish;
+};
+
+constexpr PartialVariant DENSE_VARIANT{MLA_DECODE_DENSE_WINDOW, MLA_DECODE_DENSE_ROW,
+    MLA_DECODE_DENSE_LOAD, MLA_DECODE_DENSE_VALUE, ""};
+constexpr PartialVariant QUANT_VARIANT{MLA_DECODE_QUANT_WINDOW, MLA_DECODE_QUANT_ROW,
+    MLA_DECODE_QUANT_LOAD, MLA_DECODE_QUANT_VALUE, MLA_DECODE_QUANT_FINISH};
+
+std::string partial_source(const PartialVariant& v) {
+    return std::string(MLA_DECODE_PARTIAL_HEAD) + v.window + MLA_DECODE_LOOP_OPEN + v.row +
+        MLA_DECODE_ROPE_SCORE + v.load + MLA_DECODE_SOFTMAX + v.value + MLA_DECODE_LOOP_CLOSE +
+        v.finish + MLA_DECODE_EXCHANGE;
+}
+
 constexpr const char* MLA_DECODE_MERGE_SOURCE = R"(
     const int d = thread_position_in_grid.x;
     const int head = thread_position_in_grid.y;
@@ -147,6 +240,7 @@ constexpr const char* MLA_DECODE_MERGE_SOURCE = R"(
 
 struct MlaDecodeKernels {
     std::optional<mlx::core::fast::CustomKernelFunction> partial;
+    std::optional<mlx::core::fast::CustomKernelFunction> partial_quantized;
     std::optional<mlx::core::fast::CustomKernelFunction> merge;
     std::once_flag init_flag;
 
@@ -159,7 +253,14 @@ struct MlaDecodeKernels {
                 "mlxcel_mla_absorbed_decode_partial",
                 {"q_abs", "q_pe", "ckv", "kpe", "scale_arr", "params"},
                 {"part", "lse"},
-                std::string(MLA_DECODE_PARTIAL_SOURCE),
+                partial_source(DENSE_VARIANT),
+                "",
+                /* ensure_row_contiguous = */ false);
+            partial_quantized = mlx::core::fast::metal_kernel(
+                "mlxcel_mla_absorbed_decode_partial_quantized",
+                {"q_abs", "q_pe", "ckv_q", "scales", "biases", "kpe", "scale_arr", "params"},
+                {"part", "lse"},
+                partial_source(QUANT_VARIANT),
                 "",
                 /* ensure_row_contiguous = */ false);
             merge = mlx::core::fast::metal_kernel(
@@ -176,8 +277,7 @@ MlaDecodeKernels& kernels() {
     return holder;
 }
 
-// The port table holds the partial pass; the merge is launched alongside it
-// and only exists where the partial does.
+// The port table holds the partial pass; the merge exists where it does.
 const mlxcel::KernelPorts& mla_absorbed_decode_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
@@ -191,77 +291,126 @@ const mlxcel::KernelPorts& mla_absorbed_decode_ports() {
     return ports;
 }
 
+// The quantized partial pass has its own table and shares the merge. No CUDA
+// or ROCm port either: the composed quantized path runs there.
+const mlxcel::KernelPorts& mla_absorbed_decode_quantized_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            kernels().init();
+            return *kernels().partial_quantized;
+        },
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
+[[noreturn]] void fail(const std::string& what) {
+    throw std::invalid_argument("[mla_absorbed_decode] " + what);
+}
+
+bool is_kernel_float(mlx::core::Dtype dt) {
+    return dt == mlx::core::float16 || dt == mlx::core::bfloat16 || dt == mlx::core::float32;
+}
+
+// What both variants require of the queries.
+void check_queries(const mlx::core::array& q_abs, const mlx::core::array& q_pe) {
+    if (q_abs.ndim() != 4 || q_pe.ndim() != 4) fail("every input must be 4-D");
+    if (q_abs.shape(2) != 1 || q_pe.shape(2) != 1) fail("one query per head only");
+    if (q_pe.shape(0) != q_abs.shape(0) || q_pe.shape(1) != q_abs.shape(1)) {
+        fail("q_pe disagrees with q_abs");
+    }
+    const int R = q_abs.shape(3), P = q_pe.shape(3);
+    if (R % 32 != 0 || P % 32 != 0 || R > 1024 || R == 0 || P == 0) {
+        fail("R and P must be non-zero multiples of 32 with R <= 1024");
+    }
+}
+
+// A window stream `[B, 1, S, width]` with a contiguous last axis.
+void check_stream(const mlx::core::array& a, int B, int S, int width, const char* what) {
+    if (a.ndim() != 4 || a.shape(0) != B || a.shape(1) != 1 || a.shape(2) != S ||
+        a.shape(3) != width) {
+        fail(std::string(what));
+    }
+    if (a.strides(3) != 1) fail("the cache rows must be contiguous");
+}
+
 void check_shapes(
     const mlx::core::array& q_abs,
     const mlx::core::array& q_pe,
     const mlx::core::array& ckv,
     const mlx::core::array& kpe) {
-    auto fail = [](const std::string& what) {
-        throw std::invalid_argument("[mla_absorbed_decode] " + what);
-    };
-    if (q_abs.ndim() != 4 || q_pe.ndim() != 4 || ckv.ndim() != 4 || kpe.ndim() != 4) {
-        fail("every input must be 4-D");
-    }
-    const int B = q_abs.shape(0), H = q_abs.shape(1), R = q_abs.shape(3);
-    const int P = q_pe.shape(3), S = ckv.shape(2);
-    if (q_abs.shape(2) != 1 || q_pe.shape(2) != 1) fail("one query per head only");
-    if (q_pe.shape(0) != B || q_pe.shape(1) != H) fail("q_pe disagrees with q_abs");
-    if (ckv.shape(0) != B || ckv.shape(1) != 1 || ckv.shape(3) != R) fail("ckv must be [B, 1, S, R]");
-    if (kpe.shape(0) != B || kpe.shape(1) != 1 || kpe.shape(2) != S || kpe.shape(3) != P) {
-        fail("kpe must be [B, 1, S, P]");
-    }
-    if (R % 32 != 0 || P % 32 != 0 || R > 1024 || R == 0 || P == 0) {
-        fail("R and P must be non-zero multiples of 32 with R <= 1024");
-    }
-    if (S < 1) fail("the latent window is empty");
-    if (ckv.strides(3) != 1 || kpe.strides(3) != 1) fail("the cache rows must be contiguous");
+    check_queries(q_abs, q_pe);
+    if (ckv.ndim() != 4 || ckv.shape(2) < 1) fail("the latent window is empty");
+    const int B = q_abs.shape(0), S = ckv.shape(2);
+    check_stream(ckv, B, S, q_abs.shape(3), "ckv must be [B, 1, S, R]");
+    check_stream(kpe, B, S, q_pe.shape(3), "kpe must be [B, 1, S, P]");
     const auto dt = q_abs.dtype();
     if (q_pe.dtype() != dt || ckv.dtype() != dt || kpe.dtype() != dt) fail("inputs must share one dtype");
-    if (dt != mlx::core::float16 && dt != mlx::core::bfloat16 && dt != mlx::core::float32) {
-        fail("dtype must be float16, bfloat16 or float32");
+    if (!is_kernel_float(dt)) fail("dtype must be float16, bfloat16 or float32");
+}
+
+// The quantized variant's contract; the rank comes from the queries.
+void check_shapes_quantized(
+    const mlx::core::array& q_abs,
+    const mlx::core::array& q_pe,
+    const mlx::core::array& ckv_q,
+    const mlx::core::array& scales,
+    const mlx::core::array& biases,
+    const mlx::core::array& kpe,
+    int group_size,
+    int bits) {
+    // The width dispatch. 8 is the only width a cache mode stores (a 4-bit
+    // latent failed the #3155 quality gate), so the rest is refused.
+    switch (bits) {
+    case 8: break;
+    default: fail("only an 8-bit latent is supported, got " + std::to_string(bits) + " bits");
+    }
+    check_queries(q_abs, q_pe);
+    const int B = q_abs.shape(0), R = q_abs.shape(3);
+    if (group_size < 1 || R % group_size != 0 || group_size % (R / 32) != 0) {
+        fail("R must be whole groups, with each lane's R / 32 elements inside one");
+    }
+    if (ckv_q.ndim() != 4 || ckv_q.shape(2) < 1) fail("the latent window is empty");
+    const int S = ckv_q.shape(2), G = R / group_size;
+    check_stream(ckv_q, B, S, R * bits / 32, "ckv_q must be [B, 1, S, R * bits / 32]");
+    check_stream(scales, B, S, G, "scales must be [B, 1, S, R / group_size]");
+    check_stream(biases, B, S, G, "biases must be [B, 1, S, R / group_size]");
+    check_stream(kpe, B, S, q_pe.shape(3), "kpe must be [B, 1, S, P]");
+    if (ckv_q.dtype() != mlx::core::uint32) fail("ckv_q must be uint32");
+    if (q_pe.dtype() != q_abs.dtype()) fail("the queries must share one dtype");
+    if (scales.dtype() != biases.dtype()) fail("scales and biases must share one dtype");
+    for (const auto* a : {&q_abs, &scales, &kpe}) {
+        if (!is_kernel_float(a->dtype())) fail("dtype must be float16, bfloat16 or float32");
     }
 }
 
-} // namespace
-
-bool mla_absorbed_decode_available() {
-    return mlx::core::default_device() == mlx::core::Device::gpu &&
-        mlxcel::has_kernel_port(mla_absorbed_decode_ports());
-}
-
-mlx::core::array mla_absorbed_decode(
+// Launch a partial pass and the merge. `window` is the variant's cache inputs
+// in its kernel's declared order and `ta` its template arguments.
+mlx::core::array launch(
+    mlx::core::fast::CustomKernelFunction& partial,
     const mlx::core::array& q_abs,
     const mlx::core::array& q_pe,
-    const mlx::core::array& ckv,
-    const mlx::core::array& kpe,
-    float scale) {
+    const std::vector<mlx::core::array>& window,
+    int S,
+    float scale,
+    const std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>>& ta) {
     using namespace mlx::core;
-    auto& partial = mlxcel::select_kernel_port(
-        "mla_absorbed_decode", "composed absorbed attention fallback", mla_absorbed_decode_ports());
-    check_shapes(q_abs, q_pe, ckv, kpe);
-
     const int B = q_abs.shape(0), H = q_abs.shape(1), R = q_abs.shape(3);
-    const int P = q_pe.shape(3), S = ckv.shape(2);
     const auto T = q_abs.dtype();
     // Keys per half, rounded up to whole simdgroup strides.
     const int C = ((S + 1) / 2 + 31) / 32 * 32;
 
+    const array params = array({H, S, C}, Shape{3});
     // The queries are tiny and usually strided views (a transpose and a
     // slice); the body reads them row-major, so make them so here.
-    const array qa = contiguous(q_abs);
-    const array qp = contiguous(q_pe);
-    const array params = array({H, S, C}, Shape{3});
-    const array scale_arr = array({scale}, Shape{1});
+    std::vector<array> inputs = {contiguous(q_abs), contiguous(q_pe)};
+    inputs.insert(inputs.end(), window.begin(), window.end());
+    inputs.push_back(array({scale}, Shape{1}));
+    inputs.push_back(params);
 
-    // R and P are template arguments because the body sizes its per-lane
-    // register arrays from them; T because the inputs' element type varies.
-    std::vector<std::pair<std::string, fast::TemplateArg>> ta = {
-        {"T", T},
-        {"R", R},
-        {"P", P},
-    };
     auto partials = partial(
-        {qa, qp, ckv, kpe, scale_arr, params},
+        inputs,
         {Shape{B * H * 2, R}, Shape{B * H * 2}},
         {float32, float32},
         std::make_tuple(2 * 1024, H, B),
@@ -283,6 +432,70 @@ mlx::core::array mla_absorbed_decode(
         false,
         {});
     return merged[0];
+}
+
+} // namespace
+
+bool mla_absorbed_decode_available() {
+    return mlx::core::default_device() == mlx::core::Device::gpu &&
+        mlxcel::has_kernel_port(mla_absorbed_decode_ports());
+}
+
+mlx::core::array mla_absorbed_decode(
+    const mlx::core::array& q_abs,
+    const mlx::core::array& q_pe,
+    const mlx::core::array& ckv,
+    const mlx::core::array& kpe,
+    float scale) {
+    auto& partial = mlxcel::select_kernel_port(
+        "mla_absorbed_decode", "composed absorbed attention fallback", mla_absorbed_decode_ports());
+    check_shapes(q_abs, q_pe, ckv, kpe);
+
+    // R and P size the body's per-lane register arrays; T is the element type.
+    return launch(
+        partial,
+        q_abs,
+        q_pe,
+        {ckv, kpe},
+        ckv.shape(2),
+        scale,
+        {{"T", q_abs.dtype()}, {"R", q_abs.shape(3)}, {"P", q_pe.shape(3)}});
+}
+
+bool mla_absorbed_decode_quantized_available() {
+    return mlx::core::default_device() == mlx::core::Device::gpu &&
+        mlxcel::has_kernel_port(mla_absorbed_decode_quantized_ports());
+}
+
+mlx::core::array mla_absorbed_decode_quantized(
+    const mlx::core::array& q_abs,
+    const mlx::core::array& q_pe,
+    const mlx::core::array& ckv_q,
+    const mlx::core::array& scales,
+    const mlx::core::array& biases,
+    const mlx::core::array& kpe,
+    float scale,
+    int group_size,
+    int bits) {
+    auto& partial = mlxcel::select_kernel_port(
+        "mla_absorbed_decode_quantized",
+        "composed quantized absorbed attention fallback",
+        mla_absorbed_decode_quantized_ports());
+    check_shapes_quantized(q_abs, q_pe, ckv_q, scales, biases, kpe, group_size, bits);
+    // `TK` is the rope window's element type; the scale and bias dtype reaches
+    // the kernel through its generated signature, and the body reads bytes.
+    return launch(
+        partial,
+        q_abs,
+        q_pe,
+        {ckv_q, scales, biases, kpe},
+        ckv_q.shape(2),
+        scale,
+        {{"T", q_abs.dtype()},
+         {"TK", kpe.dtype()},
+         {"R", q_abs.shape(3)},
+         {"P", q_pe.shape(3)},
+         {"GS", group_size}});
 }
 
 } // namespace mlxcel::turbo

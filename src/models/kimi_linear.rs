@@ -34,7 +34,7 @@ use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
 
-use super::model_owned::ModelOwnedSequenceState;
+use super::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -455,14 +455,24 @@ impl KimiLinearCache {
     }
 }
 
-fn make_kimi_caches_from_layers(layers: &[KimiDecoderLayer]) -> Vec<KimiLinearCache> {
+/// One cache per layer: KDA state for a linear layer, and for an MLA layer a
+/// latent-pair `KVCache` in the table's mode for that layer index (fp16 when
+/// no table was injected). The table is indexed by layer, so a KDA layer's
+/// entry is simply unused (#3162).
+fn make_kimi_caches_from_layers(
+    layers: &[KimiDecoderLayer],
+    modes: &KvCacheLayerModes,
+) -> Vec<KimiLinearCache> {
     layers
         .iter()
-        .map(|layer| {
+        .enumerate()
+        .map(|(idx, layer)| {
             if layer.is_linear {
                 KimiLinearCache::Delta(KimiDeltaCache::new())
             } else {
-                KimiLinearCache::MLA(KVCache::new())
+                KimiLinearCache::MLA(KVCache::new_with_mode(
+                    super::mla_batched::latent_pair_cache_mode(modes.mode_for_layer(idx)),
+                ))
             }
         })
         .collect()
@@ -493,16 +503,32 @@ struct KimiMLAAttention {
 /// it as a boolean condition: zero would become `false`, reversing the mask
 /// and leaving the final prefill row entirely blocked.
 fn apply_mla_causal_mask(scores: &MlxArray, mask: &MlxArray) -> UniquePtr<MlxArray> {
-    let scores_dtype = mlxcel_core::array_dtype(scores);
-    let mask = if mlxcel_core::array_dtype(mask) == scores_dtype {
-        mlxcel_core::copy(mask)
-    } else {
-        mlxcel_core::astype(mask, scores_dtype)
-    };
+    let mask = mla_mask_in_dtype(mask, mlxcel_core::array_dtype(scores));
     mlxcel_core::add(scores, &mask)
 }
 
+/// `mask` in the positional scores' dtype, the form [`apply_mla_causal_mask`]
+/// adds. The quantized decode adds the same array to its rope-score term.
+fn mla_mask_in_dtype(mask: &MlxArray, dtype: i32) -> UniquePtr<MlxArray> {
+    if mlxcel_core::array_dtype(mask) == dtype {
+        mlxcel_core::copy(mask)
+    } else {
+        mlxcel_core::astype(mask, dtype)
+    }
+}
+
 impl KimiMLAAttention {
+    /// The layer's MLA shape, for the latent cache view.
+    fn geometry(&self) -> mlxcel_core::mla::MlaGeometry {
+        super::mla_batched::mla_geometry(
+            self.num_heads,
+            self.kv_lora_rank,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self._v_head_dim,
+        )
+    }
+
     fn forward_batched_decode(
         &self,
         x: &MlxArray,
@@ -536,7 +562,16 @@ impl KimiMLAAttention {
         let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
         let kv_latent = mlxcel_core::expand_dims(&self.kv_a_layernorm.forward(&compressed), 1);
         let output = super::mla_batched::mla_latent_decode_rows(
-            &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale, None,
+            "kimi_linear",
+            true,
+            self.geometry(),
+            &q_latent,
+            &q_pe,
+            &kv_latent,
+            &k_pe,
+            caches,
+            self.scale,
+            None,
         );
         let output = self.unembed_out.forward(&output, true);
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
@@ -593,8 +628,19 @@ impl KimiMLAAttention {
         let kv_latent = self.kv_a_layernorm.forward(&compressed);
         let kv_latent = mlxcel_core::expand_dims(&kv_latent, 1);
 
-        // Update KV cache (stores kv_latent as "keys" and k_pe as "values")
-        let (cached_latent, cached_k_pe) = cache.update_and_fetch(kv_latent, k_pe);
+        // Update KV cache (stores kv_latent as "keys" and k_pe as "values").
+        // An `int8` cache stores the latent as the affine group-64 triple and
+        // hands back a quantized window; the fresh chunk is quantized before
+        // this step reads it, so a prefill reads what later decode steps read
+        // (#3162). An fp16 cache is updated exactly as before.
+        let window = super::mla_batched::store_latent_step(
+            cache,
+            self.geometry(),
+            kv_latent,
+            k_pe,
+            "kimi_linear",
+            true,
+        );
 
         // Cost-model gate (issue #2408): one query is always absorbed, and a
         // multi-token step behind a long enough cache can be cheaper absorbed
@@ -607,6 +653,47 @@ impl KimiMLAAttention {
             self.qk_nope_head_dim as usize,
             self._v_head_dim as usize,
         );
+
+        // A quantized window's one absorbed query goes to
+        // `quantized_absorbed_attention`, which runs the fused kernel's
+        // quantized variant where it applies (Metal, unmasked, up to
+        // `FUSED_DECODE_QUANTIZED_MAX_KEYS` keys, #3156; records
+        // `AbsorbedFused`) and the #3155 composed decode on the packed rows
+        // otherwise (records `AbsorbedComposed`). The caller's additive mask
+        // is cast to the score dtype, as `apply_mla_causal_mask` does, and
+        // added to the rope-score term where the dense code adds it. Every
+        // other step over a quantized window dequantizes it once and runs the
+        // fp16 code below.
+        let (cached_latent, cached_k_pe) = match window {
+            mlxcel_core::mla::LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } if absorbed && l == 1 => {
+                let q_latent = self.embed_q.forward(&q_nope, true);
+                let mask = mask.map(|m| mla_mask_in_dtype(m, mlxcel_core::array_dtype(&q_pe)));
+                let output = mlxcel_core::mla::quantized_absorbed_attention(
+                    &q_latent,
+                    &q_pe,
+                    &ckv_q,
+                    &scales,
+                    &biases,
+                    &kpe,
+                    bits,
+                    group_size,
+                    self.scale,
+                    mask.as_deref(),
+                );
+                let output = self.unembed_out.forward(&output, true);
+                let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+                let output = mlxcel_core::reshape(&output, &[b, l, -1]);
+                return self.o_proj.forward(&output);
+            }
+            window => super::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe)),
+        };
         mlxcel_core::mla::stats::record(if absorbed {
             if l == 1 {
                 mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
@@ -1373,6 +1460,10 @@ pub struct KimiLinearModel {
     pub tie_word_embeddings: bool,
     _ssm_layer_idx: usize,
     sequence_state: ModelOwnedSequenceState<KimiLinearCache>,
+    /// Resolved per-layer KV cache modes, injected by the generator or the
+    /// scheduler through [`LanguageModel::set_kv_cache_layer_modes`]. Only
+    /// the MLA layers read it (#3162).
+    kv_cache_layer_modes: KvCacheLayerModes,
     eos_token_ids: Vec<i32>,
 }
 
@@ -1422,7 +1513,7 @@ impl KimiLinearModel {
     }
 
     pub fn make_kimi_caches(&self) -> Vec<KimiLinearCache> {
-        make_kimi_caches_from_layers(&self.layers)
+        make_kimi_caches_from_layers(&self.layers, &self.kv_cache_layer_modes)
     }
 
     fn delta_rows_uniform(rows: &[&KimiDeltaCache]) -> bool {
@@ -1846,7 +1937,8 @@ impl KimiLinearModel {
         } else {
             0
         };
-        let internal_caches = make_kimi_caches_from_layers(&layers);
+        let kv_cache_layer_modes = KvCacheLayerModes::new();
+        let internal_caches = make_kimi_caches_from_layers(&layers, &kv_cache_layer_modes);
         let eos_token_ids = super::parse_optional_eos_token_ids(&config.eos_token_id);
 
         Ok(Self {
@@ -1857,6 +1949,7 @@ impl KimiLinearModel {
             tie_word_embeddings: config.tie_word_embeddings,
             _ssm_layer_idx: ssm_layer_idx,
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            kv_cache_layer_modes,
             eos_token_ids,
         })
     }
@@ -1907,16 +2000,37 @@ impl LanguageModel for KimiLinearModel {
         self.layers.len()
     }
 
-    /// No mode table: report the real storage so the server does not fall back to the configured
-    /// table (issue #2790). MLA layers keep an FP16 `KVCache`; KDA linear layers none.
+    /// What each layer stores, by the builder's own rule: an MLA layer holds
+    /// its table mode (fp16 or the affine int8 latent, #3162), a KDA layer no
+    /// KV (issue #2790). Before a table is injected every MLA layer is fp16.
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
-        crate::models::model_owned::table_less_storage_modes(self.layers.len(), |idx| {
-            if self.layers[idx].is_linear {
-                crate::models::model_owned::LayerKv::None
-            } else {
-                crate::models::model_owned::LayerKv::Fp16Only
-            }
-        })
+        Some(
+            (0..self.layers.len())
+                .map(|idx| {
+                    let kind = if self.layers[idx].is_linear {
+                        LayerKv::None
+                    } else {
+                        LayerKv::Full
+                    };
+                    kind.stored_mode(super::mla_batched::latent_pair_cache_mode(
+                        self.kv_cache_layer_modes.mode_for_layer(idx),
+                    ))
+                })
+                .collect(),
+        )
+    }
+
+    /// Record the resolved per-layer table and rebuild the fallback slot so
+    /// it is not left holding caches in the previous mode. Both injection
+    /// sites run before any sequence exists.
+    fn set_kv_cache_layer_modes(&self, modes: Vec<mlxcel_core::cache::KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.sequence_state
+            .replace_internal(self.make_kimi_caches());
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<mlxcel_core::cache::KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
     }
 
     fn supports_padded_prefill(&self) -> bool {
@@ -2089,3 +2203,7 @@ impl LanguageModel for KimiLinearModel {
 #[cfg(test)]
 #[path = "kimi_linear_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "kimi_linear_latent_tests.rs"]
+mod latent_tests;

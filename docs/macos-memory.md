@@ -42,7 +42,7 @@ After a load the server logs `Process footprint after load`. With `--metrics`, `
 
 The external PLE row cache of `qwen4_exp` checks availability before each 64 MiB growth step and stops growing, evicting instead, rather than push macOS below the reserve. The check reuses one query for 250 ms. The KV prompt-cache store is not gated: an entry's arrays already exist when it is inserted and the store is bounded by a byte budget, so there is no growth step to refuse.
 
-The prompt-cache snapshot store grows the same way: while it is below its byte budget, each snapshot insert that would add to its resident size re-checks availability against the reserve and is skipped instead of stored when the host cannot spare it. A store at its budget only replaces entries, so it is never refused.
+The prompt-cache snapshot store grows the same way: while it is below its byte budget, each snapshot insert that would add to its resident size re-checks availability against the reserve and is skipped instead of stored when the host cannot spare it. A store at its budget only replaces entries, so it is never refused. Each skipped snapshot or state checkpoint is counted as `mlxcel_prompt_cache_reject_total{reason="memory_reserve"}` on `/metrics` and becomes the `last_reject` reason in `GET /v1/cache/stats`, so a store that stays empty because the host is short of memory says so.
 
 ## What was measured
 

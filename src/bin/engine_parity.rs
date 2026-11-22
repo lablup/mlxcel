@@ -221,6 +221,10 @@ fn gate_failed(expect_identical: bool, diverged: usize) -> bool {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    // These binaries take no `--mla-latent-quant` flag but load MLA models,
+    // so fix the option from `MLXCEL_MLA_LATENT_QUANT` before anything
+    // resolves a KV cache mode; a bad value is a startup error (issue #3179).
+    mlxcel::cli::mla_latent_option::init_mla_latent_quant(None)?;
     let sdpa_deterministic = std::env::var("MLXCEL_SDPA_DETERMINISTIC").is_ok_and(|v| v == "1");
     validate_expect_identical(args.expect_identical, sdpa_deterministic)?;
     validate_prompt_text(&args.prompt)?;

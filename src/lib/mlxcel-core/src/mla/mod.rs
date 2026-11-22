@@ -98,27 +98,55 @@ pub mod absorb;
 pub mod cache;
 pub mod decode;
 pub mod kv_b_split;
+pub mod latent_keys;
+pub mod latent_option;
+pub mod latent_pair;
 pub mod prefill;
+pub mod quant_latent;
 pub mod split_kv;
 pub mod stats;
 
 #[cfg(test)]
 mod fused_decode_tests;
 #[cfg(test)]
+mod latent_int4_tests;
+#[cfg(test)]
 mod prefill_tests;
 #[cfg(test)]
 pub(crate) mod testkit;
+#[cfg(test)]
+mod turbo_latent;
 
 pub use absorb::MlaAbsorbedProjections;
 pub use cache::{
     MLA_LATENT_CACHE_FAMILIES, MlaLatentCache, caches_mla_latent_pair,
     decompressed_bytes_per_token, latent_bytes_per_token, latent_layout_supports_mode,
+    stores_latent_through_view,
 };
 pub use decode::{
-    FUSED_DECODE_MAX_KEYS, absorb_queries, absorbed_decode, fused_absorbed_decode, unabsorb_output,
+    FUSED_DECODE_MAX_KEYS, FUSED_DECODE_QUANTIZED_MAX_KEYS, absorb_queries, absorbed_decode,
+    fused_absorbed_decode, fused_absorbed_decode_quantized, unabsorb_output,
 };
 pub use kv_b_split::{KvBProjGeometry, decompose_kv_b_proj};
+pub use latent_keys::{
+    DSA_INDEXER_KEY_FAMILIES, SIDECAR_KEY_BITS, caches_dsa_indexer_key, check_stored_key_width,
+    quantized_key_slot_bytes_per_token,
+};
+pub use latent_option::{
+    EXPERIMENTAL_LATENT_NOTES, ExperimentalLatentNote, MLA_LATENT_QUANT_ENV, MLA_LATENT_QUANT_FLAG,
+    MlaLatentQuant, effective_latent_bits, experimental_latent_notes, has_mla_latent_cache,
+    holds_mla_latent, init_mla_latent_quant, latent_cache_bits, latent_cache_bits_with,
+    latent_option_notices, mla_latent_quant, option_decides_latent, resolve_mla_latent_quant,
+    set_mla_latent_quant, with_mla_latent_quant,
+};
+pub use latent_pair::{
+    QUANTIZED_LATENT_FAMILIES, latent_pair_supports_mode, latent_pair_supports_mode_with,
+    stores_quantized_latent_pair, stores_quantized_latent_pair_with,
+};
 pub use prefill::{FoldedMask, rope_folded_attention};
+pub use quant_latent::{
+    LatentWindow, quantized_absorbed_attention, quantized_latent_bytes_per_token,
+};
 pub use split_kv::{MlaSplitPlan, absorbed_decode_split_kv};
 pub use stats::{MlaDecodePath, MlaDispatchCounts};
 

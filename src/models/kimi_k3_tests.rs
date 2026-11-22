@@ -74,7 +74,7 @@ fn kda_p() -> usize {
 
 /// Layer `i` is KDA for `i` in {0, 2} (1-based `kda_layers = [1, 3]`), MLA
 /// for {1, 3}; layer 0 is dense, 1..3 are MoE.
-fn tiny_text_config() -> KimiK3TextConfig {
+pub(super) fn tiny_text_config() -> KimiK3TextConfig {
     KimiK3TextConfig {
         model_type: "kimi_linear".to_string(),
         vocab_size: VOCAB,
@@ -146,7 +146,7 @@ fn arr(data: &[f32], shape: &[i32]) -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_f32(data, shape)
 }
 
-fn noise_arr(shape: &[i32], seed: u32, scale: f32) -> UniquePtr<MlxArray> {
+pub(super) fn noise_arr(shape: &[i32], seed: u32, scale: f32) -> UniquePtr<MlxArray> {
     let n: i32 = shape.iter().product();
     arr(&scaled_noise(n as usize, seed, scale), shape)
 }
@@ -285,8 +285,9 @@ fn raw_kda_weights(weights: &mut WeightMap, prefix: &str, seed: u32) {
     );
 }
 
-/// One MLA attention block under `prefix` (raw: `kv_b_proj`, not yet decomposed).
-fn raw_mla_weights(weights: &mut WeightMap, prefix: &str, seed: u32) {
+/// One MLA attention block under `prefix` (raw: `kv_b_proj`, not yet
+/// decomposed), with latent width `kv_lora`.
+fn raw_mla_weights(weights: &mut WeightMap, prefix: &str, seed: u32, kv_lora: usize) {
     let d = HIDDEN as i32;
     let h = MLA_HEADS as i32;
     let qhd = (QK_NOPE + QK_ROPE) as i32;
@@ -304,16 +305,16 @@ fn raw_mla_weights(weights: &mut WeightMap, prefix: &str, seed: u32) {
     );
     weights.insert(
         format!("{prefix}.kv_a_proj_with_mqa.weight"),
-        noise_arr(&[(KV_LORA + QK_ROPE) as i32, d], seed + 3, 0.5),
+        noise_arr(&[(kv_lora + QK_ROPE) as i32, d], seed + 3, 0.5),
     );
     weights.insert(
         format!("{prefix}.kv_a_layernorm.weight"),
-        arr(&ones_plus_noise(KV_LORA, seed + 4), &[KV_LORA as i32]),
+        arr(&ones_plus_noise(kv_lora, seed + 4), &[kv_lora as i32]),
     );
     weights.insert(
         format!("{prefix}.kv_b_proj.weight"),
         noise_arr(
-            &[h * (QK_NOPE + V_HEAD) as i32, KV_LORA as i32],
+            &[h * (QK_NOPE + V_HEAD) as i32, kv_lora as i32],
             seed + 5,
             0.5,
         ),
@@ -472,7 +473,12 @@ fn raw_checkpoint(config: &KimiK3TextConfig, layout: RawLayout) -> WeightMap {
         if config.is_linear_layer(l) {
             raw_kda_weights(&mut w, &format!("{prefix}.self_attn"), seed + 10);
         } else {
-            raw_mla_weights(&mut w, &format!("{prefix}.self_attn"), seed + 10);
+            raw_mla_weights(
+                &mut w,
+                &format!("{prefix}.self_attn"),
+                seed + 10,
+                config.kv_lora_rank,
+            );
         }
         if config.is_moe_layer(l) {
             raw_moe_weights(
@@ -512,7 +518,7 @@ fn raw_checkpoint(config: &KimiK3TextConfig, layout: RawLayout) -> WeightMap {
 }
 
 /// Sanitized weights of the tiny checkpoint.
-fn sanitized(config: &KimiK3TextConfig) -> WeightMap {
+pub(super) fn sanitized(config: &KimiK3TextConfig) -> WeightMap {
     let raw = raw_checkpoint(
         config,
         RawLayout {

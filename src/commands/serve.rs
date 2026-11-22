@@ -989,6 +989,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         cache_type_k: args.turbo.cache_type_k,
         cache_type_v: args.turbo.cache_type_v,
         kv_cache_mode_legacy: args.turbo.kv_cache_mode,
+        mla_latent_quant: args.turbo.mla_latent_quant,
         // continuous-batching KV quantization knobs (flattened
         // from `BatchKvQuantArgs`).
         kv_bits: args.batch_quant.kv_bits,

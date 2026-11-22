@@ -2362,6 +2362,9 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // function-level SAFETY note on `TurboKvCacheArgs::apply_to_environment`
     // for the full precondition.
     args.turbo.apply_to_environment();
+    // Fix `--mla-latent-quant` (or `MLXCEL_MLA_LATENT_QUANT`) for the process
+    // before `into_startup_config` resolves the KV cache mode (issue #3179).
+    mlxcel::cli::mla_latent_option::init_mla_latent_quant(args.turbo.mla_latent_quant)?;
 
     // Axis B (B7): apply `LLAMA_ARG_LANG_BIAS` env-var fallback
     // before resolving, so env-supplied values flow through the same
@@ -3084,6 +3087,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         cache_type_k: args.turbo.cache_type_k,
         cache_type_v: args.turbo.cache_type_v,
         kv_cache_mode_legacy: args.turbo.kv_cache_mode,
+        mla_latent_quant: args.turbo.mla_latent_quant,
         // continuous-batching KV quantization knobs (flattened
         // from `BatchKvQuantArgs`).
         kv_bits: args.batch_quant.kv_bits,

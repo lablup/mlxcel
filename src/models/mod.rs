@@ -107,6 +107,8 @@ pub mod gated_delta;
 // hybrid families, so its working set is bounded by a chunk, not the prefill
 // piece (#3073).
 pub(crate) mod mla_batched;
+#[cfg(test)]
+pub(crate) mod mla_latent_test_support;
 pub(crate) mod ssd_scan;
 // `ssm_a` computes the SSM transition `A = -exp(A_log)` in float32 for the
 // Mamba1, Jamba and Mamba2 families (#3046, #3057, #3125).

@@ -37,6 +37,7 @@ pub mod infill_args;
 pub mod llama_short_flags;
 pub mod logging_compat_args;
 pub mod max_tokens;
+pub mod mla_latent_option;
 pub mod multimodal_compat_args;
 pub mod rope_args;
 pub mod slot_args;

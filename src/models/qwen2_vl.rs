@@ -91,6 +91,20 @@ fn default_bits() -> i32 {
 }
 
 impl Qwen2VLConfig {
+    /// Give the config the layout of a ModelOpt NVFP4 export's repacked
+    /// linears: 4-bit codes in the 16-element blocks the transcode keeps.
+    ///
+    /// Such an export has no MLX `quantization` block, and without one
+    /// [`Self::group_size`] and [`Self::bits`] are 0, which the quantized
+    /// loaders refuse. A config that already has the block is left alone.
+    ///
+    /// Used by: `load_qwen2_5_vl` (`src/loading/vlm_qwen.rs`)
+    pub(crate) fn declare_modelopt_nvfp4_layout(&mut self) {
+        self.quantization.get_or_insert(QuantConfig {
+            group_size: crate::models::sanitize::NVFP4_SOURCE_GROUP_SIZE as i32,
+            bits: 4,
+        });
+    }
     fn num_kv_heads(&self) -> usize {
         self.num_key_value_heads.unwrap_or(self.num_attention_heads)
     }

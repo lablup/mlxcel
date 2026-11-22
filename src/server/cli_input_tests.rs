@@ -214,6 +214,7 @@ fn sample_input() -> ServerStartupInput {
         cache_type_k: None,
         cache_type_v: None,
         kv_cache_mode_legacy: None,
+        mla_latent_quant: None,
         // continuous-batching KV quantization knobs (off by default).
         kv_bits: 0,
         kv_group_size: mlxcel_core::cache::DEFAULT_KV_GROUP_SIZE,
@@ -3151,4 +3152,205 @@ fn int8_sizing_charges_the_fp16_last_layer() {
     let off = BatchKvQuantConfig::default();
     let sizing = super::kv_mode_for_batch(KVCacheMode::Fp16, &off);
     assert!(!sizing.fp16_last_layer);
+}
+
+/// A model directory whose `config.json` carries only `model_type`.
+fn kv_quant_model_dir(model_type: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        format!("{{\"model_type\": \"{model_type}\"}}"),
+    )
+    .expect("write config.json");
+    dir
+}
+
+/// `--kv-bits 8` is held on DeepSeek V2 in both absorption states (the affine
+/// MLA latent under absorbed decode, per-head int8 without it, issue #3155),
+/// and the serve preflight sizes that mode. It is also held on `deepseek_v3`,
+/// whose int8 cache stores the affine latent (issue #3160). A latent-pair
+/// family outside that list still has it taken off, and `--kv-quant-scheme turboquant` is still taken off V2 while
+/// it absorbs. `--kv-bits 4` uniform stays a startup error: 4-bit failed the
+/// quality gate, so no mode backs it.
+#[test]
+fn kv_bits_8_is_held_on_deepseek_v2() {
+    use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
+
+    let uniform8 = || BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, true).unwrap();
+    let absorbed = mlxcel_core::mla::absorbed_enabled();
+
+    let v2 = kv_quant_model_dir("deepseek_v2");
+    let mut batch = uniform8();
+    assert_eq!(
+        super::disable_batch_kv_quant_for_family(&mut batch, v2.path()),
+        None
+    );
+    assert_eq!(batch.base_mode(), KVCacheMode::Int8);
+    let sizing = super::effective_serve_kv_cache_mode(KVCacheMode::Fp16, uniform8(), v2.path());
+    assert_eq!(sizing.mode, KVCacheMode::Int8);
+    assert!(sizing.fp16_last_layer);
+
+    let v3 = kv_quant_model_dir("deepseek_v3");
+    let mut batch = uniform8();
+    assert_eq!(
+        super::disable_batch_kv_quant_for_family(&mut batch, v3.path()),
+        None
+    );
+    assert_eq!(batch.base_mode(), KVCacheMode::Int8);
+
+    // Every family in `mla::QUANTIZED_LATENT_FAMILIES` holds it too; the
+    // other latent-pair families, GLM-4.7-Flash among them (issue #3161),
+    // still have it taken off.
+    for &family in mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES {
+        let dir = kv_quant_model_dir(family);
+        let mut batch = uniform8();
+        let refused = super::disable_batch_kv_quant_for_family(&mut batch, dir.path());
+        if mlxcel_core::mla::stores_quantized_latent_pair(family) {
+            assert_eq!(refused, None, "{family}");
+            assert_eq!(batch.base_mode(), KVCacheMode::Int8, "{family}");
+        } else {
+            assert_eq!(refused, Some(KVCacheMode::Int8), "{family}");
+            assert!(!batch.is_enabled(), "{family}");
+        }
+    }
+
+    let mut turbo = BatchKvQuantConfig::new(KvQuantScheme::TurboQuant, 4, 64, true).unwrap();
+    let refused = super::disable_batch_kv_quant_for_family(&mut turbo, v2.path());
+    assert_eq!(refused.is_some(), absorbed);
+    assert_eq!(turbo.is_enabled(), !absorbed);
+
+    let err = BatchKvQuantConfig::new(KvQuantScheme::Uniform, 4, 64, true).unwrap_err();
+    assert!(err.contains("--kv-bits 4"), "{err}");
+}
+
+/// An absorbed MLA latent is grouped in 64s only, so a different
+/// `--kv-group-size` fails startup for such a model rather than being accepted
+/// and ignored. Models that do not store a quantized latent are unaffected.
+#[test]
+fn kv_group_size_other_than_64_is_rejected_for_a_quantized_latent() {
+    let v2 = kv_quant_model_dir("deepseek_v2");
+    let mut input = sample_input();
+    input.model_path = v2.path().to_path_buf();
+    input.kv_bits = 8;
+    input.kv_group_size = 32;
+    let result = input.into_startup_config();
+    if mlxcel_core::mla::absorbed_enabled() {
+        let err = result.expect_err("group size 32 must fail startup");
+        let text = err.to_string();
+        assert!(text.contains("--kv-group-size 32"), "{text}");
+        assert!(text.contains("groups of 64"), "{text}");
+    } else {
+        result.expect("per-head int8 does not read the group size");
+    }
+
+    let mut input = sample_input();
+    input.model_path = v2.path().to_path_buf();
+    input.kv_bits = 8;
+    input.kv_group_size = 64;
+    input
+        .into_startup_config()
+        .expect("group size 64 is the latent's own");
+
+    let llama = kv_quant_model_dir("llama");
+    let mut input = sample_input();
+    input.model_path = llama.path().to_path_buf();
+    input.kv_bits = 8;
+    input.kv_group_size = 32;
+    input
+        .into_startup_config()
+        .expect("per-head int8 does not read the group size");
+}
+
+/// `--mla-latent-quant` at server startup (issue #3179): the option in force
+/// is carried in the startup config, decides the KV cache mode of a model
+/// that holds an MLA latent, takes the `--kv-bits` table off such a model,
+/// and raises its warnings once as startup notices.
+#[test]
+fn mla_latent_quant_reaches_the_startup_config_and_decides_an_mla_model() {
+    use mlxcel_core::mla::MlaLatentQuant::{Auto, Fp16, Int4, Int8};
+    use mlxcel_core::mla::with_mla_latent_quant;
+
+    let glm = kv_quant_model_dir("glm4_moe_lite");
+    let startup = |option, flag, kv_bits: i32, legacy: Option<&str>| {
+        with_mla_latent_quant(option, || {
+            let mut input = sample_input();
+            input.model_path = glm.path().to_path_buf();
+            input.mla_latent_quant = flag;
+            input.kv_bits = kv_bits;
+            input.kv_cache_mode_legacy = legacy.map(str::to_string);
+            input.into_startup_config()
+        })
+    };
+    let count = |startup: &crate::server::ServerStartupConfig, needle: &str| {
+        startup
+            .startup_notices
+            .iter()
+            .filter(|notice| notice.message.contains(needle))
+            .count()
+    };
+
+    // Unset: GLM keeps fp16 and nothing is said about the option.
+    let auto = startup(Auto, None, 0, None).expect("auto");
+    assert_eq!(auto.mla_latent_quant, Auto);
+    assert_eq!(auto.kv_cache_mode, KVCacheMode::Fp16);
+    assert_eq!(count(&auto, "mla-latent-quant"), 0);
+
+    // int4, from the flag or from the environment variable (flag absent).
+    for flag in [Some(Int4), None] {
+        let int4 = startup(Int4, flag, 0, None).expect("int4");
+        assert_eq!(int4.mla_latent_quant, Int4);
+        assert_eq!(int4.kv_cache_mode, KVCacheMode::Int8);
+        assert_eq!(count(&int4, "is experimental"), 1);
+        assert_eq!(count(&int4, "disagree on the MLA latent precision"), 0);
+    }
+
+    // `--kv-bits 8` under int4: the table steps aside, so the last layer is
+    // not left fp16, and the disagreement is named once.
+    let int4 = startup(Int4, Some(Int4), 8, None).expect("int4 with --kv-bits 8");
+    assert_eq!(int4.kv_cache_mode, KVCacheMode::Int8);
+    assert!(!int4.batch_kv_quant.is_enabled());
+    assert_eq!(count(&int4, "disagree on the MLA latent precision"), 1);
+    assert_eq!(count(&int4, "is experimental"), 1);
+    assert_eq!(count(&int4, "--kv-bits 8 is not applied"), 1);
+    assert_eq!(count(&int4, "cannot hold"), 0);
+
+    // fp16 under `--kv-cache-mode int8`: fp16 caches and one line naming both.
+    let fp16 = startup(Fp16, Some(Fp16), 0, Some("int8")).expect("fp16");
+    assert_eq!(fp16.kv_cache_mode, KVCacheMode::Fp16);
+    assert_eq!(count(&fp16, "disagree on the MLA latent precision"), 1);
+    assert_eq!(count(&fp16, "is experimental"), 0);
+
+    // A flag the process did not apply is a startup error, not a silent no-op.
+    let err = startup(Int8, Some(Int4), 0, None).expect_err("flag and process disagree");
+    assert!(err.to_string().contains("was not applied"), "{err}");
+
+    // A model with no MLA latent keeps its table and gets the ignored line.
+    let llama = kv_quant_model_dir("llama");
+    let ignored = with_mla_latent_quant(Fp16, || {
+        let mut input = sample_input();
+        input.model_path = llama.path().to_path_buf();
+        input.mla_latent_quant = Some(Fp16);
+        input.kv_bits = 8;
+        input.into_startup_config()
+    })
+    .expect("llama");
+    assert!(ignored.batch_kv_quant.is_enabled());
+    assert_eq!(count(&ignored, "is ignored"), 1);
+
+    // The serve preflight sizes what startup builds.
+    with_mla_latent_quant(Int4, || {
+        let sizing = super::effective_serve_kv_cache_mode(
+            KVCacheMode::Fp16,
+            mlxcel_core::cache::BatchKvQuantConfig::new(
+                mlxcel_core::cache::KvQuantScheme::Uniform,
+                8,
+                64,
+                true,
+            )
+            .unwrap(),
+            glm.path(),
+        );
+        assert_eq!(sizing.mode, KVCacheMode::Int8);
+        assert!(!sizing.fp16_last_layer);
+    });
 }
