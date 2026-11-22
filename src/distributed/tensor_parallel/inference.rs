@@ -412,6 +412,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // VLM-kind models earlier, this keeps the dispatch table total.
         ModelType::Step3p7 => "step3p5",
         ModelType::RecurrentGemma => "recurrent_gemma",
+        ModelType::Z1t => "z1t",
         ModelType::LlavaVLM
         | ModelType::LlavaBunnyVLM
         | ModelType::AyaVisionVLM

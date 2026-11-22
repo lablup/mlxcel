@@ -127,6 +127,9 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
         ModelType::Rwkv7 => {
             Some(load_from_path(model_path, models::Rwkv7::load).map(LoadedModel::Rwkv7)?)
         }
+        ModelType::Z1t => {
+            Some(load_from_path(model_path, models::Z1t::load).map(LoadedModel::Z1t)?)
+        }
         ModelType::RecurrentGemma => Some(
             super::load_pair_from_dir(path_str, |path| models::GriffinModel::load(&path))
                 .map(LoadedModel::RecurrentGemma)?,

@@ -149,6 +149,7 @@ pub fn generate_shard_plan(
         | "nemotron_nas"
         | "rwkv7"
         | "recurrent_gemma"
+        | "z1t"
         | "kimi_linear"
         | "kimi_k3"
         | "longcat_flash"

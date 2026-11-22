@@ -97,7 +97,7 @@ pub const STATE_TAIL_EAGER_MIN_ROWS: i32 = 256;
 /// Used by: Qwen 3.5, Qwen3-Next, Qwen4-Exp (gated-delta and PLE), Mamba,
 /// Mamba2, FalconH1, GraniteMoeHybrid, Plamo2, NemotronH, Jamba, Lfm2 (and its
 /// speculative path), KimiLinear and KimiK3 (short conv), RecurrentGemma,
-/// Inkling (short conv)
+/// Inkling (short conv), Z1T (AFT-conv window)
 pub fn materialized_state_tail(x: &MlxArray, n_keep: i32) -> UniquePtr<MlxArray> {
     materialized_axis_tail(x, 1, n_keep)
 }
@@ -132,7 +132,8 @@ pub fn materialized_axis_tail(x: &MlxArray, axis: usize, n_keep: i32) -> UniqueP
 /// Used by: Mamba2, FalconH1, GraniteMoeHybrid (SSM final state), the
 /// gated-delta chunked scan (Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear,
 /// KimiK3), BailingMoeLinear (GLA state), and the conv-state sites that keep a
-/// per-row or non-axis-1 tail: Baichuan, Inkling batched, TP Qwen3.5 rows
+/// per-row or non-axis-1 tail: Baichuan, Inkling batched, TP Qwen3.5 rows,
+/// and Z1T (AFT-conv running pool sums)
 pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
     if rows >= STATE_TAIL_EAGER_MIN_ROWS {
         crate::deferred_eval::async_eval_or_defer(state);

@@ -851,6 +851,7 @@ impl ModelType {
             ModelType::Step3p7 => "step3p7",
             ModelType::Rwkv7 => "rwkv7",
             ModelType::RecurrentGemma => "recurrent_gemma",
+            ModelType::Z1t => "z1t",
             ModelType::Whisper => "whisper",
             ModelType::Kokoro => "kokoro",
             ModelType::NemotronVoiceChat => "nemotron_voicechat",
@@ -1003,7 +1004,8 @@ impl ModelType {
             | ModelType::Qwen35
             | ModelType::Plamo2
             | ModelType::Rwkv7
-            | ModelType::RecurrentGemma => "hybrid_ssm",
+            | ModelType::RecurrentGemma
+            | ModelType::Z1t => "hybrid_ssm",
             ModelType::Llama4
             | ModelType::Qwen3Moe
             | ModelType::Qwen35Moe
@@ -1237,6 +1239,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         }
         ModelType::NemotronNAS => &["nemotron-nas"],
         ModelType::Rwkv7 => &["rwkv7"],
+        ModelType::Z1t => &["z1t"],
         ModelType::KimiLinear => &["kimi_linear"],
         ModelType::KimiK3 | ModelType::KimiK3VLM => &["kimi_k3"],
         ModelType::KimiVL => &["kimi_vl"],

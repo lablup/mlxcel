@@ -275,6 +275,7 @@ macro_rules! for_each_model_registration {
             Step3p7 => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Step-3.7 cannot be loaded with LoRA adapters yet") };
             Rwkv7 => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             RecurrentGemma => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
+            Z1t => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             Whisper => { kind: Text, directory: Nonstandard, weight: None, adapter: Some("Whisper ASR checkpoints are served through the /v1/audio/* endpoints, not text generation or adapter loading") };
             Kokoro => { kind: Text, directory: Nonstandard, weight: None, adapter: Some("Kokoro TTS checkpoints are served through the /v1/audio/speech endpoint, not text generation or adapter loading") };
             // Embedding families (epic #1348). Each family sub-issue supplies its

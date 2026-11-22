@@ -62,6 +62,18 @@ fn all_hybrid_ssm_model_types_round_trip() {
     }
 }
 
+/// Z1T (#2364) keeps AFT-conv pool sums and a conv window per layer, so APC
+/// must be disabled for it whether it is found by `model_type` or by the
+/// architecture name.
+#[test]
+fn z1t_is_detected_as_recurrent() {
+    assert!(is_hybrid_ssm_model_type("z1t"));
+    assert_eq!(
+        detect_hybrid_ssm(&json!({ "architectures": ["Z1TForCausalLM"] })).as_deref(),
+        Some("Z1TForCausalLM")
+    );
+}
+
 /// Baichuan-M1 keeps a per-sequence K/V convolution state next to its dense
 /// KV cache (#2567). A restored KV prefix would arrive without the conv state
 /// of its last token, so APC must treat the family as recurrent.
