@@ -837,6 +837,7 @@ impl ModelType {
             ModelType::Inkling => "inkling",
             ModelType::InklingVLM => "inkling_vlm",
             ModelType::Plamo2 => "plamo2",
+            ModelType::Plamo2VLM => "plamo2_vlm",
             ModelType::GraniteMoeHybrid => "granitemoehybrid",
             ModelType::KimiLinear => "kimi_linear",
             ModelType::KimiK3 => "kimi_k3",
@@ -1226,6 +1227,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::Lfm2Moe => &["lfm2_moe"],
         ModelType::Inkling | ModelType::InklingVLM => &["inkling_mm_model", "inkling"],
         ModelType::Plamo2 => &["plamo2"],
+        ModelType::Plamo2VLM => &["plamo2vl"],
         ModelType::GraniteMoeHybrid => &["granitemoehybrid"],
         ModelType::NemotronH => &["nemotron_h"],
         ModelType::NemotronHNanoOmniVLM => {

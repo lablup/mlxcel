@@ -50,6 +50,7 @@ pub mod phi3_v;
 pub mod phi4_siglip;
 pub mod phi4mm;
 pub mod pixtral;
+pub mod plamo2_vl;
 pub mod qwen2_vl;
 pub mod siglip;
 pub mod smolvlm;

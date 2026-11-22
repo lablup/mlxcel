@@ -176,6 +176,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "NemotronHNanoOmniVlModel@src/vision/nemotron_h_nano_omni_vl.rs",
     "Phi3VLModel@src/vision/phi3_vl.rs",
     "Phi4SigLipVLModel@src/vision/phi4_siglip_vl.rs",
+    "Plamo2VlModel@src/vision/plamo2_vl.rs",
     "Qwen35VLModel@src/vision/qwen3_5_vl.rs",
     "Qwen4ExpVLModel@src/vision/qwen4_exp_vl.rs",
     "SmolVLMModel@src/vision/smolvlm.rs",

@@ -1373,6 +1373,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::Inkling => "inkling",
         ModelType::InklingVLM => "inkling_vlm",
         ModelType::Plamo2 => "plamo2",
+        ModelType::Plamo2VLM => "plamo2_vlm",
         ModelType::GraniteMoeHybrid => "granitemoehybrid",
         ModelType::KimiLinear => "kimi_linear",
         ModelType::KimiK3 => "kimi_k3",

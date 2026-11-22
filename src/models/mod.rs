@@ -746,6 +746,7 @@ pub enum ModelType {
 
     // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
     Plamo2,
+    Plamo2VLM, // PLaMo 2.1 VL (plamo2vl): SigLIP tiles + RMSNorm/GELU adapter + PLaMo 2 text
 
     // IBM Granite 4.x (Mamba2 + attention interleaved hybrid)
     GraniteMoeHybrid,
@@ -992,6 +993,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::InklingVLM,
     // Preferred Networks PLaMo 2
     ModelType::Plamo2,
+    ModelType::Plamo2VLM,
     // IBM Granite 4.x hybrid
     ModelType::GraniteMoeHybrid,
     // Kimi models
@@ -1269,6 +1271,10 @@ impl ModelType {
 
             // ----- Preferred Networks -----
             ModelType::Plamo2 => ("PLaMo 2 (Mamba + attention hybrid)", "PLaMo"),
+            ModelType::Plamo2VLM => (
+                "PLaMo 2.1 VL (SigLIP tiles + MLP adapter + PLaMo 2 hybrid)",
+                "Other VLM",
+            ),
 
             // ----- RWKV -----
             ModelType::Rwkv7 => ("RWKV v7", "RWKV"),
@@ -1646,6 +1652,7 @@ mod metadata_tests {
             Inkling,
             InklingVLM,
             Plamo2,
+            Plamo2VLM,
             GraniteMoeHybrid,
             KimiLinear,
             KimiK3,
