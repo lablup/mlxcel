@@ -22,6 +22,9 @@
 //! projection's checkpoint key and the prompt format, so the projection
 //! math, the `embedding_dim` reader, the `1_Dense` override and the
 //! LoRA-only rejection live here rather than twice.
+//!
+//! The text-only LFM2.5-ColBERT head (`crate::models::lfm2_embedding`) reuses
+//! [`project_and_normalize`] as well.
 
 use std::path::Path;
 

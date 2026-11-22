@@ -49,12 +49,13 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 | `src/models/qwen3_embedding.rs` | Qwen3-Embedding: causal Qwen3, last-token pooling. |
 | `src/models/qwen3_vl_embedding.rs` | Qwen3-VL-Embedding: multimodal chat formatting, vision injection and last-token pooling. |
 | `src/models/llama_nemotron_vl_embedding.rs` | Llama-Nemotron-VL-Embed: SigLIP tiling, projection and bidirectional Llama pooling. |
-| `src/models/col_late_interaction.rs` | Shared by the two late-interaction families: `embedding_dim`, the `1_Dense` projection override, the LoRA-only rejection, per-token projection and normalization, the query format. |
+| `src/models/col_late_interaction.rs` | Shared by the two late-interaction VLM families (LFM2.5-ColBERT reuses only `project_and_normalize`): `embedding_dim`, the `1_Dense` projection override, the LoRA-only rejection, per-token projection and normalization, the query format. |
 | `src/models/colidefics3.rs` | ColIdefics3: SmolVLM / Idefics3 without a head plus a 128-dim projection. |
 | `src/models/colqwen2_5.rs` | ColQwen2.5: Qwen2.5-VL without a head plus a 128-dim projection. |
 | `src/models/llama_bidirec.rs` | Bidirectional Llama (LLM2Vec): Llama 3 layers under a padding-only mask, mean pooling. |
 | `src/models/ministral3_embedding.rs` | Nemotron-3-Embed: bidirectional Ministral 3, Llama 4 attention scaling at offset 0, mean pooling. |
-| `src/models/lfm2_embedding.rs` | LFM2.5-Embedding: bidirectional LFM2 (non-causal short conv), CLS pooling. |
+| `src/models/lfm2_embedding.rs` | LFM2.5-Embedding and LFM2.5-Encoder: bidirectional LFM2 (non-causal short conv), CLS pooling; LFM2.5-ColBERT: the same backbone with a token projection, multi-vector. |
+| `src/models/lfm2_embedding_head.rs` | LFM2 head selection: finds the ColBERT projection (`1_Dense/`, `dense.*`, or an mlx-vlm re-export's `projection.*`) and validates it against `1_Dense/config.json` and `mlx.proj_dim`. |
 | `src/rerank/mod.rs` | `Reranker` trait, `RerankerKind`, `RerankItem`, `detect_reranker_kind`. |
 | `src/rerank/loader.rs` | `load_reranker`: kind dispatch, batch-size and length overrides. |
 | `src/rerank/sequence_classifier.rs` | Cross-encoder path: pair tokenization, longest-first truncation, `sigmoid(logit)`. |
@@ -71,7 +72,7 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 A checkpoint is served as an embedding model, before the ordinary `model_type` dispatch runs, when any of these hold:
 
 - `config.json` `model_type` is an encoder-only family: `bert`, `xlm-roberta`, `modernbert`, `siglip`, `embedding_gemma2`, `embedding_gemma2_text`. These never generate text; a `BertForMaskedLM` or `ModernBertForMaskedLM` export loads as an embedder with its MLM head dropped.
-- `config.json` `architectures[0]` is an embedding architecture: `BertModel`, `XLMRobertaModel`, `ModernBertModel`, `SiglipModel`, `SiglipTextModel`, `EmbeddingGemma2Model`, `Gemma3TextModel` with `use_bidirectional_attention: true`, `LlamaBidirectionalModel`, `LlamaNemotronVLModel`, `Lfm2BidirectionalModel`, `Ministral3Model` with `is_causal: false`, `ColIdefics3`, `ColQwen2_5`, `ColQwen2ForRetrieval`.
+- `config.json` `architectures[0]` is an embedding architecture: `BertModel`, `XLMRobertaModel`, `ModernBertModel`, `SiglipModel`, `SiglipTextModel`, `EmbeddingGemma2Model`, `Gemma3TextModel` with `use_bidirectional_attention: true`, `LlamaBidirectionalModel`, `LlamaNemotronVLModel`, `Lfm2BidirectionalModel`, `Lfm2BidirectionalForMaskedLM`, `Ministral3Model` with `is_causal: false`, `ColIdefics3`, `ColQwen2_5`, `ColQwen2ForRetrieval`.
 - `modules.json` exists and lists a module whose `type` ends with `.Pooling` (the sentence-transformers layout). A `modules.json` whose only extra module is `1_LogitScore` (Qwen3-VL-Reranker) does not qualify.
 - `1_Pooling/config.json` exists.
 
@@ -372,14 +373,32 @@ The attention layers take the usual padding-only mask. The short conv needs two 
 
 Pooling is CLS: the tokenizer's post-processor prepends `<|startoftext|>` and the sentence vector is the hidden state there. Right padding puts it at index 0 in every row, though the pooling finds it by first-real-token argmax rather than assuming that.
 
-The LFM2 and LFM2.5 ColBERT late-interaction checkpoints share this `model_type` and this architecture but project every token through a `1_Dense` module and emit one vector per token. They are rejected at load rather than served as a single pooled vector.
-
 `max_length` is 512 (`sentence_bert_config.json`), well under the hard cap. Prompt prefixes, applied by the caller: `query: ` and `document: `.
 
 ```sh
 mlxcel embed -m LiquidAI/LFM2.5-Embedding-350M \
   -p "query: how do solar panels generate electricity" \
   -p "document: Photovoltaic cells convert sunlight into electricity through the photovoltaic effect."
+```
+
+Two more checkpoints share this backbone, `model_type` and `ModelType`. The loader tells them apart by their weights:
+
+- `LiquidAI/LFM2.5-Encoder-350M` (`architectures: ["Lfm2BidirectionalForMaskedLM"]`) stores the backbone under `lfm2.`, which is stripped before the shared sanitize. Its masked-LM head is tied to `embed_tokens`, so nothing else is dropped and no fill-mask output is served. It pools like LFM2.5-Embedding: CLS, unless a `1_Pooling` folder or `--pooling` says otherwise, returning a 1024-wide vector. This is an MLM backbone published for fine-tuning, so its pooled vector is not a trained sentence embedding; use LFM2.5-Embedding for retrieval.
+- `LiquidAI/LFM2.5-ColBERT-350M` and its mlx-community conversions (`-bf16`, `-4bit`, `-8bit`) are late-interaction retrievers. The HF export keeps the token projection in `1_Dense/` (folded to `dense.0.*` at load); the conversions store it as a top-level `dense.*` linear, quantized with the backbone in the `-4bit` and `-8bit` builds; a checkpoint re-exported by mlx-vlm stores it as `projection.*`, quantized or not. Exactly one of these layouts may be present. With a projection present the model is multi-vector: every token's hidden state is projected to 128 dimensions and L2-normalized, pooling is skipped, and `/v1/embeddings` returns `[num_tokens, 128]` per input (see [Multi-vector output](#multi-vector-late-interaction-output)). A `1_Dense/config.json` must declare `activation_function` Identity and `use_residual` false, and its `out_features` (and the conversions' `mlx.proj_dim`) must match the weight. Two or more Dense modules are a load error.
+
+The ColBERT head keeps the padding-zeroed conv input described above. The mlx-vlm reference runs it with `mask_convolutions=False`; both agree on unpadded rows, and keeping the mask makes a padded row equal the same row run alone.
+
+Known differences from PyLate scores, all caller-side or absent from the mlx-vlm reference too:
+
+- The `[Q] ` and `[D] ` prefixes (`config_sentence_transformers.json` `query_prefix` / `document_prefix`) are not added for you; prepend them as with the `query: ` / `document: ` prefixes above.
+- PyLate expands a query to `query_length` 32 with mask tokens; mlxcel embeds the query as given.
+- PyLate drops the vectors of punctuation tokens in documents (`skiplist_words`); mlxcel returns every token.
+
+```sh
+mlxcel embed -m LiquidAI/LFM2.5-ColBERT-350M \
+  -p "[Q] how do solar panels generate electricity" \
+  -p "[D] Photovoltaic cells convert sunlight into electricity." \
+  -p "[D] The recipe calls for two cups of flour and one egg."
 ```
 
 ### Batch geometry and bf16
