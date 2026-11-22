@@ -833,3 +833,26 @@ fn d1_3b_refuses_audio_through_the_shared_gate() {
         DecisionError::InvalidInput("This model does not support audio input".to_string())
     );
 }
+
+#[test]
+fn an_image_marker_in_the_state_is_invalid_input() {
+    let Some(dir) = local_checkpoint(D1_CHECKPOINT) else {
+        return;
+    };
+    let _guard = mlx_test_guard();
+    let mut model = D1DecisionModel::load(&dir).expect("d1-3B loads");
+    let err = super::predict(
+        &mut model,
+        Some(&json!("look: <image>")),
+        &json!({"cats": {"type": "bool", "instructions": "Cats?"}}),
+        DecisionMedia {
+            images: vec![cats_image(false)],
+            ..DecisionMedia::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, DecisionError::InvalidInput(m) if m.contains("must not contain `<image>`")),
+        "{err:?}"
+    );
+}

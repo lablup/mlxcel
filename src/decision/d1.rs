@@ -205,6 +205,20 @@ impl D1DecisionModel {
             let embeds = self.vlm.text_model.input_embeddings(&ids);
             return Ok((trunk, branches, embeds));
         }
+        // The prompt writes one `<image>` per image; one more written by the
+        // caller in the state or a single question's instructions would not
+        // match the images sent, which is the caller's error, not the model's.
+        let markers = trunk
+            .iter()
+            .filter(|&&id| id == self.vlm.image_token_id)
+            .count();
+        if markers != images.len() {
+            return Err(DecisionError::InvalidInput(format!(
+                "the prompt holds {markers} `<image>` markers for {} images; the state and \
+                 instructions must not contain `<image>`",
+                images.len()
+            )));
+        }
         let capped: Vec<image::DynamicImage> = images.iter().map(cap_pixels).collect();
         let (pixel_values, layouts) = self.vlm.processor.preprocess_with_grid(&capped);
         crate::multimodal::lfm2_vl_prompt::insert_lfm2_vl_image_tokens(
