@@ -158,15 +158,15 @@ pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
 /// commit that is 13 non-test files under `src/models`, in five groups.
 /// Hybrid stacks that keep their mask for now: MiniMaxM3, RecurrentGemma.
 /// Sliding-window and dual-attention families that build a separate global
-/// mask per forward: Gemma3, Gemma4, DiffusionGemma. MLA and custom-attention
+/// mask per forward: Gemma4, DiffusionGemma. MLA and custom-attention
 /// decoders that add the mask to scores by hand: DeepSeekV2, DeepSeekV3.2,
 /// the GLM4MoeLite MTP drafter, and the Qwen 3.5 speculative forward.
 /// KimiLinear, GLM4MoeLite, KimiK3 and LongcatFlashNgram fold the rope half
 /// into SDPA through `mla::rope_folded_attention` and take causal mode
 /// instead (#3099). Speculative verify blocks: Lfm2 (`forward_speculative`).
-/// Files that call it only from test or diagnostic code: Gemma3n (its
-/// `xla-diagnostics` probes) and ExaoneMoe (its cache tests); Gemma4MtpTarget
-/// only names it in a comment.
+/// Files that call it only from test or diagnostic code: Gemma3 (its mask
+/// tests), Gemma3n (its `xla-diagnostics` probes) and ExaoneMoe (its cache
+/// tests); Gemma4MtpTarget only names it in a comment.
 /// The hybrid, full-attention, GLM4V-family and sliding-window decoders that
 /// can take MLX's causal mode build their prefill masks through
 /// [`prefill_causal_mask`] and [`prefill_sliding_window_mask`] instead
@@ -174,7 +174,9 @@ pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
 /// MiMoV2, DeepSeekV4), whose layers, like Laguna's, run
 /// [`crate::causal_prefill_attention`] (#3098). Outside `src/models` the
 /// callers are `lib.rs`, `layers.rs`, the tensor-parallel Llama runtime
-/// (Gemma 4), and disaggregated handoff; the grep also
+/// (Gemma 4), disaggregated handoff
+/// (`src/distributed/disaggregated/handoff_impl.rs`) and the SAM 3 text
+/// encoder (`src/vision/dense/sam3/text_encoder.rs`); the grep also
 /// matches `cache.rs` (calls inside its `#[cfg(test)]` module) and
 /// `drafter/qwen3_5_mtp/layer.rs` (a comment mention, not a call).
 ///
@@ -651,8 +653,16 @@ pub fn create_bidirectional_window_mask(mask: &MlxArray, window: i32) -> UniqueP
 /// `f32` in native byte order because the cast lands the data in `FLOAT32`
 /// before the raw copy.
 ///
-/// Used by: the `/v1/embeddings` engine (pooled vectors back to the HTTP
-/// layer), `mlxcel embed`, and the embedding mask / pooling tests.
+/// Used by: code that reads a finished result back to the host. That is the
+/// `/v1/embeddings` engine (pooled vectors back to the HTTP layer) and
+/// `mlxcel embed`, the reranker, the token classification models, the Flux2
+/// scheduler, tiling and transformer, the dense-vision and detection
+/// predictors under `src/vision`, the Gemma4, Qwen3-VL and NemotronParse
+/// model files, and the embedding mask / pooling tests.
+///
+/// The caller set is too large to enumerate by name without going stale, so
+/// the groups above are a summary. Regenerate the exact list with
+/// `grep -rln '\barray_to_vec_f32(' src --include='*.rs' | grep -v 'tests\.rs$'`.
 pub fn array_to_vec_f32(arr: &MlxArray) -> Vec<f32> {
     let as_f32 = if ffi::array_dtype(arr) == dtype::FLOAT32 {
         None
