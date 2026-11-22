@@ -2613,8 +2613,9 @@ fn run_offline_mtp(
 
     // Inkling exactness gate (#1549): the same single call the server's
     // `mtp_capable_target` makes. No static kernel prerequisite; the measured
-    // block-vs-chain probe is the whole condition, and its `qmv_wide` retry
-    // keeps MTP engaged where dropping that kernel restores exactness.
+    // block-vs-chain probe is the whole condition. On an M3 Ultra it declines
+    // even after the `qmv_wide` retry, so MTP there needs
+    // `MLXCEL_MTP_ALLOW_INEXACT=1`.
     let inkling_text = match model {
         LoadedModel::Inkling(inkling) => Some(inkling),
         LoadedModel::InklingVLM(vlm) => Some(&vlm.text),

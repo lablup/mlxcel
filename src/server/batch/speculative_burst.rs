@@ -753,7 +753,9 @@ pub(crate) fn mtp_capable_target(model: &LoadedModel, block_size: usize) -> bool
         // Inkling (issue #1549): admitted unconditionally before, which on
         // Apple GPU generation 15+ served temperature-0 streams that differed
         // from classic decode at narrow verify widths. Same measured gate as
-        // the arms above; its `qmv_wide` retry restores exactness there.
+        // the arms above. On an M3 Ultra the probe still declines with
+        // `qmv_wide` off (the `T = 1` convolution and attention kernels
+        // differ too), so only `MLXCEL_MTP_ALLOW_INEXACT=1` engages it there.
         LoadedModel::Inkling(m) => m.mtp_exactness_allows(block_size),
         LoadedModel::InklingVLM(vlm) => vlm.text.mtp_exactness_allows(block_size),
         // GLM-4.7-Flash (`glm4_moe_lite`, issue #1326) paired with the
