@@ -133,10 +133,14 @@ fn warn_latent_view_declined(family: &str, mode: mlxcel_core::cache::KVCacheMode
 /// `int8` arm alone. On Kimi Linear the KDA recurrent state would then stay
 /// float32 for the rest of the sequence and every decode step would run in
 /// float32 (#3162); on GLM-4.7-Flash and LongCat every later layer and the
-/// logits of a multi-token step would run in float32 (#3161).
+/// logits of a multi-token step would run in float32 (#3161). DeepSeek V2 and
+/// the `DeepSeekV3Attention` families have no recurrent state, so there the
+/// promotion was limited to the multi-token step itself (#3177).
 ///
 /// Used by: the Kimi Linear, Kimi K3, GLM-4.7-Flash and LongCat MLA
-/// multi-token steps.
+/// multi-token steps, DeepSeek V2's decompressed step (`deepseek_v2.rs`) and
+/// `DeepSeekV3Attention` (`deepseek_v3.rs`: deepseek_v3, kimi_k2,
+/// joyai_llm_flash, kimi_vl, kimi_k25, youtu, youtu_llm, youtu_vl).
 pub(crate) fn dense_latent_in(
     window: LatentWindow,
     dtype: i32,
