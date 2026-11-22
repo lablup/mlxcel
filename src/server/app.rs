@@ -325,6 +325,13 @@ pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<Route
         // worker when one is loaded; a structured 501 otherwise.
         reg("/v1/rerank", Method::POST, post(routes::create_rerank)),
         reg("/v1/reranking", Method::POST, post(routes::create_rerank)),
+        // Typed decisions (mlx-vlm's decision API), served by the decision
+        // worker when `--decision-model` loaded one; a structured 501 otherwise.
+        reg(
+            "/v1/decisions",
+            Method::POST,
+            post(routes::create_decisions),
+        ),
         // Responses API (OpenAI /v1/responses surface).
         reg("/v1/responses", Method::POST, post(routes::create_response)),
         reg(
@@ -435,6 +442,7 @@ pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<Route
         ),
         reg("/rerank", Method::POST, post(routes::create_rerank)),
         reg("/reranking", Method::POST, post(routes::create_rerank)),
+        reg("/decisions", Method::POST, post(routes::create_decisions)),
         reg("/responses", Method::POST, post(routes::create_response)),
         reg(
             "/responses/{id}",

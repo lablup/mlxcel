@@ -158,6 +158,19 @@ pub async fn list_models(State(state): State<AppState>) -> Json<serde_json::Valu
             "capabilities": ["rerank"],
         }));
     }
+    // `--decision-model` is always a side model, so it never coincides with
+    // the primary entry.
+    if let Some(decision) = state.decision_model.as_ref()
+        && data.iter().all(|model| model["id"] != decision.model_id())
+    {
+        data.push(serde_json::json!({
+            "id": decision.model_id(),
+            "object": "model",
+            "created": decision.created_at(),
+            "owned_by": "llamacpp",
+            "capabilities": ["decision"],
+        }));
+    }
 
     Json(serde_json::json!({
         "models": [b10621_ollama_entry(&state)],

@@ -280,6 +280,21 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Rerank(commands::RerankArgs),
 
+    /// Answer typed questions with a decision checkpoint.
+    ///
+    /// Loads a decision model the way `--decision-model` does and answers
+    /// named `choice`, `score`, `bool` and `multi_label` questions about a
+    /// state (text) and optional media with calibrated probabilities. Prints
+    /// the `POST /v1/decisions` response JSON. Questions are checked before
+    /// the model loads. See docs/decisions.md.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel decide -m <decision checkpoint> --state "My invoice was charged twice" --questions '{"topic": {"type": "choice", "instructions": "Route the ticket", "criteria": ["billing", "technical", "sales"]}}'
+    ///     mlxcel decide -m <decision checkpoint> --image screenshot.png --questions-file questions.json
+    #[command(verbatim_doc_comment)]
+    Decide(commands::DecideArgs),
+
     /// Tag and redact entities with a token-classification checkpoint.
     ///
     /// Runs a fixed-label BIO / BIOES token classifier (BERT / XLM-RoBERTa
@@ -1509,6 +1524,13 @@ Embeddings and Reranking:
   Full request schemas, examples, and supported families:
     https://github.com/lablup/mlxcel/blob/main/docs/embeddings.md
 
+Typed Decisions:
+  --decision-model <checkpoint> serves POST /v1/decisions beside the chat model
+  in -m: named choice, score, bool and multi_label questions answered with
+  calibrated probabilities. A load failure is a startup error.
+  Request schema and validation rules:
+    https://github.com/lablup/mlxcel/blob/main/docs/decisions.md
+
 Remote Pipeline Parallel Example (TCP):
   1. Generate a shared cluster config:
        CLUSTER_NAME=studio-pp \\
@@ -1945,6 +1967,19 @@ pub(crate) struct ServeArgs {
     /// `MLXCEL_RERANKER_MODEL`.
     #[arg(long, env = "LLAMA_ARG_RERANKER_MODEL", value_name = "PATH_OR_REPO_ID")]
     reranker_model: Option<String>,
+
+    /// Decision checkpoint to serve on /v1/decisions next to the chat model
+    ///
+    /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
+    /// `-m`). Loads on its own worker thread and answers typed questions
+    /// (`choice`, `score`, `bool`, `multi_label`) with calibrated
+    /// probabilities; `-m` keeps serving chat. A decision model is never
+    /// served through `-m`. A load failure, including a checkpoint that is not
+    /// a decision model, is a startup error. Queue depth and timeout use the
+    /// `--embedding-*` worker flags. Also reads `MLXCEL_DECISION_MODEL`. See
+    /// docs/decisions.md.
+    #[arg(long, env = "MLXCEL_DECISION_MODEL", value_name = "PATH_OR_REPO_ID")]
+    decision_model: Option<String>,
 
     /// Query/document pairs per rerank forward pass (0 = the reranker kind's default)
     ///
@@ -3492,6 +3527,7 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         Commands::Serve(args) => args.model.as_deref(),
         Commands::Embed(args) => Some(args.model.as_path()),
         Commands::Rerank(args) => Some(args.model.as_path()),
+        Commands::Decide(args) => Some(args.model.as_path()),
         Commands::Tag(args) => Some(args.model.as_path()),
         Commands::Extract(args) => Some(args.model.as_path()),
         Commands::Tune(args) => args.model.as_deref(),
@@ -3683,6 +3719,7 @@ fn main() -> anyhow::Result<()> {
         Commands::GenerateImage(args) => commands::run_generate_image(args),
         Commands::Embed(args) => commands::run_embed(args),
         Commands::Rerank(args) => commands::run_rerank(args),
+        Commands::Decide(args) => commands::run_decide(args),
         Commands::Tag(args) => commands::run_tag(args),
         Commands::Extract(args) => commands::run_extract(args),
         Commands::Rm(args) => commands::run_remove(

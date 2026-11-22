@@ -20,6 +20,7 @@
 pub mod audio;
 pub mod backend;
 pub mod cli;
+pub mod decision;
 pub mod distributed;
 pub mod downloader;
 pub mod embeddings;

@@ -43,6 +43,7 @@ Current GitHub-facing docs:
 27. `vision-model-scope.md` - the scope record for detection, segmentation, 3D body, grounding, and image or video generation families: which are supported, which moved to the image-generation and dense-prediction epics with their port issues, which remain out of scope, and the criteria for re-scoping one.
 28. `dense-prediction.md` - the `mlxcel predict` image/video CLI, tensor and preview file contract, shared interpolation/preprocessing APIs, and family-registration guide.
 29. `macos-memory.md` - macOS memory guardrails: the available-now figure and reserve, footprint metrics, optional weight wiring, stepped growth, and the soak procedure.
+30. `decisions.md` - the typed decisions API (`POST /v1/decisions`, `--decision-model`, `mlxcel decide`): the request schema, the eight validation rules with their exact messages, the answer shapes, error codes, and how a decision model registers.
 
 ## mlxcelverse maintenance
 

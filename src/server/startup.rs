@@ -281,6 +281,10 @@ pub struct ServerStartupConfig {
     /// `--rerank-batch-size`. Forwarded to
     /// [`super::config::ServerConfig::rerank_batch_size`].
     pub rerank_batch_size: usize,
+    /// `--decision-model`: decision checkpoint served on `/v1/decisions` next
+    /// to the chat model. Read only at startup, so it is not mirrored into
+    /// `ServerConfig` (and stays out of the runtime-settings schema).
+    pub decision_model_path: Option<PathBuf>,
     /// Prefill chunk size when no other sequence is decoding (0 = disabled).
     pub prefill_chunk_size: usize,
     /// Prefill chunk size while at least one other sequence is decoding.
@@ -753,6 +757,7 @@ impl Default for ServerStartupConfig {
                 crate::server::config::DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
             reranker_model_path: None,
             rerank_batch_size: crate::server::config::DEFAULT_RERANK_BATCH_SIZE,
+            decision_model_path: None,
             prefill_chunk_size: prefill_chunk_policy.alone,
             prefill_chunk_size_contended: prefill_chunk_policy.contended,
             batch_size_conflict: false,
@@ -4264,6 +4269,12 @@ impl SideWorkerProvider for Arc<dyn crate::server::rerank_model::RerankModelProv
     }
 }
 
+impl SideWorkerProvider for Arc<dyn crate::server::decision_model::DecisionModelProvider> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
 impl SideWorkerProvider for Arc<crate::server::realtime_engine::RealtimeVoiceChatEngine> {
     fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
         self.as_ref().shutdown_and_wait(timeout)
@@ -4524,6 +4535,21 @@ async fn serve_with_side_model_workers(
     if let Some(provider) = &rerank_model {
         side_workers.push(SideWorkerExit::new("rerank", Arc::clone(provider)));
     }
+    // `--decision-model` (#2343) is always an explicit side model, so a load
+    // failure is fatal like `--image-model`. Its id is the directory name.
+    let decision_model = crate::server::decision_worker::resolve_decision_provider(
+        startup.decision_model_path.as_deref(),
+        startup
+            .decision_model_path
+            .as_deref()
+            .map(side_model_id_for_path)
+            .unwrap_or_default(),
+        config.embedding_queue_depth,
+        config.embedding_request_timeout_secs,
+    )?;
+    if let Some(provider) = &decision_model {
+        side_workers.push(SideWorkerExit::new("decision", Arc::clone(provider)));
+    }
     // A mode flag that resolved no worker is a command line that cannot do
     // what it asked for, so it fails here rather than answering 501 to every
     // request for the life of the process (#1452).
@@ -4553,6 +4579,7 @@ async fn serve_with_side_model_workers(
     .with_embedding_model(embedding_model)
     .with_image_model(image_model)
     .with_rerank_model(rerank_model)
+    .with_decision_model(decision_model)
     .with_realtime_engine(realtime_engine);
     #[cfg(feature = "webui")]
     let state = state.with_webui_startup(Arc::new(startup.clone()));
@@ -4757,8 +4784,8 @@ pub(crate) fn resolve_embedding_source(
 
 /// Served id of an explicitly named side checkpoint: its directory name.
 ///
-/// Used by both `--embedding-model` and `--reranker-model`, which each get
-/// their own id next to the chat model's.
+/// Used by `--embedding-model`, `--reranker-model` and `--decision-model`,
+/// which each get their own id next to the chat model's.
 fn side_model_id_for_path(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())

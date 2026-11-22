@@ -28,6 +28,7 @@ use crate::tokenizer::MlxcelTokenizer;
 use super::audio_model::AudioModelProvider;
 use super::batch::BatchObservability;
 use super::conversation_store::ConversationStore;
+use super::decision_model::DecisionModelProvider;
 use super::embedding_model::EmbeddingModelProvider;
 use super::image_model::ImageModelProvider;
 use super::prompt_cache::{PromptCacheStore, metrics::PromptCacheMetrics};
@@ -583,6 +584,10 @@ pub struct AppState {
     /// `--reranker-model`); while it is `None` the route returns a structured
     /// `501 Not Implemented`.
     pub rerank_model: Option<Arc<dyn RerankModelProvider>>,
+    /// Decision-model provider serving `POST /v1/decisions`. `None` until
+    /// `--decision-model` loads a checkpoint; while it is `None` the route
+    /// returns a structured `501 Not Implemented` naming the flag.
+    pub decision_model: Option<Arc<dyn DecisionModelProvider>>,
     /// Realtime VoiceChat engine serving the `/v1/realtime` WebSocket
     /// (#1376). `Some` only when `-m` is a Nemotron VoiceChat checkpoint;
     /// the route is mounted only then.
@@ -811,6 +816,7 @@ impl AppState {
             embedding_model: None,
             image_model: None,
             rerank_model: None,
+            decision_model: None,
             realtime_engine: None,
             stream_sessions: Arc::new(super::stream_session::StreamSessionManager::new()),
             completion_controls: Arc::new(
@@ -883,6 +889,7 @@ impl AppState {
             embedding_model: None,
             image_model: None,
             rerank_model: None,
+            decision_model: None,
             realtime_engine: None,
             stream_sessions: Arc::new(super::stream_session::StreamSessionManager::new()),
             completion_controls: Arc::new(
@@ -1012,6 +1019,14 @@ impl AppState {
     #[must_use]
     pub fn with_rerank_model(mut self, provider: Option<Arc<dyn RerankModelProvider>>) -> Self {
         self.rerank_model = provider;
+        self
+    }
+
+    /// Attach a decision-model provider serving `POST /v1/decisions`.
+    /// Pass `None` to leave the route returning a structured `501`.
+    #[must_use]
+    pub fn with_decision_model(mut self, provider: Option<Arc<dyn DecisionModelProvider>>) -> Self {
+        self.decision_model = provider;
         self
     }
 

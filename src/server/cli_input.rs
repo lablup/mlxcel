@@ -170,6 +170,9 @@ pub struct ServerStartupInput {
     pub reranker_model_path: Option<PathBuf>,
     /// `--rerank-batch-size`: query/document pairs per rerank forward pass.
     pub rerank_batch_size: usize,
+    /// `--decision-model`: resolved decision checkpoint directory served on
+    /// `/v1/decisions` next to the chat model.
+    pub decision_model_path: Option<PathBuf>,
     /// Explicit `--prefill-chunk-size`, or `None` to use the adaptive policy.
     pub prefill_chunk_size: Option<usize>,
     /// #1011: `--prefill-grant-interval`, the decode ticks a parked chunked
@@ -815,6 +818,7 @@ impl ServerStartupInput {
                 ("--webui", self.webui_enabled),
                 ("--embedding-model", self.embedding_model_path.is_some()),
                 ("--reranker-model", self.reranker_model_path.is_some()),
+                ("--decision-model", self.decision_model_path.is_some()),
                 ("--reranking", embedding_compat.rerank_only),
                 (
                     "--embeddings",
@@ -1196,6 +1200,7 @@ impl ServerStartupInput {
             embedding_request_timeout_secs: self.embedding_request_timeout_secs,
             reranker_model_path: self.reranker_model_path,
             rerank_batch_size: self.rerank_batch_size,
+            decision_model_path: self.decision_model_path,
             prefill_chunk_size: prefill_chunk_policy.alone,
             prefill_chunk_size_contended: prefill_chunk_policy.contended,
             prefill_grant_interval: self.prefill_grant_interval,
