@@ -1211,7 +1211,42 @@ pub(crate) fn sanitize_gemma4_nvfp4_weights(
     // checkpoint, so mlx-lm's per-expert tensor scales are resolved against
     // the config on the file's own key names (issue #2351).
     crate::models::switch_layers::apply_native_global_scale_flags(weights, config)?;
-    sanitize_modelopt_nvfp4_weights(weights, config)
+    sanitize_modelopt_nvfp4_weights(weights, config)?;
+    stack_gemma4_per_expert_planes(weights);
+    Ok(())
+}
+
+/// Stack a Gemma 4 MoE export's per-expert linears into the
+/// `experts.switch_glu.{proj}` planes the model loads.
+///
+/// mlx-lm stores a layer's experts stacked, as
+/// `…layers.{l}.experts.switch_glu.{gate_proj, up_proj, down_proj}`.
+/// llm-compressor writes each expert as its own `Linear`,
+/// `…layers.{l}.experts.{e}.{gate_proj, up_proj, down_proj}`
+/// (`RedHatAI/gemma-4-26B-A4B-it-NVFP4`), and the model then found no
+/// `switch_glu` plane. Each expert's NVFP4 tensor scale, which the repack
+/// leaves beside its plane, is stacked with it as the per-expert output
+/// multiplier ([`crate::models::switch_layers::drain_numbered_expert_planes`]).
+/// A no-op for a checkpoint without numbered experts.
+///
+/// Used by: [`sanitize_gemma4_nvfp4_weights`]
+fn stack_gemma4_per_expert_planes(weights: &mut mlxcel_core::weights::WeightMap) {
+    let mut expert_roots: Vec<String> = weights
+        .keys()
+        .filter_map(|key| key.strip_suffix(".experts.0.gate_proj.weight"))
+        .map(|layer| format!("{layer}.experts"))
+        .collect();
+    expert_roots.sort();
+    for root in expert_roots {
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
+            crate::models::switch_layers::drain_numbered_expert_planes(
+                weights,
+                &root,
+                proj,
+                &format!("{root}.switch_glu.{proj}"),
+            );
+        }
+    }
 }
 
 /// Normalize ModelOpt NVFP4 keys and repack the `{weight, weight_scale,
@@ -3687,6 +3722,97 @@ mod tests {
             "model.vision_tower.timm_model.conv_stem.conv.weight"
         ));
         assert!(gemma3n_bf16_key("model.embed_vision.embedding.weight"));
+    }
+
+    /// llm-compressor writes a Gemma 4 MoE layer's experts as one linear each
+    /// (`RedHatAI/gemma-4-26B-A4B-it-NVFP4`), and the model loads them stacked
+    /// under `experts.switch_glu`. Every layer's experts are stacked there,
+    /// each expert's NVFP4 tensor scale with them, and nothing else moves.
+    #[test]
+    fn gemma4_per_expert_planes_are_stacked_under_switch_glu() {
+        use crate::models::switch_layers::{
+            SwitchLinear, expect_native_nvfp4_load, insert_modelopt_expert_plane,
+            stacked_inv_global_scale,
+        };
+
+        let mut weights = mlxcel_core::weights::WeightMap::new();
+        for layer in 0..2usize {
+            for e in 0..3usize {
+                for (j, (proj, out, input)) in [
+                    ("gate_proj", 32, 64),
+                    ("up_proj", 32, 64),
+                    ("down_proj", 64, 32),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    insert_modelopt_expert_plane(
+                        &mut weights,
+                        &format!("language_model.model.layers.{layer}.experts.{e}.{proj}"),
+                        out,
+                        input,
+                        (1 + layer * 9 + e * 3 + j) as f32 * 0.25,
+                        (layer * 9 + e * 3 + j) as u32,
+                    );
+                }
+            }
+        }
+        // A dense MLP of the same layer and the router are not experts.
+        for key in [
+            "language_model.model.layers.0.mlp.gate_proj.weight",
+            "language_model.model.layers.0.router.proj.weight",
+        ] {
+            weights.insert(
+                key.to_string(),
+                mlxcel_core::from_slice_f32(&[1.0; 4], &[2, 2]),
+            );
+        }
+
+        stack_gemma4_per_expert_planes(&mut weights);
+
+        for layer in 0..2usize {
+            let glu = format!("language_model.model.layers.{layer}.experts.switch_glu");
+            for (j, proj) in ["gate_proj", "up_proj", "down_proj"]
+                .into_iter()
+                .enumerate()
+            {
+                let want: Vec<f32> = (0..3)
+                    .map(|e| (1 + layer * 9 + e * 3 + j) as f32 * 0.25)
+                    .collect();
+                let prefix = format!("{glu}.{proj}");
+                assert_eq!(
+                    stacked_inv_global_scale(&weights, &prefix),
+                    want,
+                    "{prefix}"
+                );
+                expect_native_nvfp4_load(
+                    SwitchLinear::from_weights(&weights, &prefix, 16, 4),
+                    &prefix,
+                    "the stacked Gemma 4 expert plane loads with its multiplier",
+                );
+            }
+        }
+        assert!(
+            !weights
+                .keys()
+                .any(|k| k.contains(".experts.0.") || k.contains(".experts.2.")),
+            "no per-expert key is left behind"
+        );
+        // 2 layers x 3 projections x (weight, scales, inv_global_scale) + 2.
+        assert_eq!(weights.len(), 20);
+        assert!(weights.contains_key("language_model.model.layers.0.mlp.gate_proj.weight"));
+        assert!(weights.contains_key("language_model.model.layers.0.router.proj.weight"));
+
+        // A checkpoint whose experts are already stacked is left as it is.
+        let before: Vec<String> = {
+            let mut keys: Vec<String> = weights.keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        stack_gemma4_per_expert_planes(&mut weights);
+        let mut after: Vec<String> = weights.keys().cloned().collect();
+        after.sort();
+        assert_eq!(before, after);
     }
 
     #[test]

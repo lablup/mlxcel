@@ -1356,6 +1356,9 @@ fn is_vlm_registry_type(model_type: ModelType) -> bool {
 
 /// Families whose runtime accepts `int8` through the quantized MLA latent
 /// (`mlxcel_core::mla::QUANTIZED_LATENT_FAMILIES`), without a Turbo mode.
+/// This is the default gate: the advertised modes do not follow an explicit,
+/// experimental `--mla-latent-quant` (issue #3179), which can store a
+/// quantized latent on a family not listed here.
 fn stores_quantized_latent(model_type: ModelType) -> bool {
     matches!(
         model_type,

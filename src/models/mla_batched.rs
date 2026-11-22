@@ -70,6 +70,10 @@ pub(crate) fn mla_geometry(
 /// caller that passes `false` never gets the latent view, whatever the cache
 /// mode, so a family outside the list keeps its per-token path.
 ///
+/// The view packs the latent at 8 bits, or at 4 under `--mla-latent-quant
+/// int4` (`mla::latent_cache_bits`, issue #3179); the returned window carries
+/// the width, so no caller here chooses it.
+///
 /// `kv_latent` may be wider than `geometry.kv_lora_rank`: DeepSeek V3.2
 /// appends the DSA indexer key to it. The view is asked for that stored width
 /// (`MlaLatentCache::supports_with_key_width`), which on an `int8` cache has

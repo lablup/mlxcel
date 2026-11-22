@@ -3334,13 +3334,12 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         KVCacheMode::Int8 => {
             // The same flag selects two codecs: the affine group-64 latent on
             // an absorbed MLA cache (issue #3155), per-token absmax elsewhere.
-            let codec = if mlxcel::cli::turbo_args::model_stores_quantized_latent(
+            let codec = match mlxcel::cli::mla_latent_option::model_latent_bits(
                 kv_cache_mode,
                 std::path::Path::new(&args.model.model),
             ) {
-                "affine group-64 MLA latent, fp16 rope keys"
-            } else {
-                "per-token absmax quantization"
+                Some(bits) => mlxcel::cli::mla_latent_option::latent_codec_label(bits),
+                None => "per-token absmax quantization".to_string(),
             };
             println!("KV cache mode: int8 ({codec}){kv_cache_mode_suffix}");
         }

@@ -371,3 +371,57 @@ fn an_ungroupable_rank_falls_back_to_per_token_rows() {
     assert!(!cache.holds_quantized_latent());
     assert!(steps.iter().flatten().all(|v| v.is_finite()));
 }
+
+/// `--mla-latent-quant int4` on a `DeepSeekV3Attention` family (issue #3179):
+/// the `int8` storage packs the latent at 4 bits, the rows read back within
+/// the 4-bit codec step of the fp16 latent, every decode step takes the
+/// composed path (the fused kernel reads 8-bit codes only), and a decode step
+/// matches the dense step over the same rows dequantized.
+#[test]
+fn a_forced_int4_latent_stores_four_bit_rows_and_decodes_composed() {
+    use crate::models::mla_latent_test_support as support;
+    use mlxcel_core::mla::{MlaLatentQuant, with_mla_latent_quant};
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let cfg = quantizable_config();
+    let attn = attention(&cfg);
+    let mut fp16 = KVCache::new();
+    let _ = run_layer(&attn, &cfg, &mut fp16, 5, 9);
+
+    with_mla_latent_quant(MlaLatentQuant::Int4, || {
+        let mut int4 = KVCache::new_with_mode(KVCacheMode::Int8);
+        mlxcel_core::eval(&attn.forward(&hidden_rows(&cfg, 0, 5), &mut int4, None));
+        let before = mlxcel_core::mla::stats::snapshot();
+        let got: Vec<Vec<f32>> = (5..9)
+            .map(|t| values(&attn.forward(&hidden_rows(&cfg, t, t + 1), &mut int4, None)))
+            .collect();
+        let after = mlxcel_core::mla::stats::snapshot();
+        let delta = |path| after.get(path).saturating_sub(before.get(path));
+        assert_eq!(delta(MlaDecodePath::AbsorbedComposed), 4);
+        assert_eq!(delta(MlaDecodePath::AbsorbedFused), 0);
+
+        assert_eq!(int4.stored_latent_bits(), Some(4));
+        assert_eq!(
+            int4.bytes_per_reserved_token(),
+            mlxcel_core::mla::quantized_latent_bytes_per_token(64, 8, 4, 64)
+        );
+        support::assert_stored_columns(&int4, &fp16, 0, 64, support::INT4_ROW_TOL);
+
+        // The dequantized reference: a two-token step dequantizes the window
+        // and runs the dense code, and its last position reads the same nine
+        // stored rows the last single-token step read packed.
+        let mut twin = KVCache::new_with_mode(KVCacheMode::Int8);
+        mlxcel_core::eval(&attn.forward(&hidden_rows(&cfg, 0, 7), &mut twin, None));
+        let pair = values(&attn.forward(&hidden_rows(&cfg, 7, 9), &mut twin, None));
+        let want = support::last_position(&pair, cfg.hidden_size);
+        let err = support::max_rel_error(&got[3], &want);
+        assert!(
+            err < support::SAME_ROWS_TOL,
+            "int4 decode off its stored rows by {err}"
+        );
+    });
+    // The option is scoped: the same cache mode stores 8-bit rows outside it.
+    let mut int8 = KVCache::new_with_mode(KVCacheMode::Int8);
+    let _ = run_layer(&attn, &cfg, &mut int8, 5, 9);
+    assert_eq!(int8.stored_latent_bits(), Some(8));
+}

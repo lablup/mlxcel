@@ -346,3 +346,93 @@ fn a_chat_turn_with_a_history_boundary_resumes_the_next_turn_from_it() {
         "the hit decodes what the cold run decodes"
     );
 }
+
+/// A gate over a fixed host reading, for simulating a machine's memory.
+fn gate_reporting(
+    status: mlxcel_core::host_memory::HostMemoryStatus,
+) -> Arc<mlxcel_core::host_memory::AvailabilityGate> {
+    Arc::new(mlxcel_core::host_memory::AvailabilityGate::with_probe(
+        std::time::Duration::from_secs(3600),
+        move || Some(status),
+    ))
+}
+
+/// A 16 GB host with 4 GiB available now: below the 7 GiB macOS reserve, so
+/// the guardrail must refuse every growth step (the CI Mac mini of #3146).
+fn host_below_the_reserve() -> mlxcel_core::host_memory::HostMemoryStatus {
+    const GIB: u64 = 1 << 30;
+    mlxcel_core::host_memory::HostMemoryStatus {
+        total_bytes: 16 * GIB,
+        available_now_bytes: 4 * GIB,
+        reserve_bytes: mlxcel_core::host_memory::memory_reserve_bytes(16 * GIB),
+        wired_bytes: 0,
+    }
+}
+
+/// Issue #3146: on a host below its memory reserve the guardrail declines
+/// the donation, and the decline is counted under its own reason instead of
+/// leaving the store empty with nothing to say why. Before the fix the
+/// scheduler read the real host through a process-wide gate, so the nightly
+/// tests on a 16 GB runner stored nothing and failed with `0 inserts`.
+#[test]
+fn a_host_below_the_memory_reserve_declines_the_snapshot_and_says_why() {
+    let store = test_store();
+    let mut sched = scheduler(store.clone())
+        .with_snapshot_growth_gate(gate_reporting(host_below_the_reserve()));
+    let first = prompt(40);
+    let seen = run_request(&mut sched, &first, true, 4);
+
+    let ctx = cache_ctx();
+    let key =
+        BatchScheduler::compose_prompt_cache_key(&ctx, &seen, sched.rope_regime_for(seen.len()));
+    assert!(
+        store.lookup_snapshot_prefix(&key, &seen).is_none(),
+        "the guardrail kept the snapshot out of the store"
+    );
+    assert_eq!(store.stats().snapshot_entries, 0);
+    let obs = sched.batch_observability.snapshot();
+    assert!(
+        obs.prompt_cache_reject_memory_reserve >= 1,
+        "the decline is counted, not silent"
+    );
+    assert_eq!(
+        obs.prompt_cache_last_reject.map(|r| r.reason),
+        Some("memory_reserve"),
+        "last_reject names the guardrail"
+    );
+}
+
+/// The other half of #3146: the scheduler a unit test builds does not read
+/// the host, so the same request stores its snapshot whatever the machine's
+/// memory, and a host with room to spare stores it through a real gate too.
+#[test]
+fn a_test_scheduler_stores_snapshots_whatever_the_host_memory() {
+    const GIB: u64 = 1 << 30;
+    let roomy = mlxcel_core::host_memory::HostMemoryStatus {
+        total_bytes: 16 * GIB,
+        available_now_bytes: 12 * GIB,
+        reserve_bytes: mlxcel_core::host_memory::memory_reserve_bytes(16 * GIB),
+        wired_bytes: 0,
+    };
+    for gate in [None, Some(gate_reporting(roomy))] {
+        let store = test_store();
+        let mut sched = scheduler(store.clone());
+        if let Some(gate) = gate {
+            sched = sched.with_snapshot_growth_gate(gate);
+        }
+        let first = prompt(40);
+        run_request(&mut sched, &first, true, 4);
+        assert_eq!(
+            store.stats().snapshot_entries,
+            1,
+            "the prompt boundary was stored"
+        );
+        assert_eq!(
+            sched
+                .batch_observability
+                .snapshot()
+                .prompt_cache_reject_memory_reserve,
+            0
+        );
+    }
+}

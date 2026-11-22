@@ -31,15 +31,44 @@
 //!   rope stream ([`LatentWindow::gather_rows`]), so the window is never
 //!   dequantized to be gathered from.
 //!
+//! ## Split slot (issue #3179)
+//!
+//! Under `--mla-latent-quant int4` the latent columns are stored 4-bit and the
+//! indexer key stays at [`SIDECAR_KEY_BITS`]: the #3163 overlap gate showed
+//! the indexer's selection is the precision-sensitive part. The slot is then
+//! two runs of whole groups packed at different widths, written one after the
+//! other in the same three buffers:
+//!
+//! ```text
+//!   packed  [ rank/64 groups x 8 words (4-bit) | index/64 groups x 16 words (8-bit) ]
+//!   scales  [ rank/64                          | index/64                           ]
+//!   biases  [ rank/64                          | index/64                           ]
+//! ```
+//!
+//! No extra field records the boundary. A [`LatentWindow::Quantized`] carries
+//! the latent width in `bits`, the sidecar width is fixed, and the packed and
+//! scale widths then determine how many leading groups are latent
+//! (`latent_group_count`). A window whose slot is one width (every non-DSA
+//! family, and DSA at 8 bits) has no sidecar run and reads exactly as before.
+//!
 //! Kept beside [`crate::mla::quant_latent`] rather than inside it so the DSA
 //! column and row arithmetic stays in one small file.
 
 use cxx::UniquePtr;
 
 use crate::cache::KVCacheMode;
-use crate::cache::latent_quant::LATENT_QUANT_GROUP_SIZE;
+use crate::cache::latent_quant::{LATENT_QUANT_GROUP_SIZE, QuantizedLatentRows};
+use crate::concatenate;
+use crate::dtype;
 use crate::ffi::{self, MlxArray};
-use crate::mla::quant_latent::{LatentWindow, dequantize_latent};
+use crate::mla::quant_latent::{
+    LatentWindow, dequantize_latent, quantize_latent_rows, quantize_latent_triple,
+    quantized_latent_bytes_per_token,
+};
+
+/// Bit width a sidecar cached beside the latent (the DSA indexer key) is
+/// stored at, whatever width the latent itself takes.
+pub const SIDECAR_KEY_BITS: i32 = 8;
 
 /// `model_type` values whose cached "K" slot is `[kv_latent | DSA indexer
 /// key]`: `DeepSeekV32Model` under both spellings of its `config.json` value,
@@ -116,8 +145,42 @@ fn take_rows(a: &MlxArray, positions: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::take_along_axis(a, &idx, 2)
 }
 
-/// Elements `[from, to)` of a packed latent as its `(packed, scales, biases)`
-/// slices. A group is `group * bits / 32` packed words and one scale and bias.
+/// How many leading groups of a packed key slot are stored at `bits`; any
+/// groups after them are a sidecar at [`SIDECAR_KEY_BITS`] (module docs,
+/// "Split slot"). Equal to the slot's group count when it has one width.
+fn latent_group_count(packed: &MlxArray, scales: &MlxArray, bits: i32, group: i32) -> i32 {
+    let last = |a: &MlxArray| ffi::array_shape(a).last().copied().unwrap_or(0);
+    let (words, groups) = (last(packed), last(scales));
+    let (per_latent, per_sidecar) = (group * bits / 32, group * SIDECAR_KEY_BITS / 32);
+    if per_latent == per_sidecar {
+        return groups;
+    }
+    let latent = (groups * per_sidecar - words) / (per_sidecar - per_latent);
+    assert!(
+        (0..=groups).contains(&latent)
+            && latent * per_latent + (groups - latent) * per_sidecar == words,
+        "mla: a {words}-word packed key slot with {groups} groups is not a {bits}-bit latent \
+         with a {SIDECAR_KEY_BITS}-bit sidecar"
+    );
+    latent
+}
+
+/// Whether a packed key slot stores a sidecar at a different width from its
+/// latent, so it cannot be handed to a kernel as one `bits`-wide tensor.
+pub(crate) fn has_split_sidecar(
+    packed: &MlxArray,
+    scales: &MlxArray,
+    bits: i32,
+    group: i32,
+) -> bool {
+    let groups = ffi::array_shape(scales).last().copied().unwrap_or(0);
+    latent_group_count(packed, scales, bits, group) != groups
+}
+
+/// Elements `[from, to)` of a packed key slot as its `(packed, scales,
+/// biases)` slices and the bit width they are stored at. A group is
+/// `group * width / 32` packed words and one scale and bias. On a split slot
+/// the range must lie in the latent run or in the sidecar run.
 fn quantized_columns(
     packed: &MlxArray,
     scales: &MlxArray,
@@ -130,19 +193,135 @@ fn quantized_columns(
     UniquePtr<MlxArray>,
     UniquePtr<MlxArray>,
     UniquePtr<MlxArray>,
+    i32,
 ) {
     assert!(
         group > 0 && from % group == 0 && to % group == 0 && from <= to,
         "mla: key columns [{from}, {to}) of a quantized latent must fall on {group}-element \
          group boundaries"
     );
-    let words_per_group = group * bits / 32;
+    let latent = latent_group_count(packed, scales, bits, group);
     let (g0, g1) = (from / group, to / group);
+    assert!(
+        g1 <= latent || g0 >= latent,
+        "mla: key columns [{from}, {to}) straddle the latent and its sidecar, which are packed \
+         at different widths"
+    );
+    let (per_latent, per_sidecar) = (group * bits / 32, group * SIDECAR_KEY_BITS / 32);
+    let word_at = |g: i32| {
+        if g <= latent {
+            g * per_latent
+        } else {
+            latent * per_latent + (g - latent) * per_sidecar
+        }
+    };
+    let part_bits = if g0 >= latent && g1 > g0 {
+        SIDECAR_KEY_BITS
+    } else {
+        bits
+    };
     (
-        last_axis(packed, g0 * words_per_group, g1 * words_per_group),
+        last_axis(packed, word_at(g0), word_at(g1)),
         last_axis(scales, g0, g1),
         last_axis(biases, g0, g1),
+        part_bits,
     )
+}
+
+/// Quantize one step's `[B, 1, L, width]` key-slot rows whose first
+/// `kv_lora_rank` elements are the latent, stored at `bits`.
+///
+/// A slot with no sidecar, and any slot at [`SIDECAR_KEY_BITS`], is one call
+/// of the latent quantizer over the whole row, as it always was. Otherwise
+/// the latent and the sidecar go through that same quantizer separately, at
+/// `bits` and at [`SIDECAR_KEY_BITS`], and are concatenated (module docs,
+/// "Split slot").
+///
+/// Used by: [`crate::mla::MlaLatentCache::update_and_fetch`].
+pub(crate) fn quantize_key_slot_rows(
+    ckv: &MlxArray,
+    kpe: UniquePtr<MlxArray>,
+    kv_lora_rank: i32,
+    bits: i32,
+) -> QuantizedLatentRows {
+    let width = ffi::array_shape(ckv).last().copied().unwrap_or(0);
+    if bits == SIDECAR_KEY_BITS || width <= kv_lora_rank {
+        return quantize_latent_rows(ckv, kpe, bits);
+    }
+    let kpe = ffi::astype(&kpe, dtype::FLOAT16);
+    let (packed, scales, biases) = quantize_latent_triple(&last_axis(ckv, 0, kv_lora_rank), bits);
+    let (side_packed, side_scales, side_biases) =
+        quantize_latent_triple(&last_axis(ckv, kv_lora_rank, width), SIDECAR_KEY_BITS);
+    QuantizedLatentRows {
+        packed: concatenate(&packed, &side_packed, -1),
+        scales: concatenate(&scales, &side_scales, -1),
+        biases: concatenate(&biases, &side_biases, -1),
+        kpe,
+    }
+}
+
+/// Dequantize a whole packed key slot to `[B, 1, S, width]`, the latent run
+/// at `bits` and any sidecar run at [`SIDECAR_KEY_BITS`].
+///
+/// Used by: [`LatentWindow::into_dense`].
+pub(crate) fn dequantize_key_slot(
+    packed: &MlxArray,
+    scales: &MlxArray,
+    biases: &MlxArray,
+    bits: i32,
+    group: i32,
+) -> UniquePtr<MlxArray> {
+    let groups = ffi::array_shape(scales).last().copied().unwrap_or(0);
+    let latent = latent_group_count(packed, scales, bits, group);
+    if latent == groups {
+        return dequantize_latent(packed, scales, biases, bits, group);
+    }
+    let part = |from: i32, to: i32| {
+        let (p, s, b, part_bits) = quantized_columns(packed, scales, biases, bits, group, from, to);
+        dequantize_latent(&p, &s, &b, part_bits, group)
+    };
+    concatenate(
+        &part(0, latent * group),
+        &part(latent * group, groups * group),
+        -1,
+    )
+}
+
+/// Bytes one token of a quantized key slot costs, per layer: a
+/// `kv_lora_rank`-wide latent at `bits`, a `sidecar`-wide sidecar at
+/// [`SIDECAR_KEY_BITS`], the group scales and biases of both, and the fp16
+/// rope stream.
+///
+/// With no sidecar, or at `bits == 8`, this is
+/// [`quantized_latent_bytes_per_token`] over the whole slot: 672 at 8 bits
+/// and 416 at 4 bits for rank 512 and rope 64. A DSA slot (rank 512, indexer
+/// key 128) costs 808 at 8 bits and 552 at 4 bits.
+///
+/// Used by: `mlxcel::execution::kv_arch` (sizing) and
+/// [`crate::mla::MlaLatentCache::bytes_per_token`].
+#[must_use]
+pub const fn quantized_key_slot_bytes_per_token(
+    kv_lora_rank: usize,
+    sidecar: usize,
+    qk_rope_head_dim: usize,
+    bits: usize,
+    group_size: usize,
+) -> usize {
+    if sidecar == 0 || bits == SIDECAR_KEY_BITS as usize {
+        return quantized_latent_bytes_per_token(
+            kv_lora_rank.saturating_add(sidecar),
+            qk_rope_head_dim,
+            bits,
+            group_size,
+        );
+    }
+    quantized_latent_bytes_per_token(kv_lora_rank, qk_rope_head_dim, bits, group_size)
+        .saturating_add(quantized_latent_bytes_per_token(
+            sidecar,
+            0,
+            SIDECAR_KEY_BITS as usize,
+            group_size,
+        ))
 }
 
 impl LatentWindow {
@@ -181,9 +360,9 @@ impl LatentWindow {
                 bits,
                 group_size,
             } => {
-                let (packed, scales, biases) =
+                let (packed, scales, biases, part_bits) =
                     quantized_columns(ckv_q, scales, biases, *bits, *group_size, from, to);
-                let dense = dequantize_latent(&packed, &scales, &biases, *bits, *group_size);
+                let dense = dequantize_latent(&packed, &scales, &biases, part_bits, *group_size);
                 ffi::astype(&dense, ffi::array_dtype(kpe))
             }
         }
@@ -194,7 +373,9 @@ impl LatentWindow {
     ///
     /// On a quantized window `from` and `to` must be group boundaries; a
     /// group is `group_size * bits / 32` packed words and one scale and bias,
-    /// so the result is three last-axis slices and nothing is dequantized.
+    /// so the result is three last-axis slices and nothing is dequantized. On
+    /// a split slot the range lies in the latent or in the sidecar, and the
+    /// result's `bits` is that run's width.
     ///
     /// Used by: the DSA attention (`models::deepseek_v32`), which drops the
     /// indexer-key columns before decode reads the latent.
@@ -216,7 +397,7 @@ impl LatentWindow {
                 bits,
                 group_size,
             } => {
-                let (ckv_q, scales, biases) =
+                let (ckv_q, scales, biases, bits) =
                     quantized_columns(&ckv_q, &scales, &biases, bits, group_size, from, to);
                 Self::Quantized {
                     ckv_q,

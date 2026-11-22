@@ -33,6 +33,9 @@ use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::{Glm4MoeLiteModel, ModelArgs};
 
+#[path = "glm4_moe_lite_latent_option_tests.rs"]
+mod latent_option;
+
 const VOCAB: i32 = 32;
 const HIDDEN: i32 = 16;
 const HEADS: i32 = 2;

@@ -49,7 +49,7 @@ use mlxcel_core::layers::{
     KVCache, LOADABLE_AFFINE_BITS, RMSNorm, SUPPORTED_AFFINE_GROUP_SIZES, UnifiedEmbedding,
     UnifiedLinear,
 };
-use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, silu, stack_arrays};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, silu};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -2170,45 +2170,12 @@ impl Qwen3NextModel {
 
             let base = format!("model.layers.{}.mlp.switch_mlp", l);
             for proj in ["gate_proj", "up_proj", "down_proj"] {
-                let mut expert_weights: Vec<UniquePtr<MlxArray>> = Vec::new();
-                let mut expert_scales: Vec<UniquePtr<MlxArray>> = Vec::new();
-                let mut expert_biases: Vec<UniquePtr<MlxArray>> = Vec::new();
-
-                let mut e = 0;
-                while let Some(w) = weights.remove(&format!(
-                    "model.layers.{}.mlp.experts.{}.{}.weight",
-                    l, e, proj
-                )) {
-                    expert_weights.push(w);
-                    if let Some(s) = weights.remove(&format!(
-                        "model.layers.{}.mlp.experts.{}.{}.scales",
-                        l, e, proj
-                    )) {
-                        expert_scales.push(s);
-                    }
-                    if let Some(b) = weights.remove(&format!(
-                        "model.layers.{}.mlp.experts.{}.{}.biases",
-                        l, e, proj
-                    )) {
-                        expert_biases.push(b);
-                    }
-                    e += 1;
-                }
-
-                if !expert_weights.is_empty() {
-                    let stacked = stack_arrays(&expert_weights, 0);
-                    weights.insert(format!("{}.{}.weight", base, proj), stacked);
-
-                    if !expert_scales.is_empty() {
-                        let stacked = stack_arrays(&expert_scales, 0);
-                        weights.insert(format!("{}.{}.scales", base, proj), stacked);
-                    }
-
-                    if !expert_biases.is_empty() {
-                        let stacked = stack_arrays(&expert_biases, 0);
-                        weights.insert(format!("{}.{}.biases", base, proj), stacked);
-                    }
-                }
+                crate::models::switch_layers::drain_numbered_expert_planes(
+                    &mut weights,
+                    &format!("model.layers.{l}.mlp.experts"),
+                    proj,
+                    &format!("{base}.{proj}"),
+                );
             }
         }
 

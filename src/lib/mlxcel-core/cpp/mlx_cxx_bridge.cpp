@@ -3414,6 +3414,31 @@ std::unique_ptr<MlxArray> any_axis(const MlxArray& a, int32_t axis, bool keepdim
     return std::make_unique<MlxArray>(mlx::core::any(a.inner, axis, keepdims));
 }
 
+// Test-only. One reduction over several axes at once, in MLX's native dtype:
+// op 0 sum, 1 prod, 2 any, 3 all. The per-axis entry points above take one
+// axis, which never reaches the backends' multi-axis row reduction.
+std::unique_ptr<MlxArray> reduce_axes_probe_for_test(
+    const MlxArray& a,
+    int32_t op,
+    rust::Slice<const int32_t> axes,
+    bool keepdims
+) {
+    std::vector<int> axes_vec(axes.begin(), axes.end());
+    switch (op) {
+        case 0:
+            return std::make_unique<MlxArray>(mlx::core::sum(a.inner, axes_vec, keepdims));
+        case 1:
+            return std::make_unique<MlxArray>(mlx::core::prod(a.inner, axes_vec, keepdims));
+        case 2:
+            return std::make_unique<MlxArray>(mlx::core::any(a.inner, axes_vec, keepdims));
+        case 3:
+            return std::make_unique<MlxArray>(mlx::core::all(a.inner, axes_vec, keepdims));
+        default:
+            throw std::invalid_argument(
+                "reduce_axes_probe_for_test: op must be 0 (sum), 1 (prod), 2 (any) or 3 (all)");
+    }
+}
+
 std::unique_ptr<MlxArray> greater_equal(const MlxArray& a, const MlxArray& b) {
     return std::make_unique<MlxArray>(mlx::core::greater_equal(a.inner, b.inner));
 }

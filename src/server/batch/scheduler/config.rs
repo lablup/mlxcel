@@ -158,6 +158,7 @@ impl BatchScheduler {
             prompt_cache: None,
             prompt_cache_seq_ctx: std::collections::HashMap::new(),
             prompt_cache_prompt_end_stored: std::collections::HashSet::new(),
+            snapshot_growth_gate: super::prompt_cache::default_snapshot_growth_gate(),
             prompt_cache_adopted_lineage: std::collections::HashMap::new(),
             prompt_cache_warmups: std::collections::VecDeque::new(),
             kv_cache_mode: KVCacheMode::Fp16,
@@ -882,6 +883,17 @@ impl BatchScheduler {
     ///
     /// When `None` every hot path short-circuits on the `is_some()` check
     /// before any store access so the bit-exact baseline is preserved.
+    /// Replace the host-memory gate snapshot growth goes through, so a test
+    /// can simulate a host below its memory reserve (#3146).
+    #[cfg(test)]
+    pub(crate) fn with_snapshot_growth_gate(
+        mut self,
+        gate: Arc<mlxcel_core::host_memory::AvailabilityGate>,
+    ) -> Self {
+        self.snapshot_growth_gate = gate;
+        self
+    }
+
     pub fn with_prompt_cache(mut self, store: Option<Arc<PromptCacheStore>>) -> Self {
         self.prompt_cache = store;
         self

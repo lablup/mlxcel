@@ -430,6 +430,11 @@ pub struct ServerStartupInput {
     /// Raw string from `--kv-cache-mode` (legacy shorthand).
     /// `None` means the flag was not provided (= default FP16).
     pub kv_cache_mode_legacy: Option<String>,
+    /// `--mla-latent-quant` as parsed (issue #3179). `None` means the flag
+    /// was not given; the value in force then comes from
+    /// `MLXCEL_MLA_LATENT_QUANT`. The binary fixes the option for the process
+    /// before this input is resolved (`cli::mla_latent_option`).
+    pub mla_latent_quant: Option<mlxcel_core::mla::MlaLatentQuant>,
 
     // prompt-prefix KV cache knobs.
     // Each field stores the raw CLI/env value before normalization into
@@ -975,6 +980,38 @@ impl ServerStartupInput {
         // V2 `--kv-bits 8` is held: its Int8 caches store the MLA latent
         // quantized (issue #3155), while `--kv-quant-scheme turboquant` is
         // still taken off there.
+        //
+        // `--mla-latent-quant` (issue #3179) is resolved in the same call: the
+        // process-wide option, which the binary fixed from this flag or its
+        // environment variable, decides the mode of a model that holds an MLA
+        // latent. A flag value that is not the one in force means the binary
+        // skipped that step, and the caches would not follow the flag.
+        let mla_latent_quant = mlxcel_core::mla::mla_latent_quant();
+        if let Some(flag) = self.mla_latent_quant
+            && flag != mla_latent_quant
+        {
+            anyhow::bail!(
+                "--mla-latent-quant {flag} was not applied at process start (the value in \
+                 force is {mla_latent_quant}); call cli::mla_latent_option::init_mla_latent_quant \
+                 before resolving the server configuration"
+            );
+        }
+        // The lines an explicit value prints are phrased against the mode the
+        // operator's flags select, which is the `--kv-bits` table's when it is
+        // on.
+        let latent_notice_mode = if batch_kv_quant.is_enabled() {
+            batch_kv_quant.base_mode()
+        } else {
+            kv_cache_mode
+        };
+        startup_notices.extend(
+            crate::cli::mla_latent_option::mla_latent_option_notices(
+                latent_notice_mode,
+                &self.model_path,
+            )
+            .into_iter()
+            .map(StartupNotice::warn),
+        );
         let (kv_cache_mode, kv_mode_warning) =
             crate::cli::turbo_args::resolve_effective_kv_cache_mode(
                 kv_cache_mode,
@@ -990,12 +1027,24 @@ impl ServerStartupInput {
         if let Some(requested_batch_mode) =
             disable_batch_kv_quant_for_family(&mut batch_kv_quant, &self.model_path)
         {
-            startup_notices.push(StartupNotice::warn(format!(
-                "warning: disabling batched KV quantization (--kv-bits {}) for this model \
+            if crate::cli::mla_latent_option::option_decides_model(&self.model_path) {
+                // Not a refusal: every KV cache of this model is an MLA latent
+                // cache, and the explicit option has already set their storage
+                // through `kv_cache_mode`.
+                startup_notices.push(StartupNotice::info(format!(
+                    "--kv-bits {} is not applied to this model: --mla-latent-quant \
+                     {mla_latent_quant} decides its MLA latent caches, which are all of its KV \
+                     caches (including the last layer)",
+                    self.kv_bits
+                )));
+            } else {
+                startup_notices.push(StartupNotice::warn(format!(
+                    "warning: disabling batched KV quantization (--kv-bits {}) for this model \
                  family; it selects a {requested_batch_mode} KV cache, which this family \
                  cannot hold. Serving its KV caches at fp16",
-                self.kv_bits
-            )));
+                    self.kv_bits
+                )));
+            }
         }
         // An absorbed MLA latent is grouped in 64s only (issue #3155). A
         // different `--kv-group-size` would be ignored by the latent codec, so
@@ -1260,6 +1309,7 @@ impl ServerStartupInput {
             chat_template_kwargs,
             prompt_cache,
             kv_cache_mode,
+            mla_latent_quant,
             startup_notices,
             batch_kv_quant,
             // lower the raw `usize` (0 = disabled) into a
@@ -1412,6 +1462,14 @@ pub fn disable_batch_kv_quant_for_family(
         return None;
     }
     let requested = batch_kv_quant.base_mode();
+    // An explicit `--mla-latent-quant` decides every KV cache of a model that
+    // holds an MLA latent (issue #3179), through `kv_cache_mode`. The table
+    // would otherwise keep its own last layer at fp16, or disagree on the
+    // storage, so it steps aside whatever it asked for.
+    if crate::cli::mla_latent_option::option_decides_model(model_path) {
+        batch_kv_quant.bits = 0;
+        return Some(requested);
+    }
     let (effective, _) =
         crate::cli::turbo_args::resolve_effective_kv_cache_mode(requested, model_path);
     if effective != requested {

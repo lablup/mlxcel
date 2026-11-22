@@ -179,9 +179,11 @@ fn a_panic_is_an_error_and_the_worker_survives() {
     assert_eq!(p.generate(request(1, 2)).unwrap()[0].seed, 2);
 }
 
-/// Blocks every generation until the test sends a token.
+/// Blocks every generation until the test sends a token, and reports each
+/// generation that has started so a test can wait for the worker to dequeue.
 struct Gated {
     gate: Mutex<mpsc::Receiver<()>>,
+    started: Mutex<mpsc::Sender<()>>,
 }
 
 impl ImageGenerationModel for Gated {
@@ -195,6 +197,7 @@ impl ImageGenerationModel for Gated {
         ImageSamplingDefaults::new(1, 0.0).unwrap()
     }
     fn generate(&self, req: &ImageRequest) -> anyhow::Result<Vec<GeneratedImage>> {
+        let _ = self.started.lock().unwrap().send(());
         let _ = self
             .gate
             .lock()
@@ -209,32 +212,50 @@ impl ImageGenerationModel for Gated {
     }
 }
 
+/// A provider over [`Gated`]: the sender releases one generation per token,
+/// and the receiver yields one token per generation the worker has started.
 fn gated_provider(
     queue_depth: usize,
     timeout: Duration,
-) -> (Arc<ImageWorkerProvider>, mpsc::Sender<()>) {
+) -> (
+    Arc<ImageWorkerProvider>,
+    mpsc::Sender<()>,
+    mpsc::Receiver<()>,
+) {
     let (release, gate) = mpsc::channel();
+    let (started_tx, started) = mpsc::channel();
     let provider =
         ImageWorkerProvider::from_loader("gated".to_string(), queue_depth, timeout, move || {
             Ok(Box::new(Gated {
                 gate: Mutex::new(gate),
+                started: Mutex::new(started_tx),
             }))
         })
         .unwrap();
-    (Arc::new(provider), release)
+    (Arc::new(provider), release, started)
 }
 
 #[test]
 fn a_full_queue_sheds_load() {
-    let (provider, release) = gated_provider(1, Duration::from_secs(30));
+    let (provider, release, started) = gated_provider(1, Duration::from_secs(30));
     let (results_tx, results) = mpsc::channel();
     let mut handles = Vec::new();
-    for seed in 0..4 {
+    let submit = |seed: u64, handles: &mut Vec<std::thread::JoinHandle<()>>| {
         let provider = Arc::clone(&provider);
         let tx = results_tx.clone();
         handles.push(std::thread::spawn(move || {
             let _ = tx.send(provider.generate(request(1, seed)));
         }));
+    };
+    // The first request must be running, not queued, before the others
+    // arrive: submitted together, all four could find the worker still idle
+    // with the first in its one-slot queue, and three would be rejected.
+    submit(0, &mut handles);
+    started
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the worker started the first request");
+    for seed in 1..4 {
+        submit(seed, &mut handles);
     }
     drop(results_tx);
 
@@ -259,7 +280,7 @@ fn a_full_queue_sheds_load() {
 
 #[test]
 fn a_slow_request_times_out_without_killing_the_worker() {
-    let (provider, release) = gated_provider(4, Duration::from_millis(100));
+    let (provider, release, _started) = gated_provider(4, Duration::from_millis(100));
     let err = provider.generate(request(1, 1)).expect_err("times out");
     assert!(matches!(err, ImageError::Timeout), "{err:?}");
     // Let the abandoned generation finish, then the worker serves again.

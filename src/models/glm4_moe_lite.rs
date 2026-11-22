@@ -172,7 +172,9 @@ pub struct MlaAttention {
     /// Whether this layer stores an `int8` cache's latent through the
     /// quantizing view (`mla_batched::store_latent_step`'s opt-in): set from
     /// `mla::stores_quantized_latent_pair`, so it is on only while the family
-    /// is in `mla::QUANTIZED_LATENT_FAMILIES`. GLM-4.7-Flash is not: its
+    /// is in `mla::QUANTIZED_LATENT_FAMILIES` or an explicit
+    /// `--mla-latent-quant int8` / `int4` is in force (issue #3179).
+    /// GLM-4.7-Flash is not listed: its
     /// teacher-forced trace showed decided-position disagreements against the
     /// fp16 latent (#3161), so an `int8` request resolves to fp16 and this
     /// stays off. Tests turn it on to exercise the ported path.
