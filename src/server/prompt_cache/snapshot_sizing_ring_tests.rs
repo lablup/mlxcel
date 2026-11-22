@@ -125,3 +125,45 @@ fn ring_checkpoints_are_sized_only_for_their_families_and_fp16() {
     // the attention-only Gemma 4.
     assert!(recommend_state_checkpoint_capacity_from_config(&gemma4_12b_config(), None).is_none());
 }
+
+#[test]
+fn gemma3_and_afmoe_ring_checkpoints_are_sized_from_their_windowed_layers() {
+    // Gemma 3 marks its global layers with `sliding_window_pattern`: 12
+    // layers at a pattern of 6 leave 10 sliding layers.
+    let gemma3 = json!({
+        "model_type": "gemma3",
+        "text_config": {
+            "model_type": "gemma3_text",
+            "num_hidden_layers": 12,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 4,
+            "head_dim": 128,
+            "sliding_window": 512,
+            "sliding_window_pattern": 6,
+            "hidden_size": 1024
+        }
+    });
+    let rec = recommend_ring_checkpoint_capacity_from_config(&gemma3, KVCacheMode::Fp16, 256, None)
+        .expect("Gemma 3 stores ring checkpoints");
+    assert_eq!(rec.entry_bytes, 10 * 4 * 128 * 2 * 2 * (512 - 1 + 256));
+
+    // AFMoE schedules its layers with `layer_types`: 3 of 4 are sliding.
+    let afmoe = json!({
+        "model_type": "afmoe",
+        "num_hidden_layers": 4,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "head_dim": 64,
+        "sliding_window": 128,
+        "layer_types": [
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "full_attention"
+        ],
+        "hidden_size": 512
+    });
+    let rec = recommend_ring_checkpoint_capacity_from_config(&afmoe, KVCacheMode::Fp16, 1, None)
+        .expect("AFMoE stores ring checkpoints");
+    assert_eq!(rec.entry_bytes, 3 * 2 * 64 * 2 * 2 * 128);
+}
