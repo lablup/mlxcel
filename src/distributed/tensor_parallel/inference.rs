@@ -416,6 +416,8 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // Kimi-VL / Kimi-VL 2.5 use a DeepSeek-V3-style MoE text backbone.
         ModelType::KimiVL | ModelType::KimiK25 => "deepseek_v3",
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => "longcat_flash",
+        // Replicated like the other LongCat types; no tensor-parallel port.
+        ModelType::LongcatFlashSparse => "longcat_flash_sparse",
         ModelType::Step3p5 => "step3p5",
         // Step-3.7's text backbone is the Step-3.5 MoE stack; TP is refused for
         // VLM-kind models earlier, this keeps the dispatch table total.

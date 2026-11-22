@@ -146,6 +146,7 @@ fn cases() -> Vec<(&'static str, ParseTheta)> {
         case!(llada2_moe::ModelArgs),
         case!(llama4::TextArgs),
         case!(longcat_flash_ngram::LongcatFlashNgramConfig),
+        case!(longcat_flash_sparse::LongcatFlashSparseConfig),
         case!(mimo::ModelArgs),
         case!(minicpm::ModelArgs),
         case!(minicpm3::ModelArgs),

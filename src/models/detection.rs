@@ -782,6 +782,18 @@ impl ModelDetectionProbes for FullFilesystemDetectionProbes {
     }
 }
 
+/// Whether `architectures[0]` is LongCat-Flash-Lite-Sparse's `LongcatCausalLM`.
+/// Whether a config names the LongCat-Flash-Lite-Sparse architecture
+/// (`LongcatCausalLM`), which the original checkpoint declares without a
+/// `model_type`.
+pub(crate) fn is_longcat_sparse_architecture(v: &Value) -> bool {
+    v["architectures"]
+        .as_array()
+        .and_then(|archs| archs.first())
+        .and_then(Value::as_str)
+        == Some("LongcatCausalLM")
+}
+
 /// Detect a model type from an already parsed config using caller-supplied filesystem probes.
 ///
 /// The loader passes probes that may inspect SafeTensors indexes or headers, while metadata-only callers can pass bounded probes that fail closed when a decision would require reading weight headers. Keeping the dispatch here prevents UI catalog support from drifting into a second handwritten model list.
@@ -832,6 +844,14 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         && let Some(redirect) = crate::imagegen::image_checkpoint_redirect_error(model_path)
     {
         return Err(redirect);
+    }
+
+    // The original `meituan-longcat/LongCat-Flash-Lite-Sparse` config carries
+    // no `model_type`; its architecture names the variant (#2362). The
+    // mlx-community conversions declare `longcat_flash_sparse` and take the
+    // arm below.
+    if v["model_type"].is_null() && is_longcat_sparse_architecture(v) {
+        return Ok(ModelType::LongcatFlashSparse);
     }
 
     let model_type_raw = v["model_type"]
@@ -1113,6 +1133,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "locateanything" => Ok(ModelType::LocateAnythingVLM),
         "longcat_flash" => Ok(ModelType::LongcatFlash),
         "longcat_flash_ngram" => Ok(ModelType::LongcatFlashNgram),
+        "longcat_flash_sparse" => Ok(ModelType::LongcatFlashSparse),
         "step3p5" => Ok(ModelType::Step3p5),
         "step3p7" => Ok(ModelType::Step3p7),
         "recurrent_gemma" | "griffin" => Ok(ModelType::RecurrentGemma),
