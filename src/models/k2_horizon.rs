@@ -323,8 +323,74 @@ pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Llama3Model, K2HorizonConfi
     let weights = crate::models::load_text_weights(model_dir, None)?;
     let mut args = config.to_llama3_args();
     args.set_checkpoint_label(model_dir);
+    args.eos_token_id = eos_with_turn_terminator(
+        args.eos_token_id.as_ref(),
+        resolve_turn_terminator(model_dir),
+    );
     let model = Llama3Model::from_weights(&weights, &args)?;
     Ok((model, config))
+}
+
+/// The chat template's turn terminator. Every assistant turn the template
+/// renders ends with it, but `config.json`, `generation_config.json` and
+/// `tokenizer_config.json` all declare only `<|endoftext|>` as EOS, so without
+/// it the marker is decoded into the reply before the model emits EOS.
+pub const TURN_TERMINATOR: &str = "<|ifm|im_end|>";
+
+/// Resolve [`TURN_TERMINATOR`] by name from the checkpoint's added tokens:
+/// `tokenizer.json`'s `added_tokens`, then `tokenizer_config.json`'s
+/// `added_tokens_decoder`. `None` when neither file names it.
+fn resolve_turn_terminator(model_dir: &Path) -> Option<i32> {
+    let read = |name: &str| -> Option<serde_json::Value> {
+        let text = std::fs::read_to_string(model_dir.join(name)).ok()?;
+        serde_json::from_str(&text).ok()
+    };
+    read("tokenizer.json")
+        .and_then(|t| added_token_id(&t, TURN_TERMINATOR))
+        .or_else(|| {
+            read("tokenizer_config.json").and_then(|t| decoder_token_id(&t, TURN_TERMINATOR))
+        })
+}
+
+/// The id of the `tokenizer.json` added token whose content is `content`.
+pub(crate) fn added_token_id(tokenizer_json: &serde_json::Value, content: &str) -> Option<i32> {
+    tokenizer_json
+        .get("added_tokens")?
+        .as_array()?
+        .iter()
+        .find(|t| t.get("content").and_then(serde_json::Value::as_str) == Some(content))
+        .and_then(|t| t.get("id")?.as_i64())
+        .and_then(|id| i32::try_from(id).ok())
+}
+
+/// The id of the `tokenizer_config.json` `added_tokens_decoder` entry whose
+/// content is `content`.
+pub(crate) fn decoder_token_id(tokenizer_config: &serde_json::Value, content: &str) -> Option<i32> {
+    tokenizer_config
+        .get("added_tokens_decoder")?
+        .as_object()?
+        .iter()
+        .find(|(_, t)| t.get("content").and_then(serde_json::Value::as_str) == Some(content))
+        .and_then(|(id, _)| id.parse::<i32>().ok())
+}
+
+/// The declared EOS ids followed by the turn terminator, when it resolved and
+/// is not already declared.
+pub(crate) fn eos_with_turn_terminator(
+    declared: Option<&EosTokenId>,
+    terminator: Option<i32>,
+) -> Option<EosTokenId> {
+    let mut ids: Vec<i32> = match declared {
+        Some(EosTokenId::Single(id)) => vec![*id],
+        Some(EosTokenId::Multiple(ids)) => ids.clone(),
+        None => Vec::new(),
+    };
+    if let Some(id) = terminator
+        && !ids.contains(&id)
+    {
+        ids.push(id);
+    }
+    (!ids.is_empty()).then_some(EosTokenId::Multiple(ids))
 }
 
 /// Build the shared Llama decoder from already-loaded weights (adapter path).

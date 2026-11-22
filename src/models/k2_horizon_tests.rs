@@ -18,7 +18,11 @@
 
 use serde_json::{Value, json};
 
-use super::{K2HorizonConfig, parse_config};
+use super::{
+    K2HorizonConfig, TURN_TERMINATOR, added_token_id, decoder_token_id, eos_with_turn_terminator,
+    parse_config,
+};
+use crate::models::llama3::EosTokenId;
 
 /// `IFM/K2-Horizon-0.9B` `config.json` (flat `rope_theta`, YaRN under
 /// `rope_parameters`, no `rope_scaling` key).
@@ -203,4 +207,51 @@ fn bad_geometry_is_refused() {
         let err = refusal(&value);
         assert!(err.contains(needle), "{field}: {err}");
     }
+}
+
+#[test]
+fn turn_terminator_resolves_by_name_and_joins_the_eos_ids() {
+    let tokenizer_json = json!({"added_tokens": [
+        {"id": 1, "content": "<|endoftext|>", "special": true},
+        {"id": 64019, "content": TURN_TERMINATOR, "special": true}
+    ]});
+    assert_eq!(
+        added_token_id(&tokenizer_json, TURN_TERMINATOR),
+        Some(64019)
+    );
+    assert_eq!(
+        added_token_id(&json!({"added_tokens": []}), TURN_TERMINATOR),
+        None
+    );
+
+    let tokenizer_config = json!({"added_tokens_decoder": {
+        "1": {"content": "<|endoftext|>"},
+        "64019": {"content": TURN_TERMINATOR}
+    }});
+    assert_eq!(
+        decoder_token_id(&tokenizer_config, TURN_TERMINATOR),
+        Some(64019)
+    );
+
+    let mut args = parse(&config_0_9b()).to_llama3_args();
+    args.eos_token_id = eos_with_turn_terminator(args.eos_token_id.as_ref(), Some(64019));
+    assert_eq!(args.eos_token_ids(), vec![1, 64019]);
+
+    // Already declared, or unresolved: the declared set is unchanged.
+    let declared = EosTokenId::Multiple(vec![1, 64019]);
+    let kept = eos_with_turn_terminator(Some(&declared), Some(64019));
+    assert!(matches!(kept, Some(EosTokenId::Multiple(ref ids)) if ids == &vec![1, 64019]));
+    let unresolved = eos_with_turn_terminator(Some(&EosTokenId::Single(1)), None);
+    assert!(matches!(unresolved, Some(EosTokenId::Multiple(ref ids)) if ids == &vec![1]));
+    assert!(eos_with_turn_terminator(None, None).is_none());
+}
+
+#[test]
+fn turn_terminator_resolves_from_the_real_checkpoint_tokenizer() {
+    // Skips when the checkpoint is not present on this host.
+    let dir = std::path::Path::new("models/k2-horizon-0.9b");
+    if !dir.join("tokenizer.json").exists() {
+        return;
+    }
+    assert_eq!(super::resolve_turn_terminator(dir), Some(64019));
 }
