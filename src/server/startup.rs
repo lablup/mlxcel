@@ -4747,8 +4747,8 @@ pub(crate) fn check_serving_mode(
         EmbeddingServingMode::RerankOnly => anyhow::bail!(
             "--reranking restricts this server to rerank requests, but no reranker was loaded: \
              pass a sequence-classifier checkpoint or a multi-vector (late-interaction) \
-             embedder to -m, or name a reranker with --reranker-model <path>. The Qwen3 and Qwen3-VL generative rerankers are only \
-             reachable through --reranker-model."
+             embedder to -m, or name a reranker with --reranker-model <path>. The Qwen3 and Qwen3-VL \
+             generative rerankers are only reachable through --reranker-model."
         ),
         EmbeddingServingMode::ImageOnly => anyhow::bail!(
             "--image-model without -m restricts this server to image generation, but no image \

@@ -450,7 +450,7 @@ A mask is never built as `(1 - m) * C` with a finite `C` in the activation dtype
 | 501 | `not_implemented` | No embedding model loaded: `No embedding model loaded; start with -m <embedding checkpoint> or --embedding-model <path>`. |
 | 503 | `server_busy` | The bounded worker queue is full (`--embedding-queue-depth`). |
 | 504 | `server_timeout` | The worker did not reply within `--embedding-request-timeout-secs`. |
-| 500 | `server_error` | The forward pass failed, or a checkpoint kind returned a score outside `[0, 1]` (any finite score is valid for `late_interaction`). |
+| 500 | `server_error` | The forward pass failed. |
 
 ## Server flags
 
@@ -587,7 +587,7 @@ An item is either a bare string or an object with `text`, `image` and/or `image_
 | 501 | `not_implemented` | No reranker loaded: `This server does not support reranking. Start it with --reranking, with a sequence-classifier checkpoint or a multi-vector (late-interaction) embedder in -m, or with --reranker-model <path>.` |
 | 503 | `server_busy` | The bounded worker queue is full (`--embedding-queue-depth`, shared with the embedding worker). |
 | 504 | `server_timeout` | The worker did not reply within `--embedding-request-timeout-secs`. |
-| 500 | `server_error` | The forward pass failed. |
+| 500 | `server_error` | The forward pass failed, or a checkpoint kind returned a score outside `[0, 1]` (any finite score is valid for `late_interaction`). |
 
 ### Reranker flags
 

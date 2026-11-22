@@ -216,6 +216,14 @@ fn kinds_report_their_instruction_support_and_batch_defaults() {
 }
 
 #[test]
+fn only_late_interaction_scores_are_exempt_from_the_probability_range() {
+    assert!(RerankerKind::SequenceClassifier.scores_are_probabilities());
+    assert!(RerankerKind::GenerativeText.scores_are_probabilities());
+    assert!(RerankerKind::GenerativeVl.scores_are_probabilities());
+    assert!(!RerankerKind::LateInteraction.scores_are_probabilities());
+}
+
+#[test]
 fn items_report_emptiness_and_text() {
     assert!(RerankItem::default().is_empty());
     assert!(RerankItem::text("   ").is_empty());

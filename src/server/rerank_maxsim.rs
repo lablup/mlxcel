@@ -283,11 +283,19 @@ pub(crate) fn resolve_late_interaction_reranker(
             )))
         }
         (LateInteractionDecision::ShadowedByReranker, Some(embedding)) => {
-            tracing::info!(
-                model_id = %embedding.model_id(),
-                "The multi-vector embedder is not exposed on /v1/rerank: the configured \
-                 reranker serves it"
-            );
+            if rerank_model.is_some() {
+                tracing::info!(
+                    model_id = %embedding.model_id(),
+                    "The multi-vector embedder is not exposed on /v1/rerank: the configured \
+                     reranker serves it"
+                );
+            } else {
+                tracing::warn!(
+                    model_id = %embedding.model_id(),
+                    "The multi-vector embedder is not exposed on /v1/rerank: a reranker is \
+                     configured but failed to load, so /v1/rerank answers 501"
+                );
+            }
             rerank_model
         }
         _ => rerank_model,
