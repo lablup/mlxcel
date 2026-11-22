@@ -545,3 +545,36 @@ fn the_spacing_holds_when_checkpoints_arrive_longest_first() {
         .expect("whole snapshot");
     assert_eq!(kept_boundaries(&store, 2, 95), vec![2]);
 }
+
+#[test]
+fn reinserting_a_common_ancestor_after_a_fork_applies_the_cap_across_both_branches() {
+    // Documented behaviour of the per-conversation cap: the line of a shared
+    // ancestor holds every branch below it, so re-inserting the ancestor after
+    // a fork counts the sibling branches together. One branch can lose its
+    // checkpoints, but the memory stays within the cap for both.
+    let cap = 2;
+    let store = PromptCacheStore::with_config(capped_config(Some(cap), 0));
+    let insert = |tokens: &[i32], lineage: SnapshotLineage| {
+        store
+            .insert_snapshot(&key(SESSION, tokens), whole(tokens, lineage.clone()))
+            .expect("whole snapshot");
+        store
+            .insert_state_checkpoint(&key(SESSION, tokens), checkpoint(tokens, lineage))
+            .expect("checkpoint");
+    };
+    // Branch A: turns 1 to 3. Branch B forks after turn 2 and adds two turns.
+    run_turns(&store, SESSION, 3);
+    let fork = |len: usize| edited_after(20, len);
+    insert(&fork(40), chain_lineage(2).extended(40, 10));
+    insert(
+        &fork(50),
+        chain_lineage(2).extended(40, 10).extended(50, 11),
+    );
+    // The ancestor at turn 2 is regenerated: its line is both branches.
+    insert(&history(20), chain_lineage(2));
+    let entries = store.stats().state_checkpoint_entries;
+    assert!(
+        entries <= cap,
+        "checkpoints of both branches stay within the cap {cap}, got {entries}"
+    );
+}

@@ -220,9 +220,20 @@ impl Inner {
     /// ones. The conversation is the inserted checkpoint's whole lineage: the
     /// checkpoints of the same session bucket and session whose tokens are a
     /// prefix of its tokens, and those it is a prefix of. Requests without a
-    /// session key share one session, and their chats only share a line where
-    /// their tokens do, so one chat's checkpoints are not counted against
-    /// another's. The inserted checkpoint itself can be the one dropped.
+    /// session key share one session, and chats whose tokens never share a
+    /// prefix are not counted against each other. The inserted checkpoint
+    /// itself can be the one dropped.
+    ///
+    /// Fork behaviour: branches of one chat that diverge after a common
+    /// ancestor are counted together whenever the inserted checkpoint is that
+    /// ancestor or a prefix of both, because the ancestor's line contains the
+    /// checkpoints of every branch below it. Re-inserting a shorter common
+    /// ancestor after a fork (edit at `k + 1`, then regenerate at `k`) therefore
+    /// applies the cap across the sibling branches, and one branch can lose its
+    /// checkpoints to the other's. This over-evicts and never over-retains: the
+    /// checkpoints of the inserted line stay within the cap, and so does the
+    /// memory they hold. Inserting a checkpoint that lies on one branch only
+    /// counts that branch's line and the ancestors below it.
     fn enforce_conversation_checkpoint_rules(&mut self, digest: &PromptCacheKeyDigest) {
         let spacing = self.config.state_checkpoint_min_spacing_tokens;
         let cap = self.config.state_checkpoints_per_conversation;
