@@ -421,7 +421,8 @@ impl LatentWindow {
     /// row dequantizes to exactly what the row dequantized to in place.
     ///
     /// Used by: DSA sparse decode (`models::deepseek_v32`), single-sequence
-    /// and batched.
+    /// and batched, and the LSA sparse decode of
+    /// `models::longcat_flash_sparse`.
     #[must_use]
     pub fn gather_rows(&self, indices: &MlxArray) -> Self {
         let s = ffi::array_shape(indices);

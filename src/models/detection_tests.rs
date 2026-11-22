@@ -603,6 +603,31 @@ fn k2_horizon_model_type_is_detected() {
 }
 
 #[test]
+fn xing4_0_model_type_is_detected() {
+    // Xing4.0 reuses the DeepSeek-V3 decoder but wraps it in a hyper-connection
+    // stream, so it must route to its own model, not the `deepseek_v3` arm.
+    let model_dir = temp_path("xing4_0_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "xing4_0",
+            "architectures": ["Xing4_0ForCausalLM"],
+            "hidden_size": 3584,
+            "num_hidden_layers": 40,
+            "hc_mult": 4,
+            "vocab_size": 131072
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Xing40);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn fastvlm_model_type_is_detected() {
     for model_type in ["fastvlm", "llava_qwen2"] {
         let model_dir = temp_path(&format!("fastvlm_{model_type}"));
@@ -2431,4 +2456,48 @@ fn decider2_is_refused_with_the_decision_entry_points() {
         ),
         "{error}"
     );
+}
+
+#[test]
+fn longcat_flash_sparse_is_detected_with_and_without_model_type() {
+    // The original `meituan-longcat/LongCat-Flash-Lite-Sparse` config omits
+    // `model_type` (#2362), so its `LongcatCausalLM` architecture decides; the
+    // mlx-community conversions declare `longcat_flash_sparse`. The n-gram
+    // variant keeps its own type.
+    for (name, config, want) in [
+        (
+            "longcat_sparse_hf",
+            r#"{"architectures": ["LongcatCausalLM"], "attention_method": "LSA"}"#,
+            ModelType::LongcatFlashSparse,
+        ),
+        (
+            "longcat_sparse_mlx",
+            r#"{"model_type": "longcat_flash_sparse", "architectures": ["LongcatCausalLM"], "vision_config": {}}"#,
+            ModelType::LongcatFlashSparse,
+        ),
+        (
+            "longcat_ngram",
+            r#"{"model_type": "longcat_flash_ngram", "architectures": ["LongcatFlashNgramForCausalLM"]}"#,
+            ModelType::LongcatFlashNgram,
+        ),
+    ] {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("config.json"), config).unwrap();
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, want, "{name}");
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    // Another architecture with no `model_type` still reports the missing key.
+    let model_dir = temp_path("longcat_other_arch");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{"architectures": ["LongcatFlashForCausalLM"]}"#,
+    )
+    .unwrap();
+    let err = super::detection::get_model_type(&model_dir).unwrap_err();
+    assert!(err.to_string().contains("model_type"), "{err}");
+    fs::remove_dir_all(model_dir).unwrap();
 }

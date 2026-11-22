@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use super::request::ToolChoice;
+use super::responses_mcp::{McpApprovalRequestItem, McpCallItem, McpListToolsItem, McpUsage};
 use super::responses_request::{ResponseReasoningConfig, ResponseTextConfig};
 
 /// Top-level response object returned by `POST /v1/responses` and
@@ -135,6 +136,12 @@ pub enum ResponseOutputItem {
     /// its output with one; a stored response that carries one replays it
     /// as a [`super::responses_request::ResponseInputItem::Compaction`].
     Compaction(ResponseCompactionItem),
+    /// The tools an MCP server offers to this response (issue #1457).
+    McpListTools(McpListToolsItem),
+    /// One MCP tool call the server-side tool loop ran or refused.
+    McpCall(McpCallItem),
+    /// An MCP tool call waiting for the caller's approval.
+    McpApprovalRequest(McpApprovalRequestItem),
 }
 
 impl ResponseOutputItem {
@@ -145,6 +152,9 @@ impl ResponseOutputItem {
             ResponseOutputItem::FunctionCall(f) => f.id.as_str(),
             ResponseOutputItem::Reasoning(r) => r.id.as_str(),
             ResponseOutputItem::Compaction(c) => c.id.as_str(),
+            ResponseOutputItem::McpListTools(m) => m.id.as_str(),
+            ResponseOutputItem::McpCall(m) => m.id.as_str(),
+            ResponseOutputItem::McpApprovalRequest(m) => m.id.as_str(),
         }
     }
 }
@@ -246,6 +256,10 @@ pub struct ResponseUsage {
     pub input_tokens_details: Option<ResponseInputTokensDetails>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens_details: Option<ResponseOutputTokensDetails>,
+    /// mlxcel extension, present only on a response the server-side MCP tool
+    /// loop produced (issue #1457): what the loop did and its bounds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpUsage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -388,6 +402,7 @@ mod tests {
                 total_tokens: 2,
                 input_tokens_details: None,
                 output_tokens_details: None,
+                mcp: None,
             },
             error: None,
             incomplete_details: None,

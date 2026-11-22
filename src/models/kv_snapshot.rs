@@ -62,7 +62,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 /// `chunked` is not parameterized: Llama 4 is its only holder and it has no
 /// pre-existing spelling to preserve.
 ///
-/// Used by: Gemma 3, AFMoE, Gemma 4, Llama 4, Muse Glimmer.
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4, Muse Glimmer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct KvSnapshotNames {
     /// Human-readable family label used in error messages, for example
@@ -135,7 +135,7 @@ fn unsupported_mode(family: &str, prefix: &str, kind: &str, mode: KVCacheMode) -
 /// An empty cache stores nothing and is not an error: KV-shared layers never
 /// populate their own cache, and `restore_standard` leaves such a layer fresh.
 ///
-/// Used by: Gemma 3, AFMoE, Gemma 4, Llama 4, Muse Glimmer.
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4, Muse Glimmer.
 pub(crate) fn snapshot_standard(
     cache: &KVCache,
     snapshot: &mut ModelStateSnapshot,
@@ -171,7 +171,7 @@ pub(crate) fn snapshot_standard(
 /// cache's configured mode must be [`KVCacheMode::Fp16`]; a mismatch is an
 /// error rather than a silent reinterpretation of a quantized buffer.
 ///
-/// Used by: Gemma 3, AFMoE, Gemma 4, Llama 4, Muse Glimmer.
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4, Muse Glimmer.
 pub(crate) fn restore_standard(
     cache: &mut KVCache,
     snapshot: &ModelStateSnapshot,
@@ -220,7 +220,7 @@ pub(crate) fn restore_standard(
 /// truncatable: the layer captured nothing, `restore_standard` leaves a fresh
 /// cache, and there is no tail to drop.
 ///
-/// Used by: Gemma 3, AFMoE, Gemma 4, Llama 4.
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4.
 pub(crate) fn standard_truncatable_to(
     snapshot: &ModelStateSnapshot,
     prefix: &str,
@@ -252,7 +252,7 @@ pub(crate) fn standard_truncatable_to(
 /// buffer keeps its capacity and the next update overwrites the rewound tail
 /// in place.
 ///
-/// Used by: Gemma 3, AFMoE, Gemma 4, Llama 4.
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4.
 pub(crate) fn truncate_standard(
     cache: &mut KVCache,
     target_len: i32,
@@ -282,7 +282,7 @@ pub(crate) fn truncate_standard(
 /// geometry: `.max_size`, `.buffer_size`, `.offset`, `.start_position`, `.idx`,
 /// `.step`, `.mode`, `.turbo_seed` and the optional reference ring origin.
 ///
-/// Used by: Gemma 3, AFMoE, Gemma 4, Muse Glimmer.
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Muse Glimmer.
 pub(crate) fn snapshot_rotating(
     cache: &RotatingKVCache,
     snapshot: &mut ModelStateSnapshot,
@@ -357,7 +357,7 @@ pub(crate) fn snapshot_rotating(
 /// [`RotatingKVCache::restore_fp16_snapshot_state`], which validates the ring
 /// geometry against the copied buffers.
 ///
-/// Used by: Gemma 3, AFMoE, Gemma 4, Muse Glimmer.
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Muse Glimmer.
 pub(crate) fn restore_rotating(
     cache: &mut RotatingKVCache,
     snapshot: &ModelStateSnapshot,
@@ -433,7 +433,7 @@ pub(crate) fn restore_rotating(
 /// load-bearing check: it holds only while the ring has not wrapped, because a
 /// wrapped ring no longer keeps logical token `t` at slot `t`.
 ///
-/// Used by: Gemma 3, AFMoE, Gemma 4.
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4.
 pub(crate) fn rotating_truncatable_to(
     snapshot: &ModelStateSnapshot,
     prefix: &str,
@@ -487,7 +487,7 @@ pub(crate) fn rotating_truncatable_to(
 /// `offset` and `idx`, which is sound while slot and logical position still
 /// agree and silently wrong once they do not.
 ///
-/// Used by: Gemma 3, AFMoE, Gemma 4.
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4.
 pub(crate) fn truncate_rotating(
     cache: &mut RotatingKVCache,
     target_len: i32,

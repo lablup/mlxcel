@@ -45,8 +45,11 @@ use crate::server::chat_request::{
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::conversation_store::ConversationItem;
 use crate::server::responses_store::StoredResponse;
+#[cfg(test)]
+use crate::server::responses_translator::responses_request_to_chat;
 use crate::server::responses_translator::{
-    OutboundContext, ResponsesTranslateError, build_response_object, responses_request_to_chat,
+    OutboundContext, ResponsesTranslateError, build_response_object,
+    responses_request_to_chat_with_mcp,
 };
 use crate::server::streaming::sse_response;
 use crate::server::streaming_responses::responses_sse_channel_resumable;
@@ -114,15 +117,37 @@ pub async fn create_response(
         return err.into_response();
     }
 
+    // Server-side MCP tool loop (issue #1457): resolve the request's `mcp`
+    // tools and approval answers first, so everything about them that is a
+    // 400 is answered before any model or tool work. `None` when the request
+    // has no MCP side, and always when the loop is disabled; the translator
+    // below then refuses an `mcp` tool with the message naming the opt-in.
+    let mcp_setup = match super::responses_mcp::prepare_mcp(&state, &request).await {
+        Ok(setup) => setup,
+        Err(err) => return err.into_response(),
+    };
+    if mcp_setup.is_some() && compact_threshold.is_some() {
+        return ErrorResponse::new(
+            "context_management is not supported together with mcp tools",
+            "invalid_request_error",
+        )
+        .into_response();
+    }
+
     // -- Translate Responses request → ChatCompletionRequest ---------------
-    let mut translated = match responses_request_to_chat(
+    let mut translated = match responses_request_to_chat_with_mcp(
         &request,
         state.responses_store.as_ref(),
         state.conversation_store.as_ref(),
+        state.mcp.is_some(),
     ) {
         Ok(t) => t,
         Err(err) => return translate_error_to_response(err).into_response(),
     };
+    // The MCP tools the request may use are function tools to the model.
+    if let Some(setup) = mcp_setup.as_ref() {
+        setup.add_tools(&mut translated.chat_request);
+    }
 
     // Refuse media parts the loaded checkpoint cannot consume, with b10621's
     // own `<kind> input is not supported` wording, before any referenced URL or
@@ -241,6 +266,25 @@ pub async fn create_response(
     let priority = parse_priority_header(&headers);
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
     let created_at = chrono::Utc::now().timestamp() as f64;
+
+    if let Some(setup) = mcp_setup {
+        return super::responses_mcp::create_mcp_response(
+            super::responses_mcp::McpResponseArgs {
+                state,
+                live,
+                request,
+                translated,
+                response_id,
+                created_at,
+                priority,
+                budget_override,
+                structured,
+                setup,
+            },
+            &headers,
+        )
+        .await;
+    }
 
     if background {
         return super::responses_background::create_background_response(

@@ -19,9 +19,10 @@
 //! text input (string or typed item array), function tools, structured
 //! output via `text.format.json_schema`, `previous_response_id` and
 //! string-form `conversation` chaining, plus standard sampling overrides.
-//! Built-in tool types (`web_search`, `file_search`, `computer_use_preview`,
-//! `code_interpreter`, `image_generation`, `mcp`, `custom`, `apply_patch`,
-//! `function_shell`) are deserialized into the [`ResponseTool::Unsupported`]
+//! The built-in `mcp` tool is parsed for the server-side MCP tool loop (issue
+//! #1457). Other built-in tool types (`web_search`, `file_search`,
+//! `computer_use_preview`, `code_interpreter`, `image_generation`, `custom`,
+//! `apply_patch`, `function_shell`) are deserialized into the [`ResponseTool::Unsupported`]
 //! catch-all so the route layer can reject them with a clean 400 listing
 //! the unsupported tool type rather than silently ignoring them.
 
@@ -259,6 +260,35 @@ pub enum ResponseInputItem {
     /// it, with the capsule's summary and retained items; see
     /// [`crate::server::responses_compaction::resolve_compaction`].
     Compaction { encrypted_content: String },
+    /// A prior `mcp_list_tools` output item (issue #1457). It carries no
+    /// conversation content; its presence tells the tool loop the server's
+    /// tools were already listed in this chain.
+    McpListTools { server_label: String },
+    /// A prior `mcp_call` output item: a tool call the server ran, with its
+    /// result. Replayed as history, never run again.
+    McpCall {
+        id: String,
+        server_label: String,
+        name: String,
+        arguments: String,
+        output: Option<String>,
+        error: Option<String>,
+        approval_request_id: Option<String>,
+    },
+    /// A prior `mcp_approval_request` output item.
+    McpApprovalRequest {
+        id: String,
+        server_label: String,
+        name: String,
+        arguments: String,
+    },
+    /// The caller's answer to an `mcp_approval_request` of the response
+    /// named by `previous_response_id`.
+    McpApprovalResponse {
+        approval_request_id: String,
+        approve: bool,
+        reason: Option<String>,
+    },
 }
 
 /// Wire form of [`ResponseInputItem`] once `type` is known to be present.
@@ -285,6 +315,36 @@ enum TaggedInputItem {
     },
     Compaction {
         encrypted_content: String,
+    },
+    McpListTools {
+        server_label: String,
+    },
+    McpCall {
+        #[serde(default)]
+        id: Option<String>,
+        server_label: String,
+        name: String,
+        #[serde(default)]
+        arguments: String,
+        #[serde(default)]
+        output: Option<String>,
+        #[serde(default)]
+        error: Option<serde_json::Value>,
+        #[serde(default)]
+        approval_request_id: Option<String>,
+    },
+    McpApprovalRequest {
+        id: String,
+        server_label: String,
+        name: String,
+        #[serde(default)]
+        arguments: String,
+    },
+    McpApprovalResponse {
+        approval_request_id: String,
+        approve: bool,
+        #[serde(default)]
+        reason: Option<String>,
     },
 }
 
@@ -324,6 +384,51 @@ impl TryFrom<serde_json::Value> for ResponseInputItem {
             TaggedInputItem::Compaction { encrypted_content } => {
                 Self::Compaction { encrypted_content }
             }
+            TaggedInputItem::McpListTools { server_label } => Self::McpListTools { server_label },
+            TaggedInputItem::McpCall {
+                id,
+                server_label,
+                name,
+                arguments,
+                output,
+                error,
+                approval_request_id,
+            } => Self::McpCall {
+                id: id.unwrap_or_else(|| format!("mcp_{}", uuid::Uuid::new_v4().simple())),
+                server_label,
+                name,
+                arguments,
+                output,
+                // OpenAI has carried the error both as a string and as an
+                // object; either is kept as text.
+                error: error.filter(|error| !error.is_null()).map(|error| {
+                    error
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| error.to_string())
+                }),
+                approval_request_id,
+            },
+            TaggedInputItem::McpApprovalRequest {
+                id,
+                server_label,
+                name,
+                arguments,
+            } => Self::McpApprovalRequest {
+                id,
+                server_label,
+                name,
+                arguments,
+            },
+            TaggedInputItem::McpApprovalResponse {
+                approval_request_id,
+                approve,
+                reason,
+            } => Self::McpApprovalResponse {
+                approval_request_id,
+                approve,
+                reason,
+            },
         })
     }
 }
@@ -385,6 +490,10 @@ impl ResponseInputContent {
 pub enum ResponseTool {
     /// `{"type": "function", "name": ..., "description": ..., "parameters": ...}`
     Function(FunctionToolDefinition),
+    /// `{"type": "mcp", "server_label": ...}`: tools of an MCP server the
+    /// operator configured at startup, run by the server-side tool loop
+    /// (issue #1457). Refused unless that loop is enabled.
+    Mcp(super::responses_mcp::McpToolDefinition),
     /// Catch-all for unsupported built-in tools. The deserialiser captures
     /// the raw object so the route can echo back the offending `type`.
     #[serde(other)]

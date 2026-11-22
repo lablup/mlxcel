@@ -24,10 +24,16 @@
 //! processes, `--ui-mcp-proxy` opens the generic `/cors-proxy` URL proxy so
 //! the browser can reach remote MCP servers, and `--agent` turns the proxy
 //! and every built-in tool on at once. mlxcel accepts the `--ui`/`--webui`
-//! flag pair for its bundled WebUI, but still executes no server-side tools
-//! on a model's behalf and does not serve arbitrary static directories; a
-//! server-side MCP tool loop is tracked separately as a product feature
-//! (#1457), outside b10621 compatibility.
+//! flag pair for its bundled WebUI, serves no `/tools` endpoint, runs none of
+//! b10621's built-in tools, and does not serve arbitrary static directories.
+//!
+//! The two MCP server-set flags are the exception (#1457): together with the
+//! mlxcel opt-in `--mcp-tools` they configure the server-side MCP tool loop,
+//! a product feature outside b10621 compatibility that is reached through
+//! the `/v1/responses` built-in `mcp` tool, not through `/tools`. Without
+//! `--mcp-tools` either flag, or its `LLAMA_ARG_MCP_SERVERS_*` variable,
+//! still fails startup, so a variable inherited from a llama.cpp deployment
+//! never starts a process on its own.
 //!
 //! The classification is now split between #1435 and #1838: the flags parse,
 //! `--ui`/`--webui` enable mlxcel's bundled WebUI, the negative forms
@@ -68,13 +74,20 @@ use crate::cli::ggml_compat_args::env_bool_pair;
 /// after this one.
 pub const WEBUI_HELP_HEADING: &str = "WebUI Options";
 
+/// `--help` section of the server-side MCP tool loop flags (issue #1457).
+pub const MCP_HELP_HEADING: &str = "MCP Tool Options";
+
 /// llama-server b10621 Web UI / tools / MCP / agent compatibility surface.
 ///
 /// The `--webui` / `--no-webui` pair is mlxcel's own product flag for the
-/// bundled WebUI, so it is the one visible pair here, under its own
+/// bundled WebUI, so it is visible here under its own
 /// [`WEBUI_HELP_HEADING`] (#1900); `--ui` / `--no-ui` stay hidden aliases of
-/// it for b10621 compatibility. Every other argument is a hidden llama-server
-/// compatibility surface that fails startup in [`Self::ensure_supported`].
+/// it for b10621 compatibility. The MCP flags are visible under
+/// [`MCP_HELP_HEADING`]: `--mcp-tools` and its bounds are mlxcel product
+/// flags, and the two b10621 server-set spellings are accepted only together
+/// with that opt-in ([`crate::server::mcp::resolve_mcp_startup`], #1457).
+/// Every other argument is a hidden llama-server compatibility surface that
+/// fails startup in [`Self::ensure_supported`].
 #[derive(Debug, Clone, Default, Args)]
 pub struct UiCompatArgs {
     /// Serve the bundled browser WebUI at <api-prefix>/webui/ with its
@@ -154,25 +167,75 @@ pub struct UiCompatArgs {
     )]
     pub tools_runtime: Option<String>,
 
-    /// b10621 `--mcp-servers-config`: a file of stdio MCP servers exposed
-    /// through `/tools` for the browser UI. Rejected at startup.
+    /// Enable the server-side MCP tool loop on /v1/responses: the stdio MCP
+    /// servers named by --mcp-servers-config or --mcp-servers-json are
+    /// started as child processes with this server's privileges, and a
+    /// request's built-in `mcp` tool can call their tools. Off by default.
+    /// Refused on a non-loopback listener without --api-key or
+    /// --api-key-file.
+    #[arg(
+        long = "mcp-tools",
+        help_heading = MCP_HELP_HEADING,
+        action = clap::ArgAction::SetTrue
+    )]
+    pub mcp_tools: bool,
+
+    /// File with the MCP servers to start, in the Cursor-compatible
+    /// {"mcpServers": {"<name>": {"command", "args", "env"}}} format (stdio
+    /// servers only). Requires --mcp-tools; without it startup fails.
     #[arg(
         long = "mcp-servers-config",
         value_name = "PATH",
         env = "LLAMA_ARG_MCP_SERVERS_CONFIG",
-        hide = true
+        hide_env_values = true,
+        help_heading = MCP_HELP_HEADING
     )]
     pub mcp_servers_config: Option<String>,
 
-    /// b10621 `--mcp-servers-json`: the same MCP server set as inline JSON.
-    /// Rejected at startup.
+    /// The same MCP server set as inline JSON. Requires --mcp-tools; pass
+    /// either this or --mcp-servers-config, not both. The document can hold
+    /// credentials in its `env` entries, so --help never prints the value
+    /// of either variable.
     #[arg(
         long = "mcp-servers-json",
         value_name = "JSON",
         env = "LLAMA_ARG_MCP_SERVERS_JSON",
-        hide = true
+        hide_env_values = true,
+        help_heading = MCP_HELP_HEADING
     )]
     pub mcp_servers_json: Option<String>,
+
+    /// Most model turns in one response that may be followed by MCP tool
+    /// execution. A response that still asks for tools after that ends as
+    /// `incomplete` with reason `max_tool_rounds`.
+    #[arg(
+        long = "mcp-max-tool-rounds",
+        value_name = "N",
+        default_value_t = crate::server::mcp::config::DEFAULT_MAX_TOOL_ROUNDS,
+        help_heading = MCP_HELP_HEADING
+    )]
+    pub mcp_max_tool_rounds: usize,
+
+    /// Seconds one MCP tool call (or one MCP server start) may take before
+    /// the server process is killed and the call reported as failed.
+    #[arg(
+        long = "mcp-tool-timeout",
+        value_name = "SECONDS",
+        default_value_t = crate::server::mcp::config::DEFAULT_TOOL_TIMEOUT_SECS,
+        help_heading = MCP_HELP_HEADING
+    )]
+    pub mcp_tool_timeout: u64,
+
+    /// Most bytes of text one MCP tool call may hand to the model. Longer
+    /// output is truncated; a single message over four times this size
+    /// fails the call.
+    #[arg(
+        long = "mcp-max-output-bytes",
+        value_name = "BYTES",
+        default_value_t = crate::server::mcp::config::DEFAULT_MAX_OUTPUT_BYTES,
+        help_heading = MCP_HELP_HEADING
+    )]
+    pub mcp_max_output_bytes: usize,
 
     /// b10621 `--ui-mcp-proxy` / `--webui-mcp-proxy`: enable the generic
     /// `/cors-proxy` URL proxy for the browser UI. Rejected at startup: a
@@ -262,17 +325,23 @@ impl UiCompatArgs {
                 "it selects where llama-server executes its built-in tools, and mlxcel executes none",
             ));
         }
-        if self.mcp_servers_config.is_some() {
-            return Err(reject(
-                "--mcp-servers-config",
-                "llama-server spawns MCP processes for its browser UI; mlxcel spawns none (a server-side MCP tool loop is tracked separately in issue #1457)",
-            ));
-        }
-        if self.mcp_servers_json.is_some() {
-            return Err(reject(
-                "--mcp-servers-json",
-                "llama-server spawns MCP processes for its browser UI; mlxcel spawns none (a server-side MCP tool loop is tracked separately in issue #1457)",
-            ));
+        // The MCP server set starts child processes, so it needs the mlxcel
+        // opt-in beside it (#1457). This is what keeps an inherited
+        // LLAMA_ARG_MCP_SERVERS_* variable from spawning anything.
+        if !self.mcp_tools {
+            let flag = if self.mcp_servers_config.is_some() {
+                Some("--mcp-servers-config")
+            } else if self.mcp_servers_json.is_some() {
+                Some("--mcp-servers-json")
+            } else {
+                None
+            };
+            if let Some(flag) = flag {
+                return Err(reject(
+                    flag,
+                    "without --mcp-tools. It (or its LLAMA_ARG_MCP_SERVERS_* variable) configures MCP child processes that run with this server's privileges, and mlxcel starts them only with the explicit --mcp-tools opt-in, which enables the server-side MCP tool loop on /v1/responses. Add --mcp-tools, or remove the MCP server configuration",
+                ));
+            }
         }
         if self.ui_mcp_proxy {
             return Err(reject(

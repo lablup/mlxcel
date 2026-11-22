@@ -446,14 +446,22 @@ environment map.
 
 ## Deliberate non-goals
 
-mlxcel does not ship llama-server's embedded Web UI and does not execute tools,
-MCP servers, an agent loop, or the UI CORS proxy. Its own bundled WebUI is a
-separate, opt-in feature started with `--webui`; see
-[`webui/README.md`](webui/README.md). Enabling those compatibility
-flags fails at startup instead of silently pretending that the capability is
-active. `/tools` and `/cors-proxy` retain the disabled-feature response shape
-expected by clients. Client-declared tools and parsed `tool_calls` remain
-supported because execution stays with the client.
+mlxcel does not ship llama-server's embedded Web UI and does not run
+llama-server's built-in tools, its `/tools` endpoint, an agent mode, or the UI
+CORS proxy. Its own bundled WebUI is a separate, opt-in feature started with
+`--webui`; see [`webui/README.md`](webui/README.md). Enabling those
+compatibility flags fails at startup instead of silently pretending that the
+capability is active. `/tools` and `/cors-proxy` retain the disabled-feature
+response shape expected by clients. Client-declared tools and parsed
+`tool_calls` remain supported because execution stays with the client.
+
+MCP servers are the one exception, and only as an explicit opt-in:
+`--mcp-tools` with `--mcp-servers-config` or `--mcp-servers-json` runs a
+server-side MCP tool loop for the built-in `mcp` tool of `/v1/responses`. It is
+off by default, refused on a non-loopback listener without API keys, and
+unavailable in router mode and on distributed launches (tensor-parallel, pipeline-stage, `--node-role`); without `--mcp-tools` the two server-set flags still
+fail startup. See
+[`responses-api.md`](responses-api.md#mcp-tools-server-side-tool-loop).
 
 For every b10621 option and native field, including intentional differences
 not repeated here, consult [`llama-server-compat.md`](llama-server-compat.md).

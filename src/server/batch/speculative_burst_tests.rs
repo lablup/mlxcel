@@ -2271,6 +2271,29 @@ fn mtp_capable_target_names_both_inkling_variants() {
     }
 }
 
+/// Inkling targets consult the measured block-vs-chain gate instead of being
+/// admitted unconditionally (issue #1549): on an M3 Ultra the 4-bit
+/// Inkling-Small checkpoint diverged from classic decode at verify widths 2
+/// and 3 under the default `qmv_wide` dispatch. Seeds the memoized verdict at
+/// widths no other test uses, since the verdict cache is process-wide.
+#[test]
+fn mtp_capable_target_gates_inkling_on_the_exactness_verdict() {
+    let text = crate::models::inkling::tiny_model();
+    let key = |block_size: u32| crate::models::speculative_exactness::ProbeKey {
+        block_size,
+        hidden_size: 4,
+        num_hidden_layers: text.num_layers() as u32,
+    };
+    crate::models::speculative_exactness::seed_decision_for_test(key(1549), false);
+    crate::models::speculative_exactness::seed_decision_for_test(key(1550), true);
+    let model = crate::LoadedModel::Inkling(text);
+    assert!(
+        !super::speculative_burst::mtp_capable_target(&model, 1549),
+        "an Inkling target whose verify block diverges from the chain must decline MTP"
+    );
+    assert!(super::speculative_burst::mtp_capable_target(&model, 1550));
+}
+
 #[test]
 fn every_mtp_dispatch_site_covers_every_capable_variant() {
     let capable = mtp_capable_variants();
