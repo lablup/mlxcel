@@ -2143,7 +2143,10 @@ fn generate_accepts_space_separated_unlimited_max_tokens() {
         let Commands::Generate(args) = cli.command else {
             panic!("expected the generate subcommand");
         };
-        assert_eq!(args.max_tokens, mlxcel::cli::max_tokens::UNLIMITED_MAX_TOKENS);
+        assert_eq!(
+            args.generation.max_tokens,
+            mlxcel::cli::max_tokens::UNLIMITED_MAX_TOKENS
+        );
     }
 }
 
