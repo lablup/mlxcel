@@ -71,6 +71,14 @@ fn a_gemma4_ring_checkpoint_is_every_sliding_ring_at_its_window() {
     )
     .unwrap();
     assert_eq!(tight.capacity_bytes, 1 << 30, "an eighth of what is left");
+
+    // gemma-4-12b-it ships as `gemma4_unified` / `gemma4_unified_text`.
+    let mut unified = gemma4_12b_config();
+    unified["model_type"] = json!("gemma4_unified");
+    unified["text_config"]["model_type"] = json!("gemma4_unified_text");
+    let rec = recommend_ring_checkpoint_capacity_from_config(&unified, KVCacheMode::Fp16, None)
+        .expect("the Unified checkpoint stores ring checkpoints too");
+    assert_eq!(rec.entry_bytes, 320 << 20);
 }
 
 #[test]

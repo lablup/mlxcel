@@ -446,11 +446,15 @@ pub fn recommend_state_checkpoint_capacity_from_config(
 
 /// Families whose turn-boundary state checkpoint is the sliding rings alone
 /// (issue #3255): the model implements `state_checkpoint_from_snapshot` by
-/// keeping only its rotating caches.
+/// keeping only its rotating caches. Gemma 4 checkpoints also ship as
+/// `gemma4_unified`, served by the same text model.
 fn ring_checkpoint_family(config: &Value) -> bool {
-    model_types(config)
-        .iter()
-        .any(|mt| matches!(mt.as_str(), "gemma3" | "gemma4" | "afmoe"))
+    model_types(config).iter().any(|mt| {
+        matches!(
+            mt.as_str(),
+            "gemma3" | "gemma4" | "gemma4_unified" | "afmoe"
+        )
+    })
 }
 
 /// Whether the model at `model_dir` stores ring-only state checkpoints
