@@ -8,7 +8,7 @@ Issue #2362. Correctness evidence for `longcat_flash_sparse` against mlx-vlm, th
 - **Checkpoints:** `mlx-community/LongCat-Flash-Lite-Sparse-4bit` (`models/longcat-flash-lite-sparse-4bit`; 14 layers, two MLA sub-blocks each, LSA with `index_topk` 2048, `index_init_tokens` 16, `index_local_tokens` 1024) and `longcat-flash-lite-4bit` (the ngram variant, for the regression check).
 - **Corpus:** `docs/architecture.md` followed by `docs/benchmarks.md` at `a3e38aec` (36,276 tokens with the checkpoint's tokenizer).
 - **Reference:** mlx-vlm 0.8.0 at `d998a620` (vendored `references/mlx-vlm`), mlx 0.32.4, through `scripts/longcat_sparse_oracle_trace.py`.
-- **Candidate:** `examples/logit_trace` built from the PR branch (release, `metal,accelerate`).
+- **Candidate:** `examples/logit_trace` built from the PR branch (release, `metal,accelerate`), after the review fixes (float32 indexer scores, one shared prefill mask per layer).
 - **Metric:** `scripts/compare_logit_traces.py --decided 2`: top-1 disagreements on positions where the reference's top two are at least 2 logits apart.
 
 ## Against mlx-vlm
@@ -17,17 +17,17 @@ The oracle runs one causal forward per chunk group (`64 52 8 3072`: 52 chunks of
 
 | Candidate | Reference arm | Positions | Decided disagreements | Top-1 flips | Largest gap at a flip |
 | --- | --- | --- | --- | --- | --- |
-| multi-token, all chunks | mlx-vlm | 3328 | 0 / 1384 | 135 | 1.500 |
-| multi-token, chunks 33 to 51 (context over 2048) | mlx-vlm | 1216 | 0 / 499 | 51 | 0.625 |
-| decode (gather), fp16 latent | mlx-vlm | 256 | 0 / 81 | 7 | 0.312 |
-| decode (gather), int8 latent | mlx-vlm | 256 | 0 / 81 | 16 | 0.875 |
-| multi-token, chunks 33 to 51 | mlx-vlm `--ngram-fusion` | 1216 | 59 / 119 | 1040 | 5.031 |
-| decode (gather), fp16 latent | mlx-vlm `--ngram-fusion` | 256 | 14 / 24 | 237 | n/a |
-| multi-token, chunks 33 to 51 | mlx-vlm `--no-forced-columns` | 1216 | 0 / 494 | 54 | 0.938 |
+| multi-token, all chunks | mlx-vlm | 3328 | 0 / 1384 | 141 | 1.500 |
+| multi-token, chunks 33 to 51 (context over 2048) | mlx-vlm | 1216 | 0 / 499 | 56 | 0.812 |
+| decode (gather), fp16 latent | mlx-vlm | 256 | 0 / 81 | 10 | 0.375 |
+| decode (gather), int8 latent | mlx-vlm | 256 | 0 / 81 | 13 | 0.875 |
+| multi-token, chunks 33 to 51 | mlx-vlm `--ngram-fusion` | 1216 | 59 / 119 | 1041 | 5.031 |
+| decode (gather), fp16 latent | mlx-vlm `--ngram-fusion` | 256 | 14 / 24 | 237 | 3.375 |
+| multi-token, chunks 33 to 51 | mlx-vlm `--no-forced-columns` | 1216 | 0 / 494 | 58 | 0.938 |
 
 `--ngram-fusion` swaps the reference's embedding fusion for the `longcat_flash_ngram` form `(word + proj) / (1 + n)`; the trace separates it from the real model on half the decided positions. `--no-forced-columns` clears the indexer's sink and local columns. Against the real reference it disagrees with itself on 0 of 499 decided positions behind 2048+ tokens (39 near-tie flips, the largest at 0.438), so on this corpus the forced columns change only near-ties and that arm does not separate; the forced-column rule is pinned by the unit tests (`lsa_selection_forces_sink_and_local_columns`) instead.
 
-Perplexity behind 2048+ tokens: mlx-vlm 21.82, mlxcel 21.53 (-1.3%).
+Perplexity behind 2048+ tokens: mlx-vlm 21.82, mlxcel 21.52 (-1.4%). The same multi-token trace before the review fixes (bf16 indexer scores) agreed with this one on every decided position; float32 scoring moves only near-ties.
 
 ## The quantized latent
 
@@ -35,12 +35,12 @@ Every arm traces the same 256 positions behind 3072 tokens. Decode arms: `MLXCEL
 
 | Reference | Candidate | Decided disagreements | Top-1 agreement | Largest gap at a flip | Perplexity |
 | --- | --- | --- | --- | --- | --- |
-| fp16 decode | int8 decode | 0 / 75 | 236 / 256 (92.2%) | 0.875 | -0.5% |
-| fp16 multi-token | int8 multi-token | 0 / 77 | 238 / 256 (93.0%) | 0.625 | -1.9% |
-| fp16 decode | int4 decode | 4 / 75 | 181 / 256 (70.7%) | 3.375 | +18.1% |
-| fp16 multi-token | int4 multi-token | 6 / 77 | 175 / 256 (68.4%) | 3.562 | +16.3% |
-| int4 multi-token | int4 decode | 0 / 71 | 233 / 256 (91.0%) | 0.750 | +2.2% |
-| fp16 multi-token | fp16 decode | 0 / 77 | 248 / 256 (96.9%) | 0.125 | +0.7% |
+| fp16 decode | int8 decode | 0 / 78 | 243 / 256 (94.9%) | 0.875 | -0.5% |
+| fp16 multi-token | int8 multi-token | 0 / 78 | 237 / 256 (92.6%) | 0.688 | -0.8% |
+| fp16 decode | int4 decode | 4 / 78 | 186 / 256 (72.7%) | 3.750 | +23.1% |
+| fp16 multi-token | int4 multi-token | 6 / 78 | 176 / 256 (68.8%) | 3.500 | +15.5% |
+| int4 multi-token | int4 decode | 0 / 70 | 237 / 256 (92.6%) | 0.500 | +7.1% |
+| fp16 multi-token | fp16 decode | 0 / 78 | 248 / 256 (96.9%) | 0.312 | +0.5% |
 
 `MLXCEL_TRACE_MLA_STATS` on the decode arms: fp16 `absorbed_composed=7168`, int8 `absorbed_fused=7168`, int4 `absorbed_composed=7168` (256 steps times 28 MLA sub-blocks), with `decompressed=112` from the context passes only. The int8 latent is in the rounding class, as on `longcat_flash_ngram` (#3161). The int4 latent is not: it is the only arm with decided disagreements, and the int4 multi-token arm (whole window dequantized, selection as a mask) agrees with the int4 gathered decode arm on every decided position, so the loss comes from the 4-bit codec and not from the gather. `mla::EXPERIMENTAL_LATENT_NOTES` quotes this result in the `--mla-latent-quant int4` startup warning for this family; the default stays fp16 and `--kv-cache-mode int8` stores the 8-bit latent.
 

@@ -121,6 +121,12 @@ fn longcat_sparse_adds_its_fp16_indexer_key_cache() {
     assert_eq!(fp16.marginal_bytes_per_token, 4 * (2 * 1152 + 2 * 129));
     let int8 = estimate_kv_arch_from_config(&cfg, 2048, KVCacheMode::Int8, 1).expect("estimate");
     assert_eq!(int8.marginal_bytes_per_token, 4 * (2 * 672 + 2 * 129));
+    // The original HF config names no `model_type`, only `LongcatCausalLM`.
+    let mut hf = cfg.clone();
+    hf.as_object_mut().unwrap().remove("model_type");
+    hf["architectures"] = serde_json::json!(["LongcatCausalLM"]);
+    let e = estimate_kv_arch_from_config(&hf, 2048, KVCacheMode::Fp16, 1).expect("estimate");
+    assert_eq!(e.marginal_bytes_per_token, fp16.marginal_bytes_per_token);
     cfg["attention_method"] = serde_json::json!("MLA");
     let dense = estimate_kv_arch_from_config(&cfg, 2048, KVCacheMode::Fp16, 1).expect("estimate");
     assert_eq!(dense.marginal_bytes_per_token, 2 * 4 * 1152);

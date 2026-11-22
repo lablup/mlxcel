@@ -783,7 +783,10 @@ impl ModelDetectionProbes for FullFilesystemDetectionProbes {
 }
 
 /// Whether `architectures[0]` is LongCat-Flash-Lite-Sparse's `LongcatCausalLM`.
-fn is_longcat_sparse_architecture(v: &Value) -> bool {
+/// Whether a config names the LongCat-Flash-Lite-Sparse architecture
+/// (`LongcatCausalLM`), which the original checkpoint declares without a
+/// `model_type`.
+pub(crate) fn is_longcat_sparse_architecture(v: &Value) -> bool {
     v["architectures"]
         .as_array()
         .and_then(|archs| archs.first())

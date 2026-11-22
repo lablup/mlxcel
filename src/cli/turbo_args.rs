@@ -659,10 +659,13 @@ pub(crate) fn kv_rules_model_type(config: &serde_json::Value) -> Option<String> 
     {
         return Some(decoder);
     }
+    // A config without a top-level `model_type` (the original
+    // LongCat-Flash-Lite-Sparse one, #2362) keys on the decoder's fallback.
     config
         .get("model_type")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
+        .or_else(|| crate::execution::config_fields::kv_decoder_model_type(config))
 }
 
 #[cfg(test)]

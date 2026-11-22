@@ -379,7 +379,8 @@ fn lsa_selection_forces_sink_and_local_columns() {
         "the arm without forced columns differs"
     );
 
-    // A two-column local window ending at the query keeps columns 8 and 9.
+    // A three-column local window ending at the query keeps columns 7, 8
+    // and 9; the remaining slot goes to the best score (column 0).
     let local = LsaSelection {
         topk: 4,
         init_tokens: 0,
@@ -805,6 +806,30 @@ fn unsupported_configs_are_refused() {
         .err()
         .expect("missing indexer refused");
     assert!(err.contains("model.layers.1.self_attn.0.indexer"), "{err}");
+
+    // Indexer projections that do not match the config are refused at load,
+    // not left to abort (or broadcast) in the first forward.
+    let mut weights = sanitize_weights(tiny_weights(&base, 8), &base).unwrap();
+    let key = "model.layers.0.self_attn.0.indexer.weights_proj.weight";
+    weights.insert(
+        key.to_string(),
+        mlxcel_core::from_slice_f32(&pseudo_random(3, HIDDEN as usize, 0.5), &[1, HIDDEN]),
+    );
+    let err = LongcatFlashSparseModel::from_weights(&weights, &base)
+        .err()
+        .expect("one-row weights_proj refused");
+    assert!(err.contains(key), "{err}");
+
+    // Per-embedder projections of different widths are refused by sanitize.
+    let mut raw = tiny_weights(&base, 8);
+    raw.insert(
+        "language_model.model.oe_embed_proj2.weight".to_string(),
+        mlxcel_core::from_slice_f32(&pseudo_random(4, 4 * 3, 0.5), &[3, 4]),
+    );
+    let err = sanitize_weights(raw, &base)
+        .err()
+        .expect("mismatched projection refused");
+    assert!(err.contains("oe_embed_proj2"), "{err}");
 
     // Dense MLA ignores the selection rule and needs no indexer.
     let mut dense = base.clone();

@@ -137,6 +137,8 @@ const HYBRID_SSM_ARCH_FRAGMENTS: &[&str] = &[
     "qwen3next",
     "falconmamba",
     "longcatflash",
+    // LongCat-Flash-Lite-Sparse's original config has no `model_type` (#2362).
+    "longcatcausallm",
     "rwkv7",
     "recurrentgemma",
     "z1t",

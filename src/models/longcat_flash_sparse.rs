@@ -430,7 +430,33 @@ impl LsaIndexer {
         let linear = |name: &str| {
             UnifiedLinear::from_weights(weights, &format!("{prefix}.{name}"), gs, bits)
         };
+        // A shape the config does not describe would abort inside the first
+        // forward's reshape or matmul, or broadcast into a wrong selection.
+        let (heads, dim) = (args.index_n_heads as i64, args.index_head_dim as i64);
+        let (q_lora, hidden) = (args.q_lora_rank as i64, args.hidden_size as i64);
+        check_linear_shape(
+            weights,
+            &format!("{prefix}.wq_b"),
+            heads * dim,
+            q_lora,
+            bits,
+        )?;
+        check_linear_shape(weights, &format!("{prefix}.wk"), dim, hidden, bits)?;
+        check_linear_shape(
+            weights,
+            &format!("{prefix}.weights_proj"),
+            heads,
+            hidden,
+            bits,
+        )?;
         let norm_weight = get_weight_copy(weights, &format!("{prefix}.k_norm.weight"))?;
+        let norm_len = mlxcel_core::array_shape(&norm_weight);
+        if norm_len != [dim as i32] {
+            return Err(format!(
+                "longcat_flash_sparse: `{prefix}.k_norm.weight` has shape {norm_len:?}, \
+                 but index_head_dim is {dim}"
+            ));
+        }
         let k_norm = if args.index_k_norm_type.eq_ignore_ascii_case("rms") {
             IndexerNorm::Rms(RMSNorm::new(norm_weight, args.rms_norm_eps))
         } else {
@@ -498,9 +524,53 @@ impl LsaIndexer {
     }
 }
 
-/// `sum_h relu(q_h . k) * w_h * n_heads^-0.5 * head_dim^-0.5`, `[B, 1, L, S]`.
+/// Check that the linear `prefix` maps `want_in` features to `want_out`: a
+/// float weight is `[out, in]`, an affine-packed one `[out, in * bits / 32]`
+/// beside its `scales`.
+fn check_linear_shape(
+    weights: &WeightMap,
+    prefix: &str,
+    want_out: i64,
+    want_in: i64,
+    bits: i32,
+) -> Result<(), String> {
+    let key = format!("{prefix}.weight");
+    let w = weights
+        .get(&key)
+        .ok_or_else(|| format!("longcat_flash_sparse: missing `{key}`"))?;
+    let shape = mlxcel_core::array_shape(w);
+    if shape.len() != 2 {
+        return Err(format!(
+            "longcat_flash_sparse: `{key}` is {shape:?}, not 2-D"
+        ));
+    }
+    let cols = i64::from(shape[1]);
+    let logical_in = if weights.contains_key(&format!("{prefix}.scales")) {
+        cols * 32 / i64::from(bits.max(1))
+    } else {
+        cols
+    };
+    if i64::from(shape[0]) != want_out || logical_in != want_in {
+        return Err(format!(
+            "longcat_flash_sparse: `{key}` is {shape:?} ({logical_in} input features), \
+             but the config needs {want_out} x {want_in}"
+        ));
+    }
+    Ok(())
+}
+
+/// Score elements (`H * L * S`) above which [`indexer_scores`] accumulates one
+/// head at a time instead of materializing every head's scores at once.
+const INDEXER_SCORE_CHUNK_ELEMS: i64 = 1 << 24;
+
+/// `sum_h relu(q_h . k) * w_h * n_heads^-0.5 * head_dim^-0.5`, `[B, 1, L, S]`
+/// in float32.
 ///
-/// `q` `[B, H, L, D]`, `k` `[B, 1, S, D]`, `weights` `[B, L, H]`.
+/// `q` `[B, H, L, D]`, `k` `[B, 1, S, D]`, `weights` `[B, L, H]`. Computed in
+/// float32 as upstream's Metal score kernel (`indexer_dense_scores`) does, so
+/// the top-k ranking over thousands of keys is not decided by bf16 rounding.
+/// A multi-token step over a long window adds the heads one by one, which
+/// keeps the temporary at `[B, 1, L, S]`.
 fn indexer_scores(
     q: &MlxArray,
     k: &MlxArray,
@@ -508,14 +578,33 @@ fn indexer_scores(
     n_heads: i32,
     head_dim: i32,
 ) -> UniquePtr<MlxArray> {
-    let k_t = mlxcel_core::transpose_axes(k, &[0, 1, 3, 2]);
-    let scores = mlxcel_core::relu(&mlxcel_core::matmul(q, &k_t));
+    let f32 = dtype::FLOAT32;
+    let q = mlxcel_core::astype(q, f32);
+    let k_t = mlxcel_core::astype(&mlxcel_core::transpose_axes(k, &[0, 1, 3, 2]), f32);
     let scale = (n_heads as f32).powf(-0.5) * (head_dim as f32).powf(-0.5);
-    let scale = mlxcel_core::full_f32(&[1], scale, mlxcel_core::array_dtype(weights));
-    let w = mlxcel_core::multiply(weights, &scale);
+    let scale = mlxcel_core::full_f32(&[1], scale, f32);
+    let w = mlxcel_core::multiply(&mlxcel_core::astype(weights, f32), &scale);
+    // [B, H, L, 1]
     let w = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&w, &[0, 2, 1]), -1);
-    let w = mlxcel_core::astype(&w, mlxcel_core::array_dtype(&scores));
-    mlxcel_core::sum_axis(&mlxcel_core::multiply(&scores, &w), 1, true)
+    let q_shape = mlxcel_core::array_shape(&q);
+    let k_len = mlxcel_core::array_shape(&k_t)[3];
+    let elems = i64::from(n_heads) * i64::from(q_shape[2]) * i64::from(k_len);
+    if elems <= INDEXER_SCORE_CHUNK_ELEMS {
+        let scores = mlxcel_core::relu(&mlxcel_core::matmul(&q, &k_t));
+        return mlxcel_core::sum_axis(&mlxcel_core::multiply(&scores, &w), 1, true);
+    }
+    let mut total: Option<UniquePtr<MlxArray>> = None;
+    for h in 0..n_heads {
+        let q_h = mlxcel_core::utils::slice_axis(&q, 1, h, h + 1);
+        let w_h = mlxcel_core::utils::slice_axis(&w, 1, h, h + 1);
+        let s_h = mlxcel_core::relu(&mlxcel_core::matmul(&q_h, &k_t));
+        let s_h = mlxcel_core::multiply(&s_h, &w_h);
+        total = Some(match total {
+            Some(acc) => mlxcel_core::add(&acc, &s_h),
+            None => s_h,
+        });
+    }
+    total.expect("index_n_heads is validated positive")
 }
 
 /// The causal keep mask of `l` queries at positions `start..start + l` over
@@ -542,8 +631,10 @@ pub(crate) fn lsa_top_indices(
 ) -> UniquePtr<MlxArray> {
     let shape = mlxcel_core::array_shape(scores);
     let (l, s) = (shape[2], shape[3]);
+    // A decode row is the last key's query: every key is causal for it.
+    let decode = l == 1 && start + 1 == s;
     let causal = causal_keep(start, l, s);
-    let mut scores = mlxcel_core::copy(scores);
+    let mut forced_scores = None;
     if selection.init_tokens > 0 || selection.local_tokens > 0 {
         let cols = mlxcel_core::reshape(&mlxcel_core::arange_i32(0, s, 1), &[1, s]);
         let sink = mlxcel_core::less(
@@ -556,19 +647,31 @@ pub(crate) fn lsa_top_indices(
                 &rows,
                 &mlxcel_core::from_slice_i32(&[selection.local_tokens], &[1]),
             );
-            let local =
-                mlxcel_core::logical_and(&causal, &mlxcel_core::greater(&cols, &window_start));
+            let after = mlxcel_core::greater(&cols, &window_start);
+            let local = if decode {
+                after
+            } else {
+                mlxcel_core::logical_and(&causal, &after)
+            };
             mlxcel_core::logical_or(&sink, &local)
         } else {
             sink
         };
-        let inf = mlxcel_core::full_f32(&[1], f32::INFINITY, mlxcel_core::array_dtype(&scores));
-        scores = mlxcel_core::where_cond(&forced, &inf, &scores);
+        let inf = mlxcel_core::full_f32(&[1], f32::INFINITY, mlxcel_core::array_dtype(scores));
+        forced_scores = Some(mlxcel_core::where_cond(&forced, &inf, scores));
     }
-    let neg_inf = mlxcel_core::full_f32(&[1], f32::NEG_INFINITY, mlxcel_core::array_dtype(&scores));
-    let scores = mlxcel_core::where_cond(&causal, &scores, &neg_inf);
+    let scores: &MlxArray = forced_scores.as_deref().unwrap_or(scores);
+    let causal_scores;
+    let scores = if decode {
+        scores
+    } else {
+        let neg_inf =
+            mlxcel_core::full_f32(&[1], f32::NEG_INFINITY, mlxcel_core::array_dtype(scores));
+        causal_scores = mlxcel_core::where_cond(&causal, scores, &neg_inf);
+        &*causal_scores
+    };
     let kth = s - selection.topk;
-    let part = mlxcel_core::argpartition(&scores, kth, -1);
+    let part = mlxcel_core::argpartition(scores, kth, -1);
     slice_axis(&part, -1, kth, s)
 }
 
@@ -583,17 +686,22 @@ pub(crate) fn sparse_prefill_mask(
 ) -> UniquePtr<MlxArray> {
     let shape = mlxcel_core::array_shape(indices);
     let (b, l, k) = (shape[0], shape[2], shape[3]);
-    let base = mlxcel_core::zeros(&[b, 1, l, kv_len], dtype::FLOAT32);
-    let ones = mlxcel_core::ones(&[b, 1, l, k], dtype::FLOAT32);
-    let filled = mlxcel_core::put_along_axis(&base, indices, &ones, -1);
-    let half = mlxcel_core::full_f32(&[1], 0.5, dtype::FLOAT32);
-    let keep = mlxcel_core::logical_and(
-        &mlxcel_core::greater(&filled, &half),
-        &causal_keep(start, l, kv_len),
-    );
-    let zero = mlxcel_core::full_f32(&[1], 0.0, dtype);
+    // Built in the mask's own dtype: `-inf` everywhere, `0` scattered onto the
+    // selected keys, then the causal condition.
+    let dropped = mlxcel_core::full_f32(&[b, 1, l, kv_len], f32::NEG_INFINITY, dtype);
+    let kept = mlxcel_core::zeros(&[b, 1, l, k], dtype);
+    let selected = mlxcel_core::put_along_axis(&dropped, indices, &kept, -1);
     let neg_inf = mlxcel_core::full_f32(&[1], f32::NEG_INFINITY, dtype);
-    mlxcel_core::where_cond(&keep, &zero, &neg_inf)
+    mlxcel_core::where_cond(&causal_keep(start, l, kv_len), &selected, &neg_inf)
+}
+
+/// One step's key selection, shared by both sub-blocks of a layer: the
+/// indices `[B, 1, L, index_topk]` and, for a multi-token step, the additive
+/// mask built from them once (both sub-blocks attend the same window length
+/// in the same dtype).
+struct Selection {
+    indices: UniquePtr<MlxArray>,
+    mask: Option<UniquePtr<MlxArray>>,
 }
 
 /// One MLA sub-block: the shared LongCat projections and attention, this
@@ -612,8 +720,8 @@ impl SparseMla {
         x: &MlxArray,
         latent_cache: &mut KVCache,
         index_cache: &mut KVCache,
-        shared: Option<&MlxArray>,
-    ) -> (UniquePtr<MlxArray>, Option<UniquePtr<MlxArray>>) {
+        shared: Option<&Selection>,
+    ) -> (UniquePtr<MlxArray>, Option<Selection>) {
         let shape = mlxcel_core::array_shape(x);
         let (b, l) = (shape[0], shape[1]);
         let MlaProjections {
@@ -629,10 +737,24 @@ impl SparseMla {
         let q_pe = self.rope.apply(&q_pe, rope_dims, true, offset);
         let k_pe = self.rope.apply(&k_pe, rope_dims, true, offset);
 
-        let selected = match (&self.indexer, &qr) {
-            (Some(indexer), Some(qr)) => indexer.select(x, qr, index_cache),
-            _ => shared.map(mlxcel_core::copy),
+        let owned = match (&self.indexer, &qr) {
+            (Some(indexer), Some(qr)) => indexer.select(x, qr, index_cache).map(|indices| {
+                // The latent cache grows in step with the indexer cache, so
+                // the window after this step's write is `offset + l` long.
+                let mask = (l > 1).then(|| {
+                    let kv_len = offset + l;
+                    sparse_prefill_mask(
+                        &indices,
+                        kv_len - l,
+                        kv_len,
+                        mlxcel_core::array_dtype(&q_pe),
+                    )
+                });
+                Selection { indices, mask }
+            }),
+            _ => None,
         };
+        let selected = owned.as_ref().or(shared);
 
         let window = crate::models::mla_batched::store_latent_step(
             latent_cache,
@@ -643,7 +765,7 @@ impl SparseMla {
             true,
         );
         let absorbed = self.inner.absorbed(l, latent_cache);
-        let output = match &selected {
+        let output = match selected {
             None => {
                 debug_assert!(l == 1 || window.seq_len() == latent_cache.live_len());
                 self.inner
@@ -652,24 +774,24 @@ impl SparseMla {
             // One query attends only its selected rows, gathered from the
             // window in the layout the cache stores (fp16 or the packed
             // quantized latent); every gathered row is causally valid.
-            Some(indices) if l == 1 => {
+            Some(Selection {
+                indices,
+                mask: None,
+            }) => {
+                debug_assert_eq!(l, 1);
                 let gathered: LatentWindow = window.gather_rows(indices);
                 self.inner
                     .attend_window(gathered, &q_nope, &q_pe, true, None, b, l)
             }
-            Some(indices) => {
-                let kv_len = window.seq_len();
-                let mask = sparse_prefill_mask(
-                    indices,
-                    kv_len - l,
-                    kv_len,
-                    mlxcel_core::array_dtype(&q_pe),
-                );
+            Some(Selection {
+                mask: Some(mask), ..
+            }) => {
+                debug_assert_eq!(mlxcel_core::array_shape(mask)[3], window.seq_len());
                 self.inner
-                    .attend_window(window, &q_nope, &q_pe, absorbed, Some(&mask), b, l)
+                    .attend_window(window, &q_nope, &q_pe, absorbed, Some(mask), b, l)
             }
         };
-        (output, selected)
+        (output, owned)
     }
 }
 
@@ -695,11 +817,11 @@ impl SparseDecoderLayer {
         let [latent0, latent1] = latent;
         let mut hidden = mlxcel_core::copy(x);
         let mut shortcut = None;
-        let mut selection: Option<UniquePtr<MlxArray>> = None;
+        let mut selection: Option<Selection> = None;
         for (i, latent_cache) in [latent0, latent1].into_iter().enumerate() {
             let normed = self.input_layernorm[i].forward(&hidden);
             let (attn_out, used) =
-                self.self_attn[i].forward(&normed, latent_cache, index, selection.as_deref());
+                self.self_attn[i].forward(&normed, latent_cache, index, selection.as_ref());
             if i == 0 {
                 selection = used;
             }
@@ -859,6 +981,14 @@ impl SparseNgramEmbedding {
             )?;
             embedders.push(embedding);
         }
+        let hidden = args.hidden_size as i64;
+        check_linear_shape(
+            weights,
+            &format!("{prefix}.post_proj"),
+            hidden,
+            (num_embedders as i64) * (emb_dim as i64),
+            bits,
+        )?;
         let post_proj =
             UnifiedLinear::from_weights(weights, &format!("{prefix}.post_proj"), gs, bits)?;
         Ok(Self {
@@ -1228,6 +1358,19 @@ pub fn sanitize_weights(
                 "longcat_flash_sparse: model.oe_embed_proj*.{part} indices are not 0..{}",
                 parts.len()
             ));
+        }
+        // Concatenation aborts inside MLX on mismatched parts, so a malformed
+        // checkpoint is refused here instead.
+        let rows = mlxcel_core::array_shape(&parts[0].1);
+        for (index, part_array) in &parts {
+            let shape = mlxcel_core::array_shape(part_array);
+            if shape.len() != 2 || rows.len() != 2 || shape[0] != rows[0] {
+                return Err(format!(
+                    "longcat_flash_sparse: model.oe_embed_proj{index}.{part} is {shape:?}; every \
+                     per-embedder projection must be 2-D with {:?} rows",
+                    rows.first()
+                ));
+            }
         }
         let refs: Vec<&MlxArray> = parts.iter().map(|(_, a)| &**a).collect();
         // Every per-embedder projection maps its lookup to `hidden`, so the

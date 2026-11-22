@@ -429,14 +429,6 @@ pub fn deepseek_v2_caches_latent(mode: KVCacheMode) -> bool {
     deepseek_v2_latent_layout(mlxcel_core::mla::absorbed_enabled(), mode)
 }
 
-/// Classify a model's config into KV layer groups and an architecture kind.
-///
-/// `v2_latent` says whether DeepSeek V2 caches the latent in this run
-/// ([`deepseek_v2_caches_latent`]) and `v2_latent_bits` the affine bit width
-/// the mode stores a latent at, if any (`mla::latent_cache_bits`).
-/// `v2_latent` is read by V2 only; the bit width is also read by the families
-/// that store their latent through the quantizing view
-/// (`mla::stores_quantized_latent_pair`), whose int8 cache is the affine latent.
 /// Elements per token of LongCat-Flash-Lite-Sparse's indexer-key cache: the
 /// key plus the one-column placeholder value, or `None` for any other family
 /// and for its dense `attention_method: MLA` form.
@@ -455,6 +447,14 @@ fn longcat_sparse_index_elems(text: &Value, model_type: &str) -> Option<u64> {
     })
 }
 
+/// Classify a model's config into KV layer groups and an architecture kind.
+///
+/// `v2_latent` says whether DeepSeek V2 caches the latent in this run
+/// ([`deepseek_v2_caches_latent`]) and `v2_latent_bits` the affine bit width
+/// the mode stores a latent at, if any (`mla::latent_cache_bits`).
+/// `v2_latent` is read by V2 only; the bit width is also read by the families
+/// that store their latent through the quantizing view
+/// (`mla::stores_quantized_latent_pair`), whose int8 cache is the affine latent.
 fn classify(
     text: &Value,
     model_type: &str,
