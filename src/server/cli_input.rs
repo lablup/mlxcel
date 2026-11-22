@@ -338,6 +338,12 @@ pub struct ServerStartupInput {
     pub video_max_frames: usize,
     /// Sampling rate for the no-native-video-path fallback (`--video-fps`).
     pub video_fps: f64,
+    /// Exact frame count replacing fps sampling (`--video-num-frames`, issue
+    /// #2399). `None` keeps fps sampling.
+    pub video_num_frames: Option<usize>,
+    /// Sampling floor applied before the frame cap (`--video-min-frames`, issue
+    /// #2399). `None` keeps the built-in floor.
+    pub video_min_frames: Option<usize>,
     pub max_image_payload_size: usize,
     pub max_images_per_request: usize,
     pub max_image_width: u32,
@@ -1293,6 +1299,8 @@ impl ServerStartupInput {
             vision_cache_size: self.vision_cache_size,
             video_max_frames: self.video_max_frames,
             video_fps: self.video_fps,
+            video_num_frames: self.video_num_frames,
+            video_min_frames: self.video_min_frames,
             max_image_payload_size: self.max_image_payload_size,
             max_images_per_request: self.max_images_per_request,
             max_image_width: self.max_image_width,

@@ -1141,6 +1141,17 @@ mod ffi {
         /// Any along axis
         fn any_axis(a: &MlxArray, axis: i32, keepdims: bool) -> UniquePtr<MlxArray>;
 
+        /// Test-only. One reduction over several axes at once, in MLX's native
+        /// dtype: `op` 0 sum, 1 prod, 2 any, 3 all. The per-axis functions
+        /// take one axis, which never reaches a backend's multi-axis row
+        /// reduction (`reduce_output_dtype_tests.rs`). Errors on another `op`.
+        fn reduce_axes_probe_for_test(
+            a: &MlxArray,
+            op: i32,
+            axes: &[i32],
+            keepdims: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Greater than or equal comparison
         fn greater_equal(a: &MlxArray, b: &MlxArray) -> UniquePtr<MlxArray>;
 
@@ -4714,6 +4725,12 @@ mod compiled_dtype_cast_tests;
 #[cfg(test)]
 #[path = "conv_no_plan_tests.rs"]
 mod conv_no_plan_tests;
+
+// Reductions whose output dtype differs from the input's (a mask sum, `any`
+// and `all` over a non-bool input) return the same values as on the CPU.
+#[cfg(test)]
+#[path = "reduce_output_dtype_tests.rs"]
+mod reduce_output_dtype_tests;
 
 // CPU quantized matmul accumulates in f32 for bf16 and f16 activations (issue
 // #2248): affine transposed and plain, 3/4/6/8-bit, and MXFP4, each against a

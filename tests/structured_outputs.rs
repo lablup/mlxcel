@@ -401,6 +401,8 @@ fn end_to_end_constrained_chat_completion_emits_schema_conforming_json() {
         structured: Some(constraint),
         grammar: None,
         image_soft_tokens: None,
+        video_num_frames: None,
+        video_min_frames: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,

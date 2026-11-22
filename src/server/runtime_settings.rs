@@ -135,6 +135,8 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "vision_cache_size",
     "video_max_frames",
     "video_fps",
+    "video_num_frames",
+    "video_min_frames",
     "lang_bias_config",
     "reasoning_budget",
     "chat_template_kwargs",
@@ -508,6 +510,8 @@ fn read_only_reason(field: &str) -> &'static str {
         | "vision_cache_size"
         | "video_max_frames"
         | "video_fps"
+        | "video_num_frames"
+        | "video_min_frames"
         | "prompt_cache"
         | "kv_cache_mode"
         | "batch_kv_quant"
@@ -659,6 +663,8 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
         "vision_cache_size" => json!(config.vision_cache_size),
         "video_max_frames" => json!(config.video_max_frames),
         "video_fps" => json!(config.video_fps),
+        "video_num_frames" => json!(config.video_num_frames),
+        "video_min_frames" => json!(config.video_min_frames),
         "prompt_cache" => values::prompt_cache(&config.prompt_cache),
         "kv_cache_mode" => json!(config.kv_cache_mode.to_string()),
         "batch_kv_quant" => values::batch_kv_quant(&config.batch_kv_quant),
@@ -747,7 +753,9 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "prefill_grant_interval"
         | "explicit_max_kv_size"
         | "max_batch_prefill_tokens"
-        | "max_kv_size" => KnobKind::IntOrNull,
+        | "max_kv_size"
+        | "video_num_frames"
+        | "video_min_frames" => KnobKind::IntOrNull,
         "video_fps"
         | "default_typical_p"
         | "default_top_n_sigma"

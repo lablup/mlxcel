@@ -4273,6 +4273,18 @@
       "test_id": "settings-startup-video-fps"
     },
     {
+      "key": "settings.startup.video_num_frames",
+      "en": "Video target frame count",
+      "ko": "비디오 목표 프레임 수",
+      "test_id": "settings-startup-video-num-frames"
+    },
+    {
+      "key": "settings.startup.video_min_frames",
+      "en": "Video minimum frames",
+      "ko": "비디오 최소 프레임 수",
+      "test_id": "settings-startup-video-min-frames"
+    },
+    {
       "key": "settings.startup.prompt_cache",
       "en": "Prompt cache",
       "ko": "프롬프트 캐시",

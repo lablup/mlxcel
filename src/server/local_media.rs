@@ -62,6 +62,10 @@ pub struct LocalMedia<'a> {
     pub videos: &'a [PathBuf],
     /// Sampling rate for the videos, in frames per second.
     pub fps: f64,
+    /// `--video-num-frames`: exact frame count replacing `fps` sampling.
+    pub video_num_frames: Option<usize>,
+    /// `--video-min-frames`: sampling floor applied before the max-frames cap.
+    pub video_min_frames: Option<usize>,
     /// The Gemma 4 image soft-token budget, already validated.
     pub image_soft_tokens: Option<usize>,
     /// `--no-chat-template`: the prompt is raw text with no message parts.
@@ -198,6 +202,10 @@ pub fn prepare_local_vlm_embeddings(
         &videos,
         None,
         media.image_soft_tokens,
+        crate::multimodal::video::VideoFrameKnobs {
+            num_frames: media.video_num_frames,
+            min_frames: media.video_min_frames,
+        },
         &cancelled,
         &observability,
     )

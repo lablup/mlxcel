@@ -311,6 +311,82 @@ impl Default for FrameSamplingPolicy {
     }
 }
 
+/// Frame-count knobs shared by every native-video decode path (issue #2399).
+///
+/// `--video-num-frames` replaces `--video-fps` sampling with an exact frame
+/// count; `--video-min-frames` raises the floor the sampler starts from. One
+/// `Copy` bundle keeps every CLI and worker helper that forwards the knobs from
+/// growing two `Option<usize>` parameters each, and centralises the
+/// [`FrameSamplingPolicy`] they imply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[must_use]
+pub struct VideoFrameKnobs {
+    /// Exact frame count replacing fps sampling (`--video-num-frames`).
+    pub num_frames: Option<usize>,
+    /// Sampling floor applied before the max-frames cap (`--video-min-frames`).
+    pub min_frames: Option<usize>,
+}
+
+impl VideoFrameKnobs {
+    /// The sampling policy these knobs imply: the requested floor, everything
+    /// else at the historical Gemma/Kimi default.
+    pub fn sampling_policy(self) -> FrameSamplingPolicy {
+        self.apply_to(FrameSamplingPolicy::default())
+    }
+
+    /// Apply these knobs to a checkpoint-provided policy, keeping that
+    /// checkpoint's own bounds and factor.
+    ///
+    /// `--video-min-frames` only ever raises the floor: a lower value than the
+    /// checkpoint's own minimum would let a checkpoint that requires more
+    /// frames receive fewer, so the engine-side minimum wins.
+    pub fn apply_to(self, policy: FrameSamplingPolicy) -> FrameSamplingPolicy {
+        match self.min_frames {
+            Some(min_frames) => FrameSamplingPolicy {
+                min_frames: min_frames.max(policy.min_frames),
+                ..policy
+            },
+            None => policy,
+        }
+    }
+
+    /// Clamp [`Self::num_frames`] to a native-video processor's own frame cap.
+    ///
+    /// A processor that takes no target count (the Gemma 4 VLM's
+    /// `process_videos`, whose cap is `DEFAULT_VIDEO_NUM_FRAMES` = 32 for the
+    /// shipped checkpoint) resamples whatever it is handed down to its own
+    /// `video_num_frames`. A larger `--video-num-frames` therefore cannot be
+    /// honored on that arm: decoding the extra frames only to drop them is
+    /// ffmpeg time and peak memory spent on frames nothing ever encodes.
+    ///
+    /// The clamp lives here rather than at the call site so the resulting
+    /// frame count is assertable without a checkpoint, a GPU or a decoder
+    /// (issue #2399). A request at or below `cap` is returned unchanged, so a
+    /// caller can detect a clamp by comparing [`Self::num_frames`].
+    pub fn clamped_to_processor_cap(self, cap: usize) -> Self {
+        Self {
+            num_frames: self.num_frames.map(|requested| requested.min(cap)),
+            ..self
+        }
+    }
+
+    /// Decode `source` with these knobs, resolving the resource caps from the
+    /// environment exactly as [`load_video_source`] does.
+    pub fn load_source(
+        self,
+        source: &VideoSource,
+        target_fps: Option<f64>,
+    ) -> Result<Vec<DynamicImage>, VideoError> {
+        load_video_source_with_policy(
+            source,
+            target_fps,
+            self.num_frames,
+            self.sampling_policy(),
+            &VideoLimits::from_env(),
+        )
+    }
+}
+
 /// Default cap on source-video pixel count (width × height). Env var
 /// `MLXCEL_VIDEO_MAX_PIXELS` overrides. Default = 4096 × 4096 = 16 777 216.
 const DEFAULT_MAX_PIXELS: u64 = 4096 * 4096;
@@ -1863,6 +1939,12 @@ pub fn video_frames_lead_text(frames: usize) -> String {
 /// Returns the kept frames together with the count `target_fps` alone would
 /// have sampled, so the caller can still report "kept of sampled".
 ///
+/// `target_nframes` (#2399) replaces fps sampling with an exact count when set,
+/// and `min_frames` raises the sampling floor; both reach
+/// [`smart_nframes_with_policy`] before anything is decoded, so an
+/// out-of-range `target_nframes` fails here with [`VideoError::Extract`]
+/// against the canonical path.
+///
 /// # Errors
 /// The failures [`load_video_source`] returns: ffmpeg missing, an unprobeable
 /// container, a resource cap exceeded, or no frame decoded.
@@ -1870,6 +1952,8 @@ pub fn load_video_source_frames_fallback(
     source: &VideoSource,
     target_fps: f64,
     max_frames: usize,
+    target_nframes: Option<usize>,
+    min_frames: Option<usize>,
 ) -> Result<(Vec<DynamicImage>, usize), VideoError> {
     if !ffmpeg_available() {
         return Err(VideoError::FfmpegMissing);
@@ -1877,15 +1961,27 @@ pub fn load_video_source_frames_fallback(
     let limits = VideoLimits::from_env();
     let canonical = source.canonical_path().to_path_buf();
     let meta = probe_video(source, &limits)?;
-    let sampled = smart_nframes(meta.total_frames, meta.fps, Some(target_fps), None).map_err(
-        |err| match err {
-            VideoError::Extract { message, .. } => VideoError::Extract {
-                path: canonical.clone(),
-                message,
-            },
-            other => other,
+    // The same knob bundle the native-video families use, so both fronts read
+    // `--video-num-frames`/`--video-min-frames` through one policy resolver.
+    let policy = VideoFrameKnobs {
+        num_frames: target_nframes,
+        min_frames,
+    }
+    .sampling_policy();
+    let sampled = smart_nframes_with_policy(
+        meta.total_frames,
+        meta.fps,
+        Some(target_fps),
+        target_nframes,
+        policy,
+    )
+    .map_err(|err| match err {
+        VideoError::Extract { message, .. } => VideoError::Extract {
+            path: canonical.clone(),
+            message,
         },
-    )?;
+        other => other,
+    })?;
     let decoded = sampled.min(max_frames.max(MIN_FALLBACK_MAX_FRAMES));
     let indices = uniform_indices(meta.total_frames, decoded);
     let frames = extract_frames_single_pass(source, &indices, meta.fps, &limits)?;

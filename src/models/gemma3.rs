@@ -131,6 +131,23 @@ impl ModelArgs {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
 
+    /// Give the config the layout of an NVFP4 export's repacked linears:
+    /// 4-bit codes in the 16-element blocks the transcode keeps.
+    ///
+    /// An export from NVIDIA ModelOpt or compressed-tensors has no MLX
+    /// `quantization` block, and without one [`Self::group_size`] is the
+    /// affine default of 64, which every repacked linear then has to be
+    /// reconciled away from. A config that already has the block is left
+    /// alone.
+    ///
+    /// Used by: `load_gemma3_vlm` (`src/loading/vlm_gemma.rs`)
+    pub(crate) fn declare_modelopt_nvfp4_layout(&mut self) {
+        self.quantization.get_or_insert(Quantization {
+            group_size: crate::models::sanitize::NVFP4_SOURCE_GROUP_SIZE as i32,
+            bits: 4,
+        });
+    }
+
     /// The RoPE position scale the global-attention layers rotate at.
     ///
     /// Gemma 3 applies `rope_scaling` to the global layers only. mlx-lm reaches

@@ -349,6 +349,20 @@ pub struct ServerGenerateOptions {
     /// on the supported ladder. Ignored by every non-Gemma-4 model.
     pub image_soft_tokens: Option<usize>,
 
+    /// Server-wide `--video-num-frames` (issue #2399), copied from
+    /// [`ServerConfig::video_num_frames`].
+    ///
+    /// Not a per-request override: this is the operator's startup knob carried
+    /// in the request envelope so the admission-time media preparation can
+    /// hand it to the video decoders without reaching back for the live
+    /// config. `None` keeps `--video-fps` sampling.
+    pub video_num_frames: Option<usize>,
+
+    /// Server-wide `--video-min-frames` (issue #2399), copied from
+    /// [`ServerConfig::video_min_frames`]. Same carriage as
+    /// [`Self::video_num_frames`]; `None` keeps the built-in sampling floor.
+    pub video_min_frames: Option<usize>,
+
     /// Prompt token ids produced by a native (non-Jinja) chat renderer,
     /// bypassing tokenization of the prompt string (#1338).
     ///
@@ -991,6 +1005,18 @@ pub struct ServerConfig {
     /// Read only on the fallback path, for the same reason as
     /// [`Self::video_max_frames`].
     pub video_fps: f64,
+    /// Exact frame count that replaces fps sampling (issue #2399). `None` keeps
+    /// the `--video-fps` sampling behavior.
+    ///
+    /// Unlike [`Self::video_max_frames`], this is read on both fronts: the
+    /// frame fallback passes it to the sampling helper, and the native video
+    /// families pass it as their processor's `target_nframes`.
+    pub video_num_frames: Option<usize>,
+    /// Sampling floor applied before the frame cap (issue #2399). `None` keeps
+    /// the built-in floor.
+    ///
+    /// Read on both fronts, for the same reason as [`Self::video_num_frames`].
+    pub video_min_frames: Option<usize>,
     /// Axis B (B8): server-wide language bias configuration, if
     /// resolved at startup from CLI flags or the `LLAMA_ARG_LANG_BIAS` env
     /// var. Every batch sequence inherits this same policy (Phase 1 single
@@ -1291,6 +1317,8 @@ impl Default for ServerConfig {
             vision_cache_size: crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
             video_max_frames: crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
             video_fps: crate::multimodal::video::DEFAULT_FPS,
+            video_num_frames: None,
+            video_min_frames: None,
             lang_bias_config: None,
             reasoning_budget: None,
             chat_template_kwargs: None,

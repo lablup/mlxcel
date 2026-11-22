@@ -91,6 +91,29 @@ impl WhisperDims {
     }
 }
 
+/// One decoded 30 s window of a Whisper transcription.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhisperSegment {
+    /// Mel-frame offset the window started at. Convert to seconds with
+    /// `seek * WHISPER_HOP_LENGTH / WHISPER_SAMPLE_RATE`.
+    pub seek: usize,
+    /// Decoded text for this window, already trimmed.
+    pub text: String,
+}
+
+/// Result of [`WhisperModel::transcribe`]: the concatenated transcript plus the
+/// per-window segments that produced it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhisperTranscript {
+    /// Concatenated text of every window.
+    pub text: String,
+    /// Language tag, either supplied by the caller or detected in window one.
+    pub language: Option<String>,
+    /// Per-window segments in decode order. Empty when the input carried no
+    /// mel frames.
+    pub segments: Vec<WhisperSegment>,
+}
+
 /// Loaded Whisper ASR model: audio encoder, text decoder, and resolved
 /// tokenizer. Holds MLX weight handles, so the owning provider serializes
 /// access and asserts thread-safety (see `crate::server::whisper_stt`).
@@ -154,7 +177,7 @@ impl WhisperModel {
         audio_16k: &[f32],
         language: Option<&str>,
         translate: bool,
-    ) -> Result<(String, Option<String>)> {
+    ) -> Result<WhisperTranscript> {
         let n_mels = self.dims.n_mels as usize;
         // Pad the waveform to a whole number of 30 s windows before the log-mel
         // transform so the silent tail is normalized like trained silence rather
@@ -162,11 +185,16 @@ impl WhisperModel {
         let audio_padded = pad_audio_to_window_multiple(audio_16k);
         let (mel, frames) = whisper_mel::log_mel_spectrogram(&audio_padded, n_mels);
         if frames == 0 {
-            return Ok((String::new(), language.map(String::from)));
+            return Ok(WhisperTranscript {
+                text: String::new(),
+                language: language.map(String::from),
+                segments: Vec::new(),
+            });
         }
 
         let mut text = String::new();
         let mut used_language: Option<String> = language.map(String::from);
+        let mut segments: Vec<WhisperSegment> = Vec::new();
         let mut seek = 0usize;
         while seek < frames {
             let window = padded_window(&mel, frames, n_mels, seek);
@@ -189,11 +217,20 @@ impl WhisperModel {
             if used_language.is_none() {
                 used_language = detected;
             }
-            text.push_str(&self.tokenizer.decode_text(&tokens));
+            let segment_text = self.tokenizer.decode_text(&tokens);
+            text.push_str(&segment_text);
+            segments.push(WhisperSegment {
+                seek,
+                text: segment_text.trim().to_string(),
+            });
             seek += whisper_mel::WHISPER_N_FRAMES;
         }
 
-        Ok((text, used_language))
+        Ok(WhisperTranscript {
+            text,
+            language: used_language,
+            segments,
+        })
     }
 }
 
@@ -399,5 +436,47 @@ mod tests {
             global_min < -1e-2,
             "log floor must differ from the 0.0 the buggy mel padding produced, got {global_min}"
         );
+    }
+
+    #[test]
+    fn window_offsets_advance_by_one_window_and_cover_the_clip() {
+        // A 65 s clip pads to three whole windows. The scheduler that emits one
+        // segment per window must step `seek` by exactly WHISPER_N_FRAMES so the
+        // reported segment offsets stay contiguous and cover the real audio,
+        // rather than repeating or skipping a window.
+        let samples = (65.0 * whisper_mel::WHISPER_SAMPLE_RATE as f32) as usize;
+        let tone = vec![0.1f32; samples];
+        let padded = pad_audio_to_window_multiple(&tone);
+        assert_eq!(
+            padded.len(),
+            3 * whisper_mel::WHISPER_N_SAMPLES,
+            "65 s must pad up to three 30 s windows"
+        );
+
+        let mut seeks = Vec::new();
+        let mut seek = 0usize;
+        let frames = whisper_mel::WHISPER_N_FRAMES * 3;
+        while seek < frames {
+            seeks.push(seek);
+            seek += whisper_mel::WHISPER_N_FRAMES;
+        }
+        assert_eq!(
+            seeks,
+            vec![
+                0,
+                whisper_mel::WHISPER_N_FRAMES,
+                2 * whisper_mel::WHISPER_N_FRAMES
+            ]
+        );
+
+        // Each window offset converts to the expected wall-clock start.
+        let starts: Vec<f32> = seeks
+            .iter()
+            .map(|&f| {
+                (f * whisper_mel::WHISPER_HOP_LENGTH) as f32
+                    / whisper_mel::WHISPER_SAMPLE_RATE as f32
+            })
+            .collect();
+        assert_eq!(starts, vec![0.0, 30.0, 60.0]);
     }
 }

@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 
+use super::detection::model_type_has_native_video;
 use super::{ModelType, get_model_type};
 
 fn checkpoint(name: &str, with_vision_config: bool) -> PathBuf {
@@ -135,5 +136,31 @@ fn audio_weights_do_not_hide_or_fabricate_the_vlm_shell() {
     )
     .unwrap();
     assert_eq!(get_model_type(&path).unwrap(), ModelType::Inkling);
+    fs::remove_dir_all(path).unwrap();
+}
+
+/// Inkling pairs adjacent timestamped frames, so a frame-count knob cannot
+/// apply to it: `--video-num-frames` / `--video-min-frames` only ever reach the
+/// video-to-images fallback and the families whose processor takes a
+/// `target_nframes`. Inkling is detected as natively video-capable, so the
+/// fallback declines the clip and the knob never reaches a sampler on this
+/// path (issue #2399). Pin that dispatch fact instead of a knob parameter that
+/// Inkling's embedding functions do not take.
+#[test]
+fn inkling_video_is_native_so_the_frame_count_knobs_never_reach_it() {
+    let path = checkpoint("native_video", true);
+    fs::write(
+        path.join("model.safetensors.index.json"),
+        r#"{"weight_map":{"model.visual.final_norm.weight":"model.safetensors"}}"#,
+    )
+    .unwrap();
+    let detected = get_model_type(&path).unwrap();
+    assert_eq!(detected, ModelType::InklingVLM);
+    assert!(
+        model_type_has_native_video(detected),
+        "Inkling samples video through its own processor, so it must be \
+         native-video: the frames fallback has to decline the clip and \
+         `--video-num-frames` / `--video-min-frames` must never be applied to it"
+    );
     fs::remove_dir_all(path).unwrap();
 }

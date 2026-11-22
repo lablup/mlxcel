@@ -188,6 +188,8 @@ fn sample_args() -> crate::ServeArgs {
         vision_cache_size: 20,
         video_max_frames: mlxcel::video::DEFAULT_FALLBACK_MAX_FRAMES,
         video_fps: mlxcel::video::DEFAULT_FPS,
+        video_num_frames: None,
+        video_min_frames: None,
         max_image_payload_size: mlxcel::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
         max_images_per_request: mlxcel::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
         max_image_width: mlxcel::server::DEFAULT_MAX_IMAGE_WIDTH,

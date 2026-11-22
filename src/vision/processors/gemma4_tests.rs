@@ -57,6 +57,13 @@ fn process_videos_emits_one_features_block_per_video() {
 
 #[test]
 fn process_videos_clamps_long_inputs_to_video_num_frames() {
+    // The processor's own `video_num_frames` is the last word on the emitted
+    // frame count, whatever count the decoder was asked for. This is one half
+    // of the `--video-num-frames` contract; the other half is that a request
+    // above this cap is clamped before decoding instead of being silently
+    // truncated here, which
+    // `video_num_frames_knob_is_clamped_to_the_processor_cap_before_sampling`
+    // asserts (issue #2399).
     let mut processor = Gemma4Processor::new(16, 280, 3);
     processor.set_video_config(70, 4).unwrap();
     let videos = vec![frames(20, 224, 224)];
@@ -65,9 +72,57 @@ fn process_videos_clamps_long_inputs_to_video_num_frames() {
     assert_eq!(
         features[0].num_frames(),
         4,
-        "downsampled to video_num_frames"
+        "a processor cap of 4 must emit 4 frames from a 20-frame input"
     );
     assert_eq!(features[0].frame_timestamps.len(), 4);
+}
+
+#[test]
+fn video_num_frames_knob_is_clamped_to_the_processor_cap_before_sampling() {
+    // `--video-num-frames 64` cannot be honored by a processor whose own cap
+    // is 32: `process_videos` takes no target count and resamples down to
+    // `video_num_frames` regardless. The clamp has to happen before decoding
+    // (decoding frames the sampler drops is ffmpeg time and peak memory spent
+    // on nothing), and the emitted count is the clamped one, not the
+    // requested one (issue #2399).
+    use crate::multimodal::video::VideoFrameKnobs;
+
+    let mut processor = Gemma4Processor::new(16, 280, 3);
+    let cap = 32;
+    processor.set_video_config(70, cap).unwrap();
+    assert_eq!(
+        processor.video_num_frames, cap,
+        "the shipped checkpoint's clip cap"
+    );
+
+    let requested = VideoFrameKnobs {
+        num_frames: Some(64),
+        min_frames: None,
+    };
+    let effective = requested.clamped_to_processor_cap(processor.video_num_frames);
+    assert_eq!(effective.num_frames, Some(cap), "clamped before decoding");
+
+    // Feed exactly what the (clamped) decode would have handed the
+    // processor, and assert the emitted count is the clamp's -- the number
+    // the knob degrades to, not the number the caller asked for.
+    let decoded = frames(effective.num_frames.unwrap(), 224, 224);
+    let features = processor.process_videos(&[decoded], None);
+    assert_eq!(
+        features[0].num_frames(),
+        cap,
+        "a request for 64 frames against a {cap}-frame processor cap must emit {cap}"
+    );
+
+    // Below the cap the request is honored exactly, so the clamp only ever
+    // bites above it.
+    let within_cap = VideoFrameKnobs {
+        num_frames: Some(16),
+        min_frames: None,
+    }
+    .clamped_to_processor_cap(processor.video_num_frames);
+    let decoded = frames(within_cap.num_frames.unwrap(), 224, 224);
+    let features = processor.process_videos(&[decoded], None);
+    assert_eq!(features[0].num_frames(), 16);
 }
 
 #[test]
