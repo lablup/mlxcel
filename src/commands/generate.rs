@@ -2611,6 +2611,28 @@ fn run_offline_mtp(
         ));
     }
 
+    // Inkling exactness gate (#1549): the same single call the server's
+    // `mtp_capable_target` makes. No static kernel prerequisite; the measured
+    // block-vs-chain probe is the whole condition, and its `qmv_wide` retry
+    // keeps MTP engaged where dropping that kernel restores exactness.
+    let inkling_text = match model {
+        LoadedModel::Inkling(inkling) => Some(inkling),
+        LoadedModel::InklingVLM(vlm) => Some(&vlm.text),
+        _ => None,
+    };
+    if let Some(inkling) = inkling_text
+        && !inkling.mtp_exactness_allows(block_size)
+    {
+        return Err(anyhow!(
+            "Inkling MTP speculative decoding declined: at --draft-block-size \
+             {block_size} this GPU's multi-token verify block is not byte-identical \
+             to the single-token decode chain, so temperature-0 output would \
+             silently differ from `mlxcel generate` without --draft-model. Try a \
+             smaller --draft-block-size, or set MLXCEL_MTP_ALLOW_INEXACT=1 to \
+             engage anyway and forfeit the byte-identity contract."
+        ));
+    }
+
     // Resolve the concrete target reference the drafter binds to, and reject any
     // non-MTP-capable target. Mirrors the server burst dispatch
     // (`run_mtp_burst`): bind to the same concrete Gemma 4 model the adapter

@@ -17,7 +17,7 @@ use std::io::Write;
 use serde_json::json;
 
 use super::config::InklingMtpConfig;
-use super::model::{InklingMtpDraftModel, has_inkling_mtp_tensors};
+use super::model::{InklingMtpDraftModel, has_inkling_mtp_tensors, load_drafter_weights};
 use super::sanitize::sanitize_weights;
 use crate::dtype;
 use crate::inkling_layer::InklingLayerCache;
@@ -341,4 +341,30 @@ fn flat_snapshot_restores_kv_and_all_four_convolution_states_exactly() {
     for (actual, expected) in restored.conv.iter().zip(expected_conv) {
         assert_same(actual.as_deref().unwrap(), &expected);
     }
+}
+
+/// The Inkling drafter keeps its checkpoint dtype instead of taking the
+/// shared drafter bf16 -> f16 load cast, so it stays dtype-uniform with an
+/// Inkling target that keeps bf16 (issue #1549).
+#[test]
+fn drafter_load_keeps_bf16_checkpoint_dtype() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "model.mtp.layers.0.embed_norm.weight";
+    let mut header =
+        format!("{{\"{name}\":{{\"dtype\":\"BF16\",\"shape\":[2],\"data_offsets\":[0,4]}}}}");
+    while !header.len().is_multiple_of(8) {
+        header.push(' ');
+    }
+    let mut file = std::fs::File::create(dir.path().join("model.safetensors")).unwrap();
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(header.as_bytes()).unwrap();
+    // bf16 1.0 and 2.0
+    file.write_all(&[0x80, 0x3f, 0x00, 0x40]).unwrap();
+    drop(file);
+    let weights = load_drafter_weights(dir.path()).unwrap();
+    let loaded = weights
+        .get("blocks.0.embed_norm.weight")
+        .expect("sanitized embed_norm");
+    assert_eq!(crate::array_dtype(loaded), dtype::BFLOAT16);
 }
