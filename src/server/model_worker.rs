@@ -1699,6 +1699,11 @@ fn is_image_limit_error(err: &ImageError) -> bool {
 /// (`None` = use the checkpoint's configured budget). It is already validated
 /// against the supported ladder at the request boundary. Every non-Gemma-4
 /// family ignores it.
+///
+/// `video_knobs` carries the server-wide `--video-num-frames` /
+/// `--video-min-frames` knobs (issue #2399) into the native-video decode paths.
+/// Only the families that decode frames natively consume them; Inkling keeps
+/// its own fixed adjacent-pair sampling.
 pub(crate) fn prepare_request_vlm_embeddings(
     model: &LoadedModel,
     tokenizer: &MlxcelTokenizer,
@@ -1709,6 +1714,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
     videos: &[crate::server::media::ResolvedVideo],
     vision_caches: Option<&ModelVisionCaches>,
     image_soft_tokens: Option<usize>,
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
     cancelled: &AtomicBool,
     observability: &BatchObservability,
 ) -> Result<Option<InputEmbeddings>> {
@@ -1824,6 +1830,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
                 audio,
                 end_of_turn_token_id,
                 image_soft_tokens,
+                video_knobs,
             );
         }
         return prepare_request_video_embeddings(
@@ -1833,6 +1840,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
             images,
             videos,
             image_soft_tokens,
+            video_knobs,
         );
     }
 
@@ -3276,10 +3284,14 @@ fn prepare_request_video_embeddings(
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
     image_soft_tokens: Option<usize>,
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
 
     if let LoadedModel::InklingVLM(inkling) = model {
+        // Inkling samples adjacent timestamped pairs rather than independent
+        // frames, and caps a request at sixteen pairs. A frame-count knob
+        // would fight that pairing, so `video_knobs` deliberately stops here.
         let prompt_layout = crate::vlm_runtime::InklingVideoPromptLayout::Structured(
             crate::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)?,
         );
@@ -3303,18 +3315,26 @@ fn prepare_request_video_embeddings(
             images,
             videos,
             image_soft_tokens,
+            video_knobs,
         );
     }
 
     // Kimi-VL / Kimi-VL 2.5 (kimi_k25) MoonViT 3D video path (issue #551).
     if let LoadedModel::KimiVL(kimi) = model {
-        return prepare_kimi_vl_video_embeddings(kimi, prompt_tokens, images, videos);
+        return prepare_kimi_vl_video_embeddings(kimi, prompt_tokens, images, videos, video_knobs);
     }
 
     // Qwen-VL video path (issue #1166): shared image/video patchifier,
     // prompt-order placeholder expansion, and exact scatter cardinality.
     if let Some(qwen) = crate::vlm_runtime::qwen_video_runtime(model) {
-        return prepare_qwen_vl_video_embeddings(qwen, tokenizer, prompt_tokens, images, videos);
+        return prepare_qwen_vl_video_embeddings(
+            qwen,
+            tokenizer,
+            prompt_tokens,
+            images,
+            videos,
+            video_knobs,
+        );
     }
 
     let gemma4_vl = match model {
@@ -3351,12 +3371,32 @@ fn prepare_request_video_embeddings(
     // never re-opens the canonical path, so an attacker cannot win the
     // canonicalise → ffmpeg-open swap race even with write access to an
     // allowlist directory.
+    // `process_videos` takes no target count: it samples each clip down to the
+    // processor's own `video_num_frames` (32 for the shipped checkpoint). A
+    // `--video-num-frames` larger than that cap therefore cannot be honored on
+    // this arm, so clamp it before decoding instead of decoding frames the
+    // sampler is about to drop, and report the clamp rather than truncating
+    // silently (issue #2399).
+    let processor_frame_cap = gemma4_vl.processor.video_num_frames;
+    let clamped_knobs = video_knobs.clamped_to_processor_cap(processor_frame_cap);
+    if clamped_knobs.num_frames != video_knobs.num_frames {
+        tracing::warn!(
+            requested_frames = video_knobs.num_frames,
+            processor_frame_cap,
+            effective_frames = clamped_knobs.num_frames,
+            "--video-num-frames exceeds the Gemma 4 processor frame cap for this \
+             checkpoint; the request is clamped to processor_frame_cap frames per clip"
+        );
+    }
+    let effective_knobs = clamped_knobs;
+
     let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
     let mut fps_per_video: Vec<f64> = Vec::with_capacity(videos.len());
     for resolved in videos.iter() {
         let fps = resolved.fps.unwrap_or(video::DEFAULT_FPS);
-        let frames =
-            video::load_video_source(&resolved.source, Some(fps), None).map_err(|err| {
+        let frames = effective_knobs
+            .load_source(&resolved.source, Some(fps))
+            .map_err(|err| {
                 anyhow!(
                     "Failed to load video {:?}: {}",
                     resolved.source.canonical_path(),
@@ -3546,6 +3586,7 @@ fn prepare_kimi_vl_video_embeddings(
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
 
@@ -3563,8 +3604,9 @@ fn prepare_kimi_vl_video_embeddings(
     let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
     for resolved in videos.iter() {
         let fps = resolved.fps.unwrap_or(video::DEFAULT_FPS);
-        let frames =
-            video::load_video_source(&resolved.source, Some(fps), None).map_err(|err| {
+        let frames = video_knobs
+            .load_source(&resolved.source, Some(fps))
+            .map_err(|err| {
                 anyhow!(
                     "Failed to load video {:?}: {}",
                     resolved.source.canonical_path(),
@@ -3610,6 +3652,7 @@ fn prepare_qwen_vl_video_embeddings(
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
 
@@ -3621,7 +3664,7 @@ fn prepare_qwen_vl_video_embeddings(
     }
 
     let info = qwen.prompt_info();
-    let policy = info.processor.video_sampling_policy();
+    let policy = video_knobs.apply_to(info.processor.video_sampling_policy());
     let limits = video::VideoLimits::from_env();
     let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
     let mut sampled_timing: Vec<(Vec<usize>, f64)> = Vec::with_capacity(videos.len());
@@ -3630,7 +3673,7 @@ fn prepare_qwen_vl_video_embeddings(
         let sampled = video::load_video_source_sampled_with_policy(
             &resolved.source,
             Some(fps),
-            None,
+            video_knobs.num_frames,
             policy,
             &limits,
         )
@@ -3723,8 +3766,9 @@ fn prepare_gemma4_unified_video_embeddings(
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
     image_soft_tokens: Option<usize>,
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Option<InputEmbeddings>> {
-    let decoded_videos = gemma4_unified_server_decode_videos(videos)?;
+    let decoded_videos = gemma4_unified_server_decode_videos(videos, video_knobs)?;
     // Optional companion images (e.g. user passes both image_url and video_url).
     let processed_images =
         gemma4_unified_server_images(unified, prompt_tokens, images, image_soft_tokens)?;
@@ -3748,6 +3792,7 @@ fn prepare_gemma4_unified_video_embeddings(
 /// canonical path.
 fn gemma4_unified_server_decode_videos(
     videos: &[crate::server::media::ResolvedVideo],
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Vec<Vec<image::DynamicImage>>> {
     use crate::multimodal::video;
 
@@ -3761,8 +3806,9 @@ fn gemma4_unified_server_decode_videos(
     let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
     for resolved in videos.iter() {
         let fps = resolved.fps.unwrap_or(video::DEFAULT_FPS);
-        let frames =
-            video::load_video_source(&resolved.source, Some(fps), None).map_err(|err| {
+        let frames = video_knobs
+            .load_source(&resolved.source, Some(fps))
+            .map_err(|err| {
                 anyhow!(
                     "Failed to load video {:?}: {}",
                     resolved.source.canonical_path(),
@@ -3835,6 +3881,7 @@ fn prepare_gemma4_unified_video_and_audio_embeddings(
     audio_data: &[Vec<u8>],
     end_of_turn_token_id: Option<i32>,
     image_soft_tokens: Option<usize>,
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Option<InputEmbeddings>> {
     // Strict where the audio-only path (`prepare_gemma4_unified_audio_embeddings`)
     // is lenient: that one warns and drops the audio, this one refuses. The
@@ -3860,7 +3907,7 @@ fn prepare_gemma4_unified_video_and_audio_embeddings(
     // combined path from being the cheaper way to buy that work.
     let audio_input = gemma4_unified_server_audio_features(unified, audio_data)?;
 
-    let decoded_videos = gemma4_unified_server_decode_videos(videos)?;
+    let decoded_videos = gemma4_unified_server_decode_videos(videos, video_knobs)?;
     let processed_images =
         gemma4_unified_server_images(unified, prompt_tokens, images, image_soft_tokens)?;
     let video_frames = gemma4_unified_server_video_frames(unified, prompt_tokens, &decoded_videos)?;

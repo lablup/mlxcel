@@ -179,6 +179,8 @@ fn sample_input() -> ServerStartupInput {
         vision_cache_size: 20,
         video_max_frames: crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
         video_fps: crate::multimodal::video::DEFAULT_FPS,
+        video_num_frames: None,
+        video_min_frames: None,
         max_image_payload_size: crate::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
         max_images_per_request: crate::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
         max_image_width: crate::server::DEFAULT_MAX_IMAGE_WIDTH,
@@ -454,6 +456,27 @@ fn into_startup_config_propagates_image_limits() {
     assert_eq!(startup.max_image_width, 4096);
     assert_eq!(startup.max_image_height, 2048);
     assert_eq!(startup.max_image_decode_alloc_bytes, 64 * 1024 * 1024);
+}
+
+#[test]
+fn into_startup_config_propagates_video_frame_knobs() {
+    // Issue #2399: both knobs must survive the `ServerStartupInput` ->
+    // `ServerStartupConfig` hop, or the worker-side video decode helpers would
+    // only ever see the defaults.
+    let mut input = sample_input();
+    input.video_num_frames = Some(24);
+    input.video_min_frames = Some(12);
+
+    let startup = input.into_startup_config().expect("valid startup input");
+    assert_eq!(startup.video_num_frames, Some(24));
+    assert_eq!(startup.video_min_frames, Some(12));
+
+    // An unflagged front stays a no-op rather than resolving to a count.
+    let startup = sample_input()
+        .into_startup_config()
+        .expect("valid startup input");
+    assert_eq!(startup.video_num_frames, None);
+    assert_eq!(startup.video_min_frames, None);
 }
 
 #[test]

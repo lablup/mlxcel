@@ -1854,6 +1854,85 @@ fn serve_store_byte_budget_envs_parse_when_flags_are_absent() {
 }
 
 #[test]
+fn serve_video_frame_knobs_parse_from_flags_and_envs() {
+    // Issue #2399: `--video-num-frames` / `--video-min-frames` are read on the
+    // serve front, where the worker turns them into the native-video
+    // `target_nframes` and sampling floor.
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let defaults = parse_serve_args(&[]);
+    assert_eq!(defaults.video_num_frames, None);
+    assert_eq!(defaults.video_min_frames, None);
+
+    let args = parse_serve_args(&["--video-num-frames", "24", "--video-min-frames", "12"]);
+    assert_eq!(args.video_num_frames, Some(24));
+    assert_eq!(args.video_min_frames, Some(12));
+
+    {
+        let _env = ScopedEnv::set(&[
+            ("MLXCEL_VIDEO_NUM_FRAMES", "48"),
+            ("MLXCEL_VIDEO_MIN_FRAMES", "16"),
+        ]);
+        let args = parse_serve_args(&[]);
+        assert_eq!(args.video_num_frames, Some(48));
+        assert_eq!(args.video_min_frames, Some(16));
+    }
+
+    // A flag beats the env var, as on every other mlxcel knob.
+    {
+        let _env = ScopedEnv::set(&[
+            ("MLXCEL_VIDEO_NUM_FRAMES", "48"),
+            ("MLXCEL_VIDEO_MIN_FRAMES", "16"),
+        ]);
+        let args = parse_serve_args(&["--video-num-frames", "8"]);
+        assert_eq!(args.video_num_frames, Some(8));
+        assert_eq!(args.video_min_frames, Some(16));
+    }
+}
+
+#[test]
+fn generate_video_frame_knobs_parse_from_flags_and_envs() {
+    // The one-shot front carries the same knob on the CLI's ordered-image
+    // fallback (issue #2399); the fields live on the flattened
+    // `GenerationOptions` group.
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let knobs = |rest: &'static [&'static str]| {
+        let mut argv = vec!["mlxcel", "generate", "-m", "models/foo", "-p", "hi"];
+        argv.extend_from_slice(rest);
+        let argv: &'static [&'static str] = Vec::leak(argv);
+        let Commands::Generate(args) = parse_cli(argv).command else {
+            panic!("expected generate command");
+        };
+        (
+            args.generation.video_num_frames,
+            args.generation.video_min_frames,
+        )
+    };
+
+    assert_eq!(knobs(&[]), (None, None));
+    assert_eq!(
+        knobs(&["--video-num-frames", "24", "--video-min-frames", "12"]),
+        (Some(24), Some(12))
+    );
+
+    {
+        let _env = ScopedEnv::set(&[
+            ("MLXCEL_VIDEO_NUM_FRAMES", "48"),
+            ("MLXCEL_VIDEO_MIN_FRAMES", "16"),
+        ]);
+        assert_eq!(knobs(&[]), (Some(48), Some(16)));
+        assert_eq!(knobs(&["--video-min-frames", "4"]), (Some(48), Some(4)));
+    }
+}
+
+#[test]
 fn serve_responses_background_flags_parse_with_defaults() {
     let _lock = CLI_ENV_LOCK
         .get_or_init(|| Mutex::new(()))

@@ -713,6 +713,8 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             video: Vec::new(),
             fps: 2.0,
             video_max_frames: mlxcel::video::DEFAULT_FALLBACK_MAX_FRAMES,
+            video_num_frames: None,
+            video_min_frames: None,
             output_audio: None,
             speaker: "ethan".to_string(),
             extra_decoding_seconds: 3.0,
@@ -1245,6 +1247,8 @@ fn cli_video_fallback_declines_native_and_text_only_checkpoints() {
             &[PathBuf::from("/no/such/clip.mp4")],
             2.0,
             8,
+            None,
+            None,
         )
         .unwrap()
         .is_none(),
@@ -1258,6 +1262,8 @@ fn cli_video_fallback_declines_native_and_text_only_checkpoints() {
             &[PathBuf::from("/no/such/clip.mp4")],
             2.0,
             8,
+            None,
+            None,
         )
         .unwrap()
         .is_none(),
@@ -1267,7 +1273,7 @@ fn cli_video_fallback_declines_native_and_text_only_checkpoints() {
     // No `--video` at all is a no-op for every family.
     let fallback = model_dir_with_config(gemma3_vlm_config());
     assert!(
-        super::expand_cli_videos_to_frames(fallback.path(), &[], 2.0, 8)
+        super::expand_cli_videos_to_frames(fallback.path(), &[], 2.0, 8, None, None)
             .unwrap()
             .is_none()
     );
@@ -1312,10 +1318,16 @@ fn cli_video_fallback_appends_frame_images_and_clears_video() {
     let model = model_dir_with_config(gemma3_vlm_config());
     // 4 s at --fps 2.0 samples to 8 frames, so a cap of 4 exercises the
     // subsample rather than the identity path.
-    let expansion =
-        super::expand_cli_videos_to_frames(model.path(), std::slice::from_ref(&clip), 2.0, 4)
-            .expect("the fallback decodes the clip")
-            .expect("an image-only VLM must take the fallback");
+    let expansion = super::expand_cli_videos_to_frames(
+        model.path(),
+        std::slice::from_ref(&clip),
+        2.0,
+        4,
+        None,
+        None,
+    )
+    .expect("the fallback decodes the clip")
+    .expect("an image-only VLM must take the fallback");
 
     assert_eq!(expansion.clips.len(), 1);
     let clip_frames = &expansion.clips[0];

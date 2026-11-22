@@ -104,6 +104,8 @@ export const startupSettingStrings = [
   { key: 'settings.startup.vision_cache_size', en: 'Vision cache size', ko: '비전 캐시 크기', test_id: 'settings-startup-vision-cache-size' },
   { key: 'settings.startup.video_max_frames', en: 'Video max frames', ko: '비디오 최대 프레임 수', test_id: 'settings-startup-video-max-frames' },
   { key: 'settings.startup.video_fps', en: 'Video frame rate', ko: '비디오 프레임 속도', test_id: 'settings-startup-video-fps' },
+  { key: 'settings.startup.video_num_frames', en: 'Video target frame count', ko: '비디오 목표 프레임 수', test_id: 'settings-startup-video-num-frames' },
+  { key: 'settings.startup.video_min_frames', en: 'Video minimum frames', ko: '비디오 최소 프레임 수', test_id: 'settings-startup-video-min-frames' },
   { key: 'settings.startup.prompt_cache', en: 'Prompt cache', ko: '프롬프트 캐시', test_id: 'settings-startup-prompt-cache' },
   { key: 'settings.startup.prompt_cache.enabled', en: 'Enabled', ko: '사용', test_id: 'settings-startup-prompt-cache-enabled' },
   { key: 'settings.startup.prompt_cache.capacity_bytes', en: 'Capacity (bytes)', ko: '용량(바이트)', test_id: 'settings-startup-prompt-cache-capacity-bytes' },

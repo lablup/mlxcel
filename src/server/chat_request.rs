@@ -400,6 +400,12 @@ pub(crate) struct VideoFramesFallback {
     pub(crate) max_frames: usize,
     /// Decode rate used when the `video_url` part carries no `fps` of its own.
     pub(crate) default_fps: f64,
+    /// Exact frame count that replaces fps sampling when the operator set
+    /// `--video-num-frames` (#2399).
+    pub(crate) target_nframes: Option<usize>,
+    /// Sampling floor applied before the `max_frames` cap when the operator set
+    /// `--video-min-frames` (#2399).
+    pub(crate) min_frames: Option<usize>,
 }
 
 impl VideoFramesFallback {
@@ -408,6 +414,8 @@ impl VideoFramesFallback {
         Self {
             max_frames: config.video_max_frames,
             default_fps: config.video_fps,
+            target_nframes: config.video_num_frames,
+            min_frames: config.video_min_frames,
         }
     }
 
@@ -531,13 +539,7 @@ pub(crate) async fn expand_video_parts_to_frames(
         model_id,
         cancel,
         move |video_url, max_frames| {
-            decode_video_part(
-                video_url,
-                settings.default_fps,
-                max_frames,
-                allowlist,
-                cancel,
-            )
+            decode_video_part(video_url, settings, max_frames, allowlist, cancel)
         },
     )
     .await
@@ -662,7 +664,7 @@ where
 /// ffmpeg is told so before any clip is downloaded.
 async fn decode_video_part(
     video_url: crate::server::types::request::VideoUrl,
-    default_fps: f64,
+    settings: VideoFramesFallback,
     max_frames: usize,
     allowlist: &[PathBuf],
     cancel: &CancellationToken,
@@ -684,14 +686,21 @@ async fn decode_video_part(
                 super::media::VIDEO_DIR_ALLOWLIST_ENV
             ))
         })?;
-    let fps = video_url.fps.unwrap_or(default_fps);
+    let fps = video_url.fps.unwrap_or(settings.default_fps);
     let label = resolved.canonical_path().display().to_string();
     let cancel = cancel.clone();
     // ffmpeg decode plus PNG encode is seconds of CPU on a long clip, so it
     // runs on the blocking pool like the image decode path does rather than
     // parking a Tokio worker.
     let decoded = tokio::task::spawn_blocking(move || {
-        decode_video_frames_blocking(&resolved.source, fps, max_frames, &cancel)
+        decode_video_frames_blocking(
+            &resolved.source,
+            fps,
+            max_frames,
+            settings.target_nframes,
+            settings.min_frames,
+            &cancel,
+        )
     })
     .await
     .map_err(|err| {
@@ -718,13 +727,20 @@ fn decode_video_frames_blocking(
     source: &crate::multimodal::video::VideoSource,
     fps: f64,
     max_frames: usize,
+    target_nframes: Option<usize>,
+    min_frames: Option<usize>,
     cancel: &CancellationToken,
 ) -> std::result::Result<Option<(Vec<Vec<u8>>, usize)>, crate::multimodal::video::VideoError> {
     if cancel.is_cancelled() {
         return Ok(None);
     }
-    let (frames, sampled) =
-        crate::multimodal::video::load_video_source_frames_fallback(source, fps, max_frames)?;
+    let (frames, sampled) = crate::multimodal::video::load_video_source_frames_fallback(
+        source,
+        fps,
+        max_frames,
+        target_nframes,
+        min_frames,
+    )?;
     let kept = crate::multimodal::video::subsample_evenly(frames, max_frames);
     crate::multimodal::video::frames_to_png(&kept).map(|png| Some((png, sampled)))
 }

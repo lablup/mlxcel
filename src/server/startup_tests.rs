@@ -1756,6 +1756,17 @@ fn detect_model_media_support_recognises_inkling_video() {
         !support.video_with_audio,
         "Inkling VLM must keep the combined video+audio refusal, got {support:?}"
     );
+    // Issue #2399: Inkling pairs adjacent frames into its own prompt, so the
+    // `--video-num-frames` / `--video-min-frames` knobs are documented as
+    // ignored. That promise is structural, not a flag check inside the family:
+    // the fallback is the only consumer of the knobs and a native-video family
+    // never enters it, so refusing the fallback here is what makes the flags
+    // inert for Inkling.
+    assert!(
+        !support.video_frames_fallback,
+        "Inkling must never enter the frames fallback that honours the frame-count knobs, \
+         got {support:?}"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 

@@ -452,6 +452,12 @@ pub struct ServerStartupConfig {
     /// Sampling rate the video frame fallback decodes at when the request
     /// carries no `video_url.fps` of its own.
     pub video_fps: f64,
+    /// Exact frame count that replaces fps sampling (issue #2399). `None`
+    /// keeps fps sampling.
+    pub video_num_frames: Option<usize>,
+    /// Sampling floor applied before the frame cap (issue #2399). `None` keeps
+    /// the built-in floor.
+    pub video_min_frames: Option<usize>,
 
     /// Maximum encoded image payload bytes accepted per image content block.
     pub max_image_payload_size: usize,
@@ -846,6 +852,8 @@ impl Default for ServerStartupConfig {
             vision_cache_size: crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
             video_max_frames: crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
             video_fps: crate::multimodal::video::DEFAULT_FPS,
+            video_num_frames: None,
+            video_min_frames: None,
             max_image_payload_size: crate::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
             max_images_per_request: crate::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
             max_image_width: crate::server::DEFAULT_MAX_IMAGE_WIDTH,
@@ -2031,6 +2039,8 @@ pub(super) fn build_server_config(
         } else {
             crate::multimodal::video::DEFAULT_FPS
         },
+        video_num_frames: startup.video_num_frames,
+        video_min_frames: startup.video_min_frames,
         lang_bias_config: startup.lang_bias_config.clone(),
         reasoning_budget: startup.reasoning_budget,
         chat_template_kwargs: startup.chat_template_kwargs.clone(),
@@ -2284,6 +2294,9 @@ pub(crate) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             grammar: None,
             // Warmup is text-only; no image budget to override.
             image_soft_tokens: None,
+            // Warmup carries no media, so the frame knobs never apply.
+            video_num_frames: None,
+            video_min_frames: None,
             pre_rendered_prompt_tokens: None,
         },
     )?;
