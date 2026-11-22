@@ -1101,6 +1101,15 @@ impl SwitchGLU {
                     layout.group_size
                 ));
             }
+            // A plane whose shapes solve to 1 bit would reach `gather_qmm`,
+            // which has no 1-bit kernel and aborts at the first routed forward
+            // pass; `SwitchLinear` refuses the same layout (issue #1370).
+            if layout.bits == 1 {
+                return Err(format!(
+                    "{prefix}.{proj}: 1-bit quantization is supported for dense linears and \
+                     embeddings only; 1-bit MoE expert stacks (gather_qmm) are not supported"
+                ));
+            }
             validate_expert_quantization_params(
                 &format!("{prefix}.{proj}"),
                 group_size,

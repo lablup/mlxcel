@@ -699,3 +699,31 @@ fn routed_expert_planes_take_per_path_widths_from_the_shapes() {
     assert_eq!(out.len(), 3 * 2 * hidden as usize);
     assert!(out.iter().all(|v| v.is_finite()));
 }
+
+/// A hostile expert plane must be refused at load, not handed to `gather_qmm`:
+/// shapes that solve to 1 bit (no `gather_qmm` kernel) or to no integer width
+/// at all are both load errors naming the plane.
+#[test]
+fn routed_expert_planes_with_unrunnable_widths_are_refused() {
+    use crate::models::switch_layers::insert_stacked_quantized_expert_plane;
+    let cfg = test_config_dense_direct_q();
+    // gs 64, in 64: an honest 4-bit plane packs 8 words into 1 group.
+    for (down_packed_in, needle) in [(2, "1-bit"), (3, "down_proj")] {
+        let mut weights = WeightMap::new();
+        insert_stacked_quantized_expert_plane(&mut weights, "p.gate_proj", 2, 64, 8, 1);
+        insert_stacked_quantized_expert_plane(&mut weights, "p.up_proj", 2, 64, 8, 1);
+        insert_stacked_quantized_expert_plane(
+            &mut weights,
+            "p.down_proj",
+            2,
+            64,
+            down_packed_in,
+            1,
+        );
+        let err = crate::models::deepseek_v3::SwitchGLU::from_weights(&weights, &cfg, "p")
+            .err()
+            .expect("an unrunnable expert plane must be refused at load");
+        assert!(err.contains("p.down_proj"), "{err}");
+        assert!(err.contains(needle), "{err}");
+    }
+}
