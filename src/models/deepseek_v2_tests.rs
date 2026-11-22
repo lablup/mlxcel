@@ -450,7 +450,6 @@ fn int8_cache_stores_a_quantized_latent_and_decodes_like_its_own_row() {
     );
 }
 
-/// One dense MLA layer over a 16-token vocabulary.
 /// A bf16 layer over an int8 latent keeps bf16 activations on the decompressed
 /// multi-token step (#3177). The window dequantizes to FP16, and bf16 against
 /// FP16 promotes to float32 in MLX, so without the cast back the step returned
@@ -505,6 +504,24 @@ fn a_bf16_layer_keeps_bf16_over_an_int8_latent() {
         bf16,
         "prefill output dtype"
     );
+    // Behind the 5-token window the cost model absorbs a 2-token step, which
+    // dequantizes the window inside `MlaLatentCache::attend_preprojected`.
+    let before = mlxcel_core::mla::stats::snapshot();
+    let absorbed_step = attn.forward(&hidden(2), None, &mut cache);
+    mlxcel_core::eval(&absorbed_step);
+    let after = mlxcel_core::mla::stats::snapshot();
+    assert!(
+        after
+            .get(mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill)
+            .saturating_sub(before.get(mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill))
+            >= 1,
+        "the 2-token step must take the absorbed multi-token path"
+    );
+    assert_eq!(
+        mlxcel_core::array_dtype(&absorbed_step),
+        bf16,
+        "absorbed multi-token step output dtype"
+    );
     let decode = attn.forward(&hidden(1), None, &mut cache);
     assert_eq!(
         mlxcel_core::array_dtype(&decode),
@@ -513,6 +530,7 @@ fn a_bf16_layer_keeps_bf16_over_an_int8_latent() {
     );
 }
 
+/// One dense MLA layer over a 16-token vocabulary.
 fn tiny_harness_model() -> super::DeepSeekV2Model {
     let mut args = mla_test_args();
     args.vocab_size = 16;

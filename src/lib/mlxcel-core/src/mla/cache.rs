@@ -422,9 +422,20 @@ impl<'a> MlaLatentCache<'a> {
                 );
             }
             // More than one query: dequantize once and run the dense folded
-            // attention, which never takes the fused kernel.
+            // attention, which never takes the fused kernel. The dequantized
+            // window is FP16; it is cast to the query dtype so a bf16
+            // checkpoint's step is not promoted to float32 (#3177).
             window @ LatentWindow::Quantized { .. } => {
                 let (ckv_all, kpe_all) = window.into_dense();
+                let dtype = crate::ffi::array_dtype(q_pe);
+                let cast = |a: UniquePtr<MlxArray>| {
+                    if crate::ffi::array_dtype(&a) == dtype {
+                        a
+                    } else {
+                        crate::ffi::astype(&a, dtype)
+                    }
+                };
+                let (ckv_all, kpe_all) = (cast(ckv_all), cast(kpe_all));
                 return absorbed_attention(q_absorbed, q_pe, &ckv_all, &kpe_all, scale, mask);
             }
         };
