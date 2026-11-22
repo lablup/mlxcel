@@ -433,6 +433,72 @@ fn load_refuses_checkpoint_shapes_the_forward_cannot_run() {
 }
 
 #[test]
+fn tap_indices_checks_slots_and_layer_coverage() {
+    let args = tiny_config(4);
+    let taps = args.tap_indices().expect("tiny taps");
+    assert_eq!(taps.get(&2), Some(&vec![0, 1, 2]));
+    assert_eq!(taps.get(&3), Some(&vec![0, 2, 3]));
+
+    let with = |key: &str, idx: serde_json::Value, expect: &str| {
+        let mut a = tiny_config(4);
+        a.mudd_tap_idx
+            .insert(key.to_string(), serde_json::from_value(idx).unwrap());
+        let err = a.tap_indices().unwrap_err();
+        assert!(err.starts_with("Limite: ") && err.contains(expect), "{err}");
+    };
+    // A tap reading a slot that is not computed yet.
+    with("2", serde_json::json!([0, 1, 3]), "not computed yet");
+    // More taps than `mudd_taps`.
+    with("2", serde_json::json!([0, 1, 2, 2]), "MUDD taps");
+    // An empty tap list.
+    with("2", serde_json::json!([]), "MUDD taps");
+    // A key that is not a layer.
+    with("x", serde_json::json!([0]), "not a layer");
+    // A tapped layer missing from `mudd_layers`.
+    with("1", serde_json::json!([0, 1]), "mudd_layers");
+}
+
+#[test]
+fn sigmoid_softcap_parses_defaults_and_refuses_other_kinds() {
+    assert_eq!(
+        tiny_config(4).sigmoid_softcap().unwrap(),
+        Some((2.0, 0.5, 1.5))
+    );
+    let mut a = tiny_config(4);
+    a.softcap_logits = Some(serde_json::json!({"kind": "sigmoid"}));
+    assert_eq!(a.sigmoid_softcap().unwrap(), Some((0.0, 0.0, 1.0)));
+    a.softcap_logits = None;
+    assert_eq!(a.sigmoid_softcap().unwrap(), None);
+    a.softcap_logits = Some(serde_json::Value::Null);
+    assert_eq!(a.sigmoid_softcap().unwrap(), None);
+    a.softcap_logits = Some(serde_json::json!({"kind": "tanh"}));
+    assert!(a.sigmoid_softcap().unwrap_err().contains("only sigmoid"));
+    a.softcap_logits = Some(serde_json::json!({"kind": "sigmoid", "c": 0.0}));
+    assert!(a.sigmoid_softcap().unwrap_err().contains("nonzero"));
+}
+
+#[test]
+fn eos_token_ids_accept_a_number_a_list_or_nothing() {
+    let mut a = tiny_config(4);
+    assert_eq!(a.eos_token_ids(), vec![15]);
+    a.eos_token_id = Some(serde_json::json!([3, 7]));
+    assert_eq!(a.eos_token_ids(), vec![3, 7]);
+    a.eos_token_id = None;
+    assert!(a.eos_token_ids().is_empty());
+}
+
+#[test]
+fn position_helpers_shape_and_values() {
+    use super::limite_layers::positions_from_offsets;
+    let p = positions_from_offset(5, 3);
+    assert_eq!(mlxcel_core::array_shape(&p), vec![1, 3]);
+    assert_eq!(values(&p), vec![5.0, 6.0, 7.0]);
+    let q = positions_from_offsets(&[4, 9]);
+    assert_eq!(mlxcel_core::array_shape(&q), vec![2, 1]);
+    assert_eq!(values(&q), vec![4.0, 9.0]);
+}
+
+#[test]
 fn limite_native_isolation() {
     contracts(tiny_wrapper, |m, id| m.sequence_offsets(id));
 }
