@@ -1181,6 +1181,28 @@ pub(crate) async fn try_extract_chat_audio_data_with_cancellation(
     Ok(audio_data)
 }
 
+/// Acquire the single `audio` clip of a `POST /v1/decisions` request.
+///
+/// `data` takes every form a chat `input_audio.data` does (data URI, URL,
+/// `file://` or bare path under `--media-path`, raw base64) under the same
+/// limits. The bytes decide the container, so the declared format is only the
+/// one the chat path defaults to.
+pub(crate) async fn read_decision_audio(
+    data: &str,
+) -> std::result::Result<Vec<u8>, AudioAcquisitionError> {
+    let input = InputAudio {
+        data: data.to_string(),
+        format: "wav".to_string(),
+    };
+    read_audio_input(
+        &input,
+        0,
+        ABSOLUTE_MAX_AUDIO_PAYLOAD_SIZE,
+        &NeverCancelAudioAcquisition,
+    )
+    .await
+}
+
 fn checked_audio_request_total(
     current: usize,
     additional: usize,
