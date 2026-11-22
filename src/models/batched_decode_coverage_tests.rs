@@ -144,6 +144,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "TensorParallelLlamaModel@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelQwen35Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelQwen3Model@src/distributed/tensor_parallel/llama_runtime.rs",
+    "Xing40Model@src/models/xing4_0.rs",
     "YoutuLanguageModel@src/models/youtu_vl_lm.rs",
     "Z1t@src/models/z1t.rs",
 ];

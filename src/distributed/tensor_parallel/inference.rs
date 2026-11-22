@@ -220,6 +220,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::DeepSeekV3 => "deepseek_v3",
         ModelType::DeepSeekV32 => "deepseek_v32",
         ModelType::DeepSeekV4 => "deepseek_v4",
+        ModelType::Xing40 => "xing4_0",
         ModelType::Dots1 => "dots1",
         ModelType::Cohere => "cohere",
         ModelType::Cohere2 => "cohere2",

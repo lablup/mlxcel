@@ -772,6 +772,7 @@ impl ModelType {
             ModelType::DeepSeekV3 => "deepseek_v3",
             ModelType::DeepSeekV32 => "deepseek_v32",
             ModelType::DeepSeekV4 => "deepseek_v4",
+            ModelType::Xing40 => "xing4_0",
             ModelType::Dots1 => "dots1",
             ModelType::Cohere => "cohere",
             ModelType::Cohere2 => "cohere2",
@@ -1023,6 +1024,7 @@ impl ModelType {
             | ModelType::DeepSeekV3
             | ModelType::DeepSeekV32
             | ModelType::DeepSeekV4
+            | ModelType::Xing40
             | ModelType::Dots1
             | ModelType::Cohere2Moe
             | ModelType::Glm4Moe
@@ -1171,6 +1173,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::DeepSeekV3 => &["deepseek_v3", "kimi_k2", "joyai_llm_flash"],
         ModelType::DeepSeekV32 => &["deepseek_v32", "deepseek_v3.2"],
         ModelType::DeepSeekV4 => &["deepseek_v4"],
+        ModelType::Xing40 => &["xing4_0"],
         ModelType::Dots1 => &["dots1"],
         ModelType::Cohere => &["cohere"],
         ModelType::Cohere2 => &["cohere2"],

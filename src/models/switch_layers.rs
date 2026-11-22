@@ -349,7 +349,8 @@ pub(crate) fn validate_expert_quantization_shapes(
 /// Used by: the guard tests of every family listed on
 ///          [`validate_expert_quantization_params`], plus the Qwen3MoE and
 ///          Qwen3VLMoE block-loader guard tests (their experts moved onto the
-///          shared loader in issue #1884)
+///          shared loader in issue #1884), and the Xing4.0 per-plane width
+///          refusal test (issue #2356)
 #[cfg(test)]
 pub(crate) fn insert_stacked_quantized_expert_plane(
     weights: &mut WeightMap,
