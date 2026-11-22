@@ -2136,14 +2136,15 @@ fn serve_reports_a_mistyped_flag_after_an_option_instead_of_swallowing_it() {
 }
 
 #[test]
-fn negative_numbers_stay_rejected_on_sibling_subcommands() {
-    // `allow_negative_numbers` is a per-command setting applied to `serve`
-    // only, so the sibling subcommands keep clap's default posture. Pinning it
-    // here records that the blast radius of #1459 is the server surface, not
-    // every `mlxcel` subcommand.
-    let err = Cli::try_parse_from(["mlxcel", "generate", "--max-tokens", "-1"])
-        .expect_err("`generate --max-tokens -1` must keep the default clap rejection");
-    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+fn generate_accepts_space_separated_unlimited_max_tokens() {
+    for flag in ["-n", "--max-tokens"] {
+        let cli = Cli::try_parse_from(["mlxcel", "generate", "--model", "model", flag, "-1"])
+            .expect("generate must accept a space-separated unlimited token budget");
+        let Commands::Generate(args) = cli.command else {
+            panic!("expected the generate subcommand");
+        };
+        assert_eq!(args.max_tokens, mlxcel::cli::max_tokens::UNLIMITED_MAX_TOKENS);
+    }
 }
 
 #[test]
