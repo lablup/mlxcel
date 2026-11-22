@@ -1050,6 +1050,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "starcoder2" => Ok(ModelType::StarCoder2),
         "mellum" => Ok(ModelType::Mellum),
         "laguna" => Ok(ModelType::Laguna),
+        "limite" => Ok(ModelType::Limite),
         "minicpm" => Ok(ModelType::MiniCPM),
         "minicpm3" => Ok(ModelType::MiniCPM3),
         "stablelm" => Ok(ModelType::StableLM),

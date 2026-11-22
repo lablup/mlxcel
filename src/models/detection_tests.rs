@@ -834,6 +834,28 @@ fn mellum_model_type_is_detected() {
 }
 
 #[test]
+fn limite_model_type_is_detected() {
+    let model_dir = temp_path("limite_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "limite",
+            "architectures": ["LimiteForCausalLM"],
+            "hidden_size": 1280,
+            "num_hidden_layers": 48,
+            "vocab_size": 151680
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Limite);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn laguna_model_type_is_detected() {
     let model_dir = temp_path("laguna_code");
     fs::create_dir_all(&model_dir).unwrap();

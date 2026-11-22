@@ -1349,6 +1349,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",
         ModelType::Laguna => "laguna",
+        ModelType::Limite => "limite",
         ModelType::Helium => "helium",
         ModelType::K2Horizon => "k2_horizon",
         ModelType::TeleChat3 => "telechat3",
