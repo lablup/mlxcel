@@ -847,6 +847,7 @@ pub(crate) struct GenerationOptions {
         long,
         default_value = "-1",
         value_parser = mlxcel::cli::max_tokens::parse_max_tokens,
+        allow_negative_numbers = true,
         value_name = "N"
     )]
     pub(crate) max_tokens: usize,
