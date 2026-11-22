@@ -30,7 +30,8 @@
 //! `src/models/lfm2_tests.rs`, next to the mixer it changes.
 //!
 //! The last test loads the real `LiquidAI/LFM2.5-Embedding-350M` checkpoint and
-//! soft-skips when it is not downloaded.
+//! soft-skips when it is not downloaded. The encoder and ColBERT heads are
+//! gated in `lfm2_embedding_head_tests.rs`.
 //!
 //! Every test that evaluates an MLX graph takes the shared `mlx_test_guard`;
 //! see its doc comment for the two ways parallel MLX work breaks this suite.
@@ -42,12 +43,11 @@ use super::Lfm2EmbeddingModel;
 use crate::embeddings::model::{EmbeddingBatch, EmbeddingModel};
 use crate::embeddings::pooling::PoolingMode;
 use crate::models::embedding_test_support::{
-    Rng, cosine, err_string, ids_array, local_checkpoint, max_abs_diff, mlx_test_guard, temp_dir,
-    to_vec,
+    Rng, cosine, err_string, ids_array, local_checkpoint, max_abs_diff, mlx_test_guard, to_vec,
 };
 use crate::models::lfm2::ModelArgs;
 
-const HIDDEN: usize = 16;
+pub(super) const HIDDEN: usize = 16;
 const INTERMEDIATE: usize = 32;
 const VOCAB: usize = 32;
 /// Two conv layers around one attention layer, so both mixer kinds run.
@@ -75,7 +75,7 @@ const CHECKPOINT_DIM: usize = 1024;
 /// reading pad-token embeddings.
 const BATCH_COSINE_TOLERANCE: f32 = 1e-3;
 
-fn tiny_args() -> ModelArgs {
+pub(super) fn tiny_args() -> ModelArgs {
     ModelArgs {
         model_type: "lfm2".to_string(),
         vocab_size: VOCAB,
@@ -107,7 +107,7 @@ fn tiny_args() -> ModelArgs {
 /// Deterministic dense weights for `args`, in the checkpoint's own key layout
 /// (`w1`/`w2`/`w3` feed-forward, `[hidden, 1, L_cache]` conv weight), so
 /// `Lfm2Model::from_weights`'s own sanitize pass runs too.
-fn tiny_weights(args: &ModelArgs) -> WeightMap {
+pub(super) fn tiny_weights(args: &ModelArgs) -> WeightMap {
     let mut rng = Rng::new(0x00C0_FFEE_1325);
     let mut w = WeightMap::new();
     let h = args.hidden_size as i32;
@@ -227,7 +227,7 @@ fn embed_one(model: &Lfm2EmbeddingModel, ids: &[i32]) -> Vec<f32> {
 /// The key passes [`Lfm2EmbeddingModel::load`] applies before
 /// `Lfm2Model::from_weights` runs its own sanitize.
 fn family_sanitize(weights: &mut WeightMap) -> usize {
-    crate::models::embedding_sanitize::sanitize_decoder_embedding_weights(weights)
+    super::sanitize_family_weights(weights)
 }
 
 fn sorted_keys(weights: &WeightMap) -> Vec<String> {
@@ -282,22 +282,31 @@ fn sanitize_key_sets_are_pinned_for_both_layouts() {
 }
 
 #[test]
-fn rejects_late_interaction_layout() {
-    // The LFM2 / LFM2.5 ColBERT checkpoints share this `model_type` and this
-    // architecture but project every token through a `1_Dense` module. Loading
-    // one here would return a single pooled vector and look like it worked.
-    let dir = temp_dir("lfm2_colbert");
-    std::fs::create_dir_all(dir.join("1_Dense")).unwrap();
-    let err = err_string(super::reject_late_interaction(&dir, 0));
-    assert!(err.contains("late-interaction"), "{err}");
-    std::fs::remove_dir_all(&dir).unwrap();
-
-    // The tensor-level signal catches the same layout when the folder is
-    // spelled differently.
-    let plain = temp_dir("lfm2_plain");
-    assert!(super::reject_late_interaction(&plain, 0).is_ok());
-    assert!(super::reject_late_interaction(&plain, 1).is_err());
-    std::fs::remove_dir_all(plain).unwrap();
+fn sanitize_strips_the_masked_lm_wrapper() {
+    // `LiquidAI/LFM2.5-Encoder-350M` saves `Lfm2BidirectionalForMaskedLM`,
+    // whose backbone sits under `lfm2.`. One strip, then the shared prefix
+    // pass, must land every root on `model.*`; the tied MLM head has no
+    // tensor of its own, so nothing is dropped.
+    let mut rng = Rng::new(0x2366_0001);
+    let mut weights = WeightMap::new();
+    for key in [
+        "lfm2.embed_tokens.weight",
+        "lfm2.layers.0.conv.conv.weight",
+        "lfm2.layers.2.self_attn.q_layernorm.weight",
+        "lfm2.embedding_norm.weight",
+    ] {
+        rng.insert(&mut weights, key, &[2, 2], 0.1);
+    }
+    assert_eq!(family_sanitize(&mut weights), 0);
+    assert_eq!(
+        sorted_keys(&weights),
+        vec![
+            "model.embed_tokens.weight",
+            "model.embedding_norm.weight",
+            "model.layers.0.conv.conv.weight",
+            "model.layers.2.self_attn.q_layernorm.weight",
+        ]
+    );
 }
 
 // Forward pass.

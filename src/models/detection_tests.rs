@@ -1372,6 +1372,12 @@ fn embedding_architectures_route_generator_model_types_to_embedding_variants() {
             ModelType::LlamaNemotronVLEmbedding,
         ),
         ("lfm2", "Lfm2BidirectionalModel", ModelType::Lfm2Embedding),
+        // LFM2.5-Encoder ships no `1_Pooling`, so only the architecture marks it.
+        (
+            "lfm2",
+            "Lfm2BidirectionalForMaskedLM",
+            ModelType::Lfm2Embedding,
+        ),
         ("idefics3", "ColIdefics3", ModelType::ColIdefics3),
         ("qwen2_5_vl", "ColQwen2_5", ModelType::ColQwen25),
         ("qwen2_5_vl", "ColQwen2ForRetrieval", ModelType::ColQwen25),

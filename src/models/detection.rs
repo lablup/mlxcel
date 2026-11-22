@@ -516,6 +516,7 @@ const EMBEDDING_ARCHITECTURES: &[&str] = &[
     "LlamaBidirectionalModel",
     "LlamaNemotronVLModel",
     "Lfm2BidirectionalModel",
+    "Lfm2BidirectionalForMaskedLM",
     "ColIdefics3",
     "ColQwen2_5",
     "ColQwen2ForRetrieval",
