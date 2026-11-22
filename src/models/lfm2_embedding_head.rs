@@ -37,6 +37,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
 use serde::Deserialize;
 use serde_json::Value;
@@ -99,6 +100,85 @@ pub(super) fn take_projection_keys(weights: &mut WeightMap, prefix: &str) {
     for suffix in PROJECTION_SUFFIXES {
         weights.remove(&format!("{prefix}.{suffix}"));
     }
+}
+
+/// The `(out_features, in_features)` of a built projection, after checking
+/// every tensor it carries agrees with them.
+///
+/// MLX checks operand shapes when the op is built, and those ops cross the
+/// FFI without a `Result`, so a `bias` of the wrong length or a `scales`
+/// plane whose rows disagree with the packed weight would abort the process
+/// at the first embed request instead of failing the load. The widths come
+/// from the built linear, whose quantization layout is already reconciled
+/// against the tensor shapes, not from the config's declared `group_size`.
+pub(super) fn projection_widths(linear: &UnifiedLinear, prefix: &str) -> Result<(usize, usize)> {
+    let (weight_shape, bias, quantized) = match linear {
+        UnifiedLinear::Regular(dense) => (
+            mlxcel_core::array_shape(&dense.weight),
+            dense.bias.as_ref(),
+            None,
+        ),
+        UnifiedLinear::Quantized { weight, bias } => (
+            mlxcel_core::array_shape(&weight.weight),
+            bias.as_ref(),
+            Some(weight),
+        ),
+    };
+    let [out_features, stored_in] = weight_shape[..] else {
+        bail!("LFM2 ColBERT projection `{prefix}.weight` has shape {weight_shape:?}, not rank 2");
+    };
+    let in_features = match quantized {
+        None => stored_in,
+        Some(q) => {
+            let scales = mlxcel_core::array_shape(&q.scales);
+            let groups = match scales[..] {
+                [rows, groups] if rows == out_features => groups,
+                _ => bail!(
+                    "LFM2 ColBERT projection `{prefix}.scales` has shape {scales:?}, which does \
+                     not match the {out_features}-row packed weight"
+                ),
+            };
+            if let Some(biases) = &q.biases {
+                let biases = mlxcel_core::array_shape(biases);
+                if biases != scales {
+                    bail!(
+                        "LFM2 ColBERT projection `{prefix}.biases` has shape {biases:?} but \
+                         `{prefix}.scales` has {scales:?}"
+                    );
+                }
+            }
+            let unpacked = (q.bits > 0)
+                .then(|| i64::from(stored_in) * 32)
+                .filter(|bits_total| bits_total % i64::from(q.bits) == 0)
+                .map(|bits_total| bits_total / i64::from(q.bits));
+            let grouped = i64::from(groups) * i64::from(q.group_size);
+            match unpacked {
+                Some(width) if width == grouped && width <= i64::from(i32::MAX) => width as i32,
+                _ => bail!(
+                    "LFM2 ColBERT projection `{prefix}` packs {stored_in} words at {} bits, which \
+                     does not match {groups} groups of {}",
+                    q.bits,
+                    q.group_size
+                ),
+            }
+        }
+    };
+    if out_features <= 0 || in_features <= 0 {
+        bail!(
+            "LFM2 ColBERT projection `{prefix}` is {out_features}x{in_features}; both widths \
+             must be positive"
+        );
+    }
+    if let Some(bias) = bias {
+        let bias = mlxcel_core::array_shape(bias);
+        if bias != [out_features] {
+            bail!(
+                "LFM2 ColBERT projection `{prefix}.bias` has shape {bias:?}, but the projection \
+                 has {out_features} output features"
+            );
+        }
+    }
+    Ok((out_features as usize, in_features as usize))
 }
 
 /// `{N}_Dense` module folders in `model_dir`, sorted.

@@ -78,7 +78,7 @@ use crate::embeddings::loader::load_embedding_weights;
 use crate::embeddings::model::{EmbeddingBatch, EmbeddingModel, EmbeddingOutput};
 use crate::embeddings::pooling::{PoolingMode, pool, resolve_pooling_mode};
 use crate::models::col_late_interaction::project_and_normalize;
-use crate::models::embedding_sanitize::{linear_features, sanitize_decoder_embedding_weights};
+use crate::models::embedding_sanitize::sanitize_decoder_embedding_weights;
 use crate::models::lfm2::{Lfm2Model, ModelArgs};
 
 #[path = "lfm2_embedding_head.rs"]
@@ -183,21 +183,18 @@ impl Lfm2EmbeddingModel {
         let mut embedding_dim = args.hidden_size;
         let projection = match head::find_projection(&weights, 0)? {
             Some(prefix) => {
-                let (out_features, in_features) = linear_features(&weights, prefix, group_size)
-                    .with_context(|| {
-                        format!("LFM2 ColBERT projection `{prefix}` is not a rank-2 linear")
-                    })?;
-                if in_features as usize != args.hidden_size {
+                let linear = UnifiedLinear::from_weights(&weights, prefix, group_size, bits)
+                    .map_err(|e| anyhow::anyhow!("LFM2 ColBERT projection `{prefix}`: {e}"))?;
+                let (out_features, in_features) = head::projection_widths(&linear, prefix)?;
+                if in_features != args.hidden_size {
                     bail!(
                         "LFM2 ColBERT projection `{prefix}` takes {in_features} input features \
                          but the backbone hidden size is {}",
                         args.hidden_size
                     );
                 }
-                let linear = UnifiedLinear::from_weights(&weights, prefix, group_size, bits)
-                    .map_err(|e| anyhow::anyhow!("LFM2 ColBERT projection `{prefix}`: {e}"))?;
                 head::take_projection_keys(&mut weights, prefix);
-                embedding_dim = out_features as usize;
+                embedding_dim = out_features;
                 Some(linear)
             }
             None => None,

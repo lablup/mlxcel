@@ -284,6 +284,88 @@ fn more_than_one_projection_is_refused() {
     assert_eq!(find_projection(&WeightMap::new(), 0).unwrap(), None);
 }
 
+/// The quantized `projection.*` triple of `quantized_projection_module_loads_multi_vector`,
+/// over a 32-wide backbone.
+fn quantized_projection_weights() -> (WeightMap, crate::models::lfm2::ModelArgs) {
+    let group_size = 32;
+    let mut args = tiny_args();
+    args.hidden_size = 32;
+    args.quantization = Some(crate::models::lfm2::Quantization {
+        group_size,
+        bits: 4,
+    });
+    let mut weights = tiny_weights(&args);
+    let dense = Rng::new(0x2366_0005).tensor(&[PROJ_DIM as i32, 32], 0.3);
+    let quantized = mlxcel_core::quantize_weights(&dense, group_size, 4);
+    weights.insert(
+        "projection.weight".to_string(),
+        mlxcel_core::quantized_weights_w(&quantized),
+    );
+    weights.insert(
+        "projection.scales".to_string(),
+        mlxcel_core::quantized_weights_scales(&quantized),
+    );
+    weights.insert(
+        "projection.biases".to_string(),
+        mlxcel_core::quantized_weights_biases(&quantized),
+    );
+    (weights, args)
+}
+
+#[test]
+fn malformed_projection_tensors_fail_the_load() {
+    let _guard = mlx_test_guard();
+    // Each of these used to load and then abort the process inside MLX at
+    // the first embed request, where the shape error has no `Result` to
+    // travel through.
+    let load = |weights: WeightMap, args| {
+        err_string(Lfm2EmbeddingModel::from_weights(
+            weights,
+            args,
+            PoolingMode::Cls,
+            true,
+        ))
+    };
+
+    let mut short_bias = colbert_weights("dense.weight");
+    Rng::new(0x2366_0006).insert(&mut short_bias, "dense.bias", &[PROJ_DIM as i32 - 1], 0.1);
+    assert!(load(short_bias, tiny_args()).contains("dense.bias"));
+
+    let mut no_rows = tiny_weights(&tiny_args());
+    no_rows.insert(
+        "dense.weight".to_string(),
+        mlxcel_core::zeros(&[0, HIDDEN as i32], mlxcel_core::dtype::FLOAT32),
+    );
+    assert!(load(no_rows, tiny_args()).contains("must be positive"));
+
+    let (mut rows, args) = quantized_projection_weights();
+    let scales = mlxcel_core::array_shape(&rows["projection.scales"]);
+    rows.insert(
+        "projection.scales".to_string(),
+        Rng::new(0x2366_0007).tensor(&[scales[0] - 1, scales[1]], 0.1),
+    );
+    rows.insert(
+        "projection.biases".to_string(),
+        Rng::new(0x2366_0008).tensor(&[scales[0] - 1, scales[1]], 0.1),
+    );
+    assert!(load(rows, args).contains("projection.scales"));
+
+    let (mut biases, args) = quantized_projection_weights();
+    biases.insert(
+        "projection.biases".to_string(),
+        Rng::new(0x2366_0009).tensor(&[scales[0], scales[1] + 1], 0.1),
+    );
+    assert!(load(biases, args).contains("projection.biases"));
+
+    let (mut quant_bias, args) = quantized_projection_weights();
+    Rng::new(0x2366_000A).insert(&mut quant_bias, "projection.bias", &[3], 0.1);
+    assert!(load(quant_bias, args).contains("projection.bias"));
+
+    // The well-formed triple still loads.
+    let (weights, args) = quantized_projection_weights();
+    assert!(Lfm2EmbeddingModel::from_weights(weights, args, PoolingMode::Cls, true).is_ok());
+}
+
 fn write_dense_config(dir: &Path, config: &Value) {
     std::fs::create_dir_all(dir.join("1_Dense")).unwrap();
     std::fs::write(
