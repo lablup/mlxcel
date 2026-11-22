@@ -710,6 +710,65 @@ async fn an_approval_that_cannot_be_collected_refuses_the_call() {
 }
 
 #[tokio::test]
+async fn refused_calls_count_toward_the_tool_round_bound() {
+    // A model that keeps calling a tool it may not run must still stop.
+    let mut config = fake_config();
+    config.limits.max_tool_rounds = 1;
+    let h = harness_with(Some(config)).await;
+    h.turn(&[&tool_call("add", json!({"a": 1, "b": 2}))]);
+    h.turn(&[&tool_call("add", json!({"a": 1, "b": 2}))]);
+    let mut request = body(json!([{"type": "mcp", "server_label": "fake"}]));
+    request["store"] = json!(false);
+    let (status, response) = h.create(request).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["status"], "incomplete");
+    assert_eq!(response["incomplete_details"]["reason"], "max_tool_rounds");
+    assert_eq!(response["usage"]["mcp"]["tool_rounds"], 1);
+    assert_eq!(response["usage"]["mcp"]["tool_calls"], 0);
+    assert_eq!(h.prompts().len(), 2);
+}
+
+#[tokio::test]
+async fn max_tool_calls_caps_approved_calls_on_resume() {
+    let h = harness().await;
+    h.turn(&[
+        &tool_call("add", json!({"a": 17, "b": 25})),
+        &tool_call("add", json!({"a": 1, "b": 2})),
+    ]);
+    let tools = json!([{"type": "mcp", "server_label": "fake"}]);
+    let (_, paused) = h.create(body(tools.clone())).await;
+    assert_eq!(
+        item_types(&paused),
+        [
+            "mcp_list_tools",
+            "mcp_approval_request",
+            "mcp_approval_request"
+        ]
+    );
+    let answers: Vec<Value> = paused["output"].as_array().unwrap()[1..]
+        .iter()
+        .map(|item| {
+            json!({"type": "mcp_approval_response", "approval_request_id": item["id"], "approve": true})
+        })
+        .collect();
+    let _ = h.prompts();
+    let (status, resumed) = h
+        .create(json!({
+            "model": "mcp-test-model", "previous_response_id": paused["id"],
+            "tools": tools, "max_tool_calls": 1, "input": answers
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["status"], "incomplete");
+    assert_eq!(resumed["incomplete_details"]["reason"], "max_tool_calls");
+    assert_eq!(item_types(&resumed), ["mcp_call", "mcp_call"]);
+    assert_eq!(resumed["output"][0]["output"], "42");
+    assert_eq!(resumed["output"][1]["status"], "incomplete");
+    assert_eq!(resumed["usage"]["mcp"]["tool_calls"], 1);
+    assert!(h.prompts().is_empty(), "no model turn after the bound");
+}
+
+#[tokio::test]
 async fn per_tool_approval_runs_exempt_tools_and_pauses_on_the_rest() {
     let h = harness().await;
     h.turn(&[

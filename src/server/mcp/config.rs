@@ -50,7 +50,7 @@ pub struct McpServerSpec {
 /// Bounds applied to every response that runs MCP tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McpLimits {
-    /// Model turns that may be followed by tool execution in one response.
+    /// Model turns in one response whose MCP calls are run or refused.
     pub max_tool_rounds: usize,
     /// Wall-clock limit of one `tools/call`, and of one server start.
     pub tool_timeout: Duration,

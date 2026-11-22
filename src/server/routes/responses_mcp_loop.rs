@@ -229,11 +229,15 @@ impl ToolLoop<'_> {
 
     /// Consume the request's approval answers and run the approved calls
     /// with the arguments stored when they were requested.
+    ///
+    /// The request's `max_tool_calls` caps these calls too: an approved call
+    /// past it is reported as not run, and the response ends `incomplete`.
     fn resume_approvals(&mut self, messages: &mut [Message]) -> Result<(), Stop> {
         let run = self.run;
         if run.setup.answers.is_empty() {
             return Ok(());
         }
+        let mut bound = None;
         let previous = run.request.previous_response_id.as_deref().unwrap_or("");
         let approvals = run
             .setup
@@ -249,12 +253,23 @@ impl ToolLoop<'_> {
             if !answer.approve {
                 continue;
             }
+            let calls_spent = run
+                .request
+                .max_tool_calls
+                .is_some_and(|max| self.usage.tool_calls >= max);
+            let refusal = calls_spent.then(|| {
+                bound = Some(INCOMPLETE_MAX_TOOL_CALLS);
+                Refusal {
+                    error: "not run: the response reached its max_tool_calls limit".to_string(),
+                    status: McpCallStatus::Incomplete,
+                }
+            });
             let (_, text) = self.mcp_call(
                 &approval.server_label,
                 &approval.tool_name,
                 &approval.arguments,
                 Some(approval.id.clone()),
-                None,
+                refusal,
             );
             if let Some(message) = messages.iter_mut().rev().find(|message| {
                 message.role == Role::Tool
@@ -263,7 +278,10 @@ impl ToolLoop<'_> {
                 message.content = MessageContent::Text(text);
             }
         }
-        Ok(())
+        match bound {
+            Some(reason) => Err(Stop::Bound(reason)),
+            None => Ok(()),
+        }
     }
 
     /// The model turns and the tool work between them.
@@ -372,7 +390,6 @@ impl ToolLoop<'_> {
             let rounds_spent = self.usage.tool_rounds >= limits.max_tool_rounds;
             let mut bound = None;
             let mut hands_back = false;
-            let mut ran_tool = false;
             let mut turn_calls = Vec::with_capacity(calls.len());
             let mut results = Vec::new();
             for call in calls {
@@ -444,7 +461,6 @@ impl ToolLoop<'_> {
                 } else {
                     None
                 };
-                ran_tool |= refusal.is_none();
                 let (item_id, text) = self.mcp_call(
                     &tool.server_label,
                     &call.name,
@@ -464,7 +480,10 @@ impl ToolLoop<'_> {
             if hands_back {
                 return Stop::Finished;
             }
-            if ran_tool {
+            // A round counts whether its calls ran or were refused: a model
+            // that keeps calling a tool it may not run (approval that cannot
+            // be collected) must still reach the round bound.
+            if !results.is_empty() {
                 self.usage.tool_rounds += 1;
             }
             chat.messages.push(Message {

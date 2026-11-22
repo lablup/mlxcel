@@ -125,7 +125,7 @@ pub struct McpApprovalRequestItem {
 /// it ran under, so a caller can see which bound ended a response.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct McpUsage {
-    /// Model turns that were followed by tool execution.
+    /// Model turns whose MCP calls were run or refused.
     pub tool_rounds: usize,
     /// Tool calls sent to an MCP server.
     pub tool_calls: usize,

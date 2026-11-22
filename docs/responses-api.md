@@ -609,7 +609,7 @@ mlxcel-server -m <model> --mcp-tools --mcp-servers-config mcp.json
 | `--mcp-tools` | off | Enables the loop. Required: `--mcp-servers-config`, `--mcp-servers-json` or their `LLAMA_ARG_MCP_SERVERS_CONFIG` / `LLAMA_ARG_MCP_SERVERS_JSON` variables without it fail startup, so a variable inherited from a llama.cpp deployment never starts a process. The opt-in has no environment variable. |
 | `--mcp-servers-config <PATH>` | none | File with the server set. |
 | `--mcp-servers-json <JSON>` | none | The same document inline. Pass one of the two, not both. |
-| `--mcp-max-tool-rounds <N>` | 8 | Model turns in one response that may be followed by tool execution. |
+| `--mcp-max-tool-rounds <N>` | 8 | Model turns in one response whose MCP calls are run or refused. A refused call (for example one that needs approval on a `store: false` request) still spends its round. |
 | `--mcp-tool-timeout <SECONDS>` | 30 | Limit for one tool call and for one server start. |
 | `--mcp-max-output-bytes <BYTES>` | 65536 | Text one tool call may hand to the model. |
 
@@ -663,7 +663,7 @@ Streaming sends the same items. Each `mcp_call` is `response.output_item.added`,
 | Situation | Result |
 |-----------|--------|
 | The model asks for MCP tools after `--mcp-max-tool-rounds` rounds | The calls are not run (`mcp_call` items with `status: "incomplete"` and an `error`); the response ends `status: "incomplete"`, `incomplete_details.reason: "max_tool_rounds"`. |
-| More MCP calls than the request's `max_tool_calls` | Same, with reason `max_tool_calls`. |
+| More MCP calls than the request's `max_tool_calls` (approved calls run on resume included) | Same, with reason `max_tool_calls`. |
 | A model turn hits `max_output_tokens` | The turn's calls are not run; `incomplete`, reason `max_output_tokens`. |
 | A tool call exceeds `--mcp-tool-timeout` | The child is killed; that `mcp_call` has `error` "MCP server did not answer within N ms". |
 | The child exits, or closes its output, during a call | That `mcp_call` has `error` "MCP server exited or closed its output before answering". |
