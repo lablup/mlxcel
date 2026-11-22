@@ -179,6 +179,8 @@ mlxcel-server -m Qwen3.5-0.8B-4bit \
 
 See [Embeddings and reranking](docs/embeddings.md) for multimodal inputs, supported families, pooling, request schemas, and side-model serving.
 
+Typed decision models (named `choice`, `score`, `bool` and `multi_label` questions answered with calibrated probabilities) are served with `--decision-model` on `POST /v1/decisions` and run offline with `mlxcel decide`; see [Typed decisions](docs/decisions.md). The API is in place and decision families are being ported.
+
 ### Tag and redact entities
 
 `mlxcel tag` runs a BIO / BIOES token classifier (BERT or XLM-RoBERTa `ForTokenClassification`) and prints the tagged spans with character offsets plus a redacted copy of the text.
