@@ -748,6 +748,15 @@ pub enum WorkerShutdownError {
 /// Shared by every worker that must be joined before the process returns from
 /// `main`: the chat model worker and the audio, embedding, image, rerank and
 /// realtime side workers (#2738, #2745).
+///
+/// The watcher also releases the worker's MLX buffers once the join returns
+/// (#2399). `join` only completes after the worker's stack frame — and with it
+/// the loaded model and every array it owned — has been dropped, on the panic
+/// path too, so the buffers are already free and sitting in MLX's allocator
+/// cache. Clearing here reclaims them instead of leaving a whole model resident
+/// for the next load in the same process. One clear covers every worker
+/// constructor because every constructor goes through this function; the model
+/// worker's idle-sleep clear (`model_worker`) is a separate, still-needed site.
 pub(crate) fn observe_worker_exit(
     worker_handle: thread::JoinHandle<()>,
 ) -> (thread::JoinHandle<()>, Arc<WorkerExitObserver>) {
@@ -755,6 +764,15 @@ pub(crate) fn observe_worker_exit(
     let observer_for_thread = observer.clone();
     let watcher = thread::spawn(move || {
         let panic_message = worker_handle.join().err().map(worker_panic_message);
+        let before = mlxcel_core::memory::snapshot().cache_bytes;
+        mlxcel_core::memory::clear_cache();
+        let after = mlxcel_core::memory::snapshot().cache_bytes;
+        tracing::debug!(
+            cache_bytes_before = before,
+            cache_bytes_after = after,
+            released_bytes = before.saturating_sub(after),
+            "worker exited; cleared the MLX allocator cache"
+        );
         observer_for_thread.mark_observed(panic_message);
     });
     (watcher, observer)
