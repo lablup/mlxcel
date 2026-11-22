@@ -53,6 +53,7 @@ pub mod kokoro_tts;
 mod listen;
 pub mod local_media;
 pub mod logging;
+pub mod mcp;
 // `pub(crate)` so `crate::decision::media` reuses the guarded fetchers.
 pub(crate) mod media;
 mod media_net;
@@ -74,6 +75,7 @@ pub mod rerank_model;
 pub mod rerank_worker;
 pub mod responses_background_events;
 pub(crate) mod responses_compaction;
+pub(crate) mod responses_mcp_lowering;
 pub mod responses_store;
 pub mod responses_translator;
 pub mod router_cache;

@@ -71,7 +71,7 @@ pub(crate) fn run_serve(args: crate::ServeArgs) -> anyhow::Result<()> {
 async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // Native Windows is single-node only (#58): refuse distributed flags
     // before the model reference is resolved (and possibly downloaded).
-    mlxcel::server::ServerDistributedFlags {
+    let distributed_flags = mlxcel::server::ServerDistributedFlags {
         pp_auto: args.pp_auto.is_some(),
         pp_peer: args.pp_peer,
         distributed_config: args.distributed_config.is_some(),
@@ -82,8 +82,8 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         serving_bind: args.serving_bind.is_some(),
         pp_layers: args.pp_layers.is_some(),
         tp_size: args.tp_size,
-    }
-    .ensure_supported()?;
+    };
+    distributed_flags.ensure_supported()?;
     env_fallback_settings_endpoint(
         &mut args.settings,
         long_cli_flag_was_set("settings"),
@@ -247,6 +247,14 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         .ui_compat
         .webui_enabled()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // Server-side MCP tool loop (#1457): the server set parses here, before
+    // the model reference resolves, so a bad document fails in milliseconds.
+    let mcp = mlxcel::server::mcp::resolve_mcp_startup(&args.ui_compat)
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    if mcp.is_some() {
+        mlxcel::server::mcp::validate_mcp_single_node(distributed_flags.first_requested())
+            .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    }
     let image_token_bounds = args
         .multimodal_compat
         .image_token_bounds()
@@ -322,6 +330,13 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         && !has_model_source;
     if webui_enabled && router_mode {
         args.models_autoload = false;
+    }
+    if mcp.is_some() && router_mode {
+        anyhow::bail!(
+            "--mcp-tools is served by a single-model server only: the server-side MCP tool loop \
+             runs beside one loaded chat model. Start mlxcel-server with a model argument, or \
+             remove --mcp-tools and the MCP server configuration"
+        );
     }
     // #2825: `--image-model` with no model source serves image generation
     // alone. `build_startup_input` names any conflicting flag after folding in
@@ -631,6 +646,10 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         .ui_compat
         .webui_enabled()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // Server-side MCP tool loop (#1457): the server set parses here, before
+    // the model reference resolves, so a bad document fails in milliseconds.
+    let mcp = mlxcel::server::mcp::resolve_mcp_startup(&args.ui_compat)
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
 
     // Axis B (B8): resolve --lang-bias / --lang-bias-config early so
     // errors surface before the server starts. Empty resolution = None =
@@ -828,6 +847,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
             || std::env::var_os("MLXCEL_DECODE_TIMEOUT").is_some(),
         api_prefix: args.api_prefix,
         webui_enabled,
+        mcp,
         sse_ping_interval: args.sse_ping_interval,
         threads_http: args.threads_http,
         reuse_port: args.reuse_port,

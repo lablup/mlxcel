@@ -37,7 +37,12 @@
 //!   `response.function_call_arguments.done`
 //! - `response.reasoning_text.delta`, `response.reasoning_text.done`
 //!
-//! Reserved-for-Phase-2/3 events (audio, refusal, MCP, web/file search,
+//! - `response.mcp_list_tools.in_progress` / `.completed` / `.failed`,
+//!   `response.mcp_call.in_progress` / `.completed` / `.failed`,
+//!   `response.mcp_call_arguments.delta` / `.done`, only on a response the
+//!   server-side MCP tool loop produces (issue #1457)
+//!
+//! Reserved-for-Phase-2/3 events (audio, refusal, web/file search,
 //! code interpreter, image gen, custom tool) are not emitted.
 
 use serde::Serialize;
@@ -180,6 +185,58 @@ pub enum ResponseStreamEvent {
         content_index: usize,
         text: String,
     },
+    // MCP tool loop events (issue #1457). Each names the `mcp_list_tools` or
+    // `mcp_call` output item it reports on.
+    #[serde(rename = "response.mcp_list_tools.in_progress")]
+    McpListToolsInProgress {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_list_tools.completed")]
+    McpListToolsCompleted {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_list_tools.failed")]
+    McpListToolsFailed {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_call.in_progress")]
+    McpCallInProgress {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_call.completed")]
+    McpCallCompleted {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_call.failed")]
+    McpCallFailed {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_call_arguments.delta")]
+    McpCallArgumentsDelta {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+        delta: String,
+    },
+    #[serde(rename = "response.mcp_call_arguments.done")]
+    McpCallArgumentsDone {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+        arguments: String,
+    },
 }
 
 impl ResponseStreamEvent {
@@ -209,6 +266,20 @@ impl ResponseStreamEvent {
             }
             ResponseStreamEvent::ReasoningTextDelta { .. } => "response.reasoning_text.delta",
             ResponseStreamEvent::ReasoningTextDone { .. } => "response.reasoning_text.done",
+            ResponseStreamEvent::McpListToolsInProgress { .. } => {
+                "response.mcp_list_tools.in_progress"
+            }
+            ResponseStreamEvent::McpListToolsCompleted { .. } => {
+                "response.mcp_list_tools.completed"
+            }
+            ResponseStreamEvent::McpListToolsFailed { .. } => "response.mcp_list_tools.failed",
+            ResponseStreamEvent::McpCallInProgress { .. } => "response.mcp_call.in_progress",
+            ResponseStreamEvent::McpCallCompleted { .. } => "response.mcp_call.completed",
+            ResponseStreamEvent::McpCallFailed { .. } => "response.mcp_call.failed",
+            ResponseStreamEvent::McpCallArgumentsDelta { .. } => {
+                "response.mcp_call_arguments.delta"
+            }
+            ResponseStreamEvent::McpCallArgumentsDone { .. } => "response.mcp_call_arguments.done",
         }
     }
 
@@ -270,6 +341,30 @@ impl ResponseStreamEvent {
                 sequence_number, ..
             }
             | ResponseStreamEvent::ReasoningTextDone {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsInProgress {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsCompleted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsFailed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallInProgress {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallCompleted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallFailed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallArgumentsDelta {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallArgumentsDone {
                 sequence_number, ..
             } => *sequence_number,
         }
@@ -335,6 +430,30 @@ impl ResponseStreamEvent {
             }
             | ResponseStreamEvent::ReasoningTextDone {
                 sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsInProgress {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsCompleted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsFailed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallInProgress {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallCompleted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallFailed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallArgumentsDelta {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallArgumentsDone {
+                sequence_number, ..
             } => sequence_number,
         }
     }
@@ -389,6 +508,7 @@ mod tests {
                 total_tokens: 0,
                 input_tokens_details: None,
                 output_tokens_details: None,
+                mcp: None,
             },
             error: None,
             incomplete_details: None,

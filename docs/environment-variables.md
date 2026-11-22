@@ -76,6 +76,8 @@ Both server entry points accept the canonical llama-server b10621 variables belo
 | `LLAMA_ARG_HF_FILE` | `--hf-file` (always rejected) | — |
 | `LLAMA_ARG_MODEL_URL` | `--model-url` (always rejected) | — |
 | `LLAMA_ARG_DOCKER_REPO` | `--docker-repo` (always rejected) | — |
+| `LLAMA_ARG_MCP_SERVERS_CONFIG` | `--mcp-servers-config` (rejected without `--mcp-tools`) | none |
+| `LLAMA_ARG_MCP_SERVERS_JSON` | `--mcp-servers-json` (rejected without `--mcp-tools`) | none |
 
 `LLAMA_ARG_TIMEOUT` changed meaning in v0.7.0 (#1432). It is now the HTTP socket read/write timeout with llama-server's 3600-second default, matching b10621. The per-request decode watchdog it used to configure moved to `--decode-timeout` / `MLXCEL_DECODE_TIMEOUT`, with its 600-second default unchanged. Setting `--timeout` (or `LLAMA_ARG_TIMEOUT`) without also setting the decode watchdog logs a migration warning at startup.
 
@@ -84,6 +86,8 @@ Both server entry points accept the canonical llama-server b10621 variables belo
 `LLAMA_ARG_OFFLINE` is the one variable in this table that is not bound through clap either, for a different reason (#1434). `--offline` carries no value, and llama-server fires a value-less option from the environment only when the value is exactly `on`, `enabled`, `true`, or `1`; anything else, an empty value and `0` included, leaves the flag alone. mlxcel reproduces that set exactly rather than using a general boolean parser, so a variable inherited as `LLAMA_ARG_OFFLINE=0` does not pin a deployment offline and a value outside the set does not abort startup.
 
 `LLAMA_ARG_CORS_ORIGINS` and its mlxcel-native counterpart `MLXCEL_ALLOWED_ORIGINS` are read at runtime rather than through clap (#2664). `--cors-origins` and `--allowed-origins` are mutually exclusive, and clap counts a variable bound to one of them as if the flag had been typed, so `LLAMA_ARG_CORS_ORIGINS=... --allowed-origins ...` used to fail to parse. Now a flag on the command line wins: its own variable is unused, and the other side's variable is ignored with a warning naming it. With neither flag, whichever variable is set applies as before, and setting both stops startup with an error naming both. Passing both flags on the command line is still a parse error.
+
+`LLAMA_ARG_MCP_SERVERS_CONFIG` and `LLAMA_ARG_MCP_SERVERS_JSON` name the MCP servers of the server-side MCP tool loop (#1457). They take effect only when `--mcp-tools` is on the command line; set without it, either one fails startup, so a variable inherited from a llama.cpp deployment never starts a child process. `--mcp-tools` and the loop's bounds (`--mcp-max-tool-rounds`, `--mcp-tool-timeout`, `--mcp-max-output-bytes`) have no environment variable. MCP children do not inherit the server's environment: see [responses-api.md](responses-api.md#security).
 
 `HF_TOKEN` is a credential, so `--help` never renders its resolved value. `LLAMA_API_KEY`, `LLAMA_ARG_CORS_ORIGINS` and `MLXCEL_ALLOWED_ORIGINS` are not bound through clap at all, so they cannot be rendered either. Everything else in this table is printed by `--help` the way clap normally does.
 

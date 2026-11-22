@@ -1033,6 +1033,47 @@ pub(crate) fn response_input_item_size_bytes(item: &ResponseInputItem) -> usize 
         ResponseInputItem::Compaction { encrypted_content } => {
             32usize.saturating_add(str_size_bytes(encrypted_content))
         }
+        ResponseInputItem::McpListTools { server_label } => {
+            32usize.saturating_add(str_size_bytes(server_label))
+        }
+        ResponseInputItem::McpCall {
+            id,
+            server_label,
+            name,
+            arguments,
+            output,
+            error,
+            approval_request_id,
+        } => 96usize
+            .saturating_add(str_size_bytes(id))
+            .saturating_add(str_size_bytes(server_label))
+            .saturating_add(str_size_bytes(name))
+            .saturating_add(str_size_bytes(arguments))
+            .saturating_add(output.as_deref().map(str_size_bytes).unwrap_or(0))
+            .saturating_add(error.as_deref().map(str_size_bytes).unwrap_or(0))
+            .saturating_add(
+                approval_request_id
+                    .as_deref()
+                    .map(str_size_bytes)
+                    .unwrap_or(0),
+            ),
+        ResponseInputItem::McpApprovalRequest {
+            id,
+            server_label,
+            name,
+            arguments,
+        } => 64usize
+            .saturating_add(str_size_bytes(id))
+            .saturating_add(str_size_bytes(server_label))
+            .saturating_add(str_size_bytes(name))
+            .saturating_add(str_size_bytes(arguments)),
+        ResponseInputItem::McpApprovalResponse {
+            approval_request_id,
+            reason,
+            ..
+        } => 48usize
+            .saturating_add(str_size_bytes(approval_request_id))
+            .saturating_add(reason.as_deref().map(str_size_bytes).unwrap_or(0)),
     }
 }
 
@@ -1131,6 +1172,7 @@ mod tests {
                     total_tokens: 0,
                     input_tokens_details: None,
                     output_tokens_details: None,
+                    mcp: None,
                 },
                 error: None,
                 incomplete_details: None,

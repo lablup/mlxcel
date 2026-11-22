@@ -565,6 +565,10 @@ pub struct AppState {
     /// `conversation` field in Responses-API requests. `None` when the
     /// store is disabled.
     pub conversation_store: Option<Arc<ConversationStore>>,
+    /// MCP servers behind the server-side tool loop on `/v1/responses`
+    /// (issue #1457). `None` unless the operator passed `--mcp-tools`; while
+    /// it is `None` an `mcp` tool in a request is refused.
+    pub(crate) mcp: Option<Arc<super::mcp::McpRuntime>>,
     /// Audio-model provider serving the `/audio/*` endpoints. `None` until a
     /// speech-to-text or text-to-speech model is wired in; while it is `None`
     /// the audio routes return a structured `501 Not Implemented`.
@@ -812,6 +816,7 @@ impl AppState {
             reasoning_echo: Arc::new(super::reasoning_echo::ReasoningEchoStore::from_env()),
             responses_store: None,
             conversation_store: None,
+            mcp: None,
             audio_model: None,
             embedding_model: None,
             image_model: None,
@@ -885,6 +890,7 @@ impl AppState {
             reasoning_echo: Arc::new(super::reasoning_echo::ReasoningEchoStore::from_env()),
             responses_store: None,
             conversation_store: None,
+            mcp: None,
             audio_model: None,
             embedding_model: None,
             image_model: None,
@@ -949,6 +955,14 @@ impl AppState {
     #[must_use]
     pub fn with_responses_store(mut self, store: Option<Arc<ResponsesStore>>) -> Self {
         self.responses_store = store;
+        self
+    }
+
+    /// Attach the MCP runtime of the server-side tool loop (issue #1457).
+    /// `None` keeps the loop off.
+    #[must_use]
+    pub fn with_mcp(mut self, mcp: Option<Arc<super::mcp::McpRuntime>>) -> Self {
+        self.mcp = mcp;
         self
     }
 
