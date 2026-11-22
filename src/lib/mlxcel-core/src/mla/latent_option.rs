@@ -365,6 +365,14 @@ pub static EXPERIMENTAL_LATENT_NOTES: &[ExperimentalLatentNote] = &[
                (docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md)",
     },
     ExperimentalLatentNote {
+        families: &["longcat_flash_sparse"],
+        bits: &[4],
+        text: "LongCat-Flash-Lite-Sparse with an int4 latent showed 6 decided-position \
+               disagreements of 77 against the fp16 latent behind 3072 tokens, with flips up to \
+               3.56 logits, and moved perplexity by +16.3% (docs/benchmark_results/\
+               longcat-flash-sparse-m3ultra-2026-11-23.md)",
+    },
+    ExperimentalLatentNote {
         families: &[],
         bits: &[4],
         text: "a 4-bit latent on DeepSeek-V2-Lite had 0 decided disagreements but flipped the \
