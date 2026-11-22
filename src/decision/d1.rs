@@ -88,6 +88,10 @@ pub(crate) struct D1DecisionModel {
     tokenizer: MlxcelTokenizer,
     /// `tokenizer_config.json` `bos_token`, written at the head of the prompt.
     bos: String,
+    /// `text_config.max_position_embeddings`: the most prompt tokens (trunk
+    /// plus every question) a request may run, so a long state or a flood
+    /// of questions is a 400 rather than an unbounded KV cache and forward.
+    max_prompt_tokens: usize,
 }
 
 // SAFETY: `DecisionModel` is `Send` so the boxed scorer can be handed to the
@@ -117,6 +121,51 @@ fn read_bos_token(model_dir: &Path) -> String {
     }
 }
 
+/// Prompt cap when `config.json` names no context length: the 32k
+/// `text_config.max_position_embeddings` of the published d1-3B checkpoints.
+pub(crate) const DEFAULT_MAX_PROMPT_TOKENS: usize = 32_768;
+
+fn read_max_prompt_tokens(model_dir: &Path) -> usize {
+    std::fs::read_to_string(model_dir.join("config.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .as_ref()
+        .and_then(max_prompt_tokens_from_config)
+        .unwrap_or(DEFAULT_MAX_PROMPT_TOKENS)
+}
+
+/// `text_config.max_position_embeddings` (or a top-level one), when positive.
+pub(crate) fn max_prompt_tokens_from_config(config: &Value) -> Option<usize> {
+    config
+        .get("text_config")
+        .and_then(|text| text.get("max_position_embeddings"))
+        .or_else(|| config.get("max_position_embeddings"))
+        .and_then(Value::as_u64)
+        .filter(|&n| n > 0)
+        .and_then(|n| usize::try_from(n).ok())
+}
+
+/// Refuse a request whose prompt (the trunk once plus every question, the
+/// `usage.input_tokens` it would report) exceeds the model's context, before
+/// any forward runs. That bounds both the longest row, so the KV cache and
+/// one forward stay within what the model was trained for, and the total
+/// work, which the number of questions would otherwise grow without limit.
+pub(crate) fn check_prompt_length(
+    trunk_len: usize,
+    branches: &[Vec<i32>],
+    max_tokens: usize,
+) -> Result<(), DecisionError> {
+    let total = branches
+        .iter()
+        .fold(trunk_len, |sum, branch| sum.saturating_add(branch.len()));
+    if total > max_tokens {
+        return Err(DecisionError::InvalidInput(format!(
+            "the decision prompt (state and all questions) is {total} tokens, more than the model's {max_tokens}-token context"
+        )));
+    }
+    Ok(())
+}
+
 impl D1DecisionModel {
     /// Load a d1 checkpoint through the LFM2-VL loader.
     pub(crate) fn load(model_dir: &Path) -> Result<Self> {
@@ -131,10 +180,12 @@ impl D1DecisionModel {
             })?,
         );
         let bos = read_bos_token(model_dir);
+        let max_prompt_tokens = read_max_prompt_tokens(model_dir);
         Ok(Self {
             vlm,
             tokenizer,
             bos,
+            max_prompt_tokens,
         })
     }
 
@@ -149,6 +200,7 @@ impl D1DecisionModel {
         let (mut trunk, branches) =
             prompt_ids(&self.tokenizer, &self.bos, state, questions, images.len())?;
         if images.is_empty() {
+            check_prompt_length(trunk.len(), &branches, self.max_prompt_tokens)?;
             let ids = ids_array(&[trunk.clone()]);
             let embeds = self.vlm.text_model.input_embeddings(&ids);
             return Ok((trunk, branches, embeds));
@@ -167,6 +219,7 @@ impl D1DecisionModel {
             self.vlm.use_image_special_tokens,
         )
         .map_err(internal)?;
+        check_prompt_length(trunk.len(), &branches, self.max_prompt_tokens)?;
         let ids = ids_array(&[trunk.clone()]);
         let embeds = self
             .vlm
@@ -193,21 +246,20 @@ fn eval_caches(caches: &[Lfm2LayerCache]) {
     }
 }
 
-/// Log-probabilities over the vocabulary at row `r`, position `last[r]`, of
-/// `hidden` (`[rows, width, hidden]`), as one `Vec<f32>` per row. Logits are
-/// taken in float32, as upstream's `_logz` does.
+/// Log-probabilities over the vocabulary at each `(row, position)` of
+/// `hidden` (`[rows, width, hidden]`), as one `Vec<f32>` per pair. Logits
+/// are taken in float32, as upstream's `_logz` does.
 fn answer_slot_logprobs(
     text: &Lfm2Model,
     hidden: &MlxArray,
-    last: &[usize],
+    slots: &[(usize, usize)],
 ) -> Result<Vec<Vec<f32>>, DecisionError> {
     let shape = mlxcel_core::array_shape(hidden);
     let (rows, width, dim) = (shape[0], shape[1], shape[2]);
     let flat = mlxcel_core::reshape(hidden, &[rows * width, dim]);
-    let index: Vec<i32> = last
+    let index: Vec<i32> = slots
         .iter()
-        .enumerate()
-        .map(|(row, &pos)| row as i32 * width + pos as i32)
+        .map(|&(row, pos)| row as i32 * width + pos as i32)
         .collect();
     let index = mlxcel_core::from_slice_i32(&index, &[index.len() as i32]);
     let picked = mlxcel_core::take(&flat, &index, 0);
@@ -215,11 +267,11 @@ fn answer_slot_logprobs(
     let logz = mlxcel_core::subtract(&logits, &mlxcel_core::logsumexp_axis(&logits, -1, true));
     let values = mlxcel_core::utils::array_to_vec_f32(&logz);
     let vocab = *mlxcel_core::array_shape(&logz).last().unwrap_or(&0) as usize;
-    if vocab == 0 || values.len() != vocab * last.len() {
+    if vocab == 0 || values.len() != vocab * slots.len() {
         return Err(DecisionError::Internal(format!(
             "answer-slot logits have {} values for {} rows",
             values.len(),
-            last.len()
+            slots.len()
         )));
     }
     Ok(values.chunks(vocab).map(<[f32]>::to_vec).collect())
@@ -250,7 +302,7 @@ pub(crate) fn answer_logprobs(
     let mut caches = text.make_caches();
     if branches.is_empty() && trunk_len <= step {
         let hidden = text.forward_hidden_with_caches(trunk_embeds, &mut caches);
-        return answer_slot_logprobs(text, &hidden, &[trunk_len - 1]);
+        return answer_slot_logprobs(text, &hidden, &[(0, trunk_len - 1)]);
     }
     let dim = mlxcel_core::array_shape(trunk_embeds)[2];
     let chunk = |start: usize, end: usize| {
@@ -265,7 +317,7 @@ pub(crate) fn answer_logprobs(
     }
     let hidden = text.forward_hidden_with_caches(&chunk(start, trunk_len), &mut caches);
     if branches.is_empty() {
-        return answer_slot_logprobs(text, &hidden, &[trunk_len - start - 1]);
+        return answer_slot_logprobs(text, &hidden, &[(0, trunk_len - start - 1)]);
     }
     drop(hidden);
     eval_caches(&caches);
@@ -290,14 +342,42 @@ pub(crate) fn answer_logprobs(
             .map(|cache| cache.tile(rows.len() as i32))
             .collect::<Result<Vec<_>, _>>()
             .map_err(internal)?;
-        let embeds = text.input_embeddings(&ids_array(&rows));
-        let hidden = text.forward_hidden_with_caches(&embeds, &mut tiled);
-        let last: Vec<usize> = chunk.iter().map(|&j| lengths[j] - 1).collect();
-        for (&j, logz) in chunk
-            .iter()
-            .zip(answer_slot_logprobs(text, &hidden, &last)?)
-        {
-            out[j] = Some(logz);
+        // A batch wider than `step` (one long question runs alone however
+        // long it is) is read `step` positions at a time against the tiled
+        // cache, as the trunk is, so the activations of one forward stay
+        // bounded. The rows are causal, so each row's answer slot is read
+        // from the piece that holds it.
+        let ids = ids_array(&rows);
+        let batch = rows.len() as i32;
+        let mut start = 0;
+        while start < width {
+            let end = (start + step).min(width);
+            let piece = if start == 0 && end == width {
+                text.input_embeddings(&ids)
+            } else {
+                let piece_ids = mlxcel_core::slice(&ids, &[0, start as i32], &[batch, end as i32]);
+                text.input_embeddings(&piece_ids)
+            };
+            let hidden = text.forward_hidden_with_caches(&piece, &mut tiled);
+            let (rows_here, slots): (Vec<usize>, Vec<(usize, usize)>) = chunk
+                .iter()
+                .enumerate()
+                .filter(|&(_, &j)| (start..end).contains(&(lengths[j] - 1)))
+                .map(|(row, &j)| (j, (row, lengths[j] - 1 - start)))
+                .unzip();
+            if !slots.is_empty() {
+                for (j, logz) in rows_here
+                    .into_iter()
+                    .zip(answer_slot_logprobs(text, &hidden, &slots)?)
+                {
+                    out[j] = Some(logz);
+                }
+            }
+            drop(hidden);
+            if end < width {
+                eval_caches(&tiled);
+            }
+            start = end;
         }
     }
     out.into_iter()

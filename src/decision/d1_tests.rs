@@ -342,6 +342,73 @@ fn aliases_fall_back_to_the_first_unused_single_token() {
 }
 
 #[test]
+fn alias_fallback_encodes_each_pool_entry_at_most_once() {
+    // Every code and pool entry is two tokens except the pool's lowercase
+    // letters, so options fall back deep into the pool. A rescan from the
+    // start per option would encode ~150 entries per option; resuming the
+    // scan keeps the total near one pool sweep plus one call per option.
+    struct Counting(std::cell::Cell<usize>);
+    impl TokenEncoder for Counting {
+        fn encode_text(&self, text: &str) -> Result<Vec<u32>, DecisionError> {
+            self.0.set(self.0.get() + 1);
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if c.is_ascii_lowercase() => Ok(vec![c as u32]),
+                _ => Ok(vec![1, 2]),
+            }
+        }
+    }
+    let labels: Vec<String> = (0..40).map(|i| format!("label {i}")).collect();
+    let encoder = Counting(std::cell::Cell::new(0));
+    let err = aliases(&encoder, &labels).unwrap_err();
+    assert_eq!(
+        err,
+        DecisionError::InvalidInput("no single-token alias left for 40 options".to_string())
+    );
+    let pool_len = 26 + 100 + 26 + 200 + 26 * 26;
+    assert!(
+        encoder.0.get() <= labels.len() + pool_len,
+        "{} encoder calls",
+        encoder.0.get()
+    );
+    // The resumed scan still hands out the first unused entries in order.
+    let six: Vec<String> = (0..6).map(|i| format!("label {i}")).collect();
+    let codes: Vec<String> = aliases(&encoder, &six)
+        .unwrap()
+        .into_iter()
+        .map(|(code, _)| code)
+        .collect();
+    assert_eq!(codes, strings(&["a", "b", "c", "d", "e", "f"]));
+}
+
+#[test]
+fn prompts_longer_than_the_context_are_invalid_input() {
+    use super::d1::{check_prompt_length, max_prompt_tokens_from_config};
+    assert_eq!(
+        max_prompt_tokens_from_config(&json!({"text_config": {"max_position_embeddings": 128000}})),
+        Some(128_000)
+    );
+    assert_eq!(
+        max_prompt_tokens_from_config(&json!({"text_config": {}})),
+        None
+    );
+    // The trunk counts once and every question counts: 60 + 10 + 30 fits.
+    let branches = vec![vec![1; 10], vec![1; 30]];
+    assert!(check_prompt_length(60, &branches, 100).is_ok());
+    assert_eq!(
+        check_prompt_length(61, &branches, 100).unwrap_err(),
+        DecisionError::InvalidInput(
+            "the decision prompt (state and all questions) is 101 tokens, more than the model's 100-token context"
+                .to_string()
+        )
+    );
+    // Many short questions on a short state are refused by their sum.
+    assert!(check_prompt_length(1, &vec![vec![1; 2]; 49], 100).is_ok());
+    assert!(check_prompt_length(1, &vec![vec![1; 2]; 50], 100).is_err());
+    assert!(check_prompt_length(101, &[], 100).is_err());
+}
+
+#[test]
 fn aliases_fail_when_the_pool_is_exhausted() {
     // Every text is the same single token, so only the first option gets one.
     struct OneToken;
@@ -568,8 +635,9 @@ fn trunk_and_branches_match_single_passes_in_f32() {
     let trunk_embeds = embed(&model, &trunk);
     // One batch; then a budget that splits the rows across a batch boundary;
     // then one so small the trunk is read in 7-token chunks and every row
-    // runs alone.
-    for budget in [1 << 16, 2 * (trunk.len() + 7), 7] {
+    // runs alone; then one under the branch width, so each row is also read
+    // in 3-token pieces against its tiled cache.
+    for budget in [1 << 16, 2 * (trunk.len() + 7), 7, 3] {
         let together = answer_logprobs(&model, &trunk_embeds, &branches, budget).unwrap();
         assert_eq!(together.len(), branches.len());
         for (row, (got, want)) in together.iter().zip(&singles).enumerate() {

@@ -186,14 +186,22 @@ fn fallback_pool() -> &'static [String] {
 }
 
 /// A distinct single-token code for every label: `(code, token_id)`.
+///
+/// The fallback scan resumes where the previous one stopped: an entry it
+/// passed over was either not one token or already used, and both stay true
+/// as `used` only grows, so the result is the same as rescanning the pool
+/// from the start for every option. That keeps the encoder calls linear in
+/// the option count plus the pool size, where a rescan would run up to one
+/// pool sweep per option on a request with hundreds of unencodable labels.
 pub(crate) fn aliases(
     encoder: &dyn TokenEncoder,
     labels: &[String],
 ) -> Result<Vec<(String, u32)>, DecisionError> {
-    let mut used: Vec<u32> = Vec::with_capacity(labels.len());
+    let mut used: std::collections::HashSet<u32> =
+        std::collections::HashSet::with_capacity(labels.len());
     let mut out: Vec<(String, u32)> = Vec::with_capacity(labels.len());
     let take = |raw: &str,
-                used: &mut Vec<u32>,
+                used: &mut std::collections::HashSet<u32>,
                 out: &mut Vec<(String, u32)>|
      -> Result<bool, DecisionError> {
         let ids = encoder.encode_text(raw)?;
@@ -201,15 +209,19 @@ pub(crate) fn aliases(
             return Ok(false);
         }
         out.push((raw.to_string(), ids[0]));
-        used.push(ids[0]);
+        used.insert(ids[0]);
         Ok(true)
     };
+    let pool = fallback_pool();
+    let mut cursor = 0;
     for code in option_codes(labels) {
         if take(&code, &mut used, &mut out)? {
             continue;
         }
         let mut found = false;
-        for raw in fallback_pool() {
+        while cursor < pool.len() {
+            let raw = &pool[cursor];
+            cursor += 1;
             if take(raw, &mut used, &mut out)? {
                 found = true;
                 break;
