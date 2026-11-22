@@ -2282,6 +2282,14 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         .as_ref()
         .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("limite"));
 
+    // Decider-2b's output is a calibrated probability, not a token: its
+    // per-type temperatures were fitted on the bf16 weights the reference
+    // runs, and the f16 cast moves an isolated score level by 2e-3, the
+    // parity tolerance (issue #2359). Keep the checkpoint's bf16.
+    let is_decider2 = parsed_config
+        .as_ref()
+        .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("decider2"));
+
     let mut weights = if is_gemma4 {
         load_gemma4_text_weights(model_dir)?
     } else {
@@ -2398,6 +2406,7 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         && !is_bitnet
         && !is_nanochat
         && !is_limite
+        && !is_decider2
     {
         let had_bf16 = if keep_gemma3n_bf16 {
             convert_bf16_weights_with_keep(&mut weights, gemma3n_bf16_key)

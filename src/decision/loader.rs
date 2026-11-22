@@ -28,9 +28,7 @@
 //! 3. a constructor arm in `construct`, returning its
 //!    [`DecisionModel`](super::DecisionModel) scorer.
 //!
-//! Until the first family lands, the only variant is the `#[cfg(test)]` stub,
-//! so in a production build [`DecisionKind`] has no values and every load
-//! fails with "<path> is not a decision checkpoint".
+//! Families: Decider-2b (`decider2`, #2359), plus the `#[cfg(test)]` stub.
 
 use std::path::{Path, PathBuf};
 
@@ -45,6 +43,8 @@ use super::{DecisionModel, MediaKind, QuestionKind};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DecisionKind {
+    /// Decider-2b (`model_type: decider2`), `src/decision/decider2.rs`.
+    Decider2,
     /// The deterministic test model in `src/decision/stub.rs`.
     #[cfg(test)]
     Stub,
@@ -55,6 +55,7 @@ impl DecisionKind {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            DecisionKind::Decider2 => "decider2",
             #[cfg(test)]
             DecisionKind::Stub => "stub",
         }
@@ -86,6 +87,9 @@ pub fn detect_decision_kind(config: &Value) -> Result<DecisionKind> {
         .get("model_type")
         .and_then(Value::as_str)
         .unwrap_or("");
+    if model_type == super::decider2::DECIDER2_MODEL_TYPE {
+        return Ok(DecisionKind::Decider2);
+    }
     #[cfg(test)]
     if model_type == super::stub::STUB_MODEL_TYPE {
         return Ok(DecisionKind::Stub);
@@ -131,12 +135,9 @@ pub fn load_decision_model(model_path: &Path) -> Result<LoadedDecisionModel> {
 }
 
 /// Build the scorer for `kind` from the checkpoint at `model_dir`.
-// `model_dir` is unused while the only variant is the test stub, and in a
-// production build the match has no arms at all; the first family to land
-// reads its weights from it and this allow goes.
-#[cfg_attr(not(test), allow(unused_variables))]
 fn construct(kind: DecisionKind, model_dir: &Path) -> Result<Box<dyn DecisionModel>> {
     match kind {
+        DecisionKind::Decider2 => Ok(Box::new(super::decider2::Decider2Model::load(model_dir)?)),
         #[cfg(test)]
         DecisionKind::Stub => Ok(Box::new(super::stub::StubDecisionModel::load(model_dir))),
     }
@@ -149,3 +150,7 @@ pub(crate) fn declarations(model: &dyn DecisionModel) -> (Vec<QuestionKind>, Vec
         model.decision_media().to_vec(),
     )
 }
+
+#[cfg(test)]
+#[path = "loader_tests.rs"]
+mod tests;

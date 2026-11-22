@@ -2,7 +2,17 @@
 
 A decision model answers named questions about a state with calibrated probabilities instead of generated text: route a ticket to `billing`, rate a screenshot from `low` to `high`, say whether a transcript asks for a refund. mlxcel serves them through `POST /v1/decisions`, the `--decision-model` server flag, and the offline `mlxcel decide` command. The contract is mlx-vlm's shared decision API ([`decision.py`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/decision.py), [`decide.py`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/decide.py), [`server/decisions.py`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/server/decisions.py)), including its validation messages, so a client written against mlx-vlm sees the same responses.
 
-**Current status.** The API surface (request validation, the worker, the route, the server flag, the CLI) is implemented and tested against a stub model. No decision family is ported yet: Decider-2b (#2359), Clef (#2365) and the LiquidAI d1 models (#2367) each add a loader arm and a scorer. Until one lands, `--decision-model` and `mlxcel decide` refuse every checkpoint with `<path> is not a decision checkpoint`.
+**Current status.** One decision family is ported: Decider-2b (`decider2`, below). Clef (#2365) and the LiquidAI d1 models (#2367) each add a loader arm and a scorer. Any other checkpoint is refused by `--decision-model` and `mlxcel decide` with `<path> is not a decision checkpoint`.
+
+## Decision models
+
+| Family | `model_type` | Types | Media | Checkpoint |
+|--------|--------------|-------|-------|------------|
+| Decider-2b | `decider2` | `choice`, `score`, `bool` (`noul`) | none | [`nativ-community/decider-2b`](https://huggingface.co/nativ-community/decider-2b) |
+
+**Decider-2b** (`src/decision/decider2.rs`) is a Qwen3.5-2B finetune that reads label-token logits at an open answer slot; it never generates, and `mlxcel generate` refuses it with a pointer to `mlxcel decide`. Each question is its own prompt: `Context:\n<state>` (a string state as is, any other JSON value serialized like Python's `json.dumps(..., ensure_ascii=False)` after lists of 8 or more items get an `_index` per item), truncated to `decision_config.max_state_tokens` (32768) tokens, then the question, one `(A) option` line per option and `Answer: (`. Options are labelled `A` to `Z`, then `AA` onwards (255 labels); past 10 options each label token id is spliced in directly. Prompts are batched while `rows * longest <= 8192` tokens, right-padded to a multiple of 64, and the post-norm hidden at each prompt's last token is multiplied by the label tokens' embedding rows. Logits are divided by `decision_config.temperature_by_type` (`choice` 1.164, `score` 1.124, `noul` 1.624) before an f32 softmax. With `isolated_levels` (the published default), a `score` question is asked once per level as a yes/no "Does the proposed answer fit?" row, and level probabilities are the per-level `p(yes)` normalized by their sum.
+
+Model limits (400): `choice needs 2 to 255 options`, `score needs 2 to 10 levels`, `Question needs instructions` (`instructions`, falling back to `question`, must be non-empty). A state longer than `max_state_tokens` is truncated, not refused. Metadata: `confidence` (argmax probability) and `certainty` (`max(0, 1 - entropy / ln(n))`) on `choice` and `score`; `legend`, `level_fit` (per-level `p(yes)`) and `fit_mass` (their sum) on `score`. Probabilities are rounded to 4 places and the score `value` to 2. `usage.input_tokens` counts the prefix every prompt shares once. Upstream's packed mode (`independent=False`) and per-call `isolated` override are Python keyword arguments only and are not ported.
 
 ## Endpoints
 
@@ -120,6 +130,7 @@ The command prints the `POST /v1/decisions` response JSON, pretty-printed with n
 | `src/decision/validate.rs` | `validate_questions` (rules 1 to 8) and `validate_question_structure` (rule 4). |
 | `src/decision/answer.rs` | `Answer` constructors and the answer JSON. |
 | `src/decision/loader.rs` | `DecisionKind`, `detect_decision_kind`, `load_decision_model`. |
+| `src/decision/decider2.rs`, `decider2_prompt.rs`, `decider2_rows.rs` | Decider-2b: loading, batched scoring over `Qwen35Model::forward_prefill_hidden`, question rendering and prompt ids, row planning and answers. |
 | `src/decision/cli.rs`, `src/decision/media.rs` | `mlxcel decide` input preparation, audio decoding, CLI media loading. |
 | `src/server/decision_model.rs` | `DecisionModelProvider` and `DecisionProviderError`. |
 | `src/server/decision_worker.rs` | `DecisionWorkerProvider` (bounded queue, timeout, panic boundary) and startup loading. |
@@ -138,4 +149,4 @@ A model port adds three things and touches nothing else; the worker, route, CLI 
    - `predict` receives only questions that passed the shared validation, in request order, and must answer each one in that order. It checks its own limits (option counts, level counts, a rule such as d1-omni's images-or-audio exclusivity) and reports them as `DecisionError::InvalidInput`, which surfaces as 400.
    - Build answers with `Answer::choice`, `Answer::score`, `Answer::bool` and `Answer::multi_label`, which fill `confidence`, `legend` and the bool `value` the same way for every model. Put model-specific metrics in the `metadata` map passed to them.
 
-Tests for a port run the scorer through `decision::predict` with a real checkpoint, and the first family to land also validates `POST /v1/decisions` end to end.
+Tests for a port run the scorer through `decision::predict` with a real checkpoint against a fixture generated with mlx-vlm (`src/decision/decider2_parity_tests.rs` and `tests/fixtures/generate_decider2_fixture.py` are the template), and the port adds a row to the table under Decision models.

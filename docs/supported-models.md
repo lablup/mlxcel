@@ -874,6 +874,14 @@ Rerankers score how relevant a document is to a query and are served through `PO
 
 Only the cross-encoder kind is detectable from a checkpoint alone, so it is the only one `-m` can serve; `mlxcel arch` lists it as `SequenceClassifier` under the `Reranker` family. A classifier with more than one output label is rejected at load, and a `ForSequenceClassification` export on any other family (`DebertaV2ForSequenceClassification`, for instance) stays on the ordinary dispatch and is reported there. `Qwen/Qwen3-VL-Reranker-2B` ships a `modules.json` whose only extra module is `1_LogitScore` rather than a `Pooling` one, which is why detection does not mistake it for an embedding export.
 
+## Decision models
+
+Decision models answer typed questions (`choice`, `score`, `bool`) about a state with calibrated probabilities and never generate. They are served through `POST /v1/decisions` with `mlxcel-server --decision-model` and run offline with `mlxcel decide`; see [Typed decisions](decisions.md) for the request schema and each family's prompt and limits. `mlxcel generate` refuses them with a pointer to those entry points.
+
+| Family | `model_type` | Types | Media | Validated checkpoint | Status |
+|--------|--------------|-------|-------|----------------------|--------|
+| Decider-2b | `decider2` (`Qwen3_5ForCausalLM`) | `choice`, `score`, `bool` (`noul`) | none | [`nativ-community/decider-2b`](https://huggingface.co/nativ-community/decider-2b) (bf16) | supported. The Qwen3.5 text backbone (`Qwen35Model`) read at the answer slot through the tied embedding rows of 255 label tokens, with per-type temperatures and isolated score levels, ported from mlx-vlm's `decider2`. The checkpoint stays bf16 on Apple Silicon (no load-time f16 cast), because its temperatures were fitted on the bf16 weights. Prompt token ids match upstream exactly on a committed fixture; on a short request (3-option choice, isolated 4-level score, bool) every probability is within 1.4e-3 of mlx-vlm, and on a ~400-token JSON state (12-option choice, bool) within 1.5e-2 with the same answers, the bf16 accumulation spread upstream itself shows against an f32 run. |
+
 ## Token-classification and span-extraction models
 
 Token classifiers tag every token with a BIO or BIOES label and are run offline through `mlxcel tag`, which prints character spans and a redacted copy of the text; span extractors take their labels with every request and run through `mlxcel extract`. See [Token classification and span extraction](token-classification.md) for the pipelines, the flags and the output schemas. Detection for both commands reads `config.json` alone and does not change the generation, embedding or reranker routing above. The DeBERTa-v2 encoder that GLiNER2.5 introduces (`src/models/deberta_v2.rs`) carries no head of its own; `DebertaV2ForSequenceClassification` rerankers and DeBERTa embedders are not ported and stay on the ordinary dispatch.

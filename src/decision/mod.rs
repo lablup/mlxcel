@@ -56,6 +56,9 @@
 
 pub mod answer;
 pub mod cli;
+pub(crate) mod decider2;
+pub(crate) mod decider2_prompt;
+pub(crate) mod decider2_rows;
 pub mod loader;
 pub mod media;
 pub mod validate;
@@ -70,6 +73,14 @@ mod media_tests;
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "decider2_tests.rs"]
+mod decider2_tests;
+
+#[cfg(test)]
+#[path = "decider2_parity_tests.rs"]
+mod decider2_parity_tests;
 
 use serde_json::{Map, Value};
 use thiserror::Error;
