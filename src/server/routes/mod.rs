@@ -33,6 +33,7 @@ pub mod chat;
 pub(crate) mod chat_generation;
 pub mod completions;
 pub mod control;
+pub mod decisions;
 pub mod detokenize;
 pub mod embeddings;
 pub mod feature_disabled;
@@ -93,6 +94,7 @@ pub use cache::{cache_reset, cache_stats};
 pub use chat::chat_completions;
 pub use completions::completions;
 pub use control::chat_completions_control;
+pub use decisions::create_decisions;
 pub use detokenize::detokenize;
 pub use embeddings::{create_embeddings, native_embeddings};
 pub use feature_disabled::feature_disabled;
@@ -160,6 +162,10 @@ pub(crate) fn chat_unavailable_message(state: &AppState) -> Option<String> {
     if state.rerank_model.is_some() {
         routes.push("/v1/rerank");
         side_model_flags.push("--reranker-model <path>");
+    }
+    if state.decision_model.is_some() {
+        routes.push("/v1/decisions");
+        side_model_flags.push("--decision-model <path>");
     }
     if state.realtime_engine.is_some() {
         routes.push(realtime::REALTIME_PATH);

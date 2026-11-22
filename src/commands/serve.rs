@@ -678,6 +678,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
                 ("--webui", webui_enabled),
                 ("--embedding-model", args.embedding_model.is_some()),
                 ("--reranker-model", args.reranker_model.is_some()),
+                ("--decision-model", args.decision_model.is_some()),
                 ("--embeddings", embeddings),
                 ("--reranking", reranking),
             ],
@@ -721,6 +722,24 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
 
     let reranker_model_path = args
         .reranker_model
+        .as_deref()
+        .map(|value| {
+            resolve_model_source_with_options(
+                std::path::Path::new(value),
+                ModelSourceOptions {
+                    models_dir: args.model_store_root.as_deref(),
+                    revision: args.revision.as_deref(),
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                    cwd_models_dir: None,
+                },
+            )
+        })
+        .transpose()?;
+
+    // `--decision-model` accepts the same path-or-repo-id shapes as `-m`.
+    let decision_model_path = args
+        .decision_model
         .as_deref()
         .map(|value| {
             resolve_model_source_with_options(
@@ -841,6 +860,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         embedding_request_timeout_secs: args.embedding_request_timeout_secs,
         reranker_model_path,
         rerank_batch_size: args.rerank_batch_size,
+        decision_model_path,
         prefill_chunk_size: args.prefill_chunk_size,
         prefill_grant_interval: args.prefill_grant_interval,
         batch_size: args.batch_size,

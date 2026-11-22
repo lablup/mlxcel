@@ -69,6 +69,7 @@ fn sample_args() -> crate::ServeArgs {
         embedding_request_timeout_secs: 120,
         reranker_model: None,
         rerank_batch_size: 0,
+        decision_model: None,
         prefill_chunk_size: Some(512),
         prefill_grant_interval: None,
         batch_size: None,

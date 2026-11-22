@@ -134,6 +134,13 @@ Embeddings and Reranking:
   Full request schemas, examples, and supported families:
     https://github.com/lablup/mlxcel/blob/main/docs/embeddings.md
 
+Typed Decisions:
+  --decision-model <checkpoint> serves POST /v1/decisions beside the chat model
+  in -m: named choice, score, bool and multi_label questions answered with
+  calibrated probabilities. A load failure is a startup error.
+  Request schema and validation rules:
+    https://github.com/lablup/mlxcel/blob/main/docs/decisions.md
+
 Remote Pipeline Parallel Example (TCP):
   1. Generate a shared cluster config:
        CLUSTER_NAME=studio-pp \\
@@ -848,6 +855,19 @@ struct ServerArgs {
         value_name = "PATH_OR_REPO_ID"
     )]
     reranker_model: Option<String>,
+
+    /// Decision checkpoint to serve on /v1/decisions next to the chat model
+    ///
+    /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
+    /// `-m`). Loads on its own worker thread and answers typed questions
+    /// (`choice`, `score`, `bool`, `multi_label`) with calibrated
+    /// probabilities; `-m` keeps serving chat. A decision model is never
+    /// served through `-m`. A load failure, including a checkpoint that is not
+    /// a decision model, is a startup error. Queue depth and timeout use the
+    /// `--embedding-*` worker flags. Also reads `MLXCEL_DECISION_MODEL`. See
+    /// docs/decisions.md.
+    #[arg(long, env = "MLXCEL_DECISION_MODEL", value_name = "PATH_OR_REPO_ID")]
+    decision_model: Option<String>,
 
     /// Query/document pairs per rerank forward pass (0 = the reranker kind's default)
     ///
@@ -2741,6 +2761,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
                 ("--webui", webui_enabled),
                 ("--embedding-model", args.embedding_model.is_some()),
                 ("--reranker-model", args.reranker_model.is_some()),
+                ("--decision-model", args.decision_model.is_some()),
                 ("--embeddings", embeddings),
                 ("--reranking", reranking),
             ],
@@ -2856,6 +2877,24 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         })
         .transpose()?;
 
+    // `--decision-model` accepts the same path-or-repo-id shapes as `-m`.
+    let decision_model_path = args
+        .decision_model
+        .as_deref()
+        .map(|value| {
+            resolve_model_source_with_options(
+                std::path::Path::new(value),
+                ModelSourceOptions {
+                    models_dir: args.model_store_root.as_deref(),
+                    revision: args.revision.as_deref(),
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                    cwd_models_dir: None,
+                },
+            )
+        })
+        .transpose()?;
+
     // `--draft-model` accepts the same path-or-repo-id shapes as `-m`. The
     // target's `--revision` is not applied to it.
     let draft_model_path = args
@@ -2941,6 +2980,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         embedding_request_timeout_secs: args.embedding_request_timeout_secs,
         reranker_model_path,
         rerank_batch_size: args.rerank_batch_size,
+        decision_model_path,
         prefill_chunk_size: args.prefill_chunk_size,
         prefill_grant_interval: args.prefill_grant_interval,
         batch_size: args.batch_size,

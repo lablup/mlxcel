@@ -22,6 +22,7 @@ pub(crate) mod chat;
 mod chat_transcript;
 mod cli_server;
 mod cli_turn;
+pub(crate) mod decide;
 pub(crate) mod detect;
 pub(crate) mod download;
 pub(crate) mod embed;
@@ -51,6 +52,7 @@ pub(crate) mod tag;
 pub(crate) mod tune;
 
 pub(crate) use chat::{ChatOptions, run_chat};
+pub(crate) use decide::{DecideArgs, run_decide};
 pub(crate) use detect::run_detect;
 pub(crate) use download::run_download;
 pub(crate) use embed::{EmbedArgs, run_embed};

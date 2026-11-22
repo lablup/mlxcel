@@ -89,6 +89,7 @@ fn sample_input() -> ServerStartupInput {
         embedding_request_timeout_secs: 120,
         reranker_model_path: None,
         rerank_batch_size: 0,
+        decision_model_path: None,
         prefill_chunk_size: None,
         prefill_grant_interval: None,
         batch_size: None,

@@ -32,6 +32,8 @@ pub(crate) mod completion_control;
 mod config;
 pub mod conversation_store;
 mod cors;
+pub mod decision_model;
+pub mod decision_worker;
 pub(crate) mod diffusion_worker;
 pub(crate) mod dry_breakers;
 pub mod embedding_model;
@@ -51,7 +53,8 @@ pub mod kokoro_tts;
 mod listen;
 pub mod local_media;
 pub mod logging;
-mod media;
+// `pub(crate)` so `crate::decision::media` reuses the guarded fetchers.
+pub(crate) mod media;
 mod media_net;
 pub mod media_root;
 pub mod model_meta;
