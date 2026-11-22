@@ -41,6 +41,9 @@ use super::{parse_vlm_config, read_sanitized_vlm_config};
 ///   both the non-quantized bare `.weight` and the quantized triplet
 ///   (`.weight` + `.scales` + `.biases`); see
 ///   [`split_fused_gate_up_component`] for the per-component axis handling;
+/// * map a module-layout export's vision keys
+///   (`embed_vision.patch_*` / `pos_*`, `embed_vision.multimodal_embedder.*`)
+///   onto the checkpoint layout, see [`module_layout_vision_key`];
 /// * drop `embed_audio*` when `has_audio` is false.
 pub(crate) fn sanitize_gemma4_unified_weights(
     raw: mlxcel_core::weights::WeightMap,
@@ -265,7 +268,7 @@ fn normalize_gemma4_unified_key(key: &str) -> String {
     // → drop the leading `model.`.
     for mm_prefix in ["embed_vision.", "vision_embedder.", "embed_audio."] {
         if let Some(rest) = key.strip_prefix(&format!("model.{mm_prefix}")) {
-            return format!("{mm_prefix}{rest}");
+            return module_layout_vision_key(&format!("{mm_prefix}{rest}"));
         }
     }
     // Bare `language_model.X` (not already `language_model.model.X`) →
@@ -274,6 +277,38 @@ fn normalize_gemma4_unified_key(key: &str) -> String {
         && !rest.starts_with("model.")
     {
         return format!("language_model.model.{rest}");
+    }
+    module_layout_vision_key(key)
+}
+
+/// The vision embedder's own layers, which a module-layout export keeps under
+/// `embed_vision.` beside the projection.
+const VISION_EMBEDDER_LAYERS: [&str; 5] = [
+    "patch_dense",
+    "patch_ln1",
+    "patch_ln2",
+    "pos_embedding",
+    "pos_norm",
+];
+
+/// Map the vision keys of a module-layout export onto the checkpoint layout.
+///
+/// `google/gemma-4-12B-it` stores the vision embedder as
+/// `vision_embedder.{patch_dense, patch_ln1, patch_ln2, pos_embedding,
+/// pos_norm}` and its projection as `embed_vision.embedding_projection`. Some
+/// re-exports (the NVIDIA ModelOpt ones seen so far) write the other layout:
+/// the same layers under `embed_vision.` and the projection under
+/// `embed_vision.multimodal_embedder.`. Any other key is returned as it is.
+fn module_layout_vision_key(key: &str) -> String {
+    let Some(rest) = key.strip_prefix("embed_vision.") else {
+        return key.to_string();
+    };
+    if let Some(projection) = rest.strip_prefix("multimodal_embedder.") {
+        return format!("embed_vision.{projection}");
+    }
+    let layer = rest.split('.').next().unwrap_or_default();
+    if VISION_EMBEDDER_LAYERS.contains(&layer) {
+        return format!("vision_embedder.{rest}");
     }
     key.to_string()
 }

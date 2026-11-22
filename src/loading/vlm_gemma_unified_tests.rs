@@ -140,6 +140,123 @@ fn unified_key_normalization_prefixes() {
     );
 }
 
+/// A module-layout export (`r0b0tlab/gemma-4-12B-it-nvfp4` and the other
+/// ModelOpt exports of this model) keeps the vision embedder's layers under
+/// `embed_vision.` and the projection under `embed_vision.multimodal_embedder.`.
+/// The loader reads `vision_embedder.*` and `embed_vision.embedding_projection`,
+/// so such a checkpoint failed with `Weight not found:
+/// vision_embedder.patch_ln1.weight`.
+#[test]
+fn unified_key_normalization_maps_the_module_layout_vision_keys() {
+    for (key, want) in [
+        (
+            "model.embed_vision.patch_dense.weight",
+            "vision_embedder.patch_dense.weight",
+        ),
+        (
+            "model.embed_vision.patch_dense.bias",
+            "vision_embedder.patch_dense.bias",
+        ),
+        (
+            "model.embed_vision.patch_ln1.weight",
+            "vision_embedder.patch_ln1.weight",
+        ),
+        (
+            "model.embed_vision.patch_ln2.bias",
+            "vision_embedder.patch_ln2.bias",
+        ),
+        (
+            "model.embed_vision.pos_embedding",
+            "vision_embedder.pos_embedding",
+        ),
+        (
+            "model.embed_vision.pos_norm.weight",
+            "vision_embedder.pos_norm.weight",
+        ),
+        (
+            "model.embed_vision.multimodal_embedder.embedding_projection.weight",
+            "embed_vision.embedding_projection.weight",
+        ),
+        // The same keys without the leading `model.`.
+        (
+            "embed_vision.patch_ln1.weight",
+            "vision_embedder.patch_ln1.weight",
+        ),
+        (
+            "embed_vision.multimodal_embedder.embedding_projection.weight",
+            "embed_vision.embedding_projection.weight",
+        ),
+        // The checkpoint layout, the audio projection and a text key that
+        // merely contains a layer name are left alone.
+        (
+            "model.embed_vision.embedding_projection.weight",
+            "embed_vision.embedding_projection.weight",
+        ),
+        (
+            "model.vision_embedder.patch_ln1.weight",
+            "vision_embedder.patch_ln1.weight",
+        ),
+        (
+            "model.embed_audio.embedding_projection.weight",
+            "embed_audio.embedding_projection.weight",
+        ),
+        (
+            "model.language_model.layers.0.pos_norm.weight",
+            "language_model.model.layers.0.pos_norm.weight",
+        ),
+    ] {
+        assert_eq!(normalize_gemma4_unified_key(key), want, "{key}");
+    }
+}
+
+/// The whole map of a module-layout export comes out under the names the
+/// vision embedder and the projection are loaded from, with the values intact.
+#[test]
+fn unified_sanitize_maps_a_module_layout_vision_embedder() {
+    let module_layout = [
+        "model.embed_vision.patch_dense.weight",
+        "model.embed_vision.patch_dense.bias",
+        "model.embed_vision.patch_ln1.weight",
+        "model.embed_vision.patch_ln1.bias",
+        "model.embed_vision.patch_ln2.weight",
+        "model.embed_vision.patch_ln2.bias",
+        "model.embed_vision.pos_embedding",
+        "model.embed_vision.pos_norm.weight",
+        "model.embed_vision.pos_norm.bias",
+        "model.embed_vision.multimodal_embedder.embedding_projection.weight",
+    ];
+    let checkpoint_layout = [
+        "vision_embedder.patch_dense.weight",
+        "vision_embedder.patch_dense.bias",
+        "vision_embedder.patch_ln1.weight",
+        "vision_embedder.patch_ln1.bias",
+        "vision_embedder.patch_ln2.weight",
+        "vision_embedder.patch_ln2.bias",
+        "vision_embedder.pos_embedding",
+        "vision_embedder.pos_norm.weight",
+        "vision_embedder.pos_norm.bias",
+        "embed_vision.embedding_projection.weight",
+    ];
+    let mut raw = WeightMap::new();
+    for (index, key) in module_layout.iter().enumerate() {
+        raw.insert(
+            key.to_string(),
+            mlxcel_core::from_slice_f32(&[index as f32; 2], &[2]),
+        );
+    }
+    let out = sanitize_gemma4_unified_weights(raw, false);
+    assert_eq!(out.len(), checkpoint_layout.len());
+    for (index, key) in checkpoint_layout.iter().enumerate() {
+        let value = out.get(*key).unwrap_or_else(|| panic!("missing {key}"));
+        mlxcel_core::eval(value);
+        assert_eq!(
+            mlxcel_core::utils::array_to_vec_f32(value),
+            vec![index as f32; 2],
+            "{key}"
+        );
+    }
+}
+
 #[test]
 fn unified_sanitize_drops_rotary_and_lm_head() {
     let mut raw = WeightMap::new();

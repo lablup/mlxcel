@@ -1257,8 +1257,10 @@ fn stack_gemma4_per_expert_planes(weights: &mut mlxcel_core::weights::WeightMap)
 ///
 /// Used by: [`sanitize_gemma4_nvfp4_weights`], [`load_text_weights`] for
 /// every other text family whose config declares ModelOpt NVFP4 (issue #2351),
-/// and the Qwen3.5 VLM loader's `split_qwen3_5_vlm_weights`, which reads its
-/// checkpoint without going through `load_text_weights`
+/// and the VLM loaders that read their checkpoint without going through
+/// `load_text_weights`: `split_qwen3_5_vlm_weights`, `prepare_qwen2_5_vl_weights`,
+/// `prepare_gemma3_vlm_weights` and the Gemma 4 Unified route's
+/// `resolve_and_sanitize_gemma4_unified_weights`
 pub(crate) fn sanitize_modelopt_nvfp4_weights(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
