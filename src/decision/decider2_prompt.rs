@@ -332,17 +332,27 @@ impl Decider2Prompter {
             .map_err(|error| DecisionError::Internal(format!("tokenizer: {error}")))
     }
 
-    /// Upstream's `_prompt`: the truncated context, the question, one line
-    /// per option and the open answer slot. Past 10 options each label id is
-    /// spliced in directly so it cannot merge with its neighbours.
+    /// The ids of `"Context:\n" + context`, truncated to `max_state_tokens`.
+    ///
+    /// Every row of a request shares them, so a request encodes its state
+    /// once rather than once per question.
+    pub(crate) fn context_ids(&self, context: &str) -> Result<Vec<u32>, DecisionError> {
+        let mut ids = self.encode(&format!("Context:\n{context}"))?;
+        ids.truncate(self.max_state_tokens);
+        Ok(ids)
+    }
+
+    /// Upstream's `_prompt`: the truncated context (from
+    /// [`Self::context_ids`]), the question, one line per option and the open
+    /// answer slot. Past 10 options each label id is spliced in directly so
+    /// it cannot merge with its neighbours.
     pub(crate) fn prompt(
         &self,
-        context: &str,
+        context_ids: &[u32],
         instruction: &str,
         options: &[String],
     ) -> Result<Vec<u32>, DecisionError> {
-        let mut ids = self.encode(&format!("Context:\n{context}"))?;
-        ids.truncate(self.max_state_tokens);
+        let mut ids = context_ids.to_vec();
         let head = format!("\n\nQuestion: {instruction}\nOptions:");
         let tail = "\nAnswer: (";
         if options.len() <= INLINE_OPTIONS {

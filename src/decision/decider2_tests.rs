@@ -24,11 +24,12 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
+use super::decider2::{DecisionSettings, build_prompts};
 use super::decider2_prompt::{
     Decider2Prompter, python_float, python_json, render_question, render_state,
 };
 use super::decider2_rows::{
-    Slot, Temperatures, answer, group_rows, input_tokens, padded_length, plan_rows,
+    Row, Slot, Temperatures, answer, group_rows, input_tokens, padded_length, plan_rows,
 };
 use super::{Answer, DecisionError, MediaPresence, Question, QuestionKind, validate_questions};
 
@@ -377,8 +378,9 @@ fn prompt_ids_match_upstream() {
         let context = render_state(Some(&case["state"]));
         let (rows, _) = plan_rows(&[rendered], &temperatures(), case["level"].is_number());
         let row = case["level"].as_u64().map_or(0, |level| level as usize);
+        let context_ids = prompter.context_ids(&context).expect("context");
         let ids = prompter
-            .prompt(&context, &rows[row].instruction, &rows[row].options)
+            .prompt(&context_ids, &rows[row].instruction, &rows[row].options)
             .expect("prompt");
         let expected: Vec<u32> = serde_json::from_value(case["ids"].clone()).expect("ids");
         assert_eq!(ids, expected, "{}", case["name"]);
@@ -393,10 +395,82 @@ fn long_state_is_truncated_not_refused() {
     let prompter = Decider2Prompter::load(&dir, 16).expect("tokenizer");
     let state = "word ".repeat(500);
     let options = ["a".to_string(), "b".to_string()];
-    let ids = prompter.prompt(&state, "Pick", &options).expect("prompt");
+    let context_ids = prompter.context_ids(&state).expect("context");
+    let ids = prompter
+        .prompt(&context_ids, "Pick", &options)
+        .expect("prompt");
     let tail = prompter
         .encode("\n\nQuestion: Pick\nOptions:\n(A) a\n(B) b\nAnswer: (")
         .expect("tail");
     assert_eq!(ids.len(), 16 + tail.len());
     assert_eq!(&ids[16..], tail.as_slice());
+}
+
+fn two_option_row(instruction: &str) -> Row {
+    Row {
+        instruction: instruction.to_string(),
+        options: vec!["a".to_string(), "b".to_string()],
+        temperature: 1.0,
+    }
+}
+
+/// The shared state is encoded once and every row matches a one-row prompt.
+#[test]
+fn build_prompts_shares_the_state_encoding() {
+    let Some(dir) = checkpoint(false) else {
+        return;
+    };
+    let prompter = Decider2Prompter::load(&dir, 32768).expect("tokenizer");
+    let rows = [two_option_row("First?"), two_option_row("Second?")];
+    let prompts = build_prompts(&prompter, "some state", &rows, 1 << 16, 1 << 16).expect("fits");
+    let context = prompter.context_ids("some state").expect("context");
+    for (row, ids) in rows.iter().zip(&prompts) {
+        let alone = prompter
+            .prompt(&context, &row.instruction, &row.options)
+            .expect("prompt");
+        assert_eq!(ids, &alone);
+    }
+}
+
+/// Many questions over one state, or one oversized question, are refused as
+/// invalid input instead of being queued for prefill.
+#[test]
+fn build_prompts_bounds_request_and_row_tokens() {
+    let Some(dir) = checkpoint(false) else {
+        return;
+    };
+    let prompter = Decider2Prompter::load(&dir, 32768).expect("tokenizer");
+    let state = "word ".repeat(200);
+    let one = build_prompts(&prompter, &state, &[two_option_row("Q?")], 1 << 16, 1 << 16)
+        .expect("one row fits");
+    let per_row = one[0].len();
+    let rows: Vec<Row> = (0..10).map(|_| two_option_row("Q?")).collect();
+    assert_eq!(
+        build_prompts(&prompter, &state, &rows, 1 << 16, per_row * 10)
+            .expect("exactly at the budget")
+            .len(),
+        10
+    );
+    match build_prompts(&prompter, &state, &rows, 1 << 16, per_row * 10 - 1) {
+        Err(DecisionError::InvalidInput(message)) => {
+            assert!(message.contains("prompt tokens in total"), "{message}");
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+    let long = two_option_row(&"why ".repeat(5000));
+    match build_prompts(&prompter, "s", &[long], 1024, 1 << 20) {
+        Err(DecisionError::InvalidInput(message)) => {
+            assert!(message.contains("at most 1024"), "{message}");
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}
+
+#[test]
+fn decision_config_rejects_unusable_temperatures() {
+    let config = |temperature: Value, by_type: Value| json!({"decision_config": {"temperature": temperature, "temperature_by_type": by_type}});
+    assert!(DecisionSettings::from_config(&config(json!(1.1), json!({"choice": 1.2}))).is_ok());
+    assert!(DecisionSettings::from_config(&config(json!(0.0), json!({}))).is_err());
+    assert!(DecisionSettings::from_config(&config(json!(-1.0), json!({}))).is_err());
+    assert!(DecisionSettings::from_config(&config(json!(1.0), json!({"score": 0.0}))).is_err());
 }

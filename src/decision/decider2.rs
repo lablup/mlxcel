@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -61,6 +61,57 @@ fn default_max_state_tokens() -> usize {
     32768
 }
 
+/// Most prompt tokens one request may score, summed over its rows.
+///
+/// `max_state_tokens` bounds the state in each row, but not how many rows a
+/// request asks for: every question (and every isolated score level) repeats
+/// the state, so a 2 MB body of short questions over a 32k-token state would
+/// otherwise queue billions of prefill tokens on the one decision worker.
+/// 2^20 still scores 32 questions over a full 32768-token state.
+pub(crate) const MAX_REQUEST_TOKENS: usize = 1 << 20;
+const _: () = assert!(MAX_REQUEST_TOKENS >= 32 * 32768);
+
+/// Row length cap when `config.json` has no `max_position_embeddings`.
+const DEFAULT_MAX_ROW_TOKENS: usize = 262_144;
+
+/// Encode every row's prompt, refusing a request whose rows exceed
+/// `max_row_tokens` each or `max_request_tokens` together.
+///
+/// The state is encoded once and shared. Encoding stops at the first row
+/// past either limit, so a refused request never holds more than the budget
+/// in prompt ids. Both refusals are [`DecisionError::InvalidInput`] (a 400):
+/// the instruction and option texts are not truncated, so only the request
+/// can make a row too long.
+pub(crate) fn build_prompts(
+    prompter: &Decider2Prompter,
+    context: &str,
+    rows: &[Row],
+    max_row_tokens: usize,
+    max_request_tokens: usize,
+) -> Result<Vec<Vec<u32>>, DecisionError> {
+    let context_ids = prompter.context_ids(context)?;
+    let mut prompts = Vec::with_capacity(rows.len().min(max_request_tokens));
+    let mut total = 0usize;
+    for row in rows {
+        let ids = prompter.prompt(&context_ids, &row.instruction, &row.options)?;
+        if ids.len() > max_row_tokens {
+            return Err(DecisionError::InvalidInput(format!(
+                "A question's prompt is {} tokens; this model reads at most {max_row_tokens}",
+                ids.len()
+            )));
+        }
+        total = total.saturating_add(ids.len());
+        if total > max_request_tokens {
+            return Err(DecisionError::InvalidInput(format!(
+                "The questions need more than {max_request_tokens} prompt tokens in total; \
+                 send fewer questions or a shorter state"
+            )));
+        }
+        prompts.push(ids);
+    }
+    Ok(prompts)
+}
+
 /// `config.json` `decision_config`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct DecisionSettings {
@@ -83,7 +134,15 @@ impl DecisionSettings {
         let section = config
             .get("decision_config")
             .ok_or_else(|| anyhow!("decider2 config.json has no decision_config"))?;
-        serde_json::from_value(section.clone()).context("parsing decider2 decision_config")
+        let settings: Self =
+            serde_json::from_value(section.clone()).context("parsing decider2 decision_config")?;
+        let positive = |value: f32| value.is_finite() && value > 0.0;
+        if !positive(settings.temperature)
+            || !settings.temperature_by_type.values().all(|t| positive(*t))
+        {
+            bail!("decider2 decision_config temperatures must be finite and positive");
+        }
+        Ok(settings)
     }
 
     fn temperatures(&self) -> Temperatures {
@@ -102,6 +161,9 @@ pub(crate) struct Decider2Model {
     label_weights_t: UniquePtr<MlxArray>,
     settings: DecisionSettings,
     pad_token_id: i32,
+    /// Longest prompt one row may be: the backbone's
+    /// `max_position_embeddings`.
+    max_row_tokens: usize,
 }
 
 // SAFETY: the decision worker and `mlxcel decide` both build the scorer and
@@ -144,6 +206,12 @@ impl Decider2Model {
         let settings = DecisionSettings::from_config(&config)?;
         let prompter = Decider2Prompter::load(model_dir, settings.max_state_tokens)?;
         let pad_token_id = pad_token_id(model_dir, &config, &prompter);
+        let max_row_tokens = config
+            .get("max_position_embeddings")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(DEFAULT_MAX_ROW_TOKENS);
         let (backbone, _) =
             Qwen35Model::load(model_dir).map_err(|error| anyhow!("decider2 backbone: {error}"))?;
         let ids: Vec<i32> = prompter
@@ -162,6 +230,7 @@ impl Decider2Model {
             label_weights_t,
             settings,
             pad_token_id,
+            max_row_tokens,
         })
     }
 
@@ -247,13 +316,13 @@ impl DecisionModel for Decider2Model {
             &self.settings.temperatures(),
             self.settings.isolated_levels,
         );
-        let prompts: Vec<Vec<u32>> = rows
-            .iter()
-            .map(|row| {
-                self.prompter
-                    .prompt(&context, &row.instruction, &row.options)
-            })
-            .collect::<Result<_, _>>()?;
+        let prompts = build_prompts(
+            &self.prompter,
+            &context,
+            &rows,
+            self.max_row_tokens,
+            MAX_REQUEST_TOKENS,
+        )?;
         let probabilities = self.score_rows(&prompts, &rows)?;
         let answers = questions
             .iter()
