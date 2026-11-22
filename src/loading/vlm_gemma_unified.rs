@@ -166,6 +166,8 @@ fn is_per_expert_scale(component: &str) -> bool {
 /// Resolve the per-expert NVFP4 tensor scales against the config on the
 /// checkpoint's own key names, then sanitize (issue #2444). The flag pass
 /// must see the raw keys, since the config names the paths the export wrote.
+/// Last, an NVFP4 export's quantized linears (ModelOpt triplets, or the same
+/// planes under compressed-tensors' names) are repacked to MLX native NVFP4.
 ///
 /// Used by: [`load_gemma4_unified`]
 pub(crate) fn resolve_and_sanitize_gemma4_unified_weights(
@@ -174,7 +176,14 @@ pub(crate) fn resolve_and_sanitize_gemma4_unified_weights(
     has_audio: bool,
 ) -> Result<mlxcel_core::weights::WeightMap, String> {
     models::switch_layers::apply_native_global_scale_flags(&mut raw, Some(config))?;
-    Ok(sanitize_gemma4_unified_weights(raw, has_audio))
+    let mut weights = sanitize_gemma4_unified_weights(raw, has_audio);
+    // An NVFP4 export from NVIDIA ModelOpt or compressed-tensors stores each
+    // quantized linear as a triplet of packed codes, block scales and a tensor
+    // scale; repack them to MLX native NVFP4, as `load_gemma4_vlm` does for
+    // Gemma 4. It runs on the sanitized key names and is a no-op for a
+    // checkpoint without such triplets.
+    models::sanitize_modelopt_nvfp4_weights(&mut weights, Some(config))?;
+    Ok(weights)
 }
 
 /// Map a matched component to the suffix written under `switch_glu`. The bare

@@ -8,8 +8,9 @@
 //   - Added output type template parameter V (separate from accumulation type U)
 //   - Kernels write cast_to<V>(accumulated) to output, enabling fp32
 //     accumulation with bf16 output for Sum/Prod reductions
-//   - Dispatch code passes T (input type) as output type for final writes,
-//     U (accumulation type) for two-pass intermediates
+//   - Dispatch code passes ReduceOutput<OP, T> as output type for final
+//     writes (T for bf16 Sum/Prod, the accumulation type otherwise), U
+//     (accumulation type) for two-pass intermediates
 //   - Two-pass reduction uses fp32 intermediate for bf16 precision
 
 #include <numeric>
@@ -310,15 +311,17 @@ void col_reduce_looped(
         constexpr int BN = 32;
         dim3 grid = output_grid_for_col_reduce(out, args, BN);
         int blocks = BM * BN / N_READS;
-        // Output type is T (matches input dtype = out.dtype())
+        // The output type follows the output dtype, which is not the input
+        // dtype for sum(bool), any(float32) and the like.
+        using V = typename cu::ReduceOutput<OP, T>::type;
         auto kernel =
-            cu::col_reduce_looped<T, U, T, OP, reduce_ndim(), BM, BN, N_READS>;
+            cu::col_reduce_looped<T, U, V, OP, reduce_ndim(), BM, BN, N_READS>;
         encoder.add_kernel_node(
             kernel,
             grid,
             blocks,
             gpu_ptr<T>(in),
-            gpu_ptr<T>(out),
+            gpu_ptr<V>(out),
             static_cast<cu::ColReduceArgs>(args),
             out.size() / args.reduction_stride);
       });
@@ -349,14 +352,15 @@ void col_reduce_small(
       constexpr int N_READS = 16 / sizeof(T);
       auto tmp_grid = get_2d_grid_dims(out.shape(), out.strides());
       auto [grid, block] = get_grid_and_block(tmp_grid.x, tmp_grid.y, 1);
-      // Output type is T (matches input dtype = out.dtype())
-      auto kernel = cu::col_reduce_small<T, U, T, OP, N_READS>;
+      // The output type follows the output dtype.
+      using V = typename cu::ReduceOutput<OP, T>::type;
+      auto kernel = cu::col_reduce_small<T, U, V, OP, N_READS>;
       encoder.add_kernel_node(
           kernel,
           grid,
           block,
           gpu_ptr<T>(in),
-          gpu_ptr<T>(out),
+          gpu_ptr<V>(out),
           static_cast<cu::ColReduceArgs>(args),
           out.size());
     });
@@ -455,7 +459,7 @@ void col_reduce_two_pass(
               out.size() / args.reduction_stride);
         }
 
-        // --- Second pass: U intermediate -> T output ---
+        // --- Second pass: U intermediate -> V output ---
         {
           // Prepare the reduction arguments for the 2nd pass
           cu::ColReduceArgs second_args = args;
@@ -480,11 +484,12 @@ void col_reduce_two_pass(
                     output_grid_for_col_reduce(out, second_args, BN);
                 int blocks = BM * BN / N_READS;
 
-                // Second pass: U input, U accumulation, T output
+                // Second pass: U input, U accumulation, V output
+                using V = typename cu::ReduceOutput<OP, T>::type;
                 auto kernel = cu::col_reduce_looped<
                     U,
                     U,
-                    T,
+                    V,
                     OP,
                     reduce_ndim2(),
                     BM,
@@ -495,7 +500,7 @@ void col_reduce_two_pass(
                     grid,
                     blocks,
                     gpu_ptr<U>(intermediate),
-                    gpu_ptr<T>(out),
+                    gpu_ptr<V>(out),
                     second_args,
                     second_args.reduction_stride);
               });

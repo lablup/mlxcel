@@ -698,3 +698,77 @@ fn qwen3_next_router_gate_loads_its_own_affine_layout() {
         .expect("a matching declared pair loads unchanged");
     assert_eq!(gate.quantized_weight().map(|q| q.bits), Some(8));
 }
+
+/// Qwen3-Next has the same per-expert stacking pass as Qwen3.5: a repacked
+/// NVFP4 export's per-expert tensor scales are stacked into the output
+/// multiplier instead of being left behind, where the expert loader refuses
+/// the plane.
+#[test]
+fn qwen3_next_sanitize_stacks_per_expert_nvfp4_tensor_scales() {
+    use crate::models::switch_layers::{
+        expect_native_nvfp4_load, insert_modelopt_expert_plane, stacked_inv_global_scale,
+    };
+
+    let config: Qwen3NextConfig = serde_json::from_value(serde_json::json!({
+        "model_type": "qwen3_next",
+        "hidden_size": 64,
+        "num_hidden_layers": 1,
+        "intermediate_size": 32,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 32,
+        "linear_num_value_heads": 2,
+        "linear_num_key_heads": 1,
+        "linear_key_head_dim": 32,
+        "linear_value_head_dim": 32,
+        "linear_conv_kernel_dim": 4,
+        "num_experts": 2,
+        "num_experts_per_tok": 1,
+        "decoder_sparse_step": 1,
+        "moe_intermediate_size": 32,
+        "shared_expert_intermediate_size": 32,
+        "vocab_size": 32,
+        "tie_word_embeddings": false,
+    }))
+    .expect("test config must parse");
+    let mut weights = WeightMap::new();
+    for e in 0..2usize {
+        for (j, (proj, out, input)) in [
+            ("gate_proj", 32, 64),
+            ("up_proj", 32, 64),
+            ("down_proj", 64, 32),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_modelopt_expert_plane(
+                &mut weights,
+                &format!("model.layers.0.mlp.experts.{e}.{proj}"),
+                out,
+                input,
+                (1 + e + j) as f32 * 0.5,
+                (e * 3 + j) as u32,
+            );
+        }
+    }
+
+    let weights = Qwen3NextModel::sanitize_weights(weights, &config);
+
+    let prefix = "model.layers.0.mlp.switch_mlp";
+    for (j, proj) in ["gate_proj", "up_proj", "down_proj"]
+        .into_iter()
+        .enumerate()
+    {
+        let want: Vec<f32> = (0..2).map(|e| (1 + e + j) as f32 * 0.5).collect();
+        assert_eq!(
+            stacked_inv_global_scale(&weights, &format!("{prefix}.{proj}")),
+            want
+        );
+    }
+    assert!(!weights.keys().any(|k| k.contains(".experts.")));
+    expect_native_nvfp4_load(
+        super::SwitchGLU::from_weights(&weights, &config, prefix),
+        prefix,
+        "the stacked planes load through the Qwen3-Next expert block",
+    );
+}

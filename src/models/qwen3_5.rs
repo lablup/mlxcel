@@ -44,9 +44,7 @@ use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{
-    PrefillAttention, create_causal_mask, prefill_causal_mask, silu, stack_arrays,
-};
+use mlxcel_core::utils::{PrefillAttention, create_causal_mask, prefill_causal_mask, silu};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -4090,101 +4088,31 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
         // (gate_proj/up_proj/down_proj since #588); w1->gate, w3->up, w2->down
         // (issue #670: stacking into the legacy w1/w2/w3 slots left every
         // qwen3.5-MoE checkpoint failing with "Missing weight: ...gate_proj").
+        let experts = format!("model.layers.{l}.mlp.experts");
         for (src_proj, dst_proj) in [("w1", "gate_proj"), ("w2", "down_proj"), ("w3", "up_proj")] {
-            let mut expert_weights: Vec<UniquePtr<MlxArray>> = Vec::new();
-            let mut expert_scales: Vec<UniquePtr<MlxArray>> = Vec::new();
-            let mut expert_biases: Vec<UniquePtr<MlxArray>> = Vec::new();
-
-            let mut e = 0;
-            while let Some(w) = weights.remove(&format!(
-                "model.layers.{}.mlp.experts.{}.{}.weight",
-                l, e, src_proj
-            )) {
-                expert_weights.push(w);
-                if let Some(s) = weights.remove(&format!(
-                    "model.layers.{}.mlp.experts.{}.{}.scales",
-                    l, e, src_proj
-                )) {
-                    expert_scales.push(s);
-                }
-                if let Some(b) = weights.remove(&format!(
-                    "model.layers.{}.mlp.experts.{}.{}.biases",
-                    l, e, src_proj
-                )) {
-                    expert_biases.push(b);
-                }
-                e += 1;
-            }
-
-            if !expert_weights.is_empty() {
-                let stacked = stack_arrays(&expert_weights, 0);
-                weights.insert(format!("{}.{}.weight", base, dst_proj), stacked);
-
-                if !expert_scales.is_empty() {
-                    let stacked = stack_arrays(&expert_scales, 0);
-                    weights.insert(format!("{}.{}.scales", base, dst_proj), stacked);
-                }
-
-                if !expert_biases.is_empty() {
-                    let stacked = stack_arrays(&expert_biases, 0);
-                    weights.insert(format!("{}.{}.biases", base, dst_proj), stacked);
-                }
-            }
+            crate::models::switch_layers::drain_numbered_expert_planes(
+                &mut weights,
+                &experts,
+                src_proj,
+                &format!("{base}.{dst_proj}"),
+            );
         }
 
         // Handle per-expert gate_proj/up_proj/down_proj naming variant.
         // Checkpoints that store experts under `experts.{e}.gate_proj.weight`
         // instead of `experts.{e}.w1.weight` use this layout; the names map
         // straight onto the block's own gate/up/down slots (issue #670).
-        for (src_proj, dst_proj) in [
-            ("gate_proj", "gate_proj"),
-            ("up_proj", "up_proj"),
-            ("down_proj", "down_proj"),
-        ] {
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
             // Skip if this target slot is already populated by the w1/w2/w3 pass above.
-            if weights.contains_key(format!("{}.{}.weight", base, dst_proj).as_str()) {
+            if weights.contains_key(format!("{}.{}.weight", base, proj).as_str()) {
                 continue;
             }
-
-            let mut expert_weights: Vec<UniquePtr<MlxArray>> = Vec::new();
-            let mut expert_scales: Vec<UniquePtr<MlxArray>> = Vec::new();
-            let mut expert_biases: Vec<UniquePtr<MlxArray>> = Vec::new();
-
-            let mut e = 0;
-            while let Some(w) = weights.remove(&format!(
-                "model.layers.{}.mlp.experts.{}.{}.weight",
-                l, e, src_proj
-            )) {
-                expert_weights.push(w);
-                if let Some(s) = weights.remove(&format!(
-                    "model.layers.{}.mlp.experts.{}.{}.scales",
-                    l, e, src_proj
-                )) {
-                    expert_scales.push(s);
-                }
-                if let Some(b) = weights.remove(&format!(
-                    "model.layers.{}.mlp.experts.{}.{}.biases",
-                    l, e, src_proj
-                )) {
-                    expert_biases.push(b);
-                }
-                e += 1;
-            }
-
-            if !expert_weights.is_empty() {
-                let stacked = stack_arrays(&expert_weights, 0);
-                weights.insert(format!("{}.{}.weight", base, dst_proj), stacked);
-
-                if !expert_scales.is_empty() {
-                    let stacked = stack_arrays(&expert_scales, 0);
-                    weights.insert(format!("{}.{}.scales", base, dst_proj), stacked);
-                }
-
-                if !expert_biases.is_empty() {
-                    let stacked = stack_arrays(&expert_biases, 0);
-                    weights.insert(format!("{}.{}.biases", base, dst_proj), stacked);
-                }
-            }
+            crate::models::switch_layers::drain_numbered_expert_planes(
+                &mut weights,
+                &experts,
+                proj,
+                &format!("{base}.{proj}"),
+            );
         }
     }
 
@@ -5040,6 +4968,83 @@ mod sanitize_tests {
             let sanitized = sanitize_weights(weights, &config);
             SwitchGLU::from_weights(&sanitized, &next_config, "model.layers.0.mlp.switch_mlp")
                 .unwrap_or_else(|e| panic!("SwitchGLU must load after sanitize for {label}: {e}"));
+        }
+    }
+
+    /// An NVFP4 export from NVIDIA ModelOpt or compressed-tensors
+    /// (`RedHatAI/Qwen3.6-35B-A3B-NVFP4`) stores each expert as its own
+    /// linear, and the repack leaves that expert's tensor scale beside its
+    /// plane. The stacking pass took `weight` / `scales` / `biases` only, so
+    /// the scales stayed behind and the expert loader refused the plane
+    /// (`... was left unstacked`). They are now stacked into the
+    /// `[num_experts]` output multiplier, under both per-expert namings.
+    #[test]
+    fn sanitize_weights_stacks_per_expert_nvfp4_tensor_scales() {
+        use crate::models::qwen3_next::SwitchGLU;
+        use crate::models::switch_layers::{
+            expect_native_nvfp4_load, insert_modelopt_expert_plane, stacked_inv_global_scale,
+        };
+
+        let num_experts: usize = 2;
+        let config: Qwen35Config = serde_json::from_value(serde_json::json!({
+            "model_type": "qwen3_5",
+            "hidden_size": 64,
+            "num_hidden_layers": 1,
+            "intermediate_size": 32,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "num_experts": num_experts,
+            "num_experts_per_tok": 2,
+            "decoder_sparse_step": 1,
+            "moe_intermediate_size": 32,
+            "shared_expert_intermediate_size": 0,
+            "full_attention_interval": 4,
+            "vocab_size": 100
+        }))
+        .expect("minimal qwen3.5-moe test config");
+        let prefix = "model.layers.0.mlp.switch_mlp";
+        // (source names, in the gate / up / down order of the block's slots)
+        for names in [["gate_proj", "up_proj", "down_proj"], ["w1", "w3", "w2"]] {
+            let mut weights = WeightMap::new();
+            for e in 0..num_experts {
+                for (j, (src, (out, input))) in names
+                    .into_iter()
+                    .zip([(32, 64), (32, 64), (64, 32)])
+                    .enumerate()
+                {
+                    insert_modelopt_expert_plane(
+                        &mut weights,
+                        &format!("model.layers.0.mlp.experts.{e}.{src}"),
+                        out,
+                        input,
+                        (1 + e + j) as f32 * 0.5,
+                        (e * 3 + j) as u32,
+                    );
+                }
+            }
+
+            let weights = sanitize_weights(weights, &config);
+
+            for (j, proj) in ["gate_proj", "up_proj", "down_proj"]
+                .into_iter()
+                .enumerate()
+            {
+                let want: Vec<f32> = (0..num_experts).map(|e| (1 + e + j) as f32 * 0.5).collect();
+                assert_eq!(
+                    stacked_inv_global_scale(&weights, &format!("{prefix}.{proj}")),
+                    want,
+                    "{names:?}"
+                );
+            }
+            assert!(
+                !weights.keys().any(|k| k.contains(".experts.")),
+                "{names:?}: no per-expert key is left behind"
+            );
+            expect_native_nvfp4_load(
+                SwitchGLU::from_weights(&weights, &config.to_qwen3next_config(), prefix),
+                prefix,
+                "the stacked planes load through the Qwen3.5 expert block",
+            );
         }
     }
 }
