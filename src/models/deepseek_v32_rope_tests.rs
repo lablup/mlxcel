@@ -408,3 +408,67 @@ fn yarn_model_batched_decode_matches_sequential() {
         1e-4,
     );
 }
+
+/// A cache with nothing in it whose next write lands at absolute `offset`.
+fn empty_cache_at(offset: i32) -> KVCache {
+    let mut cache = KVCache::new();
+    cache
+        .restore_fp16_live_window(None, None, offset)
+        .expect("empty fp16 window");
+    cache
+}
+
+/// The MLA queries rotate with the same YaRN table as the cached keys, in
+/// single-sequence and batched decode alike.
+///
+/// The query is not cached, so it is observed through RoPE's relative-position
+/// property: when `q_pe` and `k_pe` rotate with one table, every attention
+/// score depends only on the distance between query and key, and the same two
+/// tokens attend identically at positions `0, 1` and at `p, p + 1`. A query
+/// rotated by a different table than its keys (plain RoPE against cached YaRN
+/// keys, the pre-#3178 failure on the query side) breaks that invariance once
+/// `p` is past the original context, where the two tables disagree.
+#[test]
+fn mla_queries_rotate_with_the_key_table_past_the_original_context() {
+    let _runtime = crate::initialize_runtime();
+    let args = tiny_config(Some(&tiny_yarn_block()));
+    let attn = tiny_attention(&args);
+    let hidden = args.hidden_size;
+    let far = 8 * ORIGINAL_CTX;
+    let tokens = |len: usize| {
+        let a = constant_rows(1, hidden, 0.1);
+        let b = constant_rows(len - 1, hidden, -0.4);
+        mlxcel_core::concatenate(&a, &b, 1)
+    };
+
+    // Single-sequence: a two-token prefill at 0 and at `far`.
+    let near_out = attn.forward(&tokens(2), None, &mut empty_cache_at(0));
+    let far_out = attn.forward(&tokens(2), None, &mut empty_cache_at(far));
+    let err = max_abs_diff(&far_out, &near_out);
+    assert!(
+        err < 1e-4,
+        "prefill at {far} must attend as at 0 when q_pe and k_pe share a table (max diff {err})"
+    );
+
+    // Batched decode: one key cached per row, then one query per row, the two
+    // rows `far` positions apart.
+    let mut near = empty_cache_at(0);
+    let mut far_cache = empty_cache_at(far);
+    for cache in [&mut near, &mut far_cache] {
+        let out = attn.forward(&constant_rows(1, hidden, 0.1), None, cache);
+        mlxcel_core::eval(&out);
+    }
+    let step = constant_rows(1, hidden, -0.4);
+    let batch = mlxcel_core::concatenate(&step, &step, 0);
+    let got = {
+        let mut caches = [&mut near, &mut far_cache];
+        attn.forward_batched_decode(&batch, &mut caches)
+    };
+    mlxcel_core::eval(&got);
+    let err = max_abs_diff(&slice_axis(&got, 0, 1, 2), &slice_axis(&got, 0, 0, 1));
+    assert!(
+        err < 1e-4,
+        "batched decode at {} must attend as at 1 (max diff {err})",
+        far + 1
+    );
+}
