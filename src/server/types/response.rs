@@ -694,6 +694,25 @@ pub struct AudioTranscriptionResponse {
     /// Source audio duration in seconds (verbose responses only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f32>,
+    /// Per-window transcript segments (verbose responses only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<TranscriptionSegment>>,
+}
+
+/// One transcript segment as serialized by the OpenAI-compatible
+/// `verbose_json` response.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptionSegment {
+    /// Zero-based segment index.
+    pub id: usize,
+    /// Start offset in decoded samples.
+    pub seek: usize,
+    /// Segment start in seconds.
+    pub start: f32,
+    /// Segment end in seconds.
+    pub end: f32,
+    /// Segment text.
+    pub text: String,
 }
 
 /// The resolved side-model capability block of `GET /props` (#1452).

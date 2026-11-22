@@ -34,7 +34,7 @@ use crate::audio::whisper_mel;
 use crate::models::WhisperModel;
 use crate::server::audio_model::{
     AudioModelError, AudioModelKind, AudioModelProvider, AudioSynthesizeInput,
-    AudioSynthesizeOutput, AudioTranscribeInput, AudioTranscribeOutput,
+    AudioSynthesizeOutput, AudioTranscribeInput, AudioTranscribeOutput, TranscriptSegment,
 };
 use crate::server::audio_worker::{AudioEngine, AudioWorker};
 
@@ -119,15 +119,135 @@ impl AudioEngine for WhisperEngine {
         // matches the lowercase Whisper language tags.
         let hint = input.language.as_deref().map(str::to_ascii_lowercase);
 
-        let (text, used_language) = self
+        let transcript = self
             .model
             .transcribe(&audio_16k, hint.as_deref(), input.translate)
             .map_err(|e| AudioModelError::Inference(format!("transcription failed: {e}")))?;
 
+        let segments = map_window_segments(&transcript.segments, duration_seconds);
+
         Ok(AudioTranscribeOutput {
-            text: text.trim().to_string(),
-            language: used_language.or(hint),
+            text: transcript.text.trim().to_string(),
+            language: transcript.language.or(hint),
             duration_seconds: Some(duration_seconds),
+            segments,
         })
+    }
+}
+
+/// Convert the model's per-window segments into the wire shape the API reports.
+///
+/// One segment is emitted per decoded 30 s window. The model reports `seek` as a
+/// mel-frame offset, so it is converted to a sample offset through the hop
+/// length, and then to a wall-clock start. Empty windows are dropped: the
+/// trailing window of a short clip is silent-padded to a full 30 s, and a
+/// segment with no text would otherwise claim transcript time that was never
+/// spoken. `end` is clamped to the real duration for the same reason, and the
+/// reported `id` is re-numbered over the surviving windows so it stays
+/// contiguous.
+fn map_window_segments(
+    windows: &[crate::models::whisper::WhisperSegment],
+    duration_seconds: f32,
+) -> Vec<TranscriptSegment> {
+    let window_seconds = (whisper_mel::WHISPER_N_FRAMES * whisper_mel::WHISPER_HOP_LENGTH) as f32
+        / whisper_mel::WHISPER_SAMPLE_RATE as f32;
+    windows
+        .iter()
+        .filter(|segment| !segment.text.is_empty())
+        .enumerate()
+        .map(|(id, segment)| {
+            let seek = segment.seek * whisper_mel::WHISPER_HOP_LENGTH;
+            let start = seek as f32 / whisper_mel::WHISPER_SAMPLE_RATE as f32;
+            TranscriptSegment {
+                id,
+                seek,
+                start,
+                end: (start + window_seconds).min(duration_seconds),
+                text: segment.text.clone(),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::whisper::WhisperSegment;
+
+    /// 65 s spans three 30 s windows; the third must be clamped to the real
+    /// duration instead of reporting the silent padding out to 90 s.
+    #[test]
+    fn map_window_segments_clamps_the_trailing_window_to_the_real_duration() {
+        let windows: Vec<WhisperSegment> = (0..3)
+            .map(|i| WhisperSegment {
+                seek: i * whisper_mel::WHISPER_N_FRAMES,
+                text: format!("window {i}"),
+            })
+            .collect();
+
+        let segments = map_window_segments(&windows, 65.0);
+
+        assert_eq!(segments.len(), 3);
+        assert_eq!(
+            segments.iter().map(|s| s.start).collect::<Vec<_>>(),
+            vec![0.0, 30.0, 60.0]
+        );
+        assert_eq!(segments[0].end, 30.0);
+        assert_eq!(segments[1].end, 60.0);
+        assert_eq!(
+            segments[2].end, 65.0,
+            "the last window must end at the real duration, not at the padded 90 s"
+        );
+        assert_eq!(
+            segments[2].seek,
+            2 * whisper_mel::WHISPER_N_FRAMES * whisper_mel::WHISPER_HOP_LENGTH,
+            "seek must be converted from mel frames to samples"
+        );
+    }
+
+    /// A silent trailing window carries no text, so it must not invent
+    /// transcript time, and the surviving ids must stay contiguous.
+    #[test]
+    fn map_window_segments_drops_silent_windows_and_renumbers_ids() {
+        let windows = vec![
+            WhisperSegment {
+                seek: 0,
+                text: "hello".to_string(),
+            },
+            WhisperSegment {
+                seek: whisper_mel::WHISPER_N_FRAMES,
+                text: String::new(),
+            },
+            WhisperSegment {
+                seek: 2 * whisper_mel::WHISPER_N_FRAMES,
+                text: "world".to_string(),
+            },
+        ];
+
+        let segments = map_window_segments(&windows, 65.0);
+
+        assert_eq!(segments.len(), 2, "the silent window must be dropped");
+        assert_eq!(
+            segments.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![0, 1],
+            "ids must be renumbered over the surviving windows"
+        );
+        assert_eq!(segments[1].start, 60.0);
+        assert_eq!(segments[1].end, 65.0);
+    }
+
+    /// A clip shorter than one window must not report a padded 30 s end.
+    #[test]
+    fn map_window_segments_short_clip_stays_within_the_source_duration() {
+        let windows = vec![WhisperSegment {
+            seek: 0,
+            text: "short".to_string(),
+        }];
+
+        let segments = map_window_segments(&windows, 4.25);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start, 0.0);
+        assert_eq!(segments[0].end, 4.25);
     }
 }
