@@ -77,6 +77,11 @@ pub struct RopeScalingSpec {
     pub mscale: Option<f32>,
     /// YaRN attention-magnitude multiplier denominator (`mscale_all_dim`).
     pub mscale_all_dim: Option<f32>,
+    /// The transformers 5 YaRN `attention_factor` (`0.1 * ln(factor) + 1`).
+    /// [`yarn_rope_setup`] does not read it: the magnitude comes from
+    /// `mscale` / `mscale_all_dim`. A loader that wants to check a
+    /// checkpoint's declared value against that derivation reads it here.
+    pub attention_factor: Option<f32>,
 }
 
 impl RopeScalingSpec {
@@ -103,6 +108,7 @@ impl RopeScalingSpec {
             beta_slow: f32_at("beta_slow"),
             mscale: f32_at("mscale"),
             mscale_all_dim: f32_at("mscale_all_dim"),
+            attention_factor: f32_at("attention_factor"),
         }
     }
 
@@ -395,7 +401,7 @@ pub fn llama3_rope_freqs(
 /// Mirrors `yarn_get_mscale` in `src/models/deepseek_v2.rs` and b10621's
 /// `get_mscale`
 /// ([`src/llama-context.cpp`](https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/src/llama-context.cpp)).
-fn yarn_get_mscale(scale: f32, mscale: f32) -> f32 {
+pub(crate) fn yarn_get_mscale(scale: f32, mscale: f32) -> f32 {
     if scale <= 1.0 {
         1.0
     } else {

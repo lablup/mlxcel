@@ -511,6 +511,38 @@ fn helium_model_type_is_detected() {
 }
 
 #[test]
+fn k2_horizon_model_type_is_detected() {
+    // K2-Horizon loads on the shared Llama decoder, but through its own config
+    // translation so `K2HorizonConfig::validate` can refuse the grouped-norm
+    // and MoE variants; it must not fall through to the plain Llama arm.
+    let model_dir = temp_path("k2_horizon_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "k2_horizon",
+            "architectures": ["K2HorizonForCausalLM"],
+            "hidden_size": 1536,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "num_hidden_layers": 28,
+            "intermediate_size": 5120,
+            "head_dim": 64,
+            "layernorm_num_groups": 1,
+            "rope_parameters": {"rope_type": "yarn", "factor": 16.0},
+            "rope_theta": 1000000.0,
+            "vocab_size": 64256
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::K2Horizon);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn fastvlm_model_type_is_detected() {
     for model_type in ["fastvlm", "llava_qwen2"] {
         let model_dir = temp_path(&format!("fastvlm_{model_type}"));

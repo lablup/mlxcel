@@ -1045,6 +1045,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "gpt_bigcode" => Ok(ModelType::GptBigCode),
         "gpt_neox" => Ok(ModelType::GptNeoX),
         "helium" => Ok(ModelType::Helium),
+        "k2_horizon" => Ok(ModelType::K2Horizon),
         "telechat3" => Ok(ModelType::TeleChat3),
         "starcoder2" => Ok(ModelType::StarCoder2),
         "mellum" => Ok(ModelType::Mellum),
