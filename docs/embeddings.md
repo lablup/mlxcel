@@ -531,7 +531,7 @@ Video documents are out of scope.
 
 ### Late-interaction scoring
 
-When the embedding model `mlxcel-server` serves (from `-m` or `--embedding-model`) is multi-vector and neither `--reranker-model` nor a reranker `-m` is configured, `/v1/rerank` and its aliases score documents by MaxSim over that embedder (#1426). There is no second checkpoint and no second worker: the query and each document are embedded through the embedding worker one item per call, exactly as `/v1/embeddings` would embed them, and `crate::embeddings::maxsim` scores the read-back rows, the same function `mlxcel embed` prints its `MaxSim similarity` matrix with. `/props` reports `capabilities.reranking.kind` as `late_interaction`, and `/v1/models` lists the shared id once. A configured reranker always wins; the startup log then says the multi-vector embedder is not exposed on `/v1/rerank`. A single-vector embedder is never used this way, because MaxSim over one row is a plain dot product.
+When the embedding model `mlxcel-server` serves (from `-m` or `--embedding-model`) is multi-vector and neither `--reranker-model` nor a reranker `-m` is configured, `/v1/rerank` and its aliases score documents by MaxSim over that embedder (#1426). There is no second checkpoint and no second worker: the query and the documents are embedded through the embedding worker exactly as `/v1/embeddings` would embed them (every text item in one `embed_texts` call, so one queue slot and one reply timeout cover the whole request, then each image item in its own call, capped by the per-request image limit), and `crate::embeddings::maxsim` scores the read-back rows, the same function `mlxcel embed` prints its `MaxSim similarity` matrix with. `/props` reports `capabilities.reranking.kind` as `late_interaction`, and `/v1/models` lists the shared id once. A configured reranker always wins; the startup log then says the multi-vector embedder is not exposed on `/v1/rerank`. A single-vector embedder is never used this way, because MaxSim over one row is a plain dot product.
 
 - Scores are the raw MaxSim sum, not probabilities, and are not normalized. Each row is L2-normalized, so the score is bounded by the query's row count and grows with the query's length: it ranks documents for one query and is not comparable across queries or with a cross-encoder's score. The margin between documents is what the number is for.
 - An item is embedded as its image when it carries one (ColIdefics3 and ColQwen2.5 accept images, LFM2.5-ColBERT does not and answers `400`), otherwise as its text. A document whose embedding has no rows scores `0.0`.
@@ -550,7 +550,7 @@ curl -s localhost:8080/v1/rerank -H 'Content-Type: application/json' -d '{
 
 ColIdefics3 and ColQwen2.5 serve page images the same way: send the pages as `{"image_url": "data:image/png;base64,..."}` documents. `vidore/colSmol-256M` is a LoRA adapter, so merge it into `vidore/ColSmolVLM-Instruct-256M-base` first (`tests/fixtures/generate_colsmol_rerank_fixture.py` does this) and serve the merged directory.
 
-Batching documents through the embedder in one call and scoring with `maxsim_mlx` on the worker are not done; `mlxcel rerank` does not load multi-vector embedders.
+Scoring with `maxsim_mlx` on the worker is not done (the read-back rows of every text item are held at once, the same footprint a `/v1/embeddings` response for those inputs has); `mlxcel rerank` does not load multi-vector embedders.
 
 ### Request and response
 

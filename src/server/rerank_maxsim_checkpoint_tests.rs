@@ -39,8 +39,9 @@ const COLSMOL_QUERY: &str = "What was the total revenue in 2023?";
 /// Batch width `mlxcel embed` uses by default.
 const CLI_BATCH_SIZE: usize = 16;
 
-/// Absolute tolerance between the one-input-per-call rerank path and the
-/// CLI's single padded batch, which agree only to bf16 batched-prefill drift.
+/// Absolute tolerance between the rerank path (the query and the documents in
+/// one batch, in a different order) and the CLI's single padded batch, which
+/// agree only to bf16 batched-prefill drift.
 const CLI_PARITY_TOLERANCE: f32 = 5e-3;
 
 fn load_worker(dir: &Path, id: &str) -> Arc<dyn EmbeddingModelProvider> {

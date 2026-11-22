@@ -29,7 +29,7 @@
 
 use std::sync::Arc;
 
-use crate::embeddings::{EmbdNormalize, EmbedOptions, EmbedReply, maxsim};
+use crate::embeddings::{EmbdNormalize, EmbedOptions, EmbedReply, EmbeddingVector, maxsim};
 use crate::rerank::{RerankItem, RerankScores, RerankerKind};
 use crate::server::embedding_model::{EmbeddingError, EmbeddingModelProvider};
 use crate::server::rerank_model::{RerankError, RerankModelProvider};
@@ -63,20 +63,78 @@ impl MaxSimRerankProvider {
         }
     }
 
-    /// Embed one item: its image when it carries one, otherwise its text.
-    fn embed_item(&self, item: &RerankItem) -> Result<EmbedReply, RerankError> {
-        let reply = match &item.image {
-            Some(_) if !self.embedding.supports_images() => {
+    /// Embed the query and every document, returning one vector per item in
+    /// `[query, documents...]` order plus the total prompt tokens.
+    ///
+    /// Every text item goes to the worker in ONE `embed_texts` call, the way
+    /// `/v1/embeddings` dispatches a text batch: one queue slot, one reply
+    /// timeout and length-sorted micro-batching for the whole request. One
+    /// call per document would let a single request holding thousands of short
+    /// documents occupy the worker for thousands of reply timeouts back to
+    /// back, and hit `QueueFull` halfway through after spending the earlier
+    /// forwards. Image items stay one call each, as the embedder takes one
+    /// image per call; their count is already capped by the route's
+    /// per-request image limit.
+    fn embed_items(
+        &self,
+        items: &[&RerankItem],
+    ) -> Result<(Vec<EmbeddingVector>, usize), RerankError> {
+        for item in items {
+            if item.image.is_some() && !self.embedding.supports_images() {
                 return Err(RerankError::InvalidInput(
                     "the loaded late-interaction reranker does not accept images".to_string(),
                 ));
             }
-            Some(image) => self.embedding.embed_image(image.clone(), self.options()),
-            None => self
+        }
+        let mut slots: Vec<Option<EmbeddingVector>> = (0..items.len()).map(|_| None).collect();
+        let mut prompt_tokens = 0usize;
+
+        let text_indices: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| item.image.is_none().then_some(index))
+            .collect();
+        if !text_indices.is_empty() {
+            let texts = text_indices
+                .iter()
+                .map(|&index| items[index].text_or_empty().to_string())
+                .collect();
+            let reply = self
                 .embedding
-                .embed_texts(vec![item.text_or_empty().to_string()], self.options()),
-        };
-        reply.map_err(embedding_error_to_rerank)
+                .embed_texts(texts, self.options())
+                .map_err(embedding_error_to_rerank)?;
+            if reply.vectors.len() != text_indices.len() {
+                return Err(RerankError::Internal(format!(
+                    "the embedder returned {} vectors for {} texts",
+                    reply.vectors.len(),
+                    text_indices.len()
+                )));
+            }
+            prompt_tokens += reply.prompt_tokens;
+            for (&index, vector) in text_indices.iter().zip(reply.vectors) {
+                slots[index] = Some(vector);
+            }
+        }
+
+        for (index, item) in items.iter().enumerate() {
+            let Some(image) = &item.image else {
+                continue;
+            };
+            let reply = self
+                .embedding
+                .embed_image(image.clone(), self.options())
+                .map_err(embedding_error_to_rerank)?;
+            prompt_tokens += reply.prompt_tokens;
+            slots[index] = Some(single_vector(reply, index)?);
+        }
+
+        let vectors = slots
+            .into_iter()
+            .map(|slot| {
+                slot.ok_or_else(|| RerankError::Internal("an item produced no vector".to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((vectors, prompt_tokens))
     }
 }
 
@@ -90,14 +148,20 @@ fn embedding_error_to_rerank(err: EmbeddingError) -> RerankError {
     }
 }
 
-/// The rows of a one-input reply.
-fn single_rows<'a>(reply: &'a EmbedReply, label: &str) -> Result<Vec<&'a [f32]>, RerankError> {
-    match reply.vectors.as_slice() {
-        [vector] => Ok(vector.rows().collect()),
-        vectors => Err(RerankError::Internal(format!(
-            "the embedder returned {} vectors for {label}, expected 1",
-            vectors.len()
-        ))),
+/// The one vector of a one-image reply; `index` 0 is the query.
+fn single_vector(reply: EmbedReply, index: usize) -> Result<EmbeddingVector, RerankError> {
+    let count = reply.vectors.len();
+    match <[EmbeddingVector; 1]>::try_from(reply.vectors) {
+        Ok([vector]) => Ok(vector),
+        Err(_) => {
+            let label = match index {
+                0 => "the query".to_string(),
+                n => format!("documents[{}]", n - 1),
+            };
+            Err(RerankError::Internal(format!(
+                "the embedder returned {count} vectors for {label}, expected 1"
+            )))
+        }
     }
 }
 
@@ -110,18 +174,20 @@ impl RerankModelProvider for MaxSimRerankProvider {
     ) -> Result<RerankScores, RerankError> {
         // The route rejects an `instruction` for this kind before dispatch,
         // because `accepts_instruction()` is false, so it is never seen here.
-        let query_reply = self.embed_item(&query)?;
-        let query_rows = single_rows(&query_reply, "the query")?;
-        let mut prompt_tokens = query_reply.prompt_tokens;
-        let mut scores = Vec::with_capacity(documents.len());
-        for (index, document) in documents.iter().enumerate() {
-            let reply = self.embed_item(document)?;
-            prompt_tokens += reply.prompt_tokens;
-            let rows = single_rows(&reply, &format!("documents[{index}]"))?;
-            // A document with no rows scores 0.0 inside `maxsim`, matching
-            // `mlxcel embed`'s similarity matrix.
-            scores.push(maxsim(&query_rows, &rows));
-        }
+        let items: Vec<&RerankItem> = std::iter::once(&query).chain(documents.iter()).collect();
+        let (vectors, prompt_tokens) = self.embed_items(&items)?;
+        let Some((query_vector, document_vectors)) = vectors.split_first() else {
+            return Err(RerankError::Internal(
+                "the query produced no vector".to_string(),
+            ));
+        };
+        let query_rows: Vec<&[f32]> = query_vector.rows().collect();
+        // A document with no rows scores 0.0 inside `maxsim`, matching
+        // `mlxcel embed`'s similarity matrix.
+        let scores = document_vectors
+            .iter()
+            .map(|vector| maxsim(&query_rows, &vector.rows().collect::<Vec<_>>()))
+            .collect();
         Ok(RerankScores {
             scores,
             prompt_tokens,

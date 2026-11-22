@@ -63,6 +63,7 @@ fn table(text: &str) -> Result<(Vec<Vec<f32>>, usize), EmbeddingError> {
         "relevant" => Ok((relevant_rows(), 3)),
         "unrelated" => Ok((unrelated_rows(), 1)),
         "no rows" => Ok((Vec::new(), 0)),
+        "nan" => Ok((vec![vec![f32::NAN, 0.0]], 1)),
         "busy" => Err(EmbeddingError::QueueFull),
         "broken" => Err(EmbeddingError::Internal("forward failed".to_string())),
         other => Err(EmbeddingError::InvalidInput(format!(
@@ -83,6 +84,8 @@ struct StubColEmbedder {
     multi_vector: bool,
     images: bool,
     calls: Mutex<Vec<String>>,
+    /// Worker round trips: one per `embed_texts` or `embed_image` call.
+    dispatches: Mutex<usize>,
 }
 
 impl StubColEmbedder {
@@ -91,11 +94,16 @@ impl StubColEmbedder {
             multi_vector,
             images,
             calls: Mutex::new(Vec::new()),
+            dispatches: Mutex::new(0),
         })
     }
 
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("calls lock").clone()
+    }
+
+    fn dispatches(&self) -> usize {
+        *self.dispatches.lock().expect("dispatches lock")
     }
 }
 
@@ -105,6 +113,7 @@ impl EmbeddingModelProvider for StubColEmbedder {
         texts: Vec<String>,
         _opts: EmbedOptions,
     ) -> Result<EmbedReply, EmbeddingError> {
+        *self.dispatches.lock().expect("dispatches lock") += 1;
         let mut vectors = Vec::new();
         let mut prompt_tokens = 0;
         for text in texts {
@@ -132,6 +141,7 @@ impl EmbeddingModelProvider for StubColEmbedder {
         _image: ImageInput,
         _opts: EmbedOptions,
     ) -> Result<EmbedReply, EmbeddingError> {
+        *self.dispatches.lock().expect("dispatches lock") += 1;
         self.calls
             .lock()
             .expect("calls lock")
@@ -254,8 +264,9 @@ async fn scores_are_maxsim_of_the_same_rows_in_document_order() {
     // Query 2 + unrelated 1 + relevant 3.
     assert_eq!(body["usage"]["prompt_tokens"], 6, "{body}");
     assert_eq!(body["usage"]["total_tokens"], 6, "{body}");
-    // One embedder call per item, query first, then documents in order.
+    // Query first, then documents in order, all in one worker round trip.
     assert_eq!(embedder.calls(), ["query", "unrelated", "relevant"]);
+    assert_eq!(embedder.dispatches(), 1);
 }
 
 #[tokio::test]
@@ -357,7 +368,9 @@ async fn image_documents_reach_an_image_embedder() {
     assert_eq!(by_index(0), maxsim(&query_rows(), &image_rows()));
     assert_eq!(by_index(1), maxsim(&query_rows(), &relevant_rows()));
     assert_eq!(body["usage"]["prompt_tokens"], 2 + 4 + 3, "{body}");
-    assert_eq!(embedder.calls(), ["query", "<image>", "relevant"]);
+    // The texts go in one batch, then each image on its own.
+    assert_eq!(embedder.calls(), ["query", "relevant", "<image>"]);
+    assert_eq!(embedder.dispatches(), 2);
 }
 
 #[tokio::test]
@@ -491,4 +504,101 @@ fn a_single_vector_embedder_never_gets_the_provider() {
         explicit.supports_images(),
         "the explicit provider, not a new one"
     );
+}
+
+#[tokio::test]
+async fn many_text_documents_take_one_worker_round_trip() {
+    // One dispatch per document would hold the worker for one reply timeout
+    // per document and could hit QueueFull mid-request; the whole text side
+    // of a request is one batch, as on `/v1/embeddings`.
+    let embedder = StubColEmbedder::new(true, false);
+    let documents: Vec<&str> = (0..500)
+        .map(|i| if i % 2 == 0 { "relevant" } else { "unrelated" })
+        .collect();
+    let (status, body) = post(
+        app_for(Arc::clone(&embedder)),
+        json!({"query": "query", "documents": documents}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["results"].as_array().expect("results").len(), 500);
+    assert_eq!(embedder.dispatches(), 1);
+    assert_eq!(embedder.calls().len(), 501);
+}
+
+#[tokio::test]
+async fn a_non_finite_maxsim_score_is_a_generic_500() {
+    let (status, body) = post(
+        app_for(StubColEmbedder::new(true, false)),
+        json!({"query": "query", "documents": ["relevant", "nan"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        body["error"]["message"], "rerank inference returned an invalid numeric result",
+        "{body}"
+    );
+}
+
+#[test]
+fn a_short_text_reply_is_an_internal_error_not_a_misaligned_score() {
+    struct ShortReply(Arc<StubColEmbedder>);
+    impl EmbeddingModelProvider for ShortReply {
+        fn embed_texts(
+            &self,
+            texts: Vec<String>,
+            opts: EmbedOptions,
+        ) -> Result<EmbedReply, EmbeddingError> {
+            let mut reply = self.0.embed_texts(texts, opts)?;
+            reply.vectors.pop();
+            Ok(reply)
+        }
+        fn embed_tokens(
+            &self,
+            token_rows: Vec<Vec<u32>>,
+            opts: EmbedOptions,
+        ) -> Result<EmbedReply, EmbeddingError> {
+            self.0.embed_tokens(token_rows, opts)
+        }
+        fn embed_image(
+            &self,
+            image: ImageInput,
+            opts: EmbedOptions,
+        ) -> Result<EmbedReply, EmbeddingError> {
+            self.0.embed_image(image, opts)
+        }
+        fn model_id(&self) -> &str {
+            self.0.model_id()
+        }
+        fn created_at(&self) -> i64 {
+            self.0.created_at()
+        }
+        fn dim(&self) -> usize {
+            self.0.dim()
+        }
+        fn multi_vector(&self) -> bool {
+            true
+        }
+        fn vocab_size(&self) -> usize {
+            self.0.vocab_size()
+        }
+        fn max_length(&self) -> usize {
+            self.0.max_length()
+        }
+        fn shutdown_and_wait(&self, timeout: std::time::Duration) -> anyhow::Result<()> {
+            self.0.shutdown_and_wait(timeout)
+        }
+    }
+    let provider = MaxSimRerankProvider::new(
+        Arc::new(ShortReply(StubColEmbedder::new(true, false))),
+        None,
+    );
+    let err = provider
+        .rerank(
+            RerankItem::text("query"),
+            vec![RerankItem::text("relevant"), RerankItem::text("unrelated")],
+            None,
+        )
+        .expect_err("a short reply");
+    assert!(matches!(err, RerankError::Internal(_)), "{err:?}");
 }
