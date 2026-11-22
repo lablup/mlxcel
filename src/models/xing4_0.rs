@@ -399,6 +399,7 @@ impl XingDecoderLayer {
         weights: &WeightMap,
         config: &Xing40Config,
         rope: &RopeScalingKind,
+        rope_base_override: f32,
         layer_idx: usize,
     ) -> Result<Self, String> {
         let DecoderLayer {
@@ -409,7 +410,13 @@ impl XingDecoderLayer {
         } = DecoderLayer::from_weights(weights, &config.base, layer_idx)?;
         let self_attn = match rope.freqs() {
             Some(freqs) => self_attn.with_rope_table(mlxcel_core::copy(freqs), rope.attn_scale()),
-            None => self_attn,
+            // No table: the plain rotation runs at `rope_base`, which must carry
+            // a `--rope-freq-base` override just as the table would have, or the
+            // override is counted as applied while the rotation ignores it.
+            None => DeepSeekV3Attention {
+                rope_base: rope_base_override,
+                ..self_attn
+            },
         };
         let prefix = format!("model.layers.{layer_idx}");
         Ok(Self {
@@ -564,10 +571,15 @@ impl Xing40Model {
         let group_size = args.group_size();
         let bits = args.bits();
         let rope = resolve_rope(args)?;
+        // `rope_theta` after any `--rope-freq-base` override, for the layers
+        // that rotate without a table (a `default` scheme, or a block that
+        // resolved to one). `RopeScalingKind::resolve` applies the same
+        // override to the table it builds.
+        let rope_base = crate::models::rope_overrides::resolve_base(args.rope_theta);
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)?;
         let layers = (0..args.num_hidden_layers)
-            .map(|i| XingDecoderLayer::from_weights(weights, config, &rope, i))
+            .map(|i| XingDecoderLayer::from_weights(weights, config, &rope, rope_base, i))
             .collect::<Result<Vec<_>, _>>()?;
         let norm_weight = weights
             .get("model.norm.weight")
