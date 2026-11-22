@@ -146,6 +146,7 @@ pub(crate) fn parse_optional_eos_token_ids(value: &Option<serde_json::Value>) ->
 // Model implementations (mlxcel-core based)
 pub mod afmoe;
 pub mod apertus;
+pub mod arcee;
 pub mod baichuan;
 pub mod bailing_moe;
 pub mod bailing_moe_linear;
@@ -335,6 +336,7 @@ pub mod kokoro;
 // Re-export model types
 pub use afmoe::AfmoeModel;
 pub use apertus::ApertusModel;
+pub use arcee::ArceeModel;
 pub use baichuan::BaichuanModel;
 pub use bailing_moe::BailingMoeModel;
 pub use bailing_moe_linear::BailingMoeLinearModel;
@@ -674,6 +676,9 @@ pub enum ModelType {
     /// attention with NoPE global layers, a sigmoid attention gate,
     /// sandwich norms, muP embedding scale and a sparse MoE FFN.
     Afmoe,
+    /// Arcee AFM dense (`arcee`, AFM-4.5B): a Llama-shaped decoder with a
+    /// gate-free squared-ReLU MLP and YaRN RoPE. Not AFMoE and not Apple AFM-7.
+    Arcee,
     /// Kuaishou Klear (`Klear`): a Qwen3-shaped sparse MoE whose shared
     /// expert is blended with the routed mixture through a learned 2-way
     /// softmax rather than added.
@@ -945,6 +950,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::BailingMoe,
     ModelType::BailingMoeLinear,
     ModelType::Afmoe,
+    ModelType::Arcee,
     ModelType::Klear,
     // Apertus (Swiss AI)
     ModelType::Apertus,
@@ -1193,6 +1199,7 @@ impl ModelType {
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
             ModelType::BailingMoe => ("Ling / Bailing MoE (shared + routed experts)", "Bailing"),
             ModelType::Afmoe => ("Arcee AFMoE / Trinity (sliding + full hybrid MoE)", "Arcee"),
+            ModelType::Arcee => ("Arcee AFM dense (squared-ReLU MLP, YaRN RoPE)", "Arcee"),
             ModelType::Klear => ("Klear MoE (coefficient-blended shared expert)", "Klear"),
             ModelType::BailingMoeLinear => (
                 "Ling / Ring linear-attention MoE (GLA + full attention hybrid)",
@@ -1623,6 +1630,7 @@ mod metadata_tests {
             BailingMoe,
             BailingMoeLinear,
             Afmoe,
+            Arcee,
             Klear,
             Apertus,
             SeedOss,

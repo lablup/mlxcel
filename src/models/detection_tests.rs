@@ -542,6 +542,35 @@ fn helium_model_type_is_detected() {
 }
 
 #[test]
+fn arcee_dense_model_type_is_detected() {
+    // AFM-4.5B (`arcee`) is the dense Arcee family. It must not resolve to
+    // AFMoE (`afmoe`) or fall through to the SwiGLU Llama arm (#1719).
+    let model_dir = temp_path("arcee_dense_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "arcee",
+            "architectures": ["ArceeForCausalLM"],
+            "hidden_act": "relu2",
+            "hidden_size": 2560,
+            "num_attention_heads": 20,
+            "num_key_value_heads": 4,
+            "num_hidden_layers": 36,
+            "intermediate_size": 18432,
+            "head_dim": 128,
+            "vocab_size": 128005
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Arcee);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn k2_horizon_model_type_is_detected() {
     // K2-Horizon loads on the shared Llama decoder, but through its own config
     // translation so `K2HorizonConfig::validate` can refuse the grouped-norm

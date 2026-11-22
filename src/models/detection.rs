@@ -1023,6 +1023,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "bailing_moe" => Ok(ModelType::BailingMoe),
         "bailing_moe_linear" => Ok(ModelType::BailingMoeLinear),
         "afmoe" => Ok(ModelType::Afmoe),
+        "arcee" => Ok(ModelType::Arcee),
         // `Kwai-Klear/Klear-46B-A2.5B-Instruct` declares the CAPITALIZED
         // `"Klear"`. It matches this lowercase arm only because
         // `model_type_raw` is lowercased above; mlx-lm, which does not
