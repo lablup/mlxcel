@@ -218,6 +218,8 @@ pub enum LoadedModel {
     // the wrapper's per-sequence model-owned state.
     IQuestLoopCoder(models::IQuestLoopCoderWrapper),
     Laguna(models::LagunaWrapper),
+    // Sliding/global caches owned per sequence by the wrapper.
+    Limite(models::LimiteWrapper),
     MiniCPM(models::MiniCPMModel),
     MiniCPM3(models::MiniCPM3Model),
     StableLM(models::StableLMModel),
@@ -401,6 +403,7 @@ macro_rules! delegate_language_model {
             LoadedModel::StarCoder2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Mellum(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Laguna(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Limite(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiniCPM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiniCPM3(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::StableLM(inner) => LanguageModel::$method(inner, $($arg),*),

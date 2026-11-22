@@ -2273,6 +2273,15 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         .as_ref()
         .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("nanochat"));
 
+    // Limite's every norm is a weightless RMSNorm whose epsilon is the
+    // activation dtype's `finfo.eps` (bf16 0.0078125, f16 0.00098), and its
+    // folded projection scalars round to the weight dtype, so the f16 cast
+    // changes the model's arithmetic rather than only its precision. Keep the
+    // checkpoint's bf16, as the reference runs it (issue #2360).
+    let is_limite = parsed_config
+        .as_ref()
+        .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("limite"));
+
     let mut weights = if is_gemma4 {
         load_gemma4_text_weights(model_dir)?
     } else {
@@ -2385,7 +2394,11 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // 85.3 s to 4.8 s, decode 118.1 to 49.2 ms/token, with 17 * 23 answered
     // identically and the same token count generated in both dtypes. Ampere and
     // later keep the guard, so their behavior is unchanged.
-    if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref()) && !is_bitnet && !is_nanochat {
+    if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref())
+        && !is_bitnet
+        && !is_nanochat
+        && !is_limite
+    {
         let had_bf16 = if keep_gemma3n_bf16 {
             convert_bf16_weights_with_keep(&mut weights, gemma3n_bf16_key)
         } else {
@@ -2687,7 +2700,8 @@ fn is_f16_fragile_below_ampere(config: &Value) -> bool {
     // failures. BitNet's relu^2 is not listed because the text loader excludes
     // it separately through `is_bitnet`; nanochat is listed here as well as
     // excluded through `is_nanochat`, since its residual overflows f16.
-    const MEASURED_FRAGILE: &[&str] = &["apertus", "nanochat"];
+    // Limite is listed for its dtype-dependent norm epsilon (#2360).
+    const MEASURED_FRAGILE: &[&str] = &["apertus", "nanochat", "limite"];
     MEASURED_FRAGILE
         .iter()
         .any(|needle| model_type.contains(needle))

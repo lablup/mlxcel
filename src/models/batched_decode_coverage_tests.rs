@@ -79,6 +79,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "KlearModel@src/models/klear.rs",
     "LagunaWrapper@src/models/laguna.rs",
     "Lfm2Model@src/models/lfm2.rs",
+    "LimiteWrapper@src/models/limite_wrapper.rs",
     "Llama3Model@src/models/llama3.rs",
     "Llama4Wrapper@src/models/llama4.rs",
     "Mamba2Model@src/models/mamba2.rs",

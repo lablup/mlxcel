@@ -367,6 +367,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",
         ModelType::Laguna => "laguna",
+        ModelType::Limite => "limite",
         ModelType::MiniCPM | ModelType::MiniCPMOVLM => "minicpm",
         ModelType::MiniCPM3 => "minicpm3",
         ModelType::StableLM => "stablelm",

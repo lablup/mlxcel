@@ -237,6 +237,8 @@ pub mod laguna_sanitize;
 pub mod laguna_speculative;
 pub mod lfm2;
 pub mod lfm2_embedding;
+pub mod limite;
+pub(crate) mod limite_layers;
 pub mod llada2_moe;
 pub mod llama3;
 pub mod llama4;
@@ -404,6 +406,7 @@ pub use kimi_linear::KimiLinearModel;
 pub use klear::KlearModel;
 pub use laguna::{LagunaModel, LagunaWrapper};
 pub use lfm2::Lfm2Model;
+pub use limite::{LimiteModel, LimiteWrapper};
 pub use llada2_moe::Llada2MoeModel;
 pub use llama3::Llama3Model;
 pub use llama4::{Llama4CxxModel, Llama4Wrapper};
@@ -709,6 +712,8 @@ pub enum ModelType {
     Mellum, // Mellum 2 (JetBrains hybrid-attention MoE code model)
     Laguna, // Poolside Laguna XS / S (hybrid sliding/full MoE with NVFP4 experts)
 
+    Limite, // Paradigma Limite (MUDD dense connections, sliding/NoPE-global, sigmoid-softcapped head)
+
     // Other Transformer models
     Helium,    // Kyutai Helium (Llama-shaped dense decoder with traditional RoPE)
     K2Horizon, // IFM K2-Horizon dense (Llama-shaped decoder with YaRN RoPE)
@@ -964,6 +969,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::StarCoder2,
     ModelType::Mellum,
     ModelType::Laguna,
+    ModelType::Limite,
     // Other Transformer models
     ModelType::Helium,
     ModelType::K2Horizon,
@@ -1349,6 +1355,7 @@ impl ModelType {
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
             ModelType::Mellum => ("Mellum 2 (JetBrains code)", "Specialized"),
             ModelType::Laguna => ("Laguna XS / S (Poolside code, hybrid MoE)", "Specialized"),
+            ModelType::Limite => ("Paradigma Limite (MUDD, sliding/global)", "Specialized"),
             ModelType::StableLM => ("StableLM", "Specialized"),
             ModelType::Baichuan => ("Baichuan", "Specialized"),
             ModelType::MiniCPM => ("MiniCPM 1", "Specialized"),
@@ -1628,6 +1635,7 @@ mod metadata_tests {
             StarCoder2,
             Mellum,
             Laguna,
+            Limite,
             Helium,
             K2Horizon,
             TeleChat3,
@@ -1845,6 +1853,10 @@ mod plamo2_tests;
 #[cfg(test)]
 #[path = "mellum_tests.rs"]
 mod mellum_tests;
+
+#[cfg(test)]
+#[path = "limite_tests.rs"]
+mod limite_tests;
 
 #[cfg(test)]
 #[path = "laguna_dflash_tests.rs"]

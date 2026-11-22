@@ -813,6 +813,7 @@ impl ModelType {
             ModelType::StarCoder2 => "starcoder2",
             ModelType::Mellum => "mellum",
             ModelType::Laguna => "laguna",
+            ModelType::Limite => "limite",
             ModelType::Helium => "helium",
             ModelType::K2Horizon => "k2_horizon",
             ModelType::TeleChat3 => "telechat3",
@@ -1210,6 +1211,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::StarCoder2 => &["starcoder2"],
         ModelType::Mellum => &["mellum"],
         ModelType::Laguna => &["laguna"],
+        ModelType::Limite => &["limite"],
         ModelType::MiniCPM => &["minicpm"],
         ModelType::MiniCPM3 => &["minicpm3"],
         ModelType::StableLM => &["stablelm"],
@@ -1432,6 +1434,7 @@ fn supports_turbo_kv(model_type: ModelType) -> bool {
             | ModelType::Step3p7
             | ModelType::Mellum
             | ModelType::Laguna
+            | ModelType::Limite
             | ModelType::NemotronNAS
     )
 }
@@ -1892,6 +1895,7 @@ mod tests {
             ModelType::Step3p7,
             ModelType::Mellum,
             ModelType::Laguna,
+            ModelType::Limite,
             ModelType::NemotronNAS,
         ] {
             assert_eq!(
