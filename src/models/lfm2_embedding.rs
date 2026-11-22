@@ -259,7 +259,7 @@ impl EmbeddingModel for Lfm2EmbeddingModel {
 
 #[cfg(test)]
 #[path = "lfm2_embedding_tests.rs"]
-mod lfm2_embedding_tests;
+pub(crate) mod lfm2_embedding_tests;
 
 #[cfg(test)]
 #[path = "lfm2_embedding_head_tests.rs"]
