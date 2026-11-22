@@ -282,6 +282,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // added, neither of which the shard rules name. This arm only keeps
         // the dispatch table total.
         ModelType::Klear => "klear",
+        // Not shardable by the generic transformer plan, for AFMoE's reasons:
+        // stacked experts under `mlp.switch_mlp` and rotating sliding caches.
+        // This arm only keeps the dispatch table total.
+        ModelType::Kolibri1 => "kolibri1",
         ModelType::Apertus => "apertus",
         ModelType::SeedOss => "seed_oss",
         ModelType::Granite => "granite",

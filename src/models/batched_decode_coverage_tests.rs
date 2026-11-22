@@ -78,6 +78,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "KimiK3Model@src/models/kimi_k3.rs",
     "KimiLinearModel@src/models/kimi_linear.rs",
     "KlearModel@src/models/klear.rs",
+    "Kolibri1Model@src/models/kolibri1_lm.rs",
     "LagunaWrapper@src/models/laguna.rs",
     "Lfm2Model@src/models/lfm2.rs",
     "LimiteWrapper@src/models/limite_wrapper.rs",

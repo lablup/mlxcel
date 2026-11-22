@@ -201,7 +201,7 @@ const FUSED_MOE_MAX_DFF_GPU_PORT: i32 = if cfg!(feature = "rocm") {
 /// The cap is family-agnostic, but it only governs families whose fused decode
 /// goes through the shared [`SwitchGLU::forward_fused_kernel`]: AFMoE,
 /// BailingMoe, Cohere2Moe, DBRX, dots.llm1, GraniteMoeHybrid, Inkling, Klear,
-/// Laguna, LFM2, Mellum, MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe),
+/// Kolibri-1, Laguna, LFM2, Mellum, MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe),
 /// Qwen2Moe, Qwen3-MoE and Qwen3-VL-MoE (and the Qwen3-Omni-MoE thinker, which
 /// is built as a `Qwen3VLMoeModel`). Two families still drive a fused kernel
 /// from their own
@@ -1280,8 +1280,9 @@ pub(crate) fn stack_expert_leaf(
 /// shape checks refuse.
 ///
 /// Used by: the MoE stacking passes of Qwen3.5 (`qwen3_5::sanitize_weights`)
-/// and Qwen3-Next (`Qwen3NextModel::sanitize_weights`), and Gemma 4's
-/// `stack_gemma4_per_expert_planes` (`src/models/sanitize.rs`)
+/// and Qwen3-Next (`Qwen3NextModel::sanitize_weights`), Gemma 4's
+/// `stack_gemma4_per_expert_planes` (`src/models/sanitize.rs`), and
+/// Kolibri-1 (`kolibri1_weights::sanitize_weights`)
 pub(crate) fn drain_numbered_expert_planes(
     weights: &mut WeightMap,
     experts_root: &str,
@@ -1640,7 +1641,7 @@ impl SwitchGLU {
     /// Used by: AfMoE, BailingMoe, BailingMoeLinear, Cohere2Moe, Dbrx,
     ///          DeepSeekV2, DeepSeekV3, DeepSeekV32, Dots1, Ernie4_5MoeVL,
     ///          GLM4Moe, GraniteMoeHybrid, Jamba, KimiK3, KimiLinear, Klear,
-    ///          Laguna, Lfm2, LongcatFlashNgram, Mellum, MiniMax, Mistral4,
+    ///          Kolibri1, Laguna, Lfm2, LongcatFlashNgram, Mellum, MiniMax, Mistral4,
     ///          Mixtral, OLMoE, PhiMoE, Qwen2Moe, Qwen3_5, Qwen3Moe,
     ///          Qwen3VLMoe, SolarOpen, Step3p5, and Inkling through
     ///          [`Self::forward_with_expert_scales`]
@@ -1958,8 +1959,8 @@ impl SwitchGLU {
     /// caller (`MLXCEL_FUSED_MOE`).
     ///
     /// Used by: AfMoE, BailingMoe, Cohere2Moe, Dbrx, Dots1, GraniteMoeHybrid,
-    ///          Inkling, Klear, Laguna, Lfm2, Mellum, MiniMax, Mixtral, OLMoE,
-    ///          PhiMoE, Qwen2Moe, Qwen3Moe, and Qwen3VLMoE
+    ///          Inkling, Klear, Kolibri1, Laguna, Lfm2, Mellum, MiniMax, Mixtral,
+    ///          OLMoE, PhiMoE, Qwen2Moe, Qwen3Moe, and Qwen3VLMoE
     pub fn forward_fused_kernel(
         &self,
         x: &MlxArray,
