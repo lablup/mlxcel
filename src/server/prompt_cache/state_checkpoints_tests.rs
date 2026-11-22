@@ -484,3 +484,64 @@ fn checkpoints_closer_than_the_spacing_replace_each_other() {
         "a gap equal to the spacing keeps both"
     );
 }
+
+/// Store turns `1..=turns` in reverse order of completion: the whole snapshot
+/// of every turn first, then the checkpoints from the longest to the shortest,
+/// as requests finishing out of order would.
+fn run_turns_reversed(store: &PromptCacheStore, session: &str, turns: usize) {
+    for n in 1..=turns {
+        let tokens = history(10 * n);
+        store
+            .insert_snapshot(&key(session, &tokens), whole(&tokens, chain_lineage(n)))
+            .expect("whole snapshot");
+    }
+    for n in (1..=turns).rev() {
+        let tokens = history(10 * n);
+        store
+            .insert_state_checkpoint(
+                &key(session, &tokens),
+                checkpoint(&tokens, chain_lineage(n)),
+            )
+            .expect("checkpoint");
+    }
+}
+
+fn kept_boundaries(store: &PromptCacheStore, turns: usize, len: usize) -> Vec<usize> {
+    (1..=turns)
+        .filter(|turn| {
+            matches!(
+                lookup(store, SESSION, &edited_after(10 * turn, len)),
+                SnapshotLookupOutcome::CheckpointHit { matched_len, .. } if matched_len == 10 * turn
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_cap_holds_when_checkpoints_arrive_longest_first() {
+    // The same N + 1 boundaries inserted from the longest to the shortest keep
+    // the N longest, exactly as in forward order.
+    let n = 3;
+    let store = PromptCacheStore::with_config(capped_config(Some(n), 0));
+    run_turns_reversed(&store, SESSION, n + 1);
+    let stats = store.stats();
+    assert_eq!(stats.state_checkpoint_entries, n);
+    assert_eq!(stats.state_checkpoint_evictions, 1);
+    assert_eq!(kept_boundaries(&store, n + 1, 95), vec![2, 3]);
+}
+
+#[test]
+fn the_spacing_holds_when_checkpoints_arrive_longest_first() {
+    // Boundaries 10 tokens apart under a spacing of 15: the shorter one
+    // arriving second is the older and is the one dropped.
+    let store = PromptCacheStore::with_config(capped_config(None, 15));
+    run_turns_reversed(&store, SESSION, 2);
+    assert_eq!(store.stats().state_checkpoint_entries, 1);
+    assert_eq!(store.stats().state_checkpoint_evictions, 1);
+    // Turn 3's snapshot is the donor that makes turn 2's checkpoint offerable.
+    let tokens = history(30);
+    store
+        .insert_snapshot(&key(SESSION, &tokens), whole(&tokens, chain_lineage(3)))
+        .expect("whole snapshot");
+    assert_eq!(kept_boundaries(&store, 2, 95), vec![2]);
+}

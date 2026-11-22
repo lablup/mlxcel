@@ -211,15 +211,18 @@ impl Inner {
     }
 
     /// Apply the per-conversation rules to the conversation of the checkpoint
-    /// just inserted under `digest` (issue #3255): drop the earlier
-    /// checkpoints closer than the minimum spacing, then the shortest ones
-    /// beyond the per-conversation cap.
+    /// just inserted under `digest` (issue #3255): drop the checkpoints closer
+    /// than the minimum spacing to a longer one, then the shortest ones beyond
+    /// the per-conversation cap.
     ///
-    /// The conversation is the inserted checkpoint's line: the checkpoints of
-    /// the same session bucket and session whose tokens are a prefix of its
-    /// tokens. Requests without a session key share one session, and their
-    /// chats only share a line where their tokens do, so one chat's
-    /// checkpoints are not counted against another's.
+    /// "Newer" and "newest" mean the longer boundary, not the later insertion,
+    /// so requests that finish out of order leave the same set as in-order
+    /// ones. The conversation is the inserted checkpoint's whole lineage: the
+    /// checkpoints of the same session bucket and session whose tokens are a
+    /// prefix of its tokens, and those it is a prefix of. Requests without a
+    /// session key share one session, and their chats only share a line where
+    /// their tokens do, so one chat's checkpoints are not counted against
+    /// another's. The inserted checkpoint itself can be the one dropped.
     fn enforce_conversation_checkpoint_rules(&mut self, digest: &PromptCacheKeyDigest) {
         let spacing = self.config.state_checkpoint_min_spacing_tokens;
         let cap = self.config.state_checkpoints_per_conversation;
@@ -229,37 +232,47 @@ impl Inner {
         let Some(inserted) = self.state_checkpoints.get(digest) else {
             return;
         };
-        let len = inserted.entry.tokens.len();
-        let mut line: Vec<(usize, PromptCacheKeyDigest)> = self
+        let mut line: Vec<(PromptCacheKeyDigest, Arc<ModelSnapshotEntry>)> = self
             .state_checkpoints
             .iter()
             .filter(|(other, slot)| {
-                *other != digest
-                    && slot.sessionless == inserted.sessionless
-                    && same_session(
-                        slot.bucket.session_key.as_deref(),
-                        inserted.bucket.session_key.as_deref(),
-                    )
-                    && slot.entry.tokens.len() <= len
-                    && inserted.entry.tokens.starts_with(&slot.entry.tokens)
+                *other == digest
+                    || (slot.sessionless == inserted.sessionless
+                        && same_session(
+                            slot.bucket.session_key.as_deref(),
+                            inserted.bucket.session_key.as_deref(),
+                        )
+                        && (inserted.entry.tokens.starts_with(&slot.entry.tokens)
+                            || slot.entry.tokens.starts_with(&inserted.entry.tokens)))
             })
-            .map(|(other, slot)| (slot.entry.tokens.len(), *other))
+            .map(|(other, slot)| (*other, Arc::clone(&slot.entry)))
             .collect();
-        line.sort_by_key(|(len, other)| (*len, *other.as_bytes()));
+        // Longest first; equal lengths (same tokens, other template) by digest.
+        line.sort_by_key(|(other, entry)| {
+            (std::cmp::Reverse(entry.tokens.len()), *other.as_bytes())
+        });
         let mut dropped: Vec<PromptCacheKeyDigest> = Vec::new();
-        if spacing > 0 {
-            line.retain(|(earlier, other)| {
-                let close = len - earlier < spacing;
-                if close {
-                    dropped.push(*other);
-                }
-                !close
-            });
+        let mut kept: Vec<(PromptCacheKeyDigest, Arc<ModelSnapshotEntry>)> = Vec::new();
+        for (other, entry) in line {
+            let len = entry.tokens.len();
+            // A kept longer checkpoint on this one's line replaces it when
+            // closer than the spacing.
+            let close = spacing > 0
+                && kept.iter().any(|(_, newer)| {
+                    let newer_len = newer.tokens.len();
+                    newer_len > len
+                        && newer_len - len < spacing
+                        && newer.tokens.starts_with(&entry.tokens)
+                });
+            if close {
+                dropped.push(other);
+            } else {
+                kept.push((other, entry));
+            }
         }
         if let Some(cap) = cap {
-            // The inserted checkpoint is one of the `cap`.
-            let excess = (line.len() + 1).saturating_sub(cap.max(1));
-            dropped.extend(line.iter().take(excess).map(|(_, other)| *other));
+            // `kept` is longest first: the shortest beyond the cap go.
+            dropped.extend(kept.iter().skip(cap.max(1)).map(|(other, _)| *other));
         }
         for other in &dropped {
             self.remove_state_checkpoint(other);
