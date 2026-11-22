@@ -21,13 +21,17 @@
 //! Hugging Face/PyTorch layout; patch convolution is the only OIHW consumer and
 //! linear weights remain `[out, in]`.
 
-use super::builder::{Builder, Ty, Val};
+use super::builder::{Builder, Precision, Ty, Val};
 use super::numeric_ops::{
     exact_gelu, layer_norm_2d as layer_norm, quick_gelu, stable_softmax, tanh_gelu,
 };
 use super::vision_config::{
     LlavaVisionConfig, VisionActivation, VisionProjector, VisionWeightSpec,
 };
+
+/// Contraction precision of this graph on every device. The runtime binds the
+/// same value into the artifact's operator numeric contract (issue #3211).
+pub(crate) const LLAVA_VISION_PRECISION: Precision = Precision::F32;
 
 struct Args {
     values: Vec<Val>,
@@ -272,7 +276,7 @@ fn encoder_layer(
 fn emit_vision_impl(config: &LlavaVisionConfig, diagnostics: bool) -> String {
     let specs = config.weight_specs();
     let mut args = Args::new(&specs);
-    let mut builder = Builder::new();
+    let mut builder = Builder::new().with_precision(LLAVA_VISION_PRECISION);
     let patch_weight = args.take();
     let patch_bias = args.take();
     let class_embedding = config.class_token.then(|| args.take());

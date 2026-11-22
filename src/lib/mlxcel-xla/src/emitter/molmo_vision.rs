@@ -14,11 +14,15 @@
 
 //! StableHLO emitter for Molmo v1's ViT, attention pool, and SwiGLU projector.
 
-use super::builder::{Builder, Ty, Val};
+use super::builder::{Builder, Precision, Ty, Val};
 use super::molmo_vision_config::{
     MolmoVisionConfig, MolmoVisionWeightDType, MolmoVisionWeightSpec,
 };
 use super::molmo_vision_ops::{scalar_broadcast, silu, softmax_last};
+
+/// Contraction precision of this graph on every device. The runtime binds the
+/// same value into the artifact's operator numeric contract (issue #3211).
+pub(crate) const MOLMO_VISION_PRECISION: Precision = Precision::F32;
 
 struct Args {
     values: Vec<Val>,
@@ -332,7 +336,7 @@ fn attention_pool(
 fn emit_molmo_vision_impl(config: &MolmoVisionConfig, diagnostics: bool) -> String {
     let specs = config.weight_specs();
     let mut args = Args::new(&specs);
-    let mut builder = Builder::new();
+    let mut builder = Builder::new().with_precision(MOLMO_VISION_PRECISION);
     let class_embedding = args.take();
     let patch_embedding = args.take();
     let position_embedding = args.take();

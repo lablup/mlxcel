@@ -22,14 +22,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+use crate::aux_manifest::qualify_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
@@ -41,8 +40,17 @@ use crate::emitter::{
     QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES, QWEN3_VL_DIAGNOSTIC_BLOCK, QWEN3_VL_FIRST_DIAGNOSTIC_BLOCK,
     emit_qwen3_vl_diagnostics,
 };
-use crate::emitter::{Qwen3VlConfig, Qwen3VlHostInputs, prepare_qwen3_vl_host_inputs};
+use crate::emitter::{
+    QWEN3_VL_VISION_PRECISION, Qwen3VlConfig, Qwen3VlHostInputs, prepare_qwen3_vl_host_inputs,
+};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
+use crate::iree_identity::{
+    ProductionNumerics, compiler_version_output, observe_float_tensor, production_artifact_contract,
+};
+use crate::numeric_dtype_contract::NumericDType;
+use crate::operator_numeric_contract::{
+    AffineExecution, CheckpointSourceObserver, qwen3_vl_operators,
+};
 use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
 
 const ENTRY_NAME: &str = "qwen3_vl_vision.main";
@@ -137,22 +145,12 @@ fn compiler_generation_identity(
     flags: &[String],
     mlir: &str,
 ) -> Result<String, String> {
-    let version = Command::new(compiler)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("run {} --version: {error}", compiler.display()))?;
-    if !version.status.success() {
-        return Err(format!(
-            "{} --version failed: {}",
-            compiler.display(),
-            String::from_utf8_lossy(&version.stderr)
-        ));
-    }
+    let version = compiler_version_output(compiler)?;
     Ok(format!(
         "compiler={};compiler_sha256={};version={};flags={flags:?};mlir_sha256={}",
         compiler.display(),
         sha256_file(compiler)?,
-        String::from_utf8_lossy(&version.stdout).trim(),
+        version.as_str(),
         sha256_hex(mlir.as_bytes())
     ))
 }
@@ -386,6 +384,7 @@ fn quant_sibling(name: &str, suffix: &str) -> Result<String, String> {
 fn load_weights(
     model_dir: &Path,
     config: &Qwen3VlConfig,
+    observer: &mut CheckpointSourceObserver,
 ) -> Result<(Vec<AuxiliaryWeight>, String), String> {
     let specs = config.weight_specs();
     let locations = tensor_locations(model_dir)?;
@@ -445,6 +444,7 @@ fn load_weights(
             })?;
             let source_dtype = tensor.dtype();
             let source_shape = tensor.shape().to_vec();
+            observe_float_tensor(observer, source_dtype)?;
             let (values, transform) = if spec.name == "vision_tower.patch_embed.proj.weight" {
                 let expected_source = [
                     config.hidden,
@@ -523,6 +523,15 @@ fn load_weights(
                         ));
                     }
                 };
+                observer.observe_affine(
+                    bits,
+                    group_size,
+                    if scales_bf16 {
+                        NumericDType::Bf16
+                    } else {
+                        NumericDType::F16
+                    },
+                )?;
                 let values = dequantize_affine(
                     tensor.data(),
                     scales.data(),
@@ -638,8 +647,10 @@ fn compile_and_load(
     let cache = std::env::temp_dir().join("mlxcel-xla-qwen3-vl-vmfb");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let (weights, checkpoint_schema) = load_weights(model_dir, config)?;
-    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+    let mut observer = CheckpointSourceObserver::default();
+    let (weights, checkpoint_schema) = load_weights(model_dir, config, &mut observer)?;
+    let operators = qwen3_vl_operators();
+    let contract = production_artifact_contract(
         ENTRY_NAME,
         format!(
             "{};{};checkpoint_schema_sha256={}",
@@ -648,10 +659,18 @@ fn compile_and_load(
             sha256_hex(checkpoint_schema.as_bytes())
         ),
         compiler_generation_identity(&compiler, &flags, &mlir)?,
+        &compiler,
+        device,
+        &ProductionNumerics {
+            family: "qwen3-vl-vision",
+            operators: &operators,
+            precision: QWEN3_VL_VISION_PRECISION,
+            weights: observer.resolve(AffineExecution::Host)?,
+        },
     )?;
     let tag = format!("qwen3-vl-vision-{patch_bucket}");
     let vmfb = cached_vmfb_path(&compiler, &mlir, &flags, &cache, &tag, 0);
-    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+    let vmfb = qualify_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(&compiler, &mlir, &flags, &cache, &tag, 0, temporary)
     })?;
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)

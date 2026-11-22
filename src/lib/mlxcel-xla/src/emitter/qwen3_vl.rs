@@ -24,7 +24,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::builder::{Builder, Ty, Val};
+use super::builder::{Builder, Precision, Ty, Val};
 
 /// Qualified flattened-patch capacities for the pinned Qwen3-VL image path.
 ///
@@ -38,6 +38,10 @@ pub(crate) const QWEN3_VL_MAX_MERGED_VISUAL_POSITIONS: usize = 512 / 4;
 pub(crate) const QWEN3_VL_FIRST_DIAGNOSTIC_BLOCK: usize = 0;
 pub(crate) const QWEN3_VL_DIAGNOSTIC_BLOCK: usize = 2;
 pub(crate) const QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES: usize = 7;
+
+/// Contraction precision of this graph on every device. The runtime binds the
+/// same value into the artifact's operator numeric contract (issue #3211).
+pub(crate) const QWEN3_VL_VISION_PRECISION: Precision = Precision::F32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Qwen3VlWeightSpec {
@@ -962,7 +966,7 @@ fn emit_qwen3_vl_impl(config: &Qwen3VlConfig, patch_bucket: usize, diagnostics: 
     );
     let specs = config.weight_specs();
     let mut args = Args::new(&specs);
-    let mut builder = Builder::new();
+    let mut builder = Builder::new().with_precision(QWEN3_VL_VISION_PRECISION);
     let patch_weight = args.take();
     let patch_bias = args.take();
     let position_table = args.take();

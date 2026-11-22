@@ -145,6 +145,11 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
      "override", (
         "MLXCEL_XLA_IREE_DIST",
     )),
+    ("build-internal: set by the mlxcel-xla build script through "
+     "cargo:rustc-env to the SHA-256 of the linked IREE runtime archive, "
+     "read with option_env! into the auxiliary artifact identity", (
+        "MLXCEL_XLA_IREE_RUNTIME_SHA256",
+    )),
     ("fixture-authoring: makes a #[cfg(test)] test in "
      "mlxcel-xla/src/validation.rs rewrite the committed StableHLO goldens", (
         "MLXCEL_FREEZE_GOLDENS",

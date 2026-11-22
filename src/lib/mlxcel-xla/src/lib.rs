@@ -66,8 +66,11 @@ mod numeric_oracle;
 #[cfg(feature = "micro-oracle")]
 mod numeric_probe;
 #[cfg(any(feature = "iree", test))]
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod operator_numeric_contract;
+// IREE compiler/runtime identity shared by the probes and production artifacts.
+#[cfg(feature = "iree")]
+mod iree_identity;
 #[cfg(any(feature = "iree", test))]
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod prepared;

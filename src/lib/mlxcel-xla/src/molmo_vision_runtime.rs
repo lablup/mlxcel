@@ -22,15 +22,23 @@ use std::time::Instant;
 use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+use crate::aux_manifest::qualify_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::emitter::{
-    MolmoVisionConfig, MolmoVisionWeightDType, MolmoVisionWeightSpec, emit_molmo_vision,
+    MOLMO_VISION_PRECISION, MolmoVisionConfig, MolmoVisionWeightDType, MolmoVisionWeightSpec,
+    emit_molmo_vision,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
+use crate::iree_identity::{
+    ProductionNumerics, observe_float_tensor, production_artifact_contract,
+};
+use crate::numeric_dtype_contract::NumericDType;
+use crate::operator_numeric_contract::{
+    AffineExecution, CheckpointSourceObserver, molmo_vision_operators,
+};
 use crate::vision_runtime::{
     checked_f32_output, compiler_generation_identity, f32_as_bytes, model_shards, native_f32_bytes,
     sha256_hex, validate_finite_values,
@@ -110,7 +118,9 @@ fn resolve_weight_shards(
 
 fn load_weights(
     model_dir: &Path,
+    config: &MolmoVisionConfig,
     specs: &[MolmoVisionWeightSpec],
+    observer: &mut CheckpointSourceObserver,
 ) -> Result<(Vec<AuxiliaryWeight>, String), String> {
     let shards = resolve_weight_shards(model_dir, specs)?;
     let mut by_shard = BTreeMap::<&Path, Vec<usize>>::new();
@@ -144,6 +154,7 @@ fn load_weights(
             }
             let (bytes, dtype) = match spec.dtype {
                 MolmoVisionWeightDType::Float32 => {
+                    observe_float_tensor(observer, tensor.dtype())?;
                     let values = match tensor.dtype() {
                         Dtype::BF16 => bf16_to_f32(tensor.data()),
                         Dtype::F16 => f16_to_f32(tensor.data()),
@@ -176,6 +187,8 @@ fn load_weights(
                             tensor.dtype()
                         ));
                     }
+                    // The F16 scale/bias siblings are `Float16` specs.
+                    observer.observe_affine(config.bits, config.group_size, NumericDType::F16)?;
                     (tensor.data().to_vec(), AuxiliaryWeightDType::Uint32)
                 }
             };
@@ -211,11 +224,13 @@ fn compile_and_load(
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
     let specs = config.weight_specs();
-    let (weights, checkpoint_schema) = load_weights(model_dir, &specs)?;
+    let mut observer = CheckpointSourceObserver::default();
+    let (weights, checkpoint_schema) = load_weights(model_dir, config, &specs, &mut observer)?;
     let processor_path = model_dir.join("preprocessor_config.json");
     let processor = std::fs::read(&processor_path)
         .map_err(|error| format!("{}: {error}", processor_path.display()))?;
-    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+    let operators = molmo_vision_operators(config.bits);
+    let contract = production_artifact_contract(
         ENTRY_NAME,
         format!(
             "{};processor_sha256={};checkpoint_schema_sha256={}",
@@ -224,9 +239,17 @@ fn compile_and_load(
             sha256_hex(checkpoint_schema.as_bytes())
         ),
         compiler_generation_identity(&compiler, &flags, mlir)?,
+        &compiler,
+        device,
+        &ProductionNumerics {
+            family: "molmo-vision",
+            operators: &operators,
+            precision: MOLMO_VISION_PRECISION,
+            weights: observer.resolve(AffineExecution::InGraph)?,
+        },
     )?;
     let vmfb = cached_vmfb_path(&compiler, mlir, &flags, &cache, tag, 0);
-    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+    let vmfb = qualify_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(&compiler, mlir, &flags, &cache, tag, 0, temporary)
     })?;
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
