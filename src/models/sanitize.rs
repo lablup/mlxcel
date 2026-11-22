@@ -1464,6 +1464,54 @@ pub(crate) fn modelopt_nvfp4_group_size(quantization_config: Option<&Value>) -> 
     declared.then_some(NVFP4_SOURCE_GROUP_SIZE as i32)
 }
 
+/// Give a text config the layout of an NVFP4 export's repacked linears, for a
+/// family whose config reader only knows MLX's `quantization` block.
+///
+/// An export from NVIDIA ModelOpt or compressed-tensors (llm-compressor)
+/// declares its format in `quantization_config` (or ModelOpt's
+/// `hf_quant_config.json`) and has no `quantization` block, so the family
+/// falls back to its affine default of 64 / 4 and every repacked linear is
+/// loaded from its tensor shapes with a `quantized layout does not match
+/// declared metadata` warning. This inserts `{"group_size": 16, "bits": 4}`,
+/// the layout the direct transcode keeps. Returns whether it did; a config
+/// that already has a `quantization` block, or a checkpoint that declares no
+/// NVFP4, is left alone.
+///
+/// `model_dir` is where `hf_quant_config.json` would be; `None` for a caller
+/// that only has the parsed config, which then reads `quantization_config`
+/// alone.
+///
+/// Used by: the Qwen3.5 text loader (`Qwen35Model::load`), the Qwen3.5 VLM
+/// loader (`load_qwen3_5_vlm_with_variant`) and `qwen35_text_config`
+/// (`src/loading/special.rs`)
+pub(crate) fn merge_modelopt_nvfp4_quantization(
+    text_config: &mut Value,
+    full_config: &Value,
+    model_dir: Option<&std::path::Path>,
+) -> Result<bool, String> {
+    if text_config.get("quantization").is_some() {
+        return Ok(false);
+    }
+    let declared = match model_dir {
+        Some(model_dir) => is_modelopt_nvfp4_text_checkpoint(Some(full_config), model_dir),
+        None => [Some(full_config), full_config.get("text_config")]
+            .into_iter()
+            .flatten()
+            .any(|root| modelopt_nvfp4_group_size(root.get("quantization_config")).is_some()),
+    };
+    if !declared {
+        return Ok(false);
+    }
+    let object = text_config.as_object_mut().ok_or_else(|| {
+        "Cannot merge the NVFP4 quantization block into a non-object config".to_string()
+    })?;
+    object.insert(
+        "quantization".to_string(),
+        serde_json::json!({ "group_size": NVFP4_SOURCE_GROUP_SIZE, "bits": 4 }),
+    );
+    Ok(true)
+}
+
 /// Drop k_proj / v_proj / k_norm weight entries that belong to KV-shared
 /// layers so they are never materialized into MLX arrays.
 ///
@@ -3722,6 +3770,137 @@ mod tests {
             "model.vision_tower.timm_model.conv_stem.conv.weight"
         ));
         assert!(gemma3n_bf16_key("model.embed_vision.embedding.weight"));
+    }
+
+    fn modelopt_nvfp4_declaration() -> Value {
+        serde_json::json!({
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "config_groups": { "group_0": { "weights": {
+                "num_bits": 4, "type": "float", "group_size": 16
+            } } }
+        })
+    }
+
+    fn compressed_tensors_nvfp4_declaration() -> Value {
+        serde_json::json!({
+            "quant_method": "compressed-tensors",
+            "format": "nvfp4-pack-quantized",
+            "config_groups": { "group_0": { "weights": {
+                "num_bits": 4, "type": "float", "group_size": 16
+            } } }
+        })
+    }
+
+    /// An NVFP4 export has no MLX `quantization` block, so a family that only
+    /// reads that block loaded every repacked linear from its shapes, with a
+    /// warning each. The text config now gets the repacked layout, wherever
+    /// the export declares its format.
+    #[test]
+    fn an_nvfp4_declaration_gives_the_text_config_the_repacked_layout() {
+        let layout = serde_json::json!({ "group_size": 16, "bits": 4 });
+        let dir = std::env::temp_dir().join(format!(
+            "mlxcel_merge_nvfp4_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for declaration in [
+            modelopt_nvfp4_declaration(),
+            compressed_tensors_nvfp4_declaration(),
+        ] {
+            // Declared at the top level, as a VLM wrapper and a text-only
+            // checkpoint both do, with and without a model directory.
+            let full = serde_json::json!({
+                "model_type": "qwen3_5",
+                "quantization_config": declaration,
+                "text_config": { "hidden_size": 64 }
+            });
+            for model_dir in [Some(dir.as_path()), None] {
+                let mut text_config = full["text_config"].clone();
+                assert!(
+                    merge_modelopt_nvfp4_quantization(&mut text_config, &full, model_dir).unwrap()
+                );
+                assert_eq!(text_config["quantization"], layout);
+                assert_eq!(text_config["hidden_size"], 64);
+            }
+            // Declared inside `text_config`.
+            let nested = serde_json::json!({
+                "text_config": { "quantization_config": full["quantization_config"] }
+            });
+            for model_dir in [Some(dir.as_path()), None] {
+                let mut text_config = nested["text_config"].clone();
+                assert!(
+                    merge_modelopt_nvfp4_quantization(&mut text_config, &nested, model_dir)
+                        .unwrap()
+                );
+                assert_eq!(text_config["quantization"], layout);
+            }
+        }
+
+        // ModelOpt's sidecar file declares it too, for a caller that has the
+        // directory; one that has only the parsed config cannot see it.
+        std::fs::write(
+            dir.join("hf_quant_config.json"),
+            r#"{"producer": {"name": "modelopt"}, "quantization": {"quant_algo": "NVFP4", "group_size": 16}}"#,
+        )
+        .unwrap();
+        let bare = serde_json::json!({ "model_type": "qwen3_5" });
+        let mut text_config = bare.clone();
+        assert!(merge_modelopt_nvfp4_quantization(&mut text_config, &bare, Some(&dir)).unwrap());
+        assert_eq!(text_config["quantization"], layout);
+        let mut text_config = bare.clone();
+        assert!(!merge_modelopt_nvfp4_quantization(&mut text_config, &bare, None).unwrap());
+        assert!(text_config.get("quantization").is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A declared `quantization` block always wins, and a checkpoint that
+    /// declares no NVFP4 is left alone.
+    #[test]
+    fn the_nvfp4_layout_is_merged_only_where_it_applies() {
+        let dir = std::env::temp_dir().join(format!(
+            "mlxcel_merge_nvfp4_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let declared = serde_json::json!({ "group_size": 64, "bits": 8 });
+        let full = serde_json::json!({ "quantization_config": modelopt_nvfp4_declaration() });
+        let mut text_config = serde_json::json!({ "quantization": declared });
+        assert!(!merge_modelopt_nvfp4_quantization(&mut text_config, &full, Some(&dir)).unwrap());
+        assert_eq!(text_config["quantization"], declared);
+
+        for quantization_config in [
+            None,
+            Some(serde_json::json!({ "quant_method": "modelopt", "quant_algo": "FP8" })),
+            Some(
+                serde_json::json!({ "quant_method": "modelopt", "quant_algo": "MIXED_PRECISION" }),
+            ),
+            Some(serde_json::json!({
+                "quant_method": "compressed-tensors", "format": "float-quantized"
+            })),
+            Some(serde_json::json!({ "quant_method": "fp8", "weight_block_size": [128, 128] })),
+        ] {
+            let mut full = serde_json::json!({ "model_type": "qwen3_5" });
+            if let Some(quantization_config) = quantization_config.clone() {
+                full["quantization_config"] = quantization_config;
+            }
+            for model_dir in [Some(dir.as_path()), None] {
+                let mut text_config = serde_json::json!({ "hidden_size": 64 });
+                assert!(
+                    !merge_modelopt_nvfp4_quantization(&mut text_config, &full, model_dir).unwrap(),
+                    "{quantization_config:?}"
+                );
+                assert_eq!(text_config, serde_json::json!({ "hidden_size": 64 }));
+            }
+        }
+
+        // A text config that is not an object cannot take the block.
+        let mut not_an_object = serde_json::json!("qwen3_5");
+        let error = merge_modelopt_nvfp4_quantization(&mut not_an_object, &full, None).unwrap_err();
+        assert!(error.contains("non-object"), "{error}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// llm-compressor writes a Gemma 4 MoE layer's experts as one linear each

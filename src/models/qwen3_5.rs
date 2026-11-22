@@ -2371,6 +2371,14 @@ impl Qwen35Model {
         if let Some(detected) = fp8 {
             crate::models::merge_fp8_quantization(&mut text_config_val, detected)?;
         }
+        // An NVFP4 export from ModelOpt or compressed-tensors has no
+        // `quantization` block either; its linears are repacked to MLX native
+        // NVFP4 by `load_text_weights` below.
+        crate::models::merge_modelopt_nvfp4_quantization(
+            &mut text_config_val,
+            &v,
+            Some(model_dir),
+        )?;
 
         let config: Qwen35Config = serde_json::from_value(text_config_val)
             .map_err(|e| format!("Failed to parse config: {}", e))?;
