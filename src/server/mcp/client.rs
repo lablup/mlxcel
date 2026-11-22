@@ -81,6 +81,11 @@ pub enum McpClientError {
     Spawn(String),
     #[error("MCP server did not answer within {} ms", .0.as_millis())]
     Timeout(Duration),
+    #[error(
+        "MCP server stayed busy with other calls for {} ms; this call was not sent",
+        .0.as_millis()
+    )]
+    Busy(Duration),
     #[error("MCP server exited or closed its output before answering")]
     Closed,
     #[error("MCP server sent a message larger than the {0}-byte limit")]

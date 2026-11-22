@@ -24,6 +24,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
@@ -51,6 +52,17 @@ pub struct McpRuntime {
     servers: BTreeMap<String, McpServer>,
     limits: McpLimits,
     approvals: PendingApprovals,
+    /// Tool-loop responses running now (see [`Self::admit_run`]).
+    active_runs: AtomicUsize,
+}
+
+/// One admitted tool-loop response. Dropping it frees the place.
+pub(crate) struct McpRunPermit(Arc<McpRuntime>);
+
+impl Drop for McpRunPermit {
+    fn drop(&mut self) {
+        self.0.active_runs.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl McpRuntime {
@@ -102,6 +114,7 @@ impl McpRuntime {
             servers,
             limits: config.limits,
             approvals: PendingApprovals::default(),
+            active_runs: AtomicUsize::new(0),
         }
     }
 
@@ -111,6 +124,35 @@ impl McpRuntime {
 
     pub(crate) fn approvals(&self) -> &PendingApprovals {
         &self.approvals
+    }
+
+    /// Admit one tool-loop response, or `None` when `max_runs` already run.
+    ///
+    /// A tool-loop response holds a blocking-pool thread for its whole life,
+    /// including the time it waits on tool calls, and that time is not
+    /// counted by the model queue. Without this cap enough concurrent
+    /// requests against a slow tool would exhaust the blocking pool every
+    /// other route depends on.
+    pub(crate) fn admit_run(self: &Arc<Self>, max_runs: usize) -> Option<McpRunPermit> {
+        let max_runs = max_runs.max(1);
+        self.active_runs
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |running| {
+                (running < max_runs).then_some(running + 1)
+            })
+            .ok()?;
+        Some(McpRunPermit(Arc::clone(self)))
+    }
+
+    /// Wait for the server's child, at most one tool timeout. Calls to one
+    /// server run one at a time, so without this bound a queue of callers
+    /// behind a slow tool would wait without limit.
+    async fn lock_client<'a>(
+        &self,
+        server: &'a McpServer,
+    ) -> Result<tokio::sync::MutexGuard<'a, Option<StdioMcpClient>>, McpClientError> {
+        tokio::time::timeout(self.limits.tool_timeout, server.client.lock())
+            .await
+            .map_err(|_| McpClientError::Busy(self.limits.tool_timeout))
     }
 
     pub fn has_server(&self, label: &str) -> bool {
@@ -129,7 +171,7 @@ impl McpRuntime {
         if let Some(tools) = server.cached_tools() {
             return Ok(tools);
         }
-        let mut slot = server.client.lock().await;
+        let mut slot = self.lock_client(server).await?;
         // Another request may have finished the discovery while this one
         // waited for the child.
         if let Some(tools) = server.cached_tools() {
@@ -160,7 +202,7 @@ impl McpRuntime {
         arguments: &Value,
     ) -> Result<McpToolOutput, McpClientError> {
         let server = self.server(label)?;
-        let mut slot = server.client.lock().await;
+        let mut slot = self.lock_client(server).await?;
         let mut client = self.connected(server, &mut slot).await?;
         let result = client
             .call_tool(

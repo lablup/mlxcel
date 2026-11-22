@@ -212,6 +212,15 @@ pub(super) async fn create_mcp_response(args: McpResponseArgs, headers: &HeaderM
         return ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
             .into_response();
     }
+    // A tool-loop response holds a blocking thread while it waits on tools,
+    // outside the model queue, so the number running at once has its own
+    // cap: the same --max-queue-depth that bounds queued model work.
+    let Some(permit) = setup.runtime.admit_run(state.config.max_queue_depth) else {
+        return ErrorResponse::service_unavailable(
+            "Too many MCP tool-loop responses are running. Please try again later.",
+        )
+        .into_response();
+    };
     let stream = request.stream;
     let request = Arc::new(request);
     let translated = Arc::new(translated);
@@ -246,7 +255,10 @@ pub(super) async fn create_mcp_response(args: McpResponseArgs, headers: &HeaderM
             sender,
             &cancelled,
         ));
-        tokio::task::spawn_blocking(move || drive_mcp_run(run, cancelled, sink, runtime_handle));
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            drive_mcp_run(run, cancelled, sink, runtime_handle);
+        });
         return sse_response(stream, keepalive);
     }
 
@@ -261,7 +273,10 @@ pub(super) async fn create_mcp_response(args: McpResponseArgs, headers: &HeaderM
     // A caller that hangs up drops this future: stop the loop, so no further
     // model turn or tool call runs for a response nobody reads.
     let mut hangup = CancelOnDrop(Some(cancelled.clone()));
-    tokio::task::spawn_blocking(move || drive_mcp_run(run, cancelled, sink, runtime_handle));
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        drive_mcp_run(run, cancelled, sink, runtime_handle);
+    });
     let outcome = outcome_rx.await;
     hangup.0 = None;
     match outcome {

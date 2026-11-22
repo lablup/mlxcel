@@ -173,3 +173,48 @@ async fn listing_tools_does_not_wait_for_a_call_in_flight() {
         Err(McpClientError::Timeout(test_limits().tool_timeout))
     );
 }
+
+/// A call queued behind another on the same server gives up after one tool
+/// timeout instead of waiting without limit, and sends nothing.
+#[tokio::test]
+async fn a_call_waiting_on_a_busy_server_fails_after_one_timeout() {
+    let mut config = fake_config();
+    config.limits.tool_timeout = Duration::from_millis(400);
+    let runtime = McpRuntime::start(config).await;
+    let server = runtime.servers.get("fake").expect("configured");
+    let held = server.client.lock().await;
+    let started = Instant::now();
+    let error = runtime
+        .call_tool("fake", "add", &json!({"a": 1, "b": 2}))
+        .await
+        .expect_err("the server is held");
+    assert_eq!(error, McpClientError::Busy(Duration::from_millis(400)));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(held);
+    let sum = runtime
+        .call_tool("fake", "add", &json!({"a": 1, "b": 2}))
+        .await
+        .expect("the server serves again once free");
+    assert_eq!(sum.text, "3");
+}
+
+/// The tool-loop admission cap counts running responses and frees a place
+/// when a permit drops.
+#[test]
+fn admission_caps_concurrent_tool_loop_runs() {
+    let runtime = Arc::new(McpRuntime::new(fake_config()));
+    let first = runtime.admit_run(2).expect("first run admitted");
+    let second = runtime.admit_run(2).expect("second run admitted");
+    assert!(runtime.admit_run(2).is_none(), "a third run is refused");
+    drop(first);
+    let third = runtime.admit_run(2).expect("a freed place is reused");
+    drop((second, third));
+    // A zero cap still admits one run rather than refusing everything.
+    let only = runtime.admit_run(0).expect("cap 0 admits one");
+    assert!(runtime.admit_run(0).is_none());
+    drop(only);
+}

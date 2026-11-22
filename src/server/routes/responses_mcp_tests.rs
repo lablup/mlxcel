@@ -41,6 +41,7 @@ struct Harness {
     handle: ScriptedStreamHandle,
     prompts: mpsc::Receiver<String>,
     _options: mpsc::Receiver<crate::server::ServerGenerateOptions>,
+    runtime: Option<Arc<McpRuntime>>,
 }
 
 async fn harness() -> Harness {
@@ -69,12 +70,13 @@ async fn harness_with(mcp: Option<crate::server::mcp::McpStartupConfig>) -> Harn
     .with_responses_store(Some(Arc::new(ResponsesStore::new(
         ResponsesStoreConfig::default(),
     ))))
-    .with_mcp(runtime);
+    .with_mcp(runtime.clone());
     Harness {
         app: create_app(state),
         handle,
         prompts: prompt_rx,
         _options: options_rx,
+        runtime,
     }
 }
 
@@ -925,4 +927,25 @@ async fn chat_completions_ignores_the_loop() {
     // The call goes back to the client; nothing was run server-side.
     assert_eq!(chat["choices"][0]["finish_reason"], "tool_calls");
     assert_eq!(h.prompts().len(), 1);
+}
+
+/// Tool-loop responses running at once are capped at --max-queue-depth: one
+/// more is refused with a 503 before any model turn or tool call.
+#[tokio::test]
+async fn tool_loop_responses_past_the_admission_cap_get_503() {
+    let h = harness().await;
+    let runtime = h.runtime.as_ref().expect("loop enabled");
+    let cap = ServerConfig::default().max_queue_depth;
+    let permits: Vec<_> = (0..cap)
+        .map(|_| runtime.admit_run(cap).expect("under the cap"))
+        .collect();
+    let (status, response) = h.create(body(json!([mcp_tool(json!({}))]))).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+    assert!(
+        error_message(&response).contains("MCP tool-loop responses"),
+        "{response}"
+    );
+    assert!(h.prompts().is_empty(), "no model turn ran");
+    drop(permits);
+    assert!(runtime.admit_run(cap).is_some(), "places free on drop");
 }
