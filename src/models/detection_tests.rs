@@ -167,6 +167,37 @@ fn whisper_model_type_is_detected() {
     fs::remove_dir_all(model_dir).unwrap();
 }
 
+/// PLaMo 2.1 VL (`plamo2vl`) routes to its VLM loader, while the text-only
+/// `plamo2` checkpoint keeps the PLaMo 2 route (issue #1380).
+#[test]
+fn plamo2vl_model_type_is_detected_and_plamo2_is_unchanged() {
+    let cases = [
+        (
+            "plamo2vl",
+            r#"{
+                "model_type": "plamo2vl",
+                "architectures": ["Plamo2VLForCausalLM"],
+                "text_config": {"hidden_size": 2048, "num_hidden_layers": 32, "vocab_size": 100032},
+                "vision_config": {"model_type": "", "vision_encoder_hidden_size": 1152, "image_token_id": 100002}
+            }"#,
+            ModelType::Plamo2VLM,
+        ),
+        (
+            "plamo2",
+            r#"{"model_type": "plamo2", "hidden_size": 2048, "num_hidden_layers": 16, "vocab_size": 100000}"#,
+            ModelType::Plamo2,
+        ),
+    ];
+    for (name, config, expected) in cases {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("config.json"), config).unwrap();
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, expected, "{name}");
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
 /// Nemotron-Parse keeps its geometry under `encoder` / `decoder` sub-configs
 /// and ships an empty `vision_config`; detection keys off the top-level
 /// `model_type` alone (issue #1369).

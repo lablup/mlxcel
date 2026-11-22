@@ -412,6 +412,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::SmolVLM => Some(load_smolvlm_vlm(model_path)?),
         ModelType::Idefics2 => Some(load_idefics2_vlm(model_path)?),
         ModelType::Lfm2VL => Some(load_lfm2_vl(model_path)?),
+        ModelType::Plamo2VLM => Some(load_plamo2_vl(model_path)?),
         _ => None,
     })
 }

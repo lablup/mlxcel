@@ -39,6 +39,7 @@ use crate::multimodal::gemma3_vlm_prompt::{
 use crate::multimodal::got_ocr_prompt::prepare_got_prompt_tokens;
 use crate::multimodal::llmjp_vl_prompt::{insert_llmjp_image_tokens, text_token_count};
 use crate::multimodal::minicpmv46_prompt::prepare_minicpmv46_prompt_tokens;
+use crate::multimodal::plamo2_vl_prompt::{Plamo2VlImageTokenIds, prepare_plamo2_vl_prompt_tokens};
 use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
 use crate::phi4mm_prompt::{expand_phi4mm_placeholders, prepare_phi4mm_prompt_tokens};
@@ -344,6 +345,17 @@ pub enum VlmPreparationSummary {
     Lfm2Vl {
         image_blocks: usize,
         total_image_tokens: usize,
+    },
+    /// PLaMo 2.1 VL wrapped the text in its fixed instruction template and
+    /// framed each image as `<siglip2:img> + <plamo:image> * (729 * tiles) +
+    /// </siglip2:img>`. `pre_templated` records whether the text already
+    /// carried the template (the server render) or was wrapped (the CLI).
+    Plamo2Vl {
+        image_blocks: usize,
+        total_tiles: usize,
+        total_image_tokens: usize,
+        total_tokens: usize,
+        pre_templated: bool,
     },
     /// Granite Vision expanded each `<image>` into `num_image_tokens` copies.
     GraniteVision {
@@ -2030,6 +2042,66 @@ where
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
                 preparation,
+            }))
+        }
+        VlmRuntimeRef::Plamo2Vl(plamo) => {
+            // One shared context budget tiles every image (at most 4 tiles
+            // for a single image), then the fixed instruction template is
+            // assembled around the text and each image block is sized to its
+            // tile count. `prompt` is the raw `-p` text (CLI) or the builtin
+            // template's render (server); the builder converges both.
+            let (pixel_values, tiles_per_image) = plamo
+                .processor
+                .preprocess_with_tiles(images)
+                .map_err(|err| anyhow::anyhow!(err))?;
+            let ids = Plamo2VlImageTokenIds {
+                bos: plamo.bos_token_id,
+                img_start: plamo.img_start_token_id,
+                image: plamo.image_token_id,
+                img_end: plamo.img_end_token_id,
+            };
+            let (tokens, stats) = prepare_plamo2_vl_prompt_tokens(
+                prompt,
+                &tiles_per_image,
+                plamo.num_image_token,
+                ids,
+                &mut encode,
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+            *prompt_tokens = tokens;
+            ensure_image_token_feature_cardinality(
+                "PLaMo 2.1 VL",
+                prompt_tokens,
+                plamo.image_token_id,
+                tiles_per_image.iter().copied(),
+                plamo.num_image_token,
+            )?;
+            tracing::debug!(
+                image_blocks = stats.image_blocks,
+                total_tiles = stats.total_tiles,
+                total_image_tokens = stats.total_image_tokens,
+                total_tokens = prompt_tokens.len(),
+                "PLaMo 2.1 VL prompt prepared"
+            );
+
+            // All tiles go through the tower in one call; the opportunistic
+            // vision cache is off, as for InternVL and GOT-OCR.
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = plamo
+                .get_input_embeddings(&input_ids_arr, &pixel_values, stats.total_image_tokens)
+                .map_err(|err| anyhow::anyhow!(err))?;
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::Plamo2Vl {
+                    image_blocks: stats.image_blocks,
+                    total_tiles: stats.total_tiles,
+                    total_image_tokens: stats.total_image_tokens,
+                    total_tokens: prompt_tokens.len(),
+                    pre_templated: stats.pre_templated,
+                }),
             }))
         }
         VlmRuntimeRef::GotOcr(got) => {

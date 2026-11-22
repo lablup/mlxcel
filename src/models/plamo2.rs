@@ -55,7 +55,10 @@
 //!    `k` are RMS-normed WITHOUT a learned weight (`weight=None`, i.e. a ones
 //!    vector) and then multiplied by a per-head learned scale (`q_weight`
 //!    `[num_heads, head_dim]`, `k_weight` `[num_kv_heads, head_dim]`). RoPE
-//!    (base 10000, non-traditional) follows with the cache offset.
+//!    (non-traditional) follows with the cache offset. The base is per layer:
+//!    `rope_theta` for layers in `full_attention_idx`, `rope_local_theta` for
+//!    the rest (both default to 10000, which `plamo-2-1b` uses; PLaMo 2.1 VL
+//!    sets both to 1e6).
 //!
 //! The SSD scan, the conv-state handling, and the fused decode kernel dispatch
 //! are adapted from [`super::falcon_h1`] (the shared `mlxcel_core::ssm_update_kernel`
@@ -141,6 +144,16 @@ pub struct ModelArgs {
     #[serde(default = "default_true")]
     pub tie_word_embeddings: bool,
 
+    // RoPE bases. `plamo-2-1b` carries none of these keys and keeps base
+    // 10000 on every attention layer; the PLaMo 2.1 VL text config sets
+    // `rope_theta` and `rope_local_theta` to 1e6 (issue #1380).
+    #[serde(default = "default_rope_theta")]
+    pub rope_theta: f32,
+    #[serde(default)]
+    pub rope_local_theta: Option<f32>,
+    #[serde(default)]
+    pub full_attention_idx: Option<Vec<usize>>,
+
     #[serde(default)]
     pub eos_token_id: Option<serde_json::Value>,
     #[serde(default)]
@@ -167,6 +180,9 @@ fn default_mamba_step() -> usize {
 }
 fn default_true() -> bool {
     true
+}
+fn default_rope_theta() -> f32 {
+    10000.0
 }
 
 impl ModelArgs {
@@ -209,6 +225,22 @@ impl ModelArgs {
             return i != self.num_hidden_layers - 1;
         }
         (i % self.mamba_step) != (self.mamba_step / 2)
+    }
+
+    /// RoPE base for attention layer `layer_idx`: `rope_theta` when the layer
+    /// is listed in `full_attention_idx`, otherwise `rope_local_theta`
+    /// (falling back to `rope_theta`), as upstream `Plamo2AttentionMixer`
+    /// selects it.
+    pub fn rope_base(&self, layer_idx: usize) -> f32 {
+        let full = self
+            .full_attention_idx
+            .as_ref()
+            .is_some_and(|idx| idx.contains(&layer_idx));
+        if full {
+            self.rope_theta
+        } else {
+            self.rope_local_theta.unwrap_or(self.rope_theta)
+        }
     }
 
     pub fn eos_token_ids(&self) -> Vec<i32> {
@@ -885,6 +917,20 @@ impl Plamo2Model {
         self.config.num_hidden_layers
     }
 
+    /// RoPE base of every attention layer, in layer order (test hook for the
+    /// per-layer `rope_theta` / `rope_local_theta` selection).
+    #[cfg(test)]
+    pub(crate) fn attention_rope_bases(&self) -> Vec<(usize, f32)> {
+        self.layers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, layer)| match &layer.mixer {
+                Plamo2Mixer::Attention(attn) => Some((i, attn.rope_base)),
+                Plamo2Mixer::Mamba(_) => None,
+            })
+            .collect()
+    }
+
     pub fn make_caches(&self) -> Vec<Plamo2LayerCache> {
         self.layers.iter().map(|l| l.make_cache()).collect()
     }
@@ -907,8 +953,20 @@ impl Plamo2Model {
         caches: &mut [Plamo2LayerCache],
         row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(inputs);
+        self.forward_hidden_rows(self.embed_tokens.forward(inputs), caches, row)
+    }
 
+    /// The decoder stack from a `[B, T, hidden]` input hidden state: the token
+    /// embedding lookup for the text path, or caller-supplied embeddings for
+    /// the VLM prefill (issue #1380). Everything after the lookup (mask, Mamba
+    /// conv/SSM state, norm, head) is shared, so injecting `embed_tokens(ids)`
+    /// reproduces the token path exactly.
+    fn forward_hidden_rows(
+        &self,
+        mut h: UniquePtr<MlxArray>,
+        caches: &mut [Plamo2LayerCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(&h);
         let seq_len = shape[1];
 
@@ -1090,7 +1148,7 @@ impl Plamo2Model {
                     k_dim,
                     v_dim: k_dim,
                     scale: (args.head_dim() as f32).powf(-0.5),
-                    rope_base: 10000.0,
+                    rope_base: args.rope_base(i),
                 })
             };
 
@@ -1371,6 +1429,43 @@ impl LanguageModel for Plamo2Model {
         )
     }
 
+    fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        Some(self.embed_tokens.forward(input_ids))
+    }
+
+    fn forward_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let Some(embeddings) = input_embeddings else {
+            return self.forward(input_ids, caches, mask);
+        };
+        self.sequence_state.with_sequence_state(None, |internal| {
+            self.forward_hidden_rows(mlxcel_core::copy(embeddings), internal, None)
+        })
+    }
+
+    fn forward_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let Some(embeddings) = input_embeddings else {
+            return self.forward_with_sequence_id(input_ids, seq_id, caches, mask);
+        };
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || Plamo2Model::make_caches(self),
+            |internal| self.forward_hidden_rows(mlxcel_core::copy(embeddings), internal, None),
+        )
+    }
+
     fn last_row_logits(
         &self,
         input_ids: &MlxArray,
@@ -1380,14 +1475,19 @@ impl LanguageModel for Plamo2Model {
         _mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> Option<UniquePtr<MlxArray>> {
-        // No embeddings path: decline so the default keeps its behavior.
-        if input_embeddings.is_some() {
-            return None;
-        }
+        // Both inputs run `forward_hidden_rows`, matching the full forwards
+        // of `forward_with_sequence_id` and
+        // `forward_with_embeddings_and_sequence_id`.
         Some(self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || Plamo2Model::make_caches(self),
-            |internal| self.forward_rows_with_caches(input_ids, internal, Some(last_pos)),
+            |internal| {
+                let h = match input_embeddings {
+                    Some(embeddings) => mlxcel_core::copy(embeddings),
+                    None => self.embed_tokens.forward(input_ids),
+                };
+                self.forward_hidden_rows(h, internal, Some(last_pos))
+            },
         ))
     }
 

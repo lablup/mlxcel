@@ -78,6 +78,8 @@ pub enum VlmRuntimeRef<'a> {
     Idefics2(&'a vision::Idefics2Model),
     /// LFM2-VL (lfm2_vl) runtime.
     Lfm2Vl(&'a vision::Lfm2VlModel),
+    /// PLaMo 2.1 VL (plamo2vl) runtime (SigLIP tiles + MLP adapter + PLaMo 2).
+    Plamo2Vl(&'a vision::Plamo2VlModel),
     GraniteVision(&'a vision::GraniteVisionVLModel),
     Granite4Vision(&'a vision::Granite4VisionVLModel),
     DeepSeekOcr(&'a vision::deepseekocr::DeepSeekOcrVlModel),
@@ -265,6 +267,7 @@ impl LoadedModel {
             Self::SmolVLM(model) => Some(VlmRuntimeRef::SmolVLM(model)),
             Self::Idefics2(model) => Some(VlmRuntimeRef::Idefics2(model)),
             Self::Lfm2VL(model) => Some(VlmRuntimeRef::Lfm2Vl(model)),
+            Self::Plamo2VLM(model) => Some(VlmRuntimeRef::Plamo2Vl(model)),
             Self::Gemma3VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::Llama4VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::LlavaVLM(vlm) => Some(if vlm.vision.pixtral_layout.is_some() {
