@@ -28,6 +28,8 @@
 //! - [`validate`]: rules 1 to 8 of the contract, with upstream's messages.
 //! - [`answer`]: answer constructors and the response JSON.
 //! - [`loader`]: [`load_decision_model`], the kind dispatcher.
+//! - `d1`, `d1_prompt`: the LiquidAI d1-3B scorer (`lfm2_vl` with a
+//!   `D1Model` `auto_map`) and its prompt and readout.
 //! - [`cli`]: `mlxcel decide` input preparation (pure, testable before load).
 //! - [`media`]: audio decoding to 16 kHz mono and CLI media loading.
 //!
@@ -56,6 +58,8 @@
 
 pub mod answer;
 pub mod cli;
+pub(crate) mod d1;
+pub(crate) mod d1_prompt;
 pub(crate) mod decider2;
 pub(crate) mod decider2_prompt;
 pub(crate) mod decider2_rows;
@@ -73,6 +77,10 @@ mod media_tests;
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "d1_tests.rs"]
+mod d1_tests;
 
 #[cfg(test)]
 #[path = "decider2_tests.rs"]

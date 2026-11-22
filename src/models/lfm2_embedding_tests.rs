@@ -75,7 +75,9 @@ const CHECKPOINT_DIM: usize = 1024;
 /// reading pad-token embeddings.
 const BATCH_COSINE_TOLERANCE: f32 = 1e-3;
 
-pub(super) fn tiny_args() -> ModelArgs {
+/// Also the synthetic backbone of the d1 trunk/branch gates
+/// (`src/decision/d1_tests.rs`).
+pub(crate) fn tiny_args() -> ModelArgs {
     ModelArgs {
         model_type: "lfm2".to_string(),
         vocab_size: VOCAB,
@@ -107,7 +109,7 @@ pub(super) fn tiny_args() -> ModelArgs {
 /// Deterministic dense weights for `args`, in the checkpoint's own key layout
 /// (`w1`/`w2`/`w3` feed-forward, `[hidden, 1, L_cache]` conv weight), so
 /// `Lfm2Model::from_weights`'s own sanitize pass runs too.
-pub(super) fn tiny_weights(args: &ModelArgs) -> WeightMap {
+pub(crate) fn tiny_weights(args: &ModelArgs) -> WeightMap {
     let mut rng = Rng::new(0x00C0_FFEE_1325);
     let mut w = WeightMap::new();
     let h = args.hidden_size as i32;

@@ -9,7 +9,7 @@
 
 ## 요약
 
-Decider-2b(`model_type: decider2`, `nativ-community/decider-2b`)는 Qwen3.5-2B 파인튜닝 모델이다. 상태(state)에 대한 타입 있는 질문(`choice`, `score`, `bool`/`noul`)에 답할 때 토큰을 생성하지 않고, 열린 답 슬롯 위치의 라벨 토큰 logit만 읽는다. 이 PR은 mlx-vlm `decider2`의 기본 independent 모드를 포팅해 #2343 결정 API 뒤에 붙는 첫 실사용 계열로 만든다. 이제 `mlxcel decide -m models/decider-2b`와 `mlxcel-server --decision-model models/decider-2b`(`POST /v1/decisions`)로 서빙된다. 실제 체크포인트 기준으로 짧은 요청은 mlx-vlm과 1.4e-3, 긴 JSON 상태는 1.48e-2 이내로 일치한다. 양쪽을 f32로 돌리면 소수점 4자리까지 0.0000으로 같으므로, 남은 bf16 차이는 포팅이 아니라 backbone 연산에서 생긴다. 리뷰 과정에서 요청 하나가 단일 결정 worker에 prefill을 무제한으로 쌓지 못하도록 요청별 prompt 토큰 예산을 추가했다.
+Decider-2b(`model_type: decider2`, `nativ-community/decider-2b`)는 Qwen3.5-2B 파인튜닝 모델이다. 상태(state)에 대한 타입 있는 질문(`choice`, `score`, `bool`/`noul`)에 답할 때 토큰을 생성하지 않고, 열린 답 슬롯 위치의 라벨 토큰 logit만 읽는다. 이 PR은 mlx-vlm `decider2`의 기본 independent 모드를 포팅해 #2343 결정 API 뒤에 붙는 실사용 계열로 만든다(이 PR이 열려 있는 동안 LiquidAI d1-3B, #3282가 먼저 머지되어 또 하나의 계열이 되었다). 이제 `mlxcel decide -m models/decider-2b`와 `mlxcel-server --decision-model models/decider-2b`(`POST /v1/decisions`)로 서빙된다. 실제 체크포인트 기준으로 짧은 요청은 mlx-vlm과 1.4e-3, 긴 JSON 상태는 1.48e-2 이내로 일치한다. 양쪽을 f32로 돌리면 소수점 4자리까지 0.0000으로 같으므로, 남은 bf16 차이는 포팅이 아니라 backbone 연산에서 생긴다. 리뷰 과정에서 요청 하나가 단일 결정 worker에 prefill을 무제한으로 쌓지 못하도록 요청별 prompt 토큰 예산을 추가했다.
 
 ## 1. 문제 정의
 
