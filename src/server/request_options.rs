@@ -495,6 +495,11 @@ pub(crate) fn build_server_generate_options_with_live(
         // parts after the helper returns; the raw text-completion endpoints
         // carry no image parts and always leave it `None`.
         image_soft_tokens: None,
+        // Server-wide frame knobs (#2399): copied here so admission-time media
+        // preparation can sample native-video frames without reaching back
+        // for the live config.
+        video_num_frames: config.video_num_frames,
+        video_min_frames: config.video_min_frames,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,

@@ -1684,6 +1684,36 @@ struct ServerArgs {
     )]
     video_fps: f64,
 
+    /// Exact number of frames to sample from a video, overriding `--video-fps`
+    /// sampling (issue #2399).
+    ///
+    /// Read by the no-native-video-path fallback and by the native-video
+    /// decode, so the frames handed to the model are the requested count
+    /// whenever the checkpoint can take them. Two limits still apply: on the
+    /// fallback the count is capped by `--video-max-frames`, and the Gemma 4 VLM
+    /// processor samples at most its own 32-frame cap regardless (a larger
+    /// request is clamped and logged with a warning). Inkling pairs adjacent
+    /// frames, so it ignores this flag. Also reads `MLXCEL_VIDEO_NUM_FRAMES`.
+    #[arg(
+        long = "video-num-frames",
+        env = "MLXCEL_VIDEO_NUM_FRAMES",
+        value_name = "N"
+    )]
+    video_num_frames: Option<usize>,
+
+    /// Lower bound on the number of frames sampled from a video (issue #2399).
+    ///
+    /// Applied before the frame cap on the fallback and before each
+    /// native-video family's own sampling. `--video-num-frames` wins when both
+    /// are set, and Inkling ignores both. Also reads
+    /// `MLXCEL_VIDEO_MIN_FRAMES`.
+    #[arg(
+        long = "video-min-frames",
+        env = "MLXCEL_VIDEO_MIN_FRAMES",
+        value_name = "N"
+    )]
+    video_min_frames: Option<usize>,
+
     /// Maximum encoded bytes accepted for each image input.
     ///
     /// Also reads `LLAMA_ARG_MAX_IMAGE_PAYLOAD_SIZE`.
@@ -3017,6 +3047,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         vision_cache_size: args.vision_cache_size,
         video_max_frames: args.video_max_frames,
         video_fps: args.video_fps,
+        video_num_frames: args.video_num_frames,
+        video_min_frames: args.video_min_frames,
         max_image_payload_size: args.max_image_payload_size,
         max_images_per_request: args.max_images_per_request,
         max_image_width: args.max_image_width,

@@ -238,6 +238,8 @@ pub(super) fn options() -> ServerGenerateOptions {
         structured: None,
         grammar: None,
         image_soft_tokens: None,
+        video_num_frames: None,
+        video_min_frames: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,

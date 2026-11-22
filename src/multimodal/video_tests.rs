@@ -257,6 +257,218 @@ fn smart_nframes_policy_can_keep_all_frames_without_an_fps_target() {
     );
 }
 
+// ─── VideoFrameKnobs (#2399) ────────────────────────────────────────────────
+
+#[test]
+fn video_frame_knobs_default_keep_the_historical_policy() {
+    // `None`/`None` must be byte-identical to a plain `load_video_source`
+    // call, so an unflagged server behaves exactly as before #2399.
+    let knobs = VideoFrameKnobs::default();
+    assert_eq!(
+        knobs,
+        VideoFrameKnobs {
+            num_frames: None,
+            min_frames: None
+        }
+    );
+    assert_eq!(knobs.sampling_policy(), FrameSamplingPolicy::default());
+    assert_eq!(
+        knobs.apply_to(FrameSamplingPolicy::default()),
+        FrameSamplingPolicy::default()
+    );
+}
+
+#[test]
+fn video_frame_knobs_min_frames_raises_the_sampling_policy_floor() {
+    let knobs = VideoFrameKnobs {
+        num_frames: None,
+        min_frames: Some(12),
+    };
+    assert_eq!(knobs.sampling_policy().min_frames, 12);
+    // Everything else stays at the historical Gemma/Kimi default.
+    assert_eq!(
+        knobs.sampling_policy(),
+        FrameSamplingPolicy {
+            min_frames: 12,
+            ..FrameSamplingPolicy::default()
+        }
+    );
+}
+
+#[test]
+fn video_frame_knobs_min_frames_never_lowers_a_checkpoint_floor() {
+    // Qwen-VL derives its policy from `processor_config.json`; a knob below
+    // that checkpoint's own minimum must not shrink it, or a checkpoint that
+    // requires more frames would be handed fewer than it can encode.
+    let checkpoint = FrameSamplingPolicy {
+        min_frames: 8,
+        max_frames: 64,
+        frame_factor: 2,
+        reject_over_max: true,
+        keep_all_without_target_fps: false,
+    };
+    let lowered = VideoFrameKnobs {
+        num_frames: None,
+        min_frames: Some(4),
+    }
+    .apply_to(checkpoint);
+    assert_eq!(lowered, checkpoint);
+
+    let raised = VideoFrameKnobs {
+        num_frames: None,
+        min_frames: Some(16),
+    }
+    .apply_to(checkpoint);
+    assert_eq!(raised.min_frames, 16);
+    // The checkpoint's own bounds and flags survive the overlay.
+    assert_eq!(raised.max_frames, 64);
+    assert_eq!(raised.frame_factor, 2);
+    assert!(raised.reject_over_max);
+}
+
+#[test]
+fn video_frame_knobs_num_frames_rounds_to_the_frame_factor() {
+    // `--video-num-frames` is an exact count, but it still has to be a
+    // multiple of the frame factor or the patchifier's pooling breaks.
+    let knobs = VideoFrameKnobs {
+        num_frames: Some(7),
+        min_frames: None,
+    };
+    let policy = knobs.sampling_policy();
+    assert_eq!(
+        smart_nframes_with_policy(40, 30.0, None, knobs.num_frames, policy).unwrap(),
+        8
+    );
+}
+
+#[test]
+fn video_frame_knobs_num_frames_wins_over_the_fps_target() {
+    // Both knobs can be set at once: the exact count replaces fps sampling
+    // and the floor still applies to the resolution.
+    let knobs = VideoFrameKnobs {
+        num_frames: Some(16),
+        min_frames: Some(4),
+    };
+    let policy = knobs.sampling_policy();
+    assert_eq!(
+        smart_nframes_with_policy(300, 30.0, Some(60.0), knobs.num_frames, policy).unwrap(),
+        16
+    );
+}
+
+#[test]
+fn video_frame_knobs_min_frames_raises_the_fps_sampling_floor() {
+    // 300 frames at 30 fps is a 10 s clip, so 1 fps asks for 10 frames. The
+    // `--video-min-frames 16` floor raises that to 16 before the max-frames
+    // cap is applied, which is the whole point of the flag: a slow fps target
+    // on a short clip must not collapse to a handful of frames.
+    assert_eq!(
+        smart_nframes_with_policy(300, 30.0, Some(1.0), None, FrameSamplingPolicy::default())
+            .unwrap(),
+        10
+    );
+    let knobs = VideoFrameKnobs {
+        num_frames: None,
+        min_frames: Some(16),
+    };
+    let policy = knobs.sampling_policy();
+    assert_eq!(policy.min_frames, 16);
+    assert_eq!(
+        smart_nframes_with_policy(300, 30.0, Some(1.0), None, policy).unwrap(),
+        16
+    );
+}
+
+#[test]
+fn video_frame_knobs_num_frames_stays_exact_above_the_min_frames_floor() {
+    // `--video-num-frames` is an exact count: the floor shapes fps sampling
+    // only, so an explicit 8 with `--video-min-frames 16` decodes 8 rather
+    // than silently inflating the count the caller pinned.
+    let knobs = VideoFrameKnobs {
+        num_frames: Some(8),
+        min_frames: Some(16),
+    };
+    let policy = knobs.sampling_policy();
+    assert_eq!(
+        smart_nframes_with_policy(300, 30.0, None, knobs.num_frames, policy).unwrap(),
+        8
+    );
+    // Drop the exact count and the same clip resolves to the floor instead.
+    assert_eq!(
+        smart_nframes_with_policy(300, 30.0, Some(1.0), None, policy).unwrap(),
+        16
+    );
+}
+
+#[test]
+fn video_frame_knobs_num_frames_out_of_range_errors_before_decoding() {
+    // `--video-num-frames` is validated inside `smart_nframes_with_policy`,
+    // which every decode path calls before it touches ffmpeg. That is what
+    // lets `load_video_source_frames_fallback` report an out-of-range count as
+    // `VideoError::Extract` against the caller's canonical path (and the HTTP
+    // layer map it to a 400) instead of spending the decode first (#2399).
+    let case = |requested: usize| {
+        let knobs = VideoFrameKnobs {
+            num_frames: Some(requested),
+            min_frames: None,
+        };
+        smart_nframes_with_policy(300, 30.0, None, knobs.num_frames, knobs.sampling_policy())
+    };
+
+    // Zero rounds to zero, which is below the frame factor.
+    let err = case(0).expect_err("a zero frame count must be refused");
+    assert!(
+        matches!(err, VideoError::Extract { .. }),
+        "expected VideoError::Extract, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("out of range"),
+        "the message must name the range, got {err}"
+    );
+
+    // A count above the clip's own frame total is equally out of range, so a
+    // caller can never be handed a padded or duplicated sample.
+    let err = case(301).expect_err("an over-long frame count must be refused");
+    assert!(
+        matches!(err, VideoError::Extract { .. }),
+        "expected VideoError::Extract, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("out of range"),
+        "the message must name the range, got {err}"
+    );
+}
+
+#[test]
+fn video_frame_knobs_clamped_to_a_processor_cap_keeps_min_frames() {
+    // The Gemma 4 VLM processor takes no target count, so `process_videos`
+    // resamples whatever it is handed down to its own `video_num_frames`. A
+    // larger `--video-num-frames` therefore has to be clamped before decode,
+    // and the floor must survive the clamp so `--video-min-frames` still
+    // reaches the sampler (#2399).
+    let knobs = VideoFrameKnobs {
+        num_frames: Some(64),
+        min_frames: Some(8),
+    };
+    assert_eq!(
+        knobs.clamped_to_processor_cap(32),
+        VideoFrameKnobs {
+            num_frames: Some(32),
+            min_frames: Some(8)
+        }
+    );
+    // At or below the cap nothing changes, so a caller can detect a clamp by
+    // comparing `num_frames` before and after.
+    assert_eq!(knobs.clamped_to_processor_cap(64), knobs);
+    assert_eq!(knobs.clamped_to_processor_cap(128), knobs);
+    // An unflagged request stays unflagged: the clamp must not turn `None`
+    // into a sampled count the caller never asked for.
+    assert_eq!(
+        VideoFrameKnobs::default().clamped_to_processor_cap(32),
+        VideoFrameKnobs::default()
+    );
+}
+
 #[test]
 fn keep_all_policy_uses_a_consecutive_prefix_above_the_cap() {
     let total = 100;

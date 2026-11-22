@@ -333,6 +333,14 @@
       "sub_fields": []
     },
     {
+      "name": "video_num_frames",
+      "sub_fields": []
+    },
+    {
+      "name": "video_min_frames",
+      "sub_fields": []
+    },
+    {
       "name": "prompt_cache",
       "sub_fields": [
         "apc_block_size",

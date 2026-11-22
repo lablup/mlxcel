@@ -299,6 +299,8 @@ impl ServerEngine {
             lora_scales: None,
             grammar: None,
             image_soft_tokens: None,
+            video_num_frames: None,
+            video_min_frames: None,
             pre_rendered_prompt_tokens: Some(request.prompt_tokens.to_vec()),
             admission_notification: None,
             count_prompt_only: false,

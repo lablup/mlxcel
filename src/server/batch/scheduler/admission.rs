@@ -347,6 +347,10 @@ impl BatchScheduler {
                 &videos,
                 Some(self.vision_caches.as_ref()),
                 options.image_soft_tokens,
+                crate::multimodal::video::VideoFrameKnobs {
+                    num_frames: options.video_num_frames,
+                    min_frames: options.video_min_frames,
+                },
                 cancelled.as_ref(),
                 self.batch_observability.as_ref(),
             ) {
@@ -445,6 +449,10 @@ impl BatchScheduler {
                 &videos,
                 Some(self.vision_caches.as_ref()),
                 options.image_soft_tokens,
+                crate::multimodal::video::VideoFrameKnobs {
+                    num_frames: options.video_num_frames,
+                    min_frames: options.video_min_frames,
+                },
                 cancelled.as_ref(),
                 self.batch_observability.as_ref(),
             ) {

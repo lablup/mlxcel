@@ -1050,6 +1050,8 @@ pub(crate) fn expand_cli_videos_to_frames(
     video_paths: &[std::path::PathBuf],
     target_fps: f64,
     max_frames: usize,
+    target_nframes: Option<usize>,
+    min_frames: Option<usize>,
 ) -> Result<Option<CliVideoFrames>> {
     if video_paths.is_empty() {
         return Ok(None);
@@ -1077,9 +1079,14 @@ pub(crate) fn expand_cli_videos_to_frames(
         // frames to keep `max_frames` of them. Sharing the helper also keeps
         // the two fronts choosing the same frames out of the same clip.
         let source = mlxcel::video::VideoSource::from_path(path.clone());
-        let (frames, sampled) =
-            mlxcel::video::load_video_source_frames_fallback(&source, target_fps, max_frames)
-                .map_err(|err| anyhow!("Failed to load video {}: {err}", path.display()))?;
+        let (frames, sampled) = mlxcel::video::load_video_source_frames_fallback(
+            &source,
+            target_fps,
+            max_frames,
+            target_nframes,
+            min_frames,
+        )
+        .map_err(|err| anyhow!("Failed to load video {}: {err}", path.display()))?;
         let kept = mlxcel::video::subsample_evenly(frames, max_frames);
         let encoded = mlxcel::video::frames_to_png(&kept)
             .map_err(|err| anyhow!("Failed to encode frames of {}: {err}", path.display()))?;
@@ -3202,6 +3209,8 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         &args.generation.video,
         args.generation.fps,
         args.generation.video_max_frames,
+        args.generation.video_num_frames,
+        args.generation.video_min_frames,
     )? {
         Some(expansion) => {
             let (groups, dir) =
@@ -3535,6 +3544,8 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                 audio: args.generation.audio.as_deref(),
                 videos: &args.generation.video,
                 fps: args.generation.fps,
+                video_num_frames: args.generation.video_num_frames,
+                video_min_frames: args.generation.video_min_frames,
                 image_soft_tokens,
                 no_chat_template: args.generation.no_chat_template,
             },

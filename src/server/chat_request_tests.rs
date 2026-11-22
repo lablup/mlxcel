@@ -3766,6 +3766,8 @@ async fn video_expansion_skipped_for_native_video_model() {
         VideoFramesFallback {
             max_frames: 8,
             default_fps: 2.0,
+            target_nframes: None,
+            min_frames: None,
         },
         "gemma-4-e4b-it-4bit",
         &[],
@@ -3791,6 +3793,8 @@ async fn video_expansion_is_a_no_op_without_video_parts() {
         VideoFramesFallback {
             max_frames: 8,
             default_fps: 2.0,
+            target_nframes: None,
+            min_frames: None,
         },
         "gemma-3-4b-it-4bit",
         &[],
@@ -4032,6 +4036,8 @@ async fn video_part_expands_through_a_real_clip() {
         VideoFramesFallback {
             max_frames: 4,
             default_fps: 2.0,
+            target_nframes: None,
+            min_frames: None,
         },
         "gemma-3-4b-it-4bit",
         &[dir.canonicalize().unwrap()],
@@ -4062,6 +4068,88 @@ async fn video_part_expands_through_a_real_clip() {
 }
 
 #[tokio::test]
+#[ignore = "needs ffmpeg 5.0+ on PATH"]
+async fn video_expansion_injects_exactly_the_requested_frame_count() {
+    // `--video-num-frames N` on the HTTP fallback must splice exactly `N`
+    // frames per clip, overriding fps sampling. The clip is 4 s at 10 fps, so
+    // the governing fps here (2.0) would have sampled 8 frames: 6 spliced
+    // frames prove the knob won rather than the fps. The `max_frames` cap is
+    // above 6 so a 6 proves the knob and not the cap (issue #2399).
+    //
+    // `#[ignore]` for the reason `multimodal::video_tests` documents at the top
+    // of that file: an early return on a host without ffmpeg counts as a
+    // pass, so the skip has to be the kind that reaches the summary line. Run
+    // with `cargo test --lib server::chat_request -- --ignored`.
+    assert!(
+        crate::multimodal::video::ffmpeg_available(),
+        "this test was run explicitly, so a missing ffmpeg is a failure and not a skip"
+    );
+    let dir =
+        std::env::temp_dir().join(format!("mlxcel-video-num-frames-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = dir.join("clip.mp4");
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x48:rate=10",
+            "-t",
+            "4",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&clip)
+        .status()
+        .expect("ffmpeg runs");
+    assert!(status.success(), "ffmpeg could not build the fixture clip");
+
+    let mut request = request_with_messages(vec![user_parts(vec![
+        video_part(&format!("file://{}", clip.display())),
+        ContentPart::Text {
+            text: "Describe what changes.".to_string(),
+        },
+    ])]);
+    let requested = 6;
+    let injected = expand_video_parts_to_frames(
+        &mut request,
+        frames_fallback_support(),
+        VideoFramesFallback {
+            max_frames: 16,
+            default_fps: 2.0,
+            target_nframes: Some(requested),
+            min_frames: None,
+        },
+        "gemma-3-4b-it-4bit",
+        &[dir.canonicalize().unwrap()],
+        &CancellationToken::new(),
+    )
+    .await;
+
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    assert_eq!(
+        injected.expect("the clip decodes"),
+        requested,
+        "--video-num-frames {requested} must splice exactly {requested} frames, not the 8 \
+         the governing 2 fps would have sampled"
+    );
+    assert!(request.video_urls().is_empty());
+    let kinds = part_kinds(&request, 0);
+    // The lead text reports the kept count, unchanged by the knob (#1322).
+    assert_eq!(
+        kinds[0],
+        format!("text:{}", video_frames_lead_text(requested))
+    );
+    assert_eq!(request.image_urls().len(), requested);
+}
+
+#[tokio::test]
 async fn video_expansion_refuses_more_clips_than_the_image_budget_before_decoding() {
     // One frame per clip is the floor, so a body with more `video_url` parts
     // than the per-request image limit can never be served. The refusal has to
@@ -4080,6 +4168,8 @@ async fn video_expansion_refuses_more_clips_than_the_image_budget_before_decodin
         VideoFramesFallback {
             max_frames: 16,
             default_fps: 2.0,
+            target_nframes: None,
+            min_frames: None,
         },
         "gemma-3-4b-it-4bit",
         &[],
@@ -4128,6 +4218,8 @@ async fn video_expansion_cancelled_before_the_call_touches_no_clip() {
         VideoFramesFallback {
             max_frames: 4,
             default_fps: 2.0,
+            target_nframes: None,
+            min_frames: None,
         },
         "gemma-3-4b-it-4bit",
         &[],
@@ -4156,6 +4248,8 @@ async fn video_expansion_cancelled_before_the_call_touches_no_clip() {
         VideoFramesFallback {
             max_frames: 4,
             default_fps: 2.0,
+            target_nframes: None,
+            min_frames: None,
         },
         "gemma-3-4b-it-4bit",
         &[],
@@ -4188,6 +4282,8 @@ async fn video_expansion_cancelled_after_the_first_clip_skips_the_second() {
         VideoFramesFallback {
             max_frames: 4,
             default_fps: 2.0,
+            target_nframes: None,
+            min_frames: None,
         },
         "gemma-3-4b-it-4bit",
         &cancel,
@@ -4237,6 +4333,8 @@ async fn video_expansion_decodes_every_clip_when_not_cancelled() {
         VideoFramesFallback {
             max_frames: 4,
             default_fps: 2.0,
+            target_nframes: None,
+            min_frames: None,
         },
         "gemma-3-4b-it-4bit",
         &cancel,
@@ -4273,7 +4371,7 @@ fn queued_video_decode_returns_without_decoding_once_cancelled() {
         "/no/such/clip.mp4",
     ));
 
-    let decoded = decode_video_frames_blocking(&source, 2.0, 4, &cancel)
+    let decoded = decode_video_frames_blocking(&source, 2.0, 4, None, None, &cancel)
         .expect("a cancelled decode returns before touching ffmpeg");
 
     assert!(decoded.is_none());

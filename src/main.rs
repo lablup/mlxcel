@@ -773,6 +773,37 @@ pub(crate) struct GenerationOptions {
     )]
     pub(crate) video_max_frames: usize,
 
+    /// Exact number of frames to sample from a `--video` clip, overriding
+    /// `--fps` sampling (issue #2399).
+    ///
+    /// Read by the ordered-image fallback and by the native-video decode, so
+    /// the frames handed to the model are the requested count whenever the
+    /// checkpoint can take them. Two limits still apply: on the fallback the
+    /// count is capped by `--video-max-frames`, and the Gemma 4 VLM processor
+    /// samples at most its own 32-frame cap regardless (a larger request is
+    /// clamped and logged with a warning). Inkling pairs adjacent frames, so it
+    /// ignores this flag. Also reads `MLXCEL_VIDEO_NUM_FRAMES`.
+    #[arg(
+        long = "video-num-frames",
+        env = "MLXCEL_VIDEO_NUM_FRAMES",
+        value_name = "N"
+    )]
+    pub(crate) video_num_frames: Option<usize>,
+
+    /// Lower bound on the number of frames sampled from a `--video` clip
+    /// (issue #2399).
+    ///
+    /// Applied before the `--video-max-frames` cap on the fallback and before
+    /// each native-video family's own sampling. `--video-num-frames` wins when
+    /// both are set, and Inkling ignores both. Also reads
+    /// `MLXCEL_VIDEO_MIN_FRAMES`.
+    #[arg(
+        long = "video-min-frames",
+        env = "MLXCEL_VIDEO_MIN_FRAMES",
+        value_name = "N"
+    )]
+    pub(crate) video_min_frames: Option<usize>,
+
     /// Write synthesized speech for the generated answer to this WAV path
     /// (mono PCM16). Qwen3-Omni: 24 kHz, the talker + code2wav speech stack
     /// is loaded lazily after text generation completes, text-only prompts
@@ -2863,6 +2894,36 @@ pub(crate) struct ServeArgs {
         value_name = "FLOAT"
     )]
     video_fps: f64,
+
+    /// Exact number of frames to sample from a video, overriding `--video-fps`
+    /// sampling (issue #2399).
+    ///
+    /// Read by the no-native-video-path fallback and by the native-video
+    /// decode, so the frames handed to the model are the requested count
+    /// whenever the checkpoint can take them. Two limits still apply: on the
+    /// fallback the count is capped by `--video-max-frames`, and the Gemma 4 VLM
+    /// processor samples at most its own 32-frame cap regardless (a larger
+    /// request is clamped and logged with a warning). Inkling pairs adjacent
+    /// frames, so it ignores this flag. Also reads `MLXCEL_VIDEO_NUM_FRAMES`.
+    #[arg(
+        long = "video-num-frames",
+        env = "MLXCEL_VIDEO_NUM_FRAMES",
+        value_name = "N"
+    )]
+    video_num_frames: Option<usize>,
+
+    /// Lower bound on the number of frames sampled from a video (issue #2399).
+    ///
+    /// Applied before the frame cap on the fallback and before each
+    /// native-video family's own sampling. `--video-num-frames` wins when both
+    /// are set, and Inkling ignores both. Also reads
+    /// `MLXCEL_VIDEO_MIN_FRAMES`.
+    #[arg(
+        long = "video-min-frames",
+        env = "MLXCEL_VIDEO_MIN_FRAMES",
+        value_name = "N"
+    )]
+    video_min_frames: Option<usize>,
 
     /// Maximum encoded bytes accepted for each image input.
     ///
