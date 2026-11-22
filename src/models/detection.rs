@@ -1230,11 +1230,42 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
             "GLiNER2.5 is a span extractor; use `mlxcel extract` (checkpoint {})",
             model_path.display()
         )),
+        // A split-out MTP drafter (`gemma4_assistant`, `gemma4_unified_assistant`,
+        // `qwen3_5_mtp`, ...) only runs bound to its target, through
+        // `--draft-model`. Name that instead of "Unsupported model type".
+        // Checked in the fall-through arm so it never changes how a config
+        // that loads today is routed.
+        _ if is_mtp_drafter_model_type(&model_type) => {
+            Err(mtp_drafter_not_standalone_error(model_path, model_type_raw))
+        }
         _ => Err(anyhow::anyhow!(
             "Unsupported model type: {}",
             model_type_raw
         )),
     }
+}
+
+/// Whether `model_type` is a speculative MTP drafter registered in
+/// [`mlxcel_core::drafter::drafter_kind_by_model_type`].
+fn is_mtp_drafter_model_type(model_type: &str) -> bool {
+    matches!(
+        mlxcel_core::drafter::drafter_kind_by_model_type().get(model_type),
+        Some(mlxcel_core::drafter::DrafterKind::Mtp)
+    )
+}
+
+/// Canonical error for "this directory is an MTP speculative drafter, not a
+/// model you can load standalone". The MTP counterpart of
+/// [`dflash_drafter_not_standalone_error`].
+fn mtp_drafter_not_standalone_error(model_path: &Path, model_type_raw: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{path} is an MTP speculative drafter checkpoint (model_type `{model_type_raw}`), \
+         not a standalone model. It predicts draft tokens from the hidden states of its \
+         target model and cannot generate on its own. Pass the target model to -m \
+         (for a Gemma 4 assistant, the matching Gemma 4 checkpoint) and pass this \
+         directory to --draft-model to use it for speculative decoding.",
+        path = model_path.display(),
+    )
 }
 
 /// Detect model type from config.json

@@ -1240,6 +1240,46 @@ const DFLASH_DRAFTER_CONFIG: &str = r#"{
     "vocab_size": 248320
 }"#;
 
+// `mlx-community/gemma-4-12B-it-assistant` declares
+// `model_type: gemma4_unified_assistant`. Served as `-m` it used to fail with
+// "Unsupported model type: gemma4_unified_assistant", which hides that the
+// checkpoint is a drafter and that `--draft-model` is the flag that takes it.
+#[test]
+fn mtp_drafters_are_rejected_as_standalone_models_with_a_draft_model_hint() {
+    for model_type in [
+        "gemma4_unified_assistant",
+        "gemma4_assistant",
+        "qwen3_5_mtp",
+        "Gemma4_Unified_Assistant",
+    ] {
+        let model_dir = temp_path(&format!("mtp_drafter_{model_type}"));
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            format!(r#"{{"model_type": "{model_type}", "text_config": {{"model_type": "gemma4_text"}}}}"#),
+        )
+        .unwrap();
+
+        let error = super::detection::get_model_type(&model_dir)
+            .expect_err("an MTP drafter is not a standalone model")
+            .to_string();
+
+        assert!(
+            error.contains("MTP speculative drafter"),
+            "{model_type}: the error must name the real problem, got: {error}",
+        );
+        assert!(
+            error.contains("--draft-model"),
+            "{model_type}: the error must point at --draft-model, got: {error}",
+        );
+        assert!(
+            !error.contains("Unsupported model type"),
+            "{model_type}: got the generic error: {error}",
+        );
+        let _ = fs::remove_dir_all(&model_dir);
+    }
+}
+
 #[test]
 fn dflash_drafter_is_rejected_as_a_standalone_model() {
     let model_dir = temp_path("dflash_drafter");
