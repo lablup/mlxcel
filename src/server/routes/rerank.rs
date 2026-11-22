@@ -29,7 +29,7 @@ use axum::{
 };
 use serde_json::Value;
 
-use crate::rerank::{ImageInput, RerankItem};
+use crate::rerank::{ImageInput, RerankItem, RerankerKind};
 use crate::server::AppState;
 use crate::server::media::{
     ImageInputLimits, current_image_input_limits, fetch_labeled_image, validate_image_count,
@@ -46,7 +46,8 @@ use crate::server::types::rerank::{
 /// Opens with b10621's own sentence, verbatim; see
 /// [`super::embeddings::NO_EMBEDDING_MODEL_MESSAGE`] for why (#1452).
 pub const NO_RERANKER_MODEL_MESSAGE: &str = "This server does not support reranking. Start it with `--reranking`, with a \
-     sequence-classifier checkpoint in -m, or with --reranker-model <path>.";
+     sequence-classifier checkpoint or a multi-vector (late-interaction) embedder in -m, or \
+     with --reranker-model <path>.";
 
 fn invalid_request(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(message, "invalid_request_error")
@@ -67,6 +68,24 @@ pub(crate) fn rerank_error_response(err: RerankError) -> ErrorResponse {
             ErrorResponse::internal_server_error(format!("rerank inference failed: {message}"))
         }
     }
+}
+
+/// Whether one returned score is acceptable for the loaded kind.
+fn score_is_valid(score: f32, probabilities: bool) -> bool {
+    score.is_finite() && (!probabilities || (0.0..=1.0).contains(&score))
+}
+
+/// The `400` message for an `instruction` sent to a kind that has no prompt
+/// to render it into, naming the loaded kind.
+pub(crate) fn instruction_unsupported_message(kind: RerankerKind) -> String {
+    let how = match kind {
+        RerankerKind::LateInteraction => {
+            "late-interaction (MaxSim) reranker embeds the query and each document separately \
+             and compares their token vectors"
+        }
+        _ => "sequence-classifier reranker scores the query/document pair directly",
+    };
+    format!("`instruction` is only supported by the generative rerankers; the loaded {how}")
 }
 
 /// Validate the query and every document against the loaded reranker.
@@ -208,11 +227,7 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         .filter(|task| !task.is_empty())
         .map(str::to_string);
     if instruction.is_some() && !provider.kind().accepts_instruction() {
-        return invalid_request(
-            "`instruction` is only supported by the generative rerankers; the loaded \
-             sequence-classifier reranker scores the query/document pair directly",
-        )
-        .into_response();
+        return invalid_request(instruction_unsupported_message(provider.kind())).into_response();
     }
 
     let image_limits = current_image_input_limits();
@@ -261,12 +276,15 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         .into_response();
     }
 
+    // A late-interaction score is a raw MaxSim sum, so only the probability
+    // kinds are held to `[0, 1]` (#1426).
+    let probabilities = provider.kind().scores_are_probabilities();
     if let Some((index, score)) = scored
         .scores
         .iter()
         .copied()
         .enumerate()
-        .find(|(_, score)| !score.is_finite() || !(0.0..=1.0).contains(score))
+        .find(|(_, score)| !score_is_valid(*score, probabilities))
     {
         tracing::error!(index, score, "reranker returned an invalid relevance score");
         return ErrorResponse::internal_server_error(

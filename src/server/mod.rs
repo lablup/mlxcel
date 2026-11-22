@@ -69,6 +69,7 @@ mod realtime_session;
 pub(crate) mod reasoning_echo;
 pub mod reasoning_format;
 mod request_options;
+pub mod rerank_maxsim;
 pub mod rerank_model;
 pub mod rerank_worker;
 pub mod responses_background_events;

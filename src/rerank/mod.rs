@@ -78,6 +78,14 @@ pub enum RerankerKind {
     GenerativeText,
     /// Qwen3-VL yes/no reranker over text and image documents.
     GenerativeVl,
+    /// Late-interaction (ColBERT MaxSim) scoring over a served multi-vector
+    /// embedder: `score = sum_i max_j dot(q_i, d_j)` (#1426).
+    ///
+    /// Never detected from a reranker checkpoint; the server installs it when
+    /// the embedding model is multi-vector and no `--reranker-model` is given.
+    /// The score is the raw MaxSim sum, so its scale grows with the query's
+    /// token count and it is not a probability.
+    LateInteraction,
 }
 
 impl RerankerKind {
@@ -88,6 +96,7 @@ impl RerankerKind {
             Self::SequenceClassifier => "sequence_classifier",
             Self::GenerativeText => "generative_text",
             Self::GenerativeVl => "generative_vl",
+            Self::LateInteraction => "late_interaction",
         }
     }
 
@@ -95,10 +104,21 @@ impl RerankerKind {
     ///
     /// A cross-encoder has no place to put one: the pair is the whole input,
     /// so an instruction would silently be ignored and the route rejects it
-    /// instead.
+    /// instead. Late-interaction scoring has no prompt either: the query and
+    /// each document are embedded on their own and compared row by row.
     #[must_use]
     pub fn accepts_instruction(self) -> bool {
-        !matches!(self, Self::SequenceClassifier)
+        !matches!(self, Self::SequenceClassifier | Self::LateInteraction)
+    }
+
+    /// Whether scores of this kind are probabilities in `[0, 1]`.
+    ///
+    /// The cross-encoder and the yes/no rerankers end in a sigmoid; the
+    /// late-interaction kind reports the raw MaxSim sum, which is only
+    /// required to be finite.
+    #[must_use]
+    pub fn scores_are_probabilities(self) -> bool {
+        !matches!(self, Self::LateInteraction)
     }
 
     /// Default micro-batch width before `--rerank-batch-size` overrides it.
@@ -165,7 +185,9 @@ impl RerankItem {
 /// Result of one scoring call, in document order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RerankScores {
-    /// Relevance probability per document, same length and order as the input.
+    /// Relevance score per document, same length and order as the input: a
+    /// probability for every kind except [`RerankerKind::LateInteraction`],
+    /// whose score is the raw MaxSim sum.
     pub scores: Vec<f32>,
     /// Real (non-padding) tokens across every scored pair.
     pub prompt_tokens: usize,
