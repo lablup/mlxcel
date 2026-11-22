@@ -93,14 +93,66 @@ pub struct ArceeConfig {
     pub quantization: Option<llama3::Quantization>,
     #[serde(default)]
     pub quantization_config: Option<serde_json::Value>,
-    /// YaRN's `truncate` key. Not part of [`RopeScaling`], so it is read
-    /// from the raw config by [`parse_config`]; `None` means not declared
-    /// (transformers' default is `true`).
+    /// RoPE keys transformers reads that [`RopeScaling`] does not carry,
+    /// captured by the `Deserialize` impl below so every route that builds
+    /// this config (directory loader and adapter path alike) screens them.
     #[serde(skip)]
-    pub rope_truncate: Option<bool>,
+    pub rope_screen: RopeScreen,
 }
 
-mlxcel_core::impl_rope_lifting_deserialize!(ArceeConfig);
+/// RoPE keys outside [`RopeScaling`] that [`ArceeConfig::validate`] screens.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RopeScreen {
+    /// YaRN `truncate`; `None` means not declared (transformers: `true`).
+    pub truncate: Option<bool>,
+    /// `partial_rotary_factor`, top level or lifted from `rope_parameters`.
+    pub partial_rotary_factor: Option<f64>,
+    /// A top-level `original_max_position_embeddings`, which transformers
+    /// prefers over the one inside the RoPE block.
+    pub top_level_original_max_position_embeddings: Option<f64>,
+    /// `type` and `rope_type` when both are declared and disagree:
+    /// transformers reads `rope_type`, the shared path reads `type`.
+    pub conflicting_types: Option<(String, String)>,
+}
+
+impl RopeScreen {
+    fn from_lifted(value: &serde_json::Value) -> Self {
+        use serde_json::Value;
+        let block = ["rope_scaling", "rope_parameters"]
+            .iter()
+            .find_map(|key| value.get(*key).filter(|v| v.is_object()));
+        let in_block = |key: &str| block.and_then(|b| b.get(key));
+        let conflicting_types = match (
+            in_block("type").and_then(Value::as_str),
+            in_block("rope_type").and_then(Value::as_str),
+        ) {
+            (Some(a), Some(b)) if a != b => Some((a.to_string(), b.to_string())),
+            _ => None,
+        };
+        Self {
+            truncate: in_block("truncate").and_then(Value::as_bool),
+            partial_rotary_factor: value
+                .get("partial_rotary_factor")
+                .or_else(|| in_block("partial_rotary_factor"))
+                .and_then(Value::as_f64),
+            top_level_original_max_position_embeddings: value
+                .get("original_max_position_embeddings")
+                .and_then(Value::as_f64),
+            conflicting_types,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ArceeConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        mlxcel_core::rope_parameters::deserialize_lifting_rope_parameters(deserializer, |value| {
+            let screen = RopeScreen::from_lifted(&value);
+            let mut config = ArceeConfig::deserialize(value)?;
+            config.rope_screen = screen;
+            Ok(config)
+        })
+    }
+}
 
 fn default_model_type() -> String {
     "arcee".to_string()
@@ -180,6 +232,30 @@ impl ArceeConfig {
                  implements {IMPLEMENTED_ROPE_TYPES:?}"
             ));
         }
+        if let Some((ty, rope_ty)) = self.rope_screen.conflicting_types.as_ref() {
+            return Err(format!(
+                "Arcee rope_scaling declares type {ty:?} and rope_type {rope_ty:?}: \
+                 transformers reads rope_type and the shared RoPE path reads type"
+            ));
+        }
+        if let Some(prf) = self.rope_screen.partial_rotary_factor
+            && prf != 1.0
+        {
+            return Err(format!(
+                "Arcee partial_rotary_factor ({prf}) is not supported: the shared attention \
+                 rotates the full head"
+            ));
+        }
+        if rope_type == "linear" || rope_type == "llama3" {
+            // A block the shared path cannot use falls back to the unscaled
+            // rotation with only a warning; refuse the obvious case here.
+            return match spec.factor {
+                Some(f) if f.is_finite() && f > 0.0 => Ok(()),
+                other => Err(format!(
+                    "Arcee {rope_type} rope_scaling needs a positive finite factor, got {other:?}"
+                )),
+            };
+        }
         if rope_type != "yarn" {
             return Ok(());
         }
@@ -209,7 +285,26 @@ impl ArceeConfig {
                 ));
             }
         }
-        if self.rope_truncate == Some(false) {
+        if let (Some(fast), Some(slow)) = (spec.beta_fast, spec.beta_slow)
+            && fast < slow
+        {
+            return Err(format!(
+                "Arcee YaRN rope_scaling.beta_fast ({fast}) is below beta_slow ({slow}): the \
+                 correction ramp would be inverted"
+            ));
+        }
+        if let Some(top) = self.rope_screen.top_level_original_max_position_embeddings
+            && spec
+                .original_max_position_embeddings
+                .is_some_and(|inner| (f64::from(inner) - top).abs() > 0.5)
+        {
+            return Err(format!(
+                "Arcee original_max_position_embeddings ({top}) at the top level differs from \
+                 the rope_scaling block's: transformers prefers the top-level value and the \
+                 shared YaRN path reads the block's"
+            ));
+        }
+        if self.rope_screen.truncate == Some(false) {
             return Err(
                 "Arcee YaRN rope_scaling.truncate = false is not supported: the shared YaRN \
                  path always rounds the correction range outward"
@@ -375,14 +470,8 @@ pub(crate) fn transformers_yarn_attention_factor(
 
 /// Parse and screen an Arcee `config.json`.
 pub fn parse_config(config_str: &str) -> Result<ArceeConfig, String> {
-    let mut config: ArceeConfig = serde_json::from_str(config_str)
+    let config: ArceeConfig = serde_json::from_str(config_str)
         .map_err(|e| format!("Failed to parse Arcee config.json: {e}"))?;
-    let raw: serde_json::Value = serde_json::from_str(config_str)
-        .map_err(|e| format!("Failed to parse Arcee config.json: {e}"))?;
-    config.rope_truncate = ["rope_scaling", "rope_parameters"]
-        .iter()
-        .filter_map(|key| raw.get(*key)?.get("truncate")?.as_bool())
-        .next();
     config.validate()?;
     Ok(config)
 }

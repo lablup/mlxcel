@@ -1,2 +1,2 @@
 model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
-afm-4.5b,models/afm-4.5b,195,51,125.25,1556.92,793.78,62.99,2026-11-23,Apple_M3_Ultra_512GB,0.9.0-beta.1,release,128,"Hello, how are you today?",,c0bcf575,fc344c98
+afm-4.5b,models/afm-4.5b,195,51,125.25,1556.92,793.78,62.99,2026-11-23,Apple_M3_Ultra_512GB,0.9.0-beta.1,release,128,"Hello, how are you today?",,b778479e,fc344c98

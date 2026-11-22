@@ -549,7 +549,7 @@ pub fn verify_applied(model_label: &str) -> Result<(), String> {
     }
     if applications() == 0 {
         return Err(format!(
-            "{model_label}: {} was accepted on the command line but reached no RoPE code path,              so the model would rotate with the frequencies its own config.json declares. This              architecture computes its rotary frequencies outside the shared              `models::rope_utils` path, where the override is applied; the families that do              route through it are Llama 3.x (and through it Qwen2 / Qwen2.5, Helium, the mllama              text decoder, and every VLM whose text backbone is one of those), Qwen3,              Qwen3-MoE, Apertus, Gemma 3, Llama 4, and InternLM2 / InternLM3. Drop the flag to serve this              checkpoint with its own rotation.",
+            "{model_label}: {} was accepted on the command line but reached no RoPE code path,              so the model would rotate with the frequencies its own config.json declares. This              architecture computes its rotary frequencies outside the shared              `models::rope_utils` path, where the override is applied; the families that do              route through it are Llama 3.x (and through it Qwen2 / Qwen2.5, Helium, Arcee, the mllama              text decoder, and every VLM whose text backbone is one of those), Qwen3,              Qwen3-MoE, Apertus, Gemma 3, Llama 4, and InternLM2 / InternLM3. Drop the flag to serve this              checkpoint with its own rotation.",
             over.describe()
         ));
     }
@@ -584,7 +584,7 @@ pub(crate) fn resolve_spec(declared: Option<&RopeScalingSpec>) -> Option<RopeSca
 /// on the attention block and the table on the side. Both have to move together
 /// or a `--rope-freq-base` override would reach the table and not the plain
 /// rotation.
-// Used by: Llama 3.x text (and through it Qwen2 / Qwen2.5, Helium, the mllama
+// Used by: Llama 3.x text (and through it Qwen2 / Qwen2.5, Helium, Arcee, the mllama
 // text decoder, every VLM whose text backbone is Llama3Model or Qwen2Model),
 // Qwen3, Qwen3-MoE, Apertus, Gemma 3, Llama 4 (`llama4_helpers::Llama4Rope`),
 // InternLM3 / InternLM2 via dynamic_ntk_rope, and rope_utils' own table builder.

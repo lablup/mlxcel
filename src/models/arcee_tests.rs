@@ -174,6 +174,41 @@ fn yarn_truncate_false_is_refused() {
 }
 
 #[test]
+fn adapter_route_screens_rope_keys_too() {
+    // The adapter path builds the config with plain serde (no parse_config),
+    // so `validate` alone must still see `truncate`.
+    let mut value = afm_4_5b();
+    value["rope_scaling"]["truncate"] = json!(false);
+    let config: ArceeConfig = serde_json::from_value(value).unwrap();
+    assert!(config.validate().unwrap_err().contains("truncate"));
+}
+
+#[test]
+fn other_transformers_rope_keys_are_screened() {
+    let mut value = afm_4_5b();
+    value["partial_rotary_factor"] = json!(0.5);
+    assert!(refusal(&value).contains("partial_rotary_factor"));
+
+    let mut value = afm_4_5b();
+    value["original_max_position_embeddings"] = json!(8192);
+    assert!(refusal(&value).contains("original_max_position_embeddings"));
+    value["original_max_position_embeddings"] = json!(4096);
+    parse(&value).unwrap();
+
+    let mut value = afm_4_5b();
+    value["rope_scaling"]["type"] = json!("linear");
+    assert!(refusal(&value).contains("rope_type"));
+
+    let mut value = afm_4_5b();
+    value["rope_scaling"]["beta_fast"] = json!(0.5);
+    assert!(refusal(&value).contains("beta_fast"));
+
+    let mut value = afm_4_5b();
+    value["rope_scaling"] = json!({"rope_type": "linear"});
+    assert!(refusal(&value).contains("factor"));
+}
+
+#[test]
 fn yarn_attention_factor_mismatch_is_refused() {
     // mscale 2 without mscale_all_dim: transformers ignores it, the shared
     // path would scale by get_mscale(20, 2).

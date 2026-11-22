@@ -1142,7 +1142,8 @@ impl FusedAddRmsNormSpec for GemmaRMSNorm {
 /// Floating-point addition is commutative, so `delta` and `residual` may be
 /// passed in either order; the names describe intent, not an asymmetry.
 ///
-/// Used by: Llama3 / Qwen2-family `TransformerBlock`, Gemma `TransformerBlock`.
+/// Used by: Llama3 / Qwen2-family `TransformerBlock`, Gemma `TransformerBlock`,
+/// Arcee `ArceeBlock`.
 pub fn fused_add_rms_norm<N: FusedAddRmsNormSpec + ?Sized>(
     norm: &N,
     delta: &MlxArray,
