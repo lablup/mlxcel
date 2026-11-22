@@ -143,6 +143,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "TensorParallelQwen35Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelQwen3Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "YoutuLanguageModel@src/models/youtu_vl_lm.rs",
+    "Z1t@src/models/z1t.rs",
 ];
 
 const EXPECTED_DELEGATING: &[&str] = &[

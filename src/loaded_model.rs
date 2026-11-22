@@ -251,6 +251,7 @@ pub enum LoadedModel {
     LongcatFlashNgram(models::LongcatFlashNgramModel),
     Rwkv7(models::Rwkv7),
     RecurrentGemma(models::GriffinModel),
+    Z1t(models::Z1t),
 }
 
 // Keep the full variant list in one place so LanguageModel delegation stays
@@ -432,6 +433,7 @@ macro_rules! delegate_language_model {
             LoadedModel::LongcatFlashNgram(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Rwkv7(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::RecurrentGemma(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Z1t(inner) => LanguageModel::$method(inner, $($arg),*),
         }
     };
 }

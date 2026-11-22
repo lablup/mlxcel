@@ -1089,6 +1089,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         }
         "nemotron-nas" => Ok(ModelType::NemotronNAS),
         "rwkv7" => Ok(ModelType::Rwkv7),
+        "z1t" => Ok(ModelType::Z1t),
         "kimi_linear" => Ok(ModelType::KimiLinear),
         // Kimi K3 loads as the VLM when `config.json` carries `vision_config`
         // and the checkpoint ships `vision_tower.*` tensors (#1342); a copy

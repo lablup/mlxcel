@@ -326,6 +326,7 @@ pub mod telechat3;
 pub(crate) mod vl_embedding_test_images;
 pub mod whisper;
 pub mod youtu_vl_lm;
+pub mod z1t;
 
 // Text-to-speech (StyleTTS2 + iSTFTNet) and its grapheme-to-phoneme front-end.
 pub mod g2p;
@@ -506,6 +507,7 @@ pub use step3p5::Step3p5Model;
 pub use telechat3::TeleChat3Model;
 pub use whisper::WhisperModel;
 pub use youtu_vl_lm::YoutuLanguageModel;
+pub use z1t::Z1t;
 
 pub use kokoro::KokoroModel;
 pub use nemotron_voicechat::NemotronVoiceChatModel;
@@ -774,6 +776,8 @@ pub enum ModelType {
     // RNN models
     Rwkv7,
     RecurrentGemma,
+    // Attention-free AFT-conv decoder with model-owned streaming state
+    Z1t,
 
     // Speech-to-text (encoder-decoder ASR)
     Whisper,
@@ -1017,6 +1021,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // RNN models
     ModelType::Rwkv7,
     ModelType::RecurrentGemma,
+    ModelType::Z1t,
     // Speech-to-text
     ModelType::Whisper,
     // Text-to-speech
@@ -1284,6 +1289,9 @@ impl ModelType {
 
             // ----- RWKV -----
             ModelType::Rwkv7 => ("RWKV v7", "RWKV"),
+
+            // ----- Extropic -----
+            ModelType::Z1t => ("Z1T (attention-free AFT-conv, sparse tanh-linears)", "Z1T"),
 
             // ----- Speech-to-text (ASR) -----
             ModelType::Whisper => ("Whisper (encoder-decoder ASR)", "Speech-to-text"),
@@ -1673,6 +1681,7 @@ mod metadata_tests {
             Step3p7,
             Rwkv7,
             RecurrentGemma,
+            Z1t,
             Whisper,
             Kokoro,
             NemotronVoiceChat,

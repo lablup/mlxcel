@@ -97,7 +97,7 @@ pub const STATE_TAIL_EAGER_MIN_ROWS: i32 = 256;
 /// Used by: Qwen 3.5, Qwen3-Next, Qwen4-Exp (gated-delta and PLE), Mamba,
 /// Mamba2, FalconH1, GraniteMoeHybrid, Plamo2, NemotronH, Jamba, Lfm2 (and its
 /// speculative path), KimiLinear and KimiK3 (short conv), RecurrentGemma,
-/// Inkling (short conv)
+/// Inkling (short conv), Z1T (AFT-conv window)
 pub fn materialized_state_tail(x: &MlxArray, n_keep: i32) -> UniquePtr<MlxArray> {
     materialized_axis_tail(x, 1, n_keep)
 }
