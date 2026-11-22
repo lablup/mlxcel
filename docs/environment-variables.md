@@ -480,13 +480,14 @@ path), so only the first load of each graph variant pays the `iree-compile` cost
 The vision and audio auxiliary artifacts (LLaVA/SigLIP/Gemma 3, Qwen2-VL,
 Qwen2.5-VL, Qwen3-VL, Molmo, Molmo2, Youtu-VL, Gemma 3n audio, Phi-4-multimodal
 audio) also write a `mlxcel-xla-aux-artifact-v3-operator-numeric` manifest next
-to each vmfb. It records, per emitted operator class, the contraction precision
+to each vmfb, in a subdirectory of the cache directory named after that schema
+so older binaries that still write v1 manifests keep their own entries. It records, per emitted operator class, the contraction precision
 the graph was emitted with, the checkpoint dtype class, the input, accumulator,
 and result dtypes, and the association policy, plus the `iree-compile --version`
 string, the digest of the linked IREE runtime archive, and the HAL device. A
 cached artifact whose manifest differs in any of these is recompiled before it
-is loaded, and a v1 manifest left by an older build is replaced by one
-recompile. The contract does not name the kernel IREE selects for each dispatch
+is loaded; the first load after upgrading compiles once into the schema
+subdirectory and leaves the older v1 entry in place. The contract does not name the kernel IREE selects for each dispatch
 (it is recorded as unobserved), so it identifies an artifact without claiming
 that it passed an operator oracle.
 

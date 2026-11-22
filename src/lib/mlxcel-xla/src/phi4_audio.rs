@@ -23,13 +23,12 @@ use std::fs::File;
 use std::io::Read;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
-use crate::aux_manifest::ensure_qualified_auxiliary_artifact;
+use crate::aux_manifest::qualify_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
@@ -40,7 +39,7 @@ use crate::emitter::{
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::iree_identity::{
-    ProductionNumerics, observe_float_tensor, production_artifact_contract,
+    ProductionNumerics, compiler_version_output, observe_float_tensor, production_artifact_contract,
 };
 use crate::operator_numeric_contract::{
     AffineExecution, CheckpointSourceObserver, phi4_audio_operators,
@@ -120,23 +119,8 @@ fn generation_identity<S: AsRef<str> + std::fmt::Debug>(
     flags: &[S],
     graph: &str,
 ) -> Result<String, String> {
-    let version = Command::new(compiler)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("run {} --version: {error}", compiler.display()))?;
-    if !version.status.success() {
-        return Err(format!(
-            "{} --version failed: {}",
-            compiler.display(),
-            String::from_utf8_lossy(&version.stderr)
-        ));
-    }
-    generation_identity_from_version(
-        compiler,
-        flags,
-        graph,
-        String::from_utf8_lossy(&version.stdout).trim(),
-    )
+    let version = compiler_version_output(compiler)?;
+    generation_identity_from_version(compiler, flags, graph, version.as_str())
 }
 
 fn generation_identity_from_version<S: AsRef<str> + std::fmt::Debug>(
@@ -379,7 +363,7 @@ fn load_audio_module(
             weights: observer.resolve(AffineExecution::Host)?,
         },
     )?;
-    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+    let vmfb = qualify_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(
             &compiler,
             graph,
@@ -738,7 +722,8 @@ impl Phi4AudioDiagnosticRuntime {
 mod tests {
     use super::*;
     use crate::aux_manifest::{
-        AuxiliaryArtifactContract, auxiliary_manifest_path, verify_auxiliary_manifest,
+        AuxiliaryArtifactContract, auxiliary_manifest_path, ensure_qualified_auxiliary_artifact,
+        verify_auxiliary_manifest,
     };
 
     fn published_config() -> Phi4AudioConfig {

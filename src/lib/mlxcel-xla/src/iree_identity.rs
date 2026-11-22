@@ -20,8 +20,11 @@
 //! manifest built by one toolchain name the same backend. Issue #3212's CUDA
 //! micro-oracles reuse these helpers as well.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use safetensors::Dtype;
 use sha2::{Digest, Sha256};
@@ -33,8 +36,31 @@ use crate::operator_numeric_contract::{
     ProductionBackend, production_operator_contract,
 };
 
-/// Whitespace-normalized `iree-compile --version` output.
-pub(crate) fn compiler_version(compiler: &Path) -> Result<String, String> {
+/// Memoized `iree-compile --version` stdout, keyed by compiler path, size, and
+/// modification time so a replaced compiler is queried again.
+static COMPILER_VERSIONS: OnceLock<Mutex<HashMap<CompilerKey, String>>> = OnceLock::new();
+
+type CompilerKey = (PathBuf, u64, Option<SystemTime>);
+
+/// Trimmed `iree-compile --version` stdout, the form every generation
+/// identity records. The process runs once per compiler binary, so building a
+/// production contract and its generation identity spawns it at most once.
+pub(crate) fn compiler_version_output(compiler: &Path) -> Result<String, String> {
+    let metadata = std::fs::metadata(compiler)
+        .map_err(|error| format!("stat {}: {error}", compiler.display()))?;
+    let key = (
+        compiler.to_path_buf(),
+        metadata.len(),
+        metadata.modified().ok(),
+    );
+    let cache = COMPILER_VERSIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(version) = cache
+        .lock()
+        .map_err(|_| "compiler version cache lock poisoned".to_string())?
+        .get(&key)
+    {
+        return Ok(version.clone());
+    }
     let output = Command::new(compiler)
         .arg("--version")
         .output()
@@ -46,7 +72,17 @@ pub(crate) fn compiler_version(compiler: &Path) -> Result<String, String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let version = String::from_utf8_lossy(&output.stdout)
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    cache
+        .lock()
+        .map_err(|_| "compiler version cache lock poisoned".to_string())?
+        .insert(key, version.clone());
+    Ok(version)
+}
+
+/// Whitespace-normalized `iree-compile --version` output.
+pub(crate) fn compiler_version(compiler: &Path) -> Result<String, String> {
+    let version = compiler_version_output(compiler)?
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");

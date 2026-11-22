@@ -452,6 +452,51 @@ fn reject_manifest_downgrade(
     ))
 }
 
+/// Cache location of `contract`'s artifact for a caller-chosen `vmfb` path.
+///
+/// A v1 contract keeps `vmfb`. Every numeric schema lives in a sibling
+/// directory named after its manifest schema, so a binary that writes v3
+/// manifests never shares a cache entry with an older binary that still writes
+/// v1 at the same fixed `temp_dir()` location. Each binary then recompiles or
+/// reuses its own entry, and `reject_manifest_downgrade` only guards a single
+/// schema's directory instead of failing the older binary's loads.
+pub(crate) fn schema_scoped_vmfb_path(
+    vmfb: &Path,
+    contract: &AuxiliaryArtifactContract,
+) -> PathBuf {
+    let schema = contract.manifest_schema();
+    if schema == SCHEMA_V1 {
+        return vmfb.to_path_buf();
+    }
+    let file_name = vmfb
+        .file_name()
+        .map_or_else(|| "module.vmfb".into(), |name| name.to_os_string());
+    vmfb.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(schema)
+        .join(file_name)
+}
+
+/// Qualify a production artifact at its [`schema_scoped_vmfb_path`] and return
+/// the path the caller must pass to `IreeAuxiliaryModule::load`.
+pub(crate) fn qualify_auxiliary_artifact<F>(
+    vmfb: &Path,
+    contract: &AuxiliaryArtifactContract,
+    weights: &[AuxiliaryWeight],
+    compile: F,
+) -> Result<PathBuf, String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    let scoped = schema_scoped_vmfb_path(vmfb, contract);
+    if let Some(parent) = scoped.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("mkdir {}: {error}", parent.display()))?;
+    }
+    ensure_qualified_auxiliary_artifact(&scoped, contract, weights, compile)?;
+    Ok(scoped)
+}
+
 /// Reuse a qualified auxiliary VMFB or rebuild and publish one exactly once.
 ///
 /// `compile` must write a complete VMFB to the supplied temporary sibling.

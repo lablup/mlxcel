@@ -18,7 +18,7 @@ use std::mem::size_of;
 
 use sha2::{Digest, Sha256};
 
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+use crate::aux_manifest::{AuxiliaryArtifactContract, qualify_auxiliary_artifact};
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
@@ -1099,7 +1099,7 @@ fn execute_probe(device: &str, definition: ProbeDefinition) -> Result<NumericOra
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
     let vmfb = cached_vmfb_path(&compiler, &mlir, &flags, &cache, cache_key, 0);
-    ensure_qualified_auxiliary_artifact(&vmfb, &artifact_contract, &weights, |output| {
+    let vmfb = qualify_auxiliary_artifact(&vmfb, &artifact_contract, &weights, |output| {
         compile_one_to(&compiler, &mlir, &flags, &cache, cache_key, 0, output)
     })?;
     let mut module = IreeAuxiliaryModule::load(device, &vmfb, &artifact_contract, weights)?;

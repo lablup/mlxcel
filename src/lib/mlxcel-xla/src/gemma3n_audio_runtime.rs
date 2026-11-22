@@ -23,13 +23,12 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
-use crate::aux_manifest::ensure_qualified_auxiliary_artifact;
+use crate::aux_manifest::qualify_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
@@ -40,7 +39,7 @@ use crate::emitter::{
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::iree_identity::{
-    ProductionNumerics, observe_float_tensor, production_artifact_contract,
+    ProductionNumerics, compiler_version_output, observe_float_tensor, production_artifact_contract,
 };
 use crate::numeric_dtype_contract::NumericDType;
 use crate::operator_numeric_contract::{
@@ -237,23 +236,8 @@ fn generation_identity<S: AsRef<str> + std::fmt::Debug>(
     flags: &[S],
     mlir: &str,
 ) -> Result<String, String> {
-    let version = Command::new(compiler)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("run {} --version: {error}", compiler.display()))?;
-    if !version.status.success() {
-        return Err(format!(
-            "{} --version failed: {}",
-            compiler.display(),
-            String::from_utf8_lossy(&version.stderr)
-        ));
-    }
-    generation_identity_from_version(
-        compiler,
-        flags,
-        mlir,
-        String::from_utf8_lossy(&version.stdout).trim(),
-    )
+    let version = compiler_version_output(compiler)?;
+    generation_identity_from_version(compiler, flags, mlir, version.as_str())
 }
 
 fn generation_identity_from_version<S: AsRef<str> + std::fmt::Debug>(
@@ -663,7 +647,7 @@ impl Gemma3nAudioIreeRuntime {
             &encode_weights,
         );
         let encode_compile_started = std::time::Instant::now();
-        ensure_qualified_auxiliary_artifact(
+        let encode_vmfb = qualify_auxiliary_artifact(
             &encode_vmfb,
             &encode_contract,
             &encode_weights,
@@ -711,7 +695,7 @@ impl Gemma3nAudioIreeRuntime {
         )?;
         report_auxiliary_weights("audio-merge-weights", merge_weights_started, &merge_weights);
         let merge_compile_started = std::time::Instant::now();
-        ensure_qualified_auxiliary_artifact(
+        let merge_vmfb = qualify_auxiliary_artifact(
             &merge_vmfb,
             &merge_contract,
             &merge_weights,
@@ -1014,7 +998,9 @@ impl Gemma3nAudioIreeRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aux_manifest::{AuxiliaryArtifactContract, auxiliary_manifest_path};
+    use crate::aux_manifest::{
+        AuxiliaryArtifactContract, auxiliary_manifest_path, ensure_qualified_auxiliary_artifact,
+    };
 
     fn temp_path(tag: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()

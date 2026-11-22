@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use crate::aux_manifest::{
     AuxiliaryArtifactContract, auxiliary_manifest_path, ensure_qualified_auxiliary_artifact,
-    verify_auxiliary_manifest,
+    qualify_auxiliary_artifact, schema_scoped_vmfb_path, verify_auxiliary_manifest,
 };
 use crate::auxiliary::{AuxiliaryWeight, AuxiliaryWeightDType, AuxiliaryWeightStorage};
 use crate::emitter::Precision;
@@ -292,4 +292,53 @@ fn backend_identity_stays_unobserved_and_sanitizes_compiler_separators() {
     assert!(identity.contains("algorithm=unobserved-iree-dispatch-selection"));
     assert!(identity.contains("patch=libiree-runtime-sha256-aaaa"));
     assert!(identity.contains("target=cuda"));
+}
+
+#[test]
+fn v3_artifacts_use_a_schema_scoped_path_and_leave_v1_caches_alone() {
+    let cache = temp_vmfb("schema-scope").with_extension("");
+    std::fs::create_dir_all(&cache).unwrap();
+    let vmfb = cache.join("vision-256.vmfb");
+    let resident = weights();
+    let legacy = AuxiliaryArtifactContract::new_legacy_unqualified(
+        "vision.main",
+        "config=qwen2-5-vl",
+        "compiler=iree;mlir_sha256=0",
+    )
+    .unwrap();
+    let production = artifact(operator_set(
+        Precision::F16,
+        float_weights(CheckpointDType::F16),
+        &baseline_backend(),
+    ));
+    let mut compiles = 0usize;
+    let mut compile = |output: &std::path::Path| {
+        compiles += 1;
+        std::fs::write(output, format!("vmfb-{compiles}")).map_err(|error| error.to_string())
+    };
+
+    // An older binary published a v1 artifact at the shared fixed location.
+    let legacy_path = qualify_auxiliary_artifact(&vmfb, &legacy, &resident, &mut compile).unwrap();
+    assert_eq!(legacy_path, vmfb);
+    let legacy_manifest = std::fs::read(auxiliary_manifest_path(&vmfb)).unwrap();
+
+    // The v3 build qualifies its own entry and leaves the v1 pair untouched.
+    let scoped = qualify_auxiliary_artifact(&vmfb, &production, &resident, &mut compile).unwrap();
+    assert_eq!(scoped, schema_scoped_vmfb_path(&vmfb, &production));
+    assert_ne!(scoped, vmfb);
+    assert!(scoped.starts_with(cache.join("mlxcel-xla-aux-artifact-v3-operator-numeric")));
+    assert_eq!(std::fs::read(&vmfb).unwrap(), b"vmfb-1");
+    assert_eq!(
+        std::fs::read(auxiliary_manifest_path(&vmfb)).unwrap(),
+        legacy_manifest
+    );
+    assert!(verify_auxiliary_manifest(&vmfb, &legacy, &resident).is_ok());
+    assert!(verify_auxiliary_manifest(&scoped, &production, &resident).is_ok());
+
+    // Alternating old and new binaries reuse their own entries without a
+    // downgrade refusal or another compile.
+    qualify_auxiliary_artifact(&vmfb, &legacy, &resident, &mut compile).unwrap();
+    qualify_auxiliary_artifact(&vmfb, &production, &resident, &mut compile).unwrap();
+    assert_eq!(compiles, 2);
+    std::fs::remove_dir_all(cache).ok();
 }

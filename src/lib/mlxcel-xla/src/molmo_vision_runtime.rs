@@ -22,7 +22,7 @@ use std::time::Instant;
 use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 
-use crate::aux_manifest::ensure_qualified_auxiliary_artifact;
+use crate::aux_manifest::qualify_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
@@ -249,7 +249,7 @@ fn compile_and_load(
         },
     )?;
     let vmfb = cached_vmfb_path(&compiler, mlir, &flags, &cache, tag, 0);
-    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+    let vmfb = qualify_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(&compiler, mlir, &flags, &cache, tag, 0, temporary)
     })?;
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
