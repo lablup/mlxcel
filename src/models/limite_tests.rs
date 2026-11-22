@@ -364,6 +364,7 @@ fn config_refuses_conventions_it_does_not_implement() {
         serde_json::json!({"quantization": {"group_size": 64, "bits": 4}}),
         serde_json::json!({"mudd_layers": [2], "mudd_tap_idx": {"2": [0, 3]}}),
         serde_json::json!({"mudd_layers": [2], "mudd_tap_idx": {"3": [0]}}),
+        serde_json::json!({"mudd": false, "mudd_layers": [2], "mudd_tap_idx": {"2": [0, 2]}}),
     ] {
         assert!(parse(patch.clone()).is_err(), "{patch} must be refused");
     }

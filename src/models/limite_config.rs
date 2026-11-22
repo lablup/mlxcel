@@ -252,6 +252,10 @@ impl ModelArgs {
         }
         if self.mudd {
             self.tap_indices()?;
+        } else if !self.mudd_tap_idx.is_empty() {
+            // Upstream applies the mix whenever `mudd_tap_idx` is set, whatever
+            // `mudd` says, so a disagreeing pair cannot be honoured either way.
+            return fail("mudd is false but mudd_tap_idx is set".into());
         }
         self.sigmoid_softcap()?;
         Ok(())
