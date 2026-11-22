@@ -97,3 +97,55 @@ fn special_weight_loader_kind_returns_none_for_config_backed_models() {
     assert_eq!(special_weight_loader_kind(ModelType::Qwen3), None);
     assert_eq!(special_weight_loader_kind(ModelType::Step3p5), None);
 }
+
+/// A Qwen3.5 NVFP4 export from ModelOpt or compressed-tensors declares its
+/// format in `quantization_config` and has no `quantization` block. The text
+/// config gets the repacked layout, so the family does not fall back to its
+/// affine default of 64 and load every linear with a layout warning.
+#[test]
+fn qwen35_text_config_declares_the_layout_of_an_nvfp4_export() {
+    for quantization_config in [
+        serde_json::json!({
+            "quant_method": "compressed-tensors",
+            "format": "nvfp4-pack-quantized",
+            "config_groups": { "group_0": { "weights": {
+                "num_bits": 4, "type": "float", "group_size": 16
+            } } }
+        }),
+        serde_json::json!({
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "config_groups": { "group_0": { "weights": {
+                "num_bits": 4, "type": "float", "group_size": 16
+            } } }
+        }),
+    ] {
+        let config = serde_json::json!({
+            "model_type": "qwen3_5",
+            "quantization_config": quantization_config,
+            "text_config": {
+                "model_type": "qwen3_5_text",
+                "hidden_size": 64,
+                "num_hidden_layers": 1,
+                "intermediate_size": 32,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "vocab_size": 100
+            }
+        });
+        let merged = qwen35_text_config(&config).unwrap();
+        assert_eq!(
+            merged["quantization"],
+            serde_json::json!({ "group_size": 16, "bits": 4 })
+        );
+        let args: crate::models::qwen3_5::Qwen35Config =
+            serde_json::from_value(merged).expect("the merged text config parses");
+        assert_eq!((args.group_size(), args.bits()), (16, 4));
+
+        // Without the declaration the family default stands.
+        let mut plain = config.clone();
+        plain.as_object_mut().unwrap().remove("quantization_config");
+        let merged = qwen35_text_config(&plain).unwrap();
+        assert!(merged.get("quantization").is_none());
+    }
+}

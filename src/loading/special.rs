@@ -64,6 +64,10 @@ pub(crate) fn qwen35_text_config(config: &serde_json::Value) -> Result<serde_jso
         models::merge_fp8_quantization(&mut text_config, detected)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
+    // Neither does an NVFP4 export from ModelOpt or compressed-tensors, whose
+    // repacked linears keep 16-element blocks.
+    models::merge_modelopt_nvfp4_quantization(&mut text_config, config, None)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     Ok(text_config)
 }

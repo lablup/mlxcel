@@ -1021,6 +1021,10 @@ fn load_qwen3_5_vlm_with_variant(
         models::merge_fp8_quantization(&mut text_config_val, detected)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
+    // An NVFP4 export has no `quantization` block either;
+    // `split_qwen3_5_vlm_weights` above repacked its text linears.
+    models::merge_modelopt_nvfp4_quantization(&mut text_config_val, &full_config, Some(model_path))
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     let text_config: models::qwen3_5::Qwen35Config = serde_json::from_value(text_config_val)
         .map_err(|e| anyhow::anyhow!("Failed to parse Qwen3.5 text config: {}", e))?;
