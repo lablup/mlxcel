@@ -715,7 +715,7 @@ fn d1_3b_matches_mlx_vlm_on_text_and_images() {
     for case in fixture()["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let images = match name {
-            "cats" => vec![cats_image(false)],
+            "cats" | "cats_multi" => vec![cats_image(false)],
             "cats_2x" => vec![cats_image(true)],
             _ => Vec::new(),
         };

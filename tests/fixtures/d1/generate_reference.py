@@ -32,6 +32,8 @@ Cases:
   over the 1024 x 1024 area cap), so d1's bicubic pre-downscale runs ahead of
   the LFM2-VL processor's own resize. Pixel replication is exact, so the Rust
   gate rebuilds the identical input.
+- `cats_multi`: the image with two questions, so the trunk with expanded
+  image tokens is tiled across branches.
 - `options_27`: a 27-label choice, the two-digit code branch.
 - `bool_criteria`: a bool question with `true` / `false` descriptions.
 
@@ -82,6 +84,10 @@ BOOL_CRITERIA = {
     "instructions": "Does this need a reply today?",
     "criteria": {"true": "the customer is blocked", "false": "it can wait"},
 }
+CATS_INDOORS = {
+    "type": "bool",
+    "instructions": "Is this photo taken indoors?",
+}
 OPTIONS_27 = {
     "type": "choice",
     "instructions": "Which word comes first in the alphabet?",
@@ -131,6 +137,14 @@ def main() -> None:
         run(model, processor, "text_urgency", STATE, {"urgency": URGENCY}),
         run(model, processor, "cats", None, {"cats": CATS_Q}, images=[cats]),
         run(model, processor, "cats_2x", None, {"cats": CATS_Q}, images=[doubled(cats)]),
+        run(
+            model,
+            processor,
+            "cats_multi",
+            None,
+            {"cats": CATS_Q, "indoors": CATS_INDOORS},
+            images=[cats],
+        ),
         run(model, processor, "options_27", STATE, {"first": OPTIONS_27}),
         run(model, processor, "bool_criteria", STATE, {"today": BOOL_CRITERIA}),
     ]
