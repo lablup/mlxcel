@@ -136,6 +136,7 @@ const HYBRID_SSM_ARCH_FRAGMENTS: &[&str] = &[
     "longcatflash",
     "rwkv7",
     "recurrentgemma",
+    "z1t",
     "baichuanm1",
 ];
 

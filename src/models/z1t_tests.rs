@@ -430,3 +430,35 @@ fn z1t_chunked_gather_is_exact_for_batched_rows() {
         assert_eq!(max_abs_diff(&got, &want), 0.0, "cap {cap}");
     }
 }
+
+#[test]
+fn z1t_refuses_mis_shaped_dense_weights_at_load() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+
+    let mut bad = weights();
+    bad.insert(
+        "embedding.weight".into(),
+        varied(&[VOCAB as i32, DIM as i32 + 1], 1, 0.02),
+    );
+    let err = Z1t::from_weights(&bad, config())
+        .err()
+        .expect("bad embedding refused");
+    assert!(err.contains("embedding.weight"), "{err}");
+
+    let mut bad = weights();
+    bad.insert(
+        "clf.weight".into(),
+        varied(&[VOCAB as i32 - 1, DIM as i32], 91, 0.05),
+    );
+    let err = Z1t::from_weights(&bad, config())
+        .err()
+        .expect("bad head refused");
+    assert!(err.contains("clf.weight"), "{err}");
+
+    let mut w = WeightMap::new();
+    w.insert("d.weight".into(), varied(&[4, DIM as i32], 3, 0.05));
+    let err = Z1tLinear::from_weights(&w, "d", DIM, 5, None, &config())
+        .err()
+        .expect("bad dense projection refused");
+    assert!(err.contains("d.weight"), "{err}");
+}

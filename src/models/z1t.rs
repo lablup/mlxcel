@@ -41,7 +41,7 @@ mod layers;
 pub use config::{Z1tConfig, Z1tQuantization};
 
 pub use layers::Z1tLayerState;
-use layers::{Block, DyT};
+use layers::{Block, DyT, expect_dense_shape};
 
 /// The first prefix in `candidates` whose `{prefix}.{probe}` tensor exists.
 /// Accepts the raw JAX names the checkpoint ships and the names upstream
@@ -95,6 +95,12 @@ impl Z1tModel {
             "weight",
         )
         .ok_or("Z1T embedding weight not found")?;
+        expect_dense_shape(
+            weights,
+            &embed_prefix,
+            config.vocab_size,
+            config.hidden_size,
+        )?;
         let embed_tokens = UnifiedEmbedding::from_weights(
             weights,
             &embed_prefix,
@@ -193,6 +199,7 @@ impl Z1t {
         let model = Z1tModel::from_weights(weights, &config)?;
         let head_prefix = resolve_prefix(weights, &candidates("clf", "lm_head"), "weight")
             .ok_or("Z1T head (clf) weight not found")?;
+        expect_dense_shape(weights, &head_prefix, config.vocab_size, config.hidden_size)?;
         let lm_head =
             UnifiedLinear::from_weights(weights, &head_prefix, config.group_size(), config.bits())?;
         let eos_token_ids = super::parse_optional_eos_token_ids(&config.eos_token_id);

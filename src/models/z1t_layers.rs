@@ -50,6 +50,29 @@ fn expect_shape(name: &str, array: &MlxArray, want: &[i32]) -> Result<(), String
     Ok(())
 }
 
+/// Check the stored shape of a dense (`out`, `in`) projection before it loads.
+///
+/// Quantized checkpoints pack the input axis, so a layer that ships a
+/// `.scales` tensor is skipped: only the unquantized shape is unambiguous.
+pub(super) fn expect_dense_shape(
+    weights: &WeightMap,
+    prefix: &str,
+    out_features: usize,
+    in_features: usize,
+) -> Result<(), String> {
+    if weights.contains_key(&format!("{prefix}.scales")) {
+        return Ok(());
+    }
+    match weights.get(&format!("{prefix}.weight")) {
+        Some(w) => expect_shape(
+            &format!("{prefix}.weight"),
+            w,
+            &[out_features as i32, in_features as i32],
+        ),
+        None => Ok(()),
+    }
+}
+
 fn scalar_like(value: f32, like: &MlxArray) -> UniquePtr<MlxArray> {
     mlxcel_core::full_f32(&[], value, mlxcel_core::array_dtype(like))
 }
@@ -176,6 +199,7 @@ impl Z1tLinear {
     ) -> Result<Self, String> {
         let k = fan_in.map_or(in_features, |k| k.clamp(1, in_features));
         if k >= in_features {
+            expect_dense_shape(weights, prefix, out_features, in_features)?;
             let linear =
                 UnifiedLinear::from_weights(weights, prefix, config.group_size(), config.bits())?;
             return Ok(Self::Dense(linear));
