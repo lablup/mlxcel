@@ -165,10 +165,23 @@ impl LatentWindow {
                 bits,
                 group_size,
             } => {
-                let ckv = dequantize_latent(&ckv_q, &scales, &biases, bits, group_size);
+                let ckv = crate::mla::latent_keys::dequantize_key_slot(
+                    &ckv_q, &scales, &biases, bits, group_size,
+                );
                 (ffi::astype(&ckv, ffi::array_dtype(&kpe)), kpe)
             }
         }
+    }
+
+    /// The live quantized window `cache` holds, at the width its rows are
+    /// stored at ([`crate::cache::KVCache::stored_latent_bits`]), or `None`
+    /// when it holds no quantized latent. Reads the cache without appending.
+    ///
+    /// Used by: the tiny-model tests that check what a latent cache stored.
+    #[must_use]
+    pub fn stored(cache: &crate::cache::KVCache) -> Option<Self> {
+        let bits = cache.stored_latent_bits()?;
+        Some(Self::from_rows(cache.latent_quantized_window()?, bits))
     }
 
     pub(crate) fn from_rows(rows: QuantizedLatentRows, bits: i32) -> Self {
@@ -183,32 +196,53 @@ impl LatentWindow {
     }
 }
 
-/// Quantize one step's latent rows `[B, 1, L, kv_lora_rank]`.
+/// Quantize one step's latent rows `[B, 1, L, kv_lora_rank]` at `bits` into
+/// their `(packed, scales, biases)` triple.
 ///
 /// The codec runs in f32 so the group range is not rounded before the scale is
 /// derived, then the scale and bias are stored FP16 (32 bytes per token at
 /// rank 512). An all-zero group gets a zero bias and quantizes to zero, so it
 /// reads back as zero.
-pub(crate) fn quantize_latent_rows(
+///
+/// The one latent quantizer: [`quantize_latent_rows`] and the split key slot
+/// (`mla::latent_keys::quantize_key_slot_rows`) both call it.
+pub(crate) fn quantize_latent_triple(
     ckv: &MlxArray,
-    kpe: UniquePtr<MlxArray>,
     bits: i32,
-) -> QuantizedLatentRows {
+) -> (
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+) {
     let shape = ffi::array_shape(ckv);
     let (b, h, l, rank) = (shape[0], shape[1], shape[2], shape[3]);
     let flat = ffi::reshape(&ffi::astype(ckv, dtype::FLOAT32), &[b * h * l, rank]);
     let q = ffi::quantize_weights(&flat, LATENT_QUANT_GROUP_SIZE, bits);
     let unflatten = |a: UniquePtr<MlxArray>| ffi::reshape(&a, &[b, h, l, -1]);
-    QuantizedLatentRows {
-        packed: unflatten(ffi::quantized_weights_w(&q)),
-        scales: unflatten(ffi::astype(
+    (
+        unflatten(ffi::quantized_weights_w(&q)),
+        unflatten(ffi::astype(
             &ffi::quantized_weights_scales(&q),
             dtype::FLOAT16,
         )),
-        biases: unflatten(ffi::astype(
+        unflatten(ffi::astype(
             &ffi::quantized_weights_biases(&q),
             dtype::FLOAT16,
         )),
+    )
+}
+
+/// [`quantize_latent_triple`] with the rope stream, as one step's cache rows.
+pub(crate) fn quantize_latent_rows(
+    ckv: &MlxArray,
+    kpe: UniquePtr<MlxArray>,
+    bits: i32,
+) -> QuantizedLatentRows {
+    let (packed, scales, biases) = quantize_latent_triple(ckv, bits);
+    QuantizedLatentRows {
+        packed,
+        scales,
+        biases,
         kpe: ffi::astype(&kpe, dtype::FLOAT16),
     }
 }
@@ -322,6 +356,11 @@ pub fn quantized_absorbed_attention(
     scale: f32,
     mask: Option<&MlxArray>,
 ) -> UniquePtr<MlxArray> {
+    debug_assert!(
+        !crate::mla::latent_keys::has_split_sidecar(ckv_q, scales, bits, group_size),
+        "mla: a key slot with a sidecar must be narrowed to its latent columns \
+         (LatentWindow::narrow_keys) before attention reads it"
+    );
     if mask.is_none()
         && let Some(out) = fused_absorbed_decode_quantized(
             q_absorbed, q_pe, ckv_q, scales, biases, kpe, bits, group_size, scale,

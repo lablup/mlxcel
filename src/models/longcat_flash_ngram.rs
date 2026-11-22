@@ -1155,8 +1155,9 @@ pub struct LongcatFlashNgramModel {
     /// Whether an injected `int8` layer keeps the affine int8 latent. Read
     /// from `mla::stores_quantized_latent_pair` at load, so it follows
     /// `mla::QUANTIZED_LATENT_FAMILIES`, which lists both LongCat types since
-    /// LongCat-Flash-Lite passed the #3161 quality gate. Off, `int8` resolves
-    /// to FP16 like any other refused mode.
+    /// LongCat-Flash-Lite passed the #3161 quality gate, and the MLA latent
+    /// option in force (`--mla-latent-quant fp16` turns it off, issue #3179).
+    /// Off, `int8` resolves to FP16 like any other refused mode.
     pub(crate) quantized_latent: Cell<bool>,
 }
 

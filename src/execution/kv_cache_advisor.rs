@@ -56,7 +56,7 @@ use std::path::Path;
 
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::cache::turbo::is_symmetric_turbo_allowed;
-use mlxcel_core::mla::{caches_mla_latent_pair, stores_quantized_latent_pair};
+use mlxcel_core::mla::{MlaLatentQuant, caches_mla_latent_pair, stores_quantized_latent_pair_with};
 
 use crate::execution::config_fields;
 use crate::execution::kv_arch::{KvArchKind, estimate_kv_arch_from_config};
@@ -183,7 +183,7 @@ impl KvCacheModeAdvice {
 /// - An MLA family that always caches the latent pair
 ///   ([`caches_mla_latent_pair`]) never receives a Turbo mode, and receives
 ///   [`KVCacheMode::Int8`] at medium and long context only when it stores the
-///   latent through the quantizing view ([`stores_quantized_latent_pair`],
+///   latent through the quantizing view ([`stores_quantized_latent_pair_with`],
 ///   issue #3160). The rest have every quantized request substituted back to
 ///   fp16 at startup (issue #1350), so advice to the contrary would name a
 ///   mode the binary refuses.
@@ -222,11 +222,18 @@ pub fn recommend_kv_cache_mode(
                 // through the quantizing latent view (issue #3160): int8 keeps
                 // an affine group-64 latent with fp16 rope keys in every
                 // absorption state. The Turbo modes are still refused there.
-                Medium | Long if stores_quantized_latent_pair(model_type) => (
-                    Int8,
-                    None,
-                    "This family caches the MLA (kv_latent, k_pe) pair, and int8 stores that latent as affine group-64 8-bit with fp16 rope keys, about 1.7x smaller than the fp16 latent (672 against 1152 bytes per token per layer at kv_lora_rank 512). It decodes slower than the fp16 latent (on Metal a fused kernel reads it up to 2048 keys, the composed path beyond), so benchmark decode speed first. The Turbo modes are mis-calibrated for the latent pair and are substituted with fp16.",
-                ),
+                // The default gate, never an explicit `--mla-latent-quant`
+                // value: the advisor does not recommend an experimental
+                // precision (issue #3179).
+                Medium | Long
+                    if stores_quantized_latent_pair_with(model_type, MlaLatentQuant::Auto) =>
+                {
+                    (
+                        Int8,
+                        None,
+                        "This family caches the MLA (kv_latent, k_pe) pair, and int8 stores that latent as affine group-64 8-bit with fp16 rope keys, about 1.7x smaller than the fp16 latent (672 against 1152 bytes per token per layer at kv_lora_rank 512). It decodes slower than the fp16 latent (on Metal a fused kernel reads it up to 2048 keys, the composed path beyond), so benchmark decode speed first. The Turbo modes are mis-calibrated for the latent pair and are substituted with fp16.",
+                    )
+                }
                 // Any other family that always caches the `(kv_latent, k_pe)`
                 // pair has no decompressed fallback, so every quantized mode
                 // (int8 included) is refused and resolved back to fp16 at startup
@@ -370,8 +377,14 @@ fn arch_and_type_from_config(
     // quantized request on an absorbing DeepSeek V2 resolves back to fp16
     // (and keeps the latent), so the advice must be the latent's (#3153).
     let model_type = read_model_type(config);
-    let (kv_mode, _) =
-        mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model(kv_mode, &model_type);
+    // Resolved under the default gate (`_with` fixes the MLA latent option
+    // at `auto`), so the advice never follows an explicit
+    // `--mla-latent-quant` value (issue #3179).
+    let (kv_mode, _) = mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model_with(
+        kv_mode,
+        &model_type,
+        mlxcel_core::mla::absorbed_enabled(),
+    );
     let estimate = estimate_kv_arch_from_config(config, DEFAULT_CTX_LEN, kv_mode, 1)?;
     Some((estimate.kind, model_type))
 }

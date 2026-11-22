@@ -498,8 +498,9 @@ fn serve_preflight_kv_mode_follows_batch_kv_quant() {
 
 /// On `deepseek_v2` the batch table is a route to the decompressed cache, which
 /// is what the preflight must size when absorbed decode is off (Int8 /
-/// Turbo4Asym), and is taken off (fp16 latent) when it is on, the same as
-/// startup.
+/// Turbo4Asym). When it is on, `--kv-bits 8` keeps Int8 because the absorbed
+/// cache stores its latent as affine int8 (#3168), and the Turbo table is
+/// taken off (fp16 latent), the same as startup.
 #[test]
 fn serve_preflight_kv_mode_on_deepseek_v2_follows_the_absorption_decision() {
     use mlxcel_core::cache::KVCacheMode;
@@ -508,16 +509,11 @@ fn serve_preflight_kv_mode_on_deepseek_v2_follows_the_absorption_decision() {
 
     let mut args = sample_args();
     args.batch_quant.kv_bits = 8;
-    let expected = if absorbed {
-        KVCacheMode::Fp16
-    } else {
-        KVCacheMode::Int8
-    };
     assert_eq!(
         super::serve_preflight_kv_mode(&args, dir.path())
             .unwrap()
             .mode,
-        expected
+        KVCacheMode::Int8
     );
 
     args.batch_quant.kv_bits = 4;

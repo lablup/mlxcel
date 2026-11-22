@@ -37,7 +37,11 @@
 //! (`docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md`),
 //! so they are not in `mla::QUANTIZED_LATENT_FAMILIES` and this path is reached
 //! only by a harness that sets the cache mode itself
-//! (`MLXCEL_TRACE_KV_CACHE_MODE=int8`).
+//! (`MLXCEL_TRACE_KV_CACHE_MODE=int8`) or by an explicit, experimental
+//! `--mla-latent-quant int8` / `int4` (issue #3179). Under `int4` the latent
+//! columns are stored 4-bit and the indexer key stays 8-bit in the same slot
+//! (`mla::latent_keys`, "Split slot"); the three reads above take each run at
+//! its own width, and step 4 is always the composed decode.
 //!
 //! This file also holds the selection trace (`MLXCEL_TRACE_DSA_TOPK`) that the
 //! top-k overlap gate of #3163 is measured with.

@@ -14,7 +14,8 @@
 
 use super::{
     gemma3n_language_model_prefix, gemma3n_metadata, gemma3n_needs_conv_transpose,
-    parse_gemma3_vlm_config, sanitize_gemma3n_weights, sanitize_gemma4_audio_weights,
+    parse_gemma3_vlm_config, prepare_gemma3_vlm_weights, sanitize_gemma3n_weights,
+    sanitize_gemma4_audio_weights,
 };
 use crate::vision::config::{VLMConfig, VisionHiddenActivation};
 use mlxcel_core::dtype;
@@ -332,4 +333,252 @@ fn sanitize_gemma4_audio_weights_is_idempotent() {
     // And the idempotent result is the channel-last layout.
     assert_eq!(audio_conv_shape(&twice, LAYER0_CONV), vec![128, 3, 3, 1]);
     assert_eq!(audio_conv_shape(&twice, LCONV1D), vec![1024, 5, 1]);
+}
+
+/// Who wrote an NVFP4 export: the two producers store one weight format under
+/// different tensor names and declare it differently.
+#[derive(Debug, Clone, Copy)]
+enum Nvfp4Producer {
+    ModelOpt,
+    CompressedTensors,
+}
+
+impl Nvfp4Producer {
+    fn quantization_config(self) -> serde_json::Value {
+        match self {
+            Self::ModelOpt => json!({
+                "quant_method": "modelopt",
+                "quant_algo": "NVFP4",
+                "config_groups": { "group_0": { "weights": {
+                    "num_bits": 4, "type": "float", "group_size": 16
+                } } },
+                "producer": { "name": "modelopt" }
+            }),
+            Self::CompressedTensors => json!({
+                "quant_method": "compressed-tensors",
+                "format": "nvfp4-pack-quantized",
+                "quantization_status": "compressed",
+                "config_groups": { "group_0": { "weights": {
+                    "num_bits": 4, "type": "float", "group_size": 16
+                } } }
+            }),
+        }
+    }
+
+    /// Insert one NVFP4 linear (8 x 64) under `base` with tensor scale 0.5,
+    /// under this producer's tensor names.
+    fn insert_linear(self, weights: &mut WeightMap, base: &str) {
+        let codes: Vec<u8> = (0..8 * 32).map(|i| (i * 37 + 19) as u8).collect();
+        let block_scales: Vec<u8> = (0..8 * 4).map(|i| [0x20, 0x28, 0x30][i % 3]).collect();
+        let codes = mlxcel_core::from_bytes(&codes, &[8, 32], dtype::UINT8);
+        let block_scales = mlxcel_core::from_bytes(&block_scales, &[8, 4], dtype::UINT8);
+        weights.insert(format!("{base}.weight_scale"), block_scales);
+        match self {
+            Self::ModelOpt => {
+                weights.insert(format!("{base}.weight"), codes);
+                weights.insert(
+                    format!("{base}.weight_scale_2"),
+                    mlxcel_core::from_slice_f32(&[0.5], &[1]),
+                );
+            }
+            Self::CompressedTensors => {
+                weights.insert(format!("{base}.weight_packed"), codes);
+                weights.insert(
+                    format!("{base}.weight_global_scale"),
+                    mlxcel_core::from_slice_f32(&[2.0], &[1]),
+                );
+                weights.insert(
+                    format!("{base}.input_global_scale"),
+                    mlxcel_core::from_slice_f32(&[37.5], &[1]),
+                );
+            }
+        }
+    }
+}
+
+/// The float tensors of [`nvfp4_gemma3_vlm_checkpoint`], under the names the
+/// loader reads them by.
+const GEMMA3_VLM_FLOAT_KEYS: [&str; 3] = [
+    "model.norm.weight",
+    "vision_tower.vision_model.encoder.layers.0.mlp.fc1.weight",
+    "multi_modal_projector.mm_input_projection_weight",
+];
+
+/// A Gemma 3 VLM checkpoint in the `transformers` key layout with one NVFP4
+/// linear in the language model, a float text tensor, a float vision linear
+/// and the float projector, as `NeoChen1024/gemma-3-12b-it-NVFP4` has them.
+fn nvfp4_gemma3_vlm_checkpoint(producer: Nvfp4Producer) -> WeightMap {
+    let mut weights = WeightMap::new();
+    producer.insert_linear(&mut weights, "language_model.model.layers.0.mlp.gate_proj");
+    weights.insert(
+        "language_model.model.norm.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[1.0; 64], &[64]),
+    );
+    weights.insert(
+        "vision_tower.vision_model.encoder.layers.0.mlp.fc1.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.25; 16], &[4, 4]),
+    );
+    weights.insert(
+        "multi_modal_projector.mm_input_projection_weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.5; 8], &[2, 4]),
+    );
+    weights
+}
+
+fn gemma3_vlm_config_declaring(
+    quantization_config: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut config = gemma3_vlm_config();
+    if let Some(quantization_config) = quantization_config {
+        config["quantization_config"] = quantization_config;
+    }
+    config
+}
+
+fn tensor_bytes(weights: &WeightMap, key: &str) -> Vec<u8> {
+    let array = weights.get(key).unwrap_or_else(|| panic!("missing {key}"));
+    mlxcel_core::eval(array);
+    mlxcel_core::array_to_raw_bytes(array)
+}
+
+/// The Gemma 3 VLM route did not repack an NVFP4 export. A compressed-tensors
+/// one (`NeoChen1024/gemma-3-12b-it-NVFP4`) failed with `Weight not found`; a
+/// ModelOpt one would have reached the linear loaders as packed bytes. Both
+/// are now repacked as on the text-only route, to the same planes, and the
+/// loader is told so it can give the text config the layout.
+#[test]
+fn an_nvfp4_checkpoint_is_repacked_on_the_gemma3_vlm_route() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = "model.layers.0.mlp.gate_proj";
+    let mut planes = Vec::new();
+    for producer in [Nvfp4Producer::ModelOpt, Nvfp4Producer::CompressedTensors] {
+        let checkpoint = nvfp4_gemma3_vlm_checkpoint(producer);
+        let float_before: Vec<Vec<u8>> = GEMMA3_VLM_FLOAT_KEYS
+            .iter()
+            .map(|key| {
+                let stored = if key.starts_with("model.") {
+                    format!("language_model.{key}")
+                } else {
+                    key.to_string()
+                };
+                tensor_bytes(&checkpoint, &stored)
+            })
+            .collect();
+        let full_config = gemma3_vlm_config_declaring(Some(producer.quantization_config()));
+        let (weights, external_nvfp4) =
+            prepare_gemma3_vlm_weights(checkpoint, &full_config, dir.path()).expect("prepare");
+        assert!(external_nvfp4, "{producer:?}");
+        for gone in [
+            "weight_packed",
+            "weight_global_scale",
+            "input_global_scale",
+            "weight_scale",
+            "weight_scale_2",
+        ] {
+            assert!(
+                !weights.contains_key(&format!("{base}.{gone}")),
+                "{producer:?}: {gone}"
+            );
+        }
+        assert!(
+            weights.contains_key(&format!("{base}.scales")),
+            "{producer:?}"
+        );
+        let weight = weights.get(&format!("{base}.weight")).expect("weight");
+        assert_ne!(
+            mlxcel_core::array_dtype(weight),
+            dtype::UINT8,
+            "{producer:?}: the packed bytes were left as they were"
+        );
+        // The float tensors are routed as before and keep their bytes.
+        for (key, before) in GEMMA3_VLM_FLOAT_KEYS.iter().zip(&float_before) {
+            assert_eq!(&tensor_bytes(&weights, key), before, "{producer:?}: {key}");
+        }
+
+        let mut keys: Vec<String> = weights.keys().cloned().collect();
+        keys.sort();
+        let bytes: Vec<Vec<u8>> = keys.iter().map(|key| tensor_bytes(&weights, key)).collect();
+        planes.push((keys, bytes));
+    }
+    assert_eq!(
+        planes[0], planes[1],
+        "the two producers write one weight format"
+    );
+
+    // The text config of such an export has no MLX `quantization` block; the
+    // loader gives it the repacked layout, and leaves a declared one alone.
+    let text_config = |quantization: Option<serde_json::Value>| {
+        let mut config = json!({ "model_type": "gemma3_text", "hidden_size": 64 });
+        if let Some(quantization) = quantization {
+            config["quantization"] = quantization;
+        }
+        serde_json::from_value::<crate::models::gemma3::ModelArgs>(config).expect("text config")
+    };
+    let mut undeclared = text_config(None);
+    assert!(undeclared.quantization.is_none());
+    assert_eq!((undeclared.group_size(), undeclared.bits()), (64, 4));
+    undeclared.declare_modelopt_nvfp4_layout();
+    assert_eq!((undeclared.group_size(), undeclared.bits()), (16, 4));
+
+    let mut declared = text_config(Some(json!({ "group_size": 64, "bits": 8 })));
+    declared.declare_modelopt_nvfp4_layout();
+    assert_eq!((declared.group_size(), declared.bits()), (64, 8));
+}
+
+/// A checkpoint that does not declare NVFP4 keeps every tensor as the file
+/// has it, whatever the tensors are named.
+#[test]
+fn the_gemma3_vlm_route_repacks_only_what_the_config_declares() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = "model.layers.0.mlp.gate_proj";
+    for quantization_config in [
+        None,
+        Some(json!({ "quant_method": "modelopt", "quant_algo": "FP8" })),
+        Some(json!({ "quant_method": "other" })),
+        Some(json!({ "quant_method": "compressed-tensors", "format": "pack-quantized" })),
+    ] {
+        for (producer, kept) in [
+            (Nvfp4Producer::ModelOpt, "weight_scale_2"),
+            (Nvfp4Producer::CompressedTensors, "weight_packed"),
+        ] {
+            let (weights, external_nvfp4) = prepare_gemma3_vlm_weights(
+                nvfp4_gemma3_vlm_checkpoint(producer),
+                &gemma3_vlm_config_declaring(quantization_config.clone()),
+                dir.path(),
+            )
+            .expect("prepare");
+            assert!(!external_nvfp4, "{quantization_config:?}");
+            assert!(
+                weights.contains_key(&format!("{base}.{kept}")),
+                "{quantization_config:?} {producer:?}"
+            );
+            assert!(
+                !weights.contains_key(&format!("{base}.scales")),
+                "{quantization_config:?} {producer:?}"
+            );
+            for key in GEMMA3_VLM_FLOAT_KEYS {
+                assert!(weights.contains_key(key), "{quantization_config:?} {key}");
+            }
+        }
+    }
+}
+
+/// ModelOpt also declares the format in an `hf_quant_config.json` next to
+/// `config.json`; the route reads it as the text-only route does.
+#[test]
+fn the_gemma3_vlm_route_reads_the_modelopt_sidecar_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("hf_quant_config.json"),
+        r#"{"producer": {"name": "modelopt"}, "quantization": {"quant_algo": "NVFP4", "group_size": 16}}"#,
+    )
+    .expect("sidecar");
+    let (weights, external_nvfp4) = prepare_gemma3_vlm_weights(
+        nvfp4_gemma3_vlm_checkpoint(Nvfp4Producer::ModelOpt),
+        &gemma3_vlm_config_declaring(None),
+        dir.path(),
+    )
+    .expect("prepare");
+    assert!(external_nvfp4);
+    assert!(weights.contains_key("model.layers.0.mlp.gate_proj.scales"));
 }

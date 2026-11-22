@@ -18,8 +18,9 @@
 //!
 //! 1. **TurboQuant KV-cache** (`KV Cache (TurboQuant) Options`), every
 //!    binary flattens the same `TurboKvCacheArgs`, so the `--help` text
-//!    for `--cache-type-k`, `--cache-type-v`, `--kv-cache-mode`, and
-//!    `--turbo-boundary-v` MUST be identical across binaries.
+//!    for `--cache-type-k`, `--cache-type-v`, `--kv-cache-mode`,
+//!    `--mla-latent-quant`, and `--turbo-boundary-v` MUST be identical
+//!    across binaries.
 //! 2. **Speculative decoding** (`Speculative Decoding Options`), every binary flattens the same `SpeculativeArgs`, so the
 //!    `--help` text for `--draft-kind` and `--draft-block-size` MUST be
 //!    identical across binaries.
@@ -73,6 +74,7 @@ const EXPECTED_FLAGS: &[&str] = &[
     "--cache-type-k",
     "--cache-type-v",
     "--kv-cache-mode",
+    "--mla-latent-quant",
     "--turbo-boundary-v",
 ];
 
@@ -300,6 +302,7 @@ fn turbo_flag_signatures_match_across_binaries() {
         "--cache-type-k <TYPE>",
         "--cache-type-v <TYPE>",
         "--kv-cache-mode <MODE>",
+        "--mla-latent-quant <PRECISION>",
         "--turbo-boundary-v <COUNT>",
     ];
     for sig in signatures {
