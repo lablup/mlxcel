@@ -986,6 +986,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // `deepseek_v3` (#2384).
         "deepseek_v3" | "kimi_k2" | "joyai_llm_flash" => Ok(ModelType::DeepSeekV3),
         "deepseek_v32" | "deepseek_v3.2" => Ok(ModelType::DeepSeekV32),
+        "hy_v4" => Ok(ModelType::HyV4),
         "deepseek_v4" => Ok(ModelType::DeepSeekV4),
         "dots1" => Ok(ModelType::Dots1),
         "cohere" => Ok(ModelType::Cohere),

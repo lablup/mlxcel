@@ -156,11 +156,12 @@ pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
 ///
 /// Used by: decoders that materialize an explicit prefill mask instead of
 /// leaving `mask: None` for fused SDPA to apply causality itself. At this
-/// commit that is 13 non-test files under `src/models`, in five groups.
+/// commit that is 14 non-test files under `src/models`, in five groups.
 /// Hybrid stacks that keep their mask for now: MiniMaxM3, RecurrentGemma.
 /// Sliding-window and dual-attention families that build a separate global
 /// mask per forward: Gemma4, DiffusionGemma. MLA and custom-attention
 /// decoders that add the mask to scores by hand: DeepSeekV2, DeepSeekV3.2,
+/// Hy4 (`hy_v4_attention.rs`, which follows the V3.2 causal fallback),
 /// the GLM4MoeLite MTP drafter, and the Qwen 3.5 speculative forward.
 /// KimiLinear, GLM4MoeLite, KimiK3 and LongcatFlashNgram fold the rope half
 /// into SDPA through `mla::rope_folded_attention` and take causal mode
@@ -1390,7 +1391,8 @@ pub fn create_causal_bool_mask_with_window(
 /// # Returns
 /// Tensor of shape [batch, n_heads, seq_len, head_dim]
 ///
-/// Used by: DeepSeekV2 and MiniCPM3 under `src/models`, plus the DeepSeek-OCR
+/// Used by: DeepSeekV2, MiniCPM3 and Hy4 (`hy_v4_attention.rs`, the rope keys
+/// of its sink prefill) under `src/models`, plus the DeepSeek-OCR
 /// Qwen2 vision encoder
 /// (`src/vision/encoders/deepseekocr_qwen2.rs`) and the Qwen3-Omni MoE speech
 /// layers (`src/audio/qwen3_omni_moe/speech_layers.rs`). Most decoders never

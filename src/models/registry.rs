@@ -771,6 +771,7 @@ impl ModelType {
             ModelType::DeepSeekV2 => "deepseek_v2",
             ModelType::DeepSeekV3 => "deepseek_v3",
             ModelType::DeepSeekV32 => "deepseek_v32",
+            ModelType::HyV4 => "hy_v4",
             ModelType::DeepSeekV4 => "deepseek_v4",
             ModelType::Dots1 => "dots1",
             ModelType::Cohere => "cohere",
@@ -1020,6 +1021,7 @@ impl ModelType {
             | ModelType::DeepSeekV2
             | ModelType::DeepSeekV3
             | ModelType::DeepSeekV32
+            | ModelType::HyV4
             | ModelType::DeepSeekV4
             | ModelType::Dots1
             | ModelType::Cohere2Moe
@@ -1167,6 +1169,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::DeepSeekV2 => &["deepseek_v2"],
         ModelType::DeepSeekV3 => &["deepseek_v3", "kimi_k2", "joyai_llm_flash"],
         ModelType::DeepSeekV32 => &["deepseek_v32", "deepseek_v3.2"],
+        ModelType::HyV4 => &["hy_v4"],
         ModelType::DeepSeekV4 => &["deepseek_v4"],
         ModelType::Dots1 => &["dots1"],
         ModelType::Cohere => &["cohere"],
@@ -1850,6 +1853,7 @@ mod tests {
     fn mla_latent_cache_families_report_fp16_only_kv_modes() {
         for model_type in [
             ModelType::DeepSeekV32,
+            ModelType::HyV4,
             ModelType::Glm4MoeLite,
             ModelType::GlmMoeDsa,
         ] {

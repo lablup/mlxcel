@@ -62,8 +62,9 @@ pub(crate) fn mla_geometry(
 /// `quantized_latent` is the caller's opt in: only the attention
 /// implementations that read a [`LatentWindow::Quantized`] back pass `true`
 /// (`DeepSeekV3Attention`, #3160; the Kimi Linear and Kimi K3 MLA layers,
-/// #3162; and the DeepSeek V3.2 MLA, #3163, whose types still resolve to fp16
-/// because they are outside `mla::QUANTIZED_LATENT_FAMILIES`). GLM-4.7-Flash
+/// #3162; and the DeepSeek V3.2 MLA, #3163, and the Hy4 attention, #2354,
+/// whose types still resolve to fp16 because they are outside
+/// `mla::QUANTIZED_LATENT_FAMILIES`). GLM-4.7-Flash
 /// passes its per-layer flag, which follows that list (#3161). LongCat MLA
 /// passes `true` because its model-owned caches are built in an `int8` mode
 /// only when the model opted in (`LongcatFlashNgramModel`'s mode table). A
@@ -138,9 +139,11 @@ fn warn_latent_view_declined(family: &str, mode: mlxcel_core::cache::KVCacheMode
 /// promotion was limited to the multi-token step itself (#3177).
 ///
 /// Used by: the Kimi Linear, Kimi K3, GLM-4.7-Flash and LongCat MLA
-/// multi-token steps, DeepSeek V2's decompressed step (`deepseek_v2.rs`) and
+/// multi-token steps, DeepSeek V2's decompressed step (`deepseek_v2.rs`),
 /// `DeepSeekV3Attention` (`deepseek_v3.rs`: deepseek_v3, kimi_k2,
-/// joyai_llm_flash, kimi_vl, kimi_k25, youtu, youtu_llm, youtu_vl).
+/// joyai_llm_flash, kimi_vl, kimi_k25, youtu, youtu_llm, youtu_vl) and every
+/// step of the Hy4 attention (`hy_v4_attention.rs`), whose sink SDPA reads a
+/// dense window.
 pub(crate) fn dense_latent_in(
     window: LatentWindow,
     dtype: i32,

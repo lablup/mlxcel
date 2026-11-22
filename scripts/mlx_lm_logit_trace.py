@@ -22,7 +22,11 @@ runtime imports this file.
 
 Usage:
     mlx_lm_logit_trace.py MODEL_DIR TEXT_FILE [CHUNK_TOKENS=256] [MAX_CHUNKS=4]
-        [TOPK=8] [PREFILL=0] [--no-prefix-sharing] > reference.tsv
+        [TOPK=8] [PREFILL=0] [--no-prefix-sharing] [--mlx-vlm] > reference.tsv
+
+`--mlx-vlm` loads the checkpoint with mlx-vlm instead and traces its language
+model. It is for text checkpoints that only mlx-vlm implements, such as Hy4
+(`hy_v4`, #2354), and needs `mlx-vlm` in place of `mlx-lm`.
 
 Needs `mlx` and `mlx-lm` (with the `mlx-cuda-13` wheel on a CUDA host) plus
 `tokenizers` and `numpy`. The tokenizer, the BOS anchor and the chunk plan
@@ -118,6 +122,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="one forward per chunk, to check how closely a shared forward agrees with it",
     )
+    ap.add_argument(
+        "--mlx-vlm",
+        action="store_true",
+        help="load with mlx-vlm and trace its language model (text checkpoints only mlx-vlm "
+        "implements, such as hy_v4)",
+    )
     args = ap.parse_args(argv)
 
     chunk_tokens = usize_arg(args.chunk_tokens, 256)
@@ -128,14 +138,20 @@ def main(argv: list[str] | None = None) -> int:
     def log(message: str) -> None:
         print(message, file=sys.stderr, flush=True)
 
+    oracle = "mlx-vlm" if args.mlx_vlm else "mlx-lm"
     try:
         import mlx.core as mx
-        import mlx_lm
         import numpy  # noqa: F401
         import tokenizers
-        from mlx_lm import load
+
+        if args.mlx_vlm:
+            import mlx_vlm as oracle_module
+            from mlx_vlm.utils import load_model
+        else:
+            import mlx_lm as oracle_module
+            from mlx_lm import load
     except ModuleNotFoundError as err:
-        log(f"error: {err.name} is not installed here; run this with a Python that has mlx-lm")
+        log(f"error: {err.name} is not installed here; run this with a Python that has {oracle}")
         return 1
 
     try:
@@ -150,9 +166,20 @@ def main(argv: list[str] | None = None) -> int:
         chunks = plan_chunks(ids, bos_prefix, chunk_tokens, max_chunks, prefill)
         groups = plan_forwards(chunks, share_prefixes=not args.no_prefix_sharing)
 
-        log(f"loading {model_dir} with mlx-lm {mlx_lm.__version__} on {mx.default_device()}")
+        log(
+            f"loading {model_dir} with {oracle} {oracle_module.__version__} "
+            f"on {mx.default_device()}"
+        )
         started = time.perf_counter()
-        model, _ = load(str(model_dir))
+        if args.mlx_vlm:
+            # The processor is not needed, and a text-only checkpoint ships none.
+            language_model = load_model(model_dir).language_model
+
+            def model(tokens):
+                return language_model(tokens).logits
+
+        else:
+            model, _ = load(str(model_dir))
         log(
             f"loaded in {time.perf_counter() - started:.0f}s; "
             f"{len(chunks)} chunks in {len(groups)} forward(s)"
@@ -172,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     out = sys.stdout
     out.write(f"# model\t{args.model_dir}\n")
     out.write(
-        f"# oracle\tmlx-lm\t{mlx_lm.__version__}\tmlx\t{mx.__version__}"
+        f"# oracle\t{oracle}\t{oracle_module.__version__}\tmlx\t{mx.__version__}"
         f"\ttokenizers\t{tokenizers.__version__}\n"
     )
     out.write(f"# device\t{mx.default_device()}\n")

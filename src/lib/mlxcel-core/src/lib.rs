@@ -1645,7 +1645,7 @@ mod ffi {
         ) -> UniquePtr<MlxArray>;
 
         /// Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
-        /// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, MiMoV2Flash, OpenAIPrivacyFilter
+        /// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, MiMoV2Flash, OpenAIPrivacyFilter, HyV4
         #[allow(clippy::too_many_arguments)]
         unsafe fn fast_scaled_dot_product_attention_with_sinks(
             q: &MlxArray,

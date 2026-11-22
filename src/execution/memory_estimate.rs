@@ -1307,6 +1307,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::DeepSeekV2 => "deepseek_v2",
         ModelType::DeepSeekV3 => "deepseek_v3",
         ModelType::DeepSeekV32 => "deepseek_v32",
+        ModelType::HyV4 => "hy_v4",
         ModelType::DeepSeekV4 => "deepseek_v4",
         ModelType::Dots1 => "dots1",
         ModelType::Cohere => "cohere",
