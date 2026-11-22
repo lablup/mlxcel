@@ -2,13 +2,14 @@
 
 A decision model answers named questions about a state with calibrated probabilities instead of generated text: route a ticket to `billing`, rate a screenshot from `low` to `high`, say whether a transcript asks for a refund. mlxcel serves them through `POST /v1/decisions`, the `--decision-model` server flag, and the offline `mlxcel decide` command. The contract is mlx-vlm's shared decision API ([`decision.py`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/decision.py), [`decide.py`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/decide.py), [`server/decisions.py`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/server/decisions.py)), including its validation messages, so a client written against mlx-vlm sees the same responses.
 
-**Current status.** The API surface (request validation, the worker, the route, the server flag, the CLI) is implemented. LiquidAI d1-3B (#2367) is the first ported family, see [Supported decision models](#supported-decision-models). Decider-2b (#2359) and Clef (#2365) each add a loader arm and a scorer the same way. A checkpoint no family recognizes is refused with `<path> is not a decision checkpoint`.
+**Current status.** The API surface (request validation, the worker, the route, the server flag, the CLI) is implemented. Two families are ported, LiquidAI d1-3B (#2367) and Decider-2b (#2359), see [Supported decision models](#supported-decision-models). Clef (#2365) adds a loader arm and a scorer the same way. A checkpoint no family recognizes is refused with `<path> is not a decision checkpoint`.
 
 ## Supported decision models
 
 | Family | Detection | Checkpoints | Types | Media |
 |--------|-----------|-------------|-------|-------|
 | LiquidAI d1 | `model_type` `lfm2_vl` (or `lfm2-vl`) with `auto_map.AutoModel` ending in `D1Model` | [`LiquidAI/d1-3B`](https://huggingface.co/LiquidAI/d1-3B), [`LiquidAI/d1-3B-MLX-8bit`](https://huggingface.co/LiquidAI/d1-3B-MLX-8bit) (validated), `-MLX-4bit`, `-MLX-fp16` | `choice`, `score` (2 to 10 levels), `bool` (`noul`) | `images` |
+| Decider-2b | `model_type` `decider2` | [`nativ-community/decider-2b`](https://huggingface.co/nativ-community/decider-2b) (bf16, validated) | `choice` (2 to 255 options), `score` (2 to 10 levels), `bool` (`noul`) | none |
 
 ### LiquidAI d1-3B
 
@@ -28,6 +29,12 @@ mlxcel decide -m LiquidAI/d1-3B-MLX-8bit --state "I was charged twice, please re
 mlxcel decide -m LiquidAI/d1-3B-MLX-8bit --image cats.jpg \
   --questions '{"cats": {"type": "choice", "instructions": "How many cats are there?", "criteria": ["one", "two", "more"]}}'
 ```
+
+### Decider-2b
+
+Decider-2b (`src/decision/decider2.rs`) is a Qwen3.5-2B finetune that reads label-token logits at an open answer slot; it never generates, and `mlxcel generate` refuses it with a pointer to `mlxcel decide`. Each question is its own prompt: `Context:\n<state>` (a string state as is, any other JSON value serialized like Python's `json.dumps(..., ensure_ascii=False)` after lists of 8 or more items get an `_index` per item), truncated to `decision_config.max_state_tokens` (32768) tokens, then the question, one `(A) option` line per option and `Answer: (`. Options are labelled `A` to `Z`, then `AA` onwards (255 labels); past 10 options each label token id is spliced in directly. Prompts are batched while `rows * longest <= 8192` tokens, right-padded to a multiple of 64, and the post-norm hidden at each prompt's last token is multiplied by the label tokens' embedding rows. Logits are divided by `decision_config.temperature_by_type` (`choice` 1.164, `score` 1.124, `noul` 1.624) before an f32 softmax. A request is refused with a 400 when one prompt is longer than the backbone's `max_position_embeddings` (262144) or when its prompts together exceed 1048576 tokens; each question (and each isolated score level) repeats the state, so this bounds how much prefill one request can queue on the decision worker. With `isolated_levels` (the published default), a `score` question is asked once per level as a yes/no "Does the proposed answer fit?" row, and level probabilities are the per-level `p(yes)` normalized by their sum.
+
+Model limits (400): `choice needs 2 to 255 options`, `score needs 2 to 10 levels`, `Question needs instructions` (`instructions`, falling back to `question`, must be non-empty). A state longer than `max_state_tokens` is truncated, not refused. Metadata: `confidence` (argmax probability) and `certainty` (`max(0, 1 - entropy / ln(n))`) on `choice` and `score`; `legend`, `level_fit` (per-level `p(yes)`) and `fit_mass` (their sum) on `score`. Probabilities are rounded to 4 places and the score `value` to 2. `usage.input_tokens` counts the prefix every prompt shares once. Upstream's packed mode (`independent=False`) and per-call `isolated` override are Python keyword arguments only and are not ported.
 
 ## Endpoints
 
@@ -146,6 +153,7 @@ The command prints the `POST /v1/decisions` response JSON, pretty-printed with n
 | `src/decision/answer.rs` | `Answer` constructors and the answer JSON. |
 | `src/decision/loader.rs` | `DecisionKind`, `detect_decision_kind`, `load_decision_model`. |
 | `src/decision/d1.rs`, `src/decision/d1_prompt.rs` | The LiquidAI d1 scorer (trunk/branch forward over the LFM2-VL stack) and its prompt, option codes and readout. |
+| `src/decision/decider2.rs`, `decider2_prompt.rs`, `decider2_rows.rs` | Decider-2b: loading, batched scoring over `Qwen35Model::forward_prefill_hidden`, question rendering and prompt ids, row planning and answers. |
 | `src/decision/cli.rs`, `src/decision/media.rs` | `mlxcel decide` input preparation, audio decoding, CLI media loading. |
 | `src/server/decision_model.rs` | `DecisionModelProvider` and `DecisionProviderError`. |
 | `src/server/decision_worker.rs` | `DecisionWorkerProvider` (bounded queue, timeout, panic boundary) and startup loading. |
@@ -162,6 +170,6 @@ A model port adds three things and touches nothing else; the worker, route, CLI 
    - `decision_types` lists the question kinds it answers (`noul` requests arrive as `QuestionKind::Bool`).
    - `decision_media` lists the media it reads. A request carrying any other medium is refused before `predict` runs, so a model that reads media through extra arguments still declares them here.
    - `predict` receives only questions that passed the shared validation, in request order, and must answer each one in that order. It checks its own limits (option counts, level counts, a rule such as d1-omni's images-or-audio exclusivity) and reports them as `DecisionError::InvalidInput`, which surfaces as 400.
-   - Build answers with `Answer::choice`, `Answer::score`, `Answer::bool` and `Answer::multi_label`, which fill `confidence`, `legend` and the bool `value` the same way for every model. Put model-specific metrics in the `metadata` map passed to them.
+   - Build answers with `Answer::choice`, `Answer::score`, `Answer::bool` and `Answer::multi_label`, which fill `confidence`, `legend` and the bool `value` the same way for every model. Put model-specific metrics in the `metadata` map passed to them. Decider-2b is the exception: its scorer builds `Answer` values directly, because upstream rounds the score value to 2 places, which `Answer::score` does not do.
 
-Tests for a port run the scorer through `decision::predict` with a real checkpoint, and the first family to land also validates `POST /v1/decisions` end to end.
+Tests for a port run the scorer through `decision::predict` with a real checkpoint against a fixture generated with mlx-vlm (`src/decision/decider2_parity_tests.rs` and `tests/fixtures/generate_decider2_fixture.py` are the template), and the port adds a row to the table under Decision models.

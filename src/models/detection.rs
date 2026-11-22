@@ -1254,6 +1254,13 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
             "GLiNER2.5 is a span extractor; use `mlxcel extract` (checkpoint {})",
             model_path.display()
         )),
+        // Decider-2b answers typed questions from label-token logits and never
+        // generates: `decision::loader` serves it through `mlxcel decide` and
+        // `--decision-model` (#2359).
+        "decider2" => Err(anyhow::anyhow!(
+            "decider2 is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model` (checkpoint {})",
+            model_path.display()
+        )),
         _ => Err(anyhow::anyhow!(
             "Unsupported model type: {}",
             model_type_raw

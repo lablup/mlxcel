@@ -28,6 +28,9 @@
 //! 3. a constructor arm in `construct`, returning its
 //!    [`DecisionModel`](super::DecisionModel) scorer.
 //!
+//! Families: LiquidAI d1 (`lfm2_vl` with a `D1Model` auto_map, #2367) and
+//! Decider-2b (`decider2`, #2359), plus the `#[cfg(test)]` stub.
+//!
 //! A checkpoint no arm recognizes fails with "<path> is not a decision
 //! checkpoint".
 
@@ -47,6 +50,8 @@ pub enum DecisionKind {
     /// LiquidAI d1 (`lfm2_vl` with an `auto_map.AutoModel` ending in
     /// `D1Model`), scored by `src/decision/d1.rs`.
     D1,
+    /// Decider-2b (`model_type: decider2`), `src/decision/decider2.rs`.
+    Decider2,
     /// The deterministic test model in `src/decision/stub.rs`.
     #[cfg(test)]
     Stub,
@@ -58,6 +63,7 @@ impl DecisionKind {
     pub fn as_str(self) -> &'static str {
         match self {
             DecisionKind::D1 => "d1",
+            DecisionKind::Decider2 => "decider2",
             #[cfg(test)]
             DecisionKind::Stub => "stub",
         }
@@ -91,6 +97,9 @@ pub fn detect_decision_kind(config: &Value) -> Result<DecisionKind> {
         .unwrap_or("");
     if super::d1::is_d1_config(config) {
         return Ok(DecisionKind::D1);
+    }
+    if model_type == super::decider2::DECIDER2_MODEL_TYPE {
+        return Ok(DecisionKind::Decider2);
     }
     #[cfg(test)]
     if model_type == super::stub::STUB_MODEL_TYPE {
@@ -140,6 +149,7 @@ pub fn load_decision_model(model_path: &Path) -> Result<LoadedDecisionModel> {
 fn construct(kind: DecisionKind, model_dir: &Path) -> Result<Box<dyn DecisionModel>> {
     match kind {
         DecisionKind::D1 => Ok(Box::new(super::d1::D1DecisionModel::load(model_dir)?)),
+        DecisionKind::Decider2 => Ok(Box::new(super::decider2::Decider2Model::load(model_dir)?)),
         #[cfg(test)]
         DecisionKind::Stub => Ok(Box::new(super::stub::StubDecisionModel::load(model_dir))),
     }
@@ -152,3 +162,7 @@ pub(crate) fn declarations(model: &dyn DecisionModel) -> (Vec<QuestionKind>, Vec
         model.decision_media().to_vec(),
     )
 }
+
+#[cfg(test)]
+#[path = "loader_tests.rs"]
+mod tests;
