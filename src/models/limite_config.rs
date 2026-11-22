@@ -221,6 +221,9 @@ impl ModelArgs {
         let n = self.num_hidden_layers;
         let h = self.num_attention_heads;
         let kv = self.num_key_value_heads;
+        if n == 0 {
+            return fail("num_hidden_layers is 0".into());
+        }
         if h == 0 || kv == 0 || !h.is_multiple_of(kv) {
             return fail(format!("{h} heads do not group over {kv} KV heads"));
         }
@@ -238,6 +241,14 @@ impl ModelArgs {
             return fail(format!(
                 "value embeddings of {} x {} do not fit head_dim {}",
                 self.ve_stored_heads, self.ve_dim, self.head_dim
+            ));
+        }
+        // The reference broadcasts the value embedding over the KV heads only
+        // when it has one head or at least as many heads as KV.
+        let ve_heads = self.ve_stored_heads;
+        if !self.ve_layers.is_empty() && ve_heads < kv && ve_heads != 1 {
+            return fail(format!(
+                "ve_stored_heads {ve_heads} does not broadcast over {kv} KV heads"
             ));
         }
         for (name, layers) in [

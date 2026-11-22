@@ -44,6 +44,8 @@ use std::path::Path;
 #[path = "limite_config.rs"]
 mod config;
 pub use config::ModelArgs;
+#[path = "limite_shapes.rs"]
+mod shapes;
 
 /// The MUDD weights of one mixing layer.
 struct MuddLayer {
@@ -124,6 +126,7 @@ impl LimiteModel {
         if embed_tokens.is_quantized() {
             return Err("Limite: quantized checkpoints are not supported".into());
         }
+        shapes::check_shapes(weights, args)?;
         let dt = mlxcel_core::array_dtype(embed_tokens.weight());
         let value_embeds = if args.ve_layers.is_empty() {
             None
@@ -267,8 +270,12 @@ impl LimiteModel {
             up_proj: dense(weights, &format!("{p}.mlp.up_proj"))?,
             down_proj: dense(weights, &format!("{p}.mlp.down_proj"))?,
         };
+        // Cast once here; the per-layer `scale_by` cast is then a no-op.
         let lambda = |n: &str| -> Result<UniquePtr<MlxArray>, String> {
-            Ok(mlxcel_core::copy(weight(weights, &format!("{p}.{n}"))?))
+            Ok(mlxcel_core::astype(
+                weight(weights, &format!("{p}.{n}"))?,
+                dt,
+            ))
         };
         Ok(LimiteLayer {
             attn,
@@ -386,7 +393,9 @@ impl LimiteModel {
                 SlidingPrefillKeys::Rotating,
             )
         });
-        let positions = positions_from_offset(caches[0].offset(), seq_len);
+        let rope = self
+            .rope
+            .tables(&positions_from_offset(caches[0].offset(), seq_len));
         let (x, ve) = self.embed(input_ids);
         let h = self.decode_stack(x, |i, layer, attn_in| {
             let mask = if layer.attn.is_global {
@@ -394,14 +403,9 @@ impl LimiteModel {
             } else {
                 mask_sliding.as_deref()
             };
-            layer.attn.forward(
-                attn_in,
-                ve.as_deref(),
-                &positions,
-                &self.rope,
-                &mut caches[i],
-                mask,
-            )
+            layer
+                .attn
+                .forward(attn_in, ve.as_deref(), &rope, &mut caches[i], mask)
         });
         self.head(h, row)
     }
@@ -413,17 +417,13 @@ impl LimiteModel {
         caches: &mut [Vec<Cache>],
     ) -> UniquePtr<MlxArray> {
         let offsets: Vec<i32> = caches.iter().map(|row| row[0].offset()).collect();
-        let positions = positions_from_offsets(&offsets);
+        let rope = self.rope.tables(&positions_from_offsets(&offsets));
         let (x, ve) = self.embed(input_ids);
         let h = self.decode_stack(x, |i, layer, attn_in| {
             let mut rows: Vec<&mut Cache> = caches.iter_mut().map(|row| &mut row[i]).collect();
-            layer.attn.forward_batched_decode(
-                attn_in,
-                ve.as_deref(),
-                &positions,
-                &self.rope,
-                &mut rows,
-            )
+            layer
+                .attn
+                .forward_batched_decode(attn_in, ve.as_deref(), &rope, &mut rows)
         });
         self.head(h, None)
     }

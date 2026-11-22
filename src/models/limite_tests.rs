@@ -128,7 +128,7 @@ fn partial_interleaved_rope_rotates_only_the_declared_pairs() {
     for pos in [0.0f32, 1.0, 7.0, 300.0] {
         let input = mlxcel_core::from_slice_f32(&x, &[1, 1, heads as i32, head_dim as i32]);
         let positions = positions_from_offset(pos as i32, 1);
-        let got = values(&rope.apply(&input, &positions));
+        let got = values(&rope.tables(&positions).apply(&input));
         let want = reference_rope(&x, head_dim, pos, n_pairs, n_pairs);
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             assert!((g - w).abs() < 1e-4, "pos {pos} lane {i}: {g} vs {w}");
@@ -157,7 +157,7 @@ fn partial_interleaved_rope_rotates_only_the_declared_pairs() {
     let mut unit = vec![0.0f32; head_dim];
     unit[0] = 1.0;
     let input = mlxcel_core::from_slice_f32(&unit, &[1, 1, 1, head_dim as i32]);
-    let got = values(&rope.apply(&input, &positions_from_offset(1, 1)));
+    let got = values(&rope.tables(&positions_from_offset(1, 1)).apply(&input));
     assert!((got[0] - bf16(1.0f32.cos())).abs() < 1e-6);
     assert!((got[1] + bf16(1.0f32.sin())).abs() < 1e-6);
 }
@@ -365,9 +365,71 @@ fn config_refuses_conventions_it_does_not_implement() {
         serde_json::json!({"mudd_layers": [2], "mudd_tap_idx": {"2": [0, 3]}}),
         serde_json::json!({"mudd_layers": [2], "mudd_tap_idx": {"3": [0]}}),
         serde_json::json!({"mudd": false, "mudd_layers": [2], "mudd_tap_idx": {"2": [0, 2]}}),
+        serde_json::json!({"num_hidden_layers": 0}),
+        serde_json::json!({"num_key_value_heads": 4, "num_attention_heads": 4,
+            "ve_layers": [1], "ve_stored_heads": 3, "ve_dim": 8}),
+        serde_json::json!({"num_key_value_heads": 4, "num_attention_heads": 4,
+            "ve_layers": [1], "ve_stored_heads": 2, "ve_dim": 8}),
     ] {
         assert!(parse(patch.clone()).is_err(), "{patch} must be refused");
     }
+    // One stored head broadcasts over every KV head; more than KV is sliced.
+    for heads in [1, 2, 3] {
+        let patch = serde_json::json!({"num_key_value_heads": 2, "num_attention_heads": 4,
+            "ve_layers": [1], "ve_stored_heads": heads, "ve_dim": 8});
+        assert!(parse(patch.clone()).is_ok(), "{patch} must be accepted");
+    }
+}
+
+/// `from_weights` on the tiny fixture with one tensor replaced.
+fn load_with(name: &str, tensor: UniquePtr<MlxArray>) -> Result<LimiteModel, String> {
+    let args = tiny_config(3);
+    let mut w = tiny_weights(&args);
+    assert!(
+        w.insert(name.into(), tensor).is_some(),
+        "{name} is in the fixture"
+    );
+    LimiteModel::from_weights(&w, &args)
+}
+
+fn load_error(name: &str, tensor: UniquePtr<MlxArray>) -> String {
+    match load_with(name, tensor) {
+        Ok(_) => panic!("a bad {name} must be refused"),
+        Err(e) => e,
+    }
+}
+
+#[test]
+fn load_refuses_checkpoint_shapes_the_forward_cannot_run() {
+    // Fewer value-embedding rows than vocabulary: valid ids would gather
+    // past the table on the GPU.
+    let err = load_error("model.value_embeds.weight", patterned(&[8, 16], 1, 0.02));
+    assert!(
+        err.contains("model.value_embeds.weight") && err.contains("[16, 16]"),
+        "{err}"
+    );
+    let err = load_error(
+        "model.layers.2.self_attn.q_proj.weight",
+        patterned(&[8, 16], 1, 0.01),
+    );
+    assert!(err.contains("q_proj") && err.contains("[8, 16]"), "{err}");
+    for (name, shape) in [
+        ("model.embed_tokens.weight", vec![12, 16]),
+        ("model.layers.0.mlp.down_proj.weight", vec![16, 16]),
+        ("model.layers.1.self_attn.ve_gate", vec![2, 3]),
+        ("model.layers.0.self_attn.attn_gate", vec![1, 8]),
+        ("model.layers.0.self_attn.xsa_alpha", vec![3]),
+        ("model.layers.0.post_lambda_mlp", vec![2]),
+        ("model.mudd.dense1", vec![4, 8]),
+        ("model.mudd.dense2", vec![3, 3, 4]),
+        ("model.mudd.bias_mlp", vec![4, 2]),
+    ] {
+        let err = load_error(name, patterned(&shape, 2, 0.01));
+        assert!(err.starts_with("Limite: ") && err.contains(name), "{err}");
+    }
+    // A one-element `[1]` lambda is still a scalar.
+    let one = mlxcel_core::full_f32(&[1], 0.5, dtype::FLOAT32);
+    assert!(load_with("model.layers.0.post_lambda_mlp", one).is_ok());
 }
 
 #[test]

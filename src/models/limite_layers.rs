@@ -24,6 +24,10 @@ use mlxcel_core::layers::{KVCache, Linear, RotatingKVCache};
 use mlxcel_core::utils::slice_axis;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
+#[path = "limite_rope.rs"]
+mod rope;
+pub(crate) use rope::{PartialRope, RopeTables, positions_from_offset, positions_from_offsets};
+
 /// `torch.finfo(dtype).eps`, the epsilon `F.rms_norm(eps=None)` resolves to.
 pub(crate) fn finfo_eps(dtype_id: i32) -> f32 {
     match dtype_id {
@@ -70,79 +74,6 @@ pub(crate) fn gelu_erf(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// `x @ w.T` on a dense `[out, in]` weight.
 pub(crate) fn matmul_t(x: &MlxArray, w: &MlxArray) -> UniquePtr<MlxArray> {
     mlxcel_core::matmul(x, &mlxcel_core::transpose(w))
-}
-
-/// Partial interleaved RoPE: `n_pairs` of `head_dim / 2` pairs rotate, the
-/// rest pass through (zero frequency). Pairs are adjacent lanes and rotate
-/// `(a, b) -> (a cos + b sin, b cos - a sin)`; cos/sin are computed in f32
-/// and rounded to bf16, as the reference pins (`rope_cos_sin_dtype`).
-pub(crate) struct PartialRope {
-    /// `[head_dim]` f32: each pair's frequency twice, then zeros.
-    freqs: UniquePtr<MlxArray>,
-    /// `[head_dim]` +1 on even lanes, -1 on odd lanes, bf16.
-    lane_sign: UniquePtr<MlxArray>,
-    head_dim: i32,
-}
-
-impl PartialRope {
-    pub(crate) fn new(n_pairs: i32, head_dim: i32, base: f32) -> Self {
-        let base = scalar(1.0 / base, dtype::FLOAT32);
-        let exps = mlxcel_core::linspace(0.0, 1.0, n_pairs, dtype::FLOAT32);
-        let freq = mlxcel_core::repeat(&mlxcel_core::power(&base, &exps), 2, 0);
-        let pad = mlxcel_core::zeros(&[head_dim - 2 * n_pairs], dtype::FLOAT32);
-        let freqs = mlxcel_core::concatenate(&freq, &pad, 0);
-        let signs: Vec<f32> = (0..head_dim)
-            .map(|i| if i % 2 == 1 { -1.0 } else { 1.0 })
-            .collect();
-        let lane_sign = mlxcel_core::astype(
-            &mlxcel_core::from_slice_f32(&signs, &[head_dim]),
-            dtype::BFLOAT16,
-        );
-        Self {
-            freqs,
-            lane_sign,
-            head_dim,
-        }
-    }
-
-    /// Rotate `x` (`[B, L, H, head_dim]`) at `positions` (`[P, L]` f32 with
-    /// `P` 1 or `B`).
-    pub(crate) fn apply(&self, x: &MlxArray, positions: &MlxArray) -> UniquePtr<MlxArray> {
-        let pos_shape = mlxcel_core::array_shape(positions);
-        let (p, l) = (pos_shape[0], pos_shape[1]);
-        let pos = mlxcel_core::reshape(positions, &[p, l, 1, 1]);
-        let freqs = mlxcel_core::reshape(&self.freqs, &[1, 1, 1, self.head_dim]);
-        let theta = mlxcel_core::multiply(&pos, &freqs);
-        let cos = mlxcel_core::astype(&mlxcel_core::cos(&theta), dtype::BFLOAT16);
-        let sin = mlxcel_core::astype(&mlxcel_core::sin(&theta), dtype::BFLOAT16);
-        let sin = mlxcel_core::multiply(&sin, &self.lane_sign);
-
-        let dt = mlxcel_core::array_dtype(x);
-        let shape = mlxcel_core::array_shape(x);
-        let mut pairs = shape.clone();
-        pairs.pop();
-        pairs.extend([self.head_dim / 2, 2]);
-        let x2 = mlxcel_core::reshape(x, &pairs);
-        let last = pairs.len() as i32 - 1;
-        let a = slice_axis(&x2, last, 0, 1);
-        let b = slice_axis(&x2, last, 1, 2);
-        let flipped = mlxcel_core::reshape(&mlxcel_core::concatenate(&b, &a, last), &shape);
-        let lhs = mlxcel_core::multiply(&mlxcel_core::astype(&cos, dt), x);
-        let rhs = mlxcel_core::multiply(&mlxcel_core::astype(&sin, dt), &flipped);
-        mlxcel_core::add(&lhs, &rhs)
-    }
-}
-
-/// `[1, len]` f32 positions starting at `offset`.
-pub(crate) fn positions_from_offset(offset: i32, len: i32) -> UniquePtr<MlxArray> {
-    let pos = mlxcel_core::arange_f32(offset as f32, (offset + len) as f32, 1.0);
-    mlxcel_core::reshape(&pos, &[1, len])
-}
-
-/// `[B, 1]` f32 positions, one per decode row.
-pub(crate) fn positions_from_offsets(offsets: &[i32]) -> UniquePtr<MlxArray> {
-    let pos: Vec<f32> = offsets.iter().map(|&o| o as f32).collect();
-    mlxcel_core::from_slice_f32(&pos, &[offsets.len() as i32, 1])
 }
 
 /// One MUDD way (attention input or residual) of one mixing layer.
@@ -291,8 +222,7 @@ impl LimiteAttention {
         &self,
         attn_in: &MlxArray,
         ve_rows: Option<&MlxArray>,
-        positions: &MlxArray,
-        rope: &PartialRope,
+        rope: &RopeTables,
     ) -> Projected {
         let shape = mlxcel_core::array_shape(attn_in);
         let (b, l) = (shape[0], shape[1]);
@@ -311,8 +241,8 @@ impl LimiteAttention {
         let mut q = rms_norm(&q);
         let mut k = rms_norm(&k);
         if self.uses_rope {
-            q = rope.apply(&q, positions);
-            k = rope.apply(&k, positions);
+            q = rope.apply(&q);
+            k = rope.apply(&k);
         }
 
         let v_hat = self.xsa.as_ref().map(|xsa| {
@@ -403,13 +333,12 @@ impl LimiteAttention {
         &self,
         attn_in: &MlxArray,
         ve_rows: Option<&MlxArray>,
-        positions: &MlxArray,
-        rope: &PartialRope,
+        rope: &RopeTables,
         cache: &mut Cache,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let l = mlxcel_core::array_shape(attn_in)[1];
-        let p = self.project(attn_in, ve_rows, positions, rope);
+        let p = self.project(attn_in, ve_rows, rope);
         let (k, v) = cache.update_and_fetch(p.k, p.v);
         // A mask-less multi-token forward is a single-row prefill that left
         // causality to MLX's causal mode or native window route (#3072).
@@ -438,11 +367,10 @@ impl LimiteAttention {
         &self,
         attn_in: &MlxArray,
         ve_rows: Option<&MlxArray>,
-        positions: &MlxArray,
-        rope: &PartialRope,
+        rope: &RopeTables,
         caches: &mut [&mut Cache],
     ) -> UniquePtr<MlxArray> {
-        let p = self.project(attn_in, ve_rows, positions, rope);
+        let p = self.project(attn_in, ve_rows, rope);
         let y = attend_batched_rows(&p.q, &p.k, &p.v, caches, self.scale, None);
         self.finish(y, attn_in, p.v_hat)
     }
@@ -463,7 +391,8 @@ impl LimiteMlp {
     }
 }
 
-/// The four learned residual lambdas of a decoder layer, 0-dim f32.
+/// The four learned residual lambdas of a decoder layer, one element each,
+/// cast to the activation dtype once at load.
 pub(crate) struct Lambdas {
     pub resid_attn: UniquePtr<MlxArray>,
     pub post_attn: UniquePtr<MlxArray>,
