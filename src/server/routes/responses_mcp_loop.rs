@@ -33,7 +33,8 @@
 //! logged.
 //!
 //! Three bounds stop a response: `--mcp-max-tool-rounds` (and the request's
-//! `max_tool_calls`) end it as `incomplete`, `--mcp-tool-timeout` and
+//! `max_tool_calls`, or, when the request sets none, the fixed per-turn cap
+//! [`DEFAULT_MAX_CALLS_PER_TURN`]) end it as `incomplete`, `--mcp-tool-timeout` and
 //! `--mcp-max-output-bytes` fail or truncate a single call. `usage.mcp`
 //! reports the counts and the bounds in force.
 
@@ -42,6 +43,7 @@ use std::sync::atomic::Ordering;
 
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::mcp::approvals::PendingApproval;
+use crate::server::mcp::config::DEFAULT_MAX_CALLS_PER_TURN;
 use crate::server::model_provider::QueueFullError;
 use crate::server::responses_translator::{
     OutboundContext, TranslatedRequest, build_response_object, short_uuid,
@@ -392,6 +394,7 @@ impl ToolLoop<'_> {
             let mut hands_back = false;
             let mut turn_calls = Vec::with_capacity(calls.len());
             let mut results = Vec::new();
+            let mut turn_mcp_calls = 0usize;
             for call in calls {
                 let Some(tool) = run.setup.plan.tools.get(&call.name) else {
                     // A client-declared function tool: the caller runs it.
@@ -408,6 +411,11 @@ impl ToolLoop<'_> {
                     .request
                     .max_tool_calls
                     .is_some_and(|max| self.usage.tool_calls >= max);
+                // Without a request `max_tool_calls`, one model turn may not
+                // fan out into an unbounded number of calls.
+                turn_mcp_calls += 1;
+                let turn_spent = run.request.max_tool_calls.is_none()
+                    && turn_mcp_calls > DEFAULT_MAX_CALLS_PER_TURN;
                 let refusal = if rounds_spent {
                     bound = Some(INCOMPLETE_MAX_TOOL_ROUNDS);
                     Some(Refusal {
@@ -421,6 +429,15 @@ impl ToolLoop<'_> {
                     bound.get_or_insert(INCOMPLETE_MAX_TOOL_CALLS);
                     Some(Refusal {
                         error: "not run: the response reached its max_tool_calls limit".to_string(),
+                        status: McpCallStatus::Incomplete,
+                    })
+                } else if turn_spent {
+                    bound.get_or_insert(INCOMPLETE_MAX_TOOL_CALLS);
+                    Some(Refusal {
+                        error: format!(
+                            "not run: one model turn asked for more than {DEFAULT_MAX_CALLS_PER_TURN} \
+                             MCP calls and the request sets no max_tool_calls"
+                        ),
                         status: McpCallStatus::Incomplete,
                     })
                 } else if tool.requires_approval && can_collect_approval {

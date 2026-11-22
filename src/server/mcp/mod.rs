@@ -42,6 +42,6 @@ pub(crate) mod test_support;
 pub use client::{McpClientError, McpToolInfo, McpToolOutput};
 pub use config::{
     ListenerScope, McpLimits, McpServerSpec, McpStartupConfig, parse_mcp_servers,
-    resolve_mcp_startup, validate_mcp_exposure,
+    resolve_mcp_startup, validate_mcp_exposure, validate_mcp_single_node,
 };
 pub use runtime::McpRuntime;

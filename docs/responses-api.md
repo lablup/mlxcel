@@ -617,7 +617,7 @@ The document is parsed strictly at startup, before the model loads. Only stdio s
 
 Each server is started once the model has loaded, and its tools are listed. A server that fails to start or to list its tools does not stop the others or the process: it is logged at `warn`, a request that names it gets an `mcp_list_tools` item with an `error` and no tools from it, and that request starts it again. A child that exited, timed out, or sent an oversized or malformed message is killed and replaced by the next call that needs it. Calls to one server run one at a time; a call that waits longer than `--mcp-tool-timeout` for the server to finish other calls fails without being sent. At most `--max-queue-depth` tool-loop responses run at once (each holds a worker thread while it waits on tools); one more gets a 503.
 
-The loop needs a single loaded chat model. Router mode (`--models-dir`, `--models-preset`, or `--webui` without a model) and `--image-model` without `-m` refuse `--mcp-tools` at startup.
+The loop needs a single loaded chat model on a single node. Router mode (`--models-dir`, `--models-preset`, or `--webui` without a model), `--image-model` without `-m`, and every distributed launch (`--tp-size` above 1, `--pp-layers`, `--pp-auto`, `--pp-peer`, `--distributed-config`, `--node-role` including `router`, `--peers`, `--prefill-peers`, `--decode-peers`, `--serving-bind`) refuse `--mcp-tools` at startup with a one-line message naming the conflicting flag, because those server paths do not carry the MCP runtime.
 
 ### Request
 
@@ -664,6 +664,7 @@ Streaming sends the same items. Each `mcp_call` is `response.output_item.added`,
 |-----------|--------|
 | The model asks for MCP tools after `--mcp-max-tool-rounds` rounds | The calls are not run (`mcp_call` items with `status: "incomplete"` and an `error`); the response ends `status: "incomplete"`, `incomplete_details.reason: "max_tool_rounds"`. |
 | More MCP calls than the request's `max_tool_calls` (approved calls run on resume included) | Same, with reason `max_tool_calls`. |
+| One model turn asks for more than 16 MCP calls and the request sets no `max_tool_calls` | The first 16 run; the rest are not run (`mcp_call` items with `status: "incomplete"` and an `error`) and the response ends `incomplete` with reason `max_tool_calls`. The 16-call per-turn cap is fixed and applies only when the request has no `max_tool_calls`. |
 | A model turn hits `max_output_tokens` | The turn's calls are not run; `incomplete`, reason `max_output_tokens`. |
 | A tool call exceeds `--mcp-tool-timeout` | The child is killed; that `mcp_call` has `error` "MCP server did not answer within N ms". |
 | The server is still busy with other calls after `--mcp-tool-timeout` | The call is not sent; that `mcp_call` has `error` "MCP server stayed busy with other calls for N ms". |

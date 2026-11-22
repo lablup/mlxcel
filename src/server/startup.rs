@@ -3417,6 +3417,10 @@ fn validate_mcp_startup(
     if startup.mcp.is_none() {
         return Ok(());
     }
+    // The tensor-parallel, pipeline-stage, and router paths do not carry the
+    // MCP runtime: refuse instead of accepting the flag and ignoring it.
+    super::mcp::validate_mcp_single_node(ServerDistributedFlags::from(startup).first_requested())
+        .map_err(|message| anyhow::anyhow!(message))?;
     let resolution = crate::server::transport::resolve_listen_target(&startup.host, startup.port)?;
     let scope = match &resolution.target {
         crate::server::transport::ListenTarget::Unix(_) => super::mcp::ListenerScope::LocalOnly,

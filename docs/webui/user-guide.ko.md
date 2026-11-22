@@ -151,7 +151,7 @@ WebUI는 원격 측정 데이터를 보내지 않고 제3자 서버에 접속하
 | `--models-dir`가 없거나 읽을 수 없음 | `--models-dir /srv/missing: cannot open models directory: No such file or directory (os error 2)` | 존재하는 디렉터리를 `--models-dir`에 지정합니다. |
 | 명시한 저장소 경로가 없거나 읽을 수 없음 | `--model-store-root /srv/missing: explicit WebUI/router cache root must be a readable directory: No such file or directory (os error 2)` | 디렉터리를 만들거나 경로를 고칩니다. `MLXCEL_MODELS_DIR`도 같은 검사를 받습니다. |
 | WebUI 없이 빌드된 바이너리 | `` --webui requires a binary built with the Cargo `webui` feature; rebuild mlxcel with bundled WebUI support `` | 공식 빌드나 `--no-default-features` 없이 만든 빌드를 사용합니다. |
-| llama-server UI 플래그 사용 | `--ui-config is not supported: it configures llama-server's web UI; mlxcel's bundled WebUI does not consume upstream UI JSON.` | 플래그를 지웁니다. `--path`, `--tools`, `--tools-runtime`, `--ui-mcp-proxy`, `--agent`도 같은 방식으로 거부됩니다. `--mcp-servers-config`와 `--mcp-servers-json`은 `--mcp-tools`를 함께 주지 않으면 거부됩니다. `--mcp-tools`는 `/v1/responses`의 서버 측 MCP 도구 루프를 켜며([responses-api.md](../responses-api.md#mcp-tools-server-side-tool-loop) 참고), 단일 모델 서버에서만 동작하므로 모델 없이 `--webui`로 시작하는 라우터 모드와는 함께 쓸 수 없습니다. |
+| llama-server UI 플래그 사용 | `--ui-config is not supported: it configures llama-server's web UI; mlxcel's bundled WebUI does not consume upstream UI JSON.` | 플래그를 지웁니다. `--path`, `--tools`, `--tools-runtime`, `--ui-mcp-proxy`, `--agent`도 같은 방식으로 거부됩니다. `--mcp-servers-config`와 `--mcp-servers-json`은 `--mcp-tools`를 함께 주지 않으면 거부됩니다. `--mcp-tools`는 `/v1/responses`의 서버 측 MCP 도구 루프를 켜며([responses-api.md](../responses-api.md#mcp-tools-server-side-tool-loop) 참고), 단일 모델, 단일 노드 서버에서만 동작하므로 모델 없이 `--webui`로 시작하는 라우터 모드나 분산 실행(`--tp-size`, `--pp-*`, `--node-role`)과는 함께 쓸 수 없습니다. |
 
 브라우저에서는 다음과 같이 보입니다.
 

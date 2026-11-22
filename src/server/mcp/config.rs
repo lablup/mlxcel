@@ -34,17 +34,33 @@ pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 8;
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
 /// Default cap on the text one tool call may return, in bytes.
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+/// Cap on the MCP calls one model turn may make when the request sets no
+/// `max_tool_calls`. Calls past it are not run and the response ends
+/// `incomplete` with reason `max_tool_calls`.
+pub const DEFAULT_MAX_CALLS_PER_TURN: usize = 16;
 /// Upper bound on configured servers: each one is a child process.
 pub const MAX_SERVERS: usize = 32;
 
 /// One stdio MCP server: the argv to spawn and the environment it receives
 /// on top of the minimal inherited set (see [`super::client`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct McpServerSpec {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+}
+
+/// `env` may hold credentials, so `Debug` prints its keys only.
+impl std::fmt::Debug for McpServerSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerSpec")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// Bounds applied to every response that runs MCP tools.
@@ -299,6 +315,22 @@ pub fn validate_mcp_exposure(
          Configure --api-key or --api-key-file, bind to 127.0.0.1, ::1, or localhost, or use \
          a Unix domain socket"
     ))
+}
+
+/// Refuse the tool loop on a distributed launch (tensor-parallel, pipeline
+/// stage, or a disaggregated role including the router).
+///
+/// Those server paths do not carry the MCP runtime, so accepting the flag
+/// would ignore it silently. `distributed_flag` is the first distributed flag
+/// the launch sets, as `ServerDistributedFlags::first_requested` names it.
+pub fn validate_mcp_single_node(distributed_flag: Option<&str>) -> Result<(), String> {
+    match distributed_flag {
+        None => Ok(()),
+        Some(flag) => Err(format!(
+            "--mcp-tools is served by a single-node server only and cannot be combined with \
+             {flag}: remove --mcp-tools and the MCP server configuration, or drop {flag}"
+        )),
+    }
 }
 
 #[cfg(test)]

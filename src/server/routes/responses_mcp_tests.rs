@@ -475,6 +475,30 @@ async fn max_tool_calls_caps_the_calls_that_run() {
 }
 
 #[tokio::test]
+async fn one_turn_is_capped_when_the_request_sets_no_max_tool_calls() {
+    let h = harness().await;
+    let cap = crate::server::mcp::config::DEFAULT_MAX_CALLS_PER_TURN;
+    let calls: Vec<String> = (0..=cap)
+        .map(|_| tool_call("lookup", json!({"key": "alpha"})))
+        .collect();
+    let chunks: Vec<&str> = calls.iter().map(String::as_str).collect();
+    h.turn(&chunks);
+    let (_, response) = h.create(body(json!([mcp_tool(json!({}))]))).await;
+    assert_eq!(response["status"], "incomplete");
+    assert_eq!(response["incomplete_details"]["reason"], "max_tool_calls");
+    assert_eq!(response["usage"]["mcp"]["tool_calls"], cap);
+    // Output: the tool listing, `cap` calls that ran, and the refused one.
+    assert_eq!(response["output"][cap]["output"], "17");
+    assert_eq!(response["output"][cap + 1]["status"], "incomplete");
+    assert!(
+        response["output"][cap + 1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("more than 16")
+    );
+}
+
+#[tokio::test]
 async fn a_truncated_model_turn_ends_the_loop_without_running_its_calls() {
     let h = harness().await;
     h.handle

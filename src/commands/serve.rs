@@ -71,7 +71,7 @@ pub(crate) fn run_serve(args: crate::ServeArgs) -> anyhow::Result<()> {
 async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // Native Windows is single-node only (#58): refuse distributed flags
     // before the model reference is resolved (and possibly downloaded).
-    mlxcel::server::ServerDistributedFlags {
+    let distributed_flags = mlxcel::server::ServerDistributedFlags {
         pp_auto: args.pp_auto.is_some(),
         pp_peer: args.pp_peer,
         distributed_config: args.distributed_config.is_some(),
@@ -82,8 +82,8 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         serving_bind: args.serving_bind.is_some(),
         pp_layers: args.pp_layers.is_some(),
         tp_size: args.tp_size,
-    }
-    .ensure_supported()?;
+    };
+    distributed_flags.ensure_supported()?;
     env_fallback_settings_endpoint(
         &mut args.settings,
         long_cli_flag_was_set("settings"),
@@ -251,6 +251,10 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // the model reference resolves, so a bad document fails in milliseconds.
     let mcp = mlxcel::server::mcp::resolve_mcp_startup(&args.ui_compat)
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    if mcp.is_some() {
+        mlxcel::server::mcp::validate_mcp_single_node(distributed_flags.first_requested())
+            .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    }
     let image_token_bounds = args
         .multimodal_compat
         .image_token_bounds()

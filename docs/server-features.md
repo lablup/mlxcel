@@ -459,7 +459,7 @@ MCP servers are the one exception, and only as an explicit opt-in:
 `--mcp-tools` with `--mcp-servers-config` or `--mcp-servers-json` runs a
 server-side MCP tool loop for the built-in `mcp` tool of `/v1/responses`. It is
 off by default, refused on a non-loopback listener without API keys, and
-unavailable in router mode; without `--mcp-tools` the two server-set flags still
+unavailable in router mode and on distributed launches (tensor-parallel, pipeline-stage, `--node-role`); without `--mcp-tools` the two server-set flags still
 fail startup. See
 [`responses-api.md`](responses-api.md#mcp-tools-server-side-tool-loop).
 

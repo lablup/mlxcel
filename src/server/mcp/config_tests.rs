@@ -182,3 +182,34 @@ fn message_cap_scales_with_the_output_cap() {
     };
     assert_eq!(limits.max_message_bytes(), 4000 + 64 * 1024);
 }
+
+#[test]
+fn debug_output_hides_env_values() {
+    let spec = McpServerSpec {
+        name: "files".to_string(),
+        command: "srv".to_string(),
+        args: vec!["--root".to_string()],
+        env: BTreeMap::from([("API_TOKEN".to_string(), "s3cret-value".to_string())]),
+    };
+    let text = format!("{spec:?}");
+    assert!(text.contains("API_TOKEN"), "keys stay visible: {text}");
+    assert!(!text.contains("s3cret-value"), "value leaked: {text}");
+    let config = resolve_mcp_startup(&args(
+        true,
+        None,
+        Some(r#"{"mcpServers": {"a": {"command": "x", "env": {"K": "hunter2"}}}}"#),
+    ))
+    .unwrap()
+    .unwrap();
+    assert!(!format!("{config:?}").contains("hunter2"));
+}
+
+#[test]
+fn distributed_launches_are_refused() {
+    assert_eq!(validate_mcp_single_node(None), Ok(()));
+    for flag in ["--tp-size", "--pp-peer", "--node-role"] {
+        let message = validate_mcp_single_node(Some(flag)).unwrap_err();
+        assert!(message.contains(flag) && message.contains("--mcp-tools"));
+        assert!(!message.contains('\n'));
+    }
+}
