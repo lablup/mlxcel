@@ -4535,6 +4535,18 @@ async fn serve_with_side_model_workers(
     if let Some(provider) = &rerank_model {
         side_workers.push(SideWorkerExit::new("rerank", Arc::clone(provider)));
     }
+    // A multi-vector embedder also serves `/v1/rerank` by MaxSim when no
+    // reranker was configured (#1426). The provider shares the embedding
+    // worker, so it is not pushed as a second side worker.
+    let reranker_configured = config.reranker_model_path.is_some()
+        || resolve_rerank_source(&startup.model_path, None)
+            .is_ok_and(|source| source != RerankSource::None);
+    let rerank_model = crate::server::rerank_maxsim::resolve_late_interaction_reranker(
+        rerank_model,
+        reranker_configured,
+        embedding_model.as_ref(),
+        config.embd_normalize,
+    );
     // `--decision-model` (#2343) is always an explicit side model, so a load
     // failure is fatal like `--image-model`. Its id is the directory name.
     let decision_model = crate::server::decision_worker::resolve_decision_provider(
@@ -4734,9 +4746,9 @@ pub(crate) fn check_serving_mode(
         ),
         EmbeddingServingMode::RerankOnly => anyhow::bail!(
             "--reranking restricts this server to rerank requests, but no reranker was loaded: \
-             pass a sequence-classifier checkpoint to -m, or name a reranker with \
-             --reranker-model <path>. The Qwen3 and Qwen3-VL generative rerankers are only \
-             reachable through --reranker-model."
+             pass a sequence-classifier checkpoint or a multi-vector (late-interaction) \
+             embedder to -m, or name a reranker with --reranker-model <path>. The Qwen3 and Qwen3-VL \
+             generative rerankers are only reachable through --reranker-model."
         ),
         EmbeddingServingMode::ImageOnly => anyhow::bail!(
             "--image-model without -m restricts this server to image generation, but no image \

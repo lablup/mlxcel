@@ -140,7 +140,14 @@ impl RerankInput {
 pub struct RerankResult {
     /// Position of this document in the request's `documents` list.
     pub index: usize,
-    /// Relevance in `[0, 1]`; higher is more relevant.
+    /// Relevance score; higher is more relevant.
+    ///
+    /// A probability in `[0, 1]` for the cross-encoder and generative
+    /// rerankers. For the late-interaction kind (a multi-vector embedder such
+    /// as ColIdefics3, ColQwen2.5 or LFM2.5-ColBERT, #1426) it is the raw
+    /// MaxSim sum `sum_i max_j dot(q_i, d_j)` over the query's token rows,
+    /// not normalized: its scale grows with the query's token count, so it
+    /// ranks documents for one query and is not comparable across queries.
     pub relevance_score: f32,
     /// The request item, echoed only when `return_documents` was set.
     #[serde(skip_serializing_if = "Option::is_none")]
