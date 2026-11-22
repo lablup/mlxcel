@@ -48,18 +48,33 @@ fn gemma4_12b_config() -> Value {
     })
 }
 
+/// Bytes one ring row costs on the fixture: 40 sliding layers x 8 heads x
+/// 256 x (K and V) x 2 bytes.
+const ROW: usize = 40 * 8 * 256 * 2 * 2;
+
 #[test]
-fn a_gemma4_ring_checkpoint_is_every_sliding_ring_at_its_window() {
-    let rec = recommend_ring_checkpoint_capacity_from_config(
+fn a_gemma4_ring_checkpoint_is_every_sliding_ring_after_its_last_piece() {
+    // A decode-shaped ring is the window: 320 MiB, the figure in #3255.
+    let decode = recommend_ring_checkpoint_capacity_from_config(
         &gemma4_12b_config(),
         KVCacheMode::Fp16,
+        1,
         None,
     )
     .expect("Gemma 4 stores ring checkpoints");
-    // 40 layers x 1024 tokens x 8 heads x 256 x (K and V) x 2 bytes = 320 MiB,
-    // the figure in #3255.
-    assert_eq!(rec.entry_bytes, 40 * 1024 * 8 * 256 * 2 * 2);
-    assert_eq!(rec.entry_bytes, 320 << 20);
+    assert_eq!(decode.entry_bytes, 1024 * ROW);
+    assert_eq!(decode.entry_bytes, 320 << 20);
+    // At a history boundary the ring still holds the whole last prefill
+    // piece after the newest `window - 1` rows: 3071 rows at a 2048 chunk,
+    // 960 MiB minus a row, which is what the server stores.
+    let rec = recommend_ring_checkpoint_capacity_from_config(
+        &gemma4_12b_config(),
+        KVCacheMode::Fp16,
+        2048,
+        None,
+    )
+    .unwrap();
+    assert_eq!(rec.entry_bytes, (1024 - 1 + 2048) * ROW);
     assert_eq!(
         rec.capacity_bytes,
         rec.entry_bytes * MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES as usize
@@ -67,6 +82,7 @@ fn a_gemma4_ring_checkpoint_is_every_sliding_ring_at_its_window() {
     let tight = recommend_ring_checkpoint_capacity_from_config(
         &gemma4_12b_config(),
         KVCacheMode::Fp16,
+        2048,
         Some(8 << 30),
     )
     .unwrap();
@@ -76,7 +92,7 @@ fn a_gemma4_ring_checkpoint_is_every_sliding_ring_at_its_window() {
     let mut unified = gemma4_12b_config();
     unified["model_type"] = json!("gemma4_unified");
     unified["text_config"]["model_type"] = json!("gemma4_unified_text");
-    let rec = recommend_ring_checkpoint_capacity_from_config(&unified, KVCacheMode::Fp16, None)
+    let rec = recommend_ring_checkpoint_capacity_from_config(&unified, KVCacheMode::Fp16, 1, None)
         .expect("the Unified checkpoint stores ring checkpoints too");
     assert_eq!(rec.entry_bytes, 320 << 20);
 }
@@ -87,6 +103,7 @@ fn ring_checkpoints_are_sized_only_for_their_families_and_fp16() {
         recommend_ring_checkpoint_capacity_from_config(
             &gemma4_12b_config(),
             KVCacheMode::Int8,
+            2048,
             None
         )
         .is_none(),
@@ -101,7 +118,8 @@ fn ring_checkpoints_are_sized_only_for_their_families_and_fp16() {
         "sliding_window": 512
     });
     assert!(
-        recommend_ring_checkpoint_capacity_from_config(&llama, KVCacheMode::Fp16, None).is_none()
+        recommend_ring_checkpoint_capacity_from_config(&llama, KVCacheMode::Fp16, 2048, None)
+            .is_none()
     );
     // The hybrid families' recommendation does not change: it still ignores
     // the attention-only Gemma 4.

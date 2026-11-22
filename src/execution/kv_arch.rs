@@ -839,13 +839,18 @@ pub fn estimate_kv_arch_unwindowed_from_config(
     )
 }
 
-/// Bytes of every sliding-window layer's ring at its window width: what a
-/// ring-only prompt-cache state checkpoint of a Gemma-style model holds
-/// (issue #3255). `None` when the config has no windowed layer.
+/// Bytes of every sliding-window layer's ring right after a prefill piece of
+/// `piece_tokens` tokens: what a ring-only prompt-cache state checkpoint of a
+/// Gemma-style model holds (issue #3255). A multi-token append keeps the
+/// newest `window - 1` prior rows and the whole piece, so a ring captured at
+/// a prefill boundary holds `window - 1 + piece_tokens` rows, not `window`;
+/// `piece_tokens = 1` gives the decode-shaped ring. `None` when the config
+/// has no windowed layer.
 #[must_use]
 pub fn sliding_window_ring_bytes_from_config(
     config: &Value,
     kv_mode: impl Into<KvSizing>,
+    piece_tokens: u64,
 ) -> Option<u64> {
     let sizing = kv_mode.into();
     let text = crate::execution::config_fields::kv_decoder_config(config);
@@ -863,8 +868,9 @@ pub fn sliding_window_ring_bytes_from_config(
         .iter()
         .filter_map(|g| {
             g.window.map(|window| {
+                let rows = window.saturating_sub(1).saturating_add(piece_tokens.max(1));
                 g.bytes_per_token(int8)
-                    .saturating_mul(window)
+                    .saturating_mul(rows)
                     .saturating_mul(g.layers)
             })
         })

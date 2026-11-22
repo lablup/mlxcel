@@ -416,14 +416,28 @@ pub fn recommend_state_checkpoint_capacity(
     context_size: usize,
     kv_mode: impl Into<KvSizing>,
     ring_checkpoints: bool,
+    prefill_chunk_size: usize,
 ) -> Option<SnapshotCapacityRecommendation> {
     let kv_mode: KvSizing = kv_mode.into();
     let config = read_config(model_dir)?;
-    let available =
-        memory_left_after_model(model_dir, representative_tokens(context_size), kv_mode);
+    let representative = representative_tokens(context_size);
+    let available = memory_left_after_model(model_dir, representative, kv_mode);
+    // The piece that ends at a history boundary is at most one prefill
+    // chunk; unchunked prefill (`0`) forwards the whole prompt at once.
+    let piece_tokens = match prefill_chunk_size {
+        0 => representative,
+        chunk => chunk as u64,
+    };
     recommend_state_checkpoint_capacity_from_config(&config, available).or_else(|| {
         ring_checkpoints
-            .then(|| recommend_ring_checkpoint_capacity_from_config(&config, kv_mode, available))
+            .then(|| {
+                recommend_ring_checkpoint_capacity_from_config(
+                    &config,
+                    kv_mode,
+                    piece_tokens,
+                    available,
+                )
+            })
             .flatten()
     })
 }
@@ -465,7 +479,8 @@ pub fn model_stores_ring_checkpoints(model_dir: &Path) -> bool {
 }
 
 /// Model-aware budget for ring-only state checkpoints (issue #3255): one
-/// checkpoint is every sliding layer's ring at its window
+/// checkpoint is every sliding layer's ring as a prefill piece of
+/// `piece_tokens` leaves it, `window - 1 + piece_tokens` rows
 /// ([`sliding_window_ring_bytes_from_config`]), and the budget holds
 /// [`MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES`] of them under the same
 /// memory ceiling as the hybrid families' checkpoints.
@@ -476,14 +491,19 @@ pub fn model_stores_ring_checkpoints(model_dir: &Path) -> bool {
 pub fn recommend_ring_checkpoint_capacity_from_config(
     config: &Value,
     kv_mode: impl Into<KvSizing>,
+    piece_tokens: u64,
     available_memory_bytes: Option<u64>,
 ) -> Option<SnapshotCapacityRecommendation> {
     let kv_mode: KvSizing = kv_mode.into();
     if !ring_checkpoint_family(config) || kv_mode.mode != mlxcel_core::cache::KVCacheMode::Fp16 {
         return None;
     }
-    let entry_bytes = usize::try_from(sliding_window_ring_bytes_from_config(config, kv_mode)?)
-        .unwrap_or(usize::MAX);
+    let entry_bytes = usize::try_from(sliding_window_ring_bytes_from_config(
+        config,
+        kv_mode,
+        piece_tokens,
+    )?)
+    .unwrap_or(usize::MAX);
     Some(checkpoint_budget(
         config,
         entry_bytes,

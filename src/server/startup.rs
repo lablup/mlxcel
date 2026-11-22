@@ -3539,6 +3539,7 @@ pub(super) fn resolve_prompt_cache_store(
                     config.context_size,
                     kv_mode,
                     checkpoints.ring_checkpoints,
+                    config.prefill_chunk_size,
                 ) {
                     tracing::info!(
                         state_checkpoint_capacity_bytes = rec.capacity_bytes,
