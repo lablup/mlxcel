@@ -18,6 +18,7 @@ use std::path::Path;
 const EXPECTED_NATIVE: &[&str] = &[
     "AfmoeModel@src/models/afmoe.rs",
     "ApertusModel@src/models/apertus.rs",
+    "ArceeModel@src/models/arcee.rs",
     "BailingMoeLinearModel@src/models/bailing_moe_linear.rs",
     "BailingMoeModel@src/models/bailing_moe.rs",
     "BitNetModel@src/models/bitnet.rs",

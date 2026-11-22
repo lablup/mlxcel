@@ -191,6 +191,8 @@ pub enum LoadedModel {
     BailingMoe(models::BailingMoeModel),
     BailingMoeLinear(models::BailingMoeLinearModel),
     Afmoe(models::AfmoeModel),
+    /// Arcee AFM dense (`arcee`, issue #1719).
+    Arcee(models::ArceeModel),
     Klear(models::KlearModel),
     Apertus(models::ApertusModel),
     SeedOss(models::SeedOssModel),
@@ -381,6 +383,7 @@ macro_rules! delegate_language_model {
             LoadedModel::BailingMoe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::BailingMoeLinear(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Afmoe(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Arcee(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Klear(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Apertus(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::IQuestLoopCoder(inner) => LanguageModel::$method(inner, $($arg),*),

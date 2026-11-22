@@ -273,6 +273,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // neither of which the shard rules name. This arm only keeps the
         // dispatch table total.
         ModelType::Afmoe => "afmoe",
+        // Not "llama": the TP runtime builds a SwiGLU `llama3` decoder from
+        // `config.json` and would load this gate-free squared-ReLU MLP wrong.
+        // The refusal comes from `runtime_kind_for`, which has no arm for it.
+        ModelType::Arcee => "arcee",
         // Not shardable by the generic transformer plan: the experts live
         // under `mlp.experts` and the shared branch is blended rather than
         // added, neither of which the shard rules name. This arm only keeps
