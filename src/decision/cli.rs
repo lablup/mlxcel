@@ -50,7 +50,17 @@ impl DecideArgs {
     /// Whether any media argument was given.
     #[must_use]
     pub fn has_media(&self) -> bool {
-        !self.images.is_empty() || !self.videos.is_empty() || self.audio.is_some()
+        self.media_presence().any()
+    }
+
+    /// Which media fields the call carries, for the media gate (rule 3).
+    #[must_use]
+    pub fn media_presence(&self) -> super::MediaPresence {
+        super::MediaPresence {
+            images: !self.images.is_empty(),
+            videos: !self.videos.is_empty(),
+            audio: self.audio.is_some(),
+        }
     }
 }
 

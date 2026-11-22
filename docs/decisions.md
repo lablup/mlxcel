@@ -110,7 +110,7 @@ mlxcel decide -m <MODEL_OR_REPO_ID> [--state TEXT | --state-file PATH] \
   (--questions JSON | --questions-file PATH)
 ```
 
-The command prints the `POST /v1/decisions` response JSON, pretty-printed with non-ASCII text kept as is. `--state` and `--state-file` are mutually exclusive, as are `--questions` and `--questions-file`. The questions are parsed and checked against rule 4, and a call with neither a state nor media is refused, before the model is resolved or loaded. Local media paths are read directly; URLs and data URIs go through the server's fetchers and limits. `--models-dir` (or `MLXCEL_MODELS_DIR`) sets the store a repo id resolves into.
+The command prints the `POST /v1/decisions` response JSON, pretty-printed with non-ASCII text kept as is. `--state` and `--state-file` are mutually exclusive, as are `--questions` and `--questions-file`. The questions are parsed and checked against rule 4, and a call with neither a state nor media is refused, before the model is resolved or loaded. Once the model is loaded, the full validation runs before any medium is read, so media the model does not declare is refused without being read or fetched. Local media paths are read directly; URLs and data URIs go through the server's fetchers and limits. `--models-dir` (or `MLXCEL_MODELS_DIR`) sets the store a repo id resolves into.
 
 ## Implementation source map
 

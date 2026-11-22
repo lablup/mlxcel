@@ -22,7 +22,7 @@ use clap::{ArgGroup, Args};
 
 use mlxcel::decision::cli::{DecideArgs as DecideRequest, prepare_decide};
 use mlxcel::decision::media::load_cli_media;
-use mlxcel::decision::{load_decision_model, predict};
+use mlxcel::decision::{load_decision_model, predict, validate_questions};
 use mlxcel::downloader::resolve_model_source_with_override;
 use mlxcel::initialize_runtime_checked;
 
@@ -100,6 +100,16 @@ pub(crate) fn run_decide(args: DecideArgs) -> Result<()> {
     let _runtime = initialize_runtime_checked()?;
     let mut loaded = load_decision_model(&model_dir)
         .with_context(|| format!("failed to load decision model {}", model_dir.display()))?;
+    // Rules 1 to 8 run against the loaded model's declarations before any
+    // medium is read or fetched, so a refused medium costs nothing, as on the
+    // route. `predict` re-validates the same request below.
+    validate_questions(
+        loaded.model.decision_types(),
+        loaded.model.decision_media(),
+        prepared.state.as_ref(),
+        &prepared.questions,
+        request.media_presence(),
+    )?;
     let media = load_cli_media(&request.images, &request.videos, request.audio.as_deref())?;
 
     let result = predict(

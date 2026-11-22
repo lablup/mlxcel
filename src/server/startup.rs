@@ -4784,8 +4784,8 @@ pub(crate) fn resolve_embedding_source(
 
 /// Served id of an explicitly named side checkpoint: its directory name.
 ///
-/// Used by both `--embedding-model` and `--reranker-model`, which each get
-/// their own id next to the chat model's.
+/// Used by `--embedding-model`, `--reranker-model` and `--decision-model`,
+/// which each get their own id next to the chat model's.
 fn side_model_id_for_path(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
