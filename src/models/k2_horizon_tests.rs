@@ -181,6 +181,22 @@ fn unsupported_features_are_refused_by_name() {
 }
 
 #[test]
+fn omitted_screened_fields_take_the_hf_defaults() {
+    // HF's `K2HorizonConfig` defaults `query_key_norm` to true and
+    // `num_experts` to 128, so a config that omits either describes a QK-norm
+    // or MoE model and must not load as the dense decoder.
+    for (field, needle) in [
+        ("query_key_norm", "query_key_norm"),
+        ("num_experts", "num_experts (128)"),
+    ] {
+        let mut value = config_0_9b();
+        value.as_object_mut().unwrap().remove(field);
+        let err = refusal(&value);
+        assert!(err.contains(needle), "{field}: {err}");
+    }
+}
+
+#[test]
 fn null_screened_fields_are_accepted() {
     let mut value = config_0_9b();
     value["attention_gate_func"] = Value::Null;

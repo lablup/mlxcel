@@ -97,12 +97,15 @@ pub struct K2HorizonConfig {
     #[serde(default)]
     pub quantization_config: Option<serde_json::Value>,
 
-    // Fields screened by `validate`; none of them reaches the decoder.
+    // Fields screened by `validate`; none of them reaches the decoder. A key the
+    // config omits takes the `K2HorizonConfig` default from the HF
+    // `configuration_k2_horizon.py`, so an omitted `query_key_norm` (HF: true)
+    // or `num_experts` (HF: 128) is refused rather than read as dense.
     #[serde(default = "default_layernorm_num_groups")]
     pub layernorm_num_groups: usize,
-    #[serde(default)]
+    #[serde(default = "default_query_key_norm")]
     pub query_key_norm: bool,
-    #[serde(default)]
+    #[serde(default = "default_num_experts")]
     pub num_experts: usize,
     #[serde(default)]
     pub mova_num_experts: usize,
@@ -124,6 +127,14 @@ fn default_rms_norm_eps() -> f32 {
 }
 fn default_layernorm_num_groups() -> usize {
     1
+}
+/// HF `K2HorizonConfig.query_key_norm` default.
+fn default_query_key_norm() -> bool {
+    true
+}
+/// HF `K2HorizonConfig.num_experts` default.
+fn default_num_experts() -> usize {
+    128
 }
 /// The base mlx-vlm's `ModelConfig` defaults to, and the one the larger
 /// K2-Horizon variants declare under `rope_parameters`.
