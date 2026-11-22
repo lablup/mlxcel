@@ -516,6 +516,25 @@ impl LanguageModel for VisionLanguageModel {
             .restore_sequence_state_truncated(seq_id, snapshot, target_len)
     }
 
+    /// Turn-boundary state checkpoints are the text backbone's too (issues
+    /// #3047, #3255), for the same reason.
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.text_model.state_checkpoint_from_snapshot(snapshot)
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        self.text_model
+            .restore_sequence_state_from_checkpoint(seq_id, checkpoint, donor)
+    }
+
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         self.text_model.sequence_state_layout()
     }

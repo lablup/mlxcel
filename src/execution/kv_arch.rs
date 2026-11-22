@@ -839,6 +839,39 @@ pub fn estimate_kv_arch_unwindowed_from_config(
     )
 }
 
+/// Bytes of every sliding-window layer's ring at its window width: what a
+/// ring-only prompt-cache state checkpoint of a Gemma-style model holds
+/// (issue #3255). `None` when the config has no windowed layer.
+#[must_use]
+pub fn sliding_window_ring_bytes_from_config(
+    config: &Value,
+    kv_mode: impl Into<KvSizing>,
+) -> Option<u64> {
+    let sizing = kv_mode.into();
+    let text = crate::execution::config_fields::kv_decoder_config(config);
+    let model_type = crate::execution::config_fields::kv_decoder_model_type(config);
+    let model_type = model_type.as_deref().unwrap_or("");
+    let v2_latent_bits = mlxcel_core::mla::latent_cache_bits(sizing.mode).map(|bits| bits as u64);
+    let (groups, _) = classify(
+        &text,
+        model_type,
+        deepseek_v2_caches_latent(sizing.mode),
+        v2_latent_bits,
+    )?;
+    let int8 = sizing.mode == KVCacheMode::Int8;
+    let bytes = groups
+        .iter()
+        .filter_map(|g| {
+            g.window.map(|window| {
+                g.bytes_per_token(int8)
+                    .saturating_mul(window)
+                    .saturating_mul(g.layers)
+            })
+        })
+        .fold(0u64, u64::saturating_add);
+    (bytes > 0).then_some(bytes)
+}
+
 fn estimate_kv_arch_inner(
     config: &Value,
     ctx_len: u64,

@@ -83,6 +83,23 @@ pub struct PromptCacheConfig {
     /// `0` turns checkpoints off; startup sizes it per model, see
     /// [`state_checkpoint_capacity_override`].
     pub state_checkpoint_capacity_bytes: usize,
+    /// Most turn-boundary state checkpoints one conversation keeps
+    /// (`--ctx-checkpoints N`, issue #3255); `None` leaves only the byte
+    /// budget. A conversation is the chain of checkpoints whose tokens are
+    /// prefixes of each other in one session bucket; inserting past `N` drops
+    /// the shortest.
+    pub state_checkpoints_per_conversation: Option<usize>,
+    /// Minimum token spacing between two state checkpoints of one
+    /// conversation (`--checkpoint-min-step M`, issue #3255): a new one
+    /// closer than this to an earlier one replaces it. `0` sets no spacing.
+    pub state_checkpoint_min_spacing_tokens: usize,
+    /// Interval of the periodic prefill checkpoints (#2885 Part B), resolved
+    /// at startup from `--checkpoint-min-step` or
+    /// `MLXCEL_PROMPT_CACHE_CHECKPOINT_INTERVAL`; `None` turns them off.
+    pub checkpoint_interval_tokens: Option<usize>,
+    /// `--ctx-checkpoints` / `--checkpoint-min-step` as given, resolved
+    /// against the environment and the model at startup (issue #3255).
+    pub ctx_checkpoint_flags: super::ctx_checkpoints::CtxCheckpointFlags,
 }
 
 /// Operator kill switch for the history-boundary snapshot (issue #1143).
@@ -233,7 +250,11 @@ const CHECKPOINT_MIN_INTERVAL_TOKENS: usize = 256;
 /// Ignored when the history boundary is disabled ([`boundary_snapshot_disabled`]).
 /// Read once per process.
 ///
-/// Used by: `server::batch::scheduler::BatchScheduler::checkpoint_splits`
+/// `--checkpoint-min-step` overrides it (issue #3255); startup resolves the
+/// two into [`PromptCacheConfig::checkpoint_interval_tokens`], which the
+/// scheduler reads.
+///
+/// Used by: `server::startup::resolve_prompt_cache_store`
 pub fn checkpoint_interval_tokens() -> Option<usize> {
     #[cfg(test)]
     if let Some(value) = CHECKPOINT_TEST_OVERRIDE.with(std::cell::Cell::get) {
@@ -271,6 +292,14 @@ pub(crate) fn override_checkpoint_interval_for_test(value: Option<usize>) -> imp
     }
     let previous = CHECKPOINT_TEST_OVERRIDE.with(|cell| cell.replace(Some(value)));
     Reset(previous)
+}
+
+/// The interval [`override_checkpoint_interval_for_test`] pinned on this
+/// thread, if any. The store's accessor consults it so scheduler tests can
+/// pin the interval without building a config.
+#[cfg(test)]
+pub(crate) fn checkpoint_interval_test_override() -> Option<Option<usize>> {
+    CHECKPOINT_TEST_OVERRIDE.with(std::cell::Cell::get)
 }
 
 /// Parse an `MLXCEL_PROMPT_CACHE_CHECKPOINT_INTERVAL` value; see
@@ -482,6 +511,10 @@ impl PromptCacheConfig {
             snapshot_ttl: Duration::from_secs(Self::DEFAULT_SNAPSHOT_TTL_SECONDS),
             keep_previous_turn: false,
             state_checkpoint_capacity_bytes: 0,
+            state_checkpoints_per_conversation: None,
+            state_checkpoint_min_spacing_tokens: 0,
+            checkpoint_interval_tokens: None,
+            ctx_checkpoint_flags: super::ctx_checkpoints::CtxCheckpointFlags::default(),
         }
     }
 
@@ -498,6 +531,20 @@ impl PromptCacheConfig {
     #[must_use]
     pub fn with_state_checkpoint_capacity_bytes(mut self, capacity_bytes: usize) -> Self {
         self.state_checkpoint_capacity_bytes = capacity_bytes;
+        self
+    }
+
+    /// Builder-style: cap the state checkpoints per conversation and space
+    /// them; see [`Self::state_checkpoints_per_conversation`] and
+    /// [`Self::state_checkpoint_min_spacing_tokens`].
+    #[must_use]
+    pub fn with_state_checkpoint_rules(
+        mut self,
+        per_conversation: Option<usize>,
+        min_spacing_tokens: usize,
+    ) -> Self {
+        self.state_checkpoints_per_conversation = per_conversation;
+        self.state_checkpoint_min_spacing_tokens = min_spacing_tokens;
         self
     }
 
@@ -572,6 +619,10 @@ impl Default for PromptCacheConfig {
             snapshot_ttl: Duration::from_secs(Self::DEFAULT_SNAPSHOT_TTL_SECONDS),
             keep_previous_turn: false,
             state_checkpoint_capacity_bytes: 0,
+            state_checkpoints_per_conversation: None,
+            state_checkpoint_min_spacing_tokens: 0,
+            checkpoint_interval_tokens: None,
+            ctx_checkpoint_flags: super::ctx_checkpoints::CtxCheckpointFlags::default(),
         }
     }
 }

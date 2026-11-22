@@ -67,18 +67,26 @@ fn slot_prompt_similarity_refuses_upstreams_own_default() {
 }
 
 #[test]
-fn ctx_checkpoints_refuses_a_ring_and_accepts_zero() {
+fn ctx_checkpoints_accepts_a_count_and_zero_and_refuses_a_negative() {
     let mut ring = args();
-    ring.ctx_checkpoints = Some(32);
-    let message = ring
+    ring.ctx_checkpoints = Some(3);
+    let flags = ring
         .resolve()
-        .expect_err("a checkpoint ring must be refused");
-    assert!(message.contains("--ctx-checkpoints"));
-    assert!(message.contains("one snapshot per"));
+        .expect("a checkpoint count is accepted (#3255)");
+    assert_eq!(flags.ctx_checkpoints, Some(3));
+
+    let mut upstream_default = args();
+    upstream_default.ctx_checkpoints = Some(32);
+    assert!(upstream_default.resolve().is_ok());
 
     let mut none = args();
     none.ctx_checkpoints = Some(0);
-    assert!(none.resolve().is_ok());
+    assert_eq!(none.resolve().unwrap().ctx_checkpoints, Some(0));
+
+    let mut negative = args();
+    negative.ctx_checkpoints = Some(-1);
+    let message = negative.resolve().expect_err("a negative count is refused");
+    assert!(message.contains("--ctx-checkpoints -1"), "{message}");
 }
 
 #[test]
@@ -120,16 +128,70 @@ fn kv_unified_explicit_flags_override_the_auto_default() {
 }
 
 #[test]
-fn checkpoint_min_step_refuses_a_spacing_and_accepts_zero() {
+fn checkpoint_min_step_accepts_a_spacing_from_the_floor_and_zero() {
     let mut spacing = args();
     spacing.checkpoint_min_step = Some(8192);
-    let message = spacing
+    let flags = spacing
         .resolve()
-        .expect_err("a checkpoint spacing must be refused");
-    assert!(message.contains("--checkpoint-min-step"));
-    assert!(message.contains("--ctx-checkpoints"));
+        .expect("upstream's default spacing is accepted (#3255)");
+    assert_eq!(flags.checkpoint_min_step, Some(8192));
+
+    let mut floor = args();
+    floor.checkpoint_min_step = Some(256);
+    assert!(floor.resolve().is_ok());
 
     let mut none = args();
     none.checkpoint_min_step = Some(0);
-    assert!(none.resolve().is_ok());
+    assert_eq!(none.resolve().unwrap().checkpoint_min_step, Some(0));
+
+    let mut below = args();
+    below.checkpoint_min_step = Some(100);
+    let message = below
+        .resolve()
+        .expect_err("a spacing below the floor is refused, not clamped");
+    assert!(message.contains("floor of 256"), "{message}");
+
+    let mut negative = args();
+    negative.checkpoint_min_step = Some(-8);
+    assert!(negative.resolve().is_err());
+}
+
+#[test]
+fn the_flags_override_the_environment_switches() {
+    use crate::server::prompt_cache::{
+        CtxCheckpointEnv, CtxCheckpointFlags, resolve_ctx_checkpoint_policy,
+    };
+    let env = CtxCheckpointEnv {
+        boundary_disabled: false,
+        keep_previous_turn: true,
+        checkpoint_interval: Some(16_384),
+    };
+    let mut off = args();
+    off.ctx_checkpoints = Some(0);
+    off.checkpoint_min_step = Some(4096);
+    let (policy, _) = resolve_ctx_checkpoint_policy(off.resolve().unwrap(), env, None);
+    assert!(
+        !policy.keep_previous_turn,
+        "--ctx-checkpoints 0 beats MLXCEL_PROMPT_CACHE_KEEP_PREVIOUS_TURN"
+    );
+    assert_eq!(
+        policy.checkpoint_interval,
+        Some(4096),
+        "--checkpoint-min-step beats MLXCEL_PROMPT_CACHE_CHECKPOINT_INTERVAL"
+    );
+
+    let (policy, _) = resolve_ctx_checkpoint_policy(CtxCheckpointFlags::default(), env, None);
+    assert!(policy.keep_previous_turn);
+    assert_eq!(
+        policy.checkpoint_interval,
+        Some(16_384),
+        "unset flags leave the switches"
+    );
+}
+
+#[test]
+fn the_help_and_module_doc_no_longer_name_the_removed_capture_function() {
+    let source = include_str!("slot_args.rs");
+    assert!(!source.contains("capture_history_boundary_snapshot"));
+    assert!(!source.contains("one snapshot per sequence"));
 }

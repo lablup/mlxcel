@@ -843,10 +843,12 @@ impl ServerStartupInput {
             .resolve()
             .map_err(|message| anyhow::anyhow!("{message}"))?;
         // b10621's slot-state and checkpoint spellings (#1473). Resolved here
-        // so a request for per-slot prompt retention, slot-similarity
-        // selection, a unified KV buffer or a checkpoint ring fails the
-        // command line on both binaries with one message.
-        self.slot_compat
+        // so a request for per-slot prompt retention or slot-similarity
+        // selection, or an invalid checkpoint count or spacing, fails the
+        // command line on both binaries with one message. The checkpoint
+        // flags ride the prompt-cache config to startup (#3255).
+        let ctx_checkpoint_flags = self
+            .slot_compat
             .resolve()
             .map_err(|message| anyhow::anyhow!("{message}"))?;
         // `--no-cache-prompt` and mlxcel's `--no-prompt-cache` are two
@@ -945,6 +947,8 @@ impl ServerStartupInput {
             self.prompt_cache_snapshot_ttl_seconds,
         )
         .map_err(|e| anyhow::anyhow!("--apc-hash: {e}"))?;
+        let mut prompt_cache = prompt_cache;
+        prompt_cache.ctx_checkpoint_flags = ctx_checkpoint_flags;
 
         // Resolve the effective KV cache mode from split flags,
         // legacy shorthand, or the default (FP16).

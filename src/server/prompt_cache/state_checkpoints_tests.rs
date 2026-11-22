@@ -418,3 +418,69 @@ fn a_checkpoint_hit_counts_only_once_confirmed_and_can_be_discarded() {
         other => panic!("expected turn 1's checkpoint, got {other:?}"),
     }
 }
+
+fn capped_config(per_conversation: Option<usize>, spacing: usize) -> PromptCacheConfig {
+    config(1 << 20).with_state_checkpoint_rules(per_conversation, spacing)
+}
+
+#[test]
+fn a_conversation_keeps_its_newest_n_checkpoints() {
+    // Issue #3255: `--ctx-checkpoints N` keeps N per conversation; the N + 1th
+    // boundary drops the oldest (shortest) one.
+    let n = 3;
+    let store = PromptCacheStore::with_config(capped_config(Some(n), 0));
+    run_turns(&store, SESSION, n + 1);
+    let stats = store.stats();
+    assert_eq!(stats.state_checkpoint_entries, n);
+    assert_eq!(stats.state_checkpoint_evictions, 1);
+    let kept: Vec<usize> = (1..=n + 1)
+        .filter(|turn| {
+            matches!(
+                lookup(&store, SESSION, &edited_after(10 * turn, 95)),
+                SnapshotLookupOutcome::CheckpointHit { matched_len, .. } if matched_len == 10 * turn
+            )
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        vec![2, 3],
+        "turn 1 dropped; turn 4 is the donor's own length"
+    );
+}
+
+#[test]
+fn the_cap_counts_one_conversation_not_the_session() {
+    // Two chats under one session key (the anonymous session of requests
+    // without a key) share no tokens, so neither cap evicts the other's.
+    let store = PromptCacheStore::with_config(capped_config(Some(2), 0));
+    run_turns(&store, SESSION, 2);
+    for n in 1..=2 {
+        let tokens: Vec<i32> = (0..10 * n as i32).map(|t| t + 5000).collect();
+        let lineage = chain_lineage(n);
+        store
+            .insert_snapshot(&key(SESSION, &tokens), whole(&tokens, lineage.clone()))
+            .expect("whole snapshot");
+        store
+            .insert_state_checkpoint(&key(SESSION, &tokens), checkpoint(&tokens, lineage))
+            .expect("checkpoint");
+    }
+    assert_eq!(store.stats().state_checkpoint_entries, 4);
+    assert_eq!(store.stats().state_checkpoint_evictions, 0);
+}
+
+#[test]
+fn checkpoints_closer_than_the_spacing_replace_each_other() {
+    // `--checkpoint-min-step 15` with turns 10 tokens apart: each new
+    // boundary replaces the previous one.
+    let store = PromptCacheStore::with_config(capped_config(None, 15));
+    run_turns(&store, SESSION, 4);
+    // 10, then 20 replaces 10 (gap 10), 30 replaces 20, 40 replaces 30.
+    assert_eq!(store.stats().state_checkpoint_entries, 1);
+    let store = PromptCacheStore::with_config(capped_config(None, 10));
+    run_turns(&store, SESSION, 4);
+    assert_eq!(
+        store.stats().state_checkpoint_entries,
+        4,
+        "a gap equal to the spacing keeps both"
+    );
+}

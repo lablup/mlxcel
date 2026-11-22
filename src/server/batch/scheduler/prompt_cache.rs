@@ -1460,7 +1460,8 @@ impl BatchScheduler {
     }
 
     /// The periodic checkpoints `seq`'s plan splits at (#2885 Part B): every
-    /// multiple of `MLXCEL_PROMPT_CACHE_CHECKPOINT_INTERVAL` after the adopted
+    /// multiple of the resolved checkpoint interval (`--checkpoint-min-step` or
+    /// `MLXCEL_PROMPT_CACHE_CHECKPOINT_INTERVAL`) after the adopted
     /// prefix and before the history boundary (or the prompt end), under the
     /// same gates as [`Self::history_boundary_split`]. Capped at `max`, the
     /// deepest points kept.
@@ -1470,7 +1471,11 @@ impl BatchScheduler {
         history: Option<usize>,
         max: usize,
     ) -> Vec<usize> {
-        let Some(interval) = crate::server::prompt_cache::checkpoint_interval_tokens() else {
+        let Some(interval) = self
+            .prompt_cache
+            .as_ref()
+            .and_then(|store| store.checkpoint_interval_tokens())
+        else {
             return Vec::new();
         };
         if !self.engine.model().supports_snapshot_reuse()

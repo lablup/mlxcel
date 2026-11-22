@@ -62,6 +62,7 @@ pub(crate) mod embedding_sanitize;
 pub(crate) mod embedding_test_support;
 mod gemma3n_helpers;
 pub(crate) mod headless_llama;
+mod kv_ring_checkpoint;
 mod kv_snapshot;
 mod llama4_helpers;
 pub(crate) mod model_owned;
@@ -1773,6 +1774,10 @@ mod gemma3n_helpers_tests;
 #[cfg(test)]
 #[path = "gemma4_tests.rs"]
 pub(crate) mod gemma4_tests;
+
+#[cfg(test)]
+#[path = "gemma4_ring_checkpoint_tests.rs"]
+mod gemma4_ring_checkpoint_tests;
 
 #[cfg(test)]
 #[path = "llama4_helpers_tests.rs"]

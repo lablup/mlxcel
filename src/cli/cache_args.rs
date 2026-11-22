@@ -31,14 +31,15 @@
 //!
 //! b10621's slot and checkpoint options live in `slot_args`, not this prompt
 //! cache group. `--kv-unified` is implemented there as a shared logical
-//! live-token budget; `--slot-prompt-similarity`, `--cache-idle-slots`,
-//! `--ctx-checkpoints` and `--checkpoint-min-step` keep the diagnostic path
-//! because mlxcel has no per-slot prompt-selection policy or checkpoint ring.
-//! Its reuse is a process-wide radix trie over token prefixes rather than a
-//! scan of what each slot happens to be holding, so there is no slot prompt for
-//! a similarity threshold to compare against and no checkpoint spacing to set.
-//! Accepting those values inert would be the silent-acceptance failure epic
-//! #1431 exists to remove; their manifest entries carry the divergence instead.
+//! live-token budget, and `--ctx-checkpoints` / `--checkpoint-min-step` map
+//! onto the prompt cache's checkpoints (#3255). `--slot-prompt-similarity`
+//! and `--cache-idle-slots` keep the diagnostic path because mlxcel has no
+//! per-slot prompt-selection policy: its reuse is a process-wide radix trie
+//! over token prefixes rather than a scan of what each slot happens to be
+//! holding, so there is no slot prompt for a similarity threshold to compare
+//! against. Accepting those values inert would be the silent-acceptance
+//! failure epic #1431 exists to remove; their manifest entries carry the
+//! divergence instead.
 //! See `docs/llama-server-compat.md`.
 //!
 //! Used by: mlxcel serve, mlxcel-server.

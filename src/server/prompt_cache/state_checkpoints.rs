@@ -210,6 +210,65 @@ impl Inner {
         freed
     }
 
+    /// Apply the per-conversation rules to the conversation of the checkpoint
+    /// just inserted under `digest` (issue #3255): drop the earlier
+    /// checkpoints closer than the minimum spacing, then the shortest ones
+    /// beyond the per-conversation cap.
+    ///
+    /// The conversation is the inserted checkpoint's line: the checkpoints of
+    /// the same session bucket and session whose tokens are a prefix of its
+    /// tokens. Requests without a session key share one session, and their
+    /// chats only share a line where their tokens do, so one chat's
+    /// checkpoints are not counted against another's.
+    fn enforce_conversation_checkpoint_rules(&mut self, digest: &PromptCacheKeyDigest) {
+        let spacing = self.config.state_checkpoint_min_spacing_tokens;
+        let cap = self.config.state_checkpoints_per_conversation;
+        if spacing == 0 && cap.is_none() {
+            return;
+        }
+        let Some(inserted) = self.state_checkpoints.get(digest) else {
+            return;
+        };
+        let len = inserted.entry.tokens.len();
+        let mut line: Vec<(usize, PromptCacheKeyDigest)> = self
+            .state_checkpoints
+            .iter()
+            .filter(|(other, slot)| {
+                *other != digest
+                    && slot.sessionless == inserted.sessionless
+                    && same_session(
+                        slot.bucket.session_key.as_deref(),
+                        inserted.bucket.session_key.as_deref(),
+                    )
+                    && slot.entry.tokens.len() <= len
+                    && inserted.entry.tokens.starts_with(&slot.entry.tokens)
+            })
+            .map(|(other, slot)| (slot.entry.tokens.len(), *other))
+            .collect();
+        line.sort_by_key(|(len, other)| (*len, *other.as_bytes()));
+        let mut dropped: Vec<PromptCacheKeyDigest> = Vec::new();
+        if spacing > 0 {
+            line.retain(|(earlier, other)| {
+                let close = len - earlier < spacing;
+                if close {
+                    dropped.push(*other);
+                }
+                !close
+            });
+        }
+        if let Some(cap) = cap {
+            // The inserted checkpoint is one of the `cap`.
+            let excess = (line.len() + 1).saturating_sub(cap.max(1));
+            dropped.extend(line.iter().take(excess).map(|(_, other)| *other));
+        }
+        for other in &dropped {
+            self.remove_state_checkpoint(other);
+        }
+        self.state_checkpoint_evictions = self
+            .state_checkpoint_evictions
+            .saturating_add(dropped.len() as u64);
+    }
+
     /// Evict least-recently-used checkpoints until they fit their budget.
     fn enforce_state_checkpoint_caps(&mut self) {
         while self.state_checkpoint_bytes > self.config.state_checkpoint_capacity_bytes {
@@ -278,6 +337,20 @@ impl PromptCacheStore {
         true
     }
 
+    /// Interval of the periodic prefill checkpoints (#2885 Part B) startup
+    /// resolved from `--checkpoint-min-step` or the environment; `None` when
+    /// they are off.
+    pub fn checkpoint_interval_tokens(&self) -> Option<usize> {
+        #[cfg(test)]
+        if let Some(value) = super::super::policy::checkpoint_interval_test_override() {
+            return value;
+        }
+        self.inner
+            .read()
+            .ok()
+            .and_then(|g| g.config.checkpoint_interval_tokens)
+    }
+
     /// Byte budget for turn-boundary state checkpoints; `0` when they are off.
     pub fn state_checkpoint_capacity_bytes(&self) -> usize {
         self.inner
@@ -291,10 +364,10 @@ impl PromptCacheStore {
     /// Keyed like a snapshot. The entry's lineage must name the sequences that
     /// computed its rows, since only a donor with the same lineage can rebuild
     /// it; an entry without one is refused as [`InsertError::Disabled`]. An
-    /// insert replaces a checkpoint stored under the same key, drops the
-    /// checkpoints of the same conversation that no stored snapshot can
-    /// rebuild, and then evicts the least recently used ones until the budget
-    /// holds.
+    /// insert replaces a checkpoint stored under the same key, applies the
+    /// per-conversation spacing and cap (issue #3255), drops the checkpoints
+    /// of the same conversation that no stored snapshot can rebuild, and then
+    /// evicts the least recently used ones until the budget holds.
     pub fn insert_state_checkpoint(
         &self,
         key: &PromptCacheKey<'_>,
@@ -335,6 +408,7 @@ impl PromptCacheStore {
             },
         );
         guard.state_checkpoint_inserts = guard.state_checkpoint_inserts.saturating_add(1);
+        guard.enforce_conversation_checkpoint_rules(&digest);
         guard.drop_orphan_state_checkpoints(&SessionlessBucketKey::from_key(key), key.session_key);
         guard.enforce_state_checkpoint_caps();
         Ok(())
