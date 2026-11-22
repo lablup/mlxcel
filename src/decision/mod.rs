@@ -64,6 +64,10 @@ pub mod validate;
 pub(crate) mod stub;
 
 #[cfg(test)]
+#[path = "media_tests.rs"]
+mod media_tests;
+
+#[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
 
@@ -351,6 +355,16 @@ pub fn check_result(
         return Err(DecisionError::Internal(
             "the model did not answer the questions it was asked, in order".to_string(),
         ));
+    }
+    if let Some(((name, question), _)) = questions
+        .iter()
+        .zip(&result.answers)
+        .find(|((_, question), (_, answer))| answer.kind() != question.kind)
+    {
+        return Err(DecisionError::Internal(format!(
+            "the model answered `{name}` with the wrong answer type for a {} question",
+            question.kind.as_str()
+        )));
     }
     if let Some((name, _)) = result
         .answers

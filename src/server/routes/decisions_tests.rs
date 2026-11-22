@@ -74,6 +74,43 @@ impl DecisionModelProvider for FailingProvider {
     }
 }
 
+/// A provider that declares audio and video but must never be reached by a
+/// request that fails media acquisition.
+struct MediaProvider;
+
+impl DecisionModelProvider for MediaProvider {
+    fn predict(
+        &self,
+        _state: Option<Value>,
+        _questions: Vec<(String, Question)>,
+        _media: DecisionMedia,
+    ) -> Result<DecisionResult, DecisionProviderError> {
+        Err(DecisionProviderError::Internal(
+            "predict must not be reached".into(),
+        ))
+    }
+
+    fn model_id(&self) -> &str {
+        "media-decider"
+    }
+
+    fn created_at(&self) -> i64 {
+        0
+    }
+
+    fn decision_types(&self) -> &[QuestionKind] {
+        &[QuestionKind::Choice]
+    }
+
+    fn decision_media(&self) -> &[MediaKind] {
+        &[MediaKind::Audio, MediaKind::Video]
+    }
+
+    fn shutdown_and_wait(&self, _timeout: Duration) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 fn stub_provider() -> Arc<dyn DecisionModelProvider> {
     Arc::new(
         DecisionWorkerProvider::from_loader(
@@ -396,4 +433,53 @@ async fn a_decision_only_server_names_the_route_and_flag_on_chat() {
     let message = body["error"]["message"].as_str().expect("message");
     assert!(message.contains("/v1/decisions"), "{body}");
     assert!(message.contains("--decision-model"), "{body}");
+}
+
+fn wav_data_uri(seconds: usize, rate: u32) -> String {
+    use base64::Engine;
+    let samples = vec![0.1_f32; seconds * rate as usize];
+    let wav = crate::audio::encode_wav_pcm16(&samples, rate, 1);
+    format!(
+        "data:audio/wav;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(wav)
+    )
+}
+
+#[tokio::test]
+async fn audio_over_the_decoded_duration_cap_is_a_400() {
+    let provider: Arc<dyn DecisionModelProvider> = Arc::new(MediaProvider);
+    let request = json!({
+        "audio": wav_data_uri(crate::decision::media::MAX_DECISION_AUDIO_SECONDS + 1, 8_000),
+        "questions": {"q": {"criteria": ["a", "b"]}},
+    });
+    let (status, body) = post(app_with(Some(provider)), request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        body["error"]["message"],
+        "audio: audio is 301 seconds long; decision audio is limited to 300 seconds"
+    );
+}
+
+#[tokio::test]
+async fn audio_within_the_cap_reaches_the_model() {
+    let provider: Arc<dyn DecisionModelProvider> = Arc::new(MediaProvider);
+    let request = json!({
+        "audio": wav_data_uri(1, 16_000),
+        "questions": {"q": {"criteria": ["a", "b"]}},
+    });
+    let (status, body) = post(app_with(Some(provider)), request).await;
+    // The sentinel provider fails in predict, so a 500 proves decoding passed.
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"]["message"], "Decision prediction failed");
+}
+
+#[test]
+fn videos_need_ffmpeg_before_any_download() {
+    use super::{VIDEO_NEEDS_FFMPEG_MESSAGE, check_video_support};
+    let err = check_video_support(1, false).expect_err("no ffmpeg");
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.error.message, VIDEO_NEEDS_FFMPEG_MESSAGE);
+    assert!(check_video_support(1, true).is_ok());
+    assert!(check_video_support(0, false).is_ok(), "no videos, no probe");
 }

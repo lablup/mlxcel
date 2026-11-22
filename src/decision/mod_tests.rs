@@ -427,6 +427,60 @@ fn a_model_answering_the_wrong_questions_is_internal() {
 }
 
 #[test]
+fn an_answer_of_the_wrong_type_for_its_question_is_internal() {
+    let meta = || Default::default();
+    let questions = check(json!({
+        "c": {"type": "choice", "criteria": ["a", "b"]},
+        "s": {"type": "score", "criteria": ["lo", "hi"]},
+        "b": {"type": "bool"},
+        "n": {"type": "noul"},
+        "m": {"type": "multi_label", "criteria": ["a", "b"]},
+    }))
+    .expect("valid");
+    let choice = |q: &Question| Answer::choice(q, vec![0.5, 0.5], meta()).expect("lengths match");
+    let score = |q: &Question| Answer::score(q, vec![0.5, 0.5], meta()).expect("lengths match");
+    let multi =
+        |q: &Question| Answer::multi_label(q, vec![0.5, 0.5], meta()).expect("lengths match");
+    let right = vec![
+        ("c".to_string(), choice(&questions[0].1)),
+        ("s".to_string(), score(&questions[1].1)),
+        ("b".to_string(), Answer::bool(0.5, meta())),
+        ("n".to_string(), Answer::bool(0.5, meta())),
+        ("m".to_string(), multi(&questions[4].1)),
+    ];
+    let ok = DecisionResult {
+        answers: right.clone(),
+        usage: DecisionUsage::default(),
+    };
+    check_result(&questions, &ok).expect("matching types pass, noul answers as bool");
+
+    // Swap each answer in turn for one of a different kind.
+    let wrong = [
+        Answer::bool(0.5, meta()),
+        Answer::bool(0.5, meta()),
+        choice(&questions[0].1),
+        score(&questions[1].1),
+        choice(&questions[0].1),
+    ];
+    for (index, answer) in wrong.into_iter().enumerate() {
+        let mut answers = right.clone();
+        answers[index].1 = answer;
+        let result = DecisionResult {
+            answers,
+            usage: DecisionUsage::default(),
+        };
+        let name = questions[index].0.clone();
+        match check_result(&questions, &result) {
+            Err(DecisionError::Internal(detail)) => {
+                assert!(detail.contains(&format!("`{name}`")), "{detail}");
+                assert!(detail.contains("wrong answer type"), "{detail}");
+            }
+            other => panic!("expected an internal error for `{name}`, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn loader_detects_the_stub_and_refuses_other_checkpoints() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(

@@ -45,6 +45,19 @@ use crate::server::types::request::VideoUrl;
 pub const NO_DECISION_MODEL_MESSAGE: &str = "This server does not serve typed decisions. Start it with --decision-model \
      <path> (or MLXCEL_DECISION_MODEL) to serve POST /v1/decisions.";
 
+/// Returned for `videos` when `ffmpeg` is not on `PATH`.
+pub(crate) const VIDEO_NEEDS_FFMPEG_MESSAGE: &str = "Video input requires `ffmpeg` on PATH. Install \
+     ffmpeg (e.g. `brew install ffmpeg` on macOS or `apt install ffmpeg` on Linux) and retry.";
+
+/// Refuse `videos` on a host without `ffmpeg`. Chat sets no per-request video
+/// count cap, so none is set here either.
+fn check_video_support(video_count: usize, ffmpeg_available: bool) -> Result<(), ErrorResponse> {
+    if video_count > 0 && !ffmpeg_available {
+        return Err(invalid_request(VIDEO_NEEDS_FFMPEG_MESSAGE));
+    }
+    Ok(())
+}
+
 fn invalid_request(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(message, "invalid_request_error")
 }
@@ -144,6 +157,12 @@ async fn acquire_media(
         images.push(fetch_labeled_image(url, &format!("images[{index}]"), limits).await?);
     }
 
+    // Same order as chat: tell the caller ffmpeg is missing before any clip is
+    // downloaded. The probe is memoized at startup.
+    check_video_support(
+        body.videos.len(),
+        crate::multimodal::video::ffmpeg_available(),
+    )?;
     let mut videos = Vec::with_capacity(body.videos.len());
     let mut guards = Vec::new();
     for (index, url) in body.videos.iter().enumerate() {

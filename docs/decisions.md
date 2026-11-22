@@ -34,8 +34,8 @@ Without `--decision-model`, both routes answer `501 Not Implemented` with a mess
 
 - `model` defaults to the served decision model's id (its directory name). Naming anything else is a 400.
 - `images` are fetched and decoded with the same URL, private-address, `--media-path` and payload limits as chat images.
-- `videos` go through the same resolver as chat video input, including `MLXCEL_VIDEO_DIR_ALLOWLIST` for local paths. This field is an mlxcel addition: upstream's route accepts only `images` and `audio`, while its Python `predict` also takes `videos`, which Clef declares.
-- `audio` is one clip in any form a chat `input_audio.data` accepts (wav, mp3 or flac bytes), decoded to 16 kHz mono. A clip that fails to decode is a 400 carrying the decoder's message.
+- `videos` go through the same resolver as chat video input, including `MLXCEL_VIDEO_DIR_ALLOWLIST` for local paths. A host without `ffmpeg` on `PATH` gets a 400 naming it before any clip is downloaded, as in chat. Chat sets no per-request video count cap, so none is set here. This field is an mlxcel addition: upstream's route accepts only `images` and `audio`, while its Python `predict` also takes `videos`, which Clef declares.
+- `audio` is one clip in any form a chat `input_audio.data` accepts (wav, mp3 or flac bytes), decoded to 16 kHz mono on the blocking pool. A clip that fails to decode is a 400 carrying the decoder's message. A clip longer than 300 seconds once decoded (`MAX_DECISION_AUDIO_SECONDS`, the longest per-clip limit a chat audio family declares) is a 400 reading `audio: audio is <n> seconds long; decision audio is limited to 300 seconds`. The limit is a fixed constant, not an environment variable, and is checked on the native samples before resampling.
 
 ### Validation
 
@@ -84,7 +84,7 @@ Media is validated before it is fetched, so a refused medium costs no download. 
 | 501 | No decision model is loaded. The message names `--decision-model`. |
 | 503 | The decision worker queue is full. |
 | 504 | The worker did not answer within the request timeout. The in-flight work is not cancelled. |
-| 500 | The model failed. The detail is `Decision prediction failed`; the cause is in the server log. |
+| 500 | The model failed, or returned a result that does not answer the asked questions in order, with the wrong answer type for a question kind (a `bool` answer for a `choice` question, say), or with a non-finite number. The detail is `Decision prediction failed`; the cause is in the server log. |
 
 ## Server flag
 

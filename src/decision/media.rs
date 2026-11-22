@@ -29,19 +29,42 @@ use super::DecisionMedia;
 /// Sample rate every decision model reads audio at.
 pub const DECISION_AUDIO_SAMPLE_RATE: u32 = 16_000;
 
+/// Longest decoded clip, in seconds, a decision request may carry.
+///
+/// The encoded-size cap alone still admits hours of low-bitrate audio, so the
+/// decoded duration is bounded too. Five minutes matches the longest per-clip
+/// limit a chat audio family declares (`AudioFamilyPolicy::inkling`).
+pub const MAX_DECISION_AUDIO_SECONDS: usize = 5 * 60;
+
 /// Decode one encoded clip to 16 kHz mono samples.
 ///
-/// The error is the decoder's own message, which the route returns as a 400.
+/// The duration is checked on the native samples, before the resample copy.
+/// The error is the decoder's own message or the duration cap, which the route
+/// returns as a 400.
 pub fn decode_audio_16k(bytes: &[u8]) -> Result<Vec<f32>, String> {
     let (samples, rate) = crate::audio::feature_extractor::load_wav_from_bytes(bytes)?;
     if samples.is_empty() {
         return Err("audio decoded to no samples".to_string());
     }
+    check_audio_duration(samples.len(), rate)?;
     Ok(if rate == DECISION_AUDIO_SAMPLE_RATE {
         samples
     } else {
         crate::audio::whisper_mel::resample_to_16k(&samples, rate)
     })
+}
+
+/// Reject a clip longer than [`MAX_DECISION_AUDIO_SECONDS`].
+fn check_audio_duration(sample_count: usize, rate: u32) -> Result<(), String> {
+    let max_samples = (rate as usize).saturating_mul(MAX_DECISION_AUDIO_SECONDS);
+    if rate == 0 || sample_count > max_samples {
+        let seconds = sample_count as f64 / f64::from(rate.max(1));
+        return Err(format!(
+            "audio is {seconds:.0} seconds long; decision audio is limited to \
+             {MAX_DECISION_AUDIO_SECONDS} seconds"
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a CLI media argument is fetched rather than read from disk.

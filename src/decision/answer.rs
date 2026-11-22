@@ -30,7 +30,7 @@
 
 use serde_json::{Map, Value, json};
 
-use super::{DecisionError, Question};
+use super::{DecisionError, Question, QuestionKind};
 
 /// One answer.
 #[derive(Debug, Clone, PartialEq)]
@@ -176,6 +176,17 @@ impl Answer {
             Answer::Score { .. } => "score",
             Answer::Bool { .. } => "bool",
             Answer::MultiLabel { .. } => "multi_label",
+        }
+    }
+
+    /// The question kind this answer belongs to.
+    #[must_use]
+    pub fn kind(&self) -> QuestionKind {
+        match self {
+            Self::Choice { .. } => QuestionKind::Choice,
+            Self::Score { .. } => QuestionKind::Score,
+            Self::Bool { .. } => QuestionKind::Bool,
+            Self::MultiLabel { .. } => QuestionKind::MultiLabel,
         }
     }
 
