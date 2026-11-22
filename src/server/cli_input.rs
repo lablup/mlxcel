@@ -98,6 +98,9 @@ pub struct ServerStartupInput {
     pub api_prefix: String,
     /// `--webui` / `--ui`: serve the bundled local WebUI and typed UI API.
     pub webui_enabled: bool,
+    /// `--mcp-tools` with its server set and bounds, already resolved by
+    /// [`crate::server::mcp::resolve_mcp_startup`] (#1457). `None` = off.
+    pub mcp: Option<crate::server::mcp::McpStartupConfig>,
     /// Raw `--sse-ping-interval`; `-1` disables the pings.
     pub sse_ping_interval: i64,
     /// Raw `--threads-http`; any value below 1 selects the automatic sizing.
@@ -1173,6 +1176,7 @@ impl ServerStartupInput {
             sleep_idle_seconds: self.sleep_idle_seconds,
             api_prefix,
             webui_enabled: self.webui_enabled,
+            mcp: self.mcp,
             #[cfg(feature = "webui")]
             webui_terminal_secret: None,
             #[cfg(feature = "webui")]

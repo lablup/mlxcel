@@ -39,7 +39,8 @@
 //!   only the attention layers hold a context-proportional KV cache; the
 //!   recurrent/Mamba layers carry an O(1) state, negligible for budgeting. The
 //!   flat formula counts every layer as attention (*overcount*).
-//! - **Pure SSM** (Mamba, Mamba2): no KV cache at all (*phantom* KV).
+//! - **Pure SSM / attention-free** (Mamba, Mamba2, Z1T): no KV cache at all
+//!   (*phantom* KV). Z1T keeps an O(1) AFT-conv pool and conv window per layer.
 //!
 //! This module parses `config.json` into a set of homogeneous [`KvGroup`]s and
 //! sums their context-aware footprint. It degrades gracefully: any model whose
@@ -74,7 +75,8 @@ pub enum KvArchKind {
     MlaDecompressed,
     /// Attention + recurrent/SSM layers; only attention layers hold KV.
     Hybrid,
-    /// Pure SSM (Mamba/Mamba2) — no context-proportional KV cache.
+    /// Pure SSM (Mamba/Mamba2) or attention-free (Z1T): no
+    /// context-proportional KV cache.
     PureSsm,
 }
 
@@ -427,6 +429,24 @@ pub fn deepseek_v2_caches_latent(mode: KVCacheMode) -> bool {
     deepseek_v2_latent_layout(mlxcel_core::mla::absorbed_enabled(), mode)
 }
 
+/// Elements per token of LongCat-Flash-Lite-Sparse's indexer-key cache: the
+/// key plus the one-column placeholder value, or `None` for any other family
+/// and for its dense `attention_method: MLA` form.
+fn longcat_sparse_index_elems(text: &Value, model_type: &str) -> Option<u64> {
+    if model_type != "longcat_flash_sparse" {
+        return None;
+    }
+    let lsa = text
+        .get("attention_method")
+        .and_then(Value::as_str)
+        .is_none_or(|method| method.eq_ignore_ascii_case("lsa"));
+    lsa.then(|| {
+        get_u64(text, &["index_head_dim"])
+            .unwrap_or(128)
+            .saturating_add(1)
+    })
+}
+
 /// Classify a model's config into KV layer groups and an architecture kind.
 ///
 /// `v2_latent` says whether DeepSeek V2 caches the latent in this run
@@ -454,7 +474,9 @@ fn classify(
     let text = &owned_text;
 
     // 1. Pure SSM — no context-proportional KV cache (needs only the layer count).
-    if mt == "mamba" || mt == "mamba2" || mt == "falcon_mamba" {
+    // Z1T (#2364) is attention-free: each layer keeps a fixed-size AFT-conv
+    // pool and `ksize - 1` window, so its config carries no attention heads.
+    if mt == "mamba" || mt == "mamba2" || mt == "falcon_mamba" || mt == "z1t" {
         return Some((Vec::new(), KvArchKind::PureSsm));
     }
 
@@ -532,15 +554,25 @@ fn classify(
             let layers = kda_hybrid_mla_layers(text, num_layers)
                 .unwrap_or(num_layers)
                 .saturating_mul(caches_per_layer);
-            return Some((
-                vec![KvGroup {
-                    layers,
-                    elems_per_token: elems,
+            let mut groups = vec![KvGroup {
+                layers,
+                elems_per_token: elems,
+                window: None,
+                fixed_bytes_per_token,
+            }];
+            // LongCat-Flash-Lite-Sparse's LSA indexer keeps its keys in a
+            // third, always-fp16 cache per layer, `[index_head_dim]` plus one
+            // placeholder value column (`models::longcat_flash_sparse`,
+            // #2362).
+            if let Some(index_elems) = longcat_sparse_index_elems(text, &mt) {
+                groups.push(KvGroup {
+                    layers: num_layers,
+                    elems_per_token: index_elems,
                     window: None,
-                    fixed_bytes_per_token,
-                }],
-                KvArchKind::MlaCompressed,
-            ));
+                    fixed_bytes_per_token: Some(index_elems.saturating_mul(2)),
+                });
+            }
+            return Some((groups, KvArchKind::MlaCompressed));
         }
         // V2: decompressed K (num_heads × (qk_nope + qk_rope)) + V
         // (num_heads × v_head_dim). Defaults match the DeepSeek-V2 config.
@@ -1590,6 +1622,24 @@ mod tests {
             assert_eq!(e.total_bytes, 0);
             assert_eq!(e.marginal_bytes_per_token, 0);
         }
+    }
+
+    #[test]
+    fn z1t_attention_free_has_zero_kv() {
+        // Without the classification, the missing head count made the flat
+        // formula charge 196608 bytes per token on Z1T-0 (#2364).
+        let cfg = json!({
+            "model_type": "z1t",
+            "vocab_size": 50257,
+            "hidden_size": 12288,
+            "num_hidden_layers": 4,
+            "aft_heads": 4,
+            "aft_ksize": 4,
+        });
+        let e = est(&cfg, 8192);
+        assert_eq!(e.kind, KvArchKind::PureSsm);
+        assert_eq!(e.total_bytes, 0);
+        assert_eq!(e.marginal_bytes_per_token, 0);
     }
 
     #[test]

@@ -237,7 +237,7 @@ pub(crate) fn validate_mla_decode_batch(
 /// [`store_latent_step`]. `DeepSeekV3Attention`, Kimi Linear, Kimi K3 and the
 /// DeepSeek V3.2 MLA pass `true`, GLM-4.7-Flash its per-layer flag.
 ///
-/// Used by: `DeepSeekV3Attention` (DeepSeek V3, Kimi, Youtu), DeepSeek V3.2
+/// Used by: `DeepSeekV3Attention` (DeepSeek V3, Kimi, Youtu, Xing4.0), DeepSeek V3.2
 /// MLA, GLM-4.7-Flash MLA, Kimi Linear and Kimi K3.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mla_latent_decode_rows(

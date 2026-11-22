@@ -168,6 +168,10 @@ pub struct ServerStartupConfig {
     pub sse_ping_interval: Option<std::time::Duration>,
     /// Serve the bundled local WebUI and authenticated `/ui-api/v1` adapter routes.
     pub webui_enabled: bool,
+    /// Server-side MCP tool loop on `/v1/responses` (#1457): the stdio
+    /// servers to start and the loop's bounds. `None` (the default) leaves the
+    /// feature off and starts no process.
+    pub mcp: Option<super::mcp::McpStartupConfig>,
     /// Restart-local WebUI key generated before bind and printed after bind.
     #[cfg(feature = "webui")]
     pub(crate) webui_terminal_secret: Option<WebUiTerminalSecret>,
@@ -723,6 +727,7 @@ impl Default for ServerStartupConfig {
                 crate::server::transport::DEFAULT_SSE_PING_INTERVAL_SECS as u64,
             )),
             webui_enabled: false,
+            mcp: None,
             #[cfg(feature = "webui")]
             webui_terminal_secret: None,
             #[cfg(feature = "webui")]
@@ -3401,6 +3406,47 @@ fn is_loopback_bind_host(host: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
+/// Gate the server-side MCP tool loop (#1457). MCP children run with the
+/// server's privileges, so the loop needs a listener that is local-only or
+/// authenticated, and a single loaded chat model to run beside.
+fn validate_mcp_startup(
+    startup: &ServerStartupConfig,
+    api_keys: &crate::server::ApiKeys,
+    image_only: bool,
+) -> Result<()> {
+    if startup.mcp.is_none() {
+        return Ok(());
+    }
+    // The tensor-parallel, pipeline-stage, and router paths do not carry the
+    // MCP runtime: refuse instead of accepting the flag and ignoring it.
+    super::mcp::validate_mcp_single_node(ServerDistributedFlags::from(startup).first_requested())
+        .map_err(|message| anyhow::anyhow!(message))?;
+    let resolution = crate::server::transport::resolve_listen_target(&startup.host, startup.port)?;
+    let scope = match &resolution.target {
+        crate::server::transport::ListenTarget::Unix(_) => super::mcp::ListenerScope::LocalOnly,
+        crate::server::transport::ListenTarget::Tcp { host, .. } => {
+            if is_loopback_bind_host(host) {
+                super::mcp::ListenerScope::LocalOnly
+            } else {
+                super::mcp::ListenerScope::Network
+            }
+        }
+    };
+    super::mcp::validate_mcp_exposure(scope, &startup.host, !api_keys.is_empty())
+        .map_err(|message| anyhow::anyhow!(message))?;
+    let router_mode = startup.model_path.as_os_str().is_empty()
+        && (startup.router_models_dir.is_some()
+            || startup.models_preset.is_some()
+            || startup.webui_enabled);
+    anyhow::ensure!(
+        !router_mode && !image_only,
+        "--mcp-tools is served by a single-model server only: the server-side MCP tool loop \
+         runs beside one loaded chat model. Start mlxcel-server with a model argument, or \
+         remove --mcp-tools and the MCP server configuration"
+    );
+    Ok(())
+}
+
 fn validate_settings_endpoint_exposure(
     enabled: bool,
     host: &str,
@@ -3704,6 +3750,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         startup.port,
         &api_keys,
     )?;
+    // Server-side MCP tool loop (#1457): refused before any child process
+    // starts and before the model loads.
+    validate_mcp_startup(&startup, &api_keys, image_only)?;
     if !api_keys.is_empty() {
         // Never the key material itself: a count is all an operator needs to
         // confirm the file was read, and it is all a log should ever carry.
@@ -4581,6 +4630,18 @@ async fn serve_with_side_model_workers(
     if let Some(provider) = &rerank_model {
         side_workers.push(SideWorkerExit::new("rerank", Arc::clone(provider)));
     }
+    // A multi-vector embedder also serves `/v1/rerank` by MaxSim when no
+    // reranker was configured (#1426). The provider shares the embedding
+    // worker, so it is not pushed as a second side worker.
+    let reranker_configured = config.reranker_model_path.is_some()
+        || resolve_rerank_source(&startup.model_path, None)
+            .is_ok_and(|source| source != RerankSource::None);
+    let rerank_model = crate::server::rerank_maxsim::resolve_late_interaction_reranker(
+        rerank_model,
+        reranker_configured,
+        embedding_model.as_ref(),
+        config.embd_normalize,
+    );
     // `--decision-model` (#2343) is always an explicit side model, so a load
     // failure is fatal like `--image-model`. Its id is the directory name.
     let decision_model = crate::server::decision_worker::resolve_decision_provider(
@@ -4606,6 +4667,14 @@ async fn serve_with_side_model_workers(
         image_model.is_some(),
     )?;
 
+    // The MCP servers start last (#1457), once the model is loaded and the
+    // exposure gate has passed: discovery lists each server's tools, and a
+    // server that fails is logged and left unavailable.
+    let mcp_runtime = match startup.mcp.clone() {
+        Some(mcp) => Some(super::mcp::McpRuntime::start(mcp).await),
+        None => None,
+    };
+
     let state = AppState::with_observability(
         model_provider,
         config,
@@ -4621,6 +4690,7 @@ async fn serve_with_side_model_workers(
     .with_prompt_cache(prompt_cache_store)
     .with_responses_store(responses_store)
     .with_conversation_store(conversation_store)
+    .with_mcp(mcp_runtime)
     .with_audio_model(audio_model)
     .with_embedding_model(embedding_model)
     .with_image_model(image_model)
@@ -4780,9 +4850,9 @@ pub(crate) fn check_serving_mode(
         ),
         EmbeddingServingMode::RerankOnly => anyhow::bail!(
             "--reranking restricts this server to rerank requests, but no reranker was loaded: \
-             pass a sequence-classifier checkpoint to -m, or name a reranker with \
-             --reranker-model <path>. The Qwen3 and Qwen3-VL generative rerankers are only \
-             reachable through --reranker-model."
+             pass a sequence-classifier checkpoint or a multi-vector (late-interaction) \
+             embedder to -m, or name a reranker with --reranker-model <path>. The Qwen3 and Qwen3-VL \
+             generative rerankers are only reachable through --reranker-model."
         ),
         EmbeddingServingMode::ImageOnly => anyhow::bail!(
             "--image-model without -m restricts this server to image generation, but no image \

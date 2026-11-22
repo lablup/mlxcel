@@ -174,6 +174,14 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     // the n-gram embedding for a token embedding.
     "longcat_flash",
     "longcat_flash_ngram",
+    // Xing4.0 holds `self_attn: DeepSeekV3Attention` in every hyper-connection
+    // layer (`src/models/xing4_0.rs`, #2356), so it caches the same pair. It is
+    // not in `QUANTIZED_LATENT_FAMILIES`: no int8 latent trace has been run on
+    // it, so it keeps fp16 by default.
+    "xing4_0",
+    // LongCat-Flash-Lite-Sparse composes the same MLA (`src/models/longcat_flash_sparse.rs`,
+    // #2362); its indexer keys sit in a separate fp16 cache.
+    "longcat_flash_sparse",
 ];
 
 /// Whether `model_type` names a family that always caches an MLA latent pair.

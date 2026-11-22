@@ -768,7 +768,7 @@ pub(crate) enum Cache {
 impl Cache {
     /// Copy this layer's state into `snapshot` under `prefix` (issue #1335).
     ///
-    /// Used by: Gemma 3, AFMoE.
+    /// Used by: Gemma 3, AFMoE, Kolibri-1.
     pub(crate) fn snapshot_into(
         &self,
         snapshot: &mut ModelStateSnapshot,
@@ -787,7 +787,7 @@ impl Cache {
 
     /// Restore this layer's state from `snapshot` under `prefix` (issue #1335).
     ///
-    /// Used by: Gemma 3, AFMoE.
+    /// Used by: Gemma 3, AFMoE, Kolibri-1.
     pub(crate) fn restore_from(
         &mut self,
         snapshot: &ModelStateSnapshot,
@@ -831,7 +831,7 @@ impl Cache {
     /// sequence. Global layers hold every token at its own slot and truncate
     /// unconditionally; sliding layers only while their ring is unwrapped.
     ///
-    /// Used by: Gemma 3, AFMoE.
+    /// Used by: Gemma 3, AFMoE, Kolibri-1.
     pub(crate) fn snapshot_truncatable_to(
         snapshot: &ModelStateSnapshot,
         prefix: &str,
@@ -848,7 +848,7 @@ impl Cache {
     /// it would have had if only the first `target_len` tokens had ever been
     /// processed (issue #1335).
     ///
-    /// Used by: Gemma 3, AFMoE.
+    /// Used by: Gemma 3, AFMoE, Kolibri-1.
     pub(crate) fn truncate_to(
         &mut self,
         target_len: i32,

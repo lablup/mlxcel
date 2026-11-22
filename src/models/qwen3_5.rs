@@ -3310,20 +3310,41 @@ impl Qwen35Model {
     /// and leaves no state behind, so the positive and negative prompts of one
     /// request (and consecutive requests) cannot see each other's tokens.
     ///
-    /// Used by: `imagegen::moss_image::text_encoder::TextEncoder`.
+    /// Rows of a `[B, L]` batch are independent and causal, so a right-padded
+    /// batch reads the same hidden at each row's last real position as a
+    /// one-row call would (the Decider-2b scorer relies on this).
+    ///
+    /// Used by: `imagegen::moss_image::text_encoder::TextEncoder`,
+    /// `decision::decider2::Decider2Model`.
     pub(crate) fn forward_prefill_hidden(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
         let mut caches = self.make_internal_caches();
         self.prefill_hidden(input_ids, &mut caches)
     }
 
-    /// The body of [`Self::forward_prefill_hidden`], in lockstep with
-    /// [`Self::forward_prefill_with_last_hidden`] minus the head.
+    /// The body of [`Self::forward_prefill_hidden`]: the token embedding,
+    /// then [`Self::hidden_from_embeddings`].
     fn prefill_hidden(
         &self,
         input_ids: &MlxArray,
         caches: &mut [Qwen3NextCache],
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(input_ids);
+        let h = self.embed_tokens.forward(input_ids);
+        self.hidden_from_embeddings(h, caches, None)
+    }
+
+    /// The layer loop and final norm behind every hidden-state entry point,
+    /// in lockstep with [`Self::forward_prefill_with_last_hidden`] minus the
+    /// head. It starts from embeddings rather than ids so an entry point that
+    /// splices its own `inputs_embeds` (with explicit `position_ids`, such as
+    /// MRoPE positions) shares this loop instead of copying it; the token
+    /// entry point passes `None` and the layers derive positions from the
+    /// cache offset.
+    fn hidden_from_embeddings(
+        &self,
+        mut h: UniquePtr<MlxArray>,
+        caches: &mut [Qwen3NextCache],
+        position_ids: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(&h);
         let seq_len = shape[1];
         let fa_idx = self.config.full_attention_interval - 1;
@@ -3346,7 +3367,7 @@ impl Qwen35Model {
             } else {
                 fa_mask.as_deref()
             };
-            h = layer.forward(&h, mask, cache, None);
+            h = layer.forward(&h, mask, cache, position_ids);
         }
         self.norm.forward(&h)
     }

@@ -3541,6 +3541,15 @@ pub(crate) fn prepare_inkling_video_embeddings(
         decoded_frame_count,
         videos.len(),
     );
+    for (clip, decoded) in decoded_videos.iter().enumerate() {
+        tracing::debug!(
+            clip,
+            sampled_frames = decoded.sampled_frame_count,
+            pairs = ?decoded.pairs,
+            timestamps_s = ?decoded.timestamps,
+            "Inkling video clip plan"
+        );
+    }
     let decoded_images = if images.is_empty() {
         Vec::new()
     } else {

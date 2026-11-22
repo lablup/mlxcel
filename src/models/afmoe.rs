@@ -713,7 +713,12 @@ impl ModelArgs {
     }
 }
 
-fn rms_norm_from_weights(weights: &WeightMap, key: &str, eps: f32) -> Result<RMSNorm, String> {
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn rms_norm_from_weights(
+    weights: &WeightMap,
+    key: &str,
+    eps: f32,
+) -> Result<RMSNorm, String> {
     let weight = weights
         .get(key)
         .map(|w| mlxcel_core::copy(w))
@@ -731,8 +736,9 @@ pub struct Attention {
     pub v_proj: UnifiedLinear,
     pub o_proj: UnifiedLinear,
     /// The attention output gate. Unrelated to a SwiGLU `gate_proj` and to the
-    /// MoE router, despite sharing the name.
-    pub gate_proj: UnifiedLinear,
+    /// MoE router, despite sharing the name. Always present on AFMoE; `None`
+    /// for Kolibri-1, which reuses this block without the gate.
+    pub gate_proj: Option<UnifiedLinear>,
     pub q_norm: RMSNorm,
     pub k_norm: RMSNorm,
     pub num_heads: i32,
@@ -748,9 +754,23 @@ pub struct Attention {
     pub prefill_window: i32,
 }
 
+/// The scalars an [`Attention`] block is built from.
+///
+/// Lets a family that shares this block without sharing AFMoE's config build
+/// it. Used by: AFMoE, Kolibri1.
+pub(crate) struct AttentionGeometry {
+    pub num_heads: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    pub rms_norm_eps: f32,
+    pub rope_theta: f32,
+    pub group_size: i32,
+    pub bits: i32,
+}
+
 impl Attention {
     /// Head counts and head dim for the prefill mask choice (#3072).
-    fn prefill_attention(&self) -> PrefillAttention {
+    pub(crate) fn prefill_attention(&self) -> PrefillAttention {
         PrefillAttention::new(
             self.num_heads as usize,
             self.num_kv_heads as usize,
@@ -821,15 +841,24 @@ impl Attention {
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
 
-        // The sigmoid gate multiplies the attention output BEFORE `o_proj`, and
-        // is computed from the block input rather than from the attention
-        // result.
-        let gate = mlxcel_core::sigmoid(&self.gate_proj.forward(x));
-        let gated = mlxcel_core::multiply(&attn_out, &gate);
-        self.o_proj.forward(&gated)
+        self.gate_and_project(x, &attn_out)
     }
 
-    fn forward_batched_decode(
+    /// The sigmoid gate multiplies the attention output BEFORE `o_proj`, and
+    /// is computed from the block input rather than from the attention
+    /// result. A gateless block (Kolibri-1) goes straight to `o_proj`.
+    fn gate_and_project(&self, x: &MlxArray, attn_out: &MlxArray) -> UniquePtr<MlxArray> {
+        match &self.gate_proj {
+            Some(gate_proj) => {
+                let gate = mlxcel_core::sigmoid(&gate_proj.forward(x));
+                let gated = mlxcel_core::multiply(attn_out, &gate);
+                self.o_proj.forward(&gated)
+            }
+            None => self.o_proj.forward(attn_out),
+        }
+    }
+
+    pub(crate) fn forward_batched_decode(
         &self,
         x: &MlxArray,
         caches: &mut [&mut Cache],
@@ -889,12 +918,7 @@ impl Attention {
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
 
-        // The sigmoid gate multiplies the attention output BEFORE `o_proj`, and
-        // is computed from the block input rather than from the attention
-        // result.
-        let gate = mlxcel_core::sigmoid(&self.gate_proj.forward(x));
-        let gated = mlxcel_core::multiply(&attn_out, &gate);
-        self.o_proj.forward(&gated)
+        self.gate_and_project(x, &attn_out)
     }
 
     pub fn from_weights(
@@ -903,9 +927,30 @@ impl Attention {
         prefix: &str,
         uses_rope: bool,
     ) -> Result<Self, String> {
-        let group_size = args.group_size();
-        let bits = args.bits();
-        let head_dim = args.head_dim as i32;
+        let geometry = AttentionGeometry {
+            num_heads: args.num_attention_heads,
+            num_kv_heads: args.num_key_value_heads,
+            head_dim: args.head_dim,
+            rms_norm_eps: args.rms_norm_eps,
+            rope_theta: args.rope_theta,
+            group_size: args.group_size(),
+            bits: args.bits(),
+        };
+        Self::load(weights, prefix, &geometry, uses_rope, true)
+    }
+
+    /// Build the block from explicit geometry; `gated` loads the
+    /// `gate_proj` output gate. Used by: AFMoE (gated), Kolibri1 (gateless).
+    pub(crate) fn load(
+        weights: &WeightMap,
+        prefix: &str,
+        geometry: &AttentionGeometry,
+        uses_rope: bool,
+        gated: bool,
+    ) -> Result<Self, String> {
+        let group_size = geometry.group_size;
+        let bits = geometry.bits;
+        let head_dim = geometry.head_dim as i32;
         let load = |leaf: &str| {
             UnifiedLinear::from_weights(weights, &format!("{prefix}.{leaf}"), group_size, bits)
         };
@@ -914,23 +959,27 @@ impl Attention {
             k_proj: load("k_proj")?,
             v_proj: load("v_proj")?,
             o_proj: load("o_proj")?,
-            gate_proj: load("gate_proj")?,
+            gate_proj: if gated {
+                Some(load("gate_proj")?)
+            } else {
+                None
+            },
             q_norm: rms_norm_from_weights(
                 weights,
                 &format!("{prefix}.q_norm.weight"),
-                args.rms_norm_eps,
+                geometry.rms_norm_eps,
             )?,
             k_norm: rms_norm_from_weights(
                 weights,
                 &format!("{prefix}.k_norm.weight"),
-                args.rms_norm_eps,
+                geometry.rms_norm_eps,
             )?,
-            num_heads: args.num_attention_heads as i32,
-            num_kv_heads: args.num_key_value_heads as i32,
+            num_heads: geometry.num_heads as i32,
+            num_kv_heads: geometry.num_kv_heads as i32,
             head_dim,
             scale: 1.0 / (head_dim as f32).sqrt(),
             uses_rope,
-            rope_base: args.rope_theta,
+            rope_base: geometry.rope_theta,
             prefill_window: 0,
         })
     }
@@ -958,8 +1007,16 @@ impl Mlp {
         args: &ModelArgs,
         prefix: &str,
     ) -> Result<Self, String> {
-        let group_size = args.group_size();
-        let bits = args.bits();
+        Self::load(weights, prefix, args.group_size(), args.bits())
+    }
+
+    /// Used by: AFMoE, Kolibri1 (its shared expert).
+    pub(crate) fn load(
+        weights: &WeightMap,
+        prefix: &str,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<Self, String> {
         let load = |leaf: &str| {
             UnifiedLinear::from_weights(weights, &format!("{prefix}.{leaf}"), group_size, bits)
         };
@@ -1368,56 +1425,23 @@ impl AfmoeModel {
         caches: &mut [Cache],
         row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
-        let seq_len = mlxcel_core::array_shape(input_ids)[1];
-
         let mut h = self.embed_tokens.forward(input_ids);
         if self.embedding_scale != 1.0 {
             h = mlxcel_core::multiply_scalar(&h, self.embedding_scale);
         }
 
-        // Both prefill masks are sized from the cache's live window rather than
-        // the monotonic offset, so a trimmed cache does not produce a mask wider
-        // than the K/V it returns. Decode needs no mask: a RotatingKVCache
-        // already returns only its window.
-        let (full_mask, sliding_mask) = if seq_len > 1 {
-            let full_live = self
-                .full_attention_index
-                .map(|i| caches[i].as_interface().live_len())
-                .unwrap_or(0);
-            let sliding_live = self
-                .sliding_index
-                .map(|i| caches[i].as_interface().live_len())
-                .unwrap_or(0);
-            // Each mask is `None` where a single row can take MLX's causal
-            // mode or native window route instead and MLX fuses it (#3072).
-            let dtype = mlxcel_core::array_dtype(&h);
-            let batch = mlxcel_core::array_shape(&h)[0];
-            let geometry = |idx: Option<usize>| {
+        let (full_mask, sliding_mask) = hybrid_prefill_masks(
+            &h,
+            caches,
+            self.full_attention_index,
+            self.sliding_index,
+            self.sliding_window,
+            |idx| {
                 self.layers
-                    .get(idx.unwrap_or(0))
+                    .get(idx)
                     .map(|layer| layer.self_attn.prefill_attention())
-            };
-            (
-                geometry(self.full_attention_index).and_then(|attention| {
-                    prefill_causal_mask(seq_len, full_live, batch, attention, dtype)
-                }),
-                self.sliding_index
-                    .and_then(|idx| geometry(Some(idx)))
-                    .and_then(|attention| {
-                        prefill_sliding_window_mask(
-                            seq_len,
-                            sliding_live,
-                            self.sliding_window,
-                            batch,
-                            attention,
-                            dtype,
-                            SlidingPrefillKeys::Rotating,
-                        )
-                    }),
-            )
-        } else {
-            (None, None)
-        };
+            },
+        );
 
         for (i, layer) in self.layers.iter().enumerate() {
             let mask = if layer.uses_sliding {
@@ -1556,6 +1580,55 @@ impl AfmoeModel {
     }
 }
 
+/// The two prefill masks of a sliding/full hybrid stack whose per-layer state
+/// is the gemma3 [`Cache`] enum, for an `[B, L, hidden]` activation `h`.
+///
+/// Both masks are sized from the cache's live window rather than the
+/// monotonic offset, so a trimmed cache does not produce a mask wider than the
+/// K/V it returns. Decode (`L == 1`) needs no mask: a RotatingKVCache already
+/// returns only its window. Each mask is `None` where a single row can take
+/// MLX's causal mode or native window route instead and MLX fuses it (#3072).
+/// `geometry` answers a layer index with that layer's attention shape.
+///
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn hybrid_prefill_masks(
+    h: &MlxArray,
+    caches: &mut [Cache],
+    full_attention_index: Option<usize>,
+    sliding_index: Option<usize>,
+    sliding_window: i32,
+    geometry: impl Fn(usize) -> Option<PrefillAttention>,
+) -> (Option<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>) {
+    let shape = mlxcel_core::array_shape(h);
+    let seq_len = shape[1];
+    if seq_len <= 1 {
+        return (None, None);
+    }
+    let full_live = full_attention_index
+        .map(|i| caches[i].as_interface().live_len())
+        .unwrap_or(0);
+    let sliding_live = sliding_index
+        .map(|i| caches[i].as_interface().live_len())
+        .unwrap_or(0);
+    let dtype = mlxcel_core::array_dtype(h);
+    let batch = shape[0];
+    (
+        geometry(full_attention_index.unwrap_or(0))
+            .and_then(|attention| prefill_causal_mask(seq_len, full_live, batch, attention, dtype)),
+        sliding_index.and_then(&geometry).and_then(|attention| {
+            prefill_sliding_window_mask(
+                seq_len,
+                sliding_live,
+                sliding_window,
+                batch,
+                attention,
+                dtype,
+                SlidingPrefillKeys::Rotating,
+            )
+        }),
+    )
+}
+
 // Weight-shape validation.
 
 fn quant_mode(weights: &WeightMap, prefix: &str, group_size: i32, bits: i32) -> &'static str {
@@ -1563,7 +1636,8 @@ fn quant_mode(weights: &WeightMap, prefix: &str, group_size: i32, bits: i32) -> 
     mlxcel_core::layers::infer_quantization_mode(has_biases, group_size, bits)
 }
 
-fn validate_quantized_packing(
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn validate_quantized_packing(
     weights: &WeightMap,
     prefix: &str,
     in_features: usize,
@@ -1596,7 +1670,8 @@ fn validate_quantized_packing(
     )
 }
 
-fn validate_projection(
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn validate_projection(
     weights: &WeightMap,
     prefix: &str,
     out_features: usize,
@@ -1628,7 +1703,8 @@ fn validate_projection(
     validate_quantized_packing(weights, prefix, in_features, group_size, bits)
 }
 
-fn validate_norm(weights: &WeightMap, key: &str, dim: usize) -> Result<(), String> {
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn validate_norm(weights: &WeightMap, key: &str, dim: usize) -> Result<(), String> {
     let weight = weights
         .get(key)
         .ok_or_else(|| format!("Weight not found: {key}"))?;
@@ -1648,7 +1724,9 @@ fn validate_norm(weights: &WeightMap, key: &str, dim: usize) -> Result<(), Strin
 /// size to a negative index but performs no range check on a positive one, so a
 /// stacked tensor with fewer planes than the config claims turns an ordinary
 /// token into an out-of-bounds read whose result reaches the logits.
-fn validate_stacked_experts(
+///
+/// Used by: AFMoE, Kolibri1 (after its load-time expert stacking).
+pub(crate) fn validate_stacked_experts(
     weights: &WeightMap,
     prefix: &str,
     num_experts: usize,
@@ -1692,7 +1770,8 @@ fn validate_stacked_experts(
     validate_quantized_packing(weights, prefix, in_features, group_size, bits)
 }
 
-fn validate_mlp(
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn validate_mlp(
     weights: &WeightMap,
     prefix: &str,
     hidden: usize,

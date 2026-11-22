@@ -255,5 +255,50 @@ pub(crate) fn input_item_to_json(item: &ResponseInputItem) -> Value {
             "type": "compaction",
             "encrypted_content": encrypted_content,
         }),
+        ResponseInputItem::McpListTools { server_label } => json!({
+            "type": "mcp_list_tools",
+            "server_label": server_label,
+            "tools": [],
+        }),
+        ResponseInputItem::McpCall {
+            id,
+            server_label,
+            name,
+            arguments,
+            output,
+            error,
+            approval_request_id,
+        } => json!({
+            "type": "mcp_call",
+            "id": id,
+            "server_label": server_label,
+            "name": name,
+            "arguments": arguments,
+            "output": output,
+            "error": error,
+            "approval_request_id": approval_request_id,
+        }),
+        ResponseInputItem::McpApprovalRequest {
+            id,
+            server_label,
+            name,
+            arguments,
+        } => json!({
+            "type": "mcp_approval_request",
+            "id": id,
+            "server_label": server_label,
+            "name": name,
+            "arguments": arguments,
+        }),
+        ResponseInputItem::McpApprovalResponse {
+            approval_request_id,
+            approve,
+            reason,
+        } => json!({
+            "type": "mcp_approval_response",
+            "approval_request_id": approval_request_id,
+            "approve": approve,
+            "reason": reason,
+        }),
     }
 }

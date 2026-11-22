@@ -167,6 +167,37 @@ fn whisper_model_type_is_detected() {
     fs::remove_dir_all(model_dir).unwrap();
 }
 
+/// PLaMo 2.1 VL (`plamo2vl`) routes to its VLM loader, while the text-only
+/// `plamo2` checkpoint keeps the PLaMo 2 route (issue #1380).
+#[test]
+fn plamo2vl_model_type_is_detected_and_plamo2_is_unchanged() {
+    let cases = [
+        (
+            "plamo2vl",
+            r#"{
+                "model_type": "plamo2vl",
+                "architectures": ["Plamo2VLForCausalLM"],
+                "text_config": {"hidden_size": 2048, "num_hidden_layers": 32, "vocab_size": 100032},
+                "vision_config": {"model_type": "", "vision_encoder_hidden_size": 1152, "image_token_id": 100002}
+            }"#,
+            ModelType::Plamo2VLM,
+        ),
+        (
+            "plamo2",
+            r#"{"model_type": "plamo2", "hidden_size": 2048, "num_hidden_layers": 16, "vocab_size": 100000}"#,
+            ModelType::Plamo2,
+        ),
+    ];
+    for (name, config, expected) in cases {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("config.json"), config).unwrap();
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, expected, "{name}");
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
 /// Nemotron-Parse keeps its geometry under `encoder` / `decoder` sub-configs
 /// and ships an empty `vision_config`; detection keys off the top-level
 /// `model_type` alone (issue #1369).
@@ -511,6 +542,92 @@ fn helium_model_type_is_detected() {
 }
 
 #[test]
+fn arcee_dense_model_type_is_detected() {
+    // AFM-4.5B (`arcee`) is the dense Arcee family. It must not resolve to
+    // AFMoE (`afmoe`) or fall through to the SwiGLU Llama arm (#1719).
+    let model_dir = temp_path("arcee_dense_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "arcee",
+            "architectures": ["ArceeForCausalLM"],
+            "hidden_act": "relu2",
+            "hidden_size": 2560,
+            "num_attention_heads": 20,
+            "num_key_value_heads": 4,
+            "num_hidden_layers": 36,
+            "intermediate_size": 18432,
+            "head_dim": 128,
+            "vocab_size": 128005
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Arcee);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn k2_horizon_model_type_is_detected() {
+    // K2-Horizon loads on the shared Llama decoder, but through its own config
+    // translation so `K2HorizonConfig::validate` can refuse the grouped-norm
+    // and MoE variants; it must not fall through to the plain Llama arm.
+    let model_dir = temp_path("k2_horizon_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "k2_horizon",
+            "architectures": ["K2HorizonForCausalLM"],
+            "hidden_size": 1536,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "num_hidden_layers": 28,
+            "intermediate_size": 5120,
+            "head_dim": 64,
+            "layernorm_num_groups": 1,
+            "rope_parameters": {"rope_type": "yarn", "factor": 16.0},
+            "rope_theta": 1000000.0,
+            "vocab_size": 64256
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::K2Horizon);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn xing4_0_model_type_is_detected() {
+    // Xing4.0 reuses the DeepSeek-V3 decoder but wraps it in a hyper-connection
+    // stream, so it must route to its own model, not the `deepseek_v3` arm.
+    let model_dir = temp_path("xing4_0_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "xing4_0",
+            "architectures": ["Xing4_0ForCausalLM"],
+            "hidden_size": 3584,
+            "num_hidden_layers": 40,
+            "hc_mult": 4,
+            "vocab_size": 131072
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Xing40);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn fastvlm_model_type_is_detected() {
     for model_type in ["fastvlm", "llava_qwen2"] {
         let model_dir = temp_path(&format!("fastvlm_{model_type}"));
@@ -766,6 +883,28 @@ fn mellum_model_type_is_detected() {
 
     let detected = super::detection::get_model_type(&model_dir).unwrap();
     assert_eq!(detected, ModelType::Mellum);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn limite_model_type_is_detected() {
+    let model_dir = temp_path("limite_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "limite",
+            "architectures": ["LimiteForCausalLM"],
+            "hidden_size": 1280,
+            "num_hidden_layers": 48,
+            "vocab_size": 151680
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Limite);
 
     fs::remove_dir_all(model_dir).unwrap();
 }
@@ -2296,4 +2435,69 @@ fn indic_ocr_root_points_at_the_page_pipeline() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("page pipeline"), "{error}");
+}
+
+/// Decider-2b is a decision model: `mlxcel generate` names the decision
+/// entry points instead of the generic unsupported-type error (#2359).
+#[test]
+fn decider2_is_refused_with_the_decision_entry_points() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("config.json"),
+        r#"{"model_type": "decider2", "architectures": ["Qwen3_5ForCausalLM"]}"#,
+    )
+    .unwrap();
+    let error = super::detection::get_model_type(directory.path())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(
+            "decider2 is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model`"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn longcat_flash_sparse_is_detected_with_and_without_model_type() {
+    // The original `meituan-longcat/LongCat-Flash-Lite-Sparse` config omits
+    // `model_type` (#2362), so its `LongcatCausalLM` architecture decides; the
+    // mlx-community conversions declare `longcat_flash_sparse`. The n-gram
+    // variant keeps its own type.
+    for (name, config, want) in [
+        (
+            "longcat_sparse_hf",
+            r#"{"architectures": ["LongcatCausalLM"], "attention_method": "LSA"}"#,
+            ModelType::LongcatFlashSparse,
+        ),
+        (
+            "longcat_sparse_mlx",
+            r#"{"model_type": "longcat_flash_sparse", "architectures": ["LongcatCausalLM"], "vision_config": {}}"#,
+            ModelType::LongcatFlashSparse,
+        ),
+        (
+            "longcat_ngram",
+            r#"{"model_type": "longcat_flash_ngram", "architectures": ["LongcatFlashNgramForCausalLM"]}"#,
+            ModelType::LongcatFlashNgram,
+        ),
+    ] {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("config.json"), config).unwrap();
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, want, "{name}");
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    // Another architecture with no `model_type` still reports the missing key.
+    let model_dir = temp_path("longcat_other_arch");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{"architectures": ["LongcatFlashForCausalLM"]}"#,
+    )
+    .unwrap();
+    let err = super::detection::get_model_type(&model_dir).unwrap_err();
+    assert!(err.to_string().contains("model_type"), "{err}");
+    fs::remove_dir_all(model_dir).unwrap();
 }

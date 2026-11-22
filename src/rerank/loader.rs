@@ -102,6 +102,13 @@ pub fn load_reranker_with_options(
             batch_size,
             options.max_length,
         )?),
+        // `detect_reranker_kind` never returns it: late interaction scores
+        // with the served embedding model, not a reranker checkpoint.
+        RerankerKind::LateInteraction => anyhow::bail!(
+            "{} cannot be loaded as a late-interaction reranker; serve a multi-vector \
+             embedder with -m instead",
+            model_dir.display()
+        ),
     };
 
     let model_type = config

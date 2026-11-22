@@ -39,6 +39,46 @@ const STUB_MODEL_ID: &str = "stub-reranker";
 /// file or a network fetch.
 const TINY_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
+/// Returns the same fixed score for every document, under a chosen kind.
+struct FixedScoreProvider {
+    kind: RerankerKind,
+    score: f32,
+}
+
+impl RerankModelProvider for FixedScoreProvider {
+    fn rerank(
+        &self,
+        _query: RerankItem,
+        documents: Vec<RerankItem>,
+        _instruction: Option<String>,
+    ) -> Result<RerankScores, RerankError> {
+        Ok(RerankScores {
+            scores: vec![self.score; documents.len()],
+            prompt_tokens: 1,
+        })
+    }
+
+    fn model_id(&self) -> &str {
+        "fixed-score-reranker"
+    }
+
+    fn created_at(&self) -> i64 {
+        0
+    }
+
+    fn kind(&self) -> RerankerKind {
+        self.kind
+    }
+
+    fn max_length(&self) -> usize {
+        32
+    }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 struct NonFiniteRerankProvider;
 
 impl RerankModelProvider for NonFiniteRerankProvider {
@@ -586,4 +626,60 @@ async fn non_finite_scores_return_500() {
             .contains("invalid numeric result"),
         "{body}"
     );
+}
+
+async fn fixed_score_status(kind: RerankerKind, score: f32) -> (StatusCode, Value) {
+    let app = app_with(Some(Arc::new(FixedScoreProvider { kind, score })));
+    post(
+        app,
+        "/v1/rerank",
+        json!({"query": "alpha", "documents": ["alpha"]}),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn probability_kinds_reject_scores_outside_the_unit_interval() {
+    for kind in [
+        RerankerKind::SequenceClassifier,
+        RerankerKind::GenerativeText,
+        RerankerKind::GenerativeVl,
+    ] {
+        for score in [1.5_f32, -0.1] {
+            let (status, body) = fixed_score_status(kind, score).await;
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{kind:?} {score}: {body}"
+            );
+            assert_eq!(body["error"]["type"], "server_error");
+        }
+        let (status, body) = fixed_score_status(kind, 0.75).await;
+        assert_eq!(status, StatusCode::OK, "{kind:?}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn late_interaction_accepts_finite_scores_above_one() {
+    let (status, body) = fixed_score_status(RerankerKind::LateInteraction, 19.2).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let score = body["results"][0]["relevance_score"]
+        .as_f64()
+        .expect("relevance_score");
+    assert!((score - 19.2).abs() < 1e-4, "{body}");
+}
+
+#[tokio::test]
+async fn late_interaction_rejects_non_finite_scores() {
+    for score in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let (status, body) = fixed_score_status(RerankerKind::LateInteraction, score).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{score}: {body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("invalid numeric result"),
+            "{body}"
+        );
+    }
 }

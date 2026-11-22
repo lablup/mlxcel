@@ -1003,6 +1003,46 @@ pub enum Lfm2LayerCache {
 }
 
 impl Lfm2LayerCache {
+    /// A fresh cache holding `count` copies of this single-row cache's state:
+    /// the visible KV window and the conv tail broadcast along the batch
+    /// axis. The copies share nothing with `self`, so the trunk a decision
+    /// model filled once can be continued by several rows at a time.
+    ///
+    /// Only an FP16 attention cache can be tiled; an empty conv slot stays
+    /// empty.
+    ///
+    /// Used by: `crate::decision::d1` (the trunk/branch forward).
+    pub(crate) fn tile(&self, count: i32) -> Result<Self, String> {
+        let broadcast = |array: &MlxArray| {
+            let mut shape = mlxcel_core::array_shape(array);
+            shape[0] = count;
+            mlxcel_core::broadcast_to(array, &shape)
+        };
+        match self {
+            Lfm2LayerCache::Attention(kv) => {
+                let mut tiled = KVCache::new_with_mode(KVCacheMode::Fp16);
+                if kv.offset == 0 {
+                    return Ok(Lfm2LayerCache::Attention(tiled));
+                }
+                let (keys, values) = kv.visible_state().ok_or_else(|| {
+                    format!(
+                        "only a filled FP16 attention cache can be tiled, got {:?}",
+                        kv.mode
+                    )
+                })?;
+                tiled.restore_fp16_live_window(
+                    Some(broadcast(&keys)),
+                    Some(broadcast(&values)),
+                    kv.offset,
+                )?;
+                Ok(Lfm2LayerCache::Attention(tiled))
+            }
+            Lfm2LayerCache::Conv(state) => Ok(Lfm2LayerCache::Conv(
+                state.as_ref().map(|state| broadcast(state)),
+            )),
+        }
+    }
+
     fn offset(&self) -> i32 {
         match self {
             Lfm2LayerCache::Attention(kv) => kv.offset,
@@ -1094,7 +1134,8 @@ impl Lfm2Model {
     /// MLX's causal mode (`prefill_causal_mask`, #3072), which the attention
     /// layer runs for a mask-less multi-token forward.
     ///
-    /// Used by: `forward_embeds_rows_with_caches`, `forward_speculative_with`.
+    /// Used by: `forward_embeds_rows_with_caches`, `forward_speculative_with`,
+    /// `forward_hidden_with_caches`.
     pub(crate) fn prefill_attn_mask(
         &self,
         seq_len: i32,
@@ -1282,6 +1323,49 @@ impl Lfm2Model {
 
         let h = self.embedding_norm.forward(&h);
         self.embed_tokens.as_linear(&h)
+    }
+
+    /// The layer stack over `input_embeds` (`[B, L, hidden]`) against explicit
+    /// caches, returning the hidden states of every position after
+    /// `embedding_norm`, with no vocabulary projection. Rows continue the
+    /// caches causally, so a right-padded row's last real position never
+    /// sees its padding.
+    ///
+    /// Caches are the caller's and never touch `Lfm2Model::sequence_state`,
+    /// so this shares no state with generation.
+    ///
+    /// Used by: `crate::decision::d1` (reads only the answer slot, so it
+    /// projects just the rows it needs with [`Self::project_logits`]).
+    pub(crate) fn forward_hidden_with_caches(
+        &self,
+        input_embeds: &MlxArray,
+        caches: &mut [Lfm2LayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_embeds);
+        let attn_offset = caches
+            .iter()
+            .find(|c| matches!(c, Lfm2LayerCache::Attention(_)))
+            .map(|c| c.offset())
+            .unwrap_or(0);
+        let attn_mask = self.prefill_attn_mask(shape[1], attn_offset, shape[0], input_embeds);
+        let mut h = mlxcel_core::copy(input_embeds);
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            let mask = if layer.is_attention() {
+                attn_mask.as_deref()
+            } else {
+                None
+            };
+            h = layer.forward(&h, cache, mask, None);
+        }
+        self.embedding_norm.forward(&h)
+    }
+
+    /// Vocabulary logits for post-norm hidden states: the tied embedding
+    /// read as a linear layer, the only head LFM2 has.
+    ///
+    /// Used by: `crate::decision::d1`.
+    pub(crate) fn project_logits(&self, hidden: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.as_linear(hidden)
     }
 
     pub fn load(model_path: &str) -> Result<(Self, ModelArgs), String> {

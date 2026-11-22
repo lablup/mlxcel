@@ -2431,6 +2431,54 @@ fn server_distributed_request_names_each_distributed_flag() {
     }
 }
 
+#[test]
+fn mcp_startup_refuses_tensor_parallel_stage_and_router_roles() {
+    let mcp = crate::server::mcp::McpStartupConfig {
+        servers: Vec::new(),
+        limits: crate::server::mcp::McpLimits::default(),
+    };
+    let keys = crate::server::ApiKeys::default();
+    let launches = [
+        (
+            ServerStartupConfig {
+                tp_size: 2,
+                ..ServerStartupConfig::default()
+            },
+            "--tp-size",
+        ),
+        (
+            ServerStartupConfig {
+                pp_peer: true,
+                ..ServerStartupConfig::default()
+            },
+            "--pp-peer",
+        ),
+        (
+            ServerStartupConfig {
+                node_role: Some("router".to_string()),
+                ..ServerStartupConfig::default()
+            },
+            "--node-role",
+        ),
+    ];
+    for (mut startup, flag) in launches {
+        startup.mcp = Some(mcp.clone());
+        let message = super::validate_mcp_startup(&startup, &keys, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains(flag) && message.contains("--mcp-tools"),
+            "{message}"
+        );
+    }
+    // Without the feature the same launches are not this check's business.
+    let plain = ServerStartupConfig {
+        tp_size: 2,
+        ..ServerStartupConfig::default()
+    };
+    assert!(super::validate_mcp_startup(&plain, &keys, false).is_ok());
+}
+
 /// #2664, #2697, #2722: lines raised before `initialize_server_logging`
 /// installs a subscriber (a CORS origin variable that a command-line flag
 /// overrode, or the INFO line an `env_fallback_*` helper raises when a flag

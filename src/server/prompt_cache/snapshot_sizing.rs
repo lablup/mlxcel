@@ -366,7 +366,7 @@ fn snapshot_family_is_model_aware(
     }
     // Families whose server state is model-owned and reused only through
     // snapshots (`supports_snapshot_reuse`). The attention-only ones among
-    // them (Gemma 3/4, Llama 4, AFMoE, Inkling) park a full KV state per
+    // them (Gemma 3/4, Llama 4, AFMoE, Kolibri-1, Inkling) park a full KV state per
     // entry, which is what outgrows the fixed default on a large checkpoint.
     model_types(config).iter().any(|mt| {
         matches!(
@@ -376,6 +376,7 @@ fn snapshot_family_is_model_aware(
                 | "gemma4_unified"
                 | "llama4"
                 | "afmoe"
+                | "kolibri1"
                 | "inkling"
                 | "inkling_mm_model"
                 | "jamba"

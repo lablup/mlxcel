@@ -149,10 +149,12 @@ pub fn generate_shard_plan(
         | "nemotron_nas"
         | "rwkv7"
         | "recurrent_gemma"
+        | "z1t"
         | "kimi_linear"
         | "kimi_k3"
         | "longcat_flash"
         | "longcat_flash_ngram"
+        | "longcat_flash_sparse"
         | "qwen3_next" => Ok(build_replicated_plan(architecture, num_layers)),
 
         _ => {

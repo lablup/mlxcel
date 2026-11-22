@@ -34,6 +34,7 @@ The current `main` branch is v0.9.0-beta.1 plus unreleased work. Install from so
 - **Xiaomi MiMo-V2 / V2.6 multimodal support.** `mimo_v2` keeps the MiMo v2 Flash decoder unchanged and adds the `mimovl` vision tower for image and video input through the Qwen2.5-VL processor protocol. The loader unfuses the checkpoint's tensor-parallel `qkv_proj` (per-shard FP8 grids, including the padded 108-row degree-4 case) and repacks MXFP4 routed experts, covering both the native `XiaomiMiMo/MiMo-V2.6-Flash-RL` release and the converted `nativ-community/MiMo-V2.6-Flash-RL-MLX-4bit` one. Audio is not supported yet.
 - **DeepSeek V2 caches the MLA latent by default.** With `MLXCEL_MLA_ABSORBED` unset, `deepseek_v2` checkpoints and DeepSeek-VL2's decoder run absorbed decode over the `(ckv, kpe)` latent on Metal, CUDA and ROCm, which stores 8.9x less KV per token on DeepSeek-V2-Lite. Decode is within a few percent of the decompressed layout at a 512-token prompt and faster behind long prompts. `MLXCEL_MLA_ABSORBED=0` restores the decompressed cache. See [MLA absorbed decode](docs/mla-absorbed-decode.md).
 - **Background Responses.** `POST /v1/responses` with `background: true` returns a queued response at once; the job can be polled, streamed and resumed from an event offset, or cancelled, on a single model server and on the multi-model router.
+- **Server-side MCP tools on Responses.** With the `--mcp-tools` opt-in, `mlxcel-server` starts the stdio MCP servers of a Cursor-compatible `mcpServers` file and runs the tool loop for the built-in `mcp` tool of `POST /v1/responses`, with approval requests, per-call timeouts, output caps and a round limit. It is off by default and refused on a non-loopback listener without API keys. See [MCP tools](docs/responses-api.md#mcp-tools-server-side-tool-loop).
 
 See [Server features](docs/server-features.md) for the route and deployment map and [llama-server compatibility](docs/llama-server-compat.md) for the exact b10621 boundary.
 
@@ -179,7 +180,7 @@ mlxcel-server -m Qwen3.5-0.8B-4bit \
 
 See [Embeddings and reranking](docs/embeddings.md) for multimodal inputs, supported families, pooling, request schemas, and side-model serving.
 
-Typed decision models (named `choice`, `score`, `bool` and `multi_label` questions answered with calibrated probabilities) are served with `--decision-model` on `POST /v1/decisions` and run offline with `mlxcel decide`; see [Typed decisions](docs/decisions.md). The API is in place and decision families are being ported.
+Typed decision models (named `choice`, `score`, `bool` and `multi_label` questions answered with calibrated probabilities) are served with `--decision-model` on `POST /v1/decisions` and run offline with `mlxcel decide`; see [Typed decisions](docs/decisions.md). Ported families: LiquidAI d1-3B and Decider-2b (`decider2`).
 
 ### Tag and redact entities
 
