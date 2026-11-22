@@ -28,6 +28,9 @@ Usage:
     kolibri1_oracle_trace.py MODEL_DIR TEXT_FILE [CHUNK_TOKENS=256] [MAX_CHUNKS=4]
         [TOPK=8] [PREFILL=0] [--rope-on-full] [--no-prefix-sharing] > reference.tsv
 
+The mlxcel decode arm (`MLXCEL_TRACE_BATCH_ROWS=1`) traces from token PREFILL,
+so with `256 8 8 1024` here its chunks 0 to 3 are this trace's chunks 4 to 7.
+
 Needs `mlx`, `mlx-vlm` (any build with `mlx_vlm.models.kolibri1`, for example
 the vendored `references/mlx-vlm` on `PYTHONPATH`), `tokenizers` and `numpy`.
 """
