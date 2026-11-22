@@ -39,7 +39,8 @@
 //!   only the attention layers hold a context-proportional KV cache; the
 //!   recurrent/Mamba layers carry an O(1) state, negligible for budgeting. The
 //!   flat formula counts every layer as attention (*overcount*).
-//! - **Pure SSM** (Mamba, Mamba2): no KV cache at all (*phantom* KV).
+//! - **Pure SSM / attention-free** (Mamba, Mamba2, Z1T): no KV cache at all
+//!   (*phantom* KV). Z1T keeps an O(1) AFT-conv pool and conv window per layer.
 //!
 //! This module parses `config.json` into a set of homogeneous [`KvGroup`]s and
 //! sums their context-aware footprint. It degrades gracefully: any model whose
@@ -74,7 +75,8 @@ pub enum KvArchKind {
     MlaDecompressed,
     /// Attention + recurrent/SSM layers; only attention layers hold KV.
     Hybrid,
-    /// Pure SSM (Mamba/Mamba2) — no context-proportional KV cache.
+    /// Pure SSM (Mamba/Mamba2) or attention-free (Z1T): no
+    /// context-proportional KV cache.
     PureSsm,
 }
 
@@ -454,7 +456,9 @@ fn classify(
     let text = &owned_text;
 
     // 1. Pure SSM — no context-proportional KV cache (needs only the layer count).
-    if mt == "mamba" || mt == "mamba2" || mt == "falcon_mamba" {
+    // Z1T (#2364) is attention-free: each layer keeps a fixed-size AFT-conv
+    // pool and `ksize - 1` window, so its config carries no attention heads.
+    if mt == "mamba" || mt == "mamba2" || mt == "falcon_mamba" || mt == "z1t" {
         return Some((Vec::new(), KvArchKind::PureSsm));
     }
 
@@ -1551,6 +1555,24 @@ mod tests {
             assert_eq!(e.total_bytes, 0);
             assert_eq!(e.marginal_bytes_per_token, 0);
         }
+    }
+
+    #[test]
+    fn z1t_attention_free_has_zero_kv() {
+        // Without the classification, the missing head count made the flat
+        // formula charge 196608 bytes per token on Z1T-0 (#2364).
+        let cfg = json!({
+            "model_type": "z1t",
+            "vocab_size": 50257,
+            "hidden_size": 12288,
+            "num_hidden_layers": 4,
+            "aft_heads": 4,
+            "aft_ksize": 4,
+        });
+        let e = est(&cfg, 8192);
+        assert_eq!(e.kind, KvArchKind::PureSsm);
+        assert_eq!(e.total_bytes, 0);
+        assert_eq!(e.marginal_bytes_per_token, 0);
     }
 
     #[test]
