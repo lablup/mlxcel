@@ -275,6 +275,9 @@ fn yarn_magnitude_scales_only_the_rotated_dims() {
 #[test]
 fn prefill_and_decode_cache_yarn_rotated_keys_past_the_original_context() {
     let _runtime = crate::initialize_runtime();
+    // Forward passes bump the process-wide MLA decode-path counters that the
+    // latent tests measure as deltas, so hold the shared MLX test lock.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let args = tiny_config(Some(&tiny_yarn_block()));
     let attn = tiny_attention(&args);
     let hidden = args.hidden_size;
@@ -300,6 +303,9 @@ fn prefill_and_decode_cache_yarn_rotated_keys_past_the_original_context() {
 #[test]
 fn batched_decode_caches_yarn_rotated_keys_per_row() {
     let _runtime = crate::initialize_runtime();
+    // Forward passes bump the process-wide MLA decode-path counters that the
+    // latent tests measure as deltas, so hold the shared MLX test lock.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let args = tiny_config(Some(&tiny_yarn_block()));
     let attn = tiny_attention(&args);
     let hidden = args.hidden_size;
@@ -343,6 +349,9 @@ fn batched_decode_caches_yarn_rotated_keys_per_row() {
 #[test]
 fn indexer_queries_and_keys_rotate_with_yarn() {
     let _runtime = crate::initialize_runtime();
+    // Forward passes bump the process-wide MLA decode-path counters that the
+    // latent tests measure as deltas, so hold the shared MLX test lock.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let args = tiny_config(Some(&tiny_yarn_block()));
     let weights = synthetic_mla_weights(&args, PREFIX, true);
     let indexer = Indexer::load(&weights, &args, PREFIX)
@@ -382,6 +391,9 @@ fn indexer_queries_and_keys_rotate_with_yarn() {
 #[test]
 fn yarn_model_batched_decode_matches_sequential() {
     let _runtime = crate::initialize_runtime();
+    // Forward passes bump the process-wide MLA decode-path counters that the
+    // latent tests measure as deltas, so hold the shared MLX test lock.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let args = tiny_config(Some(&tiny_yarn_block()));
     let mut weights = synthetic_mla_weights(&args, PREFIX, true);
     let mut put = |key: &str, shape: &[i32]| {
@@ -432,6 +444,9 @@ fn empty_cache_at(offset: i32) -> KVCache {
 #[test]
 fn mla_queries_rotate_with_the_key_table_past_the_original_context() {
     let _runtime = crate::initialize_runtime();
+    // Forward passes bump the process-wide MLA decode-path counters that the
+    // latent tests measure as deltas, so hold the shared MLX test lock.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let args = tiny_config(Some(&tiny_yarn_block()));
     let attn = tiny_attention(&args);
     let hidden = args.hidden_size;
