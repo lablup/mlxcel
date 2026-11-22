@@ -68,6 +68,13 @@ const GELU_PROJECTION_OPERATION: &str = "micro-oracle.gelu-projection.f32";
 const PREFIX_SUM_OPERATION: &str = "micro-oracle.cuda-prefix-sum.f32";
 const AFFINE_Q4_DEQUANT_OPERATION: &str = "micro-oracle.affine-q4-dequant.f32";
 
+mod production;
+
+pub use production::{
+    ProductionProbeOperator, ProductionProbeSpec, SscpConvolutionGeometry, pack_affine_q4_lanes,
+    production_probe_spec, run_production_probe,
+};
+
 #[derive(Clone, Copy)]
 struct ProbeNumericContract {
     checkpoint_dtype: CheckpointDType,
@@ -1040,41 +1047,165 @@ fn checked_output_bytes(shape: &[usize]) -> Result<usize, String> {
     })
 }
 
-fn execute_probe(device: &str, definition: ProbeDefinition) -> Result<NumericOracleReport, String> {
-    if !device.starts_with("local") {
-        return Err(format!(
-            "canonical operator probes support only local IREE CPU targets, got {device:?}"
-        ));
+/// Device URIs the probe executor accepts: local IREE CPU targets plus the
+/// CUDA and HIP GPU targets `target_flags` already knows (issue #3212).
+fn validate_probe_device(device: &str) -> Result<(), String> {
+    if device.starts_with("local") || device == "cuda" || device == "hip" {
+        return Ok(());
     }
-    if definition.dynamic_operand_indices.is_empty() {
+    Err(format!(
+        "operator probes support local IREE CPU targets, \"cuda\", and \"hip\", got {device:?}"
+    ))
+}
+
+/// IREE compiler, target flags, and runtime that build and run one probe.
+struct ProbeToolchain {
+    device: String,
+    compiler: std::path::PathBuf,
+    flags: Vec<String>,
+    compiler_version: String,
+    runtime_identity: String,
+}
+
+impl ProbeToolchain {
+    fn resolve(device: &str) -> Result<Self, String> {
+        validate_probe_device(device)?;
+        let compiler = iree_compile_bin()?;
+        let flags = target_flags(device)?;
+        let compiler_version = compiler_version(&compiler)?;
+        let runtime_identity = runtime_archive_identity(&compiler)?;
+        Ok(Self {
+            device: device.to_string(),
+            compiler,
+            flags,
+            compiler_version,
+            runtime_identity,
+        })
+    }
+
+    fn candidate_algorithm(&self) -> Result<AlgorithmIdentity, String> {
+        if self.device.starts_with("local") {
+            AlgorithmIdentity::unobserved(
+                "IREE does not expose the selected CPU operator kernel identity",
+            )
+        } else {
+            AlgorithmIdentity::unobserved(format!(
+                "IREE does not expose the selected {} dispatch kernel identity",
+                self.device
+            ))
+        }
+    }
+}
+
+/// The emitted IREE side of one probe: graph, resident weights, operands, and
+/// the comparison its report applies.
+struct ProbeArtifact {
+    operation: &'static str,
+    entry: &'static str,
+    cache_key: &'static str,
+    config_identity: String,
+    mlir: String,
+    operands: Vec<NumericTensor>,
+    weights: Vec<AuxiliaryWeight>,
+    dynamic_operand_indices: Vec<usize>,
+    output_shape: Vec<usize>,
+    comparison: ComparisonMode,
+}
+
+impl ProbeDefinition {
+    fn into_artifact(self) -> ProbeArtifact {
+        ProbeArtifact {
+            operation: self.operation,
+            entry: self.entry,
+            cache_key: self.cache_key,
+            config_identity: self.config_identity,
+            mlir: self.mlir,
+            operands: self.operands,
+            weights: self.weights,
+            dynamic_operand_indices: self.dynamic_operand_indices,
+            output_shape: self.output_shape,
+            comparison: self.comparison,
+        }
+    }
+}
+
+fn execute_probe(device: &str, definition: ProbeDefinition) -> Result<NumericOracleReport, String> {
+    let toolchain = ProbeToolchain::resolve(device)?;
+    let operator_contract = operator_identity(
+        &toolchain.compiler_version,
+        &toolchain.runtime_identity,
+        device,
+        &definition,
+    )?;
+    let reference_algorithm = definition.reference_algorithm;
+    let reference = definition.reference;
+    let artifact = definition.into_artifact();
+    let reference_backend = NumericBackendIdentity::new(
+        "rust-canonical-decomposition",
+        env!("CARGO_PKG_VERSION"),
+        format!("{}-v1", artifact.cache_key),
+        "rust-f32",
+        vec![reference_algorithm.to_string()],
+        std::env::consts::ARCH,
+        "host-cpu",
+        format!("rust-{}-v1", artifact.cache_key),
+        AlgorithmIdentity::observed(reference_algorithm)?,
+    )?;
+    execute_artifact(
+        &toolchain,
+        artifact,
+        NumericOracleClaim::CanonicalDecomposition,
+        &operator_contract,
+        reference_backend,
+        reference,
+    )
+}
+
+/// Compile, qualify, load, and invoke one probe artifact against `reference`.
+///
+/// The artifact contract binds `operator_contract`, so the report and the v3
+/// manifest name the same operator identity.
+fn execute_artifact<R>(
+    toolchain: &ProbeToolchain,
+    artifact: ProbeArtifact,
+    claim: NumericOracleClaim,
+    operator_contract: &OperatorNumericContractSet,
+    reference_backend: NumericBackendIdentity,
+    reference: R,
+) -> Result<NumericOracleReport, String>
+where
+    R: FnOnce(&[NumericTensor]) -> Result<NumericTensor, String>,
+{
+    if artifact.dynamic_operand_indices.is_empty() {
         return Err(format!(
             "{} requires at least one dynamic operand",
-            definition.operation
+            artifact.operation
         ));
     }
-    for &index in &definition.dynamic_operand_indices {
-        if index >= definition.operands.len() {
+    for &index in &artifact.dynamic_operand_indices {
+        if index >= artifact.operands.len() {
             return Err(format!(
                 "{} dynamic operand index {index} exceeds {} operands",
-                definition.operation,
-                definition.operands.len()
+                artifact.operation,
+                artifact.operands.len()
             ));
         }
     }
-    let output_bytes = checked_output_bytes(&definition.output_shape)?;
-    let compiler = iree_compile_bin()?;
-    let flags = target_flags(device)?;
-    let compiler_version = compiler_version(&compiler)?;
-    let runtime_identity = runtime_archive_identity(&compiler)?;
-    let operator_contract =
-        operator_identity(&compiler_version, &runtime_identity, device, &definition)?;
+    let output_bytes = checked_output_bytes(&artifact.output_shape)?;
+    let ProbeToolchain {
+        device,
+        compiler,
+        flags,
+        compiler_version,
+        runtime_identity,
+    } = toolchain;
     let generation_identity = format!(
         "compiler={};version={};runtime={runtime_identity};flags={flags:?};mlir_sha256={}",
         compiler.display(),
         compiler_version,
-        sha256_hex(definition.mlir.as_bytes())
+        sha256_hex(artifact.mlir.as_bytes())
     );
-    let ProbeDefinition {
+    let ProbeArtifact {
         operation,
         entry,
         cache_key,
@@ -1085,10 +1216,7 @@ fn execute_probe(device: &str, definition: ProbeDefinition) -> Result<NumericOra
         dynamic_operand_indices,
         output_shape,
         comparison,
-        reference_algorithm,
-        reference,
-        ..
-    } = definition;
+    } = artifact;
     let artifact_contract = AuxiliaryArtifactContract::new_with_operator_numeric_contract(
         entry,
         config_identity,
@@ -1098,40 +1226,27 @@ fn execute_probe(device: &str, definition: ProbeDefinition) -> Result<NumericOra
     let cache = std::env::temp_dir().join("mlxcel-xla-numeric-probes");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let vmfb = cached_vmfb_path(&compiler, &mlir, &flags, &cache, cache_key, 0);
+    let vmfb = cached_vmfb_path(compiler, &mlir, flags, &cache, cache_key, 0);
     let vmfb = qualify_auxiliary_artifact(&vmfb, &artifact_contract, &weights, |output| {
-        compile_one_to(&compiler, &mlir, &flags, &cache, cache_key, 0, output)
+        compile_one_to(compiler, &mlir, flags, &cache, cache_key, 0, output)
     })?;
     let mut module = IreeAuxiliaryModule::load(device, &vmfb, &artifact_contract, weights)?;
     let artifact_fingerprint = format!("{:016x}", module.fingerprint());
-    let reference_backend = NumericBackendIdentity::new(
-        "rust-canonical-decomposition",
-        env!("CARGO_PKG_VERSION"),
-        format!("{cache_key}-v1"),
-        "rust-f32",
-        vec![reference_algorithm.to_string()],
-        std::env::consts::ARCH,
-        "host-cpu",
-        format!("rust-{cache_key}-v1"),
-        AlgorithmIdentity::observed(reference_algorithm)?,
-    )?;
     let candidate_backend = NumericBackendIdentity::new(
         "iree",
-        compiler_version,
-        runtime_identity,
+        compiler_version.clone(),
+        runtime_identity.clone(),
         compiler.display().to_string(),
-        flags.iter().map(|flag| (*flag).to_string()).collect(),
-        device,
-        device,
+        flags.clone(),
+        device.clone(),
+        device.clone(),
         artifact_fingerprint,
-        AlgorithmIdentity::unobserved(
-            "IREE does not expose the selected CPU operator kernel identity",
-        )?,
+        toolchain.candidate_algorithm()?,
     )?;
     let case = NumericOracleCase::from_operator_contract(
         operation,
-        NumericOracleClaim::CanonicalDecomposition,
-        &operator_contract,
+        claim,
+        operator_contract,
         reference_backend,
         candidate_backend,
         comparison,

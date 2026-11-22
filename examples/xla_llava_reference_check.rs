@@ -20,6 +20,9 @@
 //! `xla-diagnostics`. Generated binary captures stay outside Git and are
 //! compared by `spike/openxla/llava_reference_oracle.py`.
 
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
+
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Read;
@@ -637,6 +640,7 @@ fn render_converted_prompt(
 }
 
 fn main() {
+    mlx_reference_policy::pin_mlx_tf32_disabled_or_exit();
     let model = required_path("--model");
     let reference_dir = required_path("--reference");
     let image_path = required_path("--image");
@@ -1137,8 +1141,7 @@ fn main() {
         "host_compute": {
             "vision_projector": "float32",
             "prompt_embedding_lookup": "bfloat16",
-            "mlx_enable_tf32": std::env::var("MLX_ENABLE_TF32")
-                .unwrap_or_else(|_| "1 (MLX default)".to_string()),
+            "mlx_enable_tf32": mlx_reference_policy::recorded_mlx_tf32(),
         },
         "model_ownership": {
             "host": "image processor and text embedding table only",

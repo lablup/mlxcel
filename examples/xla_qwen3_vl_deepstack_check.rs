@@ -22,6 +22,9 @@
 //! mutates the actual captured branches to prove that dropping or zeroing one
 //! branch is detected.
 
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -210,6 +213,7 @@ fn patch_size(model: &Path) -> usize {
 }
 
 fn main() {
+    mlx_reference_policy::pin_mlx_tf32_disabled_or_exit();
     let model_path = required_path("--model");
     let image_path = required_path("--image");
     let device = argument("--device").unwrap_or_else(|| "local-task".to_string());
@@ -633,6 +637,7 @@ fn main() {
         "schema": 2,
         "model": model_path,
         "image": image_path,
+        "mlx_enable_tf32": mlx_reference_policy::recorded_mlx_tf32(),
         "device": device,
         "context_capacity": context_capacity,
         "completed_phase": "language",
