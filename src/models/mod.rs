@@ -330,6 +330,7 @@ pub mod telechat3;
 #[cfg(test)]
 pub(crate) mod vl_embedding_test_images;
 pub mod whisper;
+pub mod xing4_0;
 pub mod youtu_vl_lm;
 pub mod z1t;
 
@@ -513,6 +514,7 @@ pub use starcoder2::StarCoder2Model;
 pub use step3p5::Step3p5Model;
 pub use telechat3::TeleChat3Model;
 pub use whisper::WhisperModel;
+pub use xing4_0::Xing40Model;
 pub use youtu_vl_lm::YoutuLanguageModel;
 pub use z1t::Z1t;
 
@@ -639,6 +641,8 @@ pub enum ModelType {
     DeepSeekV32,
     /// DeepSeek-V4 (HyperConnections, pooled-KV compression, HiSA, hash-routed MoE).
     DeepSeekV4,
+    /// Xing4.0 (DeepSeek-V3 MLA + MoE inside a manifold hyper-connection stream).
+    Xing40,
     /// rednote dots.llm1 (DeepSeek-V3-style MoE without MLA).
     Dots1,
 
@@ -936,6 +940,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekV3,
     ModelType::DeepSeekV32,
     ModelType::DeepSeekV4,
+    ModelType::Xing40,
     ModelType::Dots1,
     // Cohere family
     ModelType::Cohere,
@@ -1183,6 +1188,10 @@ impl ModelType {
             ModelType::DeepSeekV3 => ("DeepSeek v3 / R1", "DeepSeek"),
             ModelType::DeepSeekV32 => ("DeepSeek v3.2", "DeepSeek"),
             ModelType::DeepSeekV4 => ("DeepSeek v4", "DeepSeek"),
+            ModelType::Xing40 => (
+                "Xing4.0 (DeepSeek-V3 MoE, hyper-connection stream)",
+                "DeepSeek",
+            ),
 
             // ----- Cohere -----
             ModelType::Cohere => ("Command R (Cohere)", "Cohere"),
@@ -1623,6 +1632,7 @@ mod metadata_tests {
             DeepSeekV3,
             DeepSeekV32,
             DeepSeekV4,
+            Xing40,
             Dots1,
             Cohere,
             Cohere2,

@@ -912,7 +912,8 @@ struct SentencePieceConfig {
     /// `added_tokens_decoder` (or `added_tokens.json` when the decoder table
     /// is absent). See [`sp_added_vocab::read_sp_added_tokens`].
     added_tokens: Vec<(u32, tokenizers::AddedToken)>,
-    /// `add_bos_token`, defaulting to false when the key is absent.
+    /// `add_bos_token`, defaulting to false when the key is absent, except for
+    /// the tokenizer classes in [`SP_CLASSES_DEFAULTING_TO_BOS`].
     add_bos: bool,
     /// `add_prefix_space`, kept as an `Option` because "absent" and
     /// "explicitly false" mean different things here: absent leaves the
@@ -920,6 +921,14 @@ struct SentencePieceConfig {
     /// `false` overrides it. See [`open_sentencepiece_processor`].
     add_prefix_space: Option<bool>,
 }
+
+/// Remote-code SentencePiece tokenizer classes whose constructor defaults
+/// `add_bos_token` to true, so a `tokenizer_config.json` that omits the key
+/// still gets a BOS on every encode with special tokens in transformers.
+///
+/// `Xing4_0Tokenizer` (`tokenization_xing4_0.py`, issue #2356) prepends
+/// `<_start>`; the released Xing4.0 configs do not spell the key out.
+const SP_CLASSES_DEFAULTING_TO_BOS: &[&str] = &["Xing4_0Tokenizer"];
 
 /// Read the SentencePiece-relevant parts of `tokenizer_config.json`: the
 /// added tokens, `add_bos_token` and `add_prefix_space`.
@@ -934,9 +943,16 @@ fn parse_special_tokens(model_path: &Path) -> SentencePieceConfig {
     let added_tokens = sp_added_vocab::read_sp_added_tokens(config.as_ref(), model_path);
 
     if let Some(config) = &config {
-        // Parse add_bos_token
+        // Parse add_bos_token; when absent, a class whose constructor
+        // defaults it to true keeps that default.
         if let Some(v) = config.get("add_bos_token").and_then(|v| v.as_bool()) {
             add_bos = v;
+        } else if config
+            .get("tokenizer_class")
+            .and_then(|v| v.as_str())
+            .is_some_and(|class| SP_CLASSES_DEFAULTING_TO_BOS.contains(&class))
+        {
+            add_bos = true;
         }
 
         // Parse add_prefix_space. Only an explicit boolean counts; a missing
@@ -3477,6 +3493,36 @@ mod tests {
             std::fs::write(dir.path().join("tokenizer_config.json"), body.to_string()).unwrap();
             assert_eq!(
                 parse_special_tokens(dir.path()).add_prefix_space,
+                expected,
+                "for {body}"
+            );
+        }
+    }
+
+    /// `Xing4_0Tokenizer` defaults `add_bos_token` to true in its constructor,
+    /// so an absent key means a BOS (issue #2356); an explicit value and any
+    /// other class keep the absent-means-false rule.
+    #[test]
+    fn xing_tokenizer_class_defaults_add_bos_on() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for (body, expected) in [
+            (
+                serde_json::json!({ "tokenizer_class": "Xing4_0Tokenizer" }),
+                true,
+            ),
+            (
+                serde_json::json!({ "tokenizer_class": "Xing4_0Tokenizer", "add_bos_token": false }),
+                false,
+            ),
+            (
+                serde_json::json!({ "tokenizer_class": "LlamaTokenizer" }),
+                false,
+            ),
+            (serde_json::json!({}), false),
+        ] {
+            std::fs::write(dir.path().join("tokenizer_config.json"), body.to_string()).unwrap();
+            assert_eq!(
+                parse_special_tokens(dir.path()).add_bos,
                 expected,
                 "for {body}"
             );
