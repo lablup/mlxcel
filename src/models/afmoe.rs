@@ -116,6 +116,7 @@ use std::path::Path;
 
 use crate::models::gemma3::{Cache, CacheInterface};
 use crate::models::gpt2::{dim_eq, validate_embedding_table};
+use crate::models::kv_ring_checkpoint;
 use crate::models::kv_snapshot::KvSnapshotNames;
 use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, group_mask_scores};
@@ -2158,6 +2159,47 @@ impl LanguageModel for AfmoeModel {
             cache
                 .truncate_to(target, AFMOE_KV_SNAPSHOT_NAMES)
                 .map_err(|err| format!("{prefix}: {err}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
+    /// A ring-only checkpoint (issue #3255): the sliding layers' rings, which
+    /// a longer snapshot of the same conversation cannot give back once they
+    /// have wrapped. The global layers come from that snapshot.
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &ModelStateSnapshot,
+    ) -> Option<ModelStateSnapshot> {
+        kv_ring_checkpoint::ring_checkpoint(
+            snapshot,
+            "afmoe",
+            self.layers.len(),
+            AFMOE_KV_SNAPSHOT_NAMES,
+        )
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &ModelStateSnapshot,
+        donor: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        let target = kv_ring_checkpoint::checkpoint_target(
+            checkpoint,
+            donor,
+            "afmoe",
+            AFMOE_KV_SNAPSHOT_NAMES,
+        )?;
+        let mut state = self.make_internal_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from_ring_checkpoint(
+                checkpoint,
+                donor,
+                &format!("layer{idx}"),
+                target,
+                AFMOE_KV_SNAPSHOT_NAMES,
+            )?;
         }
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())

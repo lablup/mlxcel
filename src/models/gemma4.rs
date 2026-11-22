@@ -38,6 +38,7 @@ pub(crate) use verify_rows::stack_prefilled_rows;
 use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
+use crate::models::kv_ring_checkpoint;
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
 use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 use crate::models::speculative_exactness::{
@@ -1298,6 +1299,37 @@ impl Cache {
             Self::Rotating(cache) => {
                 kv_snapshot::restore_rotating(cache, snapshot, prefix, GEMMA4_KV_SNAPSHOT_NAMES)
             }
+        }
+    }
+
+    /// Restore this layer from a ring checkpoint and its donor (issue #3255):
+    /// a sliding layer from the checkpoint's ring, a full-attention layer
+    /// from the donor cut back to `target` tokens.
+    ///
+    /// Used by: Gemma 4 `restore_sequence_state_from_checkpoint`.
+    pub(crate) fn restore_from_ring_checkpoint(
+        &mut self,
+        checkpoint: &ModelStateSnapshot,
+        donor: &ModelStateSnapshot,
+        prefix: &str,
+        target: i32,
+    ) -> Result<(), String> {
+        match self {
+            Self::Standard(cache) => kv_ring_checkpoint::restore_standard_from_donor(
+                cache,
+                donor,
+                prefix,
+                target,
+                GEMMA4_KV_SNAPSHOT_NAMES,
+            ),
+            Self::Rotating(cache) => kv_ring_checkpoint::restore_rotating_from_checkpoint(
+                cache,
+                checkpoint,
+                donor,
+                prefix,
+                target,
+                GEMMA4_KV_SNAPSHOT_NAMES,
+            ),
         }
     }
 
@@ -7045,6 +7077,46 @@ impl LanguageModel for Gemma4Wrapper {
             cache
                 .truncate_to(target)
                 .map_err(|err| format!("{prefix}: {err}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
+    /// A ring-only checkpoint (issue #3255): the sliding layers' rings, which
+    /// a longer snapshot of the same conversation cannot give back once they
+    /// have wrapped. The full-attention layers come from that snapshot.
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &ModelStateSnapshot,
+    ) -> Option<ModelStateSnapshot> {
+        kv_ring_checkpoint::ring_checkpoint(
+            snapshot,
+            "gemma4",
+            self.num_layers(),
+            GEMMA4_KV_SNAPSHOT_NAMES,
+        )
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &ModelStateSnapshot,
+        donor: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        let target = kv_ring_checkpoint::checkpoint_target(
+            checkpoint,
+            donor,
+            "gemma4",
+            GEMMA4_KV_SNAPSHOT_NAMES,
+        )?;
+        let mut state = self.make_configured_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from_ring_checkpoint(
+                checkpoint,
+                donor,
+                &format!("layer{idx}"),
+                target,
+            )?;
         }
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())

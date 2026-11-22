@@ -39,6 +39,7 @@
 
 mod apc_lookup;
 pub mod block_hash;
+pub mod ctx_checkpoints;
 pub mod decoded_tail;
 pub mod entry;
 pub mod hybrid_ssm;
@@ -62,6 +63,10 @@ mod snapshot_divergence_tests;
 pub use apc_lookup::ApcStoreStats;
 pub use block_hash::{
     ApcBlockHash, ApcHashAlgo, BlockHashChain, DEFAULT_APC_BLOCK_SIZE, ParseApcHashError,
+};
+pub use ctx_checkpoints::{
+    CHECKPOINT_MIN_STEP_FLOOR, CtxCheckpointEnv, CtxCheckpointFlags, CtxCheckpointNotice,
+    CtxCheckpointPolicy, resolve_ctx_checkpoint_policy,
 };
 pub use decoded_tail::decoded_tail_snapshot_enabled;
 pub use entry::{CacheEntry, DetachedKvSet, ModelSnapshotEntry, SnapshotOrigin};
@@ -90,7 +95,8 @@ pub use snapshot_sizing::{
     MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES_KEEP_PREVIOUS_TURN,
     MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES, SnapshotCapacityRecommendation,
     model_aware_snapshot_target_entries, recommend_model_kv_store_capacity,
-    recommend_model_snapshot_capacity, recommend_state_checkpoint_capacity,
+    recommend_model_snapshot_capacity, recommend_ring_checkpoint_capacity_from_config,
+    recommend_state_checkpoint_capacity,
 };
 pub use store::{PromptCacheStore, SnapshotDivergence, SnapshotLookupOutcome};
 pub use types::{BucketKey, InsertError};
