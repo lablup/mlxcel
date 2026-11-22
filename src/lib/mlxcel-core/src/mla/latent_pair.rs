@@ -69,6 +69,7 @@ pub static QUANTIZED_LATENT_FAMILIES: &[&str] = &[
     "kimi_k3",
     "longcat_flash",
     "longcat_flash_ngram",
+    "longcat_flash_sparse",
 ];
 
 /// Whether `model_type` is a latent-pair family that stores its latent through
@@ -81,8 +82,9 @@ pub static QUANTIZED_LATENT_FAMILIES: &[&str] = &[
 ///
 /// Used by: `mlxcel::cli::turbo_args::model_stores_quantized_latent`,
 /// `mlxcel::execution::kv_arch` (sizing) and the load-time `quantized_latent`
-/// flags of `mlxcel::models::glm4_moe_lite` and
-/// `mlxcel::models::longcat_flash_ngram`.
+/// flags of `mlxcel::models::glm4_moe_lite`,
+/// `mlxcel::models::longcat_flash_ngram` and
+/// `mlxcel::models::longcat_flash_sparse`.
 #[must_use]
 pub fn stores_quantized_latent_pair(model_type: &str) -> bool {
     stores_quantized_latent_pair_with(model_type, mla_latent_quant())
@@ -101,7 +103,8 @@ pub fn stores_quantized_latent_pair_with(model_type: &str, option: MlaLatentQuan
 /// The modes a latent-pair family's cache may hold under the MLA latent
 /// option in force; see [`latent_pair_supports_mode_with`].
 ///
-/// Used by: `mlxcel::models::longcat_flash_ngram` (its mode table filter).
+/// Used by: `mlxcel::models::longcat_flash_ngram` and
+/// `mlxcel::models::longcat_flash_sparse` (their mode table filters).
 pub fn latent_pair_supports_mode(model_type: &str, mode: KVCacheMode) -> Result<(), String> {
     latent_pair_supports_mode_with(model_type, mode, mla_latent_quant())
 }

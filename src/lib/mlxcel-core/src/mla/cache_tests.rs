@@ -181,6 +181,7 @@ fn only_the_fallback_less_families_are_latent_families() {
         "longcat_flash",
         "longcat_flash_ngram",
         "xing4_0",
+        "longcat_flash_sparse",
     ] {
         assert!(caches_mla_latent_pair(family), "{family}");
     }

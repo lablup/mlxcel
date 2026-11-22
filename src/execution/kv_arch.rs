@@ -437,6 +437,24 @@ pub fn deepseek_v2_caches_latent(mode: KVCacheMode) -> bool {
 /// `v2_latent` is read by V2 only; the bit width is also read by the families
 /// that store their latent through the quantizing view
 /// (`mla::stores_quantized_latent_pair`), whose int8 cache is the affine latent.
+/// Elements per token of LongCat-Flash-Lite-Sparse's indexer-key cache: the
+/// key plus the one-column placeholder value, or `None` for any other family
+/// and for its dense `attention_method: MLA` form.
+fn longcat_sparse_index_elems(text: &Value, model_type: &str) -> Option<u64> {
+    if model_type != "longcat_flash_sparse" {
+        return None;
+    }
+    let lsa = text
+        .get("attention_method")
+        .and_then(Value::as_str)
+        .is_none_or(|method| method.eq_ignore_ascii_case("lsa"));
+    lsa.then(|| {
+        get_u64(text, &["index_head_dim"])
+            .unwrap_or(128)
+            .saturating_add(1)
+    })
+}
+
 fn classify(
     text: &Value,
     model_type: &str,
@@ -536,15 +554,25 @@ fn classify(
             let layers = kda_hybrid_mla_layers(text, num_layers)
                 .unwrap_or(num_layers)
                 .saturating_mul(caches_per_layer);
-            return Some((
-                vec![KvGroup {
-                    layers,
-                    elems_per_token: elems,
+            let mut groups = vec![KvGroup {
+                layers,
+                elems_per_token: elems,
+                window: None,
+                fixed_bytes_per_token,
+            }];
+            // LongCat-Flash-Lite-Sparse's LSA indexer keeps its keys in a
+            // third, always-fp16 cache per layer, `[index_head_dim]` plus one
+            // placeholder value column (`models::longcat_flash_sparse`,
+            // #2362).
+            if let Some(index_elems) = longcat_sparse_index_elems(text, &mt) {
+                groups.push(KvGroup {
+                    layers: num_layers,
+                    elems_per_token: index_elems,
                     window: None,
-                    fixed_bytes_per_token,
-                }],
-                KvArchKind::MlaCompressed,
-            ));
+                    fixed_bytes_per_token: Some(index_elems.saturating_mul(2)),
+                });
+            }
+            return Some((groups, KvArchKind::MlaCompressed));
         }
         // V2: decompressed K (num_heads × (qk_nope + qk_rope)) + V
         // (num_heads × v_head_dim). Defaults match the DeepSeek-V2 config.

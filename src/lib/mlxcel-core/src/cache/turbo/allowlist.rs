@@ -525,7 +525,11 @@ mod tests {
     /// to fp16 with a warning that names int8.
     #[test]
     fn longcat_keeps_int8_and_refuses_turbo() {
-        for family in ["longcat_flash", "longcat_flash_ngram"] {
+        for family in [
+            "longcat_flash",
+            "longcat_flash_ngram",
+            "longcat_flash_sparse",
+        ] {
             for absorbed in [false, true] {
                 let (effective, warning) =
                     resolve_kv_cache_mode_for_model_with(KVCacheMode::Int8, family, absorbed);

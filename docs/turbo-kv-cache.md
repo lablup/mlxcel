@@ -608,7 +608,7 @@ The conservative rules the advisor applies:
 | MLA (DeepSeek V2 without absorbed decode), medium or long | `int8` | - | The cache holds decompressed per-head rows whose dimension is not a power of two, so the Turbo Walsh-Hadamard V path does not apply; per-token INT8 has no head-dim constraint. |
 | MLA (DeepSeek V2 under absorbed decode), medium or long | `int8` | - | Stores the MLA latent as affine group-64 8-bit, about 1.7x smaller than the fp16 latent, and keeps absorbed decode (#3155). |
 | MLA `DeepSeekV3Attention` families (DeepSeek V3, Kimi K2, Kimi-VL, Youtu), Kimi Linear and Kimi K3, medium or long | `int8` | - | Stores the MLA latent as affine group-64 8-bit, about 1.7x smaller than the fp16 latent (#3160, #3162). |
-| MLA LongCat (`longcat_flash`, `longcat_flash_ngram`), medium or long | `int8` | - | Stores both sub-layer latents as affine group-64 8-bit (#3161). |
+| MLA LongCat (`longcat_flash`, `longcat_flash_ngram`, `longcat_flash_sparse`), medium or long | `int8` | - | Stores both sub-layer latents as affine group-64 8-bit (#3161). |
 | Other MLA latent-pair families (GLM-4.7-Flash, DeepSeek V3.2) | `fp16` | - | Every quantized mode is substituted back to fp16 at startup. |
 | Pure SSM (Mamba/Mamba2) or attention-free Z1T | `fp16` | - | No context-proportional KV cache, so Turbo modes save almost nothing. |
 | Non-power-of-two head dim (e.g. Phi-2 at head_dim 80) | `int8` (medium/long), `fp16` (short) | - | The Turbo Walsh-Hadamard transform requires a power-of-two head dimension; the advisor downgrades any Turbo suggestion to `int8` or `fp16` for these families, matching the MLA treatment. |

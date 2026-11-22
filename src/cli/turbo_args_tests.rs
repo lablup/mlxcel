@@ -433,6 +433,7 @@ fn only_latent_view_families_store_a_quantized_latent() {
         "kimi_k3",
         "longcat_flash",
         "longcat_flash_ngram",
+        "longcat_flash_sparse",
     ] {
         let dir = model_dir_with_type(family);
         let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
