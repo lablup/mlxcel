@@ -4671,6 +4671,11 @@ pub(crate) fn emit_ssm_probe_with(
     if let Err(error) = c.validate() {
         panic!("emit_ssm_probe: {error}");
     }
+    // Zero rows would divide the chunk count by zero inside the scan.
+    assert!(
+        t > 0 && hidden > 0,
+        "emit_ssm_probe: rows and hidden must be positive (rows={t}, hidden={hidden})"
+    );
     let (hh, p, n, k, cd, di) = (
         c.n_heads,
         c.head_dim,

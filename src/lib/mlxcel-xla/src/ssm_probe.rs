@@ -20,10 +20,14 @@
 //! `xla_ssm_probe` example feeds it the inputs `spike/openxla/ssm_oracle.py`
 //! wrote and hands the outputs back to the oracle for comparison.
 
+#[cfg(feature = "iree")]
 use std::process::Command;
+#[cfg(feature = "iree")]
 use std::time::Instant;
 
+#[cfg(feature = "iree")]
 use crate::aux_manifest::{AuxiliaryArtifactContract, write_auxiliary_manifest};
+#[cfg(feature = "iree")]
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
@@ -31,6 +35,7 @@ use crate::auxiliary::{
 use crate::emitter::{
     Precision, ProbeMode, SsmConfig, SsmPrefillForm, emit_ssm_probe_with, precision_env_override,
 };
+#[cfg(feature = "iree")]
 use crate::iree::{compile_one, iree_compile_bin, target_flags};
 
 /// The probe's dimensions and mode, as `ssm_oracle.py` records them.
@@ -58,14 +63,34 @@ pub struct SsmProbeSpec {
 
 impl SsmProbeSpec {
     fn config(&self) -> Result<SsmConfig, String> {
-        let d_inner = self.n_heads * self.head_dim;
+        // `meta.json` is read from disk: reject what would panic the emitter
+        // (zero rows divide the chunk count by zero) or wrap a width.
+        if self.hidden == 0 || self.rows == 0 {
+            return Err(format!(
+                "SSM probe needs positive hidden and rows, got hidden={} rows={}",
+                self.hidden, self.rows
+            ));
+        }
+        if i32::try_from(self.rows).is_err() {
+            return Err(format!("SSM probe rows={} do not fit i32", self.rows));
+        }
+        let conv_dim = self
+            .n_heads
+            .checked_mul(self.head_dim)
+            .and_then(|d_inner| {
+                self.n_groups
+                    .checked_mul(self.state_size)?
+                    .checked_mul(2)?
+                    .checked_add(d_inner)
+            })
+            .ok_or("SSM probe conv_dim overflows usize")?;
         let config = SsmConfig {
             n_heads: self.n_heads,
             head_dim: self.head_dim,
             state_size: self.state_size,
             n_groups: self.n_groups,
             conv_kernel: self.conv_kernel,
-            conv_dim: d_inner + 2 * self.n_groups * self.state_size,
+            conv_dim,
             use_conv_bias: self.use_conv_bias,
             use_bias: self.use_bias,
             time_step_limit: self.time_step_limit,
@@ -166,6 +191,7 @@ pub struct SsmProbeOutputs {
     pub run_seconds: f64,
 }
 
+#[cfg(feature = "iree")]
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     values
         .iter()
@@ -173,6 +199,7 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
         .collect()
 }
 
+#[cfg(feature = "iree")]
 fn decode_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(4)
@@ -180,6 +207,7 @@ fn decode_f32(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+#[cfg(feature = "iree")]
 fn compiler_version(compiler: &std::path::Path) -> Result<String, String> {
     let out = Command::new(compiler)
         .arg("--version")
@@ -188,8 +216,16 @@ fn compiler_version(compiler: &std::path::Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Element count of `shape`, or an error when it overflows `usize`.
+fn element_count(label: &str, shape: &[usize]) -> Result<usize, String> {
+    shape
+        .iter()
+        .try_fold(1usize, |count, &dim| count.checked_mul(dim))
+        .ok_or_else(|| format!("{label} shape {shape:?} overflows usize"))
+}
+
 fn check_len(label: &str, values: &[f32], shape: &[usize]) -> Result<(), String> {
-    let expected: usize = shape.iter().product();
+    let expected = element_count(label, shape)?;
     if values.len() == expected {
         Ok(())
     } else {
@@ -200,6 +236,107 @@ fn check_len(label: &str, values: &[f32], shape: &[usize]) -> Result<(), String>
     }
 }
 
+/// Parse a little-endian `<f4` or `<i4` C-order `.npy` image (format 1.x or
+/// 2.x) into f32 values and the declared shape. `ssm_oracle.py` writes these;
+/// every length is bounds-checked so a truncated or hostile file is an error,
+/// never a panic or a short buffer.
+pub fn parse_npy_f32(bytes: &[u8]) -> Result<(Vec<f32>, Vec<usize>), String> {
+    if bytes.get(..6) != Some(b"\x93NUMPY".as_slice()) {
+        return Err("not a .npy file".to_string());
+    }
+    let short = || "truncated .npy header".to_string();
+    let (header_len, start): (usize, usize) = match bytes.get(6).copied().ok_or_else(short)? {
+        1 => {
+            let raw = bytes.get(8..10).ok_or_else(short)?;
+            (usize::from(u16::from_le_bytes([raw[0], raw[1]])), 10)
+        }
+        2 | 3 => {
+            let raw = bytes.get(8..12).ok_or_else(short)?;
+            let len = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            (
+                usize::try_from(len).map_err(|_| "npy header too long".to_string())?,
+                12,
+            )
+        }
+        version => return Err(format!("unsupported .npy version {version}")),
+    };
+    let end = start.checked_add(header_len).ok_or_else(short)?;
+    let header = bytes.get(start..end).ok_or_else(short)?;
+    let header = std::str::from_utf8(header).map_err(|_| "npy header is not UTF-8".to_string())?;
+    if !header.contains("'fortran_order': False") {
+        return Err("only C-order .npy files are supported".to_string());
+    }
+    let int = header.contains("'descr': '<i4'");
+    if !int && !header.contains("'descr': '<f4'") {
+        return Err("only <f4 and <i4 .npy files are supported".to_string());
+    }
+    let shape_text = header
+        .split("'shape': (")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .ok_or("no shape in the .npy header")?;
+    let shape = shape_text
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.parse::<usize>()
+                .map_err(|_| format!("bad .npy dim {part:?}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let count = element_count("npy", &shape)?;
+    let data = &bytes[end..];
+    if count.checked_mul(4) != Some(data.len()) {
+        return Err(format!(
+            ".npy data is {} bytes, expected {count} x 4 for {shape:?}",
+            data.len()
+        ));
+    }
+    let values = data
+        .chunks_exact(4)
+        .map(|c| {
+            let raw = [c[0], c[1], c[2], c[3]];
+            if int {
+                i32::from_le_bytes(raw) as f32
+            } else {
+                f32::from_le_bytes(raw)
+            }
+        })
+        .collect();
+    Ok((values, shape))
+}
+
+/// Serialize f32 values as a format 1.0 little-endian C-order `.npy` image.
+pub fn npy_f32_bytes(values: &[f32], shape: &[usize]) -> Result<Vec<u8>, String> {
+    if element_count("npy", shape)? != values.len() {
+        return Err(format!(
+            "{} values do not fill .npy shape {shape:?}",
+            values.len()
+        ));
+    }
+    let dims = match shape.len() {
+        0 => String::new(),
+        1 => format!("{},", shape[0]),
+        _ => shape
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let mut header = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({dims}), }}");
+    while (10 + header.len() + 1) % 64 != 0 {
+        header.push(' ');
+    }
+    header.push('\n');
+    let header_len = u16::try_from(header.len()).map_err(|_| "npy header too long".to_string())?;
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend_from_slice(&header_len.to_le_bytes());
+    bytes.extend_from_slice(header.as_bytes());
+    bytes.extend(values.iter().flat_map(|v| v.to_le_bytes()));
+    Ok(bytes)
+}
+
+#[cfg(feature = "iree")]
 /// Compile the probe for `device` and run it once on `inputs`.
 pub fn run_ssm_probe(
     device: &str,
@@ -305,4 +442,108 @@ pub fn run_ssm_probe(
         compile_seconds,
         run_seconds: started.elapsed().as_secs_f64(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tiny_spec() -> SsmProbeSpec {
+        SsmProbeSpec {
+            hidden: 16,
+            n_heads: 4,
+            head_dim: 8,
+            state_size: 16,
+            n_groups: 2,
+            conv_kernel: 4,
+            use_conv_bias: true,
+            use_bias: false,
+            time_step_limit: (0.0, f32::INFINITY),
+            norm_eps: 1e-5,
+            norm_group_size: 32,
+            chunk_size: 8,
+            rows: 16,
+            decode: false,
+            form: "chunked".to_string(),
+        }
+    }
+
+    #[test]
+    fn spec_rejects_zero_rows_and_hidden_before_emitting() {
+        tiny_spec().emit().expect("tiny spec emits");
+        for spec in [
+            SsmProbeSpec {
+                rows: 0,
+                ..tiny_spec()
+            },
+            SsmProbeSpec {
+                hidden: 0,
+                ..tiny_spec()
+            },
+            SsmProbeSpec {
+                rows: 0,
+                decode: true,
+                ..tiny_spec()
+            },
+        ] {
+            let error = spec.emit().expect_err("zero rows/hidden must be an error");
+            assert!(error.contains("positive"), "{error}");
+        }
+    }
+
+    #[test]
+    fn spec_rejects_wrapping_widths() {
+        let spec = SsmProbeSpec {
+            n_heads: usize::MAX / 2 + 1,
+            n_groups: 1,
+            ..tiny_spec()
+        };
+        assert!(spec.weight_layout().unwrap_err().contains("overflow"));
+        let spec = SsmProbeSpec {
+            rows: usize::from(u16::MAX) << 32,
+            ..tiny_spec()
+        };
+        assert!(spec.io_shapes().unwrap_err().contains("i32"));
+    }
+
+    #[test]
+    fn check_len_rejects_a_wrapping_shape() {
+        // 2^63 * 2 wraps to 0 in release arithmetic; an empty buffer must not
+        // pass as a match for it.
+        let error = check_len("x", &[], &[1usize << 63, 2]).unwrap_err();
+        assert!(error.contains("overflow"), "{error}");
+        check_len("x", &[0.0; 6], &[2, 3]).expect("exact length passes");
+        assert!(check_len("x", &[0.0; 5], &[2, 3]).is_err());
+    }
+
+    #[test]
+    fn npy_round_trips_and_rejects_bad_images() {
+        let bytes = npy_f32_bytes(&[1.0, -2.0, 3.5, 0.25, 8.0, 9.0], &[2, 3]).unwrap();
+        let (values, shape) = parse_npy_f32(&bytes).unwrap();
+        assert_eq!(shape, vec![2, 3]);
+        assert_eq!(values, vec![1.0, -2.0, 3.5, 0.25, 8.0, 9.0]);
+        assert!(npy_f32_bytes(&[1.0], &[2]).is_err());
+
+        // Truncated at every prefix length: an error, never a panic.
+        for cut in 0..bytes.len() {
+            assert!(parse_npy_f32(&bytes[..cut]).is_err(), "prefix {cut}");
+        }
+        // Version 2 magic with no room for the 4-byte header length.
+        assert!(parse_npy_f32(b"\x93NUMPY\x02\x00\x10\x00").is_err());
+        // A header length past the end of the file.
+        assert!(parse_npy_f32(b"\x93NUMPY\x01\x00\xff\xff{}").is_err());
+        // Trailing data beyond the declared shape.
+        let mut long = bytes.clone();
+        long.extend_from_slice(&[0; 4]);
+        assert!(parse_npy_f32(&long).is_err());
+        // A declared shape whose element count wraps.
+        let mut header =
+            "{'descr': '<f4', 'fortran_order': False, 'shape': (9223372036854775808, 2), }"
+                .to_string();
+        header.push('\n');
+        let mut wrapped = b"\x93NUMPY\x01\x00".to_vec();
+        wrapped.extend_from_slice(&(header.len() as u16).to_le_bytes());
+        wrapped.extend_from_slice(header.as_bytes());
+        assert!(parse_npy_f32(&wrapped).unwrap_err().contains("overflow"));
+    }
 }

@@ -312,24 +312,59 @@ impl SsmConfig {
                 self.n_heads, self.n_groups
             ));
         }
-        let expected = self.d_inner() + 2 * self.n_groups * self.state_size;
+        // Every width below is checked: the dims will come from an untrusted
+        // config.json (#3338), and a wrapped product could otherwise satisfy
+        // the conv_dim equation with absurd values.
+        let overflow = |what: &str| format!("SsmConfig {what} overflows usize");
+        let d_inner = self
+            .n_heads
+            .checked_mul(self.head_dim)
+            .ok_or_else(|| overflow("d_inner = n_heads * head_dim"))?;
+        let expected = self
+            .n_groups
+            .checked_mul(self.state_size)
+            .and_then(|gn| gn.checked_mul(2))
+            .and_then(|bc| bc.checked_add(d_inner))
+            .ok_or_else(|| overflow("conv_dim = d_inner + 2*G*N"))?;
         if self.conv_dim != expected {
             return Err(format!(
                 "SsmConfig.conv_dim={} != d_inner + 2*G*N = {expected}",
                 self.conv_dim
             ));
         }
-        if !self.d_inner().is_multiple_of(self.norm_group_size) {
+        if !d_inner.is_multiple_of(self.norm_group_size) {
             return Err(format!(
-                "SsmConfig.norm_group_size={} does not divide d_inner={}",
-                self.norm_group_size,
-                self.d_inner()
+                "SsmConfig.norm_group_size={} does not divide d_inner={d_inner}",
+                self.norm_group_size
             ));
         }
+        self.conv_dim
+            .checked_add(d_inner)
+            .and_then(|width| width.checked_add(self.n_heads))
+            .ok_or_else(|| overflow("in_proj_dim"))?;
+        d_inner
+            .checked_mul(self.state_size)
+            .ok_or_else(|| overflow("state H*P*N"))?;
+        (self.conv_kernel - 1)
+            .checked_mul(self.conv_dim)
+            .ok_or_else(|| overflow("conv tail (K-1)*conv_dim"))?;
         let (low, high) = self.time_step_limit;
-        if low.is_nan() || high.is_nan() || low > high {
+        // dt is clamped into [low, high]; a +inf floor or a -inf ceiling makes
+        // every dt infinite and the state NaN.
+        if low.is_nan()
+            || high.is_nan()
+            || low > high
+            || low == f32::INFINITY
+            || high == f32::NEG_INFINITY
+        {
             return Err(format!(
                 "SsmConfig.time_step_limit {low}..{high} is invalid"
+            ));
+        }
+        if !self.norm_eps.is_finite() || self.norm_eps < 0.0 {
+            return Err(format!(
+                "SsmConfig.norm_eps={} must be finite and non-negative",
+                self.norm_eps
             ));
         }
         Ok(())

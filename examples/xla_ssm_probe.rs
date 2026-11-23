@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mlxcel_xla::{SsmProbeInputs, SsmProbeSpec, run_ssm_probe};
+use mlxcel_xla::{SsmProbeInputs, SsmProbeSpec, npy_f32_bytes, parse_npy_f32, run_ssm_probe};
 use serde_json::Value;
 
 struct Args {
@@ -76,80 +76,22 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
-/// Read a little-endian f4 / i4 C-order `.npy` file as f32 values and shape.
-fn read_npy(path: &Path) -> Result<(Vec<f32>, Vec<usize>), String> {
+/// Read a `.npy` file and require the shape the probe declares for it.
+fn read_npy(path: &Path, want: &[usize]) -> Result<Vec<f32>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    if bytes.len() < 10 || &bytes[..6] != b"\x93NUMPY" {
-        return Err(format!("{} is not a .npy file", path.display()));
-    }
-    let (header_len, start) = match bytes[6] {
-        1 => (usize::from(u16::from_le_bytes([bytes[8], bytes[9]])), 10),
-        _ => (
-            u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize,
-            12,
-        ),
-    };
-    let header = std::str::from_utf8(&bytes[start..start + header_len])
-        .map_err(|_| format!("{}: header is not UTF-8", path.display()))?;
-    if header.contains("'fortran_order': True") {
-        return Err(format!("{}: Fortran order is unsupported", path.display()));
-    }
-    let int = header.contains("'<i4'");
-    if !int && !header.contains("'<f4'") {
+    let (values, shape) = parse_npy_f32(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    if shape != want {
         return Err(format!(
-            "{}: only <f4 and <i4 are supported",
+            "{} has shape {shape:?}, the probe expects {want:?}",
             path.display()
         ));
     }
-    let shape_text = header
-        .split("'shape': (")
-        .nth(1)
-        .and_then(|rest| rest.split(')').next())
-        .ok_or_else(|| format!("{}: no shape in header", path.display()))?;
-    let shape = shape_text
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(|part| part.parse::<usize>().map_err(|_| format!("bad dim {part}")))
-        .collect::<Result<Vec<_>, _>>()?;
-    let data = &bytes[start + header_len..];
-    let values = data
-        .chunks_exact(4)
-        .map(|c| {
-            let raw = [c[0], c[1], c[2], c[3]];
-            if int {
-                i32::from_le_bytes(raw) as f32
-            } else {
-                f32::from_le_bytes(raw)
-            }
-        })
-        .collect::<Vec<_>>();
-    if values.len() != shape.iter().product::<usize>() {
-        return Err(format!("{}: data does not match shape", path.display()));
-    }
-    Ok((values, shape))
+    Ok(values)
 }
 
 fn write_npy(path: &Path, values: &[f32], shape: &[usize]) -> Result<(), String> {
-    let dims = match shape.len() {
-        0 => String::new(),
-        1 => format!("{},", shape[0]),
-        _ => shape
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-    };
-    let mut header = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({dims}), }}");
-    while (10 + header.len() + 1) % 64 != 0 {
-        header.push(' ');
-    }
-    header.push('\n');
-    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
-    bytes.extend_from_slice(&(header.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(header.as_bytes());
-    bytes.extend(values.iter().flat_map(|v| v.to_le_bytes()));
-    std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+    std::fs::write(path, npy_f32_bytes(values, shape)?)
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 fn field<'a>(meta: &'a Value, key: &str) -> Result<&'a Value, String> {
@@ -164,14 +106,32 @@ fn usize_field(meta: &Value, key: &str) -> Result<usize, String> {
         .ok_or_else(|| format!("meta.json {key} is not an integer"))
 }
 
-fn f32_field(value: &Value) -> f32 {
-    value.as_f64().map_or(f32::INFINITY, |v| v as f32)
+/// A number, or `null` for +inf (JSON has no infinity; the oracle writes the
+/// unbounded `time_step_limit` ceiling as `null`).
+fn f32_or_inf(value: &Value, key: &str) -> Result<f32, String> {
+    match value {
+        Value::Null => Ok(f32::INFINITY),
+        other => other
+            .as_f64()
+            .map(|v| v as f32)
+            .ok_or_else(|| format!("meta.json {key} is not a number")),
+    }
 }
 
 fn spec_from_meta(meta: &Value, args: &Args) -> Result<SsmProbeSpec, String> {
-    let limit = field(meta, "time_step_limit")?
+    let limit = match field(meta, "time_step_limit")?
         .as_array()
-        .ok_or("time_step_limit is not a pair")?;
+        .map(Vec::as_slice)
+    {
+        Some([low, high]) => (
+            f32_or_inf(low, "time_step_limit[0]")?,
+            f32_or_inf(high, "time_step_limit[1]")?,
+        ),
+        _ => return Err("meta.json time_step_limit is not a pair".to_string()),
+    };
+    let norm_eps = field(meta, "norm_eps")?
+        .as_f64()
+        .ok_or("meta.json norm_eps is not a number")? as f32;
     let flag = |key: &str| field(meta, key).map(|v| v.as_bool().unwrap_or(false));
     Ok(SsmProbeSpec {
         hidden: usize_field(meta, "hidden")?,
@@ -182,8 +142,8 @@ fn spec_from_meta(meta: &Value, args: &Args) -> Result<SsmProbeSpec, String> {
         conv_kernel: usize_field(meta, "conv_kernel")?,
         use_conv_bias: flag("use_conv_bias")?,
         use_bias: flag("use_bias")?,
-        time_step_limit: (f32_field(&limit[0]), f32_field(&limit[1])),
-        norm_eps: f32_field(field(meta, "norm_eps")?),
+        time_step_limit: limit,
+        norm_eps,
         norm_group_size: usize_field(meta, "norm_group_size")?,
         chunk_size: match args.chunk_size {
             Some(size) => size,
@@ -210,28 +170,36 @@ fn main() -> Result<(), String> {
     }
     let out = args.out.clone().expect("checked in parse_args");
 
-    let load = |name: &str| read_npy(&args.inputs.join(format!("{name}.npy"))).map(|(v, _)| v);
+    let load =
+        |name: &str, shape: &[usize]| read_npy(&args.inputs.join(format!("{name}.npy")), shape);
     let weights = spec
         .weight_layout()?
         .iter()
-        .map(|(name, _)| load(name))
+        .map(|(name, shape)| load(name, shape))
         .collect::<Result<Vec<_>, _>>()?;
     let real_len = if spec.decode {
         0
     } else {
-        usize_field(&meta, "real_len")? as i32
+        let real_len = usize_field(&meta, "real_len")?;
+        if real_len > spec.rows {
+            return Err(format!(
+                "meta.json real_len={real_len} exceeds rows={}",
+                spec.rows
+            ));
+        }
+        i32::try_from(real_len).map_err(|_| format!("real_len={real_len} does not fit i32"))?
     };
+    let [x_shape, h_shape, conv_shape] = spec.io_shapes()?;
     let inputs = SsmProbeInputs {
         weights,
-        x: load("x")?,
+        x: load("x", &x_shape)?,
         real_len,
-        h0: load("h0")?,
-        conv0: load("conv0")?,
+        h0: load("h0", &h_shape)?,
+        conv0: load("conv0", &conv_shape)?,
     };
     let result = run_ssm_probe(&args.device, &spec, &inputs)?;
 
     std::fs::create_dir_all(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
-    let [x_shape, h_shape, conv_shape] = spec.io_shapes()?;
     write_npy(&out.join("y.npy"), &result.y, &x_shape)?;
     write_npy(&out.join("h.npy"), &result.h, &h_shape)?;
     write_npy(&out.join("conv.npy"), &result.conv, &conv_shape)?;

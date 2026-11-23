@@ -13,7 +13,7 @@ Run under the GPU guard, after building the example, with the ROCm env loaded:
     eval "$(scripts/iree/setup-rocm.sh --env)"
     cargo build --release --features xla-iree --example xla_ssm_probe
     scripts/rocm_gpu_guard.sh --hold -- spike/openxla/.venv/bin/python \
-        spike/openxla/ssm_lowering_measure.py --out /tmp/ssm-measure \
+        spike/openxla/ssm_lowering_measure.py --out "$(mktemp -d)" \
         --forms chunked:64,chunked:128,chunked:256,associative,sequential \
         --capacities 256,4096
 

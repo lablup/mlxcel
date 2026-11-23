@@ -66,16 +66,19 @@ gitignored), or point the scripts at one with
 eval "$(scripts/iree/setup-rocm.sh --env)"
 export MLXCEL_XLA_ROCM_TARGET=gfx1151
 PY=spike/openxla/.venv/bin/python
+# A private scratch directory: the scripts write .npy files by fixed names and
+# would follow a link planted at a predictable path in a shared /tmp.
+WORK="$(mktemp -d -t ssm-probe.XXXXXX)"
 scripts/rocm_gpu_guard.sh --hold -- cargo build --release --features xla-iree --example xla_ssm_probe
 # one case by hand
-$PY spike/openxla/ssm_oracle.py --emit-inputs /tmp/ssm --mode prefill --real-len 100
+$PY spike/openxla/ssm_oracle.py --emit-inputs "$WORK/inputs" --mode prefill --real-len 100
 scripts/rocm_gpu_guard.sh --hold -- cargo run --release --features xla-iree \
-    --example xla_ssm_probe -- --inputs /tmp/ssm --device hip --out /tmp/ssm-hip
-$PY spike/openxla/ssm_oracle.py --check /tmp/ssm-hip
+    --example xla_ssm_probe -- --inputs "$WORK/inputs" --device hip --out "$WORK/hip"
+$PY spike/openxla/ssm_oracle.py --check "$WORK/hip"
 # every acceptance case on local-task and hip
-scripts/rocm_gpu_guard.sh --hold -- spike/openxla/ssm_gate.sh /tmp/ssm-gate
+scripts/rocm_gpu_guard.sh --hold -- spike/openxla/ssm_gate.sh "$WORK/gate"
 # the prefill-lowering measurements behind FINDINGS_ssm.md
-scripts/rocm_gpu_guard.sh --hold -- $PY spike/openxla/ssm_lowering_measure.py --out /tmp/ssm-measure
+scripts/rocm_gpu_guard.sh --hold -- $PY spike/openxla/ssm_lowering_measure.py --out "$WORK/measure"
 ```
 
 ## Run

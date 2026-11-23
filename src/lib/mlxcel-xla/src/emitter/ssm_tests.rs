@@ -56,9 +56,54 @@ fn ssm_config_validates_structure() {
     let mut bad = c.clone();
     bad.norm_group_size = 5;
     assert!(bad.validate().unwrap_err().contains("norm_group_size"));
-    let mut bad = c;
+    let mut bad = c.clone();
     bad.time_step_limit = (1.0, 0.5);
     assert!(bad.validate().unwrap_err().contains("time_step_limit"));
+}
+
+/// The dims will come from an untrusted config.json (#3338): products that wrap
+/// must not satisfy the conv_dim equation, and clamps or eps that make every
+/// state NaN are rejected up front.
+#[test]
+fn ssm_config_rejects_overflow_and_non_finite_parameters() {
+    let c = SsmConfig::tiny_mamba2();
+    // H * P wraps to 0 in release arithmetic, so conv_dim = 2*G*N would match.
+    let mut bad = c.clone();
+    bad.n_heads = 2;
+    bad.n_groups = 2;
+    bad.head_dim = usize::MAX / 2 + 1;
+    bad.norm_group_size = 1;
+    bad.conv_dim = 2 * bad.n_groups * bad.state_size;
+    assert!(bad.validate().unwrap_err().contains("overflow"));
+    let mut bad = c.clone();
+    bad.conv_kernel = usize::MAX;
+    assert!(bad.validate().unwrap_err().contains("overflow"));
+
+    for limit in [
+        (f32::INFINITY, f32::INFINITY),
+        (f32::NEG_INFINITY, f32::NEG_INFINITY),
+    ] {
+        let mut bad = c.clone();
+        bad.time_step_limit = limit;
+        assert!(
+            bad.validate().unwrap_err().contains("time_step_limit"),
+            "{limit:?}"
+        );
+    }
+    let mut ok = c.clone();
+    ok.time_step_limit = (f32::NEG_INFINITY, f32::INFINITY);
+    ok.validate().expect("an open clamp is valid");
+    for eps in [f32::NAN, f32::INFINITY, -1e-5] {
+        let mut bad = c.clone();
+        bad.norm_eps = eps;
+        assert!(bad.validate().unwrap_err().contains("norm_eps"), "{eps}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "rows and hidden must be positive")]
+fn ssm_probe_refuses_zero_rows() {
+    let _ = emit_ssm_probe(&SsmConfig::tiny_mamba2(), HIDDEN, 0, ProbeMode::Prefill);
 }
 
 #[test]
