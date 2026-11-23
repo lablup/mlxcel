@@ -250,7 +250,7 @@ impl Reranker for LateInteractionReranker {
         _instruction: Option<&str>,
     ) -> Result<RerankScores> {
         score_late_interaction(&self.engine, query, documents, &self.options)
-            .map_err(|err| anyhow::anyhow!("{err}"))
+            .map_err(anyhow::Error::new)
     }
 
     fn supports_images(&self) -> bool {

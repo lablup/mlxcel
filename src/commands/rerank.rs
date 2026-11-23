@@ -70,7 +70,8 @@ pub(crate) struct RerankArgs {
     #[arg(long)]
     pub(crate) json: bool,
 
-    /// Token cap per scored pair (default: derived from the checkpoint).
+    /// Token cap per scored pair, or per embedded input for a multi-vector
+    /// embedder (default: derived from the checkpoint).
     #[arg(long = "max-length", value_name = "N")]
     pub(crate) max_length: Option<usize>,
 
