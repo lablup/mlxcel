@@ -197,10 +197,11 @@ fn resolve_weight_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathB
     names
         .iter()
         .map(|name| {
-            map.get(name)
+            let file = map
+                .get(name)
                 .and_then(serde_json::Value::as_str)
-                .map(|file| model_dir.join(file))
-                .ok_or_else(|| format!("{} has no entry for `{name}`", index.display()))
+                .ok_or_else(|| format!("{} has no entry for `{name}`", index.display()))?;
+            crate::iree::index_shard_path(model_dir, &index, file)
         })
         .collect()
 }
