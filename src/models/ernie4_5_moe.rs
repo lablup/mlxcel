@@ -474,6 +474,7 @@ impl SharedExperts {
 /// MoE layer with sparse routed experts and shared experts
 pub struct MoEBlock {
     pub gate: UnifiedLinear,
+    e_score_correction_bias: UniquePtr<MlxArray>,
     pub switch_mlp: SwitchGLU,
     pub shared_experts: Option<SharedExperts>,
     pub top_k: usize,
@@ -481,6 +482,29 @@ pub struct MoEBlock {
 }
 
 impl MoEBlock {
+    fn route(&self, x_flat: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        // Project in f32 so rounding the logits cannot turn a near-tie into a tie.
+        let x_f32 = mlxcel_core::astype(x_flat, mlxcel_core::dtype::FLOAT32);
+        let logits = self.gate.forward(&x_f32);
+        let gates = if self.use_softmax {
+            mlxcel_core::softmax(&logits, -1)
+        } else {
+            mlxcel_core::sigmoid(&logits)
+        };
+
+        // The bias ranks experts. Their mixing weights come from the raw gates.
+        let k = self.top_k as i32;
+        let biased = mlxcel_core::add(&gates, &self.e_score_correction_bias);
+        let indices = mlxcel_core::argpartition(&mlxcel_core::negative(&biased), k - 1, -1);
+        let n = mlxcel_core::array_shape(&indices)[0];
+        let indices = mlxcel_core::slice(&indices, &[0, 0], &[n, k]);
+        let scores = mlxcel_core::take_along_axis(&gates, &indices, -1);
+        let sum = mlxcel_core::sum_axis(&scores, -1, true);
+        let floor = mlxcel_core::full_f32(&[1], 1e-12, mlxcel_core::dtype::FLOAT32);
+        let scores = mlxcel_core::divide(&scores, &mlxcel_core::maximum(&sum, &floor));
+        (indices, scores)
+    }
+
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let orig_shape = mlxcel_core::array_shape(x);
         let hidden_dim = orig_shape[orig_shape.len() - 1];
@@ -493,35 +517,7 @@ impl MoEBlock {
             mlxcel_core::copy(x)
         };
 
-        // Get router logits
-        let gates = self.gate.forward(&x_flat);
-
-        // Apply gate activation (softmax or sigmoid)
-        let gates = if self.use_softmax {
-            mlxcel_core::softmax(&gates, -1)
-        } else {
-            mlxcel_core::sigmoid(&gates)
-        };
-
-        // Top-k selection
-        let k = self.top_k as i32;
-
-        // Get top-k expert indices using argpartition
-        let neg_gates = mlxcel_core::negative(&gates);
-        let indices = mlxcel_core::argpartition(&neg_gates, k - 1, -1);
-
-        // Slice to get top-k: indices[..., :k]
-        let indices_shape = mlxcel_core::array_shape(&indices);
-        let topk_indices = mlxcel_core::slice(&indices, &[0, 0], &[indices_shape[0], k]);
-
-        // Get corresponding scores
-        let scores = mlxcel_core::take_along_axis(&gates, &topk_indices, -1);
-
-        // Normalize scores
-        let score_sum = mlxcel_core::sum_axis(&scores, -1, true);
-        let eps = mlxcel_core::full_f32(&[1], 1e-12, mlxcel_core::array_dtype(&score_sum));
-        let score_sum = mlxcel_core::maximum(&score_sum, &eps);
-        let scores = mlxcel_core::divide(&scores, &score_sum);
+        let (topk_indices, scores) = self.route(&x_flat);
 
         // Apply routed experts
         let expert_out = self.switch_mlp.forward(&x_flat, &topk_indices);
@@ -862,7 +858,44 @@ impl MoEBlock {
     ) -> Result<Self, String> {
         let moe_prefix = format!("{}.mlp", prefix);
 
-        let gate = load_quantized_linear(weights, &format!("{}.gate", moe_prefix), args)?;
+        let mut gate = load_quantized_linear(weights, &format!("{}.gate", moe_prefix), args)?;
+        // mlxcel's CUDA backend promotes f32 mixed with bf16 to bf16. Widen
+        // bf16 router operands once, including affine quantization sidecars.
+        let (weight, group_bias, bias) = match &mut gate {
+            UnifiedLinear::Regular(linear) => (&mut linear.weight, None, linear.bias.as_mut()),
+            UnifiedLinear::Quantized { weight, bias } => {
+                (&mut weight.scales, weight.biases.as_mut(), bias.as_mut())
+            }
+        };
+        for operand in [Some(weight), group_bias, bias].into_iter().flatten() {
+            if mlxcel_core::array_dtype(operand) == mlxcel_core::dtype::BFLOAT16 {
+                *operand = mlxcel_core::astype(operand, mlxcel_core::dtype::FLOAT32);
+            }
+        }
+        let experts = args.moe_num_experts as i32;
+        let bias = [
+            "e_score_correction_bias",
+            "moe_statics.e_score_correction_bias",
+        ]
+        .iter()
+        .find_map(|suffix| {
+            let key = format!("{moe_prefix}.{suffix}");
+            weights.get(&key).map(|value| (key, value))
+        });
+        let e_score_correction_bias = if let Some((key, value)) = bias {
+            let shape = mlxcel_core::array_shape(value);
+            if shape != [experts] && shape != [1, experts] {
+                return Err(format!(
+                    "{key}: expected [{experts}] or [1, {experts}], got {shape:?}"
+                ));
+            }
+            mlxcel_core::astype(
+                &mlxcel_core::reshape(value, &[experts]),
+                mlxcel_core::dtype::FLOAT32,
+            )
+        } else {
+            mlxcel_core::zeros(&[experts], mlxcel_core::dtype::FLOAT32)
+        };
         let switch_mlp =
             SwitchGLU::from_weights(weights, args, &format!("{}.switch_mlp", moe_prefix))?;
 
@@ -881,6 +914,7 @@ impl MoEBlock {
 
         Ok(Self {
             gate,
+            e_score_correction_bias,
             switch_mlp,
             shared_experts,
             top_k: args.moe_k,

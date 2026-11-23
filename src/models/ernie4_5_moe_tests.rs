@@ -18,8 +18,9 @@
 
 use mlxcel_core::weights::WeightMap;
 
-use super::{Ernie45MoeModel, ModelArgs, SwitchLinear};
+use super::{Ernie45MoeModel, MoEBlock, ModelArgs, SwitchLinear};
 use crate::models::switch_layers::{HOSTILE_QUANT_PARAMS, insert_stacked_quantized_expert_plane};
+use mlxcel_core::{dtype, utils::array_to_vec_f32};
 
 /// Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *
 /// group_size` (8 * 32 == 4 * 1 * 64), so the positive control below is a plane
@@ -179,6 +180,145 @@ fn tiny_routed_weights(args: &ModelArgs) -> WeightMap {
         }
     }
     weights
+}
+
+#[test]
+fn correction_bias_changes_selection_not_weights() {
+    let mut args = tiny_routed_args();
+    args.hidden_size = 4;
+    let mut weights = tiny_routed_weights(&args);
+    weights.insert(
+        "model.layers.1.mlp.gate.weight".into(),
+        mlxcel_core::from_slice_f32(&[1., 0., 0., 0., 0.5, 0., 0., 0., 0., 0., 0., 0.], &[3, 4]),
+    );
+    weights.insert(
+        "model.layers.1.mlp.e_score_correction_bias".into(),
+        mlxcel_core::from_slice_f32(&[0., 0., 10.], &[3]),
+    );
+    let x = mlxcel_core::from_slice_f32(&[2., 0., 0., 0.], &[1, 4]);
+
+    for softmax in [true, false] {
+        let mut block = MoEBlock::from_weights(&weights, &args, "model.layers.1").unwrap();
+        block.use_softmax = softmax;
+        let (indices, scores) = block.route(&x);
+        let mut selected: Vec<_> = array_to_vec_f32(&indices)
+            .into_iter()
+            .map(|i| i as usize)
+            .zip(array_to_vec_f32(&scores))
+            .collect();
+        selected.sort_by_key(|&(expert, _)| expert);
+        assert_eq!([selected[0].0, selected[1].0], [0, 2]);
+
+        // The raw logits of the selected experts are 2 and 0.
+        let (g0, g2) = if softmax {
+            (2_f32.exp(), 1.)
+        } else {
+            (1. / (1. + (-2_f32).exp()), 0.5)
+        };
+        assert!((selected[0].1 - g0 / (g0 + g2)).abs() < 1e-6);
+        assert!((selected[1].1 - g2 / (g0 + g2)).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn correction_bias_loads_from_moe_statics_and_squeezes() {
+    let mut args = tiny_routed_args();
+    args.moe_num_experts = 4;
+    let mut weights = tiny_routed_weights(&args);
+    let prefix = "model.layers.1";
+    let raw = format!("{prefix}.mlp.moe_statics.e_score_correction_bias");
+    let converted = format!("{prefix}.mlp.e_score_correction_bias");
+    let check = |weights: &WeightMap, expected: &[f32]| {
+        let block = MoEBlock::from_weights(weights, &args, prefix).unwrap();
+        let bias = &block.e_score_correction_bias;
+        assert_eq!(mlxcel_core::array_shape(bias), [4]);
+        assert_eq!(mlxcel_core::array_dtype(bias), dtype::FLOAT32);
+        assert_eq!(array_to_vec_f32(bias), expected);
+    };
+
+    check(&weights, &[0.; 4]);
+    let values = [0.25, -0.5, 1.0, 2.0];
+    weights.insert(
+        raw.clone(),
+        mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&values, &[1, 4]),
+            dtype::BFLOAT16,
+        ),
+    );
+    check(&weights, &values);
+    // The converted key takes precedence when both exist.
+    weights.insert(converted.clone(), mlxcel_core::ones(&[4], dtype::FLOAT16));
+    check(&weights, &[1.; 4]);
+    weights.remove(&raw);
+    check(&weights, &[1.; 4]);
+
+    for shape in [&[2, 4][..], &[3], &[1, 3]] {
+        weights.insert(converted.clone(), mlxcel_core::zeros(shape, dtype::FLOAT32));
+        let err = MoEBlock::from_weights(&weights, &args, prefix)
+            .err()
+            .expect("malformed bias must fail to load");
+        assert!(err.contains(&converted), "{err}");
+    }
+}
+
+#[test]
+fn router_runs_in_f32() {
+    let mut args = tiny_routed_args();
+    args.hidden_size = 2;
+    args.moe_num_experts = 2;
+    args.moe_k = 1;
+    let mut weights = tiny_routed_weights(&args);
+    // The f32 dot products are 1 and 1 + 2^-12. Both round to 1 in f16,
+    // even though each input and gate weight is exactly representable in f16.
+    let gate = mlxcel_core::from_slice_f32(&[1., 0., 1., 1. / 4096.], &[2, 2]);
+    for gate_dtype in [dtype::FLOAT16, dtype::BFLOAT16] {
+        let weight = mlxcel_core::astype(&gate, gate_dtype);
+        let x = mlxcel_core::ones(&[1, 2], gate_dtype);
+        let low_precision = mlxcel_core::matmul(&x, &mlxcel_core::transpose(&weight));
+        assert_eq!(array_to_vec_f32(&low_precision), [1., 1.]);
+        weights.insert("model.layers.1.mlp.gate.weight".into(), weight);
+        let block = MoEBlock::from_weights(&weights, &args, "model.layers.1").unwrap();
+        let (indices, scores) = block.route(&x);
+        assert_eq!(mlxcel_core::item_i32(&indices), 1);
+        assert_eq!(mlxcel_core::array_dtype(&scores), dtype::FLOAT32);
+    }
+}
+
+#[test]
+fn quantized_router_runs_in_f32_with_bf16_scales() {
+    let mut args = tiny_routed_args();
+    args.hidden_size = 64;
+    args.moe_num_experts = 2;
+    args.moe_k = 1;
+    let mut weights = tiny_routed_weights(&args);
+    let gate = "model.layers.1.mlp.gate";
+    // Affine 4-bit rows [1, 0, ...] and [1, 1, 0, ...].
+    let mut packed = [0; 16];
+    packed[0] = 0x01;
+    packed[8] = 0x11;
+    weights.insert(
+        format!("{gate}.weight"),
+        mlxcel_core::from_slice_u32(&packed, &[2, 8]),
+    );
+    weights.insert(
+        format!("{gate}.scales"),
+        mlxcel_core::ones(&[2, 1], dtype::BFLOAT16),
+    );
+    weights.insert(
+        format!("{gate}.biases"),
+        mlxcel_core::zeros(&[2, 1], dtype::BFLOAT16),
+    );
+    let block = MoEBlock::from_weights(&weights, &args, "model.layers.1").unwrap();
+    let mut values = [0.; 64];
+    values[0] = 1.;
+    values[1] = 1. / 4096.;
+    let x = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&values, &[1, 64]),
+        dtype::BFLOAT16,
+    );
+    let (indices, scores) = block.route(&x);
+    assert_eq!(mlxcel_core::item_i32(&indices), 1);
+    assert_eq!(mlxcel_core::array_dtype(&scores), dtype::FLOAT32);
 }
 
 #[test]
