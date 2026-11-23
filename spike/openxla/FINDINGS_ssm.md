@@ -138,3 +138,5 @@ The shim now carries the state from `prefill.main` into `decode_step` (`@state_i
 | local-task | f32 (default) | 40/40 | 40/40 |
 
 A one-token prompt ("The", 10 tokens), which takes the state-reset path instead of a `real_len = 0` prefill, also matches the oracle on hip. The f16 drift measured above (0.42 max-abs on logits) did not move a greedy token here, so recurrent configs keep the per-device default precision rather than being pinned to f32 like MLA.
+
+Refusals: a request refused in Rust or failed in the shim (including a failed state reset) drops the stored state, so a decode refuses until a prefill or reset succeeds. The KV-only entry points (ragged, slot, embeddings) refuse any recurrent state until #3340, and pure `mamba2` with `n_groups > 1` is refused. The CLI omits the `KV cache mode` banner for Mamba2 on xla.

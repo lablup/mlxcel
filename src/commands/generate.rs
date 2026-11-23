@@ -1536,6 +1536,25 @@ fn generate_with_embeddings<M: LanguageModel>(
     ))
 }
 
+/// Whether the OpenXLA backend runs this model without a KV cache. Only
+/// `mamba2` qualifies today (attention-free, state threaded instead); a hybrid
+/// would need its own check. Always false off the XLA backend.
+#[cfg(feature = "xla-backend")]
+fn xla_model_has_no_kv_cache(model_dir: &Path) -> bool {
+    select_backend().name() == "xla"
+        && std::fs::read_to_string(model_dir.join("config.json"))
+            .ok()
+            .and_then(|s| mlxcel_xla::parse_hf_config_json(&s).ok())
+            .is_some_and(|v| {
+                v.get("model_type").and_then(serde_json::Value::as_str) == Some("mamba2")
+            })
+}
+
+#[cfg(not(feature = "xla-backend"))]
+fn xla_model_has_no_kv_cache(_model_dir: &Path) -> bool {
+    false
+}
+
 /// Read `num_hidden_layers` from a model directory's `config.json` (0 if absent
 /// or unparsable). The OpenXLA session stores it as metadata; the bundled graph
 /// fixes the architecture, so a best-effort value is sufficient. The parse
@@ -3359,59 +3378,63 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     {
         println!("Boundary-V: protecting {boundary} layer(s) on each end at Fp16");
     }
-    let kv_cache_mode_suffix = kv_cache_mode_banner_suffix(
-        requested_kv_cache_mode,
-        kv_cache_mode,
-        resolve_cli_pipeline_num_layers(&args.model.model).unwrap_or(0),
-    );
+    // An attention-free model on the OpenXLA backend has no KV cache, so the
+    // banner below would claim a mode for layers that do not exist (issue #3339).
+    if !xla_model_has_no_kv_cache(&args.model.model) {
+        let kv_cache_mode_suffix = kv_cache_mode_banner_suffix(
+            requested_kv_cache_mode,
+            kv_cache_mode,
+            resolve_cli_pipeline_num_layers(&args.model.model).unwrap_or(0),
+        );
 
-    match kv_cache_mode {
-        KVCacheMode::Int8 => {
-            // The same flag selects two codecs: the affine group-64 latent on
-            // an absorbed MLA cache (issue #3155), per-token absmax elsewhere.
-            let codec = match mlxcel::cli::mla_latent_option::model_latent_bits(
-                kv_cache_mode,
-                std::path::Path::new(&args.model.model),
-            ) {
-                Some(bits) => mlxcel::cli::mla_latent_option::latent_codec_label(bits),
-                None => "per-token absmax quantization".to_string(),
-            };
-            println!("KV cache mode: int8 ({codec}){kv_cache_mode_suffix}");
-        }
-        KVCacheMode::Turbo4Asym => {
-            println!(
-                "KV cache mode: fp16+turbo4 (asymmetric Fp16-K + Turbo4-V, ~26% KV savings){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Turbo4 => {
-            // Reached only when the family is on
-            // `ALLOWED_SYMMETRIC_TURBO_FAMILIES`: a non-allowlisted request was
-            // already resolved to Turbo4Asym above, which is why this line no
-            // longer describes a fallback that had never been performed.
-            println!(
-                "KV cache mode: turbo4 (symmetric Turbo4-K + Turbo4-V, ~73% KV savings; \
-                 this family is on the symmetric-Turbo4 allowlist){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Turbo4Delegated => {
-            println!(
-                "KV cache mode: turbo4-delegated (Fp16-K + Turbo4-V with hot/cold split, \
-                 ~26% KV savings + 97-100% FP16 decode speed at long context){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Turbo3Asym => {
-            println!(
-                "KV cache mode: fp16+turbo3 (asymmetric Fp16-K + Turbo3-V, \
-                 ~5.1x total KV savings){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Fp16 => {
-            // Fp16 is the default and normally announces nothing. When it is
-            // the *result* of a substitution the operator asked for something
-            // else, so name the mode actually in force (issue #1350). The
-            // reason was printed to stderr by
-            // `resolve_and_announce_kv_cache_mode`.
-            println!("KV cache mode: fp16{kv_cache_mode_suffix}");
+        match kv_cache_mode {
+            KVCacheMode::Int8 => {
+                // The same flag selects two codecs: the affine group-64 latent on
+                // an absorbed MLA cache (issue #3155), per-token absmax elsewhere.
+                let codec = match mlxcel::cli::mla_latent_option::model_latent_bits(
+                    kv_cache_mode,
+                    std::path::Path::new(&args.model.model),
+                ) {
+                    Some(bits) => mlxcel::cli::mla_latent_option::latent_codec_label(bits),
+                    None => "per-token absmax quantization".to_string(),
+                };
+                println!("KV cache mode: int8 ({codec}){kv_cache_mode_suffix}");
+            }
+            KVCacheMode::Turbo4Asym => {
+                println!(
+                    "KV cache mode: fp16+turbo4 (asymmetric Fp16-K + Turbo4-V, ~26% KV savings){kv_cache_mode_suffix}"
+                );
+            }
+            KVCacheMode::Turbo4 => {
+                // Reached only when the family is on
+                // `ALLOWED_SYMMETRIC_TURBO_FAMILIES`: a non-allowlisted request was
+                // already resolved to Turbo4Asym above, which is why this line no
+                // longer describes a fallback that had never been performed.
+                println!(
+                    "KV cache mode: turbo4 (symmetric Turbo4-K + Turbo4-V, ~73% KV savings; \
+                     this family is on the symmetric-Turbo4 allowlist){kv_cache_mode_suffix}"
+                );
+            }
+            KVCacheMode::Turbo4Delegated => {
+                println!(
+                    "KV cache mode: turbo4-delegated (Fp16-K + Turbo4-V with hot/cold split, \
+                     ~26% KV savings + 97-100% FP16 decode speed at long context){kv_cache_mode_suffix}"
+                );
+            }
+            KVCacheMode::Turbo3Asym => {
+                println!(
+                    "KV cache mode: fp16+turbo3 (asymmetric Fp16-K + Turbo3-V, \
+                     ~5.1x total KV savings){kv_cache_mode_suffix}"
+                );
+            }
+            KVCacheMode::Fp16 => {
+                // Fp16 is the default and normally announces nothing. When it is
+                // the *result* of a substitution the operator asked for something
+                // else, so name the mode actually in force (issue #1350). The
+                // reason was printed to stderr by
+                // `resolve_and_announce_kv_cache_mode`.
+                println!("KV cache mode: fp16{kv_cache_mode_suffix}");
+            }
         }
     }
 
