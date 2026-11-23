@@ -918,7 +918,7 @@ impl Mistral4Model {
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Run weight sanitization for MoE expert weight splitting
-        sanitize_weights(&mut weights, &config, "");
+        sanitize_weights(&mut weights, &config, "")?;
 
         let model = Self::from_weights(&weights, &config)?;
         Ok((model, config))
@@ -945,7 +945,7 @@ impl Mistral4Model {
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Sanitize with language_model. prefix for VLM weights
-        sanitize_weights(&mut weights, &args, "language_model.");
+        sanitize_weights(&mut weights, &args, "language_model.")?;
 
         let model = Self::from_weights_with_prefix(&weights, &args, "language_model.")?;
         Ok((model, args))
@@ -1005,11 +1005,18 @@ impl Mistral4Model {
 /// Sanitize weights for Mistral4 models.
 /// Handles fused gate_up_proj splitting for MoE expert layers.
 ///
+/// Returns `Err` naming the key, the expert index and both shapes when one
+/// per-expert plane differs in shape or dtype from expert 0's (issue #3320).
+///
 /// Used by: Mistral4
-pub fn sanitize_weights(weights: &mut WeightMap, config: &Mistral4Config, prefix: &str) {
+pub fn sanitize_weights(
+    weights: &mut WeightMap,
+    config: &Mistral4Config,
+    prefix: &str,
+) -> Result<(), String> {
     let n_routed = match config.n_routed_experts {
         Some(n) if n > 0 => n,
-        _ => return,
+        _ => return Ok(()),
     };
 
     for l in 0..config.num_hidden_layers {
@@ -1050,16 +1057,25 @@ pub fn sanitize_weights(weights: &mut WeightMap, config: &Mistral4Config, prefix
                 for k in crate::models::switch_layers::EXPERT_PLANE_LEAVES {
                     let check_key = format!("{layer_prefix}.experts.0.{m}.{k}");
                     if weights.contains_key(&check_key) {
-                        let mut expert_ptrs: Vec<*const mlxcel_core::MlxArray> = Vec::new();
-                        for e in 0..n_routed {
-                            let key = format!("{layer_prefix}.experts.{e}.{m}.{k}");
-                            if let Some(w) = weights.get(&key) {
-                                expert_ptrs
-                                    .push(w.as_ref().expect("weight map holds no null handles")
-                                        as *const mlxcel_core::MlxArray);
+                        let expert_key = |e: usize| format!("{layer_prefix}.experts.{e}.{m}.{k}");
+                        let parts: Vec<(usize, &MlxArray)> = (0..n_routed)
+                            .filter_map(|e| {
+                                weights.get(&expert_key(e)).map(|w| {
+                                    (e, w.as_ref().expect("weight map holds no null handles"))
+                                })
+                            })
+                            .collect();
+                        if !parts.is_empty() {
+                            // `stack` aborts on a shape mismatch, so refuse
+                            // one before it runs (issue #3320). The sidecar
+                            // is concatenated, not stacked.
+                            if k != "global_scale" {
+                                crate::models::switch_layers::refuse_mismatched_expert_parts(
+                                    &parts, expert_key,
+                                )?;
                             }
-                        }
-                        if !expert_ptrs.is_empty() {
+                            let expert_ptrs: Vec<*const MlxArray> =
+                                parts.iter().map(|(_, w)| *w as *const MlxArray).collect();
                             // Stacked before any expert key is removed, and
                             // the stack holds its own handles.
                             let (leaf, stacked) =
@@ -1096,6 +1112,7 @@ pub fn sanitize_weights(weights: &mut WeightMap, config: &Mistral4Config, prefix
     for key in scale_keys {
         weights.remove(&key);
     }
+    Ok(())
 }
 
 // Helper Functions.
@@ -1202,6 +1219,49 @@ impl LanguageModel for Mistral4Model {
 }
 
 #[cfg(test)]
+mod mismatched_expert_tests {
+    use super::*;
+
+    /// One expert whose plane differs in shape from expert 0's is a load
+    /// error naming its key and both shapes, not an MLX `[stack]` abort
+    /// (issue #3320).
+    #[test]
+    fn sanitize_weights_refuses_a_mismatched_expert_plane() {
+        let config: Mistral4Config = serde_json::from_value(serde_json::json!({
+            "vocab_size": 32,
+            "hidden_size": 8,
+            "intermediate_size": 4,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "rms_norm_eps": 1e-5,
+            "kv_lora_rank": 4,
+            "qk_rope_head_dim": 2,
+            "qk_nope_head_dim": 2,
+            "v_head_dim": 4,
+            "n_routed_experts": 2,
+            "moe_intermediate_size": 4
+        }))
+        .expect("tiny config parses");
+        let mut weights = WeightMap::new();
+        for (e, cols) in [(0usize, 8i32), (1, 6)] {
+            weights.insert(
+                format!("model.layers.0.mlp.experts.{e}.gate_proj.weight"),
+                mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols as usize], &[4, cols]),
+            );
+        }
+        let err = sanitize_weights(&mut weights, &config, "")
+            .expect_err("a mismatched expert must be refused");
+        assert!(
+            err.contains("model.layers.0.mlp.experts.1.gate_proj.weight")
+                && err.contains("[4, 6]")
+                && err.contains("[4, 8]"),
+            "{err}"
+        );
+        assert!(!weights.contains_key("model.layers.0.mlp.switch_mlp.gate_proj.weight"));
+    }
+}
+
+#[cfg(test)]
 mod modelopt_stack_tests {
     use super::*;
     use crate::models::switch_layers::{
@@ -1254,7 +1314,7 @@ mod modelopt_stack_tests {
                 );
             }
         }
-        sanitize_weights(&mut weights, &config, "");
+        sanitize_weights(&mut weights, &config, "").expect("well-formed experts stack");
         let prefix = "model.layers.0.mlp.switch_mlp";
         for (j, proj) in ["gate_proj", "up_proj", "down_proj"]
             .into_iter()

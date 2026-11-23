@@ -823,20 +823,31 @@ impl PhiMoeModel {
                         // `new_weights` map and keeps its inputs alive on its
                         // own, because the C++ `stack` shim copies each
                         // refcounted `mx::array` handle into its own vector.
-                        let mut expert_ptrs: Vec<*const MlxArray> = Vec::new();
-                        for e in 0..args.num_local_experts {
-                            let key = format!(
+                        let expert_key = |e: usize| {
+                            format!(
                                 "{}.block_sparse_moe.experts.{}.{}.{}",
                                 prefix, e, orig_name, weight_type
-                            );
-                            if let Some(w) = weights.get(&key) {
-                                expert_ptrs
-                                    .push(w.as_ref().expect("weight map holds no null handles")
-                                        as *const MlxArray);
-                            }
-                        }
+                            )
+                        };
+                        let parts: Vec<(usize, &MlxArray)> = (0..args.num_local_experts)
+                            .filter_map(|e| {
+                                weights.get(&expert_key(e)).map(|w| {
+                                    (e, w.as_ref().expect("weight map holds no null handles"))
+                                })
+                            })
+                            .collect();
 
-                        if !expert_ptrs.is_empty() {
+                        if !parts.is_empty() {
+                            // `stack` aborts on a shape mismatch, so refuse
+                            // one before it runs (issue #3320). The sidecar
+                            // is concatenated, not stacked.
+                            if *weight_type != "global_scale" {
+                                crate::models::switch_layers::refuse_mismatched_expert_parts(
+                                    &parts, expert_key,
+                                )?;
+                            }
+                            let expert_ptrs: Vec<*const MlxArray> =
+                                parts.iter().map(|(_, w)| *w as *const MlxArray).collect();
                             let (leaf, stacked) = crate::models::switch_layers::stack_expert_leaf(
                                 weight_type,
                                 &expert_ptrs,
@@ -1028,6 +1039,38 @@ mod sanitize_tests {
             SwitchGLU::from_weights(&stacked, prefix, args.group_size(), args.bits()),
             prefix,
             "the stacked ModelOpt plane loads through the shared SwitchGLU",
+        );
+    }
+
+    /// One expert whose plane differs in shape from expert 0's is a load
+    /// error naming its key and both shapes, not an MLX `[stack]` abort
+    /// (issue #3320). Inline for the same reason as the test below.
+    #[test]
+    fn sanitize_weights_refuses_a_mismatched_expert_plane() {
+        let args: ModelArgs = serde_json::from_str(
+            r#"{
+                "model_type": "phimoe",
+                "num_hidden_layers": 1,
+                "num_local_experts": 2,
+                "num_experts_per_tok": 2
+            }"#,
+        )
+        .expect("tiny config parses");
+        let mut weights = WeightMap::new();
+        for (e, cols) in [(0usize, 8i32), (1, 6)] {
+            weights.insert(
+                format!("model.layers.0.block_sparse_moe.experts.{e}.w1.weight"),
+                mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols as usize], &[4, cols]),
+            );
+        }
+        let err = PhiMoeModel::sanitize_weights(&weights, &args)
+            .err()
+            .expect("a mismatched expert must be refused");
+        assert!(
+            err.contains("model.layers.0.block_sparse_moe.experts.1.w1.weight")
+                && err.contains("[4, 6]")
+                && err.contains("[4, 8]"),
+            "{err}"
         );
     }
 

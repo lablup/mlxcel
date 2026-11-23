@@ -356,15 +356,26 @@ pub(crate) fn stack_experts(weights: WeightMap, layers: usize) -> Result<WeightM
                 if !out.contains_key(&first) {
                     continue;
                 }
+                let expert_key = |e: usize| format!("{root}.{e}.{projection}.{leaf}");
                 let mut parts = Vec::with_capacity(experts);
                 for expert in 0..experts {
-                    let key = format!("{root}.{expert}.{projection}.{leaf}");
+                    let key = expert_key(expert);
                     parts.push(out.remove(&key).ok_or_else(|| {
                         format!(
                             "MiMo-V2 has {experts} routed experts for layer {layer} but is missing {key}"
                         )
                     })?);
                 }
+                // `stack_owned` aborts on a shape mismatch, so refuse one
+                // before it runs (issue #3320).
+                let borrowed: Vec<(usize, &MlxArray)> = parts
+                    .iter()
+                    .enumerate()
+                    .map(|(e, part)| (e, part.as_ref().expect("weight map holds no null handles")))
+                    .collect();
+                crate::models::switch_layers::refuse_mismatched_expert_parts(
+                    &borrowed, expert_key,
+                )?;
                 out.insert(
                     format!("model.layers.{layer}.mlp.switch_mlp.{projection}.{leaf}"),
                     mlxcel_core::stack_owned(&parts, 0),
