@@ -811,6 +811,14 @@ impl XlaBucketSet {
             .map_or(&[], XlaBatchEngine::eos_token_ids)
     }
 
+    /// Replace the stop ids of every bucket (see
+    /// [`XlaBatchEngine::set_eos_token_ids`]).
+    pub fn set_eos_token_ids(&mut self, ids: &[i32]) {
+        for bucket in &mut self.buckets {
+            bucket.set_eos_token_ids(ids.to_vec());
+        }
+    }
+
     /// Advance every non-empty bucket by one step and collect their events.
     ///
     /// # Errors
@@ -894,10 +902,20 @@ impl XlaBatchEngine {
         self.engine.compatibility_fingerprint()
     }
 
-    /// The model's EOS token ids (from `generation_config.json`).
+    /// The model's EOS token ids, read from the checkpoint at load
+    /// ([`crate::config_eos_token_ids`]) unless replaced by
+    /// [`Self::set_eos_token_ids`].
     #[must_use]
     pub fn eos_token_ids(&self) -> &[i32] {
         &self.sched.eos
+    }
+
+    /// Replace the stop ids, so a caller that resolves EOS more completely than
+    /// this crate can (the root crate also reads the tokenizer's `eos_token`)
+    /// stops where the eager backend does. The scheduler reads the ids on every
+    /// step, so set them right after load, before any request is submitted.
+    pub fn set_eos_token_ids(&mut self, ids: Vec<i32>) {
+        self.sched.eos = ids;
     }
 
     /// Conditionally load a Gemma3n audio bucket against this exact verified

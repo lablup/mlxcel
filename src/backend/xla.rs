@@ -67,6 +67,19 @@ fn load_unsupported<T>() -> Result<T> {
     )
 }
 
+/// The ids an OpenXLA session stops on: the stop set the eager backend uses
+/// for the same checkpoint (#3292).
+///
+/// `mlxcel-xla` cannot see the root crate, so on its own it reads only
+/// `generation_config.json` and `config.json` (including `text_config`). Eager
+/// also resolves the tokenizer's `eos_token` through `tokenizer_config.json` or
+/// `tokenizer.json`. This merges the crate's config ids, as the declared set,
+/// with [`crate::loading::read_eos_token_ids`], the same merge the LLaVA loader
+/// applies to its `text_config` ids, so both backends stop on the same tokens.
+pub(crate) fn xla_stop_token_ids(model_path: &Path) -> Vec<i32> {
+    crate::loading::merged_eos_token_ids(mlxcel_xla::config_eos_token_ids(model_path), model_path)
+}
+
 /// Build the OpenXLA session for a resolved static capacity.
 ///
 /// The engine drives generation from the session, so it loads its own weights
@@ -83,9 +96,10 @@ fn build_xla_session(
 ) -> Result<Session> {
     let image_preprocessor = crate::load_xla_image_preprocessor(model_path)
         .map_err(|error| anyhow::anyhow!("OpenXLA image preprocessor load failed: {error}"))?;
-    let session =
+    let mut session =
         XlaInferenceSession::load_with_context_capacity(model_path, num_layers, context_capacity)
             .map_err(|e| anyhow::anyhow!(e))?;
+    session.set_eos_token_ids(xla_stop_token_ids(model_path));
     Ok(Session::xla(session, image_preprocessor))
 }
 
@@ -165,5 +179,82 @@ impl ComputeBackend for XlaBackend {
         // (issue #449 M3 Stage 2c) once real IREE execution is compiled in. Without
         // `xla-iree` there is no engine to batch with, so it reports false.
         cfg!(feature = "xla-iree")
+    }
+}
+
+// The XLA stop set must match the eager one (#3292).
+#[cfg(test)]
+mod eos_parity_tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::Path;
+
+    use super::xla_stop_token_ids;
+    use crate::loading::read_eos_token_ids;
+
+    fn as_set(ids: &[i32]) -> BTreeSet<i32> {
+        ids.iter().copied().collect()
+    }
+
+    /// generation_config, tokenizer_config (by `eos_token` name) and
+    /// config.json each declare a different id.
+    fn write_sidecars(dir: &Path, config_json: &str) {
+        fs::write(
+            dir.join("generation_config.json"),
+            r#"{"eos_token_id": 10}"#,
+        )
+        .expect("write generation config");
+        fs::write(
+            dir.join("tokenizer_config.json"),
+            r#"{"eos_token": "<|im_end|>", "added_tokens_decoder": {"11": {"content": "<|im_end|>"}}}"#,
+        )
+        .expect("write tokenizer config");
+        fs::write(dir.join("config.json"), config_json).expect("write config");
+    }
+
+    #[test]
+    fn xla_stop_set_equals_the_eager_set_across_all_sidecars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_sidecars(dir.path(), r#"{"eos_token_id": [12, 10]}"#);
+        let eager = read_eos_token_ids(dir.path());
+        assert_eq!(as_set(&eager), BTreeSet::from([10, 11, 12]));
+        assert_eq!(as_set(&xla_stop_token_ids(dir.path())), as_set(&eager));
+    }
+
+    #[test]
+    fn xla_stop_set_resolves_the_tokenizer_eos_through_tokenizer_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"eos_token": "<|im_end|>"}"#,
+        )
+        .expect("write tokenizer config");
+        fs::write(
+            dir.path().join("tokenizer.json"),
+            r#"{"added_tokens": [{"id": 151645, "content": "<|im_end|>", "special": true}]}"#,
+        )
+        .expect("write tokenizer");
+        fs::write(
+            dir.path().join("config.json"),
+            r#"{"eos_token_id": 151643}"#,
+        )
+        .expect("write config");
+        let eager = read_eos_token_ids(dir.path());
+        assert_eq!(as_set(&eager), BTreeSet::from([151643, 151645]));
+        assert_eq!(as_set(&xla_stop_token_ids(dir.path())), as_set(&eager));
+    }
+
+    /// A vision-language checkpoint's `text_config` ids are merged in as
+    /// declared ids, like the eager LLaVA loader's `merged_eos_token_ids`.
+    #[test]
+    fn xla_stop_set_adds_text_config_ids_to_the_eager_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_sidecars(
+            dir.path(),
+            r#"{"eos_token_id": 12, "text_config": {"eos_token_id": 13}}"#,
+        );
+        let mut expected = as_set(&read_eos_token_ids(dir.path()));
+        expected.insert(13);
+        assert_eq!(as_set(&xla_stop_token_ids(dir.path())), expected);
     }
 }
