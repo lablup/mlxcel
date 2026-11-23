@@ -104,6 +104,7 @@ fn the_stub_worker_reports_its_declarations_and_answers() {
             Some(json!("yes please")),
             bool_question(),
             DecisionMedia::default(),
+            Vec::new(),
         )
         .expect("predicts");
     assert_eq!(result.answers[0].1.to_json()["value"], true);
@@ -116,7 +117,12 @@ fn the_stub_worker_reports_its_declarations_and_answers() {
 fn a_slow_prediction_times_out() {
     let (provider, release) = gated_provider(4, Duration::from_millis(50));
     let err = provider
-        .predict(Some(json!("x")), bool_question(), DecisionMedia::default())
+        .predict(
+            Some(json!("x")),
+            bool_question(),
+            DecisionMedia::default(),
+            Vec::new(),
+        )
         .expect_err("times out");
     assert!(matches!(err, DecisionProviderError::Timeout), "{err:?}");
     release.send(()).ok();
@@ -131,12 +137,22 @@ fn a_full_queue_is_rejected() {
     for _ in 0..2 {
         let provider = Arc::clone(&provider);
         pending.push(std::thread::spawn(move || {
-            provider.predict(Some(json!("x")), bool_question(), DecisionMedia::default())
+            provider.predict(
+                Some(json!("x")),
+                bool_question(),
+                DecisionMedia::default(),
+                Vec::new(),
+            )
         }));
         std::thread::sleep(Duration::from_millis(100));
     }
     let err = provider
-        .predict(Some(json!("x")), bool_question(), DecisionMedia::default())
+        .predict(
+            Some(json!("x")),
+            bool_question(),
+            DecisionMedia::default(),
+            Vec::new(),
+        )
         .expect_err("queue full");
     assert!(matches!(err, DecisionProviderError::QueueFull), "{err:?}");
     for _ in 0..2 {
@@ -169,5 +185,113 @@ fn a_non_decision_checkpoint_fails_to_load() {
     assert!(
         resolve_decision_provider(None, String::new(), 4, 30)
             .is_ok_and(|provider| provider.is_none())
+    );
+}
+
+/// A [`GatedModel`] that also counts the predictions it ran.
+struct CountingGatedModel {
+    inner: GatedModel,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DecisionModel for CountingGatedModel {
+    fn decision_types(&self) -> &[QuestionKind] {
+        self.inner.decision_types()
+    }
+
+    fn decision_media(&self) -> &[MediaKind] {
+        self.inner.decision_media()
+    }
+
+    fn predict(
+        &mut self,
+        state: Option<&Value>,
+        questions: &[(String, Question)],
+        media: DecisionMedia,
+    ) -> Result<DecisionResult, DecisionError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.predict(state, questions, media)
+    }
+}
+
+#[test]
+fn a_timed_out_request_is_skipped_and_temp_files_outlive_the_prediction() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (release, gate) = mpsc::channel();
+    let gate = Arc::new(Mutex::new(gate));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let provider = DecisionWorkerProvider::from_loader(
+        "gated".into(),
+        4,
+        Duration::from_millis(100),
+        move || {
+            Ok(LoadedDecisionModel {
+                model: Box::new(CountingGatedModel {
+                    inner: GatedModel { gate },
+                    calls: counted,
+                }),
+                kind: DecisionKind::Stub,
+                model_type: "gated".into(),
+            })
+        },
+    )
+    .expect("worker spawns");
+
+    // The first request blocks the worker past its caller's timeout.
+    let temp =
+        crate::multimodal::video::PrivateTempDir::create("mlxcel-decision-test").expect("temp dir");
+    let temp_path = temp.path().to_path_buf();
+    let first = provider.predict(
+        Some(json!("x")),
+        bool_question(),
+        DecisionMedia::default(),
+        vec![temp],
+    );
+    assert!(
+        matches!(first, Err(DecisionProviderError::Timeout)),
+        "{first:?}"
+    );
+    assert!(
+        temp_path.exists(),
+        "the temp dir must outlive a prediction that is still running"
+    );
+    // The second request waits in the queue behind it and times out too.
+    let second = provider.predict(
+        Some(json!("x")),
+        bool_question(),
+        DecisionMedia::default(),
+        Vec::new(),
+    );
+    assert!(
+        matches!(second, Err(DecisionProviderError::Timeout)),
+        "{second:?}"
+    );
+
+    // Let the first prediction and a third request run. The worker reaches
+    // the third only after it has dequeued (and skipped) the second.
+    release.send(()).expect("release first");
+    release.send(()).expect("release third");
+    let mut third = Err(DecisionProviderError::Timeout);
+    for _ in 0..50 {
+        third = provider.predict(
+            Some(json!("x")),
+            bool_question(),
+            DecisionMedia::default(),
+            Vec::new(),
+        );
+        if third.is_ok() {
+            break;
+        }
+    }
+    third.expect("the third request is answered");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the timed-out queued request must not reach the model"
+    );
+    assert!(
+        !temp_path.exists(),
+        "the worker removes the temp dir after the prediction"
     );
 }

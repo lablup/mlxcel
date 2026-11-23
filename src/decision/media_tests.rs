@@ -49,3 +49,29 @@ fn the_cap_is_on_duration_not_sample_count() {
     let samples = decode_audio_16k(&wav(100, 48_000)).expect("short high-rate clip decodes");
     assert_eq!(samples.len(), 100 * 16_000);
 }
+
+#[test]
+fn a_clip_over_the_cap_is_refused_from_its_header_before_decoding() {
+    use crate::audio::preprocessing::{AudioPreprocessError, decode_native_within};
+    let clip = wav(MAX_DECISION_AUDIO_SECONDS + 1, 8_000);
+    // The container's inspect step raises this limit from the declared frame
+    // count; the decode loop is never entered.
+    match decode_native_within(&clip, MAX_DECISION_AUDIO_SECONDS) {
+        Err(AudioPreprocessError::Limit {
+            limit,
+            actual,
+            maximum,
+        }) => {
+            assert_eq!(limit, "source duration samples");
+            assert_eq!(actual, 301 * 8_000);
+            assert_eq!(maximum, 300 * 8_000);
+        }
+        other => panic!("expected the container duration limit, got {other:?}"),
+    }
+    // Other callers keep the 24-hour compatibility ceiling.
+    assert!(crate::audio::preprocessing::decode_wav_native_compat(&clip).is_ok());
+    assert_eq!(
+        decode_audio_16k(&clip).unwrap_err(),
+        "audio is 301 seconds long; decision audio is limited to 300 seconds"
+    );
+}

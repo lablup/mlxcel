@@ -504,6 +504,34 @@ fn enforce_limit(
 pub(crate) fn decode_wav_native_compat(
     bytes: &[u8],
 ) -> Result<(Vec<f32>, u32), AudioPreprocessError> {
+    decode_native(bytes, LEGACY_MAX_DURATION_SECONDS, false)
+}
+
+/// The compatibility decoder's duration ceiling: 24 hours.
+const LEGACY_MAX_DURATION_SECONDS: usize = 24 * 60 * 60;
+
+/// [`decode_wav_native_compat`] with a caller-chosen duration ceiling.
+///
+/// The clip's declared geometry is inspected first, so a clip longer than
+/// `max_duration_seconds` is refused with the `source duration samples`
+/// limit before any sample is decoded (issue #3296). The decode loop still
+/// enforces the same ceiling for a container whose header declares no
+/// length or understates it.
+pub(crate) fn decode_native_within(
+    bytes: &[u8],
+    max_duration_seconds: usize,
+) -> Result<(Vec<f32>, u32), AudioPreprocessError> {
+    decode_native(bytes, max_duration_seconds, true)
+}
+
+/// Shared body of the native-rate decoders. `inspect_first` runs the
+/// container's header checks before decoding; the compatibility decoder
+/// keeps its historical decode-only behavior.
+fn decode_native(
+    bytes: &[u8],
+    max_duration_seconds: usize,
+    inspect_first: bool,
+) -> Result<(Vec<f32>, u32), AudioPreprocessError> {
     struct NeverCancel;
     impl AudioCancellation for NeverCancel {
         fn is_cancelled(&self, _checkpoint: AudioPreprocessCheckpoint) -> bool {
@@ -518,7 +546,7 @@ pub(crate) fn decode_wav_native_compat(
         target_channels: 1,
         dtype: "f32",
         resampling: AudioResamplingPolicy::Native,
-        max_duration_seconds: 24 * 60 * 60,
+        max_duration_seconds,
         max_samples_per_clip: usize::MAX,
         max_encoded_bytes_per_clip: 500 * 1024 * 1024,
         max_clips: 1,
@@ -542,6 +570,9 @@ pub(crate) fn decode_wav_native_compat(
             actual: bytes.len(),
             maximum: policy.max_encoded_bytes_per_clip,
         });
+    }
+    if inspect_first {
+        container::inspect(bytes, 0, policy, &NeverCancel)?;
     }
     let native = container::decode(bytes, 0, policy, &NeverCancel)?;
     Ok((native.samples, native.sample_rate))
