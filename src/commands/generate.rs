@@ -2775,7 +2775,7 @@ fn run_offline_mtp(
         // internal fallback cache slot, the documented offline / single-row
         // CLI shape.
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => drive_offline_mtp(
-            mlxcel::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(qwen, None),
+            mlxcel::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::fallback(qwen),
             drafter,
             prompt_tokens,
             max_tokens,
@@ -2784,7 +2784,7 @@ fn run_offline_mtp(
             block_size,
         ),
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => drive_offline_mtp(
-            mlxcel::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(vlm, None),
+            mlxcel::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::fallback(vlm),
             drafter,
             prompt_tokens,
             max_tokens,

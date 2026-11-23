@@ -250,10 +250,12 @@ fn run(prompt_len: usize, chunk: usize, align: bool, backend: DecodeStorageBacke
         if snapshot.is_none()
             && let Some(seq_id) = sched.active_batch.sequence_ids().first().copied()
         {
-            snapshot = sched
-                .engine
-                .model()
-                .snapshot_sequence_state(seq_id, prompt_len);
+            snapshot = crate::server::prompt_cache::state_snapshot::snapshot_sequence_state(
+                sched.engine.model(),
+                sched.engine.pool(),
+                seq_id,
+                prompt_len,
+            );
         }
         sched.finalize_completed();
         if sched.active_batch.is_empty()

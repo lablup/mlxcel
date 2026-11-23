@@ -310,6 +310,9 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// their VLM wrappers) builds the sequence's caches in
     /// `prepare_sequence_state` from the modes it holds at that moment, and
     /// a later `set_kv_cache_layer_modes` rebuilds only its fallback slot.
+    /// A scheduler-owned family (Gemma 3, Qwen 3.5) is the same case one step
+    /// earlier: the pool builds its layer state inside [`Engine::open`] from
+    /// the modes the model holds then.
     ///
     /// A model that cannot batch keeps one set of caches inside itself
     /// (NemotronNAS and LongCat-Flash / LongCat-Flash-Ngram hold them in one

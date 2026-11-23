@@ -1806,9 +1806,11 @@ impl LanguageModel for Llama4Wrapper {
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         self.kv_cache_layer_modes.storage_modes(|layer_idx| {
             if uses_chunked_cache(layer_idx) {
-                crate::models::model_owned::LayerKv::Fp16Only
+                mlxcel_core::cache::LayerStateKind::Chunked {
+                    chunk: self.model.attention_chunk_size as i32,
+                }
             } else {
-                crate::models::model_owned::LayerKv::Full
+                mlxcel_core::cache::LayerStateKind::Full
             }
         })
     }

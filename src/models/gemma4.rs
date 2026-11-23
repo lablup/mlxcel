@@ -40,11 +40,12 @@ use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::kv_ring_checkpoint;
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
 use crate::models::switch_layers::{SwitchLinear, gather_sort};
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{
@@ -6936,7 +6937,7 @@ impl LanguageModel for Gemma4Wrapper {
                 .get(layer_idx)
                 .is_some_and(|layer_type| layer_type != "full_attention")
                 .then_some(window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 

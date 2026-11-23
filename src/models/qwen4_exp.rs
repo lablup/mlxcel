@@ -1355,8 +1355,8 @@ impl LanguageModel for Qwen4ExpModel {
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         self.kv_cache_layer_modes
             .storage_modes(|layer_idx| match self.layers.get(layer_idx) {
-                Some(layer) if !layer.is_linear() => crate::models::model_owned::LayerKv::Full,
-                _ => crate::models::model_owned::LayerKv::None,
+                Some(layer) if !layer.is_linear() => mlxcel_core::cache::LayerStateKind::Full,
+                _ => mlxcel_core::cache::LayerStateKind::None,
             })
     }
 
