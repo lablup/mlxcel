@@ -211,13 +211,14 @@ impl Qwen2VLProcessor {
 
     /// Override the checkpoint's resize bounds in pixels.
     ///
-    /// Most Qwen-VL checkpoints ship the family defaults, so their loaders take
-    /// [`DEFAULT_MIN_PIXELS`] / [`DEFAULT_MAX_PIXELS`]. Cohere Compass does not:
-    /// its `preprocessor_config.json` sets `size.shortest_edge` to 65536 and
-    /// `size.longest_edge` to 16777216, and reading them is what makes
+    /// Qwen2-VL / Qwen2.5-VL checkpoints ship the family defaults, so their
+    /// loaders take [`DEFAULT_MIN_PIXELS`] / [`DEFAULT_MAX_PIXELS`]. The
+    /// Qwen3-VL generation does not: its sidecars set `size.shortest_edge` to
+    /// 65536 and `size.longest_edge` to 16777216, and reading them is what makes
     /// `smart_resize` pick the same grid as the HF processor.
     ///
-    /// Used by: Cohere Compass / North-Micro-Vision.
+    /// Used by: the Qwen3-VL-generation loaders through the checkpoint resize
+    /// policy, Mage VL, CLEF.
     #[must_use]
     pub fn with_pixel_bounds(mut self, min_pixels: usize, max_pixels: usize) -> Self {
         self.min_pixels = min_pixels;
@@ -239,6 +240,12 @@ impl Qwen2VLProcessor {
     pub fn with_resize_filter(mut self, resize_filter: FilterType) -> Self {
         self.resize_filter = resize_filter;
         self
+    }
+
+    /// The image resampler this processor resizes with.
+    #[must_use]
+    pub fn resize_filter(&self) -> FilterType {
+        self.resize_filter
     }
 
     #[must_use]
@@ -274,34 +281,45 @@ impl Qwen2VLProcessor {
     /// Compute target size that satisfies constraints
     /// Returns (height, width) padded to multiples of factor
     pub(crate) fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
-        let factor = (self.patch_size * self.spatial_merge_size) as u32; // 28
+        let factor = (self.patch_size * self.spatial_merge_size) as u64; // 28
         let (min_pixels, max_pixels) = self.effective_pixel_bounds();
+        let (min_pixels, max_pixels) = (min_pixels as u64, max_pixels as u64);
+        let area = |h: u64, w: u64| h.saturating_mul(w);
+        let round_to = |edge: f64, scale: f64, mode: fn(f64) -> f64| -> u64 {
+            (mode(edge * scale / factor as f64) as u64)
+                .max(1)
+                .saturating_mul(factor)
+        };
 
-        // Start with original size, round to factor
-        let mut h = ((orig_h as f64 / factor as f64).round() as u32).max(1) * factor;
-        let mut w = ((orig_w as f64 / factor as f64).round() as u32).max(1) * factor;
+        // Start with original size, round to factor. Arithmetic is u64 and
+        // saturating so a huge image or a huge checkpoint bound cannot wrap.
+        let mut h = round_to(orig_h as f64, 1.0, f64::round);
+        let mut w = round_to(orig_w as f64, 1.0, f64::round);
 
         // Ensure within pixel limits
-        let pixels = (h * w) as usize;
+        let pixels = area(h, w);
         if pixels > max_pixels {
             let scale = (max_pixels as f64 / pixels as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).round() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).round() as u32).max(1) * factor;
+            h = round_to(h as f64, scale, f64::round);
+            w = round_to(w as f64, scale, f64::round);
         }
-        if (h * w) as usize > max_pixels {
+        if area(h, w) > max_pixels {
             // Further reduce if needed
-            let scale = (max_pixels as f64 / (h * w) as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
+            let scale = (max_pixels as f64 / area(h, w) as f64).sqrt();
+            h = round_to(h as f64, scale, f64::floor);
+            w = round_to(w as f64, scale, f64::floor);
         }
-        let pixels = (h * w) as usize;
+        let pixels = area(h, w);
         if pixels < min_pixels {
             let scale = (min_pixels as f64 / pixels as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).ceil() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).ceil() as u32).max(1) * factor;
+            h = round_to(h as f64, scale, f64::ceil);
+            w = round_to(w as f64, scale, f64::ceil);
         }
 
-        (h, w)
+        (
+            u32::try_from(h).unwrap_or(u32::MAX),
+            u32::try_from(w).unwrap_or(u32::MAX),
+        )
     }
 
     /// Compute grid_thw for a set of images

@@ -48,7 +48,7 @@ use serde_json::{Value, json};
 use crate::embeddings::limits::{read_json, resolve_pad_token_id};
 use crate::embeddings::model::ImageInput;
 use crate::embeddings::tokenize::{EncodedBatch, EncodedRow, PaddingSide};
-use crate::models::qwen3_vl_embedding::{apply_pixel_bounds, expand_image_placeholders};
+use crate::models::qwen3_vl_embedding::expand_image_placeholders;
 use crate::server::chat_template::ChatTemplateProcessor;
 use crate::tokenizer::{MlxcelTokenizer, load_tokenizer};
 
@@ -159,14 +159,15 @@ impl Qwen3VlReranker {
     ) -> Result<Self> {
         let loaded = crate::loading::load_qwen3_vl(model_dir)
             .with_context(|| format!("failed to load {} as Qwen3-VL", model_dir.display()))?;
-        let crate::LoadedModel::Qwen3VL(mut vlm) = loaded else {
+        let crate::LoadedModel::Qwen3VL(vlm) = loaded else {
             bail!(
                 "{} did not load as a Qwen3-VL stack; the multimodal reranker needs the dense \
                  Qwen3-VL layout",
                 model_dir.display()
             );
         };
-        apply_pixel_bounds(&mut vlm.processor, model_dir);
+        // `load_qwen3_vl` already applied the checkpoint's sidecar pixel bounds
+        // and resampler through the shared `QwenImageResizePolicy`.
 
         let template_path = model_dir.join(RERANKER_TEMPLATE_PATH);
         let template_source = std::fs::read_to_string(&template_path).with_context(|| {
