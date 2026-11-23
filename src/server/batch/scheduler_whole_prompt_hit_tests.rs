@@ -107,6 +107,7 @@ fn identical_prompt_replay_restores_all_but_the_last_token() {
 
     let (seq_id, adopted) = sched
         .try_adopt_cached_prefix(&cache_ctx(), &first, false)
+        .adopted()
         .expect("an identical replay hits the cache");
     assert_eq!(adopted, first.len() - 1, "adopt stops one token short");
     assert_eq!(
@@ -128,6 +129,7 @@ fn whole_entry_hit_restores_len_minus_one_and_prefills_one_token() {
 
     let (seq_id, adopted) = sched
         .try_adopt_cached_prefix(&cache_ctx(), &replay, false)
+        .adopted()
         .expect("the stored conversation hits its own entry");
     assert_eq!(adopted, replay.len() - 1);
     assert_eq!(
@@ -166,7 +168,9 @@ fn untruncatable_whole_entry_hit_falls_back_to_cold_prefill() {
         .batch_observability
         .prompt_cache_reject_reasons
         .count(PromptCacheRejectReason::LayoutConstraints);
-    let adopted = sched.try_adopt_cached_prefix(&cache_ctx(), &replay, false);
+    let adopted = sched
+        .try_adopt_cached_prefix(&cache_ctx(), &replay, false)
+        .adopted();
     assert!(
         adopted.is_none(),
         "a wrapped ring cannot drop the last token, so the hit must decline"

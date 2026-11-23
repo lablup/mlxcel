@@ -721,6 +721,73 @@ fn snapshot_lru_cap_is_independent_from_kv_entries() {
     );
 }
 
+#[test]
+fn peek_snapshot_prefix_touches_and_records_restore_source_without_counting() {
+    let metrics = AtomicPromptCacheMetrics::shared();
+    let store = PromptCacheStore::with_metrics(
+        cfg(1 << 20, 64, 4)
+            .with_snapshot_limits(1 << 20, 2, Duration::from_secs(3600))
+            .with_keep_previous_turn(true),
+        metrics.clone(),
+    );
+    let a = tokens(0, 16);
+    let b = tokens(100, 16);
+    let c = tokens(200, 16);
+    for toks in [&a, &b] {
+        store
+            .insert_snapshot(
+                &key_for_session("m", Some(&format!("chat-{}", toks[0])), toks),
+                snapshot_entry_for_test(toks.clone(), "mamba"),
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    // A peek of the oldest entry selects it like a counted lookup would.
+    let (entry, matched) = store
+        .peek_snapshot_prefix(&key_for_session("m", Some("chat-0"), &a), &a)
+        .expect("peek finds the stored snapshot");
+    assert_eq!(matched, a.len());
+    assert_eq!(entry.tokens, a);
+    thread::sleep(Duration::from_millis(5));
+
+    // It recorded the session's restore source ...
+    assert_eq!(
+        store.inner.read().unwrap().restore_sources.len(),
+        1,
+        "peek must record the restore source"
+    );
+
+    // ... and counted nothing, on the store or on the metrics sink.
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_lookups, 0);
+    assert_eq!(stats.snapshot_hits, 0);
+    assert_eq!(metrics.snapshot_lookups.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.snapshot_hits.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.snapshot_hit_tokens_total.load(Ordering::Relaxed), 0);
+
+    // The touch moved `a` to the front of the LRU order: the third insert
+    // evicts `b`, not the older-but-just-peeked `a`.
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-200"), &c),
+            snapshot_entry_for_test(c.clone(), "mamba"),
+        )
+        .unwrap();
+    assert!(
+        store
+            .peek_snapshot_prefix(&key_for_session("m", Some("chat-0"), &a), &a)
+            .is_some(),
+        "the peeked snapshot is the most recently used and must survive"
+    );
+    assert!(
+        store
+            .peek_snapshot_prefix(&key_for_session("m", Some("chat-100"), &b), &b)
+            .is_none(),
+        "the untouched snapshot is the LRU victim"
+    );
+}
+
 // ── session-chain supersede (issue #1146) ───────────────────────────────────
 //
 // A conversation stores one snapshot per turn and every turn's token vector
