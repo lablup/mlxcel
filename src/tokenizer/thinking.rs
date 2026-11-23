@@ -47,26 +47,6 @@
 //! Used by: `tokenizer::MlxcelTokenizer`, `server::chat_template`,
 //! `server::thinking_budget`, `server::tool_calls::stream_filter`.
 
-/// Reasoning-effort variants of a resolved single-token think pair, keyed by
-/// the pair's open marker.
-///
-/// IFM K2-Horizon's chat template primes the generation prompt with one of
-/// three opens chosen by `reasoning_effort` (`<ifm|think>` for high,
-/// `<ifm|think_fast>` for medium, `<ifm|think_faster>` for low), and the
-/// model closes the block with the matching close. The tokenizer resolves
-/// `<ifm|think>` as its marker pair; these are the other two pairs a prompt
-/// can prime under it (#3299).
-///
-/// Used by: [`ThinkingMarkers::primeable_pairs`],
-/// `server::thinking_budget::resolve_thinking_token_ids`.
-pub const THINK_EFFORT_VARIANTS: &[(&str, &[(&str, &str)])] = &[(
-    "<ifm|think>",
-    &[
-        ("<ifm|think_fast>", "</ifm|think_fast>"),
-        ("<ifm|think_faster>", "</ifm|think_faster>"),
-    ],
-)];
-
 /// Multi-token think and tool-call markers resolved from a tokenizer's vocab.
 ///
 /// Each field holds the **token-id sequence** that materializes the marker in
@@ -118,27 +98,6 @@ impl ThinkingMarkers {
     /// behavior added in PR #1114).
     pub fn has_thinking(&self) -> bool {
         self.think_start.is_some()
-    }
-
-    /// The (open, close) think pairs a generation prompt can prime: the
-    /// resolved pair first, then its [`THINK_EFFORT_VARIANTS`]. Empty when
-    /// either half of the resolved pair is missing or empty.
-    pub fn primeable_pairs(&self) -> Vec<(&str, &str)> {
-        let (Some(start), Some(end)) = (self.think_start.as_deref(), self.think_end.as_deref())
-        else {
-            return Vec::new();
-        };
-        if start.is_empty() || end.is_empty() {
-            return Vec::new();
-        }
-        let mut pairs = vec![(start, end)];
-        if let Some((_, variants)) = THINK_EFFORT_VARIANTS
-            .iter()
-            .find(|(open, _)| *open == start)
-        {
-            pairs.extend(variants.iter().copied());
-        }
-        pairs
     }
 
     /// `true` when the tokenizer exposes a recognized tool-call open/close

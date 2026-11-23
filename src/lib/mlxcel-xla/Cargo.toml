@@ -66,8 +66,6 @@ cc = "1"
 sha2 = "0.11"
 
 [dev-dependencies]
-# Scratch directories for the private-cache tests (#3248).
-tempfile = "3"
 # Auxiliary artifact qualification is pure Rust and must remain testable
 # without enabling/linking the native IREE runtime.
 sha2 = "0.11"

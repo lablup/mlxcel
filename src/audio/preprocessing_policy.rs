@@ -17,7 +17,7 @@ use super::AudioPreprocessError;
 const DEFAULT_MAX_ENCODED_BYTES: usize = 64 * 1024 * 1024;
 const PHI4MM_MAX_ENCODED_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_MAX_CLIPS: usize = 16;
-pub(super) const MAX_SOURCE_SAMPLE_RATE: u32 = 192_000;
+const MAX_SOURCE_SAMPLE_RATE: u32 = 192_000;
 const MICROS_PER_SECOND: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

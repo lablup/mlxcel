@@ -228,30 +228,8 @@ pub fn pick_budget_alias(
 pub struct ThinkingTokenIds {
     /// The `<think>` opening token id.
     pub open: i32,
-    /// The `</think>` closing token id. This is the one a budget forces.
+    /// The `</think>` closing token id.
     pub close: i32,
-    /// Close ids of the pair's reasoning-effort variants
-    /// ([`crate::tokenizer::THINK_EFFORT_VARIANTS`]), which also end the
-    /// block when the model emits them: K2-Horizon primed with
-    /// `<ifm|think_fast>` closes with `</ifm|think_fast>`, not `</ifm|think>`
-    /// (#3299). `None` slots are unused.
-    pub alt_closes: [Option<i32>; 2],
-}
-
-impl ThinkingTokenIds {
-    /// A pair with no effort variants.
-    pub const fn new(open: i32, close: i32) -> Self {
-        Self {
-            open,
-            close,
-            alt_closes: [None, None],
-        }
-    }
-
-    /// Whether `token` closes the block: the pair's close or a variant's.
-    pub fn is_close(&self, token: i32) -> bool {
-        token == self.close || self.alt_closes.contains(&Some(token))
-    }
 }
 
 /// Resolve the reasoning-block open/close token IDs from the tokenizer.
@@ -274,29 +252,19 @@ pub fn resolve_thinking_token_ids(
 ) -> Option<ThinkingTokenIds> {
     let hf = tokenizer.hf_tokenizer()?;
     if let (Some(open), Some(close)) = (hf.token_to_id("<think>"), hf.token_to_id("</think>")) {
-        return Some(ThinkingTokenIds::new(open as i32, close as i32));
-    }
-    // IFM K2-Horizon (#3299). The template primes one of three opens by
-    // `reasoning_effort`; the variants' closes end the block too.
-    if let (Some(open), Some(close)) = (
-        hf.token_to_id("<ifm|think>"),
-        hf.token_to_id("</ifm|think>"),
-    ) {
-        let mut ids = ThinkingTokenIds::new(open as i32, close as i32);
-        let variants = crate::tokenizer::THINK_EFFORT_VARIANTS
-            .iter()
-            .find(|(primary, _)| *primary == "<ifm|think>")
-            .map_or(&[][..], |(_, variants)| *variants);
-        for (slot, (_, variant_close)) in ids.alt_closes.iter_mut().zip(variants) {
-            *slot = hf.token_to_id(variant_close).map(|id| id as i32);
-        }
-        return Some(ids);
+        return Some(ThinkingTokenIds {
+            open: open as i32,
+            close: close as i32,
+        });
     }
     if let (Some(open), Some(close)) = (
         hf.token_to_id("<|content_thinking|>"),
         hf.token_to_id("<|end_message|>"),
     ) {
-        return Some(ThinkingTokenIds::new(open as i32, close as i32));
+        return Some(ThinkingTokenIds {
+            open: open as i32,
+            close: close as i32,
+        });
     }
     // Gemma 4 fallback: the reasoning block is wrapped in
     // `<|channel>thought\n…<channel|>`. We track the outer delimiter pair;
@@ -304,7 +272,10 @@ pub fn resolve_thinking_token_ids(
     // `ThinkingState` counts via `in_block_count`.
     if let (Some(open), Some(close)) = (hf.token_to_id("<|channel>"), hf.token_to_id("<channel|>"))
     {
-        return Some(ThinkingTokenIds::new(open as i32, close as i32));
+        return Some(ThinkingTokenIds {
+            open: open as i32,
+            close: close as i32,
+        });
     }
     None
 }
@@ -495,7 +466,7 @@ impl ThinkingState {
             }
             ThinkingPhase::InBlock => {
                 // Natural close — let it through.
-                if ids.is_close(sampled) {
+                if sampled == ids.close {
                     return ThinkingDecision::NoOverride;
                 }
                 if forced || self.budget.is_some_and(|b| self.in_block_count >= b.cap()) {
@@ -583,7 +554,7 @@ impl ThinkingState {
             ThinkingPhase::Pending => {
                 if self.enter_block_on_start {
                     // Treat every emitted token as in-block from the start.
-                    if ids.is_close(final_token) {
+                    if final_token == ids.close {
                         self.phase = ThinkingPhase::Closed;
                     } else {
                         self.phase = ThinkingPhase::InBlock;
@@ -596,7 +567,7 @@ impl ThinkingState {
                 // Otherwise remain Pending — the model chose not to reason.
             }
             ThinkingPhase::InBlock => {
-                if ids.is_close(final_token) {
+                if final_token == ids.close {
                     self.phase = ThinkingPhase::Closed;
                 } else {
                     self.in_block_count = self.in_block_count.saturating_add(1);
@@ -734,7 +705,10 @@ mod tests {
     // -- ThinkingState transitions --
 
     fn ids() -> ThinkingTokenIds {
-        ThinkingTokenIds::new(100, 200)
+        ThinkingTokenIds {
+            open: 100,
+            close: 200,
+        }
     }
 
     #[test]

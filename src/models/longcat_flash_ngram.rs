@@ -24,6 +24,7 @@
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/longcat_flash.py, longcat_flash_ngram.py
 
 use crate::models::gpt2::validate_embedding_table;
+use crate::models::mla_rope::MlaRope;
 use crate::models::model_owned::KvCacheLayerModes;
 use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::cache::KVCacheMode;
@@ -185,7 +186,10 @@ pub(super) struct LongcatFlashMLA {
     pub(super) v_head_dim: i32,
     pub(super) kv_lora_rank: i32,
     scale: f32,
-    rope_base: f32,
+    /// The `q_pe` / `k_pe` rotation: the checkpoint's YaRN table
+    /// (`longcat-flash-lite` ships `factor` 10 over 32768) or plain
+    /// `fast_rope` at `rope_theta` (#3295).
+    pub(super) rope: MlaRope,
     mla_scale_q_lora: Option<f32>,
     mla_scale_kv_lora: Option<f32>,
 }
@@ -225,22 +229,8 @@ impl LongcatFlashMLA {
 
         // Apply RoPE
         let offset = cache.offset;
-        let q_pe = mlxcel_core::fast_rope(
-            &q_pe,
-            self.qk_rope_head_dim,
-            true,
-            self.rope_base,
-            1.0,
-            offset,
-        );
-        let k_pe = mlxcel_core::fast_rope(
-            &k_pe,
-            self.qk_rope_head_dim,
-            true,
-            self.rope_base,
-            1.0,
-            offset,
-        );
+        let q_pe = self.rope.apply(&q_pe, true, offset);
+        let k_pe = self.rope.apply(&k_pe, true, offset);
 
         // Cache stores (kv_latent, k_pe). An `int8` cache stores the latent as
         // the affine group-64 triple and hands back a quantized window; the
@@ -514,10 +504,26 @@ impl LongcatFlashMLA {
         self.o_proj.forward(&attn_out)
     }
 
+    /// Resolve this config's RoPE once, for every attention to duplicate.
+    ///
+    /// No training-context fallback, matching upstream `longcat_flash`
+    /// (`initialize_rope` without `max_position_embeddings`, so `YarnRoPE`
+    /// defaults a missing original context to 4096).
+    pub(super) fn resolve_rope(args: &LongcatFlashNgramConfig) -> MlaRope {
+        MlaRope::from_block(
+            args.rope_scaling.as_ref(),
+            args.qk_rope_head_dim,
+            args.rope_theta,
+            None,
+            &args.model_type,
+        )
+    }
+
     pub(super) fn from_weights(
         weights: &WeightMap,
         args: &LongcatFlashNgramConfig,
         prefix: &str,
+        rope: MlaRope,
     ) -> Result<Self, String> {
         let gs = args.group_size();
         let bits = args.bits();
@@ -583,7 +589,7 @@ impl LongcatFlashMLA {
             v_head_dim: args.v_head_dim as i32,
             kv_lora_rank: args.kv_lora_rank as i32,
             scale: args.get_attention_scale(),
-            rope_base: args.rope_theta,
+            rope,
             mla_scale_q_lora,
             mla_scale_kv_lora,
         })
@@ -856,15 +862,24 @@ impl LongcatFlashDecoderLayer {
     fn from_weights(
         weights: &WeightMap,
         args: &LongcatFlashNgramConfig,
+        rope: &MlaRope,
         prefix: &str,
     ) -> Result<Self, String> {
         let gs = args.group_size();
         let bits = args.bits();
 
-        let self_attn_0 =
-            LongcatFlashMLA::from_weights(weights, args, &format!("{prefix}.self_attn.0"))?;
-        let self_attn_1 =
-            LongcatFlashMLA::from_weights(weights, args, &format!("{prefix}.self_attn.1"))?;
+        let self_attn_0 = LongcatFlashMLA::from_weights(
+            weights,
+            args,
+            &format!("{prefix}.self_attn.0"),
+            rope.duplicate(),
+        )?;
+        let self_attn_1 = LongcatFlashMLA::from_weights(
+            weights,
+            args,
+            &format!("{prefix}.self_attn.1"),
+            rope.duplicate(),
+        )?;
 
         let mlp_0 = LongcatFlashMLP::from_weights(
             weights,
@@ -1327,11 +1342,13 @@ impl LongcatFlashNgramModel {
         };
 
         // Layers
+        // One YaRN table for the model, duplicated into every attention.
+        let rope = LongcatFlashMLA::resolve_rope(args);
         let mut layers = Vec::with_capacity(args.num_layers);
         for i in 0..args.num_layers {
             let prefix = format!("model.layers.{i}");
             layers.push(LongcatFlashDecoderLayer::from_weights(
-                weights, args, &prefix,
+                weights, args, &rope, &prefix,
             )?);
         }
 

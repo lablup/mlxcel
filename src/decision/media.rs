@@ -38,15 +38,11 @@ pub const MAX_DECISION_AUDIO_SECONDS: usize = 5 * 60;
 
 /// Decode one encoded clip to 16 kHz mono samples.
 ///
-/// The container's declared length is checked against
-/// [`MAX_DECISION_AUDIO_SECONDS`] before any sample is decoded (issue #3296),
-/// and the decoded native samples are checked again before the resample
-/// copy. The error is the decoder's own message or the duration cap, which
-/// the route returns as a 400.
+/// The duration is checked on the native samples, before the resample copy.
+/// The error is the decoder's own message or the duration cap, which the route
+/// returns as a 400.
 pub fn decode_audio_16k(bytes: &[u8]) -> Result<Vec<f32>, String> {
-    let (samples, rate) =
-        crate::audio::preprocessing::decode_native_within(bytes, MAX_DECISION_AUDIO_SECONDS)
-            .map_err(duration_message)?;
+    let (samples, rate) = crate::audio::feature_extractor::load_wav_from_bytes(bytes)?;
     if samples.is_empty() {
         return Err("audio decoded to no samples".to_string());
     }
@@ -62,34 +58,13 @@ pub fn decode_audio_16k(bytes: &[u8]) -> Result<Vec<f32>, String> {
 fn check_audio_duration(sample_count: usize, rate: u32) -> Result<(), String> {
     let max_samples = (rate as usize).saturating_mul(MAX_DECISION_AUDIO_SECONDS);
     if rate == 0 || sample_count > max_samples {
-        return Err(over_cap_message(
-            sample_count as f64 / f64::from(rate.max(1)),
+        let seconds = sample_count as f64 / f64::from(rate.max(1));
+        return Err(format!(
+            "audio is {seconds:.0} seconds long; decision audio is limited to \
+             {MAX_DECISION_AUDIO_SECONDS} seconds"
         ));
     }
     Ok(())
-}
-
-fn over_cap_message(seconds: f64) -> String {
-    format!(
-        "audio is {seconds:.0} seconds long; decision audio is limited to \
-         {MAX_DECISION_AUDIO_SECONDS} seconds"
-    )
-}
-
-/// The decoder's error as the caller sees it. The container's duration limit
-/// becomes the same message as [`check_audio_duration`]; its `maximum` is
-/// `rate * MAX_DECISION_AUDIO_SECONDS`, which recovers the clip's length.
-fn duration_message(err: crate::audio::preprocessing::AudioPreprocessError) -> String {
-    match err {
-        crate::audio::preprocessing::AudioPreprocessError::Limit {
-            limit: "source duration samples",
-            actual,
-            maximum,
-        } if maximum > 0 => {
-            over_cap_message(actual as f64 * MAX_DECISION_AUDIO_SECONDS as f64 / maximum as f64)
-        }
-        other => other.to_string(),
-    }
 }
 
 /// Whether a CLI media argument is fetched rather than read from disk.

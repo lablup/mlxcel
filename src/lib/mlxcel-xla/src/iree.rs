@@ -88,6 +88,7 @@ use crate::{DeepStackFeatures, DeepStackPreparedPrefill, Gemma3nDensePle, Gemma3
 // MLP biases, the dense StarCoder2 MLP, and the row-sliced fused Phi3 projections)
 // and the #500 MoE expert bank (the stacked `switch_mlp` weights, dequantized with
 // `dequantize_affine_stacked`). Both are pure-Rust and unit-tested without `iree`.
+use crate::tuning::rocm_tuning_spec_flag;
 use crate::weights::{
     QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_bf16_sequential,
     dequantize_affine_f32, dequantize_affine_stacked, f16_to_f32, f32_le_to_f32, pack_f16,
@@ -1384,9 +1385,7 @@ pub(crate) fn compile_one_to<S: AsRef<str>>(
 ) -> Result<(), String> {
     let (mlir_path, _) =
         compiled_graph_paths(iree_compile, mlir, flags, cache, tag, context_capacity);
-    // Atomic and owner-only: the compiler reads this file back, so it must not
-    // be written through an entry planted at its name (#3248).
-    crate::cache_dir::write_private_atomic(&mlir_path, mlir.as_bytes())?;
+    std::fs::write(&mlir_path, mlir).map_err(|e| format!("write {}: {e}", mlir_path.display()))?;
     let mut cmd = Command::new(iree_compile);
     cmd.arg("--iree-input-type=stablehlo");
     for flag in flags {
@@ -1409,12 +1408,6 @@ pub(crate) fn compile_one_to<S: AsRef<str>>(
 
 /// Compile one bundled graph to a vmfb, cached by a hash of its text + flags so
 /// repeated loads skip the ~3 s compile.
-///
-/// A cached vmfb is reused only when it and its directory are private to the
-/// current user ([`crate::cache_dir::artifact_slot`]); otherwise the graph is
-/// compiled into a fresh private directory. The compiler writes a temporary
-/// sibling that is renamed into place, so a crash or a concurrent load never
-/// leaves or sees a partial vmfb under the cache name (#3248).
 pub(crate) fn compile_one<S: AsRef<str>>(
     iree_compile: &Path,
     mlir: &str,
@@ -1423,26 +1416,19 @@ pub(crate) fn compile_one<S: AsRef<str>>(
     tag: &str,
     context_capacity: usize,
 ) -> Result<PathBuf, String> {
-    let wanted = cached_vmfb_path(iree_compile, mlir, flags, cache, tag, context_capacity);
-    let vmfb_path = crate::cache_dir::artifact_slot(&wanted, &[])?;
-    if vmfb_path.is_file() {
+    let vmfb_path = cached_vmfb_path(iree_compile, mlir, flags, cache, tag, context_capacity);
+    if vmfb_path.exists() {
         return Ok(vmfb_path);
     }
-    let cache = vmfb_path.parent().unwrap_or(cache);
-    let temporary = crate::cache_dir::temporary_sibling(&vmfb_path, "compile");
-    if let Err(error) = compile_one_to(
+    compile_one_to(
         iree_compile,
         mlir,
         flags,
         cache,
         tag,
         context_capacity,
-        &temporary,
-    ) {
-        std::fs::remove_file(&temporary).ok();
-        return Err(error);
-    }
-    crate::cache_dir::publish_private(&temporary, &vmfb_path)?;
+        &vmfb_path,
+    )?;
     Ok(vmfb_path)
 }
 
@@ -1492,7 +1478,8 @@ fn compile_bundle(
             crate::native_qmv::CUDA_MIN_SM
         ));
     }
-    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Vmfb)?;
+    let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
+    std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
     // issue #2873: the ROCm lowering tuning spec for the narrow single-row
     // vecmats (any K, 128 <= N <= 8192), the wide long-K fallback (N >= 8193,
     // K >= 4096) and, since issues #2921 and #2956, the grouped-query decode
@@ -1500,7 +1487,7 @@ fn compile_bundle(
     // native qmv) and was not measured with it, so it stays on the compiler
     // defaults.
     if device == "hip" && matches!(cfg, RuntimeConfig::Dense(_)) {
-        flags.push(crate::tuning::rocm_tuning_spec_flag_in(&cache)?);
+        flags.push(rocm_tuning_spec_flag()?);
     }
     // issue #3043: the decode step is a long chain of small elementwise and
     // reduction dispatches whose cost is dominated by per-dispatch launch
@@ -1642,7 +1629,9 @@ fn compile_gemma3n_diagnostics(
     if !compiler.exists() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
-    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Vmfb)?;
+    let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
+    std::fs::create_dir_all(&cache)
+        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
     let mut flags = target_flags(device)?;
     if native_qmv {
         flags.push("--iree-cuda-target=sm_80".to_string());
@@ -1676,7 +1665,9 @@ fn compile_deepstack_diagnostics(device: &str, cfg: &RuntimeConfig) -> Result<Pa
     if !compiler.exists() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
-    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Vmfb)?;
+    let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
+    std::fs::create_dir_all(&cache)
+        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
     compile_one(
         &compiler,
         &mlir,

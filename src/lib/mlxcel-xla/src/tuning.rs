@@ -76,17 +76,23 @@ pub(crate) fn rocm_tuning_spec_flag_in(dir: &Path) -> Result<String, String> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     ROCM_BIGK_VECMAT_TUNING.hash(&mut h);
-    // The compiler reads the spec back, so an existing file is used only when
-    // it and `dir` are private to the current user (#3248).
-    let wanted = dir.join(format!("rocm-bigk-vecmat-{:016x}.mlir", h.finish()));
-    let path = crate::cache_dir::artifact_slot(&wanted, &[])?;
-    if !path.is_file() {
-        crate::cache_dir::write_private_atomic(&path, ROCM_BIGK_VECMAT_TUNING.as_bytes())?;
+    let path = dir.join(format!("rocm-bigk-vecmat-{:016x}.mlir", h.finish()));
+    if !path.exists() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        std::fs::write(&path, ROCM_BIGK_VECMAT_TUNING)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     Ok(format!(
         "--iree-codegen-tuning-spec-path={}",
         path.display()
     ))
+}
+
+/// The tuning-spec flag for the model compile cache
+/// (`<temp>/mlxcel-xla-vmfb`), which every model graph shares.
+pub(crate) fn rocm_tuning_spec_flag() -> Result<String, String> {
+    let dir = std::env::temp_dir().join("mlxcel-xla-vmfb");
+    rocm_tuning_spec_flag_in(&dir)
 }
 
 #[cfg(test)]

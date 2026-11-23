@@ -591,7 +591,9 @@ impl Gemma3nAudioIreeRuntime {
         if device == "cuda" {
             flags.push("--iree-cuda-target=sm_80".to_string());
         }
-        let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Gemma3nAudio)?;
+        let cache = std::env::temp_dir().join("mlxcel-xla-gemma3n-audio");
+        std::fs::create_dir_all(&cache)
+            .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
         let encode_tag = format!("audio-encode-f{frame_bucket}-b{clips}");
         let merge_tag = format!("audio-merge-ple-c{context_capacity}-b{clips}");
         let encode_vmfb = cached_vmfb_path(

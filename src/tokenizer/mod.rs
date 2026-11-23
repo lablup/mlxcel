@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub use fim::{FimToken, FimTokens, FimTriple};
-pub use thinking::{THINK_EFFORT_VARIANTS, ThinkingMarkers, find_subseq, rfind_subseq};
+pub use thinking::{ThinkingMarkers, find_subseq, rfind_subseq};
 pub use tiktoken::{KimiK3ControlIds, TiktokenFamily, TiktokenTokenizer};
 
 /// Unified tokenizer supporting HuggingFace (tokenizer.json), SentencePiece (tokenizer.model),
@@ -544,9 +544,6 @@ impl MlxcelTokenizer {
             ("<think>", "</think>"),
             ("<|content_thinking|>", "<|end_message|>"),
             ("<longcat_think>", "</longcat_think>"),
-            // IFM K2-Horizon. Its effort variants (`<ifm|think_fast>`,
-            // `<ifm|think_faster>`) come from `THINK_EFFORT_VARIANTS`.
-            ("<ifm|think>", "</ifm|think>"),
         ];
         for (start, end) in SINGLE_TOKEN_PAIRS {
             if let (Some(open_id), Some(close_id)) = (hf.token_to_id(start), hf.token_to_id(end)) {

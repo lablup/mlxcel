@@ -26,6 +26,7 @@
 //! geometry are shared; only the embedded object and its executable target
 //! differ. The ragged multi-row exports are HIP-only.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 /// The kernel source, compiled at model load with `hipcc --genco`.
@@ -70,6 +71,10 @@ pub(crate) fn requested() -> bool {
     matches!(std::env::var("MLXCEL_XLA_QUANT").as_deref(), Ok("native"))
 }
 
+fn cache_dir() -> PathBuf {
+    std::env::temp_dir().join("mlxcel-xla-qmv4")
+}
+
 fn content_hash() -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -112,30 +117,22 @@ fn cache_stem(arch: &str, hash: u64, max_b: Option<usize>) -> String {
 
 /// Compile [`QMV_KERNEL`] to an HSACO for `arch`, caching the result by kernel
 /// content, architecture and, when present, the batch bound.
-///
-/// The code object is loaded onto the GPU, so a cached one is read only from a
-/// directory private to the current user and only when the file itself is a
-/// private regular file, checked on the descriptor it is read from. Otherwise
-/// it is rebuilt into a fresh private directory (#3248).
 fn compile(arch: &str, hash: u64, max_b: Option<usize>) -> Result<Vec<u8>, String> {
-    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Qmv4)?;
+    let dir = cache_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     let stem = cache_stem(arch, hash, max_b);
-    let output = crate::cache_dir::artifact_slot(&cache.join(format!("{stem}.hsaco")), &[])?;
-    let dir = output.parent().unwrap_or(&cache).to_path_buf();
-    match crate::cache_dir::read_private(&output) {
-        Ok(Some(bytes)) => return Ok(bytes),
-        Ok(None) => {}
-        // Replaced between the slot check and the read: never use it.
-        Err(error) => return Err(format!("refusing the cached native GEMV object: {error}")),
+    let source: PathBuf = dir.join(format!("qmv4-{hash:016x}.hip"));
+    let output: PathBuf = dir.join(format!("{stem}.hsaco"));
+    if output.is_file() {
+        return std::fs::read(&output).map_err(|e| format!("read {}: {e}", output.display()));
     }
-    // Compile to private paths and rename them into place, so a concurrent load
+    // Compile to a private path and rename it into place, so a concurrent load
     // in another process never reads a half-written HSACO.
-    let source_tmp =
-        crate::cache_dir::temporary_sibling(&dir.join(format!("qmv4-{hash:016x}.hip")), "src");
-    let output_tmp = crate::cache_dir::temporary_sibling(&output, "compile");
-    // The source keeps its `.hip` extension so hipcc picks the language.
-    let source_tmp = source_tmp.with_extension("hip");
-    crate::cache_dir::write_private_atomic(&source_tmp, QMV_KERNEL.as_bytes())?;
+    let pid = std::process::id();
+    let source_tmp: PathBuf = dir.join(format!("qmv4-{hash:016x}.{pid}.hip"));
+    let output_tmp: PathBuf = dir.join(format!("{stem}.{pid}.hsaco"));
+    std::fs::write(&source_tmp, QMV_KERNEL)
+        .map_err(|e| format!("write {}: {e}", source_tmp.display()))?;
     let hipcc = std::env::var("HIPCC").unwrap_or_else(|_| "hipcc".to_string());
     let out = Command::new(&hipcc)
         .args(genco_args(arch, max_b))
@@ -143,9 +140,7 @@ fn compile(arch: &str, hash: u64, max_b: Option<usize>) -> Result<Vec<u8>, Strin
         .arg("-o")
         .arg(&output_tmp)
         .output()
-        .map_err(|e| format!("run {hipcc}: {e}"));
-    let _ = std::fs::remove_file(&source_tmp);
-    let out = out?;
+        .map_err(|e| format!("run {hipcc}: {e}"))?;
     if !out.status.success() {
         let _ = std::fs::remove_file(&output_tmp);
         return Err(format!(
@@ -153,9 +148,9 @@ fn compile(arch: &str, hash: u64, max_b: Option<usize>) -> Result<Vec<u8>, Strin
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    crate::cache_dir::publish_private(&output_tmp, &output)?;
-    crate::cache_dir::read_private(&output)?
-        .ok_or_else(|| format!("{} vanished after it was published", output.display()))
+    publish(&source_tmp, &source)?;
+    publish(&output_tmp, &output)?;
+    std::fs::read(&output).map_err(|e| format!("read {}: {e}", output.display()))
 }
 
 /// Compile [`QMV_KERNEL`] to an HSACO for `arch`, caching the result by kernel
@@ -183,6 +178,20 @@ pub(crate) fn hsaco(arch: &str) -> Result<Vec<u8>, String> {
 pub(crate) fn hsaco_multi(arch: &str, b_max: usize) -> Result<Vec<u8>, String> {
     let max_b = bucket_bound(b_max)?;
     compile(arch, content_hash(), max_b)
+}
+
+/// Rename `tmp` onto `final_path`, tolerating a concurrent load that published
+/// the same content first (`rename` replaces an existing file on Unix but not on
+/// Windows).
+fn publish(tmp: &std::path::Path, final_path: &std::path::Path) -> Result<(), String> {
+    match std::fs::rename(tmp, final_path) {
+        Ok(()) => Ok(()),
+        Err(_) if final_path.is_file() => {
+            let _ = std::fs::remove_file(tmp);
+            Ok(())
+        }
+        Err(error) => Err(format!("rename {}: {error}", final_path.display())),
+    }
 }
 
 /// The `#hal.executable.target` alias the executable objects are keyed by.

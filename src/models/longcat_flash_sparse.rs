@@ -61,8 +61,8 @@ use super::longcat_flash_ngram::{
     LongcatFlashMLA, LongcatFlashMLP, LongcatFlashMoE, LongcatFlashNgramConfig, MlaProjections,
     NgramEmbedding, QuantizationConfig, get_weight_copy,
 };
+use super::mla_rope::MlaRope;
 use super::model_owned::KvCacheLayerModes;
-use super::rope_utils::{RopeScalingKind, RopeScalingSpec};
 
 /// The `config.json` `model_type` of this family. The original
 /// `meituan-longcat` config omits the key; detection maps its
@@ -305,81 +305,17 @@ impl LongcatFlashSparseConfig {
 }
 
 /// The rotary table of the MLA and the indexer: the checkpoint's YaRN block
-/// (`deepseek_yarn` is the same table as `yarn`), or plain frequencies.
-struct SparseRope {
-    kind: RopeScalingKind,
-    base: f32,
-}
-
-impl SparseRope {
-    fn from_config(args: &LongcatFlashSparseConfig) -> Self {
-        let spec = args.rope_scaling.as_ref().map(|block| {
-            let mut spec = RopeScalingSpec::from_lookup(|key| block.get(key));
-            // mlx-vlm's `initialize_rope` builds one `YarnRoPE` for both
-            // spellings.
-            if spec.rope_type.as_deref() == Some("deepseek_yarn") {
-                spec.rope_type = Some("yarn".to_string());
-            }
-            spec
-        });
-        let kind = RopeScalingKind::resolve(
-            spec.as_ref(),
-            args.qk_rope_head_dim,
-            args.rope_theta,
-            Some(args.max_position_embeddings as f32),
-            MODEL_TYPE,
-        );
-        Self {
-            kind,
-            base: args.rope_theta,
-        }
-    }
-
-    fn duplicate(&self) -> Self {
-        Self {
-            kind: self.kind.duplicate(),
-            base: self.base,
-        }
-    }
-
-    /// Rotate the first `dims` features of `x` at `offset`, scaling them by
-    /// the YaRN magnitude first, as upstream `YarnRoPE` does.
-    fn apply(
-        &self,
-        x: &MlxArray,
-        dims: i32,
-        traditional: bool,
-        offset: i32,
-    ) -> UniquePtr<MlxArray> {
-        let mscale = self.kind.attn_scale();
-        let scaled;
-        let x = if mscale != 1.0 {
-            let width = *mlxcel_core::array_shape(x).last().unwrap_or(&dims);
-            let s = mlxcel_core::full_f32(&[1], mscale, mlxcel_core::array_dtype(x));
-            scaled = if width > dims {
-                let head = mlxcel_core::multiply(&slice_axis(x, -1, 0, dims), &s);
-                mlxcel_core::concatenate(&head, &slice_axis(x, -1, dims, width), -1)
-            } else {
-                mlxcel_core::multiply(x, &s)
-            };
-            &*scaled
-        } else {
-            x
-        };
-        match self.kind.freqs() {
-            Some(freqs) => mlxcel_core::fast_rope_with_freqs(
-                x,
-                dims,
-                traditional,
-                self.kind.scale(),
-                offset,
-                freqs,
-            ),
-            None => {
-                mlxcel_core::fast_rope(x, dims, traditional, self.base, self.kind.scale(), offset)
-            }
-        }
-    }
+/// (`deepseek_yarn` is the same table as `yarn`), or plain frequencies. The
+/// original context falls back to `max_position_embeddings` when the block
+/// names none.
+fn sparse_rope(args: &LongcatFlashSparseConfig) -> MlaRope {
+    MlaRope::from_block(
+        args.rope_scaling.as_ref(),
+        args.qk_rope_head_dim,
+        args.rope_theta,
+        Some(args.max_position_embeddings as f32),
+        MODEL_TYPE,
+    )
 }
 
 enum IndexerNorm {
@@ -404,9 +340,8 @@ struct LsaIndexer {
     weights_proj: UnifiedLinear,
     n_heads: i32,
     head_dim: i32,
-    rope_dims: i32,
     rope_traditional: bool,
-    rope: SparseRope,
+    rope: MlaRope,
     selection: LsaSelection,
 }
 
@@ -423,7 +358,7 @@ impl LsaIndexer {
         weights: &WeightMap,
         args: &LongcatFlashSparseConfig,
         prefix: &str,
-        rope: SparseRope,
+        rope: MlaRope,
     ) -> Result<Self, String> {
         let gs = args.group_size();
         let bits = args.bits();
@@ -472,7 +407,6 @@ impl LsaIndexer {
             weights_proj: linear("weights_proj")?,
             n_heads: args.index_n_heads as i32,
             head_dim: args.index_head_dim as i32,
-            rope_dims: args.qk_rope_head_dim as i32,
             rope_traditional: args.indexer_rope_interleave,
             rope,
             selection: LsaSelection {
@@ -499,15 +433,11 @@ impl LsaIndexer {
         let q = self.wq_b.forward(qr);
         let q = mlxcel_core::reshape(&q, &[b, s, self.n_heads, self.head_dim]);
         let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
-        let q = self
-            .rope
-            .apply(&q, self.rope_dims, self.rope_traditional, offset);
+        let q = self.rope.apply(&q, self.rope_traditional, offset);
 
         let k = self.k_norm.forward(&self.wk.forward(x));
         let k = mlxcel_core::reshape(&k, &[b, 1, s, self.head_dim]);
-        let k = self
-            .rope
-            .apply(&k, self.rope_dims, self.rope_traditional, offset);
+        let k = self.rope.apply(&k, self.rope_traditional, offset);
 
         // The keys ride in an fp16 KV cache whose value slot is one zero
         // column; upstream stores a zero-width value.
@@ -708,7 +638,6 @@ struct Selection {
 /// family's RoPE, and on `self_attn.0` the indexer.
 struct SparseMla {
     inner: LongcatFlashMLA,
-    rope: SparseRope,
     indexer: Option<LsaIndexer>,
 }
 
@@ -733,9 +662,8 @@ impl SparseMla {
         } = self.inner.project(x);
 
         let offset = latent_cache.offset;
-        let rope_dims = self.inner.qk_rope_head_dim;
-        let q_pe = self.rope.apply(&q_pe, rope_dims, true, offset);
-        let k_pe = self.rope.apply(&k_pe, rope_dims, true, offset);
+        let q_pe = self.inner.rope.apply(&q_pe, true, offset);
+        let k_pe = self.inner.rope.apply(&k_pe, true, offset);
 
         let owned = match (&self.indexer, &qr) {
             (Some(indexer), Some(qr)) => indexer.select(x, qr, index_cache).map(|indices| {
@@ -845,7 +773,7 @@ impl SparseDecoderLayer {
         weights: &WeightMap,
         args: &LongcatFlashSparseConfig,
         base: &LongcatFlashNgramConfig,
-        rope: &SparseRope,
+        rope: &MlaRope,
         prefix: &str,
     ) -> Result<Self, String> {
         let gs = args.group_size();
@@ -878,8 +806,12 @@ impl SparseDecoderLayer {
                 None
             };
             Ok(SparseMla {
-                inner: LongcatFlashMLA::from_weights(weights, base, &attn_prefix)?,
-                rope: rope.duplicate(),
+                inner: LongcatFlashMLA::from_weights(
+                    weights,
+                    base,
+                    &attn_prefix,
+                    rope.duplicate(),
+                )?,
                 indexer,
             })
         };
@@ -1132,7 +1064,7 @@ impl LongcatFlashSparseModel {
             )?;
             SparseEmbedding::Plain(embed)
         };
-        let rope = SparseRope::from_config(args);
+        let rope = sparse_rope(args);
         let layers = (0..args.num_layers)
             .map(|i| {
                 SparseDecoderLayer::from_weights(

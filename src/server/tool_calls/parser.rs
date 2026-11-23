@@ -44,7 +44,7 @@ use crate::server::types::request::Tool;
 /// Shared by [`strip_thinking`], which removes them, and
 /// [`thinking_marker_pair`], which reports which one a generation used, so the
 /// two cannot disagree about what delimits a thinking block.
-pub(super) const THINKING_MARKER_PAIRS: [(&str, &str); 8] = [
+pub(super) const THINKING_MARKER_PAIRS: [(&str, &str); 5] = [
     ("<think>", "</think>"),
     ("<|content_thinking|>", "<|end_message|>"),
     ("<|channel>", "<channel|>"),
@@ -54,11 +54,6 @@ pub(super) const THINKING_MARKER_PAIRS: [(&str, &str); 8] = [
     ("<|open|>think<|sep|>", "<|close|>think<|sep|>"),
     // Kimi-VL-Thinking (#2464): `◁think▷...◁/think▷` ahead of the answer.
     ("◁think▷", "◁/think▷"),
-    // IFM K2-Horizon (#3299), one pair per `reasoning_effort`. The template
-    // primes the open, so the primed-open pass keys on the close, as for K3.
-    ("<ifm|think>", "</ifm|think>"),
-    ("<ifm|think_fast>", "</ifm|think_fast>"),
-    ("<ifm|think_faster>", "</ifm|think_faster>"),
 ];
 
 fn has_inkling_primed_boundary(text: &str) -> bool {

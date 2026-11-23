@@ -16,7 +16,8 @@ use super::layers::{SparseLinear, Z1tLinear};
 use super::{Z1t, Z1tConfig, make_states};
 use crate::models::ModelType;
 use crate::models::batched_decode_harness::{
-    assert_model_owned_fresh_mixed_and_transition, assert_model_owned_multistep_with_paged_lengths,
+    assert_model_owned_fresh_mixed_and_transition,
+    assert_strict_model_owned_multistep_with_paged_lengths,
 };
 use crate::models::detection::get_model_type;
 use mlxcel_core::generate::LanguageModel;
@@ -194,43 +195,6 @@ fn z1t_streaming_state_matches_flat_forward() {
     }
 }
 
-#[test]
-fn z1t_unprepared_sequence_id_starts_from_fresh_state() {
-    // `forward_with_sequence_id` with an id that was never prepared used to
-    // panic with "missing model-owned sequence state" (#3299).
-    let _guard = crate::models::embedding_test_support::mlx_test_guard();
-    let model = model();
-    let len = TOKENS.len();
-    let ids = mlxcel_core::from_slice_i32(TOKENS, &[1, len as i32]);
-
-    model.make_caches();
-    let plain = model.forward(&ids, &mut [], None);
-    mlxcel_core::eval(&plain);
-
-    let seq = mlxcel_core::cache::SequenceId::from_raw(77);
-    let keyed = model.forward_with_sequence_id(&ids, Some(seq), &mut [], None);
-    mlxcel_core::eval(&keyed);
-    let diff = max_abs_diff(&keyed, &plain);
-    assert!(
-        diff == 0.0,
-        "fresh-id logits differ from the no-id forward by {diff}"
-    );
-
-    // The lazily created state is kept: decoding the next token under the
-    // same id continues the prompt like a no-id decode does.
-    let next = mlxcel_core::from_slice_i32(&[7], &[1, 1]);
-    let plain_next = model.forward(&next, &mut [], None);
-    let keyed_next = model.forward_with_sequence_id(&next, Some(seq), &mut [], None);
-    mlxcel_core::eval(&plain_next);
-    mlxcel_core::eval(&keyed_next);
-    let diff = max_abs_diff(&keyed_next, &plain_next);
-    assert!(
-        diff == 0.0,
-        "keyed decode differs from the no-id decode by {diff}"
-    );
-    model.release_sequence_state_by_id(seq);
-}
-
 /// Dense `[out, in]` matrix accumulating every `(o, indices[o, k])` weight.
 fn dense_reference(
     x: &[f32],
@@ -405,8 +369,7 @@ fn z1t_detection_and_eos_come_from_config() {
 #[test]
 fn z1t_model_owned_native_batched_decode() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
-    // B=1 with an unprepared id creates the state lazily, as siblings do (#3299).
-    assert_model_owned_multistep_with_paged_lengths(model, &[0; LAYERS]);
+    assert_strict_model_owned_multistep_with_paged_lengths(model, &[0; LAYERS]);
 }
 
 #[test]

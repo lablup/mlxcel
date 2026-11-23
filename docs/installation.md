@@ -88,45 +88,6 @@ At runtime, select the backend with `MLXCEL_BACKEND=xla` and tune it with the
 for the full list and [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)
 for the design.
 
-Compiled artifacts (IREE VMFBs for the text bundles and the vision and audio
-towers, the ROCm tuning spec, and the native GEMV code objects) are cached
-per user under `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/xla/<cache>`
-(`vmfb`, `vision`, `qwen2-vl`, `qwen3-vl`, `molmo-vision`, `molmo2-vision`,
-`youtu-vl`, `gemma3n-audio`, `qmv4`), so a second load of the same graph skips
-the compile. Earlier releases kept them under the shared temp directory
-(`/tmp/mlxcel-xla-*`), where another local user could plant a VMFB, which is
-native code on a CPU target (#3248). A cached artifact is loaded only when the
-cache root, `xla`, and the cache directory are real directories owned by the
-current user without group or other write access, the artifact is a regular
-file with the same properties, and every directory above the cache root up to
-`/` is a real directory owned by the current user or root that no other user
-can write. A root-owned sticky directory such as `/tmp` passes. A
-group-writable directory above the root (for example `~/.cache` created under
-a `umask` of `002`) passes only on Linux and only when all of these hold: its
-group is the process's effective group and it is not other-writable;
-`/etc/nsswitch.conf` lists only `files`, `systemd` or `compat` for `passwd`
-and `group`, and for `initgroups` if it is present (a missing or unreadable
-file, or any other source such as `sss`, `ldap`, `nis` or `winbind`, fails
-the check). The file is read as glibc reads it: the colon after the database
-name is optional, and because a later line overrides an earlier one, every
-line naming one of these databases must be local, and a line that cannot be
-parsed refuses. A `+` or `-` compat line in `/etc/passwd` or `/etc/group`,
-with or without leading white space, also refuses. Every `/etc/group`
-entry for that gid has no member besides the current user; and no other
-`/etc/passwd` account has that gid as its primary group. These files are read
-once per process. Otherwise that directory is refused with a message naming
-it and the fix: `chmod g-w <path>`, or set `MLXCEL_CACHE_DIR` to a private
-directory. mlxcel creates its cache directories with mode `0700` and its files
-with mode `0600`, removes group write from the directories it manages (and
-from the cache root when `MLXCEL_CACHE_DIR` is unset), and never changes
-anything above the root. When a check fails, stderr gets one `[mlxcel-xla]
-refusing the compiled-artifact cache at <path>: <reason>` line and the graph
-is compiled into a fresh private `mlxcel-xla-XXXXXX` directory under the temp
-directory instead, so the load still works but pays the compile (that
-directory is not removed at exit). To clear the cache, delete
-`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/xla`; the old `/tmp/mlxcel-xla-*`
-directories are no longer read and can be deleted.
-
 ## macOS on Apple Silicon
 
 Prerequisites:

@@ -668,7 +668,10 @@ fn burst_allowed_when_thinking_state_active() {
     // ThinkingState is "active" (= not disabled) when both token_ids
     // and budget are set. `from_raw_i32(256)` yields a
     // `ThinkingBudget::Limited(256)`.
-    let token_ids = ThinkingTokenIds::new(100, 101);
+    let token_ids = ThinkingTokenIds {
+        open: 100,
+        close: 101,
+    };
     let budget = ThinkingBudget::from_raw_i32(256)
         .expect("valid budget")
         .expect("256 > 0 yields Some");
@@ -1524,7 +1527,10 @@ fn apply_burst_thinking_budget_injects_close_at_budget_boundary() {
     // Budget = 2 in-block tokens. `enter_block_on_start = true` so the
     // first emitted token is already inside the `<think>` block (the
     // Qwen3 default where the chat template primes `<think>\n`).
-    let token_ids = ThinkingTokenIds::new(100, 101);
+    let token_ids = ThinkingTokenIds {
+        open: 100,
+        close: 101,
+    };
     let budget = ThinkingBudget::from_raw_i32(2)
         .expect("valid budget")
         .expect("2 > 0 yields Some");
@@ -1578,7 +1584,10 @@ fn apply_burst_thinking_budget_respects_natural_close_before_budget() {
     // `</think>` token) well before the cap. The burst must NOT inject
     // a second `</think>` — the natural close passes through and the
     // block transitions to Closed.
-    let token_ids = ThinkingTokenIds::new(100, 101);
+    let token_ids = ThinkingTokenIds {
+        open: 100,
+        close: 101,
+    };
     let budget = ThinkingBudget::from_raw_i32(1000)
         .expect("valid budget")
         .expect("1000 > 0 yields Some");

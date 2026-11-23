@@ -100,11 +100,14 @@ impl DeepSeekV3StageExecutor {
             None
         };
 
+        // One YaRN table for the stage, duplicated into each layer (#3295).
+        let rope = models::deepseek_v3::DeepSeekV3Attention::resolve_rope(&config);
         let mut layers = Vec::with_capacity(filter.num_layers());
         for layer_idx in filter.layer_range.clone() {
-            let layer =
-                models::deepseek_v3::DecoderLayer::from_weights(&weights, &config, layer_idx)
-                    .map_err(anyhow::Error::msg)?;
+            let layer = models::deepseek_v3::DecoderLayer::from_weights_with_rope(
+                &weights, &config, layer_idx, &rope,
+            )
+            .map_err(anyhow::Error::msg)?;
             layers.push(DeepSeekV3StageLayer(layer));
         }
 

@@ -49,9 +49,6 @@ use std::path::{Path, PathBuf};
 
 use mlxcel_core::session::{InferenceSession, PreparedPrefill, SessionCapabilities};
 
-// Owner-private locations for the compiled-artifact caches (#3248).
-#[cfg_attr(not(feature = "iree"), allow(dead_code))]
-mod cache_dir;
 mod context;
 #[cfg(any(feature = "diagnostics", test))]
 mod diagnostic_flags;

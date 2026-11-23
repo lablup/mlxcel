@@ -30,30 +30,28 @@ const RESET: &str = "\x1b[0m";
 
 /// Whether a rendered prompt primed an open reasoning channel that the model
 /// is expected to close in its generation: the tokenizer exposes a marker
-/// pair and `prompt` ends with its open marker or the open of one of its
-/// effort variants, ignoring trailing ASCII whitespace (Qwen-style
-/// `<think>\n`, a thinking-on Gemma 4 `<|channel>thought\n`, K2-Horizon's
-/// `<ifm|think_fast>\n`).
+/// pair and `prompt` ends with the open marker, ignoring trailing ASCII
+/// whitespace (Qwen-style `<think>\n`, a thinking-on Gemma 4
+/// `<|channel>thought\n`).
 #[must_use]
 pub fn prompt_primed_open_thinking(markers: &ThinkingMarkers, prompt: &str) -> bool {
-    primed_pair(markers, prompt).is_some()
+    match (markers.think_start.as_deref(), markers.think_end.as_deref()) {
+        (Some(start), Some(end)) if !start.is_empty() && !end.is_empty() => prompt
+            .trim_end_matches([' ', '\t', '\r', '\n'])
+            .ends_with(start),
+        _ => false,
+    }
 }
 
 /// The close marker of the thinking block `prompt` primed open, or `None`
 /// when it primed none. Shares [`prompt_primed_open_thinking`]'s rule so the
-/// two never disagree (issue #1554), and returns the close that matches the
-/// primed open when the pair has effort variants (#3299).
+/// two never disagree (issue #1554).
 #[must_use]
 pub fn prompt_primed_open_close_marker(markers: &ThinkingMarkers, prompt: &str) -> Option<String> {
-    primed_pair(markers, prompt).map(|(_, close)| close.to_string())
-}
-
-fn primed_pair<'a>(markers: &'a ThinkingMarkers, prompt: &str) -> Option<(&'a str, &'a str)> {
-    let trimmed = prompt.trim_end_matches([' ', '\t', '\r', '\n']);
-    markers
-        .primeable_pairs()
-        .into_iter()
-        .find(|(open, _)| trimmed.ends_with(open))
+    if !prompt_primed_open_thinking(markers, prompt) {
+        return None;
+    }
+    markers.think_end.clone()
 }
 
 /// Whether a generation produced text but none of it reached the visible

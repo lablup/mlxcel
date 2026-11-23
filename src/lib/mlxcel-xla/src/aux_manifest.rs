@@ -321,7 +321,8 @@ pub(crate) fn write_auxiliary_manifest(
         .map_or_else(|| "module.vmfb.aux.json".into(), |name| name.to_os_string());
     temporary_name.push(format!(".{}.{}.tmp", std::process::id(), nonce));
     let temporary = path.with_file_name(temporary_name);
-    write_owner_only_new(&temporary, &bytes)?;
+    std::fs::write(&temporary, bytes)
+        .map_err(|error| format!("write {}: {error}", temporary.display()))?;
     if let Err(error) = std::fs::rename(&temporary, &path) {
         std::fs::remove_file(&temporary).ok();
         return Err(format!(
@@ -487,36 +488,11 @@ pub(crate) fn qualify_auxiliary_artifact<F>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
-    qualify_auxiliary_artifact_for(
-        vmfb,
-        contract,
-        weights,
-        compile,
-        mlxcel_core::private_dir::current_euid(),
-    )
-}
-
-/// [`qualify_auxiliary_artifact`] checked against `euid`, so a test can model
-/// a cache directory owned by another user.
-///
-/// The manifest proves only that an artifact matches a contract derived from
-/// public inputs, not who wrote it, so the VMFB and its manifest are reused
-/// only from a directory private to `euid` and only when both are regular
-/// files private to `euid`. Anything else is left untouched and the artifact is
-/// compiled into a fresh private directory instead (#3248).
-pub(crate) fn qualify_auxiliary_artifact_for<F>(
-    vmfb: &Path,
-    contract: &AuxiliaryArtifactContract,
-    weights: &[AuxiliaryWeight],
-    compile: F,
-    euid: u32,
-) -> Result<PathBuf, String>
-where
-    F: FnOnce(&Path) -> Result<(), String>,
-{
-    let wanted = schema_scoped_vmfb_path(vmfb, contract);
-    let scoped =
-        crate::cache_dir::artifact_slot_for(&wanted, &[auxiliary_manifest_path(&wanted)], euid)?;
+    let scoped = schema_scoped_vmfb_path(vmfb, contract);
+    if let Some(parent) = scoped.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("mkdir {}: {error}", parent.display()))?;
+    }
     ensure_qualified_auxiliary_artifact(&scoped, contract, weights, compile)?;
     Ok(scoped)
 }
@@ -559,10 +535,14 @@ where
             temporary.display()
         ));
     }
-    // Owner-only before the rename, so the published VMFB passes the
-    // private-file check on the next load under any umask (#3248).
-    crate::cache_dir::publish_private(&temporary, vmfb)
-        .map_err(|error| format!("atomically install {}: {error}", vmfb.display()))?;
+    if let Err(error) = std::fs::rename(&temporary, vmfb) {
+        std::fs::remove_file(&temporary).ok();
+        return Err(format!(
+            "atomically install {} as {}: {error}",
+            temporary.display(),
+            vmfb.display()
+        ));
+    }
     if let Err(error) = write_auxiliary_manifest(vmfb, contract, weights) {
         // A VMFB without its matching identity is never a reusable cache
         // member. Remove it so the next load cannot mistake it for qualified.
@@ -683,23 +663,6 @@ fn cache_lock_owner_pid(token: &str) -> Option<u32> {
         .parse::<u128>()
         .ok()?;
     fields.next().is_none().then_some(pid)
-}
-
-/// Create `path` (which must not exist) owner-only and write `bytes` to it.
-/// The manifest is read back as a trusted cache entry, so it must not be left
-/// group-writable by the umask (#3248).
-fn write_owner_only_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options
-        .open(path)
-        .and_then(|mut file| file.write_all(bytes))
-        .map_err(|error| {
-            std::fs::remove_file(path).ok();
-            format!("write {}: {error}", path.display())
-        })
 }
 
 fn cache_lock_path(vmfb: &Path) -> PathBuf {

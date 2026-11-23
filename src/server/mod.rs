@@ -208,9 +208,6 @@ mod muse_glimmer_template_tests;
 mod reasoning_effort_tests;
 
 #[cfg(test)]
-mod k2_horizon_reasoning_tests;
-
-#[cfg(test)]
 mod store_budget_tests;
 
 #[cfg(test)]

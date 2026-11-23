@@ -583,7 +583,7 @@ An item is either a bare string or an object with `text`, `image` and/or `image_
 
 | Status | Type | When |
 |--------|------|------|
-| 400 | `invalid_request_error` | Malformed body, empty `documents`, more documents than `MLXCEL_RERANK_MAX_DOCUMENTS` (default 1024), an item with neither text nor an image, `top_n` below 1, an image item for a reranker with `supports_images() == false`, `instruction` on a sequence-classifier or late-interaction reranker, or `model` not matching the served id. |
+| 400 | `invalid_request_error` | Malformed body, empty `documents`, an item with neither text nor an image, `top_n` below 1, an image item for a reranker with `supports_images() == false`, `instruction` on a sequence-classifier or late-interaction reranker, or `model` not matching the served id. |
 | 501 | `not_implemented` | No reranker loaded: `This server does not support reranking. Start it with --reranking, with a sequence-classifier checkpoint or a multi-vector (late-interaction) embedder in -m, or with --reranker-model <path>.` |
 | 503 | `server_busy` | The bounded worker queue is full (`--embedding-queue-depth`, shared with the embedding worker). |
 | 504 | `server_timeout` | The worker did not reply within `--embedding-request-timeout-secs`. |

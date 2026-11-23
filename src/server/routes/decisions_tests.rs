@@ -49,7 +49,6 @@ impl DecisionModelProvider for FailingProvider {
         _state: Option<Value>,
         _questions: Vec<(String, Question)>,
         _media: DecisionMedia,
-        _temp_files: Vec<crate::multimodal::video::PrivateTempDir>,
     ) -> Result<DecisionResult, DecisionProviderError> {
         Err((self.0)())
     }
@@ -85,7 +84,6 @@ impl DecisionModelProvider for MediaProvider {
         _state: Option<Value>,
         _questions: Vec<(String, Question)>,
         _media: DecisionMedia,
-        _temp_files: Vec<crate::multimodal::video::PrivateTempDir>,
     ) -> Result<DecisionResult, DecisionProviderError> {
         Err(DecisionProviderError::Internal(
             "predict must not be reached".into(),
@@ -484,49 +482,4 @@ fn videos_need_ffmpeg_before_any_download() {
     assert_eq!(err.error.message, VIDEO_NEEDS_FFMPEG_MESSAGE);
     assert!(check_video_support(1, true).is_ok());
     assert!(check_video_support(0, false).is_ok(), "no videos, no probe");
-}
-
-#[test]
-fn the_video_count_cap_comes_before_the_ffmpeg_probe() {
-    use super::{MAX_DECISION_VIDEOS, check_video_support};
-    assert!(check_video_support(MAX_DECISION_VIDEOS, true).is_ok());
-    let err = check_video_support(MAX_DECISION_VIDEOS + 1, false).expect_err("over the cap");
-    assert_eq!(err.status, StatusCode::BAD_REQUEST);
-    assert!(
-        err.error.message.contains("at most 8"),
-        "{}",
-        err.error.message
-    );
-}
-
-#[tokio::test]
-async fn nine_videos_are_a_400_before_any_fetch() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    // Every URL points at this listener, so a fetch shows up as a connection.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("listener binds");
-    let address = listener.local_addr().expect("address");
-    let connections = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&connections);
-    let accept = tokio::spawn(async move {
-        while let Ok((socket, _)) = listener.accept().await {
-            counter.fetch_add(1, Ordering::SeqCst);
-            drop(socket);
-        }
-    });
-    let videos: Vec<String> = (0..super::MAX_DECISION_VIDEOS + 1)
-        .map(|index| format!("http://{address}/clip-{index}.mp4"))
-        .collect();
-    let provider: Arc<dyn DecisionModelProvider> = Arc::new(MediaProvider);
-    let request =
-        json!({"state": "hi", "videos": videos, "questions": {"q": {"criteria": ["a", "b"]}}});
-    let (status, body) = post(app_with(Some(provider)), request).await;
-    accept.abort();
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(
-        body["error"]["message"],
-        "`videos` holds 9 entries; at most 8 are allowed per request"
-    );
-    assert_eq!(connections.load(Ordering::SeqCst), 0, "a video was fetched");
 }
