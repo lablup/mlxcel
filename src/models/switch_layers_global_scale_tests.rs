@@ -549,7 +549,8 @@ fn draining_numbered_expert_planes_keeps_the_modelopt_sidecars() {
             format!("{root}.gate.weight"),
             mlxcel_core::from_slice_f32(&[0.0; 4], &[2, 2]),
         );
-        drain_numbered_expert_planes(&mut weights, &format!("{root}.experts"), src_proj, &prefix);
+        drain_numbered_expert_planes(&mut weights, &format!("{root}.experts"), src_proj, &prefix)
+            .unwrap();
 
         assert!(
             !weights.keys().any(|k| k.contains(".experts.")),
@@ -585,7 +586,8 @@ fn draining_numbered_expert_planes_keeps_the_modelopt_sidecars() {
         &format!("{root}.experts"),
         "gate_proj",
         &prefix,
-    );
+    )
+    .unwrap();
     assert_eq!(weights.len(), 3);
     assert!(!weights.keys().any(|k| k.starts_with(&prefix)));
 }
