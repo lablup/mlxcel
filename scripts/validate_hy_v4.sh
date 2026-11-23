@@ -132,7 +132,7 @@ step_preflight() {
         || { echo "$MODEL is not a hy_v4 checkpoint" >&2; exit 1; }
     (cd "$ROOT" && cargo build --release --features metal,accelerate \
         --bin mlxcel --bin mlxcel-server --example logit_trace)
-    "$BIN/mlxcel" arch | grep -i 'hy_v4' || { echo "mlxcel arch does not list hy_v4" >&2; exit 1; }
+    "$BIN/mlxcel" arch --json | grep -q '"hy_v4"' || { echo "mlxcel arch does not list hy_v4" >&2; exit 1; }
 }
 
 step_generate() {
