@@ -22,6 +22,7 @@
 //! `rollback_speculative_cache` round trip is exercised by integration tests
 //! gated behind hardware availability.
 
+use super::pooled_model::Pooled;
 use super::qwen3_5::{
     MRopePositionSource, Qwen35Config, Qwen35Model, Qwen35UnsupportedConfig,
     compact_attention_rows, eos_token_ids_from_config, mrope_position_source,
@@ -184,6 +185,18 @@ pub(crate) fn two_layer_model() -> Qwen35Model {
     two_layer_model_with_vocab(8)
 }
 
+/// [`two_layer_model`] behind a pool, for tests that drive scheduler
+/// sequences by id: Qwen 3.5 keeps no per-sequence state in the model
+/// (issue #3254).
+pub(crate) fn pooled_two_layer_model() -> Pooled<Qwen35Model> {
+    Pooled::new(two_layer_model())
+}
+
+/// [`two_layer_model_with_vocab`] behind a pool.
+pub(crate) fn pooled_two_layer_model_with_vocab(vocab: usize) -> Pooled<Qwen35Model> {
+    Pooled::new(two_layer_model_with_vocab(vocab))
+}
+
 /// [`two_layer_model`] with a `vocab`-entry embedding table and LM head, for
 /// tests that need the logits to dominate memory (#3045).
 pub(crate) fn two_layer_model_with_vocab(vocab: usize) -> Qwen35Model {
@@ -249,10 +262,12 @@ pub(crate) fn two_layer_weights_and_config(vocab: usize) -> (WeightMap, Qwen35Co
 fn issue_2572_qwen35_native_batched_decode() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
     crate::models::batched_decode_harness::assert_model_owned_multistep_allowing_no_ids(
-        two_layer_model,
+        pooled_two_layer_model,
         &[0, 3],
     );
-    crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(two_layer_model);
+    crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(
+        pooled_two_layer_model,
+    );
 }
 
 fn mrope_positions(len: usize) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
@@ -283,7 +298,7 @@ fn assert_decode_row_close(
 #[test]
 fn issue_2572_qwen35_mixed_mrope_and_text_rows_match_solo_decode() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
-    let mut model = two_layer_model();
+    let mut model = pooled_two_layer_model();
     model.set_mrope(vec![1, 0, 0], 10_000.0, 2);
 
     let actual_ids = [SequenceId::from_raw(257_200), SequenceId::from_raw(257_201)];
@@ -446,7 +461,7 @@ fn sanitize_weights_drops_mtp_keys() {
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     // mtp.* must be absent; legitimate keys must remain.
     assert!(
@@ -479,7 +494,7 @@ fn sanitize_weights_drops_lm_head_when_tied_embeddings() {
 
     let mut config = make_tiny_config();
     config.tie_word_embeddings = true;
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     assert!(
         !sanitized.contains_key("lm_head.weight"),
@@ -526,7 +541,7 @@ fn sanitize_weights_is_idempotent_on_already_converted_checkpoint_with_stray_mtp
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     // mtp.* must still be stripped.
     assert!(sanitized.keys().all(|k| !k.starts_with("mtp.")));
@@ -583,7 +598,7 @@ fn sanitize_weights_shifts_norms_exactly_once_on_raw_layout() {
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     assert!(sanitized.keys().all(|k| !k.contains("mtp.")));
 
@@ -632,7 +647,7 @@ fn sanitize_weights_does_not_shift_norms_on_a_degenerate_conv1d_shape() {
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     assert_allclose(
         sanitized.get("model.norm.weight").unwrap(),

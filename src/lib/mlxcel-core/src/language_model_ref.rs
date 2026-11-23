@@ -323,6 +323,26 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).sync_sequence_storage(seq_id, cache_pool)
     }
 
+    fn layer_state_kinds(&self) -> Option<Vec<crate::cache::LayerStateKind>> {
+        (**self).layer_state_kinds()
+    }
+
+    fn make_layer_state(&self) -> Option<Vec<crate::cache::LayerState>> {
+        (**self).make_layer_state()
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<crate::cache::LayerStateSnapshotSpec> {
+        (**self).layer_state_snapshot_spec()
+    }
+
+    fn forward_layer_state(
+        &self,
+        request: &crate::cache::LayerStateForward<'_>,
+        rows: &mut [&mut [crate::cache::LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        (**self).forward_layer_state(request, rows)
+    }
+
     fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,

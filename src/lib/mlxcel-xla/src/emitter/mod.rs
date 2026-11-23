@@ -70,6 +70,7 @@ mod molmo_vision_ops;
 pub(crate) mod numeric_ops;
 mod phi4_audio;
 pub(crate) mod production_probe_ops;
+mod quant_scale;
 mod qwen2_5_vl;
 mod qwen2_vl;
 mod qwen3_vl;
@@ -144,6 +145,8 @@ pub(crate) use phi4_audio::{
     emit_phi4_audio_diagnostic_with, emit_phi4_audio_with, phi4_audio_diagnostic_specs,
     phi4_audio_weight_specs, validate_phi4_audio_weight_shapes,
 };
+#[allow(unused_imports)]
+pub(crate) use quant_scale::{QuantScaleDtype, resolve_quant_scale_dtype};
 #[cfg(feature = "diagnostics")]
 pub(crate) use qwen2_5_vl::{Qwen25VlVisionDiagnosticLayout, emit_qwen2_5_vl_diagnostics};
 #[allow(unused_imports)]

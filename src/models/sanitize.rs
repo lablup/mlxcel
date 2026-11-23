@@ -1212,7 +1212,7 @@ pub(crate) fn sanitize_gemma4_nvfp4_weights(
     // the config on the file's own key names (issue #2351).
     crate::models::switch_layers::apply_native_global_scale_flags(weights, config)?;
     sanitize_modelopt_nvfp4_weights(weights, config)?;
-    stack_gemma4_per_expert_planes(weights);
+    stack_gemma4_per_expert_planes(weights)?;
     Ok(())
 }
 
@@ -1229,8 +1229,13 @@ pub(crate) fn sanitize_gemma4_nvfp4_weights(
 /// multiplier ([`crate::models::switch_layers::drain_numbered_expert_planes`]).
 /// A no-op for a checkpoint without numbered experts.
 ///
+/// Returns `Err` when an expert's plane disagrees in shape or dtype with the
+/// others (issue #3297).
+///
 /// Used by: [`sanitize_gemma4_nvfp4_weights`]
-fn stack_gemma4_per_expert_planes(weights: &mut mlxcel_core::weights::WeightMap) {
+fn stack_gemma4_per_expert_planes(
+    weights: &mut mlxcel_core::weights::WeightMap,
+) -> Result<(), String> {
     let mut expert_roots: Vec<String> = weights
         .keys()
         .filter_map(|key| key.strip_suffix(".experts.0.gate_proj.weight"))
@@ -1244,9 +1249,10 @@ fn stack_gemma4_per_expert_planes(weights: &mut mlxcel_core::weights::WeightMap)
                 &root,
                 proj,
                 &format!("{root}.switch_glu.{proj}"),
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 /// Normalize ModelOpt NVFP4 keys and repack the `{weight, weight_scale,
@@ -4028,7 +4034,7 @@ mod tests {
             );
         }
 
-        stack_gemma4_per_expert_planes(&mut weights);
+        stack_gemma4_per_expert_planes(&mut weights).unwrap();
 
         for layer in 0..2usize {
             let glu = format!("language_model.model.layers.{layer}.experts.switch_glu");
@@ -4069,7 +4075,7 @@ mod tests {
             keys.sort();
             keys
         };
-        stack_gemma4_per_expert_planes(&mut weights);
+        stack_gemma4_per_expert_planes(&mut weights).unwrap();
         let mut after: Vec<String> = weights.keys().cloned().collect();
         after.sort();
         assert_eq!(before, after);

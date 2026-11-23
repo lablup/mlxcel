@@ -492,6 +492,29 @@ impl LanguageModel for Qwen35VLModel {
         mlxcel_core::generate::LanguageModel::sequence_state_layout(&self.text_model)
     }
 
+    // The text model's state is scheduler-owned (issue #3254), so the
+    // wrapper forwards the whole surface: the table, the state builder, the
+    // snapshot vocabulary and the forward.
+    fn layer_state_kinds(&self) -> Option<Vec<mlxcel_core::cache::LayerStateKind>> {
+        mlxcel_core::generate::LanguageModel::layer_state_kinds(&self.text_model)
+    }
+
+    fn make_layer_state(&self) -> Option<Vec<mlxcel_core::cache::LayerState>> {
+        mlxcel_core::generate::LanguageModel::make_layer_state(&self.text_model)
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<mlxcel_core::cache::LayerStateSnapshotSpec> {
+        mlxcel_core::generate::LanguageModel::layer_state_snapshot_spec(&self.text_model)
+    }
+
+    fn forward_layer_state(
+        &self,
+        request: &mlxcel_core::cache::LayerStateForward<'_>,
+        rows: &mut [&mut [mlxcel_core::cache::LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        mlxcel_core::generate::LanguageModel::forward_layer_state(&self.text_model, request, rows)
+    }
+
     fn sync_sequence_storage(
         &self,
         seq_id: SequenceId,

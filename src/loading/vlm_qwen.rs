@@ -1048,7 +1048,8 @@ fn load_qwen3_5_vlm_with_variant(
         .map_err(|e| anyhow::anyhow!("Failed to parse Qwen3.5 text config: {}", e))?;
     text_config.validate_supported()?;
 
-    let mut text_weights = models::qwen3_5::sanitize_weights(text_weights, &text_config);
+    let mut text_weights = models::qwen3_5::sanitize_weights(text_weights, &text_config)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     models::sanitize_tied_embeddings(&mut text_weights, &full_config);
 
     let mut text_model = models::Qwen35Model::from_weights(&text_weights, &text_config)

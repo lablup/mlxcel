@@ -29,7 +29,6 @@ use super::scheduler_model_owned_cache_tests::{
     test_store, tiny_gemma3_args, tiny_gemma3_weights,
 };
 use super::*;
-use mlxcel_core::generate::LanguageModel;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 
@@ -39,11 +38,13 @@ use crate::server::prompt_cache::PromptCacheRejectReason;
 /// Per-layer cache offset of `seq_id`'s live model-owned state, read from the
 /// snapshot the model itself would donate. The tiny fixture has one layer.
 fn restored_offset(sched: &BatchScheduler, seq_id: SequenceId, kind: &str) -> i32 {
-    let snapshot = sched
-        .engine
-        .model()
-        .snapshot_sequence_state(seq_id, 0)
-        .expect("restored sequence has model-owned state");
+    let snapshot = crate::server::prompt_cache::state_snapshot::snapshot_sequence_state(
+        sched.engine.model(),
+        sched.engine.pool(),
+        seq_id,
+        0,
+    )
+    .expect("restored sequence has model-owned state");
     let name = format!("layer0.{kind}.offset");
     let offset = snapshot
         .tensor(&name)
