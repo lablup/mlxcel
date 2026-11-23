@@ -504,7 +504,7 @@ fn enforce_limit(
 pub(crate) fn decode_wav_native_compat(
     bytes: &[u8],
 ) -> Result<(Vec<f32>, u32), AudioPreprocessError> {
-    decode_native(bytes, LEGACY_MAX_DURATION_SECONDS, false)
+    decode_native(bytes, LEGACY_MAX_DURATION_SECONDS, u32::MAX, false)
 }
 
 /// The compatibility decoder's duration ceiling: 24 hours.
@@ -517,11 +517,22 @@ const LEGACY_MAX_DURATION_SECONDS: usize = 24 * 60 * 60;
 /// limit before any sample is decoded (issue #3296). The decode loop still
 /// enforces the same ceiling for a container whose header declares no
 /// length or understates it.
+///
+/// The source sample rate is held to the chat policy's 192 kHz ceiling. A
+/// duration cap alone does not bound the work: a header declaring a
+/// multi-MHz rate makes a short "duration" out of hundreds of millions of
+/// samples, so the rate is what keeps the decoded buffer proportional to
+/// `max_duration_seconds`.
 pub(crate) fn decode_native_within(
     bytes: &[u8],
     max_duration_seconds: usize,
 ) -> Result<(Vec<f32>, u32), AudioPreprocessError> {
-    decode_native(bytes, max_duration_seconds, true)
+    decode_native(
+        bytes,
+        max_duration_seconds,
+        policy::MAX_SOURCE_SAMPLE_RATE,
+        true,
+    )
 }
 
 /// Shared body of the native-rate decoders. `inspect_first` runs the
@@ -530,6 +541,7 @@ pub(crate) fn decode_native_within(
 fn decode_native(
     bytes: &[u8],
     max_duration_seconds: usize,
+    maximum_source_sample_rate: u32,
     inspect_first: bool,
 ) -> Result<(Vec<f32>, u32), AudioPreprocessError> {
     struct NeverCancel;
@@ -542,7 +554,7 @@ fn decode_native(
         family: "legacy-wav",
         target_sample_rate: 1,
         minimum_source_sample_rate: 1,
-        maximum_source_sample_rate: u32::MAX,
+        maximum_source_sample_rate,
         target_channels: 1,
         dtype: "f32",
         resampling: AudioResamplingPolicy::Native,
