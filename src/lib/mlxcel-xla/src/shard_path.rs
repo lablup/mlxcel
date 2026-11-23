@@ -45,3 +45,19 @@ pub(crate) fn index_shard_path(
     }
     Ok(model_dir.join(relative))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_plain_file_name_resolves() {
+        let dir = Path::new("/models/m");
+        let index = dir.join("model.safetensors.index.json");
+        let ok = index_shard_path(dir, &index, "model-00001.safetensors").expect("plain");
+        assert_eq!(ok, dir.join("model-00001.safetensors"));
+        for bad in ["", "..", "/", "/etc/passwd", "a/b", "../x", "x\0y"] {
+            assert!(index_shard_path(dir, &index, bad).is_err(), "{bad:?}");
+        }
+    }
+}

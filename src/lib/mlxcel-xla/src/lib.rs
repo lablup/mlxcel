@@ -93,7 +93,6 @@ mod aux_smoke;
 mod auxiliary;
 #[cfg(feature = "iree")]
 mod iree;
-// Plain shard file names from an untrusted safetensors index (#3338).
 mod local_task;
 #[cfg(any(feature = "iree", test))]
 mod molmo2;
@@ -101,6 +100,8 @@ mod molmo2;
 mod molmo2_vision_runtime;
 #[cfg(feature = "iree")]
 mod molmo_vision_runtime;
+// Plain shard file names from an untrusted safetensors index (#3338), shared by
+// the loader and the emitter-side checkpoint cross-check.
 #[cfg(any(feature = "iree", test))]
 mod shard_path;
 // Always compiled: the emitter reads its workgroup-shape constants, and the
@@ -113,10 +114,10 @@ mod phi4_audio;
 mod qwen2_vl_runtime;
 #[cfg(feature = "iree")]
 mod qwen3_vl_runtime;
-// The spec, length checks and `.npy` codec are pure Rust and unit-tested
-// without IREE; only `run_ssm_probe` needs the runtime.
 #[cfg(feature = "iree")]
 mod ssm_model_check;
+// The spec, length checks and `.npy` codec are pure Rust and unit-tested
+// without IREE; only `run_ssm_probe` needs the runtime.
 #[cfg(any(feature = "iree", test))]
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod ssm_probe;

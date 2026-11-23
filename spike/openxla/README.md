@@ -87,8 +87,11 @@ scripts/rocm_gpu_guard.sh --hold -- $PY spike/openxla/ssm_lowering_measure.py --
 checkpoint (production config reader and weight loader, through
 `examples/xla_ssm_model_check.rs`) against HF `Mamba2ForCausalLM` in fp32.
 Each run prefills the prompt once whole and once split in two calls that hand
-the returned state on, and once token by token through the decode step, and requires all three last-token logits within 3e-2 of HF
-with the same argmax.
+the returned state on, and once token by token through the decode step, and
+requires all three last-token logits within 3e-2 of HF with the same argmax.
+The projection layout defaults to `--layout inout`, the one `IreeLlama` emits.
+The config is cross-checked against the checkpoint's safetensors headers and
+file sizes before any graph is emitted; see `FINDINGS_ssm.md`.
 
 ```bash
 scripts/rocm_gpu_guard.sh --hold -- cargo build --release --features xla-iree --example xla_ssm_model_check
