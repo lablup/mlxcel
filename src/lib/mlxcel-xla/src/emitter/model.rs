@@ -395,7 +395,8 @@ fn take_abi_scalar_arg(
 /// the packed path off) this is a single f32 arg, byte-identical to before. For an
 /// MLX affine-quantized checkpoint with `MLXCEL_XLA_QUANT=packed` (issue #516) it is
 /// THREE args, the packed `[out, in_/(32/bits)]` `ui32` weight and its
-/// `[out, in_/group_size]` f16 `scales` / `biases`, reconstructed to the `[out, in_]`
+/// `[out, in_/group_size]` `scales` / `biases` (f16, or bf16 when the checkpoint
+/// stores bf16, `Config::quant_scale_dtype`, issue #603), reconstructed to the `[out, in_]`
 /// f32 weight IN THE GRAPH via [`Builder::dequant_affine`]. That reconstruction is
 /// bit-identical to the host `dequantize_affine`, so the downstream forward (and its
 /// optional f16 contraction demotion) is unchanged and stays token-exact. The three
@@ -434,13 +435,13 @@ fn take_weight(
             let scales = take_arg(
                 decls,
                 idx,
-                Ty::new(vec![out, n_groups], "f16"),
+                Ty::new(vec![out, n_groups], c.quant_scale_dtype.elt()),
                 format!("{loc}.scales"),
             );
             let biases = take_arg(
                 decls,
                 idx,
-                Ty::new(vec![out, n_groups], "f16"),
+                Ty::new(vec![out, n_groups], c.quant_scale_dtype.elt()),
                 format!("{loc}.biases"),
             );
             if b.native_proj_enabled() {
@@ -565,13 +566,13 @@ fn take_lm_head(
                 let scales = take_arg(
                     decls,
                     idx,
-                    Ty::new(vec![c.vocab, n_groups], "f16"),
+                    Ty::new(vec![c.vocab, n_groups], c.quant_scale_dtype.elt()),
                     format!("{loc}.scales"),
                 );
                 let biases = take_arg(
                     decls,
                     idx,
-                    Ty::new(vec![c.vocab, n_groups], "f16"),
+                    Ty::new(vec![c.vocab, n_groups], c.quant_scale_dtype.elt()),
                     format!("{loc}.biases"),
                 );
                 // Prefill keeps a loader-dequantized `[H, V]` operand: the head

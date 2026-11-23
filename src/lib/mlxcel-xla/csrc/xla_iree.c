@@ -903,8 +903,10 @@ static iree_status_t xla_upload_one_weight_impl(
     nelem *= (iree_host_size_t)dim;
   }
   // issue #516 per-weight dtype: f32 (0, a widened / dequantized weight) or the
-  // raw parts of an MLX affine-quantized projection, f16 (1) scales / biases or a
-  // packed U32 (2) weight the graph dequantizes in place.
+  // raw parts of an MLX affine-quantized projection, f16 (1) or bf16 (3, issue
+  // #603) scales / biases or a packed U32 (2) weight the graph dequantizes in
+  // place. The codes mirror `WDT_*` and `QuantScaleDtype::weight_dtype_code` in
+  // the Rust loader.
   iree_hal_element_type_t elt;
   iree_host_size_t esize;
   switch (weight_dtype) {
@@ -919,6 +921,10 @@ static iree_status_t xla_upload_one_weight_impl(
     case 2:
       elt = IREE_HAL_ELEMENT_TYPE_UINT_32;
       esize = 4;
+      break;
+    case 3:
+      elt = IREE_HAL_ELEMENT_TYPE_BFLOAT_16;
+      esize = 2;
       break;
     default:
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -1100,7 +1106,7 @@ int xla_llama_upload_weight(xla_ctx* c, int32_t i, const void* weight_data,
       elements *= (iree_host_size_t)weight_dims[d];
     }
     const iree_host_size_t esize =
-        weight_dtype == 1 ? 2 : 4;  // f16, else f32 / packed U32
+        (weight_dtype == 1 || weight_dtype == 3) ? 2 : 4;  // f16 / bf16, else f32 / U32
     xla_test_weight_upload_calls += 1;
     xla_test_weight_upload_bytes += (uint64_t)(elements * esize);
   }
@@ -1110,9 +1116,9 @@ int xla_llama_upload_weight(xla_ctx* c, int32_t i, const void* weight_data,
 
 // Create the execution context. `device_uri` is "local-task" (CPU) or another
 // registered HAL driver. `weight_data[i]` points at `prod(weight_dims[i*4..])`
-// elements of dtype `weight_dtypes[i]` (0 f32, 1 f16, 2 packed U32; issue #516)
-// laid out row-major; the shim copies them into resident device buffers, so the
-// caller may free them after this returns. Returns NULL on failure (after printing
+// elements of dtype `weight_dtypes[i]` (0 f32, 1 f16, 2 packed U32, 3 bf16;
+// issues #516 / #603) laid out row-major; the shim copies them into resident
+// device buffers, so the caller may free them after this returns. Returns NULL on failure (after printing
 // a diagnostic).
 
 // Create an additional execution context that shares `base`'s uploaded weights
