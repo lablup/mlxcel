@@ -49,8 +49,10 @@ pub(crate) const QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES: usize = 7;
 /// Every activation is rounded to BF16 where eager MLX stores a BF16 tensor
 /// (#3291, `qwen3_vl_ops`), so each contraction reads BF16-exact values. They
 /// enter the GEMM as BF16 where the target lowers BF16; Metal has no BF16 type
-/// (#612), so there they stay in their f32 carrier, which forms the same
-/// products.
+/// (#612), so there they stay in their f32 carrier. That forms the same
+/// products only while the vision weights are BF16-exact, as the BF16
+/// checkpoints are; a quantized vision tower dequantizes to values the carrier
+/// does not round, so it would not match the BF16 GEMM.
 pub(crate) fn qwen3_vl_vision_precision(device: &str) -> Precision {
     if precision_lowers_on(device, Precision::Bf16) {
         Precision::Bf16
@@ -1005,6 +1007,25 @@ mod tests {
             }"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn vision_precision_is_f32_on_metal_and_bf16_on_cuda() {
+        assert_eq!(qwen3_vl_vision_precision("metal"), Precision::F32);
+        assert_eq!(qwen3_vl_vision_precision("cuda"), Precision::Bf16);
+    }
+
+    #[test]
+    fn metal_precision_graph_contains_no_bf16_type() {
+        let config = config();
+        let precision = qwen3_vl_vision_precision("metal");
+        for bucket in [16, 512] {
+            let mlir = emit_qwen3_vl(&config, bucket, precision);
+            assert!(
+                !mlir.contains("bf16"),
+                "bucket {bucket} Metal graph must not name bf16"
+            );
+        }
     }
 
     #[test]
