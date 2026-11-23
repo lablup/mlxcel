@@ -4654,6 +4654,10 @@ pub mod lang_analyzer;
 // Path and mode rules for the persistent PTX cache directories (#2539, #2797).
 mod ptx_cache_dirs;
 
+// Owner-private cache directories and files for artifacts loaded as code
+// (the OpenXLA/IREE caches, #3248). Shares the PTX cache's group-write repair.
+pub mod private_dir;
+
 // Shape-bucketed kernel autotuner (issue #906): the TunableOp contract, the
 // median-of-N profiling harness, the persistent tactic cache, and the first
 // consumers. Default off; see the module docs for the precedence chain.

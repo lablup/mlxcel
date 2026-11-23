@@ -13,7 +13,8 @@
 # Usage:
 #   scripts/xla/fusion_spike.sh [DECODE_MLIR]
 # With no arg it uses the newest packed decode graph mlxcel left in its vmfb cache
-# ($TMPDIR/mlxcel-xla-vmfb/decode-*.mlir with ui32 weight args).
+# (${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/xla/vmfb/decode-*.mlir with ui32
+# weight args; #3248 moved it out of $TMPDIR).
 set -uo pipefail
 
 DEVICE="${MLXCEL_XLA_DEVICE:-}"
@@ -42,7 +43,7 @@ else
   echo "target device: cuda"
 fi
 
-CACHE="${TMPDIR:-/tmp}/mlxcel-xla-vmfb"
+CACHE="${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/xla/vmfb"
 DECODE="${1:-}"
 if [ -z "$DECODE" ]; then
   for f in $(ls -t "$CACHE"/decode-*.mlir 2>/dev/null); do

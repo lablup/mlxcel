@@ -220,9 +220,7 @@ fn compile_and_load(
 ) -> Result<IreeAuxiliaryModule, String> {
     let compiler = iree_compile_bin()?;
     let flags = target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-molmo-vision-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::MolmoVision)?;
     let specs = config.weight_specs();
     let mut observer = CheckpointSourceObserver::default();
     let (weights, checkpoint_schema) = load_weights(model_dir, config, &specs, &mut observer)?;
