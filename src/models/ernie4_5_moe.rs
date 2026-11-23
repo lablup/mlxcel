@@ -21,7 +21,9 @@
 //! - RMSNorm layer normalization
 //! - Softmax routing for expert selection
 
-use crate::models::switch_layers::validate_expert_quantization_params;
+use crate::models::switch_layers::{
+    drain_numbered_expert_planes, validate_expert_quantization_params,
+};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -683,16 +685,30 @@ impl Ernie45MoeModel {
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
 
         // Load weights
-        let weights = crate::models::load_text_weights(model_dir, None)?;
+        let mut weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Create model
-        let model = Self::from_weights(&weights, &args)?;
+        let model = Self::from_checkpoint_weights(&mut weights, &args)?;
 
         Ok((model, args))
     }
 
-    /// Create model from loaded weights
+    /// Create a model from a borrowed checkpoint without consuming the caller's tensors.
     pub fn from_weights(weights: &WeightMap, args: &ModelArgs) -> Result<Self, String> {
+        let mut handles = weights
+            .iter()
+            .map(|(key, value)| (key.clone(), mlxcel_core::array_handle_clone(value)))
+            .collect();
+        Self::from_checkpoint_weights(&mut handles, args)
+    }
+
+    /// Directory and config-backed loaders own their map and can drain numbered experts in place.
+    pub(crate) fn from_checkpoint_weights(
+        weights: &mut WeightMap,
+        args: &ModelArgs,
+    ) -> Result<Self, String> {
+        Self::prepare_checkpoint_weights(weights, args)?;
+
         // Load quantized embedding
         let embed_tokens = UnifiedEmbedding::from_weights(
             weights,
@@ -726,6 +742,65 @@ impl Ernie45MoeModel {
             lm_head,
             tie_word_embeddings: args.tie_word_embeddings,
         })
+    }
+
+    fn prepare_checkpoint_weights(weights: &mut WeightMap, args: &ModelArgs) -> Result<(), String> {
+        // The multi-token prediction head is separate from the text decoder.
+        weights.retain(|key, _| {
+            !key.split('.').any(|part| {
+                matches!(
+                    part,
+                    "mtp_block" | "mtp_linear_proj" | "mtp_hidden_norm" | "mtp_emb_norm"
+                )
+            })
+        });
+        for layer in (0..args.num_hidden_layers).filter(|&i| args.is_moe_layer(i)) {
+            let mlp = format!("model.layers.{layer}.mlp");
+            let experts = format!("{mlp}.experts");
+            for proj in ["gate_proj", "up_proj", "down_proj"] {
+                let stacked = format!("{mlp}.switch_mlp.{proj}");
+                if weights.contains_key(&format!("{stacked}.weight"))
+                    || !weights.contains_key(&format!("{experts}.0.{proj}.weight"))
+                {
+                    continue;
+                }
+                // A gap would make the stacking helper stop early. All affine sidecars
+                // must cover the same experts as their packed weights.
+                for leaf in ["weight", "scales", "biases"] {
+                    let shape = weights
+                        .get(&format!("{experts}.0.{proj}.{leaf}"))
+                        .map(|plane| mlxcel_core::array_shape(plane));
+                    for e in 1..args.moe_num_experts {
+                        let key = format!("{experts}.{e}.{proj}.{leaf}");
+                        if weights
+                            .get(&key)
+                            .map(|plane| mlxcel_core::array_shape(plane))
+                            != shape
+                        {
+                            return Err(format!(
+                                "{key}: expected the same plane layout as expert 0"
+                            ));
+                        }
+                    }
+                }
+                if weights
+                    .contains_key(&format!("{experts}.{}.{proj}.weight", args.moe_num_experts))
+                {
+                    return Err(format!(
+                        "{experts}: expected {} experts",
+                        args.moe_num_experts
+                    ));
+                }
+                drain_numbered_expert_planes(weights, &experts, proj, &stacked);
+                for leaf in ["weight", "scales", "biases"] {
+                    if let Some(plane) = weights.get(&format!("{stacked}.{leaf}")) {
+                        // Release the source planes before stacking the next projection.
+                        mlxcel_core::eval(plane);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Create KV caches for all layers
@@ -900,10 +975,16 @@ impl MoEBlock {
             SwitchGLU::from_weights(weights, args, &format!("{}.switch_mlp", moe_prefix))?;
 
         // Load shared experts if present
-        let shared_experts = if args.moe_num_shared_experts > 0 {
+        let shared_prefix = format!("{moe_prefix}.shared_experts");
+        let shared_experts = if weights.contains_key(&format!("{shared_prefix}.gate_proj.weight")) {
+            // Published ERNIE checkpoints concatenate all shared experts into one wider GLU.
+            Some(SharedExperts {
+                experts: vec![DenseMLP::from_weights(weights, args, &shared_prefix)?],
+            })
+        } else if args.moe_num_shared_experts > 0 {
             let mut experts = Vec::with_capacity(args.moe_num_shared_experts);
             for i in 0..args.moe_num_shared_experts {
-                let expert_prefix = format!("{}.shared_experts.{}", moe_prefix, i);
+                let expert_prefix = format!("{shared_prefix}.{i}");
                 let expert = DenseMLP::from_weights(weights, args, &expert_prefix)?;
                 experts.push(expert);
             }

@@ -104,8 +104,8 @@ fn ernie4_5_moe_switch_linear_rejects_quantization_params_that_would_abort_gathe
         .expect("a bf16 expert plane must not be gated on quantization params");
 }
 
-fn tiny_routed_args() -> ModelArgs {
-    serde_json::from_value(serde_json::json!({
+fn tiny_routed_config() -> serde_json::Value {
+    serde_json::json!({
         "model_type": "ernie4_5_moe",
         "hidden_size": 8,
         "num_hidden_layers": 2,
@@ -120,8 +120,11 @@ fn tiny_routed_args() -> ModelArgs {
         "moe_k": 2,
         "moe_num_shared_experts": 1,
         "tie_word_embeddings": false
-    }))
-    .unwrap()
+    })
+}
+
+fn tiny_routed_args() -> ModelArgs {
+    serde_json::from_value(tiny_routed_config()).unwrap()
 }
 
 fn tensor(shape: &[i32], phase: usize) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
@@ -349,4 +352,137 @@ fn ernie45_moe_last_row_logits_match_the_full_forward() {
         },
         crate::models::last_row_logits_harness::TOKENS,
     );
+}
+
+#[test]
+fn checkpoint_layout_loads_fused_shared_glu_at_stored_width() {
+    let mut args = tiny_routed_args();
+    args.moe_num_shared_experts = 0;
+    let mut weights = tiny_routed_weights(&args);
+    args.moe_num_shared_experts = 2;
+    let h = args.hidden_size as i32;
+    let width = 2 * args.moe_intermediate_size() as i32;
+    for (proj, shape) in [
+        ("gate_proj", [width, h]),
+        ("up_proj", [width, h]),
+        ("down_proj", [h, width]),
+    ] {
+        weights.insert(
+            format!("model.layers.1.mlp.shared_experts.{proj}.weight"),
+            tensor(&shape, 1),
+        );
+    }
+    let model = Ernie45MoeModel::from_weights(&weights, &args).unwrap();
+    let super::MLPVariant::MoE(block) = &model.layers[1].mlp else {
+        panic!("expected routed layer")
+    };
+    let shared = &block.shared_experts.as_ref().unwrap().experts;
+    assert_eq!(shared.len(), 1);
+    let input = mlxcel_core::ones(&[1, h], dtype::FLOAT32);
+    assert_eq!(
+        mlxcel_core::array_shape(&shared[0].gate_proj.forward(&input)),
+        [1, width]
+    );
+    assert_eq!(mlxcel_core::array_shape(&shared[0].forward(&input)), [1, h]);
+}
+
+#[test]
+fn checkpoint_layout_stacks_numbered_experts_in_order() {
+    check_numbered_expert_planes(false);
+}
+
+#[test]
+fn checkpoint_layout_stacks_affine_expert_planes_in_order() {
+    check_numbered_expert_planes(true);
+}
+
+fn check_numbered_expert_planes(quantized: bool) {
+    let mut args = tiny_routed_args();
+    args.hidden_size = 64;
+    args.moe_intermediate_size = Some(64);
+    let mut weights = tiny_routed_weights(&args);
+    let root = "model.layers.1.mlp";
+    for proj in ["gate_proj", "up_proj", "down_proj"] {
+        weights.remove(&format!("{root}.switch_mlp.{proj}.weight"));
+        for e in (0..args.moe_num_experts).rev() {
+            let key = format!("{root}.experts.{e}.{proj}");
+            let plane = if quantized {
+                weights.insert(
+                    format!("{key}.scales"),
+                    mlxcel_core::full_f32(&[64, 1], e as f32 + 1., dtype::FLOAT32),
+                );
+                weights.insert(
+                    format!("{key}.biases"),
+                    mlxcel_core::full_f32(&[64, 1], -(e as f32), dtype::FLOAT32),
+                );
+                mlxcel_core::from_slice_u32(&[e as u32; 64 * 8], &[64, 8])
+            } else {
+                mlxcel_core::full_f32(&[64, 64], e as f32, dtype::FLOAT32)
+            };
+            weights.insert(format!("{key}.weight"), plane);
+        }
+    }
+    let model = Ernie45MoeModel::from_weights(&weights, &args).unwrap();
+    let super::MLPVariant::MoE(block) = &model.layers[1].mlp else {
+        panic!("expected routed layer")
+    };
+    let experts = &block.switch_mlp;
+    for proj in [&experts.gate_proj, &experts.up_proj, &experts.down_proj] {
+        let check = |array: &mlxcel_core::MlxArray, cols, expected: [f32; 3]| {
+            assert_eq!(mlxcel_core::array_shape(array), [3, 64, cols]);
+            let first = mlxcel_core::slice(array, &[0, 0, 0], &[3, 1, 1]);
+            assert_eq!(array_to_vec_f32(&first), expected);
+        };
+        match proj {
+            SwitchLinear::Regular { weight, .. } => {
+                assert!(!quantized);
+                check(weight, 64, [0., 1., 2.]);
+            }
+            SwitchLinear::Quantized {
+                weight,
+                scales,
+                biases,
+                ..
+            } => {
+                assert!(quantized);
+                assert_eq!(mlxcel_core::array_dtype(weight), dtype::UINT32);
+                check(weight, 8, [0., 1., 2.]);
+                check(scales, 1, [1., 2., 3.]);
+                check(biases, 1, [0., -1., -2.]);
+            }
+        }
+    }
+}
+
+#[test]
+fn checkpoint_layout_drops_mtp_and_preserves_numbered_shared_and_stacked_routed() {
+    let mut config = tiny_routed_config();
+    config["moe_num_shared_experts"] = 2.into();
+    let mut weights = tiny_routed_weights(&serde_json::from_value(config.clone()).unwrap());
+    let mtp = [
+        "model.mtp_block.0.mlp.gate_proj.weight",
+        "model.mtp_linear_proj.0.weight",
+        "model.mtp_hidden_norm.0.weight",
+        "model.mtp_emb_norm.0.weight",
+    ];
+    for key in mtp {
+        weights.insert(key.into(), tensor(&[1], 1));
+    }
+    let model = crate::loading::config_backed::try_load_config_backed_model_from_weights(
+        crate::models::ModelType::Ernie45Moe,
+        &config.to_string(),
+        &mut weights,
+    )
+    .unwrap();
+    let Some(crate::LoadedModel::Ernie45Moe(model)) = model else {
+        panic!("expected ERNIE text MoE")
+    };
+    let super::MLPVariant::MoE(block) = &model.layers[1].mlp else {
+        panic!("expected routed layer")
+    };
+    assert_eq!(block.shared_experts.as_ref().unwrap().experts.len(), 2);
+    assert_eq!(block.switch_mlp.gate_proj.num_experts(), 3);
+    for key in mtp {
+        assert!(!weights.contains_key(key), "retained {key}");
+    }
 }
