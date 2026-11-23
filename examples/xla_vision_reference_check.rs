@@ -17,6 +17,9 @@
 //! This intentionally consumes issue #862's independently generated HF capture
 //! rather than regenerating an oracle from the implementation under test.
 
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -168,6 +171,7 @@ mod tests {
 }
 
 fn main() {
+    mlx_reference_policy::pin_mlx_tf32_disabled_or_exit();
     let model = required_path("--model");
     let reference_dir = required_path("--reference");
     let case = argument("--case").unwrap_or_else(|| "image_text".to_string());
@@ -239,6 +243,7 @@ fn main() {
         "schema": 1,
         "producer": "mlxcel-xla-iree-vision",
         "device": device,
+        "mlx_enable_tf32": mlx_reference_policy::recorded_mlx_tf32(),
         "case": case,
         "artifact_fingerprint": projector.artifact_fingerprint(),
         "hidden_shape": projection.hidden_shape,

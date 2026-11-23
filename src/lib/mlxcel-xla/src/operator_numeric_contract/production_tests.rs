@@ -297,7 +297,13 @@ fn backend_identity_stays_unobserved_and_sanitizes_compiler_separators() {
 #[test]
 fn v3_artifacts_use_a_schema_scoped_path_and_leave_v1_caches_alone() {
     let cache = temp_vmfb("schema-scope").with_extension("");
-    std::fs::create_dir_all(&cache).unwrap();
+    // Owner-only, as every production cache directory is (#3248): a
+    // group-writable one would be refused and redirected.
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&cache).unwrap();
     let vmfb = cache.join("vision-256.vmfb");
     let resident = weights();
     let legacy = AuxiliaryArtifactContract::new_legacy_unqualified(

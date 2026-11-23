@@ -120,11 +120,59 @@ impl Qwen3VLModel {
                 )
             };
 
+        self.merge_vision_features(
+            input_ids,
+            &inputs_embeds,
+            &image_features,
+            deepstack_features,
+            grid_thw,
+        )
+    }
+
+    /// Build input embeddings from vision features computed elsewhere.
+    ///
+    /// Runs exactly the merge, DeepStack-state, and MRoPE-state steps of
+    /// [`Self::get_input_embeddings`], but takes the main merger output and the
+    /// ordered DeepStack branches as arguments instead of running the eager
+    /// vision tower. A cross-backend oracle uses it to feed one backend's vision
+    /// features to the eager language model, so language-model parity is
+    /// measured on the same input instead of through accumulated vision drift.
+    pub fn get_input_embeddings_from_features(
+        &self,
+        input_ids: &MlxArray,
+        image_features: &MlxArray,
+        deepstack_features: Vec<UniquePtr<MlxArray>>,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> merge::InputEmbeddings {
+        let inputs_embeds = self.text_model.get_embed_tokens(input_ids);
+        let embed_dtype = mlxcel_core::array_dtype(&inputs_embeds);
+        let image_features = mlxcel_core::astype(image_features, embed_dtype);
+        let deepstack_features = deepstack_features
+            .iter()
+            .map(|feature| mlxcel_core::astype(feature, embed_dtype))
+            .collect();
+        self.merge_vision_features(
+            input_ids,
+            &inputs_embeds,
+            &image_features,
+            deepstack_features,
+            grid_thw,
+        )
+    }
+
+    fn merge_vision_features(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: &MlxArray,
+        image_features: &MlxArray,
+        deepstack_features: Vec<UniquePtr<MlxArray>>,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> merge::InputEmbeddings {
         // Merge vision features at image token positions (LLaVA-style)
         let merged = merge::merge_llava_any(
             &[self.image_token_id, self.video_token_id],
-            image_features.as_ref().unwrap(),
-            &inputs_embeds,
+            image_features,
+            inputs_embeds,
             input_ids,
         );
 

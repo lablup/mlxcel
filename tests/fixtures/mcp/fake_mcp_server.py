@@ -29,7 +29,10 @@ that the failure stays inside the one call that hit it:
 
 `--startup hang|crash|garbage` misbehaves during `initialize` instead.
 `--stderr-flood` writes a megabyte to stderr before serving, which must not
-block or grow the client. Runs on Python 3.9.
+block or grow the client. `--grandchild PIDFILE` forks a sleeping
+grandchild first and writes its pid to PIDFILE, the shape of a launcher
+(`npx`, `uvx`) whose real server outlives a kill of the launcher alone.
+Runs on Python 3.9.
 """
 
 import json
@@ -131,6 +134,15 @@ def main():
     startup = None
     if "--startup" in args:
         startup = args[args.index("--startup") + 1]
+    if "--grandchild" in args:
+        pid_file = args[args.index("--grandchild") + 1]
+        pid = os.fork()
+        if pid == 0:
+            time.sleep(3600)
+            os._exit(0)
+        with open(pid_file + ".tmp", "w") as handle:
+            handle.write(str(pid))
+        os.replace(pid_file + ".tmp", pid_file)
     if "--stderr-flood" in args:
         sys.stderr.write("e" * (1024 * 1024))
         sys.stderr.flush()
