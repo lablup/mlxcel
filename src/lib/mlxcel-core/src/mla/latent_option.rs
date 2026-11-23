@@ -370,8 +370,7 @@ pub static EXPERIMENTAL_LATENT_NOTES: &[ExperimentalLatentNote] = &[
         text: "Hy4-preview-4bit with an int8 key slot had 0 decided-position disagreements of \
                124 against the fp16 latent behind 512 tokens (98.0% top-1 agreement, perplexity \
                +1.00%), a context at which the DSA indexer selects nothing; its top-k overlap \
-               over a quantized slot, which DeepSeek-V3.2 missed, is unmeasured on Hy4 \
-               (docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md)",
+               over a quantized slot, which DeepSeek-V3.2 missed, is unmeasured on Hy4 (PR #3281)",
     },
     ExperimentalLatentNote {
         families: &["hy_v4"],

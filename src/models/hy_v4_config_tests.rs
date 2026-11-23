@@ -197,3 +197,27 @@ fn parity_arms_parse_and_reject_unknown_names() {
     let err = ParityArms::parse("no_sink").unwrap_err();
     assert!(err.contains("unknown arm `no_sink`"), "{err}");
 }
+
+#[test]
+fn hc_mult_and_eos_ids_are_bounded() {
+    let parse = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut json = tiny_config_json(Tiny::new(2));
+        edit(&mut json);
+        serde_json::from_value::<HyV4Config>(json)
+            .expect_err("config must be refused")
+            .to_string()
+    };
+    let err = parse(&|json| json["hc_mult"] = serde_json::json!(65));
+    assert!(err.contains("hc_mult must be between 1 and 64"), "{err}");
+    let err = parse(&|json| json["hc_mult"] = serde_json::json!(0));
+    assert!(err.contains("hc_mult must be between 1 and 64"), "{err}");
+    let err = parse(&|json| {
+        json["hc_mult"] = serde_json::json!(64);
+        json["hidden_size"] = serde_json::json!(20_000_000);
+    });
+    assert!(err.contains("does not fit in i32"), "{err}");
+    let err = parse(&|json| json["eos_token_id"] = serde_json::json!(4_294_967_297_i64));
+    assert!(err.contains("invalid eos_token_id"), "{err}");
+    let err = parse(&|json| json["eos_token_id"] = serde_json::json!([1, -2]));
+    assert!(err.contains("invalid eos_token_id"), "{err}");
+}
