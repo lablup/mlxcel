@@ -152,7 +152,10 @@ pub(super) fn tiny_gemma3() -> Gemma3Wrapper {
         mlxcel_core::from_slice_f32(&[0.0; HIDDEN as usize], &[HIDDEN]),
     );
     put(&mut w, "lm_head.weight".into(), &[VOCAB, HIDDEN]);
+    // Ring storage: these tests pin the snapshot path, which paged sliding
+    // storage (issue #3256) replaces for FP16 sequences.
     Gemma3Wrapper::new(Gemma3Model::from_weights(&w, &args).expect("tiny gemma3 loads"))
+        .without_paged_sliding()
 }
 
 fn scheduler(chunk: usize, backend: DecodeStorageBackend) -> BatchScheduler {
