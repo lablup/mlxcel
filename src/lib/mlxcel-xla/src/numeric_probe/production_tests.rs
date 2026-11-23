@@ -136,6 +136,43 @@ fn sscp_probe_uses_the_gemma3n_production_entry_and_bf16_exact_operands() {
 }
 
 #[test]
+fn sscp_probe_accumulates_exactly_in_any_f32_order_so_it_compares_bits() {
+    let probe = production_probe(ProductionProbeOperator::Gemma3nSscpConvolution).unwrap();
+    assert_eq!(probe.artifact.comparison, ComparisonMode::ExactBits);
+    let [mel, weight] = probe.spec.operands() else {
+        panic!("SSCP probe carries two operands");
+    };
+    // Every operand is an integer multiple of 2^-5 (mel) or 2^-9 (weight), so
+    // each product is an integer multiple of 2^-14.
+    let scaled = |values: &[f32], scale: f32| {
+        values
+            .iter()
+            .map(|value| {
+                let scaled = value * scale;
+                assert_eq!(
+                    scaled.fract(),
+                    0.0,
+                    "{value} is not a multiple of 1/{scale}"
+                );
+                scaled.abs() as u64
+            })
+            .collect::<Vec<_>>()
+    };
+    let mel = scaled(mel.values(), 32.0);
+    let weight = scaled(weight.values(), 512.0);
+    let window = SSCP_SPEC.kernel[0] * SSCP_SPEC.kernel[1];
+    let max_mel = mel.iter().copied().max().unwrap();
+    // Bound every partial sum of one output window, in units of 2^-14. It
+    // must fit the 24-bit F32 significand for every order to be exact.
+    let worst_window = weight
+        .chunks_exact(window)
+        .map(|taps| taps.iter().map(|tap| tap * max_mel).sum::<u64>())
+        .max()
+        .unwrap();
+    assert!(worst_window < 1 << 24, "window sum bound {worst_window}");
+}
+
+#[test]
 fn dense_probes_reuse_the_canonical_operands_and_comparisons() {
     let dense = production_probe(ProductionProbeOperator::DenseMatmul).unwrap();
     let canonical = dense_definition().unwrap();

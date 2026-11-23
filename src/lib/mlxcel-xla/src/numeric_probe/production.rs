@@ -64,13 +64,15 @@ const QWEN_SAME_INPUT_TOLERANCE: ComparisonMode = ComparisonMode::AbsoluteRelati
     relative: 0.08,
 };
 
-/// The Gemma3n audio intermediate gate's per-stage `max_abs` bound
-/// (`examples/xla_gemma3n_audio_reference_check.rs`). Its RMS bound has no
-/// element-wise equivalent and is reported through the comparison summary.
-const GEMMA3N_AUDIO_STAGE_TOLERANCE: ComparisonMode = ComparisonMode::AbsoluteRelative {
-    absolute: 5e-3,
-    relative: 0.0,
-};
+/// The first SSCP convolution is compared bit for bit. Its fixture operands
+/// are BF16-exact dyadic rationals whose products are multiples of `2^-14`
+/// and whose window sums stay far below `2^24 * 2^-14`, so every F32
+/// accumulation order (and FMA contraction) yields the same exact sum and
+/// both backends round one value to BF16. The order-independence is the
+/// "shared schedule by construction" that admits `ExactBits`; the Gemma3n
+/// audio stage gate (`max_abs` 5e-3 plus RMS 5e-4) cannot be expressed as one
+/// element-wise mode without dropping its RMS clause.
+const SSCP_CONVOLUTION_COMPARISON: ComparisonMode = ComparisonMode::ExactBits;
 
 const Q4_GROUP_SIZE: usize = 64;
 const Q4_OUTPUTS: usize = 128;
@@ -532,7 +534,7 @@ fn sscp_convolution_probe() -> Result<ProductionProbe, String> {
         operands: operands.clone(),
         dynamic_operand_indices: vec![0],
         output_shape: SSCP_SPEC.output_shape(),
-        comparison: GEMMA3N_AUDIO_STAGE_TOLERANCE,
+        comparison: SSCP_CONVOLUTION_COMPARISON,
     };
     Ok(ProductionProbe {
         spec: ProductionProbeSpec {
