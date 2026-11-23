@@ -140,15 +140,35 @@ step_generate() {
         | tee "$OUT/generate.txt"
 }
 
+# The server step's background job: `lockf` (when GPU_LOCK is set), then
+# `time`, then `mlxcel-server`. `stop_server` stops the server itself so the
+# timer still writes its report, and the EXIT trap runs it when a step fails
+# under `set -e`, so a failed smoke never leaves the checkpoint resident.
+SERVER_PID=
+stop_server() {
+    [ -n "$SERVER_PID" ] || return 0
+    local proc=$SERVER_PID child
+    while child=$(pgrep -P "$proc" | head -n 1) && [ -n "$child" ]; do
+        proc=$child
+        case "$(ps -o comm= -p "$proc")" in *mlxcel-server) break ;; esac
+    done
+    kill "$proc" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=
+}
+trap stop_server EXIT
+trap 'exit 130' INT TERM
+
 step_server() {
-    /usr/bin/time -l -o "$OUT/mem-server.txt" \
+    local lock=()
+    [ -z "${GPU_LOCK:-}" ] || lock=(/usr/bin/lockf -k "$GPU_LOCK")
+    ${lock[@]+"${lock[@]}"} /usr/bin/time -l -o "$OUT/mem-server.txt" \
         "$BIN/mlxcel-server" -m "$MODEL" --port "$PORT" > "$OUT/server.log" 2>&1 &
-    local pid=$!
-    # `pid` is the timer; stop its child (the server) and let the timer report.
-    trap 'for child in $(pgrep -P "$pid"); do kill "$child" 2>/dev/null || true; done; wait "$pid" 2>/dev/null || true' RETURN
+    SERVER_PID=$!
+    # The budget includes any wait for GPU_LOCK.
     local waited=0
     until curl -sf "http://127.0.0.1:$PORT/health" > /dev/null; do
-        kill -0 "$pid" 2>/dev/null || { echo "server exited; see $OUT/server.log" >&2; return 1; }
+        kill -0 "$SERVER_PID" 2>/dev/null || { echo "server exited; see $OUT/server.log" >&2; return 1; }
         [ "$waited" -lt 3600 ] || { echo "server not healthy after 1 h" >&2; return 1; }
         sleep 10
         waited=$((waited + 10))
@@ -158,6 +178,7 @@ step_server() {
         -d '{"model":"'"$(basename "$MODEL")"'","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":40,"temperature":0}' \
         | tee "$OUT/server-response.json"
     echo
+    stop_server
 }
 
 step_trace() {
