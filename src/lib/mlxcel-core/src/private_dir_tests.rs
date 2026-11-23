@@ -178,3 +178,49 @@ fn fresh_directories_are_new_and_owner_only() {
         verify_private_dir(dir, current_euid()).expect("private");
     }
 }
+
+/// Whoever can write a directory above the root can rename the verified root
+/// away after the check, so an other-writable (non-sticky) ancestor is
+/// refused, while the user's own group-writable `~/.cache` (umask 002 under
+/// user private groups) is not (#3248).
+#[test]
+fn a_directory_above_the_root_that_others_can_write_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let euid = current_euid();
+    let shared = tmp.path().join("shared");
+    std::fs::create_dir(&shared).expect("dir");
+    chmod(&shared, 0o777);
+    assert!(matches!(
+        ensure_private_dir(&shared.join("mlxcel"), Path::new("xla/vmfb"), true, euid),
+        Err(PrivateDirError::Writable { path, .. }) if path.ends_with("shared")
+    ));
+    assert_eq!(mode(&shared), 0o777, "an ancestor is never modified");
+
+    let own_group = tmp.path().join("own-group");
+    std::fs::create_dir(&own_group).expect("dir");
+    chmod(&own_group, 0o775);
+    ensure_private_dir(&own_group.join("mlxcel"), Path::new("xla"), true, euid)
+        .expect("the user's own group may write an ancestor");
+    assert_eq!(mode(&own_group), 0o775);
+}
+
+/// A symlink above the root is resolved once, and the returned leaf names the
+/// real directories, so swapping that symlink later cannot redirect a load.
+#[test]
+fn the_leaf_is_spelled_through_the_canonical_parent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let euid = current_euid();
+    let real = tmp.path().join("real");
+    std::fs::create_dir(&real).expect("dir");
+    chmod(&real, 0o700);
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    let leaf =
+        ensure_private_dir(&link.join("mlxcel"), Path::new("xla/vmfb"), true, euid).expect("leaf");
+    let canonical = std::fs::canonicalize(&real).expect("canonical");
+    assert_eq!(leaf, canonical.join("mlxcel").join("xla").join("vmfb"));
+    assert!(matches!(
+        ensure_private_dir(Path::new("/tmp/a/../b"), Path::new("xla"), true, euid),
+        Err(PrivateDirError::InvalidSubpath(_))
+    ));
+}

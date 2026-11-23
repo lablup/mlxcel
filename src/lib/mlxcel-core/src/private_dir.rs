@@ -239,13 +239,16 @@ pub fn verify_private_dir(path: &Path, euid: u32) -> Result<(), PrivateDirError>
 
 /// Create `root/subpath` (mode 0700 for every directory created) and verify
 /// that `root` and every directory below it on the way to the leaf is private
-/// to `euid` (see [`verify_private_dir`]). Returns the leaf.
+/// to `euid` (see [`verify_private_dir`]), and that no one else can replace
+/// `root` through a directory above it (see [`verify_trusted_ancestors`]).
+/// Returns the leaf, spelled through the canonical parent of `root`, so a
+/// symlink above `root` swapped after the check cannot redirect later opens
+/// by path.
 ///
 /// Group write is first cleared ([`clear_group_write`]) on the directories
 /// below `root`, which mlxcel owns, and on `root` itself only when
 /// `repair_root` is set (the default cache root; an explicit root is the
-/// user's choice and is checked as found). Nothing above `root` is touched or
-/// checked.
+/// user's choice and is checked as found). Nothing above `root` is modified.
 pub fn ensure_private_dir(
     root: &Path,
     subpath: &Path,
@@ -255,6 +258,12 @@ pub fn ensure_private_dir(
     if !root.is_absolute() {
         return Err(PrivateDirError::RelativeRoot(root.to_path_buf()));
     }
+    if root
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(PrivateDirError::InvalidSubpath(root.to_path_buf()));
+    }
     let mut chain = vec![root.to_path_buf()];
     for component in subpath.components() {
         let Component::Normal(name) = component else {
@@ -263,19 +272,40 @@ pub fn ensure_private_dir(
         let next = chain[chain.len() - 1].join(name);
         chain.push(next);
     }
-    let leaf = chain[chain.len() - 1].clone();
+    let requested_leaf = chain[chain.len() - 1].clone();
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
     builder.mode(0o700);
     builder
-        .create(&leaf)
+        .create(&requested_leaf)
         .map_err(|source| PrivateDirError::Io {
-            path: leaf.clone(),
+            path: requested_leaf.clone(),
             source,
         })?;
+    // Respell the chain through the canonical parent of `root` and check that
+    // parent and everything above it: whoever can write a directory above the
+    // root can rename the verified root away and put their own in its place
+    // after the check, and the IREE runtime opens a VMFB by path.
+    if let (Some(parent), Some(name)) = (root.parent(), root.file_name()) {
+        let parent = std::fs::canonicalize(parent).map_err(|source| PrivateDirError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+        verify_trusted_ancestors(&parent, euid)?;
+        let canonical_root = parent.join(name);
+        chain = chain
+            .iter()
+            .map(|dir| match dir.strip_prefix(root) {
+                Ok(rest) if rest.as_os_str().is_empty() => canonical_root.clone(),
+                Ok(rest) => canonical_root.join(rest),
+                Err(_) => dir.clone(),
+            })
+            .collect();
+    }
+    let leaf = chain[chain.len() - 1].clone();
     if repair_root {
-        clear_group_write(root, euid);
+        clear_group_write(&chain[0], euid);
     }
     for dir in &chain[1..] {
         clear_group_write(dir, euid);
@@ -284,6 +314,63 @@ pub fn ensure_private_dir(
         verify_private_dir(dir, euid)?;
     }
     Ok(leaf)
+}
+
+/// Verify that `dir` and every directory above it up to `/` cannot be used by
+/// another user to swap an entry below them: each is a real directory (not a
+/// symlink) owned by `euid` or by root, and is not other-writable unless it is
+/// a root-owned sticky directory such as `/tmp`. Group write is accepted only
+/// when the directory's group is this process's effective gid (the user's own
+/// group under the user-private-group convention, where a umask of 002 leaves
+/// `~/.cache` group-writable); any other group-writable ancestor is refused.
+/// This is the PTX cache overlay's ancestor rule (#2539), except that the
+/// user's own group is trusted, as `ensure_private_dir` never modifies a
+/// directory above the cache root. `dir` should be canonical; it is not
+/// resolved here.
+pub fn verify_trusted_ancestors(dir: &Path, euid: u32) -> Result<(), PrivateDirError> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getegid has no preconditions and cannot fail.
+        let egid = unsafe { libc::getegid() };
+        let mut current = Some(dir);
+        while let Some(component) = current {
+            let metadata =
+                std::fs::symlink_metadata(component).map_err(|source| PrivateDirError::Io {
+                    path: component.to_path_buf(),
+                    source,
+                })?;
+            if metadata.file_type().is_symlink() {
+                return Err(PrivateDirError::Symlink(component.to_path_buf()));
+            }
+            if !metadata.is_dir() {
+                return Err(PrivateDirError::NotADirectory(component.to_path_buf()));
+            }
+            if metadata.uid() != euid && metadata.uid() != 0 {
+                return Err(PrivateDirError::ForeignOwner {
+                    path: component.to_path_buf(),
+                    owner: metadata.uid(),
+                    euid,
+                });
+            }
+            let mode = metadata.mode() & 0o7777;
+            let root_sticky = metadata.uid() == 0 && mode & 0o1000 != 0;
+            let other_write = mode & 0o002 != 0;
+            let foreign_group_write = mode & 0o020 != 0 && metadata.gid() != egid;
+            if (other_write || foreign_group_write) && !root_sticky {
+                return Err(PrivateDirError::Writable {
+                    path: component.to_path_buf(),
+                    mode,
+                });
+            }
+            current = component.parent();
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dir, euid);
+        Ok(())
+    }
 }
 
 /// Open an existing cache file for reading after checking it on the opened

@@ -22,8 +22,9 @@
 //! `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/xla/<cache>`, and nothing is read
 //! from there unless the root, `xla`, and the cache directory are real
 //! directories owned by the current user that neither the group nor others can
-//! write, and the artifact itself is a regular file with the same properties
-//! (checked on the opened descriptor, see [`mlxcel_core::private_dir`]).
+//! write, no directory above the root lets another user replace it, and the
+//! artifact itself is a regular file with the same properties (checked on the
+//! opened descriptor, see [`mlxcel_core::private_dir`]).
 //!
 //! When a check fails the cache is refused, one warning names the path, and the
 //! artifact is compiled into a fresh owner-only directory created with
@@ -37,7 +38,7 @@ use std::sync::{Mutex, OnceLock};
 
 use mlxcel_core::private_dir::{
     PrivateDirError, create_fresh_private_dir, current_euid, ensure_private_dir, open_private_file,
-    seal_private_file, verify_private_dir,
+    seal_private_file, verify_private_dir, verify_trusted_ancestors,
 };
 
 /// One compiled-artifact cache of the OpenXLA backend.
@@ -253,7 +254,13 @@ fn fresh_dir() -> Result<PathBuf, String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let root = ROOT
         .get_or_init(|| {
-            create_fresh_private_dir(&std::env::temp_dir(), "mlxcel-xla-")
+            // The fallback is opened by path too, so the temp directory must be
+            // one no other user can swap it out of (a root-owned sticky `/tmp`
+            // qualifies).
+            let parent = std::fs::canonicalize(std::env::temp_dir())
+                .map_err(|error| format!("resolve the temp directory: {error}"))?;
+            verify_trusted_ancestors(&parent, current_euid())
+                .and_then(|()| create_fresh_private_dir(&parent, "mlxcel-xla-"))
                 .map_err(|error| format!("create a private XLA cache directory: {error}"))
         })
         .clone()?;

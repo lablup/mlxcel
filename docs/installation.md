@@ -97,8 +97,11 @@ the compile. Earlier releases kept them under the shared temp directory
 (`/tmp/mlxcel-xla-*`), where another local user could plant a VMFB, which is
 native code on a CPU target (#3248). A cached artifact is loaded only when the
 cache root, `xla`, and the cache directory are real directories owned by the
-current user without group or other write access, and the artifact is a
-regular file with the same properties; mlxcel creates these directories with
+current user without group or other write access, no directory above the
+cache root can be written by another user (a root-owned sticky directory such
+as `/tmp` is fine, and group write is accepted only for the user's own group),
+and the artifact is a regular file with the same properties; mlxcel creates
+these directories with
 mode `0700` and its files with mode `0600`, and removes group write from the
 directories it manages (and from the cache root when `MLXCEL_CACHE_DIR` is
 unset). Otherwise stderr gets one `[mlxcel-xla] refusing the compiled-artifact

@@ -134,6 +134,19 @@ fn a_symlinked_cache_directory_is_refused() {
 }
 
 #[test]
+fn a_root_below_a_directory_others_can_write_is_refused() {
+    let tmp = private_tempdir();
+    let shared = tmp.path().join("shared");
+    std::fs::create_dir(&shared).expect("dir");
+    chmod(&shared, 0o777);
+    let root = shared.join("mlxcel");
+    let dir =
+        resolve_cache_dir(Some(root.clone()), false, XlaCache::Vmfb, current_euid()).expect("dir");
+    assert!(!dir.starts_with(&shared), "{}", dir.display());
+    verify_private_dir(&dir, current_euid()).expect("the fallback is private");
+}
+
+#[test]
 fn a_relative_or_missing_root_uses_a_fresh_private_directory() {
     let euid = current_euid();
     for root in [Some(PathBuf::from("relative/cache")), None] {
