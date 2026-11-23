@@ -696,16 +696,22 @@ static iree_status_t xla_alloc_zeroed_bv(xla_ctx* c, iree_host_size_t rank,
 // Threaded recurrent state (epic #564, issue #3339)
 // ---------------------------------------------------------------------------
 
-// Refuse an entry point that needs the KV cache on a bundle without one. The
-// ragged, slot and embeddings paths have no state contract yet (#3340), so an
-// attention-free model reaches them only through a caller bug.
-static int xla_require_kv(const xla_ctx* c, const char* caller) {
-  if (c && c->has_kv) return 0;
+static void xla_drop_state(xla_ctx* c);
+
+// Refuse an entry point that threads only the KV cache on a bundle that threads
+// recurrent state, or has no KV at all. The ragged, slot and embeddings paths
+// have no state contract yet (#3340): on an attention-free model they have no
+// cache to fill, and on a hybrid (KV plus state) they would adopt a new KV next
+// to the previous request's state. A refusal also drops the current sequence's
+// state, so a decode cannot continue the request before it.
+static int xla_require_kv(xla_ctx* c, const char* caller) {
+  if (c && c->has_kv && c->n_state == 0) return 0;
   fprintf(stderr,
-          "%s: this bundle has no KV cache (attention-free recurrent model); "
-          "only the token prefill and the single-sequence decode thread "
-          "recurrent state\n",
+          "%s: this bundle threads recurrent state or has no KV cache; only "
+          "the token prefill and the single-sequence decode thread recurrent "
+          "state\n",
           caller);
+  if (c) xla_drop_state(c);
   return 1;
 }
 
@@ -840,6 +846,30 @@ static void xla_drop_state(xla_ctx* c) {
   }
   c->state_import_pending = 0;
 }
+
+// Forget the current sequence's state before a new request runs (issue #3339).
+// The Rust engine calls it at the start of every prefill, so a request that is
+// refused before it reaches the shim (an oversized prompt, a bad prepared
+// payload) cannot leave the previous request's state for a decode to continue.
+// A no-op for a context without recurrent state.
+void xla_llama_state_drop(xla_ctx* c) {
+  if (c) xla_drop_state(c);
+}
+
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+// Issue #3339: whether `xla_require_kv` admits a context with this KV/state
+// layout, without a device or a bundle.
+int32_t xla_test_require_kv(int32_t has_kv, int32_t n_state) {
+  if (n_state < 0 || n_state > XLA_MAX_STATE) return -1;
+  xla_ctx* c = (xla_ctx*)calloc(1, sizeof(xla_ctx));
+  if (!c) return -1;
+  c->has_kv = has_kv;
+  c->n_state = n_state;
+  int32_t refused = xla_require_kv(c, "xla_test_require_kv");
+  free(c);
+  return refused;
+}
+#endif
 
 static void xla_release_state(xla_ctx* c) {
   for (int32_t i = 0; i < XLA_MAX_STATE; ++i) {
@@ -1599,6 +1629,7 @@ int xla_llama_prefill(xla_ctx* c, int32_t adapter_mode,
   if (!c || !tokens || !positions || !out_token) {
     fprintf(stderr,
             "xla_llama_prefill: invalid context/token/position/output contract\n");
+    if (c) xla_drop_state(c);
     return 1;
   }
   if (lp != c->context_capacity || real_len < 0 || real_len > lp ||

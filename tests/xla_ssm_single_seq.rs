@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 
+use mlxcel_core::session::InferenceSession;
 use mlxcel_xla::{IreeLlama, XlaInferenceSession, XlaReferenceEngine};
 use safetensors::{Dtype, tensor::TensorView};
 use tempfile::TempDir;
@@ -412,4 +413,68 @@ fn failed_state_reset_drops_the_previous_state() {
         vec![engine.decode(PROMPT_B[0], 0).expect("decode after reset")],
         want
     );
+}
+
+/// A request refused before it reaches the shim (an oversized prompt, checked
+/// in Rust) must still drop the previous request's state, so neither the
+/// engine's nor the session's decode can continue that earlier request.
+#[test]
+#[ignore = "requires the pinned IREE distribution and compiler"]
+fn request_refused_in_rust_drops_the_previous_state() {
+    let model = create_tiny_mamba2();
+    let oversized = vec![PROMPT_B[0]; CAPACITY + 1];
+
+    let mut engine =
+        IreeLlama::load(model.path(), &device(), CAPACITY).expect("load the IREE engine");
+    engine.prefill_first(&PROMPT_A).expect("prefill");
+    engine.decode(1, PROMPT_A.len() as i32).expect("decode");
+    assert_eq!(engine.test_state_status(), Some((true, false)));
+    assert!(engine.prefill_seed(&oversized).is_err(), "oversized prefix");
+    assert_eq!(
+        engine.test_state_status(),
+        Some((false, false)),
+        "a prompt refused in Rust kept the previous request's state"
+    );
+    assert!(
+        engine.decode(PROMPT_B[0], 0).is_err(),
+        "decode after a refused request must fail"
+    );
+    engine.prefill_first(&PROMPT_A).expect("prefill");
+    assert!(engine.prefill_first(&[]).is_err(), "empty prompt");
+    assert_eq!(engine.test_state_status(), Some((false, false)));
+
+    let mut session = session(&model);
+    cli_tokens(&mut session, &PROMPT_A);
+    assert!(InferenceSession::prefill(&mut session, &oversized).is_err());
+    assert!(
+        session.decode_step(PROMPT_B[0]).is_err(),
+        "the session decoded on after a refused prefill"
+    );
+    cli_tokens(&mut session, &PROMPT_A);
+    assert!(session.generate_greedy(&oversized, 1, &[]).is_err());
+    assert!(
+        session.decode_step(PROMPT_B[0]).is_err(),
+        "the session decoded on after a refused generation"
+    );
+    assert_eq!(
+        cli_tokens(&mut session, &PROMPT_A),
+        cli_tokens(&mut self::session(&model), &PROMPT_A),
+        "a good request recovers"
+    );
+}
+
+/// The ragged, slot and embeddings entry points have no recurrent-state
+/// contract (issue #3340): they admit only a KV-only bundle and refuse a hybrid
+/// one, which would otherwise adopt a new KV next to the previous request's
+/// state. Needs no device.
+#[test]
+fn kv_only_entry_points_refuse_any_recurrent_state() {
+    assert_eq!(IreeLlama::test_kv_only_entries_refuse(true, 0), Some(false));
+    assert_eq!(IreeLlama::test_kv_only_entries_refuse(false, 2), Some(true));
+    assert_eq!(
+        IreeLlama::test_kv_only_entries_refuse(true, 1),
+        Some(true),
+        "a hybrid bundle has no state contract on these entry points"
+    );
+    assert_eq!(IreeLlama::test_kv_only_entries_refuse(true, 2), Some(true));
 }

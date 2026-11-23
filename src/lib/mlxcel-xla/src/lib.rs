@@ -746,6 +746,7 @@ impl XlaInferenceSession {
         eos_token_ids: &[i32],
         on_token: F,
     ) -> Result<(Vec<i32>, GreedyTiming), String> {
+        self.begin_request();
         if prompt_tokens.is_empty() {
             return Err("XLA generation requires a non-empty prompt".to_string());
         }
@@ -779,6 +780,15 @@ impl XlaInferenceSession {
                 decode_ms,
             },
         ))
+    }
+
+    /// Start a new request: drop the previous request's recurrent state before
+    /// any validation can refuse this one, so a `decode_step` after a refused
+    /// request cannot continue the earlier sequence (issue #3339). A no-op for a
+    /// model without recurrent state.
+    fn begin_request(&mut self) {
+        #[cfg(feature = "iree")]
+        self.engine.invalidate_sequence_state();
     }
 
     /// Advance greedy decode from `first` (a prefill's argmax) and collect the
@@ -817,6 +827,7 @@ impl XlaInferenceSession {
     /// This mirrors the batched slot-seed convention and is distinct from the
     /// prefix-prefill-plus-decode generation loop.
     pub fn prefill_first_token(&mut self, prompt_tokens: &[i32]) -> Result<i32, String> {
+        self.begin_request();
         if prompt_tokens.is_empty() {
             return Err("prefill_first_token requires a non-empty prompt".to_string());
         }
@@ -896,6 +907,7 @@ impl XlaInferenceSession {
         max_new_tokens: usize,
         eos_token_ids: &[i32],
     ) -> Result<Vec<i32>, String> {
+        self.begin_request();
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
@@ -916,6 +928,7 @@ impl XlaInferenceSession {
         max_new_tokens: usize,
         eos_token_ids: &[i32],
     ) -> Result<Vec<i32>, String> {
+        self.begin_request();
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
@@ -940,6 +953,7 @@ impl XlaInferenceSession {
         eos_token_ids: &[i32],
         on_token: F,
     ) -> Result<Vec<i32>, String> {
+        self.begin_request();
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
@@ -964,6 +978,7 @@ impl InferenceSession for XlaInferenceSession {
 
     #[cfg(feature = "iree")]
     fn prefill(&mut self, token_ids: &[i32]) -> Result<(), String> {
+        self.begin_request();
         if token_ids.len() > self.context_capacity {
             return Err(format!(
                 "prefill length {} exceeds context_capacity={}",

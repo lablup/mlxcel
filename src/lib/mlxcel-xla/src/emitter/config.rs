@@ -42,8 +42,9 @@
 //! are rejected rather than mis-emitted.
 
 use super::builder::ProjectionLayout;
+use super::recurrent_config::mamba2_from_json;
 pub use super::recurrent_config::{MixerKind, StateElem, StateTensorSpec};
-use super::recurrent_config::{mamba2_from_json, parse_hf_config_json};
+use crate::hf_json::parse_hf_config_json_tracked;
 
 /// How the RoPE inverse-frequency table is computed. Both kinds share the
 /// `outer(pos, inv_freq)` table build (see [`rope`](super::rope)); they differ
@@ -744,7 +745,8 @@ impl Config {
         // HF writes Python's bare `Infinity` into some configs (Mamba2's
         // `time_step_limit`); quote it only when the strict parse fails, so
         // every other config is parsed from its unchanged text.
-        let root = parse_hf_config_json(s).map_err(|e| format!("parse config.json: {e}"))?;
+        let (root, quoted_non_finite) =
+            parse_hf_config_json_tracked(s).map_err(|e| format!("parse config.json: {e}"))?;
         let wrapper_model_type = root.get("model_type").and_then(serde_json::Value::as_str);
         let is_phi4mm = wrapper_model_type == Some("phi4mm");
         let is_molmo2 = wrapper_model_type == Some("molmo2");
@@ -880,6 +882,17 @@ impl Config {
         // built by its own reader.
         if model_type == Some("mamba2") {
             return mamba2_from_json(&v, quantization);
+        }
+        // Only the Mamba2 reader understands the quoted `Infinity`/`NaN`
+        // spelling. Every reader below would see a string where a number was
+        // written, treat an optional field as absent and take its default, so
+        // refuse the document rather than load it with a changed value.
+        if quoted_non_finite {
+            return Err(format!(
+                "config.json has a bare Infinity or NaN number, which model_type {} \
+                 does not accept",
+                model_type.unwrap_or("(unset)")
+            ));
         }
 
         let u = |k: &str| -> Result<usize, String> {

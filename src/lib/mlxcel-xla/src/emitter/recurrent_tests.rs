@@ -152,6 +152,29 @@ fn mamba2_config_reads_every_infinity_spelling() {
     }
 }
 
+/// The quoted non-finite spelling is a Mamba2-only tolerance. An attention
+/// config reads optional floats as `Option`, so a bare `Infinity` or `NaN`
+/// quoted into a string would silently take the field's default (here: no
+/// QKV clipping) instead of failing like the strict parse did (issue #3339).
+#[test]
+fn attention_config_refuses_a_quoted_non_finite_number() {
+    let dense = |extra: &str| {
+        format!(
+            r#"{{"model_type":"llama","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":2,
+            "rms_norm_eps":1e-5,"rope_theta":10000.0,"vocab_size":32{extra}}}"#
+        )
+    };
+    Config::from_json_str(&dense("")).expect("the strict document parses");
+    for token in ["Infinity", "-Infinity", "NaN"] {
+        let error = Config::from_json_str(&dense(&format!(r#","partial_rotary_factor":{token}"#)))
+            .expect_err(token);
+        assert!(error.contains("Infinity or NaN"), "{token}: {error}");
+    }
+    // A string value that merely spells the word is ordinary JSON.
+    Config::from_json_str(&dense(r#","note":"Infinity""#)).expect("a string is not a number");
+}
+
 #[test]
 fn quote_non_finite_json_leaves_strings_and_finite_text_alone() {
     assert_eq!(quote_non_finite_json(r#"{"a": [1, 2]}"#), None);

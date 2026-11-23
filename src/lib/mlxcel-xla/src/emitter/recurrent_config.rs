@@ -198,7 +198,6 @@ impl Config {
 
 // The HF `config.json` reader lives in `crate::hf_json` because the EOS lookup
 // and the CLI layer count need it without the `iree` feature.
-pub use crate::hf_json::parse_hf_config_json;
 
 /// A JSON number, or one of the quoted non-finite tokens
 /// [`quote_non_finite_json`] produces, or `null` for +inf.
@@ -357,6 +356,7 @@ pub(super) fn mamba2_from_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hf_json::parse_hf_config_json;
 
     fn mamba2(n_groups: usize) -> Config {
         let text = format!(

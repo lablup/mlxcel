@@ -68,10 +68,24 @@ pub(crate) fn quote_non_finite_json(text: &str) -> Option<String> {
 /// tokens are quoted only when the strict parse fails, so every other config is
 /// parsed from its unchanged text.
 pub fn parse_hf_config_json(text: &str) -> Result<serde_json::Value, String> {
-    serde_json::from_str(text)
-        .or_else(|error| match quote_non_finite_json(text) {
-            Some(quoted) => serde_json::from_str(&quoted),
-            None => Err(error),
-        })
-        .map_err(|error| error.to_string())
+    parse_hf_config_json_tracked(text).map(|(value, _)| value)
+}
+
+/// [`parse_hf_config_json`], also reporting whether non-finite tokens had to
+/// be quoted. A quoted token parses as a string, which an ordinary numeric
+/// field reader treats as absent and replaces with its default, so a reader
+/// that does not understand the quoted spelling must refuse such a document
+/// instead of silently changing the value.
+pub(crate) fn parse_hf_config_json_tracked(
+    text: &str,
+) -> Result<(serde_json::Value, bool), String> {
+    match serde_json::from_str(text) {
+        Ok(value) => Ok((value, false)),
+        Err(error) => match quote_non_finite_json(text) {
+            Some(quoted) => serde_json::from_str(&quoted)
+                .map(|value| (value, true))
+                .map_err(|error| error.to_string()),
+            None => Err(error.to_string()),
+        },
+    }
 }

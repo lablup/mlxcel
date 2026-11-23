@@ -334,6 +334,9 @@ unsafe extern "C" {
     /// Start a recurrent sequence from the zero state without a prefill (an
     /// empty prompt prefix); the next decode imports it (issue #3339).
     fn xla_llama_state_reset(c: *mut XlaCtx) -> c_int;
+    /// Forget the current sequence's recurrent state, so a decode refuses until
+    /// a prefill or a state reset succeeds (a no-op without state).
+    fn xla_llama_state_drop(c: *mut XlaCtx);
     fn xla_llama_upload_weight(
         c: *mut XlaCtx,
         i: c_int,
@@ -418,6 +421,10 @@ unsafe extern "C" {
     /// Test support (issue #3339): make zero-state preparation fail.
     #[cfg(feature = "test-support")]
     fn xla_test_set_state_zero_failure(c: *mut XlaCtx, fail: c_int);
+    /// Test support (issue #3339): `1` when the KV-only entry points refuse a
+    /// context with this layout, `0` when they admit it.
+    #[cfg(feature = "test-support")]
+    fn xla_test_require_kv(has_kv: c_int, n_state: c_int) -> c_int;
     #[cfg(feature = "test-support")]
     fn xla_test_decode_counters_reset();
     #[cfg(feature = "test-support")]
@@ -3354,6 +3361,20 @@ impl IreeLlama {
         self.prefill_padded(token_ids).map(|_| ())
     }
 
+    /// Forget the previous request's recurrent state before a new request
+    /// runs (issue #3339). Every prefill entry calls it first, so a request
+    /// refused before it reaches the shim (an oversized prompt, an invalid
+    /// prepared payload) leaves no state for a decode to continue: the decode
+    /// refuses until a prefill or a state reset succeeds. A no-op for a model
+    /// without recurrent state, whose KV handling is unchanged.
+    pub(crate) fn invalidate_sequence_state(&mut self) {
+        if self.has_state {
+            // Safety: ctx is a live context; the call only releases the
+            // shim's own state references.
+            unsafe { xla_llama_state_drop(self.ctx) };
+        }
+    }
+
     /// Run the bucketed prefill over the FULL prompt and return its first token
     /// (the argmax at `prompt.len() - 1`). Unlike [`prefill_seed`], which seeds
     /// the KV and discards the token for the seed-then-decode loop, this returns
@@ -3363,6 +3384,7 @@ impl IreeLlama {
     ///
     /// [`prefill_seed`]: Self::prefill_seed
     pub fn prefill_first(&mut self, prompt: &[i32]) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         if prompt.is_empty() {
             return Err("prefill_first requires a non-empty prompt".to_string());
         }
@@ -3372,6 +3394,7 @@ impl IreeLlama {
     /// Validate an owned embeddings payload, seed the resident KV through the
     /// dedicated embeddings module, and return the first sampled token.
     pub fn prefill_prepared_first(&mut self, prepared: &PreparedPrefill) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         if self.dense_ple_shape.is_some() {
             return Err(
                 "Gemma3n requires the distinct embeddings-plus-dense-PLE prefill entry".to_string(),
@@ -3422,6 +3445,7 @@ impl IreeLlama {
         &mut self,
         request: &DeepStackPreparedPrefill,
     ) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         let schema = self.deepstack_schema.as_ref().ok_or_else(|| {
             "DeepStack prefill was requested from a runtime bundle without that capability"
                 .to_string()
@@ -3482,6 +3506,7 @@ impl IreeLlama {
         &mut self,
         request: &Gemma3nPreparedPrefill,
     ) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         let expected = self.dense_ple_shape.ok_or_else(|| {
             "dense Gemma3n PLE prefill was requested from a non-Gemma3n bundle".to_string()
         })?;
@@ -3536,6 +3561,7 @@ impl IreeLlama {
     /// state to zeros for the next decode to import, and the returned token is
     /// a placeholder the seed path discards (issue #3339).
     fn prefill_padded(&mut self, prompt: &[i32]) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         if prompt.len() > self.context_capacity {
             return Err(format!(
                 "prompt prefix of {} exceeds context_capacity={}",
@@ -3660,6 +3686,20 @@ impl IreeLlama {
         (status >= 0).then_some((status & 1 != 0, status & 2 != 0))
     }
 
+    /// Test support (issue #3339): whether the shim's ragged, slot and
+    /// embeddings entry points refuse a context with this KV/state layout
+    /// (`None` when the hook rejects `n_state`). Needs no device or bundle.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_kv_only_entries_refuse(has_kv: bool, n_state: i32) -> Option<bool> {
+        // Safety: the hook builds and frees its own scratch context.
+        match unsafe { xla_test_require_kv(c_int::from(has_kv), n_state) } {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+
     /// Test support (issue #3339): make every zero-state preparation (a state
     /// reset, or a recurrent prefill's zeroed inputs) fail until cleared.
     #[cfg(feature = "test-support")]
@@ -3691,6 +3731,7 @@ impl IreeLlama {
         positions: &[i32],
         real_len: usize,
     ) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         let axes = match self.position_mode {
             PreparedPositionMode::OneD => 1,
             PreparedPositionMode::Mrope3D => 3,
