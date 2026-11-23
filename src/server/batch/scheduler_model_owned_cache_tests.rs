@@ -448,7 +448,7 @@ fn snapshot_partial_match_declines_under_require_whole_entry() {
     second.extend([1, 2, 3, 4]);
     let ctx = cache_ctx();
 
-    let declined = sched.try_adopt_cached_prefix(&ctx, &second, true);
+    let declined = sched.try_adopt_cached_prefix(&ctx, &second, true).adopted();
     assert!(
         declined.is_none(),
         "a partial snapshot match must decline when require_whole_entry is set"
@@ -459,6 +459,7 @@ fn snapshot_partial_match_declines_under_require_whole_entry() {
     // other miss (e.g. a bad key or a below-minimum prefix).
     let adopted = sched
         .try_adopt_cached_prefix(&ctx, &second, false)
+        .adopted()
         .expect("without the gate the same partial match must adopt");
     assert_eq!(adopted.1, 20, "adopted at the 20-token common prefix");
 }

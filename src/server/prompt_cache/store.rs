@@ -1277,7 +1277,31 @@ impl PromptCacheStore {
         key: &PromptCacheKey<'_>,
         tokens: &[i32],
     ) -> Option<(Arc<ModelSnapshotEntry>, usize)> {
-        match self.snapshot_lookup(key, tokens, |_, _| false, false) {
+        Self::exact_snapshot_hit(self.snapshot_lookup(key, tokens, |_, _| false, false, true))
+    }
+
+    /// [`Self::lookup_snapshot_prefix`] without counting the lookup.
+    ///
+    /// For background warm-ups (issue #3294), which look up their base
+    /// snapshot on no request's behalf. Selection is identical: the entry is
+    /// still touched and recorded as the session's restore source, so a
+    /// warm-up orders and protects snapshots exactly as a counted lookup
+    /// does. Only `snapshot_lookups`, `snapshot_hits`, and the metrics sink's
+    /// `record_snapshot_lookup` are skipped, so neither `/v1/cache/stats` nor
+    /// `/metrics` reports a warm-up as a request lookup. Warm-ups have their
+    /// own `snapshot_warmups_run` / `snapshot_warmups_skipped` counters.
+    pub fn peek_snapshot_prefix(
+        &self,
+        key: &PromptCacheKey<'_>,
+        tokens: &[i32],
+    ) -> Option<(Arc<ModelSnapshotEntry>, usize)> {
+        Self::exact_snapshot_hit(self.snapshot_lookup(key, tokens, |_, _| false, false, false))
+    }
+
+    fn exact_snapshot_hit(
+        outcome: SnapshotLookupOutcome,
+    ) -> Option<(Arc<ModelSnapshotEntry>, usize)> {
+        match outcome {
             SnapshotLookupOutcome::Hit { entry, matched_len } => Some((entry, matched_len)),
             SnapshotLookupOutcome::CheckpointHit { .. }
             | SnapshotLookupOutcome::Diverged(_)
@@ -1330,7 +1354,7 @@ impl PromptCacheStore {
     where
         F: Fn(&ModelStateSnapshot, usize) -> bool,
     {
-        self.snapshot_lookup(key, tokens, can_truncate, true)
+        self.snapshot_lookup(key, tokens, can_truncate, true, true)
     }
 
     /// [`Self::lookup_snapshot_outcome`] without turn-boundary state
@@ -1347,15 +1371,19 @@ impl PromptCacheStore {
     where
         F: Fn(&ModelStateSnapshot, usize) -> bool,
     {
-        self.snapshot_lookup(key, tokens, can_truncate, false)
+        self.snapshot_lookup(key, tokens, can_truncate, false, true)
     }
 
+    /// `count == false` is [`Self::peek_snapshot_prefix`]: the same selection,
+    /// touch, and restore-source bookkeeping, without the lookup and hit
+    /// counters or the metrics sink.
     fn snapshot_lookup<F>(
         &self,
         key: &PromptCacheKey<'_>,
         tokens: &[i32],
         can_truncate: F,
         allow_checkpoints: bool,
+        count: bool,
     ) -> SnapshotLookupOutcome
     where
         F: Fn(&ModelStateSnapshot, usize) -> bool,
@@ -1506,19 +1534,25 @@ impl PromptCacheStore {
 
         let (entry, matched_len) = {
             let mut guard = self.inner.write().expect("prompt cache inner lock");
-            guard.snapshot_lookups = guard.snapshot_lookups.saturating_add(1);
+            if count {
+                guard.snapshot_lookups = guard.snapshot_lookups.saturating_add(1);
+            }
             match best.map(|(d, m, _)| (d, m)).or(partial) {
                 Some((digest, matched)) => {
                     let entry = match guard.snapshots.get(&digest) {
                         Some(slot) => Arc::clone(&slot.entry),
                         None => {
                             drop(guard);
-                            let metrics = Arc::clone(&self.metrics);
-                            metrics.record_snapshot_lookup(false, 0);
+                            if count {
+                                let metrics = Arc::clone(&self.metrics);
+                                metrics.record_snapshot_lookup(false, 0);
+                            }
                             return SnapshotLookupOutcome::NoCandidate;
                         }
                     };
-                    guard.snapshot_hits = guard.snapshot_hits.saturating_add(1);
+                    if count {
+                        guard.snapshot_hits = guard.snapshot_hits.saturating_add(1);
+                    }
                     entry.touch();
                     if guard.config.keep_previous_turn && key.session_key.is_some() {
                         guard.restore_sources.insert(
@@ -1535,10 +1569,12 @@ impl PromptCacheStore {
             }
         };
 
-        let metrics = Arc::clone(&self.metrics);
-        match &entry {
-            Some(_) => metrics.record_snapshot_lookup(true, matched_len),
-            None => metrics.record_snapshot_lookup(false, 0),
+        if count {
+            let metrics = Arc::clone(&self.metrics);
+            match &entry {
+                Some(_) => metrics.record_snapshot_lookup(true, matched_len),
+                None => metrics.record_snapshot_lookup(false, 0),
+            }
         }
         match entry {
             Some(entry) => SnapshotLookupOutcome::Hit { entry, matched_len },

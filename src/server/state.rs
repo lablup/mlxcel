@@ -384,8 +384,10 @@ impl PromptCacheMetrics for BatchMetricsCacheAdapter {
         // The scheduler is the only writer of the dense hit, miss, and
         // reused-token counters (#3246): `finish_prompt_cache_adopt` records a
         // hit with the adopted length that becomes `cached_tokens`, and
-        // admission records a miss when no prefix was adopted. Forwarding the
-        // store's raw lookup here as well counted every lookup twice.
+        // admission records a miss when a dense lookup ran and adopted no
+        // prefix (`PrefixAdoptOutcome::DenseMiss`, #3294), so a family that
+        // never runs a dense lookup records none. Forwarding the store's raw
+        // lookup here as well counted every lookup twice.
     }
 
     fn record_evict_lru(&self, _bytes: usize) {

@@ -14,6 +14,55 @@
 
 use super::*;
 
+/// What [`BatchScheduler::try_adopt_cached_prefix`] did for one request.
+///
+/// Admission records a dense prompt-cache miss only for [`Self::DenseMiss`]
+/// (issue #3294). A bare `Option` could not tell "the dense lookup ran and
+/// nothing was adopted" from "no dense lookup ran at all", so every cold
+/// request on a snapshot or ModelOwned family used to count as a dense miss
+/// while `/v1/cache/stats` `lookups` stayed at zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PrefixAdoptOutcome {
+    /// A KV prefix, snapshot, or state checkpoint was adopted.
+    Adopted {
+        seq_id: SequenceId,
+        adopted_len: usize,
+    },
+    /// `store.lookup_longest_prefix` ran and nothing was adopted: a store
+    /// miss, or a store hit the scheduler declined.
+    DenseMiss,
+    /// No dense KV lookup ran: the cache is inactive, the snapshot branch
+    /// declined or failed, or the family never uses the dense path.
+    NoDenseLookup,
+}
+
+impl PrefixAdoptOutcome {
+    /// The adopted sequence and the length it covers, if anything was adopted.
+    pub(super) fn adopted(self) -> Option<(SequenceId, usize)> {
+        match self {
+            Self::Adopted {
+                seq_id,
+                adopted_len,
+            } => Some((seq_id, adopted_len)),
+            Self::DenseMiss | Self::NoDenseLookup => None,
+        }
+    }
+}
+
+impl From<Option<(SequenceId, usize)>> for PrefixAdoptOutcome {
+    /// Classify the result of the dense path, which only runs after the store
+    /// lookup has been made.
+    fn from(adopted: Option<(SequenceId, usize)>) -> Self {
+        match adopted {
+            Some((seq_id, adopted_len)) => Self::Adopted {
+                seq_id,
+                adopted_len,
+            },
+            None => Self::DenseMiss,
+        }
+    }
+}
+
 impl BatchScheduler {
     /// Maximum queued background warm-ups (issue #1144).
     ///
@@ -118,21 +167,29 @@ impl BatchScheduler {
     /// [`CachePool::adopt`], paged via [`CachePool::adopt_paged`] (which shares
     /// the cached prefix's refcounted pool blocks so the prefix is never
     /// re-prefilled — #121 sub-step b).
+    ///
+    /// Every return before the dense store lookup is
+    /// [`PrefixAdoptOutcome::NoDenseLookup`]; every unadopted return from
+    /// [`Self::adopt_dense_prefix`], which starts with that lookup, is
+    /// [`PrefixAdoptOutcome::DenseMiss`] (issue #3294).
     pub(super) fn try_adopt_cached_prefix(
         &mut self,
         ctx: &PromptCacheRequestContext,
         tokens: &[i32],
         require_whole_entry: bool,
-    ) -> Option<(SequenceId, usize)> {
+    ) -> PrefixAdoptOutcome {
+        use PrefixAdoptOutcome::NoDenseLookup;
         if !self.prompt_cache_active() {
-            return None;
+            return NoDenseLookup;
         }
         // Return to the pool any paged pins a prior store op queued (an insert
         // eviction, or a previous lookup's TTL / drained-shell sweep). The
         // lookup below may sweep more; those drain on the next store touch.
         self.drain_store_paged_releases();
 
-        let store = self.prompt_cache.as_ref()?.clone();
+        let Some(store) = self.prompt_cache.clone() else {
+            return NoDenseLookup;
+        };
         // The request's own prompt length picks its table, so it may only match
         // entries stored by a request on the same side of the boundary (#1358).
         let key = Self::compose_prompt_cache_key(ctx, tokens, self.rope_regime_for(tokens.len()));
@@ -159,10 +216,13 @@ impl BatchScheduler {
             matched_len,
         } = &snapshot_outcome
         {
-            if let Some(adopted) =
+            if let Some((seq_id, adopted_len)) =
                 self.adopt_state_checkpoint(checkpoint, donor, *matched_len, tokens.len())
             {
-                return Some(adopted);
+                return PrefixAdoptOutcome::Adopted {
+                    seq_id,
+                    adopted_len,
+                };
             }
             snapshot_outcome = store.lookup_snapshot_outcome_without_checkpoints(
                 &key,
@@ -236,7 +296,7 @@ impl BatchScheduler {
                             matched_len,
                             Some(snapshot_entry.tokens.len()),
                         );
-                    return None;
+                    return NoDenseLookup;
                 }
                 tracing::debug!(
                     matched = store_matched_len,
@@ -273,7 +333,7 @@ impl BatchScheduler {
                     None,
                     matched_len,
                 );
-                return None;
+                return NoDenseLookup;
             }
             let seq_id = match self.allocate_sequence_state() {
                 Ok(id) => id,
@@ -281,7 +341,7 @@ impl BatchScheduler {
                     // Intentionally not a `record_prompt_cache_reject` site: slot
                     // exhaustion is a scheduler-capacity failure, not a cache-specific decline.
                     tracing::warn!("Cache pool allocation failed during snapshot restore: {err}");
-                    return None;
+                    return NoDenseLookup;
                 }
             };
             let restore = snapshot_entry.with_snapshot(|snapshot| {
@@ -325,7 +385,10 @@ impl BatchScheduler {
                             "prompt-cache adopt (snapshot)"
                         );
                     }
-                    return Some((seq_id, matched_len));
+                    return PrefixAdoptOutcome::Adopted {
+                        seq_id,
+                        adopted_len: matched_len,
+                    };
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -338,7 +401,7 @@ impl BatchScheduler {
                         matched_len,
                     );
                     self.release_sequence_caches(seq_id);
-                    return None;
+                    return NoDenseLookup;
                 }
             }
         }
@@ -357,12 +420,31 @@ impl BatchScheduler {
         // The same bail covers a dense family whose KV cache does not hold the
         // whole per-token state (Baichuan-M1's K/V convolution state, #2567):
         // its donate path below never stores an entry either.
+        //
+        // Because no dense lookup runs, admission records no dense miss
+        // either (issue #3294): `mlxcel_prompt_cache_misses_total` and
+        // `/v1/cache/stats` `lookups` both stay at zero for these families.
         if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned
             || !self.engine.model().kv_cache_captures_sequence_state()
         {
-            return None;
+            return NoDenseLookup;
         }
-        let (entry, store_matched_len) = store.lookup_longest_prefix(&key, tokens)?;
+        self.adopt_dense_prefix(&store, &key, tokens, require_whole_entry)
+            .into()
+    }
+
+    /// The dense KV half of [`Self::try_adopt_cached_prefix`]: look the
+    /// request up in the store and adopt the longest usable prefix. It starts
+    /// with the store lookup, so every `None` it returns is a dense miss
+    /// (a store miss or a declined store hit) for the metrics (issue #3294).
+    fn adopt_dense_prefix(
+        &mut self,
+        store: &Arc<PromptCacheStore>,
+        key: &PromptCacheKey<'_>,
+        tokens: &[i32],
+        require_whole_entry: bool,
+    ) -> Option<(SequenceId, usize)> {
+        let (entry, store_matched_len) = store.lookup_longest_prefix(key, tokens)?;
         // #124 step c: multimodal sharing requires the matched prefix to cover
         // the ENTIRE stored entry. A partial (e.g. APC block-clamped) match
         // could leave image/audio placeholder tokens in the suffix, which the
@@ -1194,7 +1276,10 @@ impl BatchScheduler {
         // would mean prefilling the whole history from cold, which is exactly
         // the foreground work this is supposed to avoid, spent speculatively.
         let key = Self::compose_prompt_cache_key(&ctx, &tokens, self.rope_regime_for(tokens.len()));
-        let Some((entry, matched_len)) = store.lookup_snapshot_prefix(&key, &tokens) else {
+        // A warm-up is not a request, so its lookup is not counted on either
+        // metrics surface (issue #3294); `peek_snapshot_prefix` selects and
+        // touches the snapshot exactly as a counted lookup would.
+        let Some((entry, matched_len)) = store.peek_snapshot_prefix(&key, &tokens) else {
             self.batch_observability.record_prompt_cache_warmup_skip();
             return;
         };

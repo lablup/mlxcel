@@ -30,7 +30,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use super::scheduler_model_owned_cache_tests::{
-    EOS_ID, enqueue, options, prompt, run_to_completion, tiny_gemma3,
+    EOS_ID, cache_ctx, enqueue, options, prompt, run_to_completion, tiny_gemma3,
 };
 use super::scheduler_prompt_lookup_tests::cycle_llama;
 use super::*;
@@ -237,4 +237,247 @@ fn snapshot_restore_counts_once_in_prometheus_with_production_wiring() {
     );
     // A restore is not a dense KV adoption.
     assert_eq!(load(&metrics.prompt_cache_hits_total), 0);
+}
+
+/// Every prompt-cache counter the two surfaces expose, read at one instant:
+/// the Prometheus atomics and the store's `/v1/cache/stats` counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Counters {
+    hits_total: u64,
+    misses_total: u64,
+    snapshot_hits_total: u64,
+    snapshot_misses_total: u64,
+    lookups: u64,
+    hits: u64,
+    snapshot_lookups: u64,
+    snapshot_hits: u64,
+}
+
+fn counters(metrics: &BatchMetrics, store: &PromptCacheStore) -> Counters {
+    let stats = store.stats();
+    Counters {
+        hits_total: load(&metrics.prompt_cache_hits_total),
+        misses_total: load(&metrics.prompt_cache_misses_total),
+        snapshot_hits_total: load(&metrics.prompt_cache_snapshot_hits_total),
+        snapshot_misses_total: load(&metrics.prompt_cache_snapshot_misses_total),
+        lookups: stats.lookups,
+        hits: stats.hits,
+        snapshot_lookups: stats.snapshot_lookups,
+        snapshot_hits: stats.snapshot_hits,
+    }
+}
+
+/// The production-wired Gemma 3 harness after one cold turn on `prompt(40)`,
+/// which leaves one snapshot of that conversation in the store.
+fn gemma3_after_cold_turn() -> (Arc<BatchMetrics>, Arc<PromptCacheStore>, BatchScheduler) {
+    let metrics = Arc::new(BatchMetrics::new());
+    let store = production_store(&metrics);
+    let mut sched = production_scheduler(
+        LoadedModel::Gemma3(tiny_gemma3()),
+        vec![EOS_ID],
+        DecodeStorageBackend::Paged,
+        &metrics,
+        Arc::clone(&store),
+    );
+    let rx = enqueue(&mut sched, prompt(40));
+    let cold = run_to_completion(&mut sched, &rx);
+    assert_eq!(cold.cached_tokens, 0, "turn 1 starts cold");
+    assert!(
+        store.stats().snapshot_entries >= 1,
+        "turn 1 donated a snapshot"
+    );
+    (metrics, store, sched)
+}
+
+/// Snapshot and ModelOwned family (issue #3294): Gemma 3 never runs a dense KV
+/// lookup, so a cold turn is not a dense miss. Before the fix admission
+/// recorded `prompt_cache_misses_total` for it while `lookups` stayed at 0.
+#[test]
+fn snapshot_family_cold_turn_records_no_dense_miss() {
+    let (metrics, store, mut sched) = gemma3_after_cold_turn();
+    let rx = enqueue(&mut sched, prompt(48));
+    let warm = run_to_completion(&mut sched, &rx);
+    assert!(warm.cached_tokens > 0, "turn 2 restores the snapshot");
+
+    let c = counters(&metrics, &store);
+    assert_eq!(c.lookups, 0, "a ModelOwned family runs no dense lookup");
+    assert_eq!(c.misses_total, 0, "and so records no dense miss");
+    assert_eq!(c.misses_total + c.hits_total, c.lookups);
+    assert_eq!(c.snapshot_hits_total, c.snapshot_hits);
+    assert_eq!(
+        c.snapshot_misses_total,
+        c.snapshot_lookups - c.snapshot_hits
+    );
+}
+
+/// The `!kv_cache_captures_sequence_state()` arm of the same bail, which
+/// Gemma 3 does not reach: Baichuan-M1 keeps convolution state outside its KV
+/// cache, so it neither donates nor looks up a dense entry (#2567).
+#[test]
+fn kv_state_incomplete_family_records_no_dense_miss() {
+    let metrics = Arc::new(BatchMetrics::new());
+    let store = production_store(&metrics);
+    let mut sched = production_scheduler(
+        LoadedModel::Baichuan(crate::models::baichuan::baichuan_tests::tiny_baichuan_model()),
+        Vec::new(),
+        DecodeStorageBackend::Dense,
+        &metrics,
+        Arc::clone(&store),
+    );
+    let model = sched.engine.model();
+    assert!(
+        !model.kv_cache_captures_sequence_state(),
+        "the fixture must take the second arm"
+    );
+    assert_ne!(
+        model.sequence_state_layout().backend,
+        SequenceStateBackend::ModelOwned
+    );
+    assert!(!model.supports_snapshot_reuse());
+
+    let first: Vec<i32> = (0..8).collect();
+    let cold = run_turn(&mut sched, &first, 2);
+    let mut second = first.clone();
+    second.extend_from_slice(&cold.generated_token_ids);
+    second.extend([20, 21]);
+    run_turn(&mut sched, &second, 1);
+
+    let c = counters(&metrics, &store);
+    assert_eq!(c.lookups, 0, "no dense lookup ran");
+    assert_eq!(c.misses_total, 0, "so no dense miss is recorded");
+    assert_eq!(c.hits_total, 0);
+}
+
+/// A dense hit the scheduler declines (here `PrefixTooShort`, an exact replay
+/// of an entry exactly `min_prefix_tokens` long, which the whole-prompt cap
+/// leaves one token short) keeps the #3268 rule: the store counts a hit, the
+/// scheduler counts a miss, and `/metrics` hits mean adoptions. This pins the
+/// rule; it passes before and after #3294.
+#[test]
+fn declined_dense_hit_counts_as_a_dense_miss() {
+    let first: Vec<i32> = (0..8).collect();
+    let metrics = Arc::new(BatchMetrics::new());
+    let store = Arc::new(PromptCacheStore::with_metrics(
+        PromptCacheConfig::new(true, 1 << 20, 32, Duration::from_secs(600), first.len()),
+        Arc::new(BatchMetricsCacheAdapter::new(Arc::clone(&metrics))),
+    ));
+    let mut sched = production_scheduler(
+        LoadedModel::Llama(cycle_llama()),
+        Vec::new(),
+        DecodeStorageBackend::Dense,
+        &metrics,
+        Arc::clone(&store),
+    );
+    let cold = run_turn(&mut sched, &first, 1);
+    assert_eq!(cold.cached_tokens, 0, "turn 1 starts cold");
+    let too_short = || {
+        sched
+            .batch_observability
+            .prompt_cache_reject_reasons
+            .count(PromptCacheRejectReason::PrefixTooShort)
+    };
+    let declines_before = too_short();
+    let hits_before = store.stats().hits;
+
+    let replay = run_turn(&mut sched, &first, 1);
+    assert_eq!(replay.cached_tokens, 0, "the declined hit prefills cold");
+    // Preconditions: the store matched and the scheduler declined it.
+    assert_eq!(store.stats().hits, hits_before + 1, "the store saw a hit");
+    let declines_after = sched
+        .batch_observability
+        .prompt_cache_reject_reasons
+        .count(PromptCacheRejectReason::PrefixTooShort);
+    assert_eq!(
+        declines_after,
+        declines_before + 1,
+        "the scheduler declined it"
+    );
+
+    let c = counters(&metrics, &store);
+    assert_eq!(c.hits_total, 0, "/metrics hits count adoptions only");
+    assert_eq!(c.misses_total, 2, "the cold turn and the declined hit");
+    assert_eq!(c.hits_total + c.misses_total, c.lookups);
+}
+
+/// A background warm-up whose base-snapshot lookup misses is not a request
+/// lookup (issue #3294): it must move neither surface's snapshot counters.
+#[test]
+fn warmup_snapshot_miss_is_not_counted() {
+    assert!(!crate::server::prompt_cache::cache_warmup_disabled());
+    let (metrics, store, mut sched) = gemma3_after_cold_turn();
+    let before = counters(&metrics, &store);
+    let skipped = sched
+        .batch_observability
+        .snapshot()
+        .prompt_cache_warmups_skipped;
+
+    sched.enqueue_prompt_cache_warmup(vec![5, 4, 3, 2, 1, 0], cache_ctx());
+    assert_eq!(
+        sched.prompt_cache_warmups.len(),
+        1,
+        "the warm-up was queued"
+    );
+    sched.run_next_prompt_cache_warmup();
+    assert_eq!(
+        sched
+            .batch_observability
+            .snapshot()
+            .prompt_cache_warmups_skipped,
+        skipped + 1,
+        "the warm-up ran and found no base snapshot"
+    );
+
+    assert_eq!(
+        counters(&metrics, &store),
+        before,
+        "a warm-up miss is not a request lookup"
+    );
+}
+
+/// A warm-up whose base-snapshot lookup hits: not counted either, and the
+/// conversation really is warmed afterwards (regression guard).
+#[test]
+fn warmup_snapshot_hit_is_not_counted_and_still_warms() {
+    assert!(!crate::server::prompt_cache::cache_warmup_disabled());
+    let (metrics, store, mut sched) = gemma3_after_cold_turn();
+    let before = counters(&metrics, &store);
+    let run = sched
+        .batch_observability
+        .snapshot()
+        .prompt_cache_warmups_run;
+
+    let target = prompt(44);
+    sched.enqueue_prompt_cache_warmup(target.clone(), cache_ctx());
+    assert_eq!(
+        sched.prompt_cache_warmups.len(),
+        1,
+        "the warm-up was queued"
+    );
+    sched.run_next_prompt_cache_warmup();
+    assert_eq!(
+        sched
+            .batch_observability
+            .snapshot()
+            .prompt_cache_warmups_run,
+        run + 1,
+        "the warm-up restored a base snapshot and ran"
+    );
+    // Read before the probe below, which counts itself.
+    let after = counters(&metrics, &store);
+    assert_eq!(after, before, "a warm-up hit is not a request lookup");
+
+    let ctx = cache_ctx();
+    let key = BatchScheduler::compose_prompt_cache_key(
+        &ctx,
+        &target,
+        sched.rope_regime_for(target.len()),
+    );
+    let (_, matched_len) = store
+        .lookup_snapshot_prefix(&key, &target)
+        .expect("the warm-up stored a snapshot of its target");
+    assert_eq!(
+        matched_len,
+        target.len(),
+        "the warm-up target is fully warm"
+    );
 }
