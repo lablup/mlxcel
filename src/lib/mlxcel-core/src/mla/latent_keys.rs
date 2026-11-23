@@ -72,11 +72,14 @@ pub const SIDECAR_KEY_BITS: i32 = 8;
 
 /// `model_type` values whose cached "K" slot is `[kv_latent | DSA indexer
 /// key]`: `DeepSeekV32Model` under both spellings of its `config.json` value,
-/// and GLM-5, which wraps that model wholesale. Every entry is also in
+/// GLM-5, which wraps that model wholesale, and Hy4, which caches the key on
+/// its `full` indexer layers only (its `shared` layers cache the latent
+/// alone, #2354). Every entry is also in
 /// [`crate::mla::MLA_LATENT_CACHE_FAMILIES`].
 ///
 /// Used by: [`caches_dsa_indexer_key`].
-pub static DSA_INDEXER_KEY_FAMILIES: &[&str] = &["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"];
+pub static DSA_INDEXER_KEY_FAMILIES: &[&str] =
+    &["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa", "hy_v4"];
 
 /// Whether `model_type` caches the DSA indexer key beside its MLA latent, so
 /// its "K" slot is `kv_lora_rank + index_head_dim` wide. Exact, trimmed,

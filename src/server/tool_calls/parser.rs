@@ -44,7 +44,7 @@ use crate::server::types::request::Tool;
 /// Shared by [`strip_thinking`], which removes them, and
 /// [`thinking_marker_pair`], which reports which one a generation used, so the
 /// two cannot disagree about what delimits a thinking block.
-pub(super) const THINKING_MARKER_PAIRS: [(&str, &str); 8] = [
+pub(super) const THINKING_MARKER_PAIRS: [(&str, &str); 9] = [
     ("<think>", "</think>"),
     ("<|content_thinking|>", "<|end_message|>"),
     ("<|channel>", "<channel|>"),
@@ -59,6 +59,8 @@ pub(super) const THINKING_MARKER_PAIRS: [(&str, &str); 8] = [
     ("<ifm|think>", "</ifm|think>"),
     ("<ifm|think_fast>", "</ifm|think_fast>"),
     ("<ifm|think_faster>", "</ifm|think_faster>"),
+    // Tencent Hy4 (#2354). The template primes the open, as for K3.
+    ("<think:opensource>", "</think:opensource>"),
 ];
 
 fn has_inkling_primed_boundary(text: &str) -> bool {

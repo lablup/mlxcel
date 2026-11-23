@@ -142,6 +142,33 @@ fn deepseek_v4_model_type_is_detected() {
     fs::remove_dir_all(model_dir).unwrap();
 }
 
+/// Hy4 (#2354) is detected from its `model_type`, and the registry that
+/// `mlxcel arch` prints carries it as a MoE text family.
+#[test]
+fn hy_v4_model_type_is_detected_and_registered() {
+    let model_dir = temp_path("hy_v4");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "hy_v4",
+            "architectures": ["HYV4ForCausalLM"],
+            "vocab_size": 120832,
+            "hidden_size": 6144,
+            "num_hidden_layers": 78
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::HyV4);
+    assert_eq!(detected.registry_id(), "hy_v4");
+    let registry = super::registry::build_architecture_registry("test");
+    assert!(registry.families.iter().any(|family| family.id == "hy_v4"));
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
 #[test]
 fn whisper_model_type_is_detected() {
     let model_dir = temp_path("whisper_asr");

@@ -90,3 +90,35 @@ fn non_dsa_latent_pair_families_keep_the_latent_only_width() {
         assert_eq!(e.marginal_bytes_per_token, 4 * 1152, "{family}");
     }
 }
+
+/// Hy4 caches the indexer key on its `full` indexer layers only (#2354): a
+/// `shared` layer reuses the previous selection and holds the latent alone.
+/// With two layers of each kind the fp16 cache is two 640-wide slots and two
+/// 512-wide ones, and a forced int8 latent is sized per kind as well.
+#[test]
+fn hy_v4_counts_the_indexer_key_on_full_layers_only() {
+    let mut cfg = dsa_text("hy_v4");
+    cfg["indexer_types"] = json!(["full", "full", "shared", "shared"]);
+    let fp16 = 2 * (640 + 64) * 2 + 2 * (512 + 64) * 2;
+    let e = estimate_kv_arch_from_config(&cfg, 2048, KVCacheMode::Fp16, 1).expect("estimate");
+    assert_eq!(e.kind, KvArchKind::MlaCompressed);
+    assert_eq!(e.marginal_bytes_per_token, fp16);
+
+    // An int8 request resolves to fp16 for this family under `auto`.
+    let e = estimate_kv_arch_from_config(&cfg, 2048, KVCacheMode::Int8, 1).expect("estimate");
+    assert!(!e.detail.contains("affine-quantized"), "{}", e.detail);
+
+    mlxcel_core::mla::with_mla_latent_quant(mlxcel_core::mla::MlaLatentQuant::Int8, || {
+        let e = estimate_kv_arch_from_config(&cfg, 2048, KVCacheMode::Int8, 1).expect("estimate");
+        assert_eq!(e.marginal_bytes_per_token, 2 * 808 + 2 * 672);
+    });
+
+    // Without the list the upstream default applies: layers 0, 1 and 5 of six.
+    cfg.as_object_mut().expect("object").remove("indexer_types");
+    cfg["num_hidden_layers"] = json!(6);
+    let e = estimate_kv_arch_from_config(&cfg, 2048, KVCacheMode::Fp16, 1).expect("estimate");
+    assert_eq!(
+        e.marginal_bytes_per_token,
+        3 * (640 + 64) * 2 + 3 * (512 + 64) * 2
+    );
+}

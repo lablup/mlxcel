@@ -140,7 +140,7 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   index-augmented key-head count and could produce a K/V head-shape failure.
   Batched decode projects index keys and queries once for the full batch, then
   slices them by row after each row's cached prefill.
-  At startup the worker reports either `decode path: native batched forward` or `decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)` for every batching-capable model. Qwen 4 Exp and Muse Glimmer currently report the fallback because their serving decode-width paths still dispatch identified rows sequentially; an anonymous-batch or batched-prefill override does not make serving decode native.
+  At startup the worker reports either `decode path: native batched forward` or `decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)` for every batching-capable model. Qwen 4 Exp and Muse Glimmer currently report the fallback because their serving decode-width paths still dispatch identified rows sequentially; an anonymous-batch or batched-prefill override does not make serving decode native. Hy4 (`hy_v4`) reports it as well: its attention sinks rule out the shared batched MLA decode rows, so every attention step is per sequence (#2354).
 - `--max-batch-prefill 4`: batch up to 4 pending prompts into one prefill pass.
   Only families that opt into `supports_batched_prefill()` (Llama 3, Qwen 3,
   Qwen 3.5, and aliases such as Qwen 2.5) use it; others fall back to sequential

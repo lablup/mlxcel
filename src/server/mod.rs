@@ -211,6 +211,9 @@ mod reasoning_effort_tests;
 mod k2_horizon_reasoning_tests;
 
 #[cfg(test)]
+mod hy_v4_reasoning_tests;
+
+#[cfg(test)]
 mod store_budget_tests;
 
 #[cfg(test)]

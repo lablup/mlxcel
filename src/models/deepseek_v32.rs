@@ -40,6 +40,12 @@ mod indexer;
 #[path = "deepseek_v32_latent.rs"]
 mod latent;
 
+// Hy4 is a DeepSeek-V3.2 derivative. It is a child module so it can reuse the
+// private MLA, indexer and MoE pieces below without widening their visibility
+// (issue #2354); nothing in this file's forward changes for it.
+#[path = "hy_v4.rs"]
+pub mod hy_v4;
+
 #[path = "deepseek_v32_rope.rs"]
 mod rope;
 

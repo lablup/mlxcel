@@ -319,6 +319,13 @@ pub fn resolve_thinking_token_ids(
         }
         return Some(ids);
     }
+    // Tencent Hy4 (#2354).
+    if let (Some(open), Some(close)) = (
+        hf.token_to_id("<think:opensource>"),
+        hf.token_to_id("</think:opensource>"),
+    ) {
+        return Some(ThinkingTokenIds::new(open as i32, close as i32));
+    }
     if let (Some(open), Some(close)) = (
         hf.token_to_id("<|content_thinking|>"),
         hf.token_to_id("<|end_message|>"),
