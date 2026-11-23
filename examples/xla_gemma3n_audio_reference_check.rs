@@ -14,6 +14,9 @@
 
 //! Audio-only MLX↔IREE intermediate gate for the pinned Gemma3n #875 fixture.
 
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -270,6 +273,7 @@ fn compare(name: &str, reference: &[f32], actual: &[f32]) -> Result<Diff, String
 }
 
 fn main() -> Result<(), String> {
+    mlx_reference_policy::pin_mlx_tf32_disabled()?;
     let model_dir = path_env("MLXCEL_GEMMA3N_AUDIO_MODEL", "models/gemma3n-e4b-4bit");
     let audio_path = path_env("MLXCEL_GEMMA3N_AUDIO_WAV", "/tmp/gemma3n-103-1240-0000.wav");
     let device = std::env::var("MLXCEL_XLA_DEVICE")

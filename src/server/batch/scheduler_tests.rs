@@ -2153,10 +2153,7 @@ fn boundary_capture_applies_respects_adopted_prefix() {
 
 #[test]
 fn handoff_thinking_state_replays_generated_tokens_before_decode() {
-    let token_ids = ThinkingTokenIds {
-        open: 10,
-        close: 11,
-    };
+    let token_ids = ThinkingTokenIds::new(10, 11);
     let state =
         build_handoff_thinking_state(Some(token_ids), 2, 16, false, &[token_ids.open, 101, 102])
             .expect("valid handoff thinking state");
@@ -2170,10 +2167,7 @@ fn handoff_thinking_state_replays_generated_tokens_before_decode() {
 
 #[test]
 fn handoff_thinking_state_replays_primed_first_token_and_validates_raw_budget() {
-    let token_ids = ThinkingTokenIds {
-        open: 10,
-        close: 11,
-    };
+    let token_ids = ThinkingTokenIds::new(10, 11);
     let state = build_handoff_thinking_state(Some(token_ids), 1, 8, true, &[101])
         .expect("valid primed handoff thinking state");
     assert_eq!(state.in_block_count, 1);

@@ -74,6 +74,7 @@ pub(crate) mod recurrent_batch;
 pub(crate) mod recurrent_snapshot;
 pub mod registry;
 mod sanitize;
+mod sliding_hybrid_lm;
 #[cfg(test)]
 pub(crate) mod ssm_test_support;
 
@@ -110,8 +111,12 @@ pub mod gated_delta;
 // hybrid families, so its working set is bounded by a chunk, not the prefill
 // piece (#3073).
 pub(crate) mod mla_batched;
+// `mla_rope` is the decoupled `q_pe` / `k_pe` RoPE of the DeepSeek-style MLA
+// attentions (DeepSeek-V3 family, V3.2, LongCat ngram and sparse, Xing4.0),
+// one type instead of the three private copies #3295 found.
 #[cfg(test)]
 pub(crate) mod mla_latent_test_support;
+pub(crate) mod mla_rope;
 pub(crate) mod ssd_scan;
 // `ssm_a` computes the SSM transition `A = -exp(A_log)` in float32 for the
 // Mamba1, Jamba and Mamba2 families (#3046, #3057, #3125).

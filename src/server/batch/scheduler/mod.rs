@@ -1204,6 +1204,10 @@ mod scheduler_lookahead_read_failure_tests;
 #[path = "../scheduler_real_batch_parity_tests.rs"]
 mod scheduler_real_batch_parity_tests;
 
+#[cfg(test)]
+#[path = "../scheduler_prompt_cache_metrics_tests.rs"]
+mod scheduler_prompt_cache_metrics_tests;
+
 /// Resolve a request's context-retention values against the server policy
 /// (#1472), pure so the arithmetic is unit-testable without a scheduler.
 ///

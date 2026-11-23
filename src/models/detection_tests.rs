@@ -1294,6 +1294,46 @@ const DFLASH_DRAFTER_CONFIG: &str = r#"{
     "vocab_size": 248320
 }"#;
 
+// `mlx-community/gemma-4-12B-it-assistant` declares
+// `model_type: gemma4_unified_assistant`. Served as `-m` it used to fail with
+// "Unsupported model type: gemma4_unified_assistant", which hides that the
+// checkpoint is a drafter and that `--draft-model` is the flag that takes it.
+#[test]
+fn mtp_drafters_are_rejected_as_standalone_models_with_a_draft_model_hint() {
+    for model_type in [
+        "gemma4_unified_assistant",
+        "gemma4_assistant",
+        "qwen3_5_mtp",
+        "Gemma4_Unified_Assistant",
+    ] {
+        let model_dir = temp_path(&format!("mtp_drafter_{model_type}"));
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            format!(r#"{{"model_type": "{model_type}", "text_config": {{"model_type": "gemma4_text"}}}}"#),
+        )
+        .unwrap();
+
+        let error = super::detection::get_model_type(&model_dir)
+            .expect_err("an MTP drafter is not a standalone model")
+            .to_string();
+
+        assert!(
+            error.contains("MTP speculative drafter"),
+            "{model_type}: the error must name the real problem, got: {error}",
+        );
+        assert!(
+            error.contains("--draft-model"),
+            "{model_type}: the error must point at --draft-model, got: {error}",
+        );
+        assert!(
+            !error.contains("Unsupported model type"),
+            "{model_type}: got the generic error: {error}",
+        );
+        let _ = fs::remove_dir_all(&model_dir);
+    }
+}
+
 #[test]
 fn dflash_drafter_is_rejected_as_a_standalone_model() {
     let model_dir = temp_path("dflash_drafter");
@@ -2453,6 +2493,27 @@ fn decider2_is_refused_with_the_decision_entry_points() {
     assert!(
         error.contains(
             "decider2 is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model`"
+        ),
+        "{error}"
+    );
+}
+
+/// Clef is a decision model: `mlxcel generate` names the decision entry
+/// points instead of the generic unsupported-type error (#2365).
+#[test]
+fn clef_is_refused_with_the_decision_entry_points() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("config.json"),
+        r#"{"model_type": "clef", "architectures": ["Qwen3_5ForConditionalGeneration"]}"#,
+    )
+    .unwrap();
+    let error = super::detection::get_model_type(directory.path())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(
+            "clef is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model`"
         ),
         "{error}"
     );

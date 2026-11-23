@@ -458,7 +458,7 @@ hit/miss metrics. `GET /v1/cache/stats` reports `snapshot_*` fields, while
 `/metrics` exposes `mlxcel_prompt_cache_snapshot_hits_total`,
 `mlxcel_prompt_cache_snapshot_misses_total`,
 `mlxcel_prompt_cache_snapshot_tokens_reused_total`, and labeled snapshot
-evictions. This path is deliberately whole-prefix only: it does not participate
+evictions. Each lookup is counted once: the snapshot and reused-token counters equal the `snapshot_*` fields of `GET /v1/cache/stats` and the `cached_tokens` the responses report. This path is deliberately whole-prefix only: it does not participate
 in APC block matching, does not share SSM state across sessions, and does not
 modify the block-sharing carve-out for hybrid SSM families.
 

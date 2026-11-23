@@ -26,6 +26,11 @@
 //! environment plus a short allowlist of ordinary variables and the entries
 //! the operator configured. The server's own secrets (API keys, access
 //! tokens, any `MLXCEL_*` or `LLAMA_*` variable) are therefore not inherited.
+//!
+//! On Unix the child leads its own process group, and discarding the client
+//! kills the whole group (issue #3296). A launcher such as `npx` or `uvx`
+//! runs the real server as a grandchild, which killing the launcher alone
+//! would leave running.
 
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -133,6 +138,10 @@ pub(crate) struct StdioMcpClient {
     next_id: u64,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     line: Vec<u8>,
+    /// The child's process group, until it has been killed. Cleared after
+    /// the one `killpg` so a later call cannot signal a reused group id.
+    #[cfg(unix)]
+    process_group: Option<i32>,
 }
 
 impl StdioMcpClient {
@@ -149,6 +158,9 @@ impl StdioMcpClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // A group of its own, so `kill_process_group` reaches grandchildren.
+        #[cfg(unix)]
+        command.process_group(0);
         for name in INHERITED_ENV {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
@@ -173,9 +185,17 @@ impl StdioMcpClient {
                 "child pipes were not created".to_string(),
             ));
         };
+        // With `process_group(0)` the group id is the child's pid.
+        #[cfg(unix)]
+        let process_group = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|pid| *pid > 0);
         let stderr_tail = Arc::new(Mutex::new(Vec::new()));
         tokio::spawn(drain_stderr(stderr, Arc::clone(&stderr_tail)));
         let mut client = Self {
+            #[cfg(unix)]
+            process_group,
             child,
             stdin,
             stdout: BufReader::new(stdout),
@@ -213,7 +233,26 @@ impl StdioMcpClient {
 
     /// Whether the child has already exited.
     pub(crate) fn has_exited(&mut self) -> bool {
-        !matches!(self.child.try_wait(), Ok(None))
+        let exited = !matches!(self.child.try_wait(), Ok(None));
+        if exited {
+            // The leader is reaped now; kill what is left of its group
+            // before the group id can be reused.
+            self.kill_process_group();
+        }
+        exited
+    }
+
+    /// Send SIGKILL to the child's whole process group, once. A no-op on
+    /// other platforms, where only the child itself is killed.
+    fn kill_process_group(&mut self) {
+        #[cfg(unix)]
+        if let Some(group) = self.process_group.take() {
+            // SAFETY: `killpg` only sends a signal; `group` is the id of the
+            // group this client created and has not signalled before.
+            unsafe {
+                libc::killpg(group, libc::SIGKILL);
+            }
+        }
     }
 
     /// Fetch the advertised tools within `deadline`.
@@ -301,8 +340,10 @@ impl StdioMcpClient {
         Ok(tool_output_from_result(&result, max_output_bytes))
     }
 
-    /// Kill the child and reap it, so a failed server leaves no zombie.
+    /// Kill the child and its process group, then reap the child, so a
+    /// failed server leaves neither a zombie nor a running grandchild.
     pub(crate) async fn shutdown(mut self) {
+        self.kill_process_group();
         let _ = self.child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await;
     }
@@ -378,6 +419,15 @@ impl StdioMcpClient {
         Err(McpClientError::InvalidJsonRpc(format!(
             "no reply within {MAX_INTERLEAVED_MESSAGES} messages"
         )))
+    }
+}
+
+impl Drop for StdioMcpClient {
+    /// A client dropped without `shutdown` (a cancelled request, a server
+    /// stopping) still takes its grandchildren down. `kill_on_drop` then
+    /// kills and reaps the child itself.
+    fn drop(&mut self) {
+        self.kill_process_group();
     }
 }
 

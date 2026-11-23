@@ -28,8 +28,11 @@
 //! `Qwen2Model`, the `llama` / `mistral` pipeline stage executors and the
 //! tensor-parallel Llama runtime), Qwen3 / Qwen3-MoE, Apertus, Gemma 3, Llama 4
 //! (text and VLM, through `llama4_helpers::Llama4Rope`), InternLM3 /
-//! InternLM2 through `dynamic_ntk_rope`, and Xing4.0 (`xing4_0`, whose
-//! DeepSeek-V3 attention takes the table through `with_rope_table`).
+//! InternLM2 through `dynamic_ntk_rope`, and the DeepSeek-style MLA families
+//! through `mla_rope::MlaRope` (#3295): DeepSeek-V3 / Kimi-K2 / JoyAI
+//! (`deepseek_v3`, and through it Kimi-VL's text model and the DeepSeek-V3
+//! pipeline stage executor), Xing4.0, DeepSeek V3.2 / GLM-5, LongCat-Flash
+//! ngram and LongCat-Flash-Lite-Sparse.
 //!
 //! Since #1450 this is also the seam llama-server b10621's `--rope-scaling`,
 //! `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` are applied at:

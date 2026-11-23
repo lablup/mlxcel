@@ -25,7 +25,14 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::embeddings::loader::read_embedding_config;
+use crate::embeddings::{
+    DEFAULT_EMBEDDING_BATCH_SIZE, EmbedOptions, EmbeddingEngine, EmbeddingLoadOptions,
+    LoadedEmbeddingModel, load_embedding_model_with_options,
+};
+use crate::model_metadata::is_embedding_model_type;
+use crate::models::get_model_type;
 
+use super::late_interaction::LateInteractionReranker;
 use super::qwen3_generative::Qwen3Reranker;
 use super::qwen3_vl_generative::Qwen3VlReranker;
 use super::sequence_classifier::SequenceClassifierReranker;
@@ -129,6 +136,100 @@ pub fn load_reranker_with_options(
     Ok(LoadedReranker {
         reranker,
         kind,
+        model_type,
+    })
+}
+
+/// Load a reranker checkpoint, or, when it is none, a multi-vector embedder
+/// scored by MaxSim (`mlxcel rerank`, #3300).
+///
+/// This is the CLI counterpart of the server's late-interaction fallback
+/// (`server::rerank_maxsim`): `/v1/rerank` scores with a multi-vector `-m`
+/// embedder when no reranker is configured, so `mlxcel rerank -m` accepts the
+/// same checkpoints. A reranker checkpoint loads exactly as
+/// [`load_reranker_with_options`] loads it. Anything that is neither a
+/// reranker nor a multi-vector embedder (a chat checkpoint, a single-vector
+/// embedder) fails with the reranker detection error, unchanged; a chat
+/// checkpoint is refused from `config.json` alone, before any weight is read.
+///
+/// `options.batch_size` becomes the embedding batch width, defaulting to the
+/// server's `--embedding-batch-size` default so both sides batch the texts the
+/// same way; `options.max_length` caps every embedded input.
+pub fn load_reranker_or_late_interaction(
+    model_path: &Path,
+    options: RerankLoadOptions,
+) -> Result<LoadedReranker> {
+    let model_dir = resolve_model_dir(model_path);
+    let config = read_embedding_config(&model_dir)?;
+    let detection = match detect_reranker_kind(&config) {
+        Ok(_) => return load_reranker_with_options(&model_dir, options),
+        Err(err) => err.context(format!(
+            "{} is not a reranker checkpoint",
+            model_dir.display()
+        )),
+    };
+    let is_embedder = get_model_type(&model_dir).is_ok_and(is_embedding_model_type);
+    if !is_embedder {
+        return Err(detection);
+    }
+    late_interaction_from_embedder(&model_dir, &config, options, detection, |dir, load| {
+        load_embedding_model_with_options(dir, load)
+    })
+}
+
+/// Load the embedder through `load` and wrap it as a late-interaction
+/// reranker, or return `detection` when it is single-vector.
+///
+/// Split out so the single-vector refusal is testable with the stub model.
+pub(crate) fn late_interaction_from_embedder(
+    model_dir: &Path,
+    config: &Value,
+    options: RerankLoadOptions,
+    detection: anyhow::Error,
+    load: impl FnOnce(&Path, EmbeddingLoadOptions) -> Result<LoadedEmbeddingModel>,
+) -> Result<LoadedReranker> {
+    let loaded = load(
+        model_dir,
+        EmbeddingLoadOptions {
+            max_length: options.max_length,
+        },
+    )
+    .with_context(|| {
+        format!(
+            "{} is not a reranker checkpoint, and loading it as a multi-vector embedder \
+             failed",
+            model_dir.display()
+        )
+    })?;
+    if !loaded.limits.multi_vector {
+        // MaxSim over one row is a plain dot product, which the server does
+        // not serve on `/v1/rerank` either.
+        return Err(detection);
+    }
+    let batch_size = options
+        .batch_size
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_EMBEDDING_BATCH_SIZE);
+    let engine = EmbeddingEngine::new(loaded, batch_size);
+    let reranker = LateInteractionReranker::new(engine, EmbedOptions::default());
+    let model_type = config
+        .get("model_type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    tracing::info!(
+        target: "mlxcel::rerank",
+        path = %model_dir.display(),
+        kind = RerankerKind::LateInteraction.as_str(),
+        model_type = %model_type,
+        max_length = reranker.max_length(),
+        batch_size = reranker.batch_size(),
+        supports_images = reranker.supports_images(),
+        "multi-vector embedder loaded as a late-interaction reranker"
+    );
+    Ok(LoadedReranker {
+        reranker: Box::new(reranker),
+        kind: RerankerKind::LateInteraction,
         model_type,
     })
 }

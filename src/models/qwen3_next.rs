@@ -2071,7 +2071,7 @@ impl Qwen3NextModel {
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Sanitize weights
-        let weights = Self::sanitize_weights(weights, &config);
+        let weights = Self::sanitize_weights(weights, &config)?;
 
         // Build model
         tracing::info!("[Qwen3Next] Building model...");
@@ -2081,7 +2081,12 @@ impl Qwen3NextModel {
         Ok((model, config))
     }
 
-    fn sanitize_weights(mut weights: WeightMap, config: &Qwen3NextConfig) -> WeightMap {
+    /// Returns `Err` when the per-expert MoE planes disagree in shape or
+    /// dtype ([`crate::models::switch_layers::drain_numbered_expert_planes`]).
+    fn sanitize_weights(
+        mut weights: WeightMap,
+        config: &Qwen3NextConfig,
+    ) -> Result<WeightMap, String> {
         // Remove lm_head if tied
         if config.tie_word_embeddings {
             weights.remove("lm_head.weight");
@@ -2100,11 +2105,11 @@ impl Qwen3NextModel {
                     &format!("model.layers.{l}.mlp.experts"),
                     proj,
                     &format!("{base}.{proj}"),
-                );
+                )?;
             }
         }
 
-        weights
+        Ok(weights)
     }
 
     pub fn from_weights(weights: &WeightMap, config: &Qwen3NextConfig) -> Result<Self, String> {
@@ -2561,7 +2566,7 @@ impl Qwen3NextStageModel {
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
 
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
-        weights = Qwen3NextModel::sanitize_weights(weights, &config);
+        weights = Qwen3NextModel::sanitize_weights(weights, &config)?;
 
         // When embeddings are tied, the final stage produces logits from the
         // embedding table, so it must keep `model.embed_tokens.weight` through

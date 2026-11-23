@@ -269,6 +269,8 @@ impl ModelArgs {
             return fail("mudd is false but mudd_tap_idx is set".into());
         }
         self.sigmoid_softcap()?;
+        crate::loading::checked_eos_token_ids(self.eos_token_id.as_ref())
+            .map_err(|err| format!("Limite: {err}"))?;
         Ok(())
     }
 
@@ -332,16 +334,9 @@ impl ModelArgs {
         Ok(Some((num("a", 0.0), num("b", 0.0), c)))
     }
 
+    /// The `eos_token_id` ids; empty when absent. [`Self::validate`] refuses
+    /// an out-of-range id, so this never narrows one to a different token.
     pub fn eos_token_ids(&self) -> Vec<i32> {
-        match &self.eos_token_id {
-            Some(serde_json::Value::Number(n)) => {
-                n.as_i64().map(|id| vec![id as i32]).unwrap_or_default()
-            }
-            Some(serde_json::Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|v| v.as_i64().map(|n| n as i32))
-                .collect(),
-            _ => Vec::new(),
-        }
+        crate::loading::checked_eos_token_ids(self.eos_token_id.as_ref()).unwrap_or_default()
     }
 }

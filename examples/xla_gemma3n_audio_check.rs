@@ -14,6 +14,9 @@
 
 //! Real-IREE #875 fixture gate for the split Gemma3n audio runtime.
 
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -150,6 +153,7 @@ fn audio_input(audio_path: &Path) -> Result<Gemma3nAudioInput, String> {
 }
 
 fn main() -> Result<(), String> {
+    mlx_reference_policy::pin_mlx_tf32_disabled()?;
     let model_dir = path_env("MLXCEL_GEMMA3N_AUDIO_MODEL", "models/gemma3n-e4b-4bit");
     let audio_path = path_env("MLXCEL_GEMMA3N_AUDIO_WAV", "/tmp/gemma3n-103-1240-0000.wav");
     let (tokenizer, tokens) = expanded_prompt(&model_dir)?;

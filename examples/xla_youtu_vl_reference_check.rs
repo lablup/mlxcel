@@ -19,6 +19,9 @@
 //! graph, prepares multimodal embeddings, captures the 40-layer MLA cache and
 //! logits, then repeats the request after an engine reset to prove slot reuse.
 
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -344,6 +347,7 @@ fn reconstruct_pixels(patches: &[f32], grid_height: usize, grid_width: usize) ->
 }
 
 fn main() {
+    mlx_reference_policy::pin_mlx_tf32_disabled_or_exit();
     let model = required_path("--model");
     let reference_root = required_path("--reference");
     let image_path = required_path("--image");
@@ -678,6 +682,7 @@ fn main() {
         "architecture": reference["architecture"].clone(),
         "generation": reference["generation"].clone(),
         "lifecycle": reference["lifecycle"].clone(),
+        "mlx_enable_tf32": mlx_reference_policy::recorded_mlx_tf32(),
         "case": {
             "name": "image_text",
             "prompt": PROMPT,

@@ -815,9 +815,7 @@ fn compile_and_load(
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
     let flags = qwen2_vl_target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-qwen2-vl-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Qwen2Vl)?;
     let mut observer = CheckpointSourceObserver::default();
     let (weights, checkpoint_schema) = load_weights(model_dir, config, &mut observer)?;
     let operators =
@@ -862,9 +860,7 @@ fn compile_and_load_diagnostics(
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
     let flags = qwen2_vl_target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-qwen2-vl-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Qwen2Vl)?;
     let mut observer = CheckpointSourceObserver::default();
     let (weights, checkpoint_schema) = load_weights(model_dir, config, &mut observer)?;
     let operators =

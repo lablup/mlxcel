@@ -180,7 +180,7 @@ mlxcel-server -m Qwen3.5-0.8B-4bit \
 
 See [Embeddings and reranking](docs/embeddings.md) for multimodal inputs, supported families, pooling, request schemas, and side-model serving.
 
-Typed decision models (named `choice`, `score`, `bool` and `multi_label` questions answered with calibrated probabilities) are served with `--decision-model` on `POST /v1/decisions` and run offline with `mlxcel decide`; see [Typed decisions](docs/decisions.md). Ported families: LiquidAI d1-3B and Decider-2b (`decider2`).
+Typed decision models (named `choice`, `score`, `bool` and `multi_label` questions answered with calibrated probabilities) are served with `--decision-model` on `POST /v1/decisions` and run offline with `mlxcel decide`; see [Typed decisions](docs/decisions.md). Ported families: LiquidAI d1-3B, Decider-2b (`decider2`) and Clef / Clef-Flash (`clef`).
 
 ### Tag and redact entities
 

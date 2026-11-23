@@ -1573,7 +1573,12 @@ pub(crate) fn spawn_xla_model_worker(
             };
             let engine =
                 match mlxcel_xla::XlaBucketSet::load(&model_path, b_max, &device, &capacities) {
-                    Ok((engine, dropped)) => {
+                    Ok((mut engine, dropped)) => {
+                        // Stop on the eager backend's EOS set, which also
+                        // covers the tokenizer's `eos_token` (#3292).
+                        engine.set_eos_token_ids(&crate::backend::xla::xla_stop_token_ids(
+                            &model_path,
+                        ));
                         // A bucket after the first can fail to compile or to
                         // allocate its cache without costing the process: the
                         // remaining shapes still serve every request that fits

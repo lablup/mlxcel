@@ -655,7 +655,6 @@ impl BatchScheduler {
                 );
                 self.batch_observability
                     .record_prompt_cache_hit(adopted_len);
-                // also increment BatchMetrics Prometheus counters.
                 self.batch_metrics.record_prompt_cache_hit(adopted_len);
                 // Update byte/entry gauges so /metrics reflects current state.
                 if let Some(ref store) = self.prompt_cache {

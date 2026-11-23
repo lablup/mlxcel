@@ -63,10 +63,10 @@ fn a_forced_latent_precision_switches_the_production_model_onto_the_view() {
             // (position 0 of a two-token step over an identical history).
             let mut twin = caches(KVCacheMode::Int8);
             mlxcel_core::eval(&model.forward(&ids(&PROMPT), &mut twin, None));
-            let before = mlxcel_core::mla::stats::snapshot();
-            let got = row(&model.forward(&ids(&[DECODE[0]]), &mut forced, None), 0);
-            let after = mlxcel_core::mla::stats::snapshot();
-            let delta = |path| after.get(path).saturating_sub(before.get(path));
+            let (got, counts) = mlxcel_core::mla::stats::scoped(|| {
+                row(&model.forward(&ids(&[DECODE[0]]), &mut forced, None), 0)
+            });
+            let delta = |path| counts.get(path);
             if bits == 4 {
                 assert_eq!(delta(MlaDecodePath::AbsorbedComposed), LAYERS as u64);
                 assert_eq!(delta(MlaDecodePath::AbsorbedFused), 0);

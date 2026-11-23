@@ -145,6 +145,46 @@ fn cumulative_group_norm(
     }
 }
 
+/// Pad one SSCP stage input and lay its `[O, H, W, I]` weight out as HWIO.
+///
+/// Reverse-causal time padding `(0, kernel - 1)` and SAME-like frequency
+/// padding `(1, 1)`, matching the eager MLX `pad` before `conv2d`.
+///
+/// Used by: [`sscp_conv`] and the production-MLX micro-oracle's emitted first
+/// SSCP convolution (`production_probe_ops`, issue #3212), so the probe runs
+/// the exact operand layout the production graph does.
+pub(super) fn sscp_conv_operands(
+    b: &mut Builder,
+    x: &Val,
+    weight: &Val,
+    kernel: [usize; 2],
+) -> (Val, Val) {
+    let zero = b.const_f32(0.0);
+    let padded = b.pad(x, &zero, &[0, 0, 1, 0], &[0, kernel[0] - 1, 1, 0]);
+    let weight = b.transpose(weight, &[1, 2, 3, 0]);
+    (padded, weight)
+}
+
+/// Convolve one padded SSCP stage and materialize its BF16 result.
+///
+/// MLX stores both operands as BF16 but accumulates the convolution into an
+/// F32 carrier before materializing the BF16 output tensor. The graph-wide
+/// BF16 contraction mode otherwise gives StableHLO a BF16 result type,
+/// allowing the local CPU backend to lose cancellation-sensitive lanes.
+///
+/// Used by: [`sscp_conv`] and the production-MLX micro-oracle (issue #3212).
+pub(super) fn sscp_conv_result(
+    b: &mut Builder,
+    padded: &Val,
+    weight: &Val,
+    stride: [usize; 2],
+    groups: usize,
+) -> Val {
+    let convolved =
+        b.convolution_f32_accumulate(padded, weight, &stride, &[(0, 0), (0, 0)], groups);
+    round_bf16(b, &convolved)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sscp_conv(
     b: &mut Builder,
@@ -157,9 +197,7 @@ fn sscp_conv(
     eps: f32,
     _diagnostic_bf16_result: bool,
 ) -> SscpConvStages {
-    let zero = b.const_f32(0.0);
-    let padded = b.pad(x, &zero, &[0, 0, 1, 0], &[0, kernel[0] - 1, 1, 0]);
-    let weight = b.transpose(weight, &[1, 2, 3, 0]);
+    let (padded, weight) = sscp_conv_operands(b, x, weight, kernel);
     // IREE CUDA may select a different contraction lowering when StableHLO
     // carries a BF16 result instead of an explicit F32 result followed by a
     // convert. Keep this diagnostics-only candidate on the exact same padded
@@ -169,13 +207,7 @@ fn sscp_conv(
     #[cfg(any(feature = "diagnostics", test))]
     let convolution_bf16_result = _diagnostic_bf16_result
         .then(|| b.convolution(&padded, &weight, &stride, &[(0, 0), (0, 0)], groups));
-    // MLX stores both operands as BF16 but accumulates the convolution into an
-    // F32 carrier before materializing the BF16 output tensor. The graph-wide
-    // BF16 contraction mode otherwise gives StableHLO a BF16 result type,
-    // allowing the local CPU backend to lose cancellation-sensitive lanes.
-    let convolved =
-        b.convolution_f32_accumulate(&padded, &weight, &stride, &[(0, 0), (0, 0)], groups);
-    let convolved = round_bf16(b, &convolved);
+    let convolved = sscp_conv_result(b, &padded, &weight, stride, groups);
     let normalized = cumulative_group_norm(b, &convolved, norm, eps);
     let activated = relu(b, &normalized.output);
     let activated = round_bf16(b, &activated);

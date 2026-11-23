@@ -98,6 +98,9 @@ pub(crate) use self::vlm::load_qwen3_vl;
 // LiquidAI d1 decisions (`src/decision/d1.rs`) run on the LFM2-VL stack
 // unchanged and only replace the head with an answer-slot readout.
 pub(crate) use self::vlm::load_lfm2_vl;
+// Clef decisions (`src/decision/clef.rs`) run on the Qwen3.5 VLM stack
+// unchanged and only add a joint schema head over its post-norm hidden.
+pub(crate) use self::vlm::load_qwen3_5_vlm;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::{
     load_qwen2_5_vl_iree_host_preprocessor, load_qwen2_vl_iree_host_preprocessor,
@@ -132,6 +135,38 @@ fn parse_eos_token_ids(config: &serde_json::Value) -> Vec<i32> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// A config's `eos_token_id` (an integer or a list of integers) as token ids,
+/// refusing an integer that is not a valid id: a negative id can never match
+/// a sampled token, and one past `i32::MAX` would wrap to a different token
+/// if narrowed with `as` (#3299). Non-integer entries are skipped, as
+/// [`parse_eos_token_ids`] skips them. The error names the offending value.
+///
+/// Used by: `models::limite_config::ModelArgs::validate`,
+/// `models::xing4_0::Xing40Config` deserialization.
+pub(crate) fn checked_eos_token_ids(value: Option<&serde_json::Value>) -> Result<Vec<i32>, String> {
+    let items: &[serde_json::Value] = match value {
+        Some(serde_json::Value::Array(items)) => items,
+        Some(v @ serde_json::Value::Number(_)) => std::slice::from_ref(v),
+        _ => return Ok(Vec::new()),
+    };
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        let serde_json::Value::Number(n) = item else {
+            continue;
+        };
+        if !(n.is_i64() || n.is_u64()) {
+            continue;
+        }
+        let id = n
+            .as_i64()
+            .and_then(|id| i32::try_from(id).ok())
+            .filter(|id| *id >= 0)
+            .ok_or_else(|| format!("eos_token_id {n} is outside 0..={}", i32::MAX))?;
+        ids.push(id);
+    }
+    Ok(ids)
 }
 
 fn tokenizer_eos_token_content(config: &serde_json::Value) -> Option<&str> {
