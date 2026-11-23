@@ -3332,6 +3332,66 @@ impl Qwen35Model {
         self.hidden_from_embeddings(h, caches, None)
     }
 
+    /// Post-final-norm hidden states of one standalone `inputs_embeds`
+    /// forward, with no LM head, honoring the stored MRoPE state.
+    ///
+    /// `inputs_embeds` is `[B, L, hidden]`, typically the output of
+    /// `Qwen35VLModel::get_input_embeddings`, which stores the request's
+    /// MRoPE `position_ids` and `rope_deltas` in the fallback slot. Positions
+    /// resolve exactly as a generation prefill resolves them
+    /// ([`mrope_position_source`] at cache offset 0); with nothing stored
+    /// (a text-only request) the positions are `0..L` on all three MRoPE
+    /// axes and still go through the MRoPE path, as upstream's
+    /// `get_rope_index` hands them to the layers (the cache-offset rope path
+    /// is the same function but rounds differently in bf16). The fallback
+    /// slot is cleared before returning, so one request's positions never
+    /// reach the next.
+    ///
+    /// Runs on fresh caches, like [`Self::forward_prefill_hidden`].
+    ///
+    /// Used by: `decision::clef::ClefModel` (the Clef joint schema head reads
+    /// the backbone's post-norm hidden over the whole sequence).
+    pub(crate) fn forward_final_hidden_with_embeddings(
+        &self,
+        inputs_embeds: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(inputs_embeds);
+        let (batch, seq_len) = (shape[0], shape[1]);
+        let position_ids = self.mrope_state.with_entry(None, |entry| {
+            let stored_shape = entry
+                .position_ids
+                .as_ref()
+                .map(|stored| mlxcel_core::array_shape(stored));
+            match mrope_position_source(stored_shape.as_deref(), batch, seq_len, 0) {
+                MRopePositionSource::SliceStored { start, end } => {
+                    match (entry.position_ids.as_ref(), stored_shape.as_ref()) {
+                        (Some(stored), Some(shape)) => Some(mlxcel_core::slice(
+                            stored,
+                            &[0, 0, start],
+                            &[shape[0], shape[1], end],
+                        )),
+                        _ => None,
+                    }
+                }
+                // Nothing stored (text only): MRoPE positions `0..L` on every
+                // axis, as upstream's `get_rope_index` gives text tokens.
+                MRopePositionSource::Recompute => Self::compute_decode_position_ids_with_delta(
+                    Some(entry.rope_deltas.unwrap_or(0)),
+                    batch,
+                    seq_len,
+                    0,
+                ),
+            }
+        });
+        self.mrope_state.clear_fallback();
+        let mut caches = self.make_internal_caches();
+        self.hidden_from_embeddings(
+            mlxcel_core::copy(inputs_embeds),
+            &mut caches,
+            position_ids.as_deref(),
+        )
+    }
+
     /// The layer loop and final norm behind every hidden-state entry point,
     /// in lockstep with [`Self::forward_prefill_with_last_hidden`] minus the
     /// head. It starts from embeddings rather than ids so an entry point that
@@ -3339,6 +3399,9 @@ impl Qwen35Model {
     /// MRoPE positions) shares this loop instead of copying it; the token
     /// entry point passes `None` and the layers derive positions from the
     /// cache offset.
+    ///
+    /// Used by: [`Self::prefill_hidden`] (MOSS-Image, Decider-2b) and
+    /// [`Self::forward_final_hidden_with_embeddings`] (Clef).
     fn hidden_from_embeddings(
         &self,
         mut h: UniquePtr<MlxArray>,

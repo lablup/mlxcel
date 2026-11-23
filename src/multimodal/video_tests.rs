@@ -1969,3 +1969,68 @@ fn frames_to_png_round_trips_every_frame_in_order() {
         assert_eq!(decoded.to_rgb8().get_pixel(0, 0)[0], index as u8);
     }
 }
+
+// ─── load_video_source_frames_at (caller-side sampler, Clef) ─────────────────
+
+#[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
+fn source_frames_at_decodes_the_sampler_picks_and_rejects_bad_ones() {
+    let name = "source_frames_at_decodes_the_sampler_picks_and_rejects_bad_ones";
+    if !video_capability_available(name) {
+        return;
+    }
+    let Some(path) = make_test_video(64, 48, 5, 2.0) else {
+        skip_or_fail_video_fixture(name, "could not create the 64x48 test video");
+        return;
+    };
+    let source = VideoSource::from_path(path.clone());
+    let limits = VideoLimits::default();
+
+    // The sampler sees the probed total and its picks come back in order.
+    let seen = std::cell::Cell::new(0usize);
+    let sampled = load_video_source_frames_at(&source, &limits, None, |total| {
+        seen.set(total);
+        Ok(vec![0, total / 2, total - 1])
+    })
+    .expect("valid picks decode");
+    assert!(seen.get() >= 8, "probed total {}", seen.get());
+    assert_eq!(sampled.frames.len(), 3);
+    assert_eq!(
+        sampled.frame_indices,
+        vec![0, seen.get() / 2, seen.get() - 1]
+    );
+
+    // Empty, out-of-order, and past-the-end picks are refused before decoding.
+    for bad in [vec![], vec![3, 1], vec![usize::MAX]] {
+        let result = load_video_source_frames_at(&source, &limits, None, |_| Ok(bad.clone()))
+            .map(|video| video.frames.len());
+        assert!(
+            matches!(result, Err(VideoError::Extract { .. })),
+            "{bad:?} -> {result:?}"
+        );
+    }
+
+    // A sampler error is returned unchanged and never reaches ffmpeg.
+    let result = load_video_source_frames_at(&source, &limits, None, |_| {
+        Err(VideoError::Extract {
+            path: std::path::PathBuf::from("sampler"),
+            message: "no".to_string(),
+        })
+    })
+    .map(|video| video.frames.len());
+    assert!(matches!(result, Err(VideoError::Extract { ref message, .. }) if message == "no"));
+
+    // The decoded-bytes budget is charged at the source resolution.
+    let result = load_video_source_frames_at(&source, &limits, Some(64 * 48 * 4 * 2), |_| {
+        Ok(vec![0, 1, 2])
+    })
+    .map(|video| video.frames.len());
+    assert!(result.is_err(), "3 frames exceed a 2-frame budget");
+    let result = load_video_source_frames_at(&source, &limits, Some(64 * 48 * 4 * 3), |_| {
+        Ok(vec![0, 1, 2])
+    })
+    .map(|video| video.frames.len());
+    assert!(result.is_ok(), "3 frames fit a 3-frame budget: {result:?}");
+
+    let _ = std::fs::remove_file(&path);
+}

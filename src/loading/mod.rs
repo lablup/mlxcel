@@ -98,6 +98,9 @@ pub(crate) use self::vlm::load_qwen3_vl;
 // LiquidAI d1 decisions (`src/decision/d1.rs`) run on the LFM2-VL stack
 // unchanged and only replace the head with an answer-slot readout.
 pub(crate) use self::vlm::load_lfm2_vl;
+// Clef decisions (`src/decision/clef.rs`) run on the Qwen3.5 VLM stack
+// unchanged and only add a joint schema head over its post-norm hidden.
+pub(crate) use self::vlm::load_qwen3_5_vlm;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::{
     load_qwen2_5_vl_iree_host_preprocessor, load_qwen2_vl_iree_host_preprocessor,

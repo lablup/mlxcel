@@ -28,8 +28,9 @@
 //! 3. a constructor arm in `construct`, returning its
 //!    [`DecisionModel`](super::DecisionModel) scorer.
 //!
-//! Families: LiquidAI d1 (`lfm2_vl` with a `D1Model` auto_map, #2367) and
-//! Decider-2b (`decider2`, #2359), plus the `#[cfg(test)]` stub.
+//! Families: LiquidAI d1 (`lfm2_vl` with a `D1Model` auto_map, #2367),
+//! Decider-2b (`decider2`, #2359) and Clef (`clef`, #2365), plus the
+//! `#[cfg(test)]` stub.
 //!
 //! A checkpoint no arm recognizes fails with "<path> is not a decision
 //! checkpoint".
@@ -52,6 +53,8 @@ pub enum DecisionKind {
     D1,
     /// Decider-2b (`model_type: decider2`), `src/decision/decider2.rs`.
     Decider2,
+    /// Clef and Clef-Flash (`model_type: clef`), `src/decision/clef.rs`.
+    Clef,
     /// The deterministic test model in `src/decision/stub.rs`.
     #[cfg(test)]
     Stub,
@@ -64,6 +67,7 @@ impl DecisionKind {
         match self {
             DecisionKind::D1 => "d1",
             DecisionKind::Decider2 => "decider2",
+            DecisionKind::Clef => "clef",
             #[cfg(test)]
             DecisionKind::Stub => "stub",
         }
@@ -100,6 +104,9 @@ pub fn detect_decision_kind(config: &Value) -> Result<DecisionKind> {
     }
     if model_type == super::decider2::DECIDER2_MODEL_TYPE {
         return Ok(DecisionKind::Decider2);
+    }
+    if model_type == super::clef::CLEF_MODEL_TYPE {
+        return Ok(DecisionKind::Clef);
     }
     #[cfg(test)]
     if model_type == super::stub::STUB_MODEL_TYPE {
@@ -150,6 +157,7 @@ fn construct(kind: DecisionKind, model_dir: &Path) -> Result<Box<dyn DecisionMod
     match kind {
         DecisionKind::D1 => Ok(Box::new(super::d1::D1DecisionModel::load(model_dir)?)),
         DecisionKind::Decider2 => Ok(Box::new(super::decider2::Decider2Model::load(model_dir)?)),
+        DecisionKind::Clef => Ok(Box::new(super::clef::ClefModel::load(model_dir)?)),
         #[cfg(test)]
         DecisionKind::Stub => Ok(Box::new(super::stub::StubDecisionModel::load(model_dir))),
     }

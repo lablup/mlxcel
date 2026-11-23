@@ -30,6 +30,9 @@
 //! - [`loader`]: [`load_decision_model`], the kind dispatcher.
 //! - `d1`, `d1_prompt`: the LiquidAI d1-3B scorer (`lfm2_vl` with a
 //!   `D1Model` `auto_map`) and its prompt and readout.
+//! - `decider2*`: the Decider-2b scorer (`decider2`).
+//! - `clef*`: the Clef / Clef-Flash scorer (`clef`): the model, its joint
+//!   schema head, its sequence and its video sampling.
 //! - [`cli`]: `mlxcel decide` input preparation (pure, testable before load).
 //! - [`media`]: audio decoding to 16 kHz mono and CLI media loading.
 //!
@@ -57,6 +60,11 @@
 //! thread or the `mlxcel decide` main thread.
 
 pub mod answer;
+pub(crate) mod clef;
+pub(crate) mod clef_head;
+mod clef_layers;
+pub(crate) mod clef_media;
+pub(crate) mod clef_sequence;
 pub mod cli;
 pub(crate) mod d1;
 pub(crate) mod d1_prompt;
@@ -89,6 +97,18 @@ mod decider2_tests;
 #[cfg(test)]
 #[path = "decider2_parity_tests.rs"]
 mod decider2_parity_tests;
+
+#[cfg(test)]
+#[path = "clef_tests.rs"]
+mod clef_tests;
+
+#[cfg(test)]
+#[path = "clef_parity_tests.rs"]
+mod clef_parity_tests;
+
+#[cfg(test)]
+#[path = "clef_limits_tests.rs"]
+mod clef_limits_tests;
 
 use serde_json::{Map, Value};
 use thiserror::Error;
