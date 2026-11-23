@@ -1052,6 +1052,7 @@ async fn route_chat(
     );
     opts.reasoning_budget = ReasoningBudgetOverride::Explicit(effective_budget);
     opts.thinking_enter_block_on_start = primed_open_thinking;
+    opts.thinking_primed_close = primed_close_marker.clone();
 
     // Assign a request id and dispatch the prefill request through the shared
     // tokenize -> select_prefill -> send body (issue #200). The chat id scheme

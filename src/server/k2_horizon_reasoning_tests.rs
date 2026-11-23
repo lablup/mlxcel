@@ -36,7 +36,9 @@ use crate::server::model_provider::ModelProvider;
 use crate::server::routes::chat::{
     extract_reasoning_content, is_prompt_primed_open_thinking, primed_open_thinking_close_marker,
 };
-use crate::server::thinking_budget::{ThinkingBudget, ThinkingState, resolve_thinking_token_ids};
+use crate::server::thinking_budget::{
+    ThinkingBudget, ThinkingDecision, ThinkingPhase, ThinkingState, resolve_thinking_token_ids,
+};
 use crate::server::tool_calls::clean_structural_tokens;
 use crate::server::tool_calls::stream_filter::StreamFilter;
 use crate::server::{AppState, ServerConfig, create_app};
@@ -186,15 +188,96 @@ fn the_thinking_budget_sees_every_variant_close() {
     assert!(!ids.is_close(ids.open));
 }
 
+fn k2_token_id(tokenizer: &MlxcelTokenizer, marker: &str) -> i32 {
+    tokenizer
+        .token_to_id(marker)
+        .unwrap_or_else(|| panic!("{marker} is in the K2-Horizon vocab")) as i32
+}
+
+fn budget(cap: u32) -> ThinkingBudget {
+    ThinkingBudget::Limited(std::num::NonZeroU32::new(cap).expect("non-zero cap"))
+}
+
+/// #3321: a primed block forces the close of the variant the template opened,
+/// on both forcing paths (an exhausted budget and a runtime `reasoning_end`).
+#[test]
+fn a_primed_budget_forces_the_close_of_the_primed_variant() {
+    let tokenizer = k2_tokenizer();
+    let ids = resolve_thinking_token_ids(&tokenizer).expect("K2-Horizon ids resolve");
+    for (effort, _, close) in EFFORTS {
+        let close_id = k2_token_id(&tokenizer, close);
+
+        let mut state =
+            ThinkingState::new(Some(ids), Some(budget(2)), true).with_primed_close(Some(close_id));
+        state.observe(7);
+        assert_eq!(
+            state.decide_override(8),
+            ThinkingDecision::NoOverride,
+            "{effort}"
+        );
+        state.observe(8);
+        assert_eq!(
+            state.decide_override(9),
+            ThinkingDecision::ForceClose(close_id),
+            "{effort}: an exhausted budget forces {close}"
+        );
+
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let forced = ThinkingState::new(Some(ids), None, true)
+            .with_force_end(Some(flag))
+            .with_primed_close(Some(close_id));
+        assert_eq!(
+            forced.decide_override(7),
+            ThinkingDecision::ForceClose(close_id),
+            "{effort}: reasoning_end forces {close}"
+        );
+    }
+}
+
+/// #3321: a block the model opens itself with a variant is tracked and closed
+/// with that variant's close.
+#[test]
+fn a_model_emitted_variant_open_is_closed_with_its_own_close() {
+    let tokenizer = k2_tokenizer();
+    let ids = resolve_thinking_token_ids(&tokenizer).expect("K2-Horizon ids resolve");
+    for (effort, open, close) in EFFORTS {
+        let mut state = ThinkingState::new(Some(ids), Some(budget(2)), false);
+        state.observe(k2_token_id(&tokenizer, open));
+        assert_eq!(state.phase, ThinkingPhase::InBlock, "{effort}");
+        state.observe(7);
+        state.observe(8);
+        assert_eq!(
+            state.decide_override(9),
+            ThinkingDecision::ForceClose(k2_token_id(&tokenizer, close)),
+            "{effort}"
+        );
+    }
+}
+
+/// A primed close that is not one of the pair's closes is ignored, so the
+/// force falls back to the pair's own close.
+#[test]
+fn an_unrelated_primed_close_falls_back_to_the_pair_close() {
+    let tokenizer = k2_tokenizer();
+    let ids = resolve_thinking_token_ids(&tokenizer).expect("K2-Horizon ids resolve");
+    let state = ThinkingState::new(Some(ids), Some(ThinkingBudget::ImmediateClose), true)
+        .with_primed_close(Some(ids.open));
+    assert_eq!(
+        state.decide_override(7),
+        ThinkingDecision::ForceClose(ids.close)
+    );
+}
+
 /// The real `/v1/chat/completions` handler against a scripted model.
 struct Harness {
     app: axum::Router,
     handle: crate::server::model_provider::ScriptedStreamHandle,
     prompts: mpsc::Receiver<String>,
+    options: mpsc::Receiver<crate::server::config::ServerGenerateOptions>,
 }
 
 fn harness() -> Harness {
-    let (options_tx, _options_rx) = mpsc::channel();
+    let (options_tx, options_rx) = mpsc::channel();
     let (prompt_tx, prompt_rx) = mpsc::channel();
     let (provider, handle) =
         ModelProvider::scripted_streaming_for_route_tests_with_prompts(options_tx, prompt_tx);
@@ -213,6 +296,7 @@ fn harness() -> Harness {
         app: create_app(state),
         handle,
         prompts: prompt_rx,
+        options: options_rx,
     }
 }
 
@@ -295,6 +379,25 @@ async fn chat_completions_split_k2_horizon_reasoning_streaming_and_not() {
             assert_eq!(reasoning.trim(), "abc", "{case}");
             assert_eq!(content.trim(), "answer", "{case}");
             assert!(!content.contains("ifm|think"), "{case}");
+        }
+    }
+}
+
+/// #3321: the chat route hands the scheduler the primed variant's close, so
+/// a forced budget close matches the open the template rendered.
+#[tokio::test]
+async fn chat_completions_pass_the_primed_variant_close_to_the_scheduler() {
+    for (effort, _, close) in EFFORTS {
+        for stream in [false, true] {
+            let h = harness();
+            h.chat(stream, effort, &["abc", close, "answer"]).await;
+            let options = h.options.recv().expect("options dispatched");
+            assert!(options.thinking_enter_block_on_start, "{effort}");
+            assert_eq!(
+                options.thinking_primed_close.as_deref(),
+                Some(close),
+                "effort {effort}, stream {stream}"
+            );
         }
     }
 }
