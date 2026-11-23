@@ -23,11 +23,14 @@
 //! Qwen3-VL host preprocessor read the policy through [`QwenImageResizePolicy`]
 //! so the two backends cannot drift apart again.
 //!
-//! Precedence follows HF: the `image_processor` block nested in
-//! `processor_config.json` (what `AutoProcessor` builds from) wins over the
-//! standalone `preprocessor_config.json`, key by key; within one file an
-//! explicit `min_pixels` / `max_pixels` beats `size.shortest_edge` /
-//! `size.longest_edge`.
+//! Precedence follows HF transformers 5.x (`ImageProcessingMixin`'s config
+//! lookup): it picks one whole source, the `image_processor` block nested in
+//! `processor_config.json` when present and the standalone
+//! `preprocessor_config.json` otherwise. The sources are not merged key by
+//! key, so a key the chosen source omits falls back to the class default
+//! (3136 / 12845056 / bicubic) even when the other file states it. Within the
+//! chosen source an explicit `min_pixels` / `max_pixels` beats
+//! `size.shortest_edge` / `size.longest_edge`.
 
 use std::path::Path;
 
@@ -75,27 +78,23 @@ impl QwenImageResizePolicy {
     }
 
     fn from_sources(nested: Option<&Value>, standalone: Option<&Value>) -> Result<Self, String> {
-        let sources = [
-            nested.map(|value| ("processor_config.json image_processor", value)),
-            standalone.map(|value| ("preprocessor_config.json", value)),
-        ];
-        let mut min_pixels = None;
-        let mut max_pixels = None;
-        let mut resample = None;
-        for (name, source) in sources.into_iter().flatten() {
-            let min = bound(name, source, "min_pixels", "shortest_edge")?;
-            let max = bound(name, source, "max_pixels", "longest_edge")?;
-            let code = positive_field(name, source.get("resample"), "resample", true)?;
-            min_pixels = min_pixels.or(min);
-            max_pixels = max_pixels.or(max);
-            resample = resample.or(code);
-        }
-        let policy = Self {
-            min_pixels,
-            max_pixels,
-            resample,
-            has_sidecar: nested.is_some() || standalone.is_some(),
+        // HF reads one whole source; the other file is ignored, not merged.
+        let selected = match (nested, standalone) {
+            (Some(value), _) => Some(("processor_config.json image_processor", value)),
+            (None, Some(value)) => Some(("preprocessor_config.json", value)),
+            (None, None) => None,
         };
+        let mut policy = Self {
+            min_pixels: None,
+            max_pixels: None,
+            resample: None,
+            has_sidecar: selected.is_some(),
+        };
+        if let Some((name, source)) = selected {
+            policy.min_pixels = bound(name, source, "min_pixels", "shortest_edge")?;
+            policy.max_pixels = bound(name, source, "max_pixels", "longest_edge")?;
+            policy.resample = positive_field(name, source.get("resample"), "resample", true)?;
+        }
         let (min, max) = policy.pixel_bounds();
         if min > MAX_SIDECAR_PIXEL_BOUND || max > MAX_SIDECAR_PIXEL_BOUND {
             return Err(format!(

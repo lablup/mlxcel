@@ -96,7 +96,7 @@ fn qwen3_vl_preprocessor_size_block_is_read() {
 /// `processor_config.json` block, so 16384 / 3868706 is the reference and the
 /// standalone 65536 / 16777216 is stale (taking it gives the 224x224 fixture
 /// 64 tokens where the reference has 49). The nested block has no `resample`,
-/// so the standalone bicubic code fills it in.
+/// so the class default (bicubic) applies; the standalone code is not read.
 #[test]
 fn the_nested_processor_config_block_wins_over_preprocessor_config() {
     let policy = read(&[
@@ -112,6 +112,56 @@ fn the_nested_processor_config_block_wins_over_preprocessor_config() {
     ])
     .unwrap();
     assert_eq!(policy.pixel_bounds(), (16_384, 3_868_706));
+    assert_eq!(policy.resample, None);
+    assert_eq!(
+        policy.resize_filter().unwrap(),
+        Some(FilterType::CatmullRom)
+    );
+}
+
+/// HF transformers 5.x selects one whole source rather than merging the two
+/// files: a nested `image_processor` block that states no bounds or resampler
+/// gets the class defaults (3136 / 12845056 / bicubic), even when the
+/// standalone `preprocessor_config.json` beside it states other values.
+#[test]
+fn a_nested_block_without_bounds_takes_class_defaults_not_the_standalone_file() {
+    let policy = read(&[
+        (
+            "processor_config.json",
+            r#"{"image_processor": {"patch_size": 16, "merge_size": 2}}"#,
+        ),
+        (
+            "preprocessor_config.json",
+            r#"{"min_pixels": 65536, "max_pixels": 16777216, "resample": 2,
+                "size": {"shortest_edge": 65536, "longest_edge": 16777216}}"#,
+        ),
+    ])
+    .unwrap();
+    assert!(policy.has_sidecar);
+    assert_eq!((policy.min_pixels, policy.max_pixels), (None, None));
+    assert_eq!(
+        policy.pixel_bounds(),
+        (DEFAULT_MIN_PIXELS, DEFAULT_MAX_PIXELS)
+    );
+    assert_eq!(policy.resample, None);
+    assert_eq!(
+        policy.resize_filter().unwrap(),
+        Some(FilterType::CatmullRom)
+    );
+}
+
+/// Without a nested block the standalone file is the whole source.
+#[test]
+fn a_processor_config_without_an_image_processor_block_falls_back_to_the_standalone_file() {
+    let policy = read(&[
+        (
+            "processor_config.json",
+            r#"{"processor_class": "Qwen3VLProcessor"}"#,
+        ),
+        ("preprocessor_config.json", QWEN3_VL_PREPROCESSOR),
+    ])
+    .unwrap();
+    assert_eq!(policy.pixel_bounds(), (65_536, 16_777_216));
     assert_eq!(policy.resample, Some(3));
 }
 
