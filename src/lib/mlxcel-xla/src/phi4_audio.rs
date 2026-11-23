@@ -336,9 +336,7 @@ fn load_audio_module(
 ) -> Result<IreeAuxiliaryModule, String> {
     let compiler = iree_compile_bin()?;
     let flags = target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Vmfb)?;
     let vmfb = cached_vmfb_path(
         &compiler,
         graph,

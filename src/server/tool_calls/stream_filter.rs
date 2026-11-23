@@ -201,6 +201,11 @@ fn canonical_thinking_pair(delimiter: &str) -> Option<(&'static str, &'static st
             Some(("<|open|>think<|sep|>", "<|close|>think<|sep|>"))
         }
         "◁think▷" | "◁/think▷" => Some(("◁think▷", "◁/think▷")),
+        "<ifm|think>" | "</ifm|think>" => Some(("<ifm|think>", "</ifm|think>")),
+        "<ifm|think_fast>" | "</ifm|think_fast>" => Some(("<ifm|think_fast>", "</ifm|think_fast>")),
+        "<ifm|think_faster>" | "</ifm|think_faster>" => {
+            Some(("<ifm|think_faster>", "</ifm|think_faster>"))
+        }
         _ => None,
     }
 }
@@ -441,6 +446,18 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // markers stay under the longest delimiter.
     ("◁/think▷", DelimiterAction::ExitThinking),
     ("◁think▷", DelimiterAction::EnterThinking),
+    // IFM K2-Horizon (#3299): one pair per `reasoning_effort`, and the
+    // template primes the open, so the model emits only the close. `<if` and
+    // `</if` start no other entry, and no pair's marker is a prefix of
+    // another's (`<ifm|think` continues with `>` or `_fast`, `_fast` with `>`
+    // or `er>`), so the partial-match window resolves each; all six stay under
+    // the longest delimiter.
+    ("</ifm|think>", DelimiterAction::ExitThinking),
+    ("<ifm|think>", DelimiterAction::EnterThinking),
+    ("</ifm|think_fast>", DelimiterAction::ExitThinking),
+    ("<ifm|think_fast>", DelimiterAction::EnterThinking),
+    ("</ifm|think_faster>", DelimiterAction::ExitThinking),
+    ("<ifm|think_faster>", DelimiterAction::EnterThinking),
     // Inkling reasoning span. The same end-message marker closes the
     // scratchpad before the model opens its answer message.
     ("<|end_message|>", DelimiterAction::ExitThinking),

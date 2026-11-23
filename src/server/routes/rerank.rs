@@ -49,6 +49,39 @@ pub const NO_RERANKER_MODEL_MESSAGE: &str = "This server does not support rerank
      sequence-classifier checkpoint or a multi-vector (late-interaction) embedder in -m, or \
      with --reranker-model <path>.";
 
+/// Documents one request may carry unless `MLXCEL_RERANK_MAX_DOCUMENTS`
+/// says otherwise (issue #3296).
+pub(crate) const DEFAULT_MAX_RERANK_DOCUMENTS: usize = 1024;
+
+/// Environment variable that moves [`DEFAULT_MAX_RERANK_DOCUMENTS`].
+const MAX_DOCUMENTS_ENV: &str = "MLXCEL_RERANK_MAX_DOCUMENTS";
+
+/// Parse a `MLXCEL_RERANK_MAX_DOCUMENTS` value. Unset keeps the default; a
+/// value that is not a positive integer is logged and also keeps it, so a typo
+/// never removes the bound.
+fn parse_max_documents(raw: Option<&str>) -> usize {
+    let Some(raw) = raw else {
+        return DEFAULT_MAX_RERANK_DOCUMENTS;
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(limit) if limit > 0 => limit,
+        _ => {
+            tracing::warn!(
+                value = raw,
+                default = DEFAULT_MAX_RERANK_DOCUMENTS,
+                "{MAX_DOCUMENTS_ENV} must be a positive integer; using the default"
+            );
+            DEFAULT_MAX_RERANK_DOCUMENTS
+        }
+    }
+}
+
+/// The per-request document cap, read from the environment once.
+fn max_rerank_documents() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| parse_max_documents(std::env::var(MAX_DOCUMENTS_ENV).ok().as_deref()))
+}
+
 fn invalid_request(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(message, "invalid_request_error")
 }
@@ -89,14 +122,25 @@ pub(crate) fn instruction_unsupported_message(kind: RerankerKind) -> String {
 }
 
 /// Validate the query and every document against the loaded reranker.
+///
+/// Runs before any image is fetched, so an over-long document list costs no
+/// fetch and no model work.
 fn validate_items(
     query: &RerankInput,
     documents: &[RerankInput],
     provider: &dyn RerankModelProvider,
     limits: ImageInputLimits,
+    max_documents: usize,
 ) -> Result<(), ErrorResponse> {
     if documents.is_empty() {
         return Err(invalid_request("`documents` must not be empty"));
+    }
+    if documents.len() > max_documents {
+        return Err(invalid_request(format!(
+            "`documents` holds {} entries; at most {max_documents} are allowed per request \
+             (set by {MAX_DOCUMENTS_ENV})",
+            documents.len()
+        )));
     }
     let image_count = usize::from(query.image_url().is_some())
         + documents
@@ -236,6 +280,7 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         &request.documents,
         provider.as_ref(),
         image_limits,
+        max_rerank_documents(),
     ) {
         return err.into_response();
     }
@@ -331,3 +376,7 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
 #[cfg(test)]
 #[path = "rerank_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rerank_limit_tests.rs"]
+mod limit_tests;

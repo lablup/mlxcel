@@ -488,6 +488,28 @@ fn eos_token_ids_accept_a_number_a_list_or_nothing() {
 }
 
 #[test]
+fn validate_refuses_eos_ids_outside_the_i32_range() {
+    // Narrowing with `as i32` wrapped 4294967298 to 2 and accepted -1 (#3299).
+    let mut a = tiny_config(4);
+    assert!(a.validate().is_ok());
+    for (eos, needle) in [
+        (serde_json::json!(4_294_967_298_u64), "4294967298"),
+        (serde_json::json!([-1]), "-1"),
+        (serde_json::json!([3, 2_147_483_648_u64]), "2147483648"),
+    ] {
+        a.eos_token_id = Some(eos);
+        let err = a.validate().unwrap_err();
+        assert!(
+            err.contains("eos_token_id") && err.contains(needle),
+            "{err}"
+        );
+    }
+    a.eos_token_id = Some(serde_json::json!([0, 2_147_483_647]));
+    assert!(a.validate().is_ok());
+    assert_eq!(a.eos_token_ids(), vec![0, i32::MAX]);
+}
+
+#[test]
 fn position_helpers_shape_and_values() {
     use super::limite_layers::positions_from_offsets;
     let p = positions_from_offset(5, 3);

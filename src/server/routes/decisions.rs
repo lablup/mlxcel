@@ -49,9 +49,20 @@ pub const NO_DECISION_MODEL_MESSAGE: &str = "This server does not serve typed de
 pub(crate) const VIDEO_NEEDS_FFMPEG_MESSAGE: &str = "Video input requires `ffmpeg` on PATH. Install \
      ffmpeg (e.g. `brew install ffmpeg` on macOS or `apt install ffmpeg` on Linux) and retry.";
 
-/// Refuse `videos` on a host without `ffmpeg`. Chat sets no per-request video
-/// count cap, so none is set here either.
+/// Videos one request may carry. Each one is resolved (possibly downloaded)
+/// before the model runs, and the model's token gate refuses an overflow only
+/// after that, so the count is capped up front (issue #3296).
+pub(crate) const MAX_DECISION_VIDEOS: usize = 8;
+
+/// Refuse more than [`MAX_DECISION_VIDEOS`] videos, and `videos` on a host
+/// without `ffmpeg`. Both checks run before any clip is resolved.
 fn check_video_support(video_count: usize, ffmpeg_available: bool) -> Result<(), ErrorResponse> {
+    if video_count > MAX_DECISION_VIDEOS {
+        return Err(invalid_request(format!(
+            "`videos` holds {video_count} entries; at most {MAX_DECISION_VIDEOS} are allowed per \
+             request"
+        )));
+    }
     if video_count > 0 && !ffmpeg_available {
         return Err(invalid_request(VIDEO_NEEDS_FFMPEG_MESSAGE));
     }
@@ -143,12 +154,18 @@ fn parse_body(body: Value) -> Result<DecisionBody, ErrorResponse> {
 
 /// Fetch and decode every medium the request carries.
 ///
-/// Returned video guards keep server-owned temp files alive until the
-/// prediction has finished.
+/// Returned video guards keep server-owned temp files alive; the provider
+/// drops them once the prediction has finished.
 async fn acquire_media(
     state: &AppState,
     body: &DecisionBody,
 ) -> Result<(DecisionMedia, Vec<PrivateTempDir>), ErrorResponse> {
+    // Refuse too many clips, then tell the caller ffmpeg is missing, before
+    // any medium is fetched. The probe is memoized at startup.
+    check_video_support(
+        body.videos.len(),
+        crate::multimodal::video::ffmpeg_available(),
+    )?;
     let limits = current_image_input_limits();
     validate_image_count(body.images.len(), limits)
         .map_err(|err| invalid_request(err.to_string()))?;
@@ -157,12 +174,6 @@ async fn acquire_media(
         images.push(fetch_labeled_image(url, &format!("images[{index}]"), limits).await?);
     }
 
-    // Same order as chat: tell the caller ffmpeg is missing before any clip is
-    // downloaded. The probe is memoized at startup.
-    check_video_support(
-        body.videos.len(),
-        crate::multimodal::video::ffmpeg_available(),
-    )?;
     let mut videos = Vec::with_capacity(body.videos.len());
     let mut guards = Vec::new();
     for (index, url) in body.videos.iter().enumerate() {
@@ -256,9 +267,12 @@ pub async fn create_decisions(State(state): State<AppState>, Json(body): Json<Va
     let started = std::time::Instant::now();
     let worker: Arc<dyn DecisionModelProvider> = provider.clone();
     let request_state = body.state;
-    let outcome =
-        tokio::task::spawn_blocking(move || worker.predict(request_state, questions, media)).await;
-    drop(guards);
+    // The guards move with the prediction: on a timeout the worker may still
+    // be decoding these files, so it, not this handler, removes them.
+    let outcome = tokio::task::spawn_blocking(move || {
+        worker.predict(request_state, questions, media, guards)
+    })
+    .await;
     let result = match outcome {
         Ok(Ok(result)) => result,
         Ok(Err(err)) => return decision_error_response(err).into_response(),

@@ -386,6 +386,35 @@ fn config_reads_the_hyper_fields_and_eos() {
 }
 
 #[test]
+fn config_refuses_eos_ids_outside_the_i32_range() {
+    // Narrowing with `as i32` wrapped 4294967298 to 2 and accepted -1 (#3299).
+    for (eos, needle) in [
+        (serde_json::json!(4_294_967_298_u64), "4294967298"),
+        (serde_json::json!([-1]), "-1"),
+        (serde_json::json!([2, 2_147_483_648_u64]), "2147483648"),
+    ] {
+        let err = serde_json::from_value::<Xing40Config>(config_json(
+            serde_json::json!({ "eos_token_id": eos }),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("eos_token_id") && err.contains(needle),
+            "{err}"
+        );
+    }
+    let mut cfg = hc_test_config(20, 1e-6);
+    assert!(cfg.validate().is_ok());
+    cfg.eos_token_ids = vec![2, -1];
+    assert!(cfg.validate().unwrap_err().contains("eos_token_id -1"));
+    let max: Xing40Config = serde_json::from_value(config_json(
+        serde_json::json!({ "eos_token_id": [0, 2_147_483_647] }),
+    ))
+    .unwrap();
+    assert_eq!(max.eos_token_ids, vec![0, i32::MAX]);
+}
+
+#[test]
 fn config_refuses_unusable_hyper_settings() {
     for (patch, needle) in [
         (serde_json::json!({"hc_mult": 0}), "hc_mult"),
