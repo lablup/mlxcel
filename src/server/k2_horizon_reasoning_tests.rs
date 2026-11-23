@@ -37,7 +37,8 @@ use crate::server::routes::chat::{
     extract_reasoning_content, is_prompt_primed_open_thinking, primed_open_thinking_close_marker,
 };
 use crate::server::thinking_budget::{
-    ThinkingBudget, ThinkingDecision, ThinkingPhase, ThinkingState, resolve_thinking_token_ids,
+    ThinkingBudget, ThinkingDecision, ThinkingPhase, ThinkingState, resolve_primed_close_id,
+    resolve_thinking_token_ids,
 };
 use crate::server::tool_calls::clean_structural_tokens;
 use crate::server::tool_calls::stream_filter::StreamFilter;
@@ -251,6 +252,82 @@ fn a_model_emitted_variant_open_is_closed_with_its_own_close() {
             ThinkingDecision::ForceClose(k2_token_id(&tokenizer, close)),
             "{effort}"
         );
+    }
+}
+
+/// #3321: the scheduler's marker-to-id step resolves each effort's close, and
+/// only for a primed prompt.
+#[test]
+fn the_primed_close_marker_resolves_to_its_token_id() {
+    let tokenizer = k2_tokenizer();
+    for (effort, _, close) in EFFORTS {
+        assert_eq!(
+            resolve_primed_close_id(&tokenizer, Some(close), true),
+            Some(k2_token_id(&tokenizer, close)),
+            "{effort}"
+        );
+        assert_eq!(
+            resolve_primed_close_id(&tokenizer, Some(close), false),
+            None,
+            "{effort}: an unprimed prompt has no primed close"
+        );
+    }
+    assert_eq!(resolve_primed_close_id(&tokenizer, None, true), None);
+    assert_eq!(
+        resolve_primed_close_id(&tokenizer, Some("<|close|>think<|sep|>"), true),
+        None
+    );
+}
+
+/// #3321 edge cases: a `--reasoning-budget-message` run still precedes the
+/// variant close, a zero budget forces the variant close at once, and a
+/// model's own close (matching or not) is let through.
+#[test]
+fn variant_close_edge_cases() {
+    let tokenizer = k2_tokenizer();
+    let ids = resolve_thinking_token_ids(&tokenizer).expect("K2-Horizon ids resolve");
+    for (effort, open, close) in EFFORTS {
+        let close_id = k2_token_id(&tokenizer, close);
+
+        let message = Arc::new(vec![900, 901]);
+        let mut state = ThinkingState::new(Some(ids), Some(budget(1)), true)
+            .with_forced_message(Some(message))
+            .with_primed_close(Some(close_id));
+        state.observe(7);
+        for want in [
+            ThinkingDecision::ForceMessage(900),
+            ThinkingDecision::ForceMessage(901),
+            ThinkingDecision::ForceClose(close_id),
+        ] {
+            let got = state.decide_override(8);
+            assert_eq!(got, want, "{effort}");
+            let emitted = match got {
+                ThinkingDecision::ForceMessage(t) | ThinkingDecision::ForceClose(t) => t,
+                ThinkingDecision::NoOverride => 8,
+            };
+            state.observe(emitted);
+        }
+        assert_eq!(state.phase, ThinkingPhase::Closed, "{effort}");
+
+        let immediate = ThinkingState::new(Some(ids), Some(ThinkingBudget::ImmediateClose), true)
+            .with_primed_close(Some(close_id));
+        assert_eq!(
+            immediate.decide_override(7),
+            ThinkingDecision::ForceClose(close_id),
+            "{effort}"
+        );
+
+        for natural in [ids.close, close_id] {
+            let mut state = ThinkingState::new(Some(ids), Some(budget(8)), false);
+            state.observe(k2_token_id(&tokenizer, open));
+            assert_eq!(
+                state.decide_override(natural),
+                ThinkingDecision::NoOverride,
+                "{effort}"
+            );
+            state.observe(natural);
+            assert_eq!(state.phase, ThinkingPhase::Closed, "{effort}");
+        }
     }
 }
 

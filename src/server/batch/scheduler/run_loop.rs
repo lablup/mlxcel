@@ -213,12 +213,11 @@ impl BatchScheduler {
             // The primed open's close, so a forced close matches the variant
             // the template opened (#3321). Only meaningful when the prompt
             // left the model inside the block.
-            .with_primed_close(
-                primed_close
-                    .filter(|_| enter_block_on_start)
-                    .and_then(|marker| self.tokenizer.token_to_id(marker))
-                    .map(|id| id as i32),
-            )
+            .with_primed_close(crate::server::thinking_budget::resolve_primed_close_id(
+                &self.tokenizer,
+                primed_close,
+                enter_block_on_start,
+            ))
     }
 
     /// Whether [`run`](Self::run) returned because b10621's idle-sleep window

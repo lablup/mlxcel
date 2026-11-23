@@ -256,7 +256,9 @@ impl ThinkingTokenIds {
 
     /// The close that pairs with `open_token` when it opens a block: `close`
     /// for the pair's own open, `alt_closes[i]` for `alt_opens[i]`, `None`
-    /// when `open_token` opens nothing.
+    /// when `open_token` opens nothing. A variant open whose paired close is
+    /// missing from the vocabulary opens nothing either: falling back to
+    /// `close` would force a close the model never pairs with that open.
     pub fn close_for_open(&self, open_token: i32) -> Option<i32> {
         if open_token == self.open {
             return Some(self.close);
@@ -332,6 +334,30 @@ pub fn resolve_thinking_token_ids(
         return Some(ThinkingTokenIds::new(open as i32, close as i32));
     }
     None
+}
+
+/// Resolve the primed open's close marker to a token id (#3321).
+///
+/// `marker` is [`ServerGenerateOptions::thinking_primed_close`]. It only
+/// matters when the prompt left the model inside the block, so `None` is
+/// returned when `enter_block_on_start` is false, and also when the marker is
+/// not a single token in this vocabulary (a multi-token close such as
+/// `<|close|>think<|sep|>`), in which case a forced close falls back to the
+/// pair's own close.
+///
+/// [`ServerGenerateOptions::thinking_primed_close`]: crate::server::ServerGenerateOptions::thinking_primed_close
+///
+/// Used by: `server::batch::scheduler` when it builds a sequence's
+/// [`ThinkingState`].
+pub fn resolve_primed_close_id(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    marker: Option<&str>,
+    enter_block_on_start: bool,
+) -> Option<i32> {
+    marker
+        .filter(|_| enter_block_on_start)
+        .and_then(|marker| tokenizer.token_to_id(marker))
+        .map(|id| id as i32)
 }
 
 /// Runtime state tracking thinking-block position for one sequence.
