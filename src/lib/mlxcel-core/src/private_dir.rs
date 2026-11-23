@@ -71,6 +71,14 @@ pub enum PrivateDirError {
         /// Its permission bits.
         mode: u32,
     },
+    /// A directory above the cache root is group-writable and its group is
+    /// not provably private to the current user.
+    GroupWritable {
+        /// The refused directory.
+        path: PathBuf,
+        /// Its permission bits.
+        mode: u32,
+    },
     /// The entry could not be created, opened, or inspected.
     Io {
         /// The entry.
@@ -92,6 +100,7 @@ impl PrivateDirError {
             | Self::NotARegularFile(path)
             | Self::ForeignOwner { path, .. }
             | Self::Writable { path, .. }
+            | Self::GroupWritable { path, .. }
             | Self::Io { path, .. } => path,
         }
     }
@@ -115,6 +124,14 @@ impl fmt::Display for PrivateDirError {
             Self::Writable { path, mode } => write!(
                 f,
                 "{} is group- or world-writable (mode {mode:o})",
+                path.display()
+            ),
+            Self::GroupWritable { path, mode } => write!(
+                f,
+                "{} is group-writable (mode {mode:o}) and its group is not provably private to \
+                 the current user; run `chmod g-w {}` or set MLXCEL_CACHE_DIR to a private \
+                 directory",
+                path.display(),
                 path.display()
             ),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
@@ -319,58 +336,91 @@ pub fn ensure_private_dir(
 /// Verify that `dir` and every directory above it up to `/` cannot be used by
 /// another user to swap an entry below them: each is a real directory (not a
 /// symlink) owned by `euid` or by root, and is not other-writable unless it is
-/// a root-owned sticky directory such as `/tmp`. Group write is accepted only
-/// when the directory's group is this process's effective gid (the user's own
-/// group under the user-private-group convention, where a umask of 002 leaves
-/// `~/.cache` group-writable); any other group-writable ancestor is refused.
-/// This is the PTX cache overlay's ancestor rule (#2539), except that the
-/// user's own group is trusted, as `ensure_private_dir` never modifies a
-/// directory above the cache root. `dir` should be canonical; it is not
-/// resolved here.
+/// a root-owned sticky directory such as `/tmp`. This is the PTX cache
+/// overlay's strict ancestor rule (#2539), with one relaxation for the user's
+/// own group, so a `~/.cache` left group-writable by a umask of 002 under user
+/// private groups keeps working.
+///
+/// A group-writable ancestor is accepted only on Linux and only when all of
+/// these hold; otherwise it is refused with
+/// [`PrivateDirError::GroupWritable`], whose message names the path and the
+/// fix (`chmod g-w <path>` or a private `MLXCEL_CACHE_DIR`):
+///
+/// 1. its group is the process's effective gid, `euid` is this process's
+///    effective uid, and the directory is not other-writable;
+/// 2. `/etc/nsswitch.conf` lists only `files`, `systemd` or `compat` for both
+///    `passwd` and `group` (a missing or unreadable file is refused);
+/// 3. every `/etc/group` line for that gid has no member besides the current
+///    user's name;
+/// 4. no `/etc/passwd` account other than the current user has that gid as its
+///    primary group.
+///
+/// Conditions 2 to 4 are read once per process from the plain-text files with
+/// bounded reads. Nothing above the cache root is modified. `dir` should be
+/// canonical; it is not resolved here.
 pub fn verify_trusted_ancestors(dir: &Path, euid: u32) -> Result<(), PrivateDirError> {
     #[cfg(unix)]
     {
         // SAFETY: getegid has no preconditions and cannot fail.
         let egid = unsafe { libc::getegid() };
-        let mut current = Some(dir);
-        while let Some(component) = current {
-            let metadata =
-                std::fs::symlink_metadata(component).map_err(|source| PrivateDirError::Io {
-                    path: component.to_path_buf(),
-                    source,
-                })?;
-            if metadata.file_type().is_symlink() {
-                return Err(PrivateDirError::Symlink(component.to_path_buf()));
-            }
-            if !metadata.is_dir() {
-                return Err(PrivateDirError::NotADirectory(component.to_path_buf()));
-            }
-            if metadata.uid() != euid && metadata.uid() != 0 {
-                return Err(PrivateDirError::ForeignOwner {
-                    path: component.to_path_buf(),
-                    owner: metadata.uid(),
-                    euid,
-                });
-            }
-            let mode = metadata.mode() & 0o7777;
-            let root_sticky = metadata.uid() == 0 && mode & 0o1000 != 0;
-            let other_write = mode & 0o002 != 0;
-            let foreign_group_write = mode & 0o020 != 0 && metadata.gid() != egid;
-            if (other_write || foreign_group_write) && !root_sticky {
-                return Err(PrivateDirError::Writable {
-                    path: component.to_path_buf(),
-                    mode,
-                });
-            }
-            current = component.parent();
-        }
-        Ok(())
+        let own_group_private =
+            euid == current_euid() && crate::private_group::own_group_is_private();
+        verify_trusted_ancestors_with(dir, euid, |gid| gid == egid && own_group_private)
     }
     #[cfg(not(unix))]
     {
         let _ = (dir, euid);
         Ok(())
     }
+}
+
+/// [`verify_trusted_ancestors`] with the group-trust decision as a parameter,
+/// so tests can drive both outcomes on any host.
+#[cfg(unix)]
+pub(crate) fn verify_trusted_ancestors_with(
+    dir: &Path,
+    euid: u32,
+    group_is_private: impl Fn(u32) -> bool,
+) -> Result<(), PrivateDirError> {
+    let mut current = Some(dir);
+    while let Some(component) = current {
+        let metadata =
+            std::fs::symlink_metadata(component).map_err(|source| PrivateDirError::Io {
+                path: component.to_path_buf(),
+                source,
+            })?;
+        if metadata.file_type().is_symlink() {
+            return Err(PrivateDirError::Symlink(component.to_path_buf()));
+        }
+        if !metadata.is_dir() {
+            return Err(PrivateDirError::NotADirectory(component.to_path_buf()));
+        }
+        if metadata.uid() != euid && metadata.uid() != 0 {
+            return Err(PrivateDirError::ForeignOwner {
+                path: component.to_path_buf(),
+                owner: metadata.uid(),
+                euid,
+            });
+        }
+        let mode = metadata.mode() & 0o7777;
+        let root_sticky = metadata.uid() == 0 && mode & 0o1000 != 0;
+        if !root_sticky {
+            if mode & 0o002 != 0 {
+                return Err(PrivateDirError::Writable {
+                    path: component.to_path_buf(),
+                    mode,
+                });
+            }
+            if mode & 0o020 != 0 && !group_is_private(metadata.gid()) {
+                return Err(PrivateDirError::GroupWritable {
+                    path: component.to_path_buf(),
+                    mode,
+                });
+            }
+        }
+        current = component.parent();
+    }
+    Ok(())
 }
 
 /// Open an existing cache file for reading after checking it on the opened

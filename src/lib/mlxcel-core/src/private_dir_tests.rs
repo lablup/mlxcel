@@ -199,9 +199,41 @@ fn a_directory_above_the_root_that_others_can_write_is_refused() {
     let own_group = tmp.path().join("own-group");
     std::fs::create_dir(&own_group).expect("dir");
     chmod(&own_group, 0o775);
-    ensure_private_dir(&own_group.join("mlxcel"), Path::new("xla"), true, euid)
-        .expect("the user's own group may write an ancestor");
-    assert_eq!(mode(&own_group), 0o775);
+    verify_trusted_ancestors_with(&own_group, euid, |_| true)
+        .expect("a provably private own group may write an ancestor");
+    assert_eq!(mode(&own_group), 0o775, "an ancestor is never modified");
+}
+
+/// The user's own group is trusted on an ancestor only when it is provably
+/// private; otherwise the strict rule applies and the message names the fix.
+#[test]
+fn a_group_writable_ancestor_is_refused_unless_the_group_is_private() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let euid = current_euid();
+    let dir = tmp.path().join("cache");
+    std::fs::create_dir(&dir).expect("dir");
+    chmod(&dir, 0o775);
+    let error = verify_trusted_ancestors_with(&dir, euid, |_| false).unwrap_err();
+    assert!(
+        matches!(&error, PrivateDirError::GroupWritable { path, .. } if *path == dir),
+        "{error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("chmod g-w {}", dir.display())),
+        "{message}"
+    );
+    assert!(message.contains("MLXCEL_CACHE_DIR"), "{message}");
+
+    // Other write is refused even when the group is private.
+    chmod(&dir, 0o777);
+    assert!(matches!(
+        verify_trusted_ancestors_with(&dir, euid, |_| true),
+        Err(PrivateDirError::Writable { .. })
+    ));
+    // The relaxation never applies to a uid other than this process's.
+    chmod(&dir, 0o775);
+    assert!(verify_trusted_ancestors(&dir, euid.wrapping_add(1)).is_err());
 }
 
 /// A symlink above the root is resolved once, and the returned leaf names the

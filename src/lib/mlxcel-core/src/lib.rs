@@ -4657,6 +4657,8 @@ mod ptx_cache_dirs;
 // Owner-private cache directories and files for artifacts loaded as code
 // (the OpenXLA/IREE caches, #3248). Shares the PTX cache's group-write repair.
 pub mod private_dir;
+// Plain-text check that the user's own group is private (#3248).
+mod private_group;
 
 // Shape-bucketed kernel autotuner (issue #906): the TunableOp contract, the
 // median-of-N profiling harness, the persistent tactic cache, and the first

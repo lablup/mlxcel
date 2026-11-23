@@ -97,17 +97,28 @@ the compile. Earlier releases kept them under the shared temp directory
 (`/tmp/mlxcel-xla-*`), where another local user could plant a VMFB, which is
 native code on a CPU target (#3248). A cached artifact is loaded only when the
 cache root, `xla`, and the cache directory are real directories owned by the
-current user without group or other write access, no directory above the
-cache root can be written by another user (a root-owned sticky directory such
-as `/tmp` is fine, and group write is accepted only for the user's own group),
-and the artifact is a regular file with the same properties; mlxcel creates
-these directories with
-mode `0700` and its files with mode `0600`, and removes group write from the
-directories it manages (and from the cache root when `MLXCEL_CACHE_DIR` is
-unset). Otherwise stderr gets one `[mlxcel-xla] refusing the compiled-artifact
-cache at <path>: <reason>` line and the graph is compiled into a fresh private
-`mlxcel-xla-XXXXXX` directory under the temp directory instead, so the load
-still works but pays the compile (that directory is not removed at exit). To clear the cache, delete
+current user without group or other write access, the artifact is a regular
+file with the same properties, and every directory above the cache root up to
+`/` is a real directory owned by the current user or root that no other user
+can write. A root-owned sticky directory such as `/tmp` passes. A
+group-writable directory above the root (for example `~/.cache` created under
+a `umask` of `002`) passes only on Linux and only when all of these hold: its
+group is the process's effective group and it is not other-writable;
+`/etc/nsswitch.conf` lists only `files`, `systemd` or `compat` for both
+`passwd` and `group` (a missing or unreadable file, or any other source such
+as `sss`, `ldap`, `nis` or `winbind`, fails the check); every `/etc/group`
+entry for that gid has no member besides the current user; and no other
+`/etc/passwd` account has that gid as its primary group. These files are read
+once per process. Otherwise that directory is refused with a message naming
+it and the fix: `chmod g-w <path>`, or set `MLXCEL_CACHE_DIR` to a private
+directory. mlxcel creates its cache directories with mode `0700` and its files
+with mode `0600`, removes group write from the directories it manages (and
+from the cache root when `MLXCEL_CACHE_DIR` is unset), and never changes
+anything above the root. When a check fails, stderr gets one `[mlxcel-xla]
+refusing the compiled-artifact cache at <path>: <reason>` line and the graph
+is compiled into a fresh private `mlxcel-xla-XXXXXX` directory under the temp
+directory instead, so the load still works but pays the compile (that
+directory is not removed at exit). To clear the cache, delete
 `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/xla`; the old `/tmp/mlxcel-xla-*`
 directories are no longer read and can be deleted.
 
