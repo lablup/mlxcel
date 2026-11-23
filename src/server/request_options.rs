@@ -478,6 +478,7 @@ pub(crate) fn build_server_generate_options_with_live(
         logprobs,
         reasoning_budget: overrides.reasoning_budget,
         thinking_enter_block_on_start: overrides.thinking_enter_block_on_start,
+        thinking_primed_close: None,
         // Default unarmed; routes that accept the b10621 `reasoning_control`
         // field replace this with the shared force flag they registered in
         // the completion-control registry (#1444).

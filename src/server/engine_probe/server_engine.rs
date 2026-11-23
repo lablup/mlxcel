@@ -292,6 +292,7 @@ impl ServerEngine {
             post_sampling_probs: false,
             reasoning_budget: Default::default(),
             thinking_enter_block_on_start: false,
+            thinking_primed_close: None,
             reasoning_control: None,
             prompt_cache_ctx,
             structured: None,

@@ -222,6 +222,8 @@ pub(crate) async fn prepare_generation(
     // `ThinkingState` then counts reasoning from the first token, as on
     // `/v1/chat/completions`.
     options.thinking_enter_block_on_start = primed_open_thinking;
+    options.thinking_primed_close =
+        super::chat::primed_open_thinking_close_marker(&state.thinking_markers, &prepared.prompt);
     options.structured = structured;
     // Wire the prompt-prefix KV cache (epic #116) into the streaming Responses
     // path too, before `options`/`translated` move into the spawned task.

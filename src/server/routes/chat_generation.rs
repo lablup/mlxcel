@@ -247,6 +247,9 @@ pub(crate) async fn prepare_chat_generation<'r>(
     // `ThinkingState` counts reasoning from the first decoded token only when
     // the prompt left the model inside an open thinking block.
     options.thinking_enter_block_on_start = primed_open_thinking;
+    // The primed open's own close, which a forced budget close must use
+    // (K2-Horizon effort variants, #3321).
+    options.thinking_primed_close = primed_close_marker.clone();
     options.structured = structured;
     if request.logprobs == Some(true) {
         options.logprobs = LogprobsConfig {

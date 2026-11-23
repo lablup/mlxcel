@@ -236,6 +236,11 @@ pub struct ThinkingTokenIds {
     /// `<ifm|think_fast>` closes with `</ifm|think_fast>`, not `</ifm|think>`
     /// (#3299). `None` slots are unused.
     pub alt_closes: [Option<i32>; 2],
+    /// Open ids of the same variants, index-paired with
+    /// [`alt_closes`](Self::alt_closes): a model that emits
+    /// `alt_opens[i]` itself enters the block and is closed with
+    /// `alt_closes[i]` (#3321). `None` slots are unused.
+    pub alt_opens: [Option<i32>; 2],
 }
 
 impl ThinkingTokenIds {
@@ -245,7 +250,23 @@ impl ThinkingTokenIds {
             open,
             close,
             alt_closes: [None, None],
+            alt_opens: [None, None],
         }
+    }
+
+    /// The close that pairs with `open_token` when it opens a block: `close`
+    /// for the pair's own open, `alt_closes[i]` for `alt_opens[i]`, `None`
+    /// when `open_token` opens nothing. A variant open whose paired close is
+    /// missing from the vocabulary opens nothing either: falling back to
+    /// `close` would force a close the model never pairs with that open.
+    pub fn close_for_open(&self, open_token: i32) -> Option<i32> {
+        if open_token == self.open {
+            return Some(self.close);
+        }
+        self.alt_opens
+            .iter()
+            .zip(self.alt_closes)
+            .find_map(|(open, close)| (*open == Some(open_token)).then_some(close).flatten())
     }
 
     /// Whether `token` closes the block: the pair's close or a variant's.
@@ -287,8 +308,14 @@ pub fn resolve_thinking_token_ids(
             .iter()
             .find(|(primary, _)| *primary == "<ifm|think>")
             .map_or(&[][..], |(_, variants)| *variants);
-        for (slot, (_, variant_close)) in ids.alt_closes.iter_mut().zip(variants) {
-            *slot = hf.token_to_id(variant_close).map(|id| id as i32);
+        for ((open_slot, close_slot), (variant_open, variant_close)) in ids
+            .alt_opens
+            .iter_mut()
+            .zip(ids.alt_closes.iter_mut())
+            .zip(variants)
+        {
+            *open_slot = hf.token_to_id(variant_open).map(|id| id as i32);
+            *close_slot = hf.token_to_id(variant_close).map(|id| id as i32);
         }
         return Some(ids);
     }
@@ -314,6 +341,30 @@ pub fn resolve_thinking_token_ids(
         return Some(ThinkingTokenIds::new(open as i32, close as i32));
     }
     None
+}
+
+/// Resolve the primed open's close marker to a token id (#3321).
+///
+/// `marker` is [`ServerGenerateOptions::thinking_primed_close`]. It only
+/// matters when the prompt left the model inside the block, so `None` is
+/// returned when `enter_block_on_start` is false, and also when the marker is
+/// not a single token in this vocabulary (a multi-token close such as
+/// `<|close|>think<|sep|>`), in which case a forced close falls back to the
+/// pair's own close.
+///
+/// [`ServerGenerateOptions::thinking_primed_close`]: crate::server::ServerGenerateOptions::thinking_primed_close
+///
+/// Used by: `server::batch::scheduler` when it builds a sequence's
+/// [`ThinkingState`].
+pub fn resolve_primed_close_id(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    marker: Option<&str>,
+    enter_block_on_start: bool,
+) -> Option<i32> {
+    marker
+        .filter(|_| enter_block_on_start)
+        .and_then(|marker| tokenizer.token_to_id(marker))
+        .map(|id| id as i32)
 }
 
 /// Runtime state tracking thinking-block position for one sequence.
@@ -381,6 +432,13 @@ pub struct ThinkingState {
     /// [`decide_override`](Self::decide_override) forced, so the cursor cannot
     /// run ahead of what the client received.
     forced_message_cursor: usize,
+    /// The close tag that pairs with the open that started this block: set
+    /// by [`observe`](Self::observe) when the model emits an open, or by
+    /// [`with_primed_close`](Self::with_primed_close) when the prompt primed
+    /// one. Both forcing paths emit it, falling back to the pair's `close`
+    /// when unset, so a K2-Horizon block opened with `<ifm|think_fast>` is
+    /// closed with `</ifm|think_fast>` rather than `</ifm|think>` (#3321).
+    active_close: Option<i32>,
 }
 
 impl ThinkingState {
@@ -403,6 +461,7 @@ impl ThinkingState {
             force_end: None,
             forced_message: None,
             forced_message_cursor: 0,
+            active_close: None,
         }
     }
 
@@ -415,6 +474,24 @@ impl ThinkingState {
     pub fn with_forced_message(mut self, tokens: Option<std::sync::Arc<Vec<i32>>>) -> Self {
         self.forced_message = tokens.filter(|run| !run.is_empty());
         self
+    }
+
+    /// Record the close tag of the block the prompt primed (#3321).
+    ///
+    /// `close` is the token id of the primed open's close marker. It is kept
+    /// only when it is one of the pair's closes ([`ThinkingTokenIds::is_close`]),
+    /// so an id from an unrelated marker family cannot be forced.
+    #[must_use]
+    pub fn with_primed_close(mut self, close: Option<i32>) -> Self {
+        self.active_close = close.filter(|id| self.token_ids.is_some_and(|ids| ids.is_close(*id)));
+        self
+    }
+
+    /// The close tag a forcing path emits: the one paired with the open that
+    /// started this block, or the pair's own close when that is unknown.
+    #[inline]
+    fn forced_close(&self, ids: ThinkingTokenIds) -> i32 {
+        self.active_close.unwrap_or(ids.close)
     }
 
     /// Attach the runtime force-end flag armed by the request's
@@ -442,6 +519,7 @@ impl ThinkingState {
             force_end: None,
             forced_message: None,
             forced_message_cursor: 0,
+            active_close: None,
         }
     }
 
@@ -492,7 +570,7 @@ impl ThinkingState {
                 if self.enter_block_on_start
                     && (forced || self.budget.is_some_and(|b| b.cap() == 0))
                 {
-                    return self.forcing_decision(ids.close);
+                    return self.forcing_decision(self.forced_close(ids));
                 }
                 // Otherwise wait until we detect `<think>` open; no override
                 // yet. (Budget=0 without a primed template still waits for
@@ -506,7 +584,7 @@ impl ThinkingState {
                     return ThinkingDecision::NoOverride;
                 }
                 if forced || self.budget.is_some_and(|b| self.in_block_count >= b.cap()) {
-                    self.forcing_decision(ids.close)
+                    self.forcing_decision(self.forced_close(ids))
                 } else {
                     ThinkingDecision::NoOverride
                 }
@@ -596,9 +674,10 @@ impl ThinkingState {
                         self.phase = ThinkingPhase::InBlock;
                         self.in_block_count = 1;
                     }
-                } else if final_token == ids.open {
+                } else if let Some(close) = ids.close_for_open(final_token) {
                     self.phase = ThinkingPhase::InBlock;
                     self.in_block_count = 0;
+                    self.active_close = Some(close);
                 }
                 // Otherwise remain Pending — the model chose not to reason.
             }

@@ -365,7 +365,7 @@ fn verify_and_rollback(
     let input = mlxcel_core::from_slice_i32(tokens, &[batch, 4]);
     let out = model.forward_speculative(&input, &mut caches, &[]);
     let kept = model.rollback_speculative_cache(&mut caches, &out.gdn_states, accepted, 4);
-    assert_eq!(kept, accepted[0]);
+    assert_eq!(kept, *accepted.iter().max().expect("at least one row"));
     caches
 }
 
@@ -377,12 +377,43 @@ fn row(tensor: &mlxcel_core::MlxArray, r: i32) -> mlxcel_core::UniquePtr<mlxcel_
     mlxcel_core::slice(tensor, &start, &stop)
 }
 
+/// A ragged batched accept (issue #2442) compacts each row to its own
+/// logical end instead of panicking: every row's gated-delta state and conv
+/// window match a B = 1 verify of that row rolled back to that row's accept,
+/// and the shared attention offset lands at `max(accepted) + 1`.
 #[test]
 #[ignore = "requires serial MLX execution"]
-#[should_panic(expected = "requires uniform per-row acceptance")]
-fn rollback_speculative_cache_panics_on_ragged_batched_accepts() {
+fn rollback_speculative_cache_compacts_ragged_batched_accepts() {
     let model = two_layer_model();
-    verify_and_rollback(&model, &[1, 2, 3, 4, 5, 6, 7, 0], &[3, 1]);
+    let rows = [[1, 2, 3, 4], [5, 6, 7, 0]];
+    let accepted = [3, 1];
+    let batched = verify_and_rollback(&model, rows.as_flattened(), &accepted);
+
+    let Qwen3NextCache::Attention(kv) = &batched[1] else {
+        panic!("layer 1 of the synthetic model is a full-attention layer");
+    };
+    assert_eq!(kv.offset, 4, "attention offset is max(accepted) + 1");
+    let Qwen3NextCache::Linear(linear) = &batched[0] else {
+        panic!("layer 0 of the synthetic model is a gated-delta layer");
+    };
+    let conv = linear.conv_state.as_ref().expect("conv state");
+    assert_eq!(mlxcel_core::array_shape(conv)[0], 2);
+    let state = linear.state_cache.as_ref().expect("gated-delta state");
+
+    for (r, tokens) in rows.iter().enumerate() {
+        let single = verify_and_rollback(&model, tokens, &[accepted[r]]);
+        let Qwen3NextCache::Linear(want) = &single[0] else {
+            unreachable!()
+        };
+        assert_allclose(
+            &row(conv, r as i32),
+            want.conv_state.as_ref().expect("B = 1 conv state"),
+        );
+        assert_allclose(
+            &row(state, r as i32),
+            want.state_cache.as_ref().expect("B = 1 gated-delta state"),
+        );
+    }
 }
 
 /// A uniform batched accept rolls every row back to the same position, and
