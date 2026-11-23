@@ -1707,8 +1707,19 @@ impl SwitchGLU {
         self.activation
     }
 
+    /// The `(gate, up, down)` expert planes, for a caller that drives its own
+    /// expert kernel over them.
+    ///
+    /// Used by: Inkling 2 (`kernels::grouped_expert_projections`, #3359)
+    pub(crate) fn projections(&self) -> [&SwitchLinear; 3] {
+        [&self.gate_proj, &self.up_proj, &self.down_proj]
+    }
+
     /// Apply the configured activation to a gate / up pair.
-    fn activate(&self, x_gate: &MlxArray, x_up: &MlxArray) -> UniquePtr<MlxArray> {
+    ///
+    /// Used by: `SwitchGLU`'s own forwards, and Inkling 2
+    /// (`kernels::grouped_expert_projections`, #3359)
+    pub(crate) fn activate(&self, x_gate: &MlxArray, x_up: &MlxArray) -> UniquePtr<MlxArray> {
         match self.activation {
             SwitchGluActivation::SwiGlu => mlxcel_core::compiled_swiglu_activation(x_gate, x_up),
             SwitchGluActivation::SiTU { beta, linear_beta } => {

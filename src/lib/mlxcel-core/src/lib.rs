@@ -876,6 +876,64 @@ mod ffi {
             bits: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
+        /// Whether the Inkling 2 Mini Metal kernels run here (#3359): a GPU
+        /// default device with a Metal port.
+        /// Used by: `inkling2_kernels::available`.
+        fn inkling2_kernels_available() -> bool;
+
+        /// Inkling 2 static short convolution in one kernel (#3359): see
+        /// `inkling2_kernels::short_convolution`. `residual` may be null.
+        /// Throws off-Metal or outside the shape contract, so `-> Result`.
+        /// Used by: `inkling2_kernels::short_convolution`.
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn inkling2_short_convolution(
+            history: &MlxArray,
+            weight: &MlxArray,
+            x: &MlxArray,
+            residual: *const MlxArray,
+            output_dtype: i32,
+            margin: i32,
+            out: &mut UniquePtr<MlxArray>,
+            next_history: &mut UniquePtr<MlxArray>,
+        ) -> Result<()>;
+
+        /// Inkling 2 attention head preparation in one kernel (#3359): see
+        /// `inkling2_kernels::prepare_attention_heads`. `-> Result` as above.
+        /// Used by: `inkling2_kernels::prepare_attention_heads`.
+        #[allow(clippy::too_many_arguments)]
+        fn inkling2_prepare_attention_heads(
+            q: &MlxArray,
+            k: &MlxArray,
+            v: &MlxArray,
+            r: &MlxArray,
+            q_scale: &MlxArray,
+            r_scale: &MlxArray,
+            clip: f32,
+            rel_clip: f32,
+            eps: f32,
+            q_out: &mut UniquePtr<MlxArray>,
+            k_out: &mut UniquePtr<MlxArray>,
+            v_out: &mut UniquePtr<MlxArray>,
+            r_out: &mut UniquePtr<MlxArray>,
+        ) -> Result<()>;
+
+        /// One grouped native-quantized expert projection over sorted routes
+        /// (#3359): see `inkling2_kernels::grouped_expert_qmv`. `global_scale`
+        /// may be null. `-> Result` as above.
+        /// Used by: `inkling2_kernels::grouped_expert_qmv`.
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn inkling2_grouped_expert_qmv(
+            x: &MlxArray,
+            w: &MlxArray,
+            scales: &MlxArray,
+            global_scale: *const MlxArray,
+            experts: &MlxArray,
+            source: &MlxArray,
+            destination: &MlxArray,
+            bits: i32,
+            group_size: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Compiled GeGLU activation: gelu(gate) * x — single fused kernel
         /// Used by: legacy/tests for precise GeGLU
         fn compiled_geglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
@@ -4558,6 +4616,8 @@ pub mod speculative;
 // Drafter trait + DrafterKind enum + model_type auto-detection. Foundational scaffolding for the Gemma 4 MTP and Qwen 3.5
 // DFlash drafter ports. Concrete drafter impls land.
 pub mod drafter;
+/// Inkling 2 Mini Metal kernels (issue #3359).
+pub mod inkling2_kernels;
 /// Shared Inkling decoder-layer primitives used by the target and native MTP drafter.
 pub mod inkling_layer;
 

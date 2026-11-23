@@ -430,3 +430,29 @@ fn trim_rewinds_kv_and_convolution_state_exactly() {
         "a refused trim must not change the state"
     );
 }
+
+/// Prompt-lookup verify rounds are allowed: a verify block longer than the
+/// convolution margin can still be rejected whole and re-decoded to the same
+/// logits (issue #3359 makes the grouped expert kernel reachable this way).
+#[test]
+fn a_rejected_verify_block_rewinds_exactly() {
+    let model = model(3, false);
+    assert!(model.supports_speculative_verify_rewind());
+    assert!(
+        mlxcel_core::speculative::prompt_lookup::prompt_lookup_unsupported_reason(&model).is_none()
+    );
+    let sequence = tokens(60, 6);
+    let mut caches = model.make_caches();
+    let _ = rows(&model.forward(&ids(&sequence[..40]), &mut caches, None));
+    let draft: Vec<i32> = tokens(20, 9);
+    {
+        let _speculative = mlxcel_core::cache::DecodeLookaheadAppendScope::enter();
+        let _ = rows(&model.forward(&ids(&draft), &mut caches, None));
+    }
+    model.trim_state(None, 20).unwrap();
+    let again = rows(&model.forward(&ids(&sequence[40..]), &mut caches, None));
+    let full = run(&model, &[&sequence]);
+    for (row, (a, b)) in again.iter().zip(&full[40..]).enumerate() {
+        assert!(max_diff(a, b) < 2e-4, "row {row}: {}", max_diff(a, b));
+    }
+}

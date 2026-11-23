@@ -633,6 +633,43 @@ std::unique_ptr<MlxArray> mla_absorbed_decode_fused_quantized(
     int32_t group_size,
     int32_t bits);
 
+// Inkling 2 Mini Metal kernels (#3359), Metal only. Each throws off-Metal or
+// outside its contract; the Rust declarations are `-> Result`.
+bool inkling2_kernels_available();
+void inkling2_short_convolution(
+    const MlxArray& history,
+    const MlxArray& weight,
+    const MlxArray& x,
+    const MlxArray* residual,
+    int32_t output_dtype,
+    int32_t margin,
+    std::unique_ptr<MlxArray>& out,
+    std::unique_ptr<MlxArray>& next_history);
+void inkling2_prepare_attention_heads(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    const MlxArray& r,
+    const MlxArray& q_scale,
+    const MlxArray& r_scale,
+    float clip,
+    float rel_clip,
+    float eps,
+    std::unique_ptr<MlxArray>& q_out,
+    std::unique_ptr<MlxArray>& k_out,
+    std::unique_ptr<MlxArray>& v_out,
+    std::unique_ptr<MlxArray>& r_out);
+std::unique_ptr<MlxArray> inkling2_grouped_expert_qmv(
+    const MlxArray& x,
+    const MlxArray& w,
+    const MlxArray& scales,
+    const MlxArray* global_scale,
+    const MlxArray& experts,
+    const MlxArray& source,
+    const MlxArray& destination,
+    int32_t bits,
+    int32_t group_size);
+
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
 // gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype (#2548)
 // Used by: Gemma3n MLP layers with activation_sparsity > 0

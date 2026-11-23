@@ -299,6 +299,21 @@ impl LanguageModel for Inkling2Model {
         Ok(())
     }
 
+    /// A verify block keeps at least as many older convolution rows and
+    /// sliding keys as it appends (`conv::history_margin`, the sliding
+    /// margin in `attention.rs`), so [`Self::rewind_decode_appends`] can stop
+    /// anywhere inside it. This is what lets prompt-lookup verify rounds, and
+    /// with them the grouped expert kernel (#3359), run on Inkling 2.
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        true
+    }
+
+    /// Unwind the newest `n` positions of `seq_id` through [`Self::trim_state`],
+    /// which refuses without mutation when a margin is too short.
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        self.trim_state(Some(seq_id), n)
+    }
+
     fn trim_state(&self, seq: Option<SequenceId>, excess: i32) -> Result<(), String> {
         if excess <= 0 {
             return Ok(());
