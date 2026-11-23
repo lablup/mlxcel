@@ -38,6 +38,49 @@ allow_patterns=['*.json','*.safetensors','tokenizer*'], \
 local_dir='models/Llama-3.2-1B-Instruct')"
 ```
 
+## Setup (Linux x86_64, oracle venv for the SSM probe)
+
+The SSM oracle (`ssm_oracle.py`, issue #3337) needs only CPU torch and
+transformers from `requirements.lock`; it does not use the IREE Python
+packages, because the XLA side runs through the Rust shim
+(`examples/xla_ssm_probe.rs`) with the ROCm toolchain's `iree-compile`.
+These steps produced the venv on the gfx1151 host (Python 3.12,
+torch 2.12.1+cpu, transformers 5.12.1):
+
+```bash
+cd spike/openxla
+uv venv --python 3.12 .venv
+uv pip install --python .venv -r requirements.lock \
+    --index-strategy unsafe-best-match \
+    --extra-index-url https://download.pytorch.org/whl/cpu
+.venv/bin/python -c "import torch, transformers.models.mamba2; print(torch.__version__)"
+```
+
+A git worktree can symlink `spike/openxla/.venv` to an existing venv (it is
+gitignored), or point the scripts at one with
+`MLXCEL_ORACLE_PYTHON=/path/to/.venv/bin/python`.
+
+## SSM scan probe (issue #3337)
+
+```bash
+eval "$(scripts/iree/setup-rocm.sh --env)"
+export MLXCEL_XLA_ROCM_TARGET=gfx1151
+PY=spike/openxla/.venv/bin/python
+# A private scratch directory: the scripts write .npy files by fixed names and
+# would follow a link planted at a predictable path in a shared /tmp.
+WORK="$(mktemp -d -t ssm-probe.XXXXXX)"
+scripts/rocm_gpu_guard.sh --hold -- cargo build --release --features xla-iree --example xla_ssm_probe
+# one case by hand
+$PY spike/openxla/ssm_oracle.py --emit-inputs "$WORK/inputs" --mode prefill --real-len 100
+scripts/rocm_gpu_guard.sh --hold -- cargo run --release --features xla-iree \
+    --example xla_ssm_probe -- --inputs "$WORK/inputs" --device hip --out "$WORK/hip"
+$PY spike/openxla/ssm_oracle.py --check "$WORK/hip"
+# every acceptance case on local-task and hip
+scripts/rocm_gpu_guard.sh --hold -- spike/openxla/ssm_gate.sh "$WORK/gate"
+# the prefill-lowering measurements behind FINDINGS_ssm.md
+scripts/rocm_gpu_guard.sh --hold -- $PY spike/openxla/ssm_lowering_measure.py --out "$WORK/measure"
+```
+
 ## Run
 
 ```bash

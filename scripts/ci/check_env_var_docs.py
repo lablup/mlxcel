@@ -161,6 +161,8 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_DUMP_DIR",
         "MLXCEL_DUMP_OUT",
         "MLXCEL_MOE_N",
+        "MLXCEL_SSM_MODE",
+        "MLXCEL_SSM_T",
     )),
     ("internal diagnostic: layer window of the xla-diagnostics #[ignore] "
      "Gemma3n all-layer trace test", (

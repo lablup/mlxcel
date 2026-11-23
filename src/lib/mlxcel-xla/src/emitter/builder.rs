@@ -1655,6 +1655,13 @@ impl Builder {
     pub fn logical_not(&mut self, a: &Val) -> Val {
         self.unary("not", a)
     }
+    pub fn abs(&mut self, a: &Val) -> Val {
+        self.unary("abs", a)
+    }
+    /// `log(1 + a)`, accurate for small `a` (the stable softplus tail).
+    pub fn log_plus_one(&mut self, a: &Val) -> Val {
+        self.unary("log_plus_one", a)
+    }
 
     /// Error function from the CHLO extension accepted by StableHLO import.
     /// Gemma3n's sparse GELU uses the exact erf form (the ordinary GeGLU path
@@ -2041,6 +2048,48 @@ impl Builder {
             r,
             lhs.name,
             rhs.name,
+            dims_list(lhs_contract),
+            dims_list(rhs_contract),
+            lhs.ty.render(),
+            rhs.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
+    /// A batched contraction that never demotes its f32 inputs, whatever the
+    /// graph precision. The SSM scan (issue #3337) runs its recurrence
+    /// contractions through this so the state stays f32 on the f16 path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dot_general_keep_f32(
+        &mut self,
+        lhs: &Val,
+        rhs: &Val,
+        lhs_batch: &[usize],
+        rhs_batch: &[usize],
+        lhs_contract: &[usize],
+        rhs_contract: &[usize],
+        out_shape: Vec<usize>,
+    ) -> Val {
+        assert_eq!(lhs.ty.elt, "f32");
+        assert_eq!(rhs.ty.elt, "f32");
+        let ty = Ty::f32(out_shape);
+        let r = self.fresh();
+        let batch = if lhs_batch.is_empty() && rhs_batch.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "batching_dims = {} x {}, ",
+                dims_list(lhs_batch),
+                dims_list(rhs_batch)
+            )
+        };
+        self.line(format!(
+            "{} = stablehlo.dot_general {}, {}, {}contracting_dims = {} x {} : ({}, {}) -> {}",
+            r,
+            lhs.name,
+            rhs.name,
+            batch,
             dims_list(lhs_contract),
             dims_list(rhs_contract),
             lhs.ty.render(),

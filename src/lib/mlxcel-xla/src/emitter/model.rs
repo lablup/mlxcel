@@ -34,9 +34,11 @@
 //! is byte-identical to before.
 
 use super::builder::{Builder, Precision, ProjectionLayout, Ty, Val, precision_from_env};
-use super::config::{Config, DeepStackConfig, MropeLayout, NormStyle};
+use super::config::{Config, DeepStackConfig, MropeLayout, NormStyle, SsmConfig};
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
+use super::ssm::{self, Mamba2MixerW, SsmLayerState};
+use super::ssm_scan::SsmPrefillForm;
 
 /// Canonical finite additive-attention value for a disallowed prefill edge.
 ///
@@ -4619,6 +4621,138 @@ pub(crate) fn emit_moe_probe_with(c: &Config, n: usize, precision: Precision) ->
         out_ty = out_ty,
         body = b.body(),
         o = out.name,
+    )
+}
+
+// ===========================================================================
+// SSM mixer probe (issue #3337): one Mamba2 mixer layer for the execution check
+// ===========================================================================
+//
+// `main(mixer weights..., x, [real_len,] h0, conv0) -> (y, h_T, conv_tail)` runs
+// ONE Mamba2 mixer layer ([`ssm::mamba2_mixer_prefill`] or
+// [`ssm::mamba2_mixer_step`]) with no norm or residual around it, so
+// `spike/openxla/ssm_oracle.py` can compare it directly to HF
+// `Mamba2Mixer.torch_forward` in fp32. The weight order is the `Mamba2MixerW`
+// field order; optional biases appear only when the config enables them.
+
+/// Which mixer form the SSM probe emits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbeMode {
+    /// One decode step over `t` batch rows: `x [t, hidden]`, `h0 [t, H, P, N]`,
+    /// `conv0 [t, K-1, C]`.
+    Decode,
+    /// A padded prompt of `t` rows: `x [t, hidden]`, `real_len`, `h0 [H, P, N]`,
+    /// `conv0 [K-1, C]`.
+    Prefill,
+}
+
+/// Emit the SSM mixer probe with the chosen prefill form at the env precision.
+/// `hidden` is the model width the in_proj reads and the out_proj writes.
+pub(crate) fn emit_ssm_probe(c: &SsmConfig, hidden: usize, t: usize, mode: ProbeMode) -> String {
+    emit_ssm_probe_with(
+        c,
+        hidden,
+        t,
+        mode,
+        SsmPrefillForm::ChunkedSsd,
+        precision_from_env(),
+    )
+}
+
+/// Emit the SSM mixer probe with an explicit prefill form and precision.
+pub(crate) fn emit_ssm_probe_with(
+    c: &SsmConfig,
+    hidden: usize,
+    t: usize,
+    mode: ProbeMode,
+    form: SsmPrefillForm,
+    precision: Precision,
+) -> String {
+    if let Err(error) = c.validate() {
+        panic!("emit_ssm_probe: {error}");
+    }
+    // Zero rows would divide the chunk count by zero inside the scan.
+    assert!(
+        t > 0 && hidden > 0,
+        "emit_ssm_probe: rows and hidden must be positive (rows={t}, hidden={hidden})"
+    );
+    let (hh, p, n, k, cd, di) = (
+        c.n_heads,
+        c.head_dim,
+        c.state_size,
+        c.conv_kernel,
+        c.conv_dim,
+        c.d_inner(),
+    );
+    let mut decls: Vec<ArgDecl> = Vec::new();
+    let mut idx = 0usize;
+    let mut arg = |shape: Vec<usize>, name: &str| {
+        take_arg(&mut decls, &mut idx, Ty::f32(shape), format!("ssm.{name}"))
+    };
+    let in_proj = arg(vec![c.in_proj_dim(), hidden], "in_proj");
+    let in_proj_b = c.use_bias.then(|| arg(vec![c.in_proj_dim()], "in_proj_b"));
+    let conv_w = arg(vec![cd, 1, k], "conv_w");
+    let conv_b = c.use_conv_bias.then(|| arg(vec![cd], "conv_b"));
+    let dt_bias = arg(vec![hh], "dt_bias");
+    let a_log = arg(vec![hh], "a_log");
+    let d = arg(vec![hh], "d");
+    let norm_w = arg(vec![di], "norm_w");
+    let out_proj = arg(vec![hidden, di], "out_proj");
+    let out_proj_b = c.use_bias.then(|| arg(vec![hidden], "out_proj_b"));
+    let w = Mamba2MixerW {
+        in_proj,
+        in_proj_b,
+        conv_w,
+        conv_b,
+        dt_bias,
+        a_log,
+        d,
+        norm_w,
+        out_proj,
+        out_proj_b,
+    };
+    let x = arg(vec![t, hidden], "x");
+
+    let mut b = Builder::new().with_precision(precision);
+    let (y, h_t, tail) = match mode {
+        ProbeMode::Prefill => {
+            let real_len = take_arg(
+                &mut decls,
+                &mut idx,
+                Ty::scalar("i32"),
+                "ssm.real_len".into(),
+            );
+            let h0 = take_arg(
+                &mut decls,
+                &mut idx,
+                Ty::f32(vec![hh, p, n]),
+                "ssm.h0".into(),
+            );
+            let conv0 = take_arg(
+                &mut decls,
+                &mut idx,
+                Ty::f32(vec![k - 1, cd]),
+                "ssm.conv0".into(),
+            );
+            ssm::mamba2_mixer_prefill_form(&mut b, c, form, &w, &x, &real_len, &h0, &conv0)
+        }
+        ProbeMode::Decode => {
+            let (h_ty, conv_ty) = ssm::ssm_state_types(c, t);
+            let h = take_arg(&mut decls, &mut idx, h_ty, "ssm.h0".into());
+            let conv = take_arg(&mut decls, &mut idx, conv_ty, "ssm.conv0".into());
+            let (y, st) = ssm::mamba2_mixer_step(&mut b, c, &w, &x, &SsmLayerState { h, conv });
+            (y, st.h, st.conv)
+        }
+    };
+    let tys = [&y, &h_t, &tail].map(|v| v.ty.render());
+    format!(
+        "module @ssm_probe {{\n  func.func public @main({sig}) -> ({outs}) {{\n{body}    return {y}, {h}, {tail} : {outs}\n  }}\n}}\n",
+        sig = render_signature(&decls),
+        outs = tys.join(", "),
+        body = b.body(),
+        y = y.name,
+        h = h_t.name,
+        tail = tail.name,
     )
 }
 

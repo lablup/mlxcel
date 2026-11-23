@@ -545,6 +545,12 @@ required-features = ["xla-diagnostics-cpu"]
 name = "xla_aux_smoke"
 required-features = ["xla-iree"]
 
+# Single-layer Mamba2 mixer probe vs the HF fp32 oracle (#3337): compiles the
+# emitter's SSM probe and runs it through the IREE shim on local-task or hip.
+[[example]]
+name = "xla_ssm_probe"
+required-features = ["xla-iree"]
+
 # Bounded canonical-decomposition vs emitted IREE operator probes. The root
 # example owns the static IREE runtime link recipe, while the reusable harness
 # remains in mlxcel-xla behind the CPU-capable micro-oracle feature.
