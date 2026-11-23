@@ -3646,8 +3646,9 @@ pub(super) fn resolve_prompt_cache_store(
 
     // Cross-request prompt-prefix KV cache store.
     // Gated on the config flag so a disabled policy reserves zero memory.
-    // wire BatchMetrics into the store so hits/misses/evictions
-    // are counted and exposed via /metrics.
+    // wire BatchMetrics into the store so evictions and snapshot misses are
+    // counted and exposed via /metrics. Hits, dense misses, and reused tokens
+    // are recorded by the scheduler, not through this adapter (#3246).
     if config.prompt_cache.is_enabled() {
         let cache_metrics = Arc::new(crate::server::state::BatchMetricsCacheAdapter::new(
             batch_metrics.clone(),

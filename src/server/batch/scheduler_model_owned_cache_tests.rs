@@ -47,7 +47,7 @@ const HIDDEN: i32 = 4;
 const VOCAB: i32 = 8;
 const INTERMEDIATE: i32 = 8;
 const HEAD_DIM: i32 = 2;
-const EOS_ID: i32 = 7;
+pub(super) const EOS_ID: i32 = 7;
 
 fn tensor(shape: &[i32], value: f32) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
     let len = shape.iter().product::<i32>() as usize;
