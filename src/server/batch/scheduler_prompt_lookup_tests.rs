@@ -49,7 +49,7 @@ fn copy_prompt() -> Vec<i32> {
 /// before it wraps.
 const PLAIN_PROMPT: &[i32] = &[0, 2, 4, 6, 8];
 
-fn cycle_llama() -> crate::models::Llama3Model {
+pub(super) fn cycle_llama() -> crate::models::Llama3Model {
     walk_llama(|t| (t + 1) % VOCAB)
 }
 

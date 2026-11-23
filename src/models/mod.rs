@@ -62,6 +62,7 @@ pub(crate) mod embedding_sanitize;
 pub(crate) mod embedding_test_support;
 mod gemma3n_helpers;
 pub(crate) mod headless_llama;
+mod kv_ring_checkpoint;
 mod kv_snapshot;
 mod llama4_helpers;
 pub(crate) mod model_owned;
@@ -251,6 +252,7 @@ pub mod llama_bidirec;
 pub mod llama_nemotron_vl_embedding;
 pub(crate) mod llama_nemotron_vl_tiling;
 pub mod longcat_flash_ngram;
+pub mod longcat_flash_sparse;
 pub mod mamba;
 pub mod mamba2;
 pub mod mellum;
@@ -359,6 +361,7 @@ pub use deepseek_v4::DeepSeekV4Model;
 pub use deepseek_v32::DeepSeekV32Model;
 pub use deepseek_v32::hy_v4;
 pub use deepseek_v32::hy_v4::HyV4Model;
+pub(crate) use detection::is_longcat_sparse_architecture;
 pub(crate) use detection::is_sequence_classification_architecture;
 pub(crate) use detection::vlm_has_vision;
 #[cfg(feature = "webui")]
@@ -422,6 +425,7 @@ pub use llada2_moe::Llada2MoeModel;
 pub use llama3::Llama3Model;
 pub use llama4::{Llama4CxxModel, Llama4Wrapper};
 pub use longcat_flash_ngram::LongcatFlashNgramModel;
+pub use longcat_flash_sparse::LongcatFlashSparseModel;
 pub use mamba::MambaModel;
 pub use mamba2::Mamba2Model;
 pub use mellum::{MellumModel, MellumWrapper};
@@ -791,6 +795,7 @@ pub enum ModelType {
     // Longcat models
     LongcatFlash,
     LongcatFlashNgram,
+    LongcatFlashSparse,
 
     // Step models
     Step3p5,
@@ -1042,6 +1047,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Longcat models
     ModelType::LongcatFlash,
     ModelType::LongcatFlashNgram,
+    ModelType::LongcatFlashSparse,
     // Step models
     ModelType::Step3p5,
     ModelType::Step3p7,
@@ -1290,6 +1296,10 @@ impl ModelType {
             ModelType::KimiK25 => ("Kimi-VL 2.5 (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
             ModelType::LongcatFlashNgram => ("LongCat Flash + N-gram embedding", "MoE (other)"),
+            ModelType::LongcatFlashSparse => (
+                "LongCat Flash Lite Sparse (LSA sparse MLA + N-gram embedding)",
+                "MoE (other)",
+            ),
             ModelType::Step3p5 => ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)"),
             ModelType::Step3p7 => ("Step-3.7 (ViT + Step-3.5 MoE)", "Step VLM"),
             ModelType::Dots1 => ("dots.llm1 (MoE)", "MoE (other)"),
@@ -1718,6 +1728,7 @@ mod metadata_tests {
             KimiK25,
             LongcatFlash,
             LongcatFlashNgram,
+            LongcatFlashSparse,
             Step3p5,
             Step3p7,
             Rwkv7,
@@ -1843,6 +1854,10 @@ mod gemma3n_helpers_tests;
 #[cfg(test)]
 #[path = "gemma4_tests.rs"]
 pub(crate) mod gemma4_tests;
+
+#[cfg(test)]
+#[path = "gemma4_ring_checkpoint_tests.rs"]
+mod gemma4_ring_checkpoint_tests;
 
 #[cfg(test)]
 #[path = "llama4_helpers_tests.rs"]

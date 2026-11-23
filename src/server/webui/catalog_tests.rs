@@ -150,10 +150,14 @@ fn incomplete_index_and_unsupported_dense_variant_stay_inspectable() {
         r#"{"weight_map":{"model.embed_tokens.weight":"missing.safetensors"}}"#,
     )
     .unwrap();
-    let unsupported = write_model(&root, "arcee", "arcee");
+    let unsupported = write_model(&root, "unported_dense_fixture", "unported_dense_fixture");
     let items = vec![
         model("broken", incomplete, RouterModelSource::ModelsDir),
-        model("arcee", unsupported, RouterModelSource::ModelsDir),
+        model(
+            "unported_dense_fixture",
+            unsupported,
+            RouterModelSource::ModelsDir,
+        ),
     ];
     let page = list_catalog(items, &CatalogQuery::default(), "srv".into(), 0).unwrap();
     let broken = page
@@ -171,17 +175,32 @@ fn incomplete_index_and_unsupported_dense_variant_stay_inspectable() {
             .unwrap()
             .contains("missing")
     );
-    let arcee = page
+    let unsupported_entry = page
         .items
         .iter()
-        .find(|entry| entry.identity.inference_id == "arcee")
+        .find(|entry| entry.identity.inference_id == "unported_dense_fixture")
         .unwrap();
-    assert_eq!(arcee.metadata.model_type.as_deref(), Some("arcee"));
-    assert!(arcee.metadata.unknown_reasons.model_type.is_none());
-    assert!(arcee.metadata.architecture.is_none());
-    assert!(arcee.metadata.unknown_reasons.architecture.is_some());
-    assert!(!arcee.metadata.support.architecturally_supported);
-    assert!(!arcee.supported);
+    assert_eq!(
+        unsupported_entry.metadata.model_type.as_deref(),
+        Some("unported_dense_fixture")
+    );
+    assert!(
+        unsupported_entry
+            .metadata
+            .unknown_reasons
+            .model_type
+            .is_none()
+    );
+    assert!(unsupported_entry.metadata.architecture.is_none());
+    assert!(
+        unsupported_entry
+            .metadata
+            .unknown_reasons
+            .architecture
+            .is_some()
+    );
+    assert!(!unsupported_entry.metadata.support.architecturally_supported);
+    assert!(!unsupported_entry.supported);
 }
 
 #[test]

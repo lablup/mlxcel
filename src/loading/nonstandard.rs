@@ -120,6 +120,12 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
             super::load_pair_from_dir(path_str, |path| models::LongcatFlashNgramModel::load(&path))
                 .map(LoadedModel::LongcatFlashNgram)?,
         ),
+        ModelType::LongcatFlashSparse => Some(
+            super::load_pair_from_dir(path_str, |path| {
+                models::LongcatFlashSparseModel::load(&path)
+            })
+            .map(LoadedModel::LongcatFlashSparse)?,
+        ),
         ModelType::YoutuLLM => Some(
             super::load_pair_from_dir(path_str, models::YoutuLanguageModel::load)
                 .map(LoadedModel::YoutuLLM)?,

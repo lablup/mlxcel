@@ -353,6 +353,11 @@ impl BatchMetrics {
 /// and the metrics reader so the single `BatchMetrics` instance stays as the
 /// source of truth for all Prometheus output.
 ///
+/// Each counter has one writer. The adapter forwards evictions and snapshot
+/// misses; dense hits, dense misses, snapshot hits, and both reused-token
+/// totals are written by the scheduler, which knows whether a lookup was
+/// actually adopted and how many tokens it reused (#3246).
+///
 /// Used by: startup.rs (PromptCacheStore::with_metrics call site)
 pub struct BatchMetricsCacheAdapter {
     inner: Arc<BatchMetrics>,
@@ -375,12 +380,12 @@ impl PromptCacheMetrics for BatchMetricsCacheAdapter {
         // `BatchObservability::prompt_cache_insert_rejects` covers this.
     }
 
-    fn record_lookup(&self, hit: bool, matched_len: usize) {
-        if hit {
-            self.inner.record_prompt_cache_hit(matched_len);
-        } else {
-            self.inner.record_prompt_cache_miss();
-        }
+    fn record_lookup(&self, _hit: bool, _matched_len: usize) {
+        // The scheduler is the only writer of the dense hit, miss, and
+        // reused-token counters (#3246): `finish_prompt_cache_adopt` records a
+        // hit with the adopted length that becomes `cached_tokens`, and
+        // admission records a miss when no prefix was adopted. Forwarding the
+        // store's raw lookup here as well counted every lookup twice.
     }
 
     fn record_evict_lru(&self, _bytes: usize) {
@@ -391,10 +396,13 @@ impl PromptCacheMetrics for BatchMetricsCacheAdapter {
         self.inner.record_prompt_cache_eviction_ttl();
     }
 
-    fn record_snapshot_lookup(&self, hit: bool, matched_len: usize) {
-        if hit {
-            self.inner.record_prompt_cache_snapshot_hit(matched_len);
-        } else {
+    fn record_snapshot_lookup(&self, hit: bool, _matched_len: usize) {
+        // Snapshot hits and their token total come from the scheduler's
+        // restore-success sites (`try_adopt_cached_prefix`, and
+        // `adopt_state_checkpoint` for a rebuilt checkpoint), with the
+        // restored length it reports as `cached_tokens` (#3246). The store is
+        // the only place a snapshot miss is known, so only misses pass here.
+        if !hit {
             self.inner.record_prompt_cache_snapshot_miss();
         }
     }

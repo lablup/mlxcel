@@ -327,3 +327,22 @@ fn batched_decode_initializes_absent_convolution_tails() {
         assert!(values.iter().all(|v| v.abs() <= 1e-5));
     }
 }
+
+/// The Inkling block-vs-chain exactness probe runs on a real model graph and
+/// refuses widths that draft nothing (issue #1549).
+#[test]
+fn exactness_probe_runs_on_the_tiny_model() {
+    let model = tiny_model();
+    let verdict = model.probe_block_chain_exactness(3);
+    assert!(
+        !matches!(
+            verdict,
+            crate::models::speculative_exactness::BlockChainExactness::NotRun(_)
+        ),
+        "a width-3 probe must compare both arms, got {verdict:?}"
+    );
+    assert!(matches!(
+        model.probe_block_chain_exactness(1),
+        crate::models::speculative_exactness::BlockChainExactness::NotRun(_)
+    ));
+}

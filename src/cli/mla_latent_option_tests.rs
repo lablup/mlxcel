@@ -123,6 +123,7 @@ fn an_explicit_value_decides_the_mode_of_every_mla_model_directory() {
         "hy_v4",
         "kimi_linear",
         "longcat_flash",
+        "longcat_flash_sparse",
     ] {
         let dir = dir_of(family);
         for requested in [

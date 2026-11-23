@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for proposing a feature. mlxcel tracks model coverage with [mlx-lm](https://github.com/ml-explore/mlx-lm) and [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) where practical; the more upstream context you can provide, the easier it is to scope.
+        Thanks for proposing a feature. mlxcel tracks model coverage with [mlx-lm](https://github.com/ml-explore/mlx-lm) and [mlx-vlm](https://github.com/Neywa-Labs/mlx-vlm) where practical; the more upstream context you can provide, the easier it is to scope.
 
   - type: textarea
     id: problem

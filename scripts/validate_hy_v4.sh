@@ -83,11 +83,19 @@ SHAPE=(64 4 8 512)
 
 mkdir -p "$OUT"
 
+# Every model run is timed with `/usr/bin/time -l`, which records the peak
+# resident set size and peak memory footprint in OUT_DIR/mem-NN.txt, in run
+# order (OUT_DIR/mem-index.txt maps each file to its command).
+RUN_N=0
 run() {
+    RUN_N=$((RUN_N + 1))
+    local mem
+    mem=$(printf '%s/mem-%02d-%s.txt' "$OUT" "$RUN_N" "$CURRENT_STEP")
+    echo "$mem: $*" >> "$OUT/mem-index.txt"
     if [ -n "${GPU_LOCK:-}" ]; then
-        /usr/bin/lockf -k "$GPU_LOCK" "$@"
+        /usr/bin/lockf -k "$GPU_LOCK" /usr/bin/time -l -o "$mem" "$@"
     else
-        "$@"
+        /usr/bin/time -l -o "$mem" "$@"
     fi
 }
 
@@ -133,9 +141,11 @@ step_generate() {
 }
 
 step_server() {
-    "$BIN/mlxcel-server" -m "$MODEL" --port "$PORT" > "$OUT/server.log" 2>&1 &
+    /usr/bin/time -l -o "$OUT/mem-server.txt" \
+        "$BIN/mlxcel-server" -m "$MODEL" --port "$PORT" > "$OUT/server.log" 2>&1 &
     local pid=$!
-    trap 'kill "$pid" 2>/dev/null || true' RETURN
+    # `pid` is the timer; stop its child (the server) and let the timer report.
+    trap 'for child in $(pgrep -P "$pid"); do kill "$child" 2>/dev/null || true; done; wait "$pid" 2>/dev/null || true' RETURN
     local waited=0
     until curl -sf "http://127.0.0.1:$PORT/health" > /dev/null; do
         kill -0 "$pid" 2>/dev/null || { echo "server exited; see $OUT/server.log" >&2; return 1; }
@@ -189,7 +199,10 @@ step_latent() {
 
 for step in "${STEPS[@]}"; do
     case "$step" in
-        preflight | generate | server | trace | arms | latent) "step_$step" ;;
+        preflight | generate | server | trace | arms | latent)
+            CURRENT_STEP=$step
+            "step_$step"
+            ;;
         *) echo "unknown step: $step" >&2; exit 2 ;;
     esac
 done

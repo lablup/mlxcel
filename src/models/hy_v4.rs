@@ -91,8 +91,8 @@ pub use self::config::{HyV4Config, IndexerType};
 use self::attention::HyV4Attention;
 use self::hyper::{IdentityHyperConnection, IdentityHyperHead, hc_expand};
 use super::{
-    DenseMLP, MoEBlock, ModelArgs, get_weight_copy, load_dense_mlp, load_mla_attention,
-    load_moe_block,
+    DenseMLP, MoEBlock, ModelArgs, get_weight_copy, load_dense_mlp, load_mla_attention_with_rope,
+    load_moe_block, rope::DsaRope,
 };
 
 enum Mlp {
@@ -226,8 +226,10 @@ impl HyV4Model {
 
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)?;
+        // One RoPE for every attention block and indexer, as V3.2 builds it.
+        let rope = DsaRope::from_args(&base)?;
         let layers = (0..base.num_hidden_layers)
-            .map(|layer| load_decoder_layer(weights, config, &base, layer, arms))
+            .map(|layer| load_decoder_layer(weights, config, &base, &rope, layer, arms))
             .collect::<Result<Vec<_>, String>>()?;
         let hc_head = IdentityHyperHead::from_weights(
             weights,
@@ -265,6 +267,7 @@ fn load_decoder_layer(
     weights: &WeightMap,
     config: &HyV4Config,
     base: &ModelArgs,
+    rope: &DsaRope,
     layer: usize,
     arms: ParityArms,
 ) -> Result<DecoderLayer, String> {
@@ -305,7 +308,7 @@ fn load_decoder_layer(
         _ => {}
     }
 
-    let mla = load_mla_attention(weights, base, &attn_prefix)?;
+    let mla = load_mla_attention_with_rope(weights, base, &attn_prefix, rope)?;
     let linear_gate = if arms.no_gate {
         None
     } else {

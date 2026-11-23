@@ -182,10 +182,11 @@ fn only_the_fallback_less_families_are_latent_families() {
         "longcat_flash",
         "longcat_flash_ngram",
         "xing4_0",
+        "longcat_flash_sparse",
     ] {
         assert!(caches_mla_latent_pair(family), "{family}");
     }
-    assert_eq!(MLA_LATENT_CACHE_FAMILIES.len(), 18);
+    assert_eq!(MLA_LATENT_CACHE_FAMILIES.len(), 19);
     assert!(!caches_mla_latent_pair("deepseek_v2"));
     assert!(!caches_mla_latent_pair("llama"));
     assert!(!caches_mla_latent_pair(""));

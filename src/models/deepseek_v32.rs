@@ -16,7 +16,8 @@
 //!
 //! Key features:
 //! - MLA (Multi-head Latent Attention) with LoRA-style projections
-//! - Yarn RoPE for extended context (reuses from V2)
+//! - YaRN RoPE for extended context on both the MLA attention and the
+//!   indexer (see [`rope`], #3178)
 //! - MoE with group expert selection
 //! - DeepSeek Sparse Attention (DSA) "lightning indexer": per layer, scores
 //!   every cached key against the query and attends only to the top-`index_topk`
@@ -45,6 +46,13 @@ mod latent;
 #[path = "hy_v4.rs"]
 pub mod hy_v4;
 
+#[path = "deepseek_v32_rope.rs"]
+mod rope;
+
+#[cfg(test)]
+#[path = "deepseek_v32_rope_tests.rs"]
+mod rope_tests;
+
 #[cfg(test)]
 #[path = "deepseek_v32_tests.rs"]
 pub(crate) mod deepseek_v32_tests;
@@ -54,6 +62,7 @@ pub(crate) mod deepseek_v32_tests;
 mod latent_tests;
 
 use crate::distributed::pipeline::{LayerFilter, StageExecutionOutput};
+use crate::models::rope_utils::RopeScalingSpec;
 use crate::models::switch_layers::validate_expert_quantization_params;
 use indexer::Indexer;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
@@ -62,17 +71,11 @@ use mlxcel_core::mla::LatentWindow;
 use mlxcel_core::utils::{silu, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+use rope::DsaRope;
 use serde::Deserialize;
 use std::path::Path;
 
 // Configuration.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RopeScaling {
-    #[serde(alias = "type", alias = "rope_type")]
-    pub scaling_type: Option<String>,
-    pub factor: Option<f32>,
-    pub mscale_all_dim: Option<f32>,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(remote = "Self")]
@@ -162,8 +165,11 @@ pub struct ModelArgs {
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
 
+    /// The full `rope_scaling` block. Its `factor` and `mscale_all_dim` set
+    /// the softmax-scale correction; the whole block selects the RoPE table
+    /// the attention and the indexer rotate with ([`rope::DsaRope`]).
     #[serde(default)]
-    pub rope_scaling: Option<RopeScaling>,
+    pub rope_scaling: Option<RopeScalingSpec>,
 
     #[serde(default)]
     pub attention_bias: bool,
@@ -324,7 +330,8 @@ struct MLAAttention {
     v_head_dim: i32,
     q_head_dim: i32,
     scale: f32,
-    rope_base: f32,
+    /// RoPE over `q_pe` / `k_pe` (`traditional = true`, as upstream).
+    rope: DsaRope,
     /// Decoder layer index, read from the weight prefix. Labels the
     /// `MLXCEL_TRACE_DSA_TOPK` selection trace; `-1` when the prefix names no
     /// layer.
@@ -371,22 +378,8 @@ impl MLAAttention {
         // deepseek_v3's `live_before`, issue #619).
         let offset = cache.offset;
         let live_before = cache.live_len();
-        let q_pe = mlxcel_core::fast_rope(
-            &q_pe,
-            self.qk_rope_head_dim,
-            true,
-            self.rope_base,
-            1.0,
-            offset,
-        );
-        let k_pe = mlxcel_core::fast_rope(
-            &k_pe,
-            self.qk_rope_head_dim,
-            true,
-            self.rope_base,
-            1.0,
-            offset,
-        );
+        let q_pe = self.rope.apply(&q_pe, true, offset);
+        let k_pe = self.rope.apply(&k_pe, true, offset);
 
         // Indexer q/k/weights for the new tokens. The roped indexer key rides
         // alongside `kv_latent` in the KV cache (concatenated on the feature
@@ -665,22 +658,8 @@ impl MLAAttention {
         let k_pe = mlxcel_core::reshape(&k_pe, &[batch, 1, 1, self.qk_rope_head_dim]);
         let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
         let offsets: Vec<i32> = caches.iter().map(|cache| cache.offset).collect();
-        let q_pe = mlxcel_core::fast_rope_batched(
-            &q_pe,
-            self.qk_rope_head_dim,
-            true,
-            self.rope_base,
-            1.0,
-            &offsets,
-        );
-        let k_pe = mlxcel_core::fast_rope_batched(
-            &k_pe,
-            self.qk_rope_head_dim,
-            true,
-            self.rope_base,
-            1.0,
-            &offsets,
-        );
+        let q_pe = self.rope.apply_batched(&q_pe, true, &offsets);
+        let k_pe = self.rope.apply_batched(&k_pe, true, &offsets);
 
         let mut index_queries = Vec::with_capacity(caches.len());
         let mut index_weights = Vec::with_capacity(caches.len());
@@ -1320,9 +1299,10 @@ impl DeepSeekV32Model {
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)?;
 
+        let rope = DsaRope::from_args(args)?;
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for i in 0..args.num_hidden_layers {
-            let layer = load_decoder_layer(weights, args, i)?;
+            let layer = load_decoder_layer(weights, args, i, &rope)?;
             layers.push(layer);
         }
 
@@ -1358,12 +1338,14 @@ fn load_decoder_layer(
     weights: &WeightMap,
     args: &ModelArgs,
     layer_idx: usize,
+    rope: &DsaRope,
 ) -> Result<DecoderLayer, String> {
     let prefix = format!("model.layers.{}", layer_idx);
     let group_size = args.group_size();
     let bits = args.bits();
 
-    let self_attn = load_mla_attention(weights, args, &format!("{}.self_attn", prefix))?;
+    let self_attn =
+        load_mla_attention_with_rope(weights, args, &format!("{}.self_attn", prefix), rope)?;
 
     let mlp = if args.is_moe_layer(layer_idx) {
         MLPType::MoE(load_moe_block(weights, args, &format!("{}.mlp", prefix))?)
@@ -1391,10 +1373,23 @@ fn load_decoder_layer(
     })
 }
 
+/// [`load_mla_attention_with_rope`] with a RoPE resolved for this block alone.
+#[cfg(test)]
 fn load_mla_attention(
     weights: &WeightMap,
     args: &ModelArgs,
     prefix: &str,
+) -> Result<MLAAttention, String> {
+    load_mla_attention_with_rope(weights, args, prefix, &DsaRope::from_args(args)?)
+}
+
+/// Load one MLA block. `rope` is the model's resolved RoPE, built once per
+/// model; the block and its indexer each take a duplicate handle.
+fn load_mla_attention_with_rope(
+    weights: &WeightMap,
+    args: &ModelArgs,
+    prefix: &str,
+    rope: &DsaRope,
 ) -> Result<MLAAttention, String> {
     let group_size = args.group_size();
     let bits = args.bits();
@@ -1452,7 +1447,7 @@ fn load_mla_attention(
             group_size,
             bits,
         )?,
-        indexer: Indexer::load(weights, args, prefix)?,
+        indexer: Indexer::load_with_rope(weights, args, prefix, rope)?,
         num_heads: args.num_attention_heads as i32,
         kv_lora_rank: args.kv_lora_rank as i32,
         qk_nope_head_dim: args.qk_nope_head_dim as i32,
@@ -1460,7 +1455,7 @@ fn load_mla_attention(
         v_head_dim: args.v_head_dim as i32,
         q_head_dim,
         scale,
-        rope_base: args.rope_theta,
+        rope: rope.duplicate(),
         layer: layer_index_from_prefix(prefix),
     })
 }
@@ -1732,9 +1727,10 @@ impl DeepSeekV32StageModel {
             None
         };
 
+        let rope = DsaRope::from_args(args)?;
         let mut layers = Vec::with_capacity(filter.num_layers());
         for layer_idx in filter.layer_range.clone() {
-            layers.push(load_decoder_layer(weights, args, layer_idx)?);
+            layers.push(load_decoder_layer(weights, args, layer_idx, &rope)?);
         }
 
         if layers.is_empty() {

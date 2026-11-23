@@ -120,11 +120,19 @@ pub(crate) fn kv_decoder_config(config: &Value) -> Cow<'_, Value> {
 ///
 /// Used by: `cli::turbo_args` (mode resolution), `execution::kv_arch` and
 /// `execution::kv_cache_advisor`.
+///
+/// The original LongCat-Flash-Lite-Sparse config names no `model_type`, only
+/// its `LongcatCausalLM` architecture, which detection maps to
+/// `longcat_flash_sparse` (#2362); this falls back the same way.
 pub(crate) fn kv_decoder_model_type(config: &Value) -> Option<String> {
     kv_decoder_config(config)
         .get("model_type")
         .and_then(Value::as_str)
         .or_else(|| config.get("model_type").and_then(Value::as_str))
+        .or_else(|| {
+            crate::models::is_longcat_sparse_architecture(config)
+                .then_some(crate::models::longcat_flash_sparse::MODEL_TYPE)
+        })
         .map(str::to_string)
 }
 

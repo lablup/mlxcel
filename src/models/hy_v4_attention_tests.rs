@@ -19,6 +19,7 @@
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use super::super::super::rope::DsaRope;
 use super::super::hy_v4_tests::{
     HEADS, HIDDEN, Tiny, max_abs_diff, tiny_config, tiny_weights, values,
 };
@@ -29,10 +30,12 @@ use super::HyV4Attention;
 fn attention(index_topk: i32, layer: usize) -> HyV4Attention {
     let tiny = Tiny::new(index_topk);
     let config = tiny_config(tiny);
+    let rope = DsaRope::from_args(&config.base).expect("tiny rope resolves");
     load_decoder_layer(
         &tiny_weights(tiny),
         &config,
         &config.base,
+        &rope,
         layer,
         ParityArms::default(),
     )
@@ -327,4 +330,38 @@ fn sink_sdpa_matches_the_written_out_softmax_at_checkpoint_geometry() {
             "causal prefill, dtype {dtype}: {diff}"
         );
     }
+}
+
+/// Hy4 rotates with plain RoPE. Its `rope_parameters` say `rope_type:
+/// default`, so the RoPE it shares with DeepSeek-V3.2 must resolve to no
+/// frequency table and no magnitude multiplier (V3.2's YaRN, #3279, must not
+/// leak in), and applying it must be bit-identical to `fast_rope` at the
+/// config's `rope_theta`, for the interleaved pairing and the half-split one.
+#[test]
+fn rope_is_plain_default_rope_at_the_configs_theta() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let attn = attention(2, 0);
+    let rope = &attn.mla.rope;
+    assert!(rope.freqs().is_none(), "a default rope carries no table");
+    assert_eq!(rope.mscale(), 1.0);
+    assert!(attn.rope_traditional, "the shipped pairing is interleaved");
+
+    let x = noise(&[1, HEADS, 3, 6], 11, 1.0);
+    for traditional in [true, false] {
+        for offset in [0, 5000] {
+            let got = values(&rope.apply(&x, traditional, offset));
+            let want = values(&mlxcel_core::fast_rope(
+                &x,
+                4,
+                traditional,
+                1e7,
+                1.0,
+                offset,
+            ));
+            assert_eq!(got, want, "traditional {traditional}, offset {offset}");
+        }
+    }
+    let a = values(&rope.apply(&x, true, 7));
+    let b = values(&rope.apply(&x, false, 7));
+    assert!(max_abs_diff(&a, &b) > 1e-3, "the two pairings must differ");
 }

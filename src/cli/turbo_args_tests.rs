@@ -433,6 +433,7 @@ fn only_latent_view_families_store_a_quantized_latent() {
         "kimi_k3",
         "longcat_flash",
         "longcat_flash_ngram",
+        "longcat_flash_sparse",
     ] {
         let dir = model_dir_with_type(family);
         let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
@@ -447,6 +448,22 @@ fn only_latent_view_families_store_a_quantized_latent() {
             dir.path()
         ));
     }
+
+    // The original LongCat-Flash-Lite-Sparse config has no `model_type`
+    // (#2362); its architecture alone picks the family's rules.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"architectures": ["LongcatCausalLM"]}"#,
+    )
+    .expect("write config.json");
+    let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
+    assert_eq!(mode, KVCacheMode::Int8);
+    assert!(warning.is_none(), "{warning:?}");
+    assert!(super::model_stores_quantized_latent(
+        KVCacheMode::Int8,
+        dir.path()
+    ));
 
     let others = mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES
         .iter()

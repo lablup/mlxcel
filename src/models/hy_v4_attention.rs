@@ -149,16 +149,10 @@ impl HyV4Attention {
         // already cached, which the causal fallback below needs (#619).
         let offset = cache.offset;
         let live_before = cache.live_len();
-        let rope = |t: &MlxArray| {
-            mlxcel_core::fast_rope(
-                t,
-                m.qk_rope_head_dim,
-                self.rope_traditional,
-                m.rope_base,
-                1.0,
-                offset,
-            )
-        };
+        // The shared DeepSeek-V3.2 RoPE (`DsaRope`), resolved from this
+        // model's own `rope_parameters`: plain RoPE for the shipped
+        // `rope_type: default`, never V3.2's YaRN table (#3279).
+        let rope = |t: &MlxArray| m.rope.apply(t, self.rope_traditional, offset);
         let q_pe = rope(&q_pe);
         let k_pe = rope(&k_pe);
 

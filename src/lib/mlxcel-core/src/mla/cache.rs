@@ -184,6 +184,9 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     // not in `QUANTIZED_LATENT_FAMILIES`: no int8 latent trace has been run on
     // it, so it keeps fp16 by default.
     "xing4_0",
+    // LongCat-Flash-Lite-Sparse composes the same MLA (`src/models/longcat_flash_sparse.rs`,
+    // #2362); its indexer keys sit in a separate fp16 cache.
+    "longcat_flash_sparse",
 ];
 
 /// Whether `model_type` names a family that always caches an MLA latent pair.

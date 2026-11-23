@@ -2463,3 +2463,89 @@ fn indic_ocr_root_points_at_the_page_pipeline() {
         .to_string();
     assert!(error.contains("page pipeline"), "{error}");
 }
+
+/// Decider-2b is a decision model: `mlxcel generate` names the decision
+/// entry points instead of the generic unsupported-type error (#2359).
+#[test]
+fn decider2_is_refused_with_the_decision_entry_points() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("config.json"),
+        r#"{"model_type": "decider2", "architectures": ["Qwen3_5ForCausalLM"]}"#,
+    )
+    .unwrap();
+    let error = super::detection::get_model_type(directory.path())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(
+            "decider2 is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model`"
+        ),
+        "{error}"
+    );
+}
+
+/// Clef is a decision model: `mlxcel generate` names the decision entry
+/// points instead of the generic unsupported-type error (#2365).
+#[test]
+fn clef_is_refused_with_the_decision_entry_points() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("config.json"),
+        r#"{"model_type": "clef", "architectures": ["Qwen3_5ForConditionalGeneration"]}"#,
+    )
+    .unwrap();
+    let error = super::detection::get_model_type(directory.path())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(
+            "clef is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model`"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn longcat_flash_sparse_is_detected_with_and_without_model_type() {
+    // The original `meituan-longcat/LongCat-Flash-Lite-Sparse` config omits
+    // `model_type` (#2362), so its `LongcatCausalLM` architecture decides; the
+    // mlx-community conversions declare `longcat_flash_sparse`. The n-gram
+    // variant keeps its own type.
+    for (name, config, want) in [
+        (
+            "longcat_sparse_hf",
+            r#"{"architectures": ["LongcatCausalLM"], "attention_method": "LSA"}"#,
+            ModelType::LongcatFlashSparse,
+        ),
+        (
+            "longcat_sparse_mlx",
+            r#"{"model_type": "longcat_flash_sparse", "architectures": ["LongcatCausalLM"], "vision_config": {}}"#,
+            ModelType::LongcatFlashSparse,
+        ),
+        (
+            "longcat_ngram",
+            r#"{"model_type": "longcat_flash_ngram", "architectures": ["LongcatFlashNgramForCausalLM"]}"#,
+            ModelType::LongcatFlashNgram,
+        ),
+    ] {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("config.json"), config).unwrap();
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, want, "{name}");
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    // Another architecture with no `model_type` still reports the missing key.
+    let model_dir = temp_path("longcat_other_arch");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{"architectures": ["LongcatFlashForCausalLM"]}"#,
+    )
+    .unwrap();
+    let err = super::detection::get_model_type(&model_dir).unwrap_err();
+    assert!(err.to_string().contains("model_type"), "{err}");
+    fs::remove_dir_all(model_dir).unwrap();
+}
