@@ -26,7 +26,9 @@ use crate::layers::RMSNorm;
 use crate::weights::WeightMap;
 use crate::{MlxArray, UniquePtr};
 
-pub use attention::{InklingAttention, InklingShortConv, banded_additive_mask, log_scaling_tau};
+pub use attention::{
+    InklingAttention, InklingShortConv, banded_additive_mask, log_scaling_tau, repeat_kv_heads,
+};
 pub use cache::InklingLayerCache;
 pub use dense_mlp::InklingDenseMlp;
 

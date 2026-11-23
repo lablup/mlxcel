@@ -353,7 +353,9 @@ impl InklingAttention {
 /// expansion is head-major: insert a repeat axis directly after the KV axis and
 /// fold it in, never `tile`, which would interleave the groups and silently
 /// pair every query head with the wrong KV head.
-fn repeat_kv_heads(x: &MlxArray, n_heads: i32, n_kv: i32) -> UniquePtr<MlxArray> {
+///
+/// Used by: Inkling (`InklingAttention`), Inkling 2 (`models::inkling2`)
+pub fn repeat_kv_heads(x: &MlxArray, n_heads: i32, n_kv: i32) -> UniquePtr<MlxArray> {
     let shape = crate::array_shape(x);
     let (batch, length, head_dim) = (shape[0], shape[2], shape[3]);
     let repeats = n_heads / n_kv;

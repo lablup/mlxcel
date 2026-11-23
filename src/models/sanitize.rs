@@ -2508,6 +2508,26 @@ pub fn is_embedding_gemma2_config(config: &Value) -> bool {
         })
 }
 
+/// Whether `config` describes an Inkling 2 checkpoint (`inkling2`,
+/// `inkling2_loop`, or their `_text` towers).
+///
+/// Used by: [`bf16_to_f16_at_load`].
+fn is_inkling2_config(config: &Value) -> bool {
+    let is_inkling2 = |model_type: Option<&str>| {
+        matches!(
+            model_type,
+            Some("inkling2" | "inkling2_loop" | "inkling2_text" | "inkling2_loop_text")
+        )
+    };
+    is_inkling2(config.get("model_type").and_then(Value::as_str))
+        || is_inkling2(
+            config
+                .get("text_config")
+                .and_then(|text| text.get("model_type"))
+                .and_then(Value::as_str),
+        )
+}
+
 /// Whether `config` describes an Inkling checkpoint: the HMLP-wrapped
 /// `inkling_mm_model`, the standalone `inkling` text model, or a config whose
 /// `text_config` is `inkling_text`. `inkling2` is a different family.
@@ -2580,6 +2600,12 @@ pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
     // matched mlx-vlm. Affine MLX conversions already stay bf16 as quantized
     // checkpoints, and the f32 community checkpoints have no bf16 to convert.
     if config.is_some_and(is_inkling_config) {
+        return false;
+    }
+    // Inkling 2 is the same case (issue #3228): the native Mini export declares
+    // `quantization_config: {modelopt, NVFP4}` but no MLX `quantization` block,
+    // and mlx-vlm keeps its bf16 dense weights, f32 queries and f32 router.
+    if config.is_some_and(is_inkling2_config) {
         return false;
     }
     if pre_ampere_cuda() {
@@ -2985,6 +3011,26 @@ mod tests {
         for config in [&nvfp4, &text, &nested] {
             assert!(!bf16_to_f16_at_load(false, Some(config)));
         }
+    }
+
+    /// The native Inkling 2 Mini export has no MLX quantization block either
+    /// (issue #3228); its bf16 dense weights must stay bf16.
+    #[test]
+    fn inkling2_configs_keep_checkpoint_dtype() {
+        let mini = serde_json::json!({
+            "model_type": "inkling2_loop",
+            "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"}
+        });
+        let small = serde_json::json!({"model_type": "inkling2"});
+        let text = serde_json::json!({"text_config": {"model_type": "inkling2_loop_text"}});
+        for config in [&mini, &small, &text] {
+            assert!(is_inkling2_config(config));
+            assert!(!is_inkling_config(config));
+            assert!(!bf16_to_f16_at_load(false, Some(config)));
+        }
+        assert!(!is_inkling2_config(
+            &serde_json::json!({"model_type": "inkling"})
+        ));
     }
 
     #[test]

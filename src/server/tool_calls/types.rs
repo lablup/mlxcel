@@ -38,6 +38,9 @@ pub enum ToolCallFormat {
     /// `<atem:invoke name="fn">` blocks with `<atem:parameter name="k">v`
     /// `</atem:parameter>` values.
     Atem,
+    /// Inkling: `<|message_model|>NAME<|content_invoke_tool_json|>`
+    /// `{"name": ..., "args": {...}}<|end_message|>`.
+    Inkling,
     /// Hermes/Qwen: `<tool_call>{"name": ..., "arguments": ...}</tool_call>`
     Hermes,
     /// Llama 3.x: `{"name": ..., "parameters": ...}` possibly with `<|python_tag|>`
@@ -129,6 +132,7 @@ impl ToolCallFormat {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Atem => "atem",
+            Self::Inkling => "inkling",
             Self::Hermes => "hermes",
             Self::Llama3 => "llama3",
             Self::MistralNemo => "mistral_nemo",
@@ -165,6 +169,7 @@ impl FromStr for ToolCallFormat {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
             "atem" => Ok(Self::Atem),
+            "inkling" => Ok(Self::Inkling),
             "hermes" => Ok(Self::Hermes),
             "llama3" | "llama_3" => Ok(Self::Llama3),
             "mistral_nemo" | "mistral-nemo" => Ok(Self::MistralNemo),

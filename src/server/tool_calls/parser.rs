@@ -19,8 +19,8 @@
 //!
 //! Used by: routes/chat, tool_calls::mod
 
-use super::types::{ParsedToolCall, ToolCallParseResult};
-use super::{atem, formats};
+use super::types::{ParsedToolCall, ToolCallFormat, ToolCallParseResult};
+use super::{atem, formats, inkling};
 use crate::server::types::request::Tool;
 
 /// Strip thinking/reasoning blocks from model output before parsing.
@@ -145,6 +145,10 @@ fn clean_content_markers(text: &str) -> String {
     // request, unknown function, malformed JSON), dropped for the same reason
     // as the Hermes block above (#2470).
     let text = strip_python_tag_blocks(&text);
+    // Inkling: an invoke message that did not become a call (no-tools
+    // request, unknown function, malformed body) is dropped whole, as the
+    // streaming filter suppresses it.
+    let text = inkling::strip_invoke_messages(&text);
     text.replace("<turn|>", "")
         .replace("<|turn>", "")
         .replace("<|think|>", "")
@@ -374,6 +378,25 @@ impl FormatParser {
 /// Returns a `ToolCallParseResult` which may contain zero or more parsed
 /// calls.
 pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallParseResult {
+    // Inkling (#3228) closes thinking and invoke messages with the same
+    // `<|end_message|>`, so its calls are taken from the raw output before the
+    // thinking pass, which would otherwise pair a thinking open with the
+    // close of a later call. The rest goes through the usual cleanup.
+    if let Some((calls, rest)) = inkling::extract_calls(raw_output) {
+        let calls = match tools {
+            Some(tools) => filter_by_tools(calls, tools),
+            None => calls,
+        };
+        if !calls.is_empty() {
+            return ToolCallParseResult {
+                format: Some(ToolCallFormat::Inkling),
+                tool_calls: calls,
+                content: clean_content_markers(strip_thinking(&rest).trim()),
+                reasoning_content: None,
+            };
+        }
+    }
+
     // Strip thinking blocks first
     let cleaned = strip_thinking(raw_output);
     let text = cleaned.trim();

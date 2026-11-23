@@ -97,6 +97,8 @@ pub enum VlmRuntimeRef<'a> {
     MuseGlimmer(&'a vision::MuseGlimmerVlmModel),
     /// Inkling HMLP image runtime with per-image dynamic tile counts.
     Inkling(&'a vision::InklingVlModel),
+    /// Inkling 2 tile runtime: each image expands to `rows * cols` tokens.
+    Inkling2(&'a vision::Inkling2VlModel),
     /// Pixtral / Mistral3 dynamic aspect-ratio runtime. Shares the generic
     /// `VisionModule` storage but preserves each image's aspect ratio and emits
     /// `[IMG] / [IMG_BREAK] / [IMG_END]` row structure (see `pixtral_layout`).
@@ -289,6 +291,9 @@ impl LoadedModel {
             Self::MiniMaxM3VL(model) => Some(VlmRuntimeRef::MiniMaxM3Vl(model)),
             Self::MuseGlimmerVLM(model) => Some(VlmRuntimeRef::MuseGlimmer(model)),
             Self::InklingVLM(model) => Some(VlmRuntimeRef::Inkling(model)),
+            Self::Inkling2VLM(model) if model.supports_images() => {
+                Some(VlmRuntimeRef::Inkling2(model))
+            }
             _ => None,
         }
     }
