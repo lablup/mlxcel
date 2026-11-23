@@ -115,7 +115,8 @@ impl<'de> Deserialize<'de> for Xing40Config {
         let value = serde_json::Value::deserialize(deserializer)?;
         let base = DeepSeekV3Config::deserialize(&value).map_err(serde::de::Error::custom)?;
         let hyper = HyperFields::deserialize(&value).map_err(serde::de::Error::custom)?;
-        let eos_token_ids = parse_eos(hyper.eos_token_id.as_ref());
+        let eos_token_ids =
+            parse_eos(hyper.eos_token_id.as_ref()).map_err(serde::de::Error::custom)?;
         let config = Self {
             base,
             hc_mult: hyper.hc_mult,
@@ -130,22 +131,20 @@ impl<'de> Deserialize<'de> for Xing40Config {
     }
 }
 
-fn parse_eos(value: Option<&serde_json::Value>) -> Vec<i32> {
-    let ids: Vec<i32> = match value {
-        Some(serde_json::Value::Number(n)) => n.as_i64().map(|v| v as i32).into_iter().collect(),
-        Some(serde_json::Value::Array(items)) => items
-            .iter()
-            .filter_map(|v| v.as_i64())
-            .map(|v| v as i32)
-            .collect(),
-        _ => Vec::new(),
-    };
-    if ids.is_empty() { vec![2] } else { ids }
+/// `eos_token_id` as ids, `<_end>` = 2 when absent; an id outside the `i32`
+/// range or a negative one is refused rather than wrapped (#3299).
+fn parse_eos(value: Option<&serde_json::Value>) -> Result<Vec<i32>, String> {
+    let ids =
+        crate::loading::checked_eos_token_ids(value).map_err(|err| format!("xing4_0: {err}"))?;
+    Ok(if ids.is_empty() { vec![2] } else { ids })
 }
 
 impl Xing40Config {
     /// Refuse hyper-connection settings the forward cannot run as declared.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(bad) = self.eos_token_ids.iter().find(|id| **id < 0) {
+            return Err(format!("xing4_0: eos_token_id {bad} is negative"));
+        }
         if self.hc_mult == 0 || self.hc_mult > MAX_HC_MULT {
             return Err(format!(
                 "xing4_0: hc_mult {} is outside 1..={MAX_HC_MULT}",
