@@ -24,7 +24,7 @@
 use super::super::{Cache, Gemma3Wrapper};
 use super::snapshot_prompt_cache::{build_wrapper, ids};
 use crate::models::kv_snapshot::KvSnapshotNames;
-use crate::models::pooled_test_model::Pooled;
+use crate::models::pooled_model::Pooled;
 use mlxcel_core::cache::{LayerState, LayerStateKind, SequenceId, SequenceStateBackend};
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::{MlxArray, UniquePtr};

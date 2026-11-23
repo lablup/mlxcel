@@ -867,7 +867,9 @@ fn gemma3_vlm_prefill_parity_arm(
     let normalizer = (GEMMA3_HIDDEN as f64).sqrt() as f32;
 
     let (model, _) = Gemma3Model::load(fixture.path()).expect("MLX Gemma 3 fixture");
-    let mlx = Gemma3Wrapper::new(model);
+    // Gemma 3's state is scheduler-owned, so the by-id forward runs over a
+    // pool sequence.
+    let mlx = mlxcel::models::pooled_model::Pooled::new(Gemma3Wrapper::new(model));
     // The precision is read at emit time and the vmfb cache is keyed per
     // precision, so each arm loads its own engine after setting the env.
     precision.apply(force_f32);

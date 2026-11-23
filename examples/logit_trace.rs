@@ -667,6 +667,10 @@ fn trace_batched_chunks(
     kv_arm: &kv_mode::KvArm,
     scalar_reference: bool,
 ) -> Result<()> {
+    // A scheduler-owned family keeps no per-sequence state in the model, so
+    // the by-id forwards below go through a pool (issue #3254). Every other
+    // family is passed through.
+    let model = &mlxcel::models::pooled_model::Pooled::new(model);
     for chunk in 0..n_chunks {
         let traced_start = trace_start + chunk * chunk_tokens;
         let rows = batched_trace_rows(ids.len(), traced_start, chunk_tokens, prefill, batch_rows)?;

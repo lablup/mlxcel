@@ -24,7 +24,7 @@ use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use super::pooled_test_model::Pooled;
+use super::pooled_model::Pooled;
 use super::qwen3_5_tests::pooled_two_layer_model;
 use crate::models::Qwen35Model;
 

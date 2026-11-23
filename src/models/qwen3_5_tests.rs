@@ -22,7 +22,7 @@
 //! `rollback_speculative_cache` round trip is exercised by integration tests
 //! gated behind hardware availability.
 
-use super::pooled_test_model::Pooled;
+use super::pooled_model::Pooled;
 use super::qwen3_5::{
     MRopePositionSource, Qwen35Config, Qwen35Model, Qwen35UnsupportedConfig,
     compact_attention_rows, eos_token_ids_from_config, mrope_position_source,

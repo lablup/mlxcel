@@ -68,8 +68,7 @@ pub(crate) mod kv_snapshot;
 mod llama4_helpers;
 pub(crate) mod model_owned;
 pub mod multimodal_placeholders;
-#[cfg(test)]
-pub(crate) mod pooled_test_model;
+pub mod pooled_model;
 pub(crate) mod qwen_mrope_state;
 pub(crate) mod recurrent_batch;
 pub(crate) mod recurrent_snapshot;

@@ -16,7 +16,8 @@ use cxx::UniquePtr;
 
 use super::*;
 use crate::cache::{
-    CachePool, PagedKvLayout, SequenceStateBackend, SequenceStateLayout, turbo::BLOCK_SIZE,
+    CachePool, LayerStateEncoding, LayerStateSnapshotSpec, PagedKvLayout, SequenceStateBackend,
+    SequenceStateLayout, turbo::BLOCK_SIZE,
 };
 use crate::generate::LanguageModel;
 
@@ -55,12 +56,12 @@ fn stored_mode_follows_the_layer_kind() {
 
 #[test]
 fn a_misaligned_turbo4asym_window_builds_fp16() {
-    let misaligned = LayerStateKind::sliding(BLOCK_SIZE as i32 + 1);
+    let misaligned = LayerStateKind::sliding(BLOCK_SIZE + 1);
     assert_eq!(
         misaligned.build_mode(KVCacheMode::Turbo4Asym),
         KVCacheMode::Fp16
     );
-    let aligned = LayerStateKind::sliding(BLOCK_SIZE as i32 * 2);
+    let aligned = LayerStateKind::sliding(BLOCK_SIZE * 2);
     assert_eq!(
         aligned.build_mode(KVCacheMode::Turbo4Asym),
         KVCacheMode::Turbo4Asym

@@ -1444,8 +1444,9 @@ fn run_mtp_burst(
         // (Qwen attention caches are plain growing KVCaches), so no
         // block-size-derived constructor parameter.
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
-            let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(
+            let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::for_sequence(
                 qwen,
+                seq.seq_id,
                 ctx.layer_state.take(),
             )
             .with_prefill_start_offset(prefill_start_offset);
@@ -1463,11 +1464,13 @@ fn run_mtp_burst(
             )
         }
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
-            let adapter = crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(
-                vlm,
-                ctx.layer_state.take(),
-            )
-            .with_prefill_start_offset(prefill_start_offset);
+            let adapter =
+                crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::for_sequence(
+                    vlm,
+                    seq.seq_id,
+                    ctx.layer_state.take(),
+                )
+                .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,

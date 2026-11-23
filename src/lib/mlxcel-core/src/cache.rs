@@ -105,6 +105,7 @@ pub mod latent_quant;
 #[path = "cache/latent_quant_tests.rs"]
 mod latent_quant_tests;
 mod layer_state;
+mod layer_state_request;
 pub use first_fill::{FIRST_FILL_REWIND_SLACK, FullFirstFillScope};
 #[cfg(test)]
 #[path = "cache/kv_trim_tests.rs"]
@@ -152,10 +153,8 @@ pub use batch_quant::{
     KvQuantScheme,
 };
 pub use detach::{DetachedCacheSet, DetachedHandle, DetachedKVCache, DetachedRotatingKVCache};
-pub use layer_state::{
-    LayerState, LayerStateEncoding, LayerStateForward, LayerStateKind, LayerStateSnapshotSpec,
-    RecurrentState,
-};
+pub use layer_state::{LayerState, LayerStateKind, RecurrentState};
+pub use layer_state_request::{LayerStateEncoding, LayerStateForward, LayerStateSnapshotSpec};
 pub use paged::{
     GatheredKv, POOL_SLAB_BLOCKS, PagedBlockId, PagedBlockPool, PagedCacheStats, PagedKvLayout,
     PagedLayerState, PagedSequenceState,
@@ -6907,8 +6906,10 @@ impl CachePool {
                 //    These actually read/write the caches handed to `forward`, so
                 //    pool-backing routes their `update_and_fetch` straight into
                 //    the shared `PagedBlockPool` (`write_prefill` + `gather_visible`).
-                //    Model-owned families (gemma3 / llama4 / qwen3_5) ignore the
-                //    caller's slice and drive their own `ModelOwnedSequenceState`;
+                //    Model-owned families (llama4 / gemma4) ignore the caller's
+                //    slice and drive their own `ModelOwnedSequenceState`, and
+                //    scheduler-owned ones (gemma3 / qwen3_5) run on the entry's
+                //    layer state;
                 //    the scheduler still routes them through the paged backend for
                 //    shadow block-table accounting (`sync_paged_state_with_lengths`),
                 //    so their placeholders stay dense — byte-identical to before.

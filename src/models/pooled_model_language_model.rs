@@ -12,21 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Test driver for a scheduler-owned model without a scheduler (issue #3254).
-//!
-//! A scheduler-owned family keeps no per-sequence state in its wrapper, so a
-//! model-level test can no longer prepare a sequence on the model and forward
-//! it by id. [`Pooled`] owns the model and a real [`CachePool`], and exposes
-//! the by-id calls those tests were written against: each one resolves the
-//! test's sequence id to a pool sequence and goes through the same entry
-//! points the engine and the prompt cache use (`forward_layer_state`, the
-//! per-layer rewinds, `server::prompt_cache::state_snapshot`). It implements
-//! `LanguageModel` itself, so the generic test helpers written over the trait
-//! run on it, and derefs to the model for the wrapper's own methods.
-
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::ops::Deref;
+//! `LanguageModel` for [`Pooled`]: the by-id entries over the pool, and
+//! everything else delegated to the model.
 
 use mlxcel_core::cache::{
     CachePool, KVCacheMode, LayerState, LayerStateForward, LayerStateKind, LayerStateSnapshotSpec,
@@ -36,148 +23,24 @@ use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, ModelStateSnapshot
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use super::Pooled;
 use crate::server::prompt_cache::state_snapshot;
-
-pub(crate) struct Pooled<M: LanguageModel> {
-    model: M,
-    pool: RefCell<CachePool>,
-    /// The test's sequence ids, mapped to the ids the pool assigned.
-    ids: RefCell<HashMap<SequenceId, SequenceId>>,
-}
-
-impl<M: LanguageModel> Deref for Pooled<M> {
-    type Target = M;
-
-    fn deref(&self) -> &M {
-        &self.model
-    }
-}
-
-impl<M: LanguageModel> std::ops::DerefMut for Pooled<M> {
-    fn deref_mut(&mut self) -> &mut M {
-        &mut self.model
-    }
-}
-
-impl<M: LanguageModel> Pooled<M> {
-    pub(crate) fn new(model: M) -> Self {
-        assert!(
-            model.layer_state_kinds().is_some(),
-            "Pooled drives scheduler-owned models"
-        );
-        Self {
-            model,
-            pool: RefCell::new(CachePool::new(64)),
-            ids: RefCell::new(HashMap::new()),
-        }
-    }
-
-    /// The pool sequence behind `seq`, opened on first use.
-    fn pool_id(&self, seq: SequenceId) -> SequenceId {
-        if let Some(id) = self.ids.borrow().get(&seq) {
-            return *id;
-        }
-        let id = self
-            .pool
-            .borrow_mut()
-            .allocate(&self.model)
-            .expect("pool sequence");
-        self.ids.borrow_mut().insert(seq, id);
-        id
-    }
-
-    /// Whether `seq` has a pool sequence.
-    pub(crate) fn has_sequence_state(&self, seq: SequenceId) -> bool {
-        self.ids.borrow().contains_key(&seq)
-    }
-
-    /// Read `seq`'s layer state.
-    pub(crate) fn with_layer_state<R>(
-        &self,
-        seq: SequenceId,
-        f: impl FnOnce(&[LayerState]) -> R,
-    ) -> R {
-        let id = self.pool_id(seq);
-        let pool = self.pool.borrow();
-        f(pool.layer_state(id).expect("scheduler-owned sequence"))
-    }
-
-    /// Mutate `seq`'s layer state.
-    pub(crate) fn with_layer_state_mut<R>(
-        &self,
-        seq: SequenceId,
-        f: impl FnOnce(&mut [LayerState]) -> R,
-    ) -> R {
-        let id = self.pool_id(seq);
-        let mut pool = self.pool.borrow_mut();
-        f(pool.layer_state_mut(id).expect("scheduler-owned sequence"))
-    }
-
-    /// The KV cache mode each of `seq`'s attention layers was built with.
-    pub(crate) fn sequence_kv_modes(&self, seq: SequenceId) -> Vec<KVCacheMode> {
-        self.with_layer_state(seq, |state| {
-            state
-                .iter()
-                .filter_map(|layer| match layer {
-                    LayerState::Kv(cache) => Some(cache.mode),
-                    LayerState::Rotating(cache) => Some(cache.mode),
-                    _ => None,
-                })
-                .collect()
-        })
-    }
-
-    fn forward_row(&self, seq: SequenceId, request: LayerStateForward<'_>) -> UniquePtr<MlxArray> {
-        let ids = [seq];
-        let request = request.with_seq_ids(Some(&ids));
-        self.with_layer_state_mut(seq, |state| {
-            self.model
-                .forward_layer_state(&request, &mut [state])
-                .expect("scheduler-owned forward")
-        })
-    }
-
-    /// The batched forward over the rows' pool state. `Err` is the model's
-    /// refusal or the pool's (a duplicate or unknown row).
-    pub(crate) fn try_forward_batched_with_ids(
-        &self,
-        input_ids: &MlxArray,
-        seq_ids: Option<&[SequenceId]>,
-        _batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-    ) -> Result<UniquePtr<MlxArray>, String> {
-        let seqs = seq_ids.ok_or("a scheduler-owned batch needs sequence ids")?;
-        if let [seq] = seqs {
-            // One row keeps the single-sequence contract, lazy open included.
-            return Ok(self.forward_row(*seq, LayerStateForward::tokens(input_ids).with_mask(mask)));
-        }
-        let ids = self.ids.borrow();
-        let pool_ids: Vec<SequenceId> = seqs
-            .iter()
-            .map(|seq| {
-                ids.get(seq).copied().ok_or_else(|| {
-                    format!("missing scheduler-owned sequence state for sequence {seq}")
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        let mut pool = self.pool.borrow_mut();
-        let mut rows = pool.batch_layer_state_mut(&pool_ids)?;
-        let request = LayerStateForward::tokens(input_ids)
-            .with_mask(mask)
-            .with_seq_ids(Some(seqs));
-        self.model.forward_layer_state(&request, &mut rows)
-    }
-}
 
 impl<M: LanguageModel> LanguageModel for Pooled<M> {
     /// Open a fresh pool sequence for `seq`, dropping any earlier one.
     fn prepare_sequence_state(&self, seq: SequenceId) {
+        if !self.scheduler_owned {
+            return self.model.prepare_sequence_state(seq);
+        }
         self.release_sequence_state_by_id(seq);
         self.model.prepare_sequence_state(seq);
         let _ = self.pool_id(seq);
     }
 
     fn release_sequence_state_by_id(&self, seq: SequenceId) {
+        if !self.scheduler_owned {
+            return self.model.release_sequence_state_by_id(seq);
+        }
         if let Some(id) = self.ids.borrow_mut().remove(&seq) {
             self.pool.borrow_mut().release(id);
         }
@@ -191,6 +54,11 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        if !self.scheduler_owned {
+            return self
+                .model
+                .forward_with_sequence_id(input_ids, seq_id, caches, mask);
+        }
         match seq_id {
             Some(seq) => {
                 self.forward_row(seq, LayerStateForward::tokens(input_ids).with_mask(mask))
@@ -209,6 +77,11 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
+        if !self.scheduler_owned {
+            return self
+                .model
+                .forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos);
+        }
         match seq_id {
             Some(seq) => self.forward_row(
                 seq,
@@ -230,6 +103,15 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        if !self.scheduler_owned {
+            return self.model.forward_with_embeddings_and_sequence_id(
+                input_ids,
+                input_embeddings,
+                seq_id,
+                caches,
+                mask,
+            );
+        }
         match seq_id {
             Some(seq) => self.forward_row(
                 seq,
@@ -256,6 +138,18 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
+        if !self.scheduler_owned {
+            return self
+                .model
+                .forward_last_logits_with_embeddings_and_sequence_id(
+                    input_ids,
+                    input_embeddings,
+                    seq_id,
+                    caches,
+                    mask,
+                    last_pos,
+                );
+        }
         match seq_id {
             Some(seq) => self.forward_row(
                 seq,
@@ -284,6 +178,11 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        if !self.scheduler_owned {
+            return self
+                .model
+                .forward_batched_with_ids(input_ids, seq_ids, batch_caches, mask);
+        }
         if seq_ids.is_none() {
             // The id-less entry runs on the model's fallback slot.
             return self
@@ -299,6 +198,9 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         seq: SequenceId,
         token_len: usize,
     ) -> Option<ModelStateSnapshot> {
+        if !self.scheduler_owned {
+            return self.model.snapshot_sequence_state(seq, token_len);
+        }
         let id = *self.ids.borrow().get(&seq)?;
         state_snapshot::snapshot_sequence_state(&self.model, &self.pool.borrow(), id, token_len)
     }
@@ -308,6 +210,9 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         seq: SequenceId,
         snapshot: &ModelStateSnapshot,
     ) -> Result<(), String> {
+        if !self.scheduler_owned {
+            return self.model.restore_sequence_state(seq, snapshot);
+        }
         let id = self.pool_id(seq);
         state_snapshot::restore_sequence_state(
             &self.model,
@@ -323,6 +228,11 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         snapshot: &ModelStateSnapshot,
         target_len: usize,
     ) -> Result<(), String> {
+        if !self.scheduler_owned {
+            return self
+                .model
+                .restore_sequence_state_truncated(seq, snapshot, target_len);
+        }
         let id = self.pool_id(seq);
         state_snapshot::restore_sequence_state_truncated(
             &self.model,
@@ -350,6 +260,11 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         checkpoint: &ModelStateSnapshot,
         donor: &ModelStateSnapshot,
     ) -> Result<(), String> {
+        if !self.scheduler_owned {
+            return self
+                .model
+                .restore_sequence_state_from_checkpoint(seq, checkpoint, donor);
+        }
         let id = self.pool_id(seq);
         state_snapshot::restore_sequence_state_from_checkpoint(
             &self.model,
@@ -362,6 +277,9 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
 
     /// The engine's decode rewind: every layer, in order.
     fn rewind_decode_appends(&self, seq: SequenceId, n: i32) -> Result<(), String> {
+        if !self.scheduler_owned {
+            return self.model.rewind_decode_appends(seq, n);
+        }
         if !self.has_sequence_state(seq) {
             return Err(format!(
                 "missing scheduler-owned sequence state for sequence {seq}"
@@ -382,6 +300,9 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
     /// The engine's pad trim: every layer for a sequence, the model's
     /// fallback slot for `None`.
     fn trim_state(&self, seq: Option<SequenceId>, excess: i32) -> Result<(), String> {
+        if !self.scheduler_owned {
+            return self.model.trim_state(seq, excess);
+        }
         let Some(seq) = seq else {
             return self.model.trim_state(None, excess);
         };
@@ -412,6 +333,9 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         seq: SequenceId,
         cache_pool: &mut CachePool,
     ) -> Result<(), String> {
+        if !self.scheduler_owned {
+            return self.model.sync_sequence_storage(seq, cache_pool);
+        }
         if !self.has_sequence_state(seq) {
             return Ok(());
         }
@@ -546,5 +470,37 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
 
     fn reset_runtime_state(&self) {
         self.model.reset_runtime_state();
+    }
+
+    fn output_suppressed_token_ids(&self) -> Vec<i32> {
+        self.model.output_suppressed_token_ids()
+    }
+
+    fn supports_chunked_prefill(&self) -> bool {
+        self.model.supports_chunked_prefill()
+    }
+
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        self.model.supports_maskless_padded_prefill()
+    }
+
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        self.model.supports_speculative_verify_rewind()
+    }
+
+    fn kv_cache_captures_sequence_state(&self) -> bool {
+        self.model.kv_cache_captures_sequence_state()
+    }
+
+    fn rope_table_regime(&self, total_prompt_len: usize) -> Option<u8> {
+        self.model.rope_table_regime(total_prompt_len)
+    }
+
+    fn after_prefill(&self) {
+        self.model.after_prefill();
+    }
+
+    fn release_sequence_state(&self, caches: &mut [KVCache]) {
+        self.model.release_sequence_state(caches);
     }
 }

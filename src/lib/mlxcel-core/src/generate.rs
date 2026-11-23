@@ -1227,9 +1227,10 @@ pub trait LanguageModel {
     /// Batched forward with the scheduler's sequence identities.
     ///
     /// `seq_ids[i]` names the sequence whose per-model state row `i` uses; a
-    /// family whose per-sequence state lives inside the model (Gemma 3,
-    /// Llama 4, Qwen3.5, Muse Glimmer, the VLM wrappers) overrides this so
-    /// each row resolves its own state. The default ignores the ids and runs
+    /// family whose per-sequence state lives inside the model (Llama 4,
+    /// Gemma 4, Muse Glimmer, the VLM wrappers) overrides this so
+    /// each row resolves its own state. A scheduler-owned family (Gemma 3,
+    /// Qwen 3.5) is forwarded through [`Self::forward_layer_state`] instead. The default ignores the ids and runs
     /// `forward_batched`. Storage is a property of each row's cache
     /// (`KVCache::attend`, ADR 0008), so there is no per-step storage hint:
     /// the `DecodeBatchContext` argument this entry used to take was removed

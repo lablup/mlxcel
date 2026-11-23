@@ -389,7 +389,7 @@ pub(crate) mod snapshot_prompt_cache {
     const SEQ_BASE: u64 = 1_335_000;
 
     use super::super::{Gemma3Model, Gemma3Wrapper, ModelArgs};
-    use crate::models::pooled_test_model::Pooled;
+    use crate::models::pooled_model::Pooled;
     use mlxcel_core::cache::{KVCacheMode, SequenceId};
     use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
     use mlxcel_core::weights::WeightMap;

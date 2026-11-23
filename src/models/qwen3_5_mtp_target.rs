@@ -57,7 +57,7 @@
 
 use std::cell::RefCell;
 
-use mlxcel_core::cache::LayerState;
+use mlxcel_core::cache::{LayerState, SequenceId};
 use mlxcel_core::generate::SamplingConfig;
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 use mlxcel_core::speculative::mtp::target::{
@@ -159,10 +159,8 @@ fn unflatten_captured(captured: VerifyCaptured) -> (UniquePtr<MlxArray>, Vec<Gdn
 /// loop. The adapter does NOT own the model and holds no tensor state.
 pub struct Qwen35MtpTargetAdapter<'a> {
     model: &'a Qwen35Model,
-    /// The sequence's layer state, borrowed from the scheduler's pool for
-    /// the life of the adapter (issue #3254); `None` is the model's fallback
-    /// slot. In a `RefCell` because `MtpTarget` is `&self`-only.
-    state: Option<RefCell<&'a mut [LayerState]>>,
+    /// Where the sequence's caches live (issue #3254).
+    state: StateSource<'a>,
     /// Adopted prompt-cache prefix length (issue #518). When `> 0`,
     /// `prefill_and_seed` forwards only `prompt_tokens[prefill_start_offset..]`
     /// over the KV already restored into the sequence slot. The seed then
@@ -172,14 +170,45 @@ pub struct Qwen35MtpTargetAdapter<'a> {
     prefill_start_offset: usize,
 }
 
+/// The caches an adapter runs over.
+enum StateSource<'a> {
+    /// The model's id-less fallback slot.
+    Fallback,
+    /// One scheduler sequence's layer state, borrowed from the pool for the
+    /// life of the adapter. In a `RefCell` because `MtpTarget` is `&self`-only.
+    Pool(RefCell<&'a mut [LayerState]>),
+    /// A scheduler sequence the pool held no layer state for.
+    Missing(SequenceId),
+}
+
 impl<'a> Qwen35MtpTargetAdapter<'a> {
-    /// Construct an adapter routing every call over `state`, the layer
-    /// state of one scheduler sequence (`None` = the model's internal
-    /// fallback slot, the offline CLI shape).
-    pub fn new(model: &'a Qwen35Model, state: Option<&'a mut [LayerState]>) -> Self {
+    /// An adapter over the model's internal fallback slot: the offline CLI
+    /// shape, which runs one sequence and holds no pool.
+    pub fn fallback(model: &'a Qwen35Model) -> Self {
         Self {
             model,
-            state: state.map(RefCell::new),
+            state: StateSource::Fallback,
+            prefill_start_offset: 0,
+        }
+    }
+
+    /// An adapter over scheduler sequence `seq_id`, whose layer state the
+    /// caller borrows from the pool (`CachePool::layer_state_mut`).
+    ///
+    /// A sequence with no layer state is kept as such and refused at the
+    /// first call. It never falls back to the shared slot: that would run
+    /// one request on another's state.
+    pub fn for_sequence(
+        model: &'a Qwen35Model,
+        seq_id: SequenceId,
+        state: Option<&'a mut [LayerState]>,
+    ) -> Self {
+        Self {
+            model,
+            state: match state {
+                Some(state) => StateSource::Pool(RefCell::new(state)),
+                None => StateSource::Missing(seq_id),
+            },
             prefill_start_offset: 0,
         }
     }
@@ -188,8 +217,11 @@ impl<'a> Qwen35MtpTargetAdapter<'a> {
     /// slot.
     fn with_state<R>(&self, f: impl FnOnce(Option<&mut [LayerState]>) -> R) -> R {
         match &self.state {
-            Some(state) => f(Some(&mut **state.borrow_mut())),
-            None => f(None),
+            StateSource::Pool(state) => f(Some(&mut **state.borrow_mut())),
+            StateSource::Fallback => f(None),
+            StateSource::Missing(seq_id) => panic!(
+                "Qwen 3.5 MTP target: sequence {seq_id} holds no scheduler-owned layer state"
+            ),
         }
     }
 
@@ -450,11 +482,22 @@ pub struct Qwen35VLMtpTargetAdapter<'a> {
 }
 
 impl<'a> Qwen35VLMtpTargetAdapter<'a> {
-    /// Construct an adapter routing every call over `state`, the layer
-    /// state of one scheduler sequence (`None` = the fallback slot).
-    pub fn new(vlm: &'a crate::vision::Qwen35VLModel, state: Option<&'a mut [LayerState]>) -> Self {
+    /// An adapter over the inner text model's fallback slot.
+    pub fn fallback(vlm: &'a crate::vision::Qwen35VLModel) -> Self {
         Self {
-            inner: Qwen35MtpTargetAdapter::new(&vlm.text_model, state),
+            inner: Qwen35MtpTargetAdapter::fallback(&vlm.text_model),
+        }
+    }
+
+    /// An adapter over scheduler sequence `seq_id`'s layer state; see
+    /// [`Qwen35MtpTargetAdapter::for_sequence`].
+    pub fn for_sequence(
+        vlm: &'a crate::vision::Qwen35VLModel,
+        seq_id: SequenceId,
+        state: Option<&'a mut [LayerState]>,
+    ) -> Self {
+        Self {
+            inner: Qwen35MtpTargetAdapter::for_sequence(&vlm.text_model, seq_id, state),
         }
     }
 
@@ -590,5 +633,94 @@ mod tests {
         let (hidden, gdn) = unflatten_captured(captured);
         assert_eq!(first_val(hidden.as_ref().unwrap()), 9.0);
         assert!(gdn.is_empty());
+    }
+
+    /// One prefill, one verify block and one rollback over `adapter`: the
+    /// first bonus, the verify tokens and the cache offsets after each step.
+    fn drive(adapter: &Qwen35MtpTargetAdapter<'_>) -> (i32, usize, Vec<i32>, usize, Vec<f32>) {
+        use mlxcel_core::generate::SamplingConfig;
+        use mlxcel_core::sampling::LogprobsConfig;
+
+        let sampler = SamplingConfig::greedy();
+        let logprobs = LogprobsConfig::default();
+        let (bonus, seed, _) = adapter.prefill_and_seed(&[1, 2, 3, 4, 5], &sampler, &[], &logprobs);
+        let verify = adapter.verify_forward(&[bonus, 3, 6, 2], &sampler, &logprobs);
+        // Accept one of the four verify positions: the rollback trims the
+        // attention rows and replays the GatedDeltaNet state.
+        let out = adapter.verify_finalize(1, 4, verify.captured);
+        let hidden = mlxcel_core::astype(&out.next_hidden, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&hidden);
+        let hidden: Vec<f32> = mlxcel_core::array_to_raw_bytes(&hidden)
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        (
+            bonus,
+            seed.kv_offset,
+            verify.target_tokens,
+            out.kv_offset,
+            hidden,
+        )
+    }
+
+    /// The adapter over a pool sequence's layer state (issue #3254) runs the
+    /// computation the fallback-slot adapter runs, and leaves the result in
+    /// the pool: prefill, verify and rollback agree step for step, and the
+    /// pool's attention layer ends at the rolled-back offset.
+    #[test]
+    fn a_pool_sequence_adapter_matches_the_fallback_adapter() {
+        use mlxcel_core::cache::CachePool;
+        use mlxcel_core::generate::LanguageModel;
+
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        let model = crate::models::qwen3_5_tests::two_layer_model();
+        model.reset_runtime_state();
+        let want = drive(&Qwen35MtpTargetAdapter::fallback(&model));
+
+        let mut pool = CachePool::new(4);
+        let seq = pool.allocate(&model).expect("pool sequence");
+        let got = drive(&Qwen35MtpTargetAdapter::for_sequence(
+            &model,
+            seq,
+            pool.layer_state_mut(seq),
+        ));
+        assert_eq!(got.0, want.0, "first bonus");
+        assert_eq!(got.1, want.1, "offset after prefill");
+        assert_eq!(got.2, want.2, "verify tokens");
+        assert_eq!(got.3, want.3, "offset after rollback");
+        assert_eq!(got.4, want.4, "hidden at the accepted position");
+        assert_eq!(got.1, 5);
+        assert_eq!(got.3, 7, "five prompt rows plus the two kept verify rows");
+
+        // The state the adapter left is the pool's, at the rolled-back offset.
+        let layers = pool.layer_state(seq).expect("layer state");
+        let offsets: Vec<i32> = layers.iter().map(|layer| layer.offset()).collect();
+        assert_eq!(offsets, vec![7, 7]);
+        assert!(
+            layers[0]
+                .as_recurrent()
+                .is_some_and(|r| r.get("state_cache").is_some())
+        );
+    }
+
+    /// A scheduler sequence with no layer state is refused. It must not run
+    /// on the shared fallback slot.
+    #[test]
+    #[should_panic(expected = "holds no scheduler-owned layer state")]
+    fn a_sequence_without_pool_state_is_refused() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        let model = crate::models::qwen3_5_tests::two_layer_model();
+        let adapter = Qwen35MtpTargetAdapter::for_sequence(
+            &model,
+            mlxcel_core::cache::SequenceId::from_raw(3_254_700),
+            None,
+        );
+        let sampler = mlxcel_core::generate::SamplingConfig::greedy();
+        let _ = adapter.prefill_and_seed(
+            &[1, 2, 3],
+            &sampler,
+            &[],
+            &mlxcel_core::sampling::LogprobsConfig::default(),
+        );
     }
 }

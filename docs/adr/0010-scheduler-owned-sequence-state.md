@@ -122,7 +122,7 @@ The per-conversation checkpoint cap (`--ctx-checkpoints N`) counted every branch
 - A capability over sequence state is written once in `state_snapshot.rs` or `layer_state.rs` and every scheduler-owned family has it.
 - A family is migrated by reporting its table, implementing `forward_layer_state`, naming its snapshot vocabulary and deleting its per-sequence map and snapshot hooks.
 - `SequenceCacheSet::nbytes()` reports what it reported before: it does not count layer state, which was not counted while it lived in the model. `layer_state_nbytes()` reports it separately.
-- Model-level tests can no longer forward a migrated family by sequence id on the bare wrapper. `models::pooled_test_model::Pooled` drives the model over a real `CachePool` and the same entry points the engine and the prompt cache use, behind the by-id calls those tests were written against.
+- Model-level tests can no longer forward a migrated family by sequence id on the bare wrapper. `models::pooled_model::Pooled` drives the model over a real `CachePool` and the same entry points the engine and the prompt cache use, behind the by-id calls those tests were written against.
 - A scheduler-owned family with a recurrent or chunked layer cannot be pad-trimmed or decode-rewound by the engine. Qwen 3.5 declines both, as it did before.
 
 ## Follow-ups

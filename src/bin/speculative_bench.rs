@@ -621,7 +621,7 @@ fn run_mtp(
             // fallback slot.
             |_seq| {
                 mlxcel_core::generate::LanguageModel::reset_runtime_state(qwen);
-                Qwen35MtpTargetAdapter::new(qwen, None)
+                Qwen35MtpTargetAdapter::fallback(qwen)
             },
             drafter,
             target_lm,
@@ -633,7 +633,7 @@ fn run_mtp(
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => run_mtp_timed(
             |_seq| {
                 mlxcel_core::generate::LanguageModel::reset_runtime_state(vlm);
-                Qwen35VLMtpTargetAdapter::new(vlm, None)
+                Qwen35VLMtpTargetAdapter::fallback(vlm)
             },
             drafter,
             target_lm,

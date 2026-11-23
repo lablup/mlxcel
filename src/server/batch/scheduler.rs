@@ -331,11 +331,13 @@ impl BatchScheduler {
             // is exactly why the cache-ownership design routes through
             // `*_for_sequence` wrappers instead of an adapter-owned cache.
             LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
-                let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(
-                    qwen,
-                    pool.layer_state_mut(seq.seq_id),
-                )
-                .with_prefill_start_offset(prefill_start_offset);
+                let adapter =
+                    crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::for_sequence(
+                        qwen,
+                        seq.seq_id,
+                        pool.layer_state_mut(seq.seq_id),
+                    )
+                    .with_prefill_start_offset(prefill_start_offset);
                 Ok(
                     crate::server::batch::speculative_slice::begin_slice_session(
                         adapter,
@@ -352,11 +354,13 @@ impl BatchScheduler {
                 )
             }
             LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
-                let adapter = crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(
-                    vlm,
-                    pool.layer_state_mut(seq.seq_id),
-                )
-                .with_prefill_start_offset(prefill_start_offset);
+                let adapter =
+                    crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::for_sequence(
+                        vlm,
+                        seq.seq_id,
+                        pool.layer_state_mut(seq.seq_id),
+                    )
+                    .with_prefill_start_offset(prefill_start_offset);
                 Ok(
                     crate::server::batch::speculative_slice::begin_slice_session(
                         adapter,
@@ -599,11 +603,13 @@ impl BatchScheduler {
                 true
             }
             LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
-                let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(
-                    qwen,
-                    pool.layer_state_mut(job.seq.seq_id),
-                )
-                .with_prefill_start_offset(job.prefill_start_offset);
+                let adapter =
+                    crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::for_sequence(
+                        qwen,
+                        job.seq.seq_id,
+                        pool.layer_state_mut(job.seq.seq_id),
+                    )
+                    .with_prefill_start_offset(job.prefill_start_offset);
                 crate::server::batch::speculative_slice::step_slice_session(
                     adapter,
                     &mut job,
@@ -612,11 +618,13 @@ impl BatchScheduler {
                 true
             }
             LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
-                let adapter = crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(
-                    vlm,
-                    pool.layer_state_mut(job.seq.seq_id),
-                )
-                .with_prefill_start_offset(job.prefill_start_offset);
+                let adapter =
+                    crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::for_sequence(
+                        vlm,
+                        job.seq.seq_id,
+                        pool.layer_state_mut(job.seq.seq_id),
+                    )
+                    .with_prefill_start_offset(job.prefill_start_offset);
                 crate::server::batch::speculative_slice::step_slice_session(
                     adapter,
                     &mut job,
