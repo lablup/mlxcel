@@ -1052,6 +1052,10 @@ async fn route_chat(
     );
     opts.reasoning_budget = ReasoningBudgetOverride::Explicit(effective_budget);
     opts.thinking_enter_block_on_start = primed_open_thinking;
+    // Not yet carried by the prefill frame's sampling payload, so the decode
+    // side of a disaggregated handoff still forces the pair's close for a
+    // primed variant (out of scope for #3321).
+    opts.thinking_primed_close = primed_close_marker.clone();
 
     // Assign a request id and dispatch the prefill request through the shared
     // tokenize -> select_prefill -> send body (issue #200). The chat id scheme

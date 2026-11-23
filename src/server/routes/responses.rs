@@ -432,6 +432,8 @@ async fn non_stream_create_response(
     // `ThinkingState` then counts reasoning from the first token, as on
     // `/v1/chat/completions`.
     options.thinking_enter_block_on_start = primed_open_thinking;
+    options.thinking_primed_close =
+        super::chat::primed_open_thinking_close_marker(&state.thinking_markers, &prepared.prompt);
     options.structured = structured;
     // Wire the cross-request prompt-prefix KV cache (epic #116) into the
     // Responses path, mirroring the chat-completions handler. Built after
