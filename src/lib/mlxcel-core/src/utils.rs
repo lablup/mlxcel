@@ -1455,6 +1455,10 @@ pub fn gelu_sigmoid(x: &MlxArray) -> UniquePtr<MlxArray> {
 }
 
 /// ReLU squared activation: max(0, x)^2 — compiled kernel fusion
+///
+/// Used by: Nemotron, NemotronH, NanoChat, Arcee (dense AFM MLP), the
+/// Nemotron H Nano Omni sound projector (`projector.rs`) and vision bridge
+/// (`nemotron_h_nano_omni_vl.rs`).
 #[inline]
 pub fn relu_squared(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::compiled_relu_squared(x)

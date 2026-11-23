@@ -184,14 +184,20 @@
       "default": "8192, 0 = no minimum",
       "description": "minimum spacing between context checkpoints in tokens (default: 8192, 0 = no minimum) (env: LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT)",
       "discovery": "help-entry-head",
-      "state": "not_applicable",
-      "issue": 1473,
+      "state": "by_design",
+      "issue": 3255,
       "test": "src/cli/slot_args_tests.rs",
-      "notes": "Declared on both binaries since #1473 so the refusal is a diagnostic rather than clap's unknown-argument error: There are no successive context checkpoints for a minimum spacing to separate; see --ctx-checkpoints. 0 is accepted as the explicit no-minimum spelling and any other value, including upstream's default of 8192, is refused at startup with a diagnostic naming the absent ring. -cms rewrites through the argv pre-pass.",
+      "notes": "Implemented since #3255. M > 0 sets the periodic prefill checkpoint interval (MLXCEL_PROMPT_CACHE_CHECKPOINT_INTERVAL) to M, at absolute multiples of M, and keeps no two state checkpoints of one conversation closer than M tokens (the newer replaces the older). 0 means no periodic checkpoints and no spacing rule. 1 to 255 are refused at startup with a message naming the 256-token floor the environment variable applies; negative values are refused. Unset keeps the environment variable's setting instead of upstream's 8192. -cms rewrites through the argv pre-pass.",
       "divergence": [
-        "a request for the behavior is refused at startup with a diagnostic; only the inert value is accepted"
+        "periodic checkpoints sit at absolute multiples of M rather than M after the previous checkpoint",
+        "values from 1 to 255 are refused",
+        "unset keeps mlxcel's default rather than 8192"
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "Spacing relative to the last checkpoint makes the split points depend on the request history, which breaks the prefix-determinism the periodic checkpoints rely on to give a cache hit the same prefill partition as a cold run of the same prompt.",
+        "revisit_if": "the prefill no longer needs a hit to reproduce the cold partition"
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--checkpoint-min-step"
@@ -374,14 +380,19 @@
       "default": "32",
       "description": "max number of context checkpoints to create per slot (default: 32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293) (env: LLAMA_ARG_CTX_CHECKPOINTS)",
       "discovery": "help-entry-head",
-      "state": "not_applicable",
-      "issue": 1473,
+      "state": "by_design",
+      "issue": 3255,
       "test": "src/cli/slot_args_tests.rs",
-      "notes": "Declared on both binaries since #1473 so the refusal is a diagnostic rather than clap's unknown-argument error: mlxcel captures at most one snapshot per sequence, at the prompt/generation boundary (capture_history_boundary_snapshot), and has no ring of per-slot context checkpoints to size. 0 is accepted as the explicit disable; any other value, including upstream's default of 32, is refused at startup with a diagnostic. --swa-checkpoints is accepted as the same spelling and -ctxcp rewrites through the argv pre-pass.",
+      "notes": "Implemented since #3255 over the prompt cache rather than a per-slot ring. N > 0 keeps the previous turn's restore snapshot (MLXCEL_PROMPT_CACHE_KEEP_PREVIOUS_TURN) and turns on turn-boundary state checkpoints where the model family stores them (the recurrent state for the Qwen 3.5 / Qwen3-Next / Qwen4-Exp hybrids, the sliding-window rings for Gemma 3, Gemma 4 and AFMoE), keeping at most N state checkpoints per conversation; a checkpoint is rebuilt over a longer snapshot of the same conversation. 0 turns both off, including the hybrids' default checkpoints, and logs that at info. Negative values are refused. Unset keeps mlxcel's defaults instead of upstream's 32. The flag and LLAMA_ARG_CTX_CHECKPOINTS override MLXCEL_PROMPT_CACHE_KEEP_PREVIOUS_TURN; MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1 disables all of it with a warning. --swa-checkpoints is accepted as the same spelling and -ctxcp rewrites through the argv pre-pass.",
       "divergence": [
-        "a request for the behavior is refused at startup with a diagnostic; only the inert value is accepted"
+        "the checkpoints are per conversation in the process-wide prompt cache, not per slot",
+        "unset keeps mlxcel's defaults rather than 32 checkpoints"
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "mlxcel has no per-slot state to checkpoint: reuse goes through a process-wide prefix cache that every request consults, so the count bounds that cache's checkpoints per conversation. Defaulting to 32 would hold up to 32 ring or recurrent-state copies per conversation for every deployment that never passes the flag.",
+        "revisit_if": "the prompt cache gains per-slot state, or a measured default count is adopted for every family"
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--ctx-checkpoints",

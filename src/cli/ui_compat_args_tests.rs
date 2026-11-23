@@ -152,12 +152,30 @@ fn help_lists_only_the_webui_pair_under_its_heading() {
         .filter_map(|arg| arg.get_long())
         .collect();
     visible.sort_unstable();
-    assert_eq!(visible, ["no-webui", "webui"]);
+    assert_eq!(
+        visible,
+        [
+            "mcp-max-output-bytes",
+            "mcp-max-tool-rounds",
+            "mcp-servers-config",
+            "mcp-servers-json",
+            "mcp-tool-timeout",
+            "mcp-tools",
+            "no-webui",
+            "webui"
+        ]
+    );
     for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+        // The MCP tool loop flags (#1457) have their own section.
+        let heading = if arg.get_long().is_some_and(|long| long.starts_with("mcp-")) {
+            MCP_HELP_HEADING
+        } else {
+            WEBUI_HELP_HEADING
+        };
         assert_eq!(
             arg.get_help_heading(),
-            Some(WEBUI_HELP_HEADING),
-            "{:?} must sit under the WebUI heading",
+            Some(heading),
+            "{:?} must sit under the {heading} heading",
             arg.get_long()
         );
         assert!(
@@ -178,7 +196,6 @@ fn help_lists_only_the_webui_pair_under_its_heading() {
         "--ui-config",
         "--path",
         "--tools",
-        "--mcp-servers",
         "--ui-mcp-proxy",
         "--agent",
     ] {
@@ -282,5 +299,68 @@ fn single_dash_agent_spellings_rewrite_to_the_long_forms() {
     assert_eq!(
         rewrite(&["probe", "-no-ag"], &mut cmd),
         ["probe", "--no-agent"]
+    );
+}
+
+/// #1457: the MCP server set is refused unless `--mcp-tools` is beside it,
+/// whether it came from the command line or from its `LLAMA_ARG_*` variable.
+#[test]
+fn mcp_server_set_needs_the_mcp_tools_opt_in() {
+    for argv in [
+        &["--mcp-servers-config", "mcp.json"][..],
+        &["--mcp-servers-json", "{}"][..],
+    ] {
+        let err = parse(argv)
+            .ensure_supported()
+            .expect_err("a server set alone must be refused");
+        assert!(err.contains(argv[0]), "{err}");
+        assert!(err.contains("without --mcp-tools"), "{err}");
+        let mut with_opt_in = vec!["--mcp-tools"];
+        with_opt_in.extend_from_slice(argv);
+        parse(&with_opt_in)
+            .ensure_supported()
+            .expect("the opt-in accepts the server set");
+    }
+
+    let _guard = crate::test_support::env_lock::env_lock();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var("LLAMA_ARG_MCP_SERVERS_JSON", "{}");
+    }
+    let parsed = Probe::try_parse_from(["probe"]).map(|probe| probe.ui);
+    // SAFETY: as above.
+    unsafe {
+        std::env::remove_var("LLAMA_ARG_MCP_SERVERS_JSON");
+    }
+    let err = parsed
+        .expect("the variable binds through clap")
+        .ensure_supported()
+        .expect_err("an inherited variable must not enable the tool loop");
+    assert!(err.contains("--mcp-tools"), "{err}");
+}
+
+#[test]
+fn mcp_bounds_default_to_the_documented_values() {
+    let args = parse(&["--mcp-tools"]);
+    assert!(args.mcp_tools);
+    assert_eq!(args.mcp_max_tool_rounds, 8);
+    assert_eq!(args.mcp_tool_timeout, 30);
+    assert_eq!(args.mcp_max_output_bytes, 65536);
+    let args = parse(&[
+        "--mcp-max-tool-rounds",
+        "3",
+        "--mcp-tool-timeout",
+        "5",
+        "--mcp-max-output-bytes",
+        "1024",
+    ]);
+    assert!(!args.mcp_tools);
+    assert_eq!(
+        (
+            args.mcp_max_tool_rounds,
+            args.mcp_tool_timeout,
+            args.mcp_max_output_bytes
+        ),
+        (3, 5, 1024)
     );
 }

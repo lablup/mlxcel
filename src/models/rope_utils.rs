@@ -27,8 +27,9 @@
 //! the `mllama` text decoder, every VLM whose text backbone is `Llama3Model` or
 //! `Qwen2Model`, the `llama` / `mistral` pipeline stage executors and the
 //! tensor-parallel Llama runtime), Qwen3 / Qwen3-MoE, Apertus, Gemma 3, Llama 4
-//! (text and VLM, through `llama4_helpers::Llama4Rope`), and InternLM3 /
-//! InternLM2 through `dynamic_ntk_rope`.
+//! (text and VLM, through `llama4_helpers::Llama4Rope`), InternLM3 /
+//! InternLM2 through `dynamic_ntk_rope`, and Xing4.0 (`xing4_0`, whose
+//! DeepSeek-V3 attention takes the table through `with_rope_table`).
 //!
 //! Since #1450 this is also the seam llama-server b10621's `--rope-scaling`,
 //! `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` are applied at:

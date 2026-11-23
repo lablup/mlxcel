@@ -220,6 +220,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::DeepSeekV3 => "deepseek_v3",
         ModelType::DeepSeekV32 => "deepseek_v32",
         ModelType::DeepSeekV4 => "deepseek_v4",
+        ModelType::Xing40 => "xing4_0",
         ModelType::Dots1 => "dots1",
         ModelType::Cohere => "cohere",
         ModelType::Cohere2 => "cohere2",
@@ -273,11 +274,19 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // neither of which the shard rules name. This arm only keeps the
         // dispatch table total.
         ModelType::Afmoe => "afmoe",
+        // Not "llama": the TP runtime builds a SwiGLU `llama3` decoder from
+        // `config.json` and would load this gate-free squared-ReLU MLP wrong.
+        // The refusal comes from `runtime_kind_for`, which has no arm for it.
+        ModelType::Arcee => "arcee",
         // Not shardable by the generic transformer plan: the experts live
         // under `mlp.experts` and the shared branch is blended rather than
         // added, neither of which the shard rules name. This arm only keeps
         // the dispatch table total.
         ModelType::Klear => "klear",
+        // Not shardable by the generic transformer plan, for AFMoE's reasons:
+        // stacked experts under `mlp.switch_mlp` and rotating sliding caches.
+        // This arm only keeps the dispatch table total.
+        ModelType::Kolibri1 => "kolibri1",
         ModelType::Apertus => "apertus",
         ModelType::SeedOss => "seed_oss",
         ModelType::Granite => "granite",
@@ -407,6 +416,8 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // Kimi-VL / Kimi-VL 2.5 use a DeepSeek-V3-style MoE text backbone.
         ModelType::KimiVL | ModelType::KimiK25 => "deepseek_v3",
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => "longcat_flash",
+        // Replicated like the other LongCat types; no tensor-parallel port.
+        ModelType::LongcatFlashSparse => "longcat_flash_sparse",
         ModelType::Step3p5 => "step3p5",
         // Step-3.7's text backbone is the Step-3.5 MoE stack; TP is refused for
         // VLM-kind models earlier, this keeps the dispatch table total.

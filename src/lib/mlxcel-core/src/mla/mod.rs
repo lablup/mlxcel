@@ -338,7 +338,8 @@ pub fn split_kv_enabled() -> bool {
 /// `models::glm4_moe_lite::MlaAttention::forward`,
 /// `models::kimi_linear::KimiMLAAttention::forward`,
 /// `models::kimi_k3::KimiK3MLAAttention::forward`,
-/// `models::longcat_flash_ngram::LongcatFlashMLA::forward`.
+/// `models::longcat_flash_ngram::LongcatFlashMLA::forward` (and its
+/// `absorbed`, which `models::longcat_flash_sparse` calls).
 #[must_use]
 pub fn use_absorbed_mla(
     l: usize,

@@ -62,6 +62,7 @@ pub(crate) mod embedding_sanitize;
 pub(crate) mod embedding_test_support;
 mod gemma3n_helpers;
 pub(crate) mod headless_llama;
+mod kv_ring_checkpoint;
 mod kv_snapshot;
 mod llama4_helpers;
 pub(crate) mod model_owned;
@@ -146,6 +147,7 @@ pub(crate) fn parse_optional_eos_token_ids(value: &Option<serde_json::Value>) ->
 // Model implementations (mlxcel-core based)
 pub mod afmoe;
 pub mod apertus;
+pub mod arcee;
 pub mod baichuan;
 pub mod bailing_moe;
 pub mod bailing_moe_linear;
@@ -231,6 +233,10 @@ pub mod k2_horizon;
 pub mod kimi_k3;
 pub mod kimi_linear;
 pub mod klear;
+pub mod kolibri1;
+mod kolibri1_lm;
+pub mod kolibri1_moe;
+pub mod kolibri1_weights;
 pub mod laguna;
 pub mod laguna_layers;
 pub mod laguna_sanitize;
@@ -246,6 +252,7 @@ pub mod llama_bidirec;
 pub mod llama_nemotron_vl_embedding;
 pub(crate) mod llama_nemotron_vl_tiling;
 pub mod longcat_flash_ngram;
+pub mod longcat_flash_sparse;
 pub mod mamba;
 pub mod mamba2;
 pub mod mellum;
@@ -325,6 +332,7 @@ pub mod telechat3;
 #[cfg(test)]
 pub(crate) mod vl_embedding_test_images;
 pub mod whisper;
+pub mod xing4_0;
 pub mod youtu_vl_lm;
 pub mod z1t;
 
@@ -335,6 +343,7 @@ pub mod kokoro;
 // Re-export model types
 pub use afmoe::AfmoeModel;
 pub use apertus::ApertusModel;
+pub use arcee::ArceeModel;
 pub use baichuan::BaichuanModel;
 pub use bailing_moe::BailingMoeModel;
 pub use bailing_moe_linear::BailingMoeLinearModel;
@@ -350,6 +359,7 @@ pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v4::DeepSeekV4Model;
 pub use deepseek_v32::DeepSeekV32Model;
+pub(crate) use detection::is_longcat_sparse_architecture;
 pub(crate) use detection::is_sequence_classification_architecture;
 pub(crate) use detection::vlm_has_vision;
 #[cfg(feature = "webui")]
@@ -405,6 +415,7 @@ pub use jina_vlm::{JinaVlmTextConfig, JinaVlmTextModel};
 pub use kimi_k3::KimiK3Model;
 pub use kimi_linear::KimiLinearModel;
 pub use klear::KlearModel;
+pub use kolibri1::Kolibri1Model;
 pub use laguna::{LagunaModel, LagunaWrapper};
 pub use lfm2::Lfm2Model;
 pub use limite::{LimiteModel, LimiteWrapper};
@@ -412,6 +423,7 @@ pub use llada2_moe::Llada2MoeModel;
 pub use llama3::Llama3Model;
 pub use llama4::{Llama4CxxModel, Llama4Wrapper};
 pub use longcat_flash_ngram::LongcatFlashNgramModel;
+pub use longcat_flash_sparse::LongcatFlashSparseModel;
 pub use mamba::MambaModel;
 pub use mamba2::Mamba2Model;
 pub use mellum::{MellumModel, MellumWrapper};
@@ -506,6 +518,7 @@ pub use starcoder2::StarCoder2Model;
 pub use step3p5::Step3p5Model;
 pub use telechat3::TeleChat3Model;
 pub use whisper::WhisperModel;
+pub use xing4_0::Xing40Model;
 pub use youtu_vl_lm::YoutuLanguageModel;
 pub use z1t::Z1t;
 
@@ -632,6 +645,8 @@ pub enum ModelType {
     DeepSeekV32,
     /// DeepSeek-V4 (HyperConnections, pooled-KV compression, HiSA, hash-routed MoE).
     DeepSeekV4,
+    /// Xing4.0 (DeepSeek-V3 MLA + MoE inside a manifold hyper-connection stream).
+    Xing40,
     /// rednote dots.llm1 (DeepSeek-V3-style MoE without MLA).
     Dots1,
 
@@ -674,10 +689,17 @@ pub enum ModelType {
     /// attention with NoPE global layers, a sigmoid attention gate,
     /// sandwich norms, muP embedding scale and a sparse MoE FFN.
     Afmoe,
+    /// Arcee AFM dense (`arcee`, AFM-4.5B): a Llama-shaped decoder with a
+    /// gate-free squared-ReLU MLP and YaRN RoPE. Not AFMoE and not Apple AFM-7.
+    Arcee,
     /// Kuaishou Klear (`Klear`): a Qwen3-shaped sparse MoE whose shared
     /// expert is blended with the routed mixture through a learned 2-way
     /// softmax rather than added.
     Klear,
+    /// Aleph Alpha Kolibri-1 (`kolibri1`): AFMoE-shaped sliding/full hybrid
+    /// MoE without the attention gate, 384 experts top-6 routed on raw
+    /// logits plus a correction bias, and a shared expert.
+    Kolibri1,
 
     // Apertus (Swiss AI)
     Apertus,
@@ -768,6 +790,7 @@ pub enum ModelType {
     // Longcat models
     LongcatFlash,
     LongcatFlashNgram,
+    LongcatFlashSparse,
 
     // Step models
     Step3p5,
@@ -922,6 +945,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekV3,
     ModelType::DeepSeekV32,
     ModelType::DeepSeekV4,
+    ModelType::Xing40,
     ModelType::Dots1,
     // Cohere family
     ModelType::Cohere,
@@ -945,7 +969,9 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::BailingMoe,
     ModelType::BailingMoeLinear,
     ModelType::Afmoe,
+    ModelType::Arcee,
     ModelType::Klear,
+    ModelType::Kolibri1,
     // Apertus (Swiss AI)
     ModelType::Apertus,
     // ByteDance Seed-OSS
@@ -1015,6 +1041,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Longcat models
     ModelType::LongcatFlash,
     ModelType::LongcatFlashNgram,
+    ModelType::LongcatFlashSparse,
     // Step models
     ModelType::Step3p5,
     ModelType::Step3p7,
@@ -1167,6 +1194,10 @@ impl ModelType {
             ModelType::DeepSeekV3 => ("DeepSeek v3 / R1", "DeepSeek"),
             ModelType::DeepSeekV32 => ("DeepSeek v3.2", "DeepSeek"),
             ModelType::DeepSeekV4 => ("DeepSeek v4", "DeepSeek"),
+            ModelType::Xing40 => (
+                "Xing4.0 (DeepSeek-V3 MoE, hyper-connection stream)",
+                "DeepSeek",
+            ),
 
             // ----- Cohere -----
             ModelType::Cohere => ("Command R (Cohere)", "Cohere"),
@@ -1193,7 +1224,12 @@ impl ModelType {
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
             ModelType::BailingMoe => ("Ling / Bailing MoE (shared + routed experts)", "Bailing"),
             ModelType::Afmoe => ("Arcee AFMoE / Trinity (sliding + full hybrid MoE)", "Arcee"),
+            ModelType::Arcee => ("Arcee AFM dense (squared-ReLU MLP, YaRN RoPE)", "Arcee"),
             ModelType::Klear => ("Klear MoE (coefficient-blended shared expert)", "Klear"),
+            ModelType::Kolibri1 => (
+                "Aleph Alpha Kolibri-1 (sliding + full hybrid MoE)",
+                "Aleph Alpha",
+            ),
             ModelType::BailingMoeLinear => (
                 "Ling / Ring linear-attention MoE (GLA + full attention hybrid)",
                 "Bailing",
@@ -1253,6 +1289,10 @@ impl ModelType {
             ModelType::KimiK25 => ("Kimi-VL 2.5 (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
             ModelType::LongcatFlashNgram => ("LongCat Flash + N-gram embedding", "MoE (other)"),
+            ModelType::LongcatFlashSparse => (
+                "LongCat Flash Lite Sparse (LSA sparse MLA + N-gram embedding)",
+                "MoE (other)",
+            ),
             ModelType::Step3p5 => ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)"),
             ModelType::Step3p7 => ("Step-3.7 (ViT + Step-3.5 MoE)", "Step VLM"),
             ModelType::Dots1 => ("dots.llm1 (MoE)", "MoE (other)"),
@@ -1602,6 +1642,7 @@ mod metadata_tests {
             DeepSeekV3,
             DeepSeekV32,
             DeepSeekV4,
+            Xing40,
             Dots1,
             Cohere,
             Cohere2,
@@ -1623,7 +1664,9 @@ mod metadata_tests {
             BailingMoe,
             BailingMoeLinear,
             Afmoe,
+            Arcee,
             Klear,
+            Kolibri1,
             Apertus,
             SeedOss,
             Granite,
@@ -1677,6 +1720,7 @@ mod metadata_tests {
             KimiK25,
             LongcatFlash,
             LongcatFlashNgram,
+            LongcatFlashSparse,
             Step3p5,
             Step3p7,
             Rwkv7,
@@ -1802,6 +1846,10 @@ mod gemma3n_helpers_tests;
 #[cfg(test)]
 #[path = "gemma4_tests.rs"]
 pub(crate) mod gemma4_tests;
+
+#[cfg(test)]
+#[path = "gemma4_ring_checkpoint_tests.rs"]
+mod gemma4_ring_checkpoint_tests;
 
 #[cfg(test)]
 #[path = "llama4_helpers_tests.rs"]

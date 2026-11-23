@@ -168,6 +168,10 @@ pub struct ServerStartupConfig {
     pub sse_ping_interval: Option<std::time::Duration>,
     /// Serve the bundled local WebUI and authenticated `/ui-api/v1` adapter routes.
     pub webui_enabled: bool,
+    /// Server-side MCP tool loop on `/v1/responses` (#1457): the stdio
+    /// servers to start and the loop's bounds. `None` (the default) leaves the
+    /// feature off and starts no process.
+    pub mcp: Option<super::mcp::McpStartupConfig>,
     /// Restart-local WebUI key generated before bind and printed after bind.
     #[cfg(feature = "webui")]
     pub(crate) webui_terminal_secret: Option<WebUiTerminalSecret>,
@@ -723,6 +727,7 @@ impl Default for ServerStartupConfig {
                 crate::server::transport::DEFAULT_SSE_PING_INTERVAL_SECS as u64,
             )),
             webui_enabled: false,
+            mcp: None,
             #[cfg(feature = "webui")]
             webui_terminal_secret: None,
             #[cfg(feature = "webui")]
@@ -3401,6 +3406,47 @@ fn is_loopback_bind_host(host: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
+/// Gate the server-side MCP tool loop (#1457). MCP children run with the
+/// server's privileges, so the loop needs a listener that is local-only or
+/// authenticated, and a single loaded chat model to run beside.
+fn validate_mcp_startup(
+    startup: &ServerStartupConfig,
+    api_keys: &crate::server::ApiKeys,
+    image_only: bool,
+) -> Result<()> {
+    if startup.mcp.is_none() {
+        return Ok(());
+    }
+    // The tensor-parallel, pipeline-stage, and router paths do not carry the
+    // MCP runtime: refuse instead of accepting the flag and ignoring it.
+    super::mcp::validate_mcp_single_node(ServerDistributedFlags::from(startup).first_requested())
+        .map_err(|message| anyhow::anyhow!(message))?;
+    let resolution = crate::server::transport::resolve_listen_target(&startup.host, startup.port)?;
+    let scope = match &resolution.target {
+        crate::server::transport::ListenTarget::Unix(_) => super::mcp::ListenerScope::LocalOnly,
+        crate::server::transport::ListenTarget::Tcp { host, .. } => {
+            if is_loopback_bind_host(host) {
+                super::mcp::ListenerScope::LocalOnly
+            } else {
+                super::mcp::ListenerScope::Network
+            }
+        }
+    };
+    super::mcp::validate_mcp_exposure(scope, &startup.host, !api_keys.is_empty())
+        .map_err(|message| anyhow::anyhow!(message))?;
+    let router_mode = startup.model_path.as_os_str().is_empty()
+        && (startup.router_models_dir.is_some()
+            || startup.models_preset.is_some()
+            || startup.webui_enabled);
+    anyhow::ensure!(
+        !router_mode && !image_only,
+        "--mcp-tools is served by a single-model server only: the server-side MCP tool loop \
+         runs beside one loaded chat model. Start mlxcel-server with a model argument, or \
+         remove --mcp-tools and the MCP server configuration"
+    );
+    Ok(())
+}
+
 fn validate_settings_endpoint_exposure(
     enabled: bool,
     host: &str,
@@ -3436,6 +3482,46 @@ fn prompt_cache_sizing_kv_mode(config: &ServerConfig) -> crate::execution::kv_ar
     crate::server::kv_mode_for_batch(config.kv_cache_mode, &config.batch_kv_quant)
 }
 
+/// Resolve `--ctx-checkpoints` / `--checkpoint-min-step` against the
+/// prompt-cache environment switches and the model's family (issue #3255),
+/// copy the result into `config.prompt_cache`, and log what the resolution
+/// asks for.
+fn resolve_ctx_checkpoints(
+    config: &mut ServerConfig,
+    model_path: &Path,
+) -> crate::server::prompt_cache::CtxCheckpointPolicy {
+    use crate::server::prompt_cache::{
+        CtxCheckpointEnv, CtxCheckpointNotice, boundary_snapshot_disabled,
+        checkpoint_interval_tokens, ctx_checkpoints::family_default_ctx_checkpoints,
+        keep_previous_turn_enabled, resolve_ctx_checkpoint_policy,
+    };
+    let env = CtxCheckpointEnv {
+        boundary_disabled: boundary_snapshot_disabled(),
+        keep_previous_turn: keep_previous_turn_enabled(),
+        checkpoint_interval: checkpoint_interval_tokens(),
+    };
+    let (policy, notices) = resolve_ctx_checkpoint_policy(
+        config.prompt_cache.ctx_checkpoint_flags,
+        env,
+        family_default_ctx_checkpoints(model_path),
+    );
+    for notice in notices {
+        match notice {
+            CtxCheckpointNotice::Info(message) => tracing::info!("{message}"),
+            CtxCheckpointNotice::Warn(message) => tracing::warn!("{message}"),
+        }
+    }
+    let cache = &mut config.prompt_cache;
+    // A caller-built config that already keeps the previous turn keeps it
+    // unless `--ctx-checkpoints` says otherwise.
+    cache.keep_previous_turn = policy.keep_previous_turn
+        || (cache.ctx_checkpoint_flags.ctx_checkpoints.is_none() && cache.keep_previous_turn);
+    cache.checkpoint_interval_tokens = policy.checkpoint_interval;
+    cache.state_checkpoints_per_conversation = policy.per_conversation;
+    cache.state_checkpoint_min_spacing_tokens = policy.min_spacing_tokens;
+    policy
+}
+
 /// Size the cross-request prompt-prefix cache for this model and build its
 /// store, or `None` when the policy disables it.
 ///
@@ -3449,11 +3535,11 @@ pub(super) fn resolve_prompt_cache_store(
     model_path: &Path,
     batch_metrics: &Arc<BatchMetrics>,
 ) -> Option<Arc<crate::server::prompt_cache::PromptCacheStore>> {
-    // Copied before sizing so the default budget can make room for the extra
-    // snapshot per conversation the switch keeps (#3035).
-    if crate::server::prompt_cache::keep_previous_turn_enabled() {
-        config.prompt_cache.keep_previous_turn = true;
-    }
+    // `--ctx-checkpoints` / `--checkpoint-min-step` over the environment
+    // switches (#3255). Resolved before sizing so the default budget can make
+    // room for the extra snapshot per conversation keep-previous-turn holds
+    // (#3035).
+    let checkpoints = resolve_ctx_checkpoints(config, model_path);
     let kv_mode = prompt_cache_sizing_kv_mode(config);
     if config.prompt_cache.is_enabled()
         && !config.prompt_cache.snapshot_capacity_bytes_explicit
@@ -3483,10 +3569,14 @@ pub(super) fn resolve_prompt_cache_store(
         config.prompt_cache.snapshot_capacity_bytes = rec.capacity_bytes;
     }
 
-    // Turn-boundary state checkpoints (#3047): an operator byte count wins,
-    // otherwise the hybrid families get a budget sized from their recurrent
-    // state. Families without recurrent state store none either way.
-    if config.prompt_cache.is_enabled() {
+    // Turn-boundary state checkpoints (#3047): `--ctx-checkpoints 0` turns
+    // them off, an operator byte count wins otherwise, and otherwise the
+    // hybrid families get a budget sized from their recurrent state, and the
+    // sliding-window families one sized from their rings when the flag (or
+    // their default) asks for them (#3255). Other families store none.
+    if config.prompt_cache.is_enabled() && checkpoints.state_checkpoints_off {
+        config.prompt_cache.state_checkpoint_capacity_bytes = 0;
+    } else if config.prompt_cache.is_enabled() {
         match crate::server::prompt_cache::state_checkpoint_capacity_override() {
             Some(bytes) => config.prompt_cache.state_checkpoint_capacity_bytes = bytes,
             None => {
@@ -3494,6 +3584,8 @@ pub(super) fn resolve_prompt_cache_store(
                     model_path,
                     config.context_size,
                     kv_mode,
+                    checkpoints.ring_checkpoints,
+                    config.prefill_chunk_size,
                 ) {
                     tracing::info!(
                         state_checkpoint_capacity_bytes = rec.capacity_bytes,
@@ -3554,8 +3646,9 @@ pub(super) fn resolve_prompt_cache_store(
 
     // Cross-request prompt-prefix KV cache store.
     // Gated on the config flag so a disabled policy reserves zero memory.
-    // wire BatchMetrics into the store so hits/misses/evictions
-    // are counted and exposed via /metrics.
+    // wire BatchMetrics into the store so evictions and snapshot misses are
+    // counted and exposed via /metrics. Hits, dense misses, and reused tokens
+    // are recorded by the scheduler, not through this adapter (#3246).
     if config.prompt_cache.is_enabled() {
         let cache_metrics = Arc::new(crate::server::state::BatchMetricsCacheAdapter::new(
             batch_metrics.clone(),
@@ -3658,6 +3751,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         startup.port,
         &api_keys,
     )?;
+    // Server-side MCP tool loop (#1457): refused before any child process
+    // starts and before the model loads.
+    validate_mcp_startup(&startup, &api_keys, image_only)?;
     if !api_keys.is_empty() {
         // Never the key material itself: a count is all an operator needs to
         // confirm the file was read, and it is all a log should ever carry.
@@ -4572,6 +4668,14 @@ async fn serve_with_side_model_workers(
         image_model.is_some(),
     )?;
 
+    // The MCP servers start last (#1457), once the model is loaded and the
+    // exposure gate has passed: discovery lists each server's tools, and a
+    // server that fails is logged and left unavailable.
+    let mcp_runtime = match startup.mcp.clone() {
+        Some(mcp) => Some(super::mcp::McpRuntime::start(mcp).await),
+        None => None,
+    };
+
     let state = AppState::with_observability(
         model_provider,
         config,
@@ -4587,6 +4691,7 @@ async fn serve_with_side_model_workers(
     .with_prompt_cache(prompt_cache_store)
     .with_responses_store(responses_store)
     .with_conversation_store(conversation_store)
+    .with_mcp(mcp_runtime)
     .with_audio_model(audio_model)
     .with_embedding_model(embedding_model)
     .with_image_model(image_model)

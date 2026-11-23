@@ -117,7 +117,7 @@ pub enum ToolCallFormat {
     /// inside a `<|open|>tools<|sep|>` ... `<|close|>tools<|sep|>` section.
     /// Argument values are typed by the `type` attribute rather than inferred.
     KimiK3,
-    /// LongCat-Flash (`longcat_flash`, `longcat_flash_ngram`): structurally
+    /// LongCat-Flash (`longcat_flash`, `longcat_flash_ngram`, `longcat_flash_sparse`): structurally
     /// identical to [`Glm47`](ToolCallFormat::Glm47) but with the distinct tags
     /// `<longcat_tool_call>`, `<longcat_arg_key>`, and `<longcat_arg_value>`; a
     /// block body that starts with `{` is treated as a raw JSON tool object.

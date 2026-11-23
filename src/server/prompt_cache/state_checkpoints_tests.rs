@@ -418,3 +418,163 @@ fn a_checkpoint_hit_counts_only_once_confirmed_and_can_be_discarded() {
         other => panic!("expected turn 1's checkpoint, got {other:?}"),
     }
 }
+
+fn capped_config(per_conversation: Option<usize>, spacing: usize) -> PromptCacheConfig {
+    config(1 << 20).with_state_checkpoint_rules(per_conversation, spacing)
+}
+
+#[test]
+fn a_conversation_keeps_its_newest_n_checkpoints() {
+    // Issue #3255: `--ctx-checkpoints N` keeps N per conversation; the N + 1th
+    // boundary drops the oldest (shortest) one.
+    let n = 3;
+    let store = PromptCacheStore::with_config(capped_config(Some(n), 0));
+    run_turns(&store, SESSION, n + 1);
+    let stats = store.stats();
+    assert_eq!(stats.state_checkpoint_entries, n);
+    assert_eq!(stats.state_checkpoint_evictions, 1);
+    let kept: Vec<usize> = (1..=n + 1)
+        .filter(|turn| {
+            matches!(
+                lookup(&store, SESSION, &edited_after(10 * turn, 95)),
+                SnapshotLookupOutcome::CheckpointHit { matched_len, .. } if matched_len == 10 * turn
+            )
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        vec![2, 3],
+        "turn 1 dropped; turn 4 is the donor's own length"
+    );
+}
+
+#[test]
+fn the_cap_counts_one_conversation_not_the_session() {
+    // Two chats under one session key (the anonymous session of requests
+    // without a key) share no tokens, so neither cap evicts the other's.
+    let store = PromptCacheStore::with_config(capped_config(Some(2), 0));
+    run_turns(&store, SESSION, 2);
+    for n in 1..=2 {
+        let tokens: Vec<i32> = (0..10 * n as i32).map(|t| t + 5000).collect();
+        let lineage = chain_lineage(n);
+        store
+            .insert_snapshot(&key(SESSION, &tokens), whole(&tokens, lineage.clone()))
+            .expect("whole snapshot");
+        store
+            .insert_state_checkpoint(&key(SESSION, &tokens), checkpoint(&tokens, lineage))
+            .expect("checkpoint");
+    }
+    assert_eq!(store.stats().state_checkpoint_entries, 4);
+    assert_eq!(store.stats().state_checkpoint_evictions, 0);
+}
+
+#[test]
+fn checkpoints_closer_than_the_spacing_replace_each_other() {
+    // `--checkpoint-min-step 15` with turns 10 tokens apart: each new
+    // boundary replaces the previous one.
+    let store = PromptCacheStore::with_config(capped_config(None, 15));
+    run_turns(&store, SESSION, 4);
+    // 10, then 20 replaces 10 (gap 10), 30 replaces 20, 40 replaces 30.
+    assert_eq!(store.stats().state_checkpoint_entries, 1);
+    let store = PromptCacheStore::with_config(capped_config(None, 10));
+    run_turns(&store, SESSION, 4);
+    assert_eq!(
+        store.stats().state_checkpoint_entries,
+        4,
+        "a gap equal to the spacing keeps both"
+    );
+}
+
+/// Store turns `1..=turns` in reverse order of completion: the whole snapshot
+/// of every turn first, then the checkpoints from the longest to the shortest,
+/// as requests finishing out of order would.
+fn run_turns_reversed(store: &PromptCacheStore, session: &str, turns: usize) {
+    for n in 1..=turns {
+        let tokens = history(10 * n);
+        store
+            .insert_snapshot(&key(session, &tokens), whole(&tokens, chain_lineage(n)))
+            .expect("whole snapshot");
+    }
+    for n in (1..=turns).rev() {
+        let tokens = history(10 * n);
+        store
+            .insert_state_checkpoint(
+                &key(session, &tokens),
+                checkpoint(&tokens, chain_lineage(n)),
+            )
+            .expect("checkpoint");
+    }
+}
+
+fn kept_boundaries(store: &PromptCacheStore, turns: usize, len: usize) -> Vec<usize> {
+    (1..=turns)
+        .filter(|turn| {
+            matches!(
+                lookup(store, SESSION, &edited_after(10 * turn, len)),
+                SnapshotLookupOutcome::CheckpointHit { matched_len, .. } if matched_len == 10 * turn
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_cap_holds_when_checkpoints_arrive_longest_first() {
+    // The same N + 1 boundaries inserted from the longest to the shortest keep
+    // the N longest, exactly as in forward order.
+    let n = 3;
+    let store = PromptCacheStore::with_config(capped_config(Some(n), 0));
+    run_turns_reversed(&store, SESSION, n + 1);
+    let stats = store.stats();
+    assert_eq!(stats.state_checkpoint_entries, n);
+    assert_eq!(stats.state_checkpoint_evictions, 1);
+    assert_eq!(kept_boundaries(&store, n + 1, 95), vec![2, 3]);
+}
+
+#[test]
+fn the_spacing_holds_when_checkpoints_arrive_longest_first() {
+    // Boundaries 10 tokens apart under a spacing of 15: the shorter one
+    // arriving second is the older and is the one dropped.
+    let store = PromptCacheStore::with_config(capped_config(None, 15));
+    run_turns_reversed(&store, SESSION, 2);
+    assert_eq!(store.stats().state_checkpoint_entries, 1);
+    assert_eq!(store.stats().state_checkpoint_evictions, 1);
+    // Turn 3's snapshot is the donor that makes turn 2's checkpoint offerable.
+    let tokens = history(30);
+    store
+        .insert_snapshot(&key(SESSION, &tokens), whole(&tokens, chain_lineage(3)))
+        .expect("whole snapshot");
+    assert_eq!(kept_boundaries(&store, 2, 95), vec![2]);
+}
+
+#[test]
+fn reinserting_a_common_ancestor_after_a_fork_applies_the_cap_across_both_branches() {
+    // Documented behaviour of the per-conversation cap: the line of a shared
+    // ancestor holds every branch below it, so re-inserting the ancestor after
+    // a fork counts the sibling branches together. One branch can lose its
+    // checkpoints, but the memory stays within the cap for both.
+    let cap = 2;
+    let store = PromptCacheStore::with_config(capped_config(Some(cap), 0));
+    let insert = |tokens: &[i32], lineage: SnapshotLineage| {
+        store
+            .insert_snapshot(&key(SESSION, tokens), whole(tokens, lineage.clone()))
+            .expect("whole snapshot");
+        store
+            .insert_state_checkpoint(&key(SESSION, tokens), checkpoint(tokens, lineage))
+            .expect("checkpoint");
+    };
+    // Branch A: turns 1 to 3. Branch B forks after turn 2 and adds two turns.
+    run_turns(&store, SESSION, 3);
+    let fork = |len: usize| edited_after(20, len);
+    insert(&fork(40), chain_lineage(2).extended(40, 10));
+    insert(
+        &fork(50),
+        chain_lineage(2).extended(40, 10).extended(50, 11),
+    );
+    // The ancestor at turn 2 is regenerated: its line is both branches.
+    insert(&history(20), chain_lineage(2));
+    let entries = store.stats().state_checkpoint_entries;
+    assert!(
+        entries <= cap,
+        "checkpoints of both branches stay within the cap {cap}, got {entries}"
+    );
+}

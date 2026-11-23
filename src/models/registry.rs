@@ -772,6 +772,7 @@ impl ModelType {
             ModelType::DeepSeekV3 => "deepseek_v3",
             ModelType::DeepSeekV32 => "deepseek_v32",
             ModelType::DeepSeekV4 => "deepseek_v4",
+            ModelType::Xing40 => "xing4_0",
             ModelType::Dots1 => "dots1",
             ModelType::Cohere => "cohere",
             ModelType::Cohere2 => "cohere2",
@@ -793,7 +794,9 @@ impl ModelType {
             ModelType::BailingMoe => "bailing_moe",
             ModelType::BailingMoeLinear => "bailing_moe_linear",
             ModelType::Afmoe => "afmoe",
+            ModelType::Arcee => "arcee",
             ModelType::Klear => "klear",
+            ModelType::Kolibri1 => "kolibri1",
             ModelType::Apertus => "apertus",
             ModelType::SeedOss => "seed_oss",
             ModelType::Granite => "granite",
@@ -847,6 +850,7 @@ impl ModelType {
             ModelType::KimiK25 => "kimi_k25",
             ModelType::LongcatFlash => "longcat_flash",
             ModelType::LongcatFlashNgram => "longcat_flash_ngram",
+            ModelType::LongcatFlashSparse => "longcat_flash_sparse",
             ModelType::Step3p5 => "step3p5",
             ModelType::Step3p7 => "step3p7",
             ModelType::Rwkv7 => "rwkv7",
@@ -992,6 +996,7 @@ impl ModelType {
             | ModelType::KimiK3VLM
             | ModelType::LongcatFlash
             | ModelType::LongcatFlashNgram
+            | ModelType::LongcatFlashSparse
             | ModelType::Qwen3Next => "linear_attention",
             ModelType::Mamba
             | ModelType::Mamba2
@@ -1021,6 +1026,7 @@ impl ModelType {
             | ModelType::DeepSeekV3
             | ModelType::DeepSeekV32
             | ModelType::DeepSeekV4
+            | ModelType::Xing40
             | ModelType::Dots1
             | ModelType::Cohere2Moe
             | ModelType::Glm4Moe
@@ -1031,6 +1037,7 @@ impl ModelType {
             | ModelType::BailingMoe
             | ModelType::Afmoe
             | ModelType::Klear
+            | ModelType::Kolibri1
             | ModelType::ExaOneMoe
             | ModelType::PhiMoe
             | ModelType::Phixtral
@@ -1168,6 +1175,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::DeepSeekV3 => &["deepseek_v3", "kimi_k2", "joyai_llm_flash"],
         ModelType::DeepSeekV32 => &["deepseek_v32", "deepseek_v3.2"],
         ModelType::DeepSeekV4 => &["deepseek_v4"],
+        ModelType::Xing40 => &["xing4_0"],
         ModelType::Dots1 => &["dots1"],
         ModelType::Cohere => &["cohere"],
         ModelType::Cohere2 => &["cohere2"],
@@ -1192,7 +1200,9 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::BailingMoe => &["bailing_moe"],
         ModelType::BailingMoeLinear => &["bailing_moe_linear"],
         ModelType::Afmoe => &["afmoe"],
+        ModelType::Arcee => &["arcee"],
         ModelType::Klear => &["klear"],
+        ModelType::Kolibri1 => &["kolibri1"],
         ModelType::Apertus => &["apertus"],
         ModelType::SeedOss => &["seed_oss"],
         ModelType::Granite => &["granite"],
@@ -1247,6 +1257,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::LocateAnythingVLM => &["locateanything"],
         ModelType::LongcatFlash => &["longcat_flash"],
         ModelType::LongcatFlashNgram => &["longcat_flash_ngram"],
+        ModelType::LongcatFlashSparse => &["longcat_flash_sparse"],
         ModelType::Step3p5 => &["step3p5"],
         ModelType::Step3p7 => &["step3p7"],
         ModelType::RecurrentGemma => &["recurrent_gemma", "griffin"],
@@ -1381,6 +1392,7 @@ fn stores_quantized_latent(model_type: ModelType) -> bool {
             | ModelType::KimiK3VLM
             | ModelType::LongcatFlash
             | ModelType::LongcatFlashNgram
+            | ModelType::LongcatFlashSparse
     )
 }
 
@@ -1877,6 +1889,7 @@ mod tests {
             ModelType::KimiK3VLM,
             ModelType::LongcatFlash,
             ModelType::LongcatFlashNgram,
+            ModelType::LongcatFlashSparse,
         ] {
             let family = family(model_type);
             assert_eq!(family.kv_modes, KV_INT8, "{model_type:?}");
@@ -1909,7 +1922,11 @@ mod tests {
         }
         // LongCat's model-owned caches hold the affine int8 latent and no
         // Turbo mode (#3161).
-        for model_type in [ModelType::LongcatFlash, ModelType::LongcatFlashNgram] {
+        for model_type in [
+            ModelType::LongcatFlash,
+            ModelType::LongcatFlashNgram,
+            ModelType::LongcatFlashSparse,
+        ] {
             assert_eq!(
                 family(model_type).kv_modes,
                 KV_INT8,

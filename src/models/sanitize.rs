@@ -2282,6 +2282,14 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         .as_ref()
         .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("limite"));
 
+    // Decider-2b's output is a calibrated probability, not a token: its
+    // per-type temperatures were fitted on the bf16 weights the reference
+    // runs, and the f16 cast moves an isolated score level by 2e-3, the
+    // parity tolerance (issue #2359). Keep the checkpoint's bf16.
+    let is_decider2 = parsed_config
+        .as_ref()
+        .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("decider2"));
+
     let mut weights = if is_gemma4 {
         load_gemma4_text_weights(model_dir)?
     } else {
@@ -2398,6 +2406,7 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         && !is_bitnet
         && !is_nanochat
         && !is_limite
+        && !is_decider2
     {
         let had_bf16 = if keep_gemma3n_bf16 {
             convert_bf16_weights_with_keep(&mut weights, gemma3n_bf16_key)
@@ -2493,6 +2502,27 @@ pub fn is_embedding_gemma2_config(config: &Value) -> bool {
         })
 }
 
+/// Whether `config` describes an Inkling checkpoint: the HMLP-wrapped
+/// `inkling_mm_model`, the standalone `inkling` text model, or a config whose
+/// `text_config` is `inkling_text`. `inkling2` is a different family.
+///
+/// Used by: [`bf16_to_f16_at_load`].
+fn is_inkling_config(config: &Value) -> bool {
+    let is_inkling = |model_type: Option<&str>| {
+        matches!(
+            model_type,
+            Some("inkling" | "inkling_mm_model" | "inkling_text")
+        )
+    };
+    is_inkling(config.get("model_type").and_then(Value::as_str))
+        || is_inkling(
+            config
+                .get("text_config")
+                .and_then(|text| text.get("model_type"))
+                .and_then(Value::as_str),
+        )
+}
+
 fn is_sapiens2_config(config: &Value) -> bool {
     config
         .get("architectures")
@@ -2534,6 +2564,16 @@ pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
     // Keep the family uniform in its checkpoint dtype on every backend so the
     // default CLI path preserves the published output.
     if config.is_some_and(is_sapiens2_config) {
+        return false;
+    }
+    // Inkling stays in its checkpoint dtype (issue #1549). The native
+    // `thinkingmachines/Inkling-Small-NVFP4` export declares its quantization
+    // only in the `hf_quant_config.json` sidecar, so it read as unquantized
+    // and its bf16 dense weights were cast to f16; every greedy token then
+    // decoded to id 0 on an M3 Ultra, while the same checkpoint loaded bf16
+    // matched mlx-vlm. Affine MLX conversions already stay bf16 as quantized
+    // checkpoints, and the f32 community checkpoints have no bf16 to convert.
+    if config.is_some_and(is_inkling_config) {
         return false;
     }
     if pre_ampere_cuda() {
@@ -2915,6 +2955,30 @@ mod tests {
         assert!(is_sapiens2_config(&legacy));
         assert!(!bf16_to_f16_at_load(false, Some(&modern)));
         assert!(!bf16_to_f16_at_load(false, Some(&legacy)));
+    }
+
+    /// Inkling keeps its checkpoint dtype even when its config carries no MLX
+    /// quantization block, the shape of the native NVFP4 export whose
+    /// quantization lives in `hf_quant_config.json` (issue #1549).
+    #[test]
+    fn inkling_configs_keep_checkpoint_dtype() {
+        let nvfp4 = serde_json::json!({
+            "model_type": "inkling_mm_model",
+            "text_config": {"hidden_size": 4096}
+        });
+        let text = serde_json::json!({"model_type": "inkling"});
+        let nested = serde_json::json!({
+            "model_type": "custom_wrapper",
+            "text_config": {"model_type": "inkling_text"}
+        });
+        let other = serde_json::json!({"model_type": "inkling2"});
+        assert!(is_inkling_config(&nvfp4));
+        assert!(is_inkling_config(&text));
+        assert!(is_inkling_config(&nested));
+        assert!(!is_inkling_config(&other));
+        for config in [&nvfp4, &text, &nested] {
+            assert!(!bf16_to_f16_at_load(false, Some(config)));
+        }
     }
 
     #[test]

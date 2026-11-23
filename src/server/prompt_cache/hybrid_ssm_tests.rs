@@ -74,6 +74,17 @@ fn z1t_is_detected_as_recurrent() {
     );
 }
 
+/// The original LongCat-Flash-Lite-Sparse config has no `model_type`; its
+/// `LongcatCausalLM` architecture alone must turn APC off (#2362).
+#[test]
+fn longcat_sparse_is_detected_without_model_type() {
+    assert!(is_hybrid_ssm_model_type("longcat_flash_sparse"));
+    assert_eq!(
+        detect_hybrid_ssm(&json!({ "architectures": ["LongcatCausalLM"] })).as_deref(),
+        Some("LongcatCausalLM")
+    );
+}
+
 /// Baichuan-M1 keeps a per-sequence K/V convolution state next to its dense
 /// KV cache (#2567). A restored KV prefix would arrive without the conv state
 /// of its last token, so APC must treat the family as recurrent.

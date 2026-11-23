@@ -230,6 +230,56 @@ fn a_text_only_gemma4_directory_ties_its_head_under_the_language_model_prefix() 
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Writes a one-tensor bf16 checkpoint whose config carries `model_type`.
+fn write_single_bf16_checkpoint(dir: &std::path::Path, model_type: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&json!({ "model_type": model_type })).unwrap(),
+    )
+    .unwrap();
+    write_safetensors(
+        &dir.join("model.safetensors"),
+        &[(
+            "model.norm.weight",
+            OwnedTensor {
+                dtype: SafeTensorDtype::BF16,
+                shape: vec![1],
+                data: vec![0x80, 0x3F],
+            },
+        )],
+    );
+}
+
+#[test]
+fn decider2_keeps_its_bf16_weights_at_load() {
+    // `load_text_weights(_, None)` reads the process-global surgery slot.
+    #[cfg(feature = "surgery")]
+    let _env_guard = crate::test_support::env_lock::env_lock();
+
+    // Decider-2b's temperatures were fitted on bf16 weights, so the Apple
+    // Silicon bf16 -> f16 cast must not touch it (issue #2359).
+    let dir = temp_model_dir("decider2_bf16");
+    write_single_bf16_checkpoint(&dir, "decider2");
+    let weights = load_text_weights(&dir, None).unwrap();
+    let norm = weights.get("model.norm.weight").unwrap();
+    assert_eq!(mlxcel_core::array_dtype(norm), dtype::BFLOAT16);
+    drop(weights);
+    std::fs::remove_dir_all(dir).unwrap();
+
+    // Control: the same bytes under another model type are cast on Apple
+    // Silicon, so the assertion above is not vacuous there.
+    if mlxcel_core::hardware::get_hardware().is_apple_silicon() {
+        let dir = temp_model_dir("decider2_control");
+        write_single_bf16_checkpoint(&dir, "qwen3_5");
+        let weights = load_text_weights(&dir, None).unwrap();
+        let norm = weights.get("model.norm.weight").unwrap();
+        assert_eq!(mlxcel_core::array_dtype(norm), dtype::FLOAT16);
+        drop(weights);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 const NVFP4_REPACK_ENV_KEYS: &[&str] = &["MLXCEL_NVFP4_DENSE_REPACK", "MLXCEL_NVFP4_NATIVE_REPACK"];
 
 struct EnvRestore {

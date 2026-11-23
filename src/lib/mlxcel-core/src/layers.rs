@@ -1142,7 +1142,8 @@ impl FusedAddRmsNormSpec for GemmaRMSNorm {
 /// Floating-point addition is commutative, so `delta` and `residual` may be
 /// passed in either order; the names describe intent, not an asymmetry.
 ///
-/// Used by: Llama3 / Qwen2-family `TransformerBlock`, Gemma `TransformerBlock`.
+/// Used by: Llama3 / Qwen2-family `TransformerBlock`, Gemma `TransformerBlock`,
+/// Arcee `ArceeBlock`.
 pub fn fused_add_rms_norm<N: FusedAddRmsNormSpec + ?Sized>(
     norm: &N,
     delta: &MlxArray,
@@ -4279,10 +4280,11 @@ impl QuantizedMultiLinear {
 
     /// Load from weight map
     ///
-    /// This loader stores the declared `group_size` / `bits` verbatim rather
-    /// than reconciling them against the tensor shapes, and the stored pair is
-    /// handed to `quantized_matmul` on every MLA forward, so it carries the
-    /// bound itself (issue #958). It sits in the same blind spot
+    /// This loader stores the declared `group_size` verbatim and the declared
+    /// `bits` unless an affine plane's shapes solve to another loadable width
+    /// (a per-path override, issue #2356), and the stored pair is handed to
+    /// `quantized_matmul` on every MLA forward, so it carries the bound itself
+    /// (issue #958). It sits in the same blind spot
     /// `SwitchLinear::from_stacked_parts` did before #929: a shared quantized
     /// loader that never calls [`reconcile_quantization_layout`], reached by
     /// four families whose `embed_q` / `unembed_out` are the only tensors that
@@ -4322,6 +4324,39 @@ impl QuantizedMultiLinear {
         // Absent for every block-float mode by design, which is exactly what
         // `infer_quantization_mode` keys on.
         let biases = weights.get(&biases_name).map(|w| ffi::copy(w));
+
+        // A per-path override (mlx-lm's `class_predicate` quantization, e.g.
+        // the OptiQ Xing4.0 export with its MLA projections at 8 bits under a
+        // 4-bit default, issue #2356) stores an affine plane at a width the
+        // top-level block does not declare. Solve the width from the shapes,
+        // as `UnifiedLinear` does, instead of handing `quantized_matmul` a pair
+        // it aborts on. A plane that matches the declared width keeps it.
+        let bits = if biases.is_some() {
+            let solved = infer_quantization_bits(
+                &ffi::array_shape(&weight),
+                &ffi::array_shape(&scales),
+                group_size,
+                bits,
+            )
+            .map_err(|e| format!("{prefix}: {e}"))?;
+            if solved != bits {
+                tracing::warn!(
+                    target: "mlxcel::quant",
+                    prefix,
+                    declared_bits = bits,
+                    effective_bits = solved,
+                    group_size,
+                    "MLA multi-linear plane is stored at a width the config does not declare; \
+                     using the shape-derived width"
+                );
+                validate_quantization_params(group_size, solved)
+                    .map_err(|e| format!("{prefix}: {e}"))?;
+                reject_one_bit_multi_linear(solved, prefix)?;
+            }
+            solved
+        } else {
+            bits
+        };
 
         let mode = infer_quantization_mode(biases.is_some(), group_size, bits);
         // Consistent by construction with the line above, which keys the mode
