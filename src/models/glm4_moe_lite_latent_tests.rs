@@ -227,13 +227,13 @@ fn int8_decode_tracks_the_fp16_latent_on_the_absorbed_path() {
     let run = |mode: KVCacheMode| {
         let mut caches = caches(mode);
         mlxcel_core::eval(&model.forward(&ids(&PROMPT), &mut caches, None));
-        let before = mlxcel_core::mla::stats::snapshot();
-        let steps: Vec<Vec<f32>> = DECODE
-            .iter()
-            .map(|t| row(&model.forward(&ids(&[*t]), &mut caches, None), 0))
-            .collect();
-        let after = mlxcel_core::mla::stats::snapshot();
-        let delta = move |path| after.get(path).saturating_sub(before.get(path));
+        let (steps, counts) = mlxcel_core::mla::stats::scoped(|| {
+            DECODE
+                .iter()
+                .map(|t| row(&model.forward(&ids(&[*t]), &mut caches, None), 0))
+                .collect::<Vec<Vec<f32>>>()
+        });
+        let delta = move |path| counts.get(path);
         (steps, caches, delta)
     };
     let (want, fp16_caches, _) = run(KVCacheMode::Fp16);
