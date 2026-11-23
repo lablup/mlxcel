@@ -1,7 +1,7 @@
 # PR #3288: Add Clef and Clef-Flash (clef) decision models
 
 **Date**: 2026-11-23
-**Status**: PR open (draft, closes #2365; part of #2375). Unit, sequence-fixture and real-checkpoint parity tests pass; CLI and server checked on `models/clef-flash-mlx-8bit`
+**Status**: PR open (draft, closes #2365; part of #2375). Unit, sequence-fixture and real-checkpoint parity tests pass; CLI and server checked on `models/clef-flash-mlx-8bit`, re-run after the security fixes
 **Languages**: Rust, Python (fixture generator)
 **Risk Level**: Low (new decision family; one additive Qwen3.5 hidden-state entry point and one additive video helper, generation paths untouched)
 
@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-Clef and Clef-Flash (`model_type: clef`, `nativ-community/clef-*`) are Qwen3.5 vision-language backbones with a joint schema head that scores every option of every question in one forward pass over text, images and videos. This PR ports mlx-vlm's `models/clef` behind the #2343 decision API, so `mlxcel decide -m <path>` (with `--image` / `--video`) and `mlxcel-server --decision-model <path>` (`POST /v1/decisions`) serve it. On Clef-Flash 8-bit, token ids and spans match upstream exactly, probabilities are within 1.1e-3 of mlx-vlm on an image request and 2.3e-3 (score value 2.8e-3) on a text request, and an f32 run of both sides agrees to four places. Review found no correctness defects and made no code changes.
+Clef and Clef-Flash (`model_type: clef`, `nativ-community/clef-*`) are Qwen3.5 vision-language backbones with a joint schema head that scores every option of every question in one forward pass over text, images and videos. This PR ports mlx-vlm's `models/clef` behind the #2343 decision API, so `mlxcel decide -m <path>` (with `--image` / `--video`) and `mlxcel-server --decision-model <path>` (`POST /v1/decisions`) serve it. On Clef-Flash 8-bit, token ids and spans match upstream exactly, probabilities are within 1.1e-3 of mlx-vlm on an image request and 2.3e-3 (score value 2.8e-3) on a text request, and an f32 run of both sides agrees to four places. Review found no correctness defects. A security pass then bounded the work done before the token cap, refused literal pad tokens and scrubbed server paths from video errors (section 2.5), and the real-checkpoint outputs were re-run unchanged afterward.
 
 ## 1. Problem Statement
 
@@ -29,7 +29,8 @@ Clef and Clef-Flash (`model_type: clef`, `nativ-community/clef-*`) are Qwen3.5 v
 |------|--------|------------|
 | MRoPE state leaking into a later request on the same instance | Medium | Low (cleared before and after every forward) |
 | Generation output change from the Qwen3.5 hook | High | Low (additive function, no shared code edited) |
-| One request making the single decision worker decode unbounded video | Medium | Low (4 GiB decode budget, 768-frame cap, server media count limits) |
+| One request making the single decision worker decode unbounded video | Medium | Low (4 GiB decode budget charged at source resolution, videos decoded one at a time only while the sequence fits the cap, 768-frame cap, server media count limits) |
+| A literal pad token in the state panicking the MRoPE position builder (a 500) | Medium | Low (refused with a 400 when media is present) |
 
 ## 2. Technical Review
 
@@ -49,6 +50,12 @@ Every op of `JointSchemaHead`, `EvidenceRoutingLayer` and `FieldDecoderLayer` wa
 
 The text request is 3e-4 over the issue's 2e-3 bound. No cast-point difference was found in the head, and the developer's f32 comparison (both sides identical to four places) rules out a structural port error. mlx-vlm's own bf16 and f32 runs differ by 7.9e-3 on the same request, so the residual is bf16 rounding order in the backbone kernels shared with generation. The test commits 3e-3 for text and 2e-3 for images.
 
+### 2.5 Security fixes (commit `6a0cb27a`)
+
+Before the fix, Clef decoded every requested video before checking the 16384-token cap and charged the shared 4 GiB budget with resized frames, so a request with many videos could decode up to 4 GiB per video on the single decision worker before being refused. Videos are now decoded one at a time, each only while the sequence so far (text, images, earlier videos) still fits, and the budget is charged with source-resolution bytes. The schema is encoded only up to the cap; an early refusal says `schema requires at least N tokens`, and a complete count keeps upstream's `schema requires N tokens before state; maximum is 16384`.
+
+A literal `<|image_pad|>` or `<|video_pad|>` in the state or questions parsed as a placeholder, and with media present the MRoPE position builder panicked on the extra run. Such requests are now a 400. Video errors no longer echo the server-side path of an allowlisted file or a download's temp file. `decision::clef_limits_tests` covers the cap on schema encoding, the never-decoded videos past the cap, the pad-token refusal and the path scrub.
+
 ## 3. Technical Decisions
 
 ### 3.1 Extend `hidden_from_embeddings` instead of copying the layer loop
@@ -67,7 +74,9 @@ The cache-offset rope path is mathematically identical but rounds differently in
 
 - `src/decision/clef.rs`: loading, media preparation, lexical vectors, readout.
 - `src/decision/clef_head.rs`, `clef_layers.rs`: the head port.
-- `src/decision/clef_sequence.rs`, `clef_media.rs`: sequence building and video geometry.
+- `src/decision/clef_sequence.rs`, `clef_media.rs`: sequence building and video geometry, including the capped schema encoding.
+- `src/decision/clef_limits_tests.rs`: the security tests above.
+- `src/multimodal/video_tests.rs`: `load_video_source_frames_at` tests (needs ffmpeg).
 - `src/decision/loader.rs`, `src/models/detection.rs`: the `Clef` arm and the `generate` refusal.
 
 ## 5. Learning Points
@@ -93,10 +102,10 @@ Upstream concatenates separate tokenizer calls, so span positions depend on piec
 
 | Item | Value |
 |------|-------|
-| Files changed | 21 |
-| Lines added | +4826 |
-| Lines deleted | -4 |
-| Tests added | 15 (13 Clef unit, 1 parity, 1 detection) |
+| Files changed | 25 (vs. the Decider-2b base) |
+| Lines added | +5500 |
+| Lines deleted | -13 |
+| Tests added | 20 (13 Clef unit, 4 limits, 1 parity, 1 detection, 1 video sampler) |
 
 ### Related Commits
 
@@ -104,15 +113,21 @@ Upstream concatenates separate tokenizer calls, so span positions depend on piec
 |------|------|---------|
 | `661634e7` | feat | add Clef and Clef-Flash decision models (clef) |
 | `c15c8d68` | fix | mark the Clef fixture generator executable |
+| `6a0cb27a` | fix | bound Clef work before the token cap and refuse pad tokens |
+| (final) | test/docs | cover the video sampler, document the security changes, re-validate |
 
 ## 8. Verification and Unverified Items
 
-### Verified (review rerun)
+### Verified (final run, after the security commit)
 
-- `decision::clef` 14 passed, including the parity test (gaps 0.0028 text, 0.0011 image).
-- `coverage_tests` 18 passed; clippy `-D warnings` on lib and tests, fmt, and the `scripts/ci` contract checks pass.
+- Release build on `models/clef-flash-mlx-8bit` through `mlxcel decide`, outputs identical to the pre-security run: text request `billing` 0.9757 with usage 135; image request `two` 0.9686 (remote true 0.9515) with usage 521; video request pattern true 0.9586 and kind `color bars test pattern` 0.9859 with usage 578. Audio is refused (`This model does not support audio input`), `mlxcel generate` is refused with the pointer to `mlxcel decide`, and a state containing `<|image_pad|>` with an image is refused with a 400-class message.
+- `decision::` 95 passed (including the real-checkpoint parity test and `clef_limits_tests`), `models::detection_tests` 53 passed, `coverage_tests` 18 passed, `multimodal::video` 86 passed, plus `source_frames_at_decodes_the_sampler_picks_and_rejects_bad_ones` with `--include-ignored` (needs ffmpeg).
+- clippy `-D warnings` on lib and tests, fmt, and the `scripts/ci` contract checks pass.
+- `forward_final_hidden_with_embeddings` is covered through the real-checkpoint parity test, which runs the text, image and fixture paths.
 
 ### Unverified or Remaining
+
+- `multimodal::video::tests::bench_single_pass_768_frames` (ignored, ffmpeg) fails on this host because ffmpeg rejects the 768-term `select` expression (`Cannot allocate memory`). The test is not part of this PR and the failure exists on the shared single-pass extractor, so a Clef clip long enough to sample hundreds of frames may hit it too. Not fixed here.
 
 - NVFP4 / MXFP4 builds were not run; `clef-MLX-8bit` was load-and-smoke only.
 - Video has no committed parity test (checked by hand at 7e-4).
