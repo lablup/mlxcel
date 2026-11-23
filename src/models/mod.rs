@@ -72,6 +72,7 @@ pub(crate) mod recurrent_batch;
 mod recurrent_snapshot;
 pub mod registry;
 mod sanitize;
+mod sliding_hybrid_lm;
 #[cfg(test)]
 pub(crate) mod ssm_test_support;
 
