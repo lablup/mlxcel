@@ -295,3 +295,37 @@ fn private_writes_are_atomic_and_owner_only() {
     );
     assert_eq!(read_private(&path).expect("read"), Some(b"two".to_vec()));
 }
+
+#[test]
+fn a_fallback_root_replaced_after_creation_is_not_reused() {
+    let tmp = private_tempdir();
+    let parent = tmp.path().to_path_buf();
+    let euid = current_euid();
+    let mut root = None;
+    let first = fallback_subdir(&mut root, 0, euid, || Ok(parent.clone())).expect("first");
+    let original = root.clone().expect("root is recorded");
+    assert_eq!(first, original.join("0"));
+    assert_eq!(mode(&first), 0o700);
+
+    // A temp cleaner removes the root, and someone else creates a directory
+    // of the same name that anyone can write.
+    std::fs::remove_dir_all(&original).expect("remove the root");
+    std::fs::create_dir(&original).expect("plant a same-named directory");
+    chmod(&original, 0o777);
+    let second = fallback_subdir(&mut root, 1, euid, || Ok(parent.clone())).expect("second");
+    let replacement = root.clone().expect("a new root is recorded");
+    assert_ne!(replacement, original);
+    assert_eq!(second, replacement.join("1"));
+    assert!(!original.join("1").exists());
+
+    // The same for a symlink planted at the root's name.
+    std::fs::remove_dir_all(&replacement).expect("remove the root");
+    std::os::unix::fs::symlink(&original, &replacement).expect("plant a symlink");
+    let third = fallback_subdir(&mut root, 2, euid, || Ok(parent.clone())).expect("third");
+    assert!(!third.starts_with(&replacement));
+    assert!(!original.join("2").exists());
+
+    // An intact root is reused.
+    let fourth = fallback_subdir(&mut root, 3, euid, || panic!("no new root")).expect("fourth");
+    assert_eq!(fourth.parent(), third.parent());
+}

@@ -33,8 +33,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use mlxcel_core::private_dir::{
     PrivateDirError, create_fresh_private_dir, current_euid, ensure_private_dir, open_private_file,
@@ -250,27 +250,73 @@ pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), Stri
 /// directory, created on first use. Each call returns a new subdirectory of it,
 /// so two refused locations never share a fallback.
 fn fresh_dir() -> Result<PathBuf, String> {
-    static ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    static ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let root = ROOT
-        .get_or_init(|| {
+    let mut root = ROOT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    fallback_subdir(
+        &mut root,
+        NEXT.fetch_add(1, Ordering::Relaxed),
+        current_euid(),
+        || {
             // The fallback is opened by path too, so the temp directory must be
             // one no other user can swap it out of (a root-owned sticky `/tmp`
             // qualifies).
             let parent = std::fs::canonicalize(std::env::temp_dir())
                 .map_err(|error| format!("resolve the temp directory: {error}"))?;
             verify_trusted_ancestors(&parent, current_euid())
-                .and_then(|()| create_fresh_private_dir(&parent, "mlxcel-xla-"))
-                .map_err(|error| format!("create a private XLA cache directory: {error}"))
-        })
-        .clone()?;
-    let dir = root.join(NEXT.fetch_add(1, Ordering::Relaxed).to_string());
+                .map_err(|error| format!("create a private XLA cache directory: {error}"))?;
+            Ok(parent)
+        },
+    )
+}
+
+/// Create subdirectory `index` of the fallback root held in `root`, first
+/// creating that root with `mkdtemp` under `parent()` when there is none yet or
+/// when the one held is no longer a private directory of `euid`.
+///
+/// The root is re-verified on every use, not only at creation: a temp cleaner
+/// (systemd-tmpfiles ages `/tmp`) can delete it under a long-running process,
+/// after which any local user can create a directory of the same, listable
+/// name in the shared temp directory and swap out the subdirectories created
+/// inside it between the compile and the load by path.
+pub(crate) fn fallback_subdir(
+    root: &mut Option<PathBuf>,
+    index: u64,
+    euid: u32,
+    parent: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    if root
+        .as_deref()
+        .is_some_and(|dir| verify_private_dir(dir, euid).is_err())
+    {
+        *root = None;
+    }
+    let base = match root.as_ref() {
+        Some(dir) => dir.clone(),
+        None => {
+            let created = create_fresh_private_dir(&parent()?, "mlxcel-xla-")
+                .map_err(|error| format!("create a private XLA cache directory: {error}"))?;
+            *root = Some(created.clone());
+            created
+        }
+    };
+    let dir = base.join(index.to_string());
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder
         .create(&dir)
         .map_err(|error| format!("mkdir {}: {error}", dir.display()))?;
+    // Both checks again after the mkdir, so a root replaced in the window
+    // since the check above is caught rather than handed out.
+    verify_private_dir(&base, euid)
+        .and_then(|()| verify_private_dir(&dir, euid))
+        .map_err(|error| {
+            *root = None;
+            format!("create a private XLA cache directory: {error}")
+        })?;
     Ok(dir)
 }
 
