@@ -410,14 +410,94 @@ if run_case control-report "$dir" 0 --report; then
   done
 fi
 
+# The regenerating grep only matches the original spelling followed by "(".
+# The directory named in the mask annotation covers the alias. Report the
+# matching import line even if a different use statement precedes it.
+dir="$(make_tree alias)"
+cat >"$dir/src/models/alias.rs" <<'RS'
+use mlxcel_core::layers;
+use mlxcel_core::utils::create_causal_mask as ccm;
+pub fn forward() -> f32 { ccm(1, 0) }
+RS
+if run_case alias "$dir" 0 --report; then
+  assert_contains alias "src/models/alias.rs:2 path"
+fi
+
+dir="$(make_tree glob-alias)"
+cat >"$dir/src/models/glob_alias.rs" <<'RS'
+use mlxcel_core::utils::*;
+use self::prefill_causal_mask as pcm;
+pub fn forward() -> f32 { pcm(4) }
+RS
+if run_case glob-alias "$dir" 1; then
+  assert_contains glob-alias 'annotation: src/models/glob_alias.rs.'
+fi
+
+dir="$(make_tree values)"
+add_model "$dir" assignment 'use mlxcel_core::utils::*; let g = prefill_causal_mask; g(4)'
+add_model "$dir" callback 'use mlxcel_core::utils::*; Some(4).map(prefill_causal_mask).unwrap()'
+add_model "$dir" named 'use mlxcel_core::utils::prefill_causal_mask; Some(4).map(prefill_causal_mask).unwrap()'
+if run_case values "$dir" 1; then
+  assert_contains values 'annotation: src/models/assignment.rs, src/models/callback.rs, src/models/named.rs.'
+fi
+
+# A glob brings the function into scope, but a field, parameter or local of
+# the same name does not use it. The local in one block must not hide a use
+# in a later block.
+dir="$(make_tree shadowed-values)"
+cat >"$dir/src/models/shadow.rs" <<'RS'
+use mlxcel_core::utils::*;
+struct Options { prefill_causal_mask: i32 }
+fn parameter(prefill_causal_mask: fn(i32) -> f32) -> f32 {
+    prefill_causal_mask(4)
+}
+fn local() -> f32 {
+    let prefill_causal_mask = |n: i32| n as f32;
+    Some(4).map(prefill_causal_mask).unwrap()
+}
+RS
+run_case shadowed-values "$dir" 0 || true
+cat >>"$dir/src/models/shadow.rs" <<'RS'
+fn use_after_block() -> f32 {
+    { let prefill_causal_mask = 0; assert_eq!(prefill_causal_mask, 0); }
+    Some(4).map(prefill_causal_mask).unwrap()
+}
+RS
+if run_case value-after-block "$dir" 1; then
+  assert_contains value-after-block 'annotation: src/models/shadow.rs.'
+fi
+
+# Re-exports offer downstream callers a path that omits the scoped module.
+dir="$(make_tree re-export)"
+cat >"$dir/src/models/facade.rs" <<'RS'
+pub use mlxcel_core::utils::{prefill_causal_mask as mask, repeat_kv};
+RS
+if run_case re-export "$dir" 1; then
+  assert_contains re-export "src/models/facade.rs:1: re-exports scoped function \`prefill_causal_mask\`"
+  assert_contains re-export "src/models/facade.rs:1: re-exports scoped function \`repeat_kv\`"
+fi
+cat >"$dir/src/models/facade.rs" <<'RS'
+use mlxcel_core::utils as shared;
+pub use self::shared::prefill_causal_mask as mask;
+RS
+if run_case re-export-alias "$dir" 1; then
+  assert_contains re-export-alias "src/models/facade.rs:2: re-exports scoped function \`prefill_causal_mask\`"
+fi
+cat >"$dir/src/models/facade.rs" <<'RS'
+pub(crate) use mlxcel_core::utils::*;
+RS
+if run_case re-export-glob "$dir" 1; then
+  assert_contains re-export-glob "src/models/facade.rs:1: re-exports scoped module \`mlxcel_core::utils\` through a glob"
+fi
+
 # The same disambiguation, made to gate. With its annotation removed `softcap`
 # still passes, because one caller is under the absence threshold. A checker
 # that took every bare `softcap(` for a call would see six files (the caller
 # and the five private functions of that name) and fail.
 dir="$(make_tree softcap-unannotated)"
-replace_in "$dir/$utils" '/// Used by: RecurrentGemma (`src/models/recurrent_gemma.rs`) for final logit
-/// softcapping. Gemma 2 applies the same math through `compiled_softcap`.
-' ''
+replace_in "$dir/$utils" "/// Used by: RecurrentGemma (\`src/models/recurrent_gemma.rs\`) for final logit
+/// softcapping. Gemma 2 applies the same math through \`compiled_softcap\`.
+" ''
 run_case softcap-unannotated "$dir" 0 || true
 
 # Absent annotation above the threshold. Six real callers of the unannotated
@@ -499,7 +579,7 @@ run_case roster-new-caller-named "$dir" 0 || true
 # A path names a caller as well as a family name does.
 dir="$(make_tree roster-new-caller-path)"
 add_model "$dir" rwkv7 'mlxcel_core::utils::prefill_causal_mask(4)'
-replace_in "$dir/$utils" 'HunyuanVL and Llama4.' 'HunyuanVL, Llama4 and `src/models/rwkv7.rs`.'
+replace_in "$dir/$utils" 'HunyuanVL and Llama4.' "HunyuanVL, Llama4 and \`src/models/rwkv7.rs\`."
 run_case roster-new-caller-path "$dir" 0 || true
 
 # A lower-case dictionary word is not a name: "the mamba models" names nothing.
@@ -526,6 +606,16 @@ if run_case count-drift "$dir" 1; then
 fi
 replace_in "$dir/$utils" 'that is 14 non-test' 'that is 15 non-test'
 run_case count-drift-updated "$dir" 0 || true
+
+# A comment changes the literal count without adding a production caller.
+dir="$(make_tree count-comment)"
+echo '// This path previously called create_causal_mask(4, 0).' >"$dir/src/models/old.rs"
+if run_case count-comment "$dir" 1; then
+  assert_contains count-comment "extra files may be comment or test mentions"
+  assert_contains count-comment 'grep -v'
+  assert_contains count-comment 'update the count'
+  assert_not_contains count-comment "not accounted for"
+fi
 
 # "Not used by" is checked too. The annotation says Llama3 does not call the
 # function; once `llama3.rs` does, the claim is reported along with the count.
