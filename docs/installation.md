@@ -104,9 +104,14 @@ can write. A root-owned sticky directory such as `/tmp` passes. A
 group-writable directory above the root (for example `~/.cache` created under
 a `umask` of `002`) passes only on Linux and only when all of these hold: its
 group is the process's effective group and it is not other-writable;
-`/etc/nsswitch.conf` lists only `files`, `systemd` or `compat` for both
-`passwd` and `group` (a missing or unreadable file, or any other source such
-as `sss`, `ldap`, `nis` or `winbind`, fails the check); every `/etc/group`
+`/etc/nsswitch.conf` lists only `files`, `systemd` or `compat` for `passwd`
+and `group`, and for `initgroups` if it is present (a missing or unreadable
+file, or any other source such as `sss`, `ldap`, `nis` or `winbind`, fails
+the check). The file is read as glibc reads it: the colon after the database
+name is optional, and because a later line overrides an earlier one, every
+line naming one of these databases must be local, and a line that cannot be
+parsed refuses. A `+` or `-` compat line in `/etc/passwd` or `/etc/group`,
+with or without leading white space, also refuses. Every `/etc/group`
 entry for that gid has no member besides the current user; and no other
 `/etc/passwd` account has that gid as its primary group. These files are read
 once per process. Otherwise that directory is refused with a message naming

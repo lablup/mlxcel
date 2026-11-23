@@ -21,8 +21,9 @@
 //! `/etc/passwd`, never from `getpwent`, because a group is only provably
 //! private when every account and membership comes from local files:
 //!
-//! - `nsswitch.conf` lists only `files`, `systemd` or `compat` for both
-//!   `passwd` and `group`. Any other source (`sss`, `ldap`, `nis`, `winbind`,
+//! - `nsswitch.conf` lists only `files`, `systemd` or `compat` for `passwd`
+//!   and `group` (and `initgroups`, if present), on every line naming them,
+//!   parsed the way glibc does. Any other source (`sss`, `ldap`, `nis`, `winbind`,
 //!   ...) can add members that local files do not show. A missing or
 //!   unreadable file is refused too, although glibc would then default to
 //!   `files`: a host without the file is rare enough that failing closed
@@ -46,45 +47,82 @@ const MAX_FILE_BYTES: u64 = 4 << 20;
 /// Name-service sources that resolve only from the local host.
 const LOCAL_SOURCES: [&str; 3] = ["files", "systemd", "compat"];
 
-/// Whether `contents` (an `nsswitch.conf`) resolves both `passwd` and `group`
-/// from local sources only. Each database must appear, and every line for it
-/// must list only local sources; bracketed actions such as `[NOTFOUND=return]`
-/// are not sources and are skipped.
+/// Whether the source list of one `nsswitch.conf` line names only local
+/// sources. Bracketed actions such as `[NOTFOUND=return]` (which may hold
+/// spaces) are not sources and are skipped; an unterminated bracket, an
+/// unknown source, or an empty list is not local.
+fn sources_are_local(sources: &str) -> bool {
+    let mut any = false;
+    let mut in_action = false;
+    for token in sources.split_whitespace() {
+        if in_action {
+            in_action = !token.ends_with(']');
+            continue;
+        }
+        if token.starts_with('[') {
+            in_action = !token.ends_with(']');
+            continue;
+        }
+        if !LOCAL_SOURCES.contains(&token) {
+            return false;
+        }
+        any = true;
+    }
+    any && !in_action
+}
+
+/// Whether `contents` (an `nsswitch.conf`) resolves `passwd`, `group` and
+/// `initgroups` from local sources only.
+///
+/// This follows glibc's `process_line` (`nss/nss_database.c`): leading white
+/// space is skipped, the database name is the leading token ended by a colon
+/// or white space (the colon is not required), and a later line for the same
+/// database overrides an earlier one. Because an override would hide a remote
+/// source on an earlier line, every line naming a checked database must list
+/// only local sources, not just the last. A line whose name or source list
+/// cannot be parsed (a checked name with no sources) refuses, where glibc
+/// would skip it. `passwd` and `group` must both be present; `initgroups` is
+/// optional. When `compat` is listed, glibc reads the sources from
+/// `passwd_compat` / `group_compat`, so those lines are held to the same rule.
 pub(crate) fn nsswitch_is_local(contents: &str) -> bool {
     let mut seen = [false; 2];
     for line in contents.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        let Some((database, sources)) = line.split_once(':') else {
+        let line = line.split('#').next().unwrap_or("").trim_start();
+        let name_end = line
+            .find(|c: char| c.is_whitespace() || c == ':')
+            .unwrap_or(line.len());
+        let name = &line[..name_end];
+        let checked = matches!(
+            name,
+            "passwd" | "group" | "initgroups" | "passwd_compat" | "group_compat"
+        );
+        if !checked {
             continue;
-        };
-        let index = match database.trim() {
-            "passwd" => 0,
-            "group" => 1,
-            _ => continue,
-        };
-        let mut any = false;
-        for source in sources.split_whitespace() {
-            if source.starts_with('[') {
-                continue;
-            }
-            if !LOCAL_SOURCES.contains(&source) {
-                return false;
-            }
-            any = true;
         }
-        if !any {
+        let sources = line[name_end..].trim_start_matches(|c: char| c.is_whitespace() || c == ':');
+        if !sources_are_local(sources) {
             return false;
         }
-        seen[index] = true;
+        match name {
+            "passwd" => seen[0] = true,
+            "group" => seen[1] = true,
+            _ => {}
+        }
     }
     seen == [true, true]
+}
+
+/// Whether a `/etc/passwd` or `/etc/group` line is a `+` / `-` compat
+/// inclusion. glibc skips leading white space before the prefix, so so do we.
+fn is_compat_line(line: &str) -> bool {
+    line.trim_start().starts_with(['+', '-'])
 }
 
 /// Whether every `/etc/group` line for `gid` lists no member other than
 /// `user`. A malformed line or a compat inclusion refuses.
 pub(crate) fn group_members_only(contents: &str, gid: u32, user: &str) -> bool {
     for line in contents.lines().filter(|line| !line.trim().is_empty()) {
-        if line.starts_with('+') || line.starts_with('-') {
+        if is_compat_line(line) {
             return false;
         }
         let fields: Vec<&str> = line.split(':').collect();
@@ -110,7 +148,7 @@ pub(crate) fn group_members_only(contents: &str, gid: u32, user: &str) -> bool {
 /// group. A malformed line or a compat inclusion refuses.
 pub(crate) fn no_other_primary_member(contents: &str, gid: u32, uid: u32) -> bool {
     for line in contents.lines().filter(|line| !line.trim().is_empty()) {
-        if line.starts_with('+') || line.starts_with('-') {
+        if is_compat_line(line) {
             return false;
         }
         let fields: Vec<&str> = line.split(':').collect();
@@ -256,6 +294,58 @@ mod tests {
         ] {
             assert!(!decide(Some(nss), GROUP, PASSWD), "{nss}");
         }
+    }
+
+    #[test]
+    fn a_later_remote_line_overrides_an_earlier_local_one() {
+        for nss in [
+            "passwd: files\npasswd sss\ngroup: files\n",
+            "passwd: files\ngroup: files\ngroup sss\n",
+            "passwd: files\ngroup: files\ninitgroups: files sss\n",
+            "passwd: files\ngroup: files\ninitgroups files\ninitgroups: nis\n",
+            "passwd: compat\ngroup: compat\npasswd_compat: sss\n",
+        ] {
+            assert!(!decide(Some(nss), GROUP, PASSWD), "{nss}");
+        }
+    }
+
+    #[test]
+    fn the_colon_after_the_database_name_is_optional() {
+        assert!(decide(Some("passwd files\ngroup files\n"), GROUP, PASSWD));
+        assert!(decide(
+            Some("  passwd \t files systemd\n\tgroup:files\ninitgroups: files\n"),
+            GROUP,
+            PASSWD
+        ));
+        assert!(!decide(Some("passwd sss\ngroup files\n"), GROUP, PASSWD));
+        assert!(!decide(Some("passwd files\ngroup sss\n"), GROUP, PASSWD));
+        assert!(!decide(Some("passwd\ngroup files\n"), GROUP, PASSWD));
+        assert!(!decide(
+            Some("passwd files\ngroup files\ngroup\n"),
+            GROUP,
+            PASSWD
+        ));
+    }
+
+    #[test]
+    fn bracketed_actions_are_skipped_but_must_terminate() {
+        assert!(decide(
+            Some("passwd: files [NOTFOUND=return UNAVAIL=continue] systemd\ngroup: files\n"),
+            GROUP,
+            PASSWD
+        ));
+        assert!(!decide(
+            Some("passwd: files [NOTFOUND=return\ngroup: files\n"),
+            GROUP,
+            PASSWD
+        ));
+    }
+
+    #[test]
+    fn leading_whitespace_compat_lines_are_refused() {
+        assert!(!decide(Some(NSS_LOCAL), " +devops:x:1001:\n", PASSWD));
+        assert!(!decide(Some(NSS_LOCAL), GROUP, "\t+devops::::::\n"));
+        assert!(!decide(Some(NSS_LOCAL), " -devops:x:1001:\n", PASSWD));
     }
 
     #[test]
