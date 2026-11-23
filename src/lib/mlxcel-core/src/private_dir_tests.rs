@@ -24,10 +24,20 @@ fn mode(path: &Path) -> u32 {
     std::fs::symlink_metadata(path).expect("metadata").mode() & 0o7777
 }
 
+/// A temp directory spelled through its canonical path. `ensure_private_dir`
+/// respells the chain through the canonical parent, and on macOS the temp dir
+/// sits under `/var`, a symlink to `/private/var`, so tests compare against the
+/// canonical spelling and walk ancestors that contain no symlink.
+fn canonical_tempdir() -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let base = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
+    (tmp, base)
+}
+
 #[test]
 fn creates_the_chain_owner_only_and_accepts_it() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path().join("mlxcel");
+    let (_tmp, base) = canonical_tempdir();
+    let root = base.join("mlxcel");
     let leaf = ensure_private_dir(&root, Path::new("xla/vmfb"), true, current_euid())
         .expect("a fresh chain is private");
     assert_eq!(leaf, root.join("xla").join("vmfb"));
@@ -43,10 +53,10 @@ fn refuses_a_relative_root_and_an_escaping_subpath() {
         ensure_private_dir(Path::new("rel"), Path::new("xla"), true, euid),
         Err(PrivateDirError::RelativeRoot(_))
     ));
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_tmp, base) = canonical_tempdir();
     for sub in ["../x", "/abs"] {
         assert!(matches!(
-            ensure_private_dir(tmp.path(), Path::new(sub), false, euid),
+            ensure_private_dir(base.as_path(), Path::new(sub), false, euid),
             Err(PrivateDirError::InvalidSubpath(_))
         ));
     }
@@ -54,24 +64,24 @@ fn refuses_a_relative_root_and_an_escaping_subpath() {
 
 #[test]
 fn a_directory_owned_by_another_uid_is_refused() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_tmp, base) = canonical_tempdir();
     let other = current_euid().wrapping_add(1);
     assert!(matches!(
-        verify_private_dir(tmp.path(), other),
+        verify_private_dir(base.as_path(), other),
         Err(PrivateDirError::ForeignOwner { .. })
     ));
     assert!(matches!(
-        ensure_private_dir(tmp.path(), Path::new("xla"), false, other),
+        ensure_private_dir(base.as_path(), Path::new("xla"), false, other),
         Err(PrivateDirError::ForeignOwner { .. })
     ));
 }
 
 #[test]
 fn group_or_world_writable_directories_are_refused() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_tmp, base) = canonical_tempdir();
     let euid = current_euid();
     for bits in [0o770, 0o707, 0o1777] {
-        let dir = tmp.path().join(format!("d{bits:o}"));
+        let dir = base.join(format!("d{bits:o}"));
         std::fs::create_dir(&dir).expect("dir");
         chmod(&dir, bits);
         assert!(
@@ -86,9 +96,9 @@ fn group_or_world_writable_directories_are_refused() {
 
 #[test]
 fn the_managed_chain_loses_group_write_but_an_explicit_root_does_not() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_tmp, base) = canonical_tempdir();
     let euid = current_euid();
-    let root = tmp.path().join("root");
+    let root = base.join("root");
     std::fs::create_dir_all(root.join("xla")).expect("dirs");
     chmod(&root, 0o775);
     chmod(&root.join("xla"), 0o775);
@@ -100,7 +110,7 @@ fn the_managed_chain_loses_group_write_but_an_explicit_root_does_not() {
     ensure_private_dir(&root, Path::new("xla"), true, euid).expect("default root repaired");
     assert_eq!(mode(&root), 0o755);
 
-    let world = tmp.path().join("world");
+    let world = base.join("world");
     std::fs::create_dir_all(world.join("xla")).expect("dirs");
     chmod(&world.join("xla"), 0o777);
     assert!(
@@ -111,12 +121,12 @@ fn the_managed_chain_loses_group_write_but_an_explicit_root_does_not() {
 
 #[test]
 fn symlinked_directories_are_refused_anywhere_in_the_chain() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_tmp, base) = canonical_tempdir();
     let euid = current_euid();
-    let target = tmp.path().join("elsewhere");
+    let target = base.join("elsewhere");
     std::fs::create_dir(&target).expect("dir");
     chmod(&target, 0o700);
-    let root = tmp.path().join("root");
+    let root = base.join("root");
     std::fs::create_dir(&root).expect("root");
     chmod(&root, 0o700);
     std::os::unix::fs::symlink(&target, root.join("xla")).expect("symlink");
@@ -124,7 +134,7 @@ fn symlinked_directories_are_refused_anywhere_in_the_chain() {
         ensure_private_dir(&root, Path::new("xla/vmfb"), false, euid),
         Err(PrivateDirError::Symlink(_))
     ));
-    let link_root = tmp.path().join("link-root");
+    let link_root = base.join("link-root");
     std::os::unix::fs::symlink(&target, &link_root).expect("symlink");
     assert!(matches!(
         verify_private_dir(&link_root, euid),
@@ -134,12 +144,12 @@ fn symlinked_directories_are_refused_anywhere_in_the_chain() {
 
 #[test]
 fn files_are_checked_on_the_descriptor() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_tmp, base) = canonical_tempdir();
     let euid = current_euid();
-    let missing = tmp.path().join("missing");
+    let missing = base.join("missing");
     assert!(open_private_file(&missing, euid).expect("absent").is_none());
 
-    let file = tmp.path().join("artifact.vmfb");
+    let file = base.join("artifact.vmfb");
     std::fs::write(&file, b"bytes").expect("write");
     chmod(&file, 0o664);
     assert!(matches!(
@@ -154,7 +164,7 @@ fn files_are_checked_on_the_descriptor() {
         Err(PrivateDirError::ForeignOwner { .. })
     ));
 
-    let link = tmp.path().join("link.vmfb");
+    let link = base.join("link.vmfb");
     std::os::unix::fs::symlink(&file, &link).expect("symlink");
     assert!(matches!(
         open_private_file(&link, euid),
@@ -162,16 +172,16 @@ fn files_are_checked_on_the_descriptor() {
     ));
     assert!(seal_private_file(&link).is_err(), "sealing never follows");
     assert!(matches!(
-        open_private_file(tmp.path(), euid),
+        open_private_file(base.as_path(), euid),
         Err(PrivateDirError::NotARegularFile(_))
     ));
 }
 
 #[test]
 fn fresh_directories_are_new_and_owner_only() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let first = create_fresh_private_dir(tmp.path(), "mlxcel-xla-").expect("fresh");
-    let second = create_fresh_private_dir(tmp.path(), "mlxcel-xla-").expect("fresh");
+    let (_tmp, base) = canonical_tempdir();
+    let first = create_fresh_private_dir(base.as_path(), "mlxcel-xla-").expect("fresh");
+    let second = create_fresh_private_dir(base.as_path(), "mlxcel-xla-").expect("fresh");
     assert_ne!(first, second);
     for dir in [&first, &second] {
         assert_eq!(mode(dir), 0o700);
@@ -185,9 +195,9 @@ fn fresh_directories_are_new_and_owner_only() {
 /// user private groups) is not (#3248).
 #[test]
 fn a_directory_above_the_root_that_others_can_write_is_refused() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_tmp, base) = canonical_tempdir();
     let euid = current_euid();
-    let shared = tmp.path().join("shared");
+    let shared = base.join("shared");
     std::fs::create_dir(&shared).expect("dir");
     chmod(&shared, 0o777);
     assert!(matches!(
@@ -196,7 +206,7 @@ fn a_directory_above_the_root_that_others_can_write_is_refused() {
     ));
     assert_eq!(mode(&shared), 0o777, "an ancestor is never modified");
 
-    let own_group = tmp.path().join("own-group");
+    let own_group = base.join("own-group");
     std::fs::create_dir(&own_group).expect("dir");
     chmod(&own_group, 0o775);
     verify_trusted_ancestors_with(&own_group, euid, |_| true)
@@ -208,9 +218,9 @@ fn a_directory_above_the_root_that_others_can_write_is_refused() {
 /// private; otherwise the strict rule applies and the message names the fix.
 #[test]
 fn a_group_writable_ancestor_is_refused_unless_the_group_is_private() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_tmp, base) = canonical_tempdir();
     let euid = current_euid();
-    let dir = tmp.path().join("cache");
+    let dir = base.join("cache");
     std::fs::create_dir(&dir).expect("dir");
     chmod(&dir, 0o775);
     let error = verify_trusted_ancestors_with(&dir, euid, |_| false).unwrap_err();
@@ -240,12 +250,12 @@ fn a_group_writable_ancestor_is_refused_unless_the_group_is_private() {
 /// real directories, so swapping that symlink later cannot redirect a load.
 #[test]
 fn the_leaf_is_spelled_through_the_canonical_parent() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_tmp, base) = canonical_tempdir();
     let euid = current_euid();
-    let real = tmp.path().join("real");
+    let real = base.join("real");
     std::fs::create_dir(&real).expect("dir");
     chmod(&real, 0o700);
-    let link = tmp.path().join("link");
+    let link = base.join("link");
     std::os::unix::fs::symlink(&real, &link).expect("symlink");
     let leaf =
         ensure_private_dir(&link.join("mlxcel"), Path::new("xla/vmfb"), true, euid).expect("leaf");
