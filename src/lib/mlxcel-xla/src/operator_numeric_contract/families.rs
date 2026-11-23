@@ -184,8 +184,11 @@ pub(crate) fn qwen2_vl_operators(qwen2_5: bool) -> Vec<DeclaredOperator> {
 }
 
 /// `qwen3_vl_runtime.rs`: Qwen3-VL main merger plus the DeepStack mergers
-/// (`emitter/qwen3_vl.rs`).
+/// (`emitter/qwen3_vl.rs`). The graph stores every operator result on eager
+/// MLX's BF16 grid (#3291, `emitter/qwen3_vl_ops.rs`). Only the attention
+/// scores stay f32: the fused SDPA keeps them in its f32 softmax statistics.
 pub(crate) fn qwen3_vl_operators() -> Vec<DeclaredOperator> {
+    let bf16 = NumericDType::Bf16;
     let mut operators = vec![float_kernel("patch-embedding", OperatorClass::DenseMatmul)];
     operators.extend(encoder_layer(
         OperatorClass::LayerNorm,
@@ -202,6 +205,15 @@ pub(crate) fn qwen3_vl_operators() -> Vec<DeclaredOperator> {
         ],
     ));
     operators
+        .into_iter()
+        .map(|operator| {
+            if operator.id == "encoder.attention-scores" {
+                operator
+            } else {
+                operator.rounded_to(bf16)
+            }
+        })
+        .collect()
 }
 
 /// Attention pooling and the SiLU-gated projector shared by Molmo and Molmo2.

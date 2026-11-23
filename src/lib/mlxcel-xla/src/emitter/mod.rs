@@ -74,6 +74,7 @@ mod quant_scale;
 mod qwen2_5_vl;
 mod qwen2_vl;
 mod qwen3_vl;
+mod qwen3_vl_ops;
 mod rope;
 mod vision;
 mod vision_config;
@@ -217,7 +218,7 @@ pub(crate) use molmo_vision::MOLMO_VISION_PRECISION;
 #[allow(unused_imports)]
 pub(crate) use molmo2_vision::MOLMO2_VISION_PRECISION;
 #[allow(unused_imports)]
-pub(crate) use qwen3_vl::QWEN3_VL_VISION_PRECISION;
+pub(crate) use qwen3_vl::qwen3_vl_vision_precision;
 #[allow(unused_imports)]
 pub(crate) use vision::LLAVA_VISION_PRECISION;
 #[allow(unused_imports)]
