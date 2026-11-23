@@ -24,8 +24,14 @@
 //! rows so a tail trim of that many tokens can rewind it exactly (see
 //! [`rewind_history`]); the first state is `kernel - 1` zero rows, as upstream.
 //!
-//! [`short_convolution`] is the single entry point a fused Metal kernel
-//! (mlx-vlm `kernels.py`, issue #3359) would replace.
+//! A speculative verify forward ([`mlxcel_core::cache::speculative_append_active`])
+//! keeps at least as many older rows as it appends, so its whole block can be
+//! rejected and rewound exactly even when it is longer than the margin.
+//!
+//! [`ShortConv`] runs the fused Metal kernel (mlx-vlm `kernels.py`, issue
+//! #3359; gate in `super::kernels`) where it applies and the f32 `conv1d`
+//! path otherwise. The kernel writes the same next history, so trims stay
+//! exact on either path.
 
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
@@ -35,6 +41,16 @@ use mlxcel_core::layers::UnifiedLinear;
 /// Older history rows kept beyond the convolution context, so a speculative
 /// or rejected tail of up to this many tokens can be trimmed exactly.
 pub(crate) const CONV_HISTORY_MARGIN: i32 = 16;
+
+/// Older rows a forward of `length` tokens keeps: [`CONV_HISTORY_MARGIN`], or
+/// `length` when a speculative verify block is longer than that.
+pub(crate) fn history_margin(length: i32) -> i32 {
+    if mlxcel_core::cache::speculative_append_active() {
+        CONV_HISTORY_MARGIN.max(length)
+    } else {
+        CONV_HISTORY_MARGIN
+    }
+}
 
 fn f32(x: &MlxArray) -> UniquePtr<MlxArray> {
     if mlxcel_core::array_dtype(x) == dtype::FLOAT32 {
@@ -61,7 +77,7 @@ fn context_and_next(
     let context = mlxcel_core::concatenate(&tail, xf, 1);
     let extended = mlxcel_core::concatenate(&history, xf, 1);
     let total = rows + shape[1];
-    let keep = (width + CONV_HISTORY_MARGIN).min(total);
+    let keep = (width + history_margin(shape[1])).min(total);
     let next = mlxcel_core::contiguous(
         &mlxcel_core::utils::slice_axis(&extended, 1, total - keep, total),
         false,
@@ -109,6 +125,8 @@ pub(crate) fn short_convolution(
 pub struct ShortConv {
     weight: UniquePtr<MlxArray>,
     kernel: i32,
+    /// [`super::kernels::KERNELS_ENV`] at load.
+    use_kernel: bool,
 }
 
 impl ShortConv {
@@ -130,6 +148,7 @@ impl ShortConv {
         Ok(Self {
             weight: mlxcel_core::contiguous(&f32(weight), false),
             kernel: shape[1],
+            use_kernel: super::kernels::enabled(),
         })
     }
 
@@ -140,6 +159,54 @@ impl ShortConv {
     /// `((conv + x) / sqrt(k + 1)).astype(x)`, then optionally
     /// `(out.f32 + residual.f32).astype(output_dtype)`.
     pub fn forward(
+        &self,
+        x: &MlxArray,
+        state: &mut Option<UniquePtr<MlxArray>>,
+        residual: Option<&MlxArray>,
+        output_dtype: i32,
+    ) -> UniquePtr<MlxArray> {
+        if self.use_kernel
+            && let Some(out) = self.forward_kernel(x, state, residual, output_dtype)
+        {
+            return out;
+        }
+        self.forward_ops(x, state, residual, output_dtype)
+    }
+
+    /// The fused kernel, or `None` (state untouched) where its gate refuses.
+    pub(crate) fn forward_kernel(
+        &self,
+        x: &MlxArray,
+        state: &mut Option<UniquePtr<MlxArray>>,
+        residual: Option<&MlxArray>,
+        output_dtype: i32,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let shape = mlxcel_core::array_shape(x);
+        let zeros;
+        let history = match state.as_ref().and_then(|value| value.as_ref()) {
+            Some(history) => history,
+            None => {
+                zeros = mlxcel_core::zeros(&[shape[0], self.kernel - 1, shape[2]], dtype::FLOAT32);
+                &*zeros
+            }
+        };
+        if !super::kernels::short_convolution_applies(x, history, self.kernel) {
+            return None;
+        }
+        let (out, next) = mlxcel_core::inkling2_kernels::short_convolution(
+            history,
+            &self.weight,
+            x,
+            residual,
+            output_dtype,
+            history_margin(shape[1]),
+        )?;
+        *state = Some(next);
+        Some(out)
+    }
+
+    /// The f32 `conv1d` path.
+    pub(crate) fn forward_ops(
         &self,
         x: &MlxArray,
         state: &mut Option<UniquePtr<MlxArray>>,

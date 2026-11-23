@@ -165,6 +165,10 @@ fn main() {
         // only. Forwards `mlxcel::turbo::mla_absorbed_decode` into the
         // cxx-bridge ABI.
         .file("../mlxcelverse/kernels/mla_absorbed_decode.cpp")
+        // Inkling 2 Mini short convolution, attention head preparation and
+        // grouped expert matvec kernels (#3359), Metal only.
+        .file("../mlxcelverse/kernels/inkling2_kernels.cpp")
+        .file("../mlxcelverse/kernels/inkling2_grouped_experts.cpp")
         // Fused Turbo4Delegated cold-V weighted-sum kernel
         // launcher. Reads the packed cold V directly so the dequantised
         // FP16 cold body never materialises in global memory; the host

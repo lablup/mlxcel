@@ -104,6 +104,9 @@ pub struct Inkling2Attention {
     rel_clip: f32,
     value_norm_eps: Option<f32>,
     log_scaling: Option<(f32, f32)>,
+    /// Fused head preparation (issue #3359): a looped model (Mini) with the
+    /// gamma-free value norm, kernels on at load.
+    head_kernel: bool,
 }
 
 fn tensor(weights: &WeightMap, key: &str, shape: &[i32]) -> Result<UniquePtr<MlxArray>, String> {
@@ -203,6 +206,8 @@ impl Inkling2Attention {
                 .then_some(config.log_scaling_n_floor)
                 .flatten()
                 .map(|floor| (floor as f32, config.log_scaling_alpha)),
+            head_kernel: config.use_value_norm_no_gamma
+                && super::kernels::loop_kernels_wanted(config, super::kernels::enabled()),
         })
     }
 
@@ -224,6 +229,50 @@ impl Inkling2Attention {
             KvConv::Static(conv) => conv.forward(x, state, None, mlxcel_core::array_dtype(x)),
             KvConv::Dynamic(conv) => conv.forward(x, dynamic_input, state),
         }
+    }
+
+    /// The fused kernel's l2-clipped q/k/r and normalized v, or `None` where
+    /// its shape gate refuses.
+    pub(crate) fn prepare_heads_kernel(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        v: &MlxArray,
+        r: &MlxArray,
+    ) -> Option<[UniquePtr<MlxArray>; 4]> {
+        let eps = self.value_norm_eps?;
+        super::kernels::prepare_attention_heads(
+            q,
+            k,
+            v,
+            r,
+            &self.q_scale,
+            &self.rel_scale,
+            self.qk_clip,
+            self.rel_clip,
+            eps,
+        )
+    }
+
+    /// The ops path of [`Self::prepare_heads_kernel`].
+    pub(crate) fn prepare_heads_ops(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        v: &MlxArray,
+        r: &MlxArray,
+    ) -> [UniquePtr<MlxArray>; 4] {
+        let q = l2_clip(q, self.qk_clip, Some(&self.q_scale));
+        let k = l2_clip(k, self.qk_clip, None);
+        let v = match self.value_norm_eps {
+            Some(eps) => mlxcel_core::astype(
+                &mlxcel_core::fast_rms_norm_no_weight(&f32(v), eps),
+                mlxcel_core::array_dtype(v),
+            ),
+            None => mlxcel_core::copy(v),
+        };
+        let r = l2_clip(r, self.rel_clip, Some(&self.rel_scale));
+        [q, k, v, r]
     }
 
     /// `x` feeds q, r, the gate and the sink; `key_input` / `value_input`
@@ -253,16 +302,14 @@ impl Inkling2Attention {
             &self.r_proj.forward(x),
             &[batch, length, self.heads, self.d_rel],
         );
-        let mut q = l2_clip(&q, self.qk_clip, Some(&self.q_scale));
-        let k = l2_clip(&k, self.qk_clip, None);
-        let v = match self.value_norm_eps {
-            Some(eps) => mlxcel_core::astype(
-                &mlxcel_core::fast_rms_norm_no_weight(&f32(&v), eps),
-                x_dtype,
-            ),
-            None => v,
+        let [mut q, k, v, mut r] = match self
+            .head_kernel
+            .then(|| self.prepare_heads_kernel(&q, &k, &v, &r))
+            .flatten()
+        {
+            Some(heads) => heads,
+            None => self.prepare_heads_ops(&q, &k, &v, &r),
         };
-        let mut r = l2_clip(&r, self.rel_clip, Some(&self.rel_scale));
         if let Some((floor, alpha)) = self.log_scaling {
             let tau = log_scaling_tau(length, cache.kv.offset, floor, alpha);
             let tau = mlxcel_core::reshape(&tau, &[length, 1, 1]);

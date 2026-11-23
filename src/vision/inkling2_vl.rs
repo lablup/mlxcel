@@ -289,4 +289,12 @@ impl LanguageModel for Inkling2VlModel {
     fn trim_state(&self, seq: Option<SequenceId>, excess: i32) -> Result<(), String> {
         LanguageModel::trim_state(&self.text, seq, excess)
     }
+
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        LanguageModel::supports_speculative_verify_rewind(&self.text)
+    }
+
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        LanguageModel::rewind_decode_appends(&self.text, seq_id, n)
+    }
 }
