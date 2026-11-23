@@ -250,7 +250,7 @@ fn map_attention(key: &str) -> String {
     format!("self_attn.{key}")
 }
 
-fn conv_to_mlx(value: &MlxArray) -> UniquePtr<MlxArray> {
+pub(crate) fn conv_to_mlx(value: &MlxArray) -> UniquePtr<MlxArray> {
     let shape = mlxcel_core::array_shape(value);
     if shape.len() == 3 && shape[2] != 1 {
         mlxcel_core::transpose_axes(value, &[0, 2, 1])
@@ -277,7 +277,7 @@ fn split_dense_w13(value: &MlxArray) -> Result<(UniquePtr<MlxArray>, UniquePtr<M
     ))
 }
 
-fn split_expert_w13(
+pub(crate) fn split_expert_w13(
     value: &MlxArray,
 ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
     let shape = mlxcel_core::array_shape(value);
@@ -475,7 +475,7 @@ fn validate_nvfp4_sidecar_shapes(
     Ok(())
 }
 
-fn normalized_e4m3(value: UniquePtr<MlxArray>) -> Result<UniquePtr<MlxArray>, String> {
+pub(crate) fn normalized_e4m3(value: UniquePtr<MlxArray>) -> Result<UniquePtr<MlxArray>, String> {
     if mlxcel_core::array_dtype(&value) == dtype::UINT8 {
         return Ok(value);
     }

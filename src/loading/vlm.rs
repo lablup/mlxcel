@@ -70,6 +70,8 @@ mod hunyuan_vl;
 mod idefics2;
 #[path = "vlm_inkling.rs"]
 mod inkling;
+#[path = "vlm_inkling2.rs"]
+mod inkling2;
 #[path = "vlm_internvl.rs"]
 mod internvl;
 #[path = "vlm_jina_vlm.rs"]
@@ -150,6 +152,7 @@ pub(crate) use granite4_vision::load_granite4_vision_vlm;
 pub(crate) use hunyuan_vl::load_hunyuan_vlm;
 pub(crate) use idefics2::load_idefics2_vlm;
 pub(crate) use inkling::load_inkling_vlm;
+pub(crate) use inkling2::load_inkling2_vlm;
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use jina_vlm::load_jina_vlm;
 pub(crate) use kimi_k3_loader::load_kimi_k3_vlm;

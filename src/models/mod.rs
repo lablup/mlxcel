@@ -229,6 +229,7 @@ pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_vl;
 pub mod inkling;
+pub mod inkling2;
 pub mod inkling_mtp_target;
 pub mod internlm2;
 pub mod internlm3;
@@ -417,6 +418,7 @@ pub use helium::HeliumModel;
 pub use hunyuan_moe::HunyuanMoeModel;
 pub use hunyuan_v1_dense::HunyuanV1DenseModel;
 pub use inkling::InklingModel;
+pub use inkling2::Inkling2Model;
 pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
 pub use iquestloopcoder_model::{IQuestLoopCoderModel, IQuestLoopCoderWrapper};
@@ -785,6 +787,8 @@ pub enum ModelType {
     // Thinking Machines Inkling text and HMLP vision-language model
     Inkling,
     InklingVLM,
+    // Thinking Machines Inkling 2 (Small `inkling2`, looped Mini `inkling2_loop`)
+    Inkling2VLM,
 
     // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
     Plamo2,
@@ -1041,6 +1045,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Lfm2VL,
     ModelType::Inkling,
     ModelType::InklingVLM,
+    ModelType::Inkling2VLM,
     // Preferred Networks PLaMo 2
     ModelType::Plamo2,
     ModelType::Plamo2VLM,
@@ -1332,6 +1337,10 @@ impl ModelType {
             ),
             ModelType::InklingVLM => (
                 "Inkling VLM (HMLP vision + relative-bias MoE text)",
+                "Inkling",
+            ),
+            ModelType::Inkling2VLM => (
+                "Inkling 2 (attention-residual MoE, looped core in Mini, 2-D RoPE ViT)",
                 "Inkling",
             ),
 
@@ -1726,6 +1735,7 @@ mod metadata_tests {
             Lfm2VL,
             Inkling,
             InklingVLM,
+            Inkling2VLM,
             Plamo2,
             Plamo2VLM,
             GraniteMoeHybrid,

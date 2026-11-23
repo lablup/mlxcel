@@ -83,6 +83,7 @@
 //! Used by: routes/chat (streaming path)
 
 use super::formats::{self, HarmonyRoute};
+use super::inkling;
 
 /// Split output from [`StreamFilter::feed`] / [`StreamFilter::flush`].
 ///
@@ -473,6 +474,13 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<|content_thinking|>", DelimiterAction::EnterThinking),
     ("<|message_model|>", DelimiterAction::Strip),
     ("<|content_text|>", DelimiterAction::Strip),
+    // Inkling tool call (#3228). A recipient between `<|message_model|>` and
+    // this marker is held and consumed by `scan_inkling_header`; the call's
+    // `<|end_message|>` returns to content through the row above.
+    (
+        "<|content_invoke_tool_json|>",
+        DelimiterAction::EnterToolCall,
+    ),
     // Gemma 4 tool-call delimiters — must precede Hermes `<tool_call>` to avoid
     // a spurious Hermes hit on the Gemma 4 open tag.
     ("<|tool_call>", DelimiterAction::EnterToolCall),
@@ -1359,6 +1367,12 @@ impl StreamFilter {
             earliest = choose_earlier(earliest, candidate);
         }
 
+        if let Some(MuseHeader::Delimiter(pos, len, action)) =
+            self.scan_inkling_header(end_of_stream)
+        {
+            earliest = choose_earlier(earliest, (pos, len, action));
+        }
+
         if let Some(HarmonyHeader::Delimiter(pos, len, action)) =
             self.scan_harmony_header(end_of_stream)
         {
@@ -1383,6 +1397,14 @@ impl StreamFilter {
         if !end_of_stream
             && let Some(header) = self.unterminated_header_start()
             && earliest.is_some_and(|(pos, _, _)| pos > header)
+        {
+            return None;
+        }
+        // A pending Inkling header starts with `<|message_model|>`, which is
+        // itself a `Strip` row: consuming it would stream the recipient.
+        if !end_of_stream
+            && let Some(MuseHeader::Pending(header)) = self.scan_inkling_header(false)
+            && earliest.is_some_and(|(pos, _, _)| pos >= header)
         {
             return None;
         }
@@ -1487,8 +1509,13 @@ impl StreamFilter {
             Some(MuseHeader::Pending(start)) => Some(start),
             _ => None,
         };
+        let inkling = match self.scan_inkling_header(false) {
+            Some(MuseHeader::Pending(start)) => Some(start),
+            _ => None,
+        };
         harmony
             .into_iter()
+            .chain(inkling)
             .chain(muse_boundary)
             .chain(muse_assistant)
             .chain(self.pending_harmony_role_header())
@@ -1516,6 +1543,50 @@ impl StreamFilter {
                 return Some(pos);
             }
             from = pos + HARMONY_ASSISTANT.len();
+        }
+        None
+    }
+
+    /// Scan for an Inkling recipient header,
+    /// `<|message_model|>NAME<|content_invoke_tool_json|>` (#3228). The name
+    /// is not content, so a `<|message_model|>` followed by recipient-shaped
+    /// text is held until its kind marker arrives: an invoke marker makes the
+    /// whole header one `EnterToolCall` delimiter, and any other marker drops
+    /// the name with the header. Text that outgrows
+    /// [`inkling::MAX_RECIPIENT_BYTES`], or is still open at end of stream, is
+    /// not a header and streams as before (the fixed rows strip the marker).
+    fn scan_inkling_header(&self, end_of_stream: bool) -> Option<MuseHeader> {
+        if self.harmony_active || self.atem_depth > 0 {
+            return None;
+        }
+        let mut from = 0;
+        while let Some(rel) = self.buffer[from..].find(inkling::MESSAGE) {
+            let pos = from + rel;
+            let after = pos + inkling::MESSAGE.len();
+            let tail = &self.buffer[after..];
+            match tail.find("<|") {
+                // No recipient: the fixed rows handle the kind marker.
+                Some(0) => {}
+                Some(rel) if inkling::is_recipient(&tail[..rel]) => {
+                    let marker = &tail[rel..];
+                    if marker.starts_with(inkling::INVOKE) {
+                        let len = inkling::MESSAGE.len() + rel + inkling::INVOKE.len();
+                        return Some(MuseHeader::Delimiter(
+                            pos,
+                            len,
+                            DelimiterAction::EnterToolCall,
+                        ));
+                    }
+                    if !end_of_stream && inkling::INVOKE.starts_with(marker) {
+                        return Some(MuseHeader::Pending(pos));
+                    }
+                }
+                None if !end_of_stream && tail.len() <= inkling::MAX_RECIPIENT_BYTES => {
+                    return Some(MuseHeader::Pending(pos));
+                }
+                _ => {}
+            }
+            from = after;
         }
         None
     }

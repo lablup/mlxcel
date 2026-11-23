@@ -30,6 +30,7 @@ pub mod got_ocr;
 pub mod hunyuan_vl;
 pub mod idefics2;
 pub mod inkling;
+pub mod inkling2;
 pub mod internvl;
 pub mod jina_vlm;
 pub mod kimi_k3;
