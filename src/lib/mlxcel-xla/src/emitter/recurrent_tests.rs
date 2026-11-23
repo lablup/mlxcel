@@ -23,7 +23,7 @@ use super::model::{
     emit_decode, emit_decode_batched, emit_decode_ragged, emit_decode_with, emit_prefill,
     emit_prefill_embeddings, emit_prefill_embeddings_deepstack_with, emit_prefill_with,
 };
-use super::recurrent_config::quote_non_finite_json;
+use crate::hf_json::quote_non_finite_json;
 use crate::weights::{WeightSpec, weight_specs_q};
 
 /// A two-layer Mamba2 with `n_groups = 2 < num_heads`, written the way HF

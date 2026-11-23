@@ -1538,12 +1538,15 @@ fn generate_with_embeddings<M: LanguageModel>(
 
 /// Read `num_hidden_layers` from a model directory's `config.json` (0 if absent
 /// or unparsable). The OpenXLA session stores it as metadata; the bundled graph
-/// fixes the architecture, so a best-effort value is sufficient.
+/// fixes the architecture, so a best-effort value is sufficient. The parse
+/// accepts HF's bare `Infinity` (a Mamba2 `time_step_limit`), and the count
+/// needs no attention-head fields, so an attention-free model reads its layer
+/// count like any other (issue #3339).
 #[cfg(feature = "xla-backend")]
 fn xla_num_layers(model_dir: &Path) -> usize {
     std::fs::read_to_string(model_dir.join("config.json"))
         .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|s| mlxcel_xla::parse_hf_config_json(&s).ok())
         .and_then(|v| {
             v.get("num_hidden_layers")
                 .and_then(serde_json::Value::as_u64)

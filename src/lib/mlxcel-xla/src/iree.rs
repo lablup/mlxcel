@@ -59,7 +59,7 @@ use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{
     Config, DeepStackConfig, Gemma3nConfig, Gemma3nWeightSpec, LlavaVisionConfig, Precision,
-    ProjectionLayout, QuantConfig, QuantScaleDtype, VisionProjector, WeightScheme,
+    ProjectionLayout, QuantConfig, QuantScaleDtype, StateTensorSpec, VisionProjector, WeightScheme,
     check_packed_supported, emit_decode_ragged_with_native, emit_decode_with_native,
     emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with_qmv,
     emit_gemma3n_prefill_embeddings_ple_with_qmv, emit_gemma3n_prefill_with_qmv,
@@ -81,6 +81,7 @@ use crate::prepared_gemma3::{
     GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID, Gemma3VlmCompatibilityContract,
     bind_gemma3_vlm_compatibility,
 };
+use crate::state_ffi::StateFfi;
 use crate::{DeepStackFeatures, DeepStackPreparedPrefill, Gemma3nDensePle, Gemma3nPreparedPrefill};
 // The loader reads the per-architecture checkpoint-weight order from
 // `weights::weight_specs`, which sources its names from `weight_names::scheme_names`
@@ -324,7 +325,15 @@ unsafe extern "C" {
         deepstack_target_layers: *const c_int,
         has_adapter_modes: c_int,
         local_task_workers: c_int,
+        has_kv: c_int,
+        n_state: c_int,
+        state_ranks: *const c_int,
+        state_dims: *const i64,
+        state_elems: *const c_int,
     ) -> *mut XlaCtx;
+    /// Start a recurrent sequence from the zero state without a prefill (an
+    /// empty prompt prefix); the next decode imports it (issue #3339).
+    fn xla_llama_state_reset(c: *mut XlaCtx) -> c_int;
     fn xla_llama_upload_weight(
         c: *mut XlaCtx,
         i: c_int,
@@ -402,6 +411,10 @@ unsafe extern "C" {
     /// scalar-input marker (token/pos/cache_len as ABI-level `i32` values).
     #[cfg(feature = "test-support")]
     fn xla_test_decode_scalar_inputs(c: *const XlaCtx) -> c_int;
+    /// Test support (issue #3339): `-1` without state, else bit 0 = the state
+    /// is present, bit 1 = a decode still has to import it.
+    #[cfg(feature = "test-support")]
+    fn xla_test_state_status(c: *const XlaCtx) -> c_int;
     #[cfg(feature = "test-support")]
     fn xla_test_decode_counters_reset();
     #[cfg(feature = "test-support")]
@@ -873,6 +886,8 @@ struct RuntimeFfiDimensions {
     model_layers: c_int,
     deepstack_layers: c_int,
     deepstack_visual: c_int,
+    /// The threaded recurrent-state layout and whether a KV cache exists.
+    state: StateFfi,
 }
 
 fn runtime_ffi_dimensions(
@@ -904,6 +919,7 @@ fn runtime_ffi_dimensions(
                 .map_or(0, |schema| schema.max_visual_positions),
             "deepstack_visual_positions",
         )?,
+        state: cfg.state_ffi()?,
     })
 }
 
@@ -912,7 +928,7 @@ impl RuntimeConfig {
         let path = model_dir.join("config.json");
         let text = std::fs::read_to_string(&path)
             .map_err(|error| format!("read {}: {error}", path.display()))?;
-        let root: serde_json::Value = serde_json::from_str(&text)
+        let root = crate::parse_hf_config_json(&text)
             .map_err(|error| format!("parse {}: {error}", path.display()))?;
         let model_type = root.get("model_type").and_then(serde_json::Value::as_str);
         if matches!(model_type, Some("gemma3n" | "gemma3n_text")) {
@@ -922,10 +938,40 @@ impl RuntimeConfig {
                 .map(Self::Gemma3n)
                 .map_err(|error| format!("{}: {error}", path.display()));
         }
-        Config::from_json(model_dir)?
+        let config = Config::from_json(model_dir)?;
+        // Issue #3339: refuse a Mamba2 grouping whose gated-norm reference is
+        // not settled rather than emit silently different output.
+        config.check_ssm_norm_grouping()?;
+        config
             .with_context_capacity(context_capacity)
             .map(Box::new)
             .map(Self::Dense)
+    }
+
+    /// The threaded recurrent-state tensors, in graph-argument order (issue
+    /// #3339). Empty for every attention-only model, including Gemma3n.
+    fn state_tensors(&self) -> Vec<StateTensorSpec> {
+        match self {
+            Self::Dense(config) => config.state_tensors(),
+            Self::Gemma3n(_) => Vec::new(),
+        }
+    }
+
+    /// Whether the graphs carry a KV cache; false for an attention-free model.
+    fn has_kv(&self) -> bool {
+        match self {
+            Self::Dense(config) => config.has_kv_cache(),
+            Self::Gemma3n(_) => true,
+        }
+    }
+
+    fn has_recurrent_state(&self) -> bool {
+        !self.state_tensors().is_empty()
+    }
+
+    /// The state layout as `xla_llama_create` receives it.
+    fn state_ffi(&self) -> Result<StateFfi, String> {
+        StateFfi::new(self.has_kv(), &self.state_tensors())
     }
 
     /// Select the projection weight layout this engine emits and uploads
@@ -1068,8 +1114,8 @@ fn gemma3_vlm_compatibility_from_json(
     config_json: &str,
     cfg: &RuntimeConfig,
 ) -> Result<Option<Gemma3VlmCompatibilityContract>, String> {
-    let root: serde_json::Value =
-        serde_json::from_str(config_json).map_err(|error| format!("parse config.json: {error}"))?;
+    let root = crate::parse_hf_config_json(config_json)
+        .map_err(|error| format!("parse config.json: {error}"))?;
     let is_vlm = root.get("model_type").and_then(serde_json::Value::as_str) == Some("gemma3")
         && root
             .get("vision_config")
@@ -1553,7 +1599,9 @@ pub(crate) fn compile_one<S: AsRef<str>>(
 /// Compatible entry modules loaded atomically into one runtime session.
 struct CompiledBundle {
     prefill_vmfb: PathBuf,
-    prefill_embeddings_vmfb: PathBuf,
+    /// `None` for a recurrent bundle, whose embeddings prefill has no state
+    /// contract yet (issue #3339).
+    prefill_embeddings_vmfb: Option<PathBuf>,
     prefill_embeddings_deepstack_vmfb: Option<PathBuf>,
     decode_vmfb: PathBuf,
     compatibility_fingerprint: u64,
@@ -1573,8 +1621,7 @@ fn compile_bundle(
     native_cuda_ptx: bool,
     prefill_mlir: &str,
     prefill_tag: &str,
-    prefill_embeddings_mlir: &str,
-    prefill_embeddings_tag: &str,
+    prefill_embeddings: Option<(&str, &str)>,
     prefill_embeddings_deepstack: Option<(&str, &str)>,
     decode_mlir: &str,
     decode_tag: &str,
@@ -1622,14 +1669,18 @@ fn compile_bundle(
         prefill_tag,
         cfg.context_capacity(),
     )?;
-    let pre_embeddings = compile_one(
-        &iree_compile,
-        prefill_embeddings_mlir,
-        &flags,
-        &cache,
-        prefill_embeddings_tag,
-        cfg.context_capacity(),
-    )?;
+    let pre_embeddings = prefill_embeddings
+        .map(|(mlir, tag)| {
+            compile_one(
+                &iree_compile,
+                mlir,
+                &flags,
+                &cache,
+                tag,
+                cfg.context_capacity(),
+            )
+        })
+        .transpose()?;
     let pre_embeddings_deepstack = prefill_embeddings_deepstack
         .map(|(mlir, tag)| {
             compile_one(
@@ -1659,8 +1710,13 @@ fn compile_bundle(
     if gemma3n_qmv {
         gemma3n_qmv_artifact_identity().hash(&mut fingerprint);
     }
+    // Issue #3339: the state layout is part of the artifact identity, so a
+    // context is never created against a bundle compiled for other state shapes.
+    cfg.state_ffi()?.identity().hash(&mut fingerprint);
     prefill_mlir.hash(&mut fingerprint);
-    prefill_embeddings_mlir.hash(&mut fingerprint);
+    prefill_embeddings
+        .map(|(mlir, _)| mlir)
+        .hash(&mut fingerprint);
     prefill_embeddings_deepstack
         .map(|(mlir, _)| mlir)
         .hash(&mut fingerprint);
@@ -1690,9 +1746,17 @@ fn compile_vmfbs(
     let (prefill, prefill_embeddings, prefill_embeddings_deepstack, decode) = match cfg {
         RuntimeConfig::Dense(config) => {
             check_packed_supported(device, config.packed_args && config.supports_packed_quant())?;
+            // Issue #3339 (carry-over from #3338): the embeddings prefill has no
+            // recurrent-state contract and refuses a recurrent config, so a
+            // recurrent bundle is the token prefill plus the decode only.
+            let prefill_embeddings = if config.has_recurrent_state() {
+                None
+            } else {
+                Some(emit_prefill_embeddings_with(config, true, precision)?)
+            };
             (
                 emit_prefill_with(config, true, precision),
-                emit_prefill_embeddings_with(config, true, precision)?,
+                prefill_embeddings,
                 config
                     .deepstack
                     .as_ref()
@@ -1703,7 +1767,9 @@ fn compile_vmfbs(
         }
         RuntimeConfig::Gemma3n(config) => (
             emit_gemma3n_prefill_with_qmv(config, true, precision, native_qmv),
-            emit_gemma3n_prefill_embeddings_ple_with_qmv(config, true, precision, native_qmv),
+            Some(emit_gemma3n_prefill_embeddings_ple_with_qmv(
+                config, true, precision, native_qmv,
+            )),
             None,
             emit_gemma3n_decode_with_qmv(config, true, precision, native_qmv),
         ),
@@ -1716,8 +1782,9 @@ fn compile_vmfbs(
         packed_native.is_some() && device == "cuda",
         &prefill,
         "prefill",
-        &prefill_embeddings,
-        "prefill_embeddings",
+        prefill_embeddings
+            .as_deref()
+            .map(|mlir| (mlir, "prefill_embeddings")),
         prefill_embeddings_deepstack
             .as_deref()
             .map(|mlir| (mlir, "prefill_embeddings_deepstack")),
@@ -2922,7 +2989,11 @@ fn create_bucket_ctx(
     context_capacity: usize,
 ) -> Result<*mut XlaCtx, String> {
     let c_pre = path_cstring(&bundle.prefill_vmfb)?;
-    let c_pre_embeddings = path_cstring(&bundle.prefill_embeddings_vmfb)?;
+    let c_pre_embeddings = bundle
+        .prefill_embeddings_vmfb
+        .as_deref()
+        .map(path_cstring)
+        .transpose()?;
     let c_pre_embeddings_deepstack = bundle
         .prefill_embeddings_deepstack_vmfb
         .as_deref()
@@ -2939,7 +3010,9 @@ fn create_bucket_ctx(
         xla_llama_create_bucket(
             base,
             c_pre.as_ptr(),
-            c_pre_embeddings.as_ptr(),
+            c_pre_embeddings
+                .as_ref()
+                .map_or(std::ptr::null(), |path| path.as_ptr()),
             c_pre_embeddings_deepstack
                 .as_ref()
                 .map_or(std::ptr::null(), |p| p.as_ptr()),
@@ -2993,7 +3066,11 @@ fn create_ctx_with_diagnostics(
     let c_dev = CString::new(device).map_err(|_| "device has interior nul".to_string())?;
     let local_task_workers = crate::local_task::local_task_workers_for(device)?;
     let c_pre = path_cstring(&bundle.prefill_vmfb)?;
-    let c_pre_embeddings = path_cstring(&bundle.prefill_embeddings_vmfb)?;
+    let c_pre_embeddings = bundle
+        .prefill_embeddings_vmfb
+        .as_deref()
+        .map(path_cstring)
+        .transpose()?;
     let c_pre_embeddings_deepstack = bundle
         .prefill_embeddings_deepstack_vmfb
         .as_deref()
@@ -3024,7 +3101,9 @@ fn create_ctx_with_diagnostics(
         xla_llama_create(
             c_dev.as_ptr(),
             c_pre.as_ptr(),
-            c_pre_embeddings.as_ptr(),
+            c_pre_embeddings
+                .as_ref()
+                .map_or(std::ptr::null(), |path| path.as_ptr()),
             c_pre_embeddings_deepstack
                 .as_ref()
                 .map_or(std::ptr::null(), |path| path.as_ptr()),
@@ -3054,6 +3133,11 @@ fn create_ctx_with_diagnostics(
             },
             i32::from(cfg.has_adapter_modes()),
             local_task_workers,
+            ffi.state.has_kv,
+            ffi.state.n_state,
+            ffi.state.ranks_ptr(),
+            ffi.state.dims_ptr(),
+            ffi.state.elems_ptr(),
         )
     };
     if ctx.is_null() {
@@ -3124,6 +3208,10 @@ pub struct IreeLlama {
     position_mode: PreparedPositionMode,
     decode_position: DecodePositionState,
     deepstack_schema: Option<DeepStackConfig>,
+    /// Whether the model threads recurrent state (issue #3339). An empty
+    /// prompt prefix then resets the state instead of running a
+    /// `real_len = 0` prefill, which the shim refuses for such a model.
+    has_state: bool,
 }
 
 impl IreeLlama {
@@ -3240,6 +3328,7 @@ impl IreeLlama {
             position_mode: cfg.position_mode(),
             decode_position: DecodePositionState::new(cfg.context_capacity()),
             deepstack_schema: cfg.deepstack().cloned(),
+            has_state: cfg.has_recurrent_state(),
         })
     }
 
@@ -3439,6 +3528,10 @@ impl IreeLlama {
     /// Pad `prompt` into the configured static bucket, run the prefill, and return its
     /// first token. Accepts an empty prompt (the seed-then-decode loop prefills a
     /// zero-length prefix when the prompt is a single token).
+    ///
+    /// For a recurrent model an empty prefix runs no graph: the shim resets the
+    /// state to zeros for the next decode to import, and the returned token is
+    /// a placeholder the seed path discards (issue #3339).
     fn prefill_padded(&mut self, prompt: &[i32]) -> Result<i32, String> {
         if prompt.len() > self.context_capacity {
             return Err(format!(
@@ -3446,6 +3539,17 @@ impl IreeLlama {
                 prompt.len(),
                 self.context_capacity
             ));
+        }
+        if self.has_state && prompt.is_empty() {
+            // Safety: ctx is a live context; the call reads no caller memory.
+            let rc = unsafe { xla_llama_state_reset(self.ctx) };
+            let result = if rc == 0 {
+                self.adapter_mode = 0;
+                Ok(0)
+            } else {
+                Err(format!("xla_llama_state_reset failed (status {rc})"))
+            };
+            return self.decode_position.complete_prefill(0, result);
         }
         let mut tokens = vec![0i32; self.context_capacity];
         tokens[..prompt.len()].copy_from_slice(prompt);
@@ -3541,6 +3645,16 @@ impl IreeLlama {
     pub fn test_decode_scalar_inputs(&self) -> bool {
         // Safety: the flag is a plain field read from a live context.
         unsafe { xla_test_decode_scalar_inputs(self.ctx) != 0 }
+    }
+
+    /// Test support (issue #3339): `None` when the model threads no state,
+    /// else `(present, import_pending)` for the single-sequence state handoff.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_state_status(&self) -> Option<(bool, bool)> {
+        // Safety: the status is a plain field read from a live context.
+        let status = unsafe { xla_test_state_status(self.ctx) };
+        (status >= 0).then_some((status & 1 != 0, status & 2 != 0))
     }
 
     /// Test support (issue #3028): force the per-step allocation path on
@@ -3783,6 +3897,15 @@ impl IreeRaggedLlama {
         );
         let load_started = std::time::Instant::now();
         let mut cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
+        if cfg.has_recurrent_state() {
+            // Issue #3339 ships the single-sequence state handoff only; the
+            // per-slot state carry the ragged engine needs is issue #3340.
+            return Err(format!(
+                "{} threads recurrent state, which the OpenXLA continuous-batching \
+                 engine does not carry yet; generate single-sequence instead",
+                model_dir.display()
+            ));
+        }
         checked_ffi_int(b_max, "b_max")?;
         if !RAGGED_B_VALUES.contains(&b_max) {
             return Err(format!(
@@ -3900,8 +4023,10 @@ impl IreeRaggedLlama {
             false,
             &prefill_mlir,
             "prefill_logits",
-            &prefill_embeddings_mlir,
-            "prefill_embeddings_logits",
+            Some((
+                prefill_embeddings_mlir.as_str(),
+                "prefill_embeddings_logits",
+            )),
             prefill_embeddings_deepstack_mlir
                 .as_deref()
                 .map(|mlir| (mlir, "prefill_embeddings_deepstack_logits")),

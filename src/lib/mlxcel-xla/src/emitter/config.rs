@@ -43,7 +43,7 @@
 
 use super::builder::ProjectionLayout;
 pub use super::recurrent_config::{MixerKind, StateElem, StateTensorSpec};
-use super::recurrent_config::{mamba2_from_json, quote_non_finite_json};
+use super::recurrent_config::{mamba2_from_json, parse_hf_config_json};
 
 /// How the RoPE inverse-frequency table is computed. Both kinds share the
 /// `outer(pos, inv_freq)` table build (see [`rope`](super::rope)); they differ
@@ -744,12 +744,7 @@ impl Config {
         // HF writes Python's bare `Infinity` into some configs (Mamba2's
         // `time_step_limit`); quote it only when the strict parse fails, so
         // every other config is parsed from its unchanged text.
-        let root: serde_json::Value = serde_json::from_str(s)
-            .or_else(|error| match quote_non_finite_json(s) {
-                Some(quoted) => serde_json::from_str(&quoted),
-                None => Err(error),
-            })
-            .map_err(|e| format!("parse config.json: {e}"))?;
+        let root = parse_hf_config_json(s).map_err(|e| format!("parse config.json: {e}"))?;
         let wrapper_model_type = root.get("model_type").and_then(serde_json::Value::as_str);
         let is_phi4mm = wrapper_model_type == Some("phi4mm");
         let is_molmo2 = wrapper_model_type == Some("molmo2");

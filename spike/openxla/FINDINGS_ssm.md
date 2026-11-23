@@ -126,3 +126,15 @@ Compile time of one uncached `iree-compile` for mamba2-130m (24 layers), f32:
 - Bounded carry: not needed yet. The chunk carry costs `H * nc^3` adds against `H * T * Q * (P + N)`-order within-chunk work; at the largest ladder capacity, 32768 (`nc = 256`), that is about 2% of the within-chunk work for mamba2-130m (P = 64, N = 128), and the crossover is near T = 185k to 230k depending on how the within-chunk ops are counted. Revisit if a context bucket beyond about 64k is enabled.
 - f16 conv: the prefill conv is now K shifted f32 multiply-adds (the same arithmetic as the decode step) instead of `Builder::convolution`, so prefill and decode round the same way on the f16 path.
 
+
+## Single-sequence runtime (issue #3339)
+
+The shim now carries the state from `prefill.main` into `decode_step` (`@state_import`, once per request) and `MLXCEL_BACKEND=xla mlxcel generate` runs `AntonV/mamba2-130m-hf` @ `05e8773f`. Greedy ids for "The capital of France is", 40 tokens, compared with the HF fp32 oracle (`oracle_continuation.py`, which needed no change for Mamba2):
+
+| device | precision | CLI (prefix prefill + decode) | `xla_oracle_check` (full prefill + decode) |
+|--------|-----------|------------------------------:|-------------------------------------------:|
+| hip | f16 (default) | 40/40 | 40/40 |
+| hip | f32 | 40/40 | not run |
+| local-task | f32 (default) | 40/40 | 40/40 |
+
+A one-token prompt ("The", 10 tokens), which takes the state-reset path instead of a `real_len = 0` prefill, also matches the oracle on hip. The f16 drift measured above (0.42 max-abs on logits) did not move a greedy token here, so recurrent configs keep the per-device default precision rather than being pinned to f32 like MLA.

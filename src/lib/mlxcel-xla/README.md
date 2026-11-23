@@ -295,6 +295,17 @@ The single-sequence `decode_step` takes its token, position and cache-len as ABI
 
 The module exports a no-op `decode_step.scalar_inputs` entry, which `csrc/xla_iree.c` probes at load exactly like `decode_step.kv_import`. When the marker is present the shim pushes the three values with `iree_vm_list_push_value`; when it is absent (an artifact compiled without the marker, or the M-RoPE graph, whose `tensor<3xi32>` position still needs all three buffer views) it keeps the buffer-view path. An older bundle therefore keeps working without a bundle version bump. Ragged and lockstep batch decode, Gemma3n decode and the `phi4` `adapter_mode` argument keep their current ABI.
 
+### Recurrent state ABI (Mamba2, issues #3338 / #3339)
+
+A recurrent model threads a short list of fixed-size state tensors through its graphs in `Config::state_tensors` order; for Mamba2 that is `ssm_h [L_ssm, H, P, N]` then `ssm_conv [L_ssm, K-1, conv_dim]`, both f32. The KV cache is optional: an attention-free model has none, with no dummy buffers.
+
+- `prefill.main` takes one zero-initialised input per state tensor after `real_len` and returns the advanced state after the logits (and after `kcache` / `vcache` when the model has attention). A recurrent prefill refuses `real_len = 0`; an empty prompt prefix calls `xla_llama_state_reset`, which starts the sequence from the zero state without running a graph.
+- `decode_step` keeps one `util.global private mutable` per state tensor (`@ssm_h`, `@ssm_conv`), seeded by `@state_import`. The shim stores the prefill result in `sscache[]`, sets `state_import_pending`, and imports it once before the next decode, the same way `kv_import` works. A failed or refused prefill drops the state so a decode cannot continue the previous request.
+- `xla_llama_create` takes `has_kv, n_state, state_ranks, state_dims, state_elems` (dims concatenated per tensor, element code 0 = f32, at most 8 tensors of rank 1 to 8). The layout feeds the bundle's compatibility fingerprint. A recurrent bundle has no embeddings prefill module, and the ragged, slot and embeddings entry points refuse a context without a KV cache until per-slot state lands (#3340).
+- The runtime refuses a `mamba2` config with `n_groups > 1` (Codestral Mamba, for example): its gated RMSNorm grouping is not settled against the reference those checkpoints were trained with.
+
+`MLXCEL_BACKEND=xla mlxcel generate -m models/hf/mamba2-130m` runs this path single-sequence; `scripts/xla/validate_arch.sh --single-only` is its oracle gate and `tests/xla_ssm_single_seq.rs` covers the handoff on a synthetic checkpoint. Recurrent configs use the per-device default precision (f16 on `hip`), not an f32 pin: `AntonV/mamba2-130m-hf` is token-exact against the HF fp32 oracle for 40 greedy tokens at f16 on `hip` and at f32 on `local-task`.
+
 ### LLaVA independent reference gate
 
 `scripts/xla/validate_llava_reference.sh` is the reproducible multimodal
