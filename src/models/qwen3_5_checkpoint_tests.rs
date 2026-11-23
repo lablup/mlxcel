@@ -24,7 +24,8 @@ use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use super::qwen3_5_tests::two_layer_model;
+use super::pooled_test_model::Pooled;
+use super::qwen3_5_tests::pooled_two_layer_model;
 use crate::models::Qwen35Model;
 
 /// `(checkpoint, donor)` lengths: a long cut, a one-token cut, and a cut that
@@ -35,7 +36,7 @@ fn prompt(len: usize) -> Vec<i32> {
     (0..len).map(|i| ((i * 5 + 3) % 8) as i32).collect()
 }
 
-fn forward(model: &Qwen35Model, seq: SequenceId, tokens: &[i32]) -> UniquePtr<MlxArray> {
+fn forward(model: &Pooled<Qwen35Model>, seq: SequenceId, tokens: &[i32]) -> UniquePtr<MlxArray> {
     let input = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
     let logits = model.forward_with_sequence_id(&input, Some(seq), &mut [], None);
     mlxcel_core::eval(&logits);
@@ -49,7 +50,7 @@ fn bytes(array: &MlxArray) -> Vec<u8> {
 }
 
 /// Logits of a prefill of `suffix` and eight decode steps after it.
-fn continue_from(model: &Qwen35Model, seq: SequenceId, suffix: &[i32]) -> Vec<Vec<u8>> {
+fn continue_from(model: &Pooled<Qwen35Model>, seq: SequenceId, suffix: &[i32]) -> Vec<Vec<u8>> {
     let mut out = vec![bytes(&forward(model, seq, suffix))];
     for step in 0..8 {
         out.push(bytes(&forward(model, seq, &[(step * 3 + 1) % 8])));
@@ -60,7 +61,7 @@ fn continue_from(model: &Qwen35Model, seq: SequenceId, suffix: &[i32]) -> Vec<Ve
 /// The checkpoint at `keep` and the whole snapshot at `tokens.len()` from one
 /// sequence, the way a conversation's turns produce them.
 fn chain(
-    model: &Qwen35Model,
+    model: &Pooled<Qwen35Model>,
     seq: SequenceId,
     tokens: &[i32],
     keep: usize,
@@ -87,7 +88,7 @@ fn chain(
 #[test]
 fn a_checkpoint_over_a_longer_snapshot_matches_a_direct_prefill_bit_for_bit() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
-    let model = two_layer_model();
+    let model = pooled_two_layer_model();
     let suffix = [6, 1, 4, 4, 2];
     for (case, &(keep, have)) in CASES.iter().enumerate() {
         let tokens = prompt(have);
@@ -126,7 +127,7 @@ fn a_checkpoint_over_a_longer_snapshot_matches_a_direct_prefill_bit_for_bit() {
 #[test]
 fn mismatched_checkpoints_are_refused() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
-    let model = two_layer_model();
+    let model = pooled_two_layer_model();
     let tokens = prompt(23);
     let (checkpoint, donor) = chain(&model, SequenceId::from_raw(3_047_100), &tokens, 9);
     let (_, short_donor) = chain(&model, SequenceId::from_raw(3_047_101), &tokens[..7], 4);

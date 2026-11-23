@@ -118,8 +118,9 @@ use crate::models::gemma3::{Cache, CacheInterface};
 use crate::models::gpt2::{dim_eq, validate_embedding_table};
 use crate::models::kv_ring_checkpoint;
 use crate::models::kv_snapshot::KvSnapshotNames;
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, group_mask_scores};
+use mlxcel_core::cache::LayerStateKind;
 
 /// Tensor-name and error-message vocabulary AFMoE hands to the shared
 /// serializers in [`crate::models::kv_snapshot`].
@@ -2041,7 +2042,7 @@ impl LanguageModel for AfmoeModel {
                 .get(layer_idx)
                 .is_some_and(|layer| layer.uses_sliding)
                 .then_some(self.sliding_window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 

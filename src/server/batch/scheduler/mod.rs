@@ -70,7 +70,7 @@ use crate::server::prompt_cache::key::PromptCacheKey;
 use crate::server::prompt_cache::metrics::PromptCacheRejectReason;
 use crate::server::prompt_cache::{
     CacheEntry, DetachedKvSet, ModelSnapshotEntry, PromptCacheStore, SnapshotLookupOutcome,
-    SnapshotOrigin,
+    SnapshotOrigin, state_snapshot,
 };
 use crate::server::state::BatchMetrics;
 use crate::server::thinking_budget::{

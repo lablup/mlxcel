@@ -24,7 +24,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use crate::models::gemma3::Cache;
 use crate::models::kolibri1::Kolibri1Model;
 use crate::models::kv_snapshot::KvSnapshotNames;
-use crate::models::model_owned::LayerKv;
+use mlxcel_core::cache::LayerStateKind;
 
 /// The snapshot family tag; a Kolibri-1 snapshot never restores into another
 /// family that shares the `Cache` enum.
@@ -127,7 +127,7 @@ impl LanguageModel for Kolibri1Model {
                 .get(layer_idx)
                 .is_some_and(|layer| layer.uses_sliding)
                 .then_some(self.sliding_window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 

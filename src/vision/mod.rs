@@ -542,6 +542,29 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.sequence_state_layout()
     }
 
+    // A scheduler-owned text model keeps its state in the pool entry
+    // (issue #3254), so the wrapper forwards the whole surface: the table,
+    // the state builder, the snapshot vocabulary and the forward.
+    fn layer_state_kinds(&self) -> Option<Vec<mlxcel_core::cache::LayerStateKind>> {
+        self.text_model.layer_state_kinds()
+    }
+
+    fn make_layer_state(&self) -> Option<Vec<mlxcel_core::cache::LayerState>> {
+        self.text_model.make_layer_state()
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<mlxcel_core::cache::LayerStateSnapshotSpec> {
+        self.text_model.layer_state_snapshot_spec()
+    }
+
+    fn forward_layer_state(
+        &self,
+        request: &mlxcel_core::cache::LayerStateForward<'_>,
+        rows: &mut [&mut [mlxcel_core::cache::LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        self.text_model.forward_layer_state(request, rows)
+    }
+
     fn supports_padded_prefill(&self) -> bool {
         self.text_model.supports_padded_prefill()
     }

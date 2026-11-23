@@ -99,9 +99,12 @@ mod fp16_growth;
 #[path = "cache/fp16_growth_tests.rs"]
 mod fp16_growth_tests;
 pub mod latent_quant;
+// Scheduler-owned per-layer sequence state: `LayerStateKind`, `LayerState`,
+// `RecurrentState` and the forward request (issue #3254, ADR 0010).
 #[cfg(test)]
 #[path = "cache/latent_quant_tests.rs"]
 mod latent_quant_tests;
+mod layer_state;
 pub use first_fill::{FIRST_FILL_REWIND_SLACK, FullFirstFillScope};
 #[cfg(test)]
 #[path = "cache/kv_trim_tests.rs"]
@@ -149,6 +152,10 @@ pub use batch_quant::{
     KvQuantScheme,
 };
 pub use detach::{DetachedCacheSet, DetachedHandle, DetachedKVCache, DetachedRotatingKVCache};
+pub use layer_state::{
+    LayerState, LayerStateEncoding, LayerStateForward, LayerStateKind, LayerStateSnapshotSpec,
+    RecurrentState,
+};
 pub use paged::{
     GatheredKv, POOL_SLAB_BLOCKS, PagedBlockId, PagedBlockPool, PagedCacheStats, PagedKvLayout,
     PagedLayerState, PagedSequenceState,
@@ -6513,6 +6520,20 @@ pub enum SequenceStateBackend {
     /// Model-owned/internal state. The exposed `Vec<KVCache>` acts only as a
     /// compatibility placeholder for existing generation and scheduler paths.
     ModelOwned,
+    /// Per-layer [`LayerState`] owned by the pool entry and handed to the
+    /// model's forward (issue #3254, ADR 0010). The `Vec<KVCache>` is an
+    /// empty placeholder, as for `ModelOwned`.
+    SchedulerOwned,
+}
+
+impl SequenceStateBackend {
+    /// Whether a family's per-token state lives outside the pool entry's
+    /// `Vec<KVCache>`: inside the model (`ModelOwned`) or in the entry's
+    /// [`LayerState`] vector (`SchedulerOwned`). Trimming or detaching that
+    /// `KVCache` slice reaches nothing for such a family.
+    pub const fn keeps_state_outside_kv_slice(self) -> bool {
+        matches!(self, Self::ModelOwned | Self::SchedulerOwned)
+    }
 }
 
 /// Backend/layout descriptor for allocating one sequence's runtime state.
@@ -6552,6 +6573,16 @@ impl SequenceStateLayout {
             paged_layout: None,
         }
     }
+
+    /// Allocate per-layer [`LayerState`] owned by the pool entry, built from
+    /// the model's [`crate::generate::LanguageModel::make_layer_state`].
+    pub const fn scheduler_owned(num_layers: usize) -> Self {
+        Self {
+            backend: SequenceStateBackend::SchedulerOwned,
+            num_layers,
+            paged_layout: None,
+        }
+    }
 }
 
 /// One sequence's full set of layer caches.
@@ -6576,6 +6607,11 @@ pub struct SequenceCacheSet {
     /// borrows stay non-overlapping (see the borrow-discipline notes on the
     /// `CachePool` paged methods).
     pub paged: Option<Rc<RefCell<PagedSequenceState>>>,
+    /// Per-layer state of a scheduler-owned family (issue #3254), `None` for
+    /// every other family. Present whatever `backend` says: under the paged
+    /// decode override the entry is a `PagedKvCache` shadow for accounting
+    /// while the real state lives here.
+    layer_state: Option<Vec<LayerState>>,
     /// Unique identifier assigned by the pool.
     pub seq_id: SequenceId,
     /// Number of prompt tokens originally prefilled.
@@ -6599,6 +6635,7 @@ impl SequenceCacheSet {
             backend,
             caches,
             paged,
+            layer_state: None,
             seq_id,
             prompt_len: 0,
             current_offset: 0,
@@ -6639,6 +6676,58 @@ impl SequenceCacheSet {
             None,
             None,
         )
+    }
+
+    /// Attach the per-layer state of a scheduler-owned family.
+    fn with_layer_state(mut self, layer_state: Option<Vec<LayerState>>) -> Self {
+        self.layer_state = layer_state;
+        self
+    }
+
+    /// The per-layer state of a scheduler-owned sequence, `None` for every
+    /// other family.
+    pub fn layer_state(&self) -> Option<&[LayerState]> {
+        self.layer_state.as_deref()
+    }
+
+    /// Mutable per-layer state of a scheduler-owned sequence: what the
+    /// model's forward and the prompt cache's restore write.
+    pub fn layer_state_mut(&mut self) -> Option<&mut [LayerState]> {
+        self.layer_state.as_deref_mut()
+    }
+
+    /// Replace the whole per-layer state (a snapshot restore builds a fresh
+    /// vector and installs it only once every layer validated).
+    ///
+    /// # Errors
+    ///
+    /// The sequence is not scheduler-owned, or the layer count differs.
+    pub fn install_layer_state(&mut self, layer_state: Vec<LayerState>) -> Result<(), String> {
+        let Some(current) = self.layer_state.as_mut() else {
+            return Err(format!(
+                "sequence {} holds no scheduler-owned layer state",
+                self.seq_id
+            ));
+        };
+        if current.len() != layer_state.len() {
+            return Err(format!(
+                "sequence {}: {} layers of state cannot replace {}",
+                self.seq_id,
+                layer_state.len(),
+                current.len()
+            ));
+        }
+        *current = layer_state;
+        Ok(())
+    }
+
+    /// Bytes held by a scheduler-owned sequence's per-layer state. Not part
+    /// of [`Self::nbytes`], which keeps reporting what it reported while the
+    /// same state lived inside the model.
+    pub fn layer_state_nbytes(&self) -> usize {
+        self.layer_state
+            .as_deref()
+            .map_or(0, |layers| layers.iter().map(LayerState::nbytes).sum())
     }
 
     /// Total memory footprint of all layer caches in bytes.
@@ -6779,6 +6868,25 @@ impl CachePool {
             ));
         }
 
+        // A scheduler-owned family's state is built from the model's own
+        // table whatever backend the entry is allocated on: under the paged
+        // decode override the entry is a `PagedKvCache` shadow for
+        // accounting, and the real state is still this vector (issue #3254).
+        let natural_backend = model.sequence_state_layout().backend;
+        let layer_state = if natural_backend == SequenceStateBackend::SchedulerOwned {
+            Some(model.make_layer_state().ok_or_else(|| {
+                "CachePool: the model reports a scheduler-owned layout but builds no layer state"
+                    .to_string()
+            })?)
+        } else if layout.backend == SequenceStateBackend::SchedulerOwned {
+            return Err(
+                "CachePool: a scheduler-owned layout needs a model that reports layer_state_kinds()"
+                    .to_string(),
+            );
+        } else {
+            None
+        };
+
         let id = SequenceId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let entry = match layout.backend {
             SequenceStateBackend::DenseKvCache => {
@@ -6810,7 +6918,6 @@ impl CachePool {
                 //    intercept stores raw Fp16 K/V (the #152-validated path);
                 //    Turbo4 paged layouts carry their own `cache_mode` and keep
                 //    the existing dense quantized path untouched.
-                let natural_backend = model.sequence_state_layout().backend;
                 let pool_backed = natural_backend == SequenceStateBackend::DenseKvCache
                     && paged_layout.cache_mode == KVCacheMode::Fp16;
                 let caches = if pool_backed {
@@ -6837,8 +6944,15 @@ impl CachePool {
                 )
             }
             SequenceStateBackend::ModelOwned => SequenceCacheSet::model_owned(id),
+            SequenceStateBackend::SchedulerOwned => SequenceCacheSet::with_backend(
+                id,
+                SequenceStateBackend::SchedulerOwned,
+                Vec::new(),
+                None,
+                None,
+            ),
         };
-        self.active.insert(id, entry);
+        self.active.insert(id, entry.with_layer_state(layer_state));
         Ok(id)
     }
 
@@ -6869,6 +6983,75 @@ impl CachePool {
     /// in `model.forward()`, or `None` if the ID is not active.
     pub fn get_caches_mut(&mut self, id: SequenceId) -> Option<&mut [KVCache]> {
         self.active.get_mut(&id).map(|s| s.caches.as_mut_slice())
+    }
+
+    /// The per-layer state of a scheduler-owned sequence, `None` when the id
+    /// is not active or the family is not scheduler-owned.
+    pub fn layer_state(&self, id: SequenceId) -> Option<&[LayerState]> {
+        self.active.get(&id)?.layer_state()
+    }
+
+    /// Mutable per-layer state of a scheduler-owned sequence.
+    pub fn layer_state_mut(&mut self, id: SequenceId) -> Option<&mut [LayerState]> {
+        self.active.get_mut(&id)?.layer_state_mut()
+    }
+
+    /// Per-layer state slices for several scheduler-owned sequences in one
+    /// call, the [`Self::get_batch_caches_mut`] of scheduler-owned state.
+    ///
+    /// # Errors
+    ///
+    /// A duplicate id, an inactive id, or a sequence with no layer state.
+    pub fn batch_layer_state_mut<'a>(
+        &'a mut self,
+        ids: &[SequenceId],
+    ) -> Result<Vec<&'a mut [LayerState]>, String> {
+        // Reject aliases before collecting raw pointers, for the same reason
+        // as `get_batch_caches_mut`.
+        let mut unique = HashSet::with_capacity(ids.len());
+        for &id in ids {
+            if !unique.insert(id) {
+                return Err(format!(
+                    "CachePool: duplicate sequence {id} in layer-state batch"
+                ));
+            }
+        }
+
+        let mut state_ptrs: Vec<(*mut LayerState, usize)> = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let layers = self
+                .active
+                .get_mut(&id)
+                .ok_or_else(|| format!("CachePool: sequence {id} not found"))?
+                .layer_state_mut()
+                .ok_or_else(|| format!("CachePool: sequence {id} holds no layer state"))?;
+            state_ptrs.push((layers.as_mut_ptr(), layers.len()));
+        }
+
+        // SAFETY: each `SequenceId` maps to a distinct `SequenceCacheSet`, and
+        // each set owns its own `Vec<LayerState>` allocation, so the slices
+        // are disjoint; duplicates were rejected above. The slices are tied
+        // to the lifetime of `&mut self`, and `self.active` is not mutated
+        // between pointer extraction and slice reconstruction.
+        Ok(state_ptrs
+            .iter()
+            .map(|&(ptr, len)| unsafe { std::slice::from_raw_parts_mut(ptr, len) })
+            .collect())
+    }
+
+    /// Mirror a scheduler-owned sequence's visible lengths into the paged
+    /// shadow state. A no-op for every other sequence and for a pool with no
+    /// paged shadow.
+    pub fn sync_paged_state_with_layer_state(&mut self, id: SequenceId) -> Result<(), String> {
+        let Some(visible_lens) = self.layer_state(id).map(|layers| {
+            layers
+                .iter()
+                .map(LayerState::visible_len)
+                .collect::<Vec<_>>()
+        }) else {
+            return Ok(());
+        };
+        self.sync_paged_state_with_lengths(id, &visible_lens)
     }
 
     /// Return cache slices for multiple active sequences in one call.

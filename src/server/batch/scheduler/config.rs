@@ -427,8 +427,12 @@ impl BatchScheduler {
     ) -> (ContextRetentionPolicy, bool) {
         if self.max_kv_size.is_none()
             || !policy.context_shift
-            || self.engine.model().sequence_state_layout().backend
-                != SequenceStateBackend::ModelOwned
+            || !self
+                .engine
+                .model()
+                .sequence_state_layout()
+                .backend
+                .keeps_state_outside_kv_slice()
         {
             return (policy, false);
         }

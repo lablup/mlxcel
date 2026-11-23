@@ -1114,6 +1114,10 @@ pub(crate) enum BurstOutcome {
 /// without cloning.
 pub(crate) struct BurstContext<'a> {
     pub(crate) model: &'a LoadedModel,
+    /// The B=1 sequence's scheduler-owned layer state (issue #3254), which a
+    /// speculative target of a scheduler-owned family runs over. `None` for
+    /// every other family and for batched bursts.
+    pub(crate) layer_state: Option<&'a mut [mlxcel_core::cache::LayerState]>,
     pub(crate) tokenizer: &'a crate::tokenizer::MlxcelTokenizer,
     pub(crate) drafter_slot: &'a mut WorkerDrafterSlot,
     pub(crate) dispatch: &'a crate::server::SpeculativeDispatch,
@@ -1144,6 +1148,7 @@ impl<'a> BurstContext<'a> {
     fn reborrow(&mut self) -> BurstContext<'_> {
         BurstContext {
             model: self.model,
+            layer_state: self.layer_state.as_deref_mut(),
             tokenizer: self.tokenizer,
             drafter_slot: &mut *self.drafter_slot,
             dispatch: self.dispatch,
@@ -1185,7 +1190,7 @@ impl<'a> BurstContext<'a> {
 /// does NOT need a manual bind here — and adding one would
 /// double-bind. See `run_dflash_burst` below.
 fn run_mtp_burst(
-    ctx: BurstContext<'_>,
+    mut ctx: BurstContext<'_>,
     seq: &mut SequenceInfo,
     block_size: u32,
 ) -> Result<BurstSuccess, BurstOutcome> {
@@ -1441,7 +1446,7 @@ fn run_mtp_burst(
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
             let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(
                 qwen,
-                Some(seq.seq_id),
+                ctx.layer_state.take(),
             )
             .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(
@@ -1460,7 +1465,7 @@ fn run_mtp_burst(
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
             let adapter = crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(
                 vlm,
-                Some(seq.seq_id),
+                ctx.layer_state.take(),
             )
             .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(

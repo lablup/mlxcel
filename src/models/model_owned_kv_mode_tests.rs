@@ -239,7 +239,7 @@ fn exaone4_mixed_table_is_applied_per_layer() {
     model.release_sequence_state_by_id(id);
 }
 
-fn gemma3(sliding_window: i32) -> super::gemma3::Gemma3Wrapper {
+fn gemma3(sliding_window: i32) -> super::pooled_test_model::Pooled<super::gemma3::Gemma3Wrapper> {
     super::gemma3::gemma3_tests::snapshot_prompt_cache::build_wrapper_with_window(sliding_window)
 }
 

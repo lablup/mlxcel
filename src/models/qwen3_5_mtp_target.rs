@@ -25,12 +25,13 @@
 //! Qwen 3.5 speculative hooks (`forward_speculative`,
 //! `rollback_speculative_cache`) take a caller-owned `&mut [Qwen3NextCache]`.
 //! The adapter bridges the two through the model's **sequence-routed**
-//! wrappers (`*_for_sequence`, added alongside this adapter), which resolve
-//! `seq_id` into `ModelOwnedSequenceState` internally. That keeps the adapter
-//! a stateless, cheaply reconstructible view over the model — the shape the
-//! tick-cooperative slice path depends on (it rebuilds the adapter every
-//! scheduler tick) and the reason a `RefCell<Vec<Qwen3NextCache>>`-inside-the-
-//! adapter design was rejected.
+//! wrappers (`*_for_sequence`), which run a hook over one sequence's caches.
+//! A scheduler sequence's caches are the layer state its pool entry holds
+//! (issue #3254), which the adapter borrows for its lifetime; the offline CLI
+//! passes none and runs on the model's fallback slot. The adapter owns no
+//! tensor state either way, so it stays a cheaply reconstructible view, the
+//! shape the tick-cooperative slice path depends on (it rebuilds the adapter
+//! every scheduler tick).
 //!
 //! ## Hidden-state semantics
 //!
@@ -54,7 +55,9 @@
 //! defaults, so a B > 1 dispatch declines with the existing named error and
 //! the burst driver falls back to classic decode.
 
-use mlxcel_core::cache::SequenceId;
+use std::cell::RefCell;
+
+use mlxcel_core::cache::LayerState;
 use mlxcel_core::generate::SamplingConfig;
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 use mlxcel_core::speculative::mtp::target::{
@@ -156,7 +159,10 @@ fn unflatten_captured(captured: VerifyCaptured) -> (UniquePtr<MlxArray>, Vec<Gdn
 /// loop. The adapter does NOT own the model and holds no tensor state.
 pub struct Qwen35MtpTargetAdapter<'a> {
     model: &'a Qwen35Model,
-    seq_id: Option<SequenceId>,
+    /// The sequence's layer state, borrowed from the scheduler's pool for
+    /// the life of the adapter (issue #3254); `None` is the model's fallback
+    /// slot. In a `RefCell` because `MtpTarget` is `&self`-only.
+    state: Option<RefCell<&'a mut [LayerState]>>,
     /// Adopted prompt-cache prefix length (issue #518). When `> 0`,
     /// `prefill_and_seed` forwards only `prompt_tokens[prefill_start_offset..]`
     /// over the KV already restored into the sequence slot. The seed then
@@ -167,14 +173,23 @@ pub struct Qwen35MtpTargetAdapter<'a> {
 }
 
 impl<'a> Qwen35MtpTargetAdapter<'a> {
-    /// Construct an adapter routing every call through the per-sequence
-    /// cache slot at `seq_id` (`None` = the model's internal fallback slot,
-    /// the offline CLI shape).
-    pub fn new(model: &'a Qwen35Model, seq_id: Option<SequenceId>) -> Self {
+    /// Construct an adapter routing every call over `state`, the layer
+    /// state of one scheduler sequence (`None` = the model's internal
+    /// fallback slot, the offline CLI shape).
+    pub fn new(model: &'a Qwen35Model, state: Option<&'a mut [LayerState]>) -> Self {
         Self {
             model,
-            seq_id,
+            state: state.map(RefCell::new),
             prefill_start_offset: 0,
+        }
+    }
+
+    /// Run `f` over the sequence's layer state, or `None` for the fallback
+    /// slot.
+    fn with_state<R>(&self, f: impl FnOnce(Option<&mut [LayerState]>) -> R) -> R {
+        match &self.state {
+            Some(state) => f(Some(&mut **state.borrow_mut())),
+            None => f(None),
         }
     }
 
@@ -213,9 +228,10 @@ impl<'a> MtpTarget for Qwen35MtpTargetAdapter<'a> {
         // the per-position verify attention — see
         // `forward_prefill_with_last_hidden`'s doc for why that matters for
         // first-token parity and prefill cost).
-        let (logits, hidden_pre) = self
-            .model
-            .forward_prefill_with_last_hidden_for_sequence(&prompt_arr, self.seq_id);
+        let (logits, hidden_pre) = self.with_state(|state| {
+            self.model
+                .forward_prefill_with_last_hidden_for_sequence(&prompt_arr, state)
+        });
 
         // First bonus from the last-position logits, with the
         // history-dependent-penalty context and the sampler's token bias —
@@ -246,8 +262,7 @@ impl<'a> MtpTarget for Qwen35MtpTargetAdapter<'a> {
         // Absolute post-prefill cache offset (= prompt length when cold, or
         // restored offset + suffix length under adoption).
         let kv_offset = self
-            .model
-            .speculative_cache_offset_for_sequence(self.seq_id)
+            .with_state(|state| self.model.speculative_cache_offset_for_sequence(state))
             .max(0) as usize;
         let bonus_position = kv_offset.saturating_sub(1);
 
@@ -304,9 +319,10 @@ impl<'a> MtpTarget for Qwen35MtpTargetAdapter<'a> {
     ) -> VerifyForwardOutput {
         let verify_arr = mlxcel_core::from_slice_i32(verify_input, &[1, verify_input.len() as i32]);
         let capture = self.capture_last_layer();
-        let out = self
-            .model
-            .forward_speculative_for_sequence(&verify_arr, self.seq_id, &capture);
+        let out = self.with_state(|state| {
+            self.model
+                .forward_speculative_for_sequence(&verify_arr, state, &capture)
+        });
 
         // issue #350: apply the model's output-suppression bias BEFORE the
         // per-position argmax and the logprob extraction, exactly as the
@@ -384,19 +400,20 @@ impl<'a> MtpTarget for Qwen35MtpTargetAdapter<'a> {
         // guard): the trim would be zero and the GDN replay would recompute
         // the state it already has.
         if accepted + 1 < block_size {
-            let _ = self.model.rollback_speculative_cache_for_sequence(
-                self.seq_id,
-                &gdn_states,
-                &[accepted as i32],
-                block_size as i32,
-            );
+            let _ = self.with_state(|state| {
+                self.model.rollback_speculative_cache_for_sequence(
+                    state,
+                    &gdn_states,
+                    &[accepted as i32],
+                    block_size as i32,
+                )
+            });
         }
 
         // Absolute post-rollback cache offset, read from the model-owned
         // cache (mirrors upstream's `prompt_cache[0].offset` rebind).
         let kv_offset = self
-            .model
-            .speculative_cache_offset_for_sequence(self.seq_id)
+            .with_state(|state| self.model.speculative_cache_offset_for_sequence(state))
             .max(0) as usize;
 
         MtpVerifyOutput {
@@ -433,11 +450,11 @@ pub struct Qwen35VLMtpTargetAdapter<'a> {
 }
 
 impl<'a> Qwen35VLMtpTargetAdapter<'a> {
-    /// Construct an adapter routing every call through the inner text
-    /// model's per-sequence cache slot at `seq_id`.
-    pub fn new(vlm: &'a crate::vision::Qwen35VLModel, seq_id: Option<SequenceId>) -> Self {
+    /// Construct an adapter routing every call over `state`, the layer
+    /// state of one scheduler sequence (`None` = the fallback slot).
+    pub fn new(vlm: &'a crate::vision::Qwen35VLModel, state: Option<&'a mut [LayerState]>) -> Self {
         Self {
-            inner: Qwen35MtpTargetAdapter::new(&vlm.text_model, seq_id),
+            inner: Qwen35MtpTargetAdapter::new(&vlm.text_model, state),
         }
     }
 

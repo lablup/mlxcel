@@ -169,6 +169,11 @@ impl ModelStateSnapshot {
             .map(ModelStateTensor::array)
     }
 
+    /// Names of the captured tensors, in capture order.
+    pub fn tensor_names(&self) -> impl Iterator<Item = &str> {
+        self.tensors.iter().map(ModelStateTensor::name)
+    }
+
     /// Whether no tensor payload was captured.
     pub fn is_empty(&self) -> bool {
         self.tensors.is_empty()
@@ -922,15 +927,95 @@ pub trait LanguageModel {
         Err("model does not support turn-boundary state checkpoints".to_string())
     }
 
+    /// What each layer keeps per sequence, for a family whose state the
+    /// scheduler owns (issue #3254, ADR 0010).
+    ///
+    /// `Some` moves the family's per-sequence state out of its wrapper: the
+    /// pool builds one [`crate::cache::LayerState`] per layer
+    /// ([`Self::make_layer_state`]), keeps it in the sequence's
+    /// [`crate::cache::SequenceCacheSet`] and hands it to
+    /// [`Self::forward_layer_state`], and the prompt cache snapshots, restores
+    /// and truncates it without per-family code. The table has one entry per
+    /// layer, and storage reporting ([`Self::kv_cache_storage_modes`]) derives
+    /// from the same entries.
+    ///
+    /// `None`, the default, keeps the family on its current path: dense or
+    /// paged `KVCache` rows, or state inside the model.
+    ///
+    /// Used by: the default [`Self::sequence_state_layout`] and
+    /// [`Self::make_layer_state`], and the server prompt cache.
+    fn layer_state_kinds(&self) -> Option<Vec<crate::cache::LayerStateKind>> {
+        None
+    }
+
+    /// Fresh per-layer state for one sequence of a scheduler-owned family.
+    ///
+    /// The default builds it from [`Self::layer_state_kinds`] and the modes
+    /// [`Self::kv_cache_layer_modes`] holds at the time of the call, and gives
+    /// every sliding layer a decode undo log when the family reports
+    /// [`Self::supports_decode_lookahead_rewind`]. A family overrides it to
+    /// declare recurrent tensor slots or to reuse its own cache builder.
+    ///
+    /// Used by: `CachePool::allocate_with_layout` and the prompt cache's
+    /// snapshot restore, which fills a fresh vector before installing it.
+    fn make_layer_state(&self) -> Option<Vec<crate::cache::LayerState>> {
+        let kinds = self.layer_state_kinds()?;
+        let modes = self.kv_cache_layer_modes();
+        let undo_depth = if self.supports_decode_lookahead_rewind() {
+            crate::cache::DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS
+        } else {
+            0
+        };
+        Some(crate::cache::LayerState::for_kinds(
+            &kinds,
+            modes.as_deref(),
+            undo_depth,
+        ))
+    }
+
+    /// The snapshot vocabulary of a scheduler-owned family: the family tag and
+    /// the tensor names its per-layer state is stored under. `None` for a
+    /// family that does not donate snapshots.
+    ///
+    /// Used by: the server prompt cache's generic snapshot code.
+    fn layer_state_snapshot_spec(&self) -> Option<crate::cache::LayerStateSnapshotSpec> {
+        None
+    }
+
+    /// The forward of a scheduler-owned family over the per-layer state the
+    /// pool holds: `rows[i]` is the state of row `i` of `request.input_ids`.
+    ///
+    /// One row is a single-sequence forward (a prefill piece or a decode
+    /// step) and honours `request.last_pos`; several rows are a batched decode
+    /// step or a batched prefill cohort. The forward leaves every row's state
+    /// advanced by the tokens it consumed and schedules any pending decode
+    /// undo rows before returning. `Err` promises that no row was advanced,
+    /// or that the rows are discarded with the request.
+    ///
+    /// Used by: `Engine::step`, the engine's prefill and verify entries, and
+    /// the scheduler's planned prefill, for every sequence whose pool entry
+    /// holds layer state.
+    fn forward_layer_state(
+        &self,
+        _request: &crate::cache::LayerStateForward<'_>,
+        _rows: &mut [&mut [crate::cache::LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        Err("model does not run on scheduler-owned layer state".to_string())
+    }
+
     /// Describe how one sequence's runtime state should be allocated.
     ///
-    /// Phase 0 keeps the default behavior aligned with today's
-    /// `supports_batching()` split while giving the control plane an explicit
-    /// backend/layout seam for future paged and model-owned sequence state.
+    /// A family that reports [`Self::layer_state_kinds`] is scheduler-owned.
+    /// Otherwise the default follows the `supports_batching()` split: dense
+    /// external KV caches for a batching model, model-owned state for one
+    /// that cannot batch.
     ///
     /// Used by: `CachePool::allocate()`
     fn sequence_state_layout(&self) -> crate::cache::SequenceStateLayout {
         let num_layers = self.num_layers();
+        if self.layer_state_kinds().is_some() {
+            return crate::cache::SequenceStateLayout::scheduler_owned(num_layers);
+        }
         if self.supports_batching() {
             crate::cache::SequenceStateLayout::dense_kv_cache(num_layers)
         } else {

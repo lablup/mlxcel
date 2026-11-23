@@ -295,7 +295,7 @@ impl LanguageModel for Z1t {
     /// No mode table: every layer is AFT-conv state, no KV (issue #2790).
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
         crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |_| {
-            crate::models::model_owned::LayerKv::None
+            mlxcel_core::cache::LayerStateKind::None
         })
     }
 
