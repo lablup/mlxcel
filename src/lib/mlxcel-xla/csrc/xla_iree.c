@@ -210,6 +210,9 @@ typedef struct xla_ctx {
   uint8_t* rg_valid;
   // Test-only hook: fail the V transfer of the next slot store.
   int32_t rg_fail_slot_store;
+  // Test-only hook (issue #3339): fail preparing the zero state, so a device
+  // test can drive the failed-reset path.
+  int32_t fail_state_zero;
   iree_host_size_t rg_per;
   iree_hal_dim_t rg_dims[4];
 } xla_ctx;
@@ -322,6 +325,10 @@ void xla_test_force_step_scalars_unsupported(xla_ctx* c, int32_t unsupported) {
 int32_t xla_test_state_status(const xla_ctx* c) {
   if (!c || c->n_state == 0) return -1;
   return (c->sscache[0] ? 1 : 0) | (c->state_import_pending ? 2 : 0);
+}
+// Make every later zero-state preparation fail until cleared.
+void xla_test_set_state_zero_failure(xla_ctx* c, int32_t fail) {
+  if (c) c->fail_state_zero = fail ? 1 : 0;
 }
 #endif
 
@@ -801,6 +808,10 @@ static int xla_validate_state(const xla_ctx* c, int32_t i,
 // re-zeroed on the device afterwards, so a fresh sequence never starts from
 // bytes a previous request could have left behind.
 static iree_status_t xla_state_zero_ensure(xla_ctx* c) {
+  if (c->fail_state_zero) {
+    return iree_make_status(IREE_STATUS_INTERNAL,
+                            "test hook: zero-state preparation forced to fail");
+  }
   for (int32_t i = 0; i < c->n_state; ++i) {
     const xla_state_desc* d = &c->state_desc[i];
     iree_device_size_t bytes =
@@ -879,7 +890,16 @@ int xla_llama_state_reset(xla_ctx* c) {
     fprintf(stderr, "xla_llama_state_reset: this bundle has no recurrent state\n");
     return 1;
   }
-  XLA_CHECK(xla_state_zero_ensure(c));
+  iree_status_t status = xla_state_zero_ensure(c);
+  if (!iree_status_is_ok(status)) {
+    // Like a failed prefill: forget the previous request's state, so a decode
+    // refuses instead of continuing it.
+    fprintf(stderr, "xla_llama_state_reset: preparing the zero state failed:\n");
+    iree_status_fprint(stderr, status);
+    iree_status_ignore(status);
+    xla_drop_state(c);
+    return 1;
+  }
   for (int32_t i = 0; i < c->n_state; ++i) {
     iree_hal_buffer_view_retain(c->state_zero[i]);
     if (c->sscache[i]) iree_hal_buffer_view_release(c->sscache[i]);

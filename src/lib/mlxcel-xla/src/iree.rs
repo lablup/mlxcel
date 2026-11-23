@@ -415,6 +415,9 @@ unsafe extern "C" {
     /// is present, bit 1 = a decode still has to import it.
     #[cfg(feature = "test-support")]
     fn xla_test_state_status(c: *const XlaCtx) -> c_int;
+    /// Test support (issue #3339): make zero-state preparation fail.
+    #[cfg(feature = "test-support")]
+    fn xla_test_set_state_zero_failure(c: *mut XlaCtx, fail: c_int);
     #[cfg(feature = "test-support")]
     fn xla_test_decode_counters_reset();
     #[cfg(feature = "test-support")]
@@ -3655,6 +3658,14 @@ impl IreeLlama {
         // Safety: the status is a plain field read from a live context.
         let status = unsafe { xla_test_state_status(self.ctx) };
         (status >= 0).then_some((status & 1 != 0, status & 2 != 0))
+    }
+
+    /// Test support (issue #3339): make every zero-state preparation (a state
+    /// reset, or a recurrent prefill's zeroed inputs) fail until cleared.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_state_zero_failure(&mut self, fail: bool) {
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        unsafe { xla_test_set_state_zero_failure(self.ctx, i32::from(fail)) };
     }
 
     /// Test support (issue #3028): force the per-step allocation path on

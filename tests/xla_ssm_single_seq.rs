@@ -368,3 +368,48 @@ fn empty_prefix_and_refused_prefill_never_reuse_state() {
         .expect("reference");
     assert_eq!(recovered, want_a);
 }
+
+/// A state reset that fails (the empty-prefix path of a one-token prompt) must
+/// drop the previous request's state like a failed prefill does, so a decode
+/// cannot silently continue that request.
+#[test]
+#[ignore = "requires the pinned IREE distribution and compiler"]
+fn failed_state_reset_drops_the_previous_state() {
+    let model = create_tiny_mamba2();
+    let mut engine =
+        IreeLlama::load(model.path(), &device(), CAPACITY).expect("load the IREE engine");
+    engine.prefill_first(&PROMPT_A).expect("prefill");
+    engine.decode(1, PROMPT_A.len() as i32).expect("decode");
+    assert_eq!(engine.test_state_status(), Some((true, false)));
+
+    engine.test_set_state_zero_failure(true);
+    assert!(
+        engine.prefill_seed(&[]).is_err(),
+        "the forced zero-state failure must fail the reset"
+    );
+    assert_eq!(
+        engine.test_state_status(),
+        Some((false, false)),
+        "a failed reset kept the previous request's state"
+    );
+    assert!(
+        engine.decode(PROMPT_B[0], 0).is_err(),
+        "decode after a failed reset must fail"
+    );
+
+    engine.test_set_state_zero_failure(false);
+    engine
+        .prefill_seed(&[])
+        .expect("reset after clearing the hook");
+    assert_eq!(engine.test_state_status(), Some((true, true)));
+    let mut reference =
+        XlaReferenceEngine::load_with_context_capacity(model.path(), &device(), CAPACITY)
+            .expect("load the reference engine");
+    let want = reference
+        .generate(&PROMPT_B[..1], 1, &[])
+        .expect("one-token reference");
+    assert_eq!(
+        vec![engine.decode(PROMPT_B[0], 0).expect("decode after reset")],
+        want
+    );
+}

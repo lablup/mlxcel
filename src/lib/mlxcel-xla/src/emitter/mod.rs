@@ -186,8 +186,6 @@ pub(crate) use config::{SSM_DEFAULT_CHUNK_SIZE, SsmConfig};
 // consumed by the IREE runtime (#3339) and the SSM model check.
 #[allow(unused_imports)]
 pub(crate) use config::{MixerKind, StateElem, StateTensorSpec};
-// The tolerant HF `config.json` parser (bare `Infinity`), shared by the runtime
-// and the root crate (issue #3339).
 #[allow(unused_imports)]
 pub(crate) use ssm_scan::SsmPrefillForm;
 // `resolve_precision` and the precision-taking `*_with` emit variants are consumed
