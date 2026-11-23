@@ -46,6 +46,25 @@ impl PagedBlockPool {
         self.retain_retired = retain;
     }
 
+    /// Cap the retired blocks one sliding layer keeps while retention is on
+    /// (the prompt-cache byte budget, converted to blocks by the caller).
+    pub fn set_retired_cap_blocks(&mut self, cap: usize) {
+        self.retired_cap_blocks = cap;
+    }
+
+    /// Retired sliding blocks `state` pins and their real bytes (issue #3256).
+    /// Bytes are `0` for a layer whose pool rows are not allocated yet.
+    #[must_use]
+    pub fn retired_footprint(&self, state: &super::PagedSequenceState) -> (usize, usize) {
+        let mut blocks = 0;
+        let mut bytes = 0;
+        for (layer_idx, layer) in state.layers.iter().enumerate() {
+            blocks += layer.retired.len();
+            bytes += layer.retired.len() * self.real_block_bytes(layer_idx).unwrap_or(0);
+        }
+        (blocks, bytes)
+    }
+
     /// Whether retired sliding blocks stay pinned on their sequence.
     #[must_use]
     pub fn retains_retired(&self) -> bool {
@@ -88,9 +107,42 @@ impl PagedBlockPool {
             for (_, block_id) in layer.retired.drain(..excess).collect::<Vec<_>>() {
                 self.release_block(block_id)?;
             }
+        } else {
+            let cap = self.retired_cap_blocks.max(REWIND_RESERVE_BLOCKS);
+            while layer.retired.len() > cap {
+                let victim = evict_retired_index(layer, block_size);
+                let (_, block_id) = layer.retired.remove(victim);
+                self.release_block(block_id)?;
+            }
         }
         self.bump_block_epoch();
         Ok(())
+    }
+
+    /// Release `layer`'s retired blocks that no anchor needs, oldest first,
+    /// until at most `keep_unanchored` of them remain. Returns how many were
+    /// released. The donation path calls this so an entry carries its
+    /// anchors and the newest history, not every block the window passed.
+    pub fn prune_retired(
+        &mut self,
+        layer: &mut PagedLayerState,
+        keep_unanchored: usize,
+    ) -> Result<usize, String> {
+        let block_size = self.layout.block_size.max(1);
+        let unanchored: Vec<usize> = (0..layer.retired.len())
+            .filter(|&i| !anchored(layer, layer.retired[i].0, block_size))
+            .collect();
+        let drop = unanchored.len().saturating_sub(keep_unanchored);
+        let mut released = 0;
+        for &i in unanchored[..drop].iter().rev() {
+            let (_, block_id) = layer.retired.remove(i);
+            self.release_block(block_id)?;
+            released += 1;
+        }
+        if released > 0 {
+            self.bump_block_epoch();
+        }
+        Ok(released)
     }
 
     /// Trim `token_count` positions off a sliding layer's tail and bring back
@@ -170,6 +222,27 @@ impl PagedBlockPool {
         }
         Ok(n)
     }
+}
+
+/// Whether absolute block `abs` lies in the window an anchor of `layer` needs,
+/// `[anchor - window, anchor)`.
+fn anchored(layer: &PagedLayerState, abs: usize, block_size: usize) -> bool {
+    let window = layer.window.unwrap_or(0);
+    layer.anchors.iter().any(|&anchor| {
+        let first = anchor.saturating_sub(window) / block_size;
+        let end = anchor.div_ceil(block_size);
+        (first..end).contains(&abs)
+    })
+}
+
+/// The retired entry to evict next: the oldest unanchored block, or the
+/// oldest block when every one is anchored. Never the newest
+/// [`REWIND_RESERVE_BLOCKS`], which a decode rewind may need.
+fn evict_retired_index(layer: &PagedLayerState, block_size: usize) -> usize {
+    let protected = layer.retired.len().saturating_sub(REWIND_RESERVE_BLOCKS);
+    (0..protected)
+        .find(|&i| !anchored(layer, layer.retired[i].0, block_size))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

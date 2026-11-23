@@ -7297,6 +7297,85 @@ impl CachePool {
         self.paged_pool.as_ref().map(|pool| pool.borrow().stats())
     }
 
+    /// Retired sliding blocks pinned by live sequences, as `(blocks, bytes)`
+    /// (issue #3256). Stored prompt-cache entries are counted separately by
+    /// [`Self::detached_retired_footprint`].
+    pub fn sliding_retired_footprint(&self) -> (usize, usize) {
+        let Some(pool) = self.paged_pool.as_ref() else {
+            return (0, 0);
+        };
+        let pool = pool.borrow();
+        self.active
+            .values()
+            .filter_map(|sequence| sequence.paged.as_ref())
+            .map(|state| pool.retired_footprint(&state.borrow()))
+            .fold((0, 0), |(b, n), (bb, nn)| (b + bb, n + nn))
+    }
+
+    /// Retired sliding blocks a detached set pins, as `(blocks, bytes)`.
+    pub fn detached_retired_footprint(&self, set: &DetachedPagedCacheSet) -> (usize, usize) {
+        match self.paged_pool.as_ref() {
+            Some(pool) => pool.borrow().retired_footprint(&set.paged_state),
+            None => (set.retired_block_count(), 0),
+        }
+    }
+
+    /// Configure retired-block retention for paged sliding sequences (issue
+    /// #3256): on with a per-layer cap while the prompt cache is enabled,
+    /// off (release past the rewind reserve) otherwise.
+    pub fn configure_sliding_retention(&mut self, retain: bool, cap_blocks: usize) {
+        if let Some(pool) = self.paged_pool.as_ref() {
+            let mut pool = pool.borrow_mut();
+            pool.set_retain_retired(retain);
+            pool.set_retired_cap_blocks(cap_blocks);
+        }
+    }
+
+    /// Record prefix lengths a later request is expected to reuse on every
+    /// sliding layer of `id`, so retirement and donation keep the blocks
+    /// their windows need (issue #3256).
+    pub fn set_sliding_anchors(&mut self, id: SequenceId, anchors: &[usize]) {
+        if let Some(state) = self.active.get(&id).and_then(|s| s.paged.as_ref()) {
+            for layer in state.borrow_mut().layers.iter_mut() {
+                if layer.window.is_some() {
+                    layer.anchors = anchors.to_vec();
+                }
+            }
+        }
+    }
+
+    /// Prune a detached set's unanchored retired blocks down to
+    /// `keep_unanchored` per layer, oldest first (issue #3256).
+    pub fn prune_detached_retired(
+        &mut self,
+        set: &mut DetachedPagedCacheSet,
+        keep_unanchored: usize,
+    ) -> Result<usize, String> {
+        let Some(pool) = self.paged_pool.as_ref() else {
+            return Ok(0);
+        };
+        let mut pool = pool.borrow_mut();
+        let mut released_ids = Vec::new();
+        let mut released_bytes = 0;
+        for (layer_idx, layer) in set.paged_state.layers.iter_mut().enumerate() {
+            let before: Vec<PagedBlockId> = layer.retired.iter().map(|(_, id)| *id).collect();
+            // Each retired block carries two references in a detached set:
+            // the sequence's own pin and the detach pin.
+            let released = pool.prune_retired(layer, keep_unanchored)?;
+            if released > 0 {
+                let after: std::collections::HashSet<PagedBlockId> =
+                    layer.retired.iter().map(|(_, id)| *id).collect();
+                for id in before.into_iter().filter(|id| !after.contains(id)) {
+                    pool.release_block(id)?;
+                    released_ids.push(id);
+                }
+                released_bytes += released * pool.real_block_bytes(layer_idx).unwrap_or(0);
+            }
+        }
+        set.forget_retained(&released_ids, released_bytes);
+        Ok(released_ids.len())
+    }
+
     pub fn paged_block_size(&self) -> Option<usize> {
         self.paged_pool
             .as_ref()
@@ -7787,6 +7866,7 @@ impl CachePool {
                     block_base: layer.block_base,
                     window: layer.window,
                     retired: Vec::new(),
+                    anchors: layer.anchors.clone(),
                 });
             }
             let offsets: Vec<i32> = layers.iter().map(|layer| layer.len as i32).collect();

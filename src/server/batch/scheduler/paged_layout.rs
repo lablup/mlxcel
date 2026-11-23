@@ -36,6 +36,7 @@ impl BatchScheduler {
         // keeping boundary layers at FP16 quality. No-op when the
         // configured mode is `Fp16`.
         self.apply_kv_cache_mode_to(seq_id);
+        self.configure_sliding_retention();
         Ok(seq_id)
     }
 }

@@ -132,6 +132,8 @@ fn cache_stats_response_serializes_with_expected_keys() {
         paged_bytes_reserved: 65536,
         paged_bytes_in_use: 49152,
         paged_block_budget: 128,
+        sliding_retired_blocks: 0,
+        sliding_retired_bytes: 0,
         reject_oversized: 1,
         reject_disabled: 0,
         reject_prefix_too_short: 2,
@@ -142,6 +144,7 @@ fn cache_stats_response_serializes_with_expected_keys() {
         reject_block_boundary_floor: 6,
         reject_snapshot_diverged: 7,
         reject_model_owned_state: 11,
+        reject_sliding_window_evicted: 13,
         last_reject_reason: Some("oversized".to_string()),
         last_reject_seq_id: Some(42),
         last_reject_context_len: Some(128),
@@ -309,6 +312,8 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
         paged_bytes_reserved: 0,
         paged_bytes_in_use: 0,
         paged_block_budget: 0,
+        sliding_retired_blocks: 0,
+        sliding_retired_bytes: 0,
         reject_oversized: 0,
         reject_disabled: 0,
         reject_prefix_too_short: 0,
@@ -319,6 +324,7 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
         reject_block_boundary_floor: 0,
         reject_snapshot_diverged: 0,
         reject_model_owned_state: 0,
+        reject_sliding_window_evicted: 0,
         last_reject_reason: None,
         last_reject_seq_id: None,
         last_reject_context_len: None,
@@ -384,6 +390,8 @@ fn build_stats_response_surfaces_paged_pool_independent_of_store() {
         bytes_reserved: 131072,
         bytes_in_use: 98304,
         block_budget: 256,
+        sliding_retired_blocks: 0,
+        sliding_retired_bytes: 0,
     };
     let cfg = PromptCacheConfig::default();
 
@@ -980,4 +988,39 @@ fn concurrent_reset_and_lookup_does_not_corrupt_store() {
         stats.bytes <= stats.entries * (512 + 256),
         "byte total must be consistent with entry count after concurrent resets"
     );
+}
+
+#[test]
+fn sliding_window_reject_and_retired_footprint_reach_the_stats_body() {
+    // Issue #3256: the paged sliding-window reject reason and the retired
+    // block footprint travel scheduler -> observability -> `/v1/cache/stats`.
+    use crate::server::batch::BatchObservability;
+    use crate::server::prompt_cache::PromptCacheRejectReason;
+
+    let obs = BatchObservability::new();
+    obs.record_prompt_cache_reject(PromptCacheRejectReason::SlidingWindowEvicted, None, 96);
+    obs.update_sliding_retired_gauges(12, 12 * 4096);
+    let snap = obs.snapshot();
+    let resp = super::super::cache::build_stats_response(
+        None,
+        &PromptCacheConfig::default(),
+        PagedBlockStats::from_observability(&snap),
+        RejectReasonStats::from_observability(&snap),
+        super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
+    );
+    assert_eq!(resp.reject_sliding_window_evicted, 1);
+    assert_eq!(resp.sliding_retired_blocks, 12);
+    assert_eq!(resp.sliding_retired_bytes, 12 * 4096);
+    assert_eq!(
+        resp.last_reject_reason.as_deref(),
+        Some("sliding_window_evicted")
+    );
+    let json = serde_json::to_string(&resp).unwrap();
+    assert!(
+        json.contains("\"reject_sliding_window_evicted\":1"),
+        "{json}"
+    );
+    assert!(json.contains("\"sliding_retired_blocks\":12"), "{json}");
+    assert!(json.contains("\"sliding_retired_bytes\":49152"), "{json}");
 }

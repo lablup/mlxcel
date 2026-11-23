@@ -231,6 +231,10 @@ pub struct PagedLayerState {
     /// as `(absolute block index, id)` in ascending block order. Kept for
     /// prompt-cache donation, or as the rewind reserve when retention is off.
     pub retired: Vec<(usize, PagedBlockId)>,
+    /// Prefix lengths a later request is expected to reuse (the history
+    /// boundary and the system-prompt root). Retired blocks covering
+    /// `[anchor - window, anchor)` are evicted last (issue #3256).
+    pub anchors: Vec<usize>,
 }
 
 impl PagedLayerState {
@@ -242,6 +246,7 @@ impl PagedLayerState {
             block_base: 0,
             window: None,
             retired: Vec::new(),
+            anchors: Vec::new(),
         }
     }
 
@@ -574,6 +579,9 @@ pub struct PagedBlockPool {
     /// (in `PagedLayerState::retired`) for prompt-cache donation (#3256).
     /// Off: only the rewind reserve is kept and older ones are released.
     retain_retired: bool,
+    /// Most retired blocks one sliding layer keeps while retention is on;
+    /// past it the oldest unanchored ones go back to the pool.
+    retired_cap_blocks: usize,
 }
 
 /// Default number of physical block rows per pool slab tensor. Growth appends
@@ -725,6 +733,7 @@ impl PagedBlockPool {
             decode_v2_cache: crate::paged_v2::PagedDecodeV2Cache::new(),
             slab_blocks: POOL_SLAB_BLOCKS,
             retain_retired: false,
+            retired_cap_blocks: usize::MAX,
         }
     }
 

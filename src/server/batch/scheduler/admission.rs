@@ -582,6 +582,7 @@ impl BatchScheduler {
                 .remove(&seq_id)
                 .unwrap_or_default();
             self.prompt_cache_seq_ctx.insert(seq_id, ctx);
+            self.install_sliding_anchors(seq_id);
         }
 
         // A cache hit never adopts the whole prompt: `try_adopt_cached_prefix`

@@ -1102,6 +1102,7 @@ mod handoff;
 mod mtp_dispatch;
 mod pad_trim;
 mod paged_layout;
+mod paged_sliding;
 mod planned_prefill;
 mod prefill;
 mod prompt_cache;

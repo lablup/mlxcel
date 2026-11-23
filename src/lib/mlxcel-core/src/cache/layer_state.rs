@@ -284,6 +284,16 @@ impl LayerState {
         }
     }
 
+    /// Set a pool-backed layer's RoPE offset after its block table was
+    /// installed by an adopt (issue #3256). A no-op for any other layer.
+    pub fn set_pool_offset(&mut self, offset: i32) {
+        match self {
+            Self::Kv(cache) if cache.is_paged_backed() => cache.offset = offset,
+            Self::PagedSliding(cache) => cache.kv_mut().offset = offset,
+            _ => {}
+        }
+    }
+
     /// Whether this state is the storage [`Self::new`] builds for `kind`.
     pub fn matches_kind(&self, kind: LayerStateKind) -> bool {
         match (self, kind) {
