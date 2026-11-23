@@ -150,6 +150,38 @@ impl Config {
             .map(MixerKind::family)
     }
 
+    /// `Err` for a recurrent config whose gated-RMSNorm grouping is not yet
+    /// settled against the reference its checkpoint was trained with (issue
+    /// #3339, carry-over from #3338).
+    ///
+    /// The emitter, like HF's torch path (`MambaRMSNormGated(intermediate_size)`
+    /// in transformers 5.12.1), normalizes over all of `d_inner`, while the
+    /// original `mamba_ssm` kernel normalizes per group when `n_groups > 1`
+    /// (Codestral Mamba, for one). The two agree only for a single group, so
+    /// the runtime refuses a multi-group config that normalizes over the full
+    /// width instead of producing silently different output. A family that
+    /// normalizes per group sets `norm_group_size` to `d_inner / n_groups` and
+    /// passes. The graph emitters and the HF model check keep accepting it.
+    pub fn check_ssm_norm_grouping(&self) -> Result<(), String> {
+        match &self.ssm {
+            Some(ssm)
+                if self.has_recurrent_state()
+                    && ssm.n_groups > 1
+                    && ssm.norm_group_size == ssm.d_inner() =>
+            {
+                Err(format!(
+                    "{} with n_groups = {} is not supported on the OpenXLA backend yet: \
+                     its gated RMSNorm grouping (over all of d_inner, as HF transformers \
+                     computes it, or per group, as the mamba_ssm kernel does) is not \
+                     settled against the checkpoint's reference; only n_groups = 1 runs",
+                    self.recurrent_family().unwrap_or("mamba2"),
+                    ssm.n_groups
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// `Err` naming the model type when this config threads recurrent state
     /// and `graph` has no state contract yet.
     pub(crate) fn reject_recurrent(&self, graph: &str) -> Result<(), String> {
@@ -164,51 +196,8 @@ impl Config {
     }
 }
 
-/// Replace the bare `Infinity`, `-Infinity` and `NaN` tokens Python's `json`
-/// writes (HF Mamba2 configs carry `"time_step_limit": [0.0, Infinity]`) with
-/// strings, so `serde_json` accepts the document. Text inside string literals
-/// is left alone. Returns `None` when there is nothing to replace.
-pub(super) fn quote_non_finite_json(text: &str) -> Option<String> {
-    let mut out = String::with_capacity(text.len() + 16);
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut changed = false;
-    let mut rest = text;
-    while let Some(ch) = rest.chars().next() {
-        if in_string {
-            out.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            rest = &rest[ch.len_utf8()..];
-            continue;
-        }
-        if ch == '"' {
-            in_string = true;
-            out.push(ch);
-            rest = &rest[1..];
-            continue;
-        }
-        let token = ["-Infinity", "Infinity", "NaN"]
-            .into_iter()
-            .find(|token| rest.starts_with(token));
-        if let Some(token) = token {
-            out.push('"');
-            out.push_str(token);
-            out.push('"');
-            rest = &rest[token.len()..];
-            changed = true;
-            continue;
-        }
-        out.push(ch);
-        rest = &rest[ch.len_utf8()..];
-    }
-    changed.then_some(out)
-}
+// The HF `config.json` reader lives in `crate::hf_json` because the EOS lookup
+// and the CLI layer count need it without the `iree` feature.
 
 /// A JSON number, or one of the quoted non-finite tokens
 /// [`quote_non_finite_json`] produces, or `null` for +inf.
@@ -362,4 +351,43 @@ pub(super) fn mamba2_from_json(
         layer_mixers: vec![MixerKind::Mamba2; n_layers],
         ..Config::llama_3_2_1b()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hf_json::parse_hf_config_json;
+
+    fn mamba2(n_groups: usize) -> Config {
+        let text = format!(
+            r#"{{"model_type": "mamba2", "hidden_size": 16, "num_hidden_layers": 2,
+            "vocab_size": 40, "num_heads": 4, "head_dim": 8, "state_size": 16,
+            "n_groups": {n_groups}, "conv_kernel": 4, "expand": 2}}"#
+        );
+        Config::from_json_str(&text).expect("mamba2 parses")
+    }
+
+    #[test]
+    fn hf_config_parser_accepts_bare_infinity() {
+        let value = parse_hf_config_json(r#"{"time_step_limit": [0.0, Infinity], "n": 24}"#)
+            .expect("bare Infinity parses");
+        assert_eq!(value["n"], 24);
+        assert_eq!(value["time_step_limit"][1], "Infinity");
+        assert!(parse_hf_config_json("{not json").is_err());
+    }
+
+    #[test]
+    fn runtime_refuses_an_unsettled_multi_group_norm() {
+        assert!(mamba2(1).check_ssm_norm_grouping().is_ok());
+        let error = mamba2(2).check_ssm_norm_grouping().unwrap_err();
+        assert!(error.contains("n_groups = 2"), "{error}");
+        // A per-group normalization (Nemotron-H's form) is a settled choice.
+        let mut per_group = mamba2(2);
+        if let Some(ssm) = per_group.ssm.as_mut() {
+            ssm.norm_group_size = ssm.d_inner() / ssm.n_groups;
+        }
+        assert!(per_group.check_ssm_norm_grouping().is_ok());
+        // Attention-only configs are untouched.
+        assert!(Config::llama_3_2_1b().check_ssm_norm_grouping().is_ok());
+    }
 }

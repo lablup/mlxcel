@@ -95,6 +95,18 @@ iree_status_t iree_xla_libc_ctl(void* self, iree_allocator_command_t command,
     }                                                                    \
   } while (0)
 
+// Threaded recurrent state (epic #564, issue #3339). A recurrent model threads
+// a short list of fixed-size state tensors through its graphs instead of (or,
+// for a hybrid, next to) the KV cache. Each tensor has its own per-sequence
+// shape, described once at create time in `Config::state_tensors` order.
+#define XLA_MAX_STATE 8
+#define XLA_MAX_STATE_RANK 8
+typedef struct {
+  int32_t rank;
+  int64_t dims[XLA_MAX_STATE_RANK];
+  iree_hal_element_type_t elem;
+} xla_state_desc;
+
 typedef struct xla_ctx {
   iree_runtime_instance_t* instance;
   iree_hal_device_t* device;
@@ -131,6 +143,26 @@ typedef struct xla_ctx {
   // and must be pushed into the globals before the next decode.
   int32_t kv_globals;
   int32_t kv_import_pending;
+  // issue #3339: 0 for an attention-free model, which has no KV buffers, no
+  // KV results and no `kv_import` at all; every KV use checks it.
+  int32_t has_kv;
+  // Number of threaded recurrent-state tensors (0 for attention-only models,
+  // whose behaviour is unchanged) and their per-sequence shapes.
+  int32_t n_state;
+  xla_state_desc state_desc[XLA_MAX_STATE];
+  // Single-sequence state returned by the last prefill (or zeros after a
+  // state reset). The decode module keeps its own copy in `util.global`s;
+  // `state_import_pending` means `sscache` changed and must be pushed into
+  // them through `decode_step.state_import` before the next decode, exactly
+  // like `kv_import_pending`.
+  iree_hal_buffer_view_t* sscache[XLA_MAX_STATE];
+  int32_t state_import_pending;
+  // Zeroed state inputs for a fresh sequence, allocated once per context and
+  // re-zeroed on the device before every prefill that consumes them.
+  iree_hal_buffer_view_t* state_zero[XLA_MAX_STATE];
+  // 0 when the bundle has no embeddings prefill module (recurrent configs,
+  // whose embeddings prefill has no state contract yet).
+  int32_t has_prefill_embeddings;
   // issue #3060: the 1-D decode graph may take token/pos/cache_len as ABI-level
   // `i32` values instead of rank-0 `tensor<i32>` buffer views. `scalar_inputs`
   // is set by probing for the `decode_step.scalar_inputs` entry after the bundle
@@ -178,6 +210,9 @@ typedef struct xla_ctx {
   uint8_t* rg_valid;
   // Test-only hook: fail the V transfer of the next slot store.
   int32_t rg_fail_slot_store;
+  // Test-only hook (issue #3339): fail preparing the zero state, so a device
+  // test can drive the failed-reset path.
+  int32_t fail_state_zero;
   iree_host_size_t rg_per;
   iree_hal_dim_t rg_dims[4];
 } xla_ctx;
@@ -283,6 +318,17 @@ void xla_test_force_step_scalars_unsupported(xla_ctx* c, int32_t unsupported) {
   } else {
     c->step_scalars_state = 0;
   }
+}
+// Issue #3339: the single-sequence state handoff. -1 when the context threads
+// no state, else whether the state is present (bit 0) and whether a decode
+// still has to import it into the decode globals (bit 1).
+int32_t xla_test_state_status(const xla_ctx* c) {
+  if (!c || c->n_state == 0) return -1;
+  return (c->sscache[0] ? 1 : 0) | (c->state_import_pending ? 2 : 0);
+}
+// Make every later zero-state preparation fail until cleared.
+void xla_test_set_state_zero_failure(xla_ctx* c, int32_t fail) {
+  if (c) c->fail_state_zero = fail ? 1 : 0;
 }
 #endif
 
@@ -646,6 +692,253 @@ static iree_status_t xla_alloc_zeroed_bv(xla_ctx* c, iree_host_size_t rank,
   return status;
 }
 
+// ---------------------------------------------------------------------------
+// Threaded recurrent state (epic #564, issue #3339)
+// ---------------------------------------------------------------------------
+
+static void xla_drop_state(xla_ctx* c);
+
+// Refuse an entry point that threads only the KV cache on a bundle that threads
+// recurrent state, or has no KV at all. The ragged, slot and embeddings paths
+// have no state contract yet (#3340): on an attention-free model they have no
+// cache to fill, and on a hybrid (KV plus state) they would adopt a new KV next
+// to the previous request's state. A refusal also drops the current sequence's
+// state, so a decode cannot continue the request before it.
+static int xla_require_kv(xla_ctx* c, const char* caller) {
+  if (c && c->has_kv && c->n_state == 0) return 0;
+  fprintf(stderr,
+          "%s: this bundle threads recurrent state or has no KV cache; only "
+          "the token prefill and the single-sequence decode thread recurrent "
+          "state\n",
+          caller);
+  if (c) xla_drop_state(c);
+  return 1;
+}
+
+// Element count of one validated state tensor. `xla_set_state_contract` has
+// already bounded the product, so this cannot overflow.
+static iree_host_size_t xla_state_elements(const xla_state_desc* d) {
+  iree_host_size_t n = 1;
+  for (int32_t a = 0; a < d->rank; ++a) n *= (iree_host_size_t)d->dims[a];
+  return n;
+}
+
+// Record and validate the state shapes `xla_llama_create` received. `elems`
+// uses the weight dtype codes; only 0 (f32) is a state element type today.
+static iree_status_t xla_set_state_contract(xla_ctx* c, int32_t has_kv,
+                                            int32_t n_state,
+                                            const int32_t* ranks,
+                                            const int64_t* dims,
+                                            const int32_t* elems) {
+  if (has_kv != 0 && has_kv != 1) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "has_kv must be 0 or 1, got %d", has_kv);
+  }
+  if (n_state < 0 || n_state > XLA_MAX_STATE) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "n_state=%d outside [0, %d]", n_state,
+                            XLA_MAX_STATE);
+  }
+  if (!has_kv && n_state == 0) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "a bundle without a KV cache must thread recurrent state");
+  }
+  if (n_state > 0 && (!ranks || !dims || !elems)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "state ranks, dims and elems are required");
+  }
+  size_t offset = 0;
+  for (int32_t i = 0; i < n_state; ++i) {
+    xla_state_desc* d = &c->state_desc[i];
+    if (ranks[i] < 1 || ranks[i] > XLA_MAX_STATE_RANK) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "state %d rank %d outside [1, %d]", i, ranks[i],
+                              XLA_MAX_STATE_RANK);
+    }
+    if (elems[i] != 0) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "state %d element code %d is not f32 (0)", i,
+                              elems[i]);
+    }
+    d->rank = ranks[i];
+    d->elem = IREE_HAL_ELEMENT_TYPE_FLOAT_32;
+    iree_device_size_t bytes = sizeof(float);
+    for (int32_t a = 0; a < d->rank; ++a) {
+      int64_t dim = dims[offset + (size_t)a];
+      if (dim <= 0 || (uint64_t)dim > IREE_DEVICE_SIZE_MAX / bytes ||
+          (uint64_t)dim > SIZE_MAX / bytes) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "state %d axis %d=%lld is not a positive "
+                                "dimension within the byte budget",
+                                i, a, (long long)dim);
+      }
+      d->dims[a] = dim;
+      bytes *= (iree_device_size_t)dim;
+    }
+    offset += (size_t)d->rank;
+  }
+  c->has_kv = has_kv;
+  c->n_state = n_state;
+  return iree_ok_status();
+}
+
+// Whether `bv` is a dense row-major buffer with exactly state `i`'s shape and
+// element type.
+static int xla_validate_state(const xla_ctx* c, int32_t i,
+                              iree_hal_buffer_view_t* bv) {
+  const xla_state_desc* d = &c->state_desc[i];
+  if (!bv || iree_hal_buffer_view_shape_rank(bv) != (iree_host_size_t)d->rank ||
+      iree_hal_buffer_view_element_type(bv) != d->elem ||
+      iree_hal_buffer_view_encoding_type(bv) !=
+          IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR) {
+    fprintf(stderr,
+            "xla_iree: state result %d is not a dense rank-%d f32 buffer\n", i,
+            d->rank);
+    return 1;
+  }
+  for (int32_t a = 0; a < d->rank; ++a) {
+    iree_hal_dim_t got = iree_hal_buffer_view_shape_dim(bv, (iree_host_size_t)a);
+    if ((int64_t)got != d->dims[a]) {
+      fprintf(stderr,
+              "xla_iree: state result %d axis %d is %lld, the bundle declared "
+              "%lld\n",
+              i, a, (long long)got, (long long)d->dims[a]);
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Make every `state_zero[i]` a zeroed device buffer: allocated on first use,
+// re-zeroed on the device afterwards, so a fresh sequence never starts from
+// bytes a previous request could have left behind.
+static iree_status_t xla_state_zero_ensure(xla_ctx* c) {
+  if (c->fail_state_zero) {
+    return iree_make_status(IREE_STATUS_INTERNAL,
+                            "test hook: zero-state preparation forced to fail");
+  }
+  for (int32_t i = 0; i < c->n_state; ++i) {
+    const xla_state_desc* d = &c->state_desc[i];
+    iree_device_size_t bytes =
+        (iree_device_size_t)xla_state_elements(d) * sizeof(float);
+    if (c->state_zero[i]) {
+      IREE_RETURN_IF_ERROR(xla_zero_fill_device(
+          c, iree_hal_buffer_view_buffer(c->state_zero[i]), bytes));
+      continue;
+    }
+    iree_hal_dim_t shape[XLA_MAX_STATE_RANK];
+    for (int32_t a = 0; a < d->rank; ++a) shape[a] = (iree_hal_dim_t)d->dims[a];
+    IREE_RETURN_IF_ERROR(xla_alloc_zeroed_bv(c, (iree_host_size_t)d->rank,
+                                             shape, d->elem, bytes,
+                                             &c->state_zero[i]));
+  }
+  return iree_ok_status();
+}
+
+// Forget the current sequence's state (a failed or refused recurrent prefill),
+// so a decode refuses until a prefill or a state reset succeeds instead of
+// continuing the previous request.
+static void xla_drop_state(xla_ctx* c) {
+  for (int32_t i = 0; i < c->n_state; ++i) {
+    if (c->sscache[i]) iree_hal_buffer_view_release(c->sscache[i]);
+    c->sscache[i] = NULL;
+  }
+  c->state_import_pending = 0;
+}
+
+// Forget the current sequence's state before a new request runs (issue #3339).
+// The Rust engine calls it at the start of every prefill, so a request that is
+// refused before it reaches the shim (an oversized prompt, a bad prepared
+// payload) cannot leave the previous request's state for a decode to continue.
+// A no-op for a context without recurrent state.
+void xla_llama_state_drop(xla_ctx* c) {
+  if (c) xla_drop_state(c);
+}
+
+#ifdef MLXCEL_XLA_TEST_SUPPORT
+// Issue #3339: whether `xla_require_kv` admits a context with this KV/state
+// layout, without a device or a bundle.
+int32_t xla_test_require_kv(int32_t has_kv, int32_t n_state) {
+  if (n_state < 0 || n_state > XLA_MAX_STATE) return -1;
+  xla_ctx* c = (xla_ctx*)calloc(1, sizeof(xla_ctx));
+  if (!c) return -1;
+  c->has_kv = has_kv;
+  c->n_state = n_state;
+  int32_t refused = xla_require_kv(c, "xla_test_require_kv");
+  free(c);
+  return refused;
+}
+#endif
+
+static void xla_release_state(xla_ctx* c) {
+  for (int32_t i = 0; i < XLA_MAX_STATE; ++i) {
+    if (c->sscache[i]) iree_hal_buffer_view_release(c->sscache[i]);
+    if (c->state_zero[i]) iree_hal_buffer_view_release(c->state_zero[i]);
+    c->sscache[i] = NULL;
+    c->state_zero[i] = NULL;
+  }
+  c->state_import_pending = 0;
+}
+
+// Seed the decode module's state globals from `sscache` (issue #3339). Runs
+// once per prefill or state reset, never per step, so every decode after it
+// advances the globals in place. The flag is cleared only after the import
+// succeeded; a failed import leaves it set and the decode refuses to run.
+static int xla_state_import_globals(xla_ctx* c) {
+  if (c->n_state == 0 || !c->state_import_pending) return 0;
+  iree_runtime_call_t call;
+  iree_status_t status = iree_runtime_call_initialize_by_name(
+      c->session, iree_make_cstring_view("decode_step.state_import"), &call);
+  if (!iree_status_is_ok(status)) {
+    fprintf(stderr, "xla_llama_decode: decode_step.state_import is missing\n");
+    iree_status_ignore(status);
+    return 1;
+  }
+  for (int32_t i = 0; i < c->n_state && iree_status_is_ok(status); ++i) {
+    status = iree_runtime_call_inputs_push_back_buffer_view(&call, c->sscache[i]);
+  }
+  if (iree_status_is_ok(status)) status = iree_runtime_call_invoke(&call, 0);
+  iree_runtime_call_deinitialize(&call);
+  if (!iree_status_is_ok(status)) {
+    fprintf(stderr,
+            "xla_llama_decode: seeding the decode state globals from the "
+            "prefill state failed:\n");
+    iree_status_fprint(stderr, status);
+    iree_status_ignore(status);
+    return 1;
+  }
+  c->state_import_pending = 0;
+  return 0;
+}
+
+// Start a sequence from the zero state without running the prefill graph: the
+// recurrent-model path for an empty prompt prefix, where a `real_len = 0`
+// prefill would be refused. The next decode imports the zeros.
+int xla_llama_state_reset(xla_ctx* c) {
+  if (!c || c->n_state == 0) {
+    fprintf(stderr, "xla_llama_state_reset: this bundle has no recurrent state\n");
+    return 1;
+  }
+  iree_status_t status = xla_state_zero_ensure(c);
+  if (!iree_status_is_ok(status)) {
+    // Like a failed prefill: forget the previous request's state, so a decode
+    // refuses instead of continuing it.
+    fprintf(stderr, "xla_llama_state_reset: preparing the zero state failed:\n");
+    iree_status_fprint(stderr, status);
+    iree_status_ignore(status);
+    xla_drop_state(c);
+    return 1;
+  }
+  for (int32_t i = 0; i < c->n_state; ++i) {
+    iree_hal_buffer_view_retain(c->state_zero[i]);
+    if (c->sscache[i]) iree_hal_buffer_view_release(c->sscache[i]);
+    c->sscache[i] = c->state_zero[i];
+  }
+  c->state_import_pending = 1;
+  return 0;
+}
+
 // Push the request-scoped Phi4MM adapter mode immediately after resident
 // weights. Adapter-aware single-sequence graphs consume a scalar; ragged graphs
 // consume one mode per row. Non-adapter bundles reject non-language modes.
@@ -812,10 +1105,22 @@ static iree_status_t xla_append_bundle(xla_ctx* c, const char* prefill_vmfb,
   // All bundle members enter one session atomically. Their distinct names make
   // the calls "prefill.main", "prefill_embeddings.main", and
   // "decode_step.main".
+  // issue #3339: a recurrent bundle has no embeddings prefill (that entry has
+  // no state contract yet), so the module is optional exactly when the bundle
+  // threads state; every attention-only bundle still requires it.
+  c->has_prefill_embeddings =
+      prefill_embeddings_vmfb && prefill_embeddings_vmfb[0] != '\0';
+  if (!c->has_prefill_embeddings && c->n_state == 0) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "the embeddings prefill module is required for a "
+                            "bundle without recurrent state");
+  }
   IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
       c->session, prefill_vmfb));
-  IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
-      c->session, prefill_embeddings_vmfb));
+  if (c->has_prefill_embeddings) {
+    IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
+        c->session, prefill_embeddings_vmfb));
+  }
   if (c->has_deepstack) {
     IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
         c->session, prefill_embeddings_deepstack_vmfb));
@@ -830,9 +1135,12 @@ static iree_status_t xla_append_bundle(xla_ctx* c, const char* prefill_vmfb,
   const char* embeddings_entry = c->prefill_embeddings_kind == 1
                                      ? "prefill_embeddings_ple.main"
                                      : "prefill_embeddings.main";
-  const char* required_entries[] = {"prefill.main", embeddings_entry,
-                                    "decode_step.main"};
-  for (size_t i = 0; i < 3; ++i) {
+  const char* required_entries[] = {
+      "prefill.main", "decode_step.main",
+      c->has_prefill_embeddings ? embeddings_entry : NULL,
+      c->n_state > 0 ? "decode_step.state_import" : NULL};
+  for (size_t i = 0; i < 4; ++i) {
+    if (!required_entries[i]) continue;
     iree_runtime_call_t probe;
     IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
         c->session, iree_make_cstring_view(required_entries[i]), &probe));
@@ -861,6 +1169,7 @@ static iree_status_t xla_append_bundle(xla_ctx* c, const char* prefill_vmfb,
   // keeps the full-cache argument ABI, which still works unchanged.
   c->kv_globals = 0;
   c->kv_import_pending = 0;
+  c->state_import_pending = 0;
   // issue #3060: a decode graph whose token/pos/cache_len are ABI-level `i32`
   // scalars exports `decode_step.scalar_inputs` as a no-op capability marker.
   // Probing it exactly like `kv_import` keeps an older compiled bundle on the
@@ -877,7 +1186,7 @@ static iree_status_t xla_append_bundle(xla_ctx* c, const char* prefill_vmfb,
       iree_status_ignore(s);
     }
   }
-  {
+  if (c->has_kv) {
     iree_runtime_call_t probe;
     iree_status_t s = iree_runtime_call_initialize_by_name(
         c->session, iree_make_cstring_view("decode_step.kv_import"), &probe);
@@ -959,7 +1268,11 @@ static iree_status_t xla_llama_create_impl(
     int32_t prefill_embeddings_kind,
     int32_t dense_ple_layers, int32_t dense_ple_hidden, int32_t model_layers,
     int32_t deepstack_layers, int32_t deepstack_visual_positions,
-    const int32_t* deepstack_target_layers, int32_t local_task_workers) {
+    const int32_t* deepstack_target_layers, int32_t local_task_workers,
+    int32_t has_kv, int32_t n_state, const int32_t* state_ranks,
+    const int64_t* state_dims, const int32_t* state_elems) {
+  IREE_RETURN_IF_ERROR(xla_set_state_contract(c, has_kv, n_state, state_ranks,
+                                              state_dims, state_elems));
   if (context_capacity <= 0 || hidden_size <= 0 ||
       compatibility_fingerprint == 0) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -1163,6 +1476,11 @@ static iree_status_t xla_llama_create_bucket_impl(
   c->deepstack_layers = base->deepstack_layers;
   c->deepstack_visual_positions = base->deepstack_visual_positions;
   c->has_adapter_modes = base->has_adapter_modes;
+  // The state layout describes the model (issue #3339). Each bucket owns its
+  // own state buffers, allocated by its own prefill.
+  c->has_kv = base->has_kv;
+  c->n_state = base->n_state;
+  memcpy(c->state_desc, base->state_desc, sizeof(c->state_desc));
   // Derived from the arguments, NOT copied from the base. These two flags decide
   // which modules `xla_append_bundle` appends and which entry points it probes,
   // so copying them would make a bucket try to append a module the caller did
@@ -1262,7 +1580,10 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                           int32_t deepstack_visual_positions,
                           const int32_t* deepstack_target_layers,
                           int32_t has_adapter_modes,
-                          int32_t local_task_workers) {
+                          int32_t local_task_workers, int32_t has_kv,
+                          int32_t n_state, const int32_t* state_ranks,
+                          const int64_t* state_dims,
+                          const int32_t* state_elems) {
   xla_ctx* c = (xla_ctx*)calloc(1, sizeof(xla_ctx));
   if (!c) return NULL;
   c->has_adapter_modes = has_adapter_modes != 0;
@@ -1278,7 +1599,9 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                             prefill_embeddings_kind, dense_ple_layers,
                             dense_ple_hidden, model_layers, deepstack_layers,
                             deepstack_visual_positions,
-                            deepstack_target_layers, local_task_workers);
+                            deepstack_target_layers, local_task_workers,
+                            has_kv, n_state, state_ranks, state_dims,
+                            state_elems);
   if (!iree_status_is_ok(s)) {
     fprintf(stderr, "xla_llama_create failed (code %d):\n",
             (int)iree_status_code(s));
@@ -1291,8 +1614,14 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
 }
 
 // prefill: tokens[lp], positions[lp] or positions[3, lp], real_len -> first token
-// id; the returned
-// KV cache becomes the resident cache decode threads forward.
+// id; the returned KV cache becomes the resident cache decode threads forward.
+//
+// issue #3339: a recurrent bundle also takes one zeroed input per state tensor
+// after `real_len` and returns the advanced state after the (optional) KV; the
+// state becomes `sscache` and is imported into the decode globals before the
+// next decode. An attention-free bundle returns no KV at all. A recurrent
+// prefill refuses `real_len = 0`: its logits row would be row 0 of padding, and
+// `xla_llama_state_reset` starts a sequence from the zero state instead.
 int xla_llama_prefill(xla_ctx* c, int32_t adapter_mode,
                       const int32_t* tokens, int32_t lp,
                       const int32_t* positions, int32_t real_len,
@@ -1300,83 +1629,136 @@ int xla_llama_prefill(xla_ctx* c, int32_t adapter_mode,
   if (!c || !tokens || !positions || !out_token) {
     fprintf(stderr,
             "xla_llama_prefill: invalid context/token/position/output contract\n");
+    if (c) xla_drop_state(c);
     return 1;
   }
-  if (lp != c->context_capacity || real_len < 0 || real_len > lp) {
+  if (lp != c->context_capacity || real_len < 0 || real_len > lp ||
+      (c->n_state > 0 && real_len == 0)) {
     fprintf(stderr,
-            "xla_llama_prefill: lp=%d real_len=%d context_capacity=%d\n", lp,
-            real_len, c->context_capacity);
+            "xla_llama_prefill: lp=%d real_len=%d context_capacity=%d "
+            "n_state=%d\n",
+            lp, real_len, c->context_capacity, c->n_state);
+    xla_drop_state(c);
     return 1;
   }
   if (xla_check_prefill_positions(
           "xla_llama_prefill", positions, lp,
           c->position_mode == 1 ? 3 : 1, c->context_capacity) != 0) {
+    xla_drop_state(c);
     return 1;
   }
+  int rc = 0;
+  bool call_ready = false;
   iree_runtime_call_t call;
-  XLA_CHECK(iree_runtime_call_initialize_by_name(
-      c->session, iree_make_cstring_view("prefill.main"), &call));
-  for (int32_t i = 0; i < c->n_weights; i++) {
-    XLA_CHECK(
-        iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]));
-  }
   iree_hal_buffer_view_t* mode_bv = NULL;
-  XLA_CHECK(
-      xla_push_adapter_modes(c, &call, &adapter_mode, 1, false, &mode_bv));
+  iree_hal_buffer_view_t* tok_bv = NULL;
+  iree_hal_buffer_view_t* pos_bv = NULL;
+  iree_hal_buffer_view_t* len_bv = NULL;
+  iree_hal_buffer_view_t* token_out = NULL;
+  iree_hal_buffer_view_t* kc = NULL;
+  iree_hal_buffer_view_t* vc = NULL;
+  iree_hal_buffer_view_t* states[XLA_MAX_STATE] = {NULL};
+  XLA_CHECK_GOTO(iree_runtime_call_initialize_by_name(
+                     c->session, iree_make_cstring_view("prefill.main"), &call),
+                 cleanup, rc);
+  call_ready = true;
+  for (int32_t i = 0; i < c->n_weights; i++) {
+    XLA_CHECK_GOTO(
+        iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]),
+        cleanup, rc);
+  }
+  XLA_CHECK_GOTO(
+      xla_push_adapter_modes(c, &call, &adapter_mode, 1, false, &mode_bv),
+      cleanup, rc);
   iree_hal_dim_t seq_shape[1] = {(iree_hal_dim_t)lp};
   iree_hal_dim_t position_shape[2] = {3, (iree_hal_dim_t)lp};
   iree_host_size_t seq_bytes = (iree_host_size_t)lp * sizeof(int32_t);
   iree_host_size_t position_bytes =
       seq_bytes * (c->position_mode == 1 ? 3 : 1);
-  iree_hal_buffer_view_t* tok_bv = NULL;
-  iree_hal_buffer_view_t* pos_bv = NULL;
-  iree_hal_buffer_view_t* len_bv = NULL;
-  XLA_CHECK(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32, tokens,
-                         seq_bytes, &tok_bv));
-  XLA_CHECK(xla_alloc_bv(c, c->position_mode == 1 ? 2 : 1,
-                         c->position_mode == 1 ? position_shape : seq_shape,
-                         IREE_HAL_ELEMENT_TYPE_INT_32, positions,
-                         position_bytes, &pos_bv));
-  XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &real_len,
-                         sizeof(int32_t), &len_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv));
-  XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv));
-
-  XLA_CHECK(iree_runtime_call_invoke(&call, 0));
-
-  iree_hal_buffer_view_t* token_out = NULL;
-  iree_hal_buffer_view_t* kc = NULL;
-  iree_hal_buffer_view_t* vc = NULL;
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &token_out));
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
-  XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc));
-  if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
-    iree_hal_buffer_view_release(token_out);
-    iree_hal_buffer_view_release(kc);
-    iree_hal_buffer_view_release(vc);
-    iree_hal_buffer_view_release(tok_bv);
-    iree_hal_buffer_view_release(pos_bv);
-    iree_hal_buffer_view_release(len_bv);
-    if (mode_bv) iree_hal_buffer_view_release(mode_bv);
-    iree_runtime_call_deinitialize(&call);
-    return 1;
+  XLA_CHECK_GOTO(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32,
+                              tokens, seq_bytes, &tok_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_bv(c, c->position_mode == 1 ? 2 : 1,
+                              c->position_mode == 1 ? position_shape : seq_shape,
+                              IREE_HAL_ELEMENT_TYPE_INT_32, positions,
+                              position_bytes, &pos_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32,
+                              &real_len, sizeof(int32_t), &len_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv),
+                 cleanup, rc);
+  if (c->n_state > 0) {
+    // A fresh sequence starts from the zero state, in spec order.
+    XLA_CHECK_GOTO(xla_state_zero_ensure(c), cleanup, rc);
+    for (int32_t i = 0; i < c->n_state; ++i) {
+      XLA_CHECK_GOTO(
+          iree_runtime_call_inputs_push_back_buffer_view(&call, c->state_zero[i]),
+          cleanup, rc);
+    }
   }
-  if (c->kcache) iree_hal_buffer_view_release(c->kcache);
-  if (c->vcache) iree_hal_buffer_view_release(c->vcache);
-  c->kcache = kc;
-  c->vcache = vc;
-  c->kv_import_pending = 1;
 
-  XLA_CHECK(xla_read_token(c, token_out, out_token));
+  XLA_CHECK_GOTO(iree_runtime_call_invoke(&call, 0), cleanup, rc);
 
-  iree_hal_buffer_view_release(token_out);
-  iree_hal_buffer_view_release(tok_bv);
-  iree_hal_buffer_view_release(pos_bv);
-  iree_hal_buffer_view_release(len_bv);
+  XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &token_out),
+                 cleanup, rc);
+  if (c->has_kv) {
+    XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc),
+                   cleanup, rc);
+    XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc),
+                   cleanup, rc);
+    if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+      rc = 1;
+      goto cleanup;
+    }
+  }
+  for (int32_t i = 0; i < c->n_state; ++i) {
+    XLA_CHECK_GOTO(
+        iree_runtime_call_outputs_pop_front_buffer_view(&call, &states[i]),
+        cleanup, rc);
+    if (xla_validate_state(c, i, states[i]) != 0) {
+      rc = 1;
+      goto cleanup;
+    }
+  }
+  XLA_CHECK_GOTO(xla_read_token(c, token_out, out_token), cleanup, rc);
+
+  // Every result is valid: adopt them together, so a failed request never
+  // leaves the KV of one prompt next to the state of another.
+  if (c->has_kv) {
+    if (c->kcache) iree_hal_buffer_view_release(c->kcache);
+    if (c->vcache) iree_hal_buffer_view_release(c->vcache);
+    c->kcache = kc;
+    c->vcache = vc;
+    kc = NULL;
+    vc = NULL;
+    c->kv_import_pending = 1;
+  }
+  for (int32_t i = 0; i < c->n_state; ++i) {
+    if (c->sscache[i]) iree_hal_buffer_view_release(c->sscache[i]);
+    c->sscache[i] = states[i];
+    states[i] = NULL;
+  }
+  if (c->n_state > 0) c->state_import_pending = 1;
+
+cleanup:
+  if (rc != 0) xla_drop_state(c);
+  if (token_out) iree_hal_buffer_view_release(token_out);
+  if (kc) iree_hal_buffer_view_release(kc);
+  if (vc) iree_hal_buffer_view_release(vc);
+  for (int32_t i = 0; i < XLA_MAX_STATE; ++i) {
+    if (states[i]) iree_hal_buffer_view_release(states[i]);
+  }
+  if (tok_bv) iree_hal_buffer_view_release(tok_bv);
+  if (pos_bv) iree_hal_buffer_view_release(pos_bv);
+  if (len_bv) iree_hal_buffer_view_release(len_bv);
   if (mode_bv) iree_hal_buffer_view_release(mode_bv);
-  iree_runtime_call_deinitialize(&call);
-  return 0;
+  if (call_ready) iree_runtime_call_deinitialize(&call);
+  return rc;
 }
 
 // Shared decode implementation. `position_mode` is an explicit ABI contract,
@@ -1427,10 +1809,12 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
             "xla_llama_decode: invalid context/position/output contract\n");
     return 1;
   }
-  if (!c->kcache || !c->vcache || c->position_mode != position_mode ||
-      cache_len < 0 || cache_len >= c->context_capacity) {
+  if ((c->has_kv && (!c->kcache || !c->vcache)) ||
+      (c->n_state > 0 && !c->sscache[0]) ||
+      c->position_mode != position_mode || cache_len < 0 ||
+      cache_len >= c->context_capacity) {
     fprintf(stderr,
-            "xla_llama_decode: mode=%d bundle_mode=%d cache_len=%d context_capacity=%d or KV is uninitialized\n",
+            "xla_llama_decode: mode=%d bundle_mode=%d cache_len=%d context_capacity=%d or KV/state is uninitialized\n",
             position_mode, c->position_mode, cache_len, c->context_capacity);
     return 1;
   }
@@ -1466,6 +1850,7 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
   }
   iree_runtime_call_t call;
   if (xla_kv_import_globals(c) != 0) return 1;
+  if (xla_state_import_globals(c) != 0) return 1;
   XLA_CHECK(iree_runtime_call_initialize_by_name(
       c->session, iree_make_cstring_view("decode_step.main"), &call));
   for (int32_t i = 0; i < c->n_weights; i++) {
@@ -1538,7 +1923,7 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
   // issue #3043: with the cache in module globals the step takes and returns no
   // cache at all; the global is read and written in place by the invocation, so
   // there is no 32 MB input-to-output copy and no per-step cache adoption.
-  if (!c->kv_globals) {
+  if (c->has_kv && !c->kv_globals) {
     XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->kcache));
     XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, c->vcache));
   }
@@ -1547,7 +1932,7 @@ static int xla_llama_decode_impl(xla_ctx* c, int32_t adapter_mode,
 
   iree_hal_buffer_view_t* token_out = NULL;
   XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &token_out));
-  if (!c->kv_globals) {
+  if (c->has_kv && !c->kv_globals) {
     iree_hal_buffer_view_t* kc = NULL;
     iree_hal_buffer_view_t* vc = NULL;
     XLA_CHECK(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc));
@@ -1769,6 +2154,7 @@ int xla_llama_ragged_reset(xla_ctx* c, int32_t bsz) {
             bsz);
     return 1;
   }
+  if (xla_require_kv(c, "xla_llama_ragged_reset") != 0) return 1;
   if (c->rg_compiled_b <= 0) {
     fprintf(stderr,
             "xla_llama_ragged_reset: no compiled ragged batch size is bound "
@@ -1823,6 +2209,7 @@ int xla_llama_prefill_slot_logits(
             "output/vocab contract\n");
     return 1;
   }
+  if (xla_require_kv(c, "xla_llama_prefill_slot_logits") != 0) return 1;
   if (slot < 0 || slot >= c->rg_bsz) {
     fprintf(stderr, "xla_llama_prefill_slot_logits: slot %d out of range [0,%d)\n",
             slot, c->rg_bsz);
@@ -1963,6 +2350,7 @@ int xla_llama_prefill_diagnostics_slot(
             "xla_llama_prefill_diagnostics_slot: invalid diagnostic bundle/input contract\n");
     return 1;
   }
+  if (xla_require_kv(c, "xla_llama_prefill_diagnostics_slot") != 0) return 1;
   if (xla_check_prefill_positions(
           "xla_llama_prefill_diagnostics_slot", positions, lp,
           c->position_mode == 1 ? 3 : 1, c->context_capacity) != 0) {
@@ -2061,6 +2449,7 @@ static int xla_llama_prefill_embeddings_impl(
             c ? c->position_mode : -1);
     return 1;
   }
+  if (xla_require_kv(c, "xla_llama_prefill_embeddings") != 0) return 1;
   int64_t embeddings_dims[2] = {c->context_capacity, c->hidden_size};
   int64_t positions_1d_dims[1] = {c->context_capacity};
   int64_t positions_mrope_dims[2] = {3, c->context_capacity};
@@ -2276,6 +2665,7 @@ static int xla_llama_prefill_embeddings_deepstack_impl(
             "xla_llama_prefill_embeddings_deepstack: invalid bundle/mode/count/length contract\n");
     return 1;
   }
+  if (xla_require_kv(c, "xla_llama_prefill_embeddings_deepstack") != 0) return 1;
   int64_t embeddings_dims[2] = {c->context_capacity, c->hidden_size};
   int64_t positions_1d_dims[1] = {c->context_capacity};
   int64_t positions_mrope_dims[2] = {3, c->context_capacity};
@@ -2552,6 +2942,7 @@ static int xla_llama_decode_ragged_impl(
             "position/length/vocab/output contract\n");
     return 1;
   }
+  if (xla_require_kv(c, "xla_llama_decode_ragged_logits") != 0) return 1;
   if (bsz != c->rg_bsz || !c->kcache_b || !c->vcache_b ||
       c->position_mode != position_mode) {
     fprintf(stderr,
@@ -2742,6 +3133,7 @@ void xla_llama_free(xla_ctx* c) {
   if (c->vcache) iree_hal_buffer_view_release(c->vcache);
   if (c->kcache_b) iree_hal_buffer_view_release(c->kcache_b);
   if (c->vcache_b) iree_hal_buffer_view_release(c->vcache_b);
+  xla_release_state(c);
   xla_release_step_scalars(c);
   free(c->rg_valid);
   free(c->deepstack_target_layers);

@@ -106,6 +106,7 @@ mod molmo_vision_runtime;
 mod shard_path;
 // Always compiled: the emitter reads its workgroup-shape constants, and the
 // module itself has no IREE dependency. Without the runtime only the tests use it.
+mod hf_json;
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod native_qmv;
 #[cfg(feature = "iree")]
@@ -116,6 +117,9 @@ mod qwen2_vl_runtime;
 mod qwen3_vl_runtime;
 #[cfg(feature = "iree")]
 mod ssm_model_check;
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod state_ffi;
 // The spec, length checks and `.npy` codec are pure Rust and unit-tested
 // without IREE; only `run_ssm_probe` needs the runtime.
 #[cfg(any(feature = "iree", test))]
@@ -420,6 +424,7 @@ pub use gemma3n_audio_weights::{
     Gemma3nAudioCheckpointError, Gemma3nAudioCheckpointTensorSpec, gemma3n_audio_checkpoint_specs,
     validate_gemma3n_audio_checkpoint,
 };
+pub use hf_json::parse_hf_config_json;
 #[cfg(feature = "iree")]
 pub use prepared::PreparedInputError;
 pub use prepared_deepstack::{DeepStackFeatures, DeepStackInputError, DeepStackPreparedPrefill};
@@ -498,7 +503,9 @@ pub(crate) fn resolve_eos_ids(
 pub fn config_eos_token_ids(model_path: &Path) -> Vec<i32> {
     let read_json = |name: &str| -> Option<serde_json::Value> {
         let s = std::fs::read_to_string(model_path.join(name)).ok()?;
-        serde_json::from_str(&s).ok()
+        // Tolerant of HF's bare `Infinity` (Mamba2), which would otherwise
+        // silently drop the config's EOS ids (issue #3339).
+        parse_hf_config_json(&s).ok()
     };
     resolve_eos_ids(
         read_json("generation_config.json").as_ref(),
@@ -739,6 +746,7 @@ impl XlaInferenceSession {
         eos_token_ids: &[i32],
         on_token: F,
     ) -> Result<(Vec<i32>, GreedyTiming), String> {
+        self.begin_request();
         if prompt_tokens.is_empty() {
             return Err("XLA generation requires a non-empty prompt".to_string());
         }
@@ -772,6 +780,15 @@ impl XlaInferenceSession {
                 decode_ms,
             },
         ))
+    }
+
+    /// Start a new request: drop the previous request's recurrent state before
+    /// any validation can refuse this one, so a `decode_step` after a refused
+    /// request cannot continue the earlier sequence (issue #3339). A no-op for a
+    /// model without recurrent state.
+    fn begin_request(&mut self) {
+        #[cfg(feature = "iree")]
+        self.engine.invalidate_sequence_state();
     }
 
     /// Advance greedy decode from `first` (a prefill's argmax) and collect the
@@ -810,6 +827,7 @@ impl XlaInferenceSession {
     /// This mirrors the batched slot-seed convention and is distinct from the
     /// prefix-prefill-plus-decode generation loop.
     pub fn prefill_first_token(&mut self, prompt_tokens: &[i32]) -> Result<i32, String> {
+        self.begin_request();
         if prompt_tokens.is_empty() {
             return Err("prefill_first_token requires a non-empty prompt".to_string());
         }
@@ -889,6 +907,7 @@ impl XlaInferenceSession {
         max_new_tokens: usize,
         eos_token_ids: &[i32],
     ) -> Result<Vec<i32>, String> {
+        self.begin_request();
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
@@ -909,6 +928,7 @@ impl XlaInferenceSession {
         max_new_tokens: usize,
         eos_token_ids: &[i32],
     ) -> Result<Vec<i32>, String> {
+        self.begin_request();
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
@@ -933,6 +953,7 @@ impl XlaInferenceSession {
         eos_token_ids: &[i32],
         on_token: F,
     ) -> Result<Vec<i32>, String> {
+        self.begin_request();
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
@@ -957,6 +978,7 @@ impl InferenceSession for XlaInferenceSession {
 
     #[cfg(feature = "iree")]
     fn prefill(&mut self, token_ids: &[i32]) -> Result<(), String> {
+        self.begin_request();
         if token_ids.len() > self.context_capacity {
             return Err(format!(
                 "prefill length {} exceeds context_capacity={}",
