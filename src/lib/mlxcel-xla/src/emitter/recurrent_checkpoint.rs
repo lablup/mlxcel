@@ -117,8 +117,14 @@ fn checkpoint_files(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
 fn is_projection(shape: &[usize], out: usize, in_: usize, quant: Option<QuantConfig>) -> bool {
     match shape {
         [o, i] if *o == out && *i == in_ => true,
-        [o, i] => quant
-            .is_some_and(|q| *o == out && q.bits > 0 && in_.checked_mul(q.bits) == Some(i * 32)),
+        // `i` comes from an untrusted header, so its packed width is checked too.
+        [o, i] => quant.is_some_and(|q| {
+            *o == out
+                && q.bits > 0
+                && in_
+                    .checked_mul(q.bits)
+                    .is_some_and(|w| Some(w) == i.checked_mul(32))
+        }),
         _ => false,
     }
 }

@@ -16,7 +16,9 @@
 //! The numeric gate against HF is `spike/openxla/ssm_model_check.py`.
 
 use super::builder::Precision;
-use super::config::{Config, MixerKind, SsmConfig, StateElem, StateTensorSpec, WeightScheme};
+use super::config::{
+    Config, MixerKind, QuantConfig, SsmConfig, StateElem, StateTensorSpec, WeightScheme,
+};
 use super::model::{
     emit_decode, emit_decode_batched, emit_decode_ragged, emit_decode_with, emit_prefill,
     emit_prefill_embeddings, emit_prefill_embeddings_deepstack_with, emit_prefill_with,
@@ -375,8 +377,48 @@ fn checkpoint_cross_check_bounds_every_ssm_dim() {
         .expect_err("missing layer");
     assert!(error.contains("backbone.layers.2"), "{error}");
 
+    // An affine-quantized config compares the packed width without
+    // overflowing on a hostile header dim: `(2^59 + 2) * 32` wraps to the
+    // 4-bit width of hidden 16 (64), which a wrapping multiply accepts.
+    let mut huge = shapes.clone();
+    for (name, shape) in &mut huge {
+        if name.ends_with("in_proj.weight") {
+            *shape = vec![32 + 96 + 4, (1usize << 59) + 2];
+        }
+    }
+    write(&huge);
+    let quantized = Config {
+        quantization: Some(QuantConfig {
+            bits: 4,
+            group_size: 16,
+        }),
+        ..c.clone()
+    };
+    let error = quantized
+        .validate_recurrent_checkpoint(dir.path())
+        .expect_err("an absurd packed width is refused");
+    assert!(error.contains("in_proj.weight"), "{error}");
+
     // Attention configs never read the checkpoint here.
     Config::llama_3_2_1b()
         .validate_recurrent_checkpoint(dir.path())
         .expect("no-op for attention-only configs");
+}
+
+/// HF `Mamba2Config` defaults `tie_word_embeddings` to false, so a config that
+/// omits it must read `lm_head.weight` (and refuse a checkpoint without one)
+/// rather than silently reuse the embeddings as the head.
+#[test]
+fn mamba2_omitted_tie_word_embeddings_follows_the_hf_default() {
+    let text = TINY_MAMBA2.replace(r#", "tie_word_embeddings": true"#, "");
+    assert_ne!(text, TINY_MAMBA2, "the fixture states the key");
+    let untied = Config::from_json_str(&text).expect("parses without the key");
+    assert!(!untied.tie_word_embeddings);
+    assert!(
+        weight_specs_q(&untied, false)
+            .iter()
+            .any(|spec| matches!(spec, WeightSpec::Whole(name) if name == "lm_head.weight")),
+        "an untied Mamba2 uploads its own head"
+    );
+    assert!(tiny().tie_word_embeddings, "an explicit true is kept");
 }

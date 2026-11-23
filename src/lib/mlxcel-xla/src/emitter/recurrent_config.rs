@@ -350,7 +350,10 @@ pub(super) fn mamba2_from_json(
         rope_theta: 0.0,
         vocab,
         rope: RopeScaling::Plain,
-        tie_word_embeddings: bool_or("tie_word_embeddings", true)?,
+        // HF `Mamba2Config` defaults to an untied head, so a config that omits
+        // the key reads `lm_head.weight` like HF does (the checkpoint cross-check
+        // then requires it) instead of silently reusing the embeddings.
+        tie_word_embeddings: bool_or("tie_word_embeddings", false)?,
         quantization,
         norm_style: NormStyle::Plain,
         weight_scheme: WeightScheme::Mamba2,

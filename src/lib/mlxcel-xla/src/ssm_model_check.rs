@@ -32,7 +32,8 @@ use crate::auxiliary::{
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::emitter::{
-    Config, Precision, emit_decode_buffer_abi, emit_decode_with, emit_prefill_with,
+    Config, Precision, ProjectionLayout, emit_decode_buffer_abi, emit_decode_with,
+    emit_prefill_with,
 };
 use crate::iree::{
     HostWeight, compile_one, compile_one_to, iree_compile_bin, load_host_weights, target_flags,
@@ -73,8 +74,20 @@ fn parse_precision(name: &str) -> Result<Precision, String> {
     }
 }
 
-fn load_config(model_dir: &Path, capacity: usize) -> Result<Config, String> {
-    let config = Config::from_json(model_dir)?.with_context_capacity(capacity)?;
+/// Parse the projection layout name. `inout` is the layout `IreeLlama` (the
+/// single-sequence runtime #3339 drives) always emits and uploads; `outin` is
+/// the checkpoint layout the batching engine keeps.
+fn parse_layout(name: &str) -> Result<ProjectionLayout, String> {
+    match name {
+        "inout" => Ok(ProjectionLayout::InOut),
+        "outin" => Ok(ProjectionLayout::OutIn),
+        other => Err(format!("unknown layout {other:?}; use inout or outin")),
+    }
+}
+
+fn load_config(model_dir: &Path, capacity: usize, layout: &str) -> Result<Config, String> {
+    let mut config = Config::from_json(model_dir)?.with_context_capacity(capacity)?;
+    config.projection_layout = parse_layout(layout)?;
     if !config.has_recurrent_state() {
         return Err(format!(
             "{} is not a recurrent-state model; the SSM model check runs Mamba2 only",
@@ -115,10 +128,11 @@ pub fn compile_ssm_model_graphs(
     model_dir: &Path,
     capacity: usize,
     precision: &str,
+    layout: &str,
     out_dir: &Path,
 ) -> Result<SsmModelCompileTimes, String> {
     let precision = parse_precision(precision)?;
-    let config = load_config(model_dir, capacity)?;
+    let config = load_config(model_dir, capacity, layout)?;
     let compiler = iree_compile_bin()?;
     let flags = target_flags(device)?;
     std::fs::create_dir_all(out_dir)
@@ -244,9 +258,10 @@ impl SsmDecodeSession {
         model_dir: &Path,
         capacity: usize,
         precision: &str,
+        layout: &str,
     ) -> Result<Self, String> {
         let precision = parse_precision(precision)?;
-        let config = load_config(model_dir, capacity)?;
+        let config = load_config(model_dir, capacity, layout)?;
         let mlir =
             zero_initialize_state_globals(&emit_decode_buffer_abi(&config, precision), &config)?;
         let (module, _) = load_module(
@@ -310,9 +325,10 @@ impl SsmModelSession {
         model_dir: &Path,
         capacity: usize,
         precision: &str,
+        layout: &str,
     ) -> Result<Self, String> {
         let precision = parse_precision(precision)?;
-        let config = load_config(model_dir, capacity)?;
+        let config = load_config(model_dir, capacity, layout)?;
         let mlir = emit_prefill_with(&config, false, precision);
         let (module, compile_seconds) =
             load_module(device, model_dir, &config, precision, &mlir, "prefill.main")?;

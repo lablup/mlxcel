@@ -90,6 +90,7 @@ def run_xla(args, model_dir: Path, tokens: list[int], out: Path) -> dict:
         "--device", args.device,
         "--capacity", str(args.capacity),
         "--precision", args.precision,
+        "--layout", args.layout,
         "--tokens", ",".join(map(str, tokens)),
         "--out", str(out),
     ]
@@ -114,6 +115,9 @@ def main() -> int:
     src.add_argument("--synthetic", metavar="DIR", help="build a seeded model here")
     ap.add_argument("--device", default="local-task")
     ap.add_argument("--precision", default="f32", choices=["f32", "f16", "bf16"])
+    # `inout` is what the single-sequence runtime (`IreeLlama`) emits and
+    # uploads; `outin` is the checkpoint layout the batching engine keeps.
+    ap.add_argument("--layout", default="inout", choices=["inout", "outin"])
     ap.add_argument("--capacity", type=int, default=128)
     ap.add_argument("--tokens", type=int, default=40, help="prompt length")
     ap.add_argument("--seed", type=int, default=0)

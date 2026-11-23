@@ -105,6 +105,10 @@ The carried-state cases have no HF prefill equivalent (HF prefill always starts 
 
 The f32 rows pass. The f16 rows (`MLXCEL_XLA_PRECISION=f16`: f16-resident projections and f16 contraction inputs, the scan and conv kept f32) miss the 3e-2 bar against HF fp32 by an order of magnitude, on logits spanning -3.4 to 16.7, while the argmax and top 5 match. Within f16, the paths agree far more closely than f16 agrees with fp32: whole prefill against decode differs by 6.6e-2 (local-task) and 4.2e-2 (hip), and whole against split by 3.8e-2 and 5.8e-2. The gap is projection rounding accumulated over 24 layers, not a prefill/decode mismatch. f16 is measured here, not gated; whether #3339 defaults Mamba2 to f16 on GPU should be decided on a token-level comparison.
 
+The f16 drift is fully explained by projection rounding. Rounding every `nn.Linear` input and weight to f16 (f32 accumulate) inside HF's own fp32 forward reproduces it on the same 200 tokens: 0.44 max-abs with all projections, 0.39 with only `in_proj`, 0.026 with only `out_proj`, 0.010 with only the head; keeping the `dt` columns of `in_proj` in f32 still leaves 0.40, so the error enters through `x`, `B`, `C` and `z`, not the step size. Norms, softplus, the D skip and the residual stream are f32 in the graph on every precision path, so `residual_in_fp32` changes nothing there. In that simulation, 40 greedy tokens from five prompts (including "The capital of France is") match fp32 exactly. `hip` defaults to f16 (`default_precision`), which is the precision #3339's token-exact gate will run at unless it pins f32 the way MLA configs do in `effective_precision`.
+
+The check runs the `InOut` projection layout by default (`--layout inout`), the layout `IreeLlama` always emits and uploads; `OutIn` gives the same numbers on both devices.
+
 Compile time of one uncached `iree-compile` for mamba2-130m (24 layers), f32:
 
 | target | capacity | prefill | decode |

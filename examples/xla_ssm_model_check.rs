@@ -26,7 +26,8 @@
 //!
 //! ```text
 //! cargo run --release --features xla-iree --example xla_ssm_model_check -- \
-//!     --model DIR --device hip --tokens 1,2,3 --out DIR [--capacity 128]
+//!     --model DIR --device hip --tokens 1,2,3 --out DIR [--capacity 128] \
+//!     [--precision f32|f16|bf16] [--layout inout|outin]
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ struct Args {
     device: String,
     capacity: usize,
     precision: String,
+    layout: String,
     tokens: Vec<i32>,
     split: Option<usize>,
     out: Option<PathBuf>,
@@ -50,6 +52,7 @@ fn parse_args() -> Result<Args, String> {
         device: "local-task".to_string(),
         capacity: 128,
         precision: "f32".to_string(),
+        layout: "inout".to_string(),
         tokens: Vec::new(),
         split: None,
         out: None,
@@ -62,6 +65,7 @@ fn parse_args() -> Result<Args, String> {
             "--model" => args.model = PathBuf::from(value()?),
             "--device" => args.device = value()?,
             "--precision" => args.precision = value()?,
+            "--layout" => args.layout = value()?,
             "--capacity" => {
                 let text = value()?;
                 args.capacity = text.parse().map_err(|_| format!("bad --capacity {text}"))?;
@@ -103,6 +107,7 @@ fn main() -> Result<(), String> {
             &args.model,
             args.capacity,
             &args.precision,
+            &args.layout,
             dir,
         )?;
         println!(
@@ -111,6 +116,7 @@ fn main() -> Result<(), String> {
                 "device": args.device,
                 "capacity": args.capacity,
                 "precision": args.precision,
+                "layout": args.layout,
                 "prefill_compile_s": times.prefill_seconds,
                 "decode_compile_s": times.decode_seconds,
             })
@@ -119,8 +125,13 @@ fn main() -> Result<(), String> {
     }
     let out = args.out.clone().expect("checked in parse_args");
     std::fs::create_dir_all(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
-    let mut session =
-        SsmModelSession::load(&args.device, &args.model, args.capacity, &args.precision)?;
+    let mut session = SsmModelSession::load(
+        &args.device,
+        &args.model,
+        args.capacity,
+        &args.precision,
+        &args.layout,
+    )?;
     let zero = session.zero_state();
     let whole = session.prefill(&args.tokens, &zero)?;
     write_npy(&out.join("logits.npy"), &whole.logits)?;
@@ -135,8 +146,13 @@ fn main() -> Result<(), String> {
     let first = session.prefill(&args.tokens[..split], &zero)?;
     let second = session.prefill(&args.tokens[split..], &first.states)?;
     write_npy(&out.join("logits_split.npy"), &second.logits)?;
-    let mut decode =
-        SsmDecodeSession::load(&args.device, &args.model, args.capacity, &args.precision)?;
+    let mut decode = SsmDecodeSession::load(
+        &args.device,
+        &args.model,
+        args.capacity,
+        &args.precision,
+        &args.layout,
+    )?;
     let mut decoded = Vec::new();
     for &token in &args.tokens {
         decoded = decode.step(token)?;
@@ -152,6 +168,7 @@ fn main() -> Result<(), String> {
         "device": args.device,
         "capacity": args.capacity,
         "precision": args.precision,
+        "layout": args.layout,
         "tokens": args.tokens.len(),
         "split": split,
         "compile_s": session.compile_seconds,
