@@ -549,6 +549,10 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.layer_state_kinds()
     }
 
+    fn supports_paged_sliding_state(&self) -> bool {
+        self.text_model.supports_paged_sliding_state()
+    }
+
     fn make_layer_state(&self) -> Option<Vec<mlxcel_core::cache::LayerState>> {
         self.text_model.make_layer_state()
     }

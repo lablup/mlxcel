@@ -1003,6 +1003,22 @@ pub trait LanguageModel {
         Err("model does not run on scheduler-owned layer state".to_string())
     }
 
+    /// Whether a scheduler-owned sequence of this family is stored as
+    /// window-bounded paged blocks (issue #3256): every `Full` layer a
+    /// pool-backed `KVCache`, every `Sliding` layer a
+    /// [`crate::cache::PagedSlidingKVCache`], in the pool's shared block pool.
+    ///
+    /// `true` only for a family whose forward runs on those layer variants,
+    /// and only while every layer stores FP16 (Int8 and Turbo sequences are
+    /// never pool-backed). The pool then allocates the sequence on the paged
+    /// backend whatever the decode storage setting says, since one sequence
+    /// has one backend.
+    ///
+    /// Used by: `CachePool::allocate_with_layout`.
+    fn supports_paged_sliding_state(&self) -> bool {
+        false
+    }
+
     /// Describe how one sequence's runtime state should be allocated.
     ///
     /// A family that reports [`Self::layer_state_kinds`] is scheduler-owned.

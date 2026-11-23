@@ -327,6 +327,10 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).layer_state_kinds()
     }
 
+    fn supports_paged_sliding_state(&self) -> bool {
+        (**self).supports_paged_sliding_state()
+    }
+
     fn make_layer_state(&self) -> Option<Vec<crate::cache::LayerState>> {
         (**self).make_layer_state()
     }

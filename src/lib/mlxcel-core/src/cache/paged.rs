@@ -208,11 +208,29 @@ impl PagedKvLayout {
 }
 
 /// Per-layer logical-to-physical mapping for paged KV storage.
+///
+/// `block_ids[i]` holds absolute positions `[(block_base + i) * block_size,
+/// (block_base + i + 1) * block_size)`. A full-attention layer keeps
+/// `block_base == 0`. A window-bounded sliding layer (`window: Some`, issue
+/// #3256) drops head blocks once `logical_start` passes them: each one moves
+/// to `retired` (pinned, for the prompt cache) or back to the pool, and
+/// `block_base` advances. Index the table through [`Self::block_at`] and
+/// [`Self::end_block`], never with `abs / block_size` directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagedLayerState {
     pub block_ids: Vec<PagedBlockId>,
     pub len: usize,
     pub logical_start: usize,
+    /// Absolute block index of `block_ids[0]`.
+    pub block_base: usize,
+    /// The sliding window of a window-bounded layer, `None` for full
+    /// attention. Set at allocation; the pool advances `logical_start` before
+    /// every append so the step sees at most `window - 1` earlier keys.
+    pub window: Option<usize>,
+    /// Blocks that left the window and are still pinned by this sequence,
+    /// as `(absolute block index, id)` in ascending block order. Kept for
+    /// prompt-cache donation, or as the rewind reserve when retention is off.
+    pub retired: Vec<(usize, PagedBlockId)>,
 }
 
 impl PagedLayerState {
@@ -221,7 +239,38 @@ impl PagedLayerState {
             block_ids: Vec::new(),
             len: 0,
             logical_start: 0,
+            block_base: 0,
+            window: None,
+            retired: Vec::new(),
         }
+    }
+
+    /// A fresh window-bounded sliding layer (issue #3256).
+    pub fn sliding(window: usize) -> Self {
+        Self {
+            window: Some(window.max(1)),
+            ..Self::new()
+        }
+    }
+
+    /// The block holding absolute block index `abs_block`, `None` when it is
+    /// before `block_base` (retired) or past the table.
+    #[inline]
+    pub fn block_at(&self, abs_block: usize) -> Option<PagedBlockId> {
+        abs_block
+            .checked_sub(self.block_base)
+            .and_then(|i| self.block_ids.get(i).copied())
+    }
+
+    /// Absolute block index one past the last live block.
+    #[inline]
+    pub fn end_block(&self) -> usize {
+        self.block_base + self.block_ids.len()
+    }
+
+    /// Retired blocks this layer still pins.
+    pub fn retired_blocks(&self) -> usize {
+        self.retired.len()
     }
 
     pub fn visible_len(&self) -> usize {
@@ -259,6 +308,10 @@ impl PagedLayerState {
     }
 }
 
+#[path = "paged_window.rs"]
+mod window;
+pub use window::REWIND_RESERVE_BLOCKS;
+
 impl Default for PagedLayerState {
     fn default() -> Self {
         Self::new()
@@ -292,6 +345,14 @@ impl PagedSequenceState {
         self.layers
             .iter()
             .map(PagedLayerState::reserved_blocks)
+            .sum()
+    }
+
+    /// Retired sliding blocks every layer still pins (issue #3256).
+    pub fn retired_blocks(&self) -> usize {
+        self.layers
+            .iter()
+            .map(PagedLayerState::retired_blocks)
             .sum()
     }
 
@@ -509,6 +570,10 @@ pub struct PagedBlockPool {
     /// working set the server was configured for is what makes the fused path
     /// reachable in production. See [`Self::set_slab_blocks`].
     slab_blocks: usize,
+    /// Whether blocks leaving a sliding window stay pinned on their sequence
+    /// (in `PagedLayerState::retired`) for prompt-cache donation (#3256).
+    /// Off: only the rewind reserve is kept and older ones are released.
+    retain_retired: bool,
 }
 
 /// Default number of physical block rows per pool slab tensor. Growth appends
@@ -659,6 +724,7 @@ impl PagedBlockPool {
             block_epoch: 0,
             decode_v2_cache: crate::paged_v2::PagedDecodeV2Cache::new(),
             slab_blocks: POOL_SLAB_BLOCKS,
+            retain_retired: false,
         }
     }
 
@@ -895,11 +961,10 @@ impl PagedBlockPool {
         }
         let block_size = self.layout.block_size.max(1);
         let required = (layer.len + token_count).div_ceil(block_size);
-        let fresh = required.saturating_sub(layer.block_ids.len());
+        let fresh = required.saturating_sub(layer.end_block());
         let cow = layer
-            .block_ids
-            .get(layer.len / block_size)
-            .is_some_and(|&tail| self.refcount(tail) > 1);
+            .block_at(layer.len / block_size)
+            .is_some_and(|tail| self.refcount(tail) > 1);
         fresh + usize::from(cow)
     }
 
@@ -938,7 +1003,7 @@ impl PagedBlockPool {
         // write indexed past the table.
         let new_len = layer.len + token_count;
         let required_blocks = new_len.div_ceil(self.layout.block_size);
-        while layer.block_ids.len() < required_blocks {
+        while layer.end_block() < required_blocks {
             layer.block_ids.push(self.acquire_block(layer_idx)?);
         }
         layer.len = new_len;
@@ -960,6 +1025,9 @@ impl PagedBlockPool {
         })?;
         if token_count == 0 || layer.len == 0 {
             return Ok(0);
+        }
+        if layer.window.is_some() {
+            return self.trim_window_tokens(layer, token_count);
         }
 
         let min_len = layer.logical_start.min(layer.len);
@@ -986,7 +1054,7 @@ impl PagedBlockPool {
         // a block-base offset and is deferred until a sliding-window paged
         // path exists.
         let required_blocks = layer.len.div_ceil(self.layout.block_size);
-        while layer.block_ids.len() > required_blocks {
+        while layer.end_block() > required_blocks {
             if let Some(block_id) = layer.block_ids.pop() {
                 self.release_block(block_id)?;
             }
@@ -1011,8 +1079,12 @@ impl PagedBlockPool {
             while let Some(block_id) = layer.block_ids.pop() {
                 self.release_block(block_id)?;
             }
+            for (_, block_id) in layer.retired.drain(..) {
+                self.release_block(block_id)?;
+            }
             layer.len = 0;
             layer.logical_start = 0;
+            layer.block_base = 0;
         }
         // A sequence leaving the batch (finish, eviction, preemption) is one of
         // the invalidation events issue #899 names for the decode plan cache.
@@ -1042,10 +1114,10 @@ impl PagedBlockPool {
             // Absolute-position indexing: the block table must cover the full
             // absolute length, not just the visible window (issue #196).
             let required_blocks = layer.len.div_ceil(self.layout.block_size);
-            if layer.block_ids.len() < required_blocks {
+            if layer.end_block() < required_blocks {
                 return Err(format!(
                     "PagedBlockPool: restored layer {layer_idx} has {} blocks for length {}, requires at least {}",
-                    layer.block_ids.len(),
+                    layer.end_block(),
                     layer.len,
                     required_blocks
                 ));
@@ -1584,6 +1656,13 @@ impl PagedBlockPool {
         }
 
         let block_size = self.layout.block_size as i32;
+        // A window-bounded sliding layer drops the keys this append can no
+        // longer attend before writing (issue #3256).
+        if let Some(layer) = state.layers.get_mut(layer_idx)
+            && layer.window.is_some()
+        {
+            self.settle_window_before_append(layer)?;
+        }
         // Absolute tail before the append — the first new token lands here.
         let first_abs = {
             let layer = state.layer(layer_idx).ok_or_else(|| {
@@ -1634,10 +1713,16 @@ impl PagedBlockPool {
             // Copy-on-write the target block if a sibling sequence still shares
             // it (only ever the partial prefix tail; fresh append blocks have
             // refcount 1 and skip this).
-            let block_id = state.layers[layer_idx].block_ids[block_index];
+            let layer = &mut state.layers[layer_idx];
+            let slot = block_index.checked_sub(layer.block_base).ok_or_else(|| {
+                format!(
+                    "PagedBlockPool::write_prefill: block {block_index} on layer {layer_idx} is before the live table"
+                )
+            })?;
+            let block_id = layer.block_ids[slot];
             let target_id = if self.refcount(block_id) > 1 {
                 let fresh = self.copy_on_write_block(layer_idx, block_id)?;
-                state.layers[layer_idx].block_ids[block_index] = fresh;
+                state.layers[layer_idx].block_ids[slot] = fresh;
                 fresh
             } else {
                 block_id
@@ -1675,7 +1760,9 @@ impl PagedBlockPool {
     ) -> Result<(), String> {
         let mut unassigned = 0usize;
         for block_index in first_block..=last_block {
-            let block_id = state.layers[layer_idx].block_ids[block_index];
+            let Some(block_id) = state.layers[layer_idx].block_at(block_index) else {
+                continue;
+            };
             if !self.block_rows[layer_idx].contains_key(&block_id) {
                 unassigned += 1;
             }
@@ -1861,11 +1948,17 @@ impl PagedBlockPool {
 
         let block_size = self.layout.block_size as i32;
         let n_blocks = rows.len() as i32;
-        let logical_start = layer.logical_start as i32;
-        let len = layer.len as i32;
-        if len > n_blocks * block_size {
+        // Positions relative to the first live block (`block_base`): a
+        // window-bounded layer no longer holds the blocks before it.
+        let base = (layer.block_base * self.layout.block_size) as i32;
+        let logical_start = layer.logical_start as i32 - base;
+        let len = layer.len as i32 - base;
+        if logical_start < 0 || len > n_blocks * block_size {
             return Err(format!(
-                "PagedBlockPool::gather_visible: layer {layer_idx} len {len} exceeds {n_blocks} blocks * block_size {block_size}"
+                "PagedBlockPool::gather_visible: layer {layer_idx} window [{}, {}) is outside its live blocks [{base}, {})",
+                layer.logical_start,
+                layer.len,
+                base + n_blocks * block_size
             ));
         }
 
@@ -2354,10 +2447,13 @@ impl PagedBlockPool {
             // sequence whose `len` outruns its retained blocks would read past
             // the block table.
             let n_blocks = layer.block_ids.len() as i32;
-            if layer.len as i32 > n_blocks * block_size {
+            let base = (layer.block_base * self.layout.block_size) as i32;
+            if layer.len as i32 - base > n_blocks * block_size
+                || (layer.logical_start as i32) < base
+            {
                 return Err(format!(
-                    "PagedBlockPool::paged_decode_fused: layer {layer_idx} len {} exceeds {n_blocks} blocks * block_size {block_size}",
-                    layer.len
+                    "PagedBlockPool::paged_decode_fused: layer {layer_idx} window [{}, {}) is outside its live blocks",
+                    layer.logical_start, layer.len
                 ));
             }
             for block_id in &layer.block_ids {
@@ -2369,7 +2465,7 @@ impl PagedBlockPool {
                 rows.push(row as i32);
             }
             row_offsets.push(rows.len() as i32);
-            logical_starts.push(layer.logical_start as i32);
+            logical_starts.push(layer.logical_start as i32 - base);
             visible_lens.push(layer.visible_len() as i32);
         }
 

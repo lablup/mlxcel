@@ -533,16 +533,23 @@ pub(crate) mod snapshot_prompt_cache {
         w
     }
 
+    /// The fixture on the ring storage and its snapshot path (the storage
+    /// a quantized configuration keeps; FP16 sequences are paged, #3256).
     pub(super) fn build_wrapper() -> Pooled<Gemma3Wrapper> {
         build_wrapper_with_window(8)
     }
 
     pub(crate) fn build_wrapper_with_window(sliding_window: i32) -> Pooled<Gemma3Wrapper> {
+        Pooled::new(bare_wrapper(sliding_window).without_paged_sliding())
+    }
+
+    /// The fixture as the server runs it: FP16 sequences on paged blocks.
+    pub(crate) fn bare_wrapper(sliding_window: i32) -> Gemma3Wrapper {
         let args = synthetic_args_with_window(sliding_window);
         let weights = synthetic_weights();
-        Pooled::new(Gemma3Wrapper::new(
+        Gemma3Wrapper::new(
             Gemma3Model::from_weights(&weights, &args).expect("synthetic Gemma 3 must load"),
-        ))
+        )
     }
 
     pub(super) fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
@@ -600,7 +607,12 @@ pub(crate) mod snapshot_prompt_cache {
 
     #[test]
     fn gemma3_declares_snapshot_reuse() {
+        // The ring storage takes snapshots; an FP16 paged sequence is reused
+        // as a paged prompt-cache entry instead (#3256).
         assert!(build_wrapper().supports_snapshot_reuse());
+        let paged = bare_wrapper(8);
+        assert!(paged.supports_paged_sliding_state());
+        assert!(!paged.supports_snapshot_reuse());
     }
 
     #[test]
@@ -1256,6 +1268,9 @@ mod vlm_external_mask;
 
 #[path = "gemma3_layer_state_tests.rs"]
 mod layer_state;
+
+#[path = "gemma3_paged_sliding_tests.rs"]
+mod paged_sliding;
 
 // A ModelOpt NVFP4 MLP: each projection carries a per-tensor scale beside its
 // block scales. The fused forward has no argument for it and ran all three

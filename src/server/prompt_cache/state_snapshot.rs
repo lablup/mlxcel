@@ -264,7 +264,7 @@ impl StatePolicy {
                 LayerState::Kv(cache) => kv_snapshot::truncate_standard(cache, target, names),
                 LayerState::Rotating(cache) => kv_snapshot::truncate_rotating(cache, target, names),
                 LayerState::Empty => Ok(()),
-                LayerState::Chunked(_) | LayerState::Recurrent(_) => {
+                LayerState::Chunked(_) | LayerState::Recurrent(_) | LayerState::PagedSliding(_) => {
                     Err("this storage cannot be truncated".to_string())
                 }
             };

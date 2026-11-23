@@ -94,6 +94,10 @@ fn gemma3_is_scheduler_owned() {
     ));
     // The lookahead rewind is on, so the sliding layer logs its decode writes.
     assert!(model.supports_decode_lookahead_rewind());
+    // This fixture keeps the ring storage and its snapshots; the paged
+    // storage an FP16 server sequence gets is covered by
+    // `gemma3_paged_sliding_tests` (#3256).
+    assert!(!model.supports_paged_sliding_state());
     assert!(model.supports_snapshot_reuse());
     assert_eq!(
         model.layer_state_snapshot_spec().map(|spec| spec.family),

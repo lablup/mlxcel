@@ -101,6 +101,7 @@ impl SerializablePagedLayerState {
                 .collect(),
             len: self.len,
             logical_start: self.logical_start.min(self.len),
+            ..PagedLayerState::new()
         }
     }
 }

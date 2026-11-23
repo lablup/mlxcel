@@ -353,6 +353,21 @@ impl KVCache {
         self.attend_dense(q, q_len, new_keys, new_values, scale, mask)
     }
 
+    /// Attention that always gathers the live window and runs the dense
+    /// SDPA, never the fused paged decode launch. The single-row route of a
+    /// pool-backed scheduler-owned layer (issue #3256).
+    pub fn attend_gathered(
+        &mut self,
+        q: &MlxArray,
+        new_keys: UniquePtr<MlxArray>,
+        new_values: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let q_len = query_len(q);
+        self.attend_dense(q, q_len, new_keys, new_values, scale, mask)
+    }
+
     /// Dense-storage attention: the Turbo decode variants at a single token,
     /// otherwise update, fetch the live window and run SDPA.
     fn attend_dense(
