@@ -60,11 +60,22 @@ Raw rows: [`run3-qwen-b1.json`](scheduler-owned-state-decode-gb10-2026-11-23/run
 
 Twelve samples per arm. The host was still disturbed for a few samples (the low ends of the ranges), and the medians are within the null. The three fastest samples are 193.0, 196.5 and 197.2 tok/s for main and 192.4, 193.4 and 193.9 for the branch at 256 tokens, and 172.6, 174.3 and 176.0 against 170.5, 171.5 and 175.5 at 8192.
 
+## Run 4: Gemma 3 at 256 tokens, three rounds, four samples per cell and round
+
+Raw rows: [`run4-gemma-256.json`](scheduler-owned-state-decode-gb10-2026-11-23/run4-gemma-256.json).
+
+| model | P | B | main-a | main-b | branch | main range | branch range | null | branch | in range |
+|---|---|---|---|---|---|---|---|---|---|---|
+| gemma-3-1b-it-4bit | 256 | 1 | 184.8 | 182.2 | 183.3 | 171.1 to 186.5 | 176.2 to 186.3 | 1.4% | -0.1% | yes |
+| gemma-3-1b-it-4bit | 256 | 4 | 314.5 | 322.4 | 308.2 | 188.9 to 332.3 | 193.7 to 330.6 | 2.5% | -4.1% | yes |
+
+Twelve samples per arm, taken while the host carried more load than in runs 1 and 2 (every arm is about 5% slower at `B = 1` and 18% slower at `B = 4` than in run 2).
+
 ## Reading
 
-No cell shows a decode-rate change that survives a repeat. Run 1's `B = 1` gaps of 4% to 6% do not reappear with two to four times the samples: Gemma 3 at 256 tokens moves to -1.5% with a null of 0.2% and overlapping ranges, Gemma 3 at 8192 tokens to +2.1%, and Qwen 3.5 to +3.9% and -1.4% under a 2.3% to 2.7% null. The `B = 4` cells are within the null or the main range in every run they were quiet in.
+At `B = 1` no cell shows a change that survives a repeat. Run 1's gaps of 4% to 6% came from three samples per arm. With twelve, Gemma 3 at 256 tokens is at -0.1% under a 1.4% null, and Qwen 3.5 is at +3.9% and -1.4% under 2.3% to 2.7%. Gemma 3 at 8192 tokens is at -0.8% and +2.1% in its two runs.
 
-What these runs do not rule out is a difference under about 2%, which is the size of the null on this host today. The Gemma 3 256-token cells sit 1.5% to 2.6% below main in both runs. The branch does the same device work per step, and the host-side work it adds per forward is a hash lookup and, for Qwen 3.5, moving each layer's cache handle out of the pool's vector and back, so a gap of that size is more likely noise than cost. A quiet host would settle it.
+At `B = 4` Qwen 3.5 is at -0.1% and -0.3% in its one quiet run. Gemma 3 is not settled: its branch median is below the main median in every run, by 2.6%, 2.2% and 4.1% at 256 tokens and by 3.4% and 1.9% at 8192, against nulls of 1.0% to 2.5%. It is inside the range the main arms covered in four of those five cells, and the main arms themselves are 1% to 2.5% apart, so the size is uncertain, but the sign is the same five times. The branch does the same device work per step, and the host-side work it adds is a hash lookup per forward, so no cause is known. The acceptance line of the issue (every cell within the null spread) is met for `B = 1` and for Qwen 3.5 at `B = 4`, and not shown for Gemma 3 at `B = 4`. A quiet host is needed to say whether that is a cost of 2% to 3% or noise.
 
 ## Prompt-cache behaviour on real checkpoints
 
