@@ -1022,7 +1022,7 @@ impl QuantizedSwitchGLU {
         // This expert path runs affine `gather_qmm` only. A ModelOpt NVFP4
         // plane (no zero points, a stacked `inv_global_scale` multiplier) is
         // refused by name rather than as a missing `.biases` key (issue #2351).
-        for proj in ["gate_proj", "up_proj", "down_proj"] {
+        for proj in SWITCH_GLU_PLANES {
             let plane = format!("{prefix}.{proj}");
             if weights.contains_key(&format!("{plane}.inv_global_scale"))
                 || (weights.contains_key(&format!("{plane}.scales"))
@@ -1191,14 +1191,42 @@ impl FloatSwitchGLU {
     ) -> Result<Self, String> {
         let load = |proj: &str| -> Result<crate::models::switch_layers::SwitchLinear, String> {
             let plane = format!("{prefix}.{proj}");
+            // Zero-point biases with no scales are what a quantized export
+            // looks like after its `.scales` were lost; its packed integer
+            // weight would otherwise load here and abort in `gather_mm`.
+            if weights.contains_key(&format!("{plane}.biases")) {
+                return Err(format!(
+                    "{plane}: expert plane has quantization `.biases` but no `.scales`; a float \
+                     plane carries neither"
+                ));
+            }
             let linear = crate::models::switch_layers::SwitchLinear::from_weights(
                 weights,
                 &plane,
                 args.group_size(),
                 args.bits(),
             )?;
-            match linear {
-                crate::models::switch_layers::SwitchLinear::Regular { .. } => Ok(linear),
+            match &linear {
+                crate::models::switch_layers::SwitchLinear::Regular { weight } => {
+                    let dt = mlxcel_core::array_dtype(weight);
+                    if ![
+                        mlxcel_core::dtype::FLOAT16,
+                        mlxcel_core::dtype::BFLOAT16,
+                        mlxcel_core::dtype::FLOAT32,
+                    ]
+                    .contains(&dt)
+                    {
+                        return Err(format!(
+                            "{plane}: float expert plane has dtype {dt}; an unquantized plane \
+                             must be f16, bf16 or f32 (a packed quantized plane without \
+                             `.scales`?)"
+                        ));
+                    }
+                    Ok(linear)
+                }
+                // Reachable only through `SwitchLinear`'s per-expert stacking
+                // fallback (unstacked `experts.{e}.*.scales`), which sanitize
+                // normally stacks first.
                 _ => Err(format!(
                     "{plane}: expected a float expert plane (no `.scales`), but it loaded as \
                      quantized"
@@ -2162,6 +2190,45 @@ pub(crate) mod tests {
         for (a, b) in got.iter().zip(&got3) {
             assert!((a - b).abs() <= 1e-5 * a.abs().max(1.0), "{a} vs {b}");
         }
+    }
+
+    /// A quantized export that lost every `.scales` key must not load its
+    /// packed `uint32` planes as float weights (that would abort in
+    /// `gather_mm` at the first routed forward pass).
+    #[test]
+    fn float_switch_glu_refuses_planes_that_lost_their_scales() {
+        let _runtime = crate::initialize_runtime();
+        let (e, hidden, inter) = (2i32, 64i32, 64i32);
+        let plane =
+            |shape: &[i32]| quantized_triple(&ramp((e * inter * hidden) as usize), shape, 64, 4);
+        let mut with_biases = WeightMap::new();
+        let mut packed_only = WeightMap::new();
+        for (proj, shape) in [
+            ("gate_proj", [e, inter, hidden]),
+            ("up_proj", [e, inter, hidden]),
+            ("down_proj", [e, hidden, inter]),
+        ] {
+            let (w, _s, b) = plane(&shape);
+            packed_only.insert(format!("p.{proj}.weight"), mlxcel_core::copy(&w));
+            with_biases.insert(format!("p.{proj}.weight"), w);
+            with_biases.insert(format!("p.{proj}.biases"), b);
+        }
+        let err = match SwitchGLU::from_weights(&with_biases, &test_config_moe(), "p") {
+            Ok(_) => panic!("orphan `.biases` must be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("p.gate_proj") && err.contains("no `.scales`"),
+            "{err}"
+        );
+        let err = match SwitchGLU::from_weights(&packed_only, &test_config_moe(), "p") {
+            Ok(_) => panic!("a packed integer plane must be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("p.gate_proj") && err.contains("f16, bf16 or f32"),
+            "{err}"
+        );
     }
 
     #[test]
