@@ -115,6 +115,8 @@ mod qwen;
 mod qwen3_vision;
 #[path = "vlm_qwen4_exp.rs"]
 mod qwen4_exp;
+#[path = "vlm_qwen_image_policy.rs"]
+pub(crate) mod qwen_image_policy;
 #[path = "vlm_siglip.rs"]
 mod siglip;
 #[path = "vlm_smolvlm.rs"]
@@ -900,16 +902,20 @@ fn qwen_vl_processor_with_norm<T: QwenVisionConfigExt>(
     std: [f32; 3],
 ) -> anyhow::Result<vision::processors::qwen2_vl::Qwen2VLProcessor> {
     let video_config = qwen_video_processor_config(model_path)?;
-    Ok(
-        vision::processors::qwen2_vl::Qwen2VLProcessor::new_with_norm(
-            vision_config.patch_size(),
-            vision_config.temporal_patch_size(),
-            vision_config.spatial_merge_size(),
-            mean,
-            std,
-        )
-        .with_video_config(video_config),
+    let processor = vision::processors::qwen2_vl::Qwen2VLProcessor::new_with_norm(
+        vision_config.patch_size(),
+        vision_config.temporal_patch_size(),
+        vision_config.spatial_merge_size(),
+        mean,
+        std,
     )
+    .with_video_config(video_config);
+    // Every caller here is a Qwen3-VL-generation checkpoint whose sidecars
+    // state their own pixel bounds and resampler; HF resizes against those,
+    // and so does the XLA host preprocessor (#3290).
+    qwen_image_policy::QwenImageResizePolicy::read(model_path)
+        .and_then(|policy| policy.apply(processor))
+        .map_err(anyhow::Error::msg)
 }
 
 fn qwen_video_processor_config(

@@ -211,13 +211,14 @@ impl Qwen2VLProcessor {
 
     /// Override the checkpoint's resize bounds in pixels.
     ///
-    /// Most Qwen-VL checkpoints ship the family defaults, so their loaders take
-    /// [`DEFAULT_MIN_PIXELS`] / [`DEFAULT_MAX_PIXELS`]. Cohere Compass does not:
-    /// its `preprocessor_config.json` sets `size.shortest_edge` to 65536 and
-    /// `size.longest_edge` to 16777216, and reading them is what makes
+    /// Qwen2-VL / Qwen2.5-VL checkpoints ship the family defaults, so their
+    /// loaders take [`DEFAULT_MIN_PIXELS`] / [`DEFAULT_MAX_PIXELS`]. The
+    /// Qwen3-VL generation does not: its sidecars set `size.shortest_edge` to
+    /// 65536 and `size.longest_edge` to 16777216, and reading them is what makes
     /// `smart_resize` pick the same grid as the HF processor.
     ///
-    /// Used by: Cohere Compass / North-Micro-Vision.
+    /// Used by: the Qwen3-VL-generation loaders through the checkpoint resize
+    /// policy, Mage VL, CLEF.
     #[must_use]
     pub fn with_pixel_bounds(mut self, min_pixels: usize, max_pixels: usize) -> Self {
         self.min_pixels = min_pixels;
@@ -239,6 +240,12 @@ impl Qwen2VLProcessor {
     pub fn with_resize_filter(mut self, resize_filter: FilterType) -> Self {
         self.resize_filter = resize_filter;
         self
+    }
+
+    /// The image resampler this processor resizes with.
+    #[must_use]
+    pub fn resize_filter(&self) -> FilterType {
+        self.resize_filter
     }
 
     #[must_use]

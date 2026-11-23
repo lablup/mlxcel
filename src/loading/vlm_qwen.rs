@@ -566,12 +566,19 @@ pub(crate) fn load_qwen3_vl_iree_host_preprocessor(
         },
     )
     .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    // The IREE vision artifact was validated against HF's bicubic resize at the
+    // checkpoint's own bounds, so require both explicitly before building the
+    // processor; the eager loader applies the same policy through the shared
+    // helper, which keeps the two backends on one image grid (#3290).
     let processor_policy = load_qwen3_vl_processor_policy(model_path)?;
     let processor =
         qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?
-            .with_pixel_bounds(processor_policy.min_pixels, processor_policy.max_pixels)
-            .with_resize_filter(FilterType::CatmullRom);
+            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    debug_assert_eq!(
+        (processor.min_pixels, processor.max_pixels),
+        (processor_policy.min_pixels, processor_policy.max_pixels)
+    );
+    debug_assert_eq!(processor.resize_filter(), FilterType::CatmullRom);
     let projector = mlxcel_xla::IreeQwen3VlProjector::load(model_path, device)
         .map_err(HostPreprocessorError::Iree)?;
     Qwen3VlIreeHostPreprocessor::from_parts(
@@ -599,52 +606,17 @@ struct Qwen3VlProcessorPolicy {
 fn load_qwen3_vl_processor_policy(
     model_path: &Path,
 ) -> Result<Qwen3VlProcessorPolicy, HostPreprocessorError> {
-    let path = model_path.join("preprocessor_config.json");
-    let bytes = std::fs::read(&path).map_err(|error| {
-        HostPreprocessorError::InvalidConfig(format!("{}: {error}", path.display()))
-    })?;
-    let root: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-        HostPreprocessorError::InvalidConfig(format!("parse {}: {error}", path.display()))
-    })?;
-    let object = root.as_object().ok_or_else(|| {
-        HostPreprocessorError::InvalidConfig(format!("{} must contain an object", path.display()))
-    })?;
-    let size = match object.get("size") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(value) => Some(value.as_object().ok_or_else(|| {
-            HostPreprocessorError::InvalidConfig(
-                "Qwen3-VL preprocessor_config.json size must be an object".to_string(),
-            )
-        })?),
+    let policy = super::qwen_image_policy::QwenImageResizePolicy::read(model_path)
+        .map_err(HostPreprocessorError::InvalidConfig)?;
+    let (Some(min_pixels), Some(max_pixels)) = (policy.min_pixels, policy.max_pixels) else {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "Qwen3-VL preprocessor_config.json requires size.shortest_edge/min_pixels and \
+             size.longest_edge/max_pixels"
+                .to_string(),
+        ));
     };
-    let positive_bound = |nested: &str, fallback: &str| -> Result<usize, HostPreprocessorError> {
-        let value = size
-            .and_then(|size| size.get(nested))
-            .or_else(|| object.get(fallback))
-            .ok_or_else(|| {
-                HostPreprocessorError::InvalidConfig(format!(
-                    "Qwen3-VL preprocessor_config.json requires size.{nested} or {fallback}"
-                ))
-            })?;
-        value
-                .as_u64()
-                .and_then(|value| usize::try_from(value).ok())
-                .filter(|&value| value > 0)
-                .ok_or_else(|| {
-                    HostPreprocessorError::InvalidConfig(format!(
-                        "Qwen3-VL preprocessor_config.json size.{nested}/{fallback} must be a positive integer"
-                    ))
-                })
-    };
-    let min_pixels = positive_bound("shortest_edge", "min_pixels")?;
-    let max_pixels = positive_bound("longest_edge", "max_pixels")?;
-    if min_pixels > max_pixels {
-        return Err(HostPreprocessorError::InvalidConfig(format!(
-            "Qwen3-VL preprocessor pixel bounds are inverted: min={min_pixels}, max={max_pixels}"
-        )));
-    }
-    match object.get("resample").and_then(serde_json::Value::as_u64) {
-        Some(3) => {}
+    match policy.resample {
+        Some(super::qwen_image_policy::PIL_BICUBIC) => {}
         Some(other) => {
             return Err(HostPreprocessorError::InvalidConfig(format!(
                 "Qwen3-VL IREE vision requires PIL BICUBIC resample=3, got {other}"
