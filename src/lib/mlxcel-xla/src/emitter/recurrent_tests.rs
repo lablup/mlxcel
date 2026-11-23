@@ -307,23 +307,35 @@ fn mamba2_prefill_and_decode_emit_at_every_precision() {
     }
 }
 
-#[test]
-fn checkpoint_cross_check_bounds_every_ssm_dim() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let c = tiny();
-    let write = |shapes: &[(String, Vec<usize>)]| {
-        let mut header = serde_json::Map::new();
-        for (name, shape) in shapes {
-            header.insert(
-                name.clone(),
-                serde_json::json!({"dtype": "F32", "shape": shape, "data_offsets": [0, 0]}),
-            );
-        }
-        let text = serde_json::Value::Object(header).to_string();
-        let mut bytes = (text.len() as u64).to_le_bytes().to_vec();
-        bytes.extend_from_slice(text.as_bytes());
-        std::fs::write(dir.path().join("model.safetensors"), bytes).expect("write");
-    };
+/// Write a zero-filled F32 safetensors file whose header declares `shapes`
+/// with consistent data offsets. A shape too large to back with data (the
+/// hostile-dim cases) is declared with empty offsets instead.
+fn write_safetensors(path: &std::path::Path, shapes: &[(String, Vec<usize>)]) {
+    let mut header = serde_json::Map::new();
+    let mut offset = 0usize;
+    for (name, shape) in shapes {
+        let bytes = shape
+            .iter()
+            .try_fold(4usize, |acc, &dim| acc.checked_mul(dim))
+            .filter(|&bytes| bytes <= 1 << 20)
+            .unwrap_or(0);
+        header.insert(
+            name.clone(),
+            serde_json::json!({
+                "dtype": "F32", "shape": shape, "data_offsets": [offset, offset + bytes]
+            }),
+        );
+        offset += bytes;
+    }
+    let text = serde_json::Value::Object(header).to_string();
+    let mut bytes = (text.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.resize(bytes.len() + offset, 0);
+    std::fs::write(path, bytes).expect("write");
+}
+
+/// The tiny config's tensors, two layers, tied head.
+fn tiny_checkpoint_shapes() -> Vec<(String, Vec<usize>)> {
     let mut shapes: Vec<(String, Vec<usize>)> = vec![
         ("backbone.embeddings.weight".into(), vec![40, 16]),
         ("backbone.norm_f.weight".into(), vec![16]),
@@ -340,6 +352,141 @@ fn checkpoint_cross_check_bounds_every_ssm_dim() {
         }
         shapes.push((format!("{m}norm.weight"), vec![32]));
     }
+    shapes
+}
+
+/// `num_hidden_layers` sizes `layer_mixers` before any checkpoint is read, so
+/// an absurd count is refused at parse time, for Mamba2 and dense configs.
+#[test]
+fn config_parse_refuses_an_unbounded_layer_count() {
+    let max = super::config::MAX_CONFIG_LAYERS;
+    let at_cap = TINY_MAMBA2.replace(
+        r#""num_hidden_layers": 2"#,
+        &format!(r#""num_hidden_layers": {max}"#),
+    );
+    assert_eq!(
+        Config::from_json_str(&at_cap).expect("at the cap").n_layers,
+        max
+    );
+    let over = TINY_MAMBA2.replace(
+        r#""num_hidden_layers": 2"#,
+        &format!(r#""num_hidden_layers": {}"#, max + 1),
+    );
+    let error = Config::from_json_str(&over).expect_err("mamba2 over the cap");
+    assert!(error.contains("layers"), "{error}");
+    let dense = format!(
+        r#"{{"model_type":"llama","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":{},"num_attention_heads":4,"num_key_value_heads":2,
+            "rms_norm_eps":1e-5,"rope_theta":10000.0,"vocab_size":32}}"#,
+        max + 1
+    );
+    let error = Config::from_json_str(&dense).expect_err("dense over the cap");
+    assert!(error.contains("layers"), "{error}");
+}
+
+/// A header alone must not vouch for dims: every declared tensor has to be
+/// backed by `product(shape) * dtype` bytes of the file, or a few-KB
+/// checkpoint could pass the cross-check with any dims its config asks for.
+#[test]
+fn checkpoint_cross_check_refuses_headers_larger_than_their_data() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("model.safetensors");
+    let c = tiny();
+    write_safetensors(&path, &tiny_checkpoint_shapes());
+    c.validate_recurrent_checkpoint(dir.path())
+        .expect("a backed checkpoint");
+    // Truncate the data section: the header now claims more than the file has.
+    let full = std::fs::read(&path).expect("read");
+    std::fs::write(&path, &full[..full.len() - 4]).expect("truncate");
+    let error = c
+        .validate_recurrent_checkpoint(dir.path())
+        .expect_err("a header larger than its data");
+    assert!(error.contains("data_offsets"), "{error}");
+    // Empty offsets for a declared shape are refused too.
+    let text = String::from_utf8_lossy(&full[8..]).into_owned();
+    let start = text.find("\"data_offsets\":[").expect("offsets") + 16;
+    let end = start + text[start..].find(']').expect("close");
+    let mut bytes = full.clone();
+    let zero = format!("{:<width$}", "0,0", width = end - start);
+    bytes[8 + start..8 + end].copy_from_slice(zero.as_bytes());
+    std::fs::write(&path, &bytes).expect("rewrite");
+    let error = c
+        .validate_recurrent_checkpoint(dir.path())
+        .expect_err("empty offsets");
+    assert!(error.contains("data_offsets"), "{error}");
+}
+
+/// Shard names from the index go through the loader's plain-file-name rule:
+/// `..`, `/` and nested paths are refused before anything is opened.
+#[test]
+fn checkpoint_cross_check_refuses_index_shards_outside_the_model_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let c = tiny();
+    for hostile in [
+        "..",
+        "/",
+        "/etc/passwd",
+        "../model.safetensors",
+        "sub/x.safetensors",
+    ] {
+        let index = serde_json::json!({
+            "weight_map": {"backbone.embeddings.weight": hostile}
+        });
+        std::fs::write(
+            dir.path().join("model.safetensors.index.json"),
+            index.to_string(),
+        )
+        .expect("write index");
+        let error = c
+            .validate_recurrent_checkpoint(dir.path())
+            .expect_err("hostile shard name");
+        assert!(error.contains("plain file names"), "{hostile}: {error}");
+    }
+}
+
+/// `H*P` and `G*N` are each bounded by the checkpoint, but their product (the
+/// per-layer `ssm_h` state) is bounded only by this check: a narrow-hidden
+/// checkpoint of a few MB could otherwise ask for gigabytes of state.
+#[test]
+fn checkpoint_cross_check_bounds_the_state_by_the_in_proj() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // hidden 1, d_inner = expand = 64, H = 1, N = 64: in_proj [64+64+128+1, 1]
+    // holds 257 elements, the state 64 * 64 = 4096 per layer.
+    let text = r#"{
+      "model_type": "mamba2", "hidden_size": 1, "num_hidden_layers": 1,
+      "vocab_size": 4, "num_heads": 1, "head_dim": 64, "state_size": 64,
+      "n_groups": 1, "conv_kernel": 2, "expand": 64, "tie_word_embeddings": true
+    }"#;
+    let c = Config::from_json_str(text).expect("parses");
+    let m = "backbone.layers.0.mixer.";
+    let shapes: Vec<(String, Vec<usize>)> = vec![
+        ("backbone.embeddings.weight".into(), vec![4, 1]),
+        ("backbone.norm_f.weight".into(), vec![1]),
+        ("backbone.layers.0.norm.weight".into(), vec![1]),
+        (format!("{m}in_proj.weight"), vec![64 + 192 + 1, 1]),
+        (format!("{m}out_proj.weight"), vec![1, 64]),
+        (format!("{m}conv1d.weight"), vec![192, 1, 2]),
+        (format!("{m}conv1d.bias"), vec![192]),
+        (format!("{m}dt_bias"), vec![1]),
+        (format!("{m}A_log"), vec![1]),
+        (format!("{m}D"), vec![1]),
+        (format!("{m}norm.weight"), vec![64]),
+    ];
+    write_safetensors(&dir.path().join("model.safetensors"), &shapes);
+    let error = c
+        .validate_recurrent_checkpoint(dir.path())
+        .expect_err("state wider than the in_proj");
+    assert!(error.contains("state"), "{error}");
+}
+
+#[test]
+fn checkpoint_cross_check_bounds_every_ssm_dim() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let c = tiny();
+    let write = |shapes: &[(String, Vec<usize>)]| {
+        write_safetensors(&dir.path().join("model.safetensors"), shapes);
+    };
+    let shapes = tiny_checkpoint_shapes();
     write(&shapes);
     c.validate_recurrent_checkpoint(dir.path())
         .expect("matching checkpoint");

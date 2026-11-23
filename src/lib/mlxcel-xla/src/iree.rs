@@ -1988,31 +1988,7 @@ fn merge_gemma3n_name_scheme(
     }
 }
 
-/// Resolve one shard file name from `model.safetensors.index.json` inside
-/// `model_dir`. The index comes from an untrusted checkpoint, so a name must be
-/// a single plain file name: an absolute path, a `..` component or a nested
-/// path would let it point the loader at a file outside the model directory.
-/// This matches `validate_index_shards` in `mlxcel-core`.
-pub(crate) fn index_shard_path(
-    model_dir: &Path,
-    index: &Path,
-    file: &str,
-) -> Result<PathBuf, String> {
-    let relative = Path::new(file);
-    let plain = !file.contains('\0')
-        && matches!(
-            relative.components().collect::<Vec<_>>().as_slice(),
-            [std::path::Component::Normal(_)]
-        );
-    if !plain {
-        return Err(format!(
-            "{} names shard {file:?}; shard names must be plain file names inside the model \
-             directory",
-            index.display()
-        ));
-    }
-    Ok(model_dir.join(relative))
-}
+pub(crate) use crate::shard_path::index_shard_path;
 
 fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let index = model_dir.join("model.safetensors.index.json");

@@ -93,6 +93,7 @@ mod aux_smoke;
 mod auxiliary;
 #[cfg(feature = "iree")]
 mod iree;
+// Plain shard file names from an untrusted safetensors index (#3338).
 mod local_task;
 #[cfg(any(feature = "iree", test))]
 mod molmo2;
@@ -100,6 +101,8 @@ mod molmo2;
 mod molmo2_vision_runtime;
 #[cfg(feature = "iree")]
 mod molmo_vision_runtime;
+#[cfg(any(feature = "iree", test))]
+mod shard_path;
 // Always compiled: the emitter reads its workgroup-shape constants, and the
 // module itself has no IREE dependency. Without the runtime only the tests use it.
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]

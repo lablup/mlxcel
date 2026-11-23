@@ -281,6 +281,22 @@ pub struct SsmConfig {
 /// The prefill chunk length chosen by the #3337 lowering spike.
 pub(crate) const SSM_DEFAULT_CHUNK_SIZE: usize = 128;
 
+/// Largest `num_hidden_layers` a `config.json` may declare. The parser sizes
+/// `Config::layer_mixers` by it before any checkpoint is read, so an unbounded
+/// count from an untrusted config would be an allocation of that many bytes
+/// (issue #3338). Released models stay far below this (126 for Llama 3.1 405B).
+pub(crate) const MAX_CONFIG_LAYERS: usize = 1024;
+
+/// `n_layers` when it is within [`MAX_CONFIG_LAYERS`].
+pub(crate) fn check_layer_count(n_layers: usize) -> Result<usize, String> {
+    if n_layers > MAX_CONFIG_LAYERS {
+        return Err(format!(
+            "config.json declares {n_layers} layers; at most {MAX_CONFIG_LAYERS} are supported"
+        ));
+    }
+    Ok(n_layers)
+}
+
 impl SsmConfig {
     /// `d_inner = H * P`, the gated-norm and out_proj width.
     #[must_use]
@@ -903,7 +919,7 @@ impl Config {
         // head_dim is explicit in recent configs; otherwise it is hidden / heads.
         let mut head_dim = ou("head_dim").unwrap_or(hidden / n_q.max(1));
         // ExaOne 3.x uses `num_layers` in place of `num_hidden_layers`.
-        let n_layers = u_any(&["num_hidden_layers", "num_layers"])?;
+        let n_layers = check_layer_count(u_any(&["num_hidden_layers", "num_layers"])?)?;
         let declared_deepstack = match (
             v.get("deepstack_language_layer_indices"),
             v.get("deepstack_max_visual_positions"),

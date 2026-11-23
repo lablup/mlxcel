@@ -23,6 +23,7 @@
 
 use super::config::{
     Config, NormStyle, QuantConfig, RopeScaling, SSM_DEFAULT_CHUNK_SIZE, SsmConfig, WeightScheme,
+    check_layer_count,
 };
 
 /// The token mixer of one layer. Later units add more recurrent kinds.
@@ -277,7 +278,7 @@ pub(super) fn mamba2_from_json(
         ));
     }
     let hidden = usize_key(&["hidden_size"])?;
-    let n_layers = usize_key(&["num_hidden_layers"])?;
+    let n_layers = check_layer_count(usize_key(&["num_hidden_layers"])?)?;
     let vocab = usize_key(&["vocab_size"])?;
     let n_heads = usize_key(&["num_heads"])?;
     let head_dim = usize_key(&["head_dim"])?;

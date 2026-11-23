@@ -74,7 +74,11 @@ def build_synthetic(out: Path, seed: int) -> Path:
 def hf_logits(model_dir: Path, tokens: list[int]) -> np.ndarray:
     from transformers import Mamba2ForCausalLM
 
-    model = Mamba2ForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float32).eval()
+    # safetensors only: a pickled `pytorch_model.bin` in an untrusted
+    # checkpoint directory must not be unpickled.
+    model = Mamba2ForCausalLM.from_pretrained(
+        model_dir, torch_dtype=torch.float32, use_safetensors=True
+    ).eval()
     with torch.no_grad():
         logits = model(torch.tensor([tokens])).logits[0, -1]
     return logits.float().numpy()
@@ -142,9 +146,9 @@ def main() -> int:
     run = run_xla(args, model_dir, tokens, out)
     want = hf_logits(model_dir, tokens)
     results = [
-        compare("whole", np.load(out / "logits.npy"), want),
-        compare("split", np.load(out / "logits_split.npy"), want),
-        compare("decode", np.load(out / "logits_decode.npy"), want),
+        compare("whole", np.load(out / "logits.npy", allow_pickle=False), want),
+        compare("split", np.load(out / "logits_split.npy", allow_pickle=False), want),
+        compare("decode", np.load(out / "logits_decode.npy", allow_pickle=False), want),
     ]
     passed = all(r["max_abs"] < args.tol and r["argmax"] == r["hf_argmax"] for r in results)
     report = {"model": str(model_dir), "run": run, "results": results, "passed": passed}
