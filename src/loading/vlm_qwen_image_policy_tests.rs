@@ -219,3 +219,31 @@ fn malformed_or_inverted_bounds_fail_closed() {
         "{size_not_object}"
     );
 }
+
+#[test]
+fn oversized_sidecar_bounds_are_rejected() {
+    let huge = read(&[(
+        "preprocessor_config.json",
+        r#"{"size": {"shortest_edge": 65536, "longest_edge": 4000000000000}}"#,
+    )])
+    .unwrap_err();
+    assert!(huge.contains("exceed"), "{huge}");
+    let huge_min = read(&[(
+        "preprocessor_config.json",
+        r#"{"min_pixels": 4000000000000}"#,
+    )])
+    .unwrap_err();
+    assert!(huge_min.contains("exceed"), "{huge_min}");
+}
+
+#[test]
+fn smart_resize_does_not_overflow_on_huge_inputs() {
+    use crate::vision::processors::qwen2_vl::Qwen2VLProcessor;
+    let processor = Qwen2VLProcessor::new(14, 2, 2);
+    let (h, w) = processor.smart_resize(u32::MAX, u32::MAX);
+    assert!(h > 0 && w > 0);
+    let tiny = processor
+        .with_pixel_bounds(1 << 28, 1 << 28)
+        .smart_resize(1, 1);
+    assert!(tiny.0 > 0 && tiny.1 > 0);
+}

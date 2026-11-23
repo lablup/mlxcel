@@ -42,6 +42,11 @@ use crate::vision::processors::qwen2_vl::{
 /// PIL `Image.BICUBIC`, the HF default resampler for the Qwen-VL processors.
 pub(crate) const PIL_BICUBIC: u64 = 3;
 
+/// Largest pixel bound a checkpoint may state (16384 x 16384). Real
+/// checkpoints use 16777216 at most; anything above this would let a crafted
+/// sidecar force every image to an allocation-exhausting size.
+pub(crate) const MAX_SIDECAR_PIXEL_BOUND: usize = 1 << 28;
+
 /// Resize policy resolved from a checkpoint's processor sidecars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct QwenImageResizePolicy {
@@ -92,6 +97,11 @@ impl QwenImageResizePolicy {
             has_sidecar: nested.is_some() || standalone.is_some(),
         };
         let (min, max) = policy.pixel_bounds();
+        if min > MAX_SIDECAR_PIXEL_BOUND || max > MAX_SIDECAR_PIXEL_BOUND {
+            return Err(format!(
+                "Qwen-VL image processor pixel bounds exceed {MAX_SIDECAR_PIXEL_BOUND}: min={min}, max={max}"
+            ));
+        }
         if min > max {
             return Err(format!(
                 "Qwen-VL image processor pixel bounds are inverted: min={min}, max={max}"
