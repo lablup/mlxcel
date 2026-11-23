@@ -47,18 +47,6 @@
 //! Used by: `tokenizer::MlxcelTokenizer`, `server::chat_template`,
 //! `server::thinking_budget`, `server::tool_calls::stream_filter`.
 
-/// Multi-token think and tool-call markers resolved from a tokenizer's vocab.
-///
-/// Each field holds the **token-id sequence** that materializes the marker in
-/// the model's tokenizer.  Single-token markers are length-1 sequences; the
-/// `<|channel>thought` Gemma 4 path produces a multi-token sequence.  An
-/// empty sequence (or two `None` halves) means the model has no marker of
-/// that kind.
-///
-/// The string forms (`think_start`, `think_end`, …) are kept alongside the
-/// id sequences so callers that operate on raw text (e.g. the stream filter
-/// or chat-template `enable_thinking` defaulting logic) do not need a second
-/// round-trip through the tokenizer.
 /// Reasoning-effort variants of a resolved single-token think pair, keyed by
 /// the pair's open marker.
 ///
@@ -79,6 +67,18 @@ pub const THINK_EFFORT_VARIANTS: &[(&str, &[(&str, &str)])] = &[(
     ],
 )];
 
+/// Multi-token think and tool-call markers resolved from a tokenizer's vocab.
+///
+/// Each field holds the **token-id sequence** that materializes the marker in
+/// the model's tokenizer.  Single-token markers are length-1 sequences; the
+/// `<|channel>thought` Gemma 4 path produces a multi-token sequence.  An
+/// empty sequence (or two `None` halves) means the model has no marker of
+/// that kind.
+///
+/// The string forms (`think_start`, `think_end`, …) are kept alongside the
+/// id sequences so callers that operate on raw text (e.g. the stream filter
+/// or chat-template `enable_thinking` defaulting logic) do not need a second
+/// round-trip through the tokenizer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ThinkingMarkers {
     /// Literal text of the open think marker (`"<think>"`,
