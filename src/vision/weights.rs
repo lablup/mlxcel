@@ -252,8 +252,8 @@ pub(crate) fn resolve_param_quantization(
 /// Used by: Gemma4 and Gemma4-Unified; Step3p7; Llama4; Molmo, Molmo2 and
 /// MolmoPoint; Jina-VLM; InternVL; DeepSeek-VL2 and DeepSeek-OCR; Moondream;
 /// MoonViT3D; Nemotron-H Nano Omni; Idefics2; Hunyuan-VL framing; Granite and
-/// Granite4 Vision; DINOv2; RF-DETR; SAM3, SAM3.1 and SAM3D Body; and the
-/// shared Molmo/Jina text embedding loader.
+/// Granite4 Vision; DINOv2; RF-DETR; SAM3, SAM3.1 and SAM3D Body; Inkling 2;
+/// and the shared Molmo/Jina text embedding loader.
 pub(crate) fn load_dense_param(
     weights: &WeightMap,
     key: &str,

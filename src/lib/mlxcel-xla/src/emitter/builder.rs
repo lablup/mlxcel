@@ -166,7 +166,7 @@ pub fn resolve_precision(device: &str) -> Precision {
 /// cannot lower there (issue #612). Every other device / precision pair lowers: bf16
 /// is fine on CUDA and the CPU (`local-task` / `local-sync`) targets, and f16 / f32
 /// lower everywhere. Pure (no env), so the guard logic is unit-testable directly.
-fn precision_lowers_on(device: &str, precision: Precision) -> bool {
+pub(crate) fn precision_lowers_on(device: &str, precision: Precision) -> bool {
     !(device == "metal" && precision == Precision::Bf16)
 }
 
@@ -1121,6 +1121,21 @@ impl Builder {
         let r = self.fresh();
         self.line(format!(
             "{} = stablehlo.convert {} : ({}) -> {}",
+            r,
+            x.name,
+            x.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
+    /// Reinterpret the bits of `x` as `elt` (`stablehlo.bitcast_convert`), for
+    /// same-width types such as `f32` <-> `ui32`.
+    pub fn bitcast_convert(&mut self, x: &Val, elt: &'static str) -> Val {
+        let ty = Ty::new(x.ty.shape.clone(), elt);
+        let r = self.fresh();
+        self.line(format!(
+            "{} = stablehlo.bitcast_convert {} : ({}) -> {}",
             r,
             x.name,
             x.ty.render(),
