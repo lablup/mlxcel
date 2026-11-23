@@ -151,3 +151,96 @@ fn mismatched_checkpoints_are_refused() {
     assert!(err.contains("state_cache"), "{err}");
     model.release_sequence_state_by_id(target);
 }
+
+/// Qwen 3.5 is scheduler-owned (issue #3254): its table, its pool state and
+/// its snapshot vocabulary, and the bare model refuses a sequence id on the
+/// `KVCache`-slice entry.
+#[test]
+fn qwen35_is_scheduler_owned() {
+    use mlxcel_core::cache::{LayerState, LayerStateKind, SequenceStateBackend};
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = pooled_two_layer_model();
+    assert_eq!(
+        model.sequence_state_layout().backend,
+        SequenceStateBackend::SchedulerOwned
+    );
+    assert_eq!(
+        model.layer_state_kinds(),
+        Some(vec![LayerStateKind::Recurrent, LayerStateKind::Full])
+    );
+    let state = model.make_layer_state().expect("layer state");
+    let [LayerState::Recurrent(recurrent), LayerState::Kv(_)] = state.as_slice() else {
+        panic!("a GatedDeltaNet layer then a full-attention layer");
+    };
+    assert_eq!(
+        recurrent.names().collect::<Vec<_>>(),
+        vec!["conv_state", "state_cache"]
+    );
+    assert_eq!(
+        model.layer_state_snapshot_spec().map(|spec| spec.family),
+        Some("qwen3_5")
+    );
+    assert!(model.supports_snapshot_reuse());
+
+    let bare: &Qwen35Model = &model;
+    let input = mlxcel_core::from_slice_i32(&[1, 2], &[1, 2]);
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bare.forward_with_sequence_id(&input, Some(SequenceId::from_raw(3_254_900)), &mut [], None)
+    }));
+    assert!(refused.is_err(), "a sequence id must go through the pool");
+}
+
+/// The acceptance check of #3254 for Qwen 3.5: prefill in two pieces,
+/// snapshot through the generic path, restore into a fresh pool sequence and
+/// decode 16 tokens. Every step equals a cold run prefilled with the same
+/// partition, bit for bit. A recurrent state cannot be cut back, so a whole
+/// snapshot never truncates.
+#[test]
+fn a_whole_snapshot_round_trips_bit_for_bit() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = pooled_two_layer_model();
+    for (case, partition) in [[5usize, 4], [200, 100]].into_iter().enumerate() {
+        let tokens = prompt(partition[0] + partition[1]);
+        let base = 3_254_000 + case as u64 * 10;
+        let prefill = |seq: SequenceId| {
+            model.prepare_sequence_state(seq);
+            let _ = forward(&model, seq, &tokens[..partition[0]]);
+            let _ = forward(&model, seq, &tokens[partition[0]..]);
+        };
+        let decode = |seq: SequenceId| -> Vec<Vec<u8>> {
+            (0..16)
+                .map(|step| bytes(&forward(&model, seq, &[(step * 3 + 1) % 8])))
+                .collect()
+        };
+        let (source, cold, restored) = (
+            SequenceId::from_raw(base),
+            SequenceId::from_raw(base + 1),
+            SequenceId::from_raw(base + 2),
+        );
+        prefill(source);
+        let snapshot = model
+            .snapshot_sequence_state(source, tokens.len())
+            .expect("whole snapshot");
+        assert_eq!(snapshot.family(), "qwen3_5");
+        assert!(snapshot.tensor("layer0.linear.conv_state").is_some());
+        assert!(snapshot.tensor("layer1.attention.keys").is_some());
+        assert!(!model.snapshot_truncatable_to(&snapshot, partition[0]));
+
+        prefill(cold);
+        let want = decode(cold);
+        model
+            .restore_sequence_state(restored, &snapshot)
+            .expect("restore");
+        let got = decode(restored);
+        for (step, (w, g)) in want.iter().zip(&got).enumerate() {
+            assert!(
+                w == g,
+                "partition {partition:?}: step {step} after the restore differs from the cold run"
+            );
+        }
+        for seq in [source, cold, restored] {
+            model.release_sequence_state_by_id(seq);
+        }
+    }
+}

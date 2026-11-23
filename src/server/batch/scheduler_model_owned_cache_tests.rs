@@ -305,13 +305,13 @@ pub(super) fn prompt(n: usize) -> Vec<i32> {
 /// allocated backend is exactly the thing that lies, and the layout override
 /// is a server-config artifact that never consults the model.
 #[test]
-fn paged_override_does_not_change_the_model_owned_natural_backend() {
+fn paged_override_does_not_change_the_scheduler_owned_natural_backend() {
     let mut sched = scheduler(test_store());
 
     assert_eq!(
         sched.engine.model().sequence_state_layout().backend,
-        SequenceStateBackend::ModelOwned,
-        "Gemma 3 keeps its K/V in ModelOwnedSequenceState"
+        SequenceStateBackend::SchedulerOwned,
+        "Gemma 3 keeps its K/V in the pool entry's layer state (issue #3254)"
     );
     assert!(matches!(
         sched.sequence_state_layout_override(),
@@ -333,6 +333,11 @@ fn paged_override_does_not_change_the_model_owned_natural_backend() {
     assert!(
         set.caches.is_empty(),
         "yet the sequence carries no per-layer K/V: the block table is shadow accounting"
+    );
+    assert_eq!(
+        set.layer_state().map(<[_]>::len),
+        Some(sched.engine.model().num_layers()),
+        "the real state is the layer state, present whatever backend was allocated"
     );
 }
 

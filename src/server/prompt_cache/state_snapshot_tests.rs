@@ -40,8 +40,17 @@ const QWEN35: LayerStateSnapshotSpec = LayerStateSnapshotSpec {
     encoding: LayerStateEncoding::Hybrid,
 };
 
+/// `[1, 2, n, 3]` rows whose values depend on the head, the row and the
+/// column but not on `n`, so a prefix of a longer fill equals a shorter fill.
 fn rows(n: i32, base: f32) -> UniquePtr<MlxArray> {
-    let data: Vec<f32> = (0..n * 2 * 3).map(|i| base + i as f32).collect();
+    let mut data = Vec::with_capacity((n * 2 * 3) as usize);
+    for head in 0..2 {
+        for row in 0..n {
+            for col in 0..3 {
+                data.push(base + (head * 100 + row * 3 + col) as f32);
+            }
+        }
+    }
     mlxcel_core::from_slice_f32(&data, &[1, 2, n, 3])
 }
 
