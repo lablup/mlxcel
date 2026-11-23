@@ -190,9 +190,16 @@ impl StatePolicy {
                 }
                 _ => return Err(self.unsupported(layer_idx, layer)),
             }
-            check_kv_tensors(layer).map_err(|err| format!("{} {prefix}: {err}", self.label()))?;
+            self.check_restored_layer(layer, &prefix)?;
         }
         Ok(fresh)
+    }
+
+    /// [`check_kv_tensors`] with the layer named in the error. Every restore
+    /// (whole, truncated and from a checkpoint) runs it on every layer before
+    /// the state is installed.
+    fn check_restored_layer(&self, layer: &LayerState, prefix: &str) -> Result<(), String> {
+        check_kv_tensors(layer).map_err(|err| format!("{} {prefix}: {err}", self.label()))
     }
 
     /// Whether `snapshot` can be restored covering only its first
@@ -314,7 +321,7 @@ impl StatePolicy {
                 )?;
                 for (layer_idx, layer) in fresh.iter_mut().enumerate() {
                     let prefix = format!("layer{layer_idx}");
-                    match layer {
+                    match &mut *layer {
                         LayerState::Kv(cache) => kv_ring_checkpoint::restore_standard_from_donor(
                             cache, donor, &prefix, target, names,
                         )?,
@@ -326,6 +333,7 @@ impl StatePolicy {
                         LayerState::Empty => {}
                         other => return Err(self.unsupported(layer_idx, other)),
                     }
+                    self.check_restored_layer(layer, &prefix)?;
                 }
             }
             None => {
@@ -342,7 +350,7 @@ impl StatePolicy {
                     let prefix = format!("layer{layer_idx}");
                     let (keep, have) =
                         hybrid_snapshot::checkpoint_lengths(checkpoint, donor, &prefix)?;
-                    match layer {
+                    match &mut *layer {
                         LayerState::Recurrent(state) => {
                             hybrid_snapshot::require_checkpoint_fields(
                                 checkpoint,
@@ -357,6 +365,7 @@ impl StatePolicy {
                         LayerState::Empty => {}
                         other => return Err(self.unsupported(layer_idx, other)),
                     }
+                    self.check_restored_layer(layer, &prefix)?;
                 }
             }
         }
@@ -366,12 +375,18 @@ impl StatePolicy {
 
 /// The restored keys and values of an attention layer must be one pair: both
 /// present or both absent, rank 4, the same dtype and the same batch, head
-/// and row counts. A snapshot that fails this was not written by this layer's
-/// encoder.
+/// and row counts. A full layer's buffer must also hold at least `offset`
+/// rows, since attention reads its first `offset` rows (a ring's offset counts
+/// every token it has seen, so it is not bounded by its rows). A snapshot that
+/// fails this was not written by this layer's encoder.
 fn check_kv_tensors(layer: &LayerState) -> Result<(), String> {
-    let (keys, values) = match layer {
-        LayerState::Kv(cache) => (cache.keys.as_deref(), cache.values.as_deref()),
-        LayerState::Rotating(cache) => (cache.keys.as_deref(), cache.values.as_deref()),
+    let (keys, values, full_offset) = match layer {
+        LayerState::Kv(cache) => (
+            cache.keys.as_deref(),
+            cache.values.as_deref(),
+            Some(cache.offset),
+        ),
+        LayerState::Rotating(cache) => (cache.keys.as_deref(), cache.values.as_deref(), None),
         _ => return Ok(()),
     };
     let (keys, values) = match (keys, values) {
@@ -395,6 +410,14 @@ fn check_kv_tensors(layer: &LayerState) -> Result<(), String> {
     if k_dtype != v_dtype {
         return Err(format!(
             "keys dtype {k_dtype} and values dtype {v_dtype} differ"
+        ));
+    }
+    if let Some(offset) = full_offset
+        && k_shape[2] < offset
+    {
+        return Err(format!(
+            "{} rows of keys cannot cover an offset of {offset}",
+            k_shape[2]
         ));
     }
     Ok(())

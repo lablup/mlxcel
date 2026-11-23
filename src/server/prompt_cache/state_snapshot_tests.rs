@@ -495,3 +495,70 @@ fn a_hybrid_restores_whole_and_from_a_checkpoint_but_never_truncates() {
         .expect("foreign checkpoint");
     assert!(err.contains("into Qwen 3.5"), "{err}");
 }
+
+/// `donor` with its attention keys and values replaced by `keys` and `values`.
+fn with_attention(
+    donor: &ModelStateSnapshot,
+    keys: &MlxArray,
+    values: &MlxArray,
+) -> ModelStateSnapshot {
+    let mut forged = donor
+        .subset(|name| !name.ends_with(".attention.keys") && !name.ends_with(".attention.values"));
+    forged.push_tensor("layer1.attention.keys", keys);
+    forged.push_tensor("layer1.attention.values", values);
+    forged
+}
+
+/// Every restore validates the attention tensors it installs, the checkpoint
+/// restore included: a donor whose keys and values are not one pair, or hold
+/// fewer rows than the restored offset, is a named error, never a state.
+#[test]
+fn every_restore_refuses_attention_tensors_that_do_not_fit() {
+    let policy = StatePolicy::new(QWEN35, hybrid_kinds());
+    let boundary = policy.snapshot(&filled_hybrid(3), 3).unwrap().unwrap();
+    let donor = policy.snapshot(&filled_hybrid(5), 5).unwrap().unwrap();
+    let checkpoint = policy.state_checkpoint(&boundary).expect("checkpoint");
+
+    // Values of another head count than the keys.
+    let values = mlxcel_core::from_slice_f32(&[0.0; 5 * 3], &[1, 1, 5, 3]);
+    let mismatched = with_attention(&donor, &rows(5, 1.0), &values);
+    let err = policy
+        .restore(fresh_hybrid(), &mismatched)
+        .err()
+        .expect("whole restore of a mismatched pair");
+    assert!(err.contains("not one [B, H, T, D] pair"), "{err}");
+    let err = policy
+        .restore_from_checkpoint(fresh_hybrid(), &checkpoint, &mismatched)
+        .err()
+        .expect("checkpoint restore over a mismatched pair");
+    assert!(
+        err.contains("Qwen 3.5 layer1") && err.contains("not one [B, H, T, D] pair"),
+        "{err}"
+    );
+
+    // Two rows behind a five-token donor and a three-token checkpoint.
+    let short = with_attention(&donor, &rows(2, 1.0), &rows(2, 2.0));
+    let err = policy
+        .restore(fresh_hybrid(), &short)
+        .err()
+        .expect("whole restore of too few rows");
+    assert!(
+        err.contains("2 rows of keys cannot cover an offset of 5"),
+        "{err}"
+    );
+    let err = policy
+        .restore_from_checkpoint(fresh_hybrid(), &checkpoint, &short)
+        .err()
+        .expect("checkpoint restore over too few rows");
+    assert!(
+        err.contains("2 rows of keys cannot cover an offset of 3"),
+        "{err}"
+    );
+
+    // The well-formed pair still restores.
+    assert!(
+        policy
+            .restore_from_checkpoint(fresh_hybrid(), &checkpoint, &donor)
+            .is_ok()
+    );
+}
