@@ -51,6 +51,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use std::path::Path;
 
 use super::deepseek_v3::DeepSeekV3Attention;
+use super::mla_rope::MlaRope;
 
 #[path = "youtu_vl_lm_config.rs"]
 mod youtu_vl_lm_config;
@@ -165,9 +166,18 @@ impl YoutuDecoderLayer {
         // The shared MLA attention defaults to the interleaved pair layout that
         // every DeepSeek backbone uses; Youtu carries the choice in its config,
         // so the flag has to reach the rope call rather than being assumed.
-        let self_attn =
-            DeepSeekV3Attention::from_weights(weights, &ds_cfg, &format!("{}.self_attn", prefix))?
-                .with_rope_traditional(config.rope_is_interleaved());
+        //
+        // The rotation stays plain `fast_rope` at `rope_theta`:
+        // `validate_rope_scaling` only admits a block that reduces to the
+        // identity, so the YaRN table the shared attention would resolve from
+        // it is not built (#3295).
+        let self_attn = DeepSeekV3Attention::from_weights_with_rope(
+            weights,
+            &ds_cfg,
+            &format!("{}.self_attn", prefix),
+            MlaRope::plain(ds_cfg.qk_rope_head_dim, ds_cfg.rope_theta),
+        )?
+        .with_rope_traditional(config.rope_is_interleaved());
 
         let mlp = YoutuMLP::from_weights(weights, config, &format!("{}.mlp", prefix))?;
 

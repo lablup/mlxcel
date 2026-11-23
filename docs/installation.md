@@ -41,7 +41,7 @@ opt-in seams, diagnostics harnesses, or test scaffolding.
 | `xla-diagnostics` | off | Test-only forwarding for Gemma3n intermediate oracle validation. Its pinned reference is the production CUDA runtime, so it enables `cuda` on top of `xla-diagnostics-cpu`. Gates the `xla_llava_reference_check` and `xla_vision_reference_check` examples. Not part of `xla-iree`; production bundles are unchanged. |
 | `xla-diagnostics-cpu` | off | `xla-iree` plus `mlxcel-xla/diagnostics`: the CPU-only companion for bounded host-reference checks on machines without a CUDA driver. Gates the `xla_qwen25_vl_window_check`, `xla_qwen3_vl_deepstack_check`, `xla_youtu_vl_reference_check`, `xla_gemma3n_audio_reference_check`, and `xla_gemma3n_sscp_conv_oracle` examples. Deliberately does not replace the qualified `xla-diagnostics` production-target gate. |
 | `xla-diagnostics-rocm` | off | `rocm` plus `xla-diagnostics-cpu`: the ROCm-backed companion for production AMD GPU intermediate oracle validation. |
-| `xla-micro-oracle` | off | `xla-iree` plus `mlxcel-xla/micro-oracle`: the CPU-capable bounded MLX/IREE operator-oracle harness. Gates the `xla_numeric_probe` example. CUDA-specific production probes may add `cuda`, but the shared report and comparison layer does not require it. |
+| `xla-micro-oracle` | off | `xla-iree` plus `mlxcel-xla/micro-oracle`: the CPU-capable bounded MLX/IREE operator-oracle harness. Gates the `xla_numeric_probe` example (canonical Rust references, local CPU). With `cuda` added it also gates `xla_mlx_micro_oracle`, which runs each operator's operands through the production MLX CUDA operation and the emitted IREE operation on the IREE `cuda` target and prints `production-mlx` reports carrying the MLX revision and overlay digest, `MLX_ENABLE_TF32`, the compiled CUDA architectures, the IREE compiler and runtime identity, and the first divergent coordinate (#3212). The shared report and comparison layer does not require `cuda`. |
 | `test-utils` | off | Test-only helpers. Required to build the `distributed_integration`, `pipeline_e2e`, and `paged_handoff_parity` integration tests (`cargo test --features test-utils`). Not needed for the binaries. |
 | `voicechat-mic` | off | Live microphone and speaker client for the Nemotron VoiceChat `/v1/realtime` endpoint (issue #1376). Compiles the `cpal` audio-device crate for `cargo run --example voicechat_microphone --features voicechat-mic` only, never for the library, the server, or CI; see [Nemotron VoiceChat](nemotron-voicechat.md). |
 
@@ -87,6 +87,45 @@ At runtime, select the backend with `MLXCEL_BACKEND=xla` and tune it with the
 [Environment variables](environment-variables.md#openxla--stablehlo-backend-variables)
 for the full list and [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)
 for the design.
+
+Compiled artifacts (IREE VMFBs for the text bundles and the vision and audio
+towers, the ROCm tuning spec, and the native GEMV code objects) are cached
+per user under `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/xla/<cache>`
+(`vmfb`, `vision`, `qwen2-vl`, `qwen3-vl`, `molmo-vision`, `molmo2-vision`,
+`youtu-vl`, `gemma3n-audio`, `qmv4`), so a second load of the same graph skips
+the compile. Earlier releases kept them under the shared temp directory
+(`/tmp/mlxcel-xla-*`), where another local user could plant a VMFB, which is
+native code on a CPU target (#3248). A cached artifact is loaded only when the
+cache root, `xla`, and the cache directory are real directories owned by the
+current user without group or other write access, the artifact is a regular
+file with the same properties, and every directory above the cache root up to
+`/` is a real directory owned by the current user or root that no other user
+can write. A root-owned sticky directory such as `/tmp` passes. A
+group-writable directory above the root (for example `~/.cache` created under
+a `umask` of `002`) passes only on Linux and only when all of these hold: its
+group is the process's effective group and it is not other-writable;
+`/etc/nsswitch.conf` lists only `files`, `systemd` or `compat` for `passwd`
+and `group`, and for `initgroups` if it is present (a missing or unreadable
+file, or any other source such as `sss`, `ldap`, `nis` or `winbind`, fails
+the check). The file is read as glibc reads it: the colon after the database
+name is optional, and because a later line overrides an earlier one, every
+line naming one of these databases must be local, and a line that cannot be
+parsed refuses. A `+` or `-` compat line in `/etc/passwd` or `/etc/group`,
+with or without leading white space, also refuses. Every `/etc/group`
+entry for that gid has no member besides the current user; and no other
+`/etc/passwd` account has that gid as its primary group. These files are read
+once per process. Otherwise that directory is refused with a message naming
+it and the fix: `chmod g-w <path>`, or set `MLXCEL_CACHE_DIR` to a private
+directory. mlxcel creates its cache directories with mode `0700` and its files
+with mode `0600`, removes group write from the directories it manages (and
+from the cache root when `MLXCEL_CACHE_DIR` is unset), and never changes
+anything above the root. When a check fails, stderr gets one `[mlxcel-xla]
+refusing the compiled-artifact cache at <path>: <reason>` line and the graph
+is compiled into a fresh private `mlxcel-xla-XXXXXX` directory under the temp
+directory instead, so the load still works but pays the compile (that
+directory is not removed at exit). To clear the cache, delete
+`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/xla`; the old `/tmp/mlxcel-xla-*`
+directories are no longer read and can be deleted.
 
 ## macOS on Apple Silicon
 

@@ -20,6 +20,9 @@
 //! Full intermediate comparisons remain diagnostic; the pinned #874 projection
 //! prefix is the qualified acceptance boundary.
 
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
+
 use std::path::PathBuf;
 
 use mlxcel::LoadedModel;
@@ -112,6 +115,7 @@ fn print_comparison(label: &str, comparison: &Comparison, width: usize) {
 }
 
 fn main() -> Result<(), String> {
+    mlx_reference_policy::pin_mlx_tf32_disabled()?;
     let model_dir = PathBuf::from(
         std::env::var_os("MLXCEL_PHI4MM_MODEL")
             .ok_or("set MLXCEL_PHI4MM_MODEL to the pinned official checkpoint")?,

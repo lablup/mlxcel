@@ -476,3 +476,59 @@ fn longcat_flash_ngram_neighbor_num_one_fails_to_load() {
         .expect("emb_neighbor_num 1 must be refused");
     assert!(err.contains("emb_neighbor_num"), "{err}");
 }
+
+/// [`tiny_model`] with a YaRN block whose original context (4) the
+/// 11-token fixture runs well past.
+fn tiny_yarn_model(model_type: &str) -> LongcatFlashNgramModel {
+    let mut args = tiny_config(model_type);
+    args.rope_scaling = Some(
+        serde_json::from_str(
+            r#"{"rope_type": "yarn", "factor": 10, "original_max_position_embeddings": 4,
+                "beta_fast": 32, "beta_slow": 1, "mscale": 1, "mscale_all_dim": 1}"#,
+        )
+        .expect("yarn block"),
+    );
+    let weights = tiny_weights(&args, KV_LORA, mlxcel_core::dtype::FLOAT32);
+    let weights = sanitize_weights(weights, &args).expect("sanitize tiny longcat weights");
+    LongcatFlashNgramModel::from_weights(&weights, &args).expect("build tiny longcat")
+}
+
+/// Before #3295 the ngram MLA rotated with plain frequencies whatever its
+/// `rope_scaling` said (`longcat-flash-lite` ships YaRN `factor` 10 over
+/// 32768). Every attention now carries the table, the logits past the
+/// original context change, and incremental decode still reproduces the
+/// full forward with it.
+#[test]
+fn longcat_flash_ngram_yarn_block_reaches_every_attention() {
+    let plain = tiny_model("longcat_flash_ngram");
+    let yarn = tiny_yarn_model("longcat_flash_ngram");
+    for layer in &plain.layers {
+        assert!(layer.self_attn.iter().all(|a| a.rope.freqs().is_none()));
+    }
+    for layer in &yarn.layers {
+        assert!(layer.self_attn.iter().all(|a| a.rope.freqs().is_some()));
+    }
+
+    let _ = plain.make_caches();
+    let a = plain.forward(&ids(&TOKENS), &mut [], None);
+    let _ = yarn.make_caches();
+    let full = yarn.forward(&ids(&TOKENS), &mut [], None);
+    let last = TOKENS.len() as i32 - 1;
+    assert!(
+        max_abs_diff(&row(&a, last), &row(&full, last)) > 1e-4,
+        "the YaRN table must change the logits past the original context"
+    );
+
+    let _ = yarn.make_caches();
+    let mut worst = 0.0f32;
+    let mut pos = 0usize;
+    for piece in [3usize, 2, 1, 1, 1, 1, 1, 1] {
+        let out = yarn.forward(&ids(&TOKENS[pos..pos + piece]), &mut [], None);
+        for j in 0..piece {
+            let diff = max_abs_diff(&row(&out, j as i32), &row(&full, (pos + j) as i32));
+            worst = worst.max(diff);
+        }
+        pos += piece;
+    }
+    assert!(worst <= 1e-3, "YaRN incremental decode diverged: {worst}");
+}

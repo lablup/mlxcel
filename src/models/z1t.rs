@@ -255,14 +255,13 @@ impl Z1t {
             // A multi-token call without an id starts an independent prompt.
             self.sequence_state.replace_internal(self.fresh_states());
         }
-        if let Some(seq_id) = seq_id {
-            self.sequence_state
-                .with_existing_sequence_state(seq_id, |states| self.run(input_ids, states, row))
-                .unwrap_or_else(|err| panic!("Z1T {err}"))
-        } else {
-            self.sequence_state
-                .with_sequence_state(None, |states| self.run(input_ids, states, row))
-        }
+        // An id that was never prepared starts from fresh state, as every
+        // sibling family does (#3299).
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.fresh_states(),
+            |states| self.run(input_ids, states, row),
+        )
     }
 }
 

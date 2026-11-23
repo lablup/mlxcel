@@ -169,15 +169,15 @@ fn int8_decode_tracks_the_fp16_latent_on_the_absorbed_path() {
         int8.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; int8.num_layers()]);
         let _ = int8.make_caches();
         mlxcel_core::eval(&int8.forward(&ids(&TOKENS[..4]), &mut [], None));
-        let before = mlxcel_core::mla::stats::snapshot();
-        let got: Vec<Vec<f32>> = TOKENS[4..]
-            .iter()
-            .map(|token| row(&int8.forward(&ids(&[*token]), &mut [], None), 0))
-            .collect();
-        let after = mlxcel_core::mla::stats::snapshot();
+        let (got, counts) = mlxcel_core::mla::stats::scoped(|| {
+            TOKENS[4..]
+                .iter()
+                .map(|token| row(&int8.forward(&ids(&[*token]), &mut [], None), 0))
+                .collect::<Vec<Vec<f32>>>()
+        });
         assert!(holds_quantized_latent(&int8), "{family}");
 
-        let delta = |path| after.get(path).saturating_sub(before.get(path));
+        let delta = |path| counts.get(path);
         let steps = (TOKENS.len() - 4) as u64;
         let sublayers = 2 * int8.num_layers() as u64;
         assert!(
@@ -328,10 +328,10 @@ fn a_forced_latent_precision_decides_the_model_owned_caches() {
                     support::INT4_ROW_TOL,
                 );
             }
-            let before = mlxcel_core::mla::stats::snapshot();
-            let got = row(&int4.forward(&ids(&[TOKENS[4]]), &mut [], None), 0);
-            let after = mlxcel_core::mla::stats::snapshot();
-            let delta = |path| after.get(path).saturating_sub(before.get(path));
+            let (got, counts) = mlxcel_core::mla::stats::scoped(|| {
+                row(&int4.forward(&ids(&[TOKENS[4]]), &mut [], None), 0)
+            });
+            let delta = |path| counts.get(path);
             assert_eq!(
                 delta(MlaDecodePath::AbsorbedComposed),
                 2 * int4.num_layers() as u64,

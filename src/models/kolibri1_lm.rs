@@ -13,8 +13,9 @@
 // limitations under the License.
 
 //! [`LanguageModel`] for Kolibri-1: model-owned hybrid sliding/full state,
-//! native batched decode, last-row prefill logits and model-state snapshots,
-//! on the same contracts as [`crate::models::afmoe`].
+//! native batched decode, last-row prefill logits and model-state snapshots.
+//! The state bodies are AFMoE's, shared through
+//! [`crate::models::sliding_hybrid_lm`].
 
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
@@ -24,14 +25,47 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use crate::models::gemma3::Cache;
 use crate::models::kolibri1::Kolibri1Model;
 use crate::models::kv_snapshot::KvSnapshotNames;
-use crate::models::model_owned::LayerKv;
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::sliding_hybrid_lm::{self as hybrid, SlidingHybridModel};
 
-/// The snapshot family tag; a Kolibri-1 snapshot never restores into another
-/// family that shares the `Cache` enum.
-const FAMILY: &str = "kolibri1";
+impl SlidingHybridModel for Kolibri1Model {
+    /// A Kolibri-1 snapshot never restores into another family that shares
+    /// the `Cache` enum.
+    const FAMILY: &'static str = "kolibri1";
+    const KV_NAMES: KvSnapshotNames = KvSnapshotNames::new("Kolibri-1", "standard", "rotating");
 
-const KOLIBRI1_KV_SNAPSHOT_NAMES: KvSnapshotNames =
-    KvSnapshotNames::new("Kolibri-1", "standard", "rotating");
+    fn hybrid_sequence_state(&self) -> &ModelOwnedSequenceState<Cache> {
+        &self.sequence_state
+    }
+
+    fn hybrid_kv_cache_layer_modes(&self) -> &KvCacheLayerModes {
+        &self.kv_cache_layer_modes
+    }
+
+    fn hybrid_make_internal_caches(&self) -> Vec<Cache> {
+        self.make_internal_caches()
+    }
+
+    fn hybrid_num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    fn hybrid_layer_uses_sliding(&self, layer_idx: usize) -> bool {
+        self.layers[layer_idx].uses_sliding
+    }
+
+    fn hybrid_sliding_window(&self) -> i32 {
+        self.sliding_window
+    }
+
+    fn hybrid_forward_batched_decode(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<Cache>],
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_decode_with_caches(input_ids, caches)
+    }
+}
 
 impl LanguageModel for Kolibri1Model {
     fn forward(
@@ -78,17 +112,15 @@ impl LanguageModel for Kolibri1Model {
     }
 
     fn reset_runtime_state(&self) {
-        self.sequence_state
-            .replace_internal(self.make_internal_caches());
+        hybrid::reset_runtime_state(self)
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
-        SequenceStateLayout::model_owned(self.layers.len())
+        hybrid::sequence_state_layout(self)
     }
 
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
-        self.sequence_state
-            .prepare_sequence_state(seq_id, self.make_internal_caches());
+        hybrid::prepare_sequence_state(self, seq_id)
     }
 
     fn sync_sequence_storage(
@@ -96,22 +128,11 @@ impl LanguageModel for Kolibri1Model {
         seq_id: SequenceId,
         cache_pool: &mut CachePool,
     ) -> Result<(), String> {
-        self.sequence_state
-            .with_sequence_state_ref(seq_id, |caches| {
-                let visible_lens: Vec<_> = caches.iter().map(Cache::visible_len).collect();
-                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
-            })
-            .unwrap_or_else(|| {
-                Err(format!(
-                    "missing Kolibri-1 sequence state while synchronizing sequence {seq_id}"
-                ))
-            })
+        hybrid::sync_sequence_storage(self, seq_id, cache_pool)
     }
 
     fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
-        self.kv_cache_layer_modes.set(modes);
-        self.sequence_state
-            .replace_internal(self.make_internal_caches());
+        hybrid::set_kv_cache_layer_modes(self, modes)
     }
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
@@ -122,13 +143,7 @@ impl LanguageModel for Kolibri1Model {
     /// mode but an aligned `Turbo4Asym`; the 513-token window is not aligned,
     /// so on this family they always store FP16 (issue #2783).
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
-        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
-            self.layers
-                .get(layer_idx)
-                .is_some_and(|layer| layer.uses_sliding)
-                .then_some(self.sliding_window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
-        })
+        hybrid::kv_cache_storage_modes(self)
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
@@ -144,26 +159,7 @@ impl LanguageModel for Kolibri1Model {
         seq_id: SequenceId,
         token_len: usize,
     ) -> Option<ModelStateSnapshot> {
-        self.sequence_state
-            .with_sequence_state_ref(seq_id, |state| {
-                let mut snapshot = ModelStateSnapshot::new(FAMILY, token_len);
-                for (idx, cache) in state.iter().enumerate() {
-                    if let Err(error) = cache.snapshot_into(
-                        &mut snapshot,
-                        &format!("layer{idx}"),
-                        KOLIBRI1_KV_SNAPSHOT_NAMES,
-                    ) {
-                        tracing::warn!(
-                            error,
-                            layer_idx = idx,
-                            "Kolibri-1 snapshot prompt-cache donation skipped"
-                        );
-                        return None;
-                    }
-                }
-                (!snapshot.is_empty()).then_some(snapshot)
-            })
-            .flatten()
+        hybrid::snapshot_sequence_state(self, seq_id, token_len)
     }
 
     fn restore_sequence_state(
@@ -171,38 +167,11 @@ impl LanguageModel for Kolibri1Model {
         seq_id: SequenceId,
         snapshot: &ModelStateSnapshot,
     ) -> Result<(), String> {
-        if snapshot.family() != FAMILY {
-            return Err(format!(
-                "cannot restore {} snapshot into Kolibri-1",
-                snapshot.family()
-            ));
-        }
-        let mut state = self.make_internal_caches();
-        for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from(snapshot, &format!("layer{idx}"), KOLIBRI1_KV_SNAPSHOT_NAMES)?;
-        }
-        self.sequence_state.replace_sequence_state(seq_id, state);
-        Ok(())
+        hybrid::restore_sequence_state(self, seq_id, snapshot)
     }
 
-    /// A truncating restore is sound only while every sliding layer is still
-    /// unwrapped at `target_len`; checked per layer, since one wrapped ring is
-    /// enough to make it unsound.
     fn snapshot_truncatable_to(&self, snapshot: &ModelStateSnapshot, target_len: usize) -> bool {
-        if snapshot.family() != FAMILY || target_len > snapshot.token_len() {
-            return false;
-        }
-        let Ok(target) = i32::try_from(target_len) else {
-            return false;
-        };
-        (0..self.layers.len()).all(|idx| {
-            Cache::snapshot_truncatable_to(
-                snapshot,
-                &format!("layer{idx}"),
-                target,
-                KOLIBRI1_KV_SNAPSHOT_NAMES,
-            )
-        })
+        hybrid::snapshot_truncatable_to(self, snapshot, target_len)
     }
 
     fn restore_sequence_state_truncated(
@@ -211,37 +180,11 @@ impl LanguageModel for Kolibri1Model {
         snapshot: &ModelStateSnapshot,
         target_len: usize,
     ) -> Result<(), String> {
-        if snapshot.family() != FAMILY {
-            return Err(format!(
-                "cannot restore {} snapshot into Kolibri-1",
-                snapshot.family()
-            ));
-        }
-        let target = i32::try_from(target_len).map_err(|_| {
-            format!("Kolibri-1 truncated restore: target {target_len} out of range")
-        })?;
-        // Re-check rather than trust the caller: an error here falls back to a
-        // cold prefill, a partially truncated state would corrupt generation.
-        if !self.snapshot_truncatable_to(snapshot, target_len) {
-            return Err(format!(
-                "Kolibri-1 truncated restore: snapshot cannot be truncated to {target_len} tokens"
-            ));
-        }
-        let mut state = self.make_internal_caches();
-        for (idx, cache) in state.iter_mut().enumerate() {
-            let prefix = format!("layer{idx}");
-            cache.restore_from(snapshot, &prefix, KOLIBRI1_KV_SNAPSHOT_NAMES)?;
-            cache
-                .truncate_to(target, KOLIBRI1_KV_SNAPSHOT_NAMES)
-                .map_err(|err| format!("{prefix}: {err}"))?;
-        }
-        self.sequence_state.replace_sequence_state(seq_id, state);
-        Ok(())
+        hybrid::restore_sequence_state_truncated(self, seq_id, snapshot, target_len)
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        // Compatibility only: the real state lives in `sequence_state`.
-        (0..self.layers.len()).map(|_| KVCache::new()).collect()
+        hybrid::make_caches(self)
     }
 
     fn num_layers(&self) -> usize {
@@ -272,55 +215,7 @@ impl LanguageModel for Kolibri1Model {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let shape = mlxcel_core::array_shape(input_ids);
-        assert_eq!(shape.len(), 2, "kolibri1 batched input must be rank 2");
-        assert_eq!(
-            shape[0] as usize,
-            batch_caches.len(),
-            "kolibri1 input batch must match cache rows"
-        );
-        if let Some(ids) = seq_ids {
-            assert_eq!(
-                ids.len(),
-                batch_caches.len(),
-                "kolibri1 requires one sequence id per row"
-            );
-        }
-        mlxcel_core::generate::route_batched_decode_with_ids(
-            self,
-            input_ids,
-            seq_ids,
-            batch_caches,
-            |batch_caches| {
-                let ids =
-                    seq_ids.expect("kolibri1 model-owned batched decode requires sequence ids");
-                if shape[1] != 1 || mask.is_some() {
-                    self.sequence_state
-                        .validate_sequence_states(ids)
-                        .unwrap_or_else(|error| panic!("kolibri1 batched decode: {error}"));
-                    let outputs: Vec<_> = batch_caches
-                        .iter_mut()
-                        .enumerate()
-                        .map(|(row, caches)| {
-                            let input = mlxcel_core::utils::slice_axis(
-                                input_ids,
-                                0,
-                                row as i32,
-                                row as i32 + 1,
-                            );
-                            self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
-                        })
-                        .collect();
-                    let output_refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
-                    return mlxcel_core::concatenate_many(&output_refs, 0);
-                }
-                self.sequence_state
-                    .with_batched_sequence_states(ids, |states| {
-                        self.forward_batched_decode_with_caches(input_ids, states)
-                    })
-                    .unwrap_or_else(|error| panic!("kolibri1 batched decode: {error}"))
-            },
-        )
+        hybrid::forward_batched_with_ids(self, input_ids, seq_ids, batch_caches, mask)
     }
 
     /// Opt out of tile-aligned padded prefill for the same reason as AFMoE

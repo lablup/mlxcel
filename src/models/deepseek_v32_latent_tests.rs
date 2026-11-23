@@ -224,20 +224,17 @@ fn sparse_decode_over_a_quantized_window_equals_sparse_decode_over_its_dequantiz
     let attn = attention(&args);
     let q = query();
 
-    let before = mlxcel_core::mla::stats::snapshot();
-    let got = values(&attn.quantized_decode(
-        quantized_window(&attn, 6),
-        &q.q_projected,
-        &q.q_pe,
-        Some((&q.index_q, &q.index_w)),
-        None,
-    ));
-    let after = mlxcel_core::mla::stats::snapshot();
-    let absorbed = |counts: &mlxcel_core::mla::MlaDispatchCounts| {
-        counts.get(MlaDecodePath::AbsorbedComposed) + counts.get(MlaDecodePath::AbsorbedFused)
-    };
+    let (got, counts) = mlxcel_core::mla::stats::scoped(|| {
+        values(&attn.quantized_decode(
+            quantized_window(&attn, 6),
+            &q.q_projected,
+            &q.q_pe,
+            Some((&q.index_q, &q.index_w)),
+            None,
+        ))
+    });
     assert!(
-        absorbed(&after) > absorbed(&before),
+        counts.get(MlaDecodePath::AbsorbedComposed) + counts.get(MlaDecodePath::AbsorbedFused) > 0,
         "the quantized decode must record an absorbed path"
     );
 
@@ -338,11 +335,11 @@ fn int8_forward_stores_the_slot_quantized_and_tracks_the_fp16_latent() {
     let mut int8 = KVCache::new_with_mode(KVCacheMode::Int8);
     let prefill = attn.forward(&hidden_rows(0, 5), None, &mut int8);
     mlxcel_core::eval(&prefill);
-    let before = mlxcel_core::mla::stats::snapshot();
-    let got: Vec<Vec<f32>> = (5..9)
-        .map(|t| values(&attn.forward(&hidden_rows(t, t + 1), None, &mut int8)))
-        .collect();
-    let after = mlxcel_core::mla::stats::snapshot();
+    let (got, counts) = mlxcel_core::mla::stats::scoped(|| {
+        (5..9)
+            .map(|t| values(&attn.forward(&hidden_rows(t, t + 1), None, &mut int8)))
+            .collect::<Vec<Vec<f32>>>()
+    });
     assert!(int8.holds_quantized_latent());
     assert_eq!(int8.seq_len(), 9);
     // 128 packed bytes, two groups of fp16 scale and bias, fp16 rope keys.
@@ -350,7 +347,7 @@ fn int8_forward_stores_the_slot_quantized_and_tracks_the_fp16_latent() {
         int8.bytes_per_reserved_token(),
         mlxcel_core::mla::quantized_latent_bytes_per_token(128, ROPE as usize, 8, 64)
     );
-    let delta = |path| after.get(path).saturating_sub(before.get(path));
+    let delta = |path| counts.get(path);
     assert!(
         delta(MlaDecodePath::AbsorbedComposed) + delta(MlaDecodePath::AbsorbedFused) >= 4,
         "every int8 decode step must take an absorbed quantized path"

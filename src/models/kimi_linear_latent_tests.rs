@@ -133,14 +133,6 @@ fn decode(
         .collect()
 }
 
-fn path_delta(
-    before: &mlxcel_core::mla::MlaDispatchCounts,
-    after: &mlxcel_core::mla::MlaDispatchCounts,
-    path: MlaDecodePath,
-) -> u64 {
-    after.get(path).saturating_sub(before.get(path))
-}
-
 /// An int8 cache stores the quantized latent, every single-token step takes
 /// an absorbed quantized path (fused or composed) and none is recorded as
 /// decompressed, and the output tracks the fp16 latent within the codec bound.
@@ -156,18 +148,18 @@ fn unmasked_int8_decode_tracks_the_fp16_latent_on_the_absorbed_path() {
     let x = hidden(9);
     let head = mlxcel_core::slice(&x, &[0, 0, 0], &[1, 5, HIDDEN]);
     mlxcel_core::eval(&attn.forward(&head, None, &mut int8));
-    let before = mlxcel_core::mla::stats::snapshot();
-    let got: Vec<Vec<f32>> = (5..9)
-        .map(|t| values(&attn.forward(&token(&x, t), None, &mut int8)))
-        .collect();
-    let after = mlxcel_core::mla::stats::snapshot();
+    let (got, counts) = mlxcel_core::mla::stats::scoped(|| {
+        (5..9)
+            .map(|t| values(&attn.forward(&token(&x, t), None, &mut int8)))
+            .collect::<Vec<Vec<f32>>>()
+    });
     assert!(int8.holds_quantized_latent());
     assert_eq!(int8.seq_len(), 9);
-    let absorbed = path_delta(&before, &after, MlaDecodePath::AbsorbedFused)
-        + path_delta(&before, &after, MlaDecodePath::AbsorbedComposed);
+    let absorbed =
+        counts.get(MlaDecodePath::AbsorbedFused) + counts.get(MlaDecodePath::AbsorbedComposed);
     assert!(absorbed >= 4, "every int8 decode step must be absorbed");
     assert_eq!(
-        path_delta(&before, &after, MlaDecodePath::Decompressed),
+        counts.get(MlaDecodePath::Decompressed),
         0,
         "no int8 decode step may run decompressed"
     );
@@ -191,17 +183,17 @@ fn masked_int8_decode_matches_the_dense_masked_result() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let attn = attention(64, 4);
     let want = decode(&attn, &mut KVCache::new(), 4, 8, true);
-    let before = mlxcel_core::mla::stats::snapshot();
-    let got = decode(
-        &attn,
-        &mut KVCache::new_with_mode(KVCacheMode::Int8),
-        4,
-        8,
-        true,
-    );
-    let after = mlxcel_core::mla::stats::snapshot();
+    let (got, counts) = mlxcel_core::mla::stats::scoped(|| {
+        decode(
+            &attn,
+            &mut KVCache::new_with_mode(KVCacheMode::Int8),
+            4,
+            8,
+            true,
+        )
+    });
     assert!(
-        path_delta(&before, &after, MlaDecodePath::AbsorbedComposed) >= 4,
+        counts.get(MlaDecodePath::AbsorbedComposed) >= 4,
         "a masked int8 step must take the composed quantized path"
     );
     let unmasked = decode(
@@ -442,16 +434,13 @@ fn a_forced_int4_latent_stores_four_bit_rows_and_decodes_composed() {
     with_mla_latent_quant(MlaLatentQuant::Int4, || {
         let mut int4 = KVCache::new_with_mode(KVCacheMode::Int8);
         mlxcel_core::eval(&attn.forward(&rows(0, 5), None, &mut int4));
-        let before = mlxcel_core::mla::stats::snapshot();
-        let got: Vec<Vec<f32>> = (5..9)
-            .map(|t| values(&attn.forward(&token(&x, t), None, &mut int4)))
-            .collect();
-        let after = mlxcel_core::mla::stats::snapshot();
-        assert_eq!(
-            path_delta(&before, &after, MlaDecodePath::AbsorbedComposed),
-            4
-        );
-        assert_eq!(path_delta(&before, &after, MlaDecodePath::AbsorbedFused), 0);
+        let (got, counts) = mlxcel_core::mla::stats::scoped(|| {
+            (5..9)
+                .map(|t| values(&attn.forward(&token(&x, t), None, &mut int4)))
+                .collect::<Vec<Vec<f32>>>()
+        });
+        assert_eq!(counts.get(MlaDecodePath::AbsorbedComposed), 4);
+        assert_eq!(counts.get(MlaDecodePath::AbsorbedFused), 0);
 
         assert_eq!(int4.stored_latent_bits(), Some(4));
         assert_eq!(
