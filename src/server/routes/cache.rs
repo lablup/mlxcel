@@ -292,10 +292,10 @@ pub struct CacheStatsResponse {
     /// Two consequences for anyone reading this endpoint alongside `/metrics`.
     /// `lookups` deliberately stays at zero for these families, because the
     /// adopt gate returns before the store lookup rather than performing one
-    /// that could only miss, while the Prometheus
-    /// `mlxcel_prompt_cache_misses_total` counter is recorded by the caller and
-    /// still advances per request; the two surfaces therefore disagree by
-    /// design here, where before this gate existed they agreed. And because the
+    /// that could only miss, and the Prometheus
+    /// `mlxcel_prompt_cache_misses_total` counter stays at zero with it: the
+    /// caller records a dense miss only when a dense lookup ran (#3294), so
+    /// both surfaces agree that no dense lookup happened. And because the
     /// decline fires on every healthy completion for these families, the
     /// `last_reject_*` fields stay pinned to `model_owned_state` and will mask
     /// an earlier, more interesting decline such as `oversized`; the per-reason

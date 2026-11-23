@@ -22,7 +22,9 @@
 
 use crate::models::mla_rope::MlaRope;
 use crate::models::switch_layers::validate_expert_quantization_params;
-use crate::models::switch_layers::{EXPERT_PLANE_LEAVES, stack_expert_leaf};
+use crate::models::switch_layers::{
+    EXPERT_PLANE_LEAVES, refuse_mismatched_expert_parts, stack_expert_leaf,
+};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::slice_axis;
@@ -1637,18 +1639,29 @@ impl DeepSeekV3Model {
                         for k in EXPERT_PLANE_LEAVES {
                             let check_key = format!("{}.mlp.experts.0.{}.{}", prefix, m, k);
                             if weights.contains_key(&check_key) {
-                                let mut expert_ptrs: Vec<*const MlxArray> = Vec::new();
-                                for e in 0..n_routed {
-                                    let key = format!("{}.mlp.experts.{}.{}.{}", prefix, e, m, k);
-                                    if let Some(w) = weights.get(&key) {
-                                        expert_ptrs.push(
-                                            w.as_ref().expect("weight map holds no null handles")
-                                                as *const MlxArray,
-                                        );
-                                    }
-                                }
+                                let expert_key =
+                                    |e: usize| format!("{}.mlp.experts.{}.{}.{}", prefix, e, m, k);
+                                let parts: Vec<(usize, &MlxArray)> = (0..n_routed)
+                                    .filter_map(|e| {
+                                        weights.get(&expert_key(e)).map(|w| {
+                                            (
+                                                e,
+                                                w.as_ref()
+                                                    .expect("weight map holds no null handles"),
+                                            )
+                                        })
+                                    })
+                                    .collect();
 
-                                if !expert_ptrs.is_empty() {
+                                if !parts.is_empty() {
+                                    // `stack` aborts on a shape mismatch, so
+                                    // refuse one before it runs (issue #3320).
+                                    // The sidecar is concatenated, not stacked.
+                                    if k != "global_scale" {
+                                        refuse_mismatched_expert_parts(&parts, expert_key)?;
+                                    }
+                                    let expert_ptrs: Vec<*const MlxArray> =
+                                        parts.iter().map(|(_, w)| *w as *const MlxArray).collect();
                                     // Stacked before any expert key is removed,
                                     // and the stack holds its own handles.
                                     let (leaf, stacked) = stack_expert_leaf(k, &expert_ptrs);
@@ -2360,6 +2373,30 @@ pub(crate) mod tests {
         weights.insert(
             key.to_string(),
             mlxcel_core::zeros(&[1], mlxcel_core::dtype::FLOAT32),
+        );
+    }
+
+    /// One expert whose plane differs in shape from expert 0's is a load
+    /// error naming its key and both shapes, not an MLX `[stack]` abort
+    /// (issue #3320).
+    #[test]
+    fn sanitize_weights_refuses_a_mismatched_expert_plane() {
+        let config = test_config_moe();
+        let mut weights = WeightMap::new();
+        for (e, cols) in [(0usize, 8i32), (1, 6)] {
+            weights.insert(
+                format!("model.layers.0.mlp.experts.{e}.gate_proj.weight"),
+                mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols as usize], &[4, cols]),
+            );
+        }
+        let err = DeepSeekV3Model::sanitize_weights(weights, &config)
+            .err()
+            .expect("a mismatched expert must be refused");
+        assert!(
+            err.contains("model.layers.0.mlp.experts.1.gate_proj.weight")
+                && err.contains("[4, 6]")
+                && err.contains("[4, 8]"),
+            "{err}"
         );
     }
 

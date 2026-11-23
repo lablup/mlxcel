@@ -1105,6 +1105,7 @@ mod paged_layout;
 mod planned_prefill;
 mod prefill;
 mod prompt_cache;
+mod prompt_cache_adopt;
 mod prompt_end_snapshot;
 pub(crate) mod prompt_lookup;
 mod queued_adoption;

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::prompt_cache_adopt::PrefixAdoptOutcome;
 use super::*;
 use crate::server::batch::generation_bounds::GenerationBounds;
 
@@ -391,16 +392,20 @@ impl BatchScheduler {
         } else {
             options.prompt_cache_ctx.as_ref()
         };
-        let (seq_id, prefill_start_offset, already_cached_tokens) = match ctx_ref
-            .and_then(|ctx| self.try_adopt_cached_prefix(ctx, &prompt_tokens, is_multimodal))
-        {
+        let outcome = ctx_ref
+            .map(|ctx| self.try_adopt_cached_prefix(ctx, &prompt_tokens, is_multimodal))
+            .unwrap_or(PrefixAdoptOutcome::NoDenseLookup);
+        let (seq_id, prefill_start_offset, already_cached_tokens) = match outcome.adopted() {
             Some((adopted_id, adopted_len)) => (adopted_id, adopted_len, adopted_len),
             None => {
                 // Miss or feature disabled → regular allocate.
-                // count misses only when the cache is actually
-                // active (ctx_ref is Some) to avoid inflating the miss
-                // counter for multimodal or cache-disabled requests.
-                if ctx_ref.is_some() {
+                // A dense miss is recorded only when a dense KV lookup ran
+                // and adopted nothing (issue #3294). A request without a
+                // cache context, a snapshot-branch decline, and a family that
+                // never looks up a dense entry are not dense misses, so the
+                // counter stays equal to `/v1/cache/stats` `lookups - hits`
+                // plus the dense hits the scheduler declined.
+                if outcome == PrefixAdoptOutcome::DenseMiss {
                     self.batch_metrics.record_prompt_cache_miss();
                 }
                 let seq_id = match self.allocate_sequence_state() {

@@ -35,9 +35,26 @@ are the ones `scripts/laguna_oracle_trace.py` transcribes from
 oracles cannot drift apart on which rows they score.
 
 What differs from `logit_trace`. mlx-lm runs every forward in the checkpoint's
-own activation dtype, as `mlxcel` does, so this is a same-precision reference,
-not a float32 oracle; a disagreement at a decided position is a real
-difference between the two runtimes. Like `laguna_oracle_trace.py`, each
+own dtype, so this is not a float32 oracle. `mlxcel` is not always in that
+dtype: on Apple Silicon it converts an unquantized checkpoint's bf16 tensors to
+f16 at load unless `MLXCEL_KEEP_BF16` is set (`bf16_to_f16_at_load` in
+`src/models/sanitize.rs`), while a quantized checkpoint keeps its bf16 side
+data, so only a quantized checkpoint is a same-precision pair by default. A
+second run with the mlx-lm model cast to float16 (`model.set_dtype(mx.float16,
+predicate=lambda d: d == mx.bfloat16)`) measures how much that dtype gap alone
+moves the trace.
+
+The two runtimes can also load different weights. A checkpoint that ships a
+fused, quantized MLA `kv_b_proj` (LongCat-Flash, `longcat_flash_ngram`) is
+split into `embed_q` / `unembed_out` at load: mlx-lm dequantizes it, splits
+it, and quantizes both halves again (`embed_q` along the transposed axis),
+while `mlxcel` keeps the dequantized halves dense. On
+`longcat-flash-lite-4bit` over 36864 positions the trace has 39 of 20486
+decided disagreements against the stock reference and 4 against one whose
+split is kept dense, where the bf16 and float16 references differ by 5
+(#3318). Read a residual on such a
+checkpoint against a dense-split reference before calling it a runtime
+difference. Like `laguna_oracle_trace.py`, each
 chunk is computed from one causal forward over its context plus its traced
 rows, and chunks whose token sequence is a prefix of another chunk's share
 that forward (`--no-prefix-sharing` runs one forward per chunk).

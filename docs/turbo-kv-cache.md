@@ -458,7 +458,7 @@ hit/miss metrics. `GET /v1/cache/stats` reports `snapshot_*` fields, while
 `/metrics` exposes `mlxcel_prompt_cache_snapshot_hits_total`,
 `mlxcel_prompt_cache_snapshot_misses_total`,
 `mlxcel_prompt_cache_snapshot_tokens_reused_total`, and labeled snapshot
-evictions. Each lookup is counted once: the snapshot and reused-token counters equal the `snapshot_*` fields of `GET /v1/cache/stats` and the `cached_tokens` the responses report. This path is deliberately whole-prefix only: it does not participate
+evictions. Each request lookup is counted once: the snapshot and reused-token counters equal the `snapshot_*` fields of `GET /v1/cache/stats` and the `cached_tokens` the responses report. Background warm-up lookups are not counted on either surface; warm-ups are reported only as `snapshot_warmups_run` and `snapshot_warmups_skipped`. A family that never runs a dense KV lookup leaves `mlxcel_prompt_cache_misses_total` and `lookups` both at zero. That covers families whose sequence state lives outside the dense KV slice and is restored from snapshots (Gemma 3, Llama 4), and families whose KV cache does not capture the whole sequence state, such as Baichuan-M1, which neither restores snapshots nor uses the dense path. This path is deliberately whole-prefix only: it does not participate
 in APC block matching, does not share SSM state across sessions, and does not
 modify the block-sharing carve-out for hybrid SSM families.
 

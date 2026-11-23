@@ -112,8 +112,9 @@ pub struct BatchMetrics {
     /// Cumulative successful prompt-cache adoptions (hits). Incremented by the
     /// scheduler's `try_adopt_cached_prefix` when an entry is adopted.
     pub prompt_cache_hits_total: AtomicU64,
-    /// Cumulative prompt-cache misses. Incremented in the scheduler when no
-    /// matching prefix is found and a cold allocate is used.
+    /// Cumulative prompt-cache misses. Incremented in the scheduler when a
+    /// dense KV lookup ran and no prefix was adopted (including a store hit
+    /// the scheduler declined).
     pub prompt_cache_misses_total: AtomicU64,
     /// Cumulative prefix tokens reused across all hits. Σ matched-prefix
     /// lengths from `try_adopt_cached_prefix`.
@@ -285,7 +286,8 @@ impl BatchMetrics {
             .fetch_add(matched_tokens as u64, Ordering::Relaxed);
     }
 
-    /// Record a prompt-cache miss (cold allocate path).
+    /// Record a prompt-cache miss: a dense lookup ran and no prefix was adopted
+    /// (including a declined hit).
     pub fn record_prompt_cache_miss(&self) {
         self.prompt_cache_misses_total
             .fetch_add(1, Ordering::Relaxed);
@@ -384,8 +386,10 @@ impl PromptCacheMetrics for BatchMetricsCacheAdapter {
         // The scheduler is the only writer of the dense hit, miss, and
         // reused-token counters (#3246): `finish_prompt_cache_adopt` records a
         // hit with the adopted length that becomes `cached_tokens`, and
-        // admission records a miss when no prefix was adopted. Forwarding the
-        // store's raw lookup here as well counted every lookup twice.
+        // admission records a miss when a dense lookup ran and adopted no
+        // prefix (`PrefixAdoptOutcome::DenseMiss`, #3294), so a family that
+        // never runs a dense lookup records none. Forwarding the store's raw
+        // lookup here as well counted every lookup twice.
     }
 
     fn record_evict_lru(&self, _bytes: usize) {

@@ -176,7 +176,7 @@ fn mellum_sanitize_stacks_experts_and_pops_tied_head() {
     args.num_experts = num_experts;
     args.tie_word_embeddings = true;
 
-    MellumModel::sanitize(&mut weights, &args);
+    MellumModel::sanitize(&mut weights, &args).expect("well-formed experts stack");
 
     // Tied head popped.
     assert!(!weights.contains_key("lm_head.weight"));
@@ -321,5 +321,32 @@ fn mellum_tied_model_has_no_lm_head() {
     assert!(
         model.lm_head.is_none(),
         "tied model projects through embed_tokens.as_linear"
+    );
+}
+
+/// One expert whose plane differs in shape from expert 0's is a load error
+/// naming its key and both shapes, not an MLX `[stack]` abort (issue #3320).
+#[test]
+fn sanitize_refuses_a_mismatched_expert_plane() {
+    let mut weights = WeightMap::new();
+    for proj in ["gate_proj", "up_proj", "down_proj"] {
+        for e in 0..2usize {
+            let cols = if proj == "gate_proj" && e == 1 { 6 } else { 8 };
+            weights.insert(
+                format!("model.layers.0.mlp.experts.{e}.{proj}.weight"),
+                mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols as usize], &[4, cols]),
+            );
+        }
+    }
+    let mut args: ModelArgs = serde_json::from_str(MELLUM_12B_CONFIG).unwrap();
+    args.num_hidden_layers = 1;
+    args.num_experts = 2;
+    let err = MellumModel::sanitize(&mut weights, &args)
+        .expect_err("a mismatched expert must be refused");
+    assert!(
+        err.contains("model.layers.0.mlp.experts.1.gate_proj.weight")
+            && err.contains("[4, 6]")
+            && err.contains("[4, 8]"),
+        "{err}"
     );
 }
