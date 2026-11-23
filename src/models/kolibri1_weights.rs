@@ -49,7 +49,9 @@ const PROJECTIONS: [&str; 3] = ["gate_proj", "up_proj", "down_proj"];
 ///   `num_experts` stacks short and is refused by [`validate_weights`].
 ///
 /// Idempotent: a map that already holds `switch_mlp.*` is left as it is.
-pub fn sanitize_weights(weights: &mut WeightMap, args: &ModelArgs) {
+/// Returns `Err` when an expert's plane disagrees in shape or dtype with the
+/// others, before the stack could abort the process (issue #3297).
+pub fn sanitize_weights(weights: &mut WeightMap, args: &ModelArgs) -> Result<(), String> {
     if args.tie_word_embeddings {
         weights.remove("lm_head.weight");
     }
@@ -85,7 +87,7 @@ pub fn sanitize_weights(weights: &mut WeightMap, args: &ModelArgs) {
                     &format!("{prefix}.mlp.experts"),
                     proj,
                     &stacked,
-                );
+                )?;
                 // Materialize this layer's stack now, while its 384 source
                 // planes are the only ones alive, so the copy happens at load
                 // one layer at a time instead of for all layers inside the
@@ -98,6 +100,7 @@ pub fn sanitize_weights(weights: &mut WeightMap, args: &ModelArgs) {
             }
         }
     }
+    Ok(())
 }
 
 /// Reject a checkpoint whose real tensor shapes disagree with `config.json`

@@ -3718,7 +3718,8 @@ fn load_qwen35_tp_text_weights(
 ) -> Result<WeightMap> {
     if full_config.get("vision_config").is_none() {
         let weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
-        return Ok(crate::models::qwen3_5::sanitize_moe_weights(weights, args));
+        return crate::models::qwen3_5::sanitize_moe_weights(weights, args)
+            .map_err(anyhow::Error::msg);
     }
 
     let raw_weights =
@@ -3739,7 +3740,8 @@ fn load_qwen35_tp_text_weights(
         }
     }
 
-    let mut text_weights = crate::models::qwen3_5::sanitize_weights(text_weights, args);
+    let mut text_weights =
+        crate::models::qwen3_5::sanitize_weights(text_weights, args).map_err(anyhow::Error::msg)?;
     crate::models::sanitize_tied_embeddings(&mut text_weights, full_config);
     Ok(text_weights)
 }

@@ -752,7 +752,7 @@ fn qwen3_next_sanitize_stacks_per_expert_nvfp4_tensor_scales() {
         }
     }
 
-    let weights = Qwen3NextModel::sanitize_weights(weights, &config);
+    let weights = Qwen3NextModel::sanitize_weights(weights, &config).unwrap();
 
     let prefix = "model.layers.0.mlp.switch_mlp";
     for (j, proj) in ["gate_proj", "up_proj", "down_proj"]

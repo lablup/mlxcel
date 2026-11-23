@@ -446,7 +446,7 @@ fn sanitize_weights_drops_mtp_keys() {
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     // mtp.* must be absent; legitimate keys must remain.
     assert!(
@@ -479,7 +479,7 @@ fn sanitize_weights_drops_lm_head_when_tied_embeddings() {
 
     let mut config = make_tiny_config();
     config.tie_word_embeddings = true;
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     assert!(
         !sanitized.contains_key("lm_head.weight"),
@@ -526,7 +526,7 @@ fn sanitize_weights_is_idempotent_on_already_converted_checkpoint_with_stray_mtp
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     // mtp.* must still be stripped.
     assert!(sanitized.keys().all(|k| !k.starts_with("mtp.")));
@@ -583,7 +583,7 @@ fn sanitize_weights_shifts_norms_exactly_once_on_raw_layout() {
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     assert!(sanitized.keys().all(|k| !k.contains("mtp.")));
 
@@ -632,7 +632,7 @@ fn sanitize_weights_does_not_shift_norms_on_a_degenerate_conv1d_shape() {
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     assert_allclose(
         sanitized.get("model.norm.weight").unwrap(),

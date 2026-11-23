@@ -411,7 +411,7 @@ fn full_attention_layers_apply_no_rope_and_sliding_layers_do() {
 fn model_weights() -> WeightMap {
     let args = args();
     let mut weights = checkpoint(&args, args.num_experts);
-    sanitize_weights(&mut weights, &args);
+    sanitize_weights(&mut weights, &args).unwrap();
     weights
 }
 
@@ -423,7 +423,7 @@ fn sanitize_renames_the_router_bias_and_stacks_the_expert_planes() {
     let args = args();
     let original = checkpoint(&args, args.num_experts);
     let mut weights = checkpoint(&args, args.num_experts);
-    sanitize_weights(&mut weights, &args);
+    sanitize_weights(&mut weights, &args).unwrap();
 
     let p = "model.layers.3";
     assert!(!weights.contains_key(&format!("{p}.moe.router.expert_bias")));
@@ -455,13 +455,13 @@ fn sanitize_renames_the_router_bias_and_stacks_the_expert_planes() {
 
     // Idempotent, and an already-stacked `mlp.experts.{proj}` export is renamed.
     let before = weights.len();
-    sanitize_weights(&mut weights, &args);
+    sanitize_weights(&mut weights, &args).unwrap();
     assert_eq!(weights.len(), before);
     let moved = weights
         .remove(&format!("{p}.mlp.switch_mlp.up_proj.weight"))
         .unwrap();
     weights.insert(format!("{p}.mlp.experts.up_proj.weight"), moved);
-    sanitize_weights(&mut weights, &args);
+    sanitize_weights(&mut weights, &args).unwrap();
     assert!(weights.contains_key(&format!("{p}.mlp.switch_mlp.up_proj.weight")));
     validate_weights(&weights, &args).unwrap();
 }
@@ -474,7 +474,7 @@ fn the_alternative_mlp_expert_bias_name_is_accepted() {
         .remove("model.layers.0.moe.router.expert_bias")
         .unwrap();
     weights.insert("model.layers.0.mlp.expert_bias".into(), bias);
-    sanitize_weights(&mut weights, &args);
+    sanitize_weights(&mut weights, &args).unwrap();
     assert!(weights.contains_key("model.layers.0.mlp.gate.e_score_correction_bias"));
 }
 
@@ -490,6 +490,33 @@ fn a_checkpoint_with_fewer_expert_planes_than_num_experts_is_refused() {
 }
 
 #[test]
+fn an_expert_plane_of_another_shape_fails_the_load_instead_of_aborting() {
+    // `mlxcel_core::stack` aborts the process on a shape mismatch, so the
+    // sanitize pass must refuse the plane first (issue #3297).
+    let args = args();
+    let key = "model.layers.2.mlp.experts.1.down_proj.weight";
+    let mut weights = checkpoint(&args, args.num_experts);
+    let shape = mlxcel_core::array_shape(&weights[key]);
+    weights.insert(
+        key.into(),
+        mlxcel_core::full_f32(&[shape[0], shape[1] + 1], 0.0, mlxcel_core::dtype::FLOAT32),
+    );
+    let err = sanitize_weights(&mut weights, &args).unwrap_err();
+    assert!(err.contains(key), "{err}");
+
+    let mut weights = checkpoint(&args, args.num_experts);
+    weights.insert(
+        key.into(),
+        mlxcel_core::full_f32(&[shape[0], shape[1] + 1], 0.0, mlxcel_core::dtype::FLOAT32),
+    );
+    let err = match Kolibri1Model::from_weights(&mut weights, &args) {
+        Ok(_) => panic!("a mismatched expert plane must be refused"),
+        Err(err) => err,
+    };
+    assert!(err.contains(key), "{err}");
+}
+
+#[test]
 fn a_quantized_router_is_refused() {
     let args = args();
     let mut weights = checkpoint(&args, args.num_experts);
@@ -497,7 +524,7 @@ fn a_quantized_router_is_refused() {
         "model.layers.0.mlp.gate.scales".into(),
         mlxcel_core::full_f32(&[4, 1], 1.0, mlxcel_core::dtype::FLOAT32),
     );
-    sanitize_weights(&mut weights, &args);
+    sanitize_weights(&mut weights, &args).unwrap();
     let err = validate_weights(&weights, &args).unwrap_err();
     assert!(err.contains("quantized"), "{err}");
 }

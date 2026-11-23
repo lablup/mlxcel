@@ -2414,7 +2414,7 @@ impl Qwen35Model {
         let weights = crate::models::requantize_fp8_weights(weights, fp8)?;
 
         // Strip language_model. prefix and sanitize
-        let weights = sanitize_moe_weights(weights, &config);
+        let weights = sanitize_moe_weights(weights, &config)?;
 
         tracing::info!("[Qwen3.5] Building model...");
         let model = Self::from_weights_impl(&weights, &config, backbone.is_some())?;
@@ -3845,7 +3845,7 @@ impl Qwen35StageModel {
         config.validate_supported().map_err(|e| e.to_string())?;
 
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
-        weights = sanitize_moe_weights(weights, &config);
+        weights = sanitize_moe_weights(weights, &config)?;
         let mut effective_filter = filter.clone();
         if config.tie_word_embeddings && filter.has_lm_head {
             effective_filter.has_embedding = true;
@@ -4095,7 +4095,13 @@ pub(crate) fn restore_text_model_prefix(weights: WeightMap) -> WeightMap {
         .collect()
 }
 
-pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> WeightMap {
+///
+/// Returns `Err` when the per-expert MoE planes disagree in shape or dtype
+/// ([`crate::models::switch_layers::drain_numbered_expert_planes`]).
+pub fn sanitize_weights(
+    mut weights: WeightMap,
+    config: &Qwen35Config,
+) -> Result<WeightMap, String> {
     // 1. Detect sanitization needs.
     //
     // The conv1d weight layout is the only reliable raw-vs-converted signal: a raw
@@ -4179,7 +4185,7 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
                 &experts,
                 src_proj,
                 &format!("{base}.{dst_proj}"),
-            );
+            )?;
         }
 
         // Handle per-expert gate_proj/up_proj/down_proj naming variant.
@@ -4196,7 +4202,7 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
                 &experts,
                 proj,
                 &format!("{base}.{proj}"),
-            );
+            )?;
         }
     }
 
@@ -4261,12 +4267,15 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
         }
     }
 
-    weights
+    Ok(weights)
 }
 
 /// Sanitize weights for MoE wrapper variant (qwen3_5_moe)
 /// Handles language_model prefix stripping and gate_up_proj splitting
-pub fn sanitize_moe_weights(weights: WeightMap, config: &Qwen35Config) -> WeightMap {
+pub fn sanitize_moe_weights(
+    weights: WeightMap,
+    config: &Qwen35Config,
+) -> Result<WeightMap, String> {
     let mut sanitized = WeightMap::new();
 
     for (key, value) in weights {
@@ -4748,7 +4757,7 @@ mod sanitize_tests {
             }
         }
 
-        let result = sanitize_weights(weights, &config);
+        let result = sanitize_weights(weights, &config).unwrap();
 
         // Each projection must be stacked into the slots the block loads.
         for dst in ["gate_proj", "up_proj", "down_proj"] {
@@ -4777,6 +4786,31 @@ mod sanitize_tests {
     }
 
     #[test]
+    fn sanitize_weights_refuses_mismatched_expert_shapes() {
+        // Expert 1's w1 has another shape: the load must fail with the key
+        // instead of `stack` aborting the process (issue #3297).
+        let config = moe_config(1, 3);
+        for (src_proj, dst_proj) in [("w1", "gate_proj"), ("up_proj", "up_proj")] {
+            let mut weights = WeightMap::new();
+            for e in 0..3 {
+                let cols = if e == 1 { 6 } else { 8 };
+                weights.insert(
+                    format!("model.layers.0.mlp.experts.{e}.{src_proj}.weight"),
+                    mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols], &[4, cols as i32]),
+                );
+            }
+            let Err(err) = sanitize_weights(weights, &config) else {
+                panic!("a mismatched expert must fail the sanitize");
+            };
+            assert!(
+                err.contains(&format!("model.layers.0.mlp.experts.1.{src_proj}.weight")),
+                "{dst_proj}: {err}"
+            );
+            assert!(err.contains("[4, 6]") && err.contains("[4, 8]"), "{err}");
+        }
+    }
+
+    #[test]
     fn sanitize_weights_preserves_per_expert_gate_up_down_stack_order() {
         let num_experts: usize = 2;
         let out = 2i32;
@@ -4801,7 +4835,7 @@ mod sanitize_tests {
             }
         }
 
-        let result = sanitize_weights(weights, &config);
+        let result = sanitize_weights(weights, &config).unwrap();
 
         for (proj, base) in [
             ("gate_proj", 10.0_f32),
@@ -4875,7 +4909,7 @@ mod sanitize_tests {
             }
         }
 
-        let result = sanitize_weights(weights, &config);
+        let result = sanitize_weights(weights, &config).unwrap();
 
         for (dst, suffix) in [
             ("gate_proj", "weight"),
@@ -4933,7 +4967,7 @@ mod sanitize_tests {
             }
         }
 
-        let result = sanitize_weights(weights, &config);
+        let result = sanitize_weights(weights, &config).unwrap();
 
         // The stacked gate/up/down slots must exist (from the w1/w2/w3 source,
         // which runs first and wins the slot).
@@ -5049,7 +5083,7 @@ mod sanitize_tests {
 
         let config = moe_config(1, num_experts);
         for (label, weights) in variants {
-            let sanitized = sanitize_weights(weights, &config);
+            let sanitized = sanitize_weights(weights, &config).unwrap();
             SwitchGLU::from_weights(&sanitized, &next_config, "model.layers.0.mlp.switch_mlp")
                 .unwrap_or_else(|e| panic!("SwitchGLU must load after sanitize for {label}: {e}"));
         }
@@ -5107,7 +5141,7 @@ mod sanitize_tests {
                 }
             }
 
-            let weights = sanitize_weights(weights, &config);
+            let weights = sanitize_weights(weights, &config).unwrap();
 
             for (j, proj) in ["gate_proj", "up_proj", "down_proj"]
                 .into_iter()

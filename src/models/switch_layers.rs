@@ -741,7 +741,7 @@ impl SwitchLinear {
         // already-loadable checkpoint. No declared expert count is available at
         // this generic call site, so the shortfall cross-check is skipped
         // (`None`); callers that do carry one (DeepSeek v1) pass it through.
-        if let Some(parts) = stack_individual_expert_parts(weights, prefix) {
+        if let Some(parts) = stack_individual_expert_parts(weights, prefix)? {
             refuse_unstacked_expert_sidecars(weights, prefix, &parts)?;
             let (mode, group_size) = resolve_mode(mode, &parts, group_size);
             return Self::from_stacked_parts(prefix, parts, group_size, bits, mode);
@@ -1267,6 +1267,40 @@ pub(crate) fn stack_expert_leaf(
     }
 }
 
+/// Refuse per-expert parts of one leaf that disagree in shape or dtype, before
+/// they reach `mlxcel_core::stack`. That FFI is not fallible, so MLX's
+/// `[stack]` shape exception would terminate the process instead of failing
+/// the load (issue #3297). `parts` pairs each expert index with its tensor;
+/// the first part is the reference, and `key(e)` names expert `e`'s tensor in
+/// the error.
+///
+/// Used by: [`drain_numbered_expert_planes`] and
+/// [`stack_individual_experts_with_count`]
+fn refuse_mismatched_expert_parts(
+    parts: &[(usize, &MlxArray)],
+    key: impl Fn(usize) -> String,
+) -> Result<(), String> {
+    let Some(&(first, reference)) = parts.first() else {
+        return Ok(());
+    };
+    let want_shape = mlxcel_core::array_shape(reference);
+    let want_dtype = mlxcel_core::array_dtype(reference);
+    for &(expert, part) in &parts[1..] {
+        let shape = mlxcel_core::array_shape(part);
+        let dtype = mlxcel_core::array_dtype(part);
+        if shape != want_shape || dtype != want_dtype {
+            return Err(format!(
+                "{}: expert {expert} has shape {shape:?} (dtype {dtype}), but expert {first} \
+                 ({}) has shape {want_shape:?} (dtype {want_dtype}); every expert's plane must \
+                 match before the experts are stacked",
+                key(expert),
+                key(first),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Drain the numbered per-expert planes `{experts_root}.{e}.{src_proj}.{leaf}`
 /// (`e` from 0 until an expert has no `weight`) out of `weights` and insert
 /// each leaf, stacked over the experts, under `{stacked_prefix}.{leaf}`. A
@@ -1280,6 +1314,13 @@ pub(crate) fn stack_expert_leaf(
 /// some experts carry stacks shorter than `weight`, which `SwitchLinear`'s
 /// shape checks refuse.
 ///
+/// Returns `Err` naming the key, the expert index and both shapes when one
+/// expert's `weight`, `scales` or `biases` differs in shape or dtype from the
+/// first expert that carries the leaf (issue #3297). The sidecar is exempt:
+/// it is flattened and concatenated, so a malformed one changes the vector's
+/// length instead of aborting, and `SwitchLinear` refuses that. On `Err` the
+/// drained planes are dropped; the load is failing anyway.
+///
 /// Used by: the MoE stacking passes of Qwen3.5 (`qwen3_5::sanitize_weights`)
 /// and Qwen3-Next (`Qwen3NextModel::sanitize_weights`), Gemma 4's
 /// `stack_gemma4_per_expert_planes` (`src/models/sanitize.rs`), and
@@ -1289,31 +1330,45 @@ pub(crate) fn drain_numbered_expert_planes(
     experts_root: &str,
     src_proj: &str,
     stacked_prefix: &str,
-) {
-    let mut planes: [Vec<UniquePtr<MlxArray>>; EXPERT_PLANE_LEAVES.len()] = Default::default();
+) -> Result<(), String> {
+    let mut planes: [Vec<(usize, UniquePtr<MlxArray>)>; EXPERT_PLANE_LEAVES.len()] =
+        Default::default();
     let mut expert = 0;
     while let Some(weight) = weights.remove(&format!("{experts_root}.{expert}.{src_proj}.weight")) {
-        planes[0].push(weight);
+        planes[0].push((expert, weight));
         for (slot, leaf) in EXPERT_PLANE_LEAVES.iter().enumerate().skip(1) {
             if let Some(part) =
                 weights.remove(&format!("{experts_root}.{expert}.{src_proj}.{leaf}"))
             {
-                planes[slot].push(part);
+                planes[slot].push((expert, part));
             }
         }
         expert += 1;
     }
+    let mut stacked_leaves = Vec::with_capacity(EXPERT_PLANE_LEAVES.len());
     for (leaf, parts) in EXPERT_PLANE_LEAVES.iter().zip(&planes) {
         if parts.is_empty() {
             continue;
         }
-        let ptrs: Vec<*const MlxArray> = parts
+        let borrowed: Vec<(usize, &MlxArray)> = parts
             .iter()
-            .map(|part| part.as_ref().expect("weight map holds no null handles") as *const MlxArray)
+            .map(|(e, part)| (*e, part.as_ref().expect("weight map holds no null handles")))
             .collect();
-        let (leaf, stacked) = stack_expert_leaf(leaf, &ptrs);
+        if *leaf != "global_scale" {
+            refuse_mismatched_expert_parts(&borrowed, |e| {
+                format!("{experts_root}.{e}.{src_proj}.{leaf}")
+            })?;
+        }
+        let ptrs: Vec<*const MlxArray> = borrowed
+            .iter()
+            .map(|(_, part)| *part as *const MlxArray)
+            .collect();
+        stacked_leaves.push(stack_expert_leaf(leaf, &ptrs));
+    }
+    for (leaf, stacked) in stacked_leaves {
         weights.insert(format!("{stacked_prefix}.{leaf}"), stacked);
     }
+    Ok(())
 }
 
 /// Multiply a gathered expert output by the selected experts' global scales.
@@ -1405,7 +1460,7 @@ pub(crate) fn stack_individual_experts(
     )>,
     String,
 > {
-    let Some((parts, found)) = stack_individual_experts_with_count(weights, prefix) else {
+    let Some((parts, found)) = stack_individual_experts_with_count(weights, prefix)? else {
         return Ok(None);
     };
     let StackedParts {
@@ -1430,8 +1485,11 @@ pub(crate) fn stack_individual_experts(
 
 /// [`stack_individual_experts`] for `SwitchLinear`'s own loader, which also
 /// takes the stacked ModelOpt scale sidecar (issue #2351).
-fn stack_individual_expert_parts(weights: &WeightMap, prefix: &str) -> Option<StackedParts> {
-    stack_individual_experts_with_count(weights, prefix).map(|(parts, _)| parts)
+fn stack_individual_expert_parts(
+    weights: &WeightMap,
+    prefix: &str,
+) -> Result<Option<StackedParts>, String> {
+    Ok(stack_individual_experts_with_count(weights, prefix)?.map(|(parts, _)| parts))
 }
 
 /// Same contiguous per-expert stacking as [`stack_individual_experts`], plus
@@ -1440,17 +1498,27 @@ fn stack_individual_expert_parts(weights: &WeightMap, prefix: &str) -> Option<St
 /// stacked into `inv_global_scale` through [`stack_expert_leaf`] when expert 0
 /// carries one; an expert without it shortens the vector, which
 /// `SwitchLinear`'s shape check refuses.
+///
+/// `Ok(None)` when the prefix is not in the stacked form or there is no
+/// expert 0. `Err` when an expert lacks `scales` / `biases` that expert 0
+/// carries, or when an expert's `weight`, `scales` or `biases` differs in
+/// shape or dtype from expert 0's: `mlxcel_core::stack` would otherwise abort
+/// the process on the mismatch (issue #3297).
 fn stack_individual_experts_with_count(
     weights: &WeightMap,
     prefix: &str,
-) -> Option<(StackedParts, usize)> {
+) -> Result<Option<(StackedParts, usize)>, String> {
     // prefix: "{root}.switch_mlp.{proj}"  ->  experts at "{root}.experts.{idx}.{proj}"
-    let proj = prefix.rsplit('.').next()?;
-    let root = prefix.strip_suffix(&format!(".switch_mlp.{}", proj))?;
+    let Some(proj) = prefix.rsplit('.').next() else {
+        return Ok(None);
+    };
+    let Some(root) = prefix.strip_suffix(&format!(".switch_mlp.{}", proj)) else {
+        return Ok(None);
+    };
     let expert_key = |idx: usize, leaf: &str| format!("{}.experts.{}.{}.{}", root, idx, proj, leaf);
 
     if !weights.contains_key(&expert_key(0, "weight")) {
-        return None;
+        return Ok(None);
     }
     let has_scales = weights.contains_key(&expert_key(0, "scales"));
     let has_biases = weights.contains_key(&expert_key(0, "biases"));
@@ -1494,14 +1562,23 @@ fn stack_individual_experts_with_count(
     let mut scales_ptrs: Vec<*const MlxArray> = Vec::new();
     let mut biases_ptrs: Vec<*const MlxArray> = Vec::new();
     let mut sidecar_ptrs: Vec<*const MlxArray> = Vec::new();
+    let required = |idx: usize, leaf: &str| {
+        weights.get(&expert_key(idx, leaf)).ok_or_else(|| {
+            format!(
+                "{} is missing, but {} exists; every expert must carry the same leaves",
+                expert_key(idx, leaf),
+                expert_key(0, leaf)
+            )
+        })
+    };
     let mut idx = 0;
     while let Some(weight) = weights.get(&expert_key(idx, "weight")) {
         weight_ptrs.push(as_ptr(weight));
         if has_scales {
-            scales_ptrs.push(as_ptr(weights.get(&expert_key(idx, "scales"))?));
+            scales_ptrs.push(as_ptr(required(idx, "scales")?));
         }
         if has_biases {
-            biases_ptrs.push(as_ptr(weights.get(&expert_key(idx, "biases"))?));
+            biases_ptrs.push(as_ptr(required(idx, "biases")?));
         }
         if has_sidecar && let Some(sidecar) = weights.get(&expert_key(idx, "global_scale")) {
             sidecar_ptrs.push(as_ptr(sidecar));
@@ -1509,11 +1586,28 @@ fn stack_individual_experts_with_count(
         idx += 1;
     }
 
+    // Check every stacked leaf before the first `stack` call: the FFI aborts
+    // on a shape mismatch instead of returning an error.
+    for (leaf, ptrs) in [
+        ("weight", &weight_ptrs),
+        ("scales", &scales_ptrs),
+        ("biases", &biases_ptrs),
+    ] {
+        let parts: Vec<(usize, &MlxArray)> = ptrs
+            .iter()
+            .enumerate()
+            // SAFETY: the pointers were taken from `weights`, which is borrowed
+            // for the whole function and only read.
+            .map(|(e, p)| (e, unsafe { &**p }))
+            .collect();
+        refuse_mismatched_expert_parts(&parts, |e| expert_key(e, leaf))?;
+    }
+
     let weight = mlxcel_core::stack(&weight_ptrs, 0);
     let scales = has_scales.then(|| mlxcel_core::stack(&scales_ptrs, 0));
     let biases = has_biases.then(|| mlxcel_core::stack(&biases_ptrs, 0));
     let inv_global_scale = has_sidecar.then(|| stack_expert_leaf("global_scale", &sidecar_ptrs).1);
-    Some((
+    Ok(Some((
         StackedParts {
             weight,
             scales,
@@ -1522,7 +1616,7 @@ fn stack_individual_experts_with_count(
             native_global_scale: None,
         },
         idx,
-    ))
+    )))
 }
 
 /// The gating nonlinearity a [`SwitchGLU`] applies between its `gate_proj` /
@@ -2593,6 +2687,10 @@ mod gather_index_tests;
 mod global_scale_tests;
 
 #[cfg(test)]
+#[path = "switch_layers_expert_shape_tests.rs"]
+mod expert_shape_tests;
+
+#[cfg(test)]
 #[path = "switch_layers_sorted_gather_test_support.rs"]
 mod sorted_gather_test_support;
 
@@ -3277,7 +3375,9 @@ mod tests {
                 ..
             },
             found,
-        ) = stack_individual_experts_with_count(&weights, &prefix).expect("per-expert layout");
+        ) = stack_individual_experts_with_count(&weights, &prefix)
+            .unwrap()
+            .expect("per-expert layout");
         assert_eq!(found, 3, "the contiguous expert count must be unchanged");
         let scales = scales.expect("expert 0 carries scales, so scales are stacked");
         assert!(biases.is_none(), "expert 0 carries no biases");
