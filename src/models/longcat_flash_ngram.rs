@@ -506,9 +506,10 @@ impl LongcatFlashMLA {
 
     /// Resolve this config's RoPE once, for every attention to duplicate.
     ///
-    /// No training-context fallback, matching upstream `longcat_flash`
-    /// (`initialize_rope` without `max_position_embeddings`, so `YarnRoPE`
-    /// defaults a missing original context to 4096).
+    /// No training-context fallback, matching upstream `longcat_flash`:
+    /// it passes `max_position_embeddings` to `initialize_rope`, but
+    /// `YarnRoPE` never reads it for the original context and defaults a
+    /// missing `original_max_position_embeddings` to 4096.
     pub(super) fn resolve_rope(args: &LongcatFlashNgramConfig) -> MlaRope {
         MlaRope::from_block(
             args.rope_scaling.as_ref(),

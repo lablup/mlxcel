@@ -549,7 +549,7 @@ pub fn verify_applied(model_label: &str) -> Result<(), String> {
     }
     if applications() == 0 {
         return Err(format!(
-            "{model_label}: {} was accepted on the command line but reached no RoPE code path,              so the model would rotate with the frequencies its own config.json declares. This              architecture computes its rotary frequencies outside the shared              `models::rope_utils` path, where the override is applied; the families that do              route through it are Llama 3.x (and through it Qwen2 / Qwen2.5, Helium, Arcee, the mllama              text decoder, and every VLM whose text backbone is one of those), Qwen3,              Qwen3-MoE, Apertus, Gemma 3, Llama 4, and InternLM2 / InternLM3. Drop the flag to serve this              checkpoint with its own rotation.",
+            "{model_label}: {} was accepted on the command line but reached no RoPE code path,              so the model would rotate with the frequencies its own config.json declares. This              architecture computes its rotary frequencies outside the shared              `models::rope_utils` path, where the override is applied; the families that do              route through it are Llama 3.x (and through it Qwen2 / Qwen2.5, Helium, Arcee, the mllama              text decoder, and every VLM whose text backbone is one of those), Qwen3,              Qwen3-MoE, Apertus, Gemma 3, Llama 4, InternLM2 / InternLM3, and the DeepSeek-style MLA              families (DeepSeek-V3 / Kimi-K2 / JoyAI, Xing4.0, DeepSeek V3.2 / GLM-5, LongCat-Flash              ngram and sparse). Drop the flag to serve this              checkpoint with its own rotation.",
             over.describe()
         ));
     }
