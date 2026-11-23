@@ -1275,9 +1275,11 @@ pub(crate) fn stack_expert_leaf(
 /// the first part is the reference, and `key(e)` names expert `e`'s tensor in
 /// the error.
 ///
-/// Used by: [`drain_numbered_expert_planes`] and
-/// [`stack_individual_experts_with_count`]
-fn refuse_mismatched_expert_parts(
+/// Used by: [`drain_numbered_expert_planes`],
+/// [`stack_individual_experts_with_count`], and the family-local expert
+/// stacking in DeepSeek-V3, Mistral4, PhiMoE, OLMoE, MiMo-V2 and Mellum
+/// (issue #3320)
+pub(crate) fn refuse_mismatched_expert_parts(
     parts: &[(usize, &MlxArray)],
     key: impl Fn(usize) -> String,
 ) -> Result<(), String> {

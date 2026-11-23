@@ -21,7 +21,46 @@
 //! probabilities that sum to < 1, instead of a top-k-only softmax that always
 //! sums to 1.
 
-use super::router_topk_scores;
+use super::{ModelArgs, router_topk_scores, sanitize_weights};
+use mlxcel_core::weights::WeightMap;
+
+/// One expert whose plane differs in shape from expert 0's is a load error
+/// naming its key and both shapes, not an MLX `[stack]` abort (issue #3320).
+#[test]
+fn sanitize_weights_refuses_a_mismatched_expert_plane() {
+    let args: ModelArgs = serde_json::from_value(serde_json::json!({
+        "model_type": "olmoe",
+        "vocab_size": 32,
+        "hidden_size": 8,
+        "intermediate_size": 4,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "num_experts": 2,
+        "num_experts_per_tok": 1,
+        "rms_norm_eps": 1e-5,
+        "rope_theta": 10000.0
+    }))
+    .expect("tiny config parses");
+    let mut weights = WeightMap::new();
+    for proj in ["up_proj", "down_proj", "gate_proj"] {
+        for e in 0..2usize {
+            let cols = if proj == "gate_proj" && e == 1 { 6 } else { 8 };
+            weights.insert(
+                format!("model.layers.0.mlp.experts.{e}.{proj}.weight"),
+                mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols as usize], &[4, cols]),
+            );
+        }
+    }
+    let err = sanitize_weights(weights, &args)
+        .err()
+        .expect("a mismatched expert must be refused");
+    assert!(
+        err.contains("model.layers.0.mlp.experts.1.gate_proj.weight")
+            && err.contains("[4, 6]")
+            && err.contains("[4, 8]"),
+        "{err}"
+    );
+}
 
 #[test]
 fn fused_dispatch_gate_is_callable() {

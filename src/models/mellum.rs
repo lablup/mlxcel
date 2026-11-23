@@ -1008,7 +1008,7 @@ impl MellumModel {
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
         // Stack per-expert tensors and drop a tied lm_head in place (no copy) so
         // the constructor sees the same pre-stacked layout as upstream.
-        Self::sanitize(&mut weights, &args);
+        Self::sanitize(&mut weights, &args)?;
         let model = Self::from_weights(&weights, &args)?;
         Ok((model, args))
     }
@@ -1078,15 +1078,17 @@ impl MellumModel {
     /// Mirror upstream `Model.sanitize`: drop a tied `lm_head.weight`, then stack
     /// per-expert `model.layers.{l}.mlp.experts.{e}.{up,down,gate}_proj.*`
     /// tensors into `...mlp.switch_mlp.{proj}.*`. A no-op when the experts are
-    /// already pre-stacked (no `experts.0` weight present).
-    pub fn sanitize(weights: &mut WeightMap, args: &ModelArgs) {
+    /// already pre-stacked (no `experts.0` weight present). Returns `Err`
+    /// naming the key, the expert index and both shapes when one expert's
+    /// plane differs in shape or dtype from expert 0's (issue #3320).
+    pub fn sanitize(weights: &mut WeightMap, args: &ModelArgs) -> Result<(), String> {
         if args.tie_word_embeddings {
             weights.remove("lm_head.weight");
         }
 
         let probe = "model.layers.0.mlp.experts.0.up_proj.weight";
         if !weights.contains_key(probe) {
-            return;
+            return Ok(());
         }
 
         for l in 0..args.num_hidden_layers {
@@ -1095,15 +1097,21 @@ impl MellumModel {
             }
             let prefix = format!("model.layers.{}", l);
             for proj in ["gate_proj", "up_proj", "down_proj"] {
-                stack_experts(weights, &prefix, proj, args.num_experts);
+                stack_experts(weights, &prefix, proj, args.num_experts)?;
             }
         }
+        Ok(())
     }
 }
 
 /// Stack `{prefix}.mlp.experts.{e}.{proj}.{suffix}` across experts into
 /// `{prefix}.mlp.switch_mlp.{proj}.{suffix}` for weight/scales/biases.
-fn stack_experts(weights: &mut WeightMap, prefix: &str, proj: &str, num_experts: usize) {
+fn stack_experts(
+    weights: &mut WeightMap,
+    prefix: &str,
+    proj: &str,
+    num_experts: usize,
+) -> Result<(), String> {
     for suffix in ["weight", "scales", "biases"] {
         let first = format!("{}.mlp.experts.0.{}.{}", prefix, proj, suffix);
         if !weights.contains_key(&first) {
@@ -1114,15 +1122,26 @@ fn stack_experts(weights: &mut WeightMap, prefix: &str, proj: &str, num_experts:
             let key = format!("{}.mlp.experts.{}.{}.{}", prefix, e, proj, suffix);
             match weights.remove(&key) {
                 Some(w) => parts.push(w),
-                None => return,
+                None => return Ok(()),
             }
         }
+        // `stack_owned` aborts on a shape mismatch, so refuse one before it
+        // runs (issue #3320).
+        let borrowed: Vec<(usize, &MlxArray)> = parts
+            .iter()
+            .enumerate()
+            .map(|(e, part)| (e, part.as_ref().expect("weight map holds no null handles")))
+            .collect();
+        crate::models::switch_layers::refuse_mismatched_expert_parts(&borrowed, |e| {
+            format!("{}.mlp.experts.{}.{}.{}", prefix, e, proj, suffix)
+        })?;
         let stacked = mlxcel_core::stack_owned(&parts, 0);
         weights.insert(
             format!("{}.mlp.switch_mlp.{}.{}", prefix, proj, suffix),
             stacked,
         );
     }
+    Ok(())
 }
 
 fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String> {

@@ -568,7 +568,7 @@ impl OlmoeModel {
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Sanitize weights (join expert weights if separate)
-        let weights = sanitize_weights(weights, &args);
+        let weights = sanitize_weights(weights, &args)?;
 
         // Create model
         let model = Self::from_weights(&weights, &args)?;
@@ -653,12 +653,15 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
         .ok_or_else(|| format!("Weight not found: {}", name))
 }
 
-/// Sanitize weights by joining separate expert weights into stacked format
-fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
+/// Sanitize weights by joining separate expert weights into stacked format.
+///
+/// Returns `Err` naming the key, the expert index and both shapes when one
+/// expert's plane differs in shape or dtype from expert 0's (issue #3320).
+fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> Result<WeightMap, String> {
     // Check if weights have separate expert format (e.g., mlp.experts.0.up_proj.weight)
     let check_key = "model.layers.0.mlp.experts.0.up_proj.weight";
     if !weights.contains_key(check_key) {
-        return weights;
+        return Ok(weights);
     }
 
     // Join expert weights into stacked format
@@ -668,19 +671,29 @@ fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
             for weight_name in &["weight", "scales", "biases"] {
                 let first_key = format!("{}.mlp.experts.0.{}.{}", prefix, proj_name, weight_name);
                 if weights.contains_key(&first_key) {
+                    let expert_key = |e: usize| {
+                        format!("{}.mlp.experts.{}.{}.{}", prefix, e, proj_name, weight_name)
+                    };
                     let mut expert_arrays = Vec::new();
                     for e in 0..args.num_experts {
-                        let key =
-                            format!("{}.mlp.experts.{}.{}.{}", prefix, e, proj_name, weight_name);
-                        if let Some(w) = weights.remove(&key) {
-                            expert_arrays.push(w);
+                        if let Some(w) = weights.remove(&expert_key(e)) {
+                            expert_arrays.push((e, w));
                         }
                     }
                     if !expert_arrays.is_empty() {
-                        let expert_ptrs: Vec<*const MlxArray> = expert_arrays
+                        let parts: Vec<(usize, &MlxArray)> = expert_arrays
                             .iter()
-                            .map(|a| a.as_ref().unwrap() as *const _)
+                            .map(|(e, a)| {
+                                (*e, a.as_ref().expect("weight map holds no null handles"))
+                            })
                             .collect();
+                        // `stack` aborts on a shape mismatch, so refuse one
+                        // before it runs (issue #3320).
+                        crate::models::switch_layers::refuse_mismatched_expert_parts(
+                            &parts, expert_key,
+                        )?;
+                        let expert_ptrs: Vec<*const MlxArray> =
+                            parts.iter().map(|(_, a)| *a as *const MlxArray).collect();
                         let stacked = mlxcel_core::stack(&expert_ptrs, 0);
                         let target_key =
                             format!("{}.mlp.switch_mlp.{}.{}", prefix, proj_name, weight_name);
@@ -691,7 +704,7 @@ fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
         }
     }
 
-    weights
+    Ok(weights)
 }
 
 // LanguageModel trait implementation.

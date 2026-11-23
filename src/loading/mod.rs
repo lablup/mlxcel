@@ -516,7 +516,8 @@ fn load_llama_family_from_weights(
             .ok_or_else(|| anyhow::anyhow!("Missing text_config for Mistral4"))?;
         let args: models::mistral4::Mistral4Config = serde_json::from_value(text_config.clone())
             .map_err(|err| anyhow::anyhow!("Failed to parse text_config: {}", err))?;
-        models::mistral4::sanitize_weights(weights, &args, "");
+        models::mistral4::sanitize_weights(weights, &args, "")
+            .map_err(|err| anyhow::anyhow!("{}", err))?;
         let model = models::Mistral4Model::from_weights(weights, &args)
             .map_err(|err| anyhow::anyhow!("{}", err))?;
         return Ok(LoadedModel::Mistral4(model));
