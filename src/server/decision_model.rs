@@ -24,6 +24,8 @@
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::multimodal::video::PrivateTempDir;
+
 pub use crate::decision::{DecisionMedia, DecisionResult, MediaKind, Question, QuestionKind};
 
 /// Failure modes of one decision request.
@@ -33,8 +35,9 @@ pub enum DecisionProviderError {
     /// The bounded worker queue was full at admission time (`503`).
     #[error("decision worker queue is full")]
     QueueFull,
-    /// The worker did not reply within the per-request timeout (`504`); the
-    /// in-flight MLX work is not cancelled.
+    /// The worker did not reply within the per-request timeout (`504`). A
+    /// request still queued is skipped; one already running finishes and its
+    /// answer is discarded.
     #[error("decision request timed out")]
     Timeout,
     /// The request is invalid for the loaded model (`400`).
@@ -60,11 +63,16 @@ impl From<crate::decision::DecisionError> for DecisionProviderError {
 /// `spawn_blocking`.
 pub trait DecisionModelProvider: Send + Sync {
     /// Answer validated questions about `state` and `media`.
+    ///
+    /// `temp_files` hold the server-owned files behind `media` (downloaded
+    /// videos). The provider keeps them until the model has stopped reading
+    /// them, which can be after this call returned `Timeout`.
     fn predict(
         &self,
         state: Option<Value>,
         questions: Vec<(String, Question)>,
         media: DecisionMedia,
+        temp_files: Vec<PrivateTempDir>,
     ) -> Result<DecisionResult, DecisionProviderError>;
 
     /// Served model id, reported in responses and `/v1/models`.
