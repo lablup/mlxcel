@@ -4,7 +4,7 @@ Epic #564, Phase 1, unit U1. Scope: a causal depthwise conv1d and a selective sc
 
 ## Verdict
 
-Chunked SSD lowers, compiles in under a second on `llvm-cpu` and `rocm` (gfx1151) at both 256 and 4096 rows, has a graph size independent of the capacity (157 StableHLO ops, 33 dispatches), and matches HF fp32 to 7e-6 on `local-task` and `hip`. It is the chosen prefill form, with `chunk_size = 128`. No fallback is needed. The associative scan is correct but materializes `[T, H, P, N]` per level (9.2 GiB transient at 4096 for the 130m mixer). The sequential unroll grows linearly in ops and dispatches (783 dispatches at 256) and at 4096 (102476 ops) neither `llvm-cpu` nor `rocm` finished compiling within the 1200 s budget.
+Chunked SSD lowers, compiles in under a second on `llvm-cpu` and `rocm` (gfx1151) at both 256 and 4096 rows, has a graph size independent of the capacity (157 StableHLO ops, 31 to 33 dispatches), and matches HF fp32 to 7e-6 on `local-task` and `hip`. It is the chosen prefill form, with `chunk_size = 128`. No fallback is needed. The associative scan is correct but materializes `[T, H, P, N]` per level (9.2 GiB transient at 4096 for the 130m mixer). The sequential unroll grows linearly in ops and dispatches (783 dispatches at 256) and at 4096 (102476 ops) neither `llvm-cpu` nor `rocm` finished compiling within the 1200 s budget.
 
 The scan stays f32 on the f16 path: every scan contraction goes through `Builder::dot_general_keep_f32`, and only in_proj, out_proj and the conv follow the graph precision.
 
@@ -75,6 +75,11 @@ The gate runs every acceptance case on `local-task` and `hip` at capacity 256 wi
 | prefill, real_len 0 | 0 | 0 | 0 | 0 |
 | prefill, real_len 0 from a carried state | 0 | 0 | 0 | 0 |
 | prefill, real_len 77 from a carried state, biases | 9.5e-7 | 8.3e-7 | 1.2e-6 | 3.6e-7 |
+| prefill, real_len 200 from a carried state, chunk 64 (4 chunks) | 1.3e-6 | 1.1e-6 | 6.9e-7 | 3.6e-7 |
+| prefill, real_len 100, dt clamped to [0.01, 0.05] | 6.3e-7 | 7.7e-7 | 2.9e-8 | 1.8e-7 |
+| decode, B=2, dt clamped to [0.01, 0.05] | 4.8e-7 | 6.0e-7 | 6.0e-8 | 2.4e-7 |
+
+The multi-chunk carried case is the one where the inter-chunk decay reaches `y`: with a zero `h0` and at most two chunks the state entering every chunk needs no decay, so only `h_T` would catch a wrong chunk-level decay matrix (zeroing it leaves `y` within 1e-6 on the other prefill cases but fails this one with `y` off by 1.05). The dt-clamp cases fail by 1.7e-2 / 1.9e-2 in `y` with the clamp removed; HF's default `time_step_limit` is `(0, inf)`, so no other case exercises it.
 
 The carried-state cases have no HF prefill equivalent (HF prefill always starts from zero), so their reference is HF's own decode branch run token by token from the same `h0` and conv tail.
 
@@ -82,4 +87,5 @@ The carried-state cases have no HF prefill equivalent (HF prefill always starts 
 
 - The probe signature is `emit_ssm_probe(c, hidden, t, mode)`: `SsmConfig` has no model width, so the probe takes `hidden` explicitly.
 - `mamba2_mixer_prefill` uses `conv0` as the left context of both the conv and the tail slice, so a prefill that continues from a carried state is exact and `real_len = 0` returns `h0` and `conv0` unchanged. `conv1d_causal_prefill` and `conv1d_tail` keep their zero-padded fresh-sequence contract.
+- On the f16 path the prefill conv uses `Builder::convolution`, so its operands and result are f16 before the f32 cast, while the decode step's conv is an f32 multiply-reduce. Switching the prefill to `convolution_f32_accumulate` (f16 operands, f32 result) does not compile: iree-compile rejects the depthwise (`feature_group_count = conv_dim`) mixed-type convolution with a `tensor.collapse_shape` type mismatch. If the prefill/decode conv rounding gap matters for #3338's f16 graphs, the fix is a K-tap shifted multiply-add in f32 rather than the convolution op.
 - HF's cache keeps the last `K` pre-conv inputs (`[B, C, K]`); the emitter state keeps the last `K-1` (`[B, K-1, C]`), which is all the next step reads.

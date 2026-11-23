@@ -153,7 +153,7 @@ fn ssm_scan_contractions_stay_f32_on_the_f16_path() {
         .collect();
     let demoted = dots.iter().filter(|line| line.contains("xf16>")).count();
     let full = dots.len() - demoted;
-    // in_proj and out_proj demote; the four chunked-SSD contractions do not.
+    // in_proj and out_proj demote; the five chunked-SSD contractions do not.
     assert_eq!(demoted, 2, "{dots:#?}");
     assert_eq!(full, 5, "{dots:#?}");
 }

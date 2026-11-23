@@ -72,7 +72,7 @@ class StateStub:
         return state
 
 
-def build_mixer(preset, conv_kernel, use_bias, seed, hf_chunk):
+def build_mixer(preset, conv_kernel, use_bias, seed, hf_chunk, time_step_limit=None):
     from transformers import Mamba2Config
     from transformers.models.mamba2.modeling_mamba2 import Mamba2Mixer
 
@@ -85,6 +85,7 @@ def build_mixer(preset, conv_kernel, use_bias, seed, hf_chunk):
         use_conv_bias=True,
         chunk_size=hf_chunk,
         num_hidden_layers=1,
+        **({"time_step_limit": tuple(time_step_limit)} if time_step_limit else {}),
         **dims,
     )
     torch.manual_seed(seed)
@@ -140,7 +141,9 @@ def decode_steps(mixer, rows, h0, conv0):
 def emit_inputs(args):
     os.makedirs(args.emit_inputs, exist_ok=True)
     hf_chunk = args.hf_chunk or (32 if args.dims == "mamba2-130m" else 256)
-    cfg, mixer = build_mixer(args.dims, args.conv_kernel, args.use_bias, args.seed, hf_chunk)
+    cfg, mixer = build_mixer(
+        args.dims, args.conv_kernel, args.use_bias, args.seed, hf_chunk, args.time_step_limit
+    )
     h, p, n = mixer.num_heads, mixer.head_dim, mixer.ssm_state_size
     c, k, hidden = mixer.conv_dim, mixer.conv_kernel_size, mixer.hidden_size
     gen = torch.Generator().manual_seed(args.seed + 1)
@@ -274,6 +277,13 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--chunk-size", type=int, default=128, help="XLA prefill chunk")
     ap.add_argument("--hf-chunk", type=int, default=0, help="HF torch_forward chunk")
+    ap.add_argument(
+        "--time-step-limit",
+        type=float,
+        nargs=2,
+        metavar=("LO", "HI"),
+        help="HF time_step_limit (dt clamp after softplus); default (0, inf)",
+    )
     ap.add_argument("--tol", type=float, default=TOL)
     ap.add_argument("--json", metavar="FILE", help="write the --check report here")
     args = ap.parse_args()

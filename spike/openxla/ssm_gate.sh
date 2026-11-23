@@ -26,6 +26,11 @@ CASES=(
   "prefill-empty|--mode prefill --capacity $CAP --real-len 0"
   "prefill-empty-carried|--mode prefill --capacity $CAP --real-len 0 --init-state"
   "prefill-carried|--mode prefill --capacity $CAP --real-len 77 --init-state --use-bias"
+  # A carried state crossing several chunks: the inter-chunk decay reaches y.
+  "prefill-carried-chunks|--mode prefill --capacity $CAP --real-len 200 --init-state --chunk-size 64"
+  # A finite dt clamp on both sides, with padded rows that must stay at dt = 0.
+  "prefill-dt-limit|--mode prefill --capacity $CAP --real-len 100 --time-step-limit 0.01 0.05"
+  "decode-dt-limit|--mode decode --batch 2 --time-step-limit 0.01 0.05"
 )
 
 failed=0
