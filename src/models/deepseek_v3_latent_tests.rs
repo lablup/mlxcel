@@ -124,17 +124,12 @@ fn int8_latent_decode_tracks_the_fp16_latent_on_the_composed_path() {
     let want = run_layer(&attn, &cfg, &mut fp16, 5, 9);
     assert!(!fp16.holds_quantized_latent());
 
-    let before = mlxcel_core::mla::stats::snapshot();
     let mut int8 = KVCache::new_with_mode(KVCacheMode::Int8);
-    let got = run_layer(&attn, &cfg, &mut int8, 5, 9);
-    let after = mlxcel_core::mla::stats::snapshot();
+    let (got, counts) = mlxcel_core::mla::stats::scoped(|| run_layer(&attn, &cfg, &mut int8, 5, 9));
     assert!(int8.holds_quantized_latent());
     assert_eq!(int8.seq_len(), 9);
     assert!(
-        after
-            .get(MlaDecodePath::AbsorbedComposed)
-            .saturating_sub(before.get(MlaDecodePath::AbsorbedComposed))
-            >= 4,
+        counts.get(MlaDecodePath::AbsorbedComposed) >= 4,
         "every int8 decode step must take the composed quantized path"
     );
 
@@ -391,12 +386,12 @@ fn a_forced_int4_latent_stores_four_bit_rows_and_decodes_composed() {
     with_mla_latent_quant(MlaLatentQuant::Int4, || {
         let mut int4 = KVCache::new_with_mode(KVCacheMode::Int8);
         mlxcel_core::eval(&attn.forward(&hidden_rows(&cfg, 0, 5), &mut int4, None));
-        let before = mlxcel_core::mla::stats::snapshot();
-        let got: Vec<Vec<f32>> = (5..9)
-            .map(|t| values(&attn.forward(&hidden_rows(&cfg, t, t + 1), &mut int4, None)))
-            .collect();
-        let after = mlxcel_core::mla::stats::snapshot();
-        let delta = |path| after.get(path).saturating_sub(before.get(path));
+        let (got, counts) = mlxcel_core::mla::stats::scoped(|| {
+            (5..9)
+                .map(|t| values(&attn.forward(&hidden_rows(&cfg, t, t + 1), &mut int4, None)))
+                .collect::<Vec<Vec<f32>>>()
+        });
+        let delta = |path| counts.get(path);
         assert_eq!(delta(MlaDecodePath::AbsorbedComposed), 4);
         assert_eq!(delta(MlaDecodePath::AbsorbedFused), 0);
 
