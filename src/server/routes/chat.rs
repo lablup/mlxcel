@@ -2223,7 +2223,14 @@ pub(crate) fn primed_open_thinking_close_marker(
 /// by family with [`OPEN_THINKING_SUFFIXES`] — either one closes "a block
 /// the prompt opened", so the post-processor treats the generation as
 /// closed when any of them appears in the raw output.
-const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &["<channel|>", "</think>", "<|close|>think<|sep|>"];
+const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &[
+    "<channel|>",
+    "</think>",
+    "<|close|>think<|sep|>",
+    "</ifm|think>",
+    "</ifm|think_fast>",
+    "</ifm|think_faster>",
+];
 
 /// Whether the prompt primed an open thinking block that the raw output never
 /// closed.

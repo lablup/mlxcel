@@ -81,7 +81,7 @@ pub trait SplitAttention {
 
 /// Apply one decoder attention block to pre-projected `[B, T, H*D]` tensors.
 ///
-/// Used by: Llama3 (and its aliases), Qwen3, Qwen3-MoE.
+/// Used by: Llama3 (and its aliases, including Arcee's block), Qwen3, Qwen3-MoE.
 pub fn forward_split_attention<A: SplitAttention + ?Sized>(
     attn: &A,
     q: &MlxArray,

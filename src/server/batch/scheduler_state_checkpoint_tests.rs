@@ -40,6 +40,13 @@ fn store(checkpoint_bytes: usize) -> Arc<PromptCacheStore> {
 }
 
 fn scheduler(store: Arc<PromptCacheStore>) -> BatchScheduler {
+    scheduler_with_metrics(store, Arc::new(BatchMetrics::new()))
+}
+
+fn scheduler_with_metrics(
+    store: Arc<PromptCacheStore>,
+    metrics: Arc<BatchMetrics>,
+) -> BatchScheduler {
     let (_tx, rx) = mpsc::channel();
     let sched = BatchScheduler::with_config(
         LoadedModel::Qwen35(crate::models::qwen3_5_tests::two_layer_model()),
@@ -48,7 +55,7 @@ fn scheduler(store: Arc<PromptCacheStore>) -> BatchScheduler {
         rx,
         4,
         8,
-        Arc::new(BatchMetrics::new()),
+        metrics,
         Arc::new(BatchObservability::new()),
         0,
         false,
@@ -155,6 +162,52 @@ fn an_edit_two_turns_back_resumes_from_the_rebuilt_checkpoint() {
     assert_eq!(
         served, expected,
         "the rebuilt state decodes like the whole one"
+    );
+}
+
+/// Issue #3246: with the store wired as production wires it, a checkpoint
+/// rebuild must move the Prometheus snapshot counters once, and by the length
+/// the response reports as `cached_tokens`.
+#[test]
+fn checkpoint_rebuild_counts_once_in_prometheus_with_production_wiring() {
+    use crate::server::state::BatchMetricsCacheAdapter;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let metrics = Arc::new(BatchMetrics::new());
+    let store = Arc::new(PromptCacheStore::with_metrics(
+        PromptCacheConfig::new(true, 1 << 20, 32, Duration::from_secs(600), 4)
+            .with_state_checkpoint_capacity_bytes(1 << 20),
+        Arc::new(BatchMetricsCacheAdapter::new(Arc::clone(&metrics))),
+    ));
+    let mut sched = scheduler_with_metrics(store.clone(), Arc::clone(&metrics));
+    let mut adopted_total = 0;
+    for n in 1..=4 {
+        adopted_total += run_turn(&mut sched, &history(n)).1;
+    }
+    let (_, adopted) = run_turn(&mut sched, &edited(2));
+    adopted_total += adopted;
+    assert_eq!(adopted, 2 * TURN, "the edit rebuilds turn 2's checkpoint");
+    assert_eq!(store.stats().state_checkpoint_hits, 1);
+
+    let stats = store.stats();
+    assert!(stats.snapshot_hits > 0);
+    assert_eq!(
+        metrics.prompt_cache_snapshot_hits_total.load(Relaxed),
+        stats.snapshot_hits,
+        "/metrics snapshot hits must equal /v1/cache/stats snapshot_hits"
+    );
+    assert_eq!(
+        metrics.prompt_cache_snapshot_misses_total.load(Relaxed),
+        stats.snapshot_lookups - stats.snapshot_hits,
+        "/metrics snapshot misses must equal snapshot_lookups - snapshot_hits"
+    );
+    assert_eq!(
+        metrics
+            .prompt_cache_snapshot_tokens_reused_total
+            .load(Relaxed),
+        adopted_total as u64,
+        "reused tokens must equal the summed adopted lengths"
     );
 }
 

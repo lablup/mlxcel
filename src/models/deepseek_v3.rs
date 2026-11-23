@@ -20,6 +20,7 @@
 //! - Shared experts + routed experts
 //! - First k layers are dense (no MoE)
 
+use crate::models::mla_rope::MlaRope;
 use crate::models::switch_layers::validate_expert_quantization_params;
 use crate::models::switch_layers::{EXPERT_PLANE_LEAVES, stack_expert_leaf};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
@@ -226,7 +227,6 @@ pub struct DeepSeekV3Attention {
     pub v_head_dim: i32,
     pub kv_lora_rank: i32,
     pub scale: f32,
-    pub rope_base: f32,
     /// Rotate interleaved (adjacent) pairs rather than half-split pairs.
     ///
     /// True for every DeepSeek MLA backbone, which is why `from_weights` sets
@@ -234,9 +234,50 @@ pub struct DeepSeekV3Attention {
     /// (`rope_interleave`), so its decoder overrides this through
     /// [`DeepSeekV3Attention::with_rope_traditional`] (issue #1371).
     pub rope_traditional: bool,
+    /// The `q_pe` / `k_pe` rotation: the checkpoint's `rope_scaling` table
+    /// (YaRN on every shipped DeepSeek-V3 / Kimi-K2 checkpoint) with its
+    /// magnitude multiplier, or plain `fast_rope` at `rope_theta` when the
+    /// config has no block (#3295). Youtu passes a plain one through
+    /// [`DeepSeekV3Attention::from_weights_with_rope`].
+    pub(crate) rope: MlaRope,
 }
 
 impl DeepSeekV3Attention {
+    /// Replace the rotation after construction.
+    ///
+    /// Used by: tests (production callers pass the rope to
+    /// [`Self::from_weights_with_rope`]).
+    #[cfg(test)]
+    pub(crate) fn with_rope(mut self, rope: MlaRope) -> Self {
+        self.rope = rope;
+        self
+    }
+
+    /// Resolve this config's RoPE once, for every layer to duplicate.
+    ///
+    /// No training-context fallback, matching upstream `deepseek_v3.py`:
+    /// `YarnRoPE` defaults a missing `original_max_position_embeddings` to
+    /// 4096, not to `max_position_embeddings`.
+    pub(crate) fn resolve_rope(args: &DeepSeekV3Config) -> MlaRope {
+        MlaRope::from_block(
+            args.rope_scaling.as_ref(),
+            args.qk_rope_head_dim,
+            args.rope_theta,
+            None,
+            &args.model_type,
+        )
+    }
+
+    /// RoPE for the single-sequence path.
+    fn rope(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
+        self.rope.apply(x, self.rope_traditional, offset)
+    }
+
+    /// RoPE for the batched decode path, one offset per row.
+    fn rope_batched(&self, x: &MlxArray, offsets: &[i32]) -> UniquePtr<MlxArray> {
+        self.rope.apply_batched(x, self.rope_traditional, offsets)
+    }
+
     /// Override the RoPE pair layout after construction.
     ///
     /// Used by: `models::youtu_vl_lm::YoutuDecoderLayer`.
@@ -304,22 +345,8 @@ impl DeepSeekV3Attention {
         // already in the cache (mask columns for the causal fallback below).
         let offset = cache.offset;
         let live_before = cache.live_len();
-        let q_pe = mlxcel_core::fast_rope(
-            &q_pe,
-            self.qk_rope_head_dim,
-            self.rope_traditional,
-            self.rope_base,
-            1.0,
-            offset,
-        );
-        let k_pe = mlxcel_core::fast_rope(
-            &k_pe,
-            self.qk_rope_head_dim,
-            self.rope_traditional,
-            self.rope_base,
-            1.0,
-            offset,
-        );
+        let q_pe = self.rope(&q_pe, offset);
+        let k_pe = self.rope(&k_pe, offset);
 
         // Expand kv_latent for caching: [B, L, kv_lora_rank] → [B, 1, L, kv_lora_rank]
         let kv_latent = mlxcel_core::expand_dims(&kv_latent, 1);
@@ -566,22 +593,8 @@ impl DeepSeekV3Attention {
         let k_pe = mlxcel_core::reshape(&k_pe, &[batch, 1, 1, self.qk_rope_head_dim]);
         let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
         let offsets: Vec<i32> = caches.iter().map(|cache| cache.offset).collect();
-        let q_pe = mlxcel_core::fast_rope_batched(
-            &q_pe,
-            self.qk_rope_head_dim,
-            self.rope_traditional,
-            self.rope_base,
-            1.0,
-            &offsets,
-        );
-        let k_pe = mlxcel_core::fast_rope_batched(
-            &k_pe,
-            self.qk_rope_head_dim,
-            self.rope_traditional,
-            self.rope_base,
-            1.0,
-            &offsets,
-        );
+        let q_pe = self.rope_batched(&q_pe, &offsets);
+        let k_pe = self.rope_batched(&k_pe, &offsets);
         let q_latent = self.embed_q.forward(&q_nope);
         let output = crate::models::mla_batched::mla_latent_decode_rows(
             "DeepSeekV3Attention",
@@ -605,6 +618,17 @@ impl DeepSeekV3Attention {
         weights: &WeightMap,
         args: &DeepSeekV3Config,
         prefix: &str,
+    ) -> Result<Self, String> {
+        Self::from_weights_with_rope(weights, args, prefix, Self::resolve_rope(args))
+    }
+
+    /// [`Self::from_weights`] with a rope the caller resolved (once per
+    /// model, see [`Self::resolve_rope`]).
+    pub(crate) fn from_weights_with_rope(
+        weights: &WeightMap,
+        args: &DeepSeekV3Config,
+        prefix: &str,
+        rope: MlaRope,
     ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
@@ -686,11 +710,11 @@ impl DeepSeekV3Attention {
             v_head_dim: args.v_head_dim as i32,
             kv_lora_rank: args.kv_lora_rank as i32,
             scale: args.get_attention_scale(),
-            rope_base: args.rope_theta,
             // Every DeepSeek MLA backbone rotates interleaved pairs. A backbone
             // that exposes the choice overrides this with
             // `with_rope_traditional` after construction.
             rope_traditional: true,
+            rope,
         })
     }
 }
@@ -875,7 +899,13 @@ pub struct SwitchGLU {
     pub down_scales: UniquePtr<MlxArray>,
     pub down_biases: UniquePtr<MlxArray>,
     pub group_size: i32,
+    /// Width of the `gate_proj` plane, and of every plane unless a per-path
+    /// quantization override stores `up_proj` / `down_proj` differently.
     pub bits: i32,
+    /// Width of the `up_proj` plane (equal to `bits` on uniform checkpoints).
+    pub up_bits: i32,
+    /// Width of the `down_proj` plane (equal to `bits` on uniform checkpoints).
+    pub down_bits: i32,
 }
 
 impl SwitchGLU {
@@ -934,7 +964,7 @@ impl SwitchGLU {
                 indices as *const _,
                 true,
                 self.group_size,
-                self.bits,
+                self.up_bits,
                 false,
                 "affine",
                 std::ptr::null(),
@@ -957,7 +987,7 @@ impl SwitchGLU {
                 indices as *const _,
                 true,
                 self.group_size,
-                self.bits,
+                self.down_bits,
                 false,
                 "affine",
                 std::ptr::null(),
@@ -1019,6 +1049,47 @@ impl SwitchGLU {
         let down_scales = get_weight_copy(weights, &format!("{}.down_proj.scales", prefix))?;
         let down_biases = get_weight_copy(weights, &format!("{}.down_proj.biases", prefix))?;
 
+        // A per-path quantization override (mlx-lm's `class_predicate`, e.g.
+        // the OptiQ Xing4.0 export with some expert planes at 8 bits under a
+        // 4-bit default, issue #2356) stores a plane at a width the top-level
+        // block does not declare. Each plane's width is solved from its shapes
+        // at the shared group size; a plane that matches keeps the declared
+        // width, so uniform checkpoints load exactly as before.
+        let plane_bits = |proj: &str, w: &MlxArray, s: &MlxArray| -> Result<i32, String> {
+            let layout = mlxcel_core::layers::reconcile_quantization_layout(
+                &mlxcel_core::array_shape(w),
+                &mlxcel_core::array_shape(s),
+                group_size,
+                bits,
+                "affine",
+            )
+            .map_err(|e| format!("{prefix}.{proj}: {e}"))?;
+            if layout.group_size != group_size {
+                return Err(format!(
+                    "{prefix}.{proj}: expert plane group size {} differs from the declared {group_size}",
+                    layout.group_size
+                ));
+            }
+            // A plane whose shapes solve to 1 bit would reach `gather_qmm`,
+            // which has no 1-bit kernel and aborts at the first routed forward
+            // pass; `SwitchLinear` refuses the same layout (issue #1370).
+            if layout.bits == 1 {
+                return Err(format!(
+                    "{prefix}.{proj}: 1-bit quantization is supported for dense linears and \
+                     embeddings only; 1-bit MoE expert stacks (gather_qmm) are not supported"
+                ));
+            }
+            validate_expert_quantization_params(
+                &format!("{prefix}.{proj}"),
+                group_size,
+                layout.bits,
+            )?;
+            Ok(layout.bits)
+        };
+        let gate_bits = plane_bits("gate_proj", &gate_weight, &gate_scales)?;
+        let up_bits = plane_bits("up_proj", &up_weight, &up_scales)?;
+        let down_bits = plane_bits("down_proj", &down_weight, &down_scales)?;
+
         Ok(Self {
             gate_weight,
             gate_scales,
@@ -1030,7 +1101,9 @@ impl SwitchGLU {
             down_scales,
             down_biases,
             group_size,
-            bits,
+            bits: gate_bits,
+            up_bits,
+            down_bits,
         })
     }
 }
@@ -1146,10 +1219,26 @@ impl DecoderLayer {
         args: &DeepSeekV3Config,
         layer_idx: usize,
     ) -> Result<Self, String> {
+        let rope = DeepSeekV3Attention::resolve_rope(args);
+        Self::from_weights_with_rope(weights, args, layer_idx, &rope)
+    }
+
+    /// [`Self::from_weights`] with the model's resolved rope, duplicated into
+    /// this layer's attention.
+    pub(crate) fn from_weights_with_rope(
+        weights: &WeightMap,
+        args: &DeepSeekV3Config,
+        layer_idx: usize,
+        rope: &MlaRope,
+    ) -> Result<Self, String> {
         let prefix = format!("model.layers.{}", layer_idx);
 
-        let self_attn =
-            DeepSeekV3Attention::from_weights(weights, args, &format!("{}.self_attn", prefix))?;
+        let self_attn = DeepSeekV3Attention::from_weights_with_rope(
+            weights,
+            args,
+            &format!("{}.self_attn", prefix),
+            rope.duplicate(),
+        )?;
 
         let mlp = if args.is_moe_layer(layer_idx) {
             MLPType::MoE(MoEBlock::from_weights(
@@ -1577,9 +1666,10 @@ impl DeepSeekV3Model {
         // trailer, when present, lives at index `num_hidden_layers` and was
         // already stripped by `sanitize_weights`.
         let num_layers = args.num_hidden_layers;
+        let rope = DeepSeekV3Attention::resolve_rope(args);
         let mut layers = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
-            let layer = DecoderLayer::from_weights(weights, args, i)?;
+            let layer = DecoderLayer::from_weights_with_rope(weights, args, i, &rope)?;
             layers.push(layer);
         }
 
@@ -1722,7 +1812,7 @@ pub(crate) mod tests {
     // and aborted (the reported `(1,91,12288)` vs `(1,91,6,1)` crash).
 
     /// Deterministic, varied, finite fill so quantization scales stay non-degenerate.
-    pub(super) fn ramp(n: usize) -> Vec<f32> {
+    pub(crate) fn ramp(n: usize) -> Vec<f32> {
         (0..n)
             .map(|i| (((i * 37 + 11) % 97) as f32 - 48.0) * 0.01)
             .collect()
@@ -1780,6 +1870,8 @@ pub(crate) mod tests {
             down_biases,
             group_size: gs,
             bits,
+            up_bits: bits,
+            down_bits: bits,
         }
     }
 
@@ -2042,7 +2134,7 @@ pub(crate) mod tests {
     /// Minimal config for a 2-layer dense backbone with a direct q projection
     /// (`q_lora_rank: None`), the exact shape of the Kimi-VL / Moonlight text
     /// config.
-    pub(super) fn test_config_dense_direct_q() -> DeepSeekV3Config {
+    pub(crate) fn test_config_dense_direct_q() -> DeepSeekV3Config {
         DeepSeekV3Config {
             model_type: "deepseek_v3".to_string(),
             vocab_size: 11,
@@ -2086,7 +2178,7 @@ pub(crate) mod tests {
     }
 
     /// Insert the full unquantized weight set for one direct-q decoder layer.
-    pub(super) fn insert_dense_layer_weights(
+    pub(crate) fn insert_dense_layer_weights(
         weights: &mut WeightMap,
         cfg: &DeepSeekV3Config,
         l: usize,
@@ -2149,7 +2241,7 @@ pub(crate) mod tests {
         );
     }
 
-    pub(super) fn tiny_dense_model_weights(cfg: &DeepSeekV3Config) -> WeightMap {
+    pub(crate) fn tiny_dense_model_weights(cfg: &DeepSeekV3Config) -> WeightMap {
         let mut weights = WeightMap::new();
         let hidden = cfg.hidden_size as i32;
         let vocab = cfg.vocab_size as i32;

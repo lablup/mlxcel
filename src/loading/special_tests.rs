@@ -86,6 +86,10 @@ fn special_weight_loader_kind_covers_special_families() {
         Some(SpecialWeightLoaderKind::Longcat)
     );
     assert_eq!(
+        special_weight_loader_kind(ModelType::LongcatFlashSparse),
+        Some(SpecialWeightLoaderKind::LongcatSparse)
+    );
+    assert_eq!(
         special_weight_loader_kind(ModelType::Rwkv7),
         Some(SpecialWeightLoaderKind::Rwkv7)
     );

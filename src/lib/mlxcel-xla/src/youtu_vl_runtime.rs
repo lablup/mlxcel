@@ -258,9 +258,7 @@ fn compile_and_load(
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
     let flags = target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-youtu-vl-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::YoutuVl)?;
     let mut observer = CheckpointSourceObserver::default();
     let (weights, checkpoint_schema) = load_weights(model_dir, config, &mut observer)?;
     let operators = youtu_vl_operators();
@@ -304,9 +302,7 @@ fn compile_and_load_diagnostics(
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
     let flags = target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-youtu-vl-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::YoutuVl)?;
     let mut observer = CheckpointSourceObserver::default();
     let (weights, checkpoint_schema) = load_weights(model_dir, config, &mut observer)?;
     let operators = youtu_vl_operators();

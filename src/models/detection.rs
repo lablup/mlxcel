@@ -782,6 +782,18 @@ impl ModelDetectionProbes for FullFilesystemDetectionProbes {
     }
 }
 
+/// Whether `architectures[0]` is LongCat-Flash-Lite-Sparse's `LongcatCausalLM`.
+/// Whether a config names the LongCat-Flash-Lite-Sparse architecture
+/// (`LongcatCausalLM`), which the original checkpoint declares without a
+/// `model_type`.
+pub(crate) fn is_longcat_sparse_architecture(v: &Value) -> bool {
+    v["architectures"]
+        .as_array()
+        .and_then(|archs| archs.first())
+        .and_then(Value::as_str)
+        == Some("LongcatCausalLM")
+}
+
 /// Detect a model type from an already parsed config using caller-supplied filesystem probes.
 ///
 /// The loader passes probes that may inspect SafeTensors indexes or headers, while metadata-only callers can pass bounded probes that fail closed when a decision would require reading weight headers. Keeping the dispatch here prevents UI catalog support from drifting into a second handwritten model list.
@@ -832,6 +844,14 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         && let Some(redirect) = crate::imagegen::image_checkpoint_redirect_error(model_path)
     {
         return Err(redirect);
+    }
+
+    // The original `meituan-longcat/LongCat-Flash-Lite-Sparse` config carries
+    // no `model_type`; its architecture names the variant (#2362). The
+    // mlx-community conversions declare `longcat_flash_sparse` and take the
+    // arm below.
+    if v["model_type"].is_null() && is_longcat_sparse_architecture(v) {
+        return Ok(ModelType::LongcatFlashSparse);
     }
 
     let model_type_raw = v["model_type"]
@@ -987,6 +1007,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "deepseek_v3" | "kimi_k2" | "joyai_llm_flash" => Ok(ModelType::DeepSeekV3),
         "deepseek_v32" | "deepseek_v3.2" => Ok(ModelType::DeepSeekV32),
         "deepseek_v4" => Ok(ModelType::DeepSeekV4),
+        "xing4_0" => Ok(ModelType::Xing40),
         "dots1" => Ok(ModelType::Dots1),
         "cohere" => Ok(ModelType::Cohere),
         "cohere2" => Ok(ModelType::Cohere2),
@@ -1023,6 +1044,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "bailing_moe" => Ok(ModelType::BailingMoe),
         "bailing_moe_linear" => Ok(ModelType::BailingMoeLinear),
         "afmoe" => Ok(ModelType::Afmoe),
+        "arcee" => Ok(ModelType::Arcee),
         // `Kwai-Klear/Klear-46B-A2.5B-Instruct` declares the CAPITALIZED
         // `"Klear"`. It matches this lowercase arm only because
         // `model_type_raw` is lowercased above; mlx-lm, which does not
@@ -1030,6 +1052,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // cover both spellings. Without that normalization this arm would miss
         // every published checkpoint.
         "klear" => Ok(ModelType::Klear),
+        "kolibri1" => Ok(ModelType::Kolibri1),
         "apertus" => Ok(ModelType::Apertus),
         "seed_oss" => Ok(ModelType::SeedOss),
         "granite" => Ok(ModelType::Granite),
@@ -1045,10 +1068,12 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "gpt_bigcode" => Ok(ModelType::GptBigCode),
         "gpt_neox" => Ok(ModelType::GptNeoX),
         "helium" => Ok(ModelType::Helium),
+        "k2_horizon" => Ok(ModelType::K2Horizon),
         "telechat3" => Ok(ModelType::TeleChat3),
         "starcoder2" => Ok(ModelType::StarCoder2),
         "mellum" => Ok(ModelType::Mellum),
         "laguna" => Ok(ModelType::Laguna),
+        "limite" => Ok(ModelType::Limite),
         "minicpm" => Ok(ModelType::MiniCPM),
         "minicpm3" => Ok(ModelType::MiniCPM3),
         "stablelm" => Ok(ModelType::StableLM),
@@ -1076,6 +1101,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
             }
         }
         "plamo2" => Ok(ModelType::Plamo2),
+        "plamo2vl" => Ok(ModelType::Plamo2VLM),
         "granitemoehybrid" => Ok(ModelType::GraniteMoeHybrid),
         // Nemotron VoiceChat nests a `nemotron_h` text_config; the top-level
         // type must win before any text_config fallback routes it to NemotronH.
@@ -1086,6 +1112,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         }
         "nemotron-nas" => Ok(ModelType::NemotronNAS),
         "rwkv7" => Ok(ModelType::Rwkv7),
+        "z1t" => Ok(ModelType::Z1t),
         "kimi_linear" => Ok(ModelType::KimiLinear),
         // Kimi K3 loads as the VLM when `config.json` carries `vision_config`
         // and the checkpoint ships `vision_tower.*` tensors (#1342); a copy
@@ -1106,6 +1133,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "locateanything" => Ok(ModelType::LocateAnythingVLM),
         "longcat_flash" => Ok(ModelType::LongcatFlash),
         "longcat_flash_ngram" => Ok(ModelType::LongcatFlashNgram),
+        "longcat_flash_sparse" => Ok(ModelType::LongcatFlashSparse),
         "step3p5" => Ok(ModelType::Step3p5),
         "step3p7" => Ok(ModelType::Step3p7),
         "recurrent_gemma" | "griffin" => Ok(ModelType::RecurrentGemma),
@@ -1224,6 +1252,19 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // `token_classification::loader`.
         "gliner2" | "gliner2_5" => Err(anyhow::anyhow!(
             "GLiNER2.5 is a span extractor; use `mlxcel extract` (checkpoint {})",
+            model_path.display()
+        )),
+        // Decider-2b answers typed questions from label-token logits and never
+        // generates: `decision::loader` serves it through `mlxcel decide` and
+        // `--decision-model` (#2359).
+        "decider2" => Err(anyhow::anyhow!(
+            "decider2 is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model` (checkpoint {})",
+            model_path.display()
+        )),
+        // Clef scores every option with a joint schema head over a Qwen3.5
+        // VLM and never generates: `decision::loader` serves it (#2365).
+        "clef" => Err(anyhow::anyhow!(
+            "clef is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model` (checkpoint {})",
             model_path.display()
         )),
         _ => Err(anyhow::anyhow!(

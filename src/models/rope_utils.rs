@@ -27,8 +27,12 @@
 //! the `mllama` text decoder, every VLM whose text backbone is `Llama3Model` or
 //! `Qwen2Model`, the `llama` / `mistral` pipeline stage executors and the
 //! tensor-parallel Llama runtime), Qwen3 / Qwen3-MoE, Apertus, Gemma 3, Llama 4
-//! (text and VLM, through `llama4_helpers::Llama4Rope`), and InternLM3 /
-//! InternLM2 through `dynamic_ntk_rope`.
+//! (text and VLM, through `llama4_helpers::Llama4Rope`), InternLM3 /
+//! InternLM2 through `dynamic_ntk_rope`, and the DeepSeek-style MLA families
+//! through `mla_rope::MlaRope` (#3295): DeepSeek-V3 / Kimi-K2 / JoyAI
+//! (`deepseek_v3`, and through it Kimi-VL's text model and the DeepSeek-V3
+//! pipeline stage executor), Xing4.0, DeepSeek V3.2 / GLM-5, LongCat-Flash
+//! ngram and LongCat-Flash-Lite-Sparse.
 //!
 //! Since #1450 this is also the seam llama-server b10621's `--rope-scaling`,
 //! `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` are applied at:
@@ -77,6 +81,11 @@ pub struct RopeScalingSpec {
     pub mscale: Option<f32>,
     /// YaRN attention-magnitude multiplier denominator (`mscale_all_dim`).
     pub mscale_all_dim: Option<f32>,
+    /// The transformers 5 YaRN `attention_factor` (`0.1 * ln(factor) + 1`).
+    /// [`yarn_rope_setup`] does not read it: the magnitude comes from
+    /// `mscale` / `mscale_all_dim`. A loader that wants to check a
+    /// checkpoint's declared value against that derivation reads it here.
+    pub attention_factor: Option<f32>,
 }
 
 impl RopeScalingSpec {
@@ -103,6 +112,7 @@ impl RopeScalingSpec {
             beta_slow: f32_at("beta_slow"),
             mscale: f32_at("mscale"),
             mscale_all_dim: f32_at("mscale_all_dim"),
+            attention_factor: f32_at("attention_factor"),
         }
     }
 
@@ -395,7 +405,7 @@ pub fn llama3_rope_freqs(
 /// Mirrors `yarn_get_mscale` in `src/models/deepseek_v2.rs` and b10621's
 /// `get_mscale`
 /// ([`src/llama-context.cpp`](https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/src/llama-context.cpp)).
-fn yarn_get_mscale(scale: f32, mscale: f32) -> f32 {
+pub(crate) fn yarn_get_mscale(scale: f32, mscale: f32) -> f32 {
     if scale <= 1.0 {
         1.0
     } else {

@@ -129,45 +129,48 @@ impl PreparedRun {
     }
 }
 
-/// Render, build options and the cache context, and reserve the queue slot
-/// for one streamed Responses request.
+/// One rendered, admitted generation: the prompt, its options and the queue
+/// slot, ready for the provider call.
+pub(crate) struct PreparedGeneration {
+    pub(crate) prepared: PreparedChatRequest,
+    pub(crate) options: ServerGenerateOptions,
+    pub(crate) queue_reservation: Option<SingleStreamQueueReservation>,
+    pub(crate) echo_scope: Option<ReasoningEchoScope>,
+    pub(crate) primed_open_thinking: bool,
+}
+
+/// Render `chat_request`, build its generate options and prompt-cache
+/// context, and reserve the queue slot.
 ///
-/// Used by: the streaming `/v1/responses` handler.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn prepare_response_run(
-    state: AppState,
-    live: Arc<LiveSettings>,
-    request: CreateResponseRequest,
-    translated: TranslatedRequest,
-    response_id: String,
-    created_at: f64,
+/// Used by: [`prepare_response_run`], and every model turn of the MCP tool
+/// loop (`routes::responses_mcp`, issue #1457), which renders a longer
+/// transcript each round.
+pub(crate) async fn prepare_generation(
+    state: &AppState,
+    live: &Arc<LiveSettings>,
+    chat_request: &crate::server::types::ChatCompletionRequest,
     priority: crate::server::batch::RequestPriority,
     budget_override: ReasoningBudgetOverride,
     structured: Option<
         Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>,
     >,
-    auto: Option<AutoCompaction>,
-) -> Result<PreparedRun, ErrorResponse> {
+    auto: Option<&AutoCompaction>,
+) -> Result<PreparedGeneration, ErrorResponse> {
     if !state.can_accept_request() {
         return Err(ErrorResponse::service_unavailable(
             "All slots are busy. Please try again later.",
         ));
     }
 
-    let model_id = state.display_model_id().to_string();
     let prompt_cache_enabled = state.prompt_cache.is_some();
     // Reasoning re-injection for content-only history (#2110, #2118), as on
     // `/v1/chat/completions`: only the render sees the filled copy; the cache
     // context, tool parsing and the record read the translated request as the
     // client sent it. A `reasoning` input item maps to `Message.reasoning`, so
     // client-sent reasoning still wins.
-    let echo_scope =
-        crate::server::reasoning_echo::chat_scope(&state, &live, &translated.chat_request);
-    let render_request = crate::server::reasoning_echo::render_request(
-        &state,
-        echo_scope.as_ref(),
-        &translated.chat_request,
-    );
+    let echo_scope = crate::server::reasoning_echo::chat_scope(state, live, chat_request);
+    let render_request =
+        crate::server::reasoning_echo::render_request(state, echo_scope.as_ref(), chat_request);
     let prepared = prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &render_request,
@@ -188,19 +191,15 @@ pub(crate) async fn prepare_response_run(
     // Loop-detection amplifier signal (issues #967 and #977): the Responses
     // translator maps the tool fields onto the chat request. Structured output
     // alone no longer arms the family default.
-    let amplified = chat_carries_loop_amplifier(&translated.chat_request);
+    let amplified = chat_carries_loop_amplifier(chat_request);
     let primed_open_thinking =
         is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
-    let mut options = build_generate_options_with_live(
-        &translated.chat_request.params,
-        &state.config,
-        &live,
-        amplified,
-    );
+    let mut options =
+        build_generate_options_with_live(&chat_request.params, &state.config, live, amplified);
     // Output cap at the remaining context, for `context_management`
     // requests only (issue #2397, mlx-vlm#2458).
-    if let Some(auto) = auto.as_ref() {
-        cap_output_tokens(&state, auto, &prepared, &mut options.max_tokens)?;
+    if let Some(auto) = auto {
+        cap_output_tokens(state, auto, &prepared, &mut options.max_tokens)?;
     }
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
@@ -227,9 +226,9 @@ pub(crate) async fn prepare_response_run(
     // Wire the prompt-prefix KV cache (epic #116) into the streaming Responses
     // path too, before `options`/`translated` move into the spawned task.
     options.prompt_cache_ctx = build_prompt_cache_request_context(
-        &state,
-        &live,
-        &translated.chat_request,
+        state,
+        live,
+        chat_request,
         &prepared.image_data,
         &prepared.audio_data,
         prepared.boundary_renders(),
@@ -239,6 +238,52 @@ pub(crate) async fn prepare_response_run(
         Ok(reservation) => reservation,
         Err(err) => return Err(super::generation_error_to_response(err)),
     };
+
+    Ok(PreparedGeneration {
+        prepared,
+        options,
+        queue_reservation,
+        echo_scope,
+        primed_open_thinking,
+    })
+}
+
+/// Render, build options and the cache context, and reserve the queue slot
+/// for one streamed Responses request.
+///
+/// Used by: the streaming `/v1/responses` handler.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_response_run(
+    state: AppState,
+    live: Arc<LiveSettings>,
+    request: CreateResponseRequest,
+    translated: TranslatedRequest,
+    response_id: String,
+    created_at: f64,
+    priority: crate::server::batch::RequestPriority,
+    budget_override: ReasoningBudgetOverride,
+    structured: Option<
+        Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>,
+    >,
+    auto: Option<AutoCompaction>,
+) -> Result<PreparedRun, ErrorResponse> {
+    let model_id = state.display_model_id().to_string();
+    let PreparedGeneration {
+        prepared,
+        options,
+        queue_reservation,
+        echo_scope,
+        primed_open_thinking,
+    } = prepare_generation(
+        &state,
+        &live,
+        &translated.chat_request,
+        priority,
+        budget_override,
+        structured,
+        auto.as_ref(),
+    )
+    .await?;
 
     Ok(PreparedRun {
         state,
@@ -979,7 +1024,10 @@ pub(crate) fn drive_response_run(
 
 /// The `output_text` aggregate of `items`: every message's `output_text`
 /// parts, in order.
-fn streamed_output_text(items: &[ResponseOutputItem]) -> String {
+///
+/// Used by: [`drive_response_run`] and the MCP tool loop
+/// (`routes::responses_mcp`).
+pub(super) fn streamed_output_text(items: &[ResponseOutputItem]) -> String {
     items
         .iter()
         .filter_map(|item| match item {
@@ -1027,6 +1075,27 @@ impl SseResponseSink {
         sender: ResponseStreamSender,
         cancelled: &CancellationToken,
     ) -> Self {
+        Self::from_parts(
+            &run.state,
+            Arc::clone(&run.request),
+            Arc::clone(&run.translated),
+            &run.response_id,
+            sender,
+            cancelled,
+        )
+    }
+
+    /// [`Self::new`] from the pieces of a run that is not a [`PreparedRun`].
+    ///
+    /// Used by: [`Self::new`] and the MCP tool loop (`routes::responses_mcp`).
+    pub(crate) fn from_parts(
+        state: &AppState,
+        request: Arc<CreateResponseRequest>,
+        translated: Arc<TranslatedRequest>,
+        response_id: &str,
+        sender: ResponseStreamSender,
+        cancelled: &CancellationToken,
+    ) -> Self {
         // Review H2: register this response in the in-flight registry so
         // POST /v1/responses/:id/cancel can abort it from a different
         // request thread. We OR the existing client-disconnect token with
@@ -1035,13 +1104,12 @@ impl SseResponseSink {
         // expose it via the store under the response id. When the cancel
         // handler flips it, the scheduler observes the abort on its next
         // poll, just like the client-disconnect case.
-        if let Some(store) = run.state.responses_store.as_ref() {
+        if let Some(store) = state.responses_store.as_ref() {
             match store.in_flight_write() {
                 Ok(mut g) => {
-                    g.insert(run.response_id.clone(), cancelled.clone());
+                    g.insert(response_id.to_string(), cancelled.clone());
                 }
                 Err(_) => {
-                    let response_id = &run.response_id;
                     tracing::warn!(
                         "responses_store in-flight registry is poisoned; cancellation API will not work for {response_id}"
                     );
@@ -1052,10 +1120,10 @@ impl SseResponseSink {
             after_generation: sender.after_generation(),
             sender,
             generation_over: AtomicBool::new(false),
-            state: run.state.clone(),
-            request: Arc::clone(&run.request),
-            translated: Arc::clone(&run.translated),
-            response_id: run.response_id.clone(),
+            state: state.clone(),
+            request,
+            translated,
+            response_id: response_id.to_string(),
         }
     }
 }

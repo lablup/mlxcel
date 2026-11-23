@@ -21,8 +21,15 @@
 //! (`503`), a missed reply deadline is [`DecisionProviderError::Timeout`]
 //! (`504`), and every prediction runs under `catch_unwind` so one bad request
 //! cannot kill the worker.
+//!
+//! A timed-out request sets its command's cancel flag, so a command still in
+//! the queue is skipped rather than run for a caller that already got `504`.
+//! The request's temp files travel with the command and are dropped on this
+//! thread once the prediction has finished, never under a running decode
+//! (issue #3296).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -36,6 +43,7 @@ use serde_json::Value;
 
 use crate::decision::loader::declarations;
 use crate::decision::{DecisionKind, LoadedDecisionModel, check_result, load_decision_model};
+use crate::multimodal::video::PrivateTempDir;
 use crate::server::decision_model::{
     DecisionMedia, DecisionModelProvider, DecisionProviderError, DecisionResult, MediaKind,
     Question, QuestionKind,
@@ -63,6 +71,11 @@ enum DecisionCommand {
         state: Option<Value>,
         questions: Vec<(String, Question)>,
         media: Box<DecisionMedia>,
+        /// Server-owned temp files behind `media`, dropped by the worker
+        /// after the prediction (or the skip) instead of by the caller.
+        temp_files: Vec<PrivateTempDir>,
+        /// Set by the caller when it stops waiting for the reply.
+        cancelled: Arc<AtomicBool>,
         respond: Reply,
     },
     Shutdown,
@@ -132,12 +145,16 @@ impl DecisionWorker {
         state: Option<Value>,
         questions: Vec<(String, Question)>,
         media: DecisionMedia,
+        temp_files: Vec<PrivateTempDir>,
     ) -> Result<DecisionResult, DecisionProviderError> {
         let (respond, reply) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
         let command = DecisionCommand::Predict {
             state,
             questions,
             media: Box::new(media),
+            temp_files,
+            cancelled: Arc::clone(&cancelled),
             respond,
         };
         {
@@ -154,7 +171,10 @@ impl DecisionWorker {
         }
         match reply.recv_timeout(self.request_timeout) {
             Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(DecisionProviderError::Timeout),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                cancelled.store(true, Ordering::Release);
+                Err(DecisionProviderError::Timeout)
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 Err(DecisionProviderError::Internal(WORKER_GONE.to_string()))
             }
@@ -210,14 +230,27 @@ fn worker_loop<L>(
                 state,
                 questions,
                 media,
+                temp_files,
+                cancelled,
                 respond,
             } => {
+                if cancelled.load(Ordering::Acquire) {
+                    // The caller already answered 504; dropping the command
+                    // here removes its temp files without running the model.
+                    tracing::debug!(
+                        target: "mlxcel::decision",
+                        "skipping a decision request whose caller timed out"
+                    );
+                    continue;
+                }
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let result = loaded.model.predict(state.as_ref(), &questions, *media)?;
                     check_result(&questions, &result)?;
                     Ok::<_, crate::decision::DecisionError>(result)
                 }));
                 synchronize_thread_local_stream(stream.as_ref());
+                // The model no longer reads the files.
+                drop(temp_files);
                 let result = match outcome {
                     Ok(result) => result.map_err(DecisionProviderError::from),
                     Err(payload) => {
@@ -301,8 +334,9 @@ impl DecisionModelProvider for DecisionWorkerProvider {
         state: Option<Value>,
         questions: Vec<(String, Question)>,
         media: DecisionMedia,
+        temp_files: Vec<PrivateTempDir>,
     ) -> Result<DecisionResult, DecisionProviderError> {
-        self.worker.predict(state, questions, media)
+        self.worker.predict(state, questions, media, temp_files)
     }
 
     fn model_id(&self) -> &str {

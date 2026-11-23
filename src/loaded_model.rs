@@ -169,6 +169,7 @@ pub enum LoadedModel {
     DeepSeekV3(models::DeepSeekV3Model),
     DeepSeekV32(models::DeepSeekV32Model),
     DeepSeekV4(models::DeepSeekV4Model),
+    Xing40(models::Xing40Model),
     Dots1(models::Dots1Model),
     Cohere(models::CohereModel),
     Cohere2(models::Cohere2Model),
@@ -191,7 +192,10 @@ pub enum LoadedModel {
     BailingMoe(models::BailingMoeModel),
     BailingMoeLinear(models::BailingMoeLinearModel),
     Afmoe(models::AfmoeModel),
+    /// Arcee AFM dense (`arcee`, issue #1719).
+    Arcee(models::ArceeModel),
     Klear(models::KlearModel),
+    Kolibri1(models::Kolibri1Model),
     Apertus(models::ApertusModel),
     SeedOss(models::SeedOssModel),
     Granite(models::GraniteModel),
@@ -218,6 +222,8 @@ pub enum LoadedModel {
     // the wrapper's per-sequence model-owned state.
     IQuestLoopCoder(models::IQuestLoopCoderWrapper),
     Laguna(models::LagunaWrapper),
+    // Sliding/global caches owned per sequence by the wrapper.
+    Limite(models::LimiteWrapper),
     MiniCPM(models::MiniCPMModel),
     MiniCPM3(models::MiniCPM3Model),
     StableLM(models::StableLMModel),
@@ -234,6 +240,7 @@ pub enum LoadedModel {
     Lfm2Moe(models::Lfm2Model),
     Inkling(models::InklingModel),
     Plamo2(models::Plamo2Model),
+    Plamo2VLM(vision::Plamo2VlModel),
     GraniteMoeHybrid(models::GraniteMoeHybridModel),
     NemotronH(models::NemotronHModel),
     /// Nemotron H Nano Omni — vision-capable variant (vision-only).
@@ -246,8 +253,10 @@ pub enum LoadedModel {
     KimiK3VLM(vision::KimiK3VLModel),
     LongcatFlash(models::LongcatFlashNgramModel),
     LongcatFlashNgram(models::LongcatFlashNgramModel),
+    LongcatFlashSparse(models::LongcatFlashSparseModel),
     Rwkv7(models::Rwkv7),
     RecurrentGemma(models::GriffinModel),
+    Z1t(models::Z1t),
 }
 
 // Keep the full variant list in one place so LanguageModel delegation stays
@@ -356,6 +365,7 @@ macro_rules! delegate_language_model {
             LoadedModel::DeepSeekV3(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekV32(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekV4(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Xing40(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Dots1(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Cohere(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Cohere2(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -377,7 +387,9 @@ macro_rules! delegate_language_model {
             LoadedModel::BailingMoe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::BailingMoeLinear(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Afmoe(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Arcee(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Klear(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Kolibri1(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Apertus(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::IQuestLoopCoder(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::SeedOss(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -400,6 +412,7 @@ macro_rules! delegate_language_model {
             LoadedModel::StarCoder2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Mellum(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Laguna(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Limite(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiniCPM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiniCPM3(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::StableLM(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -415,6 +428,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Lfm2Moe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Inkling(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Plamo2(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Plamo2VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::GraniteMoeHybrid(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronH(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronHNanoOmniVLM(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -425,8 +439,10 @@ macro_rules! delegate_language_model {
             LoadedModel::KimiK3VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LongcatFlash(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LongcatFlashNgram(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::LongcatFlashSparse(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Rwkv7(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::RecurrentGemma(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Z1t(inner) => LanguageModel::$method(inner, $($arg),*),
         }
     };
 }

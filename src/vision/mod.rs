@@ -100,6 +100,8 @@ pub mod paddleocr_vl;
 pub mod phi3_vl;
 pub mod phi4_siglip_vl;
 pub mod phi4mm_vl;
+pub mod plamo2_vl;
+pub mod plamo2_vl_config;
 pub mod qwen2_5_vl;
 pub mod qwen2_vl;
 pub mod qwen3_5_vl;
@@ -163,6 +165,7 @@ pub use paddleocr_vl::PaddleOcrVlModel;
 pub use phi3_vl::Phi3VLModel;
 pub use phi4_siglip_vl::Phi4SigLipVLModel;
 pub use phi4mm_vl::Phi4MMVLModel;
+pub use plamo2_vl::Plamo2VlModel;
 pub use qwen2_5_vl::Qwen25VLModel;
 pub use qwen2_vl::Qwen2VLModel;
 pub use qwen3_5_vl::Qwen35VLModel;
@@ -514,6 +517,25 @@ impl LanguageModel for VisionLanguageModel {
     ) -> Result<(), String> {
         self.text_model
             .restore_sequence_state_truncated(seq_id, snapshot, target_len)
+    }
+
+    /// Turn-boundary state checkpoints are the text backbone's too (issues
+    /// #3047, #3255), for the same reason.
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.text_model.state_checkpoint_from_snapshot(snapshot)
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        self.text_model
+            .restore_sequence_state_from_checkpoint(seq_id, checkpoint, donor)
     }
 
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {

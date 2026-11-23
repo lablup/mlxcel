@@ -58,21 +58,29 @@
       "default": "none",
       "description": "experimental: path to JSON file with MCP server definitions (Cursor-compatible format) - do not enable in untrusted environments (default: none) note: for security reasons, this will limit --cors-origins to localhost by default (env: LLAMA_ARG_MCP_SERVERS_CONFIG)",
       "discovery": "help-entry-head",
-      "state": "not_applicable",
-      "issue": 1435,
-      "test": "src/cli/ui_compat_args_tests.rs::every_unsupported_enabling_form_is_rejected_with_its_flag_named",
-      "notes": "b10621 spawns stdio MCP child processes and exposes their tools through /tools for its web UI. mlxcel spawns none, so any value fails startup; the diagnostic notes that a server-side MCP tool loop is tracked separately in issue #1457 as a product feature, outside b10621 compatibility.",
+      "state": "by_design",
+      "issue": 1457,
+      "test": "src/server/mcp/config_tests.rs::server_set_without_opt_in_fails_and_names_the_opt_in",
+      "notes": "Accepted on both binaries, visible under `MCP Tool Options`, and only together with mlxcel's `--mcp-tools` opt-in (#1457): the Cursor-compatible `mcpServers` file is parsed strictly at startup (stdio entries only) and its servers are started as child processes for the server-side MCP tool loop, which a client reaches through the OpenAI Responses built-in `mcp` tool on `/v1/responses`. Without `--mcp-tools` the flag, or `LLAMA_ARG_MCP_SERVERS_CONFIG`, fails startup with a diagnostic naming the opt-in. The loop is an mlxcel product feature outside b10621 compatibility; see docs/responses-api.md.",
       "divergence": [
-        "b10621 spawns the configured MCP servers; mlxcel rejects the flag at startup."
+        "b10621 starts the configured MCP servers on this flag alone; mlxcel requires its own `--mcp-tools` opt-in beside it and fails startup without it (#1457).",
+        "b10621 exposes the servers' tools to its browser UI through `/tools`; mlxcel exposes them through the built-in `mcp` tool of `/v1/responses`, and `/tools` keeps answering 403 feature_disabled (#1457).",
+        "Only stdio entries are accepted; an entry with `url`, `headers`, another transport or an unknown key fails startup (#1457).",
+        "b10621 limits `--cors-origins` to localhost when the option is set; mlxcel leaves the CORS policy alone and instead refuses to start on a non-loopback TCP listener without API keys (#1457).",
+        "Router mode refuses the flag: the tool loop runs beside one loaded chat model (#1457)."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "MCP servers are child processes that run with the server's privileges, and b10621 documents the option as unsafe in untrusted environments. mlxcel treats starting them as a decision the operator must state on its own command line, so the b10621 spelling alone, and above all its environment variable inherited from a llama.cpp deployment, never spawns a process. The consumer differs for the same kind of reason: b10621 feeds the tools to its browser UI through `/tools`, an endpoint its own developer documentation marks UI-internal, while mlxcel has no such UI client and exposes tool execution through the documented OpenAI Responses `mcp` tool contract, where approval, bounds and errors have a defined wire shape.",
+        "revisit_if": "mlxcel serves a `/tools` endpoint with b10621's contract for a UI that consumes it, or the maintainers decide that the server-set flag alone is sufficient consent to start MCP child processes."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--mcp-servers-config"
         ],
         "env": "LLAMA_ARG_MCP_SERVERS_CONFIG",
         "env_binding": "clap",
-        "hidden": true
+        "hidden": false
       }
     },
     {
@@ -90,21 +98,29 @@
       "default": "none",
       "description": "experimental: inline JSON with MCP server definitions (Cursor-compatible format) - do not enable in untrusted environments (default: none) note: for security reasons, this will limit --cors-origins to localhost by default (env: LLAMA_ARG_MCP_SERVERS_JSON)",
       "discovery": "help-entry-head",
-      "state": "not_applicable",
-      "issue": 1435,
-      "test": "src/cli/ui_compat_args_tests.rs::every_unsupported_enabling_form_is_rejected_with_its_flag_named",
-      "notes": "The inline-JSON spelling of --mcp-servers-config; identical classification and diagnostic.",
+      "state": "by_design",
+      "issue": 1457,
+      "test": "src/server/mcp/config_tests.rs::server_set_without_opt_in_fails_and_names_the_opt_in",
+      "notes": "The inline-JSON spelling of --mcp-servers-config; identical classification, opt-in and diagnostic (#1457). Passing both spellings fails startup.",
       "divergence": [
-        "b10621 spawns the configured MCP servers; mlxcel rejects the flag at startup."
+        "b10621 starts the configured MCP servers on this flag alone; mlxcel requires its own `--mcp-tools` opt-in beside it and fails startup without it (#1457).",
+        "b10621 exposes the servers' tools to its browser UI through `/tools`; mlxcel exposes them through the built-in `mcp` tool of `/v1/responses`, and `/tools` keeps answering 403 feature_disabled (#1457).",
+        "Only stdio entries are accepted; an entry with `url`, `headers`, another transport or an unknown key fails startup (#1457).",
+        "b10621 limits `--cors-origins` to localhost when the option is set; mlxcel leaves the CORS policy alone and instead refuses to start on a non-loopback TCP listener without API keys (#1457).",
+        "Router mode refuses the flag: the tool loop runs beside one loaded chat model (#1457)."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "MCP servers are child processes that run with the server's privileges, and b10621 documents the option as unsafe in untrusted environments. mlxcel treats starting them as a decision the operator must state on its own command line, so the b10621 spelling alone, and above all its environment variable inherited from a llama.cpp deployment, never spawns a process. The consumer differs for the same kind of reason: b10621 feeds the tools to its browser UI through `/tools`, an endpoint its own developer documentation marks UI-internal, while mlxcel has no such UI client and exposes tool execution through the documented OpenAI Responses `mcp` tool contract, where approval, bounds and errors have a defined wire shape.",
+        "revisit_if": "mlxcel serves a `/tools` endpoint with b10621's contract for a UI that consumes it, or the maintainers decide that the server-set flag alone is sufficient consent to start MCP child processes."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--mcp-servers-json"
         ],
         "env": "LLAMA_ARG_MCP_SERVERS_JSON",
         "env_binding": "clap",
-        "hidden": true
+        "hidden": false
       }
     },
     {

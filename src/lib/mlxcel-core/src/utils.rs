@@ -97,7 +97,7 @@ pub const STATE_TAIL_EAGER_MIN_ROWS: i32 = 256;
 /// Used by: Qwen 3.5, Qwen3-Next, Qwen4-Exp (gated-delta and PLE), Mamba,
 /// Mamba2, FalconH1, GraniteMoeHybrid, Plamo2, NemotronH, Jamba, Lfm2 (and its
 /// speculative path), KimiLinear and KimiK3 (short conv), RecurrentGemma,
-/// Inkling (short conv)
+/// Inkling (short conv), Z1T (AFT-conv window)
 pub fn materialized_state_tail(x: &MlxArray, n_keep: i32) -> UniquePtr<MlxArray> {
     materialized_axis_tail(x, 1, n_keep)
 }
@@ -132,7 +132,8 @@ pub fn materialized_axis_tail(x: &MlxArray, axis: usize, n_keep: i32) -> UniqueP
 /// Used by: Mamba2, FalconH1, GraniteMoeHybrid (SSM final state), the
 /// gated-delta chunked scan (Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear,
 /// KimiK3), BailingMoeLinear (GLA state), and the conv-state sites that keep a
-/// per-row or non-axis-1 tail: Baichuan, Inkling batched, TP Qwen3.5 rows
+/// per-row or non-axis-1 tail: Baichuan, Inkling batched, TP Qwen3.5 rows,
+/// and Z1T (AFT-conv running pool sums)
 pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
     if rows >= STATE_TAIL_EAGER_MIN_ROWS {
         crate::deferred_eval::async_eval_or_defer(state);
@@ -340,7 +341,8 @@ impl PrefillAttention {
 /// Mistral4, MiniCPM3, NemotronNas, GLM4V, GLM4V-MoE, HunyuanVL, PaddleOcrVL,
 /// Ernie4.5MoeVL, and the global layers of Cohere2MoE, CohereCompass, Olmo3,
 /// Ministral3, Exaone4, ExaoneMoe, Mellum, Step3P5, AFMoE and Gemma3n
-/// (#3072); GptOss, FalconOcr and the sink full layers of MiMoV2 (#3098).
+/// (#3072); GptOss, FalconOcr and the sink full layers of MiMoV2 (#3098);
+/// the NoPE global layers of Limite (#2360).
 pub fn prefill_causal_mask(
     seq_len: i32,
     offset: i32,
@@ -421,7 +423,8 @@ pub enum SlidingPrefillKeys {
 ///
 /// Used by: Cohere2, Cohere2MoE, CohereCompass, Olmo3, Ministral3, Exaone4,
 /// ExaoneMoe, Mellum, Step3P5, AFMoE, Gemma3n; GptOss, MiMoV2 and an all-local
-/// DeepSeekV4 stack (#3098).
+/// DeepSeekV4 stack (#3098); Limite, whose window is `sliding_window + 1`
+/// (#2360).
 pub fn prefill_sliding_window_mask(
     seq_len: i32,
     prior: i32,
@@ -1452,6 +1455,10 @@ pub fn gelu_sigmoid(x: &MlxArray) -> UniquePtr<MlxArray> {
 }
 
 /// ReLU squared activation: max(0, x)^2 — compiled kernel fusion
+///
+/// Used by: Nemotron, NemotronH, NanoChat, Arcee (dense AFM MLP), the
+/// Nemotron H Nano Omni sound projector (`projector.rs`) and vision bridge
+/// (`nemotron_h_nano_omni_vl.rs`).
 #[inline]
 pub fn relu_squared(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::compiled_relu_squared(x)

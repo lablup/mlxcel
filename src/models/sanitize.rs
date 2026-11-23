@@ -2273,6 +2273,23 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         .as_ref()
         .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("nanochat"));
 
+    // Limite's every norm is a weightless RMSNorm whose epsilon is the
+    // activation dtype's `finfo.eps` (bf16 0.0078125, f16 0.00098), and its
+    // folded projection scalars round to the weight dtype, so the f16 cast
+    // changes the model's arithmetic rather than only its precision. Keep the
+    // checkpoint's bf16, as the reference runs it (issue #2360).
+    let is_limite = parsed_config
+        .as_ref()
+        .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("limite"));
+
+    // Decider-2b's output is a calibrated probability, not a token: its
+    // per-type temperatures were fitted on the bf16 weights the reference
+    // runs, and the f16 cast moves an isolated score level by 2e-3, the
+    // parity tolerance (issue #2359). Keep the checkpoint's bf16.
+    let is_decider2 = parsed_config
+        .as_ref()
+        .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("decider2"));
+
     let mut weights = if is_gemma4 {
         load_gemma4_text_weights(model_dir)?
     } else {
@@ -2385,7 +2402,12 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // 85.3 s to 4.8 s, decode 118.1 to 49.2 ms/token, with 17 * 23 answered
     // identically and the same token count generated in both dtypes. Ampere and
     // later keep the guard, so their behavior is unchanged.
-    if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref()) && !is_bitnet && !is_nanochat {
+    if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref())
+        && !is_bitnet
+        && !is_nanochat
+        && !is_limite
+        && !is_decider2
+    {
         let had_bf16 = if keep_gemma3n_bf16 {
             convert_bf16_weights_with_keep(&mut weights, gemma3n_bf16_key)
         } else {
@@ -2480,6 +2502,27 @@ pub fn is_embedding_gemma2_config(config: &Value) -> bool {
         })
 }
 
+/// Whether `config` describes an Inkling checkpoint: the HMLP-wrapped
+/// `inkling_mm_model`, the standalone `inkling` text model, or a config whose
+/// `text_config` is `inkling_text`. `inkling2` is a different family.
+///
+/// Used by: [`bf16_to_f16_at_load`].
+fn is_inkling_config(config: &Value) -> bool {
+    let is_inkling = |model_type: Option<&str>| {
+        matches!(
+            model_type,
+            Some("inkling" | "inkling_mm_model" | "inkling_text")
+        )
+    };
+    is_inkling(config.get("model_type").and_then(Value::as_str))
+        || is_inkling(
+            config
+                .get("text_config")
+                .and_then(|text| text.get("model_type"))
+                .and_then(Value::as_str),
+        )
+}
+
 fn is_sapiens2_config(config: &Value) -> bool {
     config
         .get("architectures")
@@ -2521,6 +2564,16 @@ pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
     // Keep the family uniform in its checkpoint dtype on every backend so the
     // default CLI path preserves the published output.
     if config.is_some_and(is_sapiens2_config) {
+        return false;
+    }
+    // Inkling stays in its checkpoint dtype (issue #1549). The native
+    // `thinkingmachines/Inkling-Small-NVFP4` export declares its quantization
+    // only in the `hf_quant_config.json` sidecar, so it read as unquantized
+    // and its bf16 dense weights were cast to f16; every greedy token then
+    // decoded to id 0 on an M3 Ultra, while the same checkpoint loaded bf16
+    // matched mlx-vlm. Affine MLX conversions already stay bf16 as quantized
+    // checkpoints, and the f32 community checkpoints have no bf16 to convert.
+    if config.is_some_and(is_inkling_config) {
         return false;
     }
     if pre_ampere_cuda() {
@@ -2687,7 +2740,8 @@ fn is_f16_fragile_below_ampere(config: &Value) -> bool {
     // failures. BitNet's relu^2 is not listed because the text loader excludes
     // it separately through `is_bitnet`; nanochat is listed here as well as
     // excluded through `is_nanochat`, since its residual overflows f16.
-    const MEASURED_FRAGILE: &[&str] = &["apertus", "nanochat"];
+    // Limite is listed for its dtype-dependent norm epsilon (#2360).
+    const MEASURED_FRAGILE: &[&str] = &["apertus", "nanochat", "limite"];
     MEASURED_FRAGILE
         .iter()
         .any(|needle| model_type.contains(needle))
@@ -2814,7 +2868,8 @@ pub fn convert_bf16_weights(weights: &mut mlxcel_core::weights::WeightMap) -> bo
 ///
 /// Returns `true` if any bf16 tensors were found, whether converted or kept.
 ///
-/// Used by: load_text_weights, load_vlm_weights_common, load_internvl_vlm
+/// Used by: load_text_weights, load_vlm_weights_common, load_internvl_vlm,
+/// load_plamo2_vl
 #[must_use]
 pub fn convert_bf16_weights_with_keep<F>(
     weights: &mut mlxcel_core::weights::WeightMap,
@@ -2900,6 +2955,30 @@ mod tests {
         assert!(is_sapiens2_config(&legacy));
         assert!(!bf16_to_f16_at_load(false, Some(&modern)));
         assert!(!bf16_to_f16_at_load(false, Some(&legacy)));
+    }
+
+    /// Inkling keeps its checkpoint dtype even when its config carries no MLX
+    /// quantization block, the shape of the native NVFP4 export whose
+    /// quantization lives in `hf_quant_config.json` (issue #1549).
+    #[test]
+    fn inkling_configs_keep_checkpoint_dtype() {
+        let nvfp4 = serde_json::json!({
+            "model_type": "inkling_mm_model",
+            "text_config": {"hidden_size": 4096}
+        });
+        let text = serde_json::json!({"model_type": "inkling"});
+        let nested = serde_json::json!({
+            "model_type": "custom_wrapper",
+            "text_config": {"model_type": "inkling_text"}
+        });
+        let other = serde_json::json!({"model_type": "inkling2"});
+        assert!(is_inkling_config(&nvfp4));
+        assert!(is_inkling_config(&text));
+        assert!(is_inkling_config(&nested));
+        assert!(!is_inkling_config(&other));
+        for config in [&nvfp4, &text, &nested] {
+            assert!(!bf16_to_f16_at_load(false, Some(config)));
+        }
     }
 
     #[test]

@@ -58,6 +58,7 @@ fn sample_input() -> ServerStartupInput {
         decode_timeout_was_set: false,
         api_prefix: String::new(),
         webui_enabled: false,
+        mcp: None,
         sse_ping_interval: 30,
         threads_http: -1,
         reuse_port: false,

@@ -69,6 +69,7 @@ pub mod phi4mm_prompt;
 #[doc(hidden)]
 pub mod phi4mm_xla_audio;
 pub mod pixtral_prompt;
+pub mod plamo2_vl_prompt;
 pub mod qwen_vl;
 pub mod smolvlm_prompt;
 pub mod step3p7_prompt;

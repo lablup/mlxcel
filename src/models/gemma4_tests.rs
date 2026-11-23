@@ -50,6 +50,13 @@ pub(crate) fn build_synthetic_wrapper_with_layer(layer_type: &str) -> super::Gem
     cache_isolation::build_wrapper_with_layer(layer_type)
 }
 
+/// The four-layer fixture of the KV-shared tail tests: sliding, full, then a
+/// KV-shared sliding and full pair, with `sliding_window = 8`. Used by the
+/// ring checkpoint parity test (issue #3255).
+pub(crate) fn build_synthetic_kv_shared_wrapper() -> super::Gemma4Wrapper {
+    kv_shared_tail_trim::build_wrapper()
+}
+
 /// Tiny weights with 31B capability metadata, for dispatch-only tests.
 /// Never run inference through this fixture: its dimensions intentionally
 /// describe the production capability without allocating production weights.
@@ -2235,7 +2242,7 @@ mod kv_shared_tail_trim {
         Gemma4Model::from_weights(&weights(), &args()).expect("kv-shared tail fixture must load")
     }
 
-    fn build_wrapper() -> Gemma4Wrapper {
+    pub(super) fn build_wrapper() -> Gemma4Wrapper {
         Gemma4Wrapper::new(build_model())
     }
 

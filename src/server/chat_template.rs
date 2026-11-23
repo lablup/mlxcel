@@ -2110,6 +2110,33 @@ const GOT_OCR_CHAT_TEMPLATE: &str = concat!(
     "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"
 );
 
+/// PLaMo 2.1 VL's serving template (issue #1380).
+///
+/// `pfnet/plamo-2.1-2b-vl` ships no chat template: its processor joins the
+/// text of every message with newlines and wraps the result in one fixed
+/// Japanese instruction template (`_apply_ja01_template`), with no roles. This
+/// renders that template with no image markers;
+/// [`crate::multimodal::plamo2_vl_prompt::build_plamo2_vl_prompt`] then places
+/// one `<plamo:image>` per image after the `### 指示:` line, which is where the
+/// bare CLI text gets them too. The template already ends with the response
+/// opener, so `add_generation_prompt` changes nothing.
+const PLAMO2_VL_CHAT_TEMPLATE: &str = concat!(
+    // The header is an expression, not template text: the `{%-` that opens
+    // the loop would otherwise trim the newline after `### 指示:`.
+    "{{- '以下はタスクを説明する指示で、文脈を説明した入力とペアになっています。要求を適切に補完するよう応答を書いてください。\\n\\n### 指示:\\n' }}",
+    "{%- for message in messages %}",
+    "{%- if not loop.first %}{{- '\n' }}{%- endif %}",
+    "{%- if message['content'] is string %}",
+    "{{- message['content'] }}",
+    "{%- else %}",
+    "{%- for part in message['content'] %}",
+    "{%- if part['type'] == 'text' %}{{- part['text'] }}{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
+    "{%- endfor %}",
+    "{{- '\n\n### 応答:\n' }}"
+);
+
 /// MiniCPM-V 4.6 and MiniCPM-o's fallback template: plain ChatML turns with
 /// the assistant opener as the generation prompt (issue #2547).
 ///
@@ -2176,6 +2203,7 @@ fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
         // that seeds the decoder, and the page travels out-of-band.
         crate::models::ModelType::NemotronParseVLM => Some(FLORENCE2_CHAT_TEMPLATE),
         crate::models::ModelType::GotOcrVLM => Some(GOT_OCR_CHAT_TEMPLATE),
+        crate::models::ModelType::Plamo2VLM => Some(PLAMO2_VL_CHAT_TEMPLATE),
         crate::models::ModelType::MiniCPMV46VLM | crate::models::ModelType::MiniCPMOVLM => {
             Some(MINICPM_CHATML_TEMPLATE)
         }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Stack recurrent state along the sequence-row axis without changing its recurrence.
-//! Used by: Mamba1/2, Jamba, LFM2, RecurrentGemma, RWKV7, Nemotron-H,
+//! Used by: Mamba1/2, Jamba, LFM2, RecurrentGemma, RWKV7, Z1T, Nemotron-H,
 //! GraniteMoeHybrid, Falcon-H1, PLaMo2, Qwen3-Next, Qwen 3.5, Kimi Linear,
 //! Kimi K3, and Bailing MoE Linear.
 

@@ -9,7 +9,7 @@ That is correct for same-repo references, but wrong for anything else:
 * References to **mlxcel-internal** (a private repository) must never appear in
   the public tree — a public reader following them lands on an unrelated issue
   or a 404, and it leaks internal planning.
-* References to upstream projects (``ml-explore/mlx-lm``, ``Blaizzy/mlx-vlm``,
+* References to upstream projects (``ml-explore/mlx-lm``, ``Neywa-Labs/mlx-vlm``,
   ``ml-explore/mlx``, HuggingFace ``transformers`` …) should be written as
   ``org/repo#NNN`` so they resolve as cross-repository links.
 
@@ -47,7 +47,7 @@ BARE = re.compile(r"(?<!\w)#([0-9]{3,})(?![0-9a-fA-F])")
 # Lines naming an upstream project: a bare ref here is almost certainly an
 # unqualified upstream reference that should become org/repo#NNN.
 UPSTREAM = re.compile(
-    r"mlx[-_]lm|mlx[-_]vlm|ml-explore|Blaizzy|transformers|hugging\s*face|"
+    r"mlx[-_]lm|mlx[-_]vlm|ml-explore|Neywa-Labs|Blaizzy|transformers|hugging\s*face|"
     r"\bupstream\b|sglang|llama\.cpp|pytorch",
     re.IGNORECASE,
 )
@@ -164,7 +164,7 @@ def main() -> int:
     print(
         "Policy: same-repo (lablup/mlxcel) refs use bare '#N'. Any reference to another\n"
         "repository must be qualified as 'org/repo#NNN' (e.g. ml-explore/mlx-lm#1240,\n"
-        "Blaizzy/mlx-vlm#1181, ml-explore/mlx#3475). mlxcel-internal numbers must not appear.\n"
+        "Neywa-Labs/mlx-vlm#1181, ml-explore/mlx#3475). mlxcel-internal numbers must not appear.\n"
     )
     if upstream_hits:
         print(f"Likely UPSTREAM (qualify as org/repo#NNN) — {len(upstream_hits)}:")

@@ -53,6 +53,7 @@ pub mod kokoro_tts;
 mod listen;
 pub mod local_media;
 pub mod logging;
+pub mod mcp;
 // `pub(crate)` so `crate::decision::media` reuses the guarded fetchers.
 pub(crate) mod media;
 mod media_net;
@@ -69,10 +70,12 @@ mod realtime_session;
 pub(crate) mod reasoning_echo;
 pub mod reasoning_format;
 mod request_options;
+pub mod rerank_maxsim;
 pub mod rerank_model;
 pub mod rerank_worker;
 pub mod responses_background_events;
 pub(crate) mod responses_compaction;
+pub(crate) mod responses_mcp_lowering;
 pub mod responses_store;
 pub mod responses_translator;
 pub mod router_cache;
@@ -184,6 +187,9 @@ pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
 mod got_chat_template_tests;
 
 #[cfg(test)]
+mod plamo2_vl_chat_template_tests;
+
+#[cfg(test)]
 mod minicpm_chat_template_tests;
 
 #[cfg(test)]
@@ -200,6 +206,9 @@ mod muse_glimmer_template_tests;
 
 #[cfg(test)]
 mod reasoning_effort_tests;
+
+#[cfg(test)]
+mod k2_horizon_reasoning_tests;
 
 #[cfg(test)]
 mod store_budget_tests;

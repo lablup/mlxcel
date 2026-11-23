@@ -62,6 +62,7 @@ pub(crate) mod embedding_sanitize;
 pub(crate) mod embedding_test_support;
 mod gemma3n_helpers;
 pub(crate) mod headless_llama;
+mod kv_ring_checkpoint;
 mod kv_snapshot;
 mod llama4_helpers;
 pub(crate) mod model_owned;
@@ -107,8 +108,12 @@ pub mod gated_delta;
 // hybrid families, so its working set is bounded by a chunk, not the prefill
 // piece (#3073).
 pub(crate) mod mla_batched;
+// `mla_rope` is the decoupled `q_pe` / `k_pe` RoPE of the DeepSeek-style MLA
+// attentions (DeepSeek-V3 family, V3.2, LongCat ngram and sparse, Xing4.0),
+// one type instead of the three private copies #3295 found.
 #[cfg(test)]
 pub(crate) mod mla_latent_test_support;
+pub(crate) mod mla_rope;
 pub(crate) mod ssd_scan;
 // `ssm_a` computes the SSM transition `A = -exp(A_log)` in float32 for the
 // Mamba1, Jamba and Mamba2 families (#3046, #3057, #3125).
@@ -146,6 +151,7 @@ pub(crate) fn parse_optional_eos_token_ids(value: &Option<serde_json::Value>) ->
 // Model implementations (mlxcel-core based)
 pub mod afmoe;
 pub mod apertus;
+pub mod arcee;
 pub mod baichuan;
 pub mod bailing_moe;
 pub mod bailing_moe_linear;
@@ -227,15 +233,22 @@ pub mod iquestloopcoder;
 pub mod iquestloopcoder_model;
 pub mod jamba;
 pub mod jina_vlm;
+pub mod k2_horizon;
 pub mod kimi_k3;
 pub mod kimi_linear;
 pub mod klear;
+pub mod kolibri1;
+mod kolibri1_lm;
+pub mod kolibri1_moe;
+pub mod kolibri1_weights;
 pub mod laguna;
 pub mod laguna_layers;
 pub mod laguna_sanitize;
 pub mod laguna_speculative;
 pub mod lfm2;
 pub mod lfm2_embedding;
+pub mod limite;
+pub(crate) mod limite_layers;
 pub mod llada2_moe;
 pub mod llama3;
 pub mod llama4;
@@ -243,6 +256,7 @@ pub mod llama_bidirec;
 pub mod llama_nemotron_vl_embedding;
 pub(crate) mod llama_nemotron_vl_tiling;
 pub mod longcat_flash_ngram;
+pub mod longcat_flash_sparse;
 pub mod mamba;
 pub mod mamba2;
 pub mod mellum;
@@ -322,7 +336,9 @@ pub mod telechat3;
 #[cfg(test)]
 pub(crate) mod vl_embedding_test_images;
 pub mod whisper;
+pub mod xing4_0;
 pub mod youtu_vl_lm;
+pub mod z1t;
 
 // Text-to-speech (StyleTTS2 + iSTFTNet) and its grapheme-to-phoneme front-end.
 pub mod g2p;
@@ -331,6 +347,7 @@ pub mod kokoro;
 // Re-export model types
 pub use afmoe::AfmoeModel;
 pub use apertus::ApertusModel;
+pub use arcee::ArceeModel;
 pub use baichuan::BaichuanModel;
 pub use bailing_moe::BailingMoeModel;
 pub use bailing_moe_linear::BailingMoeLinearModel;
@@ -346,6 +363,7 @@ pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v4::DeepSeekV4Model;
 pub use deepseek_v32::DeepSeekV32Model;
+pub(crate) use detection::is_longcat_sparse_architecture;
 pub(crate) use detection::is_sequence_classification_architecture;
 pub(crate) use detection::vlm_has_vision;
 #[cfg(feature = "webui")]
@@ -401,12 +419,15 @@ pub use jina_vlm::{JinaVlmTextConfig, JinaVlmTextModel};
 pub use kimi_k3::KimiK3Model;
 pub use kimi_linear::KimiLinearModel;
 pub use klear::KlearModel;
+pub use kolibri1::Kolibri1Model;
 pub use laguna::{LagunaModel, LagunaWrapper};
 pub use lfm2::Lfm2Model;
+pub use limite::{LimiteModel, LimiteWrapper};
 pub use llada2_moe::Llada2MoeModel;
 pub use llama3::Llama3Model;
 pub use llama4::{Llama4CxxModel, Llama4Wrapper};
 pub use longcat_flash_ngram::LongcatFlashNgramModel;
+pub use longcat_flash_sparse::LongcatFlashSparseModel;
 pub use mamba::MambaModel;
 pub use mamba2::Mamba2Model;
 pub use mellum::{MellumModel, MellumWrapper};
@@ -501,7 +522,9 @@ pub use starcoder2::StarCoder2Model;
 pub use step3p5::Step3p5Model;
 pub use telechat3::TeleChat3Model;
 pub use whisper::WhisperModel;
+pub use xing4_0::Xing40Model;
 pub use youtu_vl_lm::YoutuLanguageModel;
+pub use z1t::Z1t;
 
 pub use kokoro::KokoroModel;
 pub use nemotron_voicechat::NemotronVoiceChatModel;
@@ -626,6 +649,8 @@ pub enum ModelType {
     DeepSeekV32,
     /// DeepSeek-V4 (HyperConnections, pooled-KV compression, HiSA, hash-routed MoE).
     DeepSeekV4,
+    /// Xing4.0 (DeepSeek-V3 MLA + MoE inside a manifold hyper-connection stream).
+    Xing40,
     /// rednote dots.llm1 (DeepSeek-V3-style MoE without MLA).
     Dots1,
 
@@ -668,10 +693,17 @@ pub enum ModelType {
     /// attention with NoPE global layers, a sigmoid attention gate,
     /// sandwich norms, muP embedding scale and a sparse MoE FFN.
     Afmoe,
+    /// Arcee AFM dense (`arcee`, AFM-4.5B): a Llama-shaped decoder with a
+    /// gate-free squared-ReLU MLP and YaRN RoPE. Not AFMoE and not Apple AFM-7.
+    Arcee,
     /// Kuaishou Klear (`Klear`): a Qwen3-shaped sparse MoE whose shared
     /// expert is blended with the routed mixture through a learned 2-way
     /// softmax rather than added.
     Klear,
+    /// Aleph Alpha Kolibri-1 (`kolibri1`): AFMoE-shaped sliding/full hybrid
+    /// MoE without the attention gate, 384 experts top-6 routed on raw
+    /// logits plus a correction bias, and a shared expert.
+    Kolibri1,
 
     // Apertus (Swiss AI)
     Apertus,
@@ -708,8 +740,11 @@ pub enum ModelType {
     Mellum, // Mellum 2 (JetBrains hybrid-attention MoE code model)
     Laguna, // Poolside Laguna XS / S (hybrid sliding/full MoE with NVFP4 experts)
 
+    Limite, // Paradigma Limite (MUDD dense connections, sliding/NoPE-global, sigmoid-softcapped head)
+
     // Other Transformer models
     Helium,    // Kyutai Helium (Llama-shaped dense decoder with traditional RoPE)
+    K2Horizon, // IFM K2-Horizon dense (Llama-shaped decoder with YaRN RoPE)
     TeleChat3, // TeleAI TeleChat3 (Llama-shaped dense decoder with YaRN RoPE scaling)
     MiniCPM,
     MiniCPM3,
@@ -744,6 +779,7 @@ pub enum ModelType {
 
     // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
     Plamo2,
+    Plamo2VLM, // PLaMo 2.1 VL (plamo2vl): SigLIP tiles + RMSNorm/GELU adapter + PLaMo 2 text
 
     // IBM Granite 4.x (Mamba2 + attention interleaved hybrid)
     GraniteMoeHybrid,
@@ -758,6 +794,7 @@ pub enum ModelType {
     // Longcat models
     LongcatFlash,
     LongcatFlashNgram,
+    LongcatFlashSparse,
 
     // Step models
     Step3p5,
@@ -766,6 +803,8 @@ pub enum ModelType {
     // RNN models
     Rwkv7,
     RecurrentGemma,
+    // Attention-free AFT-conv decoder with model-owned streaming state
+    Z1t,
 
     // Speech-to-text (encoder-decoder ASR)
     Whisper,
@@ -910,6 +949,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekV3,
     ModelType::DeepSeekV32,
     ModelType::DeepSeekV4,
+    ModelType::Xing40,
     ModelType::Dots1,
     // Cohere family
     ModelType::Cohere,
@@ -933,7 +973,9 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::BailingMoe,
     ModelType::BailingMoeLinear,
     ModelType::Afmoe,
+    ModelType::Arcee,
     ModelType::Klear,
+    ModelType::Kolibri1,
     // Apertus (Swiss AI)
     ModelType::Apertus,
     // ByteDance Seed-OSS
@@ -961,8 +1003,10 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::StarCoder2,
     ModelType::Mellum,
     ModelType::Laguna,
+    ModelType::Limite,
     // Other Transformer models
     ModelType::Helium,
+    ModelType::K2Horizon,
     ModelType::TeleChat3,
     ModelType::MiniCPM,
     ModelType::MiniCPM3,
@@ -989,6 +1033,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::InklingVLM,
     // Preferred Networks PLaMo 2
     ModelType::Plamo2,
+    ModelType::Plamo2VLM,
     // IBM Granite 4.x hybrid
     ModelType::GraniteMoeHybrid,
     // Kimi models
@@ -1000,12 +1045,14 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Longcat models
     ModelType::LongcatFlash,
     ModelType::LongcatFlashNgram,
+    ModelType::LongcatFlashSparse,
     // Step models
     ModelType::Step3p5,
     ModelType::Step3p7,
     // RNN models
     ModelType::Rwkv7,
     ModelType::RecurrentGemma,
+    ModelType::Z1t,
     // Speech-to-text
     ModelType::Whisper,
     // Text-to-speech
@@ -1151,6 +1198,10 @@ impl ModelType {
             ModelType::DeepSeekV3 => ("DeepSeek v3 / R1", "DeepSeek"),
             ModelType::DeepSeekV32 => ("DeepSeek v3.2", "DeepSeek"),
             ModelType::DeepSeekV4 => ("DeepSeek v4", "DeepSeek"),
+            ModelType::Xing40 => (
+                "Xing4.0 (DeepSeek-V3 MoE, hyper-connection stream)",
+                "DeepSeek",
+            ),
 
             // ----- Cohere -----
             ModelType::Cohere => ("Command R (Cohere)", "Cohere"),
@@ -1177,7 +1228,12 @@ impl ModelType {
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
             ModelType::BailingMoe => ("Ling / Bailing MoE (shared + routed experts)", "Bailing"),
             ModelType::Afmoe => ("Arcee AFMoE / Trinity (sliding + full hybrid MoE)", "Arcee"),
+            ModelType::Arcee => ("Arcee AFM dense (squared-ReLU MLP, YaRN RoPE)", "Arcee"),
             ModelType::Klear => ("Klear MoE (coefficient-blended shared expert)", "Klear"),
+            ModelType::Kolibri1 => (
+                "Aleph Alpha Kolibri-1 (sliding + full hybrid MoE)",
+                "Aleph Alpha",
+            ),
             ModelType::BailingMoeLinear => (
                 "Ling / Ring linear-attention MoE (GLA + full attention hybrid)",
                 "Bailing",
@@ -1237,6 +1293,10 @@ impl ModelType {
             ModelType::KimiK25 => ("Kimi-VL 2.5 (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
             ModelType::LongcatFlashNgram => ("LongCat Flash + N-gram embedding", "MoE (other)"),
+            ModelType::LongcatFlashSparse => (
+                "LongCat Flash Lite Sparse (LSA sparse MLA + N-gram embedding)",
+                "MoE (other)",
+            ),
             ModelType::Step3p5 => ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)"),
             ModelType::Step3p7 => ("Step-3.7 (ViT + Step-3.5 MoE)", "Step VLM"),
             ModelType::Dots1 => ("dots.llm1 (MoE)", "MoE (other)"),
@@ -1266,9 +1326,16 @@ impl ModelType {
 
             // ----- Preferred Networks -----
             ModelType::Plamo2 => ("PLaMo 2 (Mamba + attention hybrid)", "PLaMo"),
+            ModelType::Plamo2VLM => (
+                "PLaMo 2.1 VL (SigLIP tiles + MLP adapter + PLaMo 2 hybrid)",
+                "Other VLM",
+            ),
 
             // ----- RWKV -----
             ModelType::Rwkv7 => ("RWKV v7", "RWKV"),
+
+            // ----- Extropic -----
+            ModelType::Z1t => ("Z1T (attention-free AFT-conv, sparse tanh-linears)", "Z1T"),
 
             // ----- Speech-to-text (ASR) -----
             ModelType::Whisper => ("Whisper (encoder-decoder ASR)", "Speech-to-text"),
@@ -1332,6 +1399,7 @@ impl ModelType {
                 "Kyutai Helium (dense Llama shape, traditional RoPE)",
                 "Specialized",
             ),
+            ModelType::K2Horizon => ("IFM K2-Horizon (dense Llama shape, YaRN RoPE)", "Llama"),
             ModelType::TeleChat3 => (
                 "TeleAI TeleChat3 (dense Llama shape, YaRN RoPE)",
                 "Specialized",
@@ -1339,6 +1407,7 @@ impl ModelType {
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
             ModelType::Mellum => ("Mellum 2 (JetBrains code)", "Specialized"),
             ModelType::Laguna => ("Laguna XS / S (Poolside code, hybrid MoE)", "Specialized"),
+            ModelType::Limite => ("Paradigma Limite (MUDD, sliding/global)", "Specialized"),
             ModelType::StableLM => ("StableLM", "Specialized"),
             ModelType::Baichuan => ("Baichuan", "Specialized"),
             ModelType::MiniCPM => ("MiniCPM 1", "Specialized"),
@@ -1577,6 +1646,7 @@ mod metadata_tests {
             DeepSeekV3,
             DeepSeekV32,
             DeepSeekV4,
+            Xing40,
             Dots1,
             Cohere,
             Cohere2,
@@ -1598,7 +1668,9 @@ mod metadata_tests {
             BailingMoe,
             BailingMoeLinear,
             Afmoe,
+            Arcee,
             Klear,
+            Kolibri1,
             Apertus,
             SeedOss,
             Granite,
@@ -1618,7 +1690,9 @@ mod metadata_tests {
             StarCoder2,
             Mellum,
             Laguna,
+            Limite,
             Helium,
+            K2Horizon,
             TeleChat3,
             MiniCPM,
             MiniCPM3,
@@ -1641,6 +1715,7 @@ mod metadata_tests {
             Inkling,
             InklingVLM,
             Plamo2,
+            Plamo2VLM,
             GraniteMoeHybrid,
             KimiLinear,
             KimiK3,
@@ -1649,10 +1724,12 @@ mod metadata_tests {
             KimiK25,
             LongcatFlash,
             LongcatFlashNgram,
+            LongcatFlashSparse,
             Step3p5,
             Step3p7,
             Rwkv7,
             RecurrentGemma,
+            Z1t,
             Whisper,
             Kokoro,
             NemotronVoiceChat,
@@ -1775,6 +1852,10 @@ mod gemma3n_helpers_tests;
 pub(crate) mod gemma4_tests;
 
 #[cfg(test)]
+#[path = "gemma4_ring_checkpoint_tests.rs"]
+mod gemma4_ring_checkpoint_tests;
+
+#[cfg(test)]
 #[path = "llama4_helpers_tests.rs"]
 mod llama4_helpers_tests;
 
@@ -1833,6 +1914,10 @@ mod plamo2_tests;
 #[cfg(test)]
 #[path = "mellum_tests.rs"]
 mod mellum_tests;
+
+#[cfg(test)]
+#[path = "limite_tests.rs"]
+mod limite_tests;
 
 #[cfg(test)]
 #[path = "laguna_dflash_tests.rs"]

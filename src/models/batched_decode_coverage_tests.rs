@@ -18,6 +18,7 @@ use std::path::Path;
 const EXPECTED_NATIVE: &[&str] = &[
     "AfmoeModel@src/models/afmoe.rs",
     "ApertusModel@src/models/apertus.rs",
+    "ArceeModel@src/models/arcee.rs",
     "BailingMoeLinearModel@src/models/bailing_moe_linear.rs",
     "BailingMoeModel@src/models/bailing_moe.rs",
     "BitNetModel@src/models/bitnet.rs",
@@ -77,8 +78,10 @@ const EXPECTED_NATIVE: &[&str] = &[
     "KimiK3Model@src/models/kimi_k3.rs",
     "KimiLinearModel@src/models/kimi_linear.rs",
     "KlearModel@src/models/klear.rs",
+    "Kolibri1Model@src/models/kolibri1_lm.rs",
     "LagunaWrapper@src/models/laguna.rs",
     "Lfm2Model@src/models/lfm2.rs",
+    "LimiteWrapper@src/models/limite_wrapper.rs",
     "Llama3Model@src/models/llama3.rs",
     "Llama4Wrapper@src/models/llama4.rs",
     "Mamba2Model@src/models/mamba2.rs",
@@ -141,7 +144,9 @@ const EXPECTED_NATIVE: &[&str] = &[
     "TensorParallelLlamaModel@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelQwen35Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelQwen3Model@src/distributed/tensor_parallel/llama_runtime.rs",
+    "Xing40Model@src/models/xing4_0.rs",
     "YoutuLanguageModel@src/models/youtu_vl_lm.rs",
+    "Z1t@src/models/z1t.rs",
 ];
 
 const EXPECTED_DELEGATING: &[&str] = &[
@@ -176,6 +181,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "NemotronHNanoOmniVlModel@src/vision/nemotron_h_nano_omni_vl.rs",
     "Phi3VLModel@src/vision/phi3_vl.rs",
     "Phi4SigLipVLModel@src/vision/phi4_siglip_vl.rs",
+    "Plamo2VlModel@src/vision/plamo2_vl.rs",
     "Qwen35VLModel@src/vision/qwen3_5_vl.rs",
     "Qwen4ExpVLModel@src/vision/qwen4_exp_vl.rs",
     "SmolVLMModel@src/vision/smolvlm.rs",

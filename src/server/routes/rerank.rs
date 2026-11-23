@@ -29,7 +29,7 @@ use axum::{
 };
 use serde_json::Value;
 
-use crate::rerank::{ImageInput, RerankItem};
+use crate::rerank::{ImageInput, RerankItem, RerankerKind};
 use crate::server::AppState;
 use crate::server::media::{
     ImageInputLimits, current_image_input_limits, fetch_labeled_image, validate_image_count,
@@ -46,7 +46,41 @@ use crate::server::types::rerank::{
 /// Opens with b10621's own sentence, verbatim; see
 /// [`super::embeddings::NO_EMBEDDING_MODEL_MESSAGE`] for why (#1452).
 pub const NO_RERANKER_MODEL_MESSAGE: &str = "This server does not support reranking. Start it with `--reranking`, with a \
-     sequence-classifier checkpoint in -m, or with --reranker-model <path>.";
+     sequence-classifier checkpoint or a multi-vector (late-interaction) embedder in -m, or \
+     with --reranker-model <path>.";
+
+/// Documents one request may carry unless `MLXCEL_RERANK_MAX_DOCUMENTS`
+/// says otherwise (issue #3296).
+pub(crate) const DEFAULT_MAX_RERANK_DOCUMENTS: usize = 1024;
+
+/// Environment variable that moves [`DEFAULT_MAX_RERANK_DOCUMENTS`].
+const MAX_DOCUMENTS_ENV: &str = "MLXCEL_RERANK_MAX_DOCUMENTS";
+
+/// Parse a `MLXCEL_RERANK_MAX_DOCUMENTS` value. Unset keeps the default; a
+/// value that is not a positive integer is logged and also keeps it, so a typo
+/// never removes the bound.
+fn parse_max_documents(raw: Option<&str>) -> usize {
+    let Some(raw) = raw else {
+        return DEFAULT_MAX_RERANK_DOCUMENTS;
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(limit) if limit > 0 => limit,
+        _ => {
+            tracing::warn!(
+                value = raw,
+                default = DEFAULT_MAX_RERANK_DOCUMENTS,
+                "{MAX_DOCUMENTS_ENV} must be a positive integer; using the default"
+            );
+            DEFAULT_MAX_RERANK_DOCUMENTS
+        }
+    }
+}
+
+/// The per-request document cap, read from the environment once.
+fn max_rerank_documents() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| parse_max_documents(std::env::var(MAX_DOCUMENTS_ENV).ok().as_deref()))
+}
 
 fn invalid_request(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(message, "invalid_request_error")
@@ -69,15 +103,44 @@ pub(crate) fn rerank_error_response(err: RerankError) -> ErrorResponse {
     }
 }
 
+/// Whether one returned score is acceptable for the loaded kind.
+fn score_is_valid(score: f32, probabilities: bool) -> bool {
+    score.is_finite() && (!probabilities || (0.0..=1.0).contains(&score))
+}
+
+/// The `400` message for an `instruction` sent to a kind that has no prompt
+/// to render it into, naming the loaded kind.
+pub(crate) fn instruction_unsupported_message(kind: RerankerKind) -> String {
+    let how = match kind {
+        RerankerKind::LateInteraction => {
+            "late-interaction (MaxSim) reranker embeds the query and each document separately \
+             and compares their token vectors"
+        }
+        _ => "sequence-classifier reranker scores the query/document pair directly",
+    };
+    format!("`instruction` is only supported by the generative rerankers; the loaded {how}")
+}
+
 /// Validate the query and every document against the loaded reranker.
+///
+/// Runs before any image is fetched, so an over-long document list costs no
+/// fetch and no model work.
 fn validate_items(
     query: &RerankInput,
     documents: &[RerankInput],
     provider: &dyn RerankModelProvider,
     limits: ImageInputLimits,
+    max_documents: usize,
 ) -> Result<(), ErrorResponse> {
     if documents.is_empty() {
         return Err(invalid_request("`documents` must not be empty"));
+    }
+    if documents.len() > max_documents {
+        return Err(invalid_request(format!(
+            "`documents` holds {} entries; at most {max_documents} are allowed per request \
+             (set by {MAX_DOCUMENTS_ENV})",
+            documents.len()
+        )));
     }
     let image_count = usize::from(query.image_url().is_some())
         + documents
@@ -208,11 +271,7 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         .filter(|task| !task.is_empty())
         .map(str::to_string);
     if instruction.is_some() && !provider.kind().accepts_instruction() {
-        return invalid_request(
-            "`instruction` is only supported by the generative rerankers; the loaded \
-             sequence-classifier reranker scores the query/document pair directly",
-        )
-        .into_response();
+        return invalid_request(instruction_unsupported_message(provider.kind())).into_response();
     }
 
     let image_limits = current_image_input_limits();
@@ -221,6 +280,7 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         &request.documents,
         provider.as_ref(),
         image_limits,
+        max_rerank_documents(),
     ) {
         return err.into_response();
     }
@@ -261,12 +321,15 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         .into_response();
     }
 
+    // A late-interaction score is a raw MaxSim sum, so only the probability
+    // kinds are held to `[0, 1]` (#1426).
+    let probabilities = provider.kind().scores_are_probabilities();
     if let Some((index, score)) = scored
         .scores
         .iter()
         .copied()
         .enumerate()
-        .find(|(_, score)| !score.is_finite() || !(0.0..=1.0).contains(score))
+        .find(|(_, score)| !score_is_valid(*score, probabilities))
     {
         tracing::error!(index, score, "reranker returned an invalid relevance score");
         return ErrorResponse::internal_server_error(
@@ -313,3 +376,7 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
 #[cfg(test)]
 #[path = "rerank_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rerank_limit_tests.rs"]
+mod limit_tests;

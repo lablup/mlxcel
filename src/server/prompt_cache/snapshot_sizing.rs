@@ -30,6 +30,7 @@ use crate::execution::config_fields::{
 };
 use crate::execution::kv_arch::{
     KvArchKind, KvSizing, estimate_kv_arch_from_config, estimate_kv_arch_unwindowed_from_config,
+    sliding_window_ring_bytes_from_config,
 };
 use crate::execution::memory_estimate::{QuantHint, estimate_total_memory};
 
@@ -365,7 +366,7 @@ fn snapshot_family_is_model_aware(
     }
     // Families whose server state is model-owned and reused only through
     // snapshots (`supports_snapshot_reuse`). The attention-only ones among
-    // them (Gemma 3/4, Llama 4, AFMoE, Inkling) park a full KV state per
+    // them (Gemma 3/4, Llama 4, AFMoE, Kolibri-1, Inkling) park a full KV state per
     // entry, which is what outgrows the fixed default on a large checkpoint.
     model_types(config).iter().any(|mt| {
         matches!(
@@ -375,6 +376,7 @@ fn snapshot_family_is_model_aware(
                 | "gemma4_unified"
                 | "llama4"
                 | "afmoe"
+                | "kolibri1"
                 | "inkling"
                 | "inkling_mm_model"
                 | "jamba"
@@ -405,20 +407,40 @@ pub const MODEL_AWARE_STATE_CHECKPOINT_AVAILABLE_MEMORY_DENOMINATOR: u64 = 8;
 /// #3047): [`MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES`] checkpoints,
 /// clamped to an eighth of the memory left after the model.
 ///
-/// Returns `None` for families whose snapshots carry no recurrent state, which
-/// never store checkpoints.
+/// Returns `None` for families whose snapshots carry no recurrent state,
+/// unless `ring_checkpoints` asks for the sliding-window families' ring-only
+/// checkpoints (`--ctx-checkpoints N > 0`, issue #3255), which
+/// [`recommend_ring_checkpoint_capacity_from_config`] sizes.
 #[must_use]
 pub fn recommend_state_checkpoint_capacity(
     model_dir: &Path,
     context_size: usize,
     kv_mode: impl Into<KvSizing>,
+    ring_checkpoints: bool,
+    prefill_chunk_size: usize,
 ) -> Option<SnapshotCapacityRecommendation> {
     let kv_mode: KvSizing = kv_mode.into();
     let config = read_config(model_dir)?;
-    recommend_state_checkpoint_capacity_from_config(
-        &config,
-        memory_left_after_model(model_dir, representative_tokens(context_size), kv_mode),
-    )
+    let representative = representative_tokens(context_size);
+    let available = memory_left_after_model(model_dir, representative, kv_mode);
+    // The piece that ends at a history boundary is at most one prefill
+    // chunk; unchunked prefill (`0`) forwards the whole prompt at once.
+    let piece_tokens = match prefill_chunk_size {
+        0 => representative,
+        chunk => chunk as u64,
+    };
+    recommend_state_checkpoint_capacity_from_config(&config, available).or_else(|| {
+        ring_checkpoints
+            .then(|| {
+                recommend_ring_checkpoint_capacity_from_config(
+                    &config,
+                    kv_mode,
+                    piece_tokens,
+                    available,
+                )
+            })
+            .flatten()
+    })
 }
 
 #[must_use]
@@ -430,6 +452,73 @@ pub fn recommend_state_checkpoint_capacity_from_config(
     if entry_bytes == 0 {
         return None;
     }
+    Some(checkpoint_budget(
+        config,
+        entry_bytes,
+        available_memory_bytes,
+    ))
+}
+
+/// Families whose turn-boundary state checkpoint is the sliding rings alone
+/// (issue #3255): the model implements `state_checkpoint_from_snapshot` by
+/// keeping only its rotating caches. Gemma 4 checkpoints also ship as
+/// `gemma4_unified`, served by the same text model.
+fn ring_checkpoint_family(config: &Value) -> bool {
+    model_types(config).iter().any(|mt| {
+        matches!(
+            mt.as_str(),
+            "gemma3" | "gemma4" | "gemma4_unified" | "afmoe"
+        )
+    })
+}
+
+/// Whether the model at `model_dir` stores ring-only state checkpoints
+/// (issue #3255).
+#[must_use]
+pub fn model_stores_ring_checkpoints(model_dir: &Path) -> bool {
+    read_config(model_dir).is_some_and(|config| ring_checkpoint_family(&config))
+}
+
+/// Model-aware budget for ring-only state checkpoints (issue #3255): one
+/// checkpoint is every sliding layer's ring as a prefill piece of
+/// `piece_tokens` leaves it, `window - 1 + piece_tokens` rows
+/// ([`sliding_window_ring_bytes_from_config`]), and the budget holds
+/// [`MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES`] of them under the same
+/// memory ceiling as the hybrid families' checkpoints.
+///
+/// Returns `None` for a family that does not store ring checkpoints and for a
+/// quantized KV mode, whose caches cannot be snapshotted.
+#[must_use]
+pub fn recommend_ring_checkpoint_capacity_from_config(
+    config: &Value,
+    kv_mode: impl Into<KvSizing>,
+    piece_tokens: u64,
+    available_memory_bytes: Option<u64>,
+) -> Option<SnapshotCapacityRecommendation> {
+    let kv_mode: KvSizing = kv_mode.into();
+    if !ring_checkpoint_family(config) || kv_mode.mode != mlxcel_core::cache::KVCacheMode::Fp16 {
+        return None;
+    }
+    let entry_bytes = usize::try_from(sliding_window_ring_bytes_from_config(
+        config,
+        kv_mode,
+        piece_tokens,
+    )?)
+    .unwrap_or(usize::MAX);
+    Some(checkpoint_budget(
+        config,
+        entry_bytes,
+        available_memory_bytes,
+    ))
+}
+
+/// [`MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES`] checkpoints of
+/// `entry_bytes`, clamped to an eighth of the memory left after the model.
+fn checkpoint_budget(
+    config: &Value,
+    entry_bytes: usize,
+    available_memory_bytes: Option<u64>,
+) -> SnapshotCapacityRecommendation {
     let target = entry_bytes.saturating_mul(
         usize::try_from(MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES).unwrap_or(usize::MAX),
     );
@@ -438,7 +527,7 @@ pub fn recommend_state_checkpoint_capacity_from_config(
             .unwrap_or(usize::MAX)
     });
     let capacity_bytes = ceiling.map_or(target, |ceiling| target.min(ceiling));
-    Some(SnapshotCapacityRecommendation {
+    SnapshotCapacityRecommendation {
         capacity_bytes,
         entry_bytes,
         representative_tokens: 0,
@@ -447,7 +536,7 @@ pub fn recommend_state_checkpoint_capacity_from_config(
         available_ceiling_bytes: ceiling,
         target_entries: MODEL_AWARE_STATE_CHECKPOINT_TARGET_ENTRIES,
         architecture: model_types(config).join("/"),
-    })
+    }
 }
 
 /// Bytes of one turn-boundary state checkpoint: the recurrent state at its
@@ -613,3 +702,7 @@ fn qwen3_next_fixed_state_bytes(config: &Value) -> usize {
 #[cfg(test)]
 #[path = "snapshot_sizing_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "snapshot_sizing_ring_tests.rs"]
+mod ring_tests;

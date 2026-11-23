@@ -87,7 +87,9 @@ enum SpecialWeightLoaderKind {
     KimiK3,
     Inkling,
     Longcat,
+    LongcatSparse,
     Rwkv7,
+    Z1t,
 }
 
 fn special_weight_loader_kind(model_type: ModelType) -> Option<SpecialWeightLoaderKind> {
@@ -111,7 +113,9 @@ fn special_weight_loader_kind(model_type: ModelType) -> Option<SpecialWeightLoad
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => {
             Some(SpecialWeightLoaderKind::Longcat)
         }
+        ModelType::LongcatFlashSparse => Some(SpecialWeightLoaderKind::LongcatSparse),
         ModelType::Rwkv7 => Some(SpecialWeightLoaderKind::Rwkv7),
+        ModelType::Z1t => Some(SpecialWeightLoaderKind::Z1t),
         _ => None,
     }
 }
@@ -308,12 +312,29 @@ pub(crate) fn try_load_special_model_from_weights(
                 LoadedModel::LongcatFlash(model)
             }
         }
+        SpecialWeightLoaderKind::LongcatSparse => {
+            let args: models::longcat_flash_sparse::LongcatFlashSparseConfig =
+                super::parse_model_config(config_str)?;
+            let owned = copy_weight_map(weights);
+            let owned = models::longcat_flash_sparse::sanitize_weights(owned, &args)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            let model = models::LongcatFlashSparseModel::from_weights(&owned, &args)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            LoadedModel::LongcatFlashSparse(model)
+        }
         SpecialWeightLoaderKind::Rwkv7 => {
             let args: models::rwkv7::Rwkv7Config = super::parse_model_config(config_str)?;
             let mut model = models::Rwkv7::from_weights(weights, args)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
             model.set_eos_token_ids(super::read_eos_token_ids(model_path));
             LoadedModel::Rwkv7(model)
+        }
+        SpecialWeightLoaderKind::Z1t => {
+            let args: models::z1t::Z1tConfig = super::parse_model_config(config_str)?;
+            let mut model = models::Z1t::from_weights(weights, args)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            model.set_eos_token_ids(super::read_eos_token_ids(model_path));
+            LoadedModel::Z1t(model)
         }
     }))
 }

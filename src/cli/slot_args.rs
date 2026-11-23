@@ -16,35 +16,51 @@
 //!
 //! One canonical clap definition of the five b10621 options that configure
 //! per-slot retained prompts and the per-slot context-checkpoint ring, so both
-//! server binaries declare them identically. mlxcel has neither structure, so
-//! most of them are `not_applicable`: the inert value is accepted, and a
-//! request for the behavior is refused at startup with a diagnostic that names
-//! what is missing rather than an unknown-argument error from clap. `--kv-unified`
-//! is implemented as shared logical context-budget policy over mlxcel's existing
-//! per-sequence KV allocation.
+//! server binaries declare them identically. Two of them configure state
+//! mlxcel does not keep and are `not_applicable`: the inert value is accepted,
+//! and a request for the behavior is refused at startup with a diagnostic that
+//! names what is missing rather than an unknown-argument error from clap.
+//! `--kv-unified` is implemented as shared logical context-budget policy over
+//! mlxcel's existing per-sequence KV allocation, and `--ctx-checkpoints` /
+//! `--checkpoint-min-step` map onto the prompt cache's checkpoints (#3255).
 //!
 //! The upstream definitions are in
 //! [`common/arg.cpp`](https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/common/arg.cpp)
 //! and the state they configure lives in
 //! [`tools/server/server-context.cpp`](https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server-context.cpp).
 //!
-//! # Why these five are one group
+//! # Slots
 //!
-//! They all address state mlxcel does not keep. Slot reuse in mlxcel goes
-//! through a process-wide radix trie over token prefixes
-//! (`src/server/prompt_cache/`) that is consulted for every request regardless
-//! of which sequence last held the tokens, so there is no per-slot retained
-//! prompt for `--cache-idle-slots` to save or for
-//! `--slot-prompt-similarity` to compare against. KV is allocated per
-//! sequence through the scheduler's cache pool, so `--kv-unified` is a shared
-//! logical budget rather than a physical KV layout switch. And
-//! `capture_history_boundary_snapshot` takes at most one snapshot per sequence,
-//! at the prompt/generation boundary, so there is no ring for `--ctx-checkpoints` to size or for
-//! `--checkpoint-min-step` to space.
+//! Slot reuse in mlxcel goes through a process-wide radix trie over token
+//! prefixes (`src/server/prompt_cache/`) that is consulted for every request
+//! regardless of which sequence last held the tokens, so there is no per-slot
+//! retained prompt for `--cache-idle-slots` to save or for
+//! `--slot-prompt-similarity` to compare against. KV is allocated per sequence
+//! through the scheduler's cache pool, so `--kv-unified` is a shared logical
+//! budget rather than a physical KV layout switch.
+//!
+//! # Context checkpoints
+//!
+//! Upstream keeps up to `--ctx-checkpoints` copies of a slot's state, spaced
+//! at least `--checkpoint-min-step` tokens apart, so a request that diverges
+//! before the end of the cached prompt can roll back to one of them instead
+//! of starting cold. mlxcel's prompt cache keeps the equivalent per
+//! conversation: the snapshot the previous turn restored from
+//! (keep-previous-turn), a turn-boundary state checkpoint at each history
+//! boundary (ring-only for the sliding-window families), and periodic prefill
+//! checkpoints at absolute multiples of an interval. `--ctx-checkpoints N`
+//! turns the first two on and keeps at most `N` state checkpoints per
+//! conversation, `0` turns them off; `--checkpoint-min-step M` sets the
+//! periodic interval (at least 256) and the minimum spacing between state
+//! checkpoints, `0` turns both off. See
+//! [`crate::server::prompt_cache::ctx_checkpoints`] for the precedence over
+//! the `MLXCEL_PROMPT_CACHE_*` switches.
 //!
 //! Used by: mlxcel serve, mlxcel-server.
 
 use clap::Args;
+
+use crate::server::prompt_cache::CtxCheckpointFlags;
 
 /// Shared slot-state and checkpoint flag group.
 #[derive(Args, Debug, Default, Clone)]
@@ -99,8 +115,9 @@ pub struct SlotCompatArgs {
     )]
     pub no_kv_unified: bool,
 
-    /// Size of the per-slot context-checkpoint ring (refused above 0: mlxcel
-    /// captures at most one history-boundary snapshot per sequence).
+    /// Turn-boundary state checkpoints kept per conversation; above 0 also
+    /// keeps the previous turn's restore point, 0 turns both off (negative is
+    /// refused).
     #[arg(
         long = "ctx-checkpoints",
         visible_alias = "swa-checkpoints",
@@ -109,8 +126,9 @@ pub struct SlotCompatArgs {
     )]
     pub ctx_checkpoints: Option<i64>,
 
-    /// Minimum token spacing between successive context checkpoints (refused
-    /// above 0: there are no successive checkpoints to space).
+    /// Periodic prefill checkpoint interval and minimum spacing between state
+    /// checkpoints, in tokens; at least 256, or 0 for neither (negative is
+    /// refused).
     #[arg(
         long = "checkpoint-min-step",
         env = "LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT",
@@ -142,13 +160,20 @@ impl SlotCompatArgs {
         )
     }
 
-    /// Refuse every value that asks for state mlxcel does not keep.
+    /// Refuse every value that asks for state mlxcel does not keep, and
+    /// validate the checkpoint flags.
     ///
     /// Each inert value is accepted so a deployment script written against
     /// b10621 that turns the feature OFF keeps working; only a request for
     /// the behavior itself fails, and it fails with a diagnostic naming the
-    /// missing structure.
-    pub fn resolve(&self) -> Result<(), String> {
+    /// missing structure. The checkpoint flags are returned for startup to
+    /// resolve against the model (#3255).
+    ///
+    /// # Errors
+    ///
+    /// The diagnostic for a refused value, a negative checkpoint flag, or a
+    /// `--checkpoint-min-step` below its floor.
+    pub fn resolve(&self) -> Result<CtxCheckpointFlags, String> {
         if self.cache_idle_slots == Some(true) && !self.no_cache_idle_slots {
             return Err(
                 "--cache-idle-slots asks the server to save a slot's retained prompt when the \
@@ -177,30 +202,7 @@ impl SlotCompatArgs {
             ));
         }
 
-        if let Some(checkpoints) = self.ctx_checkpoints
-            && checkpoints != 0
-        {
-            return Err(format!(
-                "--ctx-checkpoints {checkpoints} asks for a ring of per-slot context \
-                 checkpoints to roll back to. mlxcel captures at most one snapshot per \
-                 sequence, at the prompt/generation boundary \
-                 (capture_history_boundary_snapshot), and has no ring to size. Pass \
-                 --ctx-checkpoints 0, or drop the flag."
-            ));
-        }
-
-        if let Some(spacing) = self.checkpoint_min_step
-            && spacing != 0
-        {
-            return Err(format!(
-                "--checkpoint-min-step {spacing} sets the minimum token spacing between \
-                 successive context checkpoints. mlxcel has no checkpoint ring (see \
-                 --ctx-checkpoints), so there are no successive checkpoints for a spacing to \
-                 separate. Pass --checkpoint-min-step 0, or drop the flag."
-            ));
-        }
-
-        Ok(())
+        CtxCheckpointFlags::from_raw(self.ctx_checkpoints, self.checkpoint_min_step)
     }
 
     /// Resolve llama-server b10621's unified context-budget default.

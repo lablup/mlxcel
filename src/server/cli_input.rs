@@ -98,6 +98,9 @@ pub struct ServerStartupInput {
     pub api_prefix: String,
     /// `--webui` / `--ui`: serve the bundled local WebUI and typed UI API.
     pub webui_enabled: bool,
+    /// `--mcp-tools` with its server set and bounds, already resolved by
+    /// [`crate::server::mcp::resolve_mcp_startup`] (#1457). `None` = off.
+    pub mcp: Option<crate::server::mcp::McpStartupConfig>,
     /// Raw `--sse-ping-interval`; `-1` disables the pings.
     pub sse_ping_interval: i64,
     /// Raw `--threads-http`; any value below 1 selects the automatic sizing.
@@ -843,10 +846,12 @@ impl ServerStartupInput {
             .resolve()
             .map_err(|message| anyhow::anyhow!("{message}"))?;
         // b10621's slot-state and checkpoint spellings (#1473). Resolved here
-        // so a request for per-slot prompt retention, slot-similarity
-        // selection, a unified KV buffer or a checkpoint ring fails the
-        // command line on both binaries with one message.
-        self.slot_compat
+        // so a request for per-slot prompt retention or slot-similarity
+        // selection, or an invalid checkpoint count or spacing, fails the
+        // command line on both binaries with one message. The checkpoint
+        // flags ride the prompt-cache config to startup (#3255).
+        let ctx_checkpoint_flags = self
+            .slot_compat
             .resolve()
             .map_err(|message| anyhow::anyhow!("{message}"))?;
         // `--no-cache-prompt` and mlxcel's `--no-prompt-cache` are two
@@ -945,6 +950,8 @@ impl ServerStartupInput {
             self.prompt_cache_snapshot_ttl_seconds,
         )
         .map_err(|e| anyhow::anyhow!("--apc-hash: {e}"))?;
+        let mut prompt_cache = prompt_cache;
+        prompt_cache.ctx_checkpoint_flags = ctx_checkpoint_flags;
 
         // Resolve the effective KV cache mode from split flags,
         // legacy shorthand, or the default (FP16).
@@ -1169,6 +1176,7 @@ impl ServerStartupInput {
             sleep_idle_seconds: self.sleep_idle_seconds,
             api_prefix,
             webui_enabled: self.webui_enabled,
+            mcp: self.mcp,
             #[cfg(feature = "webui")]
             webui_terminal_secret: None,
             #[cfg(feature = "webui")]

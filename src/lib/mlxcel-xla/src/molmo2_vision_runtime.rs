@@ -440,9 +440,7 @@ fn compile_vision_module(
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
     let flags = target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-molmo2-vision-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Molmo2Vision)?;
     let mut observer = CheckpointSourceObserver::default();
     let (weights, checkpoint_schema) =
         load_weights(model_dir, &config.weight_specs(), &mut observer)?;

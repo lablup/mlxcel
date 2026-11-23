@@ -4392,7 +4392,7 @@ pub fn cache_window(family: &str, window: usize, has_sliding_layer: bool) -> Res
 ///
 /// Used by: AFMoE, DeepSeek V4, Exaone4, Exaone MoE, Gemma3 (and its backbone
 /// and embedding variants), Gemma4 (MTP target and verify rows included),
-/// GPT-OSS, IQuestLoopCoder, Laguna, Llama4, Mellum, Ministral3, MiMo V2
+/// GPT-OSS, IQuestLoopCoder, Kolibri-1, Laguna, Llama4, Mellum, Ministral3, MiMo V2
 /// Flash, Muse Glimmer, OpenAI privacy filter, RecurrentGemma, Step3.5
 pub struct RotatingKVCache {
     pub keys: Option<UniquePtr<MlxArray>>,
