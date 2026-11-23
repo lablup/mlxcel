@@ -21,14 +21,15 @@
 //! core layer blends in a message read from the previous pass's block outputs.
 //! Each layer VISIT owns its KV cache and four convolution states.
 //!
-//! Derived from mlx-vlm `mlx_vlm/models/inkling2/language.py` (MIT). The
-//! Metal kernels of that port (`kernels.py`, `grouped_experts.py`) are not
-//! ported (issue #3359); [`conv::short_convolution`] and
-//! [`moe::expert_projections`] are where they would slot in.
+//! Derived from mlx-vlm `mlx_vlm/models/inkling2/language.py` (MIT). Its
+//! three Mini Metal kernels (`kernels.py`, `grouped_experts.py`; issue
+//! #3359) are gated in [`kernels`] and fall back to the ops path, which they
+//! match bitwise; `MLXCEL_INKLING2_KERNELS=0` keeps every forward on it.
 
 mod attention;
 pub mod config;
 mod conv;
+pub(crate) mod kernels;
 mod layer;
 mod moe;
 pub mod quant;
@@ -410,3 +411,5 @@ fn copy_all(values: &[UniquePtr<MlxArray>]) -> Vec<UniquePtr<MlxArray>> {
 
 #[cfg(test)]
 mod tiny_tests;
+#[cfg(test)]
+mod verify_bench_tests;
