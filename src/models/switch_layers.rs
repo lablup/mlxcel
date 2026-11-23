@@ -528,7 +528,8 @@ impl SwitchLinear {
     ///
     /// Used by: `SwitchLinear::forward`, `SwitchGLU::forward`,
     ///          `SwitchGLU::forward_with_expert_scales`,
-    ///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`)
+    ///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`),
+    ///          `DeepSeekV3` (`FloatSwitchGLU::forward`)
     pub(crate) fn forward_indexed(
         &self,
         x: &MlxArray,
@@ -2269,7 +2270,8 @@ pub(crate) struct GatherIndices {
 /// changes the graph's node count and nothing else.
 ///
 /// Used by: `SwitchGLU::forward`, `SwitchGLU::forward_with_expert_scales`,
-///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`)
+///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`),
+///          `DeepSeekV3` (`FloatSwitchGLU::forward`)
 pub(crate) fn prepare_gather_indices(x: &MlxArray, indices: &MlxArray) -> GatherIndices {
     let rhs = mlxcel_core::astype(indices, dtype::UINT32);
     let x_shape = mlxcel_core::array_shape(x);
