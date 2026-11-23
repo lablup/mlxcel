@@ -59,16 +59,13 @@ fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
 }
 
 /// Host attention of one row: `q` is `[q_heads, d]`, `k`/`v` are
-/// `[kv_heads, n, d]`, over positions `start..n`.
+/// `[kv_heads, n, d]`, over positions `start..n`; `dims` is `(q_heads, kv_heads, d)`.
 fn host_attention(
     q: &[f32],
     k: &[f32],
     v: &[f32],
-    q_heads: usize,
-    kv_heads: usize,
-    n: usize,
-    d: usize,
-    start: usize,
+    (q_heads, kv_heads, d): (usize, usize, usize),
+    (start, n): (usize, usize),
     scale: f32,
 ) -> Vec<f32> {
     let group = q_heads / kv_heads;
@@ -193,11 +190,8 @@ fn run_sliding_batch(q_heads: usize, kv_heads: usize, d: usize, prompts: &[usize
                 &hq[b * q_heads * d..(b + 1) * q_heads * d],
                 &k_all,
                 &v_all,
-                q_heads,
-                kv_heads,
-                n1,
-                d,
-                n1.saturating_sub(WINDOW),
+                (q_heads, kv_heads, d),
+                (n1.saturating_sub(WINDOW), n1),
                 scale,
             );
             let row = &got[b * q_heads * d..(b + 1) * q_heads * d];
