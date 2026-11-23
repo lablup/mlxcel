@@ -245,7 +245,7 @@ where
     view.indptr.push(0);
 
     for (r, layer) in layers.iter().enumerate() {
-        let n_blocks = layer.block_ids.len();
+        let n_blocks = layer.end_block();
         if layer.len > n_blocks * page_size {
             return Err(format!(
                 "build_paged_csr_view: request {r} len {} exceeds {n_blocks} blocks * page_size {page_size}",
@@ -267,9 +267,10 @@ where
         let first_page = layer.logical_start / page_size;
         let last_page = (layer.len - 1) / page_size;
         for page in first_page..=last_page {
-            let block_id = *layer.block_ids.get(page).ok_or_else(|| {
+            let block_id = layer.block_at(page).ok_or_else(|| {
                 format!(
-                    "build_paged_csr_view: request {r} visible page {page} is past its {n_blocks} retained blocks"
+                    "build_paged_csr_view: request {r} visible page {page} is outside its live blocks [{}, {n_blocks})",
+                    layer.block_base
                 )
             })?;
             let row = row_of(block_id).ok_or_else(|| {

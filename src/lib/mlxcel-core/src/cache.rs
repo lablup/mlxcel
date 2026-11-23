@@ -124,6 +124,7 @@ mod paged_detach;
 #[cfg(test)]
 #[path = "cache/paged_pool_tests.rs"]
 mod paged_pool_tests;
+mod paged_sliding;
 #[cfg(test)]
 #[path = "cache/paged_turbo_tests.rs"]
 mod paged_turbo_tests;
@@ -157,13 +158,14 @@ pub use layer_state::{LayerState, LayerStateKind, RecurrentState};
 pub use layer_state_request::{LayerStateEncoding, LayerStateForward, LayerStateSnapshotSpec};
 pub use paged::{
     GatheredKv, POOL_SLAB_BLOCKS, PagedBlockId, PagedBlockPool, PagedCacheStats, PagedKvLayout,
-    PagedLayerState, PagedSequenceState,
+    PagedLayerState, PagedSequenceState, REWIND_RESERVE_BLOCKS,
 };
 pub use paged_batch_decode::{
     PagedBatchDecodeStats, paged_batch_decode_attention, paged_batch_decode_stats,
 };
 pub use paged_csr::{PagedCsrView, build_paged_csr_view};
 pub use paged_detach::DetachedPagedCacheSet;
+pub use paged_sliding::PagedSlidingKVCache;
 pub use ring::RingSlidingKVCache;
 pub use sparse_csr::{
     ContiguousCacheLayout, SparseCsrStructure, SparseIndices, SparseSelection,
@@ -6505,6 +6507,11 @@ impl std::fmt::Display for SequenceId {
     }
 }
 
+/// Tokens per block of a paged sliding sequence allocated without a paged
+/// layout (issue #3256). Matches the server's paged decode block size so a
+/// pool shared with paged decode keeps one layout.
+pub const PAGED_SLIDING_BLOCK_SIZE: usize = 32;
+
 /// Logical owner/backend for one sequence's runtime state.
 ///
 /// Phase 0 keeps all backends represented through the existing `Vec<KVCache>`
@@ -6872,6 +6879,15 @@ impl CachePool {
         // decode override the entry is a `PagedKvCache` shadow for
         // accounting, and the real state is still this vector (issue #3254).
         let natural_backend = model.sequence_state_layout().backend;
+        if natural_backend == SequenceStateBackend::SchedulerOwned
+            && model.supports_paged_sliding_state()
+            && let Some(kinds) = model.layer_state_kinds()
+            && kinds
+                .iter()
+                .any(|kind| matches!(kind, LayerStateKind::Sliding { .. }))
+        {
+            return self.allocate_paged_sliding(&kinds, Some(layout));
+        }
         let layer_state = if natural_backend == SequenceStateBackend::SchedulerOwned {
             Some(model.make_layer_state().ok_or_else(|| {
                 "CachePool: the model reports a scheduler-owned layout but builds no layer state"
@@ -6954,6 +6970,63 @@ impl CachePool {
             ),
         };
         self.active.insert(id, entry.with_layer_state(layer_state));
+        Ok(id)
+    }
+
+    /// Allocate a scheduler-owned sequence whose layers live in the shared
+    /// paged pool (issue #3256): one backend for the whole sequence, full
+    /// layers pool-backed and sliding layers window-bounded.
+    ///
+    /// The layout is the override's when it is an FP16 paged layout for this
+    /// model, else the live pool's, else a uniform one with
+    /// [`PAGED_SLIDING_BLOCK_SIZE`]-token blocks.
+    fn allocate_paged_sliding(
+        &mut self,
+        kinds: &[LayerStateKind],
+        layout_override: Option<SequenceStateLayout>,
+    ) -> Result<SequenceId, String> {
+        let num_layers = kinds.len();
+        let fits = |layout: &PagedKvLayout| {
+            layout.cache_mode == KVCacheMode::Fp16 && layout.num_layers == num_layers
+        };
+        let paged_layout = match layout_override
+            .and_then(|layout| layout.paged_layout)
+            .filter(|layout| fits(layout))
+        {
+            Some(layout) => layout,
+            None => match self.paged_pool.as_ref() {
+                Some(pool) if fits(pool.borrow().layout()) => pool.borrow().layout().clone(),
+                _ => PagedKvLayout::uniform(
+                    num_layers,
+                    PAGED_SLIDING_BLOCK_SIZE,
+                    PAGED_SLIDING_BLOCK_SIZE,
+                )?,
+            },
+        };
+        self.ensure_paged_pool(&paged_layout)?;
+        let pool_rc = self
+            .paged_pool
+            .as_ref()
+            .expect("paged pool exists after ensure_paged_pool")
+            .clone();
+        let mut sequence = PagedSequenceState::new(&paged_layout);
+        for (layer, kind) in sequence.layers.iter_mut().zip(kinds) {
+            if let LayerStateKind::Sliding { window } = *kind {
+                *layer = PagedLayerState::sliding(window.max(1) as usize);
+            }
+        }
+        let state_rc = Rc::new(RefCell::new(sequence));
+        let layer_state = LayerState::pool_backed(kinds, &pool_rc, &state_rc)?;
+        let id = SequenceId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let entry = SequenceCacheSet::with_backend(
+            id,
+            SequenceStateBackend::PagedKvCache,
+            Vec::new(),
+            Some(state_rc),
+            Some(paged_layout),
+        )
+        .with_layer_state(Some(layer_state));
+        self.active.insert(id, entry);
         Ok(id)
     }
 
@@ -7044,6 +7117,14 @@ impl CachePool {
     /// shadow state. A no-op for every other sequence and for a pool with no
     /// paged shadow.
     pub fn sync_paged_state_with_layer_state(&mut self, id: SequenceId) -> Result<(), String> {
+        // A paged sliding sequence's layers write the block table themselves
+        // (issue #3256); there is no shadow to mirror.
+        if self
+            .layer_state(id)
+            .is_some_and(|layers| layers.iter().any(LayerState::is_pool_backed))
+        {
+            return Ok(());
+        }
         let Some(visible_lens) = self.layer_state(id).map(|layers| {
             layers
                 .iter()
@@ -7214,6 +7295,85 @@ impl CachePool {
         // the pool itself, covering active sequences and parked prompt-cache
         // pins alike, so no per-sequence borrows are needed anymore.
         self.paged_pool.as_ref().map(|pool| pool.borrow().stats())
+    }
+
+    /// Retired sliding blocks pinned by live sequences, as `(blocks, bytes)`
+    /// (issue #3256). Stored prompt-cache entries are counted separately by
+    /// [`Self::detached_retired_footprint`].
+    pub fn sliding_retired_footprint(&self) -> (usize, usize) {
+        let Some(pool) = self.paged_pool.as_ref() else {
+            return (0, 0);
+        };
+        let pool = pool.borrow();
+        self.active
+            .values()
+            .filter_map(|sequence| sequence.paged.as_ref())
+            .map(|state| pool.retired_footprint(&state.borrow()))
+            .fold((0, 0), |(b, n), (bb, nn)| (b + bb, n + nn))
+    }
+
+    /// Retired sliding blocks a detached set pins, as `(blocks, bytes)`.
+    pub fn detached_retired_footprint(&self, set: &DetachedPagedCacheSet) -> (usize, usize) {
+        match self.paged_pool.as_ref() {
+            Some(pool) => pool.borrow().retired_footprint(&set.paged_state),
+            None => (set.retired_block_count(), 0),
+        }
+    }
+
+    /// Configure retired-block retention for paged sliding sequences (issue
+    /// #3256): on with a per-layer cap while the prompt cache is enabled,
+    /// off (release past the rewind reserve) otherwise.
+    pub fn configure_sliding_retention(&mut self, retain: bool, cap_blocks: usize) {
+        if let Some(pool) = self.paged_pool.as_ref() {
+            let mut pool = pool.borrow_mut();
+            pool.set_retain_retired(retain);
+            pool.set_retired_cap_blocks(cap_blocks);
+        }
+    }
+
+    /// Record prefix lengths a later request is expected to reuse on every
+    /// sliding layer of `id`, so retirement and donation keep the blocks
+    /// their windows need (issue #3256).
+    pub fn set_sliding_anchors(&mut self, id: SequenceId, anchors: &[usize]) {
+        if let Some(state) = self.active.get(&id).and_then(|s| s.paged.as_ref()) {
+            for layer in state.borrow_mut().layers.iter_mut() {
+                if layer.window.is_some() {
+                    layer.anchors = anchors.to_vec();
+                }
+            }
+        }
+    }
+
+    /// Prune a detached set's unanchored retired blocks down to
+    /// `keep_unanchored` per layer, oldest first (issue #3256).
+    pub fn prune_detached_retired(
+        &mut self,
+        set: &mut DetachedPagedCacheSet,
+        keep_unanchored: usize,
+    ) -> Result<usize, String> {
+        let Some(pool) = self.paged_pool.as_ref() else {
+            return Ok(0);
+        };
+        let mut pool = pool.borrow_mut();
+        let mut released_ids = Vec::new();
+        let mut released_bytes = 0;
+        for (layer_idx, layer) in set.paged_state.layers.iter_mut().enumerate() {
+            let before: Vec<PagedBlockId> = layer.retired.iter().map(|(_, id)| *id).collect();
+            // Each retired block carries two references in a detached set:
+            // the sequence's own pin and the detach pin.
+            let released = pool.prune_retired(layer, keep_unanchored)?;
+            if released > 0 {
+                let after: std::collections::HashSet<PagedBlockId> =
+                    layer.retired.iter().map(|(_, id)| *id).collect();
+                for id in before.into_iter().filter(|id| !after.contains(id)) {
+                    pool.release_block(id)?;
+                    released_ids.push(id);
+                }
+                released_bytes += released * pool.real_block_bytes(layer_idx).unwrap_or(0);
+            }
+        }
+        set.forget_retained(&released_ids, released_bytes);
+        Ok(released_ids.len())
     }
 
     pub fn paged_block_size(&self) -> Option<usize> {
@@ -7703,6 +7863,10 @@ impl CachePool {
                     block_ids,
                     len: layer.len,
                     logical_start: layer.logical_start,
+                    block_base: layer.block_base,
+                    window: layer.window,
+                    retired: Vec::new(),
+                    anchors: layer.anchors.clone(),
                 });
             }
             let offsets: Vec<i32> = layers.iter().map(|layer| layer.len as i32).collect();
@@ -9673,11 +9837,13 @@ mod tests {
                     block_ids: vec![PagedBlockId::from_raw(7), PagedBlockId::from_raw(8)],
                     len: 6,
                     logical_start: 0,
+                    ..PagedLayerState::new()
                 },
                 PagedLayerState {
                     block_ids: vec![PagedBlockId::from_raw(42)],
                     len: 3,
                     logical_start: 0,
+                    ..PagedLayerState::new()
                 },
             ],
         };

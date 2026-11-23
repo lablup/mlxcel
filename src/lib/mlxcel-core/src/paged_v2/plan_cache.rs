@@ -104,7 +104,7 @@ impl RequestFingerprint {
         let page_size = page_size.max(1);
         let visible = layer.visible_len() > 0;
         Self {
-            blocks: layer.block_ids.len(),
+            blocks: layer.end_block(),
             first_page: layer.logical_start / page_size,
             last_page: if layer.len == 0 {
                 0

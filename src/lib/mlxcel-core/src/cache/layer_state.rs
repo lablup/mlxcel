@@ -31,8 +31,13 @@
 
 use cxx::UniquePtr;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use super::paged_sliding::PagedSlidingKVCache;
 use super::{
-    ChunkedKVCache, KVCache, KVCacheMode, KvAttention, RotatingKVCache, flush_decode_undo_rows,
+    ChunkedKVCache, KVCache, KVCacheMode, KvAttention, PagedBlockPool, PagedSequenceState,
+    RotatingKVCache, flush_decode_undo_rows, paged_batch_decode_attention,
 };
 use crate::ffi::{self, MlxArray};
 
@@ -181,8 +186,12 @@ impl RecurrentState {
 /// Attention goes through [`KvAttention`] by matching to the inner cache
 /// (ADR 0008, ADR 0009), so the storage behind a layer picks its kernel.
 pub enum LayerState {
+    /// A full-attention layer: a dense [`KVCache`], or a pool-backed one on a
+    /// paged sliding sequence (issue #3256).
     Kv(KVCache),
     Rotating(RotatingKVCache),
+    /// A sliding layer stored as window-bounded paged blocks (issue #3256).
+    PagedSliding(PagedSlidingKVCache),
     Chunked(ChunkedKVCache),
     Recurrent(RecurrentState),
     Empty,
@@ -232,6 +241,59 @@ impl LayerState {
             .collect()
     }
 
+    /// The pool-backed state of a paged sliding sequence (issue #3256):
+    /// every `Full` layer a pool-backed [`KVCache`], every `Sliding` layer a
+    /// [`PagedSlidingKVCache`] over the same sequence state, and `None`
+    /// layers empty. `state`'s sliding layers must carry their windows.
+    ///
+    /// # Errors
+    ///
+    /// A kind other than `Full`, `Sliding` or `None`: chunked and recurrent
+    /// layers have no paged storage.
+    pub fn pool_backed(
+        kinds: &[LayerStateKind],
+        pool: &Rc<RefCell<PagedBlockPool>>,
+        state: &Rc<RefCell<PagedSequenceState>>,
+    ) -> Result<Vec<Self>, String> {
+        kinds
+            .iter()
+            .enumerate()
+            .map(|(layer_idx, &kind)| match kind {
+                LayerStateKind::Full => Ok(Self::Kv(KVCache::new_paged(
+                    pool.clone(),
+                    state.clone(),
+                    layer_idx,
+                ))),
+                LayerStateKind::Sliding { window } => Ok(Self::PagedSliding(
+                    PagedSlidingKVCache::new(pool.clone(), state.clone(), layer_idx, window),
+                )),
+                LayerStateKind::None => Ok(Self::Empty),
+                other => Err(format!(
+                    "layer {layer_idx}: a {other:?} layer has no paged storage"
+                )),
+            })
+            .collect()
+    }
+
+    /// Whether this layer reads and writes the shared paged pool.
+    pub fn is_pool_backed(&self) -> bool {
+        match self {
+            Self::Kv(cache) => cache.is_paged_backed(),
+            Self::PagedSliding(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Set a pool-backed layer's RoPE offset after its block table was
+    /// installed by an adopt (issue #3256). A no-op for any other layer.
+    pub fn set_pool_offset(&mut self, offset: i32) {
+        match self {
+            Self::Kv(cache) if cache.is_paged_backed() => cache.offset = offset,
+            Self::PagedSliding(cache) => cache.kv_mut().offset = offset,
+            _ => {}
+        }
+    }
+
     /// Whether this state is the storage [`Self::new`] builds for `kind`.
     pub fn matches_kind(&self, kind: LayerStateKind) -> bool {
         match (self, kind) {
@@ -239,6 +301,9 @@ impl LayerState {
             | (Self::Recurrent(_), LayerStateKind::Recurrent)
             | (Self::Empty, LayerStateKind::None) => true,
             (Self::Rotating(cache), LayerStateKind::Sliding { window }) => cache.max_size == window,
+            (Self::PagedSliding(cache), LayerStateKind::Sliding { window }) => {
+                cache.window() == window
+            }
             (Self::Chunked(_), LayerStateKind::Chunked { .. }) => true,
             _ => false,
         }
@@ -249,6 +314,7 @@ impl LayerState {
         match self {
             Self::Kv(_) => "full",
             Self::Rotating(_) => "sliding",
+            Self::PagedSliding(_) => "paged sliding",
             Self::Chunked(_) => "chunked",
             Self::Recurrent(_) => "recurrent",
             Self::Empty => "empty",
@@ -260,6 +326,7 @@ impl LayerState {
         match self {
             Self::Kv(cache) => cache.offset,
             Self::Rotating(cache) => cache.offset,
+            Self::PagedSliding(cache) => cache.offset(),
             Self::Chunked(cache) => cache.offset,
             Self::Recurrent(state) => state.offset,
             Self::Empty => 0,
@@ -273,6 +340,7 @@ impl LayerState {
         match self {
             Self::Kv(cache) => cache.seq_len().max(0) as usize,
             Self::Rotating(cache) => cache.visible_len().max(0) as usize,
+            Self::PagedSliding(cache) => cache.visible_len(),
             Self::Chunked(cache) => (cache.offset - cache.get_start_position()).max(0) as usize,
             Self::Recurrent(_) | Self::Empty => 0,
         }
@@ -287,6 +355,7 @@ impl LayerState {
         match self {
             Self::Kv(cache) => cache.nbytes(),
             Self::Rotating(cache) => pair(&cache.keys, &cache.values),
+            Self::PagedSliding(cache) => cache.nbytes(),
             Self::Chunked(cache) => pair(&cache.keys, &cache.values),
             Self::Recurrent(state) => state.nbytes(),
             Self::Empty => 0,
@@ -315,6 +384,12 @@ impl LayerState {
                 }
             }
             Self::Rotating(cache) => cache.rewind_padded_prefill(excess),
+            Self::PagedSliding(cache) => match cache.rewind(excess)? {
+                trimmed if trimmed == excess => Ok(()),
+                trimmed => Err(format!(
+                    "paged sliding layer dropped {trimmed} of {excess} pad positions"
+                )),
+            },
             Self::Empty => Ok(()),
             Self::Chunked(_) | Self::Recurrent(_) => Err(format!(
                 "a {} layer cannot drop {excess} pad positions",
@@ -345,6 +420,12 @@ impl LayerState {
                 }
             }
             Self::Rotating(cache) => cache.rewind_decode_writes(n),
+            Self::PagedSliding(cache) => match cache.rewind(n)? {
+                trimmed if trimmed == n => Ok(()),
+                trimmed => Err(format!(
+                    "paged sliding decode rewind of {n}: trimmed {trimmed}"
+                )),
+            },
             Self::Empty => Ok(()),
             Self::Chunked(_) | Self::Recurrent(_) => Err(format!(
                 "a {} layer cannot rewind {n} decode appends",
@@ -419,10 +500,17 @@ impl KvAttention for LayerState {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         match self {
+            // A lone pool-backed decode step gathers the window and runs the
+            // dense SDPA (issue #3256); several rows take the whole-batch
+            // launch in [`LayerState::attend_batched`].
+            Self::Kv(cache) if cache.is_paged_backed() => {
+                cache.attend_gathered(q, new_keys, new_values, scale, mask)
+            }
             Self::Kv(cache) => KVCache::attend(cache, q, new_keys, new_values, scale, mask),
             Self::Rotating(cache) => {
                 RotatingKVCache::attend(cache, q, new_keys, new_values, scale, mask)
             }
+            Self::PagedSliding(cache) => cache.attend(q, new_keys, new_values, scale, mask),
             Self::Chunked(cache) => {
                 KvAttention::attend(cache, q, new_keys, new_values, scale, mask)
             }
@@ -431,6 +519,40 @@ impl KvAttention for LayerState {
                 self.storage_name()
             ),
         }
+    }
+}
+
+impl LayerState {
+    /// One layer of a batched decode step over `rows`, one layer state per
+    /// sequence. Pool-backed rows of one paged sequence family take the
+    /// whole-batch paged launch (the CSR kernel, with each sliding row's
+    /// window as its first page offset, issue #3256); every other batch runs
+    /// row by row through [`KvAttention::attend`].
+    ///
+    /// `q` is `[B, Hq, 1, D]` and `keys` / `values` `[B, Hkv, 1, D]`.
+    pub fn attend_batched(
+        q: &MlxArray,
+        keys: &MlxArray,
+        values: &MlxArray,
+        rows: &mut [&mut LayerState],
+        scale: f32,
+    ) -> UniquePtr<MlxArray> {
+        if rows.len() > 1 && rows.iter().all(|row| row.is_pool_backed()) {
+            let mut caches: Vec<&mut KVCache> = rows
+                .iter_mut()
+                .filter_map(|row| match &mut **row {
+                    Self::Kv(cache) => Some(cache),
+                    Self::PagedSliding(cache) => Some(cache.kv_mut()),
+                    _ => None,
+                })
+                .collect();
+            if let Some(out) =
+                paged_batch_decode_attention(q, keys, values, &mut caches, scale, 0.0)
+            {
+                return out;
+            }
+        }
+        super::attend_batched_rows(q, keys, values, rows, scale, None)
     }
 }
 

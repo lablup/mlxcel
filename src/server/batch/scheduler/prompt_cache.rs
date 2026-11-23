@@ -362,13 +362,16 @@ impl BatchScheduler {
         // The same bail covers a dense family whose KV cache does not hold the
         // whole per-token state (Baichuan-M1's K/V convolution state, #2567):
         // its donate path below never stores an entry either.
-        if self
-            .engine
-            .model()
-            .sequence_state_layout()
-            .backend
-            .keeps_state_outside_kv_slice()
-            || !self.engine.model().kv_cache_captures_sequence_state()
+        // A paged sliding family (issue #3256) is scheduler-owned but keeps
+        // every layer in the paged pool, so its KV entries are real.
+        if !self.paged_sliding_family()
+            && (self
+                .engine
+                .model()
+                .sequence_state_layout()
+                .backend
+                .keeps_state_outside_kv_slice()
+                || !self.engine.model().kv_cache_captures_sequence_state())
         {
             return None;
         }
@@ -431,12 +434,44 @@ impl BatchScheduler {
             /// below can still adopt those.
             TakePath,
         }
-        let backend_is_paged = matches!(self.decode_storage_backend, DecodeStorageBackend::Paged);
+        // Paged sliding sequences are paged whatever the decode storage
+        // setting says (issue #3256).
+        let backend_is_paged = matches!(self.decode_storage_backend, DecodeStorageBackend::Paged)
+            || self.paged_sliding_family();
         let min_prefix = store.min_prefix_tokens().max(1);
         let cache_pool = self.engine.pool_mut();
         // `with_detached` itself returns `None` for a drained shell; the take
         // below then also yields `None` (cold prefill).
         let clone_attempt: Option<PagedCloneOutcome> = entry.with_detached(|set| match set {
+            DetachedKvSet::Paged(paged)
+                if backend_is_paged && paged.clone_eligible() && paged.has_sliding_layers() =>
+            {
+                // The largest block boundary whose sliding windows are all
+                // still held (issue #3256).
+                let block_size = paged.layout().block_size.max(1);
+                let wanted = (matched_len.min(paged.seq_len()) / block_size) * block_size;
+                let adoptable = paged.largest_reusable_prefix(matched_len);
+                if adoptable < min_prefix {
+                    let reason = if wanted >= min_prefix {
+                        PromptCacheRejectReason::SlidingWindowEvicted
+                    } else {
+                        PromptCacheRejectReason::BlockBoundaryFloor
+                    };
+                    return PagedCloneOutcome::Decline(
+                        reason,
+                        format!(
+                            "no sliding-window boundary at or past the minimum prefix {min_prefix} \
+                             (block-floored match {wanted})"
+                        ),
+                    );
+                }
+                match cache_pool.clone_detached_paged_prefix(paged, adoptable) {
+                    Ok(clone) => PagedCloneOutcome::Cloned(Box::new(clone), adoptable),
+                    Err(err) => {
+                        PagedCloneOutcome::Decline(PromptCacheRejectReason::LayoutConstraints, err)
+                    }
+                }
+            }
             DetachedKvSet::Paged(paged) if backend_is_paged && paged.clone_eligible() => {
                 let block_size = paged.layout().block_size.max(1);
                 // Floor BOTH the partial and the whole-entry match to the
@@ -747,9 +782,13 @@ impl BatchScheduler {
         let history_prompt = ctx.history_prompt.take();
         let root_prompt = ctx.root_prompt.take();
         let root_tokens = ctx.root_prefix_tokens.take();
-        if !self.engine.model().supports_snapshot_reuse()
+        // A paged sliding family takes no snapshot at these boundaries; it
+        // records them as anchors whose window blocks retirement and
+        // donation keep (issue #3256).
+        let anchors_only = self.paged_sliding_family();
+        if !(self.engine.model().supports_snapshot_reuse() || anchors_only)
             || is_multimodal
-            || crate::server::prompt_cache::boundary_snapshot_disabled()
+            || (!anchors_only && crate::server::prompt_cache::boundary_snapshot_disabled())
         {
             ctx.history_prefix_tokens = None;
             return;
@@ -1689,13 +1728,17 @@ impl BatchScheduler {
         // restored prefix would start without the conv state of its last token.
         // `kv_cache_captures_sequence_state()` declines it under the same
         // reason.
-        if self
-            .engine
-            .model()
-            .sequence_state_layout()
-            .backend
-            .keeps_state_outside_kv_slice()
-            || !self.engine.model().kv_cache_captures_sequence_state()
+        // A paged sliding sequence (issue #3256) donates its block tables,
+        // retired sliding blocks included, through the paged arm below.
+        let paged_sliding = self.sequence_is_paged_sliding(seq_id);
+        if !paged_sliding
+            && (self
+                .engine
+                .model()
+                .sequence_state_layout()
+                .backend
+                .keeps_state_outside_kv_slice()
+                || !self.engine.model().kv_cache_captures_sequence_state())
         {
             self.batch_observability.record_prompt_cache_reject(
                 PromptCacheRejectReason::ModelOwnedState,
@@ -1714,7 +1757,7 @@ impl BatchScheduler {
 
         // Other `ModelOwned` families carry no detachable cross-request KV,
         // and a scheduler-owned sequence donates a snapshot above or nothing.
-        if backend.keeps_state_outside_kv_slice() {
+        if backend.keeps_state_outside_kv_slice() && !paged_sliding {
             return;
         }
 
@@ -1746,7 +1789,12 @@ impl BatchScheduler {
                     return;
                 }
                 match self.engine.pool_mut().detach_paged(seq_id) {
-                    Some(p) => DetachedKvSet::Paged(p),
+                    Some(mut p) => {
+                        if paged_sliding {
+                            self.prune_donated_retired(&mut p);
+                        }
+                        DetachedKvSet::Paged(p)
+                    }
                     None => return,
                 }
             }

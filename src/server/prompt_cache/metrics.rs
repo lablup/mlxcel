@@ -120,12 +120,18 @@ pub enum PromptCacheRejectReason {
     /// silent, so a host short of memory showed only `prompt_cache_inserts`
     /// stuck at zero.
     MemoryReserve,
+    /// A paged sliding-window entry matched the request, but no block
+    /// boundary at or past the minimum prefix still has every sliding block
+    /// its window needs: the blocks covering `[d - window, d)` were evicted
+    /// from the entry's retired list (issue #3256). `context_len` is the
+    /// block-floored match the request wanted.
+    SlidingWindowEvicted,
 }
 
 impl PromptCacheRejectReason {
     /// All variants, in the stable order used by Prometheus/`/v1/cache/stats`
     /// exposition helpers.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Oversized,
         Self::Disabled,
         Self::PrefixTooShort,
@@ -138,6 +144,7 @@ impl PromptCacheRejectReason {
         Self::ModelOwnedState,
         Self::RopeRegimeMismatch,
         Self::MemoryReserve,
+        Self::SlidingWindowEvicted,
     ];
 
     /// Stable lowercase snake_case label used as the Prometheus `reason`
@@ -156,6 +163,7 @@ impl PromptCacheRejectReason {
             Self::ModelOwnedState => "model_owned_state",
             Self::RopeRegimeMismatch => "rope_regime_mismatch",
             Self::MemoryReserve => "memory_reserve",
+            Self::SlidingWindowEvicted => "sliding_window_evicted",
         }
     }
 }
@@ -217,6 +225,7 @@ pub struct PromptCacheRejectCounters {
     model_owned_state: AtomicU64,
     rope_regime_mismatch: AtomicU64,
     memory_reserve: AtomicU64,
+    sliding_window_evicted: AtomicU64,
     last: Mutex<Option<PromptCacheLastReject>>,
 }
 
@@ -239,6 +248,7 @@ impl PromptCacheRejectCounters {
             PromptCacheRejectReason::ModelOwnedState => &self.model_owned_state,
             PromptCacheRejectReason::RopeRegimeMismatch => &self.rope_regime_mismatch,
             PromptCacheRejectReason::MemoryReserve => &self.memory_reserve,
+            PromptCacheRejectReason::SlidingWindowEvicted => &self.sliding_window_evicted,
         }
     }
 

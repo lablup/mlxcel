@@ -61,6 +61,7 @@ fn tiny_sliding_gemma3() -> Gemma3Wrapper {
     Gemma3Wrapper::new(
         Gemma3Model::from_weights(&tiny_gemma3_weights(), &args).expect("tiny gemma3 loads"),
     )
+    .without_paged_sliding()
 }
 
 /// Turn 1 on `first`, returning the full stored conversation

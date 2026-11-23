@@ -426,6 +426,10 @@ impl<M: LanguageModel> LanguageModel for Pooled<M> {
         self.model.layer_state_kinds()
     }
 
+    fn supports_paged_sliding_state(&self) -> bool {
+        self.model.supports_paged_sliding_state()
+    }
+
     fn make_layer_state(&self) -> Option<Vec<LayerState>> {
         self.model.make_layer_state()
     }

@@ -33,6 +33,7 @@ fn layer(ids: &[u64], len: usize, logical_start: usize) -> PagedLayerState {
         block_ids: ids.iter().copied().map(PagedBlockId::from_raw).collect(),
         len,
         logical_start,
+        ..PagedLayerState::new()
     }
 }
 

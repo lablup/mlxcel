@@ -33,8 +33,8 @@ use crate::models::model_owned::KvCacheLayerModes;
 use crate::models::rope_utils::{RopeScalingSpec, printable_label};
 use mlxcel_core::cache::{
     DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, KVCacheMode, KvAttention, LayerState,
-    LayerStateEncoding, LayerStateForward, LayerStateKind, LayerStateSnapshotSpec, SequenceId,
-    attend_batched_rows,
+    LayerStateEncoding, LayerStateForward, LayerStateKind, LayerStateSnapshotSpec,
+    PagedSlidingKVCache, SequenceId, attend_batched_rows,
 };
 use mlxcel_core::generate::ModelStateSnapshot;
 use mlxcel_core::layers::{
@@ -405,12 +405,10 @@ impl Attention {
             &offsets,
         );
 
-        // One attention per row through the row's own cache
-        // (`Cache::attend`; ADR 0008, #2172). Gemma 3's state is never
-        // pool-backed, so there is no whole-batch launch to take, and the
-        // dense-pointer paged kernels this path used to select from the
-        // scheduler's `DecodeBatchContext` were per-row loops themselves.
-        let attn_out = attend_batched_rows(&q, &k, &v, caches, self.scale, None);
+        // The storage behind the rows picks the route (ADR 0008, #2172): a
+        // ring or dense row attends on its own, and pool-backed rows of a
+        // paged sliding sequence take one whole-batch paged launch (#3256).
+        let attn_out = C::attend_batch(&q, &k, &v, caches, self.scale);
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let attn_out = mlxcel_core::reshape(
             &attn_out,
@@ -707,7 +705,43 @@ impl CacheInterface for KVCache {
         scale: f32,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        // A pool-backed full layer of a paged sliding sequence gathers its
+        // window and runs the dense SDPA on a single row (issue #3256).
+        if self.is_paged_backed() {
+            return self.attend_gathered(q, k, v, scale, mask);
+        }
         KVCache::attend(self, q, k, v, scale, mask)
+    }
+}
+
+/// A window-bounded paged sliding layer (issue #3256): the ring's contract on
+/// pool blocks.
+impl CacheInterface for PagedSlidingKVCache {
+    fn offset(&self) -> i32 {
+        PagedSlidingKVCache::offset(self)
+    }
+
+    fn live_len(&self) -> i32 {
+        PagedSlidingKVCache::live_len(self)
+    }
+
+    fn update_and_fetch(
+        &mut self,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        PagedSlidingKVCache::update_and_fetch(self, k, v)
+    }
+
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        PagedSlidingKVCache::attend(self, q, k, v, scale, mask)
     }
 }
 
@@ -925,8 +959,21 @@ pub(crate) trait SlidingLayerCache: KvAttention {
     fn as_interface(&mut self) -> &mut dyn CacheInterface;
     /// Tokens this layer has consumed.
     fn layer_offset(&self) -> i32;
-    /// The sliding ring, `None` on a global layer.
+    /// The sliding ring, `None` on a global layer and on a paged sliding one.
     fn rotating(&self) -> Option<&RotatingKVCache>;
+    /// One layer of a batched decode step over `caches`, one per row.
+    fn attend_batch(
+        q: &MlxArray,
+        k: &MlxArray,
+        v: &MlxArray,
+        caches: &mut [&mut Self],
+        scale: f32,
+    ) -> UniquePtr<MlxArray>
+    where
+        Self: Sized,
+    {
+        attend_batched_rows(q, k, v, caches, scale, None)
+    }
 }
 
 impl SlidingLayerCache for Cache {
@@ -953,6 +1000,7 @@ impl SlidingLayerCache for LayerState {
         match self {
             LayerState::Kv(c) => c,
             LayerState::Rotating(c) => c,
+            LayerState::PagedSliding(c) => c,
             other => panic!(
                 "Gemma 3 forward over a {} layer: the layer state does not match layer_state_kinds()",
                 other.storage_name()
@@ -966,6 +1014,16 @@ impl SlidingLayerCache for LayerState {
 
     fn rotating(&self) -> Option<&RotatingKVCache> {
         self.as_rotating()
+    }
+
+    fn attend_batch(
+        q: &MlxArray,
+        k: &MlxArray,
+        v: &MlxArray,
+        caches: &mut [&mut Self],
+        scale: f32,
+    ) -> UniquePtr<MlxArray> {
+        LayerState::attend_batched(q, k, v, caches, scale)
     }
 }
 
@@ -1632,6 +1690,9 @@ pub struct Gemma3Wrapper {
     /// drafter and benchmarks), which no pool entry backs.
     fallback: RefCell<Vec<LayerState>>,
     kv_cache_layer_modes: KvCacheLayerModes,
+    /// Whether an FP16 scheduler sequence is stored as paged blocks (issue
+    /// #3256). Off only in tests that drive the ring snapshot path.
+    paged_sliding: bool,
 }
 
 impl Gemma3Wrapper {
@@ -1642,7 +1703,16 @@ impl Gemma3Wrapper {
             model,
             fallback,
             kv_cache_layer_modes,
+            paged_sliding: true,
         }
+    }
+
+    /// Keep FP16 scheduler sequences on the ring storage and its snapshot
+    /// path, as quantized ones are. Used by the snapshot tests.
+    #[cfg(test)]
+    pub(crate) fn without_paged_sliding(mut self) -> Self {
+        self.paged_sliding = false;
+        self
     }
 
     /// What layer `layer_idx` keeps: a sliding ring or a full cache.
@@ -1911,9 +1981,20 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
     /// Snapshots are taken, restored, truncated and checkpointed by the
     /// prompt cache's generic code over the sequence's layer state
     /// (`server::prompt_cache::state_snapshot`), under
-    /// [`Self::layer_state_snapshot_spec`].
+    /// [`Self::layer_state_snapshot_spec`]. Only a quantized configuration
+    /// uses them: an FP16 sequence lives in paged blocks and is reused as a
+    /// paged prompt-cache entry (issue #3256).
     fn supports_snapshot_reuse(&self) -> bool {
-        true
+        !self.supports_paged_sliding_state()
+    }
+
+    /// Every layer FP16: full layers pool-backed and sliding layers
+    /// window-bounded paged blocks (issue #3256).
+    fn supports_paged_sliding_state(&self) -> bool {
+        self.paged_sliding
+            && (0..self.model.layers.len()).all(|layer_idx| {
+                self.kv_cache_layer_modes.mode_for_layer(layer_idx) == KVCacheMode::Fp16
+            })
     }
 
     fn forward_layer_state(

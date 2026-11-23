@@ -79,7 +79,8 @@ fn adaptive_plan_scheduler() -> BatchScheduler {
     args.max_position_embeddings = 8192;
     let model = Gemma3Wrapper::new(
         Gemma3Model::from_weights(&tiny_gemma3_weights(), &args).expect("tiny gemma3 loads"),
-    );
+    )
+    .without_paged_sliding();
     plan_scheduler_with_model(
         model,
         test_store(),

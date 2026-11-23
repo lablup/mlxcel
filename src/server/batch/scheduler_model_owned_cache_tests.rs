@@ -153,7 +153,10 @@ pub(super) fn tiny_gemma3_weights() -> WeightMap {
 pub(super) fn tiny_gemma3() -> Gemma3Wrapper {
     let args = tiny_gemma3_args();
     let weights = tiny_gemma3_weights();
+    // Ring storage: these tests pin the snapshot path, which paged sliding
+    // storage (issue #3256) replaces for FP16 sequences.
     Gemma3Wrapper::new(Gemma3Model::from_weights(&weights, &args).expect("tiny gemma3 loads"))
+        .without_paged_sliding()
 }
 
 pub(super) fn test_store() -> Arc<PromptCacheStore> {

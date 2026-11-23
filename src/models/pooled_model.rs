@@ -32,7 +32,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
 
-use mlxcel_core::cache::{CachePool, KVCacheMode, LayerState, LayerStateForward, SequenceId};
+use mlxcel_core::cache::{
+    CachePool, KVCacheMode, LayerState, LayerStateForward, PagedKvLayout, SequenceId,
+    SequenceStateLayout,
+};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -45,6 +48,8 @@ pub struct Pooled<M: LanguageModel> {
     pool: RefCell<CachePool>,
     /// The test's sequence ids, mapped to the ids the pool assigned.
     ids: RefCell<HashMap<SequenceId, SequenceId>>,
+    /// The layout every sequence is opened with, `None` for the model's.
+    layout: Option<SequenceStateLayout>,
 }
 
 impl<M: LanguageModel> Deref for Pooled<M> {
@@ -68,7 +73,29 @@ impl<M: LanguageModel> Pooled<M> {
             model,
             pool: RefCell::new(CachePool::new(64)),
             ids: RefCell::new(HashMap::new()),
+            layout: None,
         }
+    }
+
+    /// Open every sequence on `block_size`-token paged blocks, the layout a
+    /// paged sliding family's sequences take (issue #3256).
+    pub fn with_paged_blocks(model: M, block_size: usize) -> Self {
+        let layout = PagedKvLayout::uniform(model.num_layers(), block_size, block_size)
+            .expect("paged test layout");
+        Self {
+            layout: Some(SequenceStateLayout::paged_kv_cache(layout)),
+            ..Self::new(model)
+        }
+    }
+
+    /// Run `f` over the pool, for block accounting and detach tests.
+    pub fn with_pool<R>(&self, f: impl FnOnce(&mut CachePool) -> R) -> R {
+        f(&mut self.pool.borrow_mut())
+    }
+
+    /// The pool id behind the test's `seq`, opening it on first use.
+    pub fn pool_sequence(&self, seq: SequenceId) -> SequenceId {
+        self.pool_id(seq)
     }
 
     /// The pool sequence behind `seq`, opened on first use.
@@ -79,7 +106,7 @@ impl<M: LanguageModel> Pooled<M> {
         let id = self
             .pool
             .borrow_mut()
-            .allocate(&self.model)
+            .allocate_with_layout(&self.model, self.layout.clone())
             .expect("pool sequence");
         self.ids.borrow_mut().insert(seq, id);
         id

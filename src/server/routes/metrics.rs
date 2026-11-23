@@ -144,6 +144,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     let pc_reject_snapshot_diverged = obs.prompt_cache_reject_snapshot_diverged;
     let pc_reject_model_owned_state = obs.prompt_cache_reject_model_owned_state;
     let pc_reject_memory_reserve = obs.prompt_cache_reject_memory_reserve;
+    let pc_reject_sliding_window_evicted = obs.prompt_cache_reject_sliding_window_evicted;
 
     let pp_snapshot = state.pp_observability.snapshot();
     let body = format!(
@@ -292,7 +293,8 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          mlxcel_prompt_cache_reject_total{{reason=\"block_boundary_floor\"}} {pc_reject_block_boundary_floor}\n\
          mlxcel_prompt_cache_reject_total{{reason=\"snapshot_diverged\"}} {pc_reject_snapshot_diverged}\n\
          mlxcel_prompt_cache_reject_total{{reason=\"model_owned_state\"}} {pc_reject_model_owned_state}\n\
-         mlxcel_prompt_cache_reject_total{{reason=\"memory_reserve\"}} {pc_reject_memory_reserve}\n",
+         mlxcel_prompt_cache_reject_total{{reason=\"memory_reserve\"}} {pc_reject_memory_reserve}\n\
+         mlxcel_prompt_cache_reject_total{{reason=\"sliding_window_evicted\"}} {pc_reject_sliding_window_evicted}\n",
         gen_time_sec = gen_time_ms as f64 / 1000.0,
         seq_started = obs.sequences_started,
         seq_completed = obs.sequences_completed,
@@ -342,6 +344,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         pc_reject_snapshot_diverged = pc_reject_snapshot_diverged,
         pc_reject_model_owned_state = pc_reject_model_owned_state,
         pc_reject_memory_reserve = pc_reject_memory_reserve,
+        pc_reject_sliding_window_evicted = pc_reject_sliding_window_evicted,
     );
 
     let mut body = body;

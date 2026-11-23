@@ -251,6 +251,11 @@ pub struct BatchObservability {
     pub cache_pool_paged_block_budget: AtomicU64,
     /// Times paged decode was requested but fell back to dense.
     pub decode_storage_fallbacks: AtomicU64,
+    /// Sliding-window paged blocks that left their window and stay pinned
+    /// for prompt-cache reuse, on live sequences and stored entries (#3256).
+    pub sliding_retired_blocks: AtomicU64,
+    /// Real bytes of [`Self::sliding_retired_blocks`].
+    pub sliding_retired_bytes: AtomicU64,
 
     // -- paged decode kernel dispatch (issues #899, #903) --
     /// Layer decode steps served by the fused paged v2 kernel, cascade
@@ -381,6 +386,8 @@ impl BatchObservability {
             cache_pool_paged_bytes_in_use: AtomicU64::new(0),
             cache_pool_paged_block_budget: AtomicU64::new(0),
             decode_storage_fallbacks: AtomicU64::new(0),
+            sliding_retired_blocks: AtomicU64::new(0),
+            sliding_retired_bytes: AtomicU64::new(0),
             paged_decode_v2_launches: AtomicU64::new(0),
             paged_decode_gather_fallbacks: AtomicU64::new(0),
             cascade_launches: AtomicU64::new(0),
@@ -759,6 +766,12 @@ impl BatchObservability {
     /// than an accumulation. Copying them here is what puts "which attention
     /// kernel is this server actually running, and is the shared prefix being
     /// hoisted" into `/health` and `/metrics` without a profiler.
+    /// Publish the retired sliding-window footprint (issue #3256).
+    pub fn update_sliding_retired_gauges(&self, blocks: u64, bytes: u64) {
+        self.sliding_retired_blocks.store(blocks, Ordering::Relaxed);
+        self.sliding_retired_bytes.store(bytes, Ordering::Relaxed);
+    }
+
     pub fn update_paged_decode_gauges(&self, stats: PagedBatchDecodeStats) {
         self.paged_decode_v2_launches
             .store(stats.v2_launches, Ordering::Relaxed);
@@ -810,6 +823,8 @@ impl BatchObservability {
                 .cache_pool_paged_block_budget
                 .load(Ordering::Relaxed),
             decode_storage_fallbacks: self.decode_storage_fallbacks.load(Ordering::Relaxed),
+            sliding_retired_blocks: self.sliding_retired_blocks.load(Ordering::Relaxed),
+            sliding_retired_bytes: self.sliding_retired_bytes.load(Ordering::Relaxed),
             paged_decode_v2_launches: self.paged_decode_v2_launches.load(Ordering::Relaxed),
             paged_decode_gather_fallbacks: self
                 .paged_decode_gather_fallbacks
@@ -884,6 +899,9 @@ impl BatchObservability {
             prompt_cache_reject_memory_reserve: self
                 .prompt_cache_reject_reasons
                 .count(PromptCacheRejectReason::MemoryReserve),
+            prompt_cache_reject_sliding_window_evicted: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::SlidingWindowEvicted),
             mtp_policy: self.mtp_policy_snapshot(),
             prompt_cache_last_reject: self.prompt_cache_reject_reasons.last().map(|r| {
                 PromptCacheLastRejectSnapshot {
@@ -935,6 +953,10 @@ pub struct ObservabilitySnapshot {
     pub cache_pool_paged_bytes_in_use: u64,
     pub cache_pool_paged_block_budget: u64,
     pub decode_storage_fallbacks: u64,
+    /// Retired sliding-window blocks pinned for reuse (issue #3256).
+    pub sliding_retired_blocks: u64,
+    /// Real bytes of the retired sliding-window blocks (issue #3256).
+    pub sliding_retired_bytes: u64,
     /// Layer decode steps served by the fused paged v2 kernel (issue #899),
     /// cascade included.
     pub paged_decode_v2_launches: u64,
@@ -1010,6 +1032,9 @@ pub struct ObservabilitySnapshot {
     /// (issue #3146). A non-zero value with `prompt_cache_inserts` at zero
     /// means the host, not the request, kept the store empty.
     pub prompt_cache_reject_memory_reserve: u64,
+    /// Paged sliding-window matches declined because the sliding blocks the
+    /// adoption point needed were already evicted (issue #3256).
+    pub prompt_cache_reject_sliding_window_evicted: u64,
     /// Most recent prompt-cache reject/decline event, if any has happened
     /// yet.
     pub prompt_cache_last_reject: Option<PromptCacheLastRejectSnapshot>,

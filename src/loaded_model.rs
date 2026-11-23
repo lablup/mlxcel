@@ -763,6 +763,10 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, layer_state_kinds())
     }
 
+    fn supports_paged_sliding_state(&self) -> bool {
+        delegate_language_model!(self, supports_paged_sliding_state())
+    }
+
     fn make_layer_state(&self) -> Option<Vec<mlxcel_core::cache::LayerState>> {
         delegate_language_model!(self, make_layer_state())
     }

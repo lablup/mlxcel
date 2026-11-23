@@ -44,6 +44,8 @@ pub(crate) struct PagedBlockStats {
     pub bytes_reserved: u64,
     pub bytes_in_use: u64,
     pub block_budget: u64,
+    pub sliding_retired_blocks: u64,
+    pub sliding_retired_bytes: u64,
 }
 
 impl PagedBlockStats {
@@ -58,6 +60,8 @@ impl PagedBlockStats {
             bytes_reserved: snap.cache_pool_paged_bytes_reserved,
             bytes_in_use: snap.cache_pool_paged_bytes_in_use,
             block_budget: snap.cache_pool_paged_block_budget,
+            sliding_retired_blocks: snap.sliding_retired_blocks,
+            sliding_retired_bytes: snap.sliding_retired_bytes,
         }
     }
 }
@@ -81,6 +85,7 @@ pub(crate) struct RejectReasonStats {
     pub block_boundary_floor: u64,
     pub snapshot_diverged: u64,
     pub model_owned_state: u64,
+    pub sliding_window_evicted: u64,
     pub last_reason: Option<String>,
     pub last_seq_id: Option<u64>,
     pub last_context_len: Option<u64>,
@@ -104,6 +109,7 @@ impl RejectReasonStats {
             block_boundary_floor: snap.prompt_cache_reject_block_boundary_floor,
             snapshot_diverged: snap.prompt_cache_reject_snapshot_diverged,
             model_owned_state: snap.prompt_cache_reject_model_owned_state,
+            sliding_window_evicted: snap.prompt_cache_reject_sliding_window_evicted,
             last_reason: last.map(|r| r.reason.to_string()),
             last_seq_id: last.and_then(|r| r.seq_id),
             last_context_len: last.map(|r| r.context_len),
@@ -243,6 +249,12 @@ pub struct CacheStatsResponse {
     /// below this, so `paged_block_budget - paged_blocks_live` is the
     /// acquirable headroom before eviction / preemption kicks in.
     pub paged_block_budget: u64,
+    /// Sliding-window paged blocks that left their window and stay pinned for
+    /// prompt-cache reuse, on live sequences and stored entries (issue
+    /// #3256). They count against the prompt-cache byte budget.
+    pub sliding_retired_blocks: u64,
+    /// Real bytes of `sliding_retired_blocks`.
+    pub sliding_retired_bytes: u64,
 
     // ── Prompt-cache reject-reason breakdown (issue #774) ────────────────────
     // Sourced from the batch observability gauges (not the prompt-cache
@@ -302,6 +314,10 @@ pub struct CacheStatsResponse {
     /// counters above stay separable, so use those rather than `last_reject_*`
     /// when diagnosing a model-owned family.
     pub reject_model_owned_state: u64,
+    /// Paged sliding-window matches declined because no block boundary at or
+    /// past the minimum prefix still held every sliding block its window
+    /// needs (issue #3256, adopt path only).
+    pub reject_sliding_window_evicted: u64,
     /// Reason label of the most recent reject/decline event, if any has
     /// happened yet.
     pub last_reject_reason: Option<String>,
@@ -465,6 +481,8 @@ pub(crate) fn build_stats_response(
                 paged_bytes_reserved: paged.bytes_reserved,
                 paged_bytes_in_use: paged.bytes_in_use,
                 paged_block_budget: paged.block_budget,
+                sliding_retired_blocks: paged.sliding_retired_blocks,
+                sliding_retired_bytes: paged.sliding_retired_bytes,
                 // Reject-reason breakdown is store-independent (issue #774).
                 reject_oversized: reject.oversized,
                 reject_disabled: reject.disabled,
@@ -476,6 +494,7 @@ pub(crate) fn build_stats_response(
                 reject_block_boundary_floor: reject.block_boundary_floor,
                 reject_snapshot_diverged: reject.snapshot_diverged,
                 reject_model_owned_state: reject.model_owned_state,
+                reject_sliding_window_evicted: reject.sliding_window_evicted,
                 last_reject_reason: reject.last_reason,
                 last_reject_seq_id: reject.last_seq_id,
                 last_reject_context_len: reject.last_context_len,
@@ -534,6 +553,8 @@ pub(crate) fn build_stats_response(
             paged_bytes_reserved: paged.bytes_reserved,
             paged_bytes_in_use: paged.bytes_in_use,
             paged_block_budget: paged.block_budget,
+            sliding_retired_blocks: paged.sliding_retired_blocks,
+            sliding_retired_bytes: paged.sliding_retired_bytes,
             // Reject events can still occur while the prompt cache is
             // disabled (e.g. `InsertError::Disabled` on an in-flight donate
             // racing a runtime disable), so these mirror the `Some` branch.
@@ -547,6 +568,7 @@ pub(crate) fn build_stats_response(
             reject_block_boundary_floor: reject.block_boundary_floor,
             reject_snapshot_diverged: reject.snapshot_diverged,
             reject_model_owned_state: reject.model_owned_state,
+            reject_sliding_window_evicted: reject.sliding_window_evicted,
             last_reject_reason: reject.last_reason,
             last_reject_seq_id: reject.last_seq_id,
             last_reject_context_len: reject.last_context_len,

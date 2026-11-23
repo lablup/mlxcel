@@ -34,6 +34,7 @@ fn layer(base: u64, len: usize, logical_start: usize) -> PagedLayerState {
             .collect(),
         len,
         logical_start,
+        ..PagedLayerState::new()
     }
 }
 

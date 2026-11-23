@@ -69,6 +69,7 @@ impl BatchScheduler {
             // descends from the dropped prefix (issue #3047).
             ctx.snapshot_lineage = Default::default();
             self.prompt_cache_seq_ctx.insert(new_id, ctx);
+            self.install_sliding_anchors(new_id);
         }
         if let Some(seq) = self.prefill_queue.get_mut(old_id) {
             tracing::info!(

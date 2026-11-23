@@ -703,6 +703,27 @@ impl PromptCacheStore {
             .unwrap_or(0)
     }
 
+    /// Fold `f` over every stored paged KV set (issue #3256: the scheduler
+    /// sums the retired sliding blocks they pin for `/v1/cache/stats`).
+    pub fn fold_paged_sets<T>(
+        &self,
+        init: T,
+        mut f: impl FnMut(T, &DetachedPagedCacheSet) -> T,
+    ) -> T {
+        let Ok(guard) = self.inner.read() else {
+            return init;
+        };
+        let mut acc = Some(init);
+        for slot in guard.entries.values() {
+            slot.entry.with_detached(|set| {
+                if let DetachedKvSet::Paged(paged) = set {
+                    acc = acc.take().map(|a| f(a, paged));
+                }
+            });
+        }
+        acc.expect("the accumulator is put back after every entry")
+    }
+
     /// Whether any paged detached sets are waiting to have their pool block
     /// pins released. Cheap read-lock check the scheduler uses to skip the
     /// write-locked drain on the common (empty) path.

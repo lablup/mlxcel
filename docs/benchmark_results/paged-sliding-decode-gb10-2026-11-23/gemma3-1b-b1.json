@@ -1,0 +1,1066 @@
+{
+ "rows": [
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 0,
+   "arm": "main-a",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.57,
+   "decode_tok_s": 198.76
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 1,
+   "arm": "main-a",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.59,
+   "decode_tok_s": 197.4
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 2,
+   "arm": "main-a",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.64,
+   "decode_tok_s": 193.91
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 0,
+   "arm": "main-a",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.64,
+   "decode_tok_s": 193.28
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 1,
+   "arm": "main-a",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.7,
+   "decode_tok_s": 188.92
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 2,
+   "arm": "main-a",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.78,
+   "decode_tok_s": 183.83
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 0,
+   "arm": "branch",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.13,
+   "decode_tok_s": 163.24
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 1,
+   "arm": "branch",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.17,
+   "decode_tok_s": 161.14
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 2,
+   "arm": "branch",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.16,
+   "decode_tok_s": 161.82
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 0,
+   "arm": "branch",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.56,
+   "decode_tok_s": 143.63
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 1,
+   "arm": "branch",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.52,
+   "decode_tok_s": 145.31
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 2,
+   "arm": "branch",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.46,
+   "decode_tok_s": 147.67
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 0,
+   "arm": "main-b",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.68,
+   "decode_tok_s": 190.56
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 1,
+   "arm": "main-b",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.7,
+   "decode_tok_s": 189.18
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 2,
+   "arm": "main-b",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.69,
+   "decode_tok_s": 190.0
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 0,
+   "arm": "main-b",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.75,
+   "decode_tok_s": 185.5
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 1,
+   "arm": "main-b",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.71,
+   "decode_tok_s": 188.81
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 0,
+   "rep": 2,
+   "arm": "main-b",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.77,
+   "decode_tok_s": 184.24
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 0,
+   "arm": "branch",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    257
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "7c364afdd439"
+   ],
+   "window_s": 3.12,
+   "decode_tok_s": 163.87
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 1,
+   "arm": "branch",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    257
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "7c364afdd439"
+   ],
+   "window_s": 3.12,
+   "decode_tok_s": 163.98
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 2,
+   "arm": "branch",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    257
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "7c364afdd439"
+   ],
+   "window_s": 3.14,
+   "decode_tok_s": 162.98
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 0,
+   "arm": "branch",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8193
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "64f8e5c3a890"
+   ],
+   "window_s": 3.56,
+   "decode_tok_s": 143.66
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 1,
+   "arm": "branch",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8193
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "64f8e5c3a890"
+   ],
+   "window_s": 3.63,
+   "decode_tok_s": 140.74
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 2,
+   "arm": "branch",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8193
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "64f8e5c3a890"
+   ],
+   "window_s": 3.61,
+   "decode_tok_s": 141.64
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 0,
+   "arm": "main-b",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    257
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "9f3dcb6d02de"
+   ],
+   "window_s": 2.57,
+   "decode_tok_s": 198.95
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 1,
+   "arm": "main-b",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    257
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "9f3dcb6d02de"
+   ],
+   "window_s": 2.58,
+   "decode_tok_s": 197.97
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 2,
+   "arm": "main-b",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    257
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "9f3dcb6d02de"
+   ],
+   "window_s": 2.68,
+   "decode_tok_s": 190.34
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 0,
+   "arm": "main-b",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8193
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "64f8e5c3a890"
+   ],
+   "window_s": 2.79,
+   "decode_tok_s": 183.01
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 1,
+   "arm": "main-b",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8193
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "64f8e5c3a890"
+   ],
+   "window_s": 2.84,
+   "decode_tok_s": 179.9
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 2,
+   "arm": "main-b",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8193
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "64f8e5c3a890"
+   ],
+   "window_s": 2.8,
+   "decode_tok_s": 182.58
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 0,
+   "arm": "main-a",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    257
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "9f3dcb6d02de"
+   ],
+   "window_s": 2.6,
+   "decode_tok_s": 196.5
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 1,
+   "arm": "main-a",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    257
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "9f3dcb6d02de"
+   ],
+   "window_s": 2.8,
+   "decode_tok_s": 182.62
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 2,
+   "arm": "main-a",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    257
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "9f3dcb6d02de"
+   ],
+   "window_s": 2.6,
+   "decode_tok_s": 196.58
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 0,
+   "arm": "main-a",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8193
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "64f8e5c3a890"
+   ],
+   "window_s": 2.67,
+   "decode_tok_s": 191.67
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 1,
+   "arm": "main-a",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8193
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "64f8e5c3a890"
+   ],
+   "window_s": 2.66,
+   "decode_tok_s": 192.16
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 1,
+   "rep": 2,
+   "arm": "main-a",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8193
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "64f8e5c3a890"
+   ],
+   "window_s": 2.67,
+   "decode_tok_s": 191.64
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 0,
+   "arm": "main-b",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.56,
+   "decode_tok_s": 199.37
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 1,
+   "arm": "main-b",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.62,
+   "decode_tok_s": 194.97
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 2,
+   "arm": "main-b",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.75,
+   "decode_tok_s": 185.7
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 0,
+   "arm": "main-b",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.71,
+   "decode_tok_s": 188.73
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 1,
+   "arm": "main-b",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.83,
+   "decode_tok_s": 180.86
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 2,
+   "arm": "main-b",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.72,
+   "decode_tok_s": 188.1
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 0,
+   "arm": "main-a",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.65,
+   "decode_tok_s": 192.97
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 1,
+   "arm": "main-a",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.63,
+   "decode_tok_s": 194.13
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 2,
+   "arm": "main-a",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.73,
+   "decode_tok_s": 186.89
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 0,
+   "arm": "main-a",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.73,
+   "decode_tok_s": 187.25
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 1,
+   "arm": "main-a",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.8,
+   "decode_tok_s": 182.24
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 2,
+   "arm": "main-a",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 2.84,
+   "decode_tok_s": 179.79
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 0,
+   "arm": "branch",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.32,
+   "decode_tok_s": 154.09
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 1,
+   "arm": "branch",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.37,
+   "decode_tok_s": 151.7
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 2,
+   "arm": "branch",
+   "prompt_target": 256,
+   "prompt_tokens": [
+    258
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.29,
+   "decode_tok_s": 155.11
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 0,
+   "arm": "branch",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.63,
+   "decode_tok_s": 140.67
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 1,
+   "arm": "branch",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.59,
+   "decode_tok_s": 142.34
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "round": 2,
+   "rep": 2,
+   "arm": "branch",
+   "prompt_target": 8192,
+   "prompt_tokens": [
+    8194
+   ],
+   "batch": 1,
+   "completion_tokens": [
+    512
+   ],
+   "text_sha": [
+    "28b498ccb733"
+   ],
+   "window_s": 3.65,
+   "decode_tok_s": 140.12
+  }
+ ],
+ "summary": [
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "prompt": 256,
+   "batch": 1,
+   "main_a_median": 194.13,
+   "main_b_median": 190.56,
+   "branch_median": 161.82,
+   "main_min": 182.62,
+   "main_max": 199.37,
+   "branch_min": 151.7,
+   "branch_max": 163.98,
+   "null_spread_medians": 3.57,
+   "branch_vs_main_pct": -16.6,
+   "within_main_range": false,
+   "b1_text_main_a_eq_main_b": true,
+   "b1_text_main_eq_branch": false
+  },
+  {
+   "model": "gemma-3-1b-it-4bit",
+   "prompt": 8192,
+   "batch": 1,
+   "main_a_median": 188.92,
+   "main_b_median": 184.24,
+   "branch_median": 142.34,
+   "main_min": 179.79,
+   "main_max": 193.28,
+   "branch_min": 140.12,
+   "branch_max": 147.67,
+   "null_spread_medians": 4.68,
+   "branch_vs_main_pct": -23.63,
+   "within_main_range": false,
+   "b1_text_main_a_eq_main_b": true,
+   "b1_text_main_eq_branch": true
+  }
+ ]
+}

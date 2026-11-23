@@ -436,5 +436,6 @@ impl BatchScheduler {
         // makes the answer readable from `/health` without a profiler.
         self.batch_observability
             .update_paged_decode_gauges(mlxcel_core::cache::paged_batch_decode_stats());
+        self.publish_sliding_retired_gauges();
     }
 }
