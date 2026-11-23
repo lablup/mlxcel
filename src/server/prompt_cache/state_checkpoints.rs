@@ -210,30 +210,36 @@ impl Inner {
         freed
     }
 
-    /// Apply the per-conversation rules to the conversation of the checkpoint
-    /// just inserted under `digest` (issue #3255): drop the checkpoints closer
-    /// than the minimum spacing to a longer one, then the shortest ones beyond
-    /// the per-conversation cap.
+    /// Apply the per-conversation rules to the lines of the checkpoint just
+    /// inserted under `digest` (issue #3255, per branch since #3254): drop the
+    /// checkpoints closer than the minimum spacing to a longer one, then, on
+    /// each line, the shortest ones beyond the per-conversation cap.
     ///
     /// "Newer" and "newest" mean the longer boundary, not the later insertion,
     /// so requests that finish out of order leave the same set as in-order
-    /// ones. The conversation is the inserted checkpoint's whole lineage: the
-    /// checkpoints of the same session bucket and session whose tokens are a
-    /// prefix of its tokens, and those it is a prefix of. Requests without a
-    /// session key share one session, and chats whose tokens never share a
-    /// prefix are not counted against each other. The inserted checkpoint
-    /// itself can be the one dropped.
+    /// ones. The checkpoints considered are the inserted one's lineage: those
+    /// of the same session bucket and session whose tokens are a prefix of its
+    /// tokens, and those it is a prefix of. Requests without a session key
+    /// share one session, and chats whose tokens never share a prefix are not
+    /// counted against each other. The inserted checkpoint itself can be the
+    /// one dropped.
     ///
-    /// Fork behaviour: branches of one chat that diverge after a common
-    /// ancestor are counted together whenever the inserted checkpoint is that
-    /// ancestor or a prefix of both, because the ancestor's line contains the
-    /// checkpoints of every branch below it. Re-inserting a shorter common
-    /// ancestor after a fork (edit at `k + 1`, then regenerate at `k`) therefore
-    /// applies the cap across the sibling branches, and one branch can lose its
-    /// checkpoints to the other's. This over-evicts and never over-retains: the
-    /// checkpoints of the inserted line stay within the cap, and so does the
-    /// memory they hold. Inserting a checkpoint that lies on one branch only
-    /// counts that branch's line and the ancestors below it.
+    /// The cap counts one root-to-leaf line at a time. A line is a chain of
+    /// checkpoints in which each one's tokens extend the previous one's, and a
+    /// checkpoint is dropped when some line through the inserted checkpoint
+    /// holds `cap` longer checkpoints above it. Branches of one chat that
+    /// diverge after a common ancestor are separate lines, so re-inserting
+    /// that ancestor after a fork (edit at `k + 1`, then regenerate at `k`)
+    /// counts each branch on its own: neither branch loses a checkpoint to
+    /// its sibling, and the ancestor goes when a branch already holds `cap`
+    /// longer ones. A fork can therefore hold up to `cap` checkpoints per
+    /// branch. The byte budget ([`Self::enforce_state_checkpoint_caps`])
+    /// remains the bound on the memory all branches hold together.
+    ///
+    /// The result does not depend on insertion order: a checkpoint survives
+    /// exactly when no chain of `cap` longer checkpoints extends it, and a
+    /// checkpoint with such a chain is dropped by whichever insert completes
+    /// the chain.
     fn enforce_conversation_checkpoint_rules(&mut self, digest: &PromptCacheKeyDigest) {
         let spacing = self.config.state_checkpoint_min_spacing_tokens;
         let cap = self.config.state_checkpoints_per_conversation;
@@ -282,8 +288,28 @@ impl Inner {
             }
         }
         if let Some(cap) = cap {
-            // `kept` is longest first: the shortest beyond the cap go.
-            dropped.extend(kept.iter().skip(cap.max(1)).map(|(other, _)| *other));
+            let cap = cap.max(1);
+            // `kept` is longest first, so every checkpoint that can sit above
+            // `kept[idx]` on a line comes before it. `above[idx]` is the
+            // longest chain of them: on a single line it is `idx`, which
+            // drops the shortest beyond the cap as before, and across a fork
+            // it counts each branch separately. Checkpoints of equal tokens
+            // chain in sort order, so they still count one each.
+            let mut above: Vec<usize> = Vec::with_capacity(kept.len());
+            for (idx, (_, entry)) in kept.iter().enumerate() {
+                let chain = (0..idx)
+                    .filter(|&longer| kept[longer].1.tokens.starts_with(&entry.tokens))
+                    .map(|longer| above[longer] + 1)
+                    .max()
+                    .unwrap_or(0);
+                above.push(chain);
+            }
+            dropped.extend(
+                kept.iter()
+                    .zip(&above)
+                    .filter(|(_, chain)| **chain >= cap)
+                    .map(|((other, _), _)| *other),
+            );
         }
         for other in &dropped {
             self.remove_state_checkpoint(other);
@@ -373,6 +399,24 @@ impl PromptCacheStore {
             .read()
             .ok()
             .and_then(|g| g.config.checkpoint_interval_tokens)
+    }
+
+    /// The tokens of every stored checkpoint, sorted.
+    #[cfg(test)]
+    pub(crate) fn state_checkpoint_tokens(&self) -> Vec<Vec<i32>> {
+        let mut tokens: Vec<Vec<i32>> = self
+            .inner
+            .read()
+            .map(|inner| {
+                inner
+                    .state_checkpoints
+                    .values()
+                    .map(|slot| slot.entry.tokens.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        tokens.sort();
+        tokens
     }
 
     /// Byte budget for turn-boundary state checkpoints; `0` when they are off.

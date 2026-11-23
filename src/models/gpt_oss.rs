@@ -28,7 +28,8 @@
 use crate::models::gpt_oss_common::{
     ExpertLinear, YarnRopeParams, gpt_oss_swiglu, yarn_rope_freqs,
 };
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
@@ -1193,7 +1194,7 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
                 .get(layer_idx)
                 .is_some_and(|layer_type| layer_type != "full_attention")
                 .then_some(window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 

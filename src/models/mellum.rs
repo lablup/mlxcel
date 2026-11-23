@@ -33,8 +33,9 @@
 //! - Pre-norm residual decoder layer.
 //! - Untied or tied LM head, driven by `tie_word_embeddings`.
 
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, moe_weighted_sum};
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{
     KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
 };
@@ -1233,7 +1234,7 @@ impl mlxcel_core::generate::LanguageModel for MellumWrapper {
                 .get(layer_idx)
                 .is_some_and(|layer| layer.self_attn.is_sliding)
                 .then_some(window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 

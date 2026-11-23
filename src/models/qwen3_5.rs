@@ -32,22 +32,27 @@ use crate::models::gated_delta::{
     GatedDeltaCache, QK_L2NORM_EPS, RMSNormGated, gated_delta_update,
     gated_delta_update_chain_parity, normalize_qk,
 };
-use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::model_owned::KvCacheLayerModes;
 use crate::models::qwen_mrope_state::MRopeState;
+use crate::models::qwen3_5_layer_state::{self, LentCaches};
 use crate::models::qwen3_next::{
     MLP, Quantization, Qwen3NextAttention, Qwen3NextCache, Qwen3NextConfig, SparseMoeBlock,
 };
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
-use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{
+    KVCacheMode, LayerState, LayerStateEncoding, LayerStateForward, LayerStateKind,
+    LayerStateSnapshotSpec, SequenceId,
+};
 use mlxcel_core::dtype;
-use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{PrefillAttention, create_causal_mask, prefill_causal_mask, silu};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
+use std::cell::RefCell;
 use std::path::Path;
 
 /// Prompt length the exactness probe prefills before comparing arms, unless
@@ -1428,8 +1433,11 @@ pub struct Qwen35Model {
     pub(crate) norm: RMSNorm,
     pub(crate) lm_head: Option<UnifiedLinear>,
     pub(crate) config: Qwen35Config,
-    /// Internal and per-sequence mixed cache state.
-    sequence_state: ModelOwnedSequenceState<Qwen3NextCache>,
+    /// Mixed cache state of the id-less single-sequence run (a bare
+    /// `forward`, the CLI speculative targets and benchmarks). A scheduler
+    /// sequence's state is the layer state its pool entry holds (issue
+    /// #3254).
+    fallback: RefCell<Vec<Qwen3NextCache>>,
     kv_cache_layer_modes: KvCacheLayerModes,
     /// Per-sequence MRoPE state (mlx-vlm PR #1095). Each row
     /// in a server batch needs its own delta — the legacy fallback slot
@@ -1521,35 +1529,35 @@ impl Qwen35Model {
         }
     }
 
-    fn validate_cache_row(&self, row_idx: usize, row: &[Qwen3NextCache]) {
-        assert_eq!(
-            row.len(),
-            self.layers.len(),
-            "Qwen 3.5 batched decode cache count mismatch for row {row_idx}"
-        );
-        for (layer_idx, (cache, layer)) in row.iter().zip(&self.layers).enumerate() {
-            assert!(
-                matches!(
-                    (cache, layer.is_linear),
-                    (Qwen3NextCache::Linear(_), true) | (Qwen3NextCache::Attention(_), false)
-                ),
-                "Qwen 3.5 batched decode cache kind mismatch for row {row_idx}, layer {layer_idx}"
-            );
+    /// What a layer keeps per sequence.
+    fn layer_kind(&self, is_linear: bool) -> LayerStateKind {
+        if is_linear {
+            LayerStateKind::Recurrent
+        } else {
+            LayerStateKind::Full
         }
     }
 
-    fn validate_batch_cache_layout(&self, rows: &[Vec<Qwen3NextCache>]) {
-        for (row_idx, row) in rows.iter().enumerate() {
-            self.validate_cache_row(row_idx, row);
+    /// One row's layer state must hold a layer per decoder layer, of the
+    /// kind the layer is, before anything is forwarded over it.
+    fn check_state_row(&self, row_idx: usize, row: &[LayerState]) -> Result<(), String> {
+        if row.len() != self.layers.len() {
+            return Err(format!(
+                "Qwen 3.5 forward: row {row_idx} holds {} layers of state, the model has {}",
+                row.len(),
+                self.layers.len()
+            ));
         }
-    }
-
-    fn validate_prepared_cache_layout(&self, ids: &[SequenceId]) {
-        for (row_idx, &id) in ids.iter().enumerate() {
-            self.sequence_state
-                .with_sequence_state_ref(id, |row| self.validate_cache_row(row_idx, row))
-                .expect("preflighted Qwen 3.5 sequence state");
+        for (layer_idx, (state, layer)) in row.iter().zip(&self.layers).enumerate() {
+            if !state.matches_kind(self.layer_kind(layer.is_linear)) {
+                return Err(format!(
+                    "Qwen 3.5 forward: cache kind mismatch for row {row_idx}, layer {layer_idx}: \
+                     {} storage",
+                    state.storage_name()
+                ));
+            }
         }
+        Ok(())
     }
 
     fn batch_states_uniform(&self, rows: &[Vec<Qwen3NextCache>]) -> bool {
@@ -2069,16 +2077,6 @@ impl Qwen35Model {
         }
     }
 
-    fn visible_len(cache: &Qwen3NextCache) -> usize {
-        match cache {
-            Qwen3NextCache::Attention(kv) => kv.seq_len().max(0) as usize,
-            // Gated-delta state is model-owned recurrence, not external K/V.
-            // Keep its paged-shadow layer empty so accounting does not reserve
-            // blocks that no attention lookup can ever read.
-            Qwen3NextCache::Linear(_) => 0,
-        }
-    }
-
     fn split_batched_cache(cache: &Qwen3NextCache, batch_idx: usize) -> Qwen3NextCache {
         match cache {
             Qwen3NextCache::Attention(kv) => {
@@ -2134,21 +2132,23 @@ impl Qwen35Model {
         }
     }
 
+    /// One padded batched prefill over fresh sequences: a single `[B, L]`
+    /// forward over one batched cache, split per row into each sequence's
+    /// layer state.
     fn forward_batched_prefill(
         &self,
         input_ids: &MlxArray,
-        seq_ids: &[SequenceId],
+        rows: &mut [&mut [LayerState]],
     ) -> UniquePtr<MlxArray> {
         debug_assert!(self.configured_attention_kv_modes_all_fp16());
         let mut batched_caches = self.make_internal_caches();
         let logits = self.forward_internal(input_ids, None, &mut batched_caches, None);
-        for (batch_idx, seq_id) in seq_ids.iter().copied().enumerate() {
-            let split_caches = batched_caches
-                .iter()
-                .map(|cache| Self::split_batched_cache(cache, batch_idx))
-                .collect();
-            self.sequence_state
-                .replace_sequence_state(seq_id, split_caches);
+        for (batch_idx, row) in rows.iter_mut().enumerate() {
+            for (layer, cache) in row.iter_mut().zip(&batched_caches) {
+                *layer = qwen3_5_layer_state::into_layer_state(Self::split_batched_cache(
+                    cache, batch_idx,
+                ));
+            }
         }
         logits
     }
@@ -2163,31 +2163,48 @@ impl Qwen35Model {
         })
     }
 
+    /// The id-less multi-row forward: every row runs on the fallback slot in
+    /// turn, the semantics the `KVCache`-slice entry always had without ids.
     fn forward_batched_rows_sequential(
         &self,
         input_ids: &MlxArray,
-        seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         let input_0 = mlxcel_core::slice(input_ids, &[0, 0], &[1, shape[1]]);
-        let mut result = self.forward_with_sequence_id(
-            &input_0,
-            seq_ids.and_then(|ids| ids.first().copied()),
-            batch_caches[0],
-            None,
-        );
+        let mut result = self.forward_with_sequence_id(&input_0, None, batch_caches[0], None);
         for (i, caches) in batch_caches.iter_mut().enumerate().skip(1) {
             let input_i = mlxcel_core::slice(input_ids, &[i as i32, 0], &[i as i32 + 1, shape[1]]);
-            let logits_i = self.forward_with_sequence_id(
-                &input_i,
-                seq_ids.and_then(|ids| ids.get(i).copied()),
-                caches,
-                None,
-            );
+            let logits_i = self.forward_with_sequence_id(&input_i, None, caches, None);
             result = mlxcel_core::concatenate(&result, &logits_i, 0);
         }
         result
+    }
+
+    /// Run `f` over one sequence's caches: the layer state the pool holds
+    /// for a scheduler sequence, borrowed for the call, or the fallback slot.
+    fn with_sequence_caches<R>(
+        &self,
+        state: Option<&mut [LayerState]>,
+        f: impl FnOnce(&mut [Qwen3NextCache]) -> R,
+    ) -> R {
+        match state {
+            Some(state) => {
+                let mut caches = LentCaches::take(state).unwrap_or_else(|err| panic!("{err}"));
+                f(&mut caches)
+            }
+            None => f(&mut self.fallback.borrow_mut()),
+        }
+    }
+
+    /// A `KVCache`-slice entry reached with a scheduler sequence id. The
+    /// engine forwards a scheduler-owned sequence through
+    /// `forward_layer_state`, so this is a caller that bypassed the pool.
+    fn refuse_sequence_id(seq_id: SequenceId) -> ! {
+        panic!(
+            "Qwen 3.5 state is scheduler-owned: sequence {seq_id} must be forwarded through \
+             forward_layer_state with its pool layer state"
+        )
     }
 
     fn forward_with_sequence_caches(
@@ -2211,19 +2228,18 @@ impl Qwen35Model {
         seq_id: Option<SequenceId>,
         last_pos: Option<usize>,
     ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_internal_caches(),
-            |sequence_caches| {
-                self.forward_with_mrope_state(
-                    input_ids,
-                    input_embeddings,
-                    sequence_caches,
-                    seq_id,
-                    last_pos,
-                )
-            },
-        )
+        if let Some(seq_id) = seq_id {
+            Self::refuse_sequence_id(seq_id);
+        }
+        self.with_sequence_caches(None, |sequence_caches| {
+            self.forward_with_mrope_state(
+                input_ids,
+                input_embeddings,
+                sequence_caches,
+                None,
+                last_pos,
+            )
+        })
     }
 
     fn forward_with_mrope_state(
@@ -2486,7 +2502,7 @@ impl Qwen35Model {
             norm: RMSNorm::new(norm_weight, config.rms_norm_eps),
             lm_head,
             config: config_clone,
-            sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            fallback: RefCell::new(internal_caches),
             mrope_state: MRopeState::new(),
             kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
@@ -3189,11 +3205,11 @@ impl Qwen35Model {
 
     // === Sequence-routed speculative hooks (MTP target adapter) ============
     //
-    // The MtpTarget trait is `&self`-only with no cache parameter: the target
-    // resolves its own per-sequence cache. These wrappers route the existing
-    // caller-owned-slice speculative hooks above through
-    // `ModelOwnedSequenceState`, exactly like `forward_with_sequence_caches`
-    // does for the classic path, so the MTP adapter
+    // The MtpTarget trait is `&self`-only with no cache parameter. These
+    // wrappers route the caller-owned-slice speculative hooks above over one
+    // sequence's caches: the layer state the scheduler's pool holds, which
+    // the adapter carries for the tick, or the fallback slot (`None`), so the
+    // MTP adapter
     // (`crate::models::qwen3_5_mtp_target`) stays a stateless view over the
     // model — the shape the tick-cooperative slice path requires (it
     // reconstructs the adapter every scheduler tick).
@@ -3288,13 +3304,11 @@ impl Qwen35Model {
     pub(crate) fn forward_prefill_with_last_hidden_for_sequence(
         &self,
         input_ids: &MlxArray,
-        seq_id: Option<SequenceId>,
+        state: Option<&mut [LayerState]>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_internal_caches(),
-            |caches| self.forward_prefill_with_last_hidden(input_ids, caches),
-        )
+        self.with_sequence_caches(state, |caches| {
+            self.forward_prefill_with_last_hidden(input_ids, caches)
+        })
     }
 
     /// Post-final-norm hidden states of one standalone prompt, with no LM head.
@@ -3441,14 +3455,12 @@ impl Qwen35Model {
     pub(crate) fn forward_speculative_for_sequence(
         &self,
         input_ids: &MlxArray,
-        seq_id: Option<SequenceId>,
+        state: Option<&mut [LayerState]>,
         capture_layer_ids: &[usize],
     ) -> VerifyOutput {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_internal_caches(),
-            |caches| self.forward_speculative(input_ids, caches, capture_layer_ids),
-        )
+        self.with_sequence_caches(state, |caches| {
+            self.forward_speculative(input_ids, caches, capture_layer_ids)
+        })
     }
 
     /// Sequence-routed [`Self::rollback_speculative_cache`].
@@ -3456,12 +3468,12 @@ impl Qwen35Model {
     /// Used by: `Qwen35MtpTargetAdapter::verify_finalize`.
     pub(crate) fn rollback_speculative_cache_for_sequence(
         &self,
-        seq_id: Option<SequenceId>,
+        state: Option<&mut [LayerState]>,
         gdn_states: &[GdnRollbackSnapshot],
         accepted: &[i32],
         block_size: i32,
     ) -> i32 {
-        self.sequence_state.with_sequence_state(seq_id, |caches| {
+        self.with_sequence_caches(state, |caches| {
             self.rollback_speculative_cache(caches, gdn_states, accepted, block_size)
         })
     }
@@ -3471,16 +3483,25 @@ impl Qwen35Model {
     /// the drafter after a rollback).
     ///
     /// Used by: `Qwen35MtpTargetAdapter::{prefill_and_seed, verify_finalize}`.
-    pub(crate) fn speculative_cache_offset_for_sequence(&self, seq_id: Option<SequenceId>) -> i32 {
-        self.sequence_state.with_sequence_state(seq_id, |caches| {
-            caches
+    pub(crate) fn speculative_cache_offset_for_sequence(
+        &self,
+        state: Option<&mut [LayerState]>,
+    ) -> i32 {
+        match state {
+            Some(state) => state
+                .iter()
+                .find_map(|layer| layer.as_kv().map(|kv| kv.offset))
+                .unwrap_or(0),
+            None => self
+                .fallback
+                .borrow()
                 .iter()
                 .find_map(|c| match c {
                     Qwen3NextCache::Attention(kv) => Some(kv.offset),
                     _ => None,
                 })
-                .unwrap_or(0)
-        })
+                .unwrap_or(0),
+        }
     }
 }
 
@@ -4389,8 +4410,32 @@ impl LanguageModel for Qwen35Model {
         self.layers.len()
     }
 
-    fn sequence_state_layout(&self) -> SequenceStateLayout {
-        SequenceStateLayout::model_owned(self.layers.len())
+    /// Full attention on the attention layers, GatedDeltaNet recurrent state
+    /// on the linear ones (issue #3254). The default
+    /// `sequence_state_layout()` reads this and answers scheduler-owned.
+    fn layer_state_kinds(&self) -> Option<Vec<LayerStateKind>> {
+        Some(
+            self.layers
+                .iter()
+                .map(|layer| self.layer_kind(layer.is_linear))
+                .collect(),
+        )
+    }
+
+    /// State for one scheduler sequence: the pool form of
+    /// `make_internal_caches`, so an attention layer takes its injected mode
+    /// and a linear layer declares the GatedDeltaNet slots.
+    fn make_layer_state(&self) -> Option<Vec<LayerState>> {
+        Some(
+            self.make_internal_caches()
+                .into_iter()
+                .map(qwen3_5_layer_state::into_layer_state)
+                .collect(),
+        )
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<LayerStateSnapshotSpec> {
+        Some(QWEN35_LAYER_STATE_SNAPSHOT)
     }
 
     fn supports_batching(&self) -> bool {
@@ -4417,115 +4462,120 @@ impl LanguageModel for Qwen35Model {
         true
     }
 
-    fn prepare_sequence_state(&self, seq_id: SequenceId) {
-        self.sequence_state
-            .prepare_sequence_state(seq_id, self.make_internal_caches());
-    }
-
     fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
         self.kv_cache_layer_modes.set(modes);
-        self.sequence_state
-            .replace_internal(self.make_internal_caches());
+        *self.fallback.borrow_mut() = self.make_internal_caches();
     }
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
     }
 
-    /// Gated-delta linear layers hold no KV (issue #2790).
+    /// Gated-delta linear layers hold no KV (issue #2790). Derived from the
+    /// same table the pool allocates from.
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         self.kv_cache_layer_modes
             .storage_modes(|layer_idx| match self.layers.get(layer_idx) {
-                Some(layer) if !layer.is_linear => crate::models::model_owned::LayerKv::Full,
-                _ => crate::models::model_owned::LayerKv::None,
+                Some(layer) => self.layer_kind(layer.is_linear),
+                None => LayerStateKind::None,
             })
     }
 
     fn reset_runtime_state(&self) {
-        // Used by: bare single-row runs outside an engine sequence (the engine
-        // resets through prepare_sequence_state / release_sequence_state_by_id). Qwen 3.5 Next
-        // owns mixed attention / GatedDelta cache state in
-        // `ModelOwnedSequenceState`; reset the fallback cache slot for fresh
-        // CLI / benchmark runs without touching scheduler-owned sequence
-        // entries. Do not clear the MRoPE fallback here: VLM callers populate
-        // it during embedding preparation immediately before generation.
-        self.sequence_state
-            .replace_internal(self.make_internal_caches());
+        // Used by: bare single-row runs outside an engine sequence. Reset
+        // the fallback cache slot for fresh CLI / benchmark runs. Do not
+        // clear the MRoPE fallback here: VLM callers populate it during
+        // embedding preparation immediately before generation.
+        *self.fallback.borrow_mut() = self.make_internal_caches();
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
-        self.sequence_state.release_sequence_state(seq_id);
-        // drop the per-sequence MRoPE entry alongside the
-        // cache state so the map cannot grow as sequences cycle through.
+        // The cache state is the pool's. Drop the per-sequence MRoPE entry so
+        // the map cannot grow as sequences cycle through.
         self.release_mrope_sequence(seq_id);
     }
 
-    fn snapshot_sequence_state(
+    fn forward_layer_state(
         &self,
-        seq_id: SequenceId,
-        token_len: usize,
-    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
-        self.sequence_state
-            .with_sequence_state_ref(seq_id, |state| {
-                let mut snapshot =
-                    mlxcel_core::generate::ModelStateSnapshot::new("qwen3_5", token_len);
-                for (idx, cache) in state.iter().enumerate() {
-                    if let Err(err) = cache.snapshot_into(&mut snapshot, &format!("layer{idx}")) {
-                        tracing::warn!("Qwen 3.5 prompt-cache snapshot skipped: {err}");
-                        return None;
-                    }
-                }
-                Some(snapshot)
-            })
-            .flatten()
-    }
-
-    fn restore_sequence_state(
-        &self,
-        seq_id: SequenceId,
-        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
-    ) -> Result<(), String> {
-        if snapshot.family() != "qwen3_5" {
+        request: &LayerStateForward<'_>,
+        rows: &mut [&mut [LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let shape = mlxcel_core::array_shape(request.input_ids);
+        if shape.len() != 2 || shape[0] as usize != rows.len() {
             return Err(format!(
-                "cannot restore {} snapshot into Qwen 3.5",
-                snapshot.family()
+                "Qwen 3.5 forward: input shape {shape:?} does not match {} state rows",
+                rows.len()
             ));
         }
-        let mut state = self.make_internal_caches();
-        for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from(snapshot, &format!("layer{idx}"))?;
+        for (row_idx, row) in rows.iter().enumerate() {
+            self.check_state_row(row_idx, row)?;
         }
-        self.sequence_state.replace_sequence_state(seq_id, state);
-        Ok(())
-    }
-
-    fn state_checkpoint_from_snapshot(
-        &self,
-        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
-    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
-        (snapshot.family() == "qwen3_5")
-            .then(|| snapshot.subset(Qwen3NextCache::is_checkpoint_tensor))
-    }
-
-    fn restore_sequence_state_from_checkpoint(
-        &self,
-        seq_id: SequenceId,
-        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
-        donor: &mlxcel_core::generate::ModelStateSnapshot,
-    ) -> Result<(), String> {
-        if checkpoint.family() != "qwen3_5" || donor.family() != "qwen3_5" {
-            return Err(format!(
-                "cannot restore a {} checkpoint over a {} snapshot into Qwen 3.5",
-                checkpoint.family(),
-                donor.family()
+        if let [state] = rows {
+            let mut caches = LentCaches::take(state)?;
+            return Ok(self.forward_with_mrope_state(
+                request.input_ids,
+                request.input_embeddings,
+                &mut caches,
+                request.seq_id(0),
+                request.last_pos,
             ));
         }
-        let mut state = self.make_internal_caches();
-        for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from_checkpoint(checkpoint, donor, &format!("layer{idx}"))?;
+        if request.input_embeddings.is_some() || request.last_pos.is_some() {
+            return Err(
+                "Qwen 3.5 forward: a multi-row batch takes token ids and returns every position"
+                    .to_string(),
+            );
         }
-        self.sequence_state.replace_sequence_state(seq_id, state);
-        Ok(())
+        let Some(ids) = request.seq_ids else {
+            return Err("Qwen 3.5 forward: a multi-row batch needs sequence ids".to_string());
+        };
+        if ids.len() != rows.len() {
+            return Err("Qwen 3.5 requires one sequence id per batch row".to_string());
+        }
+
+        // A masked batch, and a batched prefill under a quantized KV mode
+        // (row-split sidecars are not supported), run row by row.
+        let row_by_row = request.mask.is_some()
+            || (shape[1] != 1 && !self.configured_attention_kv_modes_all_fp16());
+        if row_by_row {
+            let mut result: Option<UniquePtr<MlxArray>> = None;
+            for (row_idx, state) in rows.iter_mut().enumerate() {
+                let input = mlxcel_core::slice(
+                    request.input_ids,
+                    &[row_idx as i32, 0],
+                    &[row_idx as i32 + 1, shape[1]],
+                );
+                let mut caches = LentCaches::take(state)?;
+                let logits = self.forward_with_mrope_state(
+                    &input,
+                    None,
+                    &mut caches,
+                    Some(ids[row_idx]),
+                    None,
+                );
+                result = Some(match result {
+                    Some(acc) => mlxcel_core::concatenate(&acc, &logits, 0),
+                    None => logits,
+                });
+            }
+            return result.ok_or_else(|| "Qwen 3.5 forward: empty batch".to_string());
+        }
+        if shape[1] != 1 {
+            return Ok(self.forward_batched_prefill(request.input_ids, rows));
+        }
+
+        // Batched decode: one `[B, 1]` step over every row's caches.
+        let mut lent: Vec<LentCaches<'_>> = rows
+            .iter_mut()
+            .map(|state| LentCaches::take(state))
+            .collect::<Result<_, _>>()?;
+        let mut typed: Vec<Vec<Qwen3NextCache>> =
+            lent.iter_mut().map(LentCaches::take_vec).collect();
+        let logits = self.forward_batched_decode_with_caches(request.input_ids, ids, &mut typed);
+        for (row, caches) in lent.iter_mut().zip(typed) {
+            row.replace(caches);
+        }
+        Ok(logits)
     }
 
     fn forward_with_sequence_id(
@@ -4584,19 +4634,6 @@ impl LanguageModel for Qwen35Model {
         self.forward_with_sequence_caches(input_ids, input_embeddings, seq_id)
     }
 
-    fn sync_sequence_storage(
-        &self,
-        seq_id: SequenceId,
-        cache_pool: &mut CachePool,
-    ) -> Result<(), String> {
-        self.sequence_state
-            .with_sequence_state(Some(seq_id), |sequence_caches| {
-                let visible_lens: Vec<usize> =
-                    sequence_caches.iter().map(Self::visible_len).collect();
-                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
-            })
-    }
-
     fn forward_batched(
         &self,
         input_ids: &MlxArray,
@@ -4611,7 +4648,7 @@ impl LanguageModel for Qwen35Model {
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
+        _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         assert_eq!(shape.len(), 2, "Qwen 3.5 batched input must be rank 2");
@@ -4635,58 +4672,31 @@ impl LanguageModel for Qwen35Model {
             }
         }
 
-        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
-            if let Some(ids) = seq_ids {
-                self.sequence_state
-                    .validate_sequence_states(ids)
-                    .unwrap_or_else(|err| panic!("Qwen 3.5 batched decode: {err}"));
-                self.validate_prepared_cache_layout(ids);
-            }
-            if shape[1] == 1 {
-                let Some(ids) = seq_ids else {
-                    // Preserve the legacy no-id fallback-slot semantics.
-                    return self.forward_batched_rows_sequential(input_ids, None, batch_caches);
-                };
-                if mask.is_some() {
-                    return self.forward_batched_rows_sequential(
-                        input_ids,
-                        Some(ids),
-                        batch_caches,
-                    );
-                }
-                return self
-                    .sequence_state
-                    .with_batched_sequence_states(ids, |rows| {
-                        self.validate_batch_cache_layout(rows);
-                        self.forward_batched_decode_with_caches(input_ids, ids, rows)
-                    })
-                    .unwrap_or_else(|err| panic!("Qwen 3.5 batched decode: {err}"));
-            }
-
-            if mask.is_some() {
-                return self.forward_batched_rows_sequential(input_ids, seq_ids, batch_caches);
-            }
-            if let Some(ids) = seq_ids {
-                if !self.configured_attention_kv_modes_all_fp16() {
-                    tracing::debug!(
-                        "Qwen 3.5 batched prefill is disabled for non-FP16 model-owned KV modes until row-split sidecars are supported"
-                    );
-                    return self.forward_batched_rows_sequential(
-                        input_ids,
-                        Some(ids),
-                        batch_caches,
-                    );
-                }
-                return self.forward_batched_prefill(input_ids, ids);
-            }
-            self.forward_batched_rows_sequential(input_ids, None, batch_caches)
-        })
+        // Scheduler rows carry their state through `forward_layer_state`.
+        if let Some(&seq_id) = seq_ids.and_then(|ids| ids.first()) {
+            Self::refuse_sequence_id(seq_id);
+        }
+        match batch_caches.len() {
+            0 => mlxcel_core::zeros(&[0, 1, 1], dtype::FLOAT32),
+            1 => self.forward_with_sequence_id(input_ids, None, batch_caches[0], None),
+            // Preserve the legacy no-id fallback-slot semantics.
+            _ => self.forward_batched_rows_sequential(input_ids, batch_caches),
+        }
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
         eos_token_ids_from_config(&self.config)
     }
 }
+
+/// The `qwen3_5` family tag and the hybrid tensor names its layers are
+/// stored under, as the scheduler's generic snapshot code reads them (issue
+/// #3254).
+pub(crate) const QWEN35_LAYER_STATE_SNAPSHOT: LayerStateSnapshotSpec = LayerStateSnapshotSpec {
+    family: "qwen3_5",
+    label: "Qwen 3.5",
+    encoding: LayerStateEncoding::Hybrid,
+};
 
 /// EOS ids declared by a Qwen3.5 config, falling back to the stock pair.
 pub(crate) fn eos_token_ids_from_config(config: &Qwen35Config) -> Vec<i32> {

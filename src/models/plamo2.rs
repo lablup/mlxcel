@@ -1388,8 +1388,8 @@ impl LanguageModel for Plamo2Model {
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
         crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |idx| {
             match self.layers.get(idx).map(|layer| &layer.mixer) {
-                Some(Plamo2Mixer::Attention(_)) => crate::models::model_owned::LayerKv::Fp16Only,
-                _ => crate::models::model_owned::LayerKv::None,
+                Some(Plamo2Mixer::Attention(_)) => mlxcel_core::cache::LayerStateKind::Full,
+                _ => mlxcel_core::cache::LayerStateKind::None,
             }
         })
     }

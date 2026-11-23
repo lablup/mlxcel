@@ -59,13 +59,13 @@ use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{
     Config, DeepStackConfig, Gemma3nConfig, Gemma3nWeightSpec, LlavaVisionConfig, Precision,
-    ProjectionLayout, QuantConfig, VisionProjector, WeightScheme, check_packed_supported,
-    emit_decode_ragged_with_native, emit_decode_with_native, emit_gemma3n_decode_ragged_with_qmv,
-    emit_gemma3n_decode_with_qmv, emit_gemma3n_prefill_embeddings_ple_with_qmv,
-    emit_gemma3n_prefill_with_qmv, emit_prefill_embeddings_deepstack_with,
-    emit_prefill_embeddings_with, emit_prefill_with, gemma3n_qmv_artifact_identity,
-    gemma3n_qmv_is_available, gemma3n_weight_specs, precision_env_override, quant_in_graph,
-    resolve_precision_checked,
+    ProjectionLayout, QuantConfig, QuantScaleDtype, VisionProjector, WeightScheme,
+    check_packed_supported, emit_decode_ragged_with_native, emit_decode_with_native,
+    emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with_qmv,
+    emit_gemma3n_prefill_embeddings_ple_with_qmv, emit_gemma3n_prefill_with_qmv,
+    emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
+    gemma3n_qmv_artifact_identity, gemma3n_qmv_is_available, gemma3n_weight_specs,
+    precision_env_override, quant_in_graph, resolve_precision_checked, resolve_quant_scale_dtype,
 };
 #[cfg(feature = "diagnostics")]
 use crate::emitter::{
@@ -97,7 +97,8 @@ use crate::weights::{
 /// Weight-buffer element dtype passed to the C shim (issue #516 per-weight ABI):
 /// f32 (a widened / dequantized weight), or f16 / packed-U32 for the raw parts of an
 /// MLX affine-quantized projection on the packed path. Kept in sync with the
-/// `switch` in `csrc/xla_iree.c`.
+/// `switch` in `csrc/xla_iree.c`. The packed path's scales/biases take
+/// [`QuantScaleDtype::weight_dtype_code`] instead (1 f16 or 3 bf16, issue #603).
 const WDT_F32: c_int = 0;
 const WDT_F16: c_int = 1;
 const WDT_U32: c_int = 2;
@@ -752,6 +753,92 @@ fn native_head_supported(model_dir: &Path, cfg: &RuntimeConfig) -> Result<bool, 
     ))
 }
 
+/// Whether the native GEMV can read this checkpoint's affine metadata (issue
+/// #603). `csrc/qmv4.hip` and `csrc/qmv4.cu` read the scales and biases as
+/// `half`, so only f16 metadata may reach them; bf16 bytes would be
+/// misinterpreted rather than rejected. The caller falls back to the f16 weight
+/// path on an error.
+fn native_scale_dtype_check(model_dir: &Path, cfg: &RuntimeConfig) -> Result<(), String> {
+    match packed_scale_dtype(model_dir, cfg) {
+        Ok(QuantScaleDtype::F16) => Ok(()),
+        Ok(QuantScaleDtype::Bf16) => Err(
+            "MLXCEL_XLA_QUANT=native needs f16 scales/biases and this checkpoint stores bf16"
+                .to_string(),
+        ),
+        Err(error) => Err(format!(
+            "MLXCEL_XLA_QUANT=native cannot read this checkpoint's affine metadata ({error})"
+        )),
+    }
+}
+
+/// The element type of the affine `scales` / `biases` the packed path uploads
+/// raw (issue #603), read from the safetensors headers of every shard. `cfg`
+/// must already have its packed flags set, so the probed tensors are exactly
+/// the `QuantRaw` specs the loader will upload. An error (mixed f16 / bf16
+/// metadata, or another dtype) means the packed path cannot serve this
+/// checkpoint; callers fall back to the dequant-at-load path.
+fn packed_scale_dtype(model_dir: &Path, cfg: &RuntimeConfig) -> Result<QuantScaleDtype, String> {
+    let wanted: Vec<String> = cfg
+        .weight_specs()
+        .into_iter()
+        .filter_map(|spec| match spec {
+            WeightSpec::QuantRaw {
+                name,
+                part: QuantPart::Scales | QuantPart::Biases,
+            } => Some(name),
+            _ => None,
+        })
+        .collect();
+    if wanted.is_empty() {
+        return Ok(QuantScaleDtype::default());
+    }
+    let single = model_dir.join("model.safetensors");
+    let shards = if single.exists() {
+        vec![single]
+    } else {
+        checkpoint_candidate_shards(model_dir)?
+    };
+    let mut found: std::collections::HashMap<String, Dtype> = std::collections::HashMap::new();
+    for shard in shards {
+        let file =
+            File::open(&shard).map_err(|error| format!("open {}: {error}", shard.display()))?;
+        // Safety: the header is read-only for the lifetime of this scan.
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|error| format!("mmap {}: {error}", shard.display()))?;
+        let tensors = SafeTensors::deserialize(&mmap)
+            .map_err(|error| format!("parse {}: {error}", shard.display()))?;
+        for name in &wanted {
+            if found.contains_key(name) {
+                continue;
+            }
+            let wrapped = language_model_tensor_name(name);
+            if let Some(t) = [name.as_str(), wrapped.as_str()]
+                .into_iter()
+                .find_map(|candidate| tensors.tensor(candidate).ok())
+            {
+                found.insert(name.clone(), t.dtype());
+            }
+        }
+    }
+    let mut parts = Vec::with_capacity(wanted.len());
+    for name in &wanted {
+        let dtype = found
+            .get(name)
+            .ok_or_else(|| format!("{name} is missing from the checkpoint"))?;
+        let resolved = match dtype {
+            Dtype::F16 => Some(QuantScaleDtype::F16),
+            Dtype::BF16 => Some(QuantScaleDtype::Bf16),
+            _ => None,
+        };
+        parts.push((name.as_str(), resolved, format!("{dtype:?}")));
+    }
+    resolve_quant_scale_dtype(
+        parts
+            .iter()
+            .map(|(name, dtype, raw)| (*name, *dtype, raw.as_str())),
+    )
+}
+
 fn checked_ffi_int(value: usize, name: &str) -> Result<c_int, String> {
     c_int::try_from(value).map_err(|_| format!("{name}={value} does not fit the IREE C ABI c_int"))
 }
@@ -864,6 +951,23 @@ impl RuntimeConfig {
     fn set_native_head(&mut self, packed: bool) {
         if let Self::Dense(config) = self {
             config.native_head = packed;
+        }
+    }
+
+    /// Record the packed path's scales/biases element type (issue #603). The
+    /// emitter declares it and the loader uploads with it, from this one field.
+    fn set_quant_scale_dtype(&mut self, dtype: QuantScaleDtype) {
+        if let Self::Dense(config) = self {
+            config.quant_scale_dtype = dtype;
+        }
+    }
+
+    /// The packed path's scales/biases element type; f16 for Gemma3n, whose
+    /// weight list never carries raw quantized parts.
+    fn quant_scale_dtype(&self) -> QuantScaleDtype {
+        match self {
+            Self::Dense(config) => config.quant_scale_dtype,
+            Self::Gemma3n(_) => QuantScaleDtype::F16,
         }
     }
 
@@ -1883,8 +1987,35 @@ fn merge_gemma3n_name_scheme(
     }
 }
 
+/// Resolve one shard file name from `model.safetensors.index.json` inside
+/// `model_dir`. The index comes from an untrusted checkpoint, so a name must be
+/// a single plain file name: an absolute path, a `..` component or a nested
+/// path would let it point the loader at a file outside the model directory.
+/// This matches `validate_index_shards` in `mlxcel-core`.
+pub(crate) fn index_shard_path(
+    model_dir: &Path,
+    index: &Path,
+    file: &str,
+) -> Result<PathBuf, String> {
+    let relative = Path::new(file);
+    let plain = !file.contains('\0')
+        && matches!(
+            relative.components().collect::<Vec<_>>().as_slice(),
+            [std::path::Component::Normal(_)]
+        );
+    if !plain {
+        return Err(format!(
+            "{} names shard {file:?}; shard names must be plain file names inside the model \
+             directory",
+            index.display()
+        ));
+    }
+    Ok(model_dir.join(relative))
+}
+
 fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let index = model_dir.join("model.safetensors.index.json");
+    let mut hostile_index = false;
     let indexed = std::fs::read_to_string(&index)
         .map_err(|error| format!("read {}: {error}", index.display()))
         .and_then(|text| {
@@ -1897,8 +2028,9 @@ fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String>
             let mut paths = weight_map
                 .values()
                 .filter_map(serde_json::Value::as_str)
-                .map(|file| model_dir.join(file))
-                .collect::<Vec<_>>();
+                .map(|file| index_shard_path(model_dir, &index, file))
+                .collect::<Result<Vec<_>, _>>()
+                .inspect_err(|_| hostile_index = true)?;
             paths.sort();
             paths.dedup();
             if paths.is_empty() || paths.iter().any(|path| !path.is_file()) {
@@ -1911,6 +2043,9 @@ fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String>
         });
     let indexed_error = match indexed {
         Ok(paths) => return Ok(paths),
+        // A traversal entry is a hostile index, not a stale one: fail the load
+        // rather than quietly scanning the directory instead.
+        Err(error) if hostile_index => return Err(error),
         Err(error) => error,
     };
     let mut actual: Vec<PathBuf> = std::fs::read_dir(model_dir)
@@ -2170,6 +2305,53 @@ mod checkpoint_name_tests {
             vec![first, second]
         );
         std::fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    /// The shard probe (issue #603) and the loader read the index of an
+    /// untrusted checkpoint, so a shard name must not leave the model directory.
+    #[test]
+    fn candidate_shards_reject_index_names_outside_the_model_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "mlxcel-xla-traversal-index-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("model");
+        std::fs::create_dir_all(model_dir.join("nested")).unwrap();
+        let outside = root.join("outside.safetensors");
+        std::fs::write(&outside, []).unwrap();
+        std::fs::write(model_dir.join("nested/inner.safetensors"), []).unwrap();
+        std::fs::write(model_dir.join("model-00001-of-00001.safetensors"), []).unwrap();
+        let outside_text = outside.to_str().unwrap().to_string();
+        for hostile in [
+            "../outside.safetensors",
+            outside_text.as_str(),
+            "nested/inner.safetensors",
+            "./../outside.safetensors",
+        ] {
+            std::fs::write(
+                model_dir.join("model.safetensors.index.json"),
+                serde_json::json!({
+                    "weight_map": {
+                        "model.embed_tokens.weight": "model-00001-of-00001.safetensors",
+                        "model.norm.weight": hostile
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let error = checkpoint_candidate_shards(&model_dir).unwrap_err();
+            assert!(error.contains("plain file names"), "{hostile}: {error}");
+        }
+        let index = model_dir.join("model.safetensors.index.json");
+        assert_eq!(
+            index_shard_path(&model_dir, &index, "model-00001-of-00001.safetensors").unwrap(),
+            model_dir.join("model-00001-of-00001.safetensors")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2467,7 +2649,15 @@ where
                 if let WeightSpec::QuantRaw { part, .. } = &specs[i] {
                     let (code, expect) = match part {
                         QuantPart::Packed => (WDT_U32, Dtype::U32),
-                        QuantPart::Scales | QuantPart::Biases => (WDT_F16, Dtype::F16),
+                        // issue #603: the dtype the emitter declared for this arg.
+                        QuantPart::Scales | QuantPart::Biases => {
+                            let dtype = cfg.quant_scale_dtype();
+                            let expect = match dtype {
+                                QuantScaleDtype::F16 => Dtype::F16,
+                                QuantScaleDtype::Bf16 => Dtype::BF16,
+                            };
+                            (dtype.weight_dtype_code() as c_int, expect)
+                        }
                     };
                     if t.dtype() != expect {
                         return Err(format!(
@@ -2944,7 +3134,16 @@ impl IreeLlama {
                                  keeping the f16 head path"
                             ),
                         }
-                        native_module = Some(module);
+                        // issue #603: the native kernels read f16 scales/biases,
+                        // so a bf16 (or mixed) checkpoint keeps the f16 path.
+                        match native_scale_dtype_check(model_dir, &cfg) {
+                            Ok(()) => native_module = Some(module),
+                            Err(error) => {
+                                eprintln!("mlxcel: {error}; falling back to the f16 weight path");
+                                cfg.set_packed_args(false);
+                                cfg.set_native_head(false);
+                            }
+                        }
                     }
                     Err(error) => {
                         eprintln!(
@@ -2956,6 +3155,19 @@ impl IreeLlama {
             }
         } else if quant_in_graph() {
             cfg.set_packed_args(true);
+            // issue #603: declare and upload the checkpoint's own f16 or bf16
+            // affine metadata; a checkpoint the packed path cannot serve (mixed
+            // or another dtype) dequantizes at load instead.
+            match packed_scale_dtype(model_dir, &cfg) {
+                Ok(dtype) => cfg.set_quant_scale_dtype(dtype),
+                Err(error) => {
+                    eprintln!(
+                        "mlxcel: MLXCEL_XLA_QUANT=packed cannot keep this checkpoint packed \
+                         ({error}); dequantizing at load instead"
+                    );
+                    cfg.set_packed_args(false);
+                }
+            }
         }
         report_load_timing("language-config", load_started);
         runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
@@ -3554,8 +3766,19 @@ impl IreeRaggedLlama {
                     Ok(arch) => match crate::native_qmv::hsaco_multi(&arch, b_max) {
                         Ok(bytes) => {
                             cfg.set_packed_args(true);
-                            native_module =
-                                Some(crate::native_qmv::ragged_module_parts(&bytes, &arch));
+                            // issue #603: the kernels read f16 scales/biases only.
+                            match native_scale_dtype_check(model_dir, &cfg) {
+                                Ok(()) => {
+                                    native_module =
+                                        Some(crate::native_qmv::ragged_module_parts(&bytes, &arch));
+                                }
+                                Err(error) => {
+                                    eprintln!(
+                                        "mlxcel: {error}; falling back to the f16 weight path"
+                                    );
+                                    cfg.set_packed_args(false);
+                                }
+                            }
                         }
                         Err(error) => eprintln!(
                             "mlxcel: native 4-bit batch projections unavailable ({error}); \

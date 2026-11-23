@@ -389,6 +389,7 @@ pub(crate) mod snapshot_prompt_cache {
     const SEQ_BASE: u64 = 1_335_000;
 
     use super::super::{Gemma3Model, Gemma3Wrapper, ModelArgs};
+    use crate::models::pooled_model::Pooled;
     use mlxcel_core::cache::{KVCacheMode, SequenceId};
     use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
     use mlxcel_core::weights::WeightMap;
@@ -532,16 +533,16 @@ pub(crate) mod snapshot_prompt_cache {
         w
     }
 
-    pub(super) fn build_wrapper() -> Gemma3Wrapper {
+    pub(super) fn build_wrapper() -> Pooled<Gemma3Wrapper> {
         build_wrapper_with_window(8)
     }
 
-    pub(crate) fn build_wrapper_with_window(sliding_window: i32) -> Gemma3Wrapper {
+    pub(crate) fn build_wrapper_with_window(sliding_window: i32) -> Pooled<Gemma3Wrapper> {
         let args = synthetic_args_with_window(sliding_window);
         let weights = synthetic_weights();
-        Gemma3Wrapper::new(
+        Pooled::new(Gemma3Wrapper::new(
             Gemma3Model::from_weights(&weights, &args).expect("synthetic Gemma 3 must load"),
-        )
+        ))
     }
 
     pub(super) fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
@@ -557,7 +558,7 @@ pub(crate) mod snapshot_prompt_cache {
         range.map(|i| i.rem_euclid(VOCAB - 1) + 1).collect()
     }
 
-    pub(super) fn prefill(wrapper: &Gemma3Wrapper, seq: SequenceId, tokens: &[i32]) {
+    pub(super) fn prefill(wrapper: &Pooled<Gemma3Wrapper>, seq: SequenceId, tokens: &[i32]) {
         wrapper.prepare_sequence_state(seq);
         let prompt = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
         let _ = wrapper.forward_with_sequence_id(&prompt, Some(seq), &mut [], None);
@@ -569,13 +570,17 @@ pub(crate) mod snapshot_prompt_cache {
     /// Deliberately not `prefill`: that one calls `prepare_sequence_state`,
     /// which throws the restored caches away and turns the append into a cold
     /// run.
-    fn append_prefill(wrapper: &Gemma3Wrapper, seq: SequenceId, tokens: &[i32]) -> Vec<f32> {
+    fn append_prefill(
+        wrapper: &Pooled<Gemma3Wrapper>,
+        seq: SequenceId,
+        tokens: &[i32],
+    ) -> Vec<f32> {
         let chunk = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
         let logits = wrapper.forward_with_sequence_id(&chunk, Some(seq), &mut [], None);
         to_vec_f32(logits.as_ref().expect("logits"))
     }
 
-    pub(super) fn decode(wrapper: &Gemma3Wrapper, seq: SequenceId, token: i32) -> Vec<f32> {
+    pub(super) fn decode(wrapper: &Pooled<Gemma3Wrapper>, seq: SequenceId, token: i32) -> Vec<f32> {
         let input = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
         let logits = wrapper.forward_with_sequence_id(&input, Some(seq), &mut [], None);
         to_vec_f32(logits.as_ref().expect("logits"))
@@ -1248,6 +1253,9 @@ mod batched_decode_entry {
 
 #[path = "gemma3_vlm_mask_tests.rs"]
 mod vlm_external_mask;
+
+#[path = "gemma3_layer_state_tests.rs"]
+mod layer_state;
 
 // A ModelOpt NVFP4 MLP: each projection carries a per-tensor scale beside its
 // block scales. The fused forward has no argument for it and ran all three

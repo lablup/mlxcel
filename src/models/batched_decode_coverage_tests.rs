@@ -624,8 +624,11 @@ fn classify_impl(key: &str, block: &str) -> Result<Option<DecodeClassification>,
     if method_body(block, "supports_batching").is_some_and(literal_false) {
         return Ok(None);
     }
-    let has_batched_override =
-        block.contains("fn forward_batched(") || block.contains("fn forward_batched_with_ids(");
+    // A scheduler-owned family's batched forward is `forward_layer_state`,
+    // which takes the rows' pool state (issue #3254).
+    let has_batched_override = block.contains("fn forward_batched(")
+        || block.contains("fn forward_batched_with_ids(")
+        || block.contains("fn forward_layer_state(");
     match method_body(block, "batched_decode_kind") {
         Some(body) if body.contains("BatchedDecodeKind::Native") => {
             if has_batched_override {
