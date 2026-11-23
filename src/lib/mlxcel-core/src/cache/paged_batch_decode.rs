@@ -457,7 +457,7 @@ fn paged_decode_rows(
     let state_refs: Vec<&PagedSequenceState> = states.iter().map(|state| &**state).collect();
 
     let mut pool = backing.pool.borrow_mut();
-    let floor = floor.unwrap_or_else(|| crate::paged_v2::active_required_visible_tokens(batch));
+    let floor = floor.unwrap_or_else(|| batch_floor(&state_refs, layer_idx));
     match pool.paged_decode_batched_with_floor(q_batched, &state_refs, layer_idx, scale, floor) {
         Ok((launched, outcome)) => {
             // Which kernel a server actually ran has to be visible without a
@@ -492,6 +492,26 @@ fn paged_decode_rows(
             // pre-#899 path panicked on exactly these conditions too.
             panic!("PagedBlockPool::paged_decode_batched failed on layer {layer_idx}: {reason}");
         }
+    }
+}
+
+/// The visible-token floor of a batched step on `layer_idx`.
+///
+/// A window-bounded sliding layer exists only in the pool, so the alternative
+/// to the fused read is a gather of every row's window every step; on GB10 the
+/// fused read wins at any length there (issue #3256 measured a 256-token B=4
+/// cell at -14.7% against the dense ring with the floor, +4.7% without). Other
+/// layers keep the measured batch-size policy.
+fn batch_floor(states: &[&PagedSequenceState], layer_idx: usize) -> usize {
+    let windowed = states.iter().all(|state| {
+        state
+            .layer(layer_idx)
+            .is_some_and(|layer| layer.window.is_some())
+    });
+    if windowed {
+        0
+    } else {
+        crate::paged_v2::active_required_visible_tokens(states.len())
     }
 }
 

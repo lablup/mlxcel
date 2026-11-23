@@ -118,6 +118,14 @@ fn a_fused_sliding_batch_attends_each_rows_own_window() {
     run_sliding_batch(8, 2, 64, &[700, 1100, 937, 1500], 40);
 }
 
+/// Windowed rows take the fused read below the batched floor too, including
+/// rows that have not filled their window yet.
+#[test]
+fn a_short_sliding_batch_takes_the_fused_read_below_the_batch_floor() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
+    run_sliding_batch(4, 1, 256, &[100, 130, 90, 300], 40);
+}
+
 /// A lone row reads its window in place through the single-row entry, though
 /// 512 visible tokens sit far below the batched floor.
 #[test]
@@ -210,7 +218,9 @@ fn run_sliding_batch(q_heads: usize, kv_heads: usize, d: usize, prompts: &[usize
     for state in &states {
         let state = state.borrow();
         let layer = &state.layers[0];
-        assert!(layer.block_base > 0, "head blocks should have retired");
-        assert_eq!(layer.visible_len(), WINDOW);
+        if layer.len > WINDOW + PAGE {
+            assert!(layer.block_base > 0, "head blocks should have retired");
+        }
+        assert_eq!(layer.visible_len(), layer.len.min(WINDOW));
     }
 }
