@@ -18,6 +18,7 @@ use super::*;
 use crate::models::deepseek_v3::tests::{
     ramp, test_config_dense_direct_q, tiny_dense_model_weights,
 };
+use crate::models::rope_utils::RopeScalingKind;
 use mlxcel_core::utils::array_to_vec_f32;
 
 // ---- Scalar reference of the hyper connection ------------------------------
@@ -592,13 +593,17 @@ fn yarn_rope_scaling_installs_a_table_on_every_attention() {
         plain
             .layers
             .iter()
-            .all(|l| l.self_attn.rope_table.is_none())
+            .all(|l| l.self_attn.rope.freqs().is_none())
     );
 
     let mut cfg = tiny_config(Some(yarn_block()));
     cfg.base.max_position_embeddings = 256;
     let yarn = tiny_model(&cfg);
-    assert!(yarn.layers.iter().all(|l| l.self_attn.rope_table.is_some()));
+    assert!(
+        yarn.layers
+            .iter()
+            .all(|l| l.self_attn.rope.freqs().is_some())
+    );
 
     let input = mlxcel_core::from_slice_i32(&[1, 2, 3, 4, 5, 6, 7, 8], &[1, 8]);
     let a = array_to_vec_f32(&plain.forward_impl(&input, &mut plain.make_caches_impl(), None));
@@ -633,10 +638,14 @@ fn plain_frequency_table_reproduces_the_default_rope() {
     let freqs: Vec<f32> = (0..dims / 2)
         .map(|i| cfg.base.rope_theta.powf((2 * i) as f32 / dims as f32))
         .collect();
-    let tabled = make().with_rope_table(
-        mlxcel_core::from_slice_f32(&freqs, &[(dims / 2) as i32]),
-        1.0,
-    );
+    let tabled = make().with_rope(MlaRope::from_kind(
+        RopeScalingKind::Yarn {
+            freqs: mlxcel_core::from_slice_f32(&freqs, &[(dims / 2) as i32]),
+            mscale: 1.0,
+        },
+        dims,
+        cfg.base.rope_theta,
+    ));
     let default = make();
     let x = mlxcel_core::from_slice_f32(&ramp(5 * cfg.base.hidden_size), &[1, 5, 8]);
     let a = array_to_vec_f32(&default.forward(&x, &mut KVCache::new(), None));
