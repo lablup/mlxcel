@@ -121,6 +121,13 @@ impl PagedSlidingKVCache {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let q_len = ffi::array_shape(q)[2];
+        if q_len == 1 && mask.is_none() {
+            // The window is the visible range of the block table, so a decode
+            // step needs no mask (issue #3256).
+            return self
+                .kv
+                .attend_gathered(q, new_keys, new_values, scale, None);
+        }
         let (cache_k, cache_v) = self.kv.update_and_fetch(new_keys, new_values);
         let k_len = ffi::array_shape(&cache_k)[2];
         if mask.is_none() && q_len > 1 {

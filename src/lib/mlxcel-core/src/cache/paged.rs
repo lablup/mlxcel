@@ -2181,10 +2181,29 @@ impl PagedBlockPool {
         ),
         String,
     > {
-        use crate::paged_v2::{
-            PagedDecodeOutcome, PagedV2Dispatch, active_required_visible_tokens,
-            select_paged_v2_dispatch,
-        };
+        let floor = crate::paged_v2::active_required_visible_tokens(states.len());
+        self.paged_decode_batched_with_floor(q, states, layer_idx, scale, floor)
+    }
+
+    /// [`Self::paged_decode_batched`] with the caller's visible-token floor in
+    /// place of the batch-size policy. A scheduler-owned single row passes 0:
+    /// its keys live only in the pool, so the alternative to the fused read is
+    /// a gather that copies the whole visible range every step (issue #3256).
+    pub fn paged_decode_batched_with_floor(
+        &mut self,
+        q: &MlxArray,
+        states: &[&PagedSequenceState],
+        layer_idx: usize,
+        scale: f32,
+        floor: usize,
+    ) -> Result<
+        (
+            Option<UniquePtr<MlxArray>>,
+            crate::paged_v2::PagedDecodeOutcome,
+        ),
+        String,
+    > {
+        use crate::paged_v2::{PagedDecodeOutcome, PagedV2Dispatch, select_paged_v2_dispatch};
 
         // Both fused paths end in the paged-attention kernels, which have
         // Metal, CUDA and HIP ports. On a backend without them the launch
@@ -2273,7 +2292,6 @@ impl PagedBlockPool {
                 if !view.any_visible() {
                     Err(PagedDecodeOutcome::NoVisibleTokens)
                 } else {
-                    let floor = active_required_visible_tokens(batch);
                     let policy = select_paged_v2_dispatch(visible_tokens, floor);
                     match crate::layers::resolve_paged_v2_dispatch(|| policy) {
                         PagedV2Dispatch::V2 => Ok((visible_tokens, view.page_counts())),

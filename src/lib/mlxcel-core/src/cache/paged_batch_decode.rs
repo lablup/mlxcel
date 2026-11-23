@@ -381,6 +381,37 @@ pub fn paged_batch_decode_attention(
     scale: f32,
     softcap: f32,
 ) -> Option<UniquePtr<MlxArray>> {
+    paged_decode_rows(
+        q_batched, k_batched, v_batched, caches, scale, softcap, None,
+    )
+}
+
+/// One scheduler-owned row's decode step through the fused paged read.
+///
+/// A pool-backed layer of a scheduler-owned sequence has no dense copy of its
+/// keys, so below the batch floor the alternative is a gather of the whole
+/// visible range every step. This entry takes the fused kernel at any length;
+/// the kill switch and the kernel's structural declines still apply, and a
+/// decline falls back to the gather as in the batched entry (issue #3256).
+pub fn paged_single_decode_attention(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    cache: &mut KVCache,
+    scale: f32,
+) -> Option<UniquePtr<MlxArray>> {
+    paged_decode_rows(q, k, v, &mut [cache], scale, 0.0, Some(0))
+}
+
+fn paged_decode_rows(
+    q_batched: &MlxArray,
+    k_batched: &MlxArray,
+    v_batched: &MlxArray,
+    caches: &mut [&mut KVCache],
+    scale: f32,
+    softcap: f32,
+    floor: Option<usize>,
+) -> Option<UniquePtr<MlxArray>> {
     let batch = caches.len();
     let servable = batch_is_servable(caches, softcap).and_then(|()| {
         if !is_single_token_batch(&ffi::array_shape(q_batched), batch)
@@ -426,7 +457,8 @@ pub fn paged_batch_decode_attention(
     let state_refs: Vec<&PagedSequenceState> = states.iter().map(|state| &**state).collect();
 
     let mut pool = backing.pool.borrow_mut();
-    match pool.paged_decode_batched(q_batched, &state_refs, layer_idx, scale) {
+    let floor = floor.unwrap_or_else(|| crate::paged_v2::active_required_visible_tokens(batch));
+    match pool.paged_decode_batched_with_floor(q_batched, &state_refs, layer_idx, scale, floor) {
         Ok((launched, outcome)) => {
             // Which kernel a server actually ran has to be visible without a
             // profiler and without an operator opting into debug logging; a
@@ -521,3 +553,7 @@ mod paged_batch_decode_tests;
 #[cfg(test)]
 #[path = "paged_pool_offset_tests.rs"]
 mod paged_pool_offset_tests;
+
+#[cfg(test)]
+#[path = "paged_sliding_batch_tests.rs"]
+mod paged_sliding_batch_tests;

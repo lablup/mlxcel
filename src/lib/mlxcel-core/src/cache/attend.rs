@@ -365,6 +365,16 @@ impl KVCache {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let q_len = query_len(q);
+        if q_len == 1 && mask.is_none() && self.is_paged_backed() {
+            // The keys live only in the pool: read them in place with the
+            // fused kernel rather than gathering the window every step
+            // (issue #3256).
+            if let Some(out) =
+                super::paged_single_decode_attention(q, &new_keys, &new_values, self, scale)
+            {
+                return out;
+            }
+        }
         self.attend_dense(q, q_len, new_keys, new_values, scale, mask)
     }
 

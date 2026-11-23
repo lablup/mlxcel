@@ -162,6 +162,7 @@ pub use paged::{
 };
 pub use paged_batch_decode::{
     PagedBatchDecodeStats, paged_batch_decode_attention, paged_batch_decode_stats,
+    paged_single_decode_attention,
 };
 pub use paged_csr::{PagedCsrView, build_paged_csr_view};
 pub use paged_detach::DetachedPagedCacheSet;
