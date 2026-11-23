@@ -91,16 +91,36 @@ fn collect_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), Strin
     let entries = std::fs::read_dir(directory)
         .map_err(|error| format!("read {}: {error}", directory.display()))?;
     for entry in entries {
-        let path = entry
-            .map_err(|error| format!("read {}: {error}", directory.display()))?
-            .path();
-        if path.is_dir() {
+        let entry = entry.map_err(|error| format!("read {}: {error}", directory.display()))?;
+        let path = entry.path();
+        // `DirEntry::file_type` does not follow symlinks, so a symlink loop
+        // cannot recurse; a symlink is collected and hashed as its target.
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("stat {}: {error}", path.display()))?;
+        if file_type.is_dir() {
             collect_files(&path, files)?;
         } else {
             files.push(path);
         }
     }
     Ok(())
+}
+
+/// The bytes an overlay entry contributes to the digest: its contents, or for
+/// a symlink the link target prefixed so it never collides with a file.
+fn file_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("stat {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        let target = std::fs::read_link(path)
+            .map_err(|error| format!("readlink {}: {error}", path.display()))?;
+        let mut bytes = b"symlink:".to_vec();
+        bytes.extend_from_slice(target.to_string_lossy().as_bytes());
+        Ok(bytes)
+    } else {
+        std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))
+    }
 }
 
 /// SHA-256 over every overlay file's relative path and contents, in path order.
@@ -115,8 +135,7 @@ fn overlay_digest(root: &Path) -> Result<String, String> {
             let relative = file
                 .strip_prefix(&overlays)
                 .map_err(|error| format!("{}: {error}", file.display()))?;
-            let bytes = std::fs::read(&file)
-                .map_err(|error| format!("read {}: {error}", file.display()))?;
+            let bytes = file_bytes(&file)?;
             hasher.update(relative.to_string_lossy().as_bytes());
             hasher.update([0]);
             hasher.update((bytes.len() as u64).to_le_bytes());
@@ -176,4 +195,30 @@ pub fn mlx_identity(mlx_enable_tf32: &'static str) -> Result<MlxIdentity, String
         compute_capability: format!("sm_{major}{minor}"),
         mlxcel_version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_loop_does_not_recurse_and_is_hashed_by_target() {
+        let dir = std::env::temp_dir().join(format!("mlx-identity-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/file.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("sub/loop")).unwrap();
+
+        let mut files = Vec::new();
+        collect_files(&dir, &mut files).unwrap();
+        files.sort();
+        assert_eq!(files.len(), 2, "{files:?}");
+        let link = dir.join("sub/loop");
+        assert!(files.contains(&link));
+        let bytes = file_bytes(&link).unwrap();
+        assert!(bytes.starts_with(b"symlink:"));
+        assert_eq!(file_bytes(&dir.join("sub/file.txt")).unwrap(), b"x");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

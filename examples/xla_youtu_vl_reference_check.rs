@@ -682,6 +682,7 @@ fn main() {
         "architecture": reference["architecture"].clone(),
         "generation": reference["generation"].clone(),
         "lifecycle": reference["lifecycle"].clone(),
+        "mlx_enable_tf32": mlx_reference_policy::recorded_mlx_tf32(),
         "case": {
             "name": "image_text",
             "prompt": PROMPT,
