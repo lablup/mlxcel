@@ -18,7 +18,7 @@
 //! and [`piece_input`], which builds a piece's input and mask.
 
 use super::{Engine, EngineError};
-use crate::cache::{SequenceId, SequenceStateBackend};
+use crate::cache::{LayerStateForward, SequenceId, SequenceStateBackend};
 use crate::generate::LanguageModel;
 use crate::prefill_plan::{PrefillPiece, PrefillPlan};
 use crate::utils::create_padded_prefill_mask;
@@ -108,38 +108,47 @@ impl<M: LanguageModel> Engine<M> {
     /// `BatchScheduler::run_next_prompt_cache_warmup` (the server, which
     /// `mlxcel run` and chat also run on).
     pub fn prefill(&mut self, step: &PrefillStep<'_>) -> Result<PrefillOutcome, EngineError> {
-        let caches = self
-            .pool
-            .get_caches_mut(step.seq_id)
-            .ok_or(EngineError::MissingSequence(step.seq_id))?;
-        let logits = match step.embeddings {
-            Some(embeddings) => self
-                .model
-                .forward_last_logits_with_embeddings_and_sequence_id(
-                    step.input,
-                    Some(embeddings),
-                    Some(step.seq_id),
-                    caches,
-                    step.mask,
-                    step.last_pos,
-                ),
-            None => self
-                .model
-                .try_forward_last_logits_with_sequence_id(
-                    step.input,
-                    Some(step.seq_id),
-                    caches,
-                    step.mask,
-                    step.last_pos,
-                )
-                .map_err(EngineError::Forward)?,
+        let request = LayerStateForward::tokens(step.input)
+            .with_embeddings(step.embeddings)
+            .with_mask(step.mask)
+            .with_last_pos(Some(step.last_pos));
+        let logits = match self.forward_layer_state_row(step.seq_id, request) {
+            Some(logits) => logits?,
+            None => {
+                let caches = self
+                    .pool
+                    .get_caches_mut(step.seq_id)
+                    .ok_or(EngineError::MissingSequence(step.seq_id))?;
+                match step.embeddings {
+                    Some(embeddings) => self
+                        .model
+                        .forward_last_logits_with_embeddings_and_sequence_id(
+                            step.input,
+                            Some(embeddings),
+                            Some(step.seq_id),
+                            caches,
+                            step.mask,
+                            step.last_pos,
+                        ),
+                    None => self
+                        .model
+                        .try_forward_last_logits_with_sequence_id(
+                            step.input,
+                            Some(step.seq_id),
+                            caches,
+                            step.mask,
+                            step.last_pos,
+                        )
+                        .map_err(EngineError::Forward)?,
+                }
+            }
         };
         let eval = if step.eval || step.embeddings.is_some() {
             crate::try_eval(&logits).map_err(|e| e.to_string())
         } else {
             Ok(())
         };
-        let trim = trim_padded_prefill(&self.model, step.seq_id, caches, step.trim_excess);
+        let trim = self.trim_sequence_padding(step.seq_id, step.trim_excess);
         if step.embeddings.is_some() {
             // The logits were evaluated above: `after_prefill` may replace
             // weight arrays the lazy prefill graph still references.
@@ -157,29 +166,42 @@ impl<M: LanguageModel> Engine<M> {
     ///
     /// Used by: `DirectEngine::loglikelihoods`.
     pub fn score(&mut self, step: &PrefillStep<'_>) -> Result<PrefillOutcome, EngineError> {
-        let caches = self
-            .pool
-            .get_caches_mut(step.seq_id)
-            .ok_or(EngineError::MissingSequence(step.seq_id))?;
-        let logits = match step.embeddings {
-            Some(embeddings) => self.model.forward_with_embeddings_and_sequence_id(
-                step.input,
-                Some(embeddings),
-                Some(step.seq_id),
-                caches,
-                step.mask,
-            ),
-            None => self
-                .model
-                .try_forward_with_sequence_id(step.input, Some(step.seq_id), caches, step.mask)
-                .map_err(EngineError::Forward)?,
+        let request = LayerStateForward::tokens(step.input)
+            .with_embeddings(step.embeddings)
+            .with_mask(step.mask);
+        let logits = match self.forward_layer_state_row(step.seq_id, request) {
+            Some(logits) => logits?,
+            None => {
+                let caches = self
+                    .pool
+                    .get_caches_mut(step.seq_id)
+                    .ok_or(EngineError::MissingSequence(step.seq_id))?;
+                match step.embeddings {
+                    Some(embeddings) => self.model.forward_with_embeddings_and_sequence_id(
+                        step.input,
+                        Some(embeddings),
+                        Some(step.seq_id),
+                        caches,
+                        step.mask,
+                    ),
+                    None => self
+                        .model
+                        .try_forward_with_sequence_id(
+                            step.input,
+                            Some(step.seq_id),
+                            caches,
+                            step.mask,
+                        )
+                        .map_err(EngineError::Forward)?,
+                }
+            }
         };
         let eval = if step.eval {
             crate::try_eval(&logits).map_err(|e| e.to_string())
         } else {
             Ok(())
         };
-        let trim = trim_padded_prefill(&self.model, step.seq_id, caches, step.trim_excess);
+        let trim = self.trim_sequence_padding(step.seq_id, step.trim_excess);
         Ok(PrefillOutcome { logits, eval, trim })
     }
 
@@ -194,6 +216,11 @@ impl<M: LanguageModel> Engine<M> {
         input: &MlxArray,
         mask: Option<&MlxArray>,
     ) -> Result<UniquePtr<MlxArray>, EngineError> {
+        if let Some(result) =
+            self.forward_layer_state_rows(seq_ids, LayerStateForward::tokens(input).with_mask(mask))
+        {
+            return result;
+        }
         let mut batch_caches = self
             .pool
             .get_batch_caches_mut(seq_ids)
@@ -213,11 +240,31 @@ impl<M: LanguageModel> Engine<M> {
     /// Drop `excess` pad positions a padded prefill wrote for `id`, from the
     /// pool caches and from a model-owned family's own state (#1755).
     pub fn trim_padding(&mut self, id: SequenceId, excess: i32) -> Result<(), EngineError> {
-        let caches = self
-            .pool
-            .get_caches_mut(id)
-            .ok_or(EngineError::MissingSequence(id))?;
-        trim_padded_prefill(&self.model, id, caches, excess).map_err(EngineError::Trim)
+        if self.pool.get(id).is_none() {
+            return Err(EngineError::MissingSequence(id));
+        }
+        self.trim_sequence_padding(id, excess)
+            .map_err(EngineError::Trim)
+    }
+
+    /// [`trim_padded_prefill`] for `id`, plus the pad rewind of a
+    /// scheduler-owned sequence's layer state, which needs no model hook
+    /// (issue #3254).
+    fn trim_sequence_padding(&mut self, id: SequenceId, excess: i32) -> Result<(), String> {
+        if excess <= 0 {
+            return Ok(());
+        }
+        if let Some(caches) = self.pool.get_caches_mut(id) {
+            trim_padded_prefill(&self.model, id, caches, excess)?;
+        }
+        if let Some(layers) = self.pool.layer_state_mut(id) {
+            for (layer_idx, layer) in layers.iter_mut().enumerate() {
+                layer
+                    .rewind_padded_prefill(excess)
+                    .map_err(|err| format!("pad trim, sequence {id}, layer {layer_idx}: {err}"))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -228,6 +275,8 @@ impl<M: LanguageModel> Engine<M> {
 /// state is rewound through the model hook. The model's natural layout
 /// decides, not the allocated backend: a model-owned family allocated on the
 /// paged backend for block accounting still keeps its K/V to itself (#1346).
+/// A scheduler-owned family's layer state is not reachable from here; the
+/// engine rewinds it next to this call.
 pub fn trim_padded_prefill<M: LanguageModel + ?Sized>(
     model: &M,
     seq_id: SequenceId,

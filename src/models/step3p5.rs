@@ -23,8 +23,9 @@
 //! - Per-layer rope_theta and partial_rotary_factor
 //! - SwitchGLU experts with shared expert
 
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{
     KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
 };
@@ -1521,7 +1522,7 @@ impl LanguageModel for Step3p5Model {
         self.kv_cache_layer_modes.storage_modes(|layer_idx| {
             (layer_idx < self.config.num_hidden_layers && self.config.is_sliding(layer_idx))
                 .then_some(window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 

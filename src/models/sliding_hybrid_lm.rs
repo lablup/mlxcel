@@ -33,7 +33,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use crate::models::gemma3::Cache;
 use crate::models::kv_ring_checkpoint;
 use crate::models::kv_snapshot::KvSnapshotNames;
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use mlxcel_core::cache::LayerStateKind;
 
 /// What a sliding/full hybrid exposes so the shared bodies can drive it.
 ///
@@ -132,7 +133,7 @@ pub(crate) fn kv_cache_storage_modes<M: SlidingHybridModel>(
         .storage_modes(|layer_idx| {
             (layer_idx < model.hybrid_num_layers() && model.hybrid_layer_uses_sliding(layer_idx))
                 .then_some(model.hybrid_sliding_window())
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
 }
 

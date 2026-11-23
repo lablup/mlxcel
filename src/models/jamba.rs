@@ -1651,9 +1651,9 @@ impl LanguageModel for JambaModel {
         let block_types = &self.model.layers_block_type;
         crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |idx| {
             if block_types.get(idx).is_some_and(|t| t == "attention") {
-                crate::models::model_owned::LayerKv::Fp16Only
+                mlxcel_core::cache::LayerStateKind::Full
             } else {
-                crate::models::model_owned::LayerKv::None
+                mlxcel_core::cache::LayerStateKind::None
             }
         })
     }

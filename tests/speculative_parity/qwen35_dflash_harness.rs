@@ -303,7 +303,9 @@ fn b1_arbiter_top_gaps(
     tokens.extend_from_slice(emitted_prefix);
     let input = mlxcel_core::from_slice_i32(&tokens, &[1, tokens.len() as i32]);
     let seq = mlxcel_core::cache::SequenceId::from_raw(seq_raw);
-    let logits = model.forward_with_sequence_id(&input, Some(seq), &mut [], None);
+    // Qwen 3.5's state is scheduler-owned: a fresh pool sequence per call.
+    let pooled = mlxcel::models::pooled_model::Pooled::new(model);
+    let logits = pooled.forward_with_sequence_id(&input, Some(seq), &mut [], None);
     let row = mlxcel_core::slice_last_logits(&logits);
     let row = mlxcel_core::astype(&row, mlxcel_core::dtype::FLOAT32);
     mlxcel_core::eval(&row);

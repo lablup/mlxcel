@@ -3127,8 +3127,8 @@ impl LanguageModel for NemotronHModel {
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
         crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |idx| {
             match self.block_types.get(idx) {
-                Some(BlockType::Attention) => crate::models::model_owned::LayerKv::Fp16Only,
-                _ => crate::models::model_owned::LayerKv::None,
+                Some(BlockType::Attention) => mlxcel_core::cache::LayerStateKind::Full,
+                _ => mlxcel_core::cache::LayerStateKind::None,
             }
         })
     }

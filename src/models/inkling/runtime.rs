@@ -57,7 +57,7 @@ impl LanguageModel for InklingModel {
     /// table (issue #2790). Every layer keeps an FP16 `KVCache` beside its conv states.
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
         crate::models::model_owned::table_less_storage_modes(self.layers.len(), |_| {
-            crate::models::model_owned::LayerKv::Fp16Only
+            mlxcel_core::cache::LayerStateKind::Full
         })
     }
     fn eos_token_ids(&self) -> Vec<i32> {

@@ -186,28 +186,7 @@ impl Qwen3NextCache {
     ) -> Result<(), String> {
         match self {
             Qwen3NextCache::Attention(kv) => {
-                if kv.mode != KVCacheMode::Fp16 {
-                    return Err(format!(
-                        "{prefix}.attention: model-state snapshots do not yet serialize {:?} KV sidecars",
-                        kv.mode
-                    ));
-                }
-                super::recurrent_snapshot::push_kv_cache_mode(
-                    snapshot,
-                    format!("{prefix}.attention.mode"),
-                    kv.mode,
-                );
-                super::recurrent_snapshot::push_optional(
-                    snapshot,
-                    format!("{prefix}.attention.keys"),
-                    &kv.keys,
-                );
-                super::recurrent_snapshot::push_optional(
-                    snapshot,
-                    format!("{prefix}.attention.values"),
-                    &kv.values,
-                );
-                Ok(())
+                super::hybrid_snapshot::snapshot_attention(kv, snapshot, prefix)
             }
             Qwen3NextCache::Linear(gd) => {
                 gd.snapshot_into(snapshot, &format!("{prefix}.linear"));
@@ -223,33 +202,7 @@ impl Qwen3NextCache {
     ) -> Result<(), String> {
         match self {
             Qwen3NextCache::Attention(kv) => {
-                let snapshot_mode = super::recurrent_snapshot::restore_kv_cache_mode(
-                    snapshot,
-                    format!("{prefix}.attention.mode"),
-                )?
-                .unwrap_or(KVCacheMode::Fp16);
-                if snapshot_mode != kv.mode {
-                    return Err(format!(
-                        "{prefix}.attention: snapshot KV mode {:?} does not match configured mode {:?}",
-                        snapshot_mode, kv.mode
-                    ));
-                }
-                if kv.mode != KVCacheMode::Fp16 {
-                    return Err(format!(
-                        "{prefix}.attention: model-state restores do not yet deserialize {:?} KV sidecars",
-                        kv.mode
-                    ));
-                }
-                kv.keys = super::recurrent_snapshot::restore_optional(
-                    snapshot,
-                    format!("{prefix}.attention.keys"),
-                );
-                kv.values = super::recurrent_snapshot::restore_optional(
-                    snapshot,
-                    format!("{prefix}.attention.values"),
-                );
-                kv.offset = snapshot.token_len() as i32;
-                Ok(())
+                super::hybrid_snapshot::restore_attention(kv, snapshot, prefix)
             }
             Qwen3NextCache::Linear(gd) => {
                 gd.restore_from(snapshot, &format!("{prefix}.linear"));
@@ -262,9 +215,9 @@ impl Qwen3NextCache {
     /// (issue #3047): the GatedDeltaNet layers' state and convolution window.
     /// The attention layers' rows are taken from a longer snapshot instead.
     ///
-    /// Used by: Qwen3-Next and Qwen 3.5 `state_checkpoint_from_snapshot`.
+    /// Used by: Qwen3-Next `state_checkpoint_from_snapshot`.
     pub fn is_checkpoint_tensor(name: &str) -> bool {
-        name.contains(".linear.")
+        super::hybrid_snapshot::is_checkpoint_tensor(name)
     }
 
     /// Rebuild this layer for `checkpoint.token_len()` tokens from a state
@@ -275,55 +228,27 @@ impl Qwen3NextCache {
     /// present. An attention layer restores the donor's rows and cuts them
     /// back with [`KVCache::trim`], the same trim a speculative rollback uses.
     ///
-    /// Used by: Qwen3-Next and Qwen 3.5
-    /// `restore_sequence_state_from_checkpoint`.
+    /// Used by: Qwen3-Next `restore_sequence_state_from_checkpoint`.
     pub fn restore_from_checkpoint(
         &mut self,
         checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
         donor: &mlxcel_core::generate::ModelStateSnapshot,
         prefix: &str,
     ) -> Result<(), String> {
-        let keep = checkpoint.token_len();
-        let have = donor.token_len();
-        if keep == 0 || keep > have {
-            return Err(format!(
-                "{prefix}: a {keep}-token checkpoint cannot be rebuilt from a {have}-token snapshot"
-            ));
-        }
-        if let Qwen3NextCache::Linear(_) = self {
-            for field in ["conv_state", "state_cache"] {
-                if checkpoint
-                    .tensor(&format!("{prefix}.linear.{field}"))
-                    .is_none()
-                {
-                    return Err(format!(
-                        "{prefix}.linear: checkpoint has no {field} for {keep} tokens"
-                    ));
-                }
+        let (keep, have) = super::hybrid_snapshot::checkpoint_lengths(checkpoint, donor, prefix)?;
+        match self {
+            Qwen3NextCache::Linear(_) => {
+                super::hybrid_snapshot::require_checkpoint_fields(
+                    checkpoint,
+                    prefix,
+                    ["conv_state", "state_cache"],
+                )?;
+                self.restore_from(checkpoint, prefix)
             }
-            return self.restore_from(checkpoint, prefix);
-        }
-        self.restore_from(donor, prefix)?;
-        if let Qwen3NextCache::Attention(kv) = self {
-            if kv.keys.is_none() || kv.values.is_none() {
-                return Err(format!(
-                    "{prefix}.attention: the {have}-token snapshot holds no attention rows"
-                ));
-            }
-            let trim = (have - keep) as i32;
-            if trim > 0 && kv.trim(trim) != trim {
-                return Err(format!(
-                    "{prefix}.attention: could not cut {have} rows back to {keep}"
-                ));
-            }
-            if kv.offset != keep as i32 {
-                return Err(format!(
-                    "{prefix}.attention: {} rows after the cut, expected {keep}",
-                    kv.offset
-                ));
+            Qwen3NextCache::Attention(kv) => {
+                super::hybrid_snapshot::restore_attention_from_donor(kv, donor, prefix, keep, have)
             }
         }
-        Ok(())
     }
 }
 
@@ -2469,8 +2394,8 @@ impl LanguageModel for Qwen3NextModel {
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         self.kv_cache_layer_modes
             .storage_modes(|layer_idx| match self.layers.get(layer_idx) {
-                Some(layer) if !layer.is_linear => crate::models::model_owned::LayerKv::Full,
-                _ => crate::models::model_owned::LayerKv::None,
+                Some(layer) if !layer.is_linear => mlxcel_core::cache::LayerStateKind::Full,
+                _ => mlxcel_core::cache::LayerStateKind::None,
             })
     }
 
