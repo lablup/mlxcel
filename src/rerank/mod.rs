@@ -38,6 +38,7 @@
 //! Everything here holds MLX handles and runs on one thread: the server's
 //! rerank worker thread or the `mlxcel rerank` main thread.
 
+pub mod late_interaction;
 pub mod loader;
 pub mod qwen3_generative;
 pub mod qwen3_vl_generative;
@@ -55,7 +56,13 @@ use mlxcel_core::{MlxArray, dtype, utils::array_to_vec_f32};
 use serde_json::Value;
 
 pub use crate::embeddings::ImageInput;
-pub use loader::{LoadedReranker, RerankLoadOptions, load_reranker, load_reranker_with_options};
+pub use late_interaction::{
+    LateInteractionError, LateInteractionReranker, MultiVectorEmbedder, score_late_interaction,
+};
+pub use loader::{
+    LoadedReranker, RerankLoadOptions, load_reranker, load_reranker_or_late_interaction,
+    load_reranker_with_options,
+};
 
 /// Hard upper bound on the tokens one query/document pair may carry, whatever
 /// the checkpoint declares.

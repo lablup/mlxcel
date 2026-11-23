@@ -14,6 +14,10 @@
 
 //! `mlxcel rerank`: offline query/document scoring through the same code
 //! `/v1/rerank` uses, for validating a reranker port without a server.
+//!
+//! `-m` takes a reranker checkpoint or, like `mlxcel-server -m`, a
+//! multi-vector embedder, which is scored by MaxSim (`kind`
+//! `late_interaction`, #3300).
 
 use std::path::PathBuf;
 
@@ -23,14 +27,17 @@ use serde_json::json;
 
 use mlxcel::downloader::resolve_model_source_with_override;
 use mlxcel::initialize_runtime_checked;
-use mlxcel::rerank::{ImageInput, RerankItem, RerankLoadOptions, load_reranker_with_options};
+use mlxcel::rerank::{
+    ImageInput, RerankItem, RerankLoadOptions, RerankerKind, load_reranker_or_late_interaction,
+};
 
 /// Arguments for `mlxcel rerank`.
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Rerank Options")]
 pub(crate) struct RerankArgs {
-    /// Reranker checkpoint: a local directory or a HuggingFace `owner/name`
-    /// repo-id (resolved and auto-downloaded like `mlxcel generate -m`).
+    /// Reranker checkpoint, or a multi-vector embedder scored by MaxSim: a
+    /// local directory or a HuggingFace `owner/name` repo-id (resolved and
+    /// auto-downloaded like `mlxcel generate -m`).
     #[arg(short, long, value_name = "MODEL_OR_REPO_ID")]
     pub(crate) model: PathBuf,
 
@@ -67,7 +74,8 @@ pub(crate) struct RerankArgs {
     #[arg(long = "max-length", value_name = "N")]
     pub(crate) max_length: Option<usize>,
 
-    /// Query/document pairs per forward pass (default: the reranker kind's).
+    /// Query/document pairs per forward pass (default: the reranker kind's;
+    /// inputs per forward pass, default 16, for a multi-vector embedder).
     #[arg(long = "batch-size", value_name = "N")]
     pub(crate) batch_size: Option<usize>,
 
@@ -102,6 +110,20 @@ fn label(item: &RerankItem, fallback: &str) -> String {
     }
 }
 
+/// Why `--instruction` is refused for a kind that takes none.
+fn instruction_refusal(kind: RerankerKind) -> &'static str {
+    match kind {
+        RerankerKind::LateInteraction => {
+            "--instruction is only supported by the generative rerankers; this checkpoint is a \
+             multi-vector embedder and scores the query by MaxSim"
+        }
+        _ => {
+            "--instruction is only supported by the generative rerankers; this checkpoint is a \
+             sequence classifier and scores the pair directly"
+        }
+    }
+}
+
 pub(crate) fn run_rerank(args: RerankArgs) -> Result<()> {
     if args.documents.is_empty() && args.images.is_empty() {
         bail!("nothing to rerank: pass at least one -d/--document or --image");
@@ -127,7 +149,7 @@ pub(crate) fn run_rerank(args: RerankArgs) -> Result<()> {
     // host GPU (#1537).
     let _runtime = initialize_runtime_checked()?;
 
-    let loaded = load_reranker_with_options(
+    let loaded = load_reranker_or_late_interaction(
         &model_dir,
         RerankLoadOptions {
             batch_size: args.batch_size,
@@ -163,10 +185,7 @@ pub(crate) fn run_rerank(args: RerankArgs) -> Result<()> {
         );
     }
     if args.instruction.is_some() && !loaded.kind.accepts_instruction() {
-        bail!(
-            "--instruction is only supported by the generative rerankers; this checkpoint is a \
-             sequence classifier and scores the pair directly"
-        );
+        bail!("{}", instruction_refusal(loaded.kind));
     }
 
     let scored = loaded
@@ -240,6 +259,14 @@ pub(crate) fn run_rerank(args: RerankArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instruction_refusal_names_the_kind() {
+        assert!(instruction_refusal(RerankerKind::LateInteraction).contains("MaxSim"));
+        assert!(
+            instruction_refusal(RerankerKind::SequenceClassifier).contains("sequence classifier")
+        );
+    }
 
     #[test]
     fn label_truncates_long_text_and_falls_back_for_images() {
