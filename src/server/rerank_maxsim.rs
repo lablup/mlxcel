@@ -21,16 +21,22 @@
 //! puts that score behind [`RerankModelProvider`] so `POST /v1/rerank` serves
 //! it with its existing request and response schema: the query and each
 //! document are embedded through the already-running embedding worker and
-//! scored on the route side with [`crate::embeddings::maxsim`], the same
-//! function `mlxcel embed` prints its similarity matrix with.
+//! scored on the route side by [`crate::rerank::score_late_interaction`],
+//! the scoring rule `mlxcel rerank` runs over the same embedder (#3300),
+//! which ends in [`crate::embeddings::maxsim`], the same function
+//! `mlxcel embed` prints its similarity matrix with.
 //!
 //! The provider owns no worker of its own. It shares the embedding worker, so
 //! it is never registered as a separate side worker for shutdown.
 
 use std::sync::Arc;
 
-use crate::embeddings::{EmbdNormalize, EmbedOptions, EmbedReply, EmbeddingVector, maxsim};
-use crate::rerank::{RerankItem, RerankScores, RerankerKind};
+use crate::embeddings::{EmbdNormalize, EmbedOptions, EmbedReply, ImageInput};
+use crate::rerank::late_interaction::IMAGES_UNSUPPORTED;
+use crate::rerank::{
+    LateInteractionError, MultiVectorEmbedder, RerankItem, RerankScores, RerankerKind,
+    score_late_interaction,
+};
 use crate::server::embedding_model::{EmbeddingError, EmbeddingModelProvider};
 use crate::server::rerank_model::{RerankError, RerankModelProvider};
 
@@ -62,79 +68,33 @@ impl MaxSimRerankProvider {
             ..EmbedOptions::default()
         }
     }
+}
 
-    /// Embed the query and every document, returning one vector per item in
-    /// `[query, documents...]` order plus the total prompt tokens.
-    ///
-    /// Every text item goes to the worker in ONE `embed_texts` call, the way
-    /// `/v1/embeddings` dispatches a text batch: one queue slot, one reply
-    /// timeout and length-sorted micro-batching for the whole request. One
-    /// call per document would let a single request holding thousands of short
-    /// documents occupy the worker for thousands of reply timeouts back to
-    /// back, and hit `QueueFull` halfway through after spending the earlier
-    /// forwards. Image items stay one call each, as the embedder takes one
-    /// image per call; their count is already capped by the route's
-    /// per-request image limit.
-    fn embed_items(
+/// [`MultiVectorEmbedder`] over the embedding worker, so the server scores
+/// with the same [`score_late_interaction`] the CLI runs.
+struct WorkerEmbedder<'a>(&'a dyn EmbeddingModelProvider);
+
+impl MultiVectorEmbedder for WorkerEmbedder<'_> {
+    type Error = EmbeddingError;
+
+    fn supports_images(&self) -> bool {
+        self.0.supports_images()
+    }
+
+    fn embed_texts(
         &self,
-        items: &[&RerankItem],
-    ) -> Result<(Vec<EmbeddingVector>, usize), RerankError> {
-        for item in items {
-            if item.image.is_some() && !self.embedding.supports_images() {
-                return Err(RerankError::InvalidInput(
-                    "the loaded late-interaction reranker does not accept images".to_string(),
-                ));
-            }
-        }
-        let mut slots: Vec<Option<EmbeddingVector>> = (0..items.len()).map(|_| None).collect();
-        let mut prompt_tokens = 0usize;
+        texts: Vec<String>,
+        options: &EmbedOptions,
+    ) -> Result<EmbedReply, EmbeddingError> {
+        self.0.embed_texts(texts, options.clone())
+    }
 
-        let text_indices: Vec<usize> = items
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| item.image.is_none().then_some(index))
-            .collect();
-        if !text_indices.is_empty() {
-            let texts = text_indices
-                .iter()
-                .map(|&index| items[index].text_or_empty().to_string())
-                .collect();
-            let reply = self
-                .embedding
-                .embed_texts(texts, self.options())
-                .map_err(embedding_error_to_rerank)?;
-            if reply.vectors.len() != text_indices.len() {
-                return Err(RerankError::Internal(format!(
-                    "the embedder returned {} vectors for {} texts",
-                    reply.vectors.len(),
-                    text_indices.len()
-                )));
-            }
-            prompt_tokens += reply.prompt_tokens;
-            for (&index, vector) in text_indices.iter().zip(reply.vectors) {
-                slots[index] = Some(vector);
-            }
-        }
-
-        for (index, item) in items.iter().enumerate() {
-            let Some(image) = &item.image else {
-                continue;
-            };
-            let reply = self
-                .embedding
-                .embed_image(image.clone(), self.options())
-                .map_err(embedding_error_to_rerank)?;
-            prompt_tokens += reply.prompt_tokens;
-            slots[index] = Some(single_vector(reply, index)?);
-        }
-
-        let vectors = slots
-            .into_iter()
-            .map(|slot| {
-                slot.ok_or_else(|| RerankError::Internal("an item produced no vector".to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((vectors, prompt_tokens))
+    fn embed_image(
+        &self,
+        image: ImageInput,
+        options: &EmbedOptions,
+    ) -> Result<EmbedReply, EmbeddingError> {
+        self.0.embed_image(image, options.clone())
     }
 }
 
@@ -148,20 +108,14 @@ fn embedding_error_to_rerank(err: EmbeddingError) -> RerankError {
     }
 }
 
-/// The one vector of a one-image reply; `index` 0 is the query.
-fn single_vector(reply: EmbedReply, index: usize) -> Result<EmbeddingVector, RerankError> {
-    let count = reply.vectors.len();
-    match <[EmbeddingVector; 1]>::try_from(reply.vectors) {
-        Ok([vector]) => Ok(vector),
-        Err(_) => {
-            let label = match index {
-                0 => "the query".to_string(),
-                n => format!("documents[{}]", n - 1),
-            };
-            Err(RerankError::Internal(format!(
-                "the embedder returned {count} vectors for {label}, expected 1"
-            )))
+/// Map a scoring failure onto the rerank route's error envelope.
+fn late_interaction_error_to_rerank(err: LateInteractionError<EmbeddingError>) -> RerankError {
+    match err {
+        LateInteractionError::Embed(err) => embedding_error_to_rerank(err),
+        LateInteractionError::ImagesUnsupported => {
+            RerankError::InvalidInput(IMAGES_UNSUPPORTED.to_string())
         }
+        LateInteractionError::Internal(message) => RerankError::Internal(message),
     }
 }
 
@@ -174,24 +128,13 @@ impl RerankModelProvider for MaxSimRerankProvider {
     ) -> Result<RerankScores, RerankError> {
         // The route rejects an `instruction` for this kind before dispatch,
         // because `accepts_instruction()` is false, so it is never seen here.
-        let items: Vec<&RerankItem> = std::iter::once(&query).chain(documents.iter()).collect();
-        let (vectors, prompt_tokens) = self.embed_items(&items)?;
-        let Some((query_vector, document_vectors)) = vectors.split_first() else {
-            return Err(RerankError::Internal(
-                "the query produced no vector".to_string(),
-            ));
-        };
-        let query_rows: Vec<&[f32]> = query_vector.rows().collect();
-        // A document with no rows scores 0.0 inside `maxsim`, matching
-        // `mlxcel embed`'s similarity matrix.
-        let scores = document_vectors
-            .iter()
-            .map(|vector| maxsim(&query_rows, &vector.rows().collect::<Vec<_>>()))
-            .collect();
-        Ok(RerankScores {
-            scores,
-            prompt_tokens,
-        })
+        score_late_interaction(
+            &WorkerEmbedder(self.embedding.as_ref()),
+            &query,
+            &documents,
+            &self.options(),
+        )
+        .map_err(late_interaction_error_to_rerank)
     }
 
     fn model_id(&self) -> &str {

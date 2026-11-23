@@ -28,7 +28,8 @@
 //! contraction on device arrays for a caller that already holds them.
 //!
 //! Used by: `mlxcel embed` (the multi-vector similarity matrix), the
-//! late-interaction `/v1/rerank` provider (`server::rerank_maxsim`), and the
+//! late-interaction scorer `/v1/rerank` and `mlxcel rerank` share
+//! (`rerank::late_interaction`), and the
 //! ColIdefics3 / ColQwen2.5 / LFM2.5-ColBERT real-checkpoint gates.
 
 use mlxcel_core::{MlxArray, dtype};
