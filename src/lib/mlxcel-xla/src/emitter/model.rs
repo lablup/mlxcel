@@ -40,6 +40,10 @@ use super::rope;
 use super::ssm::{self, Mamba2MixerW, SsmLayerState};
 use super::ssm_scan::SsmPrefillForm;
 
+#[path = "model_recurrent.rs"]
+mod recurrent;
+use recurrent::RecurrentLayers;
+
 /// Canonical finite additive-attention value for a disallowed prefill edge.
 ///
 /// The embeddings entry accepts only `0.0` (allowed) and this value (masked).
@@ -279,6 +283,9 @@ struct LayerW {
     /// Phi4MM's immutable speech/vision adapter pairs. The request's numeric
     /// mode gates their deltas per row; the base weights are never mutated.
     phi4_lora: Option<Phi4LayerLoraW>,
+    /// The Mamba2 mixer of a recurrent layer (issue #3338); `None` on every
+    /// attention layer. A recurrent layer sets only this and `in_ln`.
+    ssm: Option<Mamba2MixerW>,
 }
 
 struct MlaLayerW {
@@ -675,6 +682,9 @@ fn take_layer_weights(
     c: &Config,
     li: usize,
 ) -> LayerW {
+    if c.layer_mixer(li).is_recurrent() {
+        return recurrent::take_ssm_layer_weights(b, decls, idx, c, li);
+    }
     let h = c.hidden;
     let inter = c.inter;
     let kv = c.n_kv * c.head_dim;
@@ -888,6 +898,7 @@ fn take_layer_weights(
         up_bias,
         moe,
         phi4_lora,
+        ssm: None,
     }
 }
 
@@ -1086,8 +1097,10 @@ fn render_signature(decls: &[ArgDecl]) -> String {
 /// visible so the sibling `moe` module (issue #500) reads the shared scalars
 /// (`zero`, `one`, `neg_inf`) it needs for the router softmax / top-k masking.
 pub(crate) struct Consts {
-    cos_table: Val,
-    sin_table: Val,
+    /// Global RoPE tables; `None` for an attention-free config (issue #3338),
+    /// which has no rotary width and no attention layer to read them.
+    cos_table: Option<Val>,
+    sin_table: Option<Val>,
     /// Gemma3 / OLMo3 local RoPE tables (`Some` only when the config has a local
     /// base), used by the sliding (local) layers; the global layers keep the
     /// `cos_table` / `sin_table`. Emitted only when present, so single-RoPE
@@ -1105,15 +1118,38 @@ pub(crate) struct Consts {
     layer_idx: Vec<Val>,
 }
 
+impl Consts {
+    /// The global RoPE cos table. Every caller is an attention path, which an
+    /// attention-free config never reaches.
+    fn cos_table(&self) -> &Val {
+        self.cos_table
+            .as_ref()
+            .expect("RoPE tables exist for every config with an attention layer")
+    }
+
+    /// The global RoPE sin table (see [`Consts::cos_table`]).
+    fn sin_table(&self) -> &Val {
+        self.sin_table
+            .as_ref()
+            .expect("RoPE tables exist for every config with an attention layer")
+    }
+}
+
 fn emit_consts(b: &mut Builder, c: &Config) -> Consts {
     let seq = c.context_capacity;
-    let (cos, sin) = rope::rope_tables(c, seq);
     // The rotary width (`head_dim`, or the smaller `rotary_dim` for a partial-RoPE
     // arch like StableLM). The Llama family has `rot == head_dim`, so its tables are
-    // byte-identical.
+    // byte-identical. An attention-free config emits no table.
     let rot = c.rotary_width();
-    let cos_table = b.const_tensor_f32(&cos, vec![seq, rot]);
-    let sin_table = b.const_tensor_f32(&sin, vec![seq, rot]);
+    let (cos_table, sin_table) = if c.has_kv_cache() {
+        let (cos, sin) = rope::rope_tables(c, seq);
+        (
+            Some(b.const_tensor_f32(&cos, vec![seq, rot])),
+            Some(b.const_tensor_f32(&sin, vec![seq, rot])),
+        )
+    } else {
+        (None, None)
+    };
     // Gemma3 / OLMo3 local RoPE tables (distinct base for the sliding layers).
     let (cos_local, sin_local) = match c.rope_local_base {
         Some(base) => {
@@ -2936,6 +2972,10 @@ fn emit_attention(
 /// decode, and prefill graphs so a family's block structure is authored once and
 /// reaches all three. For the Llama family this emits the exact op sequence each
 /// path inlined.
+///
+/// The layer's mixer comes from `c.layer_mixer(li)` (issue #3338): an attention
+/// layer runs the block below and writes the KV cache; a recurrent layer runs
+/// [`recurrent::emit_mamba2_block`] and advances its row of `state` instead.
 #[allow(clippy::too_many_arguments)]
 fn emit_transformer_layer(
     b: &mut Builder,
@@ -2947,7 +2987,11 @@ fn emit_transformer_layer(
     layout: &AttnLayout,
     kcache: &mut Val,
     vcache: &mut Val,
+    state: &mut RecurrentLayers,
 ) -> Val {
+    if c.layer_mixer(li).is_recurrent() {
+        return recurrent::emit_mamba2_block(b, c, k, lw, li, x, layout, state);
+    }
     if c.parallel_block {
         // Parallel: attention and MLP both read the one input_layernorm output;
         // their results are summed into a single residual (Cohere/Cohere2).
@@ -3014,6 +3058,40 @@ fn decode_scalar_abi_enabled() -> bool {
     }
 }
 
+/// The single-sequence decode key masks: the global causal mask (keys
+/// `s <= cache_len`, additive 0 / -1e30, shape `[S]`) and, for a windowed
+/// config, the local mask.
+fn decode_key_masks(
+    b: &mut Builder,
+    c: &Config,
+    k: &Consts,
+    cache_len: &Val,
+    seq: usize,
+) -> (Val, Option<Val>) {
+    let ii = b.iota(seq);
+    let clen_b = b.broadcast(cache_len, &[], vec![seq]);
+    let valid = b.compare("LE", &ii, &clen_b, "SIGNED");
+    let zeros_s = b.broadcast(&k.zero, &[], vec![seq]);
+    let negs_s = b.broadcast(&k.neg_big, &[], vec![seq]);
+    let kmask = b.select(&valid, &zeros_s, &negs_s);
+    // Gemma2 local (sliding-window) mask (issue #495): a local layer additionally
+    // drops keys older than the window, keeping key s iff `cache_len - s < W`. The
+    // global `kmask` already encodes causality, so anding the window in is one more
+    // `select`: within-window -> keep `kmask`, else force -1e30. Built once and
+    // reused by every local layer; emitted only for a config with a window
+    // (Gemma2), so Llama / Qwen2 stay byte-identical. When `W >= context_capacity`
+    // the predicate is always true, so it is a value
+    // no-op, which is why short-context Gemma2 output is unchanged.
+    let kmask_local = c.sliding_window.map(|w| {
+        let wc = b.const_i32(w as i32);
+        let wb = b.broadcast(&wc, &[], vec![seq]);
+        let age = b.subtract(&clen_b, &ii); // cache_len - s
+        let within = b.compare("LT", &age, &wb, "SIGNED");
+        b.select(&within, &kmask, &negs_s)
+    });
+    (kmask, kmask_local)
+}
+
 /// Emit the single-sequence decode graph, optionally with the native packed
 /// projection dispatch (issue #2889).
 ///
@@ -3027,6 +3105,25 @@ pub fn emit_decode_with_native(
     precision: Precision,
     native: Option<(&str, &str)>,
 ) -> String {
+    emit_decode_impl(c, sample, precision, native, decode_scalar_abi_enabled())
+}
+
+/// The single-sequence logits decode with rank-0 tensor `token`, `pos` and
+/// `cache_len` arguments (the pre-#3060 buffer-view ABI), which a single-entry
+/// auxiliary module can call. The SSM model check (issue #3338) drives the
+/// Mamba2 decode step this way.
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+pub(crate) fn emit_decode_buffer_abi(c: &Config, precision: Precision) -> String {
+    emit_decode_impl(c, false, precision, None, false)
+}
+
+fn emit_decode_impl(
+    c: &Config,
+    sample: bool,
+    precision: Precision,
+    native: Option<(&str, &str)>,
+    scalar_abi: bool,
+) -> String {
     let mut b = Builder::new()
         .with_precision(precision)
         .with_projection_layout(c.projection_layout)
@@ -3034,7 +3131,7 @@ pub fn emit_decode_with_native(
     // Issue #3060: the 1-D decode passes its three scalars in the VM call.
     // M-RoPE keeps the tensor position and therefore the buffer-argument ABI
     // (documented residual staging); the probe stays on/off for the whole step.
-    let scalar_abi = !c.uses_mrope() && decode_scalar_abi_enabled();
+    let scalar_abi = !c.uses_mrope() && scalar_abi;
     let (mut decls, mut a) = build_arg_schema(&mut b, c, scalar_abi);
     // The KV cache lives in two module globals instead of the argument list
     // (issue #3043). The step still emits exactly the same ops, but the cache
@@ -3065,8 +3162,17 @@ pub fn emit_decode_with_native(
         ],
         cache_elt,
     );
-    a.kcache = b.global_load("kcache", cache_ty.clone());
-    a.vcache = b.global_load("vcache", cache_ty.clone());
+    // An attention-free model (issue #3338) has no KV cache at all: no globals,
+    // no `kv_import`, and no cache argument.
+    let has_kv = c.has_kv_cache();
+    if has_kv {
+        a.kcache = b.global_load("kcache", cache_ty.clone());
+        a.vcache = b.global_load("vcache", cache_ty.clone());
+    }
+    // Recurrent state lives in one module global per state tensor, seeded by
+    // `@state_import` once per request, like the KV cache (issue #3338).
+    let state_in = recurrent::load_state_globals(&mut b, c);
+    let mut state = RecurrentLayers::split(&mut b, c, &state_in, None);
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
@@ -3080,7 +3186,11 @@ pub fn emit_decode_with_native(
     let emb = b.reshape(&emb_row, vec![h]);
     let mut x = scale_embedding(&mut b, c, emb, vec![h]);
 
-    let (cos_vec, sin_vec, cos_local, sin_local) = if c.uses_mrope() {
+    // An attention-free config reads no RoPE vector and no key mask; its
+    // `Single` layout carries unread scalar placeholders instead.
+    let (cos_vec, sin_vec, cos_local, sin_local) = if !has_kv {
+        (k.zero.clone(), k.zero.clone(), None, None)
+    } else if c.uses_mrope() {
         let positions = b.reshape(&a.pos, vec![3, 1]);
         let (cos, sin) = mrope_cos_sin(&mut b, c, &positions, 1);
         (
@@ -3090,9 +3200,9 @@ pub fn emit_decode_with_native(
             None,
         )
     } else {
-        let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, rot]);
+        let cos_row = b.dynamic_slice(k.cos_table(), &[&a.pos, &k.c0], vec![1, rot]);
         let cos_vec = b.reshape(&cos_row, vec![rot]);
-        let sin_row = b.dynamic_slice(&k.sin_table, &[&a.pos, &k.c0], vec![1, rot]);
+        let sin_row = b.dynamic_slice(k.sin_table(), &[&a.pos, &k.c0], vec![1, rot]);
         let sin_vec = b.reshape(&sin_row, vec![rot]);
         // Dual-RoPE (Gemma3 / OLMo3): the local-base [rot] vectors for the sliding layers.
         let (cos_local, sin_local) = match (&k.cos_local, &k.sin_local) {
@@ -3109,27 +3219,11 @@ pub fn emit_decode_with_native(
     };
 
     // mask: keys s valid iff s <= cache_len -> additive 0 / -1e30, shape [S]
-    let ii = b.iota(seq);
-    let clen_b = b.broadcast(&a.cache_len, &[], vec![seq]);
-    let valid = b.compare("LE", &ii, &clen_b, "SIGNED");
-    let zeros_s = b.broadcast(&k.zero, &[], vec![seq]);
-    let negs_s = b.broadcast(&k.neg_big, &[], vec![seq]);
-    let kmask = b.select(&valid, &zeros_s, &negs_s);
-    // Gemma2 local (sliding-window) mask (issue #495): a local layer additionally
-    // drops keys older than the window, keeping key s iff `cache_len - s < W`. The
-    // global `kmask` already encodes causality, so anding the window in is one more
-    // `select`: within-window -> keep `kmask`, else force -1e30. Built once and
-    // reused by every local layer; emitted only for a config with a window
-    // (Gemma2), so Llama / Qwen2 stay byte-identical. When `W >= context_capacity`
-    // the predicate is always true, so it is a value
-    // no-op, which is why short-context Gemma2 output is unchanged.
-    let kmask_local = c.sliding_window.map(|w| {
-        let wc = b.const_i32(w as i32);
-        let wb = b.broadcast(&wc, &[], vec![seq]);
-        let age = b.subtract(&clen_b, &ii); // cache_len - s
-        let within = b.compare("LT", &age, &wb, "SIGNED");
-        b.select(&within, &kmask, &negs_s)
-    });
+    let (kmask, kmask_local) = if has_kv {
+        decode_key_masks(&mut b, c, &k, &a.cache_len, seq)
+    } else {
+        (k.zero.clone(), None)
+    };
 
     let layout = AttnLayout::Single {
         adapter_mode: a.adapter_mode.clone(),
@@ -3149,7 +3243,18 @@ pub fn emit_decode_with_native(
         let lw = &a.layers[li];
         // Full transformer layer (attention + MLP, sequential or parallel), shared
         // with the ragged / prefill graphs (issues #494 / #498).
-        x = emit_transformer_layer(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
+        x = emit_transformer_layer(
+            &mut b,
+            c,
+            &k,
+            lw,
+            li,
+            &x,
+            &layout,
+            &mut kcache,
+            &mut vcache,
+            &mut state,
+        );
     }
 
     // --- tail: final norm (+ LayerNorm bias) + LM head (tied embed or untied
@@ -3189,15 +3294,28 @@ pub fn emit_decode_with_native(
     } else {
         ""
     };
-    b.global_store("kcache", &kcache);
-    b.global_store("vcache", &vcache);
+    let (kv_globals, kv_import_entry) = if has_kv {
+        b.global_store("kcache", &kcache);
+        b.global_store("vcache", &vcache);
+        (
+            format!(
+                "  util.global private mutable @kcache : {cache_ty_s}\n  util.global private mutable @vcache : {cache_ty_s}\n"
+            ),
+            format!(
+                "  func.func public @kv_import(%k: {import_ty_s}, %v: {import_ty_s}) {{\n{kv_import_body}    return\n  }}\n"
+            ),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+    for (spec, value) in c.state_tensors().iter().zip(state.join(&mut b, &state_in)) {
+        b.global_store(spec.name, &value);
+    }
+    let (state_globals, state_import_entry) = recurrent::decode_state_entries(c);
     format!(
-        "{alias}module @decode_step {{\n  util.global private mutable @kcache : {cache_ty_s}\n  util.global private mutable @vcache : {cache_ty_s}\n{native}  func.func public @main({sig}) -> {out_ty} {{\n{body}    return {l} : {out_ty}\n  }}\n  func.func public @kv_import(%k: {import_ty_s}, %v: {import_ty_s}) {{\n{kv_import_body}    return\n  }}\n{scalar_inputs_entry}}}\n",
+        "{alias}module @decode_step {{\n{kv_globals}{state_globals}{native}  func.func public @main({sig}) -> {out_ty} {{\n{body}    return {l} : {out_ty}\n  }}\n{kv_import_entry}{state_import_entry}{scalar_inputs_entry}}}\n",
         alias = native.map(|(alias, _)| alias).unwrap_or(""),
         native = native.map(|(_, source)| source).unwrap_or(""),
-        cache_ty_s = cache_ty_s,
-        import_ty_s = import_ty_s,
-        kv_import_body = kv_import_body,
         sig = sig,
         out_ty = out_ty,
         body = b.body(),
@@ -3355,16 +3473,23 @@ fn apply_rope_batched(
 /// Emit the uniform-B batched `decode_step` module text for a static batch size
 /// `bsz`. With `sample`, the graph ends in a per-row on-device argmax and
 /// returns `[B]` token ids; otherwise it returns `[B, V]` logits.
-pub fn emit_decode_batched(c: &Config, bsz: usize, sample: bool) -> String {
+pub fn emit_decode_batched(c: &Config, bsz: usize, sample: bool) -> Result<String, String> {
     emit_decode_batched_with(c, bsz, sample, precision_from_env())
 }
 
+/// The uniform-`B` batched decode. A recurrent-state config is an `Err`
+/// (issue #3338): this validation-only graph has no state contract.
 pub fn emit_decode_batched_with(
     c: &Config,
     bsz: usize,
     sample: bool,
     precision: Precision,
-) -> String {
+) -> Result<String, String> {
+    c.reject_recurrent("uniform batched decode")?;
+    Ok(emit_decode_batched_impl(c, bsz, sample, precision))
+}
+
+fn emit_decode_batched_impl(c: &Config, bsz: usize, sample: bool, precision: Precision) -> String {
     assert!(
         c.mla.is_none(),
         "uniform lockstep decode does not support MLA; use ragged decode"
@@ -3396,9 +3521,9 @@ pub fn emit_decode_batched_with(
         let (cos, sin) = mrope_cos_sin(&mut b, c, &positions, 1);
         (b.reshape(&cos, vec![d]), b.reshape(&sin, vec![d]))
     } else {
-        let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, d]);
+        let cos_row = b.dynamic_slice(k.cos_table(), &[&a.pos, &k.c0], vec![1, d]);
         let cos_vec = b.reshape(&cos_row, vec![d]);
-        let sin_row = b.dynamic_slice(&k.sin_table, &[&a.pos, &k.c0], vec![1, d]);
+        let sin_row = b.dynamic_slice(k.sin_table(), &[&a.pos, &k.c0], vec![1, d]);
         let sin_vec = b.reshape(&sin_row, vec![d]);
         (cos_vec, sin_vec)
     };
@@ -3708,7 +3833,7 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
 /// Emit the ragged (continuous-batching) `decode_step` module for a static batch
 /// size `bsz`. With `sample`, ends in a per-row on-device argmax returning `[B]`
 /// token ids; otherwise returns `[B, V]` logits.
-pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> String {
+pub fn emit_decode_ragged(c: &Config, bsz: usize, sample: bool) -> Result<String, String> {
     emit_decode_ragged_with(c, bsz, sample, precision_from_env())
 }
 
@@ -3717,7 +3842,7 @@ pub fn emit_decode_ragged_with(
     bsz: usize,
     sample: bool,
     precision: Precision,
-) -> String {
+) -> Result<String, String> {
     emit_decode_ragged_with_native(c, bsz, sample, precision, None)
 }
 
@@ -3729,7 +3854,20 @@ pub fn emit_decode_ragged_with(
 /// packed and the rank-2 calls go through the multi-row exports, which reduce
 /// every activation row against one weight read; when it is absent the graph is
 /// the same f16 one emitted before this issue.
+///
+/// A recurrent-state config is an `Err` until per-slot state lands (#3340).
 pub fn emit_decode_ragged_with_native(
+    c: &Config,
+    bsz: usize,
+    sample: bool,
+    precision: Precision,
+    native: Option<(&str, &str)>,
+) -> Result<String, String> {
+    c.reject_recurrent("ragged decode")?;
+    Ok(emit_decode_ragged_impl(c, bsz, sample, precision, native))
+}
+
+fn emit_decode_ragged_impl(
     c: &Config,
     bsz: usize,
     sample: bool,
@@ -3764,8 +3902,8 @@ pub fn emit_decode_ragged_with_native(
         (cos, sin, None, None)
     } else {
         let pos_idx = b.reshape(&a.pos, vec![bsz, 1]);
-        let cos = b.gather(&k.cos_table, &pos_idx); // [B, d]
-        let sin = b.gather(&k.sin_table, &pos_idx); // [B, d]
+        let cos = b.gather(k.cos_table(), &pos_idx); // [B, d]
+        let sin = b.gather(k.sin_table(), &pos_idx); // [B, d]
         // Dual-RoPE (Gemma3 / OLMo3): per-row local-base gathers for the sliding layers.
         let (cos_local, sin_local) = match (&k.cos_local, &k.sin_local) {
             (Some(ct), Some(st)) => (Some(b.gather(ct, &pos_idx)), Some(b.gather(st, &pos_idx))),
@@ -3815,12 +3953,24 @@ pub fn emit_decode_ragged_with_native(
     };
 
     let mut kcache = a.kcache.clone();
+    let mut state = RecurrentLayers::none();
     let mut vcache = a.vcache.clone();
 
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
         // Full transformer layer, shared with the single / prefill graphs.
-        x = emit_transformer_layer(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
+        x = emit_transformer_layer(
+            &mut b,
+            c,
+            &k,
+            lw,
+            li,
+            &x,
+            &layout,
+            &mut kcache,
+            &mut vcache,
+            &mut state,
+        );
     }
 
     let final_w = norm_w(&mut b, &a.final_norm, c, &k, h);
@@ -4238,17 +4388,27 @@ pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> Stri
 /// Emit the distinct prefill-from-embeddings StableHLO module at the ambient
 /// precision. The input hidden states are already post-token-embedding-scale;
 /// this entry performs neither a token gather nor [`scale_embedding`].
-pub(crate) fn emit_prefill_embeddings(c: &Config, sample: bool) -> String {
+pub(crate) fn emit_prefill_embeddings(c: &Config, sample: bool) -> Result<String, String> {
     emit_prefill_embeddings_with(c, sample, precision_from_env())
 }
 
 /// Emit `prefill_embeddings.main` at an explicit contraction precision.
+///
+/// A recurrent-state config is an `Err` (issue #3338): the embeddings entry has
+/// no state contract.
 pub(crate) fn emit_prefill_embeddings_with(
     c: &Config,
     sample: bool,
     precision: Precision,
-) -> String {
-    emit_prefill_module(c, sample, precision, PrefillInputKind::Embeddings, false)
+) -> Result<String, String> {
+    c.reject_recurrent("embeddings prefill")?;
+    Ok(emit_prefill_module(
+        c,
+        sample,
+        precision,
+        PrefillInputKind::Embeddings,
+        false,
+    ))
 }
 
 /// Emit the optional sparse DeepStack embeddings-prefill entry.
@@ -4260,13 +4420,20 @@ pub(crate) fn emit_prefill_embeddings_deepstack_with(
     c: &Config,
     sample: bool,
     precision: Precision,
-) -> String {
+) -> Result<String, String> {
+    c.reject_recurrent("DeepStack embeddings prefill")?;
     c.deepstack
         .as_ref()
         .expect("DeepStack prefill requires a declared schema")
         .validate(c.n_layers, c.context_capacity)
         .expect("invalid DeepStack schema");
-    emit_prefill_module(c, sample, precision, PrefillInputKind::DeepStack, false)
+    Ok(emit_prefill_module(
+        c,
+        sample,
+        precision,
+        PrefillInputKind::DeepStack,
+        false,
+    ))
 }
 
 /// Emit the full DeepStack prefill plus post-hook hidden states for oracle tests.
@@ -4276,13 +4443,20 @@ pub(crate) fn emit_prefill_embeddings_deepstack_with(
 pub(crate) fn emit_prefill_embeddings_deepstack_diagnostics_with(
     c: &Config,
     precision: Precision,
-) -> String {
+) -> Result<String, String> {
+    c.reject_recurrent("DeepStack diagnostics prefill")?;
     c.deepstack
         .as_ref()
         .expect("DeepStack diagnostics require a declared schema")
         .validate(c.n_layers, c.context_capacity)
         .expect("invalid DeepStack schema");
-    emit_prefill_module(c, false, precision, PrefillInputKind::DeepStack, true)
+    Ok(emit_prefill_module(
+        c,
+        false,
+        precision,
+        PrefillInputKind::DeepStack,
+        true,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4374,7 +4548,17 @@ fn emit_prefill_module(
     let mut b = Builder::new()
         .with_precision(precision)
         .with_projection_layout(c.projection_layout);
-    let (decls, a) = build_prefill_arg_schema(&mut b, c, lp, input_kind);
+    let (mut decls, a) = build_prefill_arg_schema(&mut b, c, lp, input_kind);
+    // Recurrent state inputs follow `real_len`, one per state tensor at its
+    // per-sequence shape (issue #3338). Only the token entry threads state; the
+    // embeddings entries reject recurrent configs before reaching here.
+    assert!(
+        matches!(input_kind, PrefillInputKind::Tokens) || !c.has_recurrent_state(),
+        "only the token prefill threads recurrent state"
+    );
+    let mut next_arg = decls.len();
+    let state_in = recurrent::take_state_args(&mut decls, &mut next_arg, c);
+    let has_kv = c.has_kv_cache();
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
@@ -4395,13 +4579,17 @@ fn emit_prefill_module(
     };
 
     // --- shared position preparation ---
-    let (cos, sin, cos_local, sin_local) = if c.uses_mrope() {
+    // An attention-free config reads neither RoPE nor a mask; its `Prefill`
+    // layout carries unread scalar placeholders instead.
+    let (cos, sin, cos_local, sin_local) = if !has_kv {
+        (k.zero.clone(), k.zero.clone(), None, None)
+    } else if c.uses_mrope() {
         let (cos, sin) = mrope_cos_sin(&mut b, c, &a.positions, lp);
         (cos, sin, None, None)
     } else {
         let pos_idx = b.reshape(&a.positions, vec![lp, 1]);
-        let cos = b.gather(&k.cos_table, &pos_idx); // [Lp, d]
-        let sin = b.gather(&k.sin_table, &pos_idx); // [Lp, d]
+        let cos = b.gather(k.cos_table(), &pos_idx); // [Lp, d]
+        let sin = b.gather(k.sin_table(), &pos_idx); // [Lp, d]
         // Dual-RoPE (Gemma3 / OLMo3): per-position local-base gathers for sliding layers.
         let (cos_local, sin_local) = match (&k.cos_local, &k.sin_local) {
             (Some(ct), Some(st)) => (Some(b.gather(ct, &pos_idx)), Some(b.gather(st, &pos_idx))),
@@ -4417,6 +4605,7 @@ fn emit_prefill_module(
     // either base mask, preserving the architecture invariant without changing
     // multimodal/global visibility.
     let (cmask, cmask_local) = match &a.input {
+        PrefillInput::Tokens(_) if !has_kv => (k.zero.clone(), None),
         PrefillInput::Tokens(_) => {
             // causal mask [Lp, Lp]: query i attends key j iff j <= i -> additive 0/-1e30
             let irow = b.iota(lp);
@@ -4488,14 +4677,32 @@ fn emit_prefill_module(
     };
 
     // caches start as zeros; prefill writes the [0:Lp] block and returns them
-    let mut kcache = b.broadcast(&k.zero, &[], vec![c.n_layers, lp, nkv, d]);
-    let mut vcache = b.broadcast(&k.zero, &[], vec![c.n_layers, lp, nkv, d]);
+    let (mut kcache, mut vcache) = if has_kv {
+        (
+            b.broadcast(&k.zero, &[], vec![c.n_layers, lp, nkv, d]),
+            b.broadcast(&k.zero, &[], vec![c.n_layers, lp, nkv, d]),
+        )
+    } else {
+        (k.zero.clone(), k.zero.clone())
+    };
+    let mut state = RecurrentLayers::split(&mut b, c, &state_in, Some(a.real_len.clone()));
     let mut deepstack_states: Option<Val> = None;
 
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
         // Full transformer layer, shared with the single / ragged graphs.
-        x = emit_transformer_layer(&mut b, c, &k, lw, li, &x, &layout, &mut kcache, &mut vcache);
+        x = emit_transformer_layer(
+            &mut b,
+            c,
+            &k,
+            lw,
+            li,
+            &x,
+            &layout,
+            &mut kcache,
+            &mut vcache,
+            &mut state,
+        );
         if let (Some(schema), PrefillInput::DeepStack(deepstack)) = (&c.deepstack, &a.input) {
             x = apply_deepstack_after_layer(
                 &mut b,
@@ -4562,6 +4769,24 @@ fn emit_prefill_module(
             kc = kcache.name,
             vc = vcache.name,
             states = states.name,
+        )
+    } else if !has_kv || !state_in.is_empty() {
+        // Issue #3338: the KV caches only when the model has attention, then
+        // one result per state tensor in `Config::state_tensors` order.
+        let mut results = vec![(out_val, out_ty)];
+        if has_kv {
+            results.push((kcache.name.clone(), cache_ty.clone()));
+            results.push((vcache.name.clone(), cache_ty.clone()));
+        }
+        for value in state.join(&mut b, &state_in) {
+            results.push((value.name.clone(), value.ty.render()));
+        }
+        let (names, tys): (Vec<String>, Vec<String>) = results.into_iter().unzip();
+        let tys = tys.join(", ");
+        format!(
+            "module @{module_name} {{\n  func.func public @main({sig}) -> ({tys}) {{\n{body}    return {names} : {tys}\n  }}\n}}\n",
+            body = b.body(),
+            names = names.join(", "),
         )
     } else {
         format!(

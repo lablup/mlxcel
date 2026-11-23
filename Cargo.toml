@@ -551,6 +551,13 @@ required-features = ["xla-iree"]
 name = "xla_ssm_probe"
 required-features = ["xla-iree"]
 
+# Whole-model Mamba2 prefill vs the HF fp32 oracle (#3338): loads a checkpoint
+# through the production config and weight loader and runs the state-threaded
+# prefill whole and split in two through the IREE shim.
+[[example]]
+name = "xla_ssm_model_check"
+required-features = ["xla-iree"]
+
 # Bounded canonical-decomposition vs emitted IREE operator probes. The root
 # example owns the static IREE runtime link recipe, while the reusable harness
 # remains in mlxcel-xla behind the CPU-capable micro-oracle feature.

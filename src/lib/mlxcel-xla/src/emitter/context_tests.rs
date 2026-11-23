@@ -31,9 +31,9 @@ fn tiny_config(context_capacity: usize) -> Config {
 fn assert_capacity_shapes(context_capacity: usize) {
     let cfg = tiny_config(context_capacity);
     let prefill = emit_prefill(&cfg, false);
-    let embeddings_prefill = emit_prefill_embeddings(&cfg, false);
+    let embeddings_prefill = emit_prefill_embeddings(&cfg, false).unwrap();
     let decode = emit_decode(&cfg, false);
-    let ragged = emit_decode_ragged(&cfg, 4, false);
+    let ragged = emit_decode_ragged(&cfg, 4, false).unwrap();
     let single_cache = format!("tensor<2x{context_capacity}x1x4xf32>");
     let batch_cache = format!("tensor<4x2x{context_capacity}x1x4xf32>");
     let prompt = format!("tensor<{context_capacity}xi32>");

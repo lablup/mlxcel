@@ -42,6 +42,8 @@
 //! are rejected rather than mis-emitted.
 
 use super::builder::ProjectionLayout;
+pub use super::recurrent_config::{MixerKind, StateElem, StateTensorSpec};
+use super::recurrent_config::{mamba2_from_json, quote_non_finite_json};
 
 /// How the RoPE inverse-frequency table is computed. Both kinds share the
 /// `outer(pos, inv_freq)` table build (see [`rope`](super::rope)); they differ
@@ -179,6 +181,9 @@ pub enum WeightScheme {
     /// Molmo v1's OLMo-style decoder layout under `language_model.model`, with
     /// fused `att_proj` QKV and fused `ff_proj` gate/up projections.
     Molmo,
+    /// HF `Mamba2ForCausalLM` names (`backbone.embeddings`, `backbone.layers.{i}.norm`
+    /// and `.mixer.*`, `backbone.norm_f`, issue #3338). MLX conversions keep them.
+    Mamba2,
 }
 
 /// MLX affine weight quantization (`config.json` `quantization`). The linear /
@@ -631,6 +636,12 @@ pub struct Config {
     /// `packed_args`, and reads it again for the upload dtype, so the declared
     /// arg and the uploaded buffer share one source. f16 everywhere else.
     pub quant_scale_dtype: super::QuantScaleDtype,
+    /// The selective state-space mixer parameters (`Some` for a model with a
+    /// Mamba2 layer, epic #564); `None` for every attention-only family.
+    pub ssm: Option<SsmConfig>,
+    /// The mixer of each layer (`len == n_layers`); `[Attention; n_layers]` for
+    /// every attention-only family. Read through [`Config::layer_mixer`].
+    pub layer_mixers: Vec<MixerKind>,
 }
 
 impl Config {
@@ -695,6 +706,8 @@ impl Config {
             packed_args: false,
             native_head: false,
             quant_scale_dtype: super::QuantScaleDtype::F16,
+            ssm: None,
+            layer_mixers: vec![MixerKind::Attention; 16],
         }
     }
 
@@ -712,8 +725,15 @@ impl Config {
     /// a `rope_scaling` whose `rope_type` is not `llama3` (e.g. yarn), or MiniCPM3's
     /// MLA attention.
     pub fn from_json_str(s: &str) -> Result<Self, String> {
-        let root: serde_json::Value =
-            serde_json::from_str(s).map_err(|e| format!("parse config.json: {e}"))?;
+        // HF writes Python's bare `Infinity` into some configs (Mamba2's
+        // `time_step_limit`); quote it only when the strict parse fails, so
+        // every other config is parsed from its unchanged text.
+        let root: serde_json::Value = serde_json::from_str(s)
+            .or_else(|error| match quote_non_finite_json(s) {
+                Some(quoted) => serde_json::from_str(&quoted),
+                None => Err(error),
+            })
+            .map_err(|e| format!("parse config.json: {e}"))?;
         let wrapper_model_type = root.get("model_type").and_then(serde_json::Value::as_str);
         let is_phi4mm = wrapper_model_type == Some("phi4mm");
         let is_molmo2 = wrapper_model_type == Some("molmo2");
@@ -844,6 +864,12 @@ impl Config {
                 })
             }
         };
+
+        // Mamba2 (issue #3338) has no attention fields at all; its config is
+        // built by its own reader.
+        if model_type == Some("mamba2") {
+            return mamba2_from_json(&v, quantization);
+        }
 
         let u = |k: &str| -> Result<usize, String> {
             v.get(k)
@@ -1831,6 +1857,8 @@ impl Config {
             packed_args: false,
             native_head: false,
             quant_scale_dtype: super::QuantScaleDtype::F16,
+            ssm: None,
+            layer_mixers: vec![MixerKind::Attention; n_layers],
         })
     }
 
@@ -1838,7 +1866,9 @@ impl Config {
     pub fn from_json(model_dir: &std::path::Path) -> Result<Self, String> {
         let p = model_dir.join("config.json");
         let s = std::fs::read_to_string(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
-        Self::from_json_str(&s).map_err(|e| format!("{}: {e}", p.display()))
+        let config = Self::from_json_str(&s).map_err(|e| format!("{}: {e}", p.display()))?;
+        config.validate_recurrent_checkpoint(model_dir)?;
+        Ok(config)
     }
 
     /// Select the static sequence shape used by all emitted graphs and caches.
@@ -1850,8 +1880,9 @@ impl Config {
         Ok(self)
     }
 
+    /// Query heads per KV head; 0 for an attention-free config (no KV heads).
     pub fn group(&self) -> usize {
-        self.n_q / self.n_kv
+        self.n_q.checked_div(self.n_kv).unwrap_or(0)
     }
 
     /// Whether the issue #516 packed in-graph dequant path can apply: an MLX
@@ -1867,6 +1898,9 @@ impl Config {
             && !self.dense_mlp
             && self.moe.is_none()
             && self.mla.is_none()
+            // The SSM mixer contracts in_proj / out_proj with the sequence
+            // helpers, which have no single-row native path (issue #3338).
+            && self.ssm.is_none()
     }
 
     /// Whether the checkpoint's packing matches the native ROCm GEMV kernel

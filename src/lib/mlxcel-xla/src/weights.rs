@@ -178,11 +178,41 @@ fn push_phi4_lora_pair(out: &mut Vec<WeightSpec>, stem: &str, adapter: &str) {
     out.push(WeightSpec::Proj(format!("{stem}.lora_B.{adapter}.weight")));
 }
 
+/// One Mamba2 layer's tensors (issue #3338), in exactly the order
+/// `take_ssm_layer_weights` (`emitter/model_recurrent.rs`) declares them: the
+/// block norm, then the mixer's in_proj (+ bias), conv1d weight (+ bias),
+/// dt_bias, A_log, D, gated-norm weight, and out_proj (+ bias). The two
+/// projections go through [`push_proj`] like every other linear weight, so the
+/// packed and f16-resident paths line up with `take_weight`.
+fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant: bool) {
+    let ssm = cfg
+        .ssm
+        .as_ref()
+        .expect("a recurrent layer implies an SsmConfig");
+    let m = format!("{p}mixer.");
+    out.push(WeightSpec::Whole(format!("{p}norm.weight")));
+    push_proj(out, format!("{m}in_proj.weight"), quant);
+    if ssm.use_bias {
+        out.push(WeightSpec::Whole(format!("{m}in_proj.bias")));
+    }
+    out.push(WeightSpec::Whole(format!("{m}conv1d.weight")));
+    if ssm.use_conv_bias {
+        out.push(WeightSpec::Whole(format!("{m}conv1d.bias")));
+    }
+    for name in ["dt_bias", "A_log", "D", "norm.weight"] {
+        out.push(WeightSpec::Whole(format!("{m}{name}")));
+    }
+    push_proj(out, format!("{m}out_proj.weight"), quant);
+    if ssm.use_bias {
+        out.push(WeightSpec::Whole(format!("{m}out_proj.bias")));
+    }
+}
+
 /// [`weight_specs`] with the packed-path decision passed explicitly (so it is
 /// testable without the `MLXCEL_XLA_QUANT` env). `quant` already folds in
 /// [`Config::supports_packed_quant`], so it is `true` only for the standard Llama
 /// layout; the fused / dense / MoE branches below are therefore never quantized.
-fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
+pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     let s = crate::weight_names::scheme_names(cfg.weight_scheme);
     let hd = cfg.head_dim;
     let nq = cfg.n_q * hd;
@@ -230,6 +260,11 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     }
     for i in 0..cfg.n_layers {
         let p = format!("{}{i}.", s.layer_stem);
+        // A recurrent (Mamba2) layer has its own tensor list (issue #3338).
+        if cfg.layer_mixer(i).is_recurrent() {
+            push_ssm_layer_specs(&mut out, cfg, &p, quant);
+            continue;
+        }
         // A MoE layer (issue #500) takes no dense MLP weights (down/gate/up); its
         // expert bank is appended after the attention weights / norms instead.
         let moe_layer = cfg.is_moe_layer(i);

@@ -81,6 +81,27 @@ scripts/rocm_gpu_guard.sh --hold -- spike/openxla/ssm_gate.sh "$WORK/gate"
 scripts/rocm_gpu_guard.sh --hold -- $PY spike/openxla/ssm_lowering_measure.py --out "$WORK/measure"
 ```
 
+## Mamba2 whole-model check (issue #3338)
+
+`ssm_model_check.py` runs the state-threaded token prefill of a whole Mamba2
+checkpoint (production config reader and weight loader, through
+`examples/xla_ssm_model_check.rs`) against HF `Mamba2ForCausalLM` in fp32.
+Each run prefills the prompt once whole and once split in two calls that hand
+the returned state on, and once token by token through the decode step, and requires all three last-token logits within 3e-2 of HF
+with the same argmax.
+
+```bash
+scripts/rocm_gpu_guard.sh --hold -- cargo build --release --features xla-iree --example xla_ssm_model_check
+# a seeded synthetic model: 2 layers, n_groups 2 < 8 heads, biased projections, untied head
+$PY spike/openxla/ssm_model_check.py --synthetic "$WORK/synth" --out "$WORK/synth-cpu" --device local-task
+# AntonV/mamba2-130m-hf on hip, crossing a chunk boundary
+scripts/rocm_gpu_guard.sh --hold -- $PY spike/openxla/ssm_model_check.py \
+    --model models/hf/mamba2-130m --out "$WORK/130m-hip" --device hip --capacity 256 --tokens 200
+# compile times of the prefill and decode graphs (uncached)
+scripts/rocm_gpu_guard.sh --hold -- target/release/examples/xla_ssm_model_check \
+    --model models/hf/mamba2-130m --device hip --capacity 256 --compile-times "$WORK/compile-hip"
+```
+
 ## Run
 
 ```bash

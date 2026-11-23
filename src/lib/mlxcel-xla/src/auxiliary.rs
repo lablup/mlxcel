@@ -99,13 +99,13 @@ impl AuxiliaryTensorDType {
 #[allow(dead_code)]
 pub(crate) enum AuxiliaryWeightDType {
     Float32,
-    // Constructed only by `numeric_probe.rs`, which is behind the
-    // `micro-oracle` feature, while `ffi_code` / `size_bytes` below must keep
+    // `Uint32` is constructed only by `numeric_probe.rs` (`micro-oracle`) and
+    // `Float16` also by the `iree`-gated SSM model check, while `ffi_code` / `size_bytes` below must keep
     // mapping them for the FFI contract on every build. Allowed rather than
     // cfg-gated: gating the variants would force a `cfg` on each arm of those
     // two matches, including the `Float32 | Uint32` arm, and leave two shapes
     // of the same enum to keep in step.
-    #[cfg_attr(not(feature = "micro-oracle"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "micro-oracle", feature = "iree")), allow(dead_code))]
     Float16,
     #[cfg_attr(not(feature = "micro-oracle"), allow(dead_code))]
     Uint32,

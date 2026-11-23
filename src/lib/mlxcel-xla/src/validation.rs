@@ -82,12 +82,14 @@ pub(crate) enum GraphKind {
 }
 
 impl GraphKind {
-    /// Emit this graph for `cfg`, at the ambient `MLXCEL_XLA_PRECISION`.
-    fn emit(self, cfg: &Config) -> String {
+    /// Emit this graph for `cfg`, at the ambient `MLXCEL_XLA_PRECISION`. A
+    /// graph kind with no recurrent-state contract is an `Err` for a
+    /// recurrent config (issue #3338).
+    fn emit(self, cfg: &Config) -> Result<String, String> {
         match self {
-            GraphKind::Prefill { sample } => emit_prefill(cfg, sample),
+            GraphKind::Prefill { sample } => Ok(emit_prefill(cfg, sample)),
             GraphKind::PrefillEmbeddings { sample } => emit_prefill_embeddings(cfg, sample),
-            GraphKind::Decode { sample } => emit_decode(cfg, sample),
+            GraphKind::Decode { sample } => Ok(emit_decode(cfg, sample)),
             GraphKind::DecodeRagged { b_max, sample } => emit_decode_ragged(cfg, b_max, sample),
             GraphKind::DecodeBatched { b_max, sample } => emit_decode_batched(cfg, b_max, sample),
         }
@@ -146,11 +148,10 @@ impl ArchFixture {
     pub fn emit_all(&self) -> Result<Vec<(&'static str, String)>, String> {
         let cfg =
             Config::from_json_str(self.config_json).map_err(|e| format!("{}: {e}", self.arch))?;
-        Ok(self
-            .graphs
+        self.graphs
             .iter()
-            .map(|g| (g.golden_name, g.kind.emit(&cfg)))
-            .collect())
+            .map(|g| Ok((g.golden_name, g.kind.emit(&cfg)?)))
+            .collect()
     }
 }
 
@@ -165,7 +166,7 @@ pub(crate) fn emit_graphs(
     kinds: &[GraphKind],
 ) -> Result<Vec<(GraphKind, String)>, String> {
     let cfg = Config::from_json_str(config_json)?;
-    Ok(kinds.iter().map(|&k| (k, k.emit(&cfg))).collect())
+    kinds.iter().map(|&k| Ok((k, k.emit(&cfg)?))).collect()
 }
 
 /// The first line at which two MLIR texts differ (1-based), with both sides, so a
@@ -286,14 +287,14 @@ pub(crate) fn check_arch(fx: &ArchFixture) -> Result<ArchReport, String> {
         .graphs
         .iter()
         .map(|g| {
-            let emitted = g.kind.emit(&cfg);
-            GraphOutcome {
+            let emitted = g.kind.emit(&cfg)?;
+            Ok(GraphOutcome {
                 kind: g.kind,
                 golden_name: g.golden_name,
                 diff: first_line_diff(g.golden, &emitted),
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(ArchReport {
         arch: fx.arch,
         graphs,
@@ -745,8 +746,8 @@ mod tests {
                 ),
                 (
                     "ragged",
-                    emit_decode_ragged(&fam, 4, false),
-                    emit_decode_ragged(&refc, 4, false),
+                    emit_decode_ragged(&fam, 4, false).unwrap(),
+                    emit_decode_ragged(&refc, 4, false).unwrap(),
                 ),
             ];
             for (name, got, want) in pairs {
