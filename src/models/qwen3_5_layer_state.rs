@@ -73,16 +73,21 @@ impl<'a> LentCaches<'a> {
                 layer.storage_name()
             ));
         }
+        // A recurrent layer keeps its (now empty) slot table in place while
+        // the tensors are lent, so returning them allocates nothing per
+        // layer and step.
         let caches = state
             .iter_mut()
-            .map(|layer| match std::mem::replace(layer, LayerState::Empty) {
-                LayerState::Kv(kv) => Qwen3NextCache::Attention(kv),
-                LayerState::Recurrent(mut recurrent) => Qwen3NextCache::Linear(GatedDeltaCache {
+            .map(|layer| match layer {
+                LayerState::Recurrent(recurrent) => Qwen3NextCache::Linear(GatedDeltaCache {
                     conv_state: recurrent.take(RECURRENT_SLOTS[0]),
                     state_cache: recurrent.take(RECURRENT_SLOTS[1]),
                     offset: recurrent.offset,
                 }),
-                _ => unreachable!("every layer was checked above"),
+                _ => match std::mem::replace(layer, LayerState::Empty) {
+                    LayerState::Kv(kv) => Qwen3NextCache::Attention(kv),
+                    _ => unreachable!("every layer was checked above"),
+                },
             })
             .collect();
         Ok(Self { state, caches })
@@ -119,7 +124,15 @@ impl DerefMut for LentCaches<'_> {
 impl Drop for LentCaches<'_> {
     fn drop(&mut self) {
         for (layer, cache) in self.state.iter_mut().zip(self.caches.drain(..)) {
-            *layer = into_layer_state(cache);
+            match (layer, cache) {
+                // Back into the slot table `take` left in place.
+                (LayerState::Recurrent(recurrent), Qwen3NextCache::Linear(delta)) => {
+                    recurrent.put(RECURRENT_SLOTS[0], delta.conv_state);
+                    recurrent.put(RECURRENT_SLOTS[1], delta.state_cache);
+                    recurrent.offset = delta.offset;
+                }
+                (layer, cache) => *layer = into_layer_state(cache),
+            }
         }
     }
 }
