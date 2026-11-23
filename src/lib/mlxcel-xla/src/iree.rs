@@ -1987,8 +1987,35 @@ fn merge_gemma3n_name_scheme(
     }
 }
 
+/// Resolve one shard file name from `model.safetensors.index.json` inside
+/// `model_dir`. The index comes from an untrusted checkpoint, so a name must be
+/// a single plain file name: an absolute path, a `..` component or a nested
+/// path would let it point the loader at a file outside the model directory.
+/// This matches `validate_index_shards` in `mlxcel-core`.
+pub(crate) fn index_shard_path(
+    model_dir: &Path,
+    index: &Path,
+    file: &str,
+) -> Result<PathBuf, String> {
+    let relative = Path::new(file);
+    let plain = !file.contains('\0')
+        && matches!(
+            relative.components().collect::<Vec<_>>().as_slice(),
+            [std::path::Component::Normal(_)]
+        );
+    if !plain {
+        return Err(format!(
+            "{} names shard {file:?}; shard names must be plain file names inside the model \
+             directory",
+            index.display()
+        ));
+    }
+    Ok(model_dir.join(relative))
+}
+
 fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let index = model_dir.join("model.safetensors.index.json");
+    let mut hostile_index = false;
     let indexed = std::fs::read_to_string(&index)
         .map_err(|error| format!("read {}: {error}", index.display()))
         .and_then(|text| {
@@ -2001,8 +2028,9 @@ fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String>
             let mut paths = weight_map
                 .values()
                 .filter_map(serde_json::Value::as_str)
-                .map(|file| model_dir.join(file))
-                .collect::<Vec<_>>();
+                .map(|file| index_shard_path(model_dir, &index, file))
+                .collect::<Result<Vec<_>, _>>()
+                .inspect_err(|_| hostile_index = true)?;
             paths.sort();
             paths.dedup();
             if paths.is_empty() || paths.iter().any(|path| !path.is_file()) {
@@ -2015,6 +2043,9 @@ fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String>
         });
     let indexed_error = match indexed {
         Ok(paths) => return Ok(paths),
+        // A traversal entry is a hostile index, not a stale one: fail the load
+        // rather than quietly scanning the directory instead.
+        Err(error) if hostile_index => return Err(error),
         Err(error) => error,
     };
     let mut actual: Vec<PathBuf> = std::fs::read_dir(model_dir)
@@ -2274,6 +2305,53 @@ mod checkpoint_name_tests {
             vec![first, second]
         );
         std::fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    /// The shard probe (issue #603) and the loader read the index of an
+    /// untrusted checkpoint, so a shard name must not leave the model directory.
+    #[test]
+    fn candidate_shards_reject_index_names_outside_the_model_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "mlxcel-xla-traversal-index-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("model");
+        std::fs::create_dir_all(model_dir.join("nested")).unwrap();
+        let outside = root.join("outside.safetensors");
+        std::fs::write(&outside, []).unwrap();
+        std::fs::write(model_dir.join("nested/inner.safetensors"), []).unwrap();
+        std::fs::write(model_dir.join("model-00001-of-00001.safetensors"), []).unwrap();
+        let outside_text = outside.to_str().unwrap().to_string();
+        for hostile in [
+            "../outside.safetensors",
+            outside_text.as_str(),
+            "nested/inner.safetensors",
+            "./../outside.safetensors",
+        ] {
+            std::fs::write(
+                model_dir.join("model.safetensors.index.json"),
+                serde_json::json!({
+                    "weight_map": {
+                        "model.embed_tokens.weight": "model-00001-of-00001.safetensors",
+                        "model.norm.weight": hostile
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let error = checkpoint_candidate_shards(&model_dir).unwrap_err();
+            assert!(error.contains("plain file names"), "{hostile}: {error}");
+        }
+        let index = model_dir.join("model.safetensors.index.json");
+        assert_eq!(
+            index_shard_path(&model_dir, &index, "model-00001-of-00001.safetensors").unwrap(),
+            model_dir.join("model-00001-of-00001.safetensors")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
