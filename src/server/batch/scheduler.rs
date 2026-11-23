@@ -565,6 +565,23 @@ impl BatchScheduler {
             slice = job.slices,
         )
         .entered();
+        // A Qwen 3.5 slice runs over the layer state the pool holds for its
+        // sequence (issue #3254). Slice 0 checked it; if the entry lost it
+        // since, fail the request instead of letting the adapter panic.
+        if matches!(
+            self.engine.model(),
+            LoadedModel::Qwen35(_)
+                | LoadedModel::Qwen35Moe(_)
+                | LoadedModel::Qwen35VLM(_)
+                | LoadedModel::Qwen35MoeVLM(_)
+        ) && self.engine.pool().layer_state(job.seq.seq_id).is_none()
+        {
+            self.fail_inflight_slice_job(
+                *job,
+                "MTP slice: the sequence holds no scheduler-owned layer state",
+            );
+            return;
+        }
         let (model, pool) = self.engine.parts_mut();
         let stepped = match model {
             LoadedModel::Gemma4(wrapper) => {

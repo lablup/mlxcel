@@ -28,11 +28,17 @@ use crate::server::prompt_cache::state_snapshot;
 
 impl<M: LanguageModel> LanguageModel for Pooled<M> {
     /// Open a fresh pool sequence for `seq`, dropping any earlier one.
+    ///
+    /// Only the pool entry is dropped. The model's own per-sequence side
+    /// state (Qwen 3.5's MRoPE positions, installed before this call) stays,
+    /// as the model-owned prepare left it.
     fn prepare_sequence_state(&self, seq: SequenceId) {
         if !self.scheduler_owned {
             return self.model.prepare_sequence_state(seq);
         }
-        self.release_sequence_state_by_id(seq);
+        if let Some(id) = self.ids.borrow_mut().remove(&seq) {
+            self.pool.borrow_mut().release(id);
+        }
         self.model.prepare_sequence_state(seq);
         let _ = self.pool_id(seq);
     }

@@ -113,6 +113,21 @@ fn a_sequence_id_on_the_kv_slice_entry_is_refused() {
         bare.forward_with_sequence_id(&input, Some(SequenceId::from_raw(SEQ_BASE)), &mut [], None);
 }
 
+#[test]
+#[should_panic(expected = "Gemma 3 state is scheduler-owned")]
+fn a_sequence_id_on_the_batched_kv_slice_entry_is_refused() {
+    let model = build_wrapper();
+    let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+    // Without the refusal the trait default would drop the ids and run both
+    // rows on the one fallback slot.
+    let bare: &Gemma3Wrapper = &model;
+    let seq_ids = [
+        SequenceId::from_raw(SEQ_BASE),
+        SequenceId::from_raw(SEQ_BASE + 1),
+    ];
+    let _ = bare.forward_batched_with_ids(&input, Some(&seq_ids), &mut [&mut [], &mut []], None);
+}
+
 /// Prefill `prompt_len` tokens in `partition`, snapshot, restore into a fresh
 /// sequence and compare 16 decode steps with a cold run of the same
 /// partition.

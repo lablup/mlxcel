@@ -2057,6 +2057,23 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         logits
     }
 
+    /// Scheduler rows carry their state through `forward_layer_state`. The
+    /// trait default would drop the ids and run every row on the shared
+    /// fallback slot, so a caller with ids is refused like the single-row
+    /// entries. Without ids the default's row-by-row fallback forward stays.
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        if let Some(&seq_id) = seq_ids.and_then(|ids| ids.first()) {
+            Self::refuse_sequence_id(seq_id);
+        }
+        self.forward_batched(input_ids, batch_caches, mask)
+    }
+
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![0, 1, 106] // Gemma3: <pad> (0), <eos> (1), <end_of_turn> (106)
     }
