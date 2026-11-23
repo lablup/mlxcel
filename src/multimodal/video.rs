@@ -1572,6 +1572,65 @@ fn frame_indices_with_policy(
     }
 }
 
+/// Decode the frames a caller-side sampler picks from the probed clip.
+///
+/// `sampler` receives the probed total frame count and returns the source
+/// frame indices to decode, in source order. The decoded-bytes budget, when
+/// given, is checked against the source resolution before ffmpeg starts.
+/// Probing applies the same resolution and duration caps as every other
+/// entry point.
+///
+/// Used by: `decision::clef` (Clef samples with upstream's
+/// `linspace(0, total - 1, count).round()` over every source frame, which no
+/// [`FrameSamplingPolicy`] expresses).
+pub fn load_video_source_frames_at<F>(
+    source: &VideoSource,
+    limits: &VideoLimits,
+    max_decoded_bytes: Option<usize>,
+    sampler: F,
+) -> Result<SampledVideo, VideoError>
+where
+    F: FnOnce(usize) -> Result<Vec<usize>, VideoError>,
+{
+    if !ffmpeg_available() {
+        return Err(VideoError::FfmpegMissing);
+    }
+    let canonical = source.canonical_path().to_path_buf();
+    let meta = probe_video(source, limits)?;
+    let mut indices = sampler(meta.total_frames)?;
+    if indices.is_empty()
+        || indices.windows(2).any(|pair| pair[0] > pair[1])
+        || indices
+            .last()
+            .is_some_and(|&last| last >= meta.total_frames)
+    {
+        return Err(VideoError::Extract {
+            path: canonical,
+            message: "sampled frame indices must be in source order and within the clip"
+                .to_string(),
+        });
+    }
+    if let Some(max_decoded_bytes) = max_decoded_bytes {
+        validate_decoded_video_budget(
+            &canonical,
+            meta.width,
+            meta.height,
+            indices.len(),
+            max_decoded_bytes,
+        )?;
+    }
+    let frames = extract_frames_single_pass(source, &indices, meta.fps, limits)?;
+    if frames.is_empty() {
+        return Err(VideoError::EmptyVideo(canonical));
+    }
+    indices.truncate(frames.len());
+    Ok(SampledVideo {
+        frames,
+        frame_indices: indices,
+        source_fps: meta.fps,
+    })
+}
+
 fn validate_decoded_video_budget(
     path: &Path,
     width: u32,

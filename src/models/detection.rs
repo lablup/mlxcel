@@ -1261,6 +1261,12 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
             "decider2 is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model` (checkpoint {})",
             model_path.display()
         )),
+        // Clef scores every option with a joint schema head over a Qwen3.5
+        // VLM and never generates: `decision::loader` serves it (#2365).
+        "clef" => Err(anyhow::anyhow!(
+            "clef is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model` (checkpoint {})",
+            model_path.display()
+        )),
         _ => Err(anyhow::anyhow!(
             "Unsupported model type: {}",
             model_type_raw
