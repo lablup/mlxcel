@@ -730,7 +730,10 @@ fn routed_expert_planes_take_per_path_widths_from_the_shapes() {
     }
     let glu = crate::models::deepseek_v3::SwitchGLU::from_weights(&weights, &cfg, "p")
         .expect("mixed-width expert planes load");
-    assert_eq!((glu.bits, glu.up_bits, glu.down_bits), (4, 4, 8));
+    let crate::models::deepseek_v3::SwitchGLU::Quantized(q) = &glu else {
+        panic!("quantized expert planes must load the quantized variant");
+    };
+    assert_eq!((q.bits, q.up_bits, q.down_bits), (4, 4, 8));
     let x = mlxcel_core::from_slice_f32(&ramp(3 * hidden as usize), &[3, hidden]);
     let idx = mlxcel_core::from_slice_i32(&[0, 1, 1, 0, 0, 1], &[3, 2]);
     let out = array_to_vec_f32(&glu.forward(&x, &idx));
