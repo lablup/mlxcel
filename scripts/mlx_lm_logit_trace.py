@@ -173,7 +173,15 @@ def main(argv: list[str] | None = None) -> int:
         started = time.perf_counter()
         if args.mlx_vlm:
             # The processor is not needed, and a text-only checkpoint ships none.
-            language_model = load_model(model_dir).language_model
+            # Load lazily and evaluate the parameters in slices: one eval over
+            # a 400 GB checkpoint is a single Metal command buffer, which hits
+            # the GPU watchdog timeout (seen on Hy4, #2354).
+            language_model = load_model(model_dir, lazy=True).language_model
+            from mlx.utils import tree_flatten
+
+            params = tree_flatten(language_model.parameters())
+            for start in range(0, len(params), 64):
+                mx.eval([value for _, value in params[start : start + 64]])
 
             def model(tokens):
                 return language_model(tokens).logits

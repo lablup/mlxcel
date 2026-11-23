@@ -155,7 +155,7 @@ step_server() {
     done
     curl -sf "http://127.0.0.1:$PORT/v1/chat/completions" \
         -H 'Content-Type: application/json' \
-        -d '{"messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":40,"temperature":0}' \
+        -d '{"model":"'"$(basename "$MODEL")"'","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":40,"temperature":0}' \
         | tee "$OUT/server-response.json"
     echo
 }
