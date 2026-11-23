@@ -47,12 +47,13 @@ impl PrefixAdoptOutcome {
             Self::DenseMiss | Self::NoDenseLookup => None,
         }
     }
-}
 
-impl From<Option<(SequenceId, usize)>> for PrefixAdoptOutcome {
-    /// Classify the result of the dense path, which only runs after the store
-    /// lookup has been made.
-    fn from(adopted: Option<(SequenceId, usize)>) -> Self {
+    /// Classify the result of [`BatchScheduler::adopt_dense_prefix`].
+    ///
+    /// Valid only after `lookup_longest_prefix` ran: a `None` is then a dense
+    /// miss. Calling it for a request that never reached the dense lookup
+    /// would count a miss for a lookup that did not happen (issue #3294).
+    fn from_dense_lookup(adopted: Option<(SequenceId, usize)>) -> Self {
         match adopted {
             Some((seq_id, adopted_len)) => Self::Adopted {
                 seq_id,
@@ -429,8 +430,12 @@ impl BatchScheduler {
         {
             return NoDenseLookup;
         }
-        self.adopt_dense_prefix(&store, &key, tokens, require_whole_entry)
-            .into()
+        PrefixAdoptOutcome::from_dense_lookup(self.adopt_dense_prefix(
+            &store,
+            &key,
+            tokens,
+            require_whole_entry,
+        ))
     }
 
     /// The dense KV half of [`Self::try_adopt_cached_prefix`]: look the

@@ -1394,10 +1394,10 @@ impl PromptCacheStore {
             if !guard.config.is_enabled() {
                 return SnapshotLookupOutcome::NoCandidate;
             }
-            let (freed, count) = guard.sweep_snapshot_ttl(now);
-            if let Some(per_entry) = freed.checked_div(count) {
+            let (freed, evicted) = guard.sweep_snapshot_ttl(now);
+            if let Some(per_entry) = freed.checked_div(evicted) {
                 let metrics = Arc::clone(&self.metrics);
-                for _ in 0..count {
+                for _ in 0..evicted {
                     metrics.record_snapshot_evict_ttl(per_entry);
                 }
             }
