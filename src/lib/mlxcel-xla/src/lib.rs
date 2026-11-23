@@ -125,7 +125,10 @@ pub use numeric_oracle::{
     NumericTensor, TensorSummary, run_bounded_numeric_oracle,
 };
 #[cfg(feature = "micro-oracle")]
-pub use numeric_probe::{run_core_operator_probes, run_dense_matmul_probe};
+pub use numeric_probe::{
+    ProductionProbeOperator, ProductionProbeSpec, SscpConvolutionGeometry, pack_affine_q4_lanes,
+    production_probe_spec, run_core_operator_probes, run_dense_matmul_probe, run_production_probe,
+};
 
 // The continuous-batching engine (#449 M3 Stage 2b). Present under `iree` (real
 // execution) and under `test` (so its backend-neutral Scheduler bookkeeping is

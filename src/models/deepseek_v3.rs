@@ -20,6 +20,7 @@
 //! - Shared experts + routed experts
 //! - First k layers are dense (no MoE)
 
+use crate::models::mla_rope::MlaRope;
 use crate::models::switch_layers::validate_expert_quantization_params;
 use crate::models::switch_layers::{EXPERT_PLANE_LEAVES, stack_expert_leaf};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
@@ -226,7 +227,6 @@ pub struct DeepSeekV3Attention {
     pub v_head_dim: i32,
     pub kv_lora_rank: i32,
     pub scale: f32,
-    pub rope_base: f32,
     /// Rotate interleaved (adjacent) pairs rather than half-split pairs.
     ///
     /// True for every DeepSeek MLA backbone, which is why `from_weights` sets
@@ -234,89 +234,48 @@ pub struct DeepSeekV3Attention {
     /// (`rope_interleave`), so its decoder overrides this through
     /// [`DeepSeekV3Attention::with_rope_traditional`] (issue #1371).
     pub rope_traditional: bool,
-    /// Optional precomputed RoPE frequency table (float32
-    /// `[qk_rope_head_dim / 2]`, the YaRN table in practice) and the magnitude
-    /// multiplier applied to `q_pe` / `k_pe` before the rotation.
-    ///
-    /// `None` for every family that builds this attention through
-    /// `from_weights` alone, which keeps their RoPE on `fast_rope` at
-    /// `rope_base` exactly as before. Xing4.0 installs its table through
-    /// [`DeepSeekV3Attention::with_rope_table`] (issue #2356).
-    pub rope_table: Option<(UniquePtr<MlxArray>, f32)>,
+    /// The `q_pe` / `k_pe` rotation: the checkpoint's `rope_scaling` table
+    /// (YaRN on every shipped DeepSeek-V3 / Kimi-K2 checkpoint) with its
+    /// magnitude multiplier, or plain `fast_rope` at `rope_theta` when the
+    /// config has no block (#3295). Youtu passes a plain one through
+    /// [`DeepSeekV3Attention::from_weights_with_rope`].
+    pub(crate) rope: MlaRope,
 }
 
 impl DeepSeekV3Attention {
-    /// Rotate `q_pe` / `k_pe` with a precomputed YaRN table instead of the
-    /// plain `rope_base` frequencies, scaling both by `mscale` first when it is
-    /// not `1.0` (upstream `YarnRoPE`).
+    /// Replace the rotation after construction.
     ///
-    /// Used by: `models::xing4_0::XingDecoderLayer`.
-    pub fn with_rope_table(mut self, freqs: UniquePtr<MlxArray>, mscale: f32) -> Self {
-        self.rope_table = Some((freqs, mscale));
+    /// Used by: tests (production callers pass the rope to
+    /// [`Self::from_weights_with_rope`]).
+    #[cfg(test)]
+    pub(crate) fn with_rope(mut self, rope: MlaRope) -> Self {
+        self.rope = rope;
         self
     }
 
-    /// RoPE for the single-sequence path: the YaRN table when one is
-    /// installed, otherwise `fast_rope` at `rope_base`.
+    /// Resolve this config's RoPE once, for every layer to duplicate.
+    ///
+    /// No training-context fallback, matching upstream `deepseek_v3.py`:
+    /// `YarnRoPE` defaults a missing `original_max_position_embeddings` to
+    /// 4096, not to `max_position_embeddings`.
+    pub(crate) fn resolve_rope(args: &DeepSeekV3Config) -> MlaRope {
+        MlaRope::from_block(
+            args.rope_scaling.as_ref(),
+            args.qk_rope_head_dim,
+            args.rope_theta,
+            None,
+            &args.model_type,
+        )
+    }
+
+    /// RoPE for the single-sequence path.
     fn rope(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
-        match &self.rope_table {
-            None => mlxcel_core::fast_rope(
-                x,
-                self.qk_rope_head_dim,
-                self.rope_traditional,
-                self.rope_base,
-                1.0,
-                offset,
-            ),
-            Some((freqs, mscale)) => {
-                let scaled;
-                let x = if *mscale != 1.0 {
-                    scaled = mlxcel_core::multiply_scalar(x, *mscale);
-                    &*scaled
-                } else {
-                    x
-                };
-                mlxcel_core::fast_rope_with_freqs(
-                    x,
-                    self.qk_rope_head_dim,
-                    self.rope_traditional,
-                    1.0,
-                    offset,
-                    freqs,
-                )
-            }
-        }
+        self.rope.apply(x, self.rope_traditional, offset)
     }
 
     /// RoPE for the batched decode path, one offset per row.
     fn rope_batched(&self, x: &MlxArray, offsets: &[i32]) -> UniquePtr<MlxArray> {
-        match &self.rope_table {
-            None => mlxcel_core::fast_rope_batched(
-                x,
-                self.qk_rope_head_dim,
-                self.rope_traditional,
-                self.rope_base,
-                1.0,
-                offsets,
-            ),
-            Some((freqs, mscale)) => {
-                let scaled;
-                let x = if *mscale != 1.0 {
-                    scaled = mlxcel_core::multiply_scalar(x, *mscale);
-                    &*scaled
-                } else {
-                    x
-                };
-                mlxcel_core::fast_rope_batched_with_freqs(
-                    x,
-                    self.qk_rope_head_dim,
-                    self.rope_traditional,
-                    1.0,
-                    offsets,
-                    freqs,
-                )
-            }
-        }
+        self.rope.apply_batched(x, self.rope_traditional, offsets)
     }
 
     /// Override the RoPE pair layout after construction.
@@ -660,6 +619,17 @@ impl DeepSeekV3Attention {
         args: &DeepSeekV3Config,
         prefix: &str,
     ) -> Result<Self, String> {
+        Self::from_weights_with_rope(weights, args, prefix, Self::resolve_rope(args))
+    }
+
+    /// [`Self::from_weights`] with a rope the caller resolved (once per
+    /// model, see [`Self::resolve_rope`]).
+    pub(crate) fn from_weights_with_rope(
+        weights: &WeightMap,
+        args: &DeepSeekV3Config,
+        prefix: &str,
+        rope: MlaRope,
+    ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
         let q_head_dim = args.q_head_dim() as i32;
@@ -740,12 +710,11 @@ impl DeepSeekV3Attention {
             v_head_dim: args.v_head_dim as i32,
             kv_lora_rank: args.kv_lora_rank as i32,
             scale: args.get_attention_scale(),
-            rope_base: args.rope_theta,
             // Every DeepSeek MLA backbone rotates interleaved pairs. A backbone
             // that exposes the choice overrides this with
             // `with_rope_traditional` after construction.
             rope_traditional: true,
-            rope_table: None,
+            rope,
         })
     }
 }
@@ -1250,10 +1219,26 @@ impl DecoderLayer {
         args: &DeepSeekV3Config,
         layer_idx: usize,
     ) -> Result<Self, String> {
+        let rope = DeepSeekV3Attention::resolve_rope(args);
+        Self::from_weights_with_rope(weights, args, layer_idx, &rope)
+    }
+
+    /// [`Self::from_weights`] with the model's resolved rope, duplicated into
+    /// this layer's attention.
+    pub(crate) fn from_weights_with_rope(
+        weights: &WeightMap,
+        args: &DeepSeekV3Config,
+        layer_idx: usize,
+        rope: &MlaRope,
+    ) -> Result<Self, String> {
         let prefix = format!("model.layers.{}", layer_idx);
 
-        let self_attn =
-            DeepSeekV3Attention::from_weights(weights, args, &format!("{}.self_attn", prefix))?;
+        let self_attn = DeepSeekV3Attention::from_weights_with_rope(
+            weights,
+            args,
+            &format!("{}.self_attn", prefix),
+            rope.duplicate(),
+        )?;
 
         let mlp = if args.is_moe_layer(layer_idx) {
             MLPType::MoE(MoEBlock::from_weights(
@@ -1681,9 +1666,10 @@ impl DeepSeekV3Model {
         // trailer, when present, lives at index `num_hidden_layers` and was
         // already stripped by `sanitize_weights`.
         let num_layers = args.num_hidden_layers;
+        let rope = DeepSeekV3Attention::resolve_rope(args);
         let mut layers = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
-            let layer = DecoderLayer::from_weights(weights, args, i)?;
+            let layer = DecoderLayer::from_weights_with_rope(weights, args, i, &rope)?;
             layers.push(layer);
         }
 

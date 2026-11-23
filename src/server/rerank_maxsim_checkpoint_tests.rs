@@ -207,3 +207,81 @@ fn colsmol_maxsim_rerank_ranks_the_matching_page_first() {
     );
     shutdown(&embedding);
 }
+
+/// Scores the CLI path (`mlxcel rerank -m <dir>`, #3300) and the server
+/// provider give the same request; both embed through the same engine with
+/// the same batch width and call split, so they agree to float noise.
+const CLI_SERVER_TOLERANCE: f32 = 1e-5;
+
+/// Score `documents` against `query` through the server provider and through
+/// `load_reranker_or_late_interaction`, and assert they agree.
+fn assert_cli_matches_server(dir: &Path, id: &str, query: RerankItem, documents: Vec<RerankItem>) {
+    let embedding = load_worker(dir, id);
+    let provider = install(&embedding);
+    let server = provider
+        .rerank(query.clone(), documents.clone(), None)
+        .expect("server MaxSim rerank scores");
+    shutdown(&embedding);
+
+    let loaded = crate::rerank::load_reranker_or_late_interaction(
+        dir,
+        crate::rerank::RerankLoadOptions::default(),
+    )
+    .unwrap_or_else(|err| panic!("{id}: the CLI loads the embedder: {err:#}"));
+    assert_eq!(loaded.kind, RerankerKind::LateInteraction);
+    assert_eq!(loaded.reranker.batch_size(), CLI_BATCH_SIZE);
+    let cli = loaded
+        .reranker
+        .score(&query, &documents, None)
+        .expect("CLI MaxSim rerank scores");
+
+    assert_eq!(cli.scores.len(), server.scores.len());
+    for (index, (c, s)) in cli.scores.iter().zip(&server.scores).enumerate() {
+        assert!(
+            (c - s).abs() <= CLI_SERVER_TOLERANCE,
+            "{id}: document {index} scores {c} on the CLI and {s} on /v1/rerank"
+        );
+    }
+    assert_eq!(cli.prompt_tokens, server.prompt_tokens);
+    eprintln!(
+        "GATE {id} cli={:?} server={:?} prompt_tokens={}",
+        cli.scores, server.scores, cli.prompt_tokens
+    );
+}
+
+#[test]
+fn lfm2_colbert_cli_rerank_matches_the_server_provider() {
+    let _guard = mlx_test_guard();
+    let Some(dir) = local_checkpoint("LiquidAI/LFM2.5-ColBERT-350M") else {
+        return;
+    };
+    let _runtime = crate::initialize_runtime();
+    assert_cli_matches_server(
+        &dir,
+        "lfm2.5-colbert",
+        RerankItem::text(LFM2_QUERY),
+        vec![
+            RerankItem::text(LFM2_UNRELATED),
+            RerankItem::text(LFM2_RELEVANT),
+        ],
+    );
+}
+
+#[test]
+fn colsmol_cli_rerank_matches_the_server_provider() {
+    let _guard = mlx_test_guard();
+    let Some(dir) = colsmol_merged_dir() else {
+        return;
+    };
+    let _runtime = crate::initialize_runtime();
+    assert_cli_matches_server(
+        &dir,
+        "colsmol-256m-merged",
+        RerankItem::text(COLSMOL_QUERY),
+        vec![
+            page(&dir, "unrelated.png"),
+            RerankItem::text("Total revenue in 2023 was 4.2 billion dollars."),
+            page(&dir, "matching.png"),
+        ],
+    );
+}

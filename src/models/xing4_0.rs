@@ -51,7 +51,7 @@ use serde::{Deserialize, Deserializer};
 use crate::models::deepseek_v3::{
     DecoderLayer, DeepSeekV3Attention, DeepSeekV3Config, DeepSeekV3Model, MLPType,
 };
-use crate::models::rope_utils::{RopeScalingKind, RopeScalingSpec};
+use crate::models::mla_rope::MlaRope;
 
 /// Upper bound on `hc_mult`. The released checkpoints use 4; the bound only
 /// keeps `(2 + hc) * hc` and `hc * hidden_size` far from i32 overflow.
@@ -115,7 +115,8 @@ impl<'de> Deserialize<'de> for Xing40Config {
         let value = serde_json::Value::deserialize(deserializer)?;
         let base = DeepSeekV3Config::deserialize(&value).map_err(serde::de::Error::custom)?;
         let hyper = HyperFields::deserialize(&value).map_err(serde::de::Error::custom)?;
-        let eos_token_ids = parse_eos(hyper.eos_token_id.as_ref());
+        let eos_token_ids =
+            parse_eos(hyper.eos_token_id.as_ref()).map_err(serde::de::Error::custom)?;
         let config = Self {
             base,
             hc_mult: hyper.hc_mult,
@@ -130,22 +131,20 @@ impl<'de> Deserialize<'de> for Xing40Config {
     }
 }
 
-fn parse_eos(value: Option<&serde_json::Value>) -> Vec<i32> {
-    let ids: Vec<i32> = match value {
-        Some(serde_json::Value::Number(n)) => n.as_i64().map(|v| v as i32).into_iter().collect(),
-        Some(serde_json::Value::Array(items)) => items
-            .iter()
-            .filter_map(|v| v.as_i64())
-            .map(|v| v as i32)
-            .collect(),
-        _ => Vec::new(),
-    };
-    if ids.is_empty() { vec![2] } else { ids }
+/// `eos_token_id` as ids, `<_end>` = 2 when absent; an id outside the `i32`
+/// range or a negative one is refused rather than wrapped (#3299).
+fn parse_eos(value: Option<&serde_json::Value>) -> Result<Vec<i32>, String> {
+    let ids =
+        crate::loading::checked_eos_token_ids(value).map_err(|err| format!("xing4_0: {err}"))?;
+    Ok(if ids.is_empty() { vec![2] } else { ids })
 }
 
 impl Xing40Config {
     /// Refuse hyper-connection settings the forward cannot run as declared.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(bad) = self.eos_token_ids.iter().find(|id| **id < 0) {
+            return Err(format!("xing4_0: eos_token_id {bad} is negative"));
+        }
         if self.hc_mult == 0 || self.hc_mult > MAX_HC_MULT {
             return Err(format!(
                 "xing4_0: hc_mult {} is outside 1..={MAX_HC_MULT}",
@@ -398,26 +397,17 @@ impl XingDecoderLayer {
     fn from_weights(
         weights: &WeightMap,
         config: &Xing40Config,
-        rope: &RopeScalingKind,
-        rope_base_override: f32,
+        rope: &MlaRope,
         layer_idx: usize,
     ) -> Result<Self, String> {
+        // The shared rope carries the table or, without one, the plain base
+        // after any `--rope-freq-base` override.
         let DecoderLayer {
             self_attn,
             mlp,
             input_layernorm,
             post_attention_layernorm,
-        } = DecoderLayer::from_weights(weights, &config.base, layer_idx)?;
-        let self_attn = match rope.freqs() {
-            Some(freqs) => self_attn.with_rope_table(mlxcel_core::copy(freqs), rope.attn_scale()),
-            // No table: the plain rotation runs at `rope_base`, which must carry
-            // a `--rope-freq-base` override just as the table would have, or the
-            // override is counted as applied while the rotation ignores it.
-            None => DeepSeekV3Attention {
-                rope_base: rope_base_override,
-                ..self_attn
-            },
-        };
+        } = DecoderLayer::from_weights_with_rope(weights, &config.base, layer_idx, rope)?;
         let prefix = format!("model.layers.{layer_idx}");
         Ok(Self {
             attn_hc: XingHyperConnection::from_weights(
@@ -442,25 +432,21 @@ impl XingDecoderLayer {
 /// (YaRN on the released checkpoints). The DeepSeek-V3 attention rotates at
 /// unit position scale with a table or at `rope_theta` without one, so a
 /// `linear` block, which needs a position scale, is refused.
-fn resolve_rope(config: &DeepSeekV3Config) -> Result<RopeScalingKind, String> {
-    let spec = config
-        .rope_scaling
-        .as_ref()
-        .map(|block| RopeScalingSpec::from_lookup(|key| block.get(key)));
-    let kind = RopeScalingKind::resolve(
-        spec.as_ref(),
+fn resolve_rope(config: &DeepSeekV3Config) -> Result<MlaRope, String> {
+    let rope = MlaRope::from_block(
+        config.rope_scaling.as_ref(),
         config.qk_rope_head_dim,
         config.rope_theta,
         Some(config.max_position_embeddings as f32),
         "xing4_0",
     );
-    if let RopeScalingKind::Linear { .. } = kind {
+    if rope.is_linear() {
         return Err(
             "xing4_0: a linear rope_scaling block is not supported by the MLA attention"
                 .to_string(),
         );
     }
-    Ok(kind)
+    Ok(rope)
 }
 
 /// Xing4.0 causal LM.
@@ -571,15 +557,10 @@ impl Xing40Model {
         let group_size = args.group_size();
         let bits = args.bits();
         let rope = resolve_rope(args)?;
-        // `rope_theta` after any `--rope-freq-base` override, for the layers
-        // that rotate without a table (a `default` scheme, or a block that
-        // resolved to one). `RopeScalingKind::resolve` applies the same
-        // override to the table it builds.
-        let rope_base = crate::models::rope_overrides::resolve_base(args.rope_theta);
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)?;
         let layers = (0..args.num_hidden_layers)
-            .map(|i| XingDecoderLayer::from_weights(weights, config, &rope, rope_base, i))
+            .map(|i| XingDecoderLayer::from_weights(weights, config, &rope, i))
             .collect::<Result<Vec<_>, _>>()?;
         let norm_weight = weights
             .get("model.norm.weight")

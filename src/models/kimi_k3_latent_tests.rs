@@ -105,11 +105,10 @@ fn int8_decode_tracks_the_fp16_latent_masked_and_unmasked() {
     for masked in [false, true] {
         let want = decode(&attn, &mut KVCache::new(), 4, 8, masked);
         let mut int8 = KVCache::new_with_mode(KVCacheMode::Int8);
-        let before = mlxcel_core::mla::stats::snapshot();
-        let got = decode(&attn, &mut int8, 4, 8, masked);
-        let after = mlxcel_core::mla::stats::snapshot();
+        let (got, counts) =
+            mlxcel_core::mla::stats::scoped(|| decode(&attn, &mut int8, 4, 8, masked));
         assert!(int8.holds_quantized_latent());
-        let delta = |path| after.get(path).saturating_sub(before.get(path));
+        let delta = |path| counts.get(path);
         let absorbed = delta(MlaDecodePath::AbsorbedFused) + delta(MlaDecodePath::AbsorbedComposed);
         assert!(absorbed >= 4, "masked={masked}: every decode step absorbed");
         if masked {

@@ -552,6 +552,12 @@ required-features = ["xla-iree"]
 name = "xla_numeric_probe"
 required-features = ["xla-micro-oracle"]
 
+# Production-MLX micro-oracles (#3212): MLX CUDA references from mlxcel-core
+# against the same emitted IREE operations on the IREE cuda target.
+[[example]]
+name = "xla_mlx_micro_oracle"
+required-features = ["cuda", "xla-micro-oracle"]
+
 # Pinned #874 MLX-vs-IREE Phi4MM Conformer and speech/vision projection parity.
 [[example]]
 name = "xla_phi4_audio_check"

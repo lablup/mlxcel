@@ -57,7 +57,8 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 | `src/models/lfm2_embedding.rs` | LFM2.5-Embedding and LFM2.5-Encoder: bidirectional LFM2 (non-causal short conv), CLS pooling; LFM2.5-ColBERT: the same backbone with a token projection, multi-vector. |
 | `src/models/lfm2_embedding_head.rs` | LFM2 head selection: finds the ColBERT projection (`1_Dense/`, `dense.*`, or an mlx-vlm re-export's `projection.*`) and validates it against `1_Dense/config.json` and `mlx.proj_dim`, and refuses a `modules.json` that lists a Pooling module. |
 | `src/rerank/mod.rs` | `Reranker` trait, `RerankerKind`, `RerankItem`, `detect_reranker_kind`. |
-| `src/rerank/loader.rs` | `load_reranker`: kind dispatch, batch-size and length overrides. |
+| `src/rerank/loader.rs` | `load_reranker`: kind dispatch, batch-size and length overrides; `load_reranker_or_late_interaction`, the `mlxcel rerank` fallback onto a multi-vector embedder. |
+| `src/rerank/late_interaction.rs` | `score_late_interaction`: the MaxSim scoring rule `/v1/rerank` and `mlxcel rerank` share; `LateInteractionReranker` for the CLI. |
 | `src/rerank/sequence_classifier.rs` | Cross-encoder path: pair tokenization, longest-first truncation, `sigmoid(logit)`. |
 | `src/rerank/qwen3_generative.rs` | Qwen3 yes/no path: the prompt recipe, left padding, `sigmoid(logit(yes) - logit(no))`. |
 | `src/rerank/qwen3_vl_generative.rs` | Qwen3-VL yes/no path: `reranker.jinja`, image merge, `1_LogitScore` token ids. |
@@ -550,7 +551,9 @@ curl -s localhost:8080/v1/rerank -H 'Content-Type: application/json' -d '{
 
 ColIdefics3 and ColQwen2.5 serve page images the same way: send the pages as `{"image_url": "data:image/png;base64,..."}` documents. `vidore/colSmol-256M` is a LoRA adapter, so merge it into `vidore/ColSmolVLM-Instruct-256M-base` first (`tests/fixtures/generate_colsmol_rerank_fixture.py` does this) and serve the merged directory.
 
-Scoring with `maxsim_mlx` on the worker is not done (the read-back rows of every text item are held at once, the same footprint a `/v1/embeddings` response for those inputs has); `mlxcel rerank` does not load multi-vector embedders.
+Scoring with `maxsim_mlx` on the worker is not done (the read-back rows of every text item are held at once, the same footprint a `/v1/embeddings` response for those inputs has).
+
+`mlxcel rerank -m` accepts the same multi-vector embedders (#3300): when the checkpoint is not a reranker, it is loaded as an embedder and, if multi-vector, scored by `crate::rerank::score_late_interaction`, the function the server's provider calls over the embedding worker. The CLI runs it over an `EmbeddingEngine` on the calling thread with the server's default batch width (16, `--batch-size` overrides it), so the same request gives the same scores on both sides (the real-checkpoint gates hold them within `1e-5`). The checkpoint's own `normalize` flag applies, as on a server started without `--embd-normalize`. `--json` reports `kind: "late_interaction"`, and `--instruction` is refused as for the cross-encoder. A checkpoint that is neither a reranker nor a multi-vector embedder (a chat export, a single-vector embedder) still fails with the `is not a reranker checkpoint` detection error; a chat export is refused from `config.json` alone, while a single-vector embedder is loaded before it is refused.
 
 ### Request and response
 
@@ -583,7 +586,7 @@ An item is either a bare string or an object with `text`, `image` and/or `image_
 
 | Status | Type | When |
 |--------|------|------|
-| 400 | `invalid_request_error` | Malformed body, empty `documents`, an item with neither text nor an image, `top_n` below 1, an image item for a reranker with `supports_images() == false`, `instruction` on a sequence-classifier or late-interaction reranker, or `model` not matching the served id. |
+| 400 | `invalid_request_error` | Malformed body, empty `documents`, more documents than `MLXCEL_RERANK_MAX_DOCUMENTS` (default 1024), an item with neither text nor an image, `top_n` below 1, an image item for a reranker with `supports_images() == false`, `instruction` on a sequence-classifier or late-interaction reranker, or `model` not matching the served id. |
 | 501 | `not_implemented` | No reranker loaded: `This server does not support reranking. Start it with --reranking, with a sequence-classifier checkpoint or a multi-vector (late-interaction) embedder in -m, or with --reranker-model <path>.` |
 | 503 | `server_busy` | The bounded worker queue is full (`--embedding-queue-depth`, shared with the embedding worker). |
 | 504 | `server_timeout` | The worker did not reply within `--embedding-request-timeout-secs`. |
@@ -625,7 +628,7 @@ mlxcel rerank -m <path or repo-id> -q "query" -d "doc" [-d "doc2" ...] [--image 
               [--max-length N] [--batch-size N] [--models-dir PATH] [--json]
 ```
 
-Prints one relevance score per document in request order, then the ranking. Image documents follow the text ones in the result order. `--json` prints one object with `scores`, `ranking`, `kind` and `prompt_tokens` instead. This is the offline validation tool for every reranker kind: the same loader, prompt assembly and batching as the server, without a listener.
+Prints one relevance score per document in request order, then the ranking. Image documents follow the text ones in the result order. `--json` prints one object with `scores`, `ranking`, `kind` and `prompt_tokens` instead. This is the offline validation tool for every reranker kind: the same loader, prompt assembly and batching as the server, without a listener. `-m` also takes a multi-vector embedder (LFM2.5-ColBERT, ColIdefics3, ColQwen2.5), scored by MaxSim exactly as `/v1/rerank` scores it over the same served model; see [Late-interaction scoring](#late-interaction-scoring).
 
 ```sh
 mlxcel rerank -m BAAI/bge-reranker-v2-m3 -q "what is panda?" \
@@ -634,6 +637,14 @@ mlxcel rerank -m BAAI/bge-reranker-v2-m3 -q "what is panda?" \
 
 mlxcel rerank -m Qwen/Qwen3-VL-Reranker-2B -q "a chart of quarterly revenue" \
   --image revenue-chart.png --image cat.jpg
+
+mlxcel rerank -m mlx-community/LFM2.5-ColBERT-350M-bf16 \
+  -q "[Q] how do solar panels generate electricity" \
+  -d "[D] The recipe calls for two cups of flour and one egg." \
+  -d "[D] Photovoltaic cells convert sunlight into electricity."
+
+mlxcel rerank -m models/colsmol-256m-merged -q "What was the total revenue in 2023?" \
+  --image matching.png --image unrelated.png
 ```
 
 ## Adding a family

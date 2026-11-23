@@ -69,6 +69,7 @@ mod molmo_vision_config;
 mod molmo_vision_ops;
 pub(crate) mod numeric_ops;
 mod phi4_audio;
+pub(crate) mod production_probe_ops;
 mod quant_scale;
 mod qwen2_5_vl;
 mod qwen2_vl;

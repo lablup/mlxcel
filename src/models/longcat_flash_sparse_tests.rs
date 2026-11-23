@@ -660,13 +660,13 @@ fn sparse_decode_gathers_the_quantized_latent_and_tracks_fp16() {
                     assert_eq!(cache.stored_latent_bits(), Some(bits));
                 }
             }
-            let before = mlxcel_core::mla::stats::snapshot();
-            let got: Vec<Vec<f32>> = TOKENS[prefill..]
-                .iter()
-                .map(|t| row(&model.forward(&ids(&[*t]), &mut [], None), 0))
-                .collect();
-            let after = mlxcel_core::mla::stats::snapshot();
-            let delta = |path| after.get(path).saturating_sub(before.get(path));
+            let (got, counts) = mlxcel_core::mla::stats::scoped(|| {
+                TOKENS[prefill..]
+                    .iter()
+                    .map(|t| row(&model.forward(&ids(&[*t]), &mut [], None), 0))
+                    .collect::<Vec<Vec<f32>>>()
+            });
+            let delta = |path| counts.get(path);
             let steps = (TOKENS.len() - prefill) as u64;
             assert!(
                 delta(MlaDecodePath::AbsorbedComposed) + delta(MlaDecodePath::AbsorbedFused)
