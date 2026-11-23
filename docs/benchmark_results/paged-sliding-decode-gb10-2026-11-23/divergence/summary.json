@@ -1,0 +1,246 @@
+{
+ "b1 main vs branch": [
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    512,
+    512
+   ],
+   "first_token_diff_step": 337,
+   "first_logprob_diff_step": 270,
+   "steps_with_logprob_diff": 18,
+   "max_abs_dlogprob_common_prefix": 0.0234375,
+   "at_diff": {
+    "a": [
+     " through",
+     {
+      " through": -1.5625,
+      " parallel": -1.5625,
+      " into": -2.15625
+     }
+    ],
+    "b": [
+     " parallel",
+     {
+      " parallel": -1.5625,
+      " into": -2.171875,
+      " through": -1.578125
+     }
+    ]
+   }
+  }
+ ],
+ "b4 main vs branch": [
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": null,
+   "first_logprob_diff_step": 279,
+   "steps_with_logprob_diff": 30,
+   "max_abs_dlogprob_common_prefix": 0.078125
+  },
+  {
+   "finish": [
+    "length",
+    "stop"
+   ],
+   "completion_tokens": [
+    1024,
+    598
+   ],
+   "first_token_diff_step": 262,
+   "first_logprob_diff_step": 256,
+   "steps_with_logprob_diff": 3,
+   "max_abs_dlogprob_common_prefix": 0.046875,
+   "at_diff": {
+    "a": [
+     " repeating",
+     {
+      " nested": -2.2578125,
+      " repeating": -2.2421875,
+      " multi": -2.3359375
+     }
+    ],
+    "b": [
+     " nested",
+     {
+      " multi": -2.34375,
+      " nested": -2.2421875,
+      " repeating": -2.25
+     }
+    ]
+   }
+  },
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": null,
+   "first_logprob_diff_step": 257,
+   "steps_with_logprob_diff": 40,
+   "max_abs_dlogprob_common_prefix": 0.03125
+  },
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": null,
+   "first_logprob_diff_step": 274,
+   "steps_with_logprob_diff": 2,
+   "max_abs_dlogprob_common_prefix": 0.359375
+  }
+ ],
+ "b4 main vs main-gather": [
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": null,
+   "first_logprob_diff_step": null,
+   "steps_with_logprob_diff": 0,
+   "max_abs_dlogprob_common_prefix": 0.0
+  },
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": null,
+   "first_logprob_diff_step": null,
+   "steps_with_logprob_diff": 0,
+   "max_abs_dlogprob_common_prefix": 0.0
+  },
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": null,
+   "first_logprob_diff_step": null,
+   "steps_with_logprob_diff": 0,
+   "max_abs_dlogprob_common_prefix": 0.0
+  },
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": null,
+   "first_logprob_diff_step": null,
+   "steps_with_logprob_diff": 0,
+   "max_abs_dlogprob_common_prefix": 0.0
+  }
+ ],
+ "b4 main vs branch-gather": [
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": null,
+   "first_logprob_diff_step": 279,
+   "steps_with_logprob_diff": 32,
+   "max_abs_dlogprob_common_prefix": 0.109375
+  },
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": 400,
+   "first_logprob_diff_step": 261,
+   "steps_with_logprob_diff": 26,
+   "max_abs_dlogprob_common_prefix": 0.0234375,
+   "at_diff": {
+    "a": [
+     " and",
+     {
+      ".": -0.859375,
+      " and": -0.859375,
+      ",": -2.390625
+     }
+    ],
+    "b": [
+     ".",
+     {
+      ".": -0.859375,
+      " and": -0.875,
+      ",": -2.40625
+     }
+    ]
+   }
+  },
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": null,
+   "first_logprob_diff_step": 262,
+   "steps_with_logprob_diff": 39,
+   "max_abs_dlogprob_common_prefix": 0.03125
+  },
+  {
+   "finish": [
+    "length",
+    "length"
+   ],
+   "completion_tokens": [
+    1024,
+    1024
+   ],
+   "first_token_diff_step": null,
+   "first_logprob_diff_step": 274,
+   "steps_with_logprob_diff": 2,
+   "max_abs_dlogprob_common_prefix": 0.25
+  }
+ ]
+}
