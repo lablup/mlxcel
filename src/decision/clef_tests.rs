@@ -72,7 +72,7 @@ pub(super) fn cats() -> image::DynamicImage {
     image::DynamicImage::ImageRgb8(image::open(path).expect("cats decodes").to_rgb8())
 }
 
-fn validated(questions: &Value, media: MediaPresence) -> Vec<(String, Question)> {
+pub(super) fn validated(questions: &Value, media: MediaPresence) -> Vec<(String, Question)> {
     validate_questions(
         TYPES,
         &[MediaKind::Image, MediaKind::Video],

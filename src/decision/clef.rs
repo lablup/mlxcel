@@ -47,13 +47,16 @@ use super::clef_media::{
     CLIP_FPS, MAX_DECODED_VIDEO_BYTES, VideoSettings, frame_count, linspace_indices, resize_frames,
     video_frame_size,
 };
-use super::clef_sequence::{ClefRow, ClefTokenizer, frame, media_block, place_state, type_id};
+use super::clef_sequence::{
+    ClefRow, ClefTokenizer, check_placeholders, frame, gated_media_block, place_state,
+    placeholder_count, type_id,
+};
 use super::decider2_rows::{calibrated_softmax, round_to};
 use super::{
     Answer, DecisionError, DecisionMedia, DecisionModel, DecisionResult, DecisionUsage, MediaKind,
     Question, QuestionKind,
 };
-use crate::multimodal::video::{VideoLimits, VideoSource, load_video_source_frames_at};
+use crate::multimodal::video::{VideoError, VideoLimits, VideoSource, load_video_source_frames_at};
 use crate::vision::Qwen35VLModel;
 use crate::vision::processors::qwen2_vl::{
     Qwen2VLMediaInput, Qwen2VLProcessor, QwenVideoProcessorConfig,
@@ -85,6 +88,27 @@ fn is_backbone_key(key: &str) -> bool {
 struct PreparedVideo {
     frames: Vec<DynamicImage>,
     group_seconds: Vec<f64>,
+    /// Bytes the source-resolution frames took when decoded (four per
+    /// pixel), charged against the request's [`MAX_DECODED_VIDEO_BYTES`].
+    decoded_bytes: usize,
+}
+
+/// A video error as the client sees it: the server-side path (an allowlisted
+/// file or a download's temp file) replaced by "the video".
+pub(crate) fn video_error_message(error: &VideoError) -> String {
+    let text = error.to_string();
+    let path = match error {
+        VideoError::FileNotFound(path) | VideoError::EmptyVideo(path) => Some(path),
+        VideoError::Probe { path, .. }
+        | VideoError::Extract { path, .. }
+        | VideoError::Io { path, .. }
+        | VideoError::Decode { path, .. } => Some(path),
+        _ => None,
+    };
+    match path.map(|path| path.display().to_string()) {
+        Some(path) if !path.is_empty() => text.replace(&path, "the video"),
+        _ => text,
+    }
 }
 
 /// The loaded Clef scorer.
@@ -204,7 +228,10 @@ impl ClefModel {
                 Ok(linspace_indices(total, frame_count(total, &settings)))
             })
             .map_err(|error| {
-                DecisionError::InvalidInput(format!("could not read the video: {error}"))
+                DecisionError::InvalidInput(format!(
+                    "could not read the video: {}",
+                    video_error_message(&error)
+                ))
             })?;
         let temporal = self.video_processor.temporal_patch_size;
         let factor = self.video_processor.patch_size * self.video_processor.spatial_merge_size;
@@ -212,6 +239,11 @@ impl ClefModel {
             .frames
             .first()
             .ok_or_else(|| DecisionError::InvalidInput("the video has no frames".to_string()))?;
+        let decoded_bytes = sampled
+            .frames
+            .iter()
+            .map(|frame| frame.width() as usize * frame.height() as usize * 4)
+            .sum();
         let (height, width) = video_frame_size(
             sampled.frames.len(),
             first.height(),
@@ -232,24 +264,55 @@ impl ClefModel {
         Ok(PreparedVideo {
             frames,
             group_seconds,
+            decoded_bytes,
         })
     }
 
-    /// Videos of one request, sharing [`MAX_DECODED_VIDEO_BYTES`].
-    fn prepare_videos(&self, sources: &[VideoSource]) -> Result<Vec<PreparedVideo>, DecisionError> {
+    /// Merged tokens of one temporal group of a prepared video.
+    fn video_group_tokens(&self, video: &PreparedVideo) -> usize {
+        let patch = self.video_processor.patch_size as i32;
+        video.frames.first().map_or(0, |first| {
+            self.merged_tokens((
+                1,
+                first.height() as i32 / patch,
+                first.width() as i32 / patch,
+            ))
+        })
+    }
+
+    /// The media block and the prepared videos of one request.
+    ///
+    /// Videos are decoded one at a time, sharing [`MAX_DECODED_VIDEO_BYTES`]
+    /// of source-resolution frames, and only while the sequence so far
+    /// (`text_tokens` of text, the images and the videos already decoded)
+    /// still fits [`super::clef_sequence::MAX_LENGTH`], so a request with
+    /// more video than the model can read is refused without decoding it.
+    fn media(
+        &self,
+        media: &DecisionMedia,
+        text_tokens: usize,
+    ) -> Result<(Vec<u32>, Vec<PreparedVideo>), DecisionError> {
+        let image_tokens: Vec<usize> = self
+            .vlm
+            .processor
+            .compute_grid_thw(&media.images)
+            .into_iter()
+            .map(|grid| self.merged_tokens(grid))
+            .collect();
         let mut remaining = MAX_DECODED_VIDEO_BYTES;
-        let mut videos = Vec::with_capacity(sources.len());
-        for source in sources {
-            let video = self.prepare_video(source, remaining)?;
-            let used = video
-                .frames
-                .iter()
-                .map(|frame| frame.width() as usize * frame.height() as usize * 4)
-                .sum::<usize>();
-            remaining = remaining.saturating_sub(used);
-            videos.push(video);
-        }
-        Ok(videos)
+        gated_media_block(
+            &self.tokenizer,
+            &image_tokens,
+            media.videos.len(),
+            text_tokens,
+            |index| {
+                let video = self.prepare_video(&media.videos[index], remaining)?;
+                remaining = remaining.saturating_sub(video.decoded_bytes);
+                let tokens = self.video_group_tokens(&video);
+                let seconds = video.group_seconds.clone();
+                Ok((video, tokens, seconds))
+            },
+        )
     }
 
     /// Pixel rows and grids of the images then the videos, in prompt order.
@@ -455,35 +518,22 @@ impl DecisionModel for ClefModel {
         media: DecisionMedia,
     ) -> Result<DecisionResult, DecisionError> {
         self.vlm.text_model.clear_mrope_state();
-        // Token counts first: a schema that cannot fit is refused before any
-        // pixel is processed.
-        let image_grids = self.vlm.processor.compute_grid_thw(&media.images);
-        let image_tokens: Vec<usize> = image_grids
-            .iter()
-            .map(|&grid| self.merged_tokens(grid))
-            .collect();
-        let videos = self.prepare_videos(&media.videos)?;
-        let video_tokens: Vec<(usize, Vec<f64>)> = videos
-            .iter()
-            .map(|video| {
-                let first = &video.frames[0];
-                let patch = self.video_processor.patch_size as i32;
-                let grid = (
-                    1,
-                    first.height() as i32 / patch,
-                    first.width() as i32 / patch,
-                );
-                (self.merged_tokens(grid), video.group_seconds.clone())
-            })
-            .collect();
-        let has_media = !media.images.is_empty() || !videos.is_empty();
-        let block = if has_media {
-            media_block(&self.tokenizer, &image_tokens, &video_tokens)?
+        // Text first, then the media in order, each checked against the
+        // cap: a schema that cannot fit is refused before any video is
+        // decoded or any pixel is processed.
+        let frame = frame(&self.tokenizer, questions, &[])?;
+        let has_media = !media.images.is_empty() || !media.videos.is_empty();
+        let (frame, videos, pads) = if has_media {
+            let (block, videos) = self.media(&media, frame.fixed_len())?;
+            let pads = placeholder_count(&self.tokenizer, &block);
+            (frame.with_media(&block)?, videos, pads)
         } else {
-            Vec::new()
+            (frame, Vec::new(), 0)
         };
-        let frame = frame(&self.tokenizer, questions, &block)?;
         let sequence = place_state(&self.tokenizer, frame, state)?;
+        if has_media {
+            check_placeholders(&self.tokenizer, &sequence.ids, pads)?;
+        }
         let pixels = if has_media {
             Some(self.pixels(&media.images, &videos)?)
         } else {

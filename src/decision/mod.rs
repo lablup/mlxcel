@@ -106,6 +106,10 @@ mod clef_tests;
 #[path = "clef_parity_tests.rs"]
 mod clef_parity_tests;
 
+#[cfg(test)]
+#[path = "clef_limits_tests.rs"]
+mod clef_limits_tests;
+
 use serde_json::{Map, Value};
 use thiserror::Error;
 

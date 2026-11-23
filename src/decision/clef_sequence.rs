@@ -234,6 +234,34 @@ impl ClefTokenizer {
     }
 }
 
+/// One image's placeholder run: `<|vision_start|>`, `count` image pads and
+/// `<|vision_end|>`.
+pub(crate) fn image_block(tokenizer: &ClefTokenizer, count: usize) -> Vec<u32> {
+    let mut ids = Vec::with_capacity(count + 2);
+    ids.push(tokenizer.vision_start);
+    ids.extend(std::iter::repeat_n(tokenizer.image_pad, count));
+    ids.push(tokenizer.vision_end);
+    ids
+}
+
+/// One video's placeholder run: every temporal group framed and preceded by
+/// its timestamp text, the whole video framed again.
+pub(crate) fn video_block(
+    tokenizer: &ClefTokenizer,
+    group_tokens: usize,
+    seconds: &[f64],
+) -> Result<Vec<u32>, DecisionError> {
+    let mut ids = vec![tokenizer.vision_start];
+    for &second in seconds {
+        ids.extend(tokenizer.encode(&crate::qwen_vl::qwen_video_timestamp_text(second))?);
+        ids.push(tokenizer.vision_start);
+        ids.extend(std::iter::repeat_n(tokenizer.video_pad, group_tokens));
+        ids.push(tokenizer.vision_end);
+    }
+    ids.push(tokenizer.vision_end);
+    Ok(ids)
+}
+
 /// The media part of the prefix: what upstream's processor expands
 /// `"<|vision_start|><|image_pad|><|vision_end|>"` per image and
 /// `"<|vision_start|><|vision_start|><|video_pad|><|vision_end|><|vision_end|>"`
@@ -241,39 +269,110 @@ impl ClefTokenizer {
 ///
 /// `images` holds each image's token count; `videos` each video's per-group
 /// token count and its group timestamps in seconds.
+#[cfg(test)]
 pub(crate) fn media_block(
     tokenizer: &ClefTokenizer,
     images: &[usize],
     videos: &[(usize, Vec<f64>)],
 ) -> Result<Vec<u32>, DecisionError> {
-    let mut ids = Vec::new();
-    for &count in images {
-        ids.push(tokenizer.vision_start);
-        ids.extend(std::iter::repeat_n(tokenizer.image_pad, count));
-        ids.push(tokenizer.vision_end);
-    }
-    for (group_tokens, seconds) in videos {
-        ids.push(tokenizer.vision_start);
-        for &second in seconds {
-            ids.extend(tokenizer.encode(&crate::qwen_vl::qwen_video_timestamp_text(second))?);
-            ids.push(tokenizer.vision_start);
-            ids.extend(std::iter::repeat_n(tokenizer.video_pad, *group_tokens));
-            ids.push(tokenizer.vision_end);
-        }
-        ids.push(tokenizer.vision_end);
-    }
-    ids.extend(tokenizer.encode("\n")?);
+    let mut next = videos.iter();
+    let (ids, _) = gated_media_block(tokenizer, images, videos.len(), 0, |_| {
+        let (tokens, seconds) = next.next().cloned().unwrap_or_default();
+        Ok(((), tokens, seconds))
+    })?;
     Ok(ids)
 }
 
+/// [`media_block`] for media that is still to be decoded, refusing a request
+/// as soon as it cannot fit.
+///
+/// `text_tokens` is the frame's length without media. Before each video is
+/// prepared (`prepare(index)` decodes it and returns it with its per-group
+/// token count and group timestamps), the tokens so far are checked against
+/// [`MAX_LENGTH`]: every video only adds tokens, so a request already over the
+/// cap is refused without decoding the rest. The final, exact check is
+/// [`Frame::with_media`].
+pub(crate) fn gated_media_block<V>(
+    tokenizer: &ClefTokenizer,
+    images: &[usize],
+    videos: usize,
+    text_tokens: usize,
+    mut prepare: impl FnMut(usize) -> Result<(V, usize, Vec<f64>), DecisionError>,
+) -> Result<(Vec<u32>, Vec<V>), DecisionError> {
+    let newline = tokenizer.encode("\n")?;
+    let mut ids = Vec::new();
+    for &count in images {
+        ids.extend(image_block(tokenizer, count));
+    }
+    let mut prepared = Vec::with_capacity(videos);
+    for index in 0..videos {
+        let fixed = text_tokens + ids.len() + newline.len();
+        if fixed > MAX_LENGTH {
+            return Err(schema_too_long(fixed, false));
+        }
+        let (video, group_tokens, seconds) = prepare(index)?;
+        ids.extend(video_block(tokenizer, group_tokens, &seconds)?);
+        prepared.push(video);
+    }
+    ids.extend(newline);
+    Ok((ids, prepared))
+}
+
+/// Upstream's refusal of a sequence whose fixed part exceeds [`MAX_LENGTH`].
+/// `complete` is false when encoding stopped early, so `tokens` is a lower
+/// bound.
+pub(crate) fn schema_too_long(tokens: usize, complete: bool) -> DecisionError {
+    let at_least = if complete { "" } else { "at least " };
+    DecisionError::InvalidInput(format!(
+        "schema requires {at_least}{tokens} tokens before state; maximum is {MAX_LENGTH}"
+    ))
+}
+
+/// Refuse a request whose own text (state, schema) carries image or video
+/// placeholder tokens when media is present.
+///
+/// Every piece is encoded with special tokens parsed, as upstream does, so a
+/// literal `<|image_pad|>` in the text becomes a placeholder the vision
+/// features and MRoPE positions are matched against; with media present the
+/// counts no longer agree. `expected` is the pad count of the media block.
+pub(crate) fn check_placeholders(
+    tokenizer: &ClefTokenizer,
+    ids: &[u32],
+    expected: usize,
+) -> Result<(), DecisionError> {
+    if placeholder_count(tokenizer, ids) != expected {
+        return Err(DecisionError::InvalidInput(
+            "state and questions may not contain the <|image_pad|> or <|video_pad|> tokens \
+             when images or videos are given"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Image and video pad tokens in `ids`.
+pub(crate) fn placeholder_count(tokenizer: &ClefTokenizer, ids: &[u32]) -> usize {
+    ids.iter()
+        .filter(|&&id| id == tokenizer.image_pad || id == tokenizer.video_pad)
+        .count()
+}
+
 /// The schema tokens and each row's spans relative to the schema start.
+///
+/// `base` is the length of everything else in the frame. Encoding stops
+/// with [`schema_too_long`] as soon as `base` plus the schema so far exceeds
+/// [`MAX_LENGTH`] while input remains, so an oversized schema is refused
+/// after at most one piece past the cap rather than encoded in full.
 pub(crate) fn schema(
     tokenizer: &ClefTokenizer,
     questions: &[(String, Question)],
+    base: usize,
 ) -> Result<(Vec<u32>, Vec<ClefRow>), DecisionError> {
     let mut ids = tokenizer.encode("\n\nSCHEMA FIELDS:\n")?;
     let mut rows = Vec::with_capacity(questions.len());
+    let over = |ids: &[u32]| base + ids.len() > MAX_LENGTH;
     for (index, (name, question)) in questions.iter().enumerate() {
+        let last_question = index + 1 == questions.len();
         ids.extend(tokenizer.encode(&format!(
             "\nFIELD {}\nID: {name}\nTYPE: {}\nINSTRUCTION: ",
             index + 1,
@@ -290,7 +389,12 @@ pub(crate) fn schema(
         ids.extend(tokenizer.encode("\nALLOWED OPTIONS:\n")?);
         let mut option_spans = Vec::new();
         let mut labels = Vec::new();
-        for (number, (option, description)) in options(question).into_iter().enumerate() {
+        if over(&ids) {
+            return Err(schema_too_long(base + ids.len(), false));
+        }
+        let options = options(question);
+        let option_count = options.len();
+        for (number, (option, description)) in options.into_iter().enumerate() {
             ids.extend(tokenizer.encode(&format!("OPTION {}: ", number + 1))?);
             let mut semantics = Map::new();
             semantics.insert("option_id".to_string(), Value::String(option.clone()));
@@ -302,6 +406,9 @@ pub(crate) fn schema(
             option_spans.push((start, ids.len()));
             labels.push(option);
             ids.extend(tokenizer.encode("\n")?);
+            if !(last_question && number + 1 == option_count) && over(&ids) {
+                return Err(schema_too_long(base + ids.len(), false));
+            }
         }
         ids.extend(tokenizer.encode("END FIELD\n")?);
         rows.push(ClefRow {
@@ -309,6 +416,9 @@ pub(crate) fn schema(
             option_spans,
             labels,
         });
+        if !last_question && over(&ids) {
+            return Err(schema_too_long(base + ids.len(), false));
+        }
     }
     Ok((ids, rows))
 }
@@ -327,6 +437,22 @@ impl Frame {
     pub(crate) fn fixed_len(&self) -> usize {
         self.prefix.len() + self.schema.len() + self.suffix.len()
     }
+
+    /// Insert the media block after the system prompt (where [`frame`] puts
+    /// it) and check the cap again. Row spans are schema-relative until
+    /// [`place_state`], so they need no shift.
+    pub(crate) fn with_media(mut self, media: &[u32]) -> Result<Self, DecisionError> {
+        self.prefix.extend_from_slice(media);
+        self.checked()
+    }
+
+    fn checked(self) -> Result<Self, DecisionError> {
+        let fixed = self.fixed_len();
+        if fixed > MAX_LENGTH {
+            return Err(schema_too_long(fixed, true));
+        }
+        Ok(self)
+    }
 }
 
 /// Everything but the state. Refuses a schema (with its media) that alone
@@ -340,21 +466,15 @@ pub(crate) fn frame(
     if !media.is_empty() {
         prefix.extend_from_slice(media);
     }
-    let (schema, rows) = schema(tokenizer, questions)?;
     let suffix = tokenizer.encode(SUFFIX)?;
-    let frame = Frame {
+    let (schema, rows) = schema(tokenizer, questions, prefix.len() + suffix.len())?;
+    Frame {
         prefix,
         schema,
         suffix,
         rows,
-    };
-    let fixed = frame.fixed_len();
-    if fixed > MAX_LENGTH {
-        return Err(DecisionError::InvalidInput(format!(
-            "schema requires {fixed} tokens before state; maximum is {MAX_LENGTH}"
-        )));
     }
-    Ok(frame)
+    .checked()
 }
 
 /// Place the state (truncated to what fits) and shift the rows onto the
