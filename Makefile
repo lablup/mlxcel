@@ -892,10 +892,9 @@ verify-kernel-dtype-keys: ## Assert every CUDA and HIP JIT kernel launch keys it
 	@bash scripts/ci/check_kernel_dtype_keys_test.sh
 
 # The `Used by:` annotations on the top-level `pub fn`s of mlxcel-core's
-# utils.rs and layers.rs are held to the call sites (issue #1141): a function
-# with more than a dozen caller files must account for every one of them, by
-# name or through the regenerating grep the annotation carries, and a recorded
-# count or a "Not used by" claim must be true. Callers are resolved through
+# utils.rs and layers.rs are held to the call sites (issue #1141): each annotation
+# must account for every caller file by name or through its regenerating grep.
+# A recorded count or a "Not used by" claim must be true. Callers are resolved through
 # `use` declarations, not matched as substrings. check_used_by_test.sh is the
 # checker's own negative coverage on a synthetic workspace: an absent
 # annotation, the pre-#1121 `create_causal_mask` roster verbatim, a roster that

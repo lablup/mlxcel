@@ -75,7 +75,8 @@ pub struct QuantizedWeight {
 /// unscaled and return wrong numbers without an error, while
 /// [`UnifiedLinear::forward`] applies the scale.
 ///
-/// Used by: the Gemma 1, Gemma 2 and Gemma 3 MLPs, and [`compiled_swiglu_mlp`].
+/// Used by: the Gemma 1 (`gemma.rs`), Gemma 2 and Gemma 3 MLPs, and
+/// [`compiled_swiglu_mlp`].
 #[must_use]
 pub fn fused_mlp_quantized_weights<'a>(
     gate: &'a UnifiedLinear,
@@ -1143,7 +1144,7 @@ impl FusedAddRmsNormSpec for GemmaRMSNorm {
 /// passed in either order; the names describe intent, not an asymmetry.
 ///
 /// Used by: Llama3 / Qwen2-family `TransformerBlock`, Gemma `TransformerBlock`,
-/// Arcee `ArceeBlock`.
+/// Arcee `ArceeBlock`, and IQuestLoopCoder.
 pub fn fused_add_rms_norm<N: FusedAddRmsNormSpec + ?Sized>(
     norm: &N,
     delta: &MlxArray,
@@ -1825,8 +1826,9 @@ pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), St
 /// `--q-bits`) around this error.
 ///
 /// Used by: `mlxcel_surgery::ops::split_mtp::split_mtp` and `preflight_checks`
-///          in `src/commands/split_mtp.rs` in the consuming crate, and the
-///          Qwen 3.5 MTP drafter's `quantize_dense_projections`
+///          in `src/commands/split_mtp.rs` in the consuming crate, the
+///          Qwen 3.5 MTP drafter's `quantize_dense_projections`, the Bonsai
+///          config (`imagegen/bonsai/config.rs`) and `vision/weights.rs`.
 pub fn validate_affine_quantization_bits(bits: i32) -> Result<(), String> {
     if SUPPORTED_AFFINE_BITS.contains(&bits) {
         return Ok(());
@@ -1858,8 +1860,9 @@ pub fn validate_affine_quantization_bits(bits: i32) -> Result<(), String> {
 /// to, not instead of, that bounds check.
 ///
 /// Used by: `mlxcel_surgery::ops::split_mtp::split_mtp` and `preflight_checks`
-///          in `src/commands/split_mtp.rs` in the consuming crate, and the
-///          Qwen 3.5 MTP drafter's `quantize_dense_projections`
+///          in `src/commands/split_mtp.rs` in the consuming crate, the
+///          Qwen 3.5 MTP drafter's `quantize_dense_projections`, the Bonsai
+///          config (`imagegen/bonsai/config.rs`) and `vision/weights.rs`.
 pub fn validate_affine_quantization_group_size(group_size: i32) -> Result<(), String> {
     if SUPPORTED_AFFINE_GROUP_SIZES.contains(&group_size) {
         return Ok(());
@@ -2013,11 +2016,11 @@ pub fn validate_one_bit_layout(
 ///          (MoE experts), `crate::models::gpt_oss` (which reads
 ///          `quantization.mode` out of `config.json` at both
 ///          `Quantization::validate` and `ExpertLinear::from_weights`),
-///          `crate::models::jamba::JambaModel::from_weights` (which reads the
+///          Jamba's `JambaModel::from_weights` (which reads the
 ///          declared mode only to refuse anything its affine-only loaders would
 ///          silently reinterpret),
-///          `crate::models::config::QuantizationArgs::get_mode` and
-///          `crate::models::gemma4::validate_quantization_scheme`
+///          `QuantizationArgs::get_mode` in `models/config.rs`,
+///          the DeepSeekV4 config and Gemma4's `validate_quantization_scheme`.
 pub fn validate_quantization_mode(mode: &str) -> Result<(), String> {
     if SUPPORTED_QUANTIZATION_MODES.contains(&mode) {
         return Ok(());
@@ -2127,9 +2130,8 @@ pub fn native_quantization_route_line(
 /// Used by: the shared dense and embedding loaders (through
 ///          `reconcile_quantization_layout_logged`),
 ///          [`QuantizedMultiLinear::from_weights`] (MLA), and in the consuming
-///          crate `crate::models::switch_layers::SwitchLinear` (MoE experts),
-///          `crate::models::gpt_oss::ExpertLinear` and `kimi_linear`'s private
-///          `MultiLinear`
+///          crate `SwitchLinear` in `switch_layers.rs`, the GPT-OSS expert
+///          loader, KimiLinear's private `MultiLinear` and `vision/weights.rs`.
 pub fn validate_quantization_mode_for_running_backend(mode: &str) -> Result<(), String> {
     use crate::hardware::QuantMode;
     use std::sync::atomic::AtomicBool;
@@ -2175,8 +2177,9 @@ pub fn validate_quantization_mode_for_running_backend(mode: &str) -> Result<(), 
 ///          [`QuantizedMultiLinear::new`] and
 ///          [`QuantizedMultiLinear::from_weights`] (which infer the mode and so
 ///          couple the two helpers rather than checking a declaration),
-///          `SwitchLinear::from_stacked_parts` and `GptOss
-///          ExpertLinear::from_weights` in the consuming crate
+///          `SwitchLinear::from_stacked_parts` in `switch_layers.rs`, the
+///          GPT-OSS expert loader (`gpt_oss_common.rs`), KimiLinear and
+///          `vision/weights.rs`.
 pub fn validate_quantization_biases(mode: &str, has_biases: bool) -> Result<(), String> {
     validate_quantization_mode(mode)?;
     match (mode == "affine", has_biases) {
@@ -4892,7 +4895,8 @@ impl MultiLinear {
 ///
 /// Returns `None` if any projection is quantized (caller should use the quantized path).
 ///
-/// Used by: Llama, Qwen2, Qwen3, Mistral and other SwiGLU FP models
+/// Used by: the SwiGLU MLPs in `llama3.rs`, `qwen3.rs` and the DFlash
+/// drafter (`drafter/dflash/mlp.rs`).
 pub fn compiled_swiglu_mlp_fp16(
     x: &MlxArray,
     gate_proj: &UnifiedLinear,
@@ -5215,8 +5219,8 @@ fn record_na_attention_dispatch(
 
 /// Causal SDPA dispatch that preserves MLX's native `"causal"` mask mode.
 ///
-/// Used by: `crate::causal_attention()` on M5-class hardware for full-window
-/// causal prefill, so upstream MLX can select the NAX causal kernel directly.
+/// Used by: `crate::causal_attention()` in `lib.rs` on M5-class hardware for
+/// full-window causal prefill, so MLX can select the NAX causal kernel directly.
 pub fn metal4_causal_attention(
     q: &MlxArray,
     k: &MlxArray,

@@ -40,6 +40,13 @@ use std::sync::OnceLock;
 /// // Slice x[:, 5:, :] along axis 1 (5 to end)
 /// let sliced = slice_axis(&x, 1, 5, -1);
 /// ```
+///
+/// Used by: model and drafter layers that split activations or weights along
+/// an axis, including RecurrentGemma and Inkling MTP, embedding pooling,
+/// generative rerankers, and vision loaders and detectors such as RF-DETR.
+/// Find qualified references and grouped imports, excluding test modules:
+/// `grep -rln '\butils::.*\bslice_axis\b\|\bslice_axis,' src --include='*.rs'
+/// | grep -v 'tests\.rs$' | grep -v '/batched_decode_harness\.rs$'`.
 pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(x);
     let ndim = shape.len();
@@ -110,7 +117,7 @@ pub fn materialized_state_tail(x: &MlxArray, n_keep: i32) -> UniquePtr<MlxArray>
 /// `try_eval`) when `x` is at least [`STATE_TAIL_EAGER_MIN_ROWS`] long along
 /// `axis`; the result is bit-identical either way.
 ///
-/// Used by: [`materialized_state_tail`], `RotatingKVCache`'s first fill
+/// Used by: [`materialized_state_tail`], `RotatingKVCache`'s first fill in `cache/first_fill.rs`
 /// (Gemma 2/3/4, Cohere2, GPT-OSS, Ministral3 and every other family with
 /// sliding-window layers, issue #3062)
 pub fn materialized_axis_tail(x: &MlxArray, axis: usize, n_keep: i32) -> UniquePtr<MlxArray> {
@@ -132,8 +139,9 @@ pub fn materialized_axis_tail(x: &MlxArray, axis: usize, n_keep: i32) -> UniqueP
 /// Used by: Mamba2, FalconH1, GraniteMoeHybrid (SSM final state), the
 /// gated-delta chunked scan (Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear,
 /// KimiK3), BailingMoeLinear (GLA state), and the conv-state sites that keep a
-/// per-row or non-axis-1 tail: Baichuan, Inkling batched, TP Qwen3.5 rows,
-/// and Z1T (AFT-conv running pool sums)
+/// per-row or non-axis-1 tail: Baichuan, Inkling batched, TP Qwen3.5 rows
+/// (`tensor_parallel/llama_runtime.rs`), Z1T (AFT-conv running pool sums),
+/// and the chunked SSD scan (`ssd_scan.rs`).
 pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
     if rows >= STATE_TAIL_EAGER_MIN_ROWS {
         crate::deferred_eval::async_eval_or_defer(state);
@@ -222,7 +230,7 @@ pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 /// `MLXCEL_PREFILL_CAUSAL_MODE=0` keeps the array mask everywhere, which is
 /// the pre-#3051 dispatch.
 ///
-/// Used by: [`prefill_causal_mask`].
+/// Used by: [`prefill_causal_mask`], `prefill_sdpa.rs` and Llama4.
 pub fn prefill_uses_causal_mode(seq_len: i32, batch: i32, has_caller_mask: bool) -> bool {
     causal_mode_applies(
         seq_len,
@@ -551,10 +559,9 @@ fn padding_mask_shape(mask: &MlxArray, builder: &str) -> (i32, i32) {
 /// padding tokens still see every real key, so no row is fully blocked and no
 /// softmax is NaN. Broadcasts against `[B, H, L, L]` scores.
 ///
-/// Used by: the encoder-only embedding families (BERT, XLM-RoBERTa,
-/// ModernBERT, SigLIP text) and the bidirectional decoder embedders
-/// (EmbeddingGemma, Qwen3-Embedding, LFM2 / Ministral3 / Llama bidirectional,
-/// ColQwen2.5, ColIdefics3) served through `/v1/embeddings`.
+/// Used by: BERT and ModernBERT, and the embedding paths in EmbeddingGemma2,
+/// Gemma3-Embedding, LFM2, Ministral3-Embedding, Llama-Bidirec and
+/// Llama-Nemotron-VL-Embedding.
 pub fn create_bidirectional_padding_mask(mask: &MlxArray) -> UniquePtr<MlxArray> {
     let (b, l) = padding_mask_shape(mask, "create_bidirectional_padding_mask");
     let zero_i32 = ffi::from_slice_i32(&[0], &[1, 1]);
@@ -578,9 +585,10 @@ pub fn create_bidirectional_padding_mask(mask: &MlxArray) -> UniquePtr<MlxArray>
 /// finite. Padding-row outputs are garbage-but-finite and are never consumed,
 /// because those key positions stay blocked for every real query.
 ///
-/// Used by: the last-token embedding families (Qwen3-Embedding without
-/// bidirectional attention, Qwen3-VL-Embedding) and any batched causal
-/// prefill over a padded `[B, L]` input.
+/// Used by: padded prefill in Qwen3-Embedding, Qwen3-VL-Embedding, ColIdefics3,
+/// ColQwen2.5, the Qwen3 and Qwen3-VL generative rerankers
+/// (`rerank/qwen3_generative.rs`, `rerank/qwen3_vl_generative.rs`), and the
+/// SAM 3 text encoder (`sam3/text_encoder.rs`).
 pub fn create_causal_padding_mask(mask: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
     let (b, total) = padding_mask_shape(mask, "create_causal_padding_mask");
     assert!(
@@ -618,8 +626,8 @@ pub fn create_causal_padding_mask(mask: &MlxArray, offset: i32) -> UniquePtr<Mlx
 /// padding query row attends every real key inside its window, and one that
 /// has none keeps its own column so no softmax row is NaN.
 ///
-/// Used by: ModernBERT local-attention layers and the EmbeddingGemma
-/// sliding-window layers served through `/v1/embeddings`.
+/// Used by: local-attention layers in ModernBERT, EmbeddingGemma2,
+/// Gemma3-Embedding and Ministral3-Embedding.
 pub fn create_bidirectional_window_mask(mask: &MlxArray, window: i32) -> UniquePtr<MlxArray> {
     let (b, l) = padding_mask_shape(mask, "create_bidirectional_window_mask");
     assert!(
@@ -721,7 +729,8 @@ pub fn array_to_vec_f32(arr: &MlxArray) -> Vec<f32> {
 /// K/V at padding positions finite, instead of relying on the kernel's hard
 /// skip of additive −∞ columns to confine NaN to never-consumed slots.
 ///
-/// Used by: BatchQuantizedKVCache, BatchTurboQuantKVCache
+/// Used by: BatchQuantizedKVCache and BatchTurboQuantKVCache in
+/// `cache/batch_quant.rs`, Gemma4 and its MTP target (`gemma4_mtp_target.rs`).
 pub fn create_causal_mask_with_left_padding(
     n: i32,
     offset: i32,
@@ -1041,7 +1050,7 @@ pub fn mask_stale_key_gap(
 /// maintains: after each round every row's cache content is a contiguous
 /// prefix, so one `(valid_end, gap_end)` pair per row describes it exactly.
 /// Used by: Gemma 4 divergent batched MTP verify, Qwen 3.5 per-row DFlash
-/// verify (issue #2442).
+/// verify in `qwen3_next.rs` (issue #2442).
 #[must_use]
 pub fn build_divergent_row_mask(
     l: i32,
@@ -1083,7 +1092,7 @@ pub fn build_divergent_row_mask(
 }
 
 /// Create a boolean causal attention mask.
-/// Used by: same as `create_causal_mask` (experimental path)
+/// Used by: the experimental boolean-mask branch of `causal_attention` in `lib.rs`.
 ///
 /// Returns a bool mask where `true` means "allowed attention".
 pub fn create_causal_bool_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
@@ -1204,7 +1213,8 @@ pub fn create_causal_mask_with_window(
 
 /// Create a sliding-window causal mask sized to the *full* key axis, without
 /// the `min(size + offset, window)` cap applied by [`create_causal_mask_with_window`].
-/// Used by: Gemma4 and Laguna directly, `lib.rs`'s shared dispatch for a
+/// Used by: Laguna DFlash (`drafter/laguna_dflash/attention.rs`),
+/// `prefill_sdpa.rs`, `lib.rs`'s shared dispatch for a
 /// softcapped single-pass prefill longer than the sliding window (#413), and
 /// `window_sdpa::legacy_causal_window_mask`, the legacy arm of the native
 /// window route that the unsoftcapped over-window prefill takes (#2621; the
@@ -1340,7 +1350,7 @@ pub fn create_sliding_window_prefill_mask_dense(
 }
 
 /// Create a boolean causal attention mask with optional sliding window.
-/// Used by: same as `create_causal_mask_with_window` (experimental path)
+/// Used by: the windowed boolean-mask branch of `causal_attention` in `lib.rs`.
 ///
 /// Returns a bool mask where `true` means "allowed attention".
 /// Shape is `(size, min(size + offset, window))` when window is specified.
@@ -1433,6 +1443,11 @@ pub fn repeat_kv(x: &MlxArray, n_rep: i32) -> UniquePtr<MlxArray> {
 
 // Activation Functions.
 /// SiLU (Swish) activation: x * sigmoid(x) — compiled kernel fusion
+///
+/// Used by: decoder MLPs and gates (including DeepSeekV2, Jamba and Mamba2)
+/// and the MoGe3, Sapiens2 and DotsOCR vision paths. Look for the wrapper's
+/// module in imports and qualified calls to distinguish it from the raw SiLU:
+/// `grep -rln '\butils::.*\bsilu\b' src --include='*.rs' | grep -v 'tests\.rs$'`.
 #[inline]
 pub fn silu(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::compiled_silu(x)
@@ -1487,11 +1502,11 @@ pub fn softplus(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// callers port an erf GELU; new code should name its formula through
 /// [`GeluActivation`] instead.
 ///
-/// Used by: about 80 non-test call sites across `src/models`,
-/// `src/vision/encoders`, `src/vision/connectors` and `src/audio`. The
-/// per-site upstream formula is recorded in `docs/gelu-call-sites.md`;
-/// regenerate the caller set with
-/// `grep -rn 'gelu_approx(' src --include='*.rs' | grep -v '_tests\.rs'`.
+/// Used by: GPT-NeoX (`gpt_neox.rs`) and the Youtu-VL merger
+/// (`youtu_vl_merger.rs`). Calls spelled `mlxcel_core::gelu_approx` use the
+/// crate-root FFI function. See `docs/gelu-call-sites.md` for the upstream
+/// formulas. Find the calls to this wrapper with
+/// `grep -rln '\butils::gelu_approx(' src --include='*.rs' | grep -v 'tests\.rs$'`.
 #[inline]
 pub fn gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::gelu_approx(x)
@@ -1929,6 +1944,13 @@ pub fn concatenate(a: &MlxArray, b: &MlxArray, axis: i32) -> UniquePtr<MlxArray>
 }
 
 /// Stack arrays along a new axis.
+///
+/// Used by: model loaders stacking expert weights (including DeepSeekV3.2
+/// and SolarOpen), recurrent and gated-delta state updates, the split-MTP
+/// surgery pass and the GLiNER2.5 scorer. Find qualified references and
+/// grouped imports, including a name on its own continuation line:
+/// `grep -rln '\butils::.*\bstack_arrays\b\|^ *stack_arrays,' src --include='*.rs'
+/// | grep -v 'tests\.rs$'`.
 pub fn stack_arrays(arrays: &[UniquePtr<MlxArray>], axis: i32) -> UniquePtr<MlxArray> {
     let ptrs: Vec<*const MlxArray> = arrays
         .iter()
@@ -1989,7 +2011,8 @@ fn get_pipeline_mode() -> PipelineMode {
 /// * `total_layers` - Total number of transformer layers in the model.
 ///
 /// Used by: Llama3, Qwen3, Gemma, Gemma2, Gemma3, Gemma4, Apertus, SeedOss,
-/// and the pipeline stage executor (`distributed/pipeline/stage_executor/common.rs`)
+/// Arcee, Nanochat and the pipeline stage executor
+/// (`distributed/pipeline/stage_executor/common.rs`).
 #[inline]
 pub fn pipeline_hint(hidden: &MlxArray, layer_idx: usize, total_layers: usize) {
     static MODE: OnceLock<PipelineMode> = OnceLock::new();

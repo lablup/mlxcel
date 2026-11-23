@@ -68,15 +68,12 @@ either: the rule is about other modules.
 The rules
 ---------
 1. **Absence.** A function with more than ``ABSENCE_THRESHOLD`` caller files
-   needs a ``Used by:`` annotation. The three functions that were above the
-   threshold and unannotated when the check landed are grandfathered in
-   ``UNANNOTATED_DEBT``; an entry that no longer applies fails the check, so
-   the list can only shrink.
+   needs a ``Used by:`` annotation. There are no grandfathered exceptions.
 2. **Form.** The annotation is a line of the function's doc block that starts
    with ``Used by:``, in a ``///`` doc comment so that it survives into
    rustdoc. It runs to the end of the doc block.
-3. **Every caller is accounted for**, once a function has more than
-   ``ENUMERATION_THRESHOLD`` caller files. Each caller file must be either
+3. **Every caller of an annotated function is accounted for.** Each caller
+   file must be either
 
    * named by the annotation: a path (``recurrent_gemma.rs``, or
      ``src/vision/dense`` for everything below a directory), or a family name
@@ -144,20 +141,6 @@ weight as the list, and it costs one comparison per caller.
 It catches #1110 by construction and is simpler, but it fails the three
 correct rosters above for their length alone.
 
-Why rule 3 has a threshold
---------------------------
-Applied to every annotated function, rule 3 failed 28 annotations on the tree
-it landed on. Seven were above ``ENUMERATION_THRESHOLD`` and were fixed in the
-same change; each had real callers nobody had recorded
-(``array_to_vec_f32`` named none of its 32). The other 21 are small, and they
-are a mix that a script cannot sort: real omissions (``pipeline_hint`` had not
-been told about Nanochat) next to accurate prose that names a caller by what
-it does (``materialized_axis_tail`` says "``RotatingKVCache``'s first fill"
-for ``cache/first_fill.rs``). Gating those would have meant rewording correct
-annotations to suit the matcher. They are counted in the summary line and
-listed by ``--report``, and the threshold is the knob to lower once they are
-cleaned up.
-
 Limits
 ------
 * A roster that still names a family which has stopped calling the function
@@ -209,23 +192,11 @@ SCOPED_FILES = (
 # unannotated caller count was 5 (`utils.rs::relu_squared`).
 ABSENCE_THRESHOLD = 5
 
-# Functions above ABSENCE_THRESHOLD that had no annotation when the check
-# landed, with their caller counts then (71, 25 and 18). Annotate one and
-# delete its entry in the same change; an entry that no longer applies fails.
-UNANNOTATED_DEBT = frozenset(
-    {
-        "src/lib/mlxcel-core/src/utils.rs::slice_axis",
-        "src/lib/mlxcel-core/src/utils.rs::silu",
-        "src/lib/mlxcel-core/src/utils.rs::stack_arrays",
-    }
-)
+# All formerly grandfathered helpers now have annotations.
+UNANNOTATED_DEBT = frozenset()
 
-# More caller files than this, and the annotation has to account for every one
-# of them (rule 3). It is the guidelines' "past roughly a dozen callers", the
-# point where a hand-written roster stops being repaired. At or below it an
-# unnamed caller is reported by --report and counted in the summary line, but
-# does not fail: see "Why rule 3 has a threshold" in the module docstring.
-ENUMERATION_THRESHOLD = 12
+# Even a single external caller must be covered once the function has a roster.
+ENUMERATION_THRESHOLD = 0
 
 # A directory's name stands for the files directly in it only while the
 # directory is a family. `src/models` (several hundred files) is a container:
