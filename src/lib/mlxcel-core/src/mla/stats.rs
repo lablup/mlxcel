@@ -25,7 +25,16 @@
 //! subscriber at all (only `src/server/startup.rs` does), so a `tracing::info!`
 //! from a CLI-reachable path emits nothing no matter what `RUST_LOG` says.
 //! Counters plus an explicit print in the harness are observable everywhere.
+//!
+//! Every call is counted twice: once in the process-global counters that
+//! [`take`] and [`report_if_requested`] read, and once in a per-thread tally
+//! that [`scoped`] reads (issue #3298). A test asserting an exact count uses
+//! [`scoped`], because the global counters also see every other MLA test the
+//! harness runs in parallel. Path selection happens while the graph is built,
+//! on the thread that calls the model's `forward`, so a test's own forwards
+//! always land in its own tally.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The MLA attention paths a step can take.
@@ -98,6 +107,36 @@ fn counter(path: MlaDecodePath) -> &'static AtomicU64 {
 #[inline]
 pub fn record(path: MlaDecodePath) {
     counter(path).fetch_add(1, Ordering::Relaxed);
+    // `try_with` so a record from a thread-local destructor during thread
+    // teardown cannot panic; the global count above still lands.
+    let _ = THREAD_COUNTS.try_with(|tally| {
+        let mut counts = tally.get();
+        counts.bump(path);
+        tally.set(counts);
+    });
+}
+
+thread_local! {
+    /// Calls recorded on this thread since it started. Never reset: [`scoped`]
+    /// subtracts a before-reading from an after-reading, so nested scopes and
+    /// a global [`take`] in between do not disturb each other.
+    static THREAD_COUNTS: Cell<MlaDispatchCounts> = const { Cell::new(MlaDispatchCounts::ZERO) };
+}
+
+/// Run `f` and return the MLA calls recorded **on the calling thread** while
+/// it ran, alongside its result.
+///
+/// Unlike a [`snapshot`] before and after, the counts exclude calls made by
+/// other threads, so an exact-count assertion holds while other MLA tests run
+/// concurrently. Calls made by threads that `f` spawns are not included.
+/// Scopes nest: an inner scope's calls are also counted by the outer one.
+///
+/// Used by: the MLA dispatch assertions in `src/models/*_tests.rs`.
+pub fn scoped<R>(f: impl FnOnce() -> R) -> (R, MlaDispatchCounts) {
+    let before = THREAD_COUNTS.with(Cell::get);
+    let result = f();
+    let after = THREAD_COUNTS.with(Cell::get);
+    (result, after.since(&before))
 }
 
 /// Environment variable that makes a run print the dispatch counters when it
@@ -130,6 +169,40 @@ pub struct MlaDispatchCounts {
 }
 
 impl MlaDispatchCounts {
+    /// All counts zero; usable in `const` context, unlike `Default`.
+    const ZERO: Self = Self {
+        decompressed: 0,
+        absorbed_prefill: 0,
+        absorbed_composed: 0,
+        absorbed_split_kv: 0,
+        absorbed_fused: 0,
+    };
+
+    fn slot(&mut self, path: MlaDecodePath) -> &mut u64 {
+        match path {
+            MlaDecodePath::Decompressed => &mut self.decompressed,
+            MlaDecodePath::AbsorbedPrefill => &mut self.absorbed_prefill,
+            MlaDecodePath::AbsorbedComposed => &mut self.absorbed_composed,
+            MlaDecodePath::AbsorbedSplitKv => &mut self.absorbed_split_kv,
+            MlaDecodePath::AbsorbedFused => &mut self.absorbed_fused,
+        }
+    }
+
+    fn bump(&mut self, path: MlaDecodePath) {
+        let slot = self.slot(path);
+        *slot = slot.wrapping_add(1);
+    }
+
+    /// Per-path difference from an earlier reading of the same monotonic tally.
+    /// Wrapping, so the difference stays exact even if a counter wrapped.
+    fn since(&self, earlier: &Self) -> Self {
+        let mut out = Self::ZERO;
+        for path in MLA_DECODE_PATHS {
+            *out.slot(path) = self.get(path).wrapping_sub(earlier.get(path));
+        }
+        out
+    }
+
     /// Count for one path.
     #[must_use]
     pub const fn get(&self, path: MlaDecodePath) -> u64 {
@@ -166,7 +239,10 @@ impl MlaDispatchCounts {
     }
 }
 
-/// Read the counters without clearing them.
+/// Read the process-global counters without clearing them.
+///
+/// These include every thread's calls; a test that asserts on the calls its
+/// own code made uses [`scoped`] instead.
 #[must_use]
 pub fn snapshot() -> MlaDispatchCounts {
     MlaDispatchCounts {
@@ -178,7 +254,8 @@ pub fn snapshot() -> MlaDispatchCounts {
     }
 }
 
-/// Read the counters and reset them to zero.
+/// Read the process-global counters and reset them to zero. The per-thread
+/// tally [`scoped`] reads is unaffected.
 ///
 /// A benchmark calls this between arms so each arm's summary describes only
 /// that arm.
@@ -222,5 +299,69 @@ mod tests {
         assert!(s.contains("absorbed_composed=0"), "{s}");
         assert_eq!(counts.total(), 7);
         assert_eq!(counts.get(MlaDecodePath::Decompressed), 7);
+    }
+
+    /// Two threads record different paths at the same time; each `scoped`
+    /// result holds only its own thread's calls (issue #3298). A
+    /// before/after `snapshot()` would see both threads' calls here.
+    #[test]
+    fn scoped_counts_only_the_calling_threads_calls() {
+        // `record` also bumps the global counters, which other mlxcel-core
+        // tests assert on under this lock.
+        let _guard = crate::mla::testkit::serial();
+        const CALLS: u64 = 1000;
+        let barrier = std::sync::Barrier::new(2);
+        let run = |path: MlaDecodePath| {
+            let ((), counts) = scoped(|| {
+                // Both threads are inside their scope before either records,
+                // and neither leaves before the other has finished.
+                barrier.wait();
+                for _ in 0..CALLS {
+                    record(path);
+                }
+                barrier.wait();
+            });
+            counts
+        };
+        let (a, b) = std::thread::scope(|s| {
+            let a = s.spawn(|| run(MlaDecodePath::Decompressed));
+            let b = s.spawn(|| run(MlaDecodePath::AbsorbedFused));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_eq!(
+            a,
+            MlaDispatchCounts {
+                decompressed: CALLS,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            b,
+            MlaDispatchCounts {
+                absorbed_fused: CALLS,
+                ..Default::default()
+            }
+        );
+        let _ = take();
+    }
+
+    #[test]
+    fn scoped_nests_and_survives_a_global_take() {
+        let _guard = crate::mla::testkit::serial();
+        let (inner, outer) = scoped(|| {
+            record(MlaDecodePath::AbsorbedComposed);
+            let ((), inner) = scoped(|| {
+                record(MlaDecodePath::AbsorbedSplitKv);
+                let _ = take();
+                record(MlaDecodePath::AbsorbedSplitKv);
+            });
+            inner
+        });
+        assert_eq!(inner.absorbed_split_kv, 2);
+        assert_eq!(inner.total(), 2);
+        assert_eq!(outer.absorbed_composed, 1);
+        assert_eq!(outer.absorbed_split_kv, 2);
+        assert_eq!(outer.total(), 3);
+        let _ = take();
     }
 }

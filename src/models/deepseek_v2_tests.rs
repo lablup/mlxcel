@@ -485,18 +485,16 @@ fn a_bf16_layer_keeps_bf16_over_an_int8_latent() {
             bf16,
         )
     };
-    let before = mlxcel_core::mla::stats::snapshot();
     let mut cache =
         mlxcel_core::layers::KVCache::new_with_mode(mlxcel_core::cache::KVCacheMode::Int8);
-    let prefill = attn.forward(&hidden(5), None, &mut cache);
-    mlxcel_core::eval(&prefill);
-    let after = mlxcel_core::mla::stats::snapshot();
+    let (prefill, counts) = mlxcel_core::mla::stats::scoped(|| {
+        let prefill = attn.forward(&hidden(5), None, &mut cache);
+        mlxcel_core::eval(&prefill);
+        prefill
+    });
     assert!(cache.holds_quantized_latent());
     assert!(
-        after
-            .get(mlxcel_core::mla::MlaDecodePath::Decompressed)
-            .saturating_sub(before.get(mlxcel_core::mla::MlaDecodePath::Decompressed))
-            >= 1,
+        counts.get(mlxcel_core::mla::MlaDecodePath::Decompressed) >= 1,
         "the cold prefill must take the decompressed path"
     );
     assert_eq!(
@@ -506,15 +504,13 @@ fn a_bf16_layer_keeps_bf16_over_an_int8_latent() {
     );
     // Behind the 5-token window the cost model absorbs a 2-token step, which
     // dequantizes the window inside `MlaLatentCache::attend_preprojected`.
-    let before = mlxcel_core::mla::stats::snapshot();
-    let absorbed_step = attn.forward(&hidden(2), None, &mut cache);
-    mlxcel_core::eval(&absorbed_step);
-    let after = mlxcel_core::mla::stats::snapshot();
+    let (absorbed_step, counts) = mlxcel_core::mla::stats::scoped(|| {
+        let absorbed_step = attn.forward(&hidden(2), None, &mut cache);
+        mlxcel_core::eval(&absorbed_step);
+        absorbed_step
+    });
     assert!(
-        after
-            .get(mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill)
-            .saturating_sub(before.get(mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill))
-            >= 1,
+        counts.get(mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill) >= 1,
         "the 2-token step must take the absorbed multi-token path"
     );
     assert_eq!(
