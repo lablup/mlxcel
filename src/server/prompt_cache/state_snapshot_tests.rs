@@ -555,6 +555,18 @@ fn every_restore_refuses_attention_tensors_that_do_not_fit() {
         "{err}"
     );
 
+    // No attention rows at all behind a five-token donor.
+    let rowless = donor
+        .subset(|name| !name.ends_with(".attention.keys") && !name.ends_with(".attention.values"));
+    let err = policy
+        .restore(fresh_hybrid(), &rowless)
+        .err()
+        .expect("whole restore with no attention rows");
+    assert!(
+        err.contains("no keys or values behind an offset of 5"),
+        "{err}"
+    );
+
     // The well-formed pair still restores.
     assert!(
         policy

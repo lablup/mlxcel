@@ -376,9 +376,10 @@ impl StatePolicy {
 /// The restored keys and values of an attention layer must be one pair: both
 /// present or both absent, rank 4, the same dtype and the same batch, head
 /// and row counts. A full layer's buffer must also hold at least `offset`
-/// rows, since attention reads its first `offset` rows (a ring's offset counts
-/// every token it has seen, so it is not bounded by its rows). A snapshot that
-/// fails this was not written by this layer's encoder.
+/// rows, since attention reads its first `offset` rows, so a full layer with
+/// no buffer must be at offset 0 (a ring's offset counts every token it has
+/// seen, so it is not bounded by its rows). A snapshot that fails this was
+/// not written by this layer's encoder.
 fn check_kv_tensors(layer: &LayerState) -> Result<(), String> {
     let (keys, values, full_offset) = match layer {
         LayerState::Kv(cache) => (
@@ -390,7 +391,16 @@ fn check_kv_tensors(layer: &LayerState) -> Result<(), String> {
         _ => return Ok(()),
     };
     let (keys, values) = match (keys, values) {
-        (None, None) => return Ok(()),
+        // A full layer with no rows cannot claim tokens: attention would read
+        // rows that were never restored.
+        (None, None) => {
+            return match full_offset {
+                Some(offset) if offset > 0 => {
+                    Err(format!("no keys or values behind an offset of {offset}"))
+                }
+                _ => Ok(()),
+            };
+        }
         (Some(keys), Some(values)) => (keys, values),
         _ => return Err("the snapshot holds only one of keys and values".to_string()),
     };
