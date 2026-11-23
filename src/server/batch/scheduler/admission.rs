@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::prompt_cache::PrefixAdoptOutcome;
+use super::prompt_cache_adopt::PrefixAdoptOutcome;
 use super::*;
 use crate::server::batch::generation_bounds::GenerationBounds;
 
