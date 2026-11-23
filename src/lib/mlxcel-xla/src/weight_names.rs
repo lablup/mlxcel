@@ -190,6 +190,32 @@ pub(crate) fn scheme_names(scheme: WeightScheme) -> SchemeNames {
             pre_ff_norm: "unused.pre_ff_norm.weight",
             post_ff_norm: "unused.post_ff_norm.weight",
         },
+        // HF Mamba2 (issue #3338). A Mamba2 layer reads only the block norm here
+        // (`input_layernorm`); its mixer tensors are named by
+        // `weights::push_ssm_layer_specs`. The attention / MLP names are never
+        // emitted for this scheme.
+        WeightScheme::Mamba2 => SchemeNames {
+            embed: "backbone.embeddings.weight",
+            final_norm: "backbone.norm_f.weight",
+            lm_head: "lm_head.weight",
+            layer_stem: "backbone.layers.",
+            down: "unused.down.weight",
+            gate: "unused.gate.weight",
+            input_layernorm: "norm.weight",
+            post_attention_layernorm: "unused.post_attention_layernorm.weight",
+            up: "unused.up.weight",
+            k_proj: "unused.k_proj.weight",
+            o_proj: "unused.o_proj.weight",
+            q_proj: "unused.q_proj.weight",
+            v_proj: "unused.v_proj.weight",
+            k_bias: "unused.k_proj.bias",
+            q_bias: "unused.q_proj.bias",
+            v_bias: "unused.v_proj.bias",
+            q_norm: "unused.q_norm.weight",
+            k_norm: "unused.k_norm.weight",
+            pre_ff_norm: "unused.pre_ff_norm.weight",
+            post_ff_norm: "unused.post_ff_norm.weight",
+        },
     }
 }
 

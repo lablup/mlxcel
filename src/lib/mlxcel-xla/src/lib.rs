@@ -100,6 +100,10 @@ mod molmo2;
 mod molmo2_vision_runtime;
 #[cfg(feature = "iree")]
 mod molmo_vision_runtime;
+// Plain shard file names from an untrusted safetensors index (#3338), shared by
+// the loader and the emitter-side checkpoint cross-check.
+#[cfg(any(feature = "iree", test))]
+mod shard_path;
 // Always compiled: the emitter reads its workgroup-shape constants, and the
 // module itself has no IREE dependency. Without the runtime only the tests use it.
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
@@ -110,6 +114,8 @@ mod phi4_audio;
 mod qwen2_vl_runtime;
 #[cfg(feature = "iree")]
 mod qwen3_vl_runtime;
+#[cfg(feature = "iree")]
+mod ssm_model_check;
 // The spec, length checks and `.npy` codec are pure Rust and unit-tested
 // without IREE; only `run_ssm_probe` needs the runtime.
 #[cfg(any(feature = "iree", test))]
@@ -240,6 +246,11 @@ pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters}
 /// Test support only (issue #3028): decode-step scalar reuse instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{decode_scalar_counters, reset_decode_scalar_counters};
+#[cfg(feature = "iree")]
+pub use ssm_model_check::{
+    SsmDecodeSession, SsmModelCompileTimes, SsmModelPrefill, SsmModelSession, SsmModelState,
+    compile_ssm_model_graphs,
+};
 #[cfg(feature = "iree")]
 pub use ssm_probe::{
     SsmProbeInputs, SsmProbeOutputs, SsmProbeSpec, npy_f32_bytes, parse_npy_f32, run_ssm_probe,

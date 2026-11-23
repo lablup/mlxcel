@@ -131,6 +131,12 @@ fn add_last(b: &mut Builder, x: &Val, bias: &Val) -> Val {
 
 /// Depthwise causal conv over a sequence that already carries its `K-1` left
 /// context rows: `xp [T+K-1, C] -> [T, C]`.
+///
+/// Computed as `K` shifted multiply-adds in f32 rather than a convolution op,
+/// so the prefill rounds exactly like the decode step ([`conv1d_causal_step`])
+/// on every precision path: `Builder::convolution` demotes its operands on the
+/// f16 path, and a mixed-type depthwise convolution does not compile
+/// (`spike/openxla/FINDINGS_ssm.md`).
 fn conv1d_over_left_context(
     b: &mut Builder,
     xp: &Val,
@@ -140,13 +146,23 @@ fn conv1d_over_left_context(
 ) -> Val {
     let (rows, channels) = (xp.ty.shape[0], xp.ty.shape[1]);
     let t = rows + 1 - k;
-    let input = b.reshape(xp, vec![1, rows, channels]);
+    let xp = to_f32(b, xp);
     let w = to_f32(b, w);
-    // torch [C, 1, K] -> channels-last kernel [K, 1, C] (one input per group).
-    let kernel = b.transpose(&w, &[2, 1, 0]);
-    let convolved = b.convolution(&input, &kernel, &[1], &[(0, 0)], channels);
-    let convolved = to_f32(b, &convolved);
-    let out = b.reshape(&convolved, vec![t, channels]);
+    // torch [C, 1, K] -> [C, K]; tap j multiplies input row t + j.
+    let w = b.reshape(&w, vec![channels, k]);
+    let mut out: Option<Val> = None;
+    for tap in 0..k {
+        let window = b.slice(&xp, &[(tap, tap + t), (0, channels)]);
+        let weight = b.slice(&w, &[(0, channels), (tap, tap + 1)]);
+        let weight = b.reshape(&weight, vec![channels]);
+        let weight = b.broadcast(&weight, &[1], vec![t, channels]);
+        let product = b.multiply(&window, &weight);
+        out = Some(match out {
+            Some(sum) => b.add(&sum, &product),
+            None => product,
+        });
+    }
+    let out = out.expect("conv_kernel is at least 2");
     match bias {
         Some(bias) => add_last(b, &out, bias),
         None => out,

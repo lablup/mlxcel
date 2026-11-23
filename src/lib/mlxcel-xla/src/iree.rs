@@ -1692,11 +1692,12 @@ fn compile_vmfbs(
             check_packed_supported(device, config.packed_args && config.supports_packed_quant())?;
             (
                 emit_prefill_with(config, true, precision),
-                emit_prefill_embeddings_with(config, true, precision),
+                emit_prefill_embeddings_with(config, true, precision)?,
                 config
                     .deepstack
                     .as_ref()
-                    .map(|_| emit_prefill_embeddings_deepstack_with(config, true, precision)),
+                    .map(|_| emit_prefill_embeddings_deepstack_with(config, true, precision))
+                    .transpose()?,
                 emit_decode_with_native(config, true, precision, packed_native),
             )
         }
@@ -1775,7 +1776,7 @@ fn compile_deepstack_diagnostics(device: &str, cfg: &RuntimeConfig) -> Result<Pa
         return Err("DeepStack diagnostics require a declared DeepStack schema".to_string());
     }
     let precision = effective_precision(device, cfg)?;
-    let mlir = emit_prefill_embeddings_deepstack_diagnostics_with(config, precision);
+    let mlir = emit_prefill_embeddings_deepstack_diagnostics_with(config, precision)?;
     let compiler = iree_compile_bin()?;
     if !compiler.exists() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
@@ -1987,31 +1988,7 @@ fn merge_gemma3n_name_scheme(
     }
 }
 
-/// Resolve one shard file name from `model.safetensors.index.json` inside
-/// `model_dir`. The index comes from an untrusted checkpoint, so a name must be
-/// a single plain file name: an absolute path, a `..` component or a nested
-/// path would let it point the loader at a file outside the model directory.
-/// This matches `validate_index_shards` in `mlxcel-core`.
-pub(crate) fn index_shard_path(
-    model_dir: &Path,
-    index: &Path,
-    file: &str,
-) -> Result<PathBuf, String> {
-    let relative = Path::new(file);
-    let plain = !file.contains('\0')
-        && matches!(
-            relative.components().collect::<Vec<_>>().as_slice(),
-            [std::path::Component::Normal(_)]
-        );
-    if !plain {
-        return Err(format!(
-            "{} names shard {file:?}; shard names must be plain file names inside the model \
-             directory",
-            index.display()
-        ));
-    }
-    Ok(model_dir.join(relative))
-}
+pub(crate) use crate::shard_path::index_shard_path;
 
 fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let index = model_dir.join("model.safetensors.index.json");
@@ -2685,6 +2662,7 @@ where
                 let mut dims = [0i64; 4];
                 match &specs[i] {
                     WeightSpec::Whole(_) => {
+                        let shape = &whole_graph_shape(name, shape);
                         let rank = checked_ffi_int(shape.len(), &format!("weight {name} rank"))?;
                         for (k, &s) in shape.iter().enumerate() {
                             dims[k] = checked_ffi_i64(s, &format!("weight {name} dim {k}"))?;
@@ -2809,6 +2787,71 @@ where
         Some(&stats.detail()),
     );
     Ok(())
+}
+
+/// The shape a whole-tensor weight is declared with in the graph. MLX
+/// conversions store a Mamba2 depthwise conv as `[C, K, 1]`, while the graph
+/// declares torch's `[C, 1, K]` (issue #3338); both are the same row-major
+/// bytes, so only the dims change.
+fn whole_graph_shape(name: &str, shape: &[usize]) -> Vec<usize> {
+    match shape {
+        [channels, kernel, 1] if name.ends_with("mixer.conv1d.weight") && *kernel > 1 => {
+            vec![*channels, 1, *kernel]
+        }
+        _ => shape.to_vec(),
+    }
+}
+
+/// One host weight read by [`load_host_weights`].
+pub(crate) enum HostWeight {
+    F32(Vec<f32>),
+    /// IEEE half bits (an f16-resident projection).
+    F16(Vec<u16>),
+}
+
+/// Read every graph weight of `cfg` from `model_dir` in the emitter's argument
+/// order, with their graph shapes, through the same loader the runtime uploads
+/// from: the config's projection layout, and f16 projections when
+/// `resident_f16` (the runtime's rule for an f16 graph). The SSM model check
+/// (issue #3338) feeds these to the auxiliary module.
+pub(crate) fn load_host_weights(
+    model_dir: &Path,
+    cfg: &Config,
+    resident_f16: bool,
+) -> Result<Vec<(HostWeight, Vec<usize>)>, String> {
+    let runtime = RuntimeConfig::Dense(Box::new(cfg.clone()));
+    let mut slots: Vec<Option<(HostWeight, Vec<usize>)>> =
+        (0..runtime.weight_specs().len()).map(|_| None).collect();
+    upload_weights_with_sink(
+        model_dir,
+        &runtime,
+        resident_f16,
+        cfg.projection_layout,
+        |index, buf, _dtype, rank, dims| {
+            let weight = match buf {
+                WeightBuf::F32(values) => HostWeight::F32(values),
+                WeightBuf::F16(bits) => HostWeight::F16(bits),
+                WeightBuf::Raw(_) => {
+                    return Err(format!("weight {index} is a raw (packed) buffer"));
+                }
+            };
+            let rank = usize::try_from(rank).map_err(|_| format!("weight {index} rank"))?;
+            let shape = dims[..rank]
+                .iter()
+                .map(|&dim| usize::try_from(dim).map_err(|_| format!("weight {index} dim")))
+                .collect::<Result<Vec<_>, _>>()?;
+            let slot = slots
+                .get_mut(index)
+                .ok_or_else(|| format!("weight index {index} out of range"))?;
+            *slot = Some((weight, shape));
+            Ok(())
+        },
+    )?;
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| slot.ok_or_else(|| format!("weight {index} was never loaded")))
+        .collect()
 }
 
 fn path_cstring(p: &Path) -> Result<CString, String> {
@@ -3818,17 +3861,21 @@ impl IreeRaggedLlama {
                     )?;
                     (
                         emit_prefill_with(config, false, precision),
-                        emit_prefill_embeddings_with(config, false, precision),
-                        config.deepstack.as_ref().map(|_| {
-                            emit_prefill_embeddings_deepstack_with(config, false, precision)
-                        }),
+                        emit_prefill_embeddings_with(config, false, precision)?,
+                        config
+                            .deepstack
+                            .as_ref()
+                            .map(|_| {
+                                emit_prefill_embeddings_deepstack_with(config, false, precision)
+                            })
+                            .transpose()?,
                         emit_decode_ragged_with_native(
                             config,
                             b_max,
                             false,
                             precision,
                             native_ragged,
-                        ),
+                        )?,
                     )
                 }
                 RuntimeConfig::Gemma3n(config) => (
