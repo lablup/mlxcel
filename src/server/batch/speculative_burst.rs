@@ -1444,10 +1444,18 @@ fn run_mtp_burst(
         // (Qwen attention caches are plain growing KVCaches), so no
         // block-size-derived constructor parameter.
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
+            // Qwen 3.5 state is the pool's (issue #3254). Without it the burst
+            // fails here instead of running on the shared fallback slot.
+            let Some(layer_state) = ctx.layer_state.take() else {
+                return Err(BurstOutcome::Error(format!(
+                    "MTP burst: sequence {} holds no scheduler-owned layer state",
+                    seq.seq_id
+                )));
+            };
             let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::for_sequence(
                 qwen,
                 seq.seq_id,
-                ctx.layer_state.take(),
+                Some(layer_state),
             )
             .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(
@@ -1464,11 +1472,19 @@ fn run_mtp_burst(
             )
         }
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
+            // Qwen 3.5 state is the pool's (issue #3254). Without it the burst
+            // fails here instead of running on the shared fallback slot.
+            let Some(layer_state) = ctx.layer_state.take() else {
+                return Err(BurstOutcome::Error(format!(
+                    "MTP burst: sequence {} holds no scheduler-owned layer state",
+                    seq.seq_id
+                )));
+            };
             let adapter =
                 crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::for_sequence(
                     vlm,
                     seq.seq_id,
-                    ctx.layer_state.take(),
+                    Some(layer_state),
                 )
                 .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(

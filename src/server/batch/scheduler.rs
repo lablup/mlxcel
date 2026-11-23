@@ -330,6 +330,16 @@ impl BatchScheduler {
             // stateless per-tick view over the model's sequence slot, which
             // is exactly why the cache-ownership design routes through
             // `*_for_sequence` wrappers instead of an adapter-owned cache.
+            // A Qwen 3.5 sequence the pool holds no layer state for cannot run
+            // the slice; decline it like an unsupported family (issue #3254).
+            LoadedModel::Qwen35(_)
+            | LoadedModel::Qwen35Moe(_)
+            | LoadedModel::Qwen35VLM(_)
+            | LoadedModel::Qwen35MoeVLM(_)
+                if pool.layer_state(seq.seq_id).is_none() =>
+            {
+                Err((seq, drafter))
+            }
             LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
                 let adapter =
                     crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::for_sequence(
