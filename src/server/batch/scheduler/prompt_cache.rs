@@ -152,9 +152,7 @@ impl BatchScheduler {
             // family whose recurrent state cannot be rewound returns false
             // here and keeps exact-prefix semantics.
             store.lookup_snapshot_outcome(&key, tokens, |snapshot, target_len| {
-                self.engine
-                    .model()
-                    .snapshot_truncatable_to(snapshot, target_len)
+                state_snapshot::snapshot_truncatable_to(self.engine.model(), snapshot, target_len)
             })
         } else {
             SnapshotLookupOutcome::NoCandidate
@@ -180,9 +178,11 @@ impl BatchScheduler {
                 &key,
                 tokens,
                 |snapshot, target_len| {
-                    self.engine
-                        .model()
-                        .snapshot_truncatable_to(snapshot, target_len)
+                    state_snapshot::snapshot_truncatable_to(
+                        self.engine.model(),
+                        snapshot,
+                        target_len,
+                    )
                 },
             );
         }
@@ -224,9 +224,11 @@ impl BatchScheduler {
             if matched_len < store_matched_len {
                 let truncatable = matched_len >= store.min_prefix_tokens().max(1)
                     && snapshot_entry.with_snapshot(|snapshot| {
-                        self.engine
-                            .model()
-                            .snapshot_truncatable_to(snapshot, matched_len)
+                        state_snapshot::snapshot_truncatable_to(
+                            self.engine.model(),
+                            snapshot,
+                            matched_len,
+                        )
                     });
                 if !truncatable {
                     // Recurrent families, and rotating families whose ring
@@ -296,15 +298,18 @@ impl BatchScheduler {
                     return NoDenseLookup;
                 }
             };
+            let (model, pool) = self.engine.parts_mut();
             let restore = snapshot_entry.with_snapshot(|snapshot| {
                 if partial {
-                    self.engine.model().restore_sequence_state_truncated(
+                    state_snapshot::restore_sequence_state_truncated(
+                        model,
+                        pool,
                         seq_id,
                         snapshot,
                         matched_len,
                     )
                 } else {
-                    self.engine.model().restore_sequence_state(seq_id, snapshot)
+                    state_snapshot::restore_sequence_state(model, pool, seq_id, snapshot)
                 }
             });
             match restore {
@@ -376,7 +381,12 @@ impl BatchScheduler {
         // Because no dense lookup runs, admission records no dense miss
         // either (issue #3294): `mlxcel_prompt_cache_misses_total` and
         // `/v1/cache/stats` `lookups` both stay at zero for these families.
-        if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned
+        if self
+            .engine
+            .model()
+            .sequence_state_layout()
+            .backend
+            .keeps_state_outside_kv_slice()
             || !self.engine.model().kv_cache_captures_sequence_state()
         {
             return NoDenseLookup;
@@ -585,11 +595,12 @@ impl BatchScheduler {
                 return None;
             }
         };
+        let (model, pool) = self.engine.parts_mut();
         let restore = checkpoint.with_snapshot(|state| {
             donor.with_snapshot(|whole| {
-                self.engine
-                    .model()
-                    .restore_sequence_state_from_checkpoint(seq_id, state, whole)
+                state_snapshot::restore_sequence_state_from_checkpoint(
+                    model, pool, seq_id, state, whole,
+                )
             })
         });
         if let Err(err) = restore {
@@ -681,11 +692,12 @@ impl BatchScheduler {
             );
             return;
         }
-        let snapshot = match self
-            .engine
-            .model()
-            .snapshot_sequence_state(seq_id, tokens.len())
-        {
+        let snapshot = match state_snapshot::snapshot_sequence_state(
+            self.engine.model(),
+            self.engine.pool(),
+            seq_id,
+            tokens.len(),
+        ) {
             Some(s) if !s.is_empty() => s,
             Some(_) => {
                 tracing::debug!(
@@ -753,11 +765,7 @@ impl BatchScheduler {
         let lineage = ctx.snapshot_lineage.extended(tokens.len(), seq_id.as_u64());
         let checkpoint = (origin == SnapshotOrigin::Boundary
             && store.state_checkpoint_capacity_bytes() > 0)
-            .then(|| {
-                self.engine
-                    .model()
-                    .state_checkpoint_from_snapshot(&snapshot)
-            })
+            .then(|| state_snapshot::state_checkpoint_from_snapshot(self.engine.model(), &snapshot))
             .flatten()
             .filter(|state| !state.is_empty());
         let entry = ModelSnapshotEntry::new(tokens, snapshot)
@@ -976,8 +984,11 @@ impl BatchScheduler {
                 return;
             }
         };
+        let (model, pool) = self.engine.parts_mut();
         if entry
-            .with_snapshot(|snapshot| self.engine.model().restore_sequence_state(seq_id, snapshot))
+            .with_snapshot(|snapshot| {
+                state_snapshot::restore_sequence_state(model, pool, seq_id, snapshot)
+            })
             .is_err()
         {
             self.release_sequence_caches(seq_id);
@@ -1443,7 +1454,12 @@ impl BatchScheduler {
         // restored prefix would start without the conv state of its last token.
         // `kv_cache_captures_sequence_state()` declines it under the same
         // reason.
-        if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned
+        if self
+            .engine
+            .model()
+            .sequence_state_layout()
+            .backend
+            .keeps_state_outside_kv_slice()
             || !self.engine.model().kv_cache_captures_sequence_state()
         {
             self.batch_observability.record_prompt_cache_reject(
@@ -1461,8 +1477,9 @@ impl BatchScheduler {
             .map(|s| s.backend)
             .unwrap_or(SequenceStateBackend::ModelOwned);
 
-        // Other `ModelOwned` families carry no detachable cross-request KV.
-        if backend == SequenceStateBackend::ModelOwned {
+        // Other `ModelOwned` families carry no detachable cross-request KV,
+        // and a scheduler-owned sequence donates a snapshot above or nothing.
+        if backend.keeps_state_outside_kv_slice() {
             return;
         }
 
@@ -1498,7 +1515,7 @@ impl BatchScheduler {
                     None => return,
                 }
             }
-            SequenceStateBackend::ModelOwned => return,
+            SequenceStateBackend::ModelOwned | SequenceStateBackend::SchedulerOwned => return,
         };
 
         if kv_set.is_empty() {

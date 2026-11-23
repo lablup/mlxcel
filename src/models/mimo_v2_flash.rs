@@ -85,8 +85,9 @@
 
 use crate::models::gemma3::{Cache, CacheInterface};
 use crate::models::gpt2::validate_embedding_table;
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::{SwitchGLU, group_mask_scores};
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
@@ -1614,7 +1615,7 @@ impl LanguageModel for MiMoV2FlashModel {
                 .get(layer_idx)
                 .is_some_and(|layer| layer.uses_sliding)
                 .then_some(self.sliding_window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 

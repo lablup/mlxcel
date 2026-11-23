@@ -526,7 +526,7 @@ impl Kolibri1Model {
     /// pass is idempotent, so an already-stacked map goes through unchanged.
     pub fn from_weights(weights: &mut WeightMap, args: &ModelArgs) -> Result<Self, String> {
         args.validate()?;
-        crate::models::kolibri1_weights::sanitize_weights(weights, args);
+        crate::models::kolibri1_weights::sanitize_weights(weights, args)?;
         crate::models::kolibri1_weights::validate_weights(weights, args)?;
 
         let group_size = args.group_size();

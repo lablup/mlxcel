@@ -473,6 +473,11 @@ pub struct Config {
     /// prefill dequantizes the same tensors in the graph. Set by the loader after
     /// inspecting the head tensor's dtype; off everywhere else.
     pub native_head: bool,
+    /// Element type of the packed `scales` / `biases` args (issue #603). The
+    /// loader resolves it from the safetensors header when it turns on
+    /// `packed_args`, and reads it again for the upload dtype, so the declared
+    /// arg and the uploaded buffer share one source. f16 everywhere else.
+    pub quant_scale_dtype: super::QuantScaleDtype,
 }
 
 impl Config {
@@ -536,6 +541,7 @@ impl Config {
             projection_layout: ProjectionLayout::OutIn,
             packed_args: false,
             native_head: false,
+            quant_scale_dtype: super::QuantScaleDtype::F16,
         }
     }
 
@@ -1671,6 +1677,7 @@ impl Config {
             projection_layout: ProjectionLayout::OutIn,
             packed_args: false,
             native_head: false,
+            quant_scale_dtype: super::QuantScaleDtype::F16,
         })
     }
 

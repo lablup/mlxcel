@@ -2294,6 +2294,7 @@ pub(crate) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             // chat-templated prompt with `<think>\n` priming, so treat the
             // first token as not-yet-in-block.
             thinking_enter_block_on_start: false,
+            thinking_primed_close: None,
             // Warmup is not a client request; nothing can control it.
             reasoning_control: None,
             // Warmup bypasses the prompt cache entirely — a single literal

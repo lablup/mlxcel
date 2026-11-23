@@ -425,6 +425,33 @@ fn run_slices(
     (job, committed_after_each_slice, rx, calls)
 }
 
+/// An unfinished slice job for sequence `raw_id` after slice 0, built over
+/// the scripted mock target and drafter. Scheduler-level tests install it as
+/// the active job to drive `execute_speculative_slice_round` without a real
+/// drafter.
+pub(super) fn unfinished_slice_job(raw_id: u64) -> (MtpSliceJob, mpsc::Receiver<GenerateEvent>) {
+    let (target_script, draft_script, eos) = two_round_script();
+    let target = MockMtpTarget::new(target_script, eos.clone());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let drafter: Box<dyn Drafter> = Box::new(ScriptedDrafter::new(draft_script, calls));
+    let (seq, rx) = make_slice_sequence_with_id(64, raw_id);
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+    let job = begin_slice_session(
+        target,
+        drafter,
+        seq,
+        &tokenizer,
+        eos,
+        /* block_size */ 4,
+        /* profile_probe_rounds */ 0,
+        /* prefill_start_offset */ 0,
+        &[],
+        Default::default(),
+    );
+    assert!(!job.finished(), "the scripted job must still be running");
+    (job, rx)
+}
+
 #[test]
 fn slice_driver_commits_identical_stream_to_run_to_completion() {
     let max_tokens = 64;

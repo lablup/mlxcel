@@ -56,7 +56,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
 
-use super::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use super::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use mlxcel_core::cache::LayerStateKind;
 
 #[path = "kimi_k3_sanitize.rs"]
 mod sanitize;
@@ -2495,9 +2496,9 @@ impl LanguageModel for KimiK3Model {
             (0..self.layers.len())
                 .map(|idx| {
                     let kind = if self.layers[idx].is_linear {
-                        LayerKv::None
+                        LayerStateKind::None
                     } else {
-                        LayerKv::Full
+                        LayerStateKind::Full
                     };
                     kind.stored_mode(super::mla_batched::latent_pair_cache_mode(
                         self.kv_cache_layer_modes.mode_for_layer(idx),

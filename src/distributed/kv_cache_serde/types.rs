@@ -64,7 +64,12 @@ impl SerializableSequenceBackend {
         match backend {
             SequenceStateBackend::DenseKvCache => Self::DenseKvCache,
             SequenceStateBackend::PagedKvCache => Self::PagedKvCache,
-            SequenceStateBackend::ModelOwned => Self::ModelOwned,
+            // The KV handoff serializes `KVCache` rows only, which neither
+            // layout holds; a scheduler-owned sequence is declined like a
+            // model-owned one.
+            SequenceStateBackend::ModelOwned | SequenceStateBackend::SchedulerOwned => {
+                Self::ModelOwned
+            }
         }
     }
 }

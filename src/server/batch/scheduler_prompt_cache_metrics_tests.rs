@@ -289,7 +289,8 @@ fn gemma3_after_cold_turn() -> (Arc<BatchMetrics>, Arc<PromptCacheStore>, BatchS
     (metrics, store, sched)
 }
 
-/// Snapshot and ModelOwned family (issue #3294): Gemma 3 never runs a dense KV
+/// Snapshot family whose state lives outside the KV slice (issue #3294):
+/// Gemma 3 never runs a dense KV
 /// lookup, so a cold turn is not a dense miss. Before the fix admission
 /// recorded `prompt_cache_misses_total` for it while `lookups` stayed at 0.
 #[test]
@@ -300,7 +301,7 @@ fn snapshot_family_cold_turn_records_no_dense_miss() {
     assert!(warm.cached_tokens > 0, "turn 2 restores the snapshot");
 
     let c = counters(&metrics, &store);
-    assert_eq!(c.lookups, 0, "a ModelOwned family runs no dense lookup");
+    assert_eq!(c.lookups, 0, "a snapshot family runs no dense lookup");
     assert_eq!(c.misses_total, 0, "and so records no dense miss");
     assert_eq!(c.misses_total + c.hits_total, c.lookups);
     assert_eq!(c.snapshot_hits_total, c.snapshot_hits);
@@ -329,9 +330,12 @@ fn kv_state_incomplete_family_records_no_dense_miss() {
         !model.kv_cache_captures_sequence_state(),
         "the fixture must take the second arm"
     );
-    assert_ne!(
-        model.sequence_state_layout().backend,
-        SequenceStateBackend::ModelOwned
+    assert!(
+        !model
+            .sequence_state_layout()
+            .backend
+            .keeps_state_outside_kv_slice(),
+        "the fixture must not take the first arm"
     );
     assert!(!model.supports_snapshot_reuse());
 

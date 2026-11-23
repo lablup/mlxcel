@@ -49,6 +49,7 @@ mod lookup;
 pub mod metrics;
 pub mod policy;
 pub mod snapshot_sizing;
+pub(crate) mod state_snapshot;
 pub mod store;
 mod trie;
 mod types;

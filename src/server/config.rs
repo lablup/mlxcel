@@ -273,6 +273,15 @@ pub struct ServerGenerateOptions {
     /// reasoning tokens.
     pub thinking_enter_block_on_start: bool,
 
+    /// The close marker of the thinking block the rendered prompt primed, as
+    /// [`crate::server::routes::chat::primed_open_thinking_close_marker`]
+    /// returns it; `None` when the prompt primed no block. The scheduler
+    /// resolves it to a token id so a forced budget close uses the tag that
+    /// matches the primed open: K2-Horizon primes `<ifm|think_fast>` for
+    /// `reasoning_effort: "medium"` and must be closed with
+    /// `</ifm|think_fast>`, not `</ifm|think>` (#3321).
+    pub thinking_primed_close: Option<String>,
+
     /// b10621 `reasoning_control` (#1444): when the request armed realtime
     /// reasoning control, this is the shared "end reasoning now" flag the
     /// sequence's [`crate::server::thinking_budget::ThinkingState`] polls at

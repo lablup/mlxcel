@@ -116,9 +116,9 @@ use std::path::Path;
 
 use crate::models::gemma3::{Cache, CacheInterface};
 use crate::models::gpt2::{dim_eq, validate_embedding_table};
-use crate::models::kv_ring_checkpoint;
 use crate::models::kv_snapshot::KvSnapshotNames;
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::sliding_hybrid_lm::{self as hybrid, SlidingHybridModel};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, group_mask_scores};
 
 /// Tensor-name and error-message vocabulary AFMoE hands to the shared
@@ -1947,6 +1947,43 @@ pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), Str
 
 // LanguageModel trait implementation.
 
+impl SlidingHybridModel for AfmoeModel {
+    const FAMILY: &'static str = "afmoe";
+    const KV_NAMES: KvSnapshotNames = AFMOE_KV_SNAPSHOT_NAMES;
+
+    fn hybrid_sequence_state(&self) -> &ModelOwnedSequenceState<Cache> {
+        &self.sequence_state
+    }
+
+    fn hybrid_kv_cache_layer_modes(&self) -> &KvCacheLayerModes {
+        &self.kv_cache_layer_modes
+    }
+
+    fn hybrid_make_internal_caches(&self) -> Vec<Cache> {
+        self.make_internal_caches()
+    }
+
+    fn hybrid_num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    fn hybrid_layer_uses_sliding(&self, layer_idx: usize) -> bool {
+        self.layers[layer_idx].uses_sliding
+    }
+
+    fn hybrid_sliding_window(&self) -> i32 {
+        self.sliding_window
+    }
+
+    fn hybrid_forward_batched_decode(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<Cache>],
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_decode_with_caches(input_ids, caches)
+    }
+}
+
 impl LanguageModel for AfmoeModel {
     fn forward(
         &self,
@@ -1993,17 +2030,15 @@ impl LanguageModel for AfmoeModel {
     }
 
     fn reset_runtime_state(&self) {
-        self.sequence_state
-            .replace_internal(self.make_internal_caches());
+        hybrid::reset_runtime_state(self)
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
-        SequenceStateLayout::model_owned(self.layers.len())
+        hybrid::sequence_state_layout(self)
     }
 
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
-        self.sequence_state
-            .prepare_sequence_state(seq_id, self.make_internal_caches());
+        hybrid::prepare_sequence_state(self, seq_id)
     }
 
     fn sync_sequence_storage(
@@ -2011,22 +2046,11 @@ impl LanguageModel for AfmoeModel {
         seq_id: SequenceId,
         cache_pool: &mut CachePool,
     ) -> Result<(), String> {
-        self.sequence_state
-            .with_sequence_state_ref(seq_id, |caches| {
-                let visible_lens: Vec<_> = caches.iter().map(Cache::visible_len).collect();
-                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
-            })
-            .unwrap_or_else(|| {
-                Err(format!(
-                    "missing AFMoE sequence state while synchronizing sequence {seq_id}"
-                ))
-            })
+        hybrid::sync_sequence_storage(self, seq_id, cache_pool)
     }
 
     fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
-        self.kv_cache_layer_modes.set(modes);
-        self.sequence_state
-            .replace_internal(self.make_internal_caches());
+        hybrid::set_kv_cache_layer_modes(self, modes)
     }
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
@@ -2036,13 +2060,7 @@ impl LanguageModel for AfmoeModel {
     /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
     /// mode but an aligned `Turbo4Asym` (issue #2783).
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
-        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
-            self.layers
-                .get(layer_idx)
-                .is_some_and(|layer| layer.uses_sliding)
-                .then_some(self.sliding_window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
-        })
+        hybrid::kv_cache_storage_modes(self)
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
@@ -2058,30 +2076,7 @@ impl LanguageModel for AfmoeModel {
         seq_id: SequenceId,
         token_len: usize,
     ) -> Option<ModelStateSnapshot> {
-        self.sequence_state
-            .with_sequence_state_ref(seq_id, |state| {
-                let mut snapshot = ModelStateSnapshot::new("afmoe", token_len);
-                for (idx, cache) in state.iter().enumerate() {
-                    if let Err(error) = cache.snapshot_into(
-                        &mut snapshot,
-                        &format!("layer{idx}"),
-                        AFMOE_KV_SNAPSHOT_NAMES,
-                    ) {
-                        tracing::warn!(
-                            error,
-                            layer_idx = idx,
-                            "AFMoE snapshot prompt-cache donation skipped"
-                        );
-                        return None;
-                    }
-                }
-                if snapshot.is_empty() {
-                    None
-                } else {
-                    Some(snapshot)
-                }
-            })
-            .flatten()
+        hybrid::snapshot_sequence_state(self, seq_id, token_len)
     }
 
     fn restore_sequence_state(
@@ -2089,45 +2084,14 @@ impl LanguageModel for AfmoeModel {
         seq_id: SequenceId,
         snapshot: &ModelStateSnapshot,
     ) -> Result<(), String> {
-        if snapshot.family() != "afmoe" {
-            return Err(format!(
-                "cannot restore {} snapshot into AFMoE",
-                snapshot.family()
-            ));
-        }
-        let mut state = self.make_internal_caches();
-        for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from(snapshot, &format!("layer{idx}"), AFMOE_KV_SNAPSHOT_NAMES)?;
-        }
-        self.sequence_state.replace_sequence_state(seq_id, state);
-        Ok(())
+        hybrid::restore_sequence_state(self, seq_id, snapshot)
     }
 
     /// AFMoE mixes one sliding layer group with full-attention layers, both
     /// ordinary KV state, so a truncating restore is sound whenever every
     /// sliding layer is still unwrapped at `target_len`.
-    ///
-    /// The check is per layer at the requested target rather than a
-    /// conversation-length heuristic: one wrapped sliding layer is enough to
-    /// make the restore unsound.
     fn snapshot_truncatable_to(&self, snapshot: &ModelStateSnapshot, target_len: usize) -> bool {
-        if snapshot.family() != "afmoe" {
-            return false;
-        }
-        if target_len > snapshot.token_len() {
-            return false;
-        }
-        let Ok(target) = i32::try_from(target_len) else {
-            return false;
-        };
-        (0..self.layers.len()).all(|idx| {
-            Cache::snapshot_truncatable_to(
-                snapshot,
-                &format!("layer{idx}"),
-                target,
-                AFMOE_KV_SNAPSHOT_NAMES,
-            )
-        })
+        hybrid::snapshot_truncatable_to(self, snapshot, target_len)
     }
 
     fn restore_sequence_state_truncated(
@@ -2136,32 +2100,7 @@ impl LanguageModel for AfmoeModel {
         snapshot: &ModelStateSnapshot,
         target_len: usize,
     ) -> Result<(), String> {
-        if snapshot.family() != "afmoe" {
-            return Err(format!(
-                "cannot restore {} snapshot into AFMoE",
-                snapshot.family()
-            ));
-        }
-        let target = i32::try_from(target_len)
-            .map_err(|_| format!("AFMoE truncated restore: target {target_len} out of range"))?;
-        // Re-check rather than trust the caller: installing a partially
-        // truncated state would corrupt generation silently, while an error
-        // here just falls back to a cold prefill.
-        if !self.snapshot_truncatable_to(snapshot, target_len) {
-            return Err(format!(
-                "AFMoE truncated restore: snapshot cannot be truncated to {target_len} tokens"
-            ));
-        }
-        let mut state = self.make_internal_caches();
-        for (idx, cache) in state.iter_mut().enumerate() {
-            let prefix = format!("layer{idx}");
-            cache.restore_from(snapshot, &prefix, AFMOE_KV_SNAPSHOT_NAMES)?;
-            cache
-                .truncate_to(target, AFMOE_KV_SNAPSHOT_NAMES)
-                .map_err(|err| format!("{prefix}: {err}"))?;
-        }
-        self.sequence_state.replace_sequence_state(seq_id, state);
-        Ok(())
+        hybrid::restore_sequence_state_truncated(self, seq_id, snapshot, target_len)
     }
 
     /// A ring-only checkpoint (issue #3255): the sliding layers' rings, which
@@ -2171,12 +2110,7 @@ impl LanguageModel for AfmoeModel {
         &self,
         snapshot: &ModelStateSnapshot,
     ) -> Option<ModelStateSnapshot> {
-        kv_ring_checkpoint::ring_checkpoint(
-            snapshot,
-            "afmoe",
-            self.layers.len(),
-            AFMOE_KV_SNAPSHOT_NAMES,
-        )
+        hybrid::state_checkpoint_from_snapshot(self, snapshot)
     }
 
     fn restore_sequence_state_from_checkpoint(
@@ -2185,29 +2119,11 @@ impl LanguageModel for AfmoeModel {
         checkpoint: &ModelStateSnapshot,
         donor: &ModelStateSnapshot,
     ) -> Result<(), String> {
-        let target = kv_ring_checkpoint::checkpoint_target(
-            checkpoint,
-            donor,
-            "afmoe",
-            AFMOE_KV_SNAPSHOT_NAMES,
-        )?;
-        let mut state = self.make_internal_caches();
-        for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from_ring_checkpoint(
-                checkpoint,
-                donor,
-                &format!("layer{idx}"),
-                target,
-                AFMOE_KV_SNAPSHOT_NAMES,
-            )?;
-        }
-        self.sequence_state.replace_sequence_state(seq_id, state);
-        Ok(())
+        hybrid::restore_sequence_state_from_checkpoint(self, seq_id, checkpoint, donor)
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        // Compatibility only: the real state lives in `sequence_state`.
-        (0..self.layers.len()).map(|_| KVCache::new()).collect()
+        hybrid::make_caches(self)
     }
 
     fn num_layers(&self) -> usize {
@@ -2225,7 +2141,7 @@ impl LanguageModel for AfmoeModel {
     fn forward_batched(
         &self,
         input_ids: &MlxArray,
-        caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_batched_with_ids(input_ids, None, caches, mask)
@@ -2234,58 +2150,11 @@ impl LanguageModel for AfmoeModel {
     fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
-        seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
-        batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let shape = mlxcel_core::array_shape(input_ids);
-        assert_eq!(shape.len(), 2, "afmoe batched input must be rank 2");
-        assert_eq!(
-            shape[0] as usize,
-            batch_caches.len(),
-            "afmoe input batch must match cache rows"
-        );
-        if let Some(ids) = seq_ids {
-            assert_eq!(
-                ids.len(),
-                batch_caches.len(),
-                "afmoe requires one sequence id per row"
-            );
-        }
-        mlxcel_core::generate::route_batched_decode_with_ids(
-            self,
-            input_ids,
-            seq_ids,
-            batch_caches,
-            |batch_caches| {
-                let ids = seq_ids.expect("afmoe model-owned batched decode requires sequence ids");
-                if shape[1] != 1 || mask.is_some() {
-                    self.sequence_state
-                        .validate_sequence_states(ids)
-                        .unwrap_or_else(|error| panic!("afmoe batched decode: {error}"));
-                    let outputs: Vec<_> = batch_caches
-                        .iter_mut()
-                        .enumerate()
-                        .map(|(row, caches)| {
-                            let input = mlxcel_core::utils::slice_axis(
-                                input_ids,
-                                0,
-                                row as i32,
-                                row as i32 + 1,
-                            );
-                            self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
-                        })
-                        .collect();
-                    let output_refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
-                    return mlxcel_core::concatenate_many(&output_refs, 0);
-                }
-                self.sequence_state
-                    .with_batched_sequence_states(ids, |states| {
-                        self.forward_batched_decode_with_caches(input_ids, states)
-                    })
-                    .unwrap_or_else(|error| panic!("afmoe batched decode: {error}"))
-            },
-        )
+        hybrid::forward_batched_with_ids(self, input_ids, seq_ids, batch_caches, mask)
     }
 
     /// Opt out of NA tile-aligned padded prefill: the scheduler's post-pad trim

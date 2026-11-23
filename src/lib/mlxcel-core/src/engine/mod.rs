@@ -35,8 +35,8 @@
 use std::fmt;
 
 use crate::cache::{
-    CachePool, DecodeLookaheadAppendScope, DetachedCacheSet, DetachedPagedCacheSet, SequenceId,
-    SequenceStateBackend, SequenceStateLayout,
+    CachePool, DecodeLookaheadAppendScope, DetachedCacheSet, DetachedPagedCacheSet,
+    LayerStateForward, SequenceId, SequenceStateBackend, SequenceStateLayout,
 };
 use crate::decode_finish::FinishCause;
 use crate::generate::LanguageModel;
@@ -473,6 +473,11 @@ impl<M: LanguageModel> Engine<M> {
         match batch.seq_ids {
             [] => Err(EngineError::Batch("empty step batch".to_string())),
             [id] => {
+                if let Some(result) =
+                    self.forward_layer_state_row(*id, LayerStateForward::tokens(batch.input))
+                {
+                    return result;
+                }
                 let caches = self
                     .pool
                     .get_caches_mut(*id)
@@ -482,6 +487,11 @@ impl<M: LanguageModel> Engine<M> {
                     .map_err(EngineError::Forward)
             }
             ids => {
+                if let Some(result) =
+                    self.forward_layer_state_rows(ids, LayerStateForward::tokens(batch.input))
+                {
+                    return result;
+                }
                 let mut batch_caches = self
                     .pool
                     .get_batch_caches_mut(ids)
@@ -519,7 +529,17 @@ impl<M: LanguageModel> Engine<M> {
                 );
             }
         }
-        if self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned
+        if let Some(layers) = self.pool.layer_state_mut(id) {
+            // Scheduler-owned state is rewound here, layer by layer, with no
+            // model hook (issue #3254).
+            for (layer_idx, layer) in layers.iter_mut().enumerate() {
+                layer.rewind_decode_appends(n).map_err(|err| {
+                    EngineError::Rewind(format!(
+                        "decode rewind, sequence {id}, layer {layer_idx}: {err}"
+                    ))
+                })?;
+            }
+        } else if self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned
             || !self.model.kv_cache_captures_sequence_state()
         {
             self.model
@@ -530,10 +550,55 @@ impl<M: LanguageModel> Engine<M> {
         Ok(())
     }
 
+    /// The single-row forward of a scheduler-owned sequence over the layer
+    /// state its pool entry holds, or `None` when `id` holds none (every
+    /// other family, and a sequence that is not open), in which case the
+    /// caller runs the `KVCache`-slice forward.
+    pub(crate) fn forward_layer_state_row(
+        &mut self,
+        id: SequenceId,
+        request: LayerStateForward<'_>,
+    ) -> Option<Result<UniquePtr<MlxArray>, EngineError>> {
+        let layers = self.pool.layer_state_mut(id)?;
+        let ids = [id];
+        let request = request.with_seq_ids(Some(&ids));
+        Some(
+            self.model
+                .forward_layer_state(&request, &mut [layers])
+                .map_err(EngineError::Forward),
+        )
+    }
+
+    /// The batched forward of scheduler-owned sequences, or `None` when the
+    /// rows hold no layer state. One engine runs one model, so the rows are
+    /// scheduler-owned together or not at all; the first row decides.
+    pub(crate) fn forward_layer_state_rows(
+        &mut self,
+        ids: &[SequenceId],
+        request: LayerStateForward<'_>,
+    ) -> Option<Result<UniquePtr<MlxArray>, EngineError>> {
+        self.pool.layer_state(*ids.first()?)?;
+        let mut rows = match self.pool.batch_layer_state_mut(ids) {
+            Ok(rows) => rows,
+            Err(err) => return Some(Err(EngineError::Batch(err))),
+        };
+        let request = request.with_seq_ids(Some(ids));
+        Some(
+            self.model
+                .forward_layer_state(&request, &mut rows)
+                .map_err(EngineError::Forward),
+        )
+    }
+
     /// Mirror a model-owned family's sequence storage into the pool's paged
     /// bookkeeping (a no-op for a pure dense pool and for pool-backed rows).
     pub fn sync_sequence_storage(&mut self, id: SequenceId) {
-        if let Err(err) = self.model.sync_sequence_storage(id, &mut self.pool) {
+        let synced = if self.pool.layer_state(id).is_some() {
+            self.pool.sync_paged_state_with_layer_state(id)
+        } else {
+            self.model.sync_sequence_storage(id, &mut self.pool)
+        };
+        if let Err(err) = synced {
             tracing::warn!("Failed to sync paged state for {id}: {err}");
         }
     }

@@ -1196,7 +1196,7 @@ impl Builder {
     /// ```
     ///
     /// where `per_u32 = 32 / bits`. The RESIDENT device weight stays packed
-    /// (4/8-bit + f16 scales/biases), the memory-bandwidth lever the OpenXLA path
+    /// (4/8-bit + f16 or bf16 scales/biases), the memory-bandwidth lever the OpenXLA path
     /// carries to an int-native target; whether IREE folds the unpack+dequant into
     /// the following matmul is target-dependent (the #513 / ADR-0004 open question).
     pub fn dequant_affine(
@@ -1224,8 +1224,16 @@ impl Builder {
         let q = self.and(&shifted, &mask_c);
         let q_flat = self.reshape(&q, vec![out, in_]);
         let q_f32 = self.convert(&q_flat, "f32");
-        // scale/bias: [out, n_groups] f16 -> f32, each group repeated across its
-        // group_size input columns -> [out, in], then w = q*scale + bias.
+        // scale/bias: [out, n_groups] f16 or bf16 -> f32 (both widen exactly, so
+        // the bf16 form issue #603 adds matches the host bf16 dequant bit for
+        // bit), each group repeated across its group_size input columns ->
+        // [out, in], then w = q*scale + bias.
+        assert!(
+            matches!(scales.ty.elt, "f16" | "bf16") && scales.ty.elt == biases.ty.elt,
+            "affine metadata must be a matching f16 or bf16 pair, got {} / {}",
+            scales.ty.elt,
+            biases.ty.elt
+        );
         let s_f32 = self.convert(scales, "f32");
         let b_f32 = self.convert(biases, "f32");
         let s_b = self.broadcast_groups(&s_f32, group_size, in_);
@@ -2647,6 +2655,51 @@ mod tests {
         );
         assert!(body.contains("stablehlo.multiply"), "q * scale");
         assert!(body.contains("stablehlo.add "), "+ bias");
+    }
+
+    /// bf16 affine metadata (issue #603): the scales/biases args keep their bf16
+    /// type and widen to f32 in the graph before `q*scale + bias`, exactly like
+    /// the f16 form, so the reconstructed weight is the same f32 `[out, in]`.
+    #[test]
+    fn dequant_affine_bf16_metadata_widens_to_f32_in_graph() {
+        let mut b = Builder::new();
+        let packed = Builder::arg(0, Ty::new(vec![2, 1], "ui32"));
+        let scales = Builder::arg(1, Ty::new(vec![2, 1], "bf16"));
+        let biases = Builder::arg(2, Ty::new(vec![2, 1], "bf16"));
+        let w = b.dequant_affine(&packed, &scales, &biases, 4, 8);
+        let body = b.body();
+        assert_eq!(w.ty.shape, vec![2, 8]);
+        assert_eq!(w.ty.elt, "f32");
+        assert_eq!(
+            body.matches("stablehlo.convert %arg1 : (tensor<2x1xbf16>) -> tensor<2x1xf32>")
+                .count()
+                + body
+                    .matches("stablehlo.convert %arg2 : (tensor<2x1xbf16>) -> tensor<2x1xf32>")
+                    .count(),
+            2,
+            "both bf16 metadata args widen to f32:\n{body}"
+        );
+        assert!(
+            !body.contains("xf16>"),
+            "no f16 type in the bf16 form:\n{body}"
+        );
+
+        // The f16 form is the same graph with only the metadata type changed.
+        let mut f = Builder::new();
+        let s16 = Builder::arg(1, Ty::new(vec![2, 1], "f16"));
+        let b16 = Builder::arg(2, Ty::new(vec![2, 1], "f16"));
+        f.dequant_affine(&packed, &s16, &b16, 4, 8);
+        assert_eq!(f.body().replace("xf16>", "xbf16>"), body);
+    }
+
+    #[test]
+    #[should_panic(expected = "matching f16 or bf16 pair")]
+    fn dequant_affine_rejects_mismatched_metadata() {
+        let mut b = Builder::new();
+        let packed = Builder::arg(0, Ty::new(vec![2, 1], "ui32"));
+        let scales = Builder::arg(1, Ty::new(vec![2, 1], "bf16"));
+        let biases = Builder::arg(2, Ty::new(vec![2, 1], "f16"));
+        b.dequant_affine(&packed, &scales, &biases, 4, 8);
     }
 
     /// 8-bit affine dequant-in-graph: `per_u32 = 4` lanes (shifts 0,8,16,24; mask

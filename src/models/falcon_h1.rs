@@ -1236,7 +1236,7 @@ impl LanguageModel for FalconH1Model {
     /// table (issue #2790). Every layer keeps an FP16 `KVCache` beside its Mamba state.
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
         crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |_| {
-            crate::models::model_owned::LayerKv::Fp16Only
+            mlxcel_core::cache::LayerStateKind::Full
         })
     }
 

@@ -15,43 +15,11 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
-use mlxcel_core::cache::{KVCacheMode, RotatingKVCache, SequenceId};
+use mlxcel_core::cache::{KVCacheMode, LayerStateKind, RotatingKVCache, SequenceId};
 
 pub(crate) struct ModelOwnedSequenceState<T> {
     internal: RefCell<Vec<T>>,
     sequences: RefCell<HashMap<SequenceId, Vec<T>>>,
-}
-
-/// What a model-owned layer keeps for attention, as its cache builder
-/// creates it. Families report storage through
-/// [`KvCacheLayerModes::storage_modes`] (or [`table_less_storage_modes`])
-/// with the same predicate their builder uses, so the two cannot drift.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LayerKv {
-    /// A `KVCache` built with the injected mode.
-    Full,
-    /// A `RotatingKVCache` over this window, which stores what
-    /// `RotatingKVCache::stored_mode` says.
-    Sliding(i32),
-    /// An attention cache that ignores the mode and stores FP16 (Llama 4's
-    /// `ChunkedKVCache`, a family with no mode table).
-    Fp16Only,
-    /// No attention KV at all (a linear-attention, recurrent, SSM or
-    /// convolution layer, or a skipped attention block).
-    None,
-}
-
-impl LayerKv {
-    /// The mode a layer of this kind stores when `mode` is injected, `None`
-    /// for a layer that holds no KV cache.
-    pub(crate) fn stored_mode(self, mode: KVCacheMode) -> Option<KVCacheMode> {
-        match self {
-            Self::Full => Some(mode),
-            Self::Sliding(window) => Some(RotatingKVCache::stored_mode(window, mode)),
-            Self::Fp16Only => Some(KVCacheMode::Fp16),
-            Self::None => None,
-        }
-    }
 }
 
 /// Storage report of a model-owned family that has no mode table and never
@@ -61,7 +29,7 @@ impl LayerKv {
 /// (issue #2790).
 pub(crate) fn table_less_storage_modes(
     n_layers: usize,
-    layer_kind: impl Fn(usize) -> LayerKv,
+    layer_kind: impl Fn(usize) -> LayerStateKind,
 ) -> Option<Vec<Option<KVCacheMode>>> {
     Some(
         (0..n_layers)
@@ -145,10 +113,10 @@ impl KvCacheLayerModes {
     ///
     /// `layer_kind(layer_idx)` says what the family's cache builder creates
     /// for that layer, with the same predicate the builder uses; see
-    /// [`LayerKv::stored_mode`]. `None` entries are layers with no KV cache.
+    /// [`LayerStateKind::stored_mode`]. `None` entries are layers with no KV cache.
     pub(crate) fn storage_modes(
         &self,
-        layer_kind: impl Fn(usize) -> LayerKv,
+        layer_kind: impl Fn(usize) -> LayerStateKind,
     ) -> Option<Vec<Option<KVCacheMode>>> {
         let modes = self.clone_modes()?;
         Some(

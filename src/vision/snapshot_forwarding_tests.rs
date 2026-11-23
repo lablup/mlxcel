@@ -89,3 +89,44 @@ fn every_snapshot_backbone_wrapper_forwards_snapshot_reuse() {
         missing.join("\n  ")
     );
 }
+
+/// Wrappers whose text backbone is scheduler-owned (issue #3254), or can be:
+/// `mod.rs` holds any `LoadedModel`, Gemma 3 among them.
+const SCHEDULER_OWNED_WRAPPERS: &[(&str, &str)] = &[
+    ("minicpmv4_6_vl.rs", include_str!("minicpmv4_6_vl.rs")),
+    ("mod.rs", include_str!("mod.rs")),
+    ("qwen3_5_vl.rs", include_str!("qwen3_5_vl.rs")),
+];
+
+/// A scheduler-owned backbone keeps its state in the pool entry. The pool
+/// builds that state from `make_layer_state`, the engine forwards through
+/// `forward_layer_state`, and the prompt cache reads `layer_state_kinds` and
+/// `layer_state_snapshot_spec`. A wrapper that forwards
+/// `sequence_state_layout` but not these four reports a scheduler-owned
+/// layout with no state behind it.
+#[test]
+fn every_scheduler_owned_backbone_wrapper_forwards_the_layer_state_surface() {
+    let mut missing = Vec::new();
+    for (file, src) in SCHEDULER_OWNED_WRAPPERS {
+        assert!(
+            src.contains("fn sequence_state_layout("),
+            "{file} no longer forwards the layout; update SCHEDULER_OWNED_WRAPPERS"
+        );
+        for method in [
+            "fn layer_state_kinds(",
+            "fn make_layer_state(",
+            "fn layer_state_snapshot_spec(",
+            "fn forward_layer_state(",
+        ] {
+            if !src.contains(method) {
+                missing.push(format!("{file}: {method}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "VLM wrappers around a scheduler-owned backbone must forward the \
+         layer-state methods:\n  {}",
+        missing.join("\n  ")
+    );
+}

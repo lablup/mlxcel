@@ -546,35 +546,95 @@ fn the_spacing_holds_when_checkpoints_arrive_longest_first() {
     assert_eq!(kept_boundaries(&store, 2, 95), vec![2]);
 }
 
+/// Insert the whole snapshot and the checkpoint of one history boundary.
+fn insert_boundary(store: &PromptCacheStore, tokens: &[i32], lineage: SnapshotLineage) {
+    store
+        .insert_snapshot(&key(SESSION, tokens), whole(tokens, lineage.clone()))
+        .expect("whole snapshot");
+    store
+        .insert_state_checkpoint(&key(SESSION, tokens), checkpoint(tokens, lineage))
+        .expect("checkpoint");
+}
+
+/// The prompt of branch B, which forks from the history after 20 tokens.
+fn fork(len: usize) -> Vec<i32> {
+    edited_after(20, len)
+}
+
+fn fork_lineage(len: usize) -> SnapshotLineage {
+    (4..=len / 10).fold(chain_lineage(2), |l, n| l.extended(10 * n, 10 + n as u64))
+}
+
 #[test]
-fn reinserting_a_common_ancestor_after_a_fork_applies_the_cap_across_both_branches() {
-    // Documented behaviour of the per-conversation cap: the line of a shared
-    // ancestor holds every branch below it, so re-inserting the ancestor after
-    // a fork counts the sibling branches together. One branch can lose its
-    // checkpoints, but the memory stays within the cap for both.
+fn reinserting_a_common_ancestor_after_a_fork_leaves_the_sibling_branches_alone() {
+    // The cap counts one root-to-leaf line at a time (issue #3254): the
+    // regenerated ancestor is counted against each branch separately, so no
+    // branch loses a checkpoint to its sibling.
     let cap = 2;
     let store = PromptCacheStore::with_config(capped_config(Some(cap), 0));
-    let insert = |tokens: &[i32], lineage: SnapshotLineage| {
-        store
-            .insert_snapshot(&key(SESSION, tokens), whole(tokens, lineage.clone()))
-            .expect("whole snapshot");
-        store
-            .insert_state_checkpoint(&key(SESSION, tokens), checkpoint(tokens, lineage))
-            .expect("checkpoint");
-    };
-    // Branch A: turns 1 to 3. Branch B forks after turn 2 and adds two turns.
-    run_turns(&store, SESSION, 3);
-    let fork = |len: usize| edited_after(20, len);
-    insert(&fork(40), chain_lineage(2).extended(40, 10));
-    insert(
-        &fork(50),
-        chain_lineage(2).extended(40, 10).extended(50, 11),
+    // Branch A: turns 1 to 4. Branch B forks after turn 2 and adds two turns.
+    run_turns(&store, SESSION, 4);
+    insert_boundary(&store, &fork(40), fork_lineage(40));
+    insert_boundary(&store, &fork(50), fork_lineage(50));
+    let branches = vec![history(30), history(40), fork(40), fork(50)];
+    let mut expected = branches.clone();
+    expected.sort();
+    assert_eq!(
+        store.state_checkpoint_tokens(),
+        expected,
+        "each branch keeps its own {cap} newest checkpoints"
     );
-    // The ancestor at turn 2 is regenerated: its line is both branches.
-    insert(&history(20), chain_lineage(2));
-    let entries = store.stats().state_checkpoint_entries;
-    assert!(
-        entries <= cap,
-        "checkpoints of both branches stay within the cap {cap}, got {entries}"
-    );
+    let evictions = store.stats().state_checkpoint_evictions;
+    // The ancestor at turn 2 is regenerated: it lies on both branches, each
+    // of which already holds `cap` longer checkpoints, so it is the one
+    // dropped.
+    insert_boundary(&store, &history(20), chain_lineage(2));
+    assert_eq!(store.state_checkpoint_tokens(), expected);
+    assert_eq!(store.stats().state_checkpoint_evictions, evictions + 1);
+}
+
+#[test]
+fn a_fork_keeps_n_checkpoints_per_branch_in_any_insertion_order() {
+    // Three boundaries on each branch above the shared ancestor, cap 2: every
+    // insertion order leaves the two longest of each branch.
+    let cap = 2;
+    let boundaries: Vec<(Vec<i32>, SnapshotLineage)> = vec![
+        (history(20), chain_lineage(2)),
+        (history(30), chain_lineage(3)),
+        (history(40), chain_lineage(4)),
+        (history(50), chain_lineage(5)),
+        (fork(40), fork_lineage(40)),
+        (fork(50), fork_lineage(50)),
+        (fork(60), fork_lineage(60)),
+    ];
+    let mut expected = vec![history(40), history(50), fork(50), fork(60)];
+    expected.sort();
+    let orders: [[usize; 7]; 5] = [
+        [0, 1, 2, 3, 4, 5, 6],
+        [6, 5, 4, 3, 2, 1, 0],
+        [3, 6, 0, 2, 5, 1, 4],
+        [4, 1, 5, 2, 6, 3, 0],
+        [1, 4, 2, 5, 3, 6, 0],
+    ];
+    for order in orders {
+        let store = PromptCacheStore::with_config(capped_config(Some(cap), 0));
+        // Every whole snapshot first, so each checkpoint has its donor
+        // whatever order the checkpoints arrive in.
+        for (tokens, lineage) in &boundaries {
+            store
+                .insert_snapshot(&key(SESSION, tokens), whole(tokens, lineage.clone()))
+                .expect("whole snapshot");
+        }
+        for idx in order {
+            let (tokens, lineage) = &boundaries[idx];
+            store
+                .insert_state_checkpoint(&key(SESSION, tokens), checkpoint(tokens, lineage.clone()))
+                .expect("checkpoint");
+        }
+        assert_eq!(
+            store.state_checkpoint_tokens(),
+            expected,
+            "insertion order {order:?}"
+        );
+    }
 }

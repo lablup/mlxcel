@@ -85,7 +85,6 @@
 
 use std::collections::HashMap;
 
-use crate::cache::SequenceStateBackend;
 use crate::generate::LanguageModel;
 
 /// Default longest n-gram matched against the context.
@@ -253,7 +252,7 @@ impl PromptLookupConfig {
 /// Verification rolls rejected tokens back with `KVCache::trim`, which is only
 /// sound when every piece of per-sequence state lives in the external caches.
 /// `supports_batching` is the existing marker for that, and a
-/// [`SequenceStateBackend::ModelOwned`] layout is the direct statement of the
+/// [`crate::cache::SequenceStateBackend::ModelOwned`] layout is the direct statement of the
 /// opposite: such a family keeps its caches inside the model, the external
 /// caches are empty placeholders, and trimming them rolls nothing back.
 /// `supports_padded_prefill` is `false` for the families whose state trailing
@@ -282,7 +281,12 @@ pub fn prompt_lookup_unsupported_reason<M: LanguageModel + ?Sized>(
         );
     }
     let model_rewinds = model.supports_speculative_verify_rewind();
-    if model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned && !model_rewinds {
+    if model
+        .sequence_state_layout()
+        .backend
+        .keeps_state_outside_kv_slice()
+        && !model_rewinds
+    {
         return Some(
             "this model owns its attention caches internally rather than in the external KV \
              caches the generator trims, so a rejected draft cannot be rolled back",

@@ -757,6 +757,26 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, sequence_state_layout())
     }
 
+    fn layer_state_kinds(&self) -> Option<Vec<mlxcel_core::cache::LayerStateKind>> {
+        delegate_language_model!(self, layer_state_kinds())
+    }
+
+    fn make_layer_state(&self) -> Option<Vec<mlxcel_core::cache::LayerState>> {
+        delegate_language_model!(self, make_layer_state())
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<mlxcel_core::cache::LayerStateSnapshotSpec> {
+        delegate_language_model!(self, layer_state_snapshot_spec())
+    }
+
+    fn forward_layer_state(
+        &self,
+        request: &mlxcel_core::cache::LayerStateForward<'_>,
+        rows: &mut [&mut [mlxcel_core::cache::LayerState]],
+    ) -> Result<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>, String> {
+        delegate_language_model!(self, forward_layer_state(request, rows))
+    }
+
     fn supports_padded_prefill(&self) -> bool {
         delegate_language_model!(self, supports_padded_prefill())
     }

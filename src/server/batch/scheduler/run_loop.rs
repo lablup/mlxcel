@@ -192,6 +192,7 @@ impl BatchScheduler {
         &self,
         override_: ReasoningBudgetOverride,
         enter_block_on_start: bool,
+        primed_close: Option<&str>,
         reasoning_control: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         forced_message: Option<std::sync::Arc<Vec<i32>>>,
     ) -> ThinkingState {
@@ -209,6 +210,14 @@ impl BatchScheduler {
         ThinkingState::new(Some(token_ids), effective, enter_block_on_start)
             .with_force_end(reasoning_control)
             .with_forced_message(forced_message)
+            // The primed open's close, so a forced close matches the variant
+            // the template opened (#3321). Only meaningful when the prompt
+            // left the model inside the block.
+            .with_primed_close(crate::server::thinking_budget::resolve_primed_close_id(
+                &self.tokenizer,
+                primed_close,
+                enter_block_on_start,
+            ))
     }
 
     /// Whether [`run`](Self::run) returned because b10621's idle-sleep window

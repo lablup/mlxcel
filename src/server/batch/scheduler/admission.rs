@@ -561,6 +561,7 @@ impl BatchScheduler {
         let thinking = self.build_thinking_state(
             options.reasoning_budget,
             options.thinking_enter_block_on_start,
+            options.thinking_primed_close.as_deref(),
             options.reasoning_control.clone(),
             // b10621 `--reasoning-budget-message` (#1470): tokenized here,
             // where the model's vocabulary lives, and memoised so a configured

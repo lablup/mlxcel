@@ -810,7 +810,8 @@ fn compute_rope_freqs(args: &ModelArgs) -> Option<UniquePtr<MlxArray>> {
 }
 
 // LanguageModel trait implementation.
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{
     KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
 };
@@ -996,7 +997,7 @@ impl mlxcel_core::generate::LanguageModel for ExaOne4Wrapper {
                 .get(layer_idx)
                 .is_some_and(|layer| layer.self_attn.is_local)
                 .then_some(window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 

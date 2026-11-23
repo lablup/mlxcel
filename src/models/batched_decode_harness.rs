@@ -213,7 +213,7 @@ fn assert_cache_advance(
 ) {
     // Model-owned families expose compatibility placeholders, not their live
     // state. Their model-specific tests must check internal offsets instead.
-    if backend == SequenceStateBackend::ModelOwned {
+    if backend.keeps_state_outside_kv_slice() {
         return;
     }
     for (row, (layers, offsets)) in caches.iter().zip(before).enumerate() {
@@ -300,9 +300,13 @@ fn assert_model_owned_multistep_impl<M: LanguageModel>(
         model.batched_decode_kind(),
         mlxcel_core::generate::BatchedDecodeKind::Native
     );
-    assert_eq!(
-        model.sequence_state_layout().backend,
-        mlxcel_core::cache::SequenceStateBackend::ModelOwned
+    // Model-owned, or scheduler-owned behind the pooled test driver: either
+    // way the `KVCache` slice is a placeholder.
+    assert!(
+        model
+            .sequence_state_layout()
+            .backend
+            .keeps_state_outside_kv_slice()
     );
     assert_model_owned_paged_sync(&model, expected_paged_lengths);
     assert_model_owned_validation_is_atomic(&make, b1_lazy);
