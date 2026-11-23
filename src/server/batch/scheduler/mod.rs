@@ -1177,6 +1177,10 @@ mod scheduler_prompt_lookup_tests;
 mod scheduler_dflash_routing_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_qwen35_slice_guard_tests.rs"]
+mod scheduler_qwen35_slice_guard_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_completion_snapshot_tests.rs"]
 mod scheduler_completion_snapshot_tests;
 

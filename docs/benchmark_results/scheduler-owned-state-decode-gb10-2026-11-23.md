@@ -71,11 +71,28 @@ Raw rows: [`run4-gemma-256.json`](scheduler-owned-state-decode-gb10-2026-11-23/r
 
 Twelve samples per arm, taken while the host carried more load than in runs 1 and 2 (every arm is about 5% slower at `B = 1` and 18% slower at `B = 4` than in run 2).
 
+## Run 5: Gemma 3 at B = 4, quiet host, four rounds, three samples per cell and round
+
+Raw rows: [`run5-gemma-b4.json`](scheduler-owned-state-decode-gb10-2026-11-23/run5-gemma-b4.json).
+
+Gemma 3 1B 4-bit only, `P` of 256 and 8192 at `B = 4`, with `BENCH_CELLS=256x4,8192x4`. The branch binary was rebuilt at `4a879e9c`, the head of the branch after the review fixes (`cargo build --release --features cuda --bin mlxcel-server`); the main binary is the one from the earlier runs (`bd931f76`). The host load average was about 2.4 to 2.9 during the run, with no other job competing.
+
+| model | P | B | main-a | main-b | branch | main range | branch range | null | branch | in range |
+|---|---|---|---|---|---|---|---|---|---|---|
+| gemma-3-1b-it-4bit | 256 | 4 | 366.21 | 363.91 | 388.52 | 254.41 to 390.13 | 361.87 to 398.38 | 0.6% | +6.4% | yes |
+| gemma-3-1b-it-4bit | 8192 | 4 | 350.60 | 344.62 | 357.85 | 307.65 to 362.18 | 341.27 to 376.07 | 1.7% | +3.1% | yes |
+
+Twelve samples per arm. The reply texts are identical across the three arms.
+
 ## Reading
 
 At `B = 1` no cell shows a change that survives a repeat. Run 1's gaps of 4% to 6% came from three samples per arm. With twelve, Gemma 3 at 256 tokens is at -0.1% under a 1.4% null, and Qwen 3.5 is at +3.9% and -1.4% under 2.3% to 2.7%. Gemma 3 at 8192 tokens is at -0.8% and +2.1% in its two runs.
 
-At `B = 4` Qwen 3.5 is at -0.1% and -0.3% in its one quiet run. Gemma 3 is not settled: its branch median is below the main median in every run, by 2.6%, 2.2% and 4.1% at 256 tokens and by 3.4% and 1.9% at 8192, against nulls of 1.0% to 2.5%. It is inside the range the main arms covered in four of those five cells, and the main arms themselves are 1% to 2.5% apart, so the size is uncertain, but the sign is the same five times. The branch does the same device work per step, and the host-side work it adds is a hash lookup per forward, so no cause is known. The acceptance line of the issue (every cell within the null spread) is met for `B = 1` and for Qwen 3.5 at `B = 4`, and not shown for Gemma 3 at `B = 4`. A quiet host is needed to say whether that is a cost of 2% to 3% or noise.
+Qwen 3.5 at `B = 4` is at -0.1% and -0.3% in its one quiet run.
+
+Gemma 3 at `B = 4` was below main in runs 1, 2 and 4 (-2.6%, -2.2% and -4.1% at 256 tokens, -3.4% and -1.9% at 8192). Run 5 repeats both cells on a quiet host with the branch rebuilt at its final commit, and the gap does not reproduce: the branch is at +6.4% (256) and +3.1% (8192), above both main arms, under nulls of 0.6% and 1.7%, and its median is inside the main range in both cells. The earlier negative sign therefore came from host load, not from the branch. The branch does the same device work per step as main, and no code difference was found.
+
+The acceptance line of the issue, no decode regression, is met in every cell measured: `B = 1` and `B = 4`, both models, at 256 and 8192 tokens.
 
 ## Prompt-cache behaviour on real checkpoints
 

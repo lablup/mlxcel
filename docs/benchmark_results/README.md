@@ -27,7 +27,7 @@ Reports keep their own measured versions, workload definitions and caveats. They
 These remain standalone because their reports leave a substantive measurement gate unfilled. This list describes the evidence in the records, not the current GitHub issue status.
 
 - [MLA absorbed decode](mla-absorbed-decode-m1ultra-2026-08-02.md): real-checkpoint token parity was not available; default-on is not justified by synthetic memory savings.
-- [Scheduler-owned sequence state, decode rate on GB10](scheduler-owned-state-decode-gb10-2026-11-23.md): main against the #3254 branch for Gemma 3 and Qwen 3.5 with a null arm; `B = 1` is within the null, while Gemma 3 at `B = 4` sits 2% to 4% below main in every run on a shared host whose null is 1% to 2.5%, which is not resolved.
+- [Scheduler-owned sequence state, decode rate on GB10](scheduler-owned-state-decode-gb10-2026-11-23.md): main against the #3254 branch for Gemma 3 and Qwen 3.5 with a null arm; no cell shows a decode regression. Gemma 3 at `B = 4` was 2% to 4% below main on a loaded host and is at or above main (+3% to +6%) on a quiet one.
 - [Qwen3.8 snapshot capacity](qwen38-snapshot-capacity-default-2026-08-30.md): sizing unit tests are not a rerun of the Apple Silicon multi-turn benchmark.
 - [GB10 fused decode-MoE Dff crossover](fused-moe-dff-crossover-gb10-2026-11-11.md): the 8192 bound is confirmed by the decision rule, but no fused-path model has been measured between Dff 6400 and 14336, and the fast models' run-to-run spread is unexplained.
 - [ROCm flash prefill](sdpa-flash-prefill-gfx1151-2026-10-13.md): kernel timings exist, but model-level before/after was not measured.
