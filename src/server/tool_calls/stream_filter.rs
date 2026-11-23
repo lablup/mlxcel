@@ -201,6 +201,9 @@ fn canonical_thinking_pair(delimiter: &str) -> Option<(&'static str, &'static st
             Some(("<|open|>think<|sep|>", "<|close|>think<|sep|>"))
         }
         "◁think▷" | "◁/think▷" => Some(("◁think▷", "◁/think▷")),
+        "<think:opensource>" | "</think:opensource>" => {
+            Some(("<think:opensource>", "</think:opensource>"))
+        }
         "<ifm|think>" | "</ifm|think>" => Some(("<ifm|think>", "</ifm|think>")),
         "<ifm|think_fast>" | "</ifm|think_fast>" => Some(("<ifm|think_fast>", "</ifm|think_fast>")),
         "<ifm|think_faster>" | "</ifm|think_faster>" => {
@@ -446,6 +449,12 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // markers stay under the longest delimiter.
     ("◁/think▷", DelimiterAction::ExitThinking),
     ("◁think▷", DelimiterAction::EnterThinking),
+    // Tencent Hy4 (#2354): `<think:opensource>...</think:opensource>`. The
+    // template primes the open, and the model may emit it again. The tags
+    // part from `<think>` / `</think>` at `:` against `>`, so neither is a
+    // prefix of the other and the partial-match window resolves both.
+    ("</think:opensource>", DelimiterAction::ExitThinking),
+    ("<think:opensource>", DelimiterAction::EnterThinking),
     // IFM K2-Horizon (#3299): one pair per `reasoning_effort`, and the
     // template primes the open, so the model emits only the close. `<if` and
     // `</if` start no other entry, and no pair's marker is a prefix of

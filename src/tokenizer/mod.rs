@@ -547,6 +547,9 @@ impl MlxcelTokenizer {
             // IFM K2-Horizon. Its effort variants (`<ifm|think_fast>`,
             // `<ifm|think_faster>`) come from `THINK_EFFORT_VARIANTS`.
             ("<ifm|think>", "</ifm|think>"),
+            // Tencent Hy4 (#2354): every structural tag carries the template's
+            // `:opensource` suffix.
+            ("<think:opensource>", "</think:opensource>"),
         ];
         for (start, end) in SINGLE_TOKEN_PAIRS {
             if let (Some(open_id), Some(close_id)) = (hf.token_to_id(start), hf.token_to_id(end)) {

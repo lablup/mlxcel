@@ -2230,6 +2230,7 @@ const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &[
     "</ifm|think>",
     "</ifm|think_fast>",
     "</ifm|think_faster>",
+    "</think:opensource>",
 ];
 
 /// Whether the prompt primed an open thinking block that the raw output never

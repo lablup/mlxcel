@@ -367,18 +367,19 @@ pub static EXPERIMENTAL_LATENT_NOTES: &[ExperimentalLatentNote] = &[
     ExperimentalLatentNote {
         families: &["hy_v4"],
         bits: &[8],
-        text: "an int8 key slot has not been quality-measured on a real Hy4 checkpoint; on \
-               DeepSeek-V3.2, whose DSA indexer Hy4 reuses, it dropped the indexer's top-k \
-               overlap with fp16 below 0.99 on 49 of 61 layers behind 4096 tokens \
+        text: "Hy4-preview-4bit with an int8 key slot had 0 decided-position disagreements of \
+               124 against the fp16 latent behind 512 tokens (98.0% top-1 agreement, perplexity \
+               +1.00%), a context at which the DSA indexer selects nothing; its top-k overlap \
+               over a quantized slot, which DeepSeek-V3.2 missed, is unmeasured on Hy4 \
                (docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md)",
     },
     ExperimentalLatentNote {
         families: &["hy_v4"],
         bits: &[4],
-        text: "the 4-bit latent of a Hy4 key slot has not been quality-measured on a real Hy4 \
-               checkpoint; the int8 slot already dropped the DSA indexer's top-k overlap with \
-               fp16 below 0.99 on 49 of 61 DeepSeek-V3.2 layers behind 4096 tokens \
-               (docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md)",
+        text: "Hy4-preview-4bit with an int4 latent had 0 decided-position disagreements of 124 \
+               against the fp16 latent behind 512 tokens (95.7% top-1 agreement, perplexity \
+               +0.68%), a context at which the DSA indexer selects nothing; its top-k overlap \
+               over a quantized slot is unmeasured on Hy4",
     },
     ExperimentalLatentNote {
         families: &["longcat_flash_sparse"],

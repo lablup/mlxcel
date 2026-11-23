@@ -166,7 +166,14 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     // Hy4 reuses the DeepSeek V3.2 MLA and writes the same pair through
     // `store_latent_step` in `src/models/hy_v4_attention.rs`: `[kv_latent |
     // indexer key]` on its `full` indexer layers, the latent alone on its
-    // `shared` ones (#2354).
+    // `shared` ones (#2354). It is not in `QUANTIZED_LATENT_FAMILIES`, like
+    // the other DSA families: on Hy4-preview-4bit behind a 512-token context
+    // the int8 latent had 0 of 124 decided-position disagreements against
+    // fp16 (98.0% top-1 agreement, perplexity +1.00%) and the int4 latent 0
+    // of 124 (95.7%, +0.68%), but at that length `kv_len <= index_topk`, so
+    // the indexer's top-k overlap over a quantized key slot, the gate
+    // DeepSeek-V3.2 missed (#3163), was never exercised. `auto` keeps fp16;
+    // an explicit `--mla-latent-quant int8` / `int4` is accepted.
     "hy_v4",
     // Kimi Linear and Kimi K3 (which reuses Kimi Linear's absorbed MLA)
     // cache the pair in model-owned MLA layers and write it through the
