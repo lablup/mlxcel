@@ -239,6 +239,124 @@ pub struct MoeConfig {
     pub weight_prefix: &'static str,
 }
 
+/// Selective state-space (Mamba2 SSD) mixer parameters (epic #564, issue #3337).
+///
+/// One recurrent mixer layer folds each token into a fixed-size state
+/// `h [H, P, N]` (f32) and carries the last `K-1` pre-conv inputs as the conv
+/// tail. `emitter/ssm.rs` reads this; parsing it from `config.json` is #3338.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SsmConfig {
+    /// H (HF `num_heads`).
+    pub n_heads: usize,
+    /// P (HF `head_dim`); `d_inner = H * P`.
+    pub head_dim: usize,
+    /// N (HF `state_size`, or `ssm_state_size`).
+    pub state_size: usize,
+    /// G (HF `n_groups`); head `h` reads B/C group `h / (H / G)`.
+    pub n_groups: usize,
+    /// K (HF `conv_kernel`).
+    pub conv_kernel: usize,
+    /// `d_inner + 2 * G * N`.
+    pub conv_dim: usize,
+    /// HF `use_conv_bias`.
+    pub use_conv_bias: bool,
+    /// HF `use_bias` (in_proj / out_proj bias).
+    pub use_bias: bool,
+    /// Clamp applied to dt after softplus; `(0.0, f32::INFINITY)` means no clamp.
+    pub time_step_limit: (f32, f32),
+    /// Gated RMSNorm eps (HF `layer_norm_epsilon`).
+    pub norm_eps: f32,
+    /// `d_inner` for Mamba2 (one group); `d_inner / n_groups` for Nemotron-H.
+    pub norm_group_size: usize,
+    /// Prefill chunk length of the chunked-SSD scan (recorded in
+    /// `spike/openxla/FINDINGS_ssm.md`).
+    pub chunk_size: usize,
+}
+
+/// The prefill chunk length chosen by the #3337 lowering spike.
+pub(crate) const SSM_DEFAULT_CHUNK_SIZE: usize = 128;
+
+impl SsmConfig {
+    /// `d_inner = H * P`, the gated-norm and out_proj width.
+    #[must_use]
+    pub fn d_inner(&self) -> usize {
+        self.n_heads * self.head_dim
+    }
+
+    /// The in_proj output width: `[z: d_inner, xBC: conv_dim, dt: H]`.
+    #[must_use]
+    pub fn in_proj_dim(&self) -> usize {
+        self.d_inner() + self.conv_dim + self.n_heads
+    }
+
+    /// Structural checks every emitter entry point relies on.
+    pub fn validate(&self) -> Result<(), String> {
+        let positive = [
+            ("n_heads", self.n_heads),
+            ("head_dim", self.head_dim),
+            ("state_size", self.state_size),
+            ("n_groups", self.n_groups),
+            ("conv_kernel", self.conv_kernel),
+            ("norm_group_size", self.norm_group_size),
+            ("chunk_size", self.chunk_size),
+        ];
+        if let Some((name, _)) = positive.iter().find(|(_, value)| *value == 0) {
+            return Err(format!("SsmConfig.{name} must be positive"));
+        }
+        if self.conv_kernel < 2 {
+            return Err("SsmConfig.conv_kernel must be at least 2 (the tail is K-1 rows)".into());
+        }
+        if !self.n_heads.is_multiple_of(self.n_groups) {
+            return Err(format!(
+                "SsmConfig.n_heads={} is not a multiple of n_groups={}",
+                self.n_heads, self.n_groups
+            ));
+        }
+        let expected = self.d_inner() + 2 * self.n_groups * self.state_size;
+        if self.conv_dim != expected {
+            return Err(format!(
+                "SsmConfig.conv_dim={} != d_inner + 2*G*N = {expected}",
+                self.conv_dim
+            ));
+        }
+        if !self.d_inner().is_multiple_of(self.norm_group_size) {
+            return Err(format!(
+                "SsmConfig.norm_group_size={} does not divide d_inner={}",
+                self.norm_group_size,
+                self.d_inner()
+            ));
+        }
+        let (low, high) = self.time_step_limit;
+        if low.is_nan() || high.is_nan() || low > high {
+            return Err(format!(
+                "SsmConfig.time_step_limit {low}..{high} is invalid"
+            ));
+        }
+        Ok(())
+    }
+
+    /// A small Mamba2 mixer for the pure-Rust emitter tests.
+    #[cfg(test)]
+    pub(crate) fn tiny_mamba2() -> Self {
+        let (n_heads, head_dim, state_size, n_groups) = (4, 8, 16, 2);
+        let d_inner = n_heads * head_dim;
+        Self {
+            n_heads,
+            head_dim,
+            state_size,
+            n_groups,
+            conv_kernel: 4,
+            conv_dim: d_inner + 2 * n_groups * state_size,
+            use_conv_bias: true,
+            use_bias: false,
+            time_step_limit: (0.0, f32::INFINITY),
+            norm_eps: 1e-5,
+            norm_group_size: d_inner,
+            chunk_size: 8,
+        }
+    }
+}
+
 /// Static DeepStack schema declared by an architecture.
 ///
 /// The target language-layer indices are part of the compiled artifact identity.

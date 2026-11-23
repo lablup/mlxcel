@@ -110,6 +110,8 @@ mod phi4_audio;
 mod qwen2_vl_runtime;
 #[cfg(feature = "iree")]
 mod qwen3_vl_runtime;
+#[cfg(feature = "iree")]
+mod ssm_probe;
 #[cfg(any(feature = "iree", test))]
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod tuning;
@@ -235,6 +237,8 @@ pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters}
 /// Test support only (issue #3028): decode-step scalar reuse instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{decode_scalar_counters, reset_decode_scalar_counters};
+#[cfg(feature = "iree")]
+pub use ssm_probe::{SsmProbeInputs, SsmProbeOutputs, SsmProbeSpec, run_ssm_probe};
 /// Test support only (issue #3060): choose the single-sequence decode argument
 /// ABI for engines loaded from this thread (`Some(true)` ABI-level scalars,
 /// `Some(false)` the legacy buffer views, `None` the default scalar ABI). The

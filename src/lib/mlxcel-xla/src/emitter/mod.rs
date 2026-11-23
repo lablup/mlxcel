@@ -75,6 +75,10 @@ mod qwen2_5_vl;
 mod qwen2_vl;
 mod qwen3_vl;
 mod rope;
+mod ssm;
+mod ssm_scan;
+#[cfg(test)]
+mod ssm_tests;
 mod vision;
 mod vision_config;
 mod youtu_vl;
@@ -170,6 +174,11 @@ pub(crate) use qwen3_vl::{
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.
 #[allow(unused_imports)]
 pub(crate) use config::{MoeConfig, SharedExpertConfig};
+// SSM mixer types (issue #3337), consumed by the probe runner and #3338.
+#[allow(unused_imports)]
+pub(crate) use config::{SSM_DEFAULT_CHUNK_SIZE, SsmConfig};
+#[allow(unused_imports)]
+pub(crate) use ssm_scan::SsmPrefillForm;
 // `resolve_precision` and the precision-taking `*_with` emit variants are consumed
 // by the IREE execution path; the f32-default `emit_*` wrappers by the byte-exact
 // regression tests. Which set is live depends on the build cfg (`iree` vs `test`),
@@ -188,13 +197,13 @@ pub(crate) use model::set_decode_scalar_abi_for_thread;
 #[allow(unused_imports)]
 pub(crate) use model::{
     PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
-    PrefillEmbeddingsInputMetadata, emit_decode, emit_decode_batched, emit_decode_ragged,
-    emit_decode_ragged_with, emit_decode_ragged_with_native, emit_decode_with,
+    PrefillEmbeddingsInputMetadata, ProbeMode, emit_decode, emit_decode_batched,
+    emit_decode_ragged, emit_decode_ragged_with, emit_decode_ragged_with_native, emit_decode_with,
     emit_decode_with_native, emit_moe_probe, emit_moe_probe_with, emit_prefill,
     emit_prefill_embeddings, emit_prefill_embeddings_deepstack_diagnostics_with,
     emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
-    mrope_axis_selector, validate_prefill_embeddings_attention_bias,
-    validate_prefill_embeddings_metadata,
+    emit_ssm_probe, emit_ssm_probe_with, mrope_axis_selector,
+    validate_prefill_embeddings_attention_bias, validate_prefill_embeddings_metadata,
 };
 #[allow(unused_imports)]
 pub(crate) use molmo_vision::emit_molmo_vision;
@@ -3380,5 +3389,30 @@ mod tests {
         let text = std::fs::read_to_string(&cfg_path).expect("read MLXCEL_DUMP_CONFIG");
         let cfg = Config::from_json_str(&text).expect("parse MoE config.json");
         std::fs::write(&out_path, emit_moe_probe(&cfg, n)).expect("write MLXCEL_DUMP_OUT");
+    }
+
+    /// Opt-in graph dump for the out-of-crate SSM execution check (issue
+    /// #3337). Ignored by default; with `--ignored` and `MLXCEL_DUMP_OUT` set it
+    /// writes the single-layer Mamba2 mixer probe (`emit_ssm_probe`) for the
+    /// `ssm_oracle.py` tiny config, so the graph can be inspected or compiled
+    /// with a stock `iree-compile`. `MLXCEL_SSM_MODE` is `prefill` (default) or
+    /// `decode`; `MLXCEL_SSM_T` sets the rows (default 16). The executing check
+    /// is `examples/xla_ssm_probe.rs`, which emits the same graph in-process.
+    #[test]
+    #[ignore = "opt-in: writes the SSM probe graph to disk for the spike/openxla execution check"]
+    fn dump_ssm_probe_for_execution_check() {
+        let out_path =
+            std::env::var("MLXCEL_DUMP_OUT").expect("set MLXCEL_DUMP_OUT to the target .mlir path");
+        let t: usize = std::env::var("MLXCEL_SSM_T")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(16);
+        let mode = match std::env::var("MLXCEL_SSM_MODE").as_deref() {
+            Ok("decode") => ProbeMode::Decode,
+            _ => ProbeMode::Prefill,
+        };
+        let cfg = SsmConfig::tiny_mamba2();
+        std::fs::write(&out_path, emit_ssm_probe(&cfg, 16, t, mode))
+            .expect("write MLXCEL_DUMP_OUT");
     }
 }
