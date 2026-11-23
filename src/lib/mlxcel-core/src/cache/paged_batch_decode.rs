@@ -499,8 +499,8 @@ fn paged_decode_rows(
 ///
 /// A window-bounded sliding layer exists only in the pool, so the alternative
 /// to the fused read is a gather of every row's window every step; on GB10 the
-/// fused read wins at any length there (issue #3256 measured a 256-token B=4
-/// cell at -14.7% against the dense ring with the floor, +4.7% without). Other
+/// gather is what a 256-token B=4 cell paid on GB10 while every row's window
+/// was below the floor (issue #3256: -14.7% against the dense ring). Other
 /// layers keep the measured batch-size policy.
 fn batch_floor(states: &[&PagedSequenceState], layer_idx: usize) -> usize {
     let windowed = states.iter().all(|state| {

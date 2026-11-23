@@ -39,7 +39,7 @@ Early experiments, 2 rounds x 2 reps each:
 | 8192 | 1 | 188.97 | 186.85 | 155.43 | 2.12 | -17.1% |
 | 8192 | 4 | 360.09 | 346.86 | 371.15 | 13.23 | +4.7% |
 
-The 256 x 4 loss had a separate cause. Before a row fills its 512-token window, four rows hold fewer than the 2048 visible tokens the batched floor asks for, so each sliding layer gathered every row's window every step. With both floors forced to 1 (`gemma3-1b-b4-floor-1.json`, 2 x 2), the same cell gave main 389.63 / 390.32 against branch 408.65 (+4.7%). Commit `31803cae` therefore drops the batched floor for layers that are windowed on every row.
+The 256 x 4 loss had a separate cause. Before a row fills its 512-token window, four rows hold fewer than the 2048 visible tokens the batched floor asks for, so each sliding layer gathered every row's window every step. With both floors forced to 1 (`gemma3-1b-b4-floor-1.json`, 2 x 2), the same cell gave main 389.63 / 390.32 against branch 408.65 (+4.7%). That experiment lifted the floor for every layer, full-attention ones included. Commit `31803cae` drops the batched floor only for layers that are windowed on every row; its own numbers are below.
 
 `gemma3-1b-gate-windowed-floor.json` (commit `31803cae`), 3 rounds x 3 reps. The load average rose from 2 to 17 during this run because a CI runner was compiling on the host, so the B=4 cells were rerun below.
 
@@ -57,7 +57,7 @@ B=4 rerun at commit `31803cae` (`gemma3-1b-gate-windowed-floor-b4-rerun.json`), 
 | 256 | 4 | 400.25 | 397.18 | 385.85 | 361.94 to 416.16 | 3.07 | -3.0% |
 | 8192 | 4 | 365.10 | 363.11 | 371.98 | 357.52 to 381.21 | 1.99 | +2.3% |
 
-Both B=4 medians lie inside main's sample range. At 256 the branch median is one null spread below main's, and at 8192 it is above.
+At 8192 the branch is above main. At 256 it is 13 tok/s (3.0%) below main, about four null spreads, so that cell is unresolved: the overlapping clippy run and the early stop below may account for part of it, and neither was ruled out. With `BENCH_ALLOW_EARLY_STOP`, the branch's 256 x 4 window ends near 598 tokens in rounds 0 and 2 (the row that stops early), while main's runs to 1024, so the two arms are not measured over the same context range in that cell.
 
 Across four separate runs, B=1 is 8% to 15% below main at 256 tokens and 14% to 18% below at 8192, far outside a null spread of 1 to 3 tok/s. Main's B=1 path keeps dense caches and never touches the pool. The branch pays a pool write, a page-table view and a fused launch per layer per step. The loss grows with context, which points at the full-attention layers: they also live in the pool on the branch and are dense on main.
 
@@ -75,7 +75,7 @@ The first full run aborted on the branch's 256 x 4 cell, where one row stopped a
    - the branch still differs from main;
    - main does not differ from itself.
 3. Where the outputs differ:
-   - Branch and main logprobs are bit-identical until the row crosses the window (decode step 256 for a 257-token prompt). After that they differ by at most 0.36 nats per token. Gemma 3 logits are bf16, so that is a few bf16 ulps.
+   - Branch and main logprobs are bit-identical until the row crosses the window (decode step 256 for a 257-token prompt). After that, B=4 row 3 differs at two steps by 0.36 and 0.11 nats, and the other differing steps across rows are at most 0.078 nats, most of them 0.031 or less. Attributing these to summation order is an inference from the tiny-fixture gap below, not a measurement on this model.
    - The ring and the paged window hold the same 512 keys in a different order (rotated against temporal), so SDPA sums them in a different order.
    - Every text divergence is a greedy flip at an exact or near-exact tie:
      - B=1, step 337: -1.5625 vs -1.5625;
