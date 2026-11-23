@@ -434,33 +434,45 @@ fn eos_ids_of(value: Option<&serde_json::Value>) -> Vec<i32> {
 /// Resolve the EOS ids from the parsed `generation_config.json` and
 /// `config.json` (either may be absent or malformed, passed as `None`).
 ///
-/// Precedence: `generation_config.json` `eos_token_id`, else `config.json`
-/// `eos_token_id`, else `config.json` `text_config.eos_token_id` (vision-language
-/// checkpoints nest the language model there). The first source that yields an
-/// id wins. Empty when none does (no EOS configured). Checkpoints such as
-/// `qwen2.5-vl-3b-instruct-4bit` ship no `generation_config.json`, so without
-/// the fallback the XLA loop ran past EOS while the eager path stopped (#3292).
+/// Returns the order-preserving, de-duplicated union of `generation_config.json`
+/// `eos_token_id`, `config.json` `eos_token_id`, and `config.json`
+/// `text_config.eos_token_id` (vision-language checkpoints nest the language
+/// model there). Union rather than first-wins, like the eager loader's
+/// `read_eos_token_ids` (#2384): a generation config listing only one of the
+/// model's stop ids must not hide the others. Empty when no source declares an
+/// id. Checkpoints such as `qwen2.5-vl-3b-instruct-4bit` ship no
+/// `generation_config.json`, so reading only that file let the XLA loop run past
+/// EOS while the eager path stopped (#3292).
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 pub(crate) fn resolve_eos_ids(
     generation_config: Option<&serde_json::Value>,
     config: Option<&serde_json::Value>,
 ) -> Vec<i32> {
-    [
+    let mut ids: Vec<i32> = Vec::new();
+    for source in [
         generation_config.and_then(|v| v.get("eos_token_id")),
         config.and_then(|v| v.get("eos_token_id")),
         config.and_then(|v| v.get("text_config")?.get("eos_token_id")),
-    ]
-    .into_iter()
-    .map(eos_ids_of)
-    .find(|ids| !ids.is_empty())
-    .unwrap_or_default()
+    ] {
+        for id in eos_ids_of(source) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
 }
 
-/// Read the model's EOS token ids (see [`resolve_eos_ids`] for the precedence).
-/// Only compiled under `iree`, where the decode loop actually runs; otherwise
-/// empty (execution errors out anyway).
-#[cfg(feature = "iree")]
-pub(crate) fn read_eos(model_path: &Path) -> Vec<i32> {
+/// The EOS ids the model directory's `generation_config.json` and `config.json`
+/// declare (see [`resolve_eos_ids`]). A missing or malformed file counts as
+/// absent.
+///
+/// This is what a session stops on when its caller supplies nothing. The root
+/// crate passes the eager loader's full stop set (which also resolves the
+/// tokenizer's `eos_token`) through `set_eos_token_ids`, using these ids as the
+/// declared set it merges into.
+#[must_use]
+pub fn config_eos_token_ids(model_path: &Path) -> Vec<i32> {
     let read_json = |name: &str| -> Option<serde_json::Value> {
         let s = std::fs::read_to_string(model_path.join(name)).ok()?;
         serde_json::from_str(&s).ok()
@@ -469,6 +481,14 @@ pub(crate) fn read_eos(model_path: &Path) -> Vec<i32> {
         read_json("generation_config.json").as_ref(),
         read_json("config.json").as_ref(),
     )
+}
+
+/// Read the model's EOS token ids (see [`config_eos_token_ids`]). Only
+/// populated under `iree`, where the decode loop actually runs; otherwise empty
+/// (execution errors out anyway).
+#[cfg(feature = "iree")]
+pub(crate) fn read_eos(model_path: &Path) -> Vec<i32> {
+    config_eos_token_ids(model_path)
 }
 
 #[cfg(not(feature = "iree"))]
@@ -603,11 +623,19 @@ impl XlaInferenceSession {
         self.context_capacity
     }
 
-    /// The model's EOS token ids (from `generation_config.json`), so the drive
-    /// loop and the seam can stop on them.
+    /// The model's EOS token ids, so the drive loop and the seam can stop on
+    /// them. Read from the checkpoint at load ([`config_eos_token_ids`]) unless
+    /// the caller replaced them with [`Self::set_eos_token_ids`].
     #[must_use]
     pub fn eos_token_ids(&self) -> &[i32] {
         &self.eos_token_ids
+    }
+
+    /// Replace the stop ids, so a caller that resolves EOS more completely than
+    /// this crate can (the root crate also reads the tokenizer's `eos_token`)
+    /// stops where the eager backend does.
+    pub fn set_eos_token_ids(&mut self, ids: Vec<i32>) {
+        self.eos_token_ids = ids;
     }
 
     /// Conditionally load the Gemma3n audio split artifacts against this exact
@@ -1210,7 +1238,7 @@ mod greedy_contract_tests {
 // EOS resolution (issue #3292) is pure JSON logic, so it runs without `iree`.
 #[cfg(test)]
 mod eos_resolution_tests {
-    use super::resolve_eos_ids;
+    use super::{config_eos_token_ids, resolve_eos_ids};
     use serde_json::{Value, json};
 
     fn resolve(generation: Option<Value>, config: Option<Value>) -> Vec<i32> {
@@ -1218,12 +1246,12 @@ mod eos_resolution_tests {
     }
 
     #[test]
-    fn generation_config_wins_over_config_json() {
+    fn generation_config_ids_come_first_then_config_json_ids() {
         let got = resolve(
             Some(json!({"eos_token_id": [1, 2]})),
             Some(json!({"eos_token_id": 9, "text_config": {"eos_token_id": 8}})),
         );
-        assert_eq!(got, vec![1, 2]);
+        assert_eq!(got, vec![1, 2, 9, 8]);
     }
 
     #[test]
@@ -1251,12 +1279,12 @@ mod eos_resolution_tests {
     }
 
     #[test]
-    fn top_level_config_beats_text_config() {
+    fn repeated_ids_across_sources_are_kept_once() {
         let got = resolve(
-            None,
-            Some(json!({"eos_token_id": 5, "text_config": {"eos_token_id": 6}})),
+            Some(json!({"eos_token_id": [5, 6]})),
+            Some(json!({"eos_token_id": [6, 5], "text_config": {"eos_token_id": 5}})),
         );
-        assert_eq!(got, vec![5]);
+        assert_eq!(got, vec![5, 6]);
     }
 
     #[test]
@@ -1272,5 +1300,19 @@ mod eos_resolution_tests {
             Some(json!({"eos_token_id": [1, "x", 4294967296i64, 2]})),
         );
         assert_eq!(got, vec![1, 2]);
+    }
+
+    #[test]
+    fn model_directory_reader_treats_missing_or_malformed_files_as_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(config_eos_token_ids(dir.path()).is_empty());
+        std::fs::write(dir.path().join("generation_config.json"), "{ not json")
+            .expect("write generation config");
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"eos_token_id": 151645, "text_config": {"eos_token_id": 151643}}"#,
+        )
+        .expect("write config");
+        assert_eq!(config_eos_token_ids(dir.path()), vec![151645, 151643]);
     }
 }
