@@ -334,6 +334,10 @@ pub mod smollm3;
 pub mod solar_open;
 /// Runtime block-vs-chain exactness gate shared by the MTP speculative paths.
 pub mod speculative_exactness;
+pub mod speculative_exactness_diag;
+pub mod speculative_exactness_draws;
+#[cfg(test)]
+mod speculative_exactness_survey_tests;
 pub mod stablelm;
 pub mod starcoder2;
 pub mod step3p5;

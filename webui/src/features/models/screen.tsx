@@ -342,7 +342,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
               sortColumnId={sort.column}
               sortDirection={sort.direction}
               onSortChange={(column, direction) => {
-                // The third header activation clears the sort in alpha.19; the library always has
+                // The third header activation clears the sort (ui-common 0.2); the library always has
                 // one, so a cleared sort returns to the default name order.
                 setLibrarySort(state.serverInstanceId, column && direction ? { column: column as SortColumn, direction: direction as SortDirection } : DEFAULT_SORT);
                 setPage(0);

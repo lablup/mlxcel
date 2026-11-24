@@ -15,7 +15,7 @@
 use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
-use mlxcel_core::{MlxArray, UniquePtr, dtype};
+use mlxcel_core::{MlxArray, UniquePtr, dtype, row_invariant};
 
 use super::{InklingConfig, weight};
 use crate::models::switch_layers::{
@@ -105,10 +105,10 @@ impl InklingDenseMlp {
     }
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let gate = self.gate_proj.forward(x);
-        let up = self.up_proj.forward(x);
+        let gate = row_invariant::linear(&self.gate_proj, x);
+        let up = row_invariant::linear(&self.up_proj, x);
         let activated = mlxcel_core::compiled_swiglu_activation(&gate, &up);
-        let down = self.down_proj.forward(&activated);
+        let down = row_invariant::linear(&self.down_proj, &activated);
         mlxcel_core::multiply(&down, &self.global_scale)
     }
 }
@@ -247,11 +247,20 @@ impl InklingSparseMoe {
         Some(down)
     }
 
+    /// Inside a verify block every position runs alone, so it takes the
+    /// kernels its decode step takes: the routed experts switch kernel with
+    /// the token count (the fused single-token kernel, the down-combine
+    /// kernel up to 8 tokens, `gather_mm` otherwise), and none of those is
+    /// row-invariant against another (issue #3409).
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        row_invariant::per_position(x, |x| self.forward_tokens(x))
+    }
+
+    fn forward_tokens(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let hidden = shape[2];
         let flat = mlxcel_core::reshape(x, &[-1, hidden]);
-        let logits = mlxcel_core::matmul(&flat, &mlxcel_core::transpose(&self.gate_weight));
+        let logits = row_invariant::dense(&flat, &self.gate_weight);
 
         // Fast path (issue #2479): the whole post-matmul routing chain is one
         // Metal kernel; at batch<=8 the routed down projection is one
@@ -369,8 +378,8 @@ impl InklingSparseMoe {
             }
         };
 
-        let shared_gate = self.shared_gate.forward(&flat);
-        let shared_up = self.shared_up.forward(&flat);
+        let shared_gate = row_invariant::linear(&self.shared_gate, &flat);
+        let shared_up = row_invariant::linear(&self.shared_up, &flat);
         let shared = mlxcel_core::compiled_swiglu_activation(&shared_gate, &shared_up);
         let shared = match gamma {
             // The route kernel emits the shared-expert weights pre-broadcast
@@ -385,7 +394,7 @@ impl InklingSparseMoe {
                 mlxcel_core::multiply(&shared, &gamma)
             }
         };
-        let shared = self.shared_down.forward(&shared);
+        let shared = row_invariant::linear(&self.shared_down, &shared);
         let output = mlxcel_core::add(&routed, &shared);
         let output = mlxcel_core::astype(&output, mlxcel_core::array_dtype(x));
         mlxcel_core::reshape(&output, &[shape[0], shape[1], hidden])

@@ -33,9 +33,9 @@ Astryx (https://github.com/facebook/astryx)
 
 The generated WebUI JavaScript and stylesheets include code and styles from these MIT-licensed packages:
 
-- @astryxdesign/core 0.7.0 (components, StyleX-compiled stylesheet and CSS reset)
-- @astryxdesign/theme-neutral 0.7.0 (the pre-built neutral theme and its stylesheet)
-- @astryxdesign/lab 0.7.0-canary.97a0d31 (the lab stylesheet)
+- @astryxdesign/core 0.7.11 (components, StyleX-compiled stylesheet and CSS reset)
+- @astryxdesign/theme-neutral 0.7.11 (the pre-built neutral theme and its stylesheet)
+- @astryxdesign/lab 0.7.11-canary.d810271 (the lab stylesheet)
 
 @astryxdesign/core ships no LICENSE file; its package.json declares the MIT License. The text below is the LICENSE published with @astryxdesign/theme-neutral and @astryxdesign/lab (verbatim):
 
@@ -62,7 +62,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-@stylexjs/stylex 0.19.0
+@stylexjs/stylex 0.19.2
 https://github.com/facebook/stylex
 
 The StyleX runtime is MIT-licensed (declared in its package.json; the package ships no LICENSE file):
@@ -90,7 +90,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-lucide-react 1.59.0
+lucide-react 1.78.0
 https://github.com/lucide-icons/lucide
 
 Published LICENSE (verbatim):
@@ -196,7 +196,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
-@lablup/ui-common 0.2.0-alpha.19
+@lablup/ui-common 0.2.0-alpha.21
 https://github.com/lablup/ui-common
 
 Published NOTICE (verbatim):

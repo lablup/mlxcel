@@ -25,27 +25,9 @@
 //! `INKLING2_DIAG_VERIFY=0` runs the block outside the speculative scope, and
 //! `INKLING2_DIAG_PROMPT` sets the prompt length (default 32).
 
-use mlxcel_core::MlxArray;
-
 use super::Inkling2Model;
+use crate::models::speculative_exactness_diag::{self as diag, Stage};
 use mlxcel_core::sampling::TokenBiasMap;
-
-fn row_f32(x: &MlxArray, row: i32) -> Vec<f32> {
-    let shape = mlxcel_core::array_shape(x);
-    let rest: i32 = shape[2..].iter().product();
-    let x = &*mlxcel_core::reshape(x, &[shape[0], shape[1], rest]);
-    let shape = mlxcel_core::array_shape(x);
-    let slab = mlxcel_core::slice(x, &[0, row, 0], &[shape[0], row + 1, shape[2]]);
-    let slab = mlxcel_core::astype(&slab, mlxcel_core::dtype::FLOAT32);
-    mlxcel_core::utils::array_to_vec_f32(&slab)
-}
-
-fn compare(a: &[f32], b: &[f32]) -> (usize, f32) {
-    a.iter().zip(b).fold((0, 0.0f32), |(n, m), (x, y)| {
-        let d = (x - y).abs();
-        (n + usize::from(x.to_bits() != y.to_bits()), m.max(d))
-    })
-}
 
 #[test]
 #[ignore = "needs a real Inkling 2 checkpoint and the GPU lock"]
@@ -92,39 +74,47 @@ fn report(model: &Inkling2Model, path: &str, width: usize, verify: bool) {
     let block: Vec<i32> = (0..width).map(|i| ((i * 13 + 4) % vocab) as i32).collect();
     let input = |t: &[i32]| mlxcel_core::from_slice_i32(t, &[1, t.len() as i32]);
 
+    // One stage per captured visit, then the logits, through the shared
+    // per-layer diagnostic (issue #3409).
+    let stages = |out: &super::speculative::Inkling2VerifyOutput| -> Vec<Stage> {
+        let mut stages: Vec<Stage> = model
+            .layer_indices
+            .iter()
+            .chain(std::iter::once(&usize::MAX))
+            .enumerate()
+            .map(|(v, &layer)| {
+                let kind = if layer == usize::MAX {
+                    "final".to_owned()
+                } else {
+                    format!("layer {layer}")
+                };
+                let hidden = out.hidden_states[v].as_ref().unwrap();
+                Stage::of(v, &kind, "visit input", hidden)
+            })
+            .collect();
+        stages.push(Stage::of(visits + 1, "final", "logits", &out.logits));
+        stages
+    };
+
     let mut chain = model.make_internal_caches();
     let _ = model.forward_speculative(&input(&prompt), &mut chain, &[], false, &none);
-    let chain_out: Vec<_> = block
+    let chain_trace: Vec<Vec<Stage>> = block
         .iter()
-        .map(|&t| model.forward_speculative(&input(&[t]), &mut chain, &ids, false, &none))
+        .map(|&t| stages(&model.forward_speculative(&input(&[t]), &mut chain, &ids, false, &none)))
         .collect();
 
     let mut caches = model.make_internal_caches();
     let _ = model.forward_speculative(&input(&prompt), &mut caches, &[], false, &none);
-    let out = model.forward_speculative(&input(&block), &mut caches, &ids, verify, &none);
+    let block_trace =
+        stages(&model.forward_speculative(&input(&block), &mut caches, &ids, verify, &none));
 
     println!("model {path} width {width} verify {verify} visits {visits}");
-    for (v, &layer) in model
-        .layer_indices
-        .iter()
-        .chain(std::iter::once(&usize::MAX))
-        .enumerate()
-    {
-        let mut line = format!("capture {v:>2} (layer {layer:>2}):");
-        for (r, chain_r) in chain_out.iter().enumerate() {
-            let a = row_f32(out.hidden_states[v].as_ref().unwrap(), r as i32);
-            let b = row_f32(chain_r.hidden_states[v].as_ref().unwrap(), 0);
-            let (n, m) = compare(&a, &b);
-            line.push_str(&format!(" r{r} {n}/{m:.2e}"));
-        }
+    for line in diag::report(&block_trace, &chain_trace) {
         println!("{line}");
     }
-    let mut line = "logits:".to_string();
-    for (r, chain_r) in chain_out.iter().enumerate() {
-        let a = row_f32(&out.logits, r as i32);
-        let b = row_f32(&chain_r.logits, 0);
-        let (n, m) = compare(&a, &b);
-        line.push_str(&format!(" r{r} {n}/{m:.2e}"));
+    match diag::locate(&block_trace, &chain_trace) {
+        Ok(Some(found)) => println!("{found}"),
+        Ok(None) => println!("every captured visit and the logits are byte-identical"),
+        Err(why) => println!("no localization: {why}"),
     }
-    println!("{line}");
 }

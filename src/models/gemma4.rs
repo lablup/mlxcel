@@ -26,8 +26,6 @@
 
 #[path = "gemma4_batched.rs"]
 mod batched;
-#[path = "gemma4_probe.rs"]
-mod probe_trace;
 #[path = "gemma4_attention.rs"]
 mod verify_attention;
 #[path = "gemma4_verify_rows.rs"]
@@ -44,6 +42,7 @@ use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
+use crate::models::speculative_exactness_diag as probe_trace;
 use crate::models::switch_layers::{SwitchLinear, gather_sort};
 use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
@@ -319,11 +318,12 @@ impl TextConfig {
     pub(crate) fn mtp_probe_prompt_lengths(&self) -> Vec<usize> {
         // Preserve the original three short draws for other Gemma variants.
         // The long buffered draw validates the measured 31B and 12B corrections.
-        let mut lengths = vec![8; 3];
-        if self.mtp_requires_linear_singleton() {
-            lengths.push(self.sliding_window.saturating_add(32).min(1536));
-        }
-        lengths
+        // Through the shared plan, so `MLXCEL_MTP_PROBE_LONG_CONTEXT` moves
+        // this family's long draw like every other's (#3409).
+        let long = self
+            .mtp_requires_linear_singleton()
+            .then(|| self.sliding_window.saturating_add(32).min(1536));
+        crate::models::speculative_exactness_draws::prompt_lengths(8, 3, long)
     }
 
     fn group_size(&self) -> i32 {
@@ -5812,13 +5812,26 @@ impl Gemma4Wrapper {
     /// `M = K` versus `M = 1` dispatch of the head projection as well as
     /// the decoder layers, exactly as the Qwen probe does.
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
-        let verdict = self.probe_block_chain_exactness_impl(block_size, false);
+        let lengths = self.model.config.mtp_probe_prompt_lengths();
+        self.probe_block_chain_exactness_at(block_size, &lengths)
+    }
+
+    /// [`Self::probe_block_chain_exactness`] over draws of the given prompt
+    /// lengths, one draw per entry.
+    ///
+    /// Used by: [`Self::probe_block_chain_exactness`] and the exactness survey test.
+    pub fn probe_block_chain_exactness_at(
+        &self,
+        block_size: usize,
+        prompt_lengths: &[usize],
+    ) -> BlockChainExactness {
+        let verdict = self.probe_block_chain_exactness_impl(block_size, prompt_lengths, false);
         if verdict.is_equal() || matches!(verdict, BlockChainExactness::NotRun(_)) {
             return verdict;
         }
         // Capture only a failed startup probe, never a serving forward. The
         // ordinary probe remains unsynchronized between sub-operations.
-        let localized = self.probe_block_chain_exactness_impl(block_size, true);
+        let localized = self.probe_block_chain_exactness_impl(block_size, prompt_lengths, true);
         if matches!(localized, BlockChainExactness::Localized { .. }) {
             localized
         } else {
@@ -5829,6 +5842,7 @@ impl Gemma4Wrapper {
     fn probe_block_chain_exactness_impl(
         &self,
         block_size: usize,
+        prompt_lengths: &[usize],
         trace: bool,
     ) -> BlockChainExactness {
         if block_size < 2 {
@@ -5850,13 +5864,7 @@ impl Gemma4Wrapper {
         // The short draws catch projection dispatch changes. One draw past
         // the standard sliding window also tests real buffered verify keys;
         // a short-only pass does not establish long-context parity (#1983).
-        for (draw, prompt_len) in self
-            .model
-            .config
-            .mtp_probe_prompt_lengths()
-            .into_iter()
-            .enumerate()
-        {
+        for (draw, prompt_len) in prompt_lengths.iter().copied().enumerate() {
             // Synthetic ids, varied per draw: dispatch depends only on shape
             // and `M`, but whether a last-ulp kernel difference lands on a
             // differing byte depends on the values (see the false-pass note

@@ -33,13 +33,15 @@ pub enum MixerKind {
     Attention,
     /// Mamba2 selective state-space mixer ([`SsmConfig`]).
     Mamba2,
+    /// A feed-forward-only block (no token mixer or persistent state).
+    None,
 }
 
 impl MixerKind {
     /// Whether the mixer carries recurrent state instead of a KV cache.
     #[must_use]
     pub fn is_recurrent(self) -> bool {
-        !matches!(self, MixerKind::Attention)
+        matches!(self, MixerKind::Mamba2)
     }
 
     /// The HF `model_type` of the family this mixer comes from, for errors.
@@ -48,6 +50,7 @@ impl MixerKind {
         match self {
             MixerKind::Attention => "attention",
             MixerKind::Mamba2 => "mamba2",
+            MixerKind::None => "ffn",
         }
     }
 }
@@ -82,7 +85,32 @@ impl Config {
     /// `norm -> mixer -> residual` with no FFN.
     #[must_use]
     pub fn layer_has_ffn(&self, li: usize) -> bool {
-        self.layer_mixer(li) == MixerKind::Attention
+        if self.weight_scheme == WeightScheme::NemotronH {
+            self.layer_mixer(li) == MixerKind::None
+        } else {
+            self.layer_mixer(li) == MixerKind::Attention
+        }
+    }
+
+    /// Number of attention rows in the KV cache, excluding SSM and FFN blocks.
+    #[must_use]
+    pub fn attn_layer_count(&self) -> usize {
+        (0..self.n_layers)
+            .filter(|&li| self.layer_mixer(li) == MixerKind::Attention)
+            .count()
+    }
+
+    /// Compact KV row for an attention layer; attention-only models keep `li`.
+    #[must_use]
+    pub fn attn_layer_index(&self, li: usize) -> Option<usize> {
+        if li >= self.n_layers || self.layer_mixer(li) != MixerKind::Attention {
+            return None;
+        }
+        Some(
+            (0..li)
+                .filter(|&i| self.layer_mixer(i) == MixerKind::Attention)
+                .count(),
+        )
     }
 
     /// Number of layers that carry recurrent state.
@@ -214,7 +242,7 @@ impl Config {
 /// for an unbounded limit: `null`, the bare `Infinity` token (quoted by
 /// [`quote_non_finite_json`] before parsing), and transformers 5's
 /// `{"__float__": "Infinity"}` object.
-fn json_f32(value: &serde_json::Value, what: &str) -> Result<f32, String> {
+pub(super) fn json_f32(value: &serde_json::Value, what: &str) -> Result<f32, String> {
     if let Some(inner) = value.as_object().and_then(|object| object.get("__float__")) {
         return json_f32(inner, what);
     }

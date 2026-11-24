@@ -7,7 +7,7 @@
 .ds-icon-button { display: inline-grid; place-items: center; padding: 0 9px; }
 .ds-icon { width: 18px; height: 18px; flex: none; }
 /* :where() keeps this at .ds-button:hover specificity, below the package's enabled-variant hover fills, while still skipping disabled buttons. */
-.ds-button:hover:where(:not(:disabled)), .ds-icon-button:hover:where(:not(:disabled)) { background: var(--color-overlay-hover); }
+.ds-button:hover:where(:not(:disabled, [aria-disabled="true"])), .ds-icon-button:hover:where(:not(:disabled, [aria-disabled="true"])) { background: var(--color-overlay-hover); }
 .ds-button:active, .ds-icon-button:active { transform: var(--mx-button-press-transform); }
 .ds-button:focus-visible, .ds-icon-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [role="tab"]:focus-visible { outline: none; box-shadow: var(--mx-focus-ring); }
 .ds-button:disabled, .ds-icon-button:disabled, .ds-field[data-disabled="true"] { opacity: 0.56; cursor: not-allowed; }

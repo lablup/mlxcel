@@ -159,3 +159,24 @@ fn per_position_splits_only_inside_a_verify_block() {
     assert_eq!(calls.get(), 5);
     assert_eq!(bytes(&y), bytes(&x));
 }
+
+/// Issue #3409: MLX binds an array of fewer than 8 elements in the `constant`
+/// address space, which the kernel source must accept. A tiny test model
+/// (hidden size 4) multiplies exactly such a row; before the fix the Metal
+/// library failed to build and the process aborted.
+#[test]
+fn a_tiny_row_or_weight_does_not_break_the_kernel_build() {
+    if !available() {
+        return;
+    }
+    for (n, k) in [(1, 4), (2, 4), (8, 4), (600, 4)] {
+        let w = array(n, k, 3, FLOAT32);
+        let x = array(2, k, 7, FLOAT32);
+        let full = matvec(&x, &w, FLOAT32).expect("kernel runs on Metal");
+        for r in 0..2 {
+            let one = matvec(&crate::utils::slice_axis(&x, 0, r, r + 1), &w, FLOAT32).unwrap();
+            let row = crate::utils::slice_axis(&full, 0, r, r + 1);
+            assert_eq!(bytes(&row), bytes(&one), "n {n} k {k} row {r}");
+        }
+    }
+}

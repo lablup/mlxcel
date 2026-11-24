@@ -62,16 +62,25 @@ export async function expectSafeLayout(page: Page): Promise<void> {
       // it; not evidence that production CSP permits it (playwright.csp.config.ts checks that).
       const properties = Array.from(element.style);
       const onlyCustom = (): boolean => properties.some((key) => !key.startsWith('--'));
-      // ProgressBar fill: its measured percentage.
-      if (element.matches('.ds-progress .astryx-progress-bar-fill')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?%$/.test(element.style.width);
+      // ProgressBar fill: since Astryx 0.7.11 its percentage, motion and indeterminate pulse travel
+      // as the bar's own `--_progress-bar-*` custom properties instead of an inline width.
+      if (element.matches('.ds-progress .astryx-progress-bar-fill')) return properties.some((key) => !key.startsWith('--_progress-bar-'));
       // Popover layers (Selector list, Tooltip, TabList keyboard hint): CSS anchor positioning.
       if (element.matches('[popover]')) return properties.some((key) => !(key.startsWith('--') || key.startsWith('position-') || ['margin-block-start', 'margin-block-end', 'margin-inline-start', 'margin-inline-end', 'justify-self', 'align-self'].includes(key)));
       // A popover's anchor: the Selector trigger box, or a Button carrying a tooltip.
       if (element.matches('.astryx-selector, .astryx-button')) return properties.join(',') !== 'anchor-name' || !/^--/.test(element.style.getPropertyValue('anchor-name'));
       // StyleX dynamic values (field and skeleton sizes, the Drawer's sheet width) travel as custom properties.
       if (element.matches('.astryx-field, .astryx-skeleton, dialog.astryx-drawer.ds-drawer')) return onlyCustom();
-      // A layer's anchor marker: a decorative box named for CSS anchor positioning.
-      if (element.matches('span[aria-hidden="true"]:empty')) return properties.slice().sort().join(',') !== 'anchor-name,left,top' || !element.style.getPropertyValue('anchor-name').startsWith('--astryx-layer-');
+      // A layer's anchor marker: a decorative box placed for CSS anchor positioning. Since Astryx
+      // 0.7.11 it carries its `anchor-name` only while its layer is shown.
+      if (element.matches('span[aria-hidden="true"]:empty')) {
+        const placed = ['left', 'top'].every((key) => /^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
+        const sorted = properties.slice().sort().join(',');
+        if (sorted === 'left,top') return !placed;
+        return sorted !== 'anchor-name,left,top' || !placed || !element.style.getPropertyValue('anchor-name').startsWith('--astryx-layer-');
+      }
+      // Astryx's shared announcer (useAnnounce, 0.7.11): two visually hidden live regions on <body>.
+      if (element.matches('body > div[data-astryx-live-region]')) return element.style.cssText !== 'position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0px; overflow: hidden; clip: rect(0px, 0px, 0px, 0px); white-space: nowrap; border: 0px; inset-block-start: 0px; inset-inline-start: 0px; pointer-events: none; user-select: none;';
       // Button loading spinner: its box size, through Astryx's own custom property.
       if (element.matches('.astryx-spinner')) return properties.slice().sort().join(',') !== 'height,width' || ['width', 'height'].some((key) => !/^(?:\d+(?:\.\d+)?px|var\(--_spinner-box-size, \d+px\))$/.test(element.style.getPropertyValue(key)));
       // A table with a fixed column: Astryx's floor, the sum of the fixed widths.
@@ -82,10 +91,12 @@ export async function expectSafeLayout(page: Page): Promise<void> {
       if (element.matches('div.astryx-app-shell')) return properties.join(',') !== '--_app-shell-header-height' || !/^\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue('--_app-shell-header-height'));
       // AppShell's navigation drawer (MobileNav): its sheet width as StyleX custom properties.
       if (element.matches('dialog.astryx-mobile-nav > div')) return onlyCustom();
-      // MobileNav's scroll lock on <html>, only while the drawer is open.
-      if (element === document.documentElement) return !document.querySelector('dialog.astryx-mobile-nav[open]') || properties.some((key) => !['overflow', 'overflow-x', 'overflow-y', 'scrollbar-gutter', 'padding-right', 'padding-inline-end'].includes(key));
-      // The modal Drawer's scroll lock on <body>, only while a modal dialog is open.
-      if (element === document.body) return !document.querySelector('dialog[open][aria-modal="true"]') || properties.some((key) => !['overflow', 'overflow-x', 'overflow-y', 'position', 'top', 'left', 'right', 'padding-right'].includes(key));
+      // Astryx's scroll lock (useScrollLock) on <html> and <body>, only while a surface that holds
+      // it is open: MobileNav's drawer or a modal dialog. Since 0.7.11 it also claims
+      // `overscroll-behavior-y: none`, so a pull at the page edge cannot scroll the page under it.
+      const scrollLockHeld = (): boolean => document.querySelector('dialog.astryx-mobile-nav[open], dialog[open][aria-modal="true"]') !== null;
+      if (element === document.documentElement) return !scrollLockHeld() || properties.some((key) => !['overflow', 'overflow-x', 'overflow-y', 'overscroll-behavior-y', 'scrollbar-gutter', 'padding-right', 'padding-inline-end'].includes(key));
+      if (element === document.body) return !scrollLockHeld() || properties.some((key) => !['overflow', 'overflow-x', 'overflow-y', 'overscroll-behavior-y', 'position', 'top', 'left', 'right', 'padding-right'].includes(key));
       // Shared SmoothHeight: the measured content height while active. Scoped to the product
       // adapter's class, so an unadapted SmoothHeight use elsewhere cannot pass by class name alone.
       if (element.matches('.uic-smooth-height.ds-smooth-height')) return properties.join(',') !== 'height' || !/^\d+px$/.test(element.style.height);
