@@ -1,7 +1,9 @@
 // Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
 // SPDX-License-Identifier: Apache-2.0
 //! Independent HF fp32 synthetic gate; generation plus per-step ragged logits.
-use crate::{IreeLlama, IreeRaggedLlama};
+#![cfg(all(feature = "xla-iree", feature = "test-utils"))]
+
+use mlxcel_xla::{IreeLlama, IreeRaggedLlama};
 use serde::Deserialize;
 
 #[derive(Deserialize)]

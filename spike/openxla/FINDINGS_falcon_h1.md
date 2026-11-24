@@ -15,7 +15,7 @@ Generate three small checkpoints and fresh-prefix HF fp32 oracle trajectories us
 ```sh
 $MLXCEL_ORACLE_PYTHON spike/openxla/falcon_h1_oracle.py --out /tmp/falcon-h1-fixtures
 MLXCEL_FALCON_H1_FIXTURES=/tmp/falcon-h1-fixtures MLXCEL_XLA_DEVICE=local-task \
-  cargo test --profile test-fast -p mlxcel-xla --features iree --lib \
+  cargo test --profile test-fast --features xla-iree,test-utils --test xla_falcon_h1 \
   falcon_h1_hf_synthetic_parity -- --ignored --nocapture --test-threads=1
 ```
 
