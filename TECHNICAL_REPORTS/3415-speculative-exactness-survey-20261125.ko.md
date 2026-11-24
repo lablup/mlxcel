@@ -1,7 +1,7 @@
 # PR #3415: speculative exactness 조사와 Inkling verify 블록의 바이트 일치
 
 **날짜**: 2026-11-25
-**상태**: Draft PR (closes #3409). M3 Ultra(512 GB)에서 로컬 체크포인트 22개로 검증. 좁은 범위의 lib 테스트, clippy, contract check 통과
+**상태**: Draft PR (closes #3409). M3 Ultra(512 GB)에서 로컬 체크포인트 21개로 검증. 좁은 범위의 lib 테스트, clippy, contract check 통과
 
 ## 요약
 

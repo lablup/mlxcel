@@ -1,7 +1,7 @@
 # PR #3415: Speculative exactness survey and a byte-exact Inkling verify block
 
 **Date**: 2026-11-25
-**Status**: Draft PR open (closes #3409). Validated on an M3 Ultra (512 GB) on 22 local checkpoints; narrow lib suites, clippy and the contract checks pass
+**Status**: Draft PR open (closes #3409). Validated on an M3 Ultra (512 GB) on 21 local checkpoints; narrow lib suites, clippy and the contract checks pass
 
 ## Executive Summary
 
