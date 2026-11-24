@@ -34,7 +34,8 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # The steel/gemm/mma.h overlay (issue #217: upstream safe-load fix
   # cherry-pick, PRs #3560/#3565) was retired when the pin moved to
   # 2026-06-11 upstream main, which carries the fix natively (issue #222).
-  # quantized.cpp retains the MLXCEL_QMV_WIDE off-switch (#1187) and the
+  # quantized.cpp retains the MLXCEL_QMV_WIDE off-switch (#1187), its
+  # diagnostic `force` value (affine qmv_wide below generation 15), and the
   # broadcast gathered-row count (#1599) in GatherQMM/GatherQQMM. The switch
   # also gates upstream's `use_qmv_mma`, which since ml-explore/mlx#4787 takes
   # affine 3- to 16-row products on generation 15 and later; without that, the

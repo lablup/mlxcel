@@ -1,5 +1,6 @@
 // Copyright © 2023-2026 Apple Inc.
-// Patched by mlxcel: `use_qmv_wide` gains an off-switch, `MLXCEL_QMV_WIDE=0`.
+// Patched by mlxcel: `use_qmv_wide` gains an off-switch, `MLXCEL_QMV_WIDE=0`,
+// and a diagnostic `MLXCEL_QMV_WIDE=force` that admits affine below gen 15.
 // Modified from upstream MLX 9f806b3606eaa9f7c807238f6bd465185cd94d6d mlx/backend/metal/quantized.cpp
 // Synced to upstream 9f806b36. Retains the QMV-wide runtime control and
 // the #1599 gathered-row correction from PR #2138: gather_qmm_rhs receives
@@ -17,9 +18,16 @@
 // contract back. Upstream exposes no knob for this and `use_qmv_wide` is
 // unchanged as of 81ba1c6a, so the switch has to live here.
 //
-// Off-switch only, matching MLXCEL_METAL4_ATTENTION: unset behaves exactly as
-// upstream, and the value is read once per process because this sits on the
-// dispatch path of every quantized matmul.
+// Unset behaves exactly as upstream, and the value is read once per process
+// because this sits on the dispatch path of every quantized matmul. `0`
+// (`false`, `no`, `off`) is the off-switch. `force` is a measurement aid: it
+// also sends affine `M >= 2` products down `qmv_wide` on generations 13 and
+// 14, which upstream excludes because the affine kernel only beats `qmv` from
+// generation 15. It lets that threshold be re-checked after a pin bump or on
+// an unmeasured chip without a rebuild; on an M1 Ultra it made the Gemma 4 12B
+// 4-bit MTP verify slower (about 68 to 91 ms per block-4 round). It touches
+// only the qmv/qmv_wide branch: `qmv_mma` and `mlxcel_affine_qmm_t_rows` keep
+// their own row ranges and are tried first.
 //
 // The same switch also gates the second delta: on GPU generations 13 and 14,
 // affine 4- and 8-bit products with 5 to 8 rows go to
@@ -595,10 +603,20 @@ std::atomic<bool>& mlxcel_qmv_wide_flag() {
   return flag;
 }
 
+// mlxcel: `MLXCEL_QMV_WIDE=force`, read once per process. See the header.
+static bool mlxcel_qmv_wide_forced() {
+  static const bool forced = [] {
+    const char* raw = std::getenv("MLXCEL_QMV_WIDE");
+    return raw != nullptr && std::strcmp(raw, "force") == 0;
+  }();
+  return forced;
+}
+
 // affine qmv_wide only beats qmv on gen-15+; fp benefits on every gen.
 inline bool use_qmv_wide(const std::string& mode, metal::Device& d) {
   return mlxcel_qmv_wide_flag().load(std::memory_order_relaxed) &&
-      (mode != "affine" || d.get_architecture_gen() >= 15);
+      (mode != "affine" || d.get_architecture_gen() >= 15 ||
+       mlxcel_qmv_wide_forced());
 }
 
 // mlxcel: whether `mlxcel_affine_qmm_t_rows` serves this product. Affine 4-
