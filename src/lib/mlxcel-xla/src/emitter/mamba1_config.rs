@@ -52,14 +52,15 @@ pub(super) fn mamba1_from_json(
             Some(_) => usize_key(keys),
         }
     };
-    let bool_or = |key: &str, default: bool| -> Result<bool, String> {
-        match value(&[key]) {
+    let bool_keys_or = |keys: &[&str], default: bool| -> Result<bool, String> {
+        match value(keys) {
             None => Ok(default),
             Some(value) => value
                 .as_bool()
-                .ok_or_else(|| format!("{family} config.json `{key}` must be a boolean")),
+                .ok_or_else(|| format!("{family} config.json {keys:?} must be a boolean")),
         }
     };
+    let bool_or = |key: &str, default: bool| bool_keys_or(&[key], default);
     let f32_or = |keys: &[&str], default: f32| -> Result<f32, String> {
         match value(keys) {
             None => Ok(default),
@@ -121,8 +122,11 @@ pub(super) fn mamba1_from_json(
         n_groups: 1,
         conv_kernel,
         conv_dim: d_inner,
-        use_conv_bias: bool_or("use_conv_bias", true)?,
-        use_bias: bool_or("use_bias", false)?,
+        // Transformers uses the `use_*` names while the original state-spaces
+        // configs use `conv_bias` / `bias`. Prefer the canonical HF spellings
+        // when a converted checkpoint happens to contain both.
+        use_conv_bias: bool_keys_or(&["use_conv_bias", "conv_bias"], true)?,
+        use_bias: bool_keys_or(&["use_bias", "bias"], false)?,
         time_step_limit: (0.0, f32::INFINITY),
         norm_eps: if bcdt_norm { mixer_eps } else { norm_eps },
         norm_group_size: d_inner,

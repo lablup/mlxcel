@@ -161,6 +161,35 @@ fn mamba1_and_falcon_mamba_parse_diagonal_state_abi() {
 }
 
 #[test]
+fn mamba1_legacy_bias_aliases_and_canonical_precedence() {
+    let aliases = TINY_MAMBA1
+        .replace(r#""use_conv_bias": true"#, r#""conv_bias": false"#)
+        .replace(r#""use_bias": false"#, r#""bias": true"#);
+    let c = Config::from_json_str(&aliases).expect("legacy Mamba1 aliases parse");
+    let ssm = c.ssm.as_ref().expect("Mamba1 carries SSM config");
+    assert!(!ssm.use_conv_bias);
+    assert!(ssm.use_bias);
+    let names = weight_specs_q(&c, false)
+        .into_iter()
+        .map(|spec| spec.tensor_name().to_string())
+        .collect::<Vec<_>>();
+    assert!(!names.iter().any(|name| name.ends_with("conv1d.bias")));
+    assert!(names.iter().any(|name| name.ends_with("in_proj.bias")));
+    assert!(names.iter().any(|name| name.ends_with("out_proj.bias")));
+
+    let both = TINY_MAMBA1
+        .replace(
+            r#""use_conv_bias": true"#,
+            r#""conv_bias": false, "use_conv_bias": true"#,
+        )
+        .replace(r#""use_bias": false"#, r#""bias": true, "use_bias": false"#);
+    let c = Config::from_json_str(&both).expect("canonical Mamba1 keys take precedence");
+    let ssm = c.ssm.as_ref().expect("Mamba1 carries SSM config");
+    assert!(ssm.use_conv_bias);
+    assert!(!ssm.use_bias);
+}
+
+#[test]
 fn mamba1_weight_specs_match_the_hf_mixer_order() {
     let c = tiny_mamba1();
     let names = weight_specs_q(&c, false)
