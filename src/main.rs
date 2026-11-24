@@ -885,6 +885,18 @@ pub(crate) struct GenerationOptions {
     #[arg(long, default_value_t = false)]
     pub(crate) show_reasoning: bool,
 
+    /// Reasoning effort handed to the chat template, for checkpoints whose
+    /// template reads one (Inkling 2).
+    ///
+    /// Inkling 2 takes a named level (`none`, `minimal`, `low`, `medium`,
+    /// `high`, `xhigh`, `max`) or a number in [0.0, 0.99]; without the flag the
+    /// template default (0.9) applies. A template that does not read a reasoning
+    /// level ignores the flag and renders the same prompt. The template decides
+    /// which values are valid and its own message is shown for a bad one. Has no
+    /// effect with `--no-chat-template`.
+    #[arg(long, value_name = "LEVEL", value_parser = parse_reasoning_effort)]
+    pub(crate) reasoning_effort: Option<String>,
+
     /// Print the recommended quantization mode for this model on the current hardware.
     ///
     /// Detects Apple Silicon generation and available memory, estimates model
@@ -1324,6 +1336,12 @@ fn parse_unit_interval(s: &str) -> Result<f32, String> {
 fn parse_image_soft_tokens(s: &str) -> Result<usize, String> {
     let v: usize = s.parse().map_err(|e| format!("not a number: {e}"))?;
     mlxcel::vision::processors::gemma4::validate_image_soft_tokens(v)
+}
+
+/// Normalize `--reasoning-effort` (trimmed, lowercase) at parse time so an
+/// empty value is rejected before any model is loaded.
+fn parse_reasoning_effort(s: &str) -> Result<String, String> {
+    mlxcel::server::in_process::reasoning_effort::parse_reasoning_effort(s)
 }
 
 /// Block-diffusion generation options.

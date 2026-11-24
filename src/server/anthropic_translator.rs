@@ -72,6 +72,10 @@ pub fn short_uuid() -> String {
 pub struct AnthropicTranslated {
     /// Synthetic chat request driving the generation pipeline.
     pub chat_request: ChatCompletionRequest,
+    /// `true` when any message carried an audio block. The block itself is
+    /// dropped from `chat_request` (it has no input shape on this route), so
+    /// this flag is how the route learns about it (issue #3376).
+    pub has_audio_block: bool,
 }
 
 /// Apply billing-stamp pinning to the flattened top-level `system` text.
@@ -174,7 +178,18 @@ pub fn anthropic_request_to_chat(request: &AnthropicRequest) -> AnthropicTransla
         params,
     };
 
-    AnthropicTranslated { chat_request }
+    let has_audio_block = request.messages.iter().any(|message| {
+        matches!(
+            &message.content,
+            AnthropicMessageContent::Blocks(blocks)
+                if blocks.iter().any(|b| matches!(b, AnthropicContentBlock::Audio))
+        )
+    });
+
+    AnthropicTranslated {
+        chat_request,
+        has_audio_block,
+    }
 }
 
 /// Append a single Anthropic message (and any tool-result turns it implies)
@@ -263,7 +278,7 @@ fn append_message(out: &mut Vec<Message>, message: &AnthropicMessage) {
                             reasoning_parts.push(text.clone());
                         }
                     }
-                    AnthropicContentBlock::Unknown => {
+                    AnthropicContentBlock::Audio | AnthropicContentBlock::Unknown => {
                         // Dropped: unknown blocks do not feed back into the
                         // next prompt.
                     }

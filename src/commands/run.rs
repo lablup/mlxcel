@@ -220,6 +220,7 @@ impl RunArgs {
             .transpose()?;
         settings.draft_kind = self.speculative.draft_kind.clone();
         settings.draft_block_size = self.speculative.draft_block_size;
+        settings.reasoning_effort = self.generation.reasoning_effort.clone();
         Ok(settings)
     }
 }

@@ -152,8 +152,8 @@ pub use config::{
 pub use cors::{CorsPolicy, OriginPolicy};
 pub use media::{
     DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES, DEFAULT_MAX_IMAGE_HEIGHT, DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
-    DEFAULT_MAX_IMAGE_WIDTH, DEFAULT_MAX_IMAGES_PER_REQUEST, ImageInputLimits,
-    configure_media_admission, media_admission_disabled,
+    DEFAULT_MAX_IMAGE_WIDTH, DEFAULT_MAX_IMAGES_PER_REQUEST, INKLING2_AUDIO_REFUSAL,
+    ImageInputLimits, configure_media_admission, media_admission_disabled,
 };
 pub(crate) use media::{
     current_image_input_limits, is_combined_video_audio_rejection, media_capability_rejection,

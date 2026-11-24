@@ -161,7 +161,14 @@ async fn compat_transcribe(
         .clone()
         .filter(|provider| provider.supports(AudioModelKind::Stt));
     if !chat_can_transcribe && stt_provider.is_none() {
-        return ErrorResponse::not_supported(NO_AUDIO_SUPPORT_MESSAGE).into_response();
+        // A checkpoint with a stated reason for having no audio encoder
+        // (Inkling 2, issue #3376) gives that reason instead of upstream's
+        // generic sentence, so every audio surface says the same thing.
+        let message = state
+            .media_support
+            .audio_refusal
+            .unwrap_or(NO_AUDIO_SUPPORT_MESSAGE);
+        return ErrorResponse::not_supported(message).into_response();
     }
 
     let Some(file) = form.file.clone() else {

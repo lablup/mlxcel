@@ -16,11 +16,12 @@
 use super::decode_xla_cli_images;
 use super::generation_preamble_echo;
 use super::{
-    CliPromptMedia, CliSamplingFlagState, CliVideoFrameGroup, CliVideoFrames, OfflineDraftRoute,
-    apply_user_chat_template, apply_vlm_chat_template, build_cli_sampling_config_with_flags,
-    cli_pipeline_requested, cli_video_content_part_count, ensure_mtp_prompt_not_empty,
-    estimate_delta_label_and_bytes, generated_suffix, generation_stats_from_duration,
-    memory_preflight_ctx_len, repl_drafter, resolve_cli_pipeline_assignments, resolve_cli_prompt,
+    BannerLayers, CliPromptMedia, CliSamplingFlagState, CliVideoFrameGroup, CliVideoFrames,
+    OfflineDraftRoute, apply_user_chat_template, apply_vlm_chat_template,
+    build_cli_sampling_config_with_flags, cli_pipeline_requested, cli_video_content_part_count,
+    ensure_mtp_prompt_not_empty, estimate_delta_label_and_bytes, generated_suffix,
+    generation_stats_from_duration, kv_cache_mode_banner_suffix, memory_preflight_ctx_len,
+    repl_drafter, resolve_cli_pipeline_assignments, resolve_cli_prompt,
     resolve_offline_draft_route, should_route_offline_mtp, strip_trailing_eos,
     validate_muse_glimmer_cli_unsupported_options, validate_pipeline_parallel_args,
     validate_prompt_lookup_args, validate_tensor_parallel_args, validate_xla_cli_image_cardinality,
@@ -29,6 +30,7 @@ use super::{
 #[cfg(feature = "xla-backend")]
 use super::{xla_required_positions, xla_sizing_budget};
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor, flatten_template_text};
+use mlxcel::server::chat_template_kwargs::ChatTemplateKwargs;
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
 use std::fs;
@@ -407,7 +409,8 @@ fn apply_user_chat_template_wraps_prompt_as_user_message() {
         "{{ messages[0].role }}: {{ messages[0].content }}".to_string(),
     );
 
-    let rendered = apply_user_chat_template(&processor, "Hello").unwrap();
+    let rendered =
+        apply_user_chat_template(&processor, "Hello", &ChatTemplateKwargs::new()).unwrap();
 
     assert_eq!(rendered, "user: Hello");
 }
@@ -666,7 +669,8 @@ fn gemma4_unified_audio_prompt_matches_reference_framing() {
     // (`expand_gemma4_audio_tokens_for_server`). At the marker level that is the
     // text-only prompt with `<|audio|>` inserted before the user turn's first
     // `<turn|>`. It must equal the CLI audio prompt.
-    let text_only = apply_user_chat_template(&processor, PROMPT).unwrap();
+    let text_only =
+        apply_user_chat_template(&processor, PROMPT, &ChatTemplateKwargs::new()).unwrap();
     let server_equiv = text_only.replacen("<turn|>", "<|audio|><turn|>", 1);
     assert_eq!(
         prompt, server_equiv,
@@ -724,6 +728,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             profile: false,
             no_chat_template: false,
             show_reasoning: false,
+            reasoning_effort: None,
             recommend_quant: false,
             estimate_memory: false,
             force_memory: false,
@@ -1771,4 +1776,143 @@ fn token_ids_line_lists_the_count_then_the_ids() {
         "[token ids (1): 42]"
     );
     assert_eq!(super::token_ids_line("token ids", &[]), "[token ids (0): ]");
+}
+
+/// A template that echoes the `reasoning_effort` kwarg the way Inkling 2's
+/// reads it (a number or a level name), and refuses an unknown name.
+const EFFORT_ECHO_TEMPLATE: &str = "{%- if reasoning_effort is string and reasoning_effort == 'bogus' -%}{{ raise_exception('Unknown reasoning_effort: bogus') }}{%- endif -%}{{ messages[0].content }}|{{ reasoning_effort if reasoning_effort is defined else 'default' }}";
+
+fn effort_media(level: Option<&str>) -> CliPromptMedia {
+    CliPromptMedia {
+        reasoning_effort: level.map(str::to_string),
+        ..CliPromptMedia::default()
+    }
+}
+
+#[test]
+fn reasoning_effort_reaches_the_cli_prompt_as_a_typed_kwarg() {
+    let processor = ChatTemplateProcessor::with_template(EFFORT_ECHO_TEMPLATE.to_string());
+    let render = |level| resolve_cli_prompt("hi", false, Some(&processor), &effort_media(level));
+    assert_eq!(render(None).unwrap(), "hi|default");
+    assert_eq!(render(Some("none")).unwrap(), "hi|none");
+    assert_eq!(render(Some("0.5")).unwrap(), "hi|0.5");
+}
+
+#[test]
+fn reasoning_effort_template_rejection_is_surfaced_unchanged() {
+    let processor = ChatTemplateProcessor::with_template(EFFORT_ECHO_TEMPLATE.to_string());
+    let err = resolve_cli_prompt("hi", false, Some(&processor), &effort_media(Some("bogus")))
+        .expect_err("the template refuses an unknown level");
+    assert_eq!(
+        err.to_string(),
+        "Chat template rejected the request: Unknown reasoning_effort: bogus"
+    );
+}
+
+#[test]
+fn reasoning_effort_leaves_a_template_that_ignores_it_byte_identical() {
+    let processor = ChatTemplateProcessor::with_template(
+        "{%- for m in messages -%}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{%- endfor -%}<|im_start|>assistant\n".to_string(),
+    );
+    let plain = resolve_cli_prompt("hi", false, Some(&processor), &effort_media(None)).unwrap();
+    for level in ["high", "none", "0.5"] {
+        let with_flag =
+            resolve_cli_prompt("hi", false, Some(&processor), &effort_media(Some(level))).unwrap();
+        assert_eq!(with_flag, plain, "--reasoning-effort {level}");
+    }
+}
+
+#[test]
+fn kv_banner_counts_cache_visits_not_config_layers() {
+    // Inkling 2 Mini: 24 physical layers in `config.json`, 48 per-visit caches,
+    // all FP16.
+    let stored = vec![Some(KVCacheMode::Fp16); 48];
+    let layers = BannerLayers {
+        num_layers: 24,
+        storage_modes: Some(&stored),
+    };
+    assert_eq!(
+        kv_cache_mode_banner_suffix(KVCacheMode::Fp16, KVCacheMode::Fp16, layers),
+        " (applied to 48 of 48 layers)"
+    );
+    // An int8 request is not claimed for caches that store FP16.
+    assert_eq!(
+        kv_cache_mode_banner_suffix(KVCacheMode::Int8, KVCacheMode::Int8, layers),
+        " (applied to 0 of 48 layers)"
+    );
+}
+
+#[test]
+fn kv_banner_without_a_storage_table_keeps_the_layer_count() {
+    let layers = BannerLayers {
+        num_layers: 24,
+        storage_modes: None,
+    };
+    assert_eq!(
+        kv_cache_mode_banner_suffix(KVCacheMode::Fp16, KVCacheMode::Fp16, layers),
+        " (applied to 24 of 24 layers)"
+    );
+}
+
+// ── audio refusal for a checkpoint with no audio encoder (issue #3376) ──────
+
+/// A directory holding only an Inkling 2 `config.json`: there are no weights,
+/// no tokenizer and no chat template, so a run that gets past the refusal would
+/// fail somewhere else with a different message.
+fn inkling2_config_only_dir() -> tempfile::TempDir {
+    drafter_fixture_dir(r#"{"model_type": "inkling2", "architectures": ["Inkling2ForCausalLM"]}"#)
+}
+
+fn parse_generate_args(argv: Vec<String>) -> crate::GenerateArgs {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            use clap::Parser;
+            match crate::Cli::try_parse_from(argv)
+                .expect("generate args parse")
+                .command
+            {
+                crate::Commands::Generate(args) => args,
+                _ => panic!("expected the generate command"),
+            }
+        })
+        .expect("spawn CLI parser thread")
+        .join()
+        .expect("CLI parser thread panicked")
+}
+
+#[test]
+fn generate_refuses_audio_for_inkling2_before_loading_anything() {
+    let dir = inkling2_config_only_dir();
+    let model = dir.path().to_string_lossy().to_string();
+    let wav = dir.path().join("x.wav");
+    for prompt in [Some("hi"), None] {
+        let mut argv: Vec<String> = ["mlxcel", "generate", "-m", &model, "--audio"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        argv.push(wav.to_string_lossy().to_string());
+        if let Some(prompt) = prompt {
+            argv.extend(["-p".to_string(), prompt.to_string()]);
+        }
+        let error = super::run_generate(parse_generate_args(argv))
+            .expect_err("--audio on Inkling 2 must be refused")
+            .to_string();
+        assert_eq!(error, mlxcel::server::INKLING2_AUDIO_REFUSAL);
+    }
+}
+
+#[test]
+fn audio_refusal_leaves_other_families_and_audio_free_runs_alone() {
+    let inkling2 = inkling2_config_only_dir();
+    // No `--audio`: nothing to refuse, the run proceeds to its own loading.
+    assert!(super::refuse_audio_without_encoder(inkling2.path(), false).is_ok());
+
+    // A family with an audio path is not touched by the check.
+    let qwen = drafter_fixture_dir(FULL_MODEL_CONFIG);
+    assert!(super::refuse_audio_without_encoder(qwen.path(), true).is_ok());
+
+    // An unreadable directory is left to the loader to report.
+    let missing = qwen.path().join("missing");
+    assert!(super::refuse_audio_without_encoder(&missing, true).is_ok());
 }
