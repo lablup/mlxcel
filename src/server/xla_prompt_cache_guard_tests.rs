@@ -65,10 +65,12 @@ fn store() -> Option<Arc<PromptCacheStore>> {
 }
 
 fn apc_requested() -> PromptCacheConfig {
-    let mut config = PromptCacheConfig::default();
-    config.apc = ApcConfig {
-        enabled: true,
-        ..ApcConfig::default()
+    let config = PromptCacheConfig {
+        apc: ApcConfig {
+            enabled: true,
+            ..ApcConfig::default()
+        },
+        ..PromptCacheConfig::default()
     };
     assert!(config.apc_enabled());
     config

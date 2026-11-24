@@ -480,17 +480,15 @@ fn state_checkpoints_do_not_depend_on_apc() {
                     .with_origin(SnapshotOrigin::Boundary)
                     .with_lineage(lineage.clone())
             };
+            store.insert_snapshot(&key(&tokens), entry(10_000)).unwrap();
             store
-                .insert_snapshot(&&key(&tokens), entry(10_000))
-                .unwrap();
-            store
-                .insert_state_checkpoint(&&key(&tokens), entry(100))
+                .insert_state_checkpoint(&key(&tokens), entry(100))
                 .unwrap();
         }
         // Edit the history after turn 2: only its checkpoint can serve.
         let mut edited: Vec<i32> = (0..45).collect();
         edited[22..].iter_mut().for_each(|t| *t += 1000);
-        match store.lookup_snapshot_outcome(&&key(&edited), &edited, |_, _| false) {
+        match store.lookup_snapshot_outcome(&key(&edited), &edited, |_, _| false) {
             SnapshotLookupOutcome::CheckpointHit { matched_len, .. } => matched_len,
             other => panic!("apc {apc_on}: expected a checkpoint hit, got {other:?}"),
         }
