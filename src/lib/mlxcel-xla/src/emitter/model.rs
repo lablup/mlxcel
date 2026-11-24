@@ -34,7 +34,9 @@
 //! is byte-identical to before.
 
 use super::builder::{Builder, Precision, ProjectionLayout, Ty, Val, precision_from_env};
-use super::config::{Config, DeepStackConfig, MropeLayout, NormStyle, SsmConfig};
+use super::config::{
+    Config, DeepStackConfig, ExpertAct, MoeScoring, MropeLayout, NormStyle, SsmConfig,
+};
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
 use super::ssm::{self, Mamba2MixerW, SsmLayerState};
@@ -916,12 +918,22 @@ fn take_moe_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li: u
     let i = m.intermediate;
     let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
     let router = take_arg(decls, idx, Ty::f32(vec![e, h]), p("moe_router"));
-    let w_gate = take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_gate"));
+    let correction_bias = matches!(
+        m.scoring,
+        MoeScoring::Sigmoid {
+            correction_bias: true,
+            ..
+        }
+    )
+    .then(|| take_arg(decls, idx, Ty::f32(vec![e]), p("moe_correction_bias")));
+    let w_gate = (m.expert_act == ExpertAct::SwiGlu)
+        .then(|| take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_gate")));
     let w_up = take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_up"));
     let w_down = take_arg(decls, idx, Ty::f32(vec![e, h, i]), p("moe_down"));
     let shared = if let Some(sh) = m.shared {
         let is = sh.intermediate;
-        let gate = take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_gate"));
+        let gate = (m.expert_act == ExpertAct::SwiGlu)
+            .then(|| take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_gate")));
         let up = take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_up"));
         let down = take_arg(decls, idx, Ty::f32(vec![h, is]), p("moe_shared_down"));
         let expert_gate = if sh.gated {
@@ -945,6 +957,7 @@ fn take_moe_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li: u
     };
     MoeLayerW {
         router,
+        correction_bias,
         w_gate,
         w_up,
         w_down,

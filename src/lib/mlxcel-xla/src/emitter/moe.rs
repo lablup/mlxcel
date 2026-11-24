@@ -50,14 +50,14 @@
 //! a throughput follow-up (it does not change the result).
 
 use super::builder::{Builder, Val};
-use super::config::{Config, MoeConfig};
+use super::config::{Config, ExpertAct, MoeConfig, MoeScoring};
 use super::model::{Consts, attn_softmax};
 
 /// One MoE layer's shared-expert weight handles (Qwen2-MoE / DeepSeek), taken in
 /// `emitter/model.rs` (which owns the arg schema) and consumed here.
 pub(crate) struct MoeSharedW {
     /// Shared-expert gate projection `[Is, H]`.
-    pub gate: Val,
+    pub gate: Option<Val>,
     /// Shared-expert up projection `[Is, H]`.
     pub up: Val,
     /// Shared-expert down projection `[H, Is]`.
@@ -74,8 +74,10 @@ pub(crate) struct MoeSharedW {
 pub(crate) struct MoeLayerW {
     /// Router (gate) projection `[E, H]`.
     pub router: Val,
+    /// Selection-only score correction `[E]` for biased sigmoid routing.
+    pub correction_bias: Option<Val>,
     /// Stacked expert gate projection `[E, I, H]`.
-    pub w_gate: Val,
+    pub w_gate: Option<Val>,
     /// Stacked expert up projection `[E, I, H]`.
     pub w_up: Val,
     /// Stacked expert down projection `[E, H, I]`.
@@ -168,6 +170,171 @@ fn topk_combine(b: &mut Builder, moe: &MoeConfig, k: &Consts, logits: &Val, n: u
     combine
 }
 
+/// Select `count` distinct row-wise maxima from `[N, E]`, returning one `[N, E]`
+/// one-hot per pick. [`Builder::argmax_batched`] resolves exact ties to the lower
+/// index, matching MLX's stable expert and group ordering.
+fn topk_onehots(
+    b: &mut Builder,
+    k: &Consts,
+    selection: &Val,
+    n: usize,
+    e: usize,
+    count: usize,
+) -> Vec<Val> {
+    let iota_e = b.iota(e);
+    let iota_ne = b.broadcast(&iota_e, &[1], vec![n, e]);
+    let neg_inf = b.broadcast(&k.neg_inf, &[], vec![n, e]);
+    let mut pool = selection.clone();
+    let mut onehots = Vec::with_capacity(count);
+    for _ in 0..count {
+        let idx = b.argmax_batched(&pool);
+        let idx_ne = b.broadcast(&idx, &[0], vec![n, e]);
+        let oneh = b.compare("EQ", &iota_ne, &idx_ne, "SIGNED");
+        pool = b.select(&oneh, &neg_inf, &pool);
+        onehots.push(oneh);
+    }
+    onehots
+}
+
+/// Gather one value per row from `scores` for each one-hot selection mask.
+fn selected_values(
+    b: &mut Builder,
+    k: &Consts,
+    scores: &Val,
+    onehots: &[Val],
+    n: usize,
+    e: usize,
+) -> Vec<Val> {
+    let zeros = b.broadcast(&k.zero, &[], vec![n, e]);
+    onehots
+        .iter()
+        .map(|oneh| {
+            let picked = b.select(oneh, scores, &zeros);
+            b.reduce_add(&picked, 1, &k.zero)
+        })
+        .collect()
+}
+
+/// Keep only experts in the `topk_group` groups. Each contiguous expert group is
+/// scored by the sum of its top two corrected scores, exactly as Nemotron-H.
+fn grouped_selection(
+    b: &mut Builder,
+    k: &Consts,
+    corrected: &Val,
+    n: usize,
+    e: usize,
+    n_group: usize,
+    topk_group: usize,
+) -> Val {
+    if topk_group == n_group {
+        return corrected.clone();
+    }
+    let per_group = e / n_group;
+    let mut group_scores: Option<Val> = None;
+    for group in 0..n_group {
+        let start = group * per_group;
+        let scores = b.slice(corrected, &[(0, n), (start, start + per_group)]);
+        let picks = topk_onehots(b, k, &scores, n, per_group, 2);
+        let vals = selected_values(b, k, &scores, &picks, n, per_group);
+        let sum = b.add(&vals[0], &vals[1]);
+        let sum = b.reshape(&sum, vec![n, 1]);
+        group_scores = Some(match group_scores {
+            Some(ref accumulated) => b.concatenate(accumulated, &sum, 1),
+            None => sum,
+        });
+    }
+    let group_scores = group_scores.expect("n_group is validated as positive");
+    let chosen_groups = topk_onehots(b, k, &group_scores, n, n_group, topk_group);
+    let neg_inf = b.broadcast(&k.neg_inf, &[], vec![n, e]);
+    let mut masked = neg_inf;
+    for chosen in chosen_groups {
+        let mut expert_mask: Option<Val> = None;
+        for group in 0..n_group {
+            let selected = b.slice(&chosen, &[(0, n), (group, group + 1)]);
+            let selected = b.reshape(&selected, vec![n]);
+            let selected = b.broadcast(&selected, &[0], vec![n, per_group]);
+            expert_mask = Some(match expert_mask {
+                Some(ref accumulated) => b.concatenate(accumulated, &selected, 1),
+                None => selected,
+            });
+        }
+        masked = b.select(
+            &expert_mask.expect("n_group is validated as positive"),
+            corrected,
+            &masked,
+        );
+    }
+    masked
+}
+
+/// Nemotron-H's grouped sigmoid router. Corrected scores participate only in
+/// selection; the returned combine matrix contains uncorrected sigmoid scores.
+fn sigmoid_topk_combine(
+    b: &mut Builder,
+    moe: &MoeConfig,
+    mw: &MoeLayerW,
+    k: &Consts,
+    logits: &Val,
+    n: usize,
+) -> Val {
+    let MoeScoring::Sigmoid {
+        correction_bias,
+        n_group,
+        topk_group,
+        routed_scaling_factor,
+        norm_topk_prob,
+    } = moe.scoring
+    else {
+        unreachable!("sigmoid_topk_combine called for a softmax router")
+    };
+    let e = moe.n_experts;
+    let scores = sigmoid(b, k, logits);
+    let corrected = if correction_bias {
+        let bias = mw
+            .correction_bias
+            .as_ref()
+            .expect("correction-bias routing requires the correction-bias weight");
+        let bias = b.broadcast(bias, &[1], vec![n, e]);
+        b.add(&scores, &bias)
+    } else {
+        scores.clone()
+    };
+    let selection = grouped_selection(b, k, &corrected, n, e, n_group, topk_group);
+    let onehots = topk_onehots(b, k, &selection, n, e, moe.top_k);
+    let vals = selected_values(b, k, &scores, &onehots, n, e);
+    let weights = if norm_topk_prob {
+        let mut denom = vals[0].clone();
+        for value in &vals[1..] {
+            denom = b.add(&denom, value);
+        }
+        vals.iter()
+            .map(|value| b.divide(value, &denom))
+            .collect::<Vec<_>>()
+    } else {
+        vals
+    };
+    let weights = if routed_scaling_factor != 1.0 {
+        let scale = b.const_f32(routed_scaling_factor);
+        weights
+            .iter()
+            .map(|weight| {
+                let scale = b.broadcast(&scale, &[], vec![n]);
+                b.multiply(weight, &scale)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        weights
+    };
+    let zeros = b.broadcast(&k.zero, &[], vec![n, e]);
+    let mut combine = zeros.clone();
+    for (oneh, weight) in onehots.iter().zip(&weights) {
+        let weight = b.broadcast(weight, &[0], vec![n, e]);
+        let term = b.select(oneh, &weight, &zeros);
+        combine = b.add(&combine, &term);
+    }
+    combine
+}
+
 /// The routed experts' masked-dense combine: compute every expert's SwiGLU over
 /// the shared normed hidden `hn` (batched over the expert axis of the stacked
 /// weights), then combine by the `[N, E]` top-k weights, giving `[N, H]`.
@@ -186,11 +353,30 @@ fn routed_experts(
     let i = moe.intermediate;
     // broadcast hn[N,H] to [E,N,H] so every expert sees the same tokens.
     let hn_e = b.broadcast(hn, &[1, 2], vec![e, n, h]); // [E, N, H]
-    // gate/up: [E,N,I] = sum_h hn_e[e,n,h] * w[e,i,h]  (batch e, contract h)
-    let gate = b.dot_general(&hn_e, &mw.w_gate, &[0], &[0], &[2], &[2], vec![e, n, i]);
-    let up = b.dot_general(&hn_e, &mw.w_up, &[0], &[0], &[2], &[2], vec![e, n, i]);
-    let act = silu(b, k, &gate);
-    let act = b.multiply(&act, &up); // [E, N, I]
+    let act = match moe.expert_act {
+        ExpertAct::SwiGlu => {
+            let gate = b.dot_general(
+                &hn_e,
+                mw.w_gate
+                    .as_ref()
+                    .expect("SwiGLU experts require the gate projection"),
+                &[0],
+                &[0],
+                &[2],
+                &[2],
+                vec![e, n, i],
+            );
+            let up = b.dot_general(&hn_e, &mw.w_up, &[0], &[0], &[2], &[2], vec![e, n, i]);
+            let act = silu(b, k, &gate);
+            b.multiply(&act, &up)
+        }
+        ExpertAct::Relu2 => {
+            let up = b.dot_general(&hn_e, &mw.w_up, &[0], &[0], &[2], &[2], vec![e, n, i]);
+            let zeros = b.broadcast(&k.zero, &[], vec![e, n, i]);
+            let relu = b.maximum(&up, &zeros);
+            b.multiply(&relu, &relu)
+        }
+    };
     // down: [E,N,H] = sum_i act[e,n,i] * w_down[e,h,i]  (batch e, contract i)
     let down = b.dot_general(&act, &mw.w_down, &[0], &[0], &[2], &[2], vec![e, n, h]);
     // combine: out[N,H] = sum_e combine[n,e] * down[e,n,h]  (batch n, contract e)
@@ -201,16 +387,32 @@ fn routed_experts(
 /// gated by `sigmoid(hn @ Wg^T)` when the family gates it (Qwen2-MoE).
 fn shared_expert(
     b: &mut Builder,
+    moe: &MoeConfig,
     k: &Consts,
     sh: &MoeSharedW,
     hn: &Val,
     n: usize,
     h: usize,
 ) -> Val {
-    let sg = b.linear_seq(hn, &sh.gate); // [N, Is]
-    let su = b.linear_seq(hn, &sh.up); // [N, Is]
-    let act = silu(b, k, &sg);
-    let act = b.multiply(&act, &su); // [N, Is]
+    let act = match moe.expert_act {
+        ExpertAct::SwiGlu => {
+            let sg = b.linear_seq(
+                hn,
+                sh.gate
+                    .as_ref()
+                    .expect("SwiGLU shared experts require the gate projection"),
+            );
+            let su = b.linear_seq(hn, &sh.up); // [N, Is]
+            let act = silu(b, k, &sg);
+            b.multiply(&act, &su)
+        }
+        ExpertAct::Relu2 => {
+            let su = b.linear_seq(hn, &sh.up); // [N, Is]
+            let zeros = b.broadcast(&k.zero, &[], su.ty.shape.clone());
+            let relu = b.maximum(&su, &zeros);
+            b.multiply(&relu, &relu)
+        }
+    };
     let down = b.linear_seq(&act, &sh.down); // [N, H]
     match &sh.expert_gate {
         Some(wg) => {
@@ -239,11 +441,14 @@ pub(crate) fn moe_block(
 ) -> Val {
     let h = c.hidden;
     let logits = b.linear_seq(hn, &mw.router); // [N, E]
-    let combine = topk_combine(b, moe, k, &logits, n); // [N, E]
+    let combine = match moe.scoring {
+        MoeScoring::Softmax => topk_combine(b, moe, k, &logits, n),
+        MoeScoring::Sigmoid { .. } => sigmoid_topk_combine(b, moe, mw, k, &logits, n),
+    };
     let routed = routed_experts(b, moe, mw, k, hn, &combine, n, h); // [N, H]
     match &mw.shared {
         Some(sh) => {
-            let s = shared_expert(b, k, sh, hn, n, h);
+            let s = shared_expert(b, moe, k, sh, hn, n, h);
             b.add(&routed, &s)
         }
         None => routed,

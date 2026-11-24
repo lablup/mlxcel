@@ -23,7 +23,7 @@
 //! feature-gated `iree.rs`) so it is unit-tested without the IREE runtime and stays
 //! in lock-step with the emitter's arg order (`emitter::model::take_layer_weights`).
 
-use crate::emitter::{Config, ProjectionLayout};
+use crate::emitter::{Config, ExpertAct, MoeScoring, ProjectionLayout};
 
 /// One checkpoint weight the loader reads, in the emitter's arg order. Most are a
 /// whole safetensors tensor; a Phi3 checkpoint fuses q/k/v into one `qkv_proj` and
@@ -488,24 +488,48 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             let m = cfg.moe.as_ref().expect("a MoE layer has a MoeConfig");
             let mp = m.weight_prefix;
             out.push(WeightSpec::Whole(format!("{p}{mp}.gate.weight")));
-            out.push(WeightSpec::Whole(format!(
-                "{p}{mp}.switch_mlp.gate_proj.weight"
-            )));
-            out.push(WeightSpec::Whole(format!(
-                "{p}{mp}.switch_mlp.up_proj.weight"
-            )));
-            out.push(WeightSpec::Whole(format!(
-                "{p}{mp}.switch_mlp.down_proj.weight"
-            )));
+            if matches!(
+                m.scoring,
+                MoeScoring::Sigmoid {
+                    correction_bias: true,
+                    ..
+                }
+            ) {
+                out.push(WeightSpec::Whole(format!(
+                    "{p}{mp}.gate.e_score_correction_bias"
+                )));
+            }
+            match m.expert_act {
+                ExpertAct::SwiGlu => {
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.switch_mlp.gate_proj.weight"
+                    )));
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.switch_mlp.up_proj.weight"
+                    )));
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.switch_mlp.down_proj.weight"
+                    )));
+                }
+                ExpertAct::Relu2 => {
+                    out.push(WeightSpec::Whole(format!("{p}{mp}.switch_mlp.fc1.weight")));
+                    out.push(WeightSpec::Whole(format!("{p}{mp}.switch_mlp.fc2.weight")));
+                }
+            }
             if let Some(sh) = m.shared {
+                let stem = if m.expert_act == ExpertAct::Relu2 {
+                    "shared_experts"
+                } else {
+                    "shared_expert"
+                };
+                if m.expert_act == ExpertAct::SwiGlu {
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.{stem}.gate_proj.weight"
+                    )));
+                }
+                out.push(WeightSpec::Whole(format!("{p}{mp}.{stem}.up_proj.weight")));
                 out.push(WeightSpec::Whole(format!(
-                    "{p}{mp}.shared_expert.gate_proj.weight"
-                )));
-                out.push(WeightSpec::Whole(format!(
-                    "{p}{mp}.shared_expert.up_proj.weight"
-                )));
-                out.push(WeightSpec::Whole(format!(
-                    "{p}{mp}.shared_expert.down_proj.weight"
+                    "{p}{mp}.{stem}.down_proj.weight"
                 )));
                 if sh.gated {
                     out.push(WeightSpec::Whole(format!(
