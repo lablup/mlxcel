@@ -11,8 +11,10 @@ A per-visit comparison of hidden states (an 8-row verify block against 8 single-
 | MLX runs one row through gemv and several through gemm, which sum in different orders | every dense product: attention q/k/v/r/o/gate/sink projections (bf16), the f32 router, the message controllers, the f32 LM head | `mlxcel_core::row_invariant`: a Metal matvec for up to 16 rows whose summation order depends on K and N only, used by decode steps and verify blocks alike |
 | The per-query zero sink column sat after the newest key, at index N+1 in a step but N+K in a block, which moved the SDPA lane assignment even for row 0 | attention | the sink column goes before the keys |
 | The message read `query @ bank^T` is a batched matmul whose batch extent is the block length | looped core (Mini) | split per position inside a verify block |
+| Past a sliding layer's 1024-token window, row r of a block also saw the r oldest keys (masked out) that decode step r had dropped, which shifted the SDPA lanes again | sliding attention, context > 1024 | inside a verify block a sliding visit attends row by row from each row's window start |
+| The DSpark prefill ran the whole prompt in one forward while classic decode prefills in 2048-token chunks, so a longer prompt left different caches | prefill, prompt > 2048 | the DSpark prefill uses the classic chunk size (`MLXCEL_PREFILL_CHUNK`) |
 
-After all three, every captured hidden state and every logit of an 8-row block equals the chain's bit for bit (Mini widths 2, 4, 8; Small width 8).
+After the first three, every captured hidden state and every logit of an 8-row block equals the chain's bit for bit after a 32-token prompt (Mini, Small and Mini 4-bit, widths 2, 4, 8). The probe draws short prompts, so it did not see the fourth: on Mini, rows 1 to 7 differed in about 200050 of 200058 logits after a 1100- or 3000-token prompt. With the fourth fix the block is exact after 1100, 3000 and 8000 tokens (Mini) and 1100 tokens (Small, Mini 4-bit).
 
 ## Decode cost of the kernel
 
@@ -39,3 +41,9 @@ An 8-row Mini verify forward takes 51.2 ms with the kernel (median of 30), again
 | Small | 2 | 19.22, 19.26 | 29.64, 29.47 | 1.54x | 62 | 0.445 | 4.11 |
 
 On Small a verify round costs about 120 ms against a 51 ms decode step, so the 2.3 tokens a prose round emits do not pay for it; the drafter loses 10% there and wins 54% on code. The expert path, not the dense products, dominates Small's verify cost (it took 107 ms with the inexact path too).
+
+A prompt of 2006 tokens (bytes 4000 to 12000 of `docs/supported-models.md` plus `Summarize the text above in three sentences.`) exercises the window and the chunked prefill: before the prefill fix the drafter-on text left classic decode in the second sentence of the reasoning; with it the two are byte-identical (classic 24.99 tok/s, drafter 24.82 and 25.50 tok/s, acceptance 0.225), so the drafter breaks even on that prompt.
+
+## Parity with mlx-vlm
+
+Putting the sink column first changes classic decode at near ties. A text trace of Mini 4-bit against mlx-vlm 466069f5 (4 x 256 positions of the #3378 corpus, `scripts/compare_logit_traces.py --decided 2`): before, 33 / 1024 top-1 differences and 0 / 372 at decided positions, perplexity -0.32% against the reference; after, 31 / 1024, 0 / 372, -0.38%. Every difference is still at an undecided position.

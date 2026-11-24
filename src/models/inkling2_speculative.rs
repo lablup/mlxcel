@@ -254,6 +254,69 @@ pub(crate) fn concat_captures(verify_out: &Inkling2VerifyOutput) -> UniquePtr<Ml
 
 /// The text model as a DFlash target; it suppresses whatever its own
 /// `output_suppressed_token_ids` names (nothing today).
+impl Inkling2Model {
+    /// The prompt goes through in the chunks classic decode prefills with
+    /// (`MLXCEL_PREFILL_CHUNK`, default 2048), so a long prompt leaves the
+    /// same caches, and the drafter-on run the same text, as classic decode
+    /// (issue #3280); one forward over a longer prompt sums its attention in
+    /// another order. Only the last chunk's logits are kept (the round loop
+    /// samples the last row); the captures are concatenated.
+    pub(crate) fn prefill_speculative(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [InklingLayerCache],
+        capture_layer_ids: &[usize],
+        suppressed: &TokenBiasMap,
+    ) -> Inkling2VerifyOutput {
+        let suppressed = suppressed;
+        let length = mlxcel_core::array_shape(verify_input)[1];
+        let chunk = mlxcel_core::prefill_plan::prefill_chunk_len() as i32;
+        if chunk == 0 || length <= chunk {
+            return self.forward_speculative(
+                verify_input,
+                caches,
+                capture_layer_ids,
+                false,
+                &suppressed,
+            );
+        }
+        let mut parts: Vec<Vec<UniquePtr<MlxArray>>> = Vec::new();
+        let mut logits = None;
+        let mut start = 0;
+        while start < length {
+            let end = (start + chunk).min(length);
+            let piece = mlxcel_core::utils::slice_axis(verify_input, 1, start, end);
+            let out =
+                self.forward_speculative(&piece, caches, capture_layer_ids, false, &suppressed);
+            // Materialize the chunk before the next one builds on its caches,
+            // as the classic chunked prefill does.
+            let mut live: Vec<*const MlxArray> = out
+                .hidden_states
+                .iter()
+                .map(|h| &**h as *const MlxArray)
+                .collect();
+            live.push(&*out.logits as *const MlxArray);
+            // SAFETY: every pointer refers to an array `out` owns until the
+            // end of this iteration.
+            unsafe { mlxcel_core::eval_all(&live) };
+            parts.push(out.hidden_states);
+            logits = Some(out.logits);
+            start = end;
+        }
+        let captures = parts[0].len();
+        let hidden_states = (0..captures)
+            .map(|c| {
+                let refs: Vec<&MlxArray> = parts.iter().map(|p| &*p[c]).collect();
+                mlxcel_core::concatenate_many(&refs, 1)
+            })
+            .collect();
+        Inkling2VerifyOutput {
+            logits: logits.expect("a prompt longer than one chunk has a chunk"),
+            hidden_states,
+        }
+    }
+}
+
 impl SpeculativeTarget for Inkling2Model {
     type Cache = InklingLayerCache;
     type VerifyOut = Inkling2VerifyOutput;
@@ -288,7 +351,7 @@ impl SpeculativeTarget for Inkling2Model {
         capture_layer_ids: &[usize],
     ) -> Self::VerifyOut {
         let suppressed = suppression_map(&LanguageModel::output_suppressed_token_ids(self));
-        self.forward_speculative(verify_input, caches, capture_layer_ids, false, &suppressed)
+        self.prefill_speculative(verify_input, caches, capture_layer_ids, &suppressed)
     }
 
     fn rollback_partial(
@@ -353,7 +416,7 @@ impl SpeculativeTarget for crate::vision::Inkling2VlModel {
     ) -> Self::VerifyOut {
         let suppressed = suppression_map(&LanguageModel::output_suppressed_token_ids(self));
         self.text
-            .forward_speculative(verify_input, caches, capture_layer_ids, false, &suppressed)
+            .prefill_speculative(verify_input, caches, capture_layer_ids, &suppressed)
     }
 
     fn rollback_partial(
