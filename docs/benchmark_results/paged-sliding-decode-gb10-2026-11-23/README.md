@@ -87,7 +87,7 @@ Before the profile, across four separate runs, B=1 was 8% to 15% below main at 2
 
 ## B=1 decode profile
 
-Gemma 3 1B 4-bit, one request, under Nsight Systems with `--cuda-graph-trace=node` (`profile/run.py`). Each figure is per decode step over the last 400 steps of a 528-token generation, so prefill and warm-up are excluded. Tracing slows the host, so the traced wall times are longer than untraced ones; the untraced per-step times are in the next table. Arms: `main` at `56bfb92a`, `b4win` at `31803cae` (the code measured in the gates above), `graph` with the byte-budget overlay fix only, and `fix` with all three fixes below.
+Gemma 3 1B 4-bit, one request, under Nsight Systems with `--cuda-graph-trace=node` (`profile/run.py`), exported with `nsys export -t sqlite` and summarized by `profile/win.py`. Each figure is per decode step over the last 400 steps of a 528-token generation, so prefill and warm-up are excluded. Tracing slows the host, so the traced wall times are longer than untraced ones; the untraced per-step times are in the next table. Arms: `main` at `56bfb92a`, `b4win` at `31803cae` (the code measured in the gates above), `graph` with the byte-budget overlay fix only, and `fix` with all three fixes below.
 
 | per step | main 256 | b4win 256 | graph 256 | main 8192 | b4win 8192 | graph 8192 | fix 8192 |
 |---|---|---|---|---|---|---|---|
