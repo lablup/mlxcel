@@ -134,9 +134,10 @@ impl LanguageModel for Inkling2Model {
         true
     }
 
-    /// Each row runs its own single-sequence forward against its own state.
+    /// One forward over every row; only the attention core runs per row
+    /// (`batched.rs`). A single row keeps the single-sequence graph.
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
-        BatchedDecodeKind::PerRowFallback
+        BatchedDecodeKind::Native
     }
 
     fn forward_batched(
@@ -148,38 +149,50 @@ impl LanguageModel for Inkling2Model {
         self.forward_batched_with_ids(input_ids, None, caches, mask)
     }
 
+    /// `[B, L]` with one sequence id per row. The model builds its own causal
+    /// banded mask, so a padded prefill cohort's mask adds nothing: its rows
+    /// are right-padded, no real position reads a later one, and the
+    /// scheduler trims each row's padding through [`Self::trim_state`].
     fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
+        _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let ids = seq_ids.expect("Inkling 2 batched decode requires one sequence id per row");
+        let ids = seq_ids.expect("Inkling 2 batched forward requires one sequence id per row");
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "Inkling 2 batched input must be rank 2");
         assert_eq!(
-            ids.len(),
-            batch_caches.len(),
-            "Inkling 2 requires one sequence id per row"
+            (ids.len(), shape[0] as usize),
+            (batch_caches.len(), batch_caches.len()),
+            "Inkling 2 requires one sequence id and one input row per cache row"
         );
-        let outputs: Vec<_> = batch_caches
-            .iter_mut()
-            .enumerate()
-            .map(|(row, caches)| {
-                let input =
-                    mlxcel_core::utils::slice_axis(input_ids, 0, row as i32, row as i32 + 1);
-                self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
-            })
-            .collect();
-        let refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
-        mlxcel_core::concatenate_many(&refs, 0)
+        mlxcel_core::generate::route_batched_decode_with_ids(
+            self,
+            input_ids,
+            seq_ids,
+            batch_caches,
+            |_| self.forward_rows(input_ids, ids),
+        )
+    }
+
+    /// The batched forward runs whole prompts too, so the server may prefill
+    /// a cohort of cold prompts in one pass.
+    fn supports_batched_prefill(&self) -> bool {
+        true
     }
 
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         mlxcel_core::cache::SequenceStateLayout::model_owned(self.layer_indices.len())
     }
 
+    /// Right padding is exact here: the attention mask and the convolutions
+    /// are causal, and a batched forward of more than one token keeps enough
+    /// convolution history ([`super::conv::WideHistoryScope`]) and sliding
+    /// keys for [`Self::trim_state`] to remove any row's padding.
     fn supports_padded_prefill(&self) -> bool {
-        false
+        true
     }
 
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
