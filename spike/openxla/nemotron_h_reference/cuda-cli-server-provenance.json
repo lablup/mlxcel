@@ -1,0 +1,24 @@
+{
+  "head": "d7e8a0409d4daa9d6f3f4a784ccfc263e38a3cdb",
+  "binary_source_head": "93ddebad382478540fdfc987fbca655744be941d",
+  "server_ctx_size": 2048,
+  "checkpoint_revision": "faba3b731ad7ea5781b9518ae75fb610a94affcf",
+  "model": "/tmp/epic564-models/nemotron-h-4b",
+  "precision": "f32",
+  "device": "cuda",
+  "context_capacity_override": 256,
+  "max_batch_size": 4,
+  "scope": "CLI 40-token oracle and four concurrent completions versus separate 24-token CLI references",
+  "gpu_lock": "outer gpu-lock run --tag issue3344-cli-server",
+  "binary_sha256": {
+    "mlxcel": "1be8e06aa690e7f8b42c834605a723626e53aaf2c5ab4eae7e6cb63b3aa053ff",
+    "mlxcel-server": "3c49b7758c8f48cbb4e8cdfb1908b0561d036cb7e656f6e6ddcb79239f60c2d0"
+  },
+  "environment": {
+    "MLXCEL_BACKEND": "xla",
+    "MLXCEL_XLA_DEVICE": "cuda",
+    "MLXCEL_XLA_PRECISION": "f32",
+    "MLXCEL_XLA_CONTEXT_CAPACITY": "256",
+    "MLXCEL_CACHE_DIR": "/tmp/epic564-cache-cuda"
+  }
+}

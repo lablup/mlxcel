@@ -101,6 +101,13 @@ pub enum NormStyle {
     OlmoPost,
 }
 
+/// Activation for non-gated feed-forward blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DenseMlpActivation {
+    Gelu,
+    Relu2,
+}
+
 /// Optional q/k normalization applied to the projected query / key before RoPE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QkNorm {
@@ -185,6 +192,8 @@ pub enum WeightScheme {
     /// HF `Mamba2ForCausalLM` names (`backbone.embeddings`, `backbone.layers.{i}.norm`
     /// and `.mixer.*`, `backbone.norm_f`, issue #3338). MLX conversions keep them.
     Mamba2,
+    /// Nemotron-H hybrid backbone with one mixer or FFN per block.
+    NemotronH,
 }
 
 /// MLX affine weight quantization (`config.json` `quantization`). The linear /
@@ -589,6 +598,8 @@ pub struct Config {
     /// Dense (non-gated) MLP: `c_proj(act(c_fc(x)))` with a `gelu_tanh` activation
     /// and no gate projection (StarCoder2). `false` keeps the SwiGLU/GeGLU gated MLP.
     pub dense_mlp: bool,
+    /// Activation of a non-gated dense MLP (StarCoder2 defaults to GELU).
+    pub dense_mlp_activation: DenseMlpActivation,
     /// Interleaved ("traditional" / GPT-J) RoPE: adjacent dims `(2i, 2i+1)` rotate
     /// together (Cohere/Cohere2, `position_embedding_type = rope_gptj`). `false` is
     /// the half-split (GPT-NeoX / Llama) convention, so the Llama family is unchanged.
@@ -708,6 +719,7 @@ impl Config {
             attn_o_bias: false,
             mlp_bias: false,
             dense_mlp: false,
+            dense_mlp_activation: DenseMlpActivation::Gelu,
             rope_interleaved: false,
             rotary_dim: None,
             rope_on_sliding_only: false,
@@ -885,6 +897,9 @@ impl Config {
 
         // Mamba2 (issue #3338) has no attention fields at all; its config is
         // built by its own reader.
+        if model_type == Some("nemotron_h") {
+            return super::nemotron_h_config::from_json(&v, quantization);
+        }
         if model_type == Some("mamba2") {
             return mamba2_from_json(&v, quantization);
         }
@@ -1871,6 +1886,7 @@ impl Config {
             attn_o_bias,
             mlp_bias,
             dense_mlp,
+            dense_mlp_activation: DenseMlpActivation::Gelu,
             rope_interleaved,
             rotary_dim,
             rope_on_sliding_only,

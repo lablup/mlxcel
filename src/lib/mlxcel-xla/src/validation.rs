@@ -546,7 +546,38 @@ dense_fixture!(EXAONE, "exaone", true);
 /// Every registered structural fixture. Append a family here to add it to the
 /// byte-exact gate; see the module docs for the freeze workflow. The MoE fixtures
 /// (issues #500 / #501) ride the same byte-exact gate as the dense families.
+pub(crate) static NEMOTRON_H: ArchFixture = ArchFixture {
+    arch: "nemotron_h",
+    config_json: include_str!("../assets/nemotron_h/config.json"),
+    graphs: &[
+        GraphFixture {
+            kind: GraphKind::Decode { sample: true },
+            golden_name: "decode.mlir",
+            golden: include_str!("../assets/nemotron_h/decode.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: true },
+            golden_name: "prefill.mlir",
+            golden: include_str!("../assets/nemotron_h/prefill.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: false },
+            golden_name: "prefill_logits.mlir",
+            golden: include_str!("../assets/nemotron_h/prefill_logits.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::DecodeRagged {
+                b_max: 4,
+                sample: false,
+            },
+            golden_name: "decode_ragged_logits_b4.mlir",
+            golden: include_str!("../assets/nemotron_h/decode_ragged_logits_b4.mlir"),
+        },
+    ],
+};
+
 pub(crate) static REGISTERED: &[&ArchFixture] = &[
+    &NEMOTRON_H,
     &LLAMA_3_2_1B,
     &COHERE,
     &COHERE2,

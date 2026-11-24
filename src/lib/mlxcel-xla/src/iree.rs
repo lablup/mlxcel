@@ -4098,17 +4098,6 @@ impl IreeRaggedLlama {
         );
         let load_started = std::time::Instant::now();
         let mut cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
-        // Issue #3340: an attention-free recurrent model (Mamba2) carries its
-        // state per slot. A hybrid (KV plus state) is refused until its
-        // attention and recurrent layers are validated together (#3344); the
-        // ragged emitter refuses it too, so this only names the model.
-        if cfg.has_recurrent_state() && cfg.has_kv() {
-            return Err(format!(
-                "{} mixes attention and recurrent layers, which the OpenXLA \
-                 continuous-batching engine does not serve yet",
-                model_dir.display()
-            ));
-        }
         checked_ffi_int(b_max, "b_max")?;
         if !RAGGED_B_VALUES.contains(&b_max) {
             return Err(format!(
@@ -4429,6 +4418,15 @@ impl IreeRaggedLlama {
     pub fn test_set_slot_store_failure(&mut self, fail: bool) {
         // Safety: `self.ctx` remains valid for the lifetime of this engine.
         unsafe { xla_test_set_slot_store_failure(self.ctx, i32::from(fail)) };
+    }
+
+    /// Fail after writing the first recurrent tensor, with both KV transfers
+    /// already complete on a hybrid. This probes the shared validity boundary
+    /// between KV and recurrent state; `false` clears either failure mode.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_state_slot_store_failure(&mut self, fail: bool) {
+        // SAFETY: `self.ctx` remains valid for the lifetime of this engine.
+        unsafe { xla_test_set_slot_store_failure(self.ctx, if fail { 2 } else { 0 }) };
     }
 
     /// Test support (issue #2923): whether `slot` currently holds a KV store
