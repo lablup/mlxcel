@@ -270,12 +270,39 @@ pub const fn default_absorbs_on(fused_available: bool, backend: GpuBackendKind) 
     fused_available || matches!(backend, GpuBackendKind::Cuda | GpuBackendKind::Rocm)
 }
 
+/// Latent rank and rope width the layout default probes the fused kernel at:
+/// DeepSeek V2's (`kv_lora_rank` 512, `qk_rope_head_dim` 64), the family whose
+/// loader reads [`absorbed_enabled`]. Other MLA geometries are checked per
+/// launch by [`decode::fused_absorbed_decode`].
+pub const DEFAULT_PROBE_RANK: i32 = 512;
+/// See [`DEFAULT_PROBE_RANK`].
+pub const DEFAULT_PROBE_ROPE: i32 = 64;
+
+/// Whether the fused kernel both may run ([`fused_decode_enabled`]) and
+/// evaluates on this device at [`DEFAULT_PROBE_RANK`] and
+/// [`DEFAULT_PROBE_ROPE`], read once per process. On an M1 Ultra the partial
+/// pass's pipeline is capped at 768 threads and the kernel launches 1024, so
+/// this is false there and DeepSeek V2 keeps the decompressed layout #3131
+/// measured as the faster one without the kernel.
+#[must_use]
+pub fn fused_decode_runs_by_default() -> bool {
+    static RUNS: OnceLock<bool> = OnceLock::new();
+    *RUNS.get_or_init(|| {
+        fused_decode_enabled()
+            && crate::ffi::mla_absorbed_decode_fused_supported(
+                crate::dtype::FLOAT16,
+                DEFAULT_PROBE_RANK,
+                DEFAULT_PROBE_ROPE,
+            )
+    })
+}
+
 /// Whether an unset [`ABSORBED_ENV`] selects the absorbed layout in this
-/// process: [`default_absorbs_on`] for [`fused_decode_enabled`] and the
-/// resolved GPU backend.
+/// process: [`default_absorbs_on`] for [`fused_decode_runs_by_default`] and
+/// the resolved GPU backend.
 #[must_use]
 pub fn default_absorbs() -> bool {
-    default_absorbs_on(fused_decode_enabled(), gpu_backend_kind())
+    default_absorbs_on(fused_decode_runs_by_default(), gpu_backend_kind())
 }
 
 /// The process's [`AbsorbedMode`], read once.
