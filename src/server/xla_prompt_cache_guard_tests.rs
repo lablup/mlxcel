@@ -137,3 +137,44 @@ fn a_local_hf_mamba2_checkpoint_is_refused() {
     assert_eq!(xla_recurrent_family(&dir).as_deref(), Some("mamba2"));
     assert_refused(&dir, "mamba2-130m");
 }
+
+/// `startup::resolve_prompt_cache_store` is where the guard is wired in: with
+/// `MLXCEL_BACKEND=xla` a recurrent model gets no store and both flags are
+/// cleared, while a dense model keeps its store and APC.
+#[test]
+fn startup_resolver_builds_no_store_for_an_xla_recurrent_model() {
+    let _env_guard = crate::test_support::env_lock::env_lock();
+    let previous = std::env::var_os("MLXCEL_BACKEND");
+    // SAFETY: the crate-wide env lock is held for the whole window in which
+    // the variable is changed, as every env-mutating test in this crate does.
+    unsafe {
+        std::env::set_var("MLXCEL_BACKEND", "xla");
+    }
+    let resolve = |config_json: &str| {
+        let dir = model_dir(config_json);
+        let mut config = crate::server::ServerConfig::default();
+        config.prompt_cache.enabled = true;
+        config.prompt_cache.apc.enabled = true;
+        let metrics = Arc::new(crate::server::state::BatchMetrics::new());
+        let store =
+            crate::server::startup::resolve_prompt_cache_store(&mut config, dir.path(), &metrics);
+        (
+            store.is_some(),
+            config.prompt_cache.enabled,
+            config.prompt_cache.apc.enabled,
+        )
+    };
+    let recurrent = resolve(TINY_MAMBA2);
+    let listed = resolve(r#"{"model_type": "granitemoehybrid"}"#);
+    let dense = resolve(TINY_LLAMA);
+    // SAFETY: as above, still under the env lock.
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("MLXCEL_BACKEND", value),
+            None => std::env::remove_var("MLXCEL_BACKEND"),
+        }
+    }
+    assert_eq!(recurrent, (false, false, false), "tiny mamba2");
+    assert_eq!(listed, (false, false, false), "granitemoehybrid");
+    assert_eq!(dense, (true, true, true), "tiny llama");
+}
