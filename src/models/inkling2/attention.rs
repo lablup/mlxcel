@@ -38,6 +38,7 @@ use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
+use super::batched::with_stacked_state;
 use super::config::Inkling2TextConfig;
 use super::conv::{DynamicShortConv, ShortConv};
 
@@ -219,16 +220,22 @@ impl Inkling2Attention {
         self.window
     }
 
+    /// The k or v convolution (`slot` 0 / 1) over every row's history.
     fn conv(
         conv: &KvConv,
         x: &MlxArray,
         dynamic_input: &MlxArray,
-        state: &mut Option<UniquePtr<MlxArray>>,
+        rows: &mut [&mut InklingLayerCache],
+        slot: usize,
     ) -> UniquePtr<MlxArray> {
-        match conv {
+        let kernel = match conv {
+            KvConv::Static(conv) => conv.kernel(),
+            KvConv::Dynamic(conv) => conv.kernel(),
+        };
+        with_stacked_state(rows, slot, kernel, x, |state| match conv {
             KvConv::Static(conv) => conv.forward(x, state, None, mlxcel_core::array_dtype(x)),
             KvConv::Dynamic(conv) => conv.forward(x, dynamic_input, state),
-        }
+        })
     }
 
     /// The fused kernel's l2-clipped q/k/r and normalized v, or `None` where
@@ -277,20 +284,27 @@ impl Inkling2Attention {
 
     /// `x` feeds q, r, the gate and the sink; `key_input` / `value_input`
     /// feed k / v (all three are `x` on a sliding layer without messages).
+    /// `rows` holds one cache per batch row of `x`; one row runs the
+    /// single-sequence graph unchanged.
     pub fn forward(
         &self,
         x: &MlxArray,
         key_input: &MlxArray,
         value_input: &MlxArray,
-        cache: &mut InklingLayerCache,
+        rows: &mut [&mut InklingLayerCache],
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let (batch, length) = (shape[0], shape[1]);
+        assert_eq!(
+            batch as usize,
+            rows.len(),
+            "Inkling 2 attention needs one cache per batch row"
+        );
         let x_dtype = mlxcel_core::array_dtype(x);
         let k = self.k_proj.forward(key_input);
         let v = self.v_proj.forward(value_input);
-        let k = Self::conv(&self.k_conv, &k, key_input, &mut cache.conv[0]);
-        let v = Self::conv(&self.v_conv, &v, value_input, &mut cache.conv[1]);
+        let k = Self::conv(&self.k_conv, &k, key_input, rows, 0);
+        let v = Self::conv(&self.v_conv, &v, value_input, rows, 1);
 
         let q = mlxcel_core::reshape(
             &self.q_proj.forward(x),
@@ -302,7 +316,7 @@ impl Inkling2Attention {
             &self.r_proj.forward(x),
             &[batch, length, self.heads, self.d_rel],
         );
-        let [mut q, k, v, mut r] = match self
+        let heads = match self
             .head_kernel
             .then(|| self.prepare_heads_kernel(&q, &k, &v, &r))
             .flatten()
@@ -310,6 +324,53 @@ impl Inkling2Attention {
             Some(heads) => heads,
             None => self.prepare_heads_ops(&q, &k, &v, &r),
         };
+        // A query-dependent sink is a zero K/V row with its own logit.
+        let sinks = self.sink_proj.forward(x);
+        let sinks = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&sinks, &[0, 2, 1]), -1);
+        let out = match rows {
+            [cache] => {
+                let [q, k, v, r] = heads;
+                self.attend(q, k, v, r, &sinks, cache, x_dtype)
+            }
+            rows => {
+                // Offsets, sliding windows and relative masks are per row.
+                let outputs: Vec<_> = rows
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(i, cache)| {
+                        let i = i as i32;
+                        let row =
+                            |value: &MlxArray| mlxcel_core::utils::slice_axis(value, 0, i, i + 1);
+                        let [q, k, v, r] = std::array::from_fn(|part| row(&heads[part]));
+                        self.attend(q, k, v, r, &row(&sinks), cache, x_dtype)
+                    })
+                    .collect();
+                let refs: Vec<&MlxArray> = outputs.iter().map(|output| &**output).collect();
+                mlxcel_core::concatenate_many(&refs, 0)
+            }
+        };
+        let out = mlxcel_core::transpose_axes(&out, &[0, 2, 1, 3]);
+        let out = mlxcel_core::reshape(&out, &[batch, length, self.heads * self.head_dim]);
+        let gate = mlxcel_core::sigmoid(&f32(&self.gate_proj.forward(x)));
+        let out = mlxcel_core::astype(&mlxcel_core::multiply(&f32(&out), &gate), x_dtype);
+        self.o_proj.forward(&out)
+    }
+
+    /// The attention core of one row: prepared `[1, L, heads, d]` q/k/v/r and
+    /// `[1, heads, L, 1]` sink logits against that row's KV cache; returns
+    /// `[1, heads, L, head_dim]`.
+    #[allow(clippy::too_many_arguments)]
+    fn attend(
+        &self,
+        mut q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        mut r: UniquePtr<MlxArray>,
+        sinks: &MlxArray,
+        cache: &mut InklingLayerCache,
+        x_dtype: i32,
+    ) -> UniquePtr<MlxArray> {
+        let length = mlxcel_core::array_shape(&q)[1];
         if let Some((floor, alpha)) = self.log_scaling {
             let tau = log_scaling_tau(length, cache.kv.offset, floor, alpha);
             let tau = mlxcel_core::reshape(&tau, &[length, 1, 1]);
@@ -342,12 +403,9 @@ impl Inkling2Attention {
             self.is_sliding.then_some(self.window),
             self.rel_extent,
         );
-        // A query-dependent sink is a zero K/V row with its own logit.
-        let sinks = self.sink_proj.forward(x);
-        let sinks = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&sinks, &[0, 2, 1]), -1);
         let mask = mlxcel_core::concatenate(
             &mlxcel_core::astype(&mask, x_dtype),
-            &mlxcel_core::astype(&sinks, x_dtype),
+            &mlxcel_core::astype(sinks, x_dtype),
             -1,
         );
         let zero_row = |value: &MlxArray| {
@@ -367,7 +425,7 @@ impl Inkling2Attention {
         }
         let mask_ptr = &*mask as *const MlxArray;
         // SAFETY: q, keys, values and mask are live MLX arrays owned above.
-        let out = unsafe {
+        unsafe {
             mlxcel_core::fast_scaled_dot_product_attention(
                 &q,
                 &keys,
@@ -375,11 +433,6 @@ impl Inkling2Attention {
                 inverse_sqrt(self.head_dim),
                 mask_ptr,
             )
-        };
-        let out = mlxcel_core::transpose_axes(&out, &[0, 2, 1, 3]);
-        let out = mlxcel_core::reshape(&out, &[batch, length, self.heads * self.head_dim]);
-        let gate = mlxcel_core::sigmoid(&f32(&self.gate_proj.forward(x)));
-        let out = mlxcel_core::astype(&mlxcel_core::multiply(&f32(&out), &gate), x_dtype);
-        self.o_proj.forward(&out)
+        }
     }
 }

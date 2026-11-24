@@ -27,6 +27,7 @@
 //! match bitwise; `MLXCEL_INKLING2_KERNELS=0` keeps every forward on it.
 
 mod attention;
+mod batched;
 pub mod config;
 mod conv;
 pub(crate) mod kernels;
@@ -294,6 +295,17 @@ impl Inkling2Model {
         caches: &mut [InklingLayerCache],
         capture_ids: &[usize],
     ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
+        self.hidden_rows(embeddings, &mut [caches], capture_ids)
+    }
+
+    /// [`Self::hidden_with_captures`] over `[B, L]` embeddings, with `rows`
+    /// holding each batch row's visit caches (see `batched.rs`).
+    fn hidden_rows(
+        &self,
+        embeddings: &MlxArray,
+        rows: &mut [&mut [InklingLayerCache]],
+        capture_ids: &[usize],
+    ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
         let mut captured: Vec<Option<UniquePtr<MlxArray>>> =
             (0..capture_ids.len()).map(|_| None).collect();
         let mut capture = |visit: usize, x: &MlxArray| {
@@ -304,8 +316,13 @@ impl Inkling2Model {
             }
         };
         assert_eq!(
-            caches.len(),
-            self.layer_indices.len(),
+            rows.len() as i32,
+            mlxcel_core::array_shape(embeddings)[0],
+            "Inkling 2 needs one cache set per batch row"
+        );
+        assert!(
+            rows.iter()
+                .all(|caches| caches.len() == self.layer_indices.len()),
             "Inkling 2 needs one cache per layer visit"
         );
         let mut x = mlxcel_core::copy(embeddings);
@@ -349,12 +366,9 @@ impl Inkling2Model {
                 _ => None,
             };
             capture(visit, &x);
-            x = self.layers[index].forward(
-                &x,
-                &mut blocks,
-                &mut caches[visit],
-                messages.as_deref(),
-            );
+            let mut visit_rows: Vec<&mut InklingLayerCache> =
+                rows.iter_mut().map(|caches| &mut caches[visit]).collect();
+            x = self.layers[index].forward(&x, &mut blocks, &mut visit_rows, messages.as_deref());
         }
         let out = self.final_input.forward(&blocks, &x);
         let out = mlxcel_core::squeeze_axis(&mlxcel_core::utils::slice_axis(&out, -2, 0, 1), -2);
@@ -457,6 +471,9 @@ fn copy_all(values: &[UniquePtr<MlxArray>]) -> Vec<UniquePtr<MlxArray>> {
         .collect()
 }
 
+#[cfg(test)]
+#[path = "inkling2/batched_tests.rs"]
+mod batched_tests;
 #[cfg(test)]
 mod tiny_tests;
 #[cfg(test)]
