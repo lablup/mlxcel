@@ -36,11 +36,19 @@ def prompt_of(tokens, salt):
     return " ".join(words)
 
 
+# `BENCH_LOGIT_BIAS='{"106": -100}'` keeps a greedy row from ending on a token
+# `ignore_eos` does not suppress, so both arms decode the same context range.
+LOGIT_BIAS = json.loads(os.environ["BENCH_LOGIT_BIAS"]) if os.environ.get("BENCH_LOGIT_BIAS") else None
+
+
 def stream(port, prompt, max_tokens, out, idx):
-    body = json.dumps({
+    req_body = {
         "model": "default", "prompt": prompt, "max_tokens": max_tokens, "temperature": 0,
         "stream": True, "stream_options": {"include_usage": True}, "ignore_eos": True,
-    }).encode()
+    }
+    if LOGIT_BIAS:
+        req_body["logit_bias"] = LOGIT_BIAS
+    body = json.dumps(req_body).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/completions", data=body,
         headers={"Content-Type": "application/json"})
