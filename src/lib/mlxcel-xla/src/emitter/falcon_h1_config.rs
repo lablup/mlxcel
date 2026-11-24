@@ -95,7 +95,7 @@ pub(super) fn from_json(v: &Value, quantization: Option<QuantConfig>) -> Result<
         return Err("falcon_h1 mamba_n_heads * mamba_d_head must equal mamba_d_ssm".into());
     }
     let n_groups = uint("mamba_n_groups", Some(1))?;
-    let state_size = uint("mamba_d_state", Some(128))?;
+    let state_size = uint("mamba_d_state", Some(256))?;
     let conv_dim = n_groups
         .checked_mul(state_size)
         .and_then(|n| n.checked_mul(2))

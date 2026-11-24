@@ -22,3 +22,22 @@ MLXCEL_FALCON_H1_FIXTURES=/tmp/falcon-h1-fixtures MLXCEL_XLA_DEVICE=local-task \
 The ignored device test compares single-sequence tokens and four concurrent ragged trajectories with independent HF logits (absolute tolerance `3e-4`) and verifies slot re-admission. Fixtures use non-unit values for every multiplier, two SSM groups, unequal branch dimensions, both gating orders, no norm, and independent bias flags. On a GB10 host, wrap a CUDA invocation in `gpu-lock run --tag issue3346 --`; on ROCm use `scripts/rocm_gpu_guard.sh --hold --`.
 
 These synthetic gates do not replace real-checkpoint acceptance: 40 oracle-exact CLI tokens, batch 4 / requests 8, four concurrent server completions, and the requested HIP `validate_arch.sh` gate remain mandatory before marking the issue complete.
+
+## External ROCm acceptance handoff
+
+The committed `falcon_h1_reference/hf-f32-oracle.json` contains the independent native-HF CPU fp32 40-token oracle for the pinned Tiny90M checkpoint; `provenance.json` records its revision, package versions, hashes, and regeneration command. Use the same original HF checkpoint, not an MLX conversion. Set the device explicitly: `setup-rocm.sh --env` supplies paths but does not select HIP.
+
+```sh
+eval "$(scripts/iree/setup-rocm.sh --env)"
+export MLXCEL_XLA_DEVICE=hip MLXCEL_XLA_ROCM_TARGET=gfx1151 MLXCEL_XLA_PRECISION=f32
+export MLXCEL_FALCON_H1_MODEL=/path/to/original-hf-falcon-h1
+export MLXCEL_FALCON_H1_ORACLE="$PWD/spike/openxla/falcon_h1_reference/hf-f32-oracle.json"
+export MLXCEL_FALCON_H1_FIXTURES=/tmp/falcon-h1-fixtures
+$MLXCEL_ORACLE_PYTHON spike/openxla/falcon_h1_oracle.py --out "$MLXCEL_FALCON_H1_FIXTURES"
+scripts/rocm_gpu_guard.sh --hold -- cargo test --profile test-fast \
+  --features xla-iree,test-utils --test xla_falcon_h1 -- --ignored --nocapture --test-threads=1
+scripts/rocm_gpu_guard.sh --hold -- scripts/xla/validate_arch.sh \
+  --model "$MLXCEL_FALCON_H1_MODEL" --device hip --batch 4 --requests 8 --maxcap 24
+```
+
+The integration suite prints the selected device for real-checkpoint token parity. Keep the requested CLI and four concurrent server-completion checks as separate acceptance evidence; direct engine parity does not prove HTTP serving or chat-template/tokenization behavior.

@@ -42,7 +42,7 @@ pub enum MixerKind {
 }
 
 impl MixerKind {
-    /// Whether the mixer carries recurrent state instead of a KV cache.
+    /// Whether the mixer carries recurrent state (possibly alongside a KV cache).
     #[must_use]
     pub fn is_recurrent(self) -> bool {
         matches!(

@@ -92,3 +92,34 @@ fn falcon_h1_hf_synthetic_parity() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires original checkpoint and independent 40-token HF oracle"]
+fn falcon_h1_original_checkpoint_oracle_tokens() {
+    #[derive(Deserialize)]
+    struct Oracle {
+        prompt_ids: Vec<i32>,
+        ref_token_ids: Vec<i32>,
+    }
+    let model = std::env::var("MLXCEL_FALCON_H1_MODEL").expect("MLXCEL_FALCON_H1_MODEL");
+    let oracle = std::env::var("MLXCEL_FALCON_H1_ORACLE").expect("MLXCEL_FALCON_H1_ORACLE");
+    let oracle: Oracle = serde_json::from_slice(&std::fs::read(oracle).unwrap()).unwrap();
+    assert!(
+        oracle.ref_token_ids.len() >= 40,
+        "acceptance requires at least 40 reference tokens"
+    );
+    let device = std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".into());
+    let mut engine = IreeLlama::load(std::path::Path::new(&model), &device, 64).unwrap();
+    let mut token = engine.prefill_first(&oracle.prompt_ids).unwrap();
+    assert_eq!(token, oracle.ref_token_ids[0], "prefill token");
+    for (step, &want) in oracle.ref_token_ids.iter().enumerate().skip(1) {
+        token = engine
+            .decode(token, (oracle.prompt_ids.len() + step - 1) as i32)
+            .unwrap();
+        assert_eq!(token, want, "decode step {step}");
+    }
+    eprintln!(
+        "Falcon-H1 {} oracle tokens match on {device}",
+        oracle.ref_token_ids.len()
+    );
+}
