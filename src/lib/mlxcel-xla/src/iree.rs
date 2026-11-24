@@ -2862,7 +2862,7 @@ where
                             ));
                         }
                         let (out, in_) = (shape[0], shape[1]);
-                        if matches!(projection_layout, ProjectionLayout::InOut) {
+                        if specs[i].uploads_transposed(projection_layout) {
                             let transposed = transpose_projection(data_ref, out, in_);
                             if remaining == 0 {
                                 drop(owned_widened.take());
