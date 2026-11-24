@@ -469,10 +469,23 @@ impl LlavaVisionConfig {
                 }
             }
         }
-        let text_hidden = object(&root, "text_config")?
+        let mut text_config = object(&root, "text_config")?.clone();
+        if model_type == "llava" {
+            crate::llava_text_defaults::apply_llava_text_config_defaults(&mut text_config);
+        }
+        let text_hidden = text_config
             .get("hidden_size")
             .and_then(Value::as_u64)
-            .ok_or_else(|| "config.json text_config.hidden_size is required".to_string())
+            .ok_or_else(|| {
+                if model_type == "llava" {
+                    crate::llava_text_defaults::llava_text_field_missing(
+                        "hidden_size",
+                        &text_config,
+                    )
+                } else {
+                    "config.json text_config.hidden_size is required".to_string()
+                }
+            })
             .and_then(|value| {
                 usize::try_from(value)
                     .map_err(|_| "text_config.hidden_size does not fit usize".to_string())

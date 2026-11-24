@@ -107,6 +107,8 @@ mod shard_path;
 // Always compiled: the emitter reads its workgroup-shape constants, and the
 // module itself has no IREE dependency. Without the runtime only the tests use it.
 mod hf_json;
+mod llava_text_defaults;
+pub use llava_text_defaults::{apply_llava_text_config_defaults, llava_text_field_missing};
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod native_qmv;
 #[cfg(feature = "iree")]

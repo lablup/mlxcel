@@ -821,6 +821,11 @@ impl Config {
                     text.entry(name.to_string()).or_insert(value);
                 }
             }
+            if wrapper_model_type == Some("llava") {
+                // LLaVA-1.5-7B conversions leave the Llama architecture fields
+                // implicit; resolve the declared model type's HF defaults (#3366).
+                crate::llava_text_defaults::apply_llava_text_config_defaults(&mut text);
+            }
             // mlx-community quantized VLMs commonly keep the affine scheme at
             // the wrapper level even though the tensors belong to the nested
             // language model.
