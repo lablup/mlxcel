@@ -61,7 +61,10 @@ def build_config() -> NemotronHConfig:
         vocab_size=VOCAB_SIZE,
         hidden_size=16,
         layers_block_type=["mamba", "attention", "moe", "mamba", "mlp"],
-        tie_word_embeddings=True,
+        # Real Nemotron-H checkpoints use an independent LM head.  Keeping the
+        # acceptance fixture untied also makes that tensor part of the schema
+        # and avoids letting an unrelated tied-head path mask E-block parity.
+        tie_word_embeddings=False,
         use_cache=False,
         num_attention_heads=4,
         num_key_value_heads=2,
@@ -155,7 +158,7 @@ def randomize_model(model: NemotronHForCausalLM) -> None:
 
 def mlx_name(name: str) -> str | None:
     if name == "lm_head.weight":
-        return None  # tied to backbone.embeddings.weight
+        return name
     if not name.startswith("model."):
         raise ValueError(f"unexpected HF tensor {name}")
     name = "backbone." + name.removeprefix("model.")
@@ -252,6 +255,7 @@ def generate(out: Path, prompt: str, max_new: int) -> None:
         "topk_group": 1,
         "norm_topk_prob": True,
         "routed_scaling_factor": 1.25,
+        "tie_word_embeddings": False,
         "tokenizer": "WordLevel with unique IDs, shared by hf/ and mlx/",
         "special_token_ids": {
             "pad": PAD_ID,

@@ -170,8 +170,38 @@ fn topk_combine(b: &mut Builder, moe: &MoeConfig, k: &Consts, logits: &Val, n: u
     combine
 }
 
+/// Row-wise routing argmax over `[N, E]` using only single-result reductions.
+///
+/// The pinned IREE compiler cannot bufferize the tuple-reduction argmax when
+/// aggressive fusion pulls the grouped sigmoid router into one CUDA dispatch.
+/// Routing scores are therefore reduced separately: NaNs select the first NaN,
+/// otherwise the row maximum selects its first occurrence. This is identical to
+/// [`Builder::argmax_batched`], including its NaN precedence and lower-index tie
+/// break, without changing the shared sampling argmax or legacy softmax routing.
+fn routing_argmax_batched(b: &mut Builder, k: &Consts, scores: &Val, n: usize, e: usize) -> Val {
+    let iota_e = b.iota(e);
+    let iota_ne = b.broadcast(&iota_e, &[1], vec![n, e]);
+    let sentinel = b.const_i32(i32::MAX);
+    let sentinels_ne = b.broadcast(&sentinel, &[], vec![n, e]);
+    let sentinels_n = b.broadcast(&sentinel, &[], vec![n]);
+
+    let is_nan = b.compare("NE", scores, scores, "FLOAT");
+    let nan_candidates = b.select(&is_nan, &iota_ne, &sentinels_ne);
+    let first_nan = b.reduce_min(&nan_candidates, 1, &sentinel);
+    let has_nan = b.compare("LT", &first_nan, &sentinels_n, "SIGNED");
+
+    let neg_inf = b.broadcast(&k.neg_inf, &[], vec![n, e]);
+    let finite_scores = b.select(&is_nan, &neg_inf, scores);
+    let maximum = b.reduce_max(&finite_scores, 1, &k.neg_inf);
+    let maximum = b.broadcast(&maximum, &[0], vec![n, e]);
+    let is_max = b.compare("EQ", &finite_scores, &maximum, "FLOAT");
+    let max_candidates = b.select(&is_max, &iota_ne, &sentinels_ne);
+    let first_max = b.reduce_min(&max_candidates, 1, &sentinel);
+    b.select(&has_nan, &first_nan, &first_max)
+}
+
 /// Select `count` distinct row-wise maxima from `[N, E]`, returning one `[N, E]`
-/// one-hot per pick. [`Builder::argmax_batched`] resolves exact ties to the lower
+/// one-hot per pick. [`routing_argmax_batched`] resolves exact ties to the lower
 /// index, matching MLX's stable expert and group ordering.
 fn topk_onehots(
     b: &mut Builder,
@@ -187,7 +217,7 @@ fn topk_onehots(
     let mut pool = selection.clone();
     let mut onehots = Vec::with_capacity(count);
     for _ in 0..count {
-        let idx = b.argmax_batched(&pool);
+        let idx = routing_argmax_batched(b, k, &pool, n, e);
         let idx_ne = b.broadcast(&idx, &[0], vec![n, e]);
         let oneh = b.compare("EQ", &iota_ne, &idx_ne, "SIGNED");
         pool = b.select(&oneh, &neg_inf, &pool);

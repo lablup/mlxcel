@@ -21,6 +21,78 @@ fn tiny_moe_json() -> serde_json::Value {
     v
 }
 
+fn write_shape_checkpoint(path: &std::path::Path, shapes: &[(String, Vec<usize>)]) {
+    let mut header = serde_json::Map::new();
+    let mut offset = 0usize;
+    for (name, shape) in shapes {
+        let bytes = 4 * shape.iter().product::<usize>();
+        header.insert(
+            name.clone(),
+            serde_json::json!({
+                "dtype": "F32", "shape": shape, "data_offsets": [offset, offset + bytes]
+            }),
+        );
+        offset += bytes;
+    }
+    let text = serde_json::Value::Object(header).to_string();
+    let mut bytes = (text.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.resize(bytes.len() + offset, 0);
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn tiny_moe_checkpoint_shapes() -> Vec<(String, Vec<usize>)> {
+    let mut shapes = vec![
+        ("backbone.embeddings.weight".into(), vec![32, 16]),
+        ("backbone.norm_f.weight".into(), vec![16]),
+    ];
+    for li in 0..5 {
+        let p = format!("backbone.layers.{li}.");
+        let m = format!("{p}mixer.");
+        shapes.push((format!("{p}norm.weight"), vec![16]));
+        match li {
+            0 | 3 => {
+                shapes.extend([
+                    (format!("{m}in_proj.weight"), vec![100, 16]),
+                    (format!("{m}out_proj.weight"), vec![16, 32]),
+                    (format!("{m}conv1d.weight"), vec![64, 1, 4]),
+                    (format!("{m}conv1d.bias"), vec![64]),
+                    (format!("{m}dt_bias"), vec![4]),
+                    (format!("{m}A_log"), vec![4]),
+                    (format!("{m}D"), vec![4]),
+                    (format!("{m}norm.weight"), vec![32]),
+                ]);
+            }
+            1 => {
+                shapes.extend([
+                    (format!("{m}q_proj.weight"), vec![32, 16]),
+                    (format!("{m}k_proj.weight"), vec![16, 16]),
+                    (format!("{m}v_proj.weight"), vec![16, 16]),
+                    (format!("{m}o_proj.weight"), vec![16, 32]),
+                ]);
+            }
+            2 => {
+                shapes.extend([
+                    (format!("{m}gate.weight"), vec![8, 16]),
+                    (format!("{m}gate.e_score_correction_bias"), vec![8]),
+                    (format!("{m}switch_mlp.fc1.weight"), vec![8, 12, 16]),
+                    (format!("{m}switch_mlp.fc2.weight"), vec![8, 16, 12]),
+                    (format!("{m}shared_experts.up_proj.weight"), vec![20, 16]),
+                    (format!("{m}shared_experts.down_proj.weight"), vec![16, 20]),
+                ]);
+            }
+            4 => {
+                shapes.extend([
+                    (format!("{m}up_proj.weight"), vec![32, 16]),
+                    (format!("{m}down_proj.weight"), vec![16, 32]),
+                ]);
+            }
+            _ => unreachable!(),
+        }
+    }
+    shapes
+}
+
 #[test]
 fn nemotron_h_schedule_and_independent_widths() {
     let c = Config::from_json_str(TINY).unwrap();
@@ -217,6 +289,14 @@ fn nemotron_h_moe_schedule_router_and_weight_schema() {
     assert!(!graph.contains("params['layers'][2]['moe_gate']"));
     assert!(graph.contains("stablehlo.logistic") || graph.contains("stablehlo.exponential"));
     assert!(graph.contains("stablehlo.maximum"), "relu2 maximum");
+    assert!(
+        graph.contains("applies stablehlo.minimum across dimensions = [1]"),
+        "sigmoid routing uses compiler-compatible first-index reductions"
+    );
+    assert!(
+        !graph.contains(":2 = stablehlo.reduce("),
+        "sigmoid routing must not emit tuple reductions"
+    );
 }
 
 #[test]
@@ -245,6 +325,42 @@ fn nemotron_h_moe_rejects_invalid_group_and_shared_shapes() {
                 .contains(message),
             "{key} should report {message}"
         );
+    }
+}
+
+#[test]
+fn nemotron_h_moe_checkpoint_load_validates_every_expert_tensor() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = tiny_moe_json();
+    std::fs::write(
+        dir.path().join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    let checkpoint = dir.path().join("model.safetensors");
+    let shapes = tiny_moe_checkpoint_shapes();
+    write_shape_checkpoint(&checkpoint, &shapes);
+    let loaded = Config::from_json(dir.path()).expect("load a complete E-block checkpoint");
+    assert!(loaded.is_moe_layer(2));
+
+    for name in [
+        "backbone.layers.2.mixer.gate.weight",
+        "backbone.layers.2.mixer.gate.e_score_correction_bias",
+        "backbone.layers.2.mixer.switch_mlp.fc1.weight",
+        "backbone.layers.2.mixer.switch_mlp.fc2.weight",
+        "backbone.layers.2.mixer.shared_experts.up_proj.weight",
+        "backbone.layers.2.mixer.shared_experts.down_proj.weight",
+    ] {
+        let mut malformed = shapes.clone();
+        let shape = &mut malformed
+            .iter_mut()
+            .find(|(tensor, _)| tensor == name)
+            .unwrap()
+            .1;
+        shape[0] += 1;
+        write_shape_checkpoint(&checkpoint, &malformed);
+        let error = Config::from_json(dir.path()).expect_err(name);
+        assert!(error.contains(name) && error.contains("shape"), "{error}");
     }
 }
 
