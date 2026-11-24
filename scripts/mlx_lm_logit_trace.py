@@ -216,9 +216,15 @@ def main(argv: list[str] | None = None) -> int:
             language_model = load_model(load_dir, lazy=True).language_model
             from mlx.utils import tree_flatten
 
+            # With the allocation cache off, each slice's transient buffers
+            # are returned before the next one: Inkling 2 Small (about 390 GB
+            # of target weights) does not fit a 512 GB host otherwise (#3373,
+            # mlx-vlm's Inkling 2 README).
+            cache_limit = mx.set_cache_limit(0)
             params = tree_flatten(language_model.parameters())
             for start in range(0, len(params), 64):
                 mx.eval([value for _, value in params[start : start + 64]])
+            mx.set_cache_limit(cache_limit)
 
             def model(tokens):
                 return language_model(tokens).logits

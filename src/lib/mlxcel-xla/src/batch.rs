@@ -1341,6 +1341,54 @@ impl LlavaReferenceDiagnosticEngine {
             decode_seconds,
         })
     }
+
+    /// Greedy-generate a text-only prompt on the gated batch engine: its token
+    /// prefill seeds slot 0, then the ragged decode continues on that cache,
+    /// the path the server takes for a text-only request.
+    ///
+    /// Issue #3364: this is the gated reference for the production
+    /// single-sequence session's token-prefill path, which compiles a
+    /// different projection layout and entry modules than this engine.
+    pub fn greedy_from_tokens(
+        &mut self,
+        prompt: &[i32],
+        max_new_tokens: usize,
+    ) -> Result<Vec<i32>, String> {
+        if max_new_tokens == 0 {
+            return Err("diagnostic token greedy requires max_new_tokens >= 1".to_string());
+        }
+        if prompt.len() + max_new_tokens > self.engine.context_capacity() {
+            return Err(format!(
+                "diagnostic token greedy would exceed context_capacity={}",
+                self.engine.context_capacity()
+            ));
+        }
+        self.engine.reset_slots_for_diagnostics()?;
+        let b_max = self.engine.b_max();
+        let vocab = self.engine.vocab();
+        let logits = self.engine.prefill_slot_logits(0, prompt)?;
+        let mut current = diagnostic_argmax(&logits[..vocab]);
+        let mut tokens = vec![current];
+        let mut cache_len = i32::try_from(prompt.len())
+            .map_err(|_| "prompt length does not fit i32".to_string())?;
+        while tokens.len() < max_new_tokens {
+            let mut carrier_tokens = vec![0; b_max];
+            let mut carrier_positions = vec![0; b_max];
+            let mut carrier_cache_lengths = vec![0; b_max];
+            carrier_tokens[0] = current;
+            carrier_positions[0] = cache_len;
+            carrier_cache_lengths[0] = cache_len;
+            let logits = self.engine.decode_ragged_logits(
+                &carrier_tokens,
+                &carrier_positions,
+                &carrier_cache_lengths,
+            )?;
+            current = diagnostic_argmax(&logits[..vocab]);
+            tokens.push(current);
+            cache_len += 1;
+        }
+        Ok(tokens)
+    }
 }
 
 #[cfg(feature = "diagnostics")]

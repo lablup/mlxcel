@@ -227,6 +227,7 @@ impl ShortConv {
             output_dtype,
             history_margin(shape[1]),
         )?;
+        super::kernels::record_dispatch(super::kernels::Kernel::ShortConvolution);
         *state = Some(next);
         Some(out)
     }
