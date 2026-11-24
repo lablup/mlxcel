@@ -20,8 +20,8 @@ use super::config::{
     Config, MixerKind, QuantConfig, SsmConfig, StateElem, StateTensorSpec, WeightScheme,
 };
 use super::model::{
-    emit_decode, emit_decode_batched, emit_decode_ragged, emit_decode_with, emit_prefill,
-    emit_prefill_embeddings, emit_prefill_embeddings_deepstack_with, emit_prefill_with,
+    emit_decode, emit_decode_batched, emit_decode_with, emit_prefill, emit_prefill_embeddings,
+    emit_prefill_embeddings_deepstack_with, emit_prefill_with,
 };
 use crate::hf_json::quote_non_finite_json;
 use crate::weights::{WeightSpec, weight_specs_q};
@@ -312,7 +312,6 @@ fn graphs_without_a_state_contract_reject_mamba2() {
     let c = tiny();
     let errors = [
         emit_decode_batched(&c, 4, false).expect_err("batched"),
-        emit_decode_ragged(&c, 4, false).expect_err("ragged"),
         emit_prefill_embeddings(&c, false).expect_err("embeddings"),
         emit_prefill_embeddings_deepstack_with(&c, false, Precision::F32).expect_err("deepstack"),
     ];
@@ -591,4 +590,45 @@ fn mamba2_omitted_tie_word_embeddings_follows_the_hf_default() {
         "an untied Mamba2 uploads its own head"
     );
     assert!(tiny().tie_word_embeddings, "an explicit true is kept");
+}
+
+/// Issue #3340: an f16 recurrent state drifts from the HF fp32 reference on
+/// hip, so a recurrent config pins F32 on every device like an MLA config, and
+/// only an explicit `MLXCEL_XLA_PRECISION` replaces the pin.
+#[test]
+fn recurrent_config_pins_f32_unless_precision_is_explicit() {
+    use super::builder::resolve_pinned_precision_with_override as resolve;
+
+    let mamba2 = tiny();
+    assert!(mamba2.pins_f32_precision());
+    for device in ["hip", "cuda", "metal", "local-task"] {
+        for raw in [None, Some(""), Some("fp8")] {
+            assert_eq!(
+                resolve(device, mamba2.pins_f32_precision(), raw).unwrap(),
+                Precision::F32,
+                "{device} {raw:?}"
+            );
+        }
+    }
+    assert_eq!(resolve("hip", true, Some("f16")).unwrap(), Precision::F16);
+    assert_eq!(
+        resolve("cuda", true, Some(" bf16 ")).unwrap(),
+        Precision::Bf16
+    );
+    assert!(resolve("metal", true, Some("bf16")).is_err());
+
+    // An attention-only config keeps the per-device default (f16 on hip).
+    let dense = Config::from_json_str(
+        r#"{"model_type": "llama", "hidden_size": 16, "intermediate_size": 32,
+            "num_hidden_layers": 2, "num_attention_heads": 2,
+            "num_key_value_heads": 2, "rms_norm_eps": 1e-6,
+            "rope_theta": 10000.0, "vocab_size": 32}"#,
+    )
+    .unwrap();
+    assert!(!dense.pins_f32_precision());
+    assert_eq!(
+        resolve("hip", dense.pins_f32_precision(), None).unwrap(),
+        Precision::F16
+    );
+    assert!(resolve("hip", false, Some("fp8")).is_err());
 }

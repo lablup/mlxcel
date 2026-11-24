@@ -137,6 +137,39 @@ The shim now carries the state from `prefill.main` into `decode_step` (`@state_i
 | hip | f32 | 40/40 | not run |
 | local-task | f32 (default) | 40/40 | 40/40 |
 
-A one-token prompt ("The", 10 tokens), which takes the state-reset path instead of a `real_len = 0` prefill, also matches the oracle on hip. The f16 drift measured above (0.42 max-abs on logits) did not move a greedy token here, so recurrent configs keep the per-device default precision rather than being pinned to f32 like MLA.
+A one-token prompt ("The", 10 tokens), which takes the state-reset path instead of a `real_len = 0` prefill, also matches the oracle on hip. The f16 drift measured above (0.42 max-abs on logits) did not move a greedy token here, so recurrent configs kept the per-device default precision rather than being pinned to f32 like MLA (superseded in #3340, below).
 
 Refusals: a request refused in Rust or failed in the shim (including a failed state reset) drops the stored state, so a decode refuses until a prefill or reset succeeds. The KV-only entry points (ragged, slot, embeddings) refuse any recurrent state until #3340, and pure `mamba2` with `n_groups > 1` is refused. The CLI omits the `KV cache mode` banner for Mamba2 on xla.
+
+## Per-slot state carry and serving (issue #3340)
+
+The continuous-batching engine now carries each slot's Mamba2 state: the ragged decode takes and returns `[B, ...]` state, the shim keeps `sscache_b[]` per slot under the KV's `rg_valid` flag, and `mlxcel-server` serves `AntonV/mamba2-130m-hf` @ `05e8773f` on `hip`.
+
+First measurement, before the precision pin:
+
+| check | precision | result |
+|-------|-----------|--------|
+| `validate_arch.sh --batch 4 --requests 8 --maxcap 24` (structural, oracle, serve) | f16 (hip default then) | PASS |
+| `xla_batch_bench`, oracle prompt, `--cancel 2` | f16 | PASS (2/2 cancelled) |
+| `xla_batch_bench`, oracle prompt, `--buckets 256,512` | f16 | PASS |
+| `xla_batch_bench`, B=8, 16 requests, 64-token prompt | f16 | PASS |
+| `xla_batch_bench`, B=4, 8 requests, 64-token prompt | f16 | 7/8; request 6 differs from token 17 |
+| same | f32 | PASS |
+| server, 4 concurrent `/v1/completions` at temperature 0 vs `mlxcel generate` | f16 | 3/4 |
+| same | f32 | 4/4 |
+
+The two f16 differences are rounding between the batched (`[B, hidden]`) and single-sequence projections, not state handling: the same workloads are exact at f32. On the server prompt that differs ("In computer science, a linked list is"), the batched f16 stream equals the HF fp32 oracle and the f32 streams, and it is the single-sequence f16 decode that departs from the oracle after 16 tokens. The single-prompt check in #3339 did not catch this.
+
+Decision: recurrent configs are now pinned to f32 on every device, like MLA, for both the single-sequence and the ragged bundles (`Config::pins_f32_precision`, `effective_precision` in `iree.rs`). An explicit `MLXCEL_XLA_PRECISION` still overrides the pin; f16 is not token-exact for recurrent models and is for measurement only. Re-run at the default precision (now f32) on `hip`:
+
+| check | result |
+|-------|--------|
+| `mlxcel generate` 40 tokens vs HF fp32 oracle: "The capital of France is", "In computer science, a linked list is", "Once upon a time, in a small village by the sea,", "The three primary colors are", "Water boils at a temperature of" | 5/5 token-exact (and `xla_oracle_check` 5/5) |
+| `validate_arch.sh --batch 4 --requests 8 --maxcap 24` | PASS (structural, token-exact, serve reference-exact; 123.7 tok/s batched vs 75.0 sequential) |
+| `xla_batch_bench`, B=4, 8 requests, 64-token prompt | PASS (122.8 tok/s) |
+| `xla_batch_bench`, oracle prompt, `--cancel 2` | PASS (2/2 cancelled; 122.5 tok/s) |
+| `xla_batch_bench`, oracle prompt, `--buckets 256,512` | PASS (98.3 tok/s) |
+| `xla_batch_bench`, B=8, 16 requests, 64-token prompt | PASS (108.7 tok/s) |
+| server, 4 concurrent `/v1/completions` at temperature 0 vs `mlxcel generate` | 4/4 |
+
+The pin costs throughput on this 130M model: the serve gate ran at 285.6 tok/s batched at f16 and 123.7 tok/s at f32.
