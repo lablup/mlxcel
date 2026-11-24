@@ -1774,20 +1774,6 @@ fn xla_sizing_budget(max_tokens: usize, budget_was_unlimited: bool) -> usize {
     }
 }
 
-/// The positions a request needs from an OpenXLA static shape: prompt plus
-/// generation budget plus any worst-case image expansion the checkpoint
-/// declares.
-#[cfg(feature = "xla-backend")]
-fn xla_required_positions(
-    prompt_len: usize,
-    sizing_budget: usize,
-    image_expansion: usize,
-) -> usize {
-    prompt_len
-        .saturating_add(sizing_budget)
-        .saturating_add(image_expansion)
-}
-
 /// One `MLXCEL_PRINT_TOKEN_IDS` line: `[<label> (<count>): <id> <id> ...]`.
 fn token_ids_line(label: &str, ids: &[i32]) -> String {
     format!(
@@ -1814,12 +1800,6 @@ fn print_token_ids_if_requested(prompt_tokens: &[i32], generated_tokens: &[i32])
     }
 }
 
-/// The worst-case image expansion to include in an OpenXLA sizing hint.
-#[cfg(feature = "xla-backend")]
-fn xla_image_expansion(model_path: &Path, image_count: usize) -> usize {
-    image_count.saturating_mul(mlxcel::xla_image_context_floor(model_path).unwrap_or(0))
-}
-
 #[cfg(feature = "xla-backend")]
 #[allow(clippy::too_many_arguments)]
 fn generate_xla(
@@ -1840,18 +1820,38 @@ fn generate_xla(
         !has_video,
         "the OpenXLA backend does not support video input yet"
     );
-    let required_positions = xla_required_positions(
-        prompt_tokens.len(),
-        sizing_budget,
-        xla_image_expansion(model_path, image_paths.len()),
-    );
-    let mut session = select_backend().create_session_for_request(
+    // Media is prepared before the shape is compiled, so the shape and the
+    // admission check use the prompt the preprocessor actually produced rather
+    // than a per-family worst case (issue #3361). The serve worker routes on
+    // the same length. Its time still counts toward the run.
+    let preparation_start = Instant::now();
+    let images = decode_xla_cli_images(image_paths)?;
+    let mut media = super::generate_xla_media::prepare_xla_cli_media(
         model_path,
-        num_layers,
-        kv_cache_mode,
-        token_bias,
-        Some(required_positions),
+        prompt,
+        prompt_tokens,
+        tokenizer,
+        &images,
+        audio_path,
     )?;
+    let preparation_time = preparation_start.elapsed();
+    let effective_prompt_len = media.effective_prompt_len(prompt_tokens.len());
+    let required_positions = mlxcel::xla_request_positions(effective_prompt_len, sizing_budget);
+    let mut session = match media.take_preprocessor() {
+        Some(preprocessor) => mlxcel::backend::xla::create_prepared_xla_session(
+            model_path,
+            num_layers,
+            required_positions,
+            Some(preprocessor),
+        )?,
+        None => select_backend().create_session_for_request(
+            model_path,
+            num_layers,
+            kv_cache_mode,
+            token_bias,
+            Some(required_positions),
+        )?,
+    };
     let start_time = Instant::now();
     // The plain text path reports its two phases from the session's own
     // windows. Every other XLA path keeps the whole-run accounting, which
@@ -1861,13 +1861,10 @@ fn generate_xla(
         mlxcel::Session::Xla(s) => {
             let capacity = s.context_capacity();
             let requested_budget = max_tokens;
-            // The prompt the graph actually admits: image placeholders expand
-            // inside the session, so their worst case is part of the room the
-            // generation budget may use.
-            let effective_prompt_len = required_positions.saturating_sub(sizing_budget);
             // The shape is static, so an unlimited (or over-wide) budget has to
-            // be clamped to the room it leaves after the prompt. The work the
-            // request asks for is unchanged: generation still stops at EOS.
+            // be clamped to the room it leaves after the expanded prompt. The
+            // work the request asks for is unchanged: generation still stops at
+            // EOS.
             let admitted = requested_budget.min(capacity.saturating_sub(effective_prompt_len));
             if std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_none() {
                 println!(
@@ -1888,154 +1885,46 @@ fn generate_xla(
                 );
             }
             let eos = s.eos_token_ids().to_vec();
-            let phi4mm_media = mlxcel::models::get_model_type(model_path)?
-                == mlxcel::models::ModelType::Phi4MMVLM
-                && (audio_path.is_some() || !image_paths.is_empty());
-            if phi4mm_media {
-                #[cfg(not(feature = "xla-iree"))]
-                {
-                    let _ = (audio_path, prompt, tokenizer, image_paths);
-                    anyhow::bail!(
-                        "OpenXLA Phi4MM media input requires a build with the xla-iree feature"
-                    );
-                }
+            match &media {
                 #[cfg(feature = "xla-iree")]
-                {
-                    let mut tokenization_error = None;
-                    let normalized = mlxcel::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
-                        prompt,
-                        image_paths.len(),
-                        usize::from(audio_path.is_some()),
-                        |text, add_special| match tokenizer.encode(text, add_special) {
-                            Ok(tokens) => tokens.into_iter().map(|token| token as i32).collect(),
-                            Err(error) => {
-                                tokenization_error = Some(error.to_string());
-                                Vec::new()
-                            }
-                        },
-                    )
-                    .map_err(|error| anyhow!("Phi4MM prompt normalization failed: {error}"))?;
-                    if let Some(error) = tokenization_error {
-                        return Err(anyhow!("Phi4MM tokenization failed: {error}"));
-                    }
-                    let cancelled = std::sync::atomic::AtomicBool::new(false);
-                    let images = decode_xla_cli_images(image_paths)?;
-                    let device = std::env::var("MLXCEL_XLA_DEVICE")
-                        .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
-                    let mut producer = if images.is_empty() {
-                        mlxcel::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load(
-                            model_path,
-                            &device,
-                            s.context_capacity(),
-                        )
-                    } else {
-                        mlxcel::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load_multimodal(
-                            model_path,
-                            &device,
-                            s.context_capacity(),
-                        )
-                    }
-                    .map_err(anyhow::Error::msg)?;
-                    let prepared = if let Some(audio_path) = audio_path {
-                        let policy =
-                            mlxcel::multimodal::phi4mm_xla_audio::load_phi4mm_audio_policy(
-                                model_path,
-                            )
-                            .map_err(anyhow::Error::msg)?;
-                        let waveforms =
-                            mlxcel::audio::preprocess_wav_file(audio_path, policy, &cancelled)
-                                .map_err(|error| {
-                                    anyhow!("OpenXLA audio waveform preprocessing failed: {error}")
-                                })?;
-                        producer.prepare_media(waveforms, normalized.tokens, &images, &cancelled)
-                    } else {
-                        producer.prepare_images(normalized.tokens, &images, &cancelled)
-                    }
-                    .map_err(|error| {
-                        anyhow!("OpenXLA Phi4MM media preprocessing failed: {error}")
-                    })?;
-                    s.generate_prepared_greedy(&prepared, max_tokens, &eos)
-                        .map_err(|error| {
-                            anyhow!("OpenXLA Phi4MM media generation failed: {error}")
-                        })?
-                }
-            } else if let Some(audio_path) = audio_path {
-                ensure!(
-                    image_paths.is_empty(),
-                    "the loaded OpenXLA Gemma3n runtime has not qualified mixed image+audio requests"
-                );
-                #[cfg(feature = "xla-iree")]
-                {
-                    let preparer = mlxcel::audio::gemma3n::Gemma3nXlaAudioPreparer::from_model(
+                super::generate_xla_media::XlaCliMedia::Phi4mm(prepared) => s
+                    .generate_prepared_greedy(prepared, max_tokens, &eos)
+                    .map_err(|error| anyhow!("OpenXLA Phi4MM media generation failed: {error}"))?,
+                super::generate_xla_media::XlaCliMedia::Gemma3nAudio => {
+                    let audio_path = audio_path
+                        .ok_or_else(|| anyhow!("OpenXLA audio request lost its audio path"))?;
+                    super::generate_xla_media::generate_xla_gemma3n_audio(
+                        s,
                         model_path,
-                        s.context_capacity(),
+                        prompt_tokens,
                         tokenizer,
-                    )
-                    .map_err(|error| anyhow!("OpenXLA audio configuration failed: {error}"))?
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "the loaded OpenXLA model/runtime bundle does not support audio input"
-                        )
-                    })?;
-                    let cancelled = std::sync::atomic::AtomicBool::new(false);
-                    let waveforms = mlxcel::audio::preprocess_wav_file(
                         audio_path,
-                        preparer.policy(),
-                        &cancelled,
-                    )
-                    .map_err(|error| anyhow!("OpenXLA audio preprocessing failed: {error}"))?;
-                    let prepared_input = preparer
-                        .prepare(
-                            &mlxcel::audio::gemma3n::Gemma3nAudioFeatureExtractor::new(),
-                            waveforms,
-                            prompt_tokens.to_vec(),
-                            &cancelled,
-                        )
-                        .map_err(|error| {
-                            anyhow!("OpenXLA audio feature preparation failed: {error}")
-                        })?;
-                    let mut runtime = s
-                        .load_gemma3n_audio(
-                            prepared_input.input.frame_bucket(),
-                            prepared_input.clips,
-                        )
-                        .map_err(|error| anyhow!("OpenXLA audio runtime load failed: {error}"))?;
-                    let prepared = runtime
-                        .invoke_prepared(
-                            &prepared_input.input,
-                            prepared_input.token_ids,
-                            preparer.audio_token_id(),
-                        )
-                        .map_err(|error| anyhow!("OpenXLA audio execution failed: {error}"))?;
-                    s.generate_gemma3n_prepared_greedy(prepared.request(), max_tokens, &eos)
-                        .map_err(|error| anyhow!("OpenXLA audio generation failed: {error}"))?
+                        max_tokens,
+                        &eos,
+                    )?
                 }
-                #[cfg(not(feature = "xla-iree"))]
-                {
-                    let _ = (audio_path, tokenizer);
-                    anyhow::bail!("OpenXLA audio execution requires the xla-iree feature");
+                super::generate_xla_media::XlaCliMedia::Text => {
+                    let (tokens, timing) = s
+                        .generate_streaming_greedy_timed(prompt_tokens, max_tokens, &eos, |_| true)
+                        .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?;
+                    xla_timing = Some(timing);
+                    tokens
                 }
-            } else if image_paths.is_empty() {
-                let (tokens, timing) = s
-                    .generate_streaming_greedy_timed(prompt_tokens, max_tokens, &eos, |_| true)
-                    .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?;
-                xla_timing = Some(timing);
-                tokens
-            } else {
-                ensure!(
-                    s.supports_images(),
-                    "the loaded OpenXLA model/runtime bundle does not support image input"
-                );
-                let images = decode_xla_cli_images(image_paths)?;
-                s.generate_images_greedy(prompt_tokens, &images, max_tokens)
-                    .map_err(|error| anyhow!("OpenXLA image generation failed: {error}"))?
+                super::generate_xla_media::XlaCliMedia::Image { request, .. } => {
+                    ensure!(
+                        s.supports_images(),
+                        "the loaded OpenXLA model/runtime bundle does not support image input"
+                    );
+                    s.generate_prepared_image_greedy(request, max_tokens)
+                        .map_err(|error| anyhow!("OpenXLA image generation failed: {error}"))?
+                }
             }
         }
         // `select_backend()` returned the XLA backend, so its `create_session`
         // yields an XLA session; any other variant would be a wiring bug.
         _ => anyhow::bail!("the OpenXLA backend did not produce an XLA session"),
     };
-    let total_time = start_time.elapsed();
+    let total_time = start_time.elapsed() + preparation_time;
     let generated_len = tokens.len();
     if let Some(timing) = xla_timing {
         // The OpenXLA session's decode window already contains the first

@@ -76,6 +76,8 @@ pub mod step3p7_prompt;
 pub mod video;
 pub mod vlm_prompt;
 pub mod vlm_runtime;
+#[cfg(feature = "xla-backend")]
+pub mod xla_image_prefill;
 pub mod youtu_vl_prompt;
 
 #[cfg(test)]

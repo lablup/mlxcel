@@ -96,11 +96,51 @@ fn build_xla_session(
 ) -> Result<Session> {
     let image_preprocessor = crate::load_xla_image_preprocessor(model_path)
         .map_err(|error| anyhow::anyhow!("OpenXLA image preprocessor load failed: {error}"))?;
+    build_xla_session_with(model_path, num_layers, context_capacity, image_preprocessor)
+}
+
+fn build_xla_session_with(
+    model_path: &Path,
+    num_layers: usize,
+    context_capacity: usize,
+    image_preprocessor: Option<Box<dyn crate::HostMultimodalPreprocessor>>,
+) -> Result<Session> {
     let mut session =
         XlaInferenceSession::load_with_context_capacity(model_path, num_layers, context_capacity)
             .map_err(|e| anyhow::anyhow!(e))?;
     session.set_eos_token_ids(xla_stop_token_ids(model_path));
     Ok(Session::xla(session, image_preprocessor))
+}
+
+/// The static shape for a request needing `required_positions`, or the pinned
+/// `MLXCEL_XLA_CONTEXT_CAPACITY` when the operator set one.
+fn request_sized_capacity(model_path: &Path, required_positions: Option<usize>) -> Result<usize> {
+    let model_window = crate::read_model_context_window(model_path);
+    mlxcel_xla::resolve_context_capacity(required_positions, model_window)
+        .map_err(|error| anyhow::anyhow!(error))
+}
+
+/// Build a single-sequence OpenXLA session for a request whose images were
+/// already prepared, sized from that request's expanded prompt.
+///
+/// The CLI prepares images before it compiles a shape so the shape can follow
+/// the processed media (`PreparedImagePrefill::sequence_len`) rather than a
+/// per-family worst case (issue #3361). The preprocessor that prepared them is
+/// handed over so the session reports the same image capability and the
+/// vision weights are not loaded a second time.
+///
+/// # Errors
+///
+/// Returns an error when the request does not fit the checkpoint window or the
+/// capacity ladder, or when the session fails to load.
+pub fn create_prepared_xla_session(
+    model_path: &Path,
+    num_layers: usize,
+    required_positions: usize,
+    image_preprocessor: Option<Box<dyn crate::HostMultimodalPreprocessor>>,
+) -> Result<Session> {
+    let context_capacity = request_sized_capacity(model_path, Some(required_positions))?;
+    build_xla_session_with(model_path, num_layers, context_capacity, image_preprocessor)
 }
 
 impl ComputeBackend for XlaBackend {
@@ -164,12 +204,10 @@ impl ComputeBackend for XlaBackend {
         // 256-token compatibility default (issue #2855). A pinned
         // `MLXCEL_XLA_CONTEXT_CAPACITY` still wins inside the resolver and
         // ignores the hint. The image guard from `create_session` is omitted on
-        // purpose: the caller's hint already includes the worst-case image
-        // expansion, so a too-small shape can no longer be compiled here.
-        let model_window = crate::read_model_context_window(model_path);
-        let context_capacity =
-            mlxcel_xla::resolve_context_capacity(required_positions, model_window)
-                .map_err(|error| anyhow::anyhow!(error))?;
+        // purpose: an image caller sizes from its processed media through
+        // `create_prepared_xla_session` instead (issue #3361), and admission
+        // still rejects a request that does not fit the compiled shape.
+        let context_capacity = request_sized_capacity(model_path, required_positions)?;
         let _ = (kv_cache_mode, token_bias);
         build_xla_session(model_path, num_layers, context_capacity)
     }
