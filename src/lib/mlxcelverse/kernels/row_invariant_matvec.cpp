@@ -44,7 +44,9 @@ namespace {
 // the four weights of every column, and adds the four products of each
 // (row, column) pair to that pair's f32 accumulator in a fixed order;
 // `simd_sum` then combines the lanes. The arithmetic of one output depends
-// only on K: neither the row count nor NO changes it.
+// only on K: neither the row count nor NO changes it. Inputs are indexed,
+// not read through a `device` pointer: MLX binds an array of fewer than 8
+// elements in the `constant` address space (a tiny test model's x or w).
 constexpr const char* ROWS_MATVEC_SOURCE = R"(
     const uint lane = thread_index_in_simdgroup;
     const uint n0 = thread_position_in_grid.y * NO;
@@ -57,14 +59,14 @@ constexpr const char* ROWS_MATVEC_SOURCE = R"(
     for (uint k = lane * 4; k < K; k += 128) {
         float xs[ROWS][4];
         for (int m = 0; m < ROWS; ++m) {
-            const device T* xr = x + size_t(m) * K + k;
-            for (int i = 0; i < 4; ++i) xs[m][i] = float(xr[i]);
+            const size_t xr = size_t(m) * K + k;
+            for (int i = 0; i < 4; ++i) xs[m][i] = float(x[xr + i]);
         }
         for (int j = 0; j < NO; ++j) {
             const uint n = min(n0 + j, N - 1);
-            const device WT* wr = w + size_t(n) * K + k;
-            const float w0 = float(wr[0]), w1 = float(wr[1]);
-            const float w2 = float(wr[2]), w3 = float(wr[3]);
+            const size_t wr = size_t(n) * K + k;
+            const float w0 = float(w[wr]), w1 = float(w[wr + 1]);
+            const float w2 = float(w[wr + 2]), w3 = float(w[wr + 3]);
             for (int m = 0; m < ROWS; ++m) {
                 float part = w0 * xs[m][0];
                 part = fma(w1, xs[m][1], part);
@@ -96,16 +98,16 @@ constexpr const char* ROWS_MATVEC_SPLIT_SOURCE = R"(
     threadgroup float partial[SPLIT][ROWS];
     float acc[ROWS];
     for (int m = 0; m < ROWS; ++m) acc[m] = 0.0f;
-    const device WT* wr = w + size_t(n) * K;
+    const size_t wr = size_t(n) * K;
     for (uint k = group * 128 + lane * 4; k < K; k += 128 * SPLIT) {
-        const float w0 = float(wr[k]), w1 = float(wr[k + 1]);
-        const float w2 = float(wr[k + 2]), w3 = float(wr[k + 3]);
+        const float w0 = float(w[wr + k]), w1 = float(w[wr + k + 1]);
+        const float w2 = float(w[wr + k + 2]), w3 = float(w[wr + k + 3]);
         for (int m = 0; m < ROWS; ++m) {
-            const device T* xr = x + size_t(m) * K + k;
-            float part = w0 * float(xr[0]);
-            part = fma(w1, float(xr[1]), part);
-            part = fma(w2, float(xr[2]), part);
-            part = fma(w3, float(xr[3]), part);
+            const size_t xr = size_t(m) * K + k;
+            float part = w0 * float(x[xr]);
+            part = fma(w1, float(x[xr + 1]), part);
+            part = fma(w2, float(x[xr + 2]), part);
+            part = fma(w3, float(x[xr + 3]), part);
             acc[m] += part;
         }
     }

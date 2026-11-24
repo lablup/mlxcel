@@ -31,6 +31,7 @@ use crate::models::laguna_layers::LagunaCache;
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
+use crate::models::speculative_exactness_draws as draws;
 use mlxcel_core::drafter::dflash::SpeculativeTarget;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -118,6 +119,31 @@ impl LagunaModel {
     /// fresh caches; the block arm's rotating caches carry the same
     /// speculative slack the burst arms them with.
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
+        let lengths =
+            draws::prompt_lengths(PROBE_PROMPT_LEN, PROBE_DRAWS, self.probe_long_context());
+        self.probe_block_chain_exactness_at(block_size, &lengths)
+    }
+
+    /// Prompt length of the probe's long draw: past the sliding window, where
+    /// a verify block's rows and the decode steps stop seeing the same keys
+    /// unless the model accounts for it (issue #3409). `None` without a
+    /// sliding layer.
+    fn probe_long_context(&self) -> Option<usize> {
+        self.layers
+            .iter()
+            .any(|layer| layer.self_attn.is_sliding)
+            .then(|| draws::past_window(self.sliding_window as usize))
+    }
+
+    /// [`Self::probe_block_chain_exactness`] over draws of the given prompt
+    /// lengths, one draw per entry.
+    ///
+    /// Used by: [`Self::probe_block_chain_exactness`] and the exactness survey test.
+    pub fn probe_block_chain_exactness_at(
+        &self,
+        block_size: usize,
+        prompt_lengths: &[usize],
+    ) -> BlockChainExactness {
         if block_size < 2 {
             return BlockChainExactness::NotRun("block width below 2 drafts nothing");
         }
@@ -125,20 +151,22 @@ impl LagunaModel {
         if vocab < 2 {
             return BlockChainExactness::NotRun("degenerate vocabulary");
         }
-        for draw in 0..PROBE_DRAWS {
-            let verdict = self.probe_one_draw(block_size, vocab, draw);
-            if !verdict.is_equal() {
-                return verdict;
-            }
-        }
-        BlockChainExactness::Equal
+        draws::run_draws(prompt_lengths, |draw, prompt_len| {
+            self.probe_one_draw(block_size, vocab, draw, prompt_len)
+        })
     }
 
-    fn probe_one_draw(&self, block_size: usize, vocab: usize, draw: usize) -> BlockChainExactness {
+    fn probe_one_draw(
+        &self,
+        block_size: usize,
+        vocab: usize,
+        draw: usize,
+        prompt_len: usize,
+    ) -> BlockChainExactness {
         let salt = draw * 977 + 1;
         let wrap =
             |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
-        let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
+        let prompt: Vec<i32> = (0..prompt_len).map(|i| wrap(i, 7, 1)).collect();
         let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
         let as_input =
