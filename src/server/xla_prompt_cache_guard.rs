@@ -43,13 +43,23 @@ pub(crate) fn xla_serve_backend_selected() -> bool {
     std::env::var("MLXCEL_BACKEND").ok().as_deref() == Some("xla")
 }
 
+/// The family logged when `config.json` cannot be read or parsed, so the
+/// guard cannot tell whether the model is recurrent.
+pub(crate) const UNDETECTED_FAMILY: &str = "unreadable config.json";
+
 /// The family to log when `model_path` must stay out of prefix sharing on the
-/// OpenXLA backend, or `None` when it may share prefixes. An unreadable
-/// `config.json` is `None`: the model load reports that error itself.
+/// OpenXLA backend, or `None` when it may share prefixes. A `config.json`
+/// that cannot be read or parsed fails closed (the cache stays off): the
+/// guard cannot rule out recurrent state, and the model load reports the
+/// error itself.
 pub(crate) fn xla_recurrent_family(model_path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(model_path.join("config.json")).ok()?;
+    let Ok(text) = std::fs::read_to_string(model_path.join("config.json")) else {
+        return Some(UNDETECTED_FAMILY.to_string());
+    };
     // Tolerant of HF's bare `Infinity` (Mamba2's `time_step_limit`).
-    let config = mlxcel_xla::parse_hf_config_json(&text).ok()?;
+    let Ok(config) = mlxcel_xla::parse_hf_config_json(&text) else {
+        return Some(UNDETECTED_FAMILY.to_string());
+    };
     let threads_state = mlxcel_xla::config_json_has_recurrent_state(&text).unwrap_or(false);
     recurrent_prefix_sharing_family(&config, threads_state)
 }

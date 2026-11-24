@@ -178,3 +178,22 @@ fn startup_resolver_builds_no_store_for_an_xla_recurrent_model() {
     assert_eq!(listed, (false, false, false), "granitemoehybrid");
     assert_eq!(dense, (true, true, true), "tiny llama");
 }
+
+/// A `config.json` the guard cannot read or parse leaves the cache off: the
+/// guard cannot rule out recurrent state, so it must not fail open.
+#[test]
+fn an_unreadable_or_unparseable_config_fails_closed() {
+    let missing = tempfile::tempdir().expect("tempdir");
+    let garbled = model_dir(r#"{"model_type": "mamba2", "#);
+    for (dir, what) in [
+        (missing.path(), "missing config.json"),
+        (garbled.path(), "unparseable config.json"),
+    ] {
+        assert_eq!(
+            xla_recurrent_family(dir).as_deref(),
+            Some(UNDETECTED_FAMILY),
+            "{what}"
+        );
+        assert_refused(dir, what);
+    }
+}
