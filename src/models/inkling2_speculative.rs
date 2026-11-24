@@ -268,7 +268,6 @@ impl Inkling2Model {
         capture_layer_ids: &[usize],
         suppressed: &TokenBiasMap,
     ) -> Inkling2VerifyOutput {
-        let suppressed = suppressed;
         let length = mlxcel_core::array_shape(verify_input)[1];
         let chunk = mlxcel_core::prefill_plan::prefill_chunk_len() as i32;
         if chunk == 0 || length <= chunk {
@@ -277,7 +276,7 @@ impl Inkling2Model {
                 caches,
                 capture_layer_ids,
                 false,
-                &suppressed,
+                suppressed,
             );
         }
         let mut parts: Vec<Vec<UniquePtr<MlxArray>>> = Vec::new();
@@ -287,7 +286,7 @@ impl Inkling2Model {
             let end = (start + chunk).min(length);
             let piece = mlxcel_core::utils::slice_axis(verify_input, 1, start, end);
             let out =
-                self.forward_speculative(&piece, caches, capture_layer_ids, false, &suppressed);
+                self.forward_speculative(&piece, caches, capture_layer_ids, false, suppressed);
             // Materialize the chunk before the next one builds on its caches,
             // as the classic chunked prefill does.
             let mut live: Vec<*const MlxArray> = out
