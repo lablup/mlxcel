@@ -5057,7 +5057,7 @@ pub(crate) fn emit_ssm_probe_with(
             );
             match &w {
                 SsmMixerW::Mamba2(w) => {
-                    ssm::mamba2_mixer_prefill_form(&mut b, &*c, form, w, &x, &real_len, &h0, &conv0)
+                    ssm::mamba2_mixer_prefill_form(&mut b, c, form, w, &x, &real_len, &h0, &conv0)
                 }
                 SsmMixerW::Mamba1(w) => {
                     ssm::mamba1_mixer_prefill(&mut b, c, w, &x, &real_len, &h0, &conv0)
