@@ -391,7 +391,9 @@ fn resolve_llava_host_text_config(vlm_config: &VLMConfig) -> serde_json::Map<Str
         .as_object()
         .cloned()
         .unwrap_or_default();
-    mlxcel_xla::apply_llava_text_config_defaults(&mut text_config);
+    if mlxcel_xla::is_llava_text_defaults_wrapper(Some(vlm_config.model_type.as_str())) {
+        mlxcel_xla::apply_llava_text_config_defaults(&mut text_config);
+    }
     text_config
 }
 

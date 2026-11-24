@@ -99,6 +99,28 @@ mod tests {
         .to_string()
     }
 
+    fn implicit_llama_text_json(wrapper: &str) -> String {
+        let mut value: Value = serde_json::from_str(&config_json()).unwrap();
+        value["model_type"] = serde_json::json!(wrapper);
+        value["text_config"] = serde_json::json!({"model_type": "llama", "vocab_size": 32064});
+        value.to_string()
+    }
+
+    #[test]
+    fn llava_implicit_llama_text_config_resolves_hidden_4096() {
+        let config = LlavaVisionConfig::from_json_str(&implicit_llama_text_json("llava")).unwrap();
+        assert_eq!(config.text_hidden, 4096);
+    }
+
+    #[test]
+    fn llava_next_wrapper_stays_outside_the_iree_vision_contract() {
+        // The text defaults apply to `llava_next` on the host and emitter, but the
+        // IREE vision graph has no anyres support and keeps rejecting the wrapper.
+        let error =
+            LlavaVisionConfig::from_json_str(&implicit_llama_text_json("llava_next")).unwrap_err();
+        assert!(error.contains("llava"), "{error}");
+    }
+
     #[test]
     fn fingerprint_binds_every_graph_shape_and_semantic_field() {
         let base = LlavaVisionConfig::from_json_str(&config_json()).unwrap();
@@ -470,14 +492,14 @@ impl LlavaVisionConfig {
             }
         }
         let mut text_config = object(&root, "text_config")?.clone();
-        if model_type == "llava" {
+        if crate::llava_text_defaults::is_llava_text_defaults_wrapper(Some(model_type)) {
             crate::llava_text_defaults::apply_llava_text_config_defaults(&mut text_config);
         }
         let text_hidden = text_config
             .get("hidden_size")
             .and_then(Value::as_u64)
             .ok_or_else(|| {
-                if model_type == "llava" {
+                if crate::llava_text_defaults::is_llava_text_defaults_wrapper(Some(model_type)) {
                     crate::llava_text_defaults::llava_text_field_missing(
                         "hidden_size",
                         &text_config,

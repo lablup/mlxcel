@@ -42,6 +42,16 @@ const LLAMA_DEFAULTS: &[(&str, fn() -> Value)] = &[
     ("tie_word_embeddings", || json!(false)),
 ];
 
+/// Whether `model_type` names a Hugging Face LLaVA wrapper (`LlavaConfig` or
+/// `LlavaNextConfig`) whose `text_config` follows the llama defaults when it
+/// leaves fields implicit. The host preprocessor, the text-graph emitter, and
+/// the IREE vision config all gate on this one predicate so a wrapper resolves
+/// identically on every path.
+#[must_use]
+pub fn is_llava_text_defaults_wrapper(model_type: Option<&str>) -> bool {
+    matches!(model_type, Some("llava" | "llava_next"))
+}
+
 /// Fill the missing architecture fields of a LLaVA `text_config` from the
 /// defaults of its declared `model_type` (an absent `model_type` is `llama`,
 /// matching the host preprocessor's own fallback). Explicit values are never
@@ -134,6 +144,14 @@ mod tests {
             message.contains("hidden_size") && message.contains("mystery"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn wrapper_predicate_covers_llava_and_llava_next_only() {
+        assert!(is_llava_text_defaults_wrapper(Some("llava")));
+        assert!(is_llava_text_defaults_wrapper(Some("llava_next")));
+        assert!(!is_llava_text_defaults_wrapper(Some("qwen2_vl")));
+        assert!(!is_llava_text_defaults_wrapper(None));
     }
 
     #[test]
