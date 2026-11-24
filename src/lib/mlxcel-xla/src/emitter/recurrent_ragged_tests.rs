@@ -14,10 +14,10 @@
 
 //! The ragged (continuous-batching) decode for recurrent configs (issue
 //! #3340): per-slot `[B, ...dims]` state inputs and results, no KV for an
-//! attention-free model, and a hybrid still refused until #3344.
+//! attention-free model. Hybrid coverage is in `nemotron_h_tests`.
 
 use super::builder::Precision;
-use super::config::{Config, MixerKind};
+use super::config::Config;
 use super::model::{emit_decode_ragged, emit_decode_ragged_with};
 
 const TINY_MAMBA2: &str = r#"{
@@ -99,16 +99,6 @@ fn mamba2_ragged_decode_writes_every_layer_row_back() {
         .filter(|line| line.contains("stablehlo.dynamic_update_slice"))
         .count();
     assert_eq!(writes, 2 * 2, "ssm_h and ssm_conv for each of two layers");
-}
-
-#[test]
-fn hybrid_ragged_decode_is_refused_until_its_layers_are_validated() {
-    let mut hybrid = Config::llama_3_2_1b();
-    hybrid.layer_mixers[0] = MixerKind::Mamba2;
-    hybrid.ssm = tiny().ssm;
-    assert!(hybrid.has_kv_cache() && hybrid.has_recurrent_state());
-    let error = emit_decode_ragged(&hybrid, 4, false).expect_err("hybrid ragged");
-    assert!(error.contains("ragged decode"), "{error}");
 }
 
 #[test]

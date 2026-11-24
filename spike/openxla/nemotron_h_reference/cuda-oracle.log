@@ -1,0 +1,3 @@
+model = /tmp/epic564-models/nemotron-h-4b
+device = cuda, prompt = 6 tokens, reference = 40 tokens
+RESULT: TOKEN-EXACT PASS (OpenXLA greedy == HF oracle)

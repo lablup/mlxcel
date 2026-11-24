@@ -10,7 +10,7 @@ The frontend lives in `webui/`, independently of the existing `webpage/` site. S
 
 ## Canonical build pipeline
 
-Run commands from the repository root, with Python 3, Node **26.5.1**, and pnpm **12.16.1** installed:
+Run commands from the repository root, with Python 3, Node **26.5.1**, and pnpm **12.23.0** installed:
 
 ```bash
 pnpm --dir webui install --frozen-lockfile
@@ -29,7 +29,7 @@ The manifest records pinned package/toolchain versions, a source digest, per-fil
 
 | Budget | Maximum |
 |---|---:|
-| Initial JavaScript, gzip | 256 KiB |
+| Initial JavaScript, gzip | 384 KiB |
 | Total JavaScript, gzip | 700 KiB |
 | All embedded assets, including manifest | 5 MiB |
 

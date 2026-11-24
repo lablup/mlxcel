@@ -67,6 +67,7 @@ mod molmo2_vision;
 mod molmo_vision;
 mod molmo_vision_config;
 mod molmo_vision_ops;
+mod nemotron_h_config;
 pub(crate) mod numeric_ops;
 mod phi4_audio;
 pub(crate) mod production_probe_ops;
@@ -89,6 +90,8 @@ mod youtu_vl_plan;
 
 #[cfg(test)]
 mod context_tests;
+#[cfg(test)]
+mod nemotron_h_tests;
 #[cfg(test)]
 mod recurrent_ragged_tests;
 #[cfg(test)]
