@@ -1386,12 +1386,20 @@ pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport
         );
     }
 
+    // Inkling 2 is a multimodal family with no audio encoder: its checkpoints
+    // hold only text and vision weights and its chat template raises on audio
+    // parts (issue #3376). Refuse audio here, with the family's own reason,
+    // before any clip is fetched. Inkling 1 (`InklingVLM`) has a real audio
+    // tower and keeps `audio: multimodal`.
+    let no_audio_encoder = matches!(model_type, ModelType::Inkling2VLM);
+
     ModelMediaSupport {
         image: multimodal,
-        audio: multimodal,
+        audio: multimodal && !no_audio_encoder,
         video_native,
         video_frames_fallback,
         video_with_audio,
+        audio_refusal: no_audio_encoder.then_some(crate::server::media::INKLING2_AUDIO_REFUSAL),
     }
 }
 

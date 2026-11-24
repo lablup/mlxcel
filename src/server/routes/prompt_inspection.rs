@@ -403,3 +403,7 @@ mod prompt_inspection_tests;
 #[cfg(test)]
 #[path = "prompt_count_route_tests.rs"]
 mod prompt_count_route_tests;
+
+#[cfg(test)]
+#[path = "inkling2_audio_route_tests.rs"]
+mod inkling2_audio_route_tests;

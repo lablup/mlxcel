@@ -606,7 +606,7 @@ impl<'a> Sink<'a> {
                         ContentPart::VideoUrl { .. } => {
                             bail!("Kimi K3 chat rendering does not support video content parts")
                         }
-                        ContentPart::InputAudio { .. } => {
+                        ContentPart::InputAudio { .. } | ContentPart::AudioUrl { .. } => {
                             bail!("Kimi K3 chat rendering does not support audio content parts")
                         }
                     }
