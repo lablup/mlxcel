@@ -4420,6 +4420,15 @@ impl IreeRaggedLlama {
         unsafe { xla_test_set_slot_store_failure(self.ctx, i32::from(fail)) };
     }
 
+    /// Fail after writing the first recurrent tensor, with both KV transfers
+    /// already complete on a hybrid. This probes the shared validity boundary
+    /// between KV and recurrent state; `false` clears either failure mode.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_state_slot_store_failure(&mut self, fail: bool) {
+        // SAFETY: `self.ctx` remains valid for the lifetime of this engine.
+        unsafe { xla_test_set_slot_store_failure(self.ctx, if fail { 2 } else { 0 }) };
+    }
+
     /// Test support (issue #2923): whether `slot` currently holds a KV store
     /// that completed both transfers. `None` means the slot index is out of
     /// range or no reset has allocated the flags.

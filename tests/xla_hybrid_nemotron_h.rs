@@ -338,47 +338,53 @@ fn decode_slot(
     out
 }
 
-/// A store that dies after the first state tensor (`ssm_h` written, `ssm_conv`
-/// not) leaves the slot invalid even though it previously held a complete
+/// A store that dies after K, or after both KV and the first state tensor
+/// (`ssm_h` written, `ssm_conv` not), leaves the slot invalid even though it previously held a complete
 /// state, an active row on it is refused before IREE runs, and the next admit
 /// stores a whole fresh state and decodes reference-exact.
 #[test]
 #[ignore = "requires the pinned IREE distribution and compiler"]
 fn torn_state_store_leaves_the_slot_invalid_and_the_next_admit_recovers() {
-    let model = create_tiny_nemotron_h();
-    let (prompt_a, prompt_b) = (PROMPTS[0], PROMPTS[1]);
-    let mut engine =
-        IreeRaggedLlama::load(model.path(), &device(), B, CAPACITY).expect("ragged engine at B=4");
-    engine
-        .prefill_slot_logits(0, prompt_b)
-        .expect("seed slot 0");
-    assert_eq!(engine.test_slot_valid(0), Some(true));
+    for after_kv in [false, true] {
+        let model = create_tiny_nemotron_h();
+        let (prompt_a, prompt_b) = (PROMPTS[0], PROMPTS[1]);
+        let mut engine = IreeRaggedLlama::load(model.path(), &device(), B, CAPACITY)
+            .expect("ragged engine at B=4");
+        engine
+            .prefill_slot_logits(0, prompt_b)
+            .expect("seed slot 0");
+        assert_eq!(engine.test_slot_valid(0), Some(true));
 
-    engine.test_set_slot_store_failure(true);
-    engine
-        .prefill_slot_logits(0, prompt_a)
-        .expect_err("the simulated state transfer failure must fail the prefill");
-    engine.test_set_slot_store_failure(false);
-    assert_eq!(
-        engine.test_slot_valid(0),
-        Some(false),
-        "torn store is valid"
-    );
-    let (tokens, positions, lens) = one_row(0, 7, prompt_a.len());
-    let error = engine
-        .decode_ragged_logits_with_modes(&[0; B], &tokens, &positions, &lens)
-        .expect_err("an active row on a torn slot must be refused");
-    assert!(
-        error.contains("xla_llama_decode_ragged_logits failed"),
-        "{error}"
-    );
+        if after_kv {
+            engine.test_set_state_slot_store_failure(true);
+        } else {
+            engine.test_set_slot_store_failure(true);
+        }
+        engine
+            .prefill_slot_logits(0, prompt_a)
+            .expect_err("the simulated state transfer failure must fail the prefill");
+        engine.test_set_slot_store_failure(false);
+        assert_eq!(
+            engine.test_slot_valid(0),
+            Some(false),
+            "torn store is valid"
+        );
+        let (tokens, positions, lens) = one_row(0, 7, prompt_a.len());
+        let error = engine
+            .decode_ragged_logits_with_modes(&[0; B], &tokens, &positions, &lens)
+            .expect_err("an active row on a torn slot must be refused");
+        assert!(
+            error.contains("xla_llama_decode_ragged_logits failed"),
+            "{error}"
+        );
 
-    let logits = engine
-        .prefill_slot_logits(0, prompt_a)
-        .expect("the next admit recovers the slot");
-    assert_eq!(engine.test_slot_valid(0), Some(true));
-    let got = decode_slot(&mut engine, 0, argmax(&logits), prompt_a.len(), 8);
-    assert_eq!(got, references(&model, &[(prompt_a, 8)], &[])[0]);
+        let logits = engine
+            .prefill_slot_logits(0, prompt_a)
+            .expect("the next admit recovers the slot");
+        assert_eq!(engine.test_slot_valid(0), Some(true));
+        let got = decode_slot(&mut engine, 0, argmax(&logits), prompt_a.len(), 8);
+        assert_eq!(got, references(&model, &[(prompt_a, 8)], &[])[0]);
+    }
 }
 
 /// A request refused in Rust before the shim runs (an empty or oversized

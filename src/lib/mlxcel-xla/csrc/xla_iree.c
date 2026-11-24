@@ -274,10 +274,11 @@ void xla_test_batch_kv_reset_counters(void) {
   xla_test_bk_h2d_bytes = 0;
 }
 
-// Force the V half of the next prefill slot store to fail, and expose the
-// per-slot validity state so a device test can prove a torn store is rejected.
+// Mode 1 fails after the first transfer (K, or the first pure-SSM state).
+// Mode 2 fails after the first state transfer, after both KV writes in a hybrid.
+// Expose validity so device tests can prove both torn-store boundaries reject.
 void xla_test_set_slot_store_failure(xla_ctx* c, int32_t fail) {
-  if (c) c->rg_fail_slot_store = fail ? 1 : 0;
+  if (c) c->rg_fail_slot_store = fail == 2 ? 2 : (fail ? 1 : 0);
 }
 
 int32_t xla_test_slot_valid(const xla_ctx* c, int32_t slot) {
@@ -2264,7 +2265,7 @@ static int xla_store_prefill_slot(xla_ctx* c, int32_t slot,
     XLA_CHECK(xla_copy_into(c, kc, c->kcache_b, off, kv_len));
     transfers++;
 #ifdef MLXCEL_XLA_TEST_SUPPORT
-    if (c->rg_fail_slot_store) {
+    if (c->rg_fail_slot_store == 1) {
       fprintf(stderr,
               "xla_iree: test hook: simulated V slot store failure at slot=%d\n",
               slot);
@@ -2279,7 +2280,8 @@ static int xla_store_prefill_slot(xla_ctx* c, int32_t slot,
     XLA_CHECK(xla_copy_into(c, states[i], c->sscache_b[i],
                             (iree_device_size_t)slot * row, row));
 #ifdef MLXCEL_XLA_TEST_SUPPORT
-    if (c->rg_fail_slot_store && transfers == 0) {
+    if ((c->rg_fail_slot_store == 1 && transfers == 0) ||
+        (c->rg_fail_slot_store == 2 && i == 0)) {
       fprintf(stderr,
               "xla_iree: test hook: simulated state slot store failure at "
               "slot=%d\n",
