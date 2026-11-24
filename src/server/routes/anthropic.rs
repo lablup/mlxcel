@@ -87,6 +87,29 @@ use super::chat::{
 /// refusal. What the arm buys is that the day that schema gains a video block,
 /// a client-fixable request error does not arrive as a `501` saying the
 /// checkpoint cannot do it. The cost is one status comparison.
+/// The media refusal for a translated Messages request, if any.
+///
+/// Wraps [`crate::server::media_capability_rejection`] and adds the one check
+/// it cannot make from the translated request: an audio block, which the
+/// translator drops, sent to a checkpoint with a stated reason for having no
+/// audio encoder (Inkling 2, issue #3376). Every other checkpoint keeps
+/// ignoring such a block, as before.
+fn anthropic_media_rejection(
+    translated: &AnthropicTranslated,
+    state: &AppState,
+) -> Option<crate::server::types::ErrorResponse> {
+    if translated.has_audio_block
+        && let Some(reason) = state.media_support.audio_refusal
+    {
+        return Some(crate::server::types::ErrorResponse::not_supported(reason));
+    }
+    crate::server::media_capability_rejection(
+        &translated.chat_request,
+        state.media_support,
+        state.display_model_id(),
+    )
+}
+
 fn media_rejection_response(
     rejection: crate::server::types::ErrorResponse,
 ) -> AnthropicErrorResponse {
@@ -184,11 +207,7 @@ pub async fn anthropic_messages(
     // file is read (issue #1451). Rendered in the Anthropic error envelope this
     // route uses, so a client parsing it does not have to special-case one
     // rejection.
-    if let Some(rejection) = crate::server::media_capability_rejection(
-        &translated.chat_request,
-        state.media_support,
-        state.display_model_id(),
-    ) {
+    if let Some(rejection) = anthropic_media_rejection(&translated, &state) {
         return media_rejection_response(rejection).into_response();
     }
 
@@ -943,11 +962,7 @@ pub async fn anthropic_count_tokens(
     // checkpoint with no image tower, and this route never reaches a worker
     // that would refuse it later (issue #1748). Same check, same order and same
     // envelope as `anthropic_messages`, so both routes answer one body alike.
-    if let Some(rejection) = crate::server::media_capability_rejection(
-        &translated.chat_request,
-        state.media_support,
-        state.display_model_id(),
-    ) {
+    if let Some(rejection) = anthropic_media_rejection(&translated, &state) {
         return media_rejection_response(rejection).into_response();
     }
 
@@ -1243,6 +1258,7 @@ mod tests {
             video_native: true,
             video_frames_fallback: false,
             video_with_audio: false,
+            audio_refusal: None,
         };
         let request = chat_request_with_media_parts(serde_json::json!([
             {"type": "video_url", "video_url": {"url": "file:///clip.mp4"}},
@@ -1272,6 +1288,7 @@ mod tests {
             video_native: true,
             video_frames_fallback: false,
             video_with_audio: false,
+            audio_refusal: None,
         };
         let request = chat_request_with_media_parts(serde_json::json!([
             {"type": "input_audio", "input_audio": {"data": "aGVsbG8=", "format": "wav"}},

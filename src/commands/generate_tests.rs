@@ -1855,3 +1855,66 @@ fn kv_banner_without_a_storage_table_keeps_the_layer_count() {
         " (applied to 24 of 24 layers)"
     );
 }
+
+// ── audio refusal for a checkpoint with no audio encoder (issue #3376) ──────
+
+/// A directory holding only an Inkling 2 `config.json`: there are no weights,
+/// no tokenizer and no chat template, so a run that gets past the refusal would
+/// fail somewhere else with a different message.
+fn inkling2_config_only_dir() -> tempfile::TempDir {
+    drafter_fixture_dir(r#"{"model_type": "inkling2", "architectures": ["Inkling2ForCausalLM"]}"#)
+}
+
+fn parse_generate_args(argv: Vec<String>) -> crate::GenerateArgs {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            use clap::Parser;
+            match crate::Cli::try_parse_from(argv)
+                .expect("generate args parse")
+                .command
+            {
+                crate::Commands::Generate(args) => args,
+                _ => panic!("expected the generate command"),
+            }
+        })
+        .expect("spawn CLI parser thread")
+        .join()
+        .expect("CLI parser thread panicked")
+}
+
+#[test]
+fn generate_refuses_audio_for_inkling2_before_loading_anything() {
+    let dir = inkling2_config_only_dir();
+    let model = dir.path().to_string_lossy().to_string();
+    let wav = dir.path().join("x.wav");
+    for prompt in [Some("hi"), None] {
+        let mut argv: Vec<String> = ["mlxcel", "generate", "-m", &model, "--audio"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        argv.push(wav.to_string_lossy().to_string());
+        if let Some(prompt) = prompt {
+            argv.extend(["-p".to_string(), prompt.to_string()]);
+        }
+        let error = super::run_generate(parse_generate_args(argv))
+            .expect_err("--audio on Inkling 2 must be refused")
+            .to_string();
+        assert_eq!(error, mlxcel::server::INKLING2_AUDIO_REFUSAL);
+    }
+}
+
+#[test]
+fn audio_refusal_leaves_other_families_and_audio_free_runs_alone() {
+    let inkling2 = inkling2_config_only_dir();
+    // No `--audio`: nothing to refuse, the run proceeds to its own loading.
+    assert!(super::refuse_audio_without_encoder(inkling2.path(), false).is_ok());
+
+    // A family with an audio path is not touched by the check.
+    let qwen = drafter_fixture_dir(FULL_MODEL_CONFIG);
+    assert!(super::refuse_audio_without_encoder(qwen.path(), true).is_ok());
+
+    // An unreadable directory is left to the loader to report.
+    let missing = qwen.path().join("missing");
+    assert!(super::refuse_audio_without_encoder(&missing, true).is_ok());
+}

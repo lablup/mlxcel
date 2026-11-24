@@ -863,6 +863,11 @@ pub enum MtpPolicyUnavailableReason {
     /// `MLXCEL_MTP_ADAPTIVE` is off. The pre-#333 static per-hardware gate
     /// decides instead, and nothing is measured or persisted.
     AdaptiveDisabled,
+    /// The server runs a DFlash-kind speculative dispatch (for example the
+    /// Inkling 2 bundled DSpark drafter, issue #3374). The adaptive policy
+    /// manages only the MTP burst, so nothing is profiled, but the pairing
+    /// fields name the DFlash pairing and its exactness gate passed.
+    DflashDispatch,
     /// No batch worker has published a policy state yet: the model is still
     /// loading. This is transient. Every worker variant publishes at
     /// startup, including the ones with no MTP path at all (the legacy
@@ -879,6 +884,7 @@ impl MtpPolicyUnavailableReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NoMtpDispatch => "no_mtp_dispatch",
+            Self::DflashDispatch => "dflash_dispatch",
             Self::AdaptiveDisabled => "adaptive_disabled",
             Self::WorkerNotReady => "worker_not_ready",
         }
@@ -891,7 +897,8 @@ impl MtpPolicyUnavailableReason {
 ///
 /// The pairing fields are `Option` because they only exist when a policy
 /// exists; they are all `Some` for every status except
-/// [`MtpPolicyStatus::Unavailable`]. Everything the persisted hint carries is
+/// [`MtpPolicyStatus::Unavailable`], where only the `dflash_dispatch` reason
+/// fills them. Everything the persisted hint carries is
 /// here too, so a consumer reading this endpoint never needs the on-disk file.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MtpPolicySnapshot {
@@ -986,6 +993,23 @@ impl MtpPolicySnapshot {
             acceptance_rate: None,
             samples: 0,
             samples_required: PROFILE_SAMPLE_TARGET,
+        }
+    }
+
+    /// The "a DFlash pairing is served" view (issue #3374): `unavailable`
+    /// with reason `dflash_dispatch`, because the adaptive policy manages only
+    /// the MTP burst, and the pairing fields filled so a consumer can show
+    /// which target and drafter are paired at which block width. A DFlash
+    /// pairing whose exactness probe declined is published through
+    /// [`Self::exactness_declined`] instead.
+    #[must_use]
+    pub fn dflash_dispatch(target: String, drafter: String, block_size: u32) -> Self {
+        Self {
+            target: Some(target),
+            drafter: Some(drafter),
+            hardware: Some(hardware_label()),
+            block_size: Some(block_size),
+            ..Self::unavailable(MtpPolicyUnavailableReason::DflashDispatch, Some(false))
         }
     }
 

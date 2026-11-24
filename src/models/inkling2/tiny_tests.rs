@@ -289,7 +289,7 @@ fn weights(seed: u64, zero_controllers: bool) -> WeightMap {
     w
 }
 
-fn model(passes: usize, zero_controllers: bool) -> Inkling2Model {
+pub(super) fn model(passes: usize, zero_controllers: bool) -> Inkling2Model {
     Inkling2Model::from_weights(config(passes), weights(7, zero_controllers), None).unwrap()
 }
 

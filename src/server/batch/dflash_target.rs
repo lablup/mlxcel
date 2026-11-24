@@ -118,6 +118,18 @@ impl DFlashVerifyOutput for crate::models::laguna_speculative::LagunaVerifyOutpu
     }
 }
 
+impl DFlashVerifyOutput for crate::models::inkling2::speculative::Inkling2VerifyOutput {
+    fn logits(&self) -> &MlxArray {
+        self.logits
+            .as_ref()
+            .expect("Inkling 2 verify output must carry logits")
+    }
+
+    fn hidden_states(&self) -> &[UniquePtr<MlxArray>] {
+        &self.hidden_states
+    }
+}
+
 impl DFlashVerifyOutput for crate::models::muse_glimmer::VerifyOutput {
     fn logits(&self) -> &MlxArray {
         self.logits
@@ -147,12 +159,16 @@ pub(crate) enum DFlashDrafterFamily {
     MuseAssistant,
     /// The Poolside Laguna DFlash drafter (issue #1351).
     Laguna,
+    /// The DSpark drafter bundled with an Inkling 2 checkpoint (issue #3374).
+    Inkling2DSpark,
 }
 
 impl DFlashDrafterFamily {
     /// Which family a loaded drafter is, read off its two self-reports.
     fn of(drafter: &dyn Drafter) -> Self {
-        if drafter.is_dspark() {
+        if drafter.is_inkling2_dspark() {
+            Self::Inkling2DSpark
+        } else if drafter.is_dspark() {
             Self::DSpark
         } else if drafter.is_muse_assistant() {
             Self::MuseAssistant
@@ -371,6 +387,27 @@ impl DFlashTargetModel for crate::models::LagunaWrapper {
     }
 }
 
+/// Inkling 2 (issue #3374), driven by the DSpark drafter bundled in its own
+/// checkpoint: every prompt row seeds the drafter context, the block width is
+/// gated by the exactness probe, and the burst is B = 1 only.
+impl DFlashTargetModel for crate::vision::Inkling2VlModel {
+    fn make_dflash_caches(&self) -> Vec<mlxcel_core::inkling_layer::InklingLayerCache> {
+        self.text.make_speculative_caches()
+    }
+    fn first_hidden_rows() -> FirstHiddenRows {
+        FirstHiddenRows::EveryPromptRow
+    }
+    fn exactness_allows(&self, block_size: usize) -> bool {
+        self.text.dflash_exactness_allows(block_size)
+    }
+    fn required_drafter_family() -> Option<DFlashDrafterFamily> {
+        Some(DFlashDrafterFamily::Inkling2DSpark)
+    }
+    fn supports_batched() -> bool {
+        false
+    }
+}
+
 impl DFlashTargetModel for crate::vision::MuseGlimmerVlmModel {
     fn make_dflash_caches(&self) -> Vec<crate::models::muse_glimmer::MuseCache> {
         self.text.make_speculative_caches()
@@ -449,6 +486,7 @@ fn required_family_pairing_error(
         DFlashDrafterFamily::DSpark => "an LFM2 DSpark drafter",
         DFlashDrafterFamily::MuseAssistant => "the Muse Glimmer assistant drafter",
         DFlashDrafterFamily::Laguna => "a Laguna DFlash drafter",
+        DFlashDrafterFamily::Inkling2DSpark => "the DSpark drafter bundled with Inkling 2",
     };
     Some(match required {
         DFlashDrafterFamily::DSpark => format!(
@@ -478,6 +516,12 @@ fn required_family_pairing_error(
              residual streams it was trained on, at a width this target does not produce, \
              and its mask token id indexes a different vocabulary. Point --model-draft at a \
              Laguna DFlash drafter, or drop it to serve this model with classic decode."
+        ),
+        DFlashDrafterFamily::Inkling2DSpark => format!(
+            "the target is an Inkling 2 checkpoint and the drafter passed to --model-draft is \
+             {got}, not its bundled DSpark drafter. An Inkling 2 target drafts with the \
+             mtp.safetensors shipped in its own checkpoint: pass the same directory to \
+             --model-draft, or drop it to serve this model with classic decode."
         ),
         DFlashDrafterFamily::Dflash => format!(
             "the target admits only the Qwen 3.5 DFlash drafter and the drafter passed to \

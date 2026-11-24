@@ -2071,15 +2071,11 @@ pub(super) fn run_generation_mode(
                 );
             }
             // issue #1351: a DFlash drafter paired with a target that has an
-            // offline DFlash arm (Laguna), explicit or auto-detected alike.
+            // offline DFlash arm (Laguna, Inkling 2), explicit or auto-detected
+            // alike.
+            // The multimodal refusal is per target there: Inkling 2 (#3374)
+            // prefills an image prompt from its merged embeddings.
             OfflineDraftRoute::Dflash => {
-                if vlm_embeddings.is_some() {
-                    return Err(anyhow!(
-                        "--draft-kind dflash does not support multimodal input in the offline \
-                         `mlxcel generate` path; rerun with a text-only prompt, or omit \
-                         --draft-model"
-                    ));
-                }
                 return super::generate_dflash::run_offline_dflash(
                     model,
                     draft_model_path,
@@ -2088,6 +2084,7 @@ pub(super) fn run_generation_mode(
                     sampling_config,
                     block_size as usize,
                     token_bias,
+                    vlm_embeddings,
                 );
             }
             // #2757: an ordinary full model drafting on the engine's
@@ -2992,6 +2989,27 @@ fn repl_drafter(args: &GenerateArgs) -> Option<(std::path::PathBuf, Option<Strin
     Some((draft_model, args.speculative.draft_kind.clone()))
 }
 
+/// Refuse `--audio` for a checkpoint that has no audio encoder (Inkling 2),
+/// before its weights load.
+///
+/// Without this the run rendered the chat template, which raises its own
+/// `Inkling 2 does not accept audio input`, and surfaced that as a template
+/// error. The text is the one the server answers with
+/// ([`mlxcel::server::INKLING2_AUDIO_REFUSAL`]), so both fronts agree.
+/// `model_path` is a resolved local directory; a path whose type cannot be
+/// read is left to the later load to report (issue #3376).
+fn refuse_audio_without_encoder(model_path: &Path, has_audio: bool) -> Result<()> {
+    if has_audio
+        && matches!(
+            mlxcel::models::get_model_type(model_path),
+            Ok(mlxcel::models::ModelType::Inkling2VLM)
+        )
+    {
+        anyhow::bail!("{}", mlxcel::server::INKLING2_AUDIO_REFUSAL);
+    }
+    Ok(())
+}
+
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // Epic #92 / issue #96: no `-p/--prompt` means "interactive chat". Route to
     // the reusable REPL entry point before any one-shot-only setup. The REPL
@@ -3012,6 +3030,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
             args.model.models_dir.as_deref(),
             args.model.revision.as_deref(),
         )?;
+        refuse_audio_without_encoder(&resolved, args.generation.audio.is_some())?;
         if super::generate_voicechat::is_voicechat_checkpoint(&resolved) {
             ensure!(
                 args.generation.audio.is_some(),
@@ -3122,6 +3141,10 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             .with_context(|| format!("resolving --draft-model {}", draft.display()))?,
         );
     }
+
+    // `--audio` for a family with no audio encoder is refused before anything
+    // loads, with the message the server gives (issue #3376).
+    refuse_audio_without_encoder(&args.model.model, args.generation.audio.is_some())?;
 
     // Nemotron VoiceChat (issue #1374) is a full-duplex speech model with
     // its own timeline loop: `-p` is its system prompt and the output length

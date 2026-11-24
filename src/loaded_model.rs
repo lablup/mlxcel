@@ -587,6 +587,12 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, lm_head_module())
     }
 
+    fn inkling2_dspark_binding(
+        &self,
+    ) -> Option<mlxcel_core::drafter::inkling2_dspark::Inkling2DsparkBinding> {
+        delegate_language_model!(self, inkling2_dspark_binding())
+    }
+
     fn after_prefill(&self) {
         delegate_language_model!(self, after_prefill())
     }
