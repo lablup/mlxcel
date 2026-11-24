@@ -27,6 +27,7 @@
 //! match bitwise; `MLXCEL_INKLING2_KERNELS=0` keeps every forward on it.
 
 mod attention;
+mod batched;
 pub mod config;
 mod conv;
 pub(crate) mod kernels;
@@ -36,6 +37,10 @@ pub mod quant;
 mod residual;
 mod runtime;
 pub(crate) mod sanitize;
+/// DSpark speculative-decoding target hooks (issue #3374): the verify forward
+/// with pre-layer captures, the rollback and the block-versus-chain probe.
+#[path = "inkling2_speculative.rs"]
+pub mod speculative;
 
 use std::path::Path;
 
@@ -136,6 +141,7 @@ impl Inkling2Model {
         }
         let text = config.text_config.clone();
         text.validate()?;
+        kernels::log_model_gates(&text);
         let weights = sanitize::sanitize_weights(weights, text.hidden_size)?;
         let quant = dense_quantization(&config);
         let embed_tokens = UnifiedEmbedding::from_weights(
@@ -275,9 +281,49 @@ impl Inkling2Model {
         embeddings: &MlxArray,
         caches: &mut [InklingLayerCache],
     ) -> UniquePtr<MlxArray> {
+        self.hidden_with_captures(embeddings, caches, &[]).0
+    }
+
+    /// [`Self::hidden`], also returning the states the bundled DSpark drafter
+    /// taps (issue #3374), in `capture_ids` order. Id `v < visit_count` is the
+    /// partial block ENTERING visit `v` (upstream `captures[visit] = x` before
+    /// the layer); id `visit_count` is the final normalized hidden in the
+    /// activation dtype. Capturing changes what is kept, never what is
+    /// computed.
+    fn hidden_with_captures(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [InklingLayerCache],
+        capture_ids: &[usize],
+    ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
+        self.hidden_rows(embeddings, &mut [caches], capture_ids)
+    }
+
+    /// [`Self::hidden_with_captures`] over `[B, L]` embeddings, with `rows`
+    /// holding each batch row's visit caches (see `batched.rs`).
+    fn hidden_rows(
+        &self,
+        embeddings: &MlxArray,
+        rows: &mut [&mut [InklingLayerCache]],
+        capture_ids: &[usize],
+    ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
+        let mut captured: Vec<Option<UniquePtr<MlxArray>>> =
+            (0..capture_ids.len()).map(|_| None).collect();
+        let mut capture = |visit: usize, x: &MlxArray| {
+            for (slot, &id) in captured.iter_mut().zip(capture_ids) {
+                if id == visit {
+                    *slot = Some(mlxcel_core::copy(x));
+                }
+            }
+        };
         assert_eq!(
-            caches.len(),
-            self.layer_indices.len(),
+            rows.len() as i32,
+            mlxcel_core::array_shape(embeddings)[0],
+            "Inkling 2 needs one cache set per batch row"
+        );
+        assert!(
+            rows.iter()
+                .all(|caches| caches.len() == self.layer_indices.len()),
             "Inkling 2 needs one cache per layer visit"
         );
         let mut x = mlxcel_core::copy(embeddings);
@@ -320,15 +366,32 @@ impl Inkling2Model {
                 }
                 _ => None,
             };
-            x = self.layers[index].forward(
-                &x,
-                &mut blocks,
-                &mut caches[visit],
-                messages.as_deref(),
-            );
+            capture(visit, &x);
+            let mut visit_rows: Vec<&mut InklingLayerCache> =
+                rows.iter_mut().map(|caches| &mut caches[visit]).collect();
+            x = self.layers[index].forward(&x, &mut blocks, &mut visit_rows, messages.as_deref());
         }
         let out = self.final_input.forward(&blocks, &x);
-        mlxcel_core::squeeze_axis(&mlxcel_core::utils::slice_axis(&out, -2, 0, 1), -2)
+        let out = mlxcel_core::squeeze_axis(&mlxcel_core::utils::slice_axis(&out, -2, 0, 1), -2);
+        let visits = self.layer_indices.len();
+        if capture_ids.contains(&visits) {
+            let normalized =
+                mlxcel_core::astype(&self.norm.forward(&out), mlxcel_core::array_dtype(&x));
+            capture(visits, &normalized);
+        }
+        // An id past the visit count captures nothing; keep the vector
+        // aligned with the request (the drafter's config validation refuses
+        // such ids before any forward runs).
+        let shape = mlxcel_core::array_shape(&out);
+        let captured = captured
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    mlxcel_core::zeros(&[shape[0], shape[1], hidden], mlxcel_core::array_dtype(&x))
+                })
+            })
+            .collect();
+        (out, captured)
     }
 
     /// Final norm, the bf16 rounding the checkpoint's f32 head expects, the
@@ -409,6 +472,9 @@ fn copy_all(values: &[UniquePtr<MlxArray>]) -> Vec<UniquePtr<MlxArray>> {
         .collect()
 }
 
+#[cfg(test)]
+#[path = "inkling2/batched_tests.rs"]
+mod batched_tests;
 #[cfg(test)]
 mod tiny_tests;
 #[cfg(test)]

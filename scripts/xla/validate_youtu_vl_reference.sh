@@ -60,7 +60,8 @@ PY
   --out "$REFERENCE"
 
 DIAGNOSTIC_FEATURES="${MLXCEL_YOUTU_VL_DIAGNOSTIC_FEATURES:-xla-diagnostics}"
-cargo run --release \
+# The production-session smoke stage selects its device the way the CLI does.
+MLXCEL_XLA_DEVICE="$DEVICE" cargo run --release \
   --features "$DIAGNOSTIC_FEATURES" \
   --example xla_youtu_vl_reference_check -- \
   --model "$MODEL_DIR" \

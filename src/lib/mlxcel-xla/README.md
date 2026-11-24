@@ -289,6 +289,19 @@ plus every K/V element across one-token, nonzero-padding, and near-capacity case
 spike/openxla/.venv/bin/python spike/openxla/prefill_embeddings_check.py
 ```
 
+### Running the lib tests (issue #3365)
+
+With `--features iree`, build the lib tests in the release profile:
+
+```bash
+eval "$(bash scripts/iree/setup-cuda.sh --env)"   # or setup-rocm.sh / setup-macos.sh
+cargo test --release -p mlxcel-xla --lib --features iree
+```
+
+The default-feature run (`cargo test -p mlxcel-xla --lib`) needs no IREE and works in any profile. The `--profile test-fast` build of the `iree` lib tests fails to link (undefined `iree_runtime_*` and `iree_hal_*` from `libxla_iree.a(xla_aux.o)`) for two reasons that combine. The IREE runtime recipe (whole-archive plus a link group) lives only in the root `mlxcel` `build.rs`, because link arguments emitted by a dependency's build script do not reach the binary that links it, so the `mlxcel-xla` lib test binary never receives the runtime archives. Release links anyway because fat LTO and `codegen-units = 1` drop the shim calls that no unit test reaches, so no reference to `xla_aux.o` survives; `test-fast` sets `lto = false`, keeps those references, and the link fails. A lib test that calls the shim (rather than the pure-Rust paths) would therefore fail in release too. Tests that need the real runtime belong in the root crate (`cargo test --features xla-iree`) or in an example, which get the recipe from the root `build.rs`.
+
+`xla_qwen25_vl_window_check` (`--features xla-diagnostics-cpu`) needs non-uniform input, and more than one image: its negative controls (full attention, identity permutation, zero vision positions) assert that the mutated run differs from the strict run, which a solid or patch-aligned repeating image cannot satisfy.
+
 ### Single-sequence decode ABI (issue #3060)
 
 The single-sequence `decode_step` takes its token, position and cache-len as ABI-level `i32` VM arguments instead of rank-0 `tensor<i32>` buffer views. A rank-0 buffer argument can only reach the host-side slice offsets and mask bounds through a host-visible staging resource, so the buffer-view ABI made IREE materialize a 192-byte `!stream.resource<staging>` allocation and three `stream.resource.load`s per step; passing the values in the VM call removes that staging. The graph rebuilds the tensor operands with `tensor.from_elements`, so the op sequence after the prologue is unchanged.
@@ -428,7 +441,7 @@ serve as the CPU non-regression baseline.
 
 Set `MLXCEL_XLA_CONTEXT_CAPACITY` before loading a model to select the sequence dimension shared by the prefill graph, decode graph, RoPE tables, masks, and single/ragged KV caches. For example, `MLXCEL_XLA_CONTEXT_CAPACITY=1024` provides enough static space for a 729-token image expansion plus text and generation headroom. The selected value is part of the compiled-artifact identity; modules and runtime buffers with a different capacity are rejected instead of being paired.
 
-Admission uses `effective_prompt_len + max_new_tokens <= context_capacity`. Text requests use their token count. A multimodal preprocessor must supply the length after placeholder expansion to the same validation helper before native execution. The error reports the effective prompt length, requested generation budget, and configured capacity, and batch rejection occurs before a request id or slot is consumed.
+Admission uses `effective_prompt_len + max_new_tokens <= context_capacity`. Text requests use their token count. A multimodal preprocessor must supply the length after placeholder expansion to the same validation helper before native execution. Both the CLI and the serve worker take that length from the prepared prefill (`PreparedPrefill::sequence_len`): the CLI prepares the images before it compiles its single shape and sizes the shape from it, and the server routes it to the smallest compiled bucket. The config-derived worst-case image floor only chooses the server's startup bucket set. The error reports the effective prompt length, requested generation budget, and configured capacity, and batch rejection occurs before a request id or slot is consumed.
 
 Larger capacities trade flexibility for resources: KV memory grows linearly with capacity, while the static prefill attention mask and score tensors grow quadratically and compilation can take longer. This backend emits a separate static StableHLO graph for each capacity; it does not claim or rely on dynamic StableHLO sequence shapes.
 

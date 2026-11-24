@@ -432,3 +432,37 @@ fn loop_kernels_are_wanted_only_on_a_looped_model_with_kernels_on() {
     assert!(!loop_kernels_wanted(&text_config(true), false));
     assert!(!loop_kernels_wanted(&text_config(false), true));
 }
+
+/// The dispatch counter behind the `RUST_LOG` evidence of #3373 counts a
+/// kernel only when it ran, not when its gate refused and the ops path did.
+#[test]
+fn dispatches_are_counted_only_when_a_kernel_runs() {
+    let _lock = lock_default_device();
+    if !metal() {
+        return;
+    }
+    let mut rng = Rng(31);
+    let conv = sconv(&mut rng, 4);
+    let before = dispatch_counts();
+    let x = rng.array(&[1, 1, C], 1.0, dtype::BFLOAT16);
+    let mut state = None;
+    assert!(
+        conv.forward_kernel(&x, &mut state, None, dtype::BFLOAT16)
+            .is_some()
+    );
+    let x = rng.array(&[1, 1, C], 1.0, dtype::FLOAT32);
+    let mut state = None;
+    assert!(
+        conv.forward_kernel(&x, &mut state, None, dtype::FLOAT32)
+            .is_none()
+    );
+    assert!(heads_kernel(&heads(&mut rng, 1, 1, 1.0, 128, 16, dtype::BFLOAT16)).is_some());
+    assert!(heads_kernel(&heads(&mut rng, 1, 1, 1.0, 64, 16, dtype::BFLOAT16)).is_none());
+    let after = dispatch_counts();
+    let delta: Vec<u64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    assert_eq!(
+        delta,
+        [1, 1, 0],
+        "short convolution, head preparation, grouped experts"
+    );
+}

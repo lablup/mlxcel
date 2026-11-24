@@ -116,6 +116,12 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).final_norm_module()
     }
 
+    fn inkling2_dspark_binding(
+        &self,
+    ) -> Option<crate::drafter::inkling2_dspark::Inkling2DsparkBinding> {
+        (**self).inkling2_dspark_binding()
+    }
+
     fn after_prefill(&self) {
         (**self).after_prefill()
     }

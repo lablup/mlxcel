@@ -42,10 +42,36 @@ use mlxcel_core::layers::UnifiedLinear;
 /// or rejected tail of up to this many tokens can be trimmed exactly.
 pub(crate) const CONV_HISTORY_MARGIN: i32 = 16;
 
+thread_local! {
+    static WIDE_HISTORY_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// While alive, every forward keeps as many older history rows as it appends,
+/// as a speculative verify does. A native batched forward of more than one
+/// token (the server's padded prefill cohort) enters it so each row's right
+/// padding can be trimmed exactly afterwards, however long it is (#3377).
+pub(crate) struct WideHistoryScope(());
+
+impl WideHistoryScope {
+    pub(crate) fn enter() -> Self {
+        WIDE_HISTORY_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self(())
+    }
+}
+
+impl Drop for WideHistoryScope {
+    fn drop(&mut self) {
+        WIDE_HISTORY_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
 /// Older rows a forward of `length` tokens keeps: [`CONV_HISTORY_MARGIN`], or
-/// `length` when a speculative verify block is longer than that.
+/// `length` when a speculative verify block (or a [`WideHistoryScope`]
+/// forward) is longer than that.
 pub(crate) fn history_margin(length: i32) -> i32 {
-    if mlxcel_core::cache::speculative_append_active() {
+    if mlxcel_core::cache::speculative_append_active()
+        || WIDE_HISTORY_DEPTH.with(|depth| depth.get() > 0)
+    {
         CONV_HISTORY_MARGIN.max(length)
     } else {
         CONV_HISTORY_MARGIN
@@ -201,6 +227,7 @@ impl ShortConv {
             output_dtype,
             history_margin(shape[1]),
         )?;
+        super::kernels::record_dispatch(super::kernels::Kernel::ShortConvolution);
         *state = Some(next);
         Some(out)
     }
@@ -275,6 +302,10 @@ impl DynamicShortConv {
             heads: heads as i32,
             kernel: kernel as i32,
         })
+    }
+
+    pub fn kernel(&self) -> i32 {
+        self.kernel
     }
 
     pub fn forward(

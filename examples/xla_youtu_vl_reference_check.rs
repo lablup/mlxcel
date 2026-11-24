@@ -18,9 +18,13 @@
 //! independently tokenizes, preprocesses, executes the actual 27-layer vision
 //! graph, prepares multimodal embeddings, captures the 40-layer MLA cache and
 //! logits, then repeats the request after an engine reset to prove slot reuse.
+//! Finally it runs the production single-sequence session the CLI uses on the
+//! image prompt and a text-only prompt (issue #3364).
 
 #[path = "xla_common/mlx_reference_policy.rs"]
 mod mlx_reference_policy;
+#[path = "xla_common/youtu_vl_production_smoke.rs"]
+mod production_smoke;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -129,9 +133,9 @@ fn verify_reference_manifest(root: &Path) -> Value {
     manifest
 }
 
-fn reference_f32(root: &Path, manifest: &Value, stage: &str) -> Vec<f32> {
+fn reference_bytes(root: &Path, manifest: &Value, stage: &str, dtype: &str) -> Vec<u8> {
     let spec = &manifest["case"]["arrays"][stage];
-    assert_eq!(spec["dtype"], "float32", "{stage} reference dtype differs");
+    assert_eq!(spec["dtype"], dtype, "{stage} reference dtype differs");
     let filename = spec["file"]
         .as_str()
         .unwrap_or_else(|| panic!("{stage} reference filename must be a string"));
@@ -146,8 +150,19 @@ fn reference_f32(root: &Path, manifest: &Value, stage: &str) -> Vec<f32> {
     );
     assert!(bytes.len().is_multiple_of(4));
     bytes
+}
+
+fn reference_f32(root: &Path, manifest: &Value, stage: &str) -> Vec<f32> {
+    reference_bytes(root, manifest, stage, "float32")
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte f32")))
+        .collect()
+}
+
+fn reference_i32(root: &Path, manifest: &Value, stage: &str) -> Vec<i32> {
+    reference_bytes(root, manifest, stage, "int32")
+        .chunks_exact(4)
+        .map(|chunk| i32::from_le_bytes(chunk.try_into().expect("four-byte i32")))
         .collect()
 }
 
@@ -532,6 +547,30 @@ fn main() {
     assert_eq!(fresh.prefill.kv_width, KV_WIDTH);
     assert_eq!(fresh.prefill.logits.len(), 283_386);
     assert_eq!(fresh.prefill.kv.len(), TEXT_LAYERS * 2 * KV_WIDTH);
+
+    // Issue #3364: the production single-sequence session compiles a different
+    // projection layout and entry modules than this engine, so the gate also
+    // drives it. The text-only gated tokens come from this engine before it is
+    // dropped, so the two engines never hold their weights at once.
+    let text_prompt = tokenizer
+        .encode(production_smoke::TEXT_PROMPT, false)
+        .expect("tokenize the text-only smoke prompt")
+        .into_iter()
+        .map(|value| i32::try_from(value).expect("token id fits i32"))
+        .collect::<Vec<_>>();
+    let text_gated = production_smoke::gated_text_tokens(&mut engine, &text_prompt, MAX_NEW_TOKENS);
+    drop(engine);
+    let hf_tokens = reference_i32(&reference_root, &reference, "greedy_tokens");
+    let mut session =
+        production_smoke::load_production_session(&model, TEXT_LAYERS, context_capacity, &device);
+    let production_image =
+        production_smoke::check_image_prompt(&mut session, &prepared, &hf_tokens);
+    let production_text =
+        production_smoke::check_text_prompt(&mut session, &text_prompt, &text_gated);
+    drop(session);
+    println!(
+        "production session matches: image {production_image:?}, text-only {production_text:?}"
+    );
 
     let mut arrays = Map::new();
     write_f32(

@@ -82,6 +82,7 @@ The four fields `target`, `drafter`, `hardware`, and `block_size` are the pairin
 | `reason` | Meaning |
 |----------|---------|
 | `no_mtp_dispatch` | The server has no MTP speculative dispatch: no drafter was supplied, or the drafter resolved to a different speculative kind. The B=1 MTP burst never runs, so `mtp_enabled` is `false`. |
+| `dflash_dispatch` | The server serves a DFlash-kind pairing (for example Inkling 2 with its bundled DSpark drafter, `--draft-model` set to the target directory). The adaptive policy manages only the MTP burst, so nothing is profiled and `mtp_enabled` is `false`, but `target`, `drafter`, `hardware` and `block_size` name the DFlash pairing, and its block-versus-chain exactness probe passed. A DFlash pairing whose probe declined reports `exactness_declined` instead. |
 | `adaptive_disabled` | `MLXCEL_MTP_ADAPTIVE` is off, so nothing is measured or persisted. What decides the B=1 burst instead is `MLXCEL_ENABLE_MTP_B1` when it is also set (an operator pin), or the static per-hardware gate when it is not. `mtp_enabled` reports whichever of the two decided. |
 | `worker_not_ready` | No batch worker has published a policy state yet: the model is still loading. This is transient. Every worker variant publishes at startup, including the legacy single-sequence (`--no-batch`) worker and the OpenXLA worker, which have no MTP path at all and publish `no_mtp_dispatch` immediately rather than leaving `worker_not_ready` as their steady state. `mtp_enabled` is `null`. |
 

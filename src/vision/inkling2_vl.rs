@@ -192,6 +192,12 @@ impl LanguageModel for Inkling2VlModel {
         Some(self.text.normalized_input_embeddings(input_ids))
     }
 
+    fn inkling2_dspark_binding(
+        &self,
+    ) -> Option<mlxcel_core::drafter::inkling2_dspark::Inkling2DsparkBinding> {
+        LanguageModel::inkling2_dspark_binding(&self.text)
+    }
+
     fn reset_runtime_state(&self) {
         LanguageModel::reset_runtime_state(&self.text);
     }
@@ -254,6 +260,10 @@ impl LanguageModel for Inkling2VlModel {
 
     fn supports_padded_prefill(&self) -> bool {
         LanguageModel::supports_padded_prefill(&self.text)
+    }
+
+    fn supports_batched_prefill(&self) -> bool {
+        LanguageModel::supports_batched_prefill(&self.text)
     }
 
     fn forward_with_sequence_id(

@@ -108,6 +108,8 @@ pub mod types;
 #[cfg(feature = "webui")]
 pub mod webui;
 pub mod whisper_stt;
+#[cfg(feature = "xla-iree")]
+pub(crate) mod xla_prompt_cache_guard;
 
 pub use app::create_app;
 pub use audio_model::{

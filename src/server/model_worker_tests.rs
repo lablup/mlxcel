@@ -94,6 +94,45 @@ fn unified_context_keeps_startup_cap_after_worker_clamp() {
     );
 }
 
+/// Issue #3362: the CLI renders the Phi4MM user turn through a template with no
+/// media branch, so the prompt carries no ordered markers. It must pass through
+/// and get the audio tag at the start of the user turn, the normalization the
+/// OpenXLA CLI path applies to the same prompt.
+#[test]
+fn phi4mm_cli_prompt_without_ordered_markers_falls_back_to_normalization() {
+    let prompt = "<|user|>Hi<|end|><|assistant|>";
+    let materialized = materialize_phi4mm_ordered_prompt(prompt, 0, 1).unwrap();
+    assert_eq!(materialized, prompt);
+
+    let prepared = crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
+        &materialized,
+        0,
+        1,
+        |text, add_special| encode_test_text(text, add_special).unwrap(),
+    )
+    .unwrap();
+    let mut expected = vec![1];
+    expected.extend("<|user|>".bytes().map(i32::from));
+    expected.push(crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID);
+    expected.extend("Hi<|end|><|assistant|>".bytes().map(i32::from));
+    assert_eq!(prepared.tokens, expected);
+    assert_eq!((prepared.image_slots, prepared.audio_slots), (0, 1));
+
+    // Explicit template tags still have to match the request's clip count.
+    let tagged = "<|user|><|audio_1|>Hi<|end|><|assistant|>";
+    let materialized = materialize_phi4mm_ordered_prompt(tagged, 0, 2).unwrap();
+    assert!(
+        crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
+            &materialized,
+            0,
+            2,
+            |text, add_special| encode_test_text(text, add_special).unwrap(),
+        )
+        .is_err(),
+        "a pre-rendered tag count that disagrees with the request must fail"
+    );
+}
+
 #[test]
 fn phi4mm_ordered_prompt_keeps_exact_mixed_media_positions() {
     let prompt = format!(

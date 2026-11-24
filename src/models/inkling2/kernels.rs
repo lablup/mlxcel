@@ -30,6 +30,15 @@
 //!
 //! mlxcel has no Inkling 2 training or sharded path, so upstream's
 //! `not self.training` and `sharding_group is None` terms always hold here.
+//!
+//! Every dispatch that reaches a kernel is counted per thread (read by the
+//! tests through `dispatch_counts`), and the first one of each kernel is
+//! logged at debug level, as is each model's gate decision at load, so
+//! `RUST_LOG=mlxcel::models::inkling2=debug` shows which kernels a run took
+//! (#3373: Small takes the short convolution and neither loop kernel).
+
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
@@ -51,6 +60,75 @@ pub(crate) fn enabled_from(value: Option<&str>) -> bool {
 /// Whether [`KERNELS_ENV`] leaves the kernels on.
 pub(crate) fn enabled() -> bool {
     enabled_from(std::env::var(KERNELS_ENV).ok().as_deref())
+}
+
+/// The three kernels, as indices into [`dispatch_counts`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    ShortConvolution = 0,
+    AttentionHeads = 1,
+    GroupedExperts = 2,
+}
+
+impl Kernel {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ShortConvolution => "short convolution",
+            Self::AttentionHeads => "attention head preparation",
+            Self::GroupedExperts => "grouped expert matvec",
+        }
+    }
+}
+
+/// Whether each kernel has been logged as taken in this process.
+static LOGGED: [AtomicBool; 3] = [
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+];
+
+thread_local! {
+    /// Dispatches on this thread: a forward runs on one thread, so a test
+    /// reads its own counts without racing tests on other threads.
+    static DISPATCHES: Cell<[u64; 3]> = const { Cell::new([0; 3]) };
+}
+
+/// Count one forward that ran `kernel` instead of the ops path.
+pub(super) fn record_dispatch(kernel: Kernel) {
+    DISPATCHES.with(|counts| {
+        let mut value = counts.get();
+        value[kernel as usize] += 1;
+        counts.set(value);
+    });
+    if !LOGGED[kernel as usize].swap(true, Ordering::Relaxed) {
+        tracing::debug!("Inkling 2 {} kernel dispatched (first use)", kernel.name());
+    }
+}
+
+/// Dispatch counts on the calling thread, indexed by [`Kernel`].
+#[cfg(test)]
+pub(crate) fn dispatch_counts() -> [u64; 3] {
+    DISPATCHES.with(Cell::get)
+}
+
+/// Log which kernels a model built from `config` can take, once at load.
+pub(crate) fn log_model_gates(config: &Inkling2TextConfig) {
+    let enabled = enabled();
+    let looped = loop_kernels_wanted(config, enabled);
+    tracing::debug!(
+        "Inkling 2 kernels: short convolution {}, attention head preparation {}, grouped expert matvec {}",
+        if enabled { "on" } else { "off" },
+        if looped && config.use_value_norm_no_gamma {
+            "on"
+        } else {
+            "off"
+        },
+        if looped {
+            "on (verify forwards)"
+        } else {
+            "off"
+        },
+    );
 }
 
 fn shape(x: &MlxArray) -> Vec<i32> {
@@ -109,9 +187,11 @@ pub(crate) fn prepare_attention_heads(
     if !attention_heads_apply(q, r) {
         return None;
     }
-    mlxcel_core::inkling2_kernels::prepare_attention_heads(
+    let out = mlxcel_core::inkling2_kernels::prepare_attention_heads(
         q, k, v, r, q_scale, r_scale, clip, rel_clip, eps,
-    )
+    )?;
+    record_dispatch(Kernel::AttentionHeads);
+    Some(out)
 }
 
 /// `(bits, group_size)` of a plane the grouped kernel decodes: native NVFP4
@@ -226,6 +306,7 @@ pub(crate) fn grouped_expert_projections(
     let gate = grouped_projection(x, gate_proj, &sorted, &source, &identity)?;
     let activated = experts.activate(&gate, &up);
     let down = grouped_projection(&activated, down_proj, &sorted, &identity, &order)?;
+    record_dispatch(Kernel::GroupedExperts);
     Some(mlxcel_core::reshape(&down, &[tokens, top_k, hidden]))
 }
 

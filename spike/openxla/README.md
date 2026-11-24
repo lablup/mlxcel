@@ -20,6 +20,7 @@ integration) are out of scope here.
 | `analyze.py` | StableHLO op inventory + on-device argmax (host-copy) characterization. |
 | `iree_run.py` | Bonus: runs one decode step through IREE, checks parity with PJRT. |
 | `requirements.lock` | Pinned, resolved env (the reproducible Phase 0 spec). |
+| `requirements-youtu.lock` | Separate pin (transformers 4.57.x) for the Youtu-VL oracle. |
 | `FINDINGS.md` | The Phase 0/1 findings writeup. |
 
 ## Setup (Linux aarch64, CPU target)
@@ -54,6 +55,16 @@ uv pip install --python .venv -r requirements.lock \
     --index-strategy unsafe-best-match \
     --extra-index-url https://download.pytorch.org/whl/cpu
 .venv/bin/python -c "import torch, transformers.models.mamba2; print(torch.__version__)"
+```
+
+`requirements.lock` also pins `torchvision` (the LLaVA and Qwen-VL image processors import it). The Youtu-VL oracle (`youtu_vl_reference_oracle.py`) cannot use that environment: transformers 5.12.1 fails to import the Youtu remote code (`DefaultFastImageProcessorKwargs`), so it has its own lock with transformers 4.57.x (#3365):
+
+```bash
+uv venv --python 3.12 .venv-youtu
+uv pip install --python .venv-youtu -r requirements-youtu.lock \
+    --index-strategy unsafe-best-match \
+    --extra-index-url https://download.pytorch.org/whl/cpu
+PYTHON=$PWD/.venv-youtu/bin/python scripts/xla/validate_youtu_vl_reference.sh ...   # the Youtu-VL gate reads PYTHON
 ```
 
 A git worktree can symlink `spike/openxla/.venv` to an existing venv (it is

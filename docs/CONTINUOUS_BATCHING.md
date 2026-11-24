@@ -58,9 +58,18 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   Llama 4, Qwen 3, Gemma 3, Gemma 3n text/VLM, Gemma 4 text/VLM/Unified,
   Helium, Qwen3-MoE, Ministral 3, ExaOne 4, Mellum, Laguna, Step 3.5,
   Step 3.7 VLM text decode, AFMoE (Trinity), Kolibri-1, DeepSeek V4,
-  IQuestLoopCoder, and Inkling text/VLM. The latter five model-owned families batch projections and
+  IQuestLoopCoder, Inkling text/VLM, and Inkling 2 text/VLM. The latter six model-owned families batch projections and
   feed-forward operations while retaining sequence-local attention caches;
   Inkling stacks convolution tails and DeepSeek V4 updates pooling per row.
+  Inkling 2 (#3377) runs one forward over every row, including Mini's three
+  loop passes and their message controllers; only the attention core
+  (relative mask, sliding window, sink, log scaling) runs per row, and each
+  convolution stacks the rows' histories left-padded to the longest and hands
+  each row back the history its own forward keeps, so per-row trims stay
+  exact. Inkling 2 also batches a cohort of cold prompts in one padded
+  prefill: rows are right-padded and every mask and convolution is causal, and
+  a batched forward of more than one token keeps as many convolution rows as
+  it appends, so `trim_state` removes any row's padding exactly.
   AFMoE and Kolibri-1 keep their full-fused B=1 expert implementation per row when that
   kernel is active, while unsupported or disabled configurations retain the
   native whole-batch expert graph.
@@ -654,7 +663,16 @@ Recurrent and hybrid SSM / linear-attention families cannot safely reuse
 arbitrary KV blocks, so they keep the hybrid-SSM/APC exclusion. Baichuan-M1 is
 a dense family that joins this exclusion (#2567): its K/V convolution state is
 model-owned per sequence and a restored KV prefix would not carry it, so the
-whole-prefix store, APC and the KV handoff all decline it. Families that
+whole-prefix store, APC and the KV handoff all decline it. Since #3341 the
+exclusion list (`HYBRID_SSM_MODEL_TYPES`) also names Qwen 3.5 (`qwen3_5`,
+`qwen3_5_moe` and their `_text` spellings), Granite 4.0-H (`granitemoehybrid`),
+Falcon-H1 (`falcon_h1`) and PLaMo 2 (`plamo2`, `plamo2vl`). On the MLX backend
+this only turns APC off at startup: those families already keep their state
+outside the KV slice, so they never reached the block-hash store, and their
+snapshots and turn-boundary checkpoints do not read the APC flag. On the
+OpenXLA backend (`MLXCEL_BACKEND=xla`) a recurrent model gets no prompt-cache
+store at all (`Config::has_recurrent_state()` or the same list), because that
+engine has no state snapshot to restore. Families that
 opt into `supports_snapshot_reuse()` instead use a separate exact-prefix
 snapshot bucket: the scheduler copies the model-owned state (at the end of
 the prefill since #3040, or not at all for a chat turn whose history-boundary

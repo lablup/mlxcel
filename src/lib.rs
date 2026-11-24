@@ -102,6 +102,10 @@ pub use multimodal::host_preprocessor::{
     Qwen2VlIreeHostPreprocessor, Qwen3VlIreeHostPreprocessor, Qwen3VlIreeVisionCapture,
     QwenVlProcessorCapture,
 };
+#[cfg(feature = "xla-backend")]
+pub use multimodal::xla_image_prefill::{
+    PreparedImagePrefill, prepare_image_prefill, xla_request_positions,
+};
 pub use multimodal::{
     falcon_ocr_prompt, internvl_prompt, kimi_vl_prompt, locateanything_prompt, minicpmo_prompt,
     moondream2_prompt, moondream3_prompt, phi3v_prompt, phi4_siglip_prompt, phi4mm_prompt,
