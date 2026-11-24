@@ -1047,6 +1047,52 @@ mod tests {
         );
     }
 
+    /// Issue #3364: the single-sequence engine uploads `kv_b_proj` transposed
+    /// (`[kv_lora_rank, n_q * (nope + v)]`, issue #2859). The latent expansion
+    /// must split that layout on its own axes; reshaping it as the
+    /// checkpoint's `[n_q, nope + v, kv_lora_rank]` scrambled every head and
+    /// made the production Youtu-VL CLI repeat one token.
+    #[test]
+    fn mla_latent_expansion_follows_the_projection_layout() {
+        // Distinct rank (12), heads (4) and head width (8 + 6) so each
+        // reshape target names exactly one layout.
+        let json = r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
+            "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
+            "kv_lora_rank":12,"q_lora_rank":24,"qk_nope_head_dim":8,
+            "qk_rope_head_dim":4,"v_head_dim":6,"rope_interleave":true,
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#;
+        let base = Config::from_json_str(json)
+            .unwrap()
+            .with_context_capacity(16)
+            .unwrap();
+        let checkpoint = "(tensor<56x12xf32>) -> tensor<4x14x12xf32>";
+        let transposed = "(tensor<12x56xf32>) -> tensor<12x4x14xf32>";
+        let mut inout = base.clone();
+        inout.projection_layout = ProjectionLayout::InOut;
+        for graph in [
+            emit_decode_with(&inout, false, Precision::F32),
+            emit_prefill_with(&inout, false, Precision::F32),
+        ] {
+            assert!(
+                graph.contains(transposed),
+                "InOut must expand kv_b on its transposed axes"
+            );
+            assert!(
+                !graph.contains(checkpoint),
+                "InOut must not reshape kv_b as the checkpoint layout"
+            );
+        }
+        let mut outin = base;
+        outin.projection_layout = ProjectionLayout::OutIn;
+        let graph = emit_decode_ragged(&outin, 2, false).unwrap();
+        assert!(
+            graph.contains(checkpoint),
+            "OutIn keeps the checkpoint split"
+        );
+        assert!(!graph.contains(transposed));
+    }
+
     fn main_signature<'a>(mlir: &'a str, graph: &str) -> &'a str {
         mlir.split("func.func public @main(")
             .nth(1)

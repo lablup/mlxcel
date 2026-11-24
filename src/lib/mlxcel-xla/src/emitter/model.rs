@@ -2462,6 +2462,18 @@ fn mla_rms_norm(
     }
 }
 
+/// Expand the cached MLA latent into per-head keys and values through
+/// `kv_b_proj`.
+///
+/// The weight arrives in the graph's projection layout: the checkpoint's
+/// `[n_q * (nope + v), kv_lora_rank]` under [`ProjectionLayout::OutIn`] (the
+/// ragged batch engine), and its upload-time transpose
+/// `[kv_lora_rank, n_q * (nope + v)]` under [`ProjectionLayout::InOut`] (the
+/// single-sequence engine, issue #2859). Each layout is split into its key and
+/// value halves along its own axes and contracted on its own `kv_lora_rank`
+/// axis, so both produce the same `[.., n_q, d]` results. Reshaping the
+/// transposed weight as if it were `OutIn` scrambles every head (issue #3364:
+/// the production CLI repeated one token while the batch-engine gate passed).
 fn mla_expand_latent(
     b: &mut Builder,
     latent: &Val,
@@ -2470,74 +2482,61 @@ fn mla_expand_latent(
     c: &Config,
 ) -> (Val, Val) {
     let m = c.mla.expect("MLA config");
-    let weights = b.reshape(
-        kv_b,
-        vec![c.n_q, m.qk_nope_head_dim + m.v_head_dim, m.kv_lora_rank],
-    );
-    let key_weights = b.slice(
-        &weights,
-        &[(0, c.n_q), (0, m.qk_nope_head_dim), (0, m.kv_lora_rank)],
-    );
-    let value_weights = b.slice(
-        &weights,
-        &[
-            (0, c.n_q),
-            (m.qk_nope_head_dim, m.qk_nope_head_dim + m.v_head_dim),
-            (0, m.kv_lora_rank),
-        ],
-    );
-    match rows {
-        None => {
-            let key = b.dot_general(
-                latent,
-                &key_weights,
-                &[],
-                &[],
-                &[0],
-                &[2],
-                vec![c.n_q, m.qk_nope_head_dim],
+    let head = m.qk_nope_head_dim + m.v_head_dim;
+    let (rank_axis, key_weights, value_weights) = match b.projection_layout() {
+        ProjectionLayout::OutIn => {
+            let weights = b.reshape(kv_b, vec![c.n_q, head, m.kv_lora_rank]);
+            let key = b.slice(
+                &weights,
+                &[(0, c.n_q), (0, m.qk_nope_head_dim), (0, m.kv_lora_rank)],
             );
-            let value = b.dot_general(
-                latent,
-                &value_weights,
-                &[],
-                &[],
-                &[0],
-                &[2],
-                vec![c.n_q, m.v_head_dim],
+            let value = b.slice(
+                &weights,
+                &[(0, c.n_q), (m.qk_nope_head_dim, head), (0, m.kv_lora_rank)],
             );
-            (key, value)
+            (2, key, value)
         }
-        Some(rows) => {
-            let key = b.dot_general(
-                latent,
-                &key_weights,
-                &[],
-                &[],
-                &[latent.ty.shape.len() - 1],
-                &[2],
-                if latent.ty.shape.len() == 2 {
-                    vec![rows, c.n_q, m.qk_nope_head_dim]
-                } else {
-                    vec![latent.ty.shape[0], rows, c.n_q, m.qk_nope_head_dim]
-                },
+        ProjectionLayout::InOut => {
+            let weights = b.reshape(kv_b, vec![m.kv_lora_rank, c.n_q, head]);
+            let key = b.slice(
+                &weights,
+                &[(0, m.kv_lora_rank), (0, c.n_q), (0, m.qk_nope_head_dim)],
             );
-            let value = b.dot_general(
-                latent,
-                &value_weights,
-                &[],
-                &[],
-                &[latent.ty.shape.len() - 1],
-                &[2],
-                if latent.ty.shape.len() == 2 {
-                    vec![rows, c.n_q, m.v_head_dim]
-                } else {
-                    vec![latent.ty.shape[0], rows, c.n_q, m.v_head_dim]
-                },
+            let value = b.slice(
+                &weights,
+                &[(0, m.kv_lora_rank), (0, c.n_q), (m.qk_nope_head_dim, head)],
             );
-            (key, value)
+            (0, key, value)
         }
-    }
+    };
+    let latent_axis = match rows {
+        None => 0,
+        Some(_) => latent.ty.shape.len() - 1,
+    };
+    let output = |width: usize| match rows {
+        None => vec![c.n_q, width],
+        Some(rows) if latent.ty.shape.len() == 2 => vec![rows, c.n_q, width],
+        Some(rows) => vec![latent.ty.shape[0], rows, c.n_q, width],
+    };
+    let key = b.dot_general(
+        latent,
+        &key_weights,
+        &[],
+        &[],
+        &[latent_axis],
+        &[rank_axis],
+        output(m.qk_nope_head_dim),
+    );
+    let value = b.dot_general(
+        latent,
+        &value_weights,
+        &[],
+        &[],
+        &[latent_axis],
+        &[rank_axis],
+        output(m.v_head_dim),
+    );
+    (key, value)
 }
 
 #[allow(clippy::too_many_arguments)]
