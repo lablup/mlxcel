@@ -87,7 +87,10 @@ def run_cli(args: argparse.Namespace, case: dict[str, Any], env: dict[str, str])
     prefix = f"Generating...\n{case['user_prompt']}"
     if prefix not in completed.stdout or "\n\n[Generated " not in completed.stdout:
         fail(f"unrecognized CLI output:\n{completed.stdout}")
-    generated = completed.stdout.split(prefix, 1)[1].rsplit("\n\n[Generated ", 1)[0]
+    # The CLI may emit a newline between the echoed prompt and the first token.
+    generated = (
+        completed.stdout.split(prefix, 1)[1].rsplit("\n\n[Generated ", 1)[0].lstrip()
+    )
     if generated != case["greedy_text"]:
         fail(
             f"CLI text mismatch: expected {case['greedy_text']!r}, got {generated!r}"
@@ -176,11 +179,13 @@ def stream_server(
         )
     if finish_reason != "length":
         fail(f"expected finish_reason='length', got {finish_reason!r}")
-    logical_prompt_tokens = len(case["unexpanded_input_ids"])
+    # The server reports the prepared sequence (image placeholders expanded to
+    # their patch tokens), as OpenAI usage does, not the unexpanded prompt.
+    prompt_tokens = case["arrays"]["expanded_token_ids"]["shape"][1]
     expected_usage = {
-        "prompt_tokens": logical_prompt_tokens,
+        "prompt_tokens": prompt_tokens,
         "completion_tokens": args.max_new,
-        "total_tokens": logical_prompt_tokens + args.max_new,
+        "total_tokens": prompt_tokens + args.max_new,
     }
     for key, expected in expected_usage.items():
         if usage.get(key) != expected:
