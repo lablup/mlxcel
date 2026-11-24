@@ -44,6 +44,32 @@ fn nemotron_h_schedule_and_independent_widths() {
 }
 
 #[test]
+fn nemotron_h_preserves_checkpoint_chunk_size() {
+    let mut v: serde_json::Value = serde_json::from_str(TINY).unwrap();
+    v["chunk_size"] = serde_json::json!(256);
+    assert_eq!(
+        Config::from_json_str(&v.to_string())
+            .unwrap()
+            .ssm
+            .unwrap()
+            .chunk_size,
+        256
+    );
+    v["chunk_size"] = serde_json::json!(0);
+    assert!(
+        Config::from_json_str(&v.to_string())
+            .unwrap_err()
+            .contains("chunk_size")
+    );
+    v["chunk_size"] = serde_json::json!(-1);
+    assert!(
+        Config::from_json_str(&v.to_string())
+            .unwrap_err()
+            .contains("chunk_size")
+    );
+}
+
+#[test]
 fn nemotron_h_block_aliases_and_rejections() {
     let original: serde_json::Value = serde_json::from_str(TINY).unwrap();
     for key in ["layers_block_type", "layer_types"] {

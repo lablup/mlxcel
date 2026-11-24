@@ -39,7 +39,7 @@ const CAPACITY: usize = 32;
 const B: usize = 4;
 const HIDDEN: usize = 16;
 const VOCAB: usize = 32;
-const LAYERS: usize = 2;
+const SSM_LAYERS: usize = 2;
 const HEADS: usize = 4;
 const HEAD_DIM: usize = 8;
 const STATE: usize = 8;
@@ -50,7 +50,7 @@ const IN_PROJ: usize = D_INNER + CONV_DIM + HEADS;
 /// Bytes of one sequence's state: `ssm_h [L, H, P, N]` plus `ssm_conv
 /// [L, K-1, conv_dim]`, f32.
 const STATE_ROW_BYTES: u64 =
-    (4 * (LAYERS * HEADS * HEAD_DIM * STATE + LAYERS * (KERNEL - 1) * CONV_DIM)) as u64;
+    (4 * (SSM_LAYERS * HEADS * HEAD_DIM * STATE + SSM_LAYERS * (KERNEL - 1) * CONV_DIM)) as u64;
 
 /// Distinct prompts of different lengths; the EOS id (31) never appears in
 /// them.
@@ -93,7 +93,7 @@ fn create_tiny_nemotron_h() -> TinyModel {
     std::fs::write(
         dir.path().join("config.json"),
         format!(
-            r#"{{"model_type":"nemotron_h","hybrid_override_pattern":"M*-M-","num_attention_heads":4,"num_key_value_heads":2,"attention_head_dim":8,"intermediate_size":32,"hidden_size":{HIDDEN},"num_hidden_layers":{LAYERS},"vocab_size":{VOCAB},"mamba_num_heads":{HEADS},"mamba_head_dim":{HEAD_DIM},"ssm_state_size":{STATE},"n_groups":2,"conv_kernel":{KERNEL},"expand":2,"use_bias":false,"use_conv_bias":true,"tie_word_embeddings":true,"layer_norm_epsilon":1e-5,"rms_norm":true,"hidden_act":"silu","eos_token_id":31}}"#
+            r#"{{"model_type":"nemotron_h","hybrid_override_pattern":"M*-M-","num_attention_heads":4,"num_key_value_heads":2,"attention_head_dim":8,"intermediate_size":32,"hidden_size":{HIDDEN},"num_hidden_layers":5,"vocab_size":{VOCAB},"mamba_num_heads":{HEADS},"mamba_head_dim":{HEAD_DIM},"ssm_state_size":{STATE},"n_groups":2,"conv_kernel":{KERNEL},"chunk_size":128,"expand":2,"use_bias":false,"use_conv_bias":true,"tie_word_embeddings":true,"layer_norm_epsilon":1e-5,"rms_norm":true,"hidden_act":"silu","eos_token_id":31}}"#
         ),
     )
     .expect("model config");

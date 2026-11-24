@@ -4,6 +4,8 @@ The implementation targets the official `nvidia/Nemotron-H-4B-Base-8K` checkpoin
 
 Record `git rev-parse HEAD`, checkpoint revision, compiler/runtime versions, device identity, command exit codes, and full token IDs with every result. Local CPU structural checks do not establish ROCm acceptance. Keep #3344 open until the required hardware gates have passed.
 
+The independent CPU HF reference is committed in `nemotron_h_reference/hf-f32-oracle.json`, with package versions, checkpoint metadata hashes, and a portable reproduction command in `nemotron_h_reference/provenance.json`. It contains six prompt tokens and forty continuation tokens. This is an HF reference artifact, not XLA or hardware acceptance; it can be passed directly to `--oracle`.
+
 ## ROCm gfx1151
 
 Every build and device operation on the 31 GiB Strix Halo host runs under its guard. Run the HF fp32 oracle (~16 GB weights) and XLA f32 engine sequentially. F32 is the recurrent default; an explicit f16 comparison cannot satisfy token-exact acceptance.

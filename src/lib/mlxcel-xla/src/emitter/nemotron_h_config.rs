@@ -158,7 +158,10 @@ pub(super) fn from_json(v: &Value, quantization: Option<QuantConfig>) -> Result<
         time_step_limit,
         norm_eps,
         norm_group_size: d_inner / n_groups,
-        chunk_size: SSM_DEFAULT_CHUNK_SIZE,
+        chunk_size: uint(
+            "chunk_size",
+            Some(uint("mamba_chunk_size", Some(SSM_DEFAULT_CHUNK_SIZE))?),
+        )?,
     };
     ssm.validate()?;
     Ok(Config {

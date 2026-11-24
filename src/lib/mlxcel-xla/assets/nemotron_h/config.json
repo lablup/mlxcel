@@ -13,6 +13,7 @@
   "ssm_state_size": 8,
   "n_groups": 2,
   "conv_kernel": 4,
+  "chunk_size": 128,
   "layer_norm_epsilon": 0.00001,
   "use_bias": false,
   "use_conv_bias": true,
