@@ -85,6 +85,15 @@ impl WeightSpec {
             WeightSpec::QuantRaw { name, .. } => name,
         }
     }
+
+    /// Whether the loader uploads this spec's 2-D checkpoint matrix transposed
+    /// to `[in, out]` (issue #2859). Only the projection specs (`Proj`, `Rows`)
+    /// follow the graph's layout; every other spec keeps the checkpoint layout
+    /// whatever the layout, so the emitter must declare those args as stored.
+    pub(crate) fn uploads_transposed(&self, layout: ProjectionLayout) -> bool {
+        matches!(self, WeightSpec::Proj(_) | WeightSpec::Rows { .. })
+            && matches!(layout, ProjectionLayout::InOut)
+    }
 }
 
 /// The checkpoint weights the loader reads, in the emitter's exact arg order
@@ -173,9 +182,16 @@ fn fused_qkv_name(cfg: &Config, prefix: &str) -> String {
     }
 }
 
+/// Push one Phi4MM adapter's A/B pair. They are `Whole` specs, not `Proj`: the
+/// emitter declares A as the checkpoint's `[rank, in]` and B as `[out, rank]` in
+/// every projection layout and contracts them with the untransposed helpers, so
+/// the loader must never apply the `InOut` transpose to them (issue #3362; a
+/// `Proj` spec here broke single-sequence prefill with a `320x3072` vs
+/// `3072x320` argument mismatch). `Whole` also keeps them f32-resident, which is
+/// the element type the emitter declares.
 fn push_phi4_lora_pair(out: &mut Vec<WeightSpec>, stem: &str, adapter: &str) {
-    out.push(WeightSpec::Proj(format!("{stem}.lora_A.{adapter}.weight")));
-    out.push(WeightSpec::Proj(format!("{stem}.lora_B.{adapter}.weight")));
+    out.push(WeightSpec::Whole(format!("{stem}.lora_A.{adapter}.weight")));
+    out.push(WeightSpec::Whole(format!("{stem}.lora_B.{adapter}.weight")));
 }
 
 /// One Mamba2 layer's tensors (issue #3338), in exactly the order
@@ -2270,3 +2286,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "weights_phi4_lora_tests.rs"]
+mod phi4_lora_layout_tests;

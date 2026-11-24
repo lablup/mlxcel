@@ -271,7 +271,6 @@ impl<T> ModelOwnedSequenceState<T> {
         self.sequences.borrow_mut().remove(&seq_id);
     }
 
-    #[cfg(test)]
     pub(crate) fn has_sequence_state(&self, seq_id: SequenceId) -> bool {
         self.sequences.borrow().contains_key(&seq_id)
     }

@@ -23,6 +23,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
 use super::attention::Inkling2Attention;
+use super::batched::with_stacked_state;
 use super::config::Inkling2TextConfig;
 use super::conv::ShortConv;
 use super::moe::Inkling2Moe;
@@ -185,12 +186,13 @@ impl Inkling2DecoderLayer {
 
     /// `x` is the partial block entering the layer; `blocks` the completed
     /// blocks of this forward (appended to at a block boundary); `messages`
-    /// the `[B, L, 4, hidden]` previous-pass messages inside a looped core.
+    /// the `[B, L, 4, hidden]` previous-pass messages inside a looped core;
+    /// `rows` one visit cache per batch row.
     pub fn forward(
         &self,
         x: &MlxArray,
         blocks: &mut Vec<UniquePtr<MlxArray>>,
-        cache: &mut InklingLayerCache,
+        rows: &mut [&mut InklingLayerCache],
         messages: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let x_dtype = mlxcel_core::array_dtype(x);
@@ -201,7 +203,7 @@ impl Inkling2DecoderLayer {
         let attn = match (&self.input_norms, messages) {
             (InputNorms::Shared(norm), None) => {
                 let input = mlxcel_core::astype(&norm.forward(&slice_part(&mixed, 0)), x_dtype);
-                self.attn.forward(&input, &input, &input, cache)
+                self.attn.forward(&input, &input, &input, rows)
             }
             (norms, messages) => {
                 let count =
@@ -229,15 +231,18 @@ impl Inkling2DecoderLayer {
                         mlxcel_core::astype(&norm.forward(part), x_dtype)
                     })
                     .collect();
-                self.attn.forward(&normed[0], &normed[1], &normed[2], cache)
+                self.attn.forward(&normed[0], &normed[1], &normed[2], rows)
             }
         };
-        let residual = self.attn_sconv.forward(
-            &attn,
-            &mut cache.conv[2],
-            (!self.is_block_boundary).then_some(x),
-            dtype::FLOAT32,
-        );
+        let kernel = self.attn_sconv.kernel();
+        let residual = with_stacked_state(rows, 2, kernel, &attn, |state| {
+            self.attn_sconv.forward(
+                &attn,
+                state,
+                (!self.is_block_boundary).then_some(x),
+                dtype::FLOAT32,
+            )
+        });
         if self.is_block_boundary {
             blocks.push(mlxcel_core::copy(x));
         }
@@ -247,7 +252,10 @@ impl Inkling2DecoderLayer {
         }
         let hidden = mlxcel_core::astype(&self.post_attention_layernorm.forward(&hidden), x_dtype);
         let hidden = self.mlp.forward(&hidden);
-        self.mlp_sconv
-            .forward(&hidden, &mut cache.conv[3], Some(&residual), x_dtype)
+        let kernel = self.mlp_sconv.kernel();
+        with_stacked_state(rows, 3, kernel, &hidden, |state| {
+            self.mlp_sconv
+                .forward(&hidden, state, Some(&residual), x_dtype)
+        })
     }
 }

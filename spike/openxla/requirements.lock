@@ -35,6 +35,7 @@ shellingham==1.5.4
 sympy==1.14.0
 tokenizers==0.22.2
 torch==2.12.1+cpu
+torchvision==0.27.1+cpu
 tqdm==4.68.3
 transformers==5.12.1
 typer==0.25.1

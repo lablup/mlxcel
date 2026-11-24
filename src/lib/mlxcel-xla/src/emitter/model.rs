@@ -1870,7 +1870,8 @@ impl AttnLayout {
 
     fn lora_branch(&self, b: &mut Builder, x: &Val, pair: &LoraPairW) -> Val {
         // Phi4MM adapter tensors are declared by `modal` in the checkpoint's
-        // `[out, in]` layout (the loader does not transpose them), so this
+        // `[out, in]` layout in every projection layout, and the loader uploads
+        // them as `Whole` specs that it never transposes (issue #3362), so this
         // branch keeps the untransposed helpers (issue #2859).
         let delta = match self {
             AttnLayout::Single { .. } => {
