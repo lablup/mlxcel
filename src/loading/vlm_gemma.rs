@@ -411,6 +411,10 @@ pub use xla_tests::reference_boundary::run_gemma3_eager_mlx_iree_prepared_bounda
 #[path = "vlm_gemma_xla_mask_tests.rs"]
 mod xla_mask_tests;
 
+#[cfg(all(test, feature = "xla-iree", feature = "test-utils"))]
+#[path = "vlm_gemma3_margin_tests.rs"]
+mod margin_tests;
+
 /// Load a Gemma3n VLM model.
 pub(crate) fn load_gemma3n_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::gemma3n::load_gemma3n_vision;

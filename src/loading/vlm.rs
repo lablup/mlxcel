@@ -979,3 +979,7 @@ mod qwen_text_only_tests;
 #[cfg(test)]
 #[path = "vlm_qwen35_modelopt_tests.rs"]
 mod qwen35_modelopt_tests;
+
+#[cfg(all(test, feature = "xla-iree"))]
+#[path = "vlm_phi4mm_margin_tests.rs"]
+mod phi4mm_margin_tests;
