@@ -300,7 +300,7 @@ pub fn run_pinned_molmo_eager_mlx_iree_boundaries() {
             &format!("vision.selected_layer_{layer}"),
             iree,
             host,
-            VISION_SELECTED_LAYER,
+            VISION,
             &mut first_divergence,
         );
     }

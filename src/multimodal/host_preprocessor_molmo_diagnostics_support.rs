@@ -64,19 +64,6 @@ pub(super) const VISION: Tolerance = Tolerance {
     rtol: 0.05,
 };
 
-// The intermediate ViT hidden states keep the eager path's half-precision rounding
-// through up to 21 layers, so a few elements drift more than the projector-level
-// `VISION` envelope. Measured on the pinned checkpoint and image (#3365), identical
-// on local-task and cuda: 4 distinct elements of 1,181,696 exceed `VISION` at layer
-// 21 (max_abs 2.80, for example 12.82 against 14.48) and 2 at layer 14 (max_abs 2.69),
-// all in the same channels the two duplicate crops share, while the projector and
-// every decoder stage stay inside `VISION`. The wider bound applies to the selected
-// layers only; a wrong activation or layout moves these tensors far past it.
-pub(super) const VISION_SELECTED_LAYER: Tolerance = Tolerance {
-    atol: 4.0,
-    rtol: 0.05,
-};
-
 pub(super) fn progress(stage: &str) {
     eprintln!("[molmo-v1-boundary] {stage}");
     io::stderr().flush().expect("flush diagnostic progress");
