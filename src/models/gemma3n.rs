@@ -2253,7 +2253,7 @@ mod xla_canonical_diagnostics {
             }
             digest.update(&buffer[..read]);
         }
-        crate::sha256_hex::sha256_hex(digest.finalize())
+        crate::sha256_hex::hex_lower(digest.finalize())
     }
 
     fn array_to_f32(array: &MlxArray) -> Vec<f32> {

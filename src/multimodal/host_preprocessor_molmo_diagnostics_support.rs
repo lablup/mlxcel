@@ -170,7 +170,7 @@ pub(super) fn digest_f32(values: &[f32]) -> String {
     for value in values {
         digest.update(value.to_bits().to_le_bytes());
     }
-    crate::sha256_hex::sha256_hex(digest.finalize())
+    crate::sha256_hex::hex_lower(digest.finalize())
 }
 
 pub(super) fn digest_i32(values: &[i32]) -> String {
@@ -178,7 +178,7 @@ pub(super) fn digest_i32(values: &[i32]) -> String {
     for value in values {
         digest.update(value.to_le_bytes());
     }
-    crate::sha256_hex::sha256_hex(digest.finalize())
+    crate::sha256_hex::hex_lower(digest.finalize())
 }
 
 #[cfg(test)]
