@@ -200,7 +200,7 @@ The exact production StableHLO modules emitted at capacity 256 were recompiled u
 | execution gate | result | decode throughput |
 |----------------|--------|------------------:|
 | CLI B=1, 40 tokens | HF token-exact 40/40 | 140.70 tok/s |
-| B=4, 8 requests | reference-exact | 89.22 tok/s |
+| B=4, 8 requests | reference-exact | 88.71 tok/s |
 | B=4, cancel 2 | 2/2 cancelled and remaining streams reference-exact | 89.22 tok/s before cancellation pass |
 | B=4, buckets 256 and 512 | both buckets routed and reference-exact | 77.00 tok/s |
 | B=8, 16 requests | reference-exact | 81.36 tok/s |
