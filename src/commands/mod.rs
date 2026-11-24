@@ -38,6 +38,8 @@ mod generate_llada2;
 mod generate_nemotron_parse;
 mod generate_vlm;
 mod generate_voicechat;
+#[cfg(feature = "xla-backend")]
+mod generate_xla_media;
 pub(crate) mod inspect;
 pub(crate) mod models;
 pub(crate) mod predict;

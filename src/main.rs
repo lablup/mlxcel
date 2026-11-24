@@ -3362,10 +3362,10 @@ pub(crate) struct ServeArgs {
     /// a long system prompt but diverge afterwards never reuse KV. With the
     /// non-consuming paged adoption a partial match shares the prefix blocks
     /// without copying or destroying the stored entry, so APC is on by
-    /// default. When enabled on a hybrid SSM/attention model (jamba, mamba,
-    /// mamba2, nemotron_h, gated_delta, kimi_linear, qwen3_next), APC is
-    /// automatically disabled at runtime since SSM state cannot be
-    /// decomposed into hashable blocks.
+    /// default. When enabled on a recurrent or hybrid SSM / linear-attention
+    /// model (Mamba, Jamba, Nemotron-H, Qwen3-Next, Qwen 3.5, Granite 4.0-H,
+    /// Falcon-H1, PLaMo 2, ...), APC is automatically disabled at runtime
+    /// since recurrent state cannot be decomposed into hashable blocks.
     ///
     /// Also reads `APC_ENABLED`.
     #[arg(
