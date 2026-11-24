@@ -262,6 +262,10 @@ impl LanguageModel for Inkling2VlModel {
         LanguageModel::supports_padded_prefill(&self.text)
     }
 
+    fn supports_batched_prefill(&self) -> bool {
+        LanguageModel::supports_batched_prefill(&self.text)
+    }
+
     fn forward_with_sequence_id(
         &self,
         input_ids: &MlxArray,
