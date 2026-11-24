@@ -669,6 +669,11 @@ std::unique_ptr<MlxArray> inkling2_grouped_expert_qmv(
     const MlxArray& destination,
     int32_t bits,
     int32_t group_size);
+bool row_invariant_matvec_available();
+std::unique_ptr<MlxArray> row_invariant_matvec(
+    const MlxArray& x,
+    const MlxArray& w,
+    int32_t output_dtype);
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
 // gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype (#2548)

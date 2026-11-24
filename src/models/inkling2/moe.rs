@@ -181,9 +181,9 @@ impl Inkling2Moe {
 
     /// `(indices [N, k] uint32-compatible, weights [N, k] f32)`.
     fn route(&self, x: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        let scores = mlxcel_core::sigmoid(&mlxcel_core::matmul(
+        let scores = mlxcel_core::sigmoid(&mlxcel_core::row_invariant::dense(
             &mlxcel_core::astype(x, dtype::FLOAT32),
-            &mlxcel_core::transpose(&self.gate_weight),
+            &self.gate_weight,
         ));
         let biased = mlxcel_core::negative(&mlxcel_core::add(&scores, &self.bias));
         let order = mlxcel_core::argpartition(&biased, self.top_k - 1, -1);

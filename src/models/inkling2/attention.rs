@@ -301,19 +301,19 @@ impl Inkling2Attention {
             "Inkling 2 attention needs one cache per batch row"
         );
         let x_dtype = mlxcel_core::array_dtype(x);
-        let k = self.k_proj.forward(key_input);
-        let v = self.v_proj.forward(value_input);
+        let k = mlxcel_core::row_invariant::linear(&self.k_proj, key_input);
+        let v = mlxcel_core::row_invariant::linear(&self.v_proj, value_input);
         let k = Self::conv(&self.k_conv, &k, key_input, rows, 0);
         let v = Self::conv(&self.v_conv, &v, value_input, rows, 1);
 
         let q = mlxcel_core::reshape(
-            &self.q_proj.forward(x),
+            &mlxcel_core::row_invariant::linear(&self.q_proj, x),
             &[batch, length, self.heads, self.head_dim],
         );
         let k = mlxcel_core::reshape(&k, &[batch, length, self.kv_heads, self.head_dim]);
         let v = mlxcel_core::reshape(&v, &[batch, length, self.kv_heads, self.head_dim]);
         let r = mlxcel_core::reshape(
-            &self.r_proj.forward(x),
+            &mlxcel_core::row_invariant::linear(&self.r_proj, x),
             &[batch, length, self.heads, self.d_rel],
         );
         let heads = match self
@@ -325,7 +325,7 @@ impl Inkling2Attention {
             None => self.prepare_heads_ops(&q, &k, &v, &r),
         };
         // A query-dependent sink is a zero K/V row with its own logit.
-        let sinks = self.sink_proj.forward(x);
+        let sinks = mlxcel_core::row_invariant::linear(&self.sink_proj, x);
         let sinks = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&sinks, &[0, 2, 1]), -1);
         let out = match rows {
             [cache] => {
@@ -351,9 +351,11 @@ impl Inkling2Attention {
         };
         let out = mlxcel_core::transpose_axes(&out, &[0, 2, 1, 3]);
         let out = mlxcel_core::reshape(&out, &[batch, length, self.heads * self.head_dim]);
-        let gate = mlxcel_core::sigmoid(&f32(&self.gate_proj.forward(x)));
+        let gate = mlxcel_core::sigmoid(&f32(&mlxcel_core::row_invariant::per_row(x, |x| {
+            self.gate_proj.forward(x)
+        })));
         let out = mlxcel_core::astype(&mlxcel_core::multiply(&f32(&out), &gate), x_dtype);
-        self.o_proj.forward(&out)
+        mlxcel_core::row_invariant::linear(&self.o_proj, &out)
     }
 
     /// The attention core of one row: prepared `[1, L, heads, d]` q/k/v/r and
@@ -403,9 +405,13 @@ impl Inkling2Attention {
             self.is_sliding.then_some(self.window),
             self.rel_extent,
         );
+        // The sink column goes FIRST (issue #3280): ahead of the keys it sits
+        // at the same index in a one-token step and in a K-row verify block,
+        // so the SDPA reduction assigns every visible key to the same lane
+        // in both and the block's masked future keys add exact zeros.
         let mask = mlxcel_core::concatenate(
-            &mlxcel_core::astype(&mask, x_dtype),
             &mlxcel_core::astype(sinks, x_dtype),
+            &mlxcel_core::astype(&mask, x_dtype),
             -1,
         );
         let zero_row = |value: &MlxArray| {
@@ -414,7 +420,7 @@ impl Inkling2Attention {
                 &[shape[0], shape[1], 1, shape[3]],
                 mlxcel_core::array_dtype(value),
             );
-            mlxcel_core::concatenate(value, &zeros, 2)
+            mlxcel_core::concatenate(&zeros, value, 2)
         };
         let mut keys = zero_row(&keys);
         let mut values = zero_row(&values);

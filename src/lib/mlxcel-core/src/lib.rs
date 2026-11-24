@@ -934,6 +934,19 @@ mod ffi {
             group_size: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
+        /// Whether the row-invariant matvec can run (Metal default device).
+        /// Used by: `row_invariant::available`.
+        fn row_invariant_matvec_available() -> bool;
+
+        /// Row-invariant dense `x [M, K] @ w [N, K]^T`, `M <= 16` (#3280):
+        /// see `row_invariant::matvec`. `-> Result` as above.
+        /// Used by: `row_invariant::matvec`.
+        fn row_invariant_matvec(
+            x: &MlxArray,
+            w: &MlxArray,
+            output_dtype: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Compiled GeGLU activation: gelu(gate) * x — single fused kernel
         /// Used by: legacy/tests for precise GeGLU
         fn compiled_geglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
@@ -4524,6 +4537,7 @@ pub mod layers;
 // Public so that `server` and `CachePool` consumers can import directly.
 pub mod batched_decode;
 pub mod cache;
+pub mod row_invariant;
 
 // Pure-Rust wrappers around frequently used FFI entry points.
 mod ops;

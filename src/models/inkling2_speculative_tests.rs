@@ -176,6 +176,27 @@ fn the_probe_runs_and_refuses_degenerate_widths() {
     );
 }
 
+/// Issue #3280: a verify block is byte-identical to single-token decode
+/// steps on Metal, looped (`passes = 3`) or not (`passes = 1`), at every
+/// width the drafter uses, so the gate lets the drafter engage there.
+#[test]
+fn the_verify_block_matches_the_chain_on_metal() {
+    if !mlxcel_core::inkling2_kernels::available() {
+        eprintln!("skipping: no Metal kernels on this backend");
+        return;
+    }
+    for passes in [1, 3] {
+        let model = model(passes, false);
+        for width in [2, 4, 8] {
+            let verdict = model.probe_block_chain_exactness(width);
+            assert!(
+                verdict.is_equal(),
+                "passes {passes} width {width}: {verdict:?}"
+            );
+        }
+    }
+}
+
 // ── Round loop ─────────────────────────────────────────────────────────────
 
 /// Delegates to the model and records every verify block's argmax rows.

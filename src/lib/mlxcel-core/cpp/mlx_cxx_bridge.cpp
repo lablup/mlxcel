@@ -6,6 +6,7 @@
 #include "../../mlxcelverse/kernels/gelu_tanh_f32.h"
 #include "../../mlxcelverse/kernels/mla_absorbed_decode.h"
 #include "../../mlxcelverse/kernels/inkling2_kernels.h"
+#include "../../mlxcelverse/kernels/row_invariant_matvec.h"
 
 #include "mlx/primitives.h"
 // Backend-agnostic CUDA availability probe; non-CUDA builds link the stub.
@@ -2118,6 +2119,18 @@ std::unique_ptr<MlxArray> inkling2_grouped_expert_qmv(
     return std::make_unique<MlxArray>(mlxcel::turbo::inkling2_grouped_expert_qmv(
         x.inner, w.inner, scales.inner, g, experts.inner, source.inner, destination.inner,
         bits, group_size));
+}
+
+bool row_invariant_matvec_available() {
+    return mlxcel::turbo::row_invariant_matvec_available();
+}
+
+std::unique_ptr<MlxArray> row_invariant_matvec(
+    const MlxArray& x,
+    const MlxArray& w,
+    int32_t output_dtype) {
+    return std::make_unique<MlxArray>(
+        mlxcel::turbo::row_invariant_matvec(x.inner, w.inner, to_dtype(output_dtype)));
 }
 
 // Compiled GeGLU: gelu(gate) * x
