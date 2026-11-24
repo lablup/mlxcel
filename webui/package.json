@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.16.1",
+  "packageManager": "pnpm@12.23.0",
   "scripts": {
     "build": "vite build",
     "typecheck": "tsc --noEmit",
@@ -20,31 +20,31 @@
     "verify-generated": "python3 ../scripts/webui/build_bundle.py --verify"
   },
   "dependencies": {
-    "@astryxdesign/lab": "0.7.0-canary.97a0d31",
-    "@lablup/ui-common": "0.2.0-alpha.19",
-    "@stylexjs/stylex": "0.19.1",
-    "lucide-react": "1.66.0",
+    "@astryxdesign/lab": "0.7.11-canary.d810271",
+    "@lablup/ui-common": "0.2.0-alpha.21",
+    "@stylexjs/stylex": "0.19.2",
+    "lucide-react": "1.78.0",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",
     "@eslint/js": "10.0.1",
-    "@lablup/ui-common-cli": "0.2.0-alpha.19",
+    "@lablup/ui-common-cli": "0.2.0-alpha.21",
     "@playwright/test": "1.64.1",
     "@types/node": "26.6.6",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
-    "@vitejs/plugin-react": "6.1.2",
-    "eslint": "10.14.0",
-    "jsdom": "30.1.3",
+    "@vitejs/plugin-react": "6.3.0",
+    "eslint": "10.15.0",
+    "jsdom": "31.0.1",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.72.1",
-    "vite": "8.3.5",
-    "vitest": "5.0.5"
+    "typescript-eslint": "8.73.0",
+    "vite": "8.3.8",
+    "vitest": "5.1.1"
   },
   "engines": {
     "node": "26.5.1",
-    "pnpm": "12.16.1"
+    "pnpm": "12.23.0"
   }
 }

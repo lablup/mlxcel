@@ -13,6 +13,7 @@ export interface SelectProps {
 
 export function Select(props: SelectProps): React.JSX.Element {
   const id = useId();
+  const labelId = `${id}-label`;
   const hintId = `${id}-hint`;
   const errorId = `${id}-error`;
   const describedBy = [props.hint ? hintId : null, props.error ? errorId : null].filter(Boolean).join(' ') || undefined;
@@ -23,8 +24,14 @@ export function Select(props: SelectProps): React.JSX.Element {
   // popover (never the narrow-viewport bottom sheet), inline next to the trigger, so inside a
   // native modal Dialog it stays in the dialog's subtree. No IME guard: the trigger is not
   // editable, and Astryx guards type-to-select and its search input against composing keys.
-  return <div className="ds-field ds-common-select" data-disabled={disabled || undefined} data-testid={props.testId}>
-    <Selector value={props.value} options={props.options} onChange={props.onChange} label={props.label} isDisabled={disabled} isLoading={props.busy} status={props.error ? { type: 'error' } : undefined} aria-describedby={describedBy} width="100%" presentation="popover" emptyText={t(props.locale ?? 'en', 'select.no_options')} />
-    {details}
-  </div>;
+  // Since ui-common 0.2.0-alpha.20 the Selector is a Form.Item wrapper and drops `label`: outside
+  // an item it renders an empty, visually hidden label. The visible label is rendered here and
+  // names the trigger through `aria-labelledby`, which Astryx joins with that empty label.
+  return (
+    <div className="ds-field ds-common-select" data-disabled={disabled || undefined} data-testid={props.testId}>
+      <span id={labelId} className="ds-common-select-label">{props.label}</span>
+      <Selector value={props.value} options={props.options} onChange={props.onChange} aria-labelledby={labelId} disabled={disabled} isLoading={props.busy} status={props.error ? 'error' : ''} aria-describedby={describedBy} width="100%" presentation="popover" emptyText={t(props.locale ?? 'en', 'select.no_options')} />
+      {details}
+    </div>
+  );
 }

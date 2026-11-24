@@ -17,8 +17,8 @@ describe('ui-common 0.2 dependency boundary', () => {
     const snapshots = lockfile.slice(lockfile.lastIndexOf('\nsnapshots:\n'));
     const cores = Array.from(snapshots.matchAll(/^ {2}'?@astryxdesign\/core@([^:']+)'?:$/gm), (match) => match[1]);
     expect(cores).toHaveLength(1);
-    expect(cores[0]).toMatch(/^0\.7\.0\(/);
-    expect(lockfile).toMatch(/^ {2}'@astryxdesign\/lab>@astryxdesign\/core': 0\.7\.0$/m);
+    expect(cores[0]).toMatch(/^0\.7\.11\(/);
+    expect(lockfile).toMatch(/^ {2}'@astryxdesign\/lab>@astryxdesign\/core': 0\.7\.11$/m);
   });
 
   it('ships the Astryx popover slide rules as the stylesheet index.html links', async () => {
