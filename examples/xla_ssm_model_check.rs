@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Whole-model Mamba2 execution check (issue #3338).
+//! Whole-model Mamba-family execution check (issues #3338 and #3348).
 //!
-//! Loads a Mamba2 checkpoint with the production config reader and weight
-//! loader, compiles the state-threaded token prefill for `--device`, and runs
+//! Loads a Mamba1, Falcon-Mamba, or Mamba2 checkpoint with the production
+//! config reader and weight loader, compiles the state-threaded token prefill
+//! for `--device`, and runs
 //! `--tokens` twice: once in a single call, and once split at `--split` into
 //! two calls that hand the returned state to the second call, then feeds the
 //! same tokens one at a time through the decode step (state in module globals).

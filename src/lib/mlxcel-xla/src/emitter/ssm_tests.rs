@@ -17,7 +17,7 @@
 //! `examples/xla_ssm_probe.rs`.
 
 use super::builder::{Builder, Precision, Ty};
-use super::config::SsmConfig;
+use super::config::{SsmConfig, SsmKind};
 use super::model::{ProbeMode, emit_ssm_probe, emit_ssm_probe_with};
 use super::ssm;
 use super::ssm_scan::SsmPrefillForm;
@@ -199,6 +199,33 @@ fn mamba1_probe_uses_bounded_diagonal_scan_and_state_shapes() {
     assert!(
         signature(&decode).contains("-> (tensor<3x8xf32>, tensor<3x16x4xf32>, tensor<3x3x16xf32>)")
     );
+}
+
+#[test]
+fn mamba1_capacity_4096_graph_stays_chunk_bounded_and_log_depth() {
+    let mut c = SsmConfig::tiny_mamba1(false);
+    c.kind = SsmKind::Mamba1 {
+        dt_rank: 48,
+        bcdt_norm: false,
+    };
+    c.head_dim = 1536;
+    c.state_size = 16;
+    c.conv_dim = 1536;
+    c.norm_group_size = 1536;
+    c.chunk_size = 128;
+    let graph = emit_ssm_probe(&c, 768, 4096, ProbeMode::Prefill);
+    assert!(graph.contains("tensor<128x1536x16xf32>"));
+    assert!(!graph.contains("tensor<4096x1536x16xf32>"));
+    assert!(
+        graph.lines().count() < 4_000,
+        "a row-unrolled scan regressed to {} StableHLO lines",
+        graph.lines().count()
+    );
+    assert!(
+        graph.matches("stablehlo.concatenate").count() < 80,
+        "output assembly must be per chunk, not per row"
+    );
+    assert_lowerable(&graph);
 }
 
 #[test]

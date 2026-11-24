@@ -216,8 +216,16 @@ Mamba1 and Falcon-Mamba use the same f32 diagonal recurrence but do not use
 Mamba2's SSD contraction. Prefill is partitioned at `chunk_size = 128` in
 production. Each partition materializes at most `[128,D,N]` `log_a` and input
 terms and carries only `[D,N]` between partitions, so the 4096-row capacity
-never creates a `[4096,D,N]` value. The focused structural fixture uses `Q=4`
-and nine rows and asserts that `[4,16,4]` occurs while `[9,16,4]` does not.
+never creates a `[4096,D,N]` value. Within a partition, a Hillis-Steele prefix
+scan composes affine pairs `(a, u)` as `(a_r*a_l, u_r + a_r*u_l)` in
+`ceil(log2(Q))` levels. This replaced an initial per-row unroll that emitted
+62,156 lines / 5.35 MiB and did not compile inside a 180 s CPU budget at 4096.
+
+The production-dimension (`D=1536`, `N=16`, `dt_rank=48`) capacity-4096 graph
+is 3,116 lines / 320 KiB. Source and emitted-shape inspection find the chunk
+shape `[128,1536,16]` and no `[4096,1536,16]` tensor. The structural regression
+also caps the graph below 4,000 lines and 80 concatenations, so a per-row scan
+or output assembly cannot silently return.
 
 The independent reference is Transformers 5.12.1 on CPU (`torch==2.12.1+cpu`),
 calling `MambaMixer.slow_forward` or `FalconMambaMixer.slow_forward` directly
@@ -226,10 +234,25 @@ IREE `local-task` runtime. Tolerance is `5e-5`.
 
 | case | rows / real length | compile s | run s | max-abs y | max-abs h | max-abs conv |
 |------|-------------------:|----------:|------:|----------:|----------:|-------------:|
-| Mamba1 padded prefill | 9 / 7 | 1.75 | 0.003 | 2.235e-8 | 1.397e-9 | 0 |
-| Mamba1 full prefill (same compiled shape) | 9 / 9 | cached | <0.001 | 2.235e-8 | 9.313e-10 | 0 |
+| Mamba1 padded prefill | 9 / 7 | 1.61 | <0.001 | 2.235e-8 | 9.313e-10 | 0 |
+| Mamba1 full prefill (same compiled shape) | 9 / 9 | cached | 0.002 | 2.235e-8 | 1.863e-9 | 0 |
 | Mamba1 decode, B=3 | 3 / 1 | 0.87 | <0.001 | 2.980e-8 | 5.960e-8 | 0 |
 | Falcon-Mamba decode, B=3 | 3 / 1 | 1.01 | <0.001 | 5.960e-8 | 5.960e-8 | 0 |
+
+At the real 130M mixer dimensions and capacity 4096 (`real_len=3584`), direct
+`llvm-cpu` compilation completed in 10.64 s at 228.2 MiB peak compiler RSS.
+The same graph through the IREE shim compiled in 9.96 s, ran on `local-task` in
+0.862 s, and the whole process peaked at 331.1 MiB RSS. Against Transformers'
+independent sequential Mamba slow path, max-abs errors were `y=3.427e-7`,
+`h=1.246e-8`, and conv tail `0` (tolerance `5e-5`).
+
+Whole-model CPU checks use the official
+`state-spaces/mamba-130m-hf` revision
+`1e76775f628fbf1350fbe4dbb3d971ba64af25a1` and a seeded two-layer
+`FalconMambaForCausalLM` checkpoint. Each check compares whole prefill, split
+prefill with carried state, and token-by-token decode against Transformers
+5.12.1 fp32. All argmaxes match; the Mamba checkpoint's worst max-abs error is
+`2.043e-3`, and Falcon-Mamba's is `4.768e-7` (whole-model tolerance `3e-2`).
 
 Reproduce the padded Mamba1 row (after exporting the pinned IREE environment):
 
@@ -243,6 +266,5 @@ cargo run --features xla-iree --example xla_ssm_probe -- \
 $PY spike/openxla/ssm_oracle.py --check /tmp/mamba1-out
 ```
 
-These are CPU execution results only. The required `hip` probe rows, real
-`state-spaces/mamba-130m-hf` whole-model gate, synthetic Falcon-Mamba whole-model
-gate, CLI, server, cancellation, and slot-recycling evidence remain pending.
+These are CPU execution results only. The required `hip` probe and whole-model
+rows, CLI, server, cancellation, and slot-recycling evidence remain pending.

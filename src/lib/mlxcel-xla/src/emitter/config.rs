@@ -460,9 +460,9 @@ impl SsmConfig {
                 "SsmConfig.time_step_limit {low}..{high} is invalid"
             ));
         }
-        if !self.norm_eps.is_finite() || self.norm_eps < 0.0 {
+        if !self.norm_eps.is_finite() || self.norm_eps <= 0.0 {
             return Err(format!(
-                "SsmConfig.norm_eps={} must be finite and non-negative",
+                "SsmConfig.norm_eps={} must be finite and positive",
                 self.norm_eps
             ));
         }

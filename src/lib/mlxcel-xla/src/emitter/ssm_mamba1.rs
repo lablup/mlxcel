@@ -58,6 +58,66 @@ pub(crate) fn diag_scan_step(b: &mut Builder, log_a: &Val, bx: &Val, h: &Val) ->
     b.add(&kept, &bx)
 }
 
+/// Shift `v` down by `by` rows, filling the new prefix with `fill`.
+fn shift_rows(b: &mut Builder, v: &Val, by: usize, fill: f32) -> Val {
+    let rank = v.ty.shape.len();
+    let rows = v.ty.shape[0];
+    debug_assert!(by < rows);
+    let mut keep: Vec<(usize, usize)> = v.ty.shape.iter().map(|&size| (0, size)).collect();
+    keep[0] = (0, rows - by);
+    let kept = b.slice(v, &keep);
+    let fill = b.const_f32(fill);
+    let mut low = vec![0; rank];
+    low[0] = by;
+    b.pad(&kept, &fill, &low, &vec![0; rank])
+}
+
+/// Log-depth inclusive prefix scan of the affine recurrence pairs in one
+/// bounded block. For `(a_t, u_t)`, composition is
+/// `(a_r, u_r) o (a_l, u_l) = (a_r*a_l, u_r + a_r*u_l)`.
+fn diag_scan_block(
+    b: &mut Builder,
+    log_a: &Val,
+    bx: &Val,
+    readout: Option<&Val>,
+    h0: &Val,
+) -> (Val, Val) {
+    let [rows, d, n] = log_a.ty.shape.as_slice() else {
+        panic!("diagonal scan block must be [T,D,N]");
+    };
+    let (rows, d, n) = (*rows, *d, *n);
+    let full = vec![rows, d, n];
+    let log_a = to_f32(b, log_a);
+    let mut decay = b.exponential(&log_a);
+    let mut acc = to_f32(b, bx);
+    let mut step = 1;
+    while step < rows {
+        let previous_decay = shift_rows(b, &decay, step, 1.0);
+        let previous_acc = shift_rows(b, &acc, step, 0.0);
+        let carried = b.multiply(&decay, &previous_acc);
+        acc = b.add(&acc, &carried);
+        decay = b.multiply(&decay, &previous_decay);
+        step *= 2;
+    }
+    let h0 = to_f32(b, h0);
+    let h0 = b.broadcast(&h0, &[1, 2], full);
+    let from_h0 = b.multiply(&decay, &h0);
+    let states = b.add(&from_h0, &acc);
+    let y = match readout {
+        Some(readout) => {
+            let readout = to_f32(b, readout);
+            let readout = b.reshape(&readout, vec![rows, 1, n]);
+            let readout = b.broadcast(&readout, &[0, 1, 2], vec![rows, d, n]);
+            let product = b.multiply(&states, &readout);
+            let zero = b.const_f32(0.0);
+            b.reduce_add(&product, 2, &zero)
+        }
+        None => b.reshape(&states, vec![rows, d]),
+    };
+    let last = b.slice(&states, &[(rows - 1, rows), (0, d), (0, n)]);
+    (y, b.reshape(&last, vec![d, n]))
+}
+
 /// Chunked diagonal scan over `log_a, bx [T,D,N]` from `h0 [D,N]`.
 ///
 /// `readout [T,N]` produces `y[t,d] = sum_n readout[t,n] * h[t,d,n]`.
@@ -87,35 +147,11 @@ pub(crate) fn diag_scan_prefill(
     let mut all_y: Option<Val> = None;
     for begin in (0..t).step_by(chunk) {
         let end = (begin + chunk).min(t);
-        let rows = end - begin;
         let log_block = b.slice(log_a, &[(begin, end), (0, d), (0, n)]);
         let bx_block = b.slice(bx, &[(begin, end), (0, d), (0, n)]);
         let read_block = readout.map(|c| b.slice(c, &[(begin, end), (0, n)]));
-        let mut block_y: Option<Val> = None;
-        for row in 0..rows {
-            let log_row = b.slice(&log_block, &[(row, row + 1), (0, d), (0, n)]);
-            let log_row = b.reshape(&log_row, vec![d, n]);
-            let bx_row = b.slice(&bx_block, &[(row, row + 1), (0, d), (0, n)]);
-            let bx_row = b.reshape(&bx_row, vec![d, n]);
-            h = diag_scan_step(b, &log_row, &bx_row, &h);
-            let y = match &read_block {
-                Some(c) => {
-                    let c = b.slice(c, &[(row, row + 1), (0, n)]);
-                    let c = b.reshape(&c, vec![n]);
-                    let c = b.broadcast(&c, &[1], vec![d, n]);
-                    let product = b.multiply(&h, &c);
-                    let zero = b.const_f32(0.0);
-                    b.reduce_add(&product, 1, &zero)
-                }
-                None => b.reshape(&h, vec![d]),
-            };
-            let y = b.reshape(&y, vec![1, d]);
-            block_y = Some(match block_y {
-                Some(previous) => b.concatenate(&previous, &y, 0),
-                None => y,
-            });
-        }
-        let block_y = block_y.expect("a scan block has at least one row");
+        let (block_y, next) = diag_scan_block(b, &log_block, &bx_block, read_block.as_ref(), &h);
+        h = next;
         all_y = Some(match all_y {
             Some(previous) => b.concatenate(&previous, &block_y, 0),
             None => block_y,

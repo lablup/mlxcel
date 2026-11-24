@@ -71,6 +71,11 @@ pub(super) fn mamba1_from_json(
         }
     };
 
+    if !bool_or("rms_norm", true)? {
+        return Err(format!(
+            "{family} with rms_norm = false (LayerNorm blocks) is not supported"
+        ));
+    }
     if let Some(act) = value(&["hidden_act"])
         && act.as_str() != Some("silu")
     {
@@ -113,6 +118,16 @@ pub(super) fn mamba1_from_json(
     let norm_eps = f32_or(&["layer_norm_epsilon", "rms_norm_eps"], 1e-5)?;
     let mixer_eps = f32_or(&["mixer_rms_eps"], 1e-6)?;
     let bcdt_norm = model_type == "falcon_mamba" || bool_or("use_bcdt_rms", false)?;
+    if !norm_eps.is_finite() || norm_eps <= 0.0 {
+        return Err(format!(
+            "{family} block norm epsilon {norm_eps} must be finite and positive"
+        ));
+    }
+    if bcdt_norm && (!mixer_eps.is_finite() || mixer_eps <= 0.0) {
+        return Err(format!(
+            "{family} mixer_rms_eps {mixer_eps} must be finite and positive"
+        ));
+    }
     let ssm = SsmConfig {
         kind: SsmKind::Mamba1 { dt_rank, bcdt_norm },
         // Reuse `n_heads * head_dim` as the common d_inner representation.

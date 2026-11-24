@@ -190,6 +190,34 @@ fn mamba1_legacy_bias_aliases_and_canonical_precedence() {
 }
 
 #[test]
+fn mamba1_rejects_unsupported_norms_and_nonpositive_epsilons() {
+    for replacement in [
+        r#""layer_norm_epsilon": 1e-5, "rms_norm": false"#,
+        r#""layer_norm_epsilon": 0"#,
+        r#""layer_norm_epsilon": -1"#,
+    ] {
+        let text = TINY_MAMBA1.replace(r#""layer_norm_epsilon": 1e-5"#, replacement);
+        let error = Config::from_json_str(&text).expect_err("invalid Mamba1 norm must fail");
+        assert!(
+            error.contains("not supported") || error.contains("finite and positive"),
+            "{error}"
+        );
+    }
+
+    let falcon = TINY_MAMBA1
+        .replace(
+            r#""model_type": "mamba""#,
+            r#""model_type": "falcon_mamba""#,
+        )
+        .replace(
+            r#""layer_norm_epsilon": 1e-5"#,
+            r#""layer_norm_epsilon": 1e-5, "mixer_rms_eps": 0"#,
+        );
+    let error = Config::from_json_str(&falcon).expect_err("zero Falcon mixer epsilon must fail");
+    assert!(error.contains("mixer_rms_eps") && error.contains("finite and positive"));
+}
+
+#[test]
 fn mamba1_weight_specs_match_the_hf_mixer_order() {
     let c = tiny_mamba1();
     let names = weight_specs_q(&c, false)
