@@ -218,3 +218,60 @@ fn run_sliding_batch(q_heads: usize, kv_heads: usize, d: usize, prompts: &[usize
         assert_eq!(layer.visible_len(), layer.len.min(WINDOW));
     }
 }
+
+/// The fused read hands Q to the kernel in its own dtype (no cast kernel per
+/// launch). Widening fp16 to f32 is exact, so the result is the same bytes as
+/// launching with Q cast to f32 first and casting the f32 result back.
+#[test]
+fn an_fp16_query_reads_the_same_bytes_as_its_f32_cast() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
+    let (q_heads, kv_heads, d) = (4usize, 1usize, 256usize);
+    let layout = PagedKvLayout::uniform(1, PAGE, PAGE * kv_heads * d * 2).expect("layout");
+    let mut pool = PagedBlockPool::new(layout.clone());
+    pool.set_slab_blocks(1024).expect("fresh pool");
+    let pool = Rc::new(RefCell::new(pool));
+    let mut rng = Rng(0x3256 << 3 | 1);
+    let prompts = [777usize, 300];
+    let states: Vec<_> = prompts
+        .iter()
+        .map(|_| {
+            let mut state = PagedSequenceState::new(&layout);
+            state.layers[0] = PagedLayerState::sliding(WINDOW);
+            Rc::new(RefCell::new(state))
+        })
+        .collect();
+    for (state, &len) in states.iter().zip(&prompts) {
+        let mut cache = KVCache::new_paged(pool.clone(), state.clone(), 0);
+        let shape = [1, kv_heads as i32, len as i32, d as i32];
+        let (k, _) = random(&mut rng, &shape);
+        let (v, _) = random(&mut rng, &shape);
+        cache.update(k, v);
+    }
+    let scale = 1.0 / (d as f32).sqrt();
+    for batch in [1usize, 2] {
+        let (q, _) = random(&mut rng, &[batch as i32, q_heads as i32, 1, d as i32]);
+        let q_f32 = ffi::astype(&q, dtype::FLOAT32);
+        let borrowed: Vec<_> = states[..batch].iter().map(|s| s.borrow()).collect();
+        let refs: Vec<&PagedSequenceState> = borrowed.iter().map(|s| &**s).collect();
+        let mut pool = pool.borrow_mut();
+        let (half, _) = pool
+            .paged_decode_batched_with_floor(&q, &refs, 0, scale, 0)
+            .expect("launch");
+        let (wide, _) = pool
+            .paged_decode_batched_with_floor(&q_f32, &refs, 0, scale, 0)
+            .expect("launch");
+        let half = half.expect("fused read served the fp16 query");
+        let wide = ffi::astype(
+            &wide.expect("fused read served the f32 query"),
+            dtype::FLOAT16,
+        );
+        ffi::eval(&half);
+        ffi::eval(&wide);
+        assert_eq!(ffi::array_dtype(&half), dtype::FLOAT16);
+        assert_eq!(
+            ffi::array_to_raw_bytes(&half),
+            ffi::array_to_raw_bytes(&wide),
+            "batch {batch}: fp16 Q and its f32 cast gave different bytes"
+        );
+    }
+}
