@@ -59,6 +59,8 @@
 
 pub mod attention;
 pub mod cache;
+/// Pipelined classic decode steps inside the B = 1 round loop (issue #3410).
+mod classic_steps;
 pub mod config;
 pub mod drafter;
 pub mod layer;
@@ -74,6 +76,8 @@ pub mod round_loop;
 /// DFlash speculative-decoding round-loop driver, B > 1 with continuous
 /// batching and per-row GDN-aware rollback (sub-13).
 pub mod round_loop_batched;
+/// Acceptance-aware verify width for the B = 1 round loop (issue #3410).
+pub mod width_policy;
 
 pub use attention::DFlashAttention;
 pub use cache::DFlashKVCache;

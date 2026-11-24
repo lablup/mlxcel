@@ -23,8 +23,8 @@
 //!   kernel size 4 and an f32 history;
 //! - attention head preparation on a looped model (Mini) with the gamma-free
 //!   value norm, for bf16 `[1, 1..=8, heads, 128]` heads and `d_rel == 16`;
-//! - the grouped expert matvec on a looped model, only inside a speculative
-//!   verify forward ([`mlxcel_core::cache::speculative_append_active`], set
+//! - the grouped expert matvec (Mini and, since issue #3410, Small), only
+//!   inside a speculative verify forward ([`mlxcel_core::cache::speculative_append_active`], set
 //!   by `Engine::verify`), for bf16 `[1, 2..=8, hidden]` and native NVFP4 or
 //!   MXFP8 planes without biases.
 //!
@@ -35,7 +35,8 @@
 //! tests through `dispatch_counts`), and the first one of each kernel is
 //! logged at debug level, as is each model's gate decision at load, so
 //! `RUST_LOG=mlxcel::models::inkling2=debug` shows which kernels a run took
-//! (#3373: Small takes the short convolution and neither loop kernel).
+//! (#3373: Small takes the short convolution and neither loop kernel; since
+//! #3410 it takes the grouped expert matvec in verify forwards).
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,7 +124,7 @@ pub(crate) fn log_model_gates(config: &Inkling2TextConfig) {
         } else {
             "off"
         },
-        if looped {
+        if grouped_experts_wanted(config, enabled) {
             "on (verify forwards)"
         } else {
             "off"
@@ -154,6 +155,18 @@ pub(crate) fn short_convolution_applies(x: &MlxArray, history: &MlxArray, kernel
 /// `loop_config`, and only while [`KERNELS_ENV`] leaves them on.
 pub(crate) fn loop_kernels_wanted(config: &Inkling2TextConfig, enabled: bool) -> bool {
     enabled && config.loop_config.is_some()
+}
+
+/// Whether a model built from `config` wants the grouped expert matvec in
+/// its verify forwards. Upstream gates it on `loop_config` with the head
+/// preparation; mlxcel takes it on Small too (issue #3410). The kernel
+/// equals the gather path row for row, so the verify block stays exact, and
+/// it decodes an expert routed by several rows once, which is most of what
+/// a Small verify round costs: 8 rows measured 129 ms with it against 150 ms
+/// without, 3 rows 75 against 81 (`docs/benchmark_results/
+/// inkling2-dspark-followups-m3ultra-2026-11-25.md`).
+pub(crate) fn grouped_experts_wanted(_config: &Inkling2TextConfig, enabled: bool) -> bool {
+    enabled
 }
 
 /// The head-preparation shape gate, after the model-level one (looped model,

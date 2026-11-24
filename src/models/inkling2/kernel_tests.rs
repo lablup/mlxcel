@@ -433,6 +433,15 @@ fn loop_kernels_are_wanted_only_on_a_looped_model_with_kernels_on() {
     assert!(!loop_kernels_wanted(&text_config(false), true));
 }
 
+/// Issue #3410: the grouped expert matvec serves unlooped Small too, and the
+/// kill switch still turns it off.
+#[test]
+fn grouped_experts_are_wanted_with_or_without_a_loop() {
+    assert!(grouped_experts_wanted(&text_config(true), true));
+    assert!(grouped_experts_wanted(&text_config(false), true));
+    assert!(!grouped_experts_wanted(&text_config(false), false));
+}
+
 /// The dispatch counter behind the `RUST_LOG` evidence of #3373 counts a
 /// kernel only when it ran, not when its gate refused and the ops path did.
 #[test]

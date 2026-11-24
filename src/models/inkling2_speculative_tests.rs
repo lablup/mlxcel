@@ -203,6 +203,9 @@ fn the_verify_block_matches_the_chain_on_metal() {
 struct Recorder<'a> {
     model: &'a Inkling2Model,
     verify_argmax: RefCell<Vec<Vec<i32>>>,
+    /// Forward the model's `exact_at_every_verify_width`, which lets the
+    /// round loop pick each round's width (issue #3410).
+    adaptive: bool,
 }
 
 impl SpeculativeTarget for Recorder<'_> {
@@ -232,6 +235,10 @@ impl SpeculativeTarget for Recorder<'_> {
         out
     }
 
+    fn exact_at_every_verify_width(&self) -> bool {
+        self.adaptive && self.model.exact_at_every_verify_width()
+    }
+
     fn rollback_partial(
         &self,
         caches: &mut [Self::Cache],
@@ -259,6 +266,8 @@ struct ScheduledDrafter {
     schedule: Vec<usize>,
     round: usize,
     next: usize,
+    /// Row count of every captured hidden the drafter was handed.
+    seen_rows: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
 }
 
 impl Drafter for ScheduledDrafter {
@@ -282,6 +291,10 @@ impl Drafter for ScheduledDrafter {
             mlxcel_core::array_shape(hidden)[2],
             CAPTURE.len() as i32 * HIDDEN
         );
+        self.seen_rows
+            .lock()
+            .unwrap()
+            .push(mlxcel_core::array_shape(hidden)[1]);
         // Re-sync on the bonus so a divergence from the reference does not
         // stall the schedule.
         if let Some(at) = self.reference[self.next..]
@@ -320,6 +333,7 @@ fn emitted_tokens_equal_the_verify_argmax_of_every_round() {
     let recorder = Recorder {
         model: &model,
         verify_argmax: RefCell::new(Vec::new()),
+        adaptive: false,
     };
     let mut caches = model.make_speculative_caches();
     let prefill = model.prefill_forward_with_capture_layers(&ids(&prompt), &mut caches, &CAPTURE);
@@ -331,6 +345,7 @@ fn emitted_tokens_equal_the_verify_argmax_of_every_round() {
         schedule: vec![0, 2, 1, usize::MAX, 0, 1, 2],
         round: 0,
         next: 0,
+        seen_rows: Default::default(),
     };
     let sampler = SamplingConfig {
         temperature: 0.0,
@@ -380,3 +395,6 @@ fn emitted_tokens_equal_the_verify_argmax_of_every_round() {
         assert_eq!(tokens, reference[..tokens.len()]);
     }
 }
+
+#[path = "inkling2_speculative_round_tests.rs"]
+mod round_tests;
