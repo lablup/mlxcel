@@ -2,7 +2,7 @@
 
 **작성일**: 2026-11-25
 
-**상태**: 부분 완료, ROCm 검증 대기
+**상태**: CUDA 및 ROCm 수용 검증 통과
 
 ## 요약
 
@@ -50,7 +50,7 @@ Test-fast CLI는 HF oracle token ID 40개와 모두 정확히 일치했다. HTTP
 
 CUDA에서 `xla_ssm_single_seq` 테스트 6개, `xla_ssm_state_carry` 테스트 5개, 별도의 `xla_hybrid_nemotron_h` 테스트 5개가 통과했다. Nemotron-H prompt-cache 제외 unit test도 통과했다. 검증 binary는 `93ddebad` 소스에서 빌드했고 CLI/server 증거는 문서만 변경된 `d7e8a040` checkout에서 캡처했다. 원시 증거와 binary hash는 `spike/openxla/nemotron_h_reference/`에 포함한다.
 
-ROCm gfx1151 전체 gate는 아직 검증되지 않았다. 이번 실행의 local-validation 정책에 따라 원격 CI는 취소했으며, 취소를 CI 통과 증거로 간주하지 않는다. PR은 draft이고 #3344는 `status:review` 상태로 열려 있다.
+ROCm gfx1151도 실행 소스 `93ddebad382478540fdfc987fbca655744be941d`에서 수용 검증을 통과했다. HF oracle을 독립 재생성했고 IREE-HIP 및 CLI 40/40 token, B4/N8 170-token, 동시 streaming HTTP 4개 출력 문자열 일치를 확인했다. HIP과 local-task에서 hybrid 테스트 5개와 SSM probe 11개가 각각 통과했으며 Mamba2 단일 시퀀스·상태 전달 및 실제 체크포인트 회귀도 통과했다. ROCm HTTP token ID와 usage count는 수집하지 않았으므로 HTTP 증거는 문자열 일치에 한정한다. 모든 빌드와 장치 작업은 ROCm guard를 사용했고 runtime은 release 빌드였으며 성능 향상을 주장하지 않는다. 명령과 로그 경로는 [ROCm 수용 기록](https://github.com/lablup/mlxcel/pull/3408#issuecomment-7138393314)에 있다. 이번 실행의 local-validation 정책에 따라 원격 CI는 취소했으며, 취소를 CI 통과 증거로 간주하지 않는다.
 
 ## 학습 포인트
 
@@ -60,7 +60,7 @@ ROCm gfx1151 전체 gate는 아직 검증되지 않았다. 이번 실행의 loca
 
 ## 후속 조치
 
-- [ ] 정확한 PR SHA를 기록하고 ROCm gfx1151에서 동일한 실제 모델, batching, server, Mamba2 증거를 남긴다.
+- [x] 정확한 실행 소스 SHA를 기록하고 ROCm gfx1151의 실제 모델, batching, server, Mamba2 증거를 남겼다([수용 기록](https://github.com/lablup/mlxcel/pull/3408#issuecomment-7138393314)).
 - [ ] Nemotron-H MoE 스케줄을 활성화하기 전에 #3345에서 `E` 블록을 구현하고 검증한다.
 
 ## 참고 자료

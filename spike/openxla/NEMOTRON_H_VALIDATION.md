@@ -2,7 +2,7 @@
 
 The implementation targets the official `nvidia/Nemotron-H-4B-Base-8K` checkpoint at revision `faba3b731ad7ea5781b9518ae75fb610a94affcf`. Download its original HF bf16 safetensors, tokenizer, and config to `models/hf/nemotron-h-4b`. Transformers 5.12.1 has native Nemotron-H support; use its CPU torch fallback with `trust_remote_code=False`. The config contains bare `Infinity`, an attention head width of 128 (4096 projection width, hidden width 3072), and an SSM width of 7168; do not rewrite these dimensions.
 
-Record `git rev-parse HEAD`, checkpoint revision, compiler/runtime versions, device identity, command exit codes, and full token IDs with every result. Local CPU structural checks do not establish ROCm acceptance. Keep #3344 open until the required hardware gates have passed.
+Record `git rev-parse HEAD`, checkpoint revision, compiler/runtime versions, device identity, command exit codes, and full token IDs with every result. Local CPU structural checks do not establish ROCm acceptance. CUDA and ROCm acceptance have passed at executable source `93ddebad`; later executable changes require the affected gates to be rerun.
 
 The independent CPU HF reference is committed in `nemotron_h_reference/hf-f32-oracle.json`, with package versions, checkpoint metadata hashes, and a portable reproduction command in `nemotron_h_reference/provenance.json`. It contains six prompt tokens and forty continuation tokens. This is an HF reference artifact, not XLA or hardware acceptance; it can be passed directly to `--oracle`.
 
@@ -17,7 +17,7 @@ The implementation was validated on NVIDIA GB10 with driver 580.178.04, f32 recu
 - The server started with `--ctx-size 2048`, B=4, an explicit XLA capacity of 256, and prompt cache/APC disabled. The earlier `--ctx-size 1024` attempt was correctly rejected because 256 tokens per slot is below the server's 512-token minimum.
 - The `xla_ssm_single_seq` target passed six tests, `xla_ssm_state_carry` passed five tests, the separate `xla_hybrid_nemotron_h` target passed five tests, and the Nemotron-H prompt-cache exclusion unit test passed on the tested source.
 
-The raw oracle, batch, CLI/server, concurrency, provenance, and focused regression outputs are in `nemotron_h_reference/`. The test-fast throughput values are informational and are not release-build performance claims. No ROCm acceptance result is recorded yet.
+The raw oracle, batch, CLI/server, concurrency, provenance, and focused regression outputs are in `nemotron_h_reference/`. The test-fast throughput values are informational and are not release-build performance claims. ROCm gfx1151 acceptance is recorded separately in the [PR validation comment](https://github.com/lablup/mlxcel/pull/3408#issuecomment-7138393314): HF/IREE/CLI 40-token parity, B4/N8, four concurrent streaming HTTP text comparisons, hybrid and SSM probes, and Mamba2 regressions all passed at `93ddebad`. ROCm HTTP IDs and usage counts were not collected.
 
 Reproduction uses the same explicit capacity and f32 environment:
 

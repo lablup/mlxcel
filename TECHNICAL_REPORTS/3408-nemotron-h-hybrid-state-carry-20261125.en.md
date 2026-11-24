@@ -2,7 +2,7 @@
 
 **Date**: 2026-11-25
 
-**Status**: Partial; ROCm acceptance pending
+**Status**: CUDA and ROCm acceptance passed
 
 ## Executive Summary
 
@@ -50,7 +50,7 @@ The test-fast CLI matched all 40 HF oracle token IDs exactly. Four HTTP requests
 
 On CUDA, `xla_ssm_single_seq` passed six tests, `xla_ssm_state_carry` passed five tests, and the separate `xla_hybrid_nemotron_h` target passed five tests. The Nemotron-H prompt-cache exclusion unit test also passed. The validation binaries came from `93ddebad`; CLI/server evidence was captured from the documentation-only checkout `d7e8a040`. Raw evidence and binary hashes are included under `spike/openxla/nemotron_h_reference/`.
 
-All ROCm gfx1151 gates remain pending. Remote CI was cancelled under the run's local-validation policy; cancellation is not passing CI evidence. The PR remains a draft and #3344 remains open at `status:review`.
+ROCm gfx1151 acceptance also passed at executable source `93ddebad382478540fdfc987fbca655744be941d`: independently regenerated HF oracle, IREE-HIP and CLI 40/40 token parity, B4/N8 170-token parity, four concurrent streaming HTTP text comparisons, five hybrid tests on HIP and local-task, eleven SSM probe cases per backend, and Mamba2 single-sequence/state-carry and real-checkpoint regressions. HTTP token IDs and usage counts were not collected on ROCm, so its HTTP evidence is rendered-text parity. All builds and device work used the ROCm guard; release runtime binaries were used without a performance claim. The [ROCm acceptance record](https://github.com/lablup/mlxcel/pull/3408#issuecomment-7138393314) identifies the commands and log directory. Remote CI was cancelled under the run's local-validation policy; cancellation is not passing CI evidence.
 
 ## Learning Points
 
@@ -60,7 +60,7 @@ An internal single-sequence reference proves batch consistency but cannot prove 
 
 ## Follow-up Actions
 
-- [ ] Record the same real-model, batching, server, and Mamba2 evidence on ROCm gfx1151 at the exact tested PR SHA.
+- [x] Record real-model, batching, server, and Mamba2 evidence on ROCm gfx1151 at the exact tested source SHA ([acceptance record](https://github.com/lablup/mlxcel/pull/3408#issuecomment-7138393314)).
 - [ ] Implement and validate `E` blocks in #3345 before enabling Nemotron-H MoE schedules.
 
 ## References
