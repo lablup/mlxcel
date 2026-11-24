@@ -523,6 +523,7 @@ pub fn config_eos_token_ids(model_path: &Path) -> Vec<i32> {
 /// The server keeps such a model out of every prefix-hash cache: a saved
 /// token prefix cannot restore its recurrent state. A config the emitter does
 /// not support is `Err`; the caller then falls back to its own family list.
+#[cfg(any(feature = "iree", test))]
 pub fn config_json_has_recurrent_state(text: &str) -> Result<bool, String> {
     emitter::Config::from_json_str(text).map(|config| config.has_recurrent_state())
 }
