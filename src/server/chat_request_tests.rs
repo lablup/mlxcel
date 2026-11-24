@@ -3610,6 +3610,7 @@ fn frames_fallback_support() -> ModelMediaSupport {
         video_native: false,
         video_frames_fallback: true,
         video_with_audio: false,
+        audio_refusal: None,
     }
 }
 
@@ -3621,6 +3622,7 @@ fn native_video_support() -> ModelMediaSupport {
         video_native: true,
         video_frames_fallback: false,
         video_with_audio: false,
+        audio_refusal: None,
     }
 }
 
@@ -3667,7 +3669,9 @@ fn part_kinds(request: &ChatCompletionRequest, message_index: usize) -> Vec<Stri
                 ContentPart::Text { text } => format!("text:{text}"),
                 ContentPart::ImageUrl { image_url } => format!("image:{}", image_url.url),
                 ContentPart::VideoUrl { video_url } => format!("video:{}", video_url.url),
-                ContentPart::InputAudio { .. } => "audio".to_string(),
+                ContentPart::InputAudio { .. } | ContentPart::AudioUrl { .. } => {
+                    "audio".to_string()
+                }
             })
             .collect(),
         MessageContent::Text(text) => vec![format!("text:{text}")],

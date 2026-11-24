@@ -229,6 +229,12 @@ pub enum ContentPart {
     /// Audio input content (base64-encoded audio data)
     #[serde(rename = "input_audio")]
     InputAudio { input_audio: InputAudio },
+    /// Audio by URL (`audio_url`), a part name some clients and chat templates
+    /// use. Accepted at parse time only so the HTTP boundary can answer it with
+    /// the same capability refusal as `input_audio` rather than a body-shape
+    /// error; no checkpoint consumes it (issue #3376).
+    #[serde(rename = "audio_url")]
+    AudioUrl { audio_url: AudioUrl },
 }
 
 /// Image URL reference.
@@ -379,6 +385,14 @@ pub struct InputAudio {
     pub format: String,
 }
 
+/// `audio_url` content part payload. Only the presence of the part matters:
+/// it is refused before the URL is read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioUrl {
+    /// URL or path of the clip.
+    pub url: String,
+}
+
 fn default_audio_format() -> String {
     "wav".to_string()
 }
@@ -521,6 +535,16 @@ impl MessageContent {
                     _ => None,
                 })
                 .collect(),
+        }
+    }
+
+    /// Whether this content carries an `audio_url` part.
+    pub fn has_audio_urls(&self) -> bool {
+        match self {
+            MessageContent::Text(_) => false,
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .any(|part| matches!(part, ContentPart::AudioUrl { .. })),
         }
     }
 
@@ -1323,6 +1347,11 @@ impl ChatCompletionRequest {
             .iter()
             .flat_map(|m| m.content.audio_inputs())
             .collect()
+    }
+
+    /// Whether any message carries an `audio_url` part.
+    pub fn has_audio_urls(&self) -> bool {
+        self.messages.iter().any(|m| m.content.has_audio_urls())
     }
 
     /// Extract all video URL references from messages.
