@@ -25,9 +25,12 @@ ROCm handoff (all commands under ``scripts/rocm_gpu_guard.sh --hold --``):
         -p 'tok4 tok17 tok5 tok29 tok11 tok8' -n 12 --temp 0 \
         --no-chat-template
 
-Compare the printed continuation IDs with ``hf-f32-oracle.json``. The ignored
-``xla_hybrid_nemotron_h`` integration test separately drives eight raw-ID requests
-through batch four and compares every stream with the single-sequence engine.
+Compare all 12 printed continuation IDs with ``hf-f32-oracle.json``. EOS is the
+reserved ID 31, and generation fails if the fixed reference ever emits it, so
+the HF and CLI paths exercise the same max-token stop policy. The ignored
+``xla_hybrid_nemotron_h`` integration test separately drives eight raw-ID
+requests through batch four and compares every stream with the single-sequence
+engine.
 """
 
 import argparse
@@ -46,11 +49,16 @@ from transformers import (
 
 PROMPT = "tok4 tok17 tok5 tok29 tok11 tok8"
 SEED = 3345
+VOCAB_SIZE = 32
+PAD_ID = 0
+BOS_ID = 1
+UNK_ID = 2
+EOS_ID = 31
 
 
 def build_config() -> NemotronHConfig:
     return NemotronHConfig(
-        vocab_size=32,
+        vocab_size=VOCAB_SIZE,
         hidden_size=16,
         layers_block_type=["mamba", "attention", "moe", "mamba", "mlp"],
         tie_word_embeddings=True,
@@ -81,19 +89,28 @@ def build_config() -> NemotronHConfig:
         norm_topk_prob=True,
         use_bias=False,
         layer_norm_epsilon=1e-5,
-        eos_token_id=2,
-        bos_token_id=1,
-        pad_token_id=0,
+        eos_token_id=EOS_ID,
+        bos_token_id=BOS_ID,
+        pad_token_id=PAD_ID,
     )
 
 
 def build_tokenizer() -> PreTrainedTokenizerFast:
-    vocab = {f"tok{index}": index for index in range(32)}
-    vocab.update({"<pad>": 0, "<bos>": 1, "<eos>": 2, "<unk>": 3})
+    vocab = {f"tok{index}": index for index in range(3, EOS_ID)}
+    vocab.update(
+        {
+            "<pad>": PAD_ID,
+            "<bos>": BOS_ID,
+            "<unk>": UNK_ID,
+            "<eos>": EOS_ID,
+        }
+    )
+    if len(vocab) != VOCAB_SIZE or len(set(vocab.values())) != VOCAB_SIZE:
+        raise AssertionError("fixture tokenizer IDs must be unique and fill the vocabulary")
     tokenizer = Tokenizer(models.WordLevel(vocab=vocab, unk_token="<unk>"))
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
     tokenizer.decoder = decoders.WordPiece(prefix="##")
-    return PreTrainedTokenizerFast(
+    fast = PreTrainedTokenizerFast(
         tokenizer_object=tokenizer,
         pad_token="<pad>",
         bos_token="<bos>",
@@ -101,6 +118,20 @@ def build_tokenizer() -> PreTrainedTokenizerFast:
         unk_token="<unk>",
         clean_up_tokenization_spaces=False,
     )
+    expected_special_ids = {
+        "<pad>": PAD_ID,
+        "<bos>": BOS_ID,
+        "<unk>": UNK_ID,
+        "<eos>": EOS_ID,
+    }
+    actual_special_ids = {
+        token: fast.convert_tokens_to_ids(token) for token in expected_special_ids
+    }
+    if len(fast) != VOCAB_SIZE or actual_special_ids != expected_special_ids:
+        raise AssertionError(
+            f"saved tokenizer contract drifted: len={len(fast)}, specials={actual_special_ids}"
+        )
+    return fast
 
 
 def randomize_model(model: NemotronHForCausalLM) -> None:
@@ -142,19 +173,42 @@ def greedy_oracle(
     prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
     input_ids = torch.tensor([prompt_ids], dtype=torch.long)
     continuation = []
+    eos_token_id = model.config.eos_token_id
+    if eos_token_id != EOS_ID:
+        raise AssertionError(f"fixture EOS drifted: expected {EOS_ID}, got {eos_token_id}")
     with torch.inference_mode():
         for _ in range(max_new):
             logits = model(input_ids=input_ids, use_cache=False).logits[:, -1, :]
             token = int(torch.argmax(logits, dim=-1).item())
+            if token == eos_token_id:
+                raise AssertionError(
+                    f"fixed fixture emitted reserved EOS {eos_token_id} "
+                    f"at continuation step {len(continuation)}"
+                )
             continuation.append(token)
             input_ids = torch.cat(
                 [input_ids, torch.tensor([[token]], dtype=torch.long)], dim=1
             )
+        generated = model.generate(
+            input_ids=torch.tensor([prompt_ids], dtype=torch.long),
+            max_new_tokens=max_new,
+            do_sample=False,
+            use_cache=False,
+        )
+    generated_continuation = generated[0, len(prompt_ids) :].tolist()
+    if generated_continuation != continuation:
+        raise AssertionError(
+            "manual eager oracle and Transformers greedy stop policy disagree: "
+            f"manual={continuation}, generate={generated_continuation}"
+        )
     return {
         "prompt": prompt,
         "prompt_ids": prompt_ids,
         "ref_token_ids": continuation,
         "max_new_tokens": max_new,
+        "eos_token_id": eos_token_id,
+        "eos_emitted": False,
+        "stop_reason": "max_new_tokens",
         "dtype": "float32",
         "oracle": "transformers NemotronHForCausalLM eager CPU",
     }
@@ -198,7 +252,15 @@ def generate(out: Path, prompt: str, max_new: int) -> None:
         "topk_group": 1,
         "norm_topk_prob": True,
         "routed_scaling_factor": 1.25,
-        "tokenizer": "WordLevel, shared by hf/ and mlx/",
+        "tokenizer": "WordLevel with unique IDs, shared by hf/ and mlx/",
+        "special_token_ids": {
+            "pad": PAD_ID,
+            "bos": BOS_ID,
+            "unk": UNK_ID,
+            "eos": EOS_ID,
+        },
+        "regular_token_ids": "tok3..tok30",
+        "eos_absent_from_reference": True,
     }
     (out / "provenance.json").write_text(
         json.dumps(provenance, indent=2) + "\n", encoding="utf-8"
