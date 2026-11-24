@@ -223,10 +223,31 @@ impl Inkling2Moe {
 }
 
 /// Routed expert outputs `[N, k, hidden]` for `x [N, hidden]`.
+///
+/// Dense (unquantized) experts multiply through `gather_mm`, which, like
+/// `matmul`, takes a different kernel for one row than for several, so a
+/// verify block runs them one token at a time to match decode steps (issue
+/// #3280). The quantized gather already agrees row for row.
 pub(crate) fn expert_projections(
     experts: &SwitchGLU,
     x: &MlxArray,
     indices: &MlxArray,
 ) -> UniquePtr<MlxArray> {
-    experts.forward(x, indices)
+    let tokens = mlxcel_core::array_shape(x)[0];
+    let split = experts.down_quantized_parts().is_none()
+        && mlxcel_core::row_invariant::in_verify_block()
+        && (2..=mlxcel_core::row_invariant::MAX_ROWS).contains(&tokens);
+    if !split {
+        return experts.forward(x, indices);
+    }
+    let parts: Vec<_> = (0..tokens)
+        .map(|t| {
+            experts.forward(
+                &mlxcel_core::utils::slice_axis(x, 0, t, t + 1),
+                &mlxcel_core::utils::slice_axis(indices, 0, t, t + 1),
+            )
+        })
+        .collect();
+    let refs: Vec<&MlxArray> = parts.iter().map(|p| &**p).collect();
+    mlxcel_core::concatenate_many(&refs, 0)
 }

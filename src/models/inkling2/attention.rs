@@ -405,13 +405,61 @@ impl Inkling2Attention {
             self.is_sliding.then_some(self.window),
             self.rel_extent,
         );
+        // Inside a verify block, row r of a sliding visit past the window
+        // would also see the r oldest keys, masked out. Their extra columns
+        // shift every key's lane in the SDPA reduction, so the row would not
+        // reproduce decode step r (issue #3280). Attend row by row over the
+        // keys from that row's window start instead; trailing (future) keys
+        // stay, since a masked column after the visible ones adds zeros.
+        let first_key = |row: i32| (source - length + row - self.window + 1).max(0);
+        if self.is_sliding
+            && length > 1
+            && first_key(length - 1) > 0
+            && mlxcel_core::row_invariant::in_verify_block()
+        {
+            let outputs: Vec<_> = (0..length)
+                .map(|row| {
+                    let start = first_key(row);
+                    let rows =
+                        |value: &MlxArray| mlxcel_core::utils::slice_axis(value, 2, row, row + 1);
+                    let window =
+                        |value: &MlxArray| mlxcel_core::utils::slice_axis(value, 2, start, source);
+                    let mask = mlxcel_core::utils::slice_axis(&rows(&mask), 3, start, source);
+                    self.sdpa(
+                        &rows(&q),
+                        &window(&keys),
+                        &window(&values),
+                        &mask,
+                        &rows(sinks),
+                        x_dtype,
+                    )
+                })
+                .collect();
+            let refs: Vec<&MlxArray> = outputs.iter().map(|output| &**output).collect();
+            return mlxcel_core::concatenate_many(&refs, 2);
+        }
+        self.sdpa(&q, &keys, &values, &mask, sinks, x_dtype)
+    }
+
+    /// SDPA of `q [1, heads, L, d]` over `keys` / `values [1, kv_heads, S, d]`
+    /// with the additive `mask [1, heads, L, S]` and the per-query sink
+    /// logits `sinks [1, heads, L, 1]`.
+    fn sdpa(
+        &self,
+        q: &MlxArray,
+        keys: &MlxArray,
+        values: &MlxArray,
+        mask: &MlxArray,
+        sinks: &MlxArray,
+        x_dtype: i32,
+    ) -> UniquePtr<MlxArray> {
         // The sink column goes FIRST (issue #3280): ahead of the keys it sits
         // at the same index in a one-token step and in a K-row verify block,
         // so the SDPA reduction assigns every visible key to the same lane
         // in both and the block's masked future keys add exact zeros.
         let mask = mlxcel_core::concatenate(
             &mlxcel_core::astype(sinks, x_dtype),
-            &mlxcel_core::astype(&mask, x_dtype),
+            &mlxcel_core::astype(mask, x_dtype),
             -1,
         );
         let zero_row = |value: &MlxArray| {
@@ -422,8 +470,8 @@ impl Inkling2Attention {
             );
             mlxcel_core::concatenate(&zeros, value, 2)
         };
-        let mut keys = zero_row(&keys);
-        let mut values = zero_row(&values);
+        let mut keys = zero_row(keys);
+        let mut values = zero_row(values);
         // The mask is per head, so the KV head axis must match the query's.
         if self.kv_heads != self.heads {
             keys = repeat_kv_heads(&keys, self.heads, self.kv_heads);
@@ -433,7 +481,7 @@ impl Inkling2Attention {
         // SAFETY: q, keys, values and mask are live MLX arrays owned above.
         unsafe {
             mlxcel_core::fast_scaled_dot_product_attention(
-                &q,
+                q,
                 &keys,
                 &values,
                 inverse_sqrt(self.head_dim),

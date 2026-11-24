@@ -22,7 +22,8 @@
 //!
 //! `INKLING2_DIAG_MODEL` picks the checkpoint (default `models/inkling-2-mini`),
 //! `INKLING2_DIAG_WIDTH` the block width (default 8), and
-//! `INKLING2_DIAG_VERIFY=0` runs the block outside the speculative scope.
+//! `INKLING2_DIAG_VERIFY=0` runs the block outside the speculative scope, and
+//! `INKLING2_DIAG_PROMPT` sets the prompt length (default 32).
 
 use mlxcel_core::MlxArray;
 
@@ -61,11 +62,30 @@ fn verify_block_vs_chain_per_visit() {
         .unwrap_or(8);
     let verify = std::env::var("INKLING2_DIAG_VERIFY").map_or(true, |v| v != "0");
     let (model, _) = Inkling2Model::load(&path).unwrap();
+    report(&model, &path, width, verify);
+}
+
+/// The same comparison on the synthetic model of `tiny_tests`.
+#[test]
+#[ignore = "diagnostic; run under the GPU lock"]
+fn tiny_verify_block_vs_chain_per_visit() {
+    for passes in [1, 3] {
+        report(&super::tiny_tests::model(passes, false), "tiny", 2, true);
+    }
+}
+
+fn report(model: &Inkling2Model, path: &str, width: usize, verify: bool) {
     let visits = model.layer_indices.len();
     let ids: Vec<usize> = (0..=visits).collect();
     let none = TokenBiasMap::new();
     let vocab = model.config.text_config.logits_width();
-    let prompt: Vec<i32> = (0..32).map(|i| ((i * 7 + 2) % vocab) as i32).collect();
+    let prompt_len: usize = std::env::var("INKLING2_DIAG_PROMPT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+    let prompt: Vec<i32> = (0..prompt_len)
+        .map(|i| ((i * 7 + 2) % vocab) as i32)
+        .collect();
     let block: Vec<i32> = (0..width).map(|i| ((i * 13 + 4) % vocab) as i32).collect();
     let input = |t: &[i32]| mlxcel_core::from_slice_i32(t, &[1, t.len() as i32]);
 
@@ -88,9 +108,9 @@ fn verify_block_vs_chain_per_visit() {
         .enumerate()
     {
         let mut line = format!("capture {v:>2} (layer {layer:>2}):");
-        for r in 0..width {
+        for (r, chain_r) in chain_out.iter().enumerate() {
             let a = row_f32(out.hidden_states[v].as_ref().unwrap(), r as i32);
-            let b = row_f32(chain_out[r].hidden_states[v].as_ref().unwrap(), 0);
+            let b = row_f32(chain_r.hidden_states[v].as_ref().unwrap(), 0);
             let (n, m) = compare(&a, &b);
             line.push_str(&format!(" r{r} {n}/{m:.2e}"));
         }

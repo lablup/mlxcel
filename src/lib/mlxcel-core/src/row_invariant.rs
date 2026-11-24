@@ -114,7 +114,9 @@ pub fn is_verify_block(shape: &[i32]) -> bool {
         && (2..=MAX_ROWS).contains(&shape[1])
 }
 
-fn in_verify_block() -> bool {
+/// Whether the products built now belong to a verify block, for callers
+/// that split a product the helpers here do not cover.
+pub fn in_verify_block() -> bool {
     mode().is_some_and(|m| m.verify_block)
 }
 
