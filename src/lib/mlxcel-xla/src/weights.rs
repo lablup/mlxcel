@@ -234,7 +234,6 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     let nq = cfg.n_q * hd;
     let nkv = cfg.n_kv * hd;
     let gated = !cfg.dense_mlp;
-    let has_post = !cfg.parallel_block;
 
     let mut out: Vec<WeightSpec> = Vec::new();
     out.push(WeightSpec::Whole(s.embed.to_string()));
@@ -281,12 +280,16 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             push_ssm_layer_specs(&mut out, cfg, &p, quant);
             continue;
         }
+        let has_ffn = cfg.layer_has_ffn(i);
+        let has_attn = cfg.attn_layer_index(i).is_some();
+        let has_post = !cfg.parallel_block && has_ffn && has_attn;
+        let nemotron = cfg.weight_scheme == crate::emitter::WeightScheme::NemotronH;
         // A MoE layer (issue #500) takes no dense MLP weights (down/gate/up); its
         // expert bank is appended after the attention weights / norms instead.
         let moe_layer = cfg.is_moe_layer(i);
         // down (dense StarCoder2 uses c_proj; else the scheme's down projection).
-        if !moe_layer {
-            let name = if cfg.dense_mlp {
+        if has_ffn && !moe_layer {
+            let name = if cfg.dense_mlp && !nemotron {
                 format!("{p}mlp.c_proj.weight")
             } else {
                 format!("{p}{}", s.down)
@@ -294,7 +297,7 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             push_proj(&mut out, phi4_base_projection(cfg, name), quant);
         }
         // gate (gated MLP only; the first half of gate_up_proj for a fused Phi3).
-        if gated && !moe_layer {
+        if has_ffn && gated && !moe_layer {
             if cfg.fused_gate_up {
                 let (name, (start, end), _) = fused_gate_up(cfg, &p);
                 out.push(WeightSpec::Rows {
@@ -323,7 +326,7 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         // up (c_fc for dense; the second half of gate_up_proj for a fused Phi3).
         // Skipped on a MoE layer (issue #500), which has no dense up projection.
-        if !moe_layer {
+        if has_ffn && !moe_layer {
             if cfg.fused_gate_up {
                 let (name, _, (start, end)) = fused_gate_up(cfg, &p);
                 out.push(WeightSpec::Rows {
@@ -331,7 +334,7 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                     start,
                     end,
                 });
-            } else if cfg.dense_mlp {
+            } else if cfg.dense_mlp && !nemotron {
                 // `c_fc` is a projection like `c_proj`: the emitter takes it
                 // through `take_weight`, so the loader must follow the graph's
                 // layout and f16-resident rule for it (issue #2859; a `Whole`
@@ -347,7 +350,9 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         // Attention projections. Youtu-VL uses the checkpoint's native MLA
         // factors; ordinary families keep wk/wo/wq/wv in their historical order.
-        if cfg.mla.is_some() {
+        if !has_attn {
+            // FFN-only block: no attention projections.
+        } else if cfg.mla.is_some() {
             push_proj(&mut out, format!("{p}self_attn.q_a_proj.weight"), quant);
             out.push(WeightSpec::Whole(format!(
                 "{p}self_attn.q_a_layernorm.weight"
@@ -407,7 +412,7 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             );
         }
         // q/k/v projection biases (k, q, v order).
-        if cfg.qkv_bias {
+        if has_attn && cfg.qkv_bias {
             if cfg.fused_qkv && cfg.weight_scheme == crate::emitter::WeightScheme::Molmo {
                 let bias = format!("{p}{}", s.q_bias);
                 out.push(WeightSpec::Elements {
@@ -452,22 +457,26 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 )));
             }
         }
-        if cfg.attn_o_bias {
-            out.push(WeightSpec::Whole(format!("{p}self_attn.o_proj.bias")));
+        if has_attn && cfg.attn_o_bias {
+            let stem = if nemotron { "mixer" } else { "self_attn" };
+            out.push(WeightSpec::Whole(format!("{p}{stem}.o_proj.bias")));
         }
-        if cfg.mlp_bias {
-            out.push(WeightSpec::Whole(if cfg.dense_mlp {
+        if has_ffn && cfg.mlp_bias {
+            out.push(WeightSpec::Whole(if cfg.dense_mlp && !nemotron {
                 format!("{p}mlp.c_proj.bias")
             } else {
-                format!("{p}mlp.down_proj.bias")
+                format!(
+                    "{p}{}.down_proj.bias",
+                    if nemotron { "mixer" } else { "mlp" }
+                )
             }));
             if gated {
                 out.push(WeightSpec::Whole(format!("{p}mlp.gate_proj.bias")));
             }
-            out.push(WeightSpec::Whole(if cfg.dense_mlp {
+            out.push(WeightSpec::Whole(if cfg.dense_mlp && !nemotron {
                 format!("{p}mlp.c_fc.bias")
             } else {
-                format!("{p}mlp.up_proj.bias")
+                format!("{p}{}.up_proj.bias", if nemotron { "mixer" } else { "mlp" })
             }));
         }
         // MoE expert bank (issue #500), last in the layer: the router, the stacked

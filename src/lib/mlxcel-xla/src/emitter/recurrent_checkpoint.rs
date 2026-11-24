@@ -195,7 +195,10 @@ impl Config {
         let Some(ssm) = self.ssm.as_ref().filter(|_| self.has_recurrent_state()) else {
             return Ok(());
         };
-        if self.weight_scheme != WeightScheme::Mamba2 {
+        if !matches!(
+            self.weight_scheme,
+            WeightScheme::Mamba2 | WeightScheme::NemotronH
+        ) {
             return Err("a recurrent config must use the Mamba2 weight scheme".into());
         }
         let mut shapes = HashMap::new();
@@ -254,6 +257,29 @@ impl Config {
             let p = format!("backbone.layers.{li}.");
             vector(&format!("{p}norm.weight"), h)?;
             let m = format!("{p}mixer.");
+            if self.attn_layer_index(li).is_some() {
+                for (name, out, input) in [
+                    ("q_proj", self.n_q * self.head_dim, h),
+                    ("k_proj", self.n_kv * self.head_dim, h),
+                    ("v_proj", self.n_kv * self.head_dim, h),
+                    ("o_proj", h, self.n_q * self.head_dim),
+                ] {
+                    proj(&format!("{m}{name}.weight"), out, input)?;
+                    if self.qkv_bias {
+                        vector(&format!("{m}{name}.bias"), out)?;
+                    }
+                }
+                continue;
+            }
+            if self.layer_mixer(li) == super::config::MixerKind::None {
+                proj(&format!("{m}up_proj.weight"), self.inter, h)?;
+                proj(&format!("{m}down_proj.weight"), h, self.inter)?;
+                if self.mlp_bias {
+                    vector(&format!("{m}up_proj.bias"), self.inter)?;
+                    vector(&format!("{m}down_proj.bias"), h)?;
+                }
+                continue;
+            }
             proj(&format!("{m}in_proj.weight"), ssm.in_proj_dim(), h)?;
             proj(&format!("{m}out_proj.weight"), h, di)?;
             if ssm.use_bias {

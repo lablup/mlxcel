@@ -3485,3 +3485,7 @@ mod tests {
             .expect("write MLXCEL_DUMP_OUT");
     }
 }
+
+mod nemotron_h_config;
+#[cfg(test)]
+mod nemotron_h_tests;

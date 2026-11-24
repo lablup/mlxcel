@@ -2220,6 +2220,8 @@ static int xla_store_prefill_slot(xla_ctx* c, int32_t slot,
     iree_host_size_t per = iree_hal_buffer_view_element_count(kc);
     if (c->rg_per == 0) {
       c->rg_per = per;
+      // Axis 0 is L_attn from the emitted prefill, not model_layers:
+      // hybrids store only attention rows and append SSM tensors separately.
       for (int32_t i = 0; i < 4; ++i) {
         c->rg_dims[i] = iree_hal_buffer_view_shape_dim(kc, i);
       }

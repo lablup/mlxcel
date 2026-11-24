@@ -4098,17 +4098,6 @@ impl IreeRaggedLlama {
         );
         let load_started = std::time::Instant::now();
         let mut cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
-        // Issue #3340: an attention-free recurrent model (Mamba2) carries its
-        // state per slot. A hybrid (KV plus state) is refused until its
-        // attention and recurrent layers are validated together (#3344); the
-        // ragged emitter refuses it too, so this only names the model.
-        if cfg.has_recurrent_state() && cfg.has_kv() {
-            return Err(format!(
-                "{} mixes attention and recurrent layers, which the OpenXLA \
-                 continuous-batching engine does not serve yet",
-                model_dir.display()
-            ));
-        }
         checked_ffi_int(b_max, "b_max")?;
         if !RAGGED_B_VALUES.contains(&b_max) {
             return Err(format!(
