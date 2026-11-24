@@ -242,8 +242,10 @@ fn molmo_pool_and_projector() -> Vec<DeclaredOperator> {
 /// checkpoint (`emitter/molmo_vision_f16.rs`, #3390): the dequantized weight,
 /// every linear product and bias add, the patch embedding, LayerNorm,
 /// quick_gelu, the encoder attention context and the residual adds. The
-/// attention scores and softmax, and the whole pooling attention up to its
-/// output projection, stay f32 as eager computes them.
+/// attention scores, softmax and the pooling attention stay f32 as eager
+/// computes them (eager casts the pool attention context back to F16 before
+/// `wo`, but the graph keeps the pool path in f32; every observable stage
+/// passes with headroom).
 pub(crate) fn molmo_vision_operators(bits: usize) -> Vec<DeclaredOperator> {
     let dequantize = if bits == 4 {
         OperatorClass::AffineQ4Dequantize
