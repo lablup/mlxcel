@@ -209,3 +209,40 @@ The exact production StableHLO modules emitted at capacity 256 were recompiled u
 The server gate used four distinct prompts of 5, 8, 13, and 5 tokens with `--ctx-size 2048 --max-batch-size 4`. It disabled recurrent prefix caching as designed, compiled the 256 and 4096 capacity buckets, and loaded in 10.43 s. All responses finished by the requested length.
 
 The existing chunked SSD lowering therefore needs no CUDA-specific change. This PR changes only the findings record, so it does not require another ROCm gate beyond the already recorded #3339 and #3340 runs.
+
+## Mamba1 diagonal scan (issue #3348)
+
+Mamba1 and Falcon-Mamba use the same f32 diagonal recurrence but do not use
+Mamba2's SSD contraction. Prefill is partitioned at `chunk_size = 128` in
+production. Each partition materializes at most `[128,D,N]` `log_a` and input
+terms and carries only `[D,N]` between partitions, so the 4096-row capacity
+never creates a `[4096,D,N]` value. The focused structural fixture uses `Q=4`
+and nine rows and asserts that `[4,16,4]` occurs while `[9,16,4]` does not.
+
+The independent reference is Transformers 5.12.1 on CPU (`torch==2.12.1+cpu`),
+calling `MambaMixer.slow_forward` or `FalconMambaMixer.slow_forward` directly
+with seeded fp32 weights. The XLA side ran through the real auxiliary ABI and
+IREE `local-task` runtime. Tolerance is `5e-5`.
+
+| case | rows / real length | compile s | run s | max-abs y | max-abs h | max-abs conv |
+|------|-------------------:|----------:|------:|----------:|----------:|-------------:|
+| Mamba1 padded prefill | 9 / 7 | 1.75 | 0.003 | 2.235e-8 | 1.397e-9 | 0 |
+| Mamba1 full prefill (same compiled shape) | 9 / 9 | cached | <0.001 | 2.235e-8 | 9.313e-10 | 0 |
+| Mamba1 decode, B=3 | 3 / 1 | 0.87 | <0.001 | 2.980e-8 | 5.960e-8 | 0 |
+| Falcon-Mamba decode, B=3 | 3 / 1 | 1.01 | <0.001 | 5.960e-8 | 5.960e-8 | 0 |
+
+Reproduce the padded Mamba1 row (after exporting the pinned IREE environment):
+
+```bash
+PY=/home/inureyes/Development/mlxcel/spike/openxla/.venv/bin/python
+$PY spike/openxla/ssm_oracle.py --kind mamba1 --dims tiny \
+  --emit-inputs /tmp/mamba1-prefill --mode prefill --capacity 9 \
+  --real-len 7 --chunk-size 4
+cargo run --features xla-iree --example xla_ssm_probe -- \
+  --inputs /tmp/mamba1-prefill --device local-task --out /tmp/mamba1-out
+$PY spike/openxla/ssm_oracle.py --check /tmp/mamba1-out
+```
+
+These are CPU execution results only. The required `hip` probe rows, real
+`state-spaces/mamba-130m-hf` whole-model gate, synthetic Falcon-Mamba whole-model
+gate, CLI, server, cancellation, and slot-recycling evidence remain pending.

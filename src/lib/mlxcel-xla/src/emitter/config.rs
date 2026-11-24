@@ -42,6 +42,7 @@
 //! are rejected rather than mis-emitted.
 
 use super::builder::ProjectionLayout;
+use super::mamba1_config::mamba1_from_json;
 use super::recurrent_config::mamba2_from_json;
 pub use super::recurrent_config::{MixerKind, StateElem, StateTensorSpec};
 use crate::hf_json::parse_hf_config_json_tracked;
@@ -192,6 +193,10 @@ pub enum WeightScheme {
     /// HF `Mamba2ForCausalLM` names (`backbone.embeddings`, `backbone.layers.{i}.norm`
     /// and `.mixer.*`, `backbone.norm_f`, issue #3338). MLX conversions keep them.
     Mamba2,
+    /// HF `MambaForCausalLM` / `FalconMambaForCausalLM` names. The outer model
+    /// names match Mamba2, but the mixer has separate `x_proj` and `dt_proj`
+    /// tensors and a per-channel `A_log [d_inner, N]` (issue #3348).
+    Mamba1,
     /// Nemotron-H hybrid backbone with one mixer or FFN per block.
     NemotronH,
 }
@@ -283,13 +288,25 @@ pub struct MoeConfig {
     pub weight_prefix: &'static str,
 }
 
-/// Selective state-space (Mamba2 SSD) mixer parameters (epic #564, issue #3337).
+/// Selective state-space mixer family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SsmKind {
+    /// Mamba2's head/group SSD form.
+    Mamba2,
+    /// Mamba1's diagonal recurrence. Falcon-Mamba enables weightless RMSNorm
+    /// on the projected dt, B, and C tensors.
+    Mamba1 { dt_rank: usize, bcdt_norm: bool },
+}
+
+/// Selective state-space mixer parameters (epic #564).
 ///
-/// One recurrent mixer layer folds each token into a fixed-size state
-/// `h [H, P, N]` (f32) and carries the last `K-1` pre-conv inputs as the conv
-/// tail. `emitter/ssm.rs` reads this; parsing it from `config.json` is #3338.
+/// One recurrent mixer layer folds each token into a fixed-size f32 state
+/// (`h [H,P,N]` for Mamba2, `h [D,N]` for Mamba1) and carries the last `K-1`
+/// pre-conv inputs as the conv tail. `emitter/ssm.rs` reads this.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SsmConfig {
+    /// The recurrence and projection layout this config uses.
+    pub kind: SsmKind,
     /// H (HF `num_heads`).
     pub n_heads: usize,
     /// P (HF `head_dim`); `d_inner = H * P`.
@@ -300,7 +317,7 @@ pub struct SsmConfig {
     pub n_groups: usize,
     /// K (HF `conv_kernel`).
     pub conv_kernel: usize,
-    /// `d_inner + 2 * G * N`.
+    /// Mamba2: `d_inner + 2 * G * N`; Mamba1: `d_inner`.
     pub conv_dim: usize,
     /// HF `use_conv_bias`.
     pub use_conv_bias: bool,
@@ -343,10 +360,14 @@ impl SsmConfig {
         self.n_heads * self.head_dim
     }
 
-    /// The in_proj output width: `[z: d_inner, xBC: conv_dim, dt: H]`.
+    /// The input projection width. Mamba2 uses
+    /// `[z: d_inner, xBC: conv_dim, dt: H]`; Mamba1 uses `[x, z]`.
     #[must_use]
     pub fn in_proj_dim(&self) -> usize {
-        self.d_inner() + self.conv_dim + self.n_heads
+        match self.kind {
+            SsmKind::Mamba2 => self.d_inner() + self.conv_dim + self.n_heads,
+            SsmKind::Mamba1 { .. } => 2 * self.d_inner(),
+        }
     }
 
     /// Structural checks every emitter entry point relies on.
@@ -380,16 +401,38 @@ impl SsmConfig {
             .n_heads
             .checked_mul(self.head_dim)
             .ok_or_else(|| overflow("d_inner = n_heads * head_dim"))?;
-        let expected = self
-            .n_groups
-            .checked_mul(self.state_size)
-            .and_then(|gn| gn.checked_mul(2))
-            .and_then(|bc| bc.checked_add(d_inner))
-            .ok_or_else(|| overflow("conv_dim = d_inner + 2*G*N"))?;
+        let expected = match self.kind {
+            SsmKind::Mamba2 => {
+                let expected = self
+                    .n_groups
+                    .checked_mul(self.state_size)
+                    .and_then(|gn| gn.checked_mul(2))
+                    .and_then(|bc| bc.checked_add(d_inner))
+                    .ok_or_else(|| overflow("conv_dim = d_inner + 2*G*N"))?;
+                expected
+                    .checked_add(d_inner)
+                    .and_then(|width| width.checked_add(self.n_heads))
+                    .ok_or_else(|| overflow("Mamba2 in_proj_dim"))?;
+                expected
+            }
+            SsmKind::Mamba1 { dt_rank, .. } => {
+                if dt_rank == 0 {
+                    return Err("SsmConfig Mamba1 dt_rank must be positive".into());
+                }
+                d_inner
+                    .checked_mul(2)
+                    .ok_or_else(|| overflow("Mamba1 in_proj_dim = 2*d_inner"))?;
+                self.state_size
+                    .checked_mul(2)
+                    .and_then(|bc| bc.checked_add(dt_rank))
+                    .ok_or_else(|| overflow("Mamba1 x_proj_dim = dt_rank + 2*state_size"))?;
+                d_inner
+            }
+        };
         if self.conv_dim != expected {
             return Err(format!(
-                "SsmConfig.conv_dim={} != d_inner + 2*G*N = {expected}",
-                self.conv_dim
+                "SsmConfig.conv_dim={} != the {:?} expected width {expected}",
+                self.conv_dim, self.kind
             ));
         }
         if !d_inner.is_multiple_of(self.norm_group_size) {
@@ -398,10 +441,6 @@ impl SsmConfig {
                 self.norm_group_size
             ));
         }
-        self.conv_dim
-            .checked_add(d_inner)
-            .and_then(|width| width.checked_add(self.n_heads))
-            .ok_or_else(|| overflow("in_proj_dim"))?;
         d_inner
             .checked_mul(self.state_size)
             .ok_or_else(|| overflow("state H*P*N"))?;
@@ -436,6 +475,7 @@ impl SsmConfig {
         let (n_heads, head_dim, state_size, n_groups) = (4, 8, 16, 2);
         let d_inner = n_heads * head_dim;
         Self {
+            kind: SsmKind::Mamba2,
             n_heads,
             head_dim,
             state_size,
@@ -448,6 +488,30 @@ impl SsmConfig {
             norm_eps: 1e-5,
             norm_group_size: d_inner,
             chunk_size: 8,
+        }
+    }
+
+    /// A small Mamba1 mixer for pure-Rust emitter tests.
+    #[cfg(test)]
+    pub(crate) fn tiny_mamba1(bcdt_norm: bool) -> Self {
+        let (d_inner, state_size) = (16, 4);
+        Self {
+            kind: SsmKind::Mamba1 {
+                dt_rank: 2,
+                bcdt_norm,
+            },
+            n_heads: 1,
+            head_dim: d_inner,
+            state_size,
+            n_groups: 1,
+            conv_kernel: 4,
+            conv_dim: d_inner,
+            use_conv_bias: true,
+            use_bias: false,
+            time_step_limit: (0.0, f32::INFINITY),
+            norm_eps: if bcdt_norm { 1e-6 } else { 1e-5 },
+            norm_group_size: d_inner,
+            chunk_size: 4,
         }
     }
 }
@@ -931,6 +995,9 @@ impl Config {
         }
         if model_type == Some("mamba2") {
             return mamba2_from_json(&v, quantization);
+        }
+        if matches!(model_type, Some("mamba" | "falcon_mamba")) {
+            return mamba1_from_json(&v, quantization);
         }
         // Only the Mamba2 reader understands the quoted `Infinity`/`NaN`
         // spelling. Every reader below would see a string where a number was

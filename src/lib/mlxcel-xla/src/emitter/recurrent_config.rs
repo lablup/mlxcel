@@ -17,13 +17,13 @@
 //!
 //! Every attention-only config carries `layer_mixers = [Attention; n_layers]`
 //! and `ssm = None`, so it has no state tensors, a KV cache, and a FFN on every
-//! layer: its graphs are unchanged. A Mamba2 config has no attention layer at
-//! all, so it has no KV cache, and threads two f32 state tensors through its
+//! layer: its graphs are unchanged. A pure Mamba config has no attention layer
+//! at all, so it has no KV cache, and threads two f32 state tensors through its
 //! graphs in the order [`Config::state_tensors`] lists them.
 
 use super::config::{
-    Config, NormStyle, QuantConfig, RopeScaling, SSM_DEFAULT_CHUNK_SIZE, SsmConfig, WeightScheme,
-    check_layer_count,
+    Config, NormStyle, QuantConfig, RopeScaling, SSM_DEFAULT_CHUNK_SIZE, SsmConfig, SsmKind,
+    WeightScheme, check_layer_count,
 };
 
 /// The token mixer of one layer. Later units add more recurrent kinds.
@@ -33,6 +33,8 @@ pub enum MixerKind {
     Attention,
     /// Mamba2 selective state-space mixer ([`SsmConfig`]).
     Mamba2,
+    /// Mamba1 diagonal selective state-space mixer ([`SsmConfig`]).
+    Mamba1,
     /// A feed-forward-only block (no token mixer or persistent state).
     None,
 }
@@ -41,7 +43,7 @@ impl MixerKind {
     /// Whether the mixer carries recurrent state instead of a KV cache.
     #[must_use]
     pub fn is_recurrent(self) -> bool {
-        matches!(self, MixerKind::Mamba2)
+        matches!(self, MixerKind::Mamba2 | MixerKind::Mamba1)
     }
 
     /// The HF `model_type` of the family this mixer comes from, for errors.
@@ -50,6 +52,7 @@ impl MixerKind {
         match self {
             MixerKind::Attention => "attention",
             MixerKind::Mamba2 => "mamba2",
+            MixerKind::Mamba1 => "mamba",
             MixerKind::None => "ffn",
         }
     }
@@ -81,7 +84,7 @@ impl Config {
             .unwrap_or(MixerKind::Attention)
     }
 
-    /// Whether layer `li` has a feed-forward sublayer. A pure Mamba2 block is
+    /// Whether layer `li` has a feed-forward sublayer. A pure Mamba block is
     /// `norm -> mixer -> residual` with no FFN.
     #[must_use]
     pub fn layer_has_ffn(&self, li: usize) -> bool {
@@ -142,24 +145,34 @@ impl Config {
     }
 
     /// The threaded state tensors, in graph-argument order. Empty for every
-    /// attention-only config. Mamba2: `ssm_h [L_ssm, H, P, N]` then
-    /// `ssm_conv [L_ssm, K-1, conv_dim]`, both f32.
+    /// attention-only config. Mamba2 uses `ssm_h [L_ssm,H,P,N]`; Mamba1 uses
+    /// `[L_ssm,D,N]`. Both then carry `ssm_conv [L_ssm,K-1,conv_dim]` in f32.
     #[must_use]
     pub fn state_tensors(&self) -> Vec<StateTensorSpec> {
         let layers = self.recurrent_layer_count();
         match &self.ssm {
-            Some(ssm) if layers > 0 => vec![
-                StateTensorSpec {
-                    name: "ssm_h",
-                    dims: vec![layers, ssm.n_heads, ssm.head_dim, ssm.state_size],
-                    elem: StateElem::F32,
-                },
-                StateTensorSpec {
-                    name: "ssm_conv",
-                    dims: vec![layers, ssm.conv_kernel - 1, ssm.conv_dim],
-                    elem: StateElem::F32,
-                },
-            ],
+            Some(ssm) if layers > 0 => {
+                let h_dims = match ssm.kind {
+                    SsmKind::Mamba2 => {
+                        vec![layers, ssm.n_heads, ssm.head_dim, ssm.state_size]
+                    }
+                    SsmKind::Mamba1 { .. } => {
+                        vec![layers, ssm.d_inner(), ssm.state_size]
+                    }
+                };
+                vec![
+                    StateTensorSpec {
+                        name: "ssm_h",
+                        dims: h_dims,
+                        elem: StateElem::F32,
+                    },
+                    StateTensorSpec {
+                        name: "ssm_conv",
+                        dims: vec![layers, ssm.conv_kernel - 1, ssm.conv_dim],
+                        elem: StateElem::F32,
+                    },
+                ]
+            }
             _ => Vec::new(),
         }
     }
@@ -350,6 +363,7 @@ pub(super) fn mamba2_from_json(
         Some(value) => json_f32(value, "layer_norm_epsilon")?,
     };
     let ssm = SsmConfig {
+        kind: SsmKind::Mamba2,
         n_heads,
         head_dim,
         state_size,

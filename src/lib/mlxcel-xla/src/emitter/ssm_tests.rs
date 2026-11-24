@@ -61,6 +61,18 @@ fn ssm_config_validates_structure() {
     assert!(bad.validate().unwrap_err().contains("time_step_limit"));
 }
 
+#[test]
+fn mamba1_config_uses_diagonal_projection_widths() {
+    let c = SsmConfig::tiny_mamba1(false);
+    c.validate().expect("tiny Mamba1 config is valid");
+    assert_eq!(c.d_inner(), 16);
+    assert_eq!(c.in_proj_dim(), 32);
+    assert_eq!(c.conv_dim, 16);
+    let mut bad = c.clone();
+    bad.conv_dim += 1;
+    assert!(bad.validate().unwrap_err().contains("conv_dim"));
+}
+
 /// The dims will come from an untrusted config.json (#3338): products that wrap
 /// must not satisfy the conv_dim equation, and clamps or eps that make every
 /// state NaN are rejected up front.
@@ -78,6 +90,12 @@ fn ssm_config_rejects_overflow_and_non_finite_parameters() {
     let mut bad = c.clone();
     bad.conv_kernel = usize::MAX;
     assert!(bad.validate().unwrap_err().contains("overflow"));
+    let mut bad = SsmConfig::tiny_mamba1(false);
+    bad.kind = super::config::SsmKind::Mamba1 {
+        dt_rank: usize::MAX,
+        bcdt_norm: false,
+    };
+    assert!(bad.validate().unwrap_err().contains("x_proj_dim"));
 
     for limit in [
         (f32::INFINITY, f32::INFINITY),
@@ -147,6 +165,67 @@ fn ssm_decode_probe_carries_batched_state() {
     assert!(sig.contains("-> (tensor<3x16xf32>, tensor<3x4x8x16xf32>, tensor<3x3x96xf32>)"));
     assert!(!graph.contains("reduce_window"), "decode has no scan");
     assert_lowerable(&graph);
+}
+
+#[test]
+fn mamba1_probe_uses_bounded_diagonal_scan_and_state_shapes() {
+    let c = SsmConfig::tiny_mamba1(false);
+    let graph = emit_ssm_probe(&c, 8, 9, ProbeMode::Prefill);
+    let sig = signature(&graph);
+    for arg in [
+        "tensor<32x8xf32> loc(\"ssm.in_proj\")",
+        "tensor<10x16xf32> loc(\"ssm.x_proj\")",
+        "tensor<16x2xf32> loc(\"ssm.dt_proj\")",
+        "tensor<16xf32> loc(\"ssm.dt_proj_b\")",
+        "tensor<16x4xf32> loc(\"ssm.a_log\")",
+        "tensor<16x4xf32> loc(\"ssm.h0\")",
+        "tensor<3x16xf32> loc(\"ssm.conv0\")",
+    ] {
+        assert!(sig.contains(arg), "missing {arg} in {sig}");
+    }
+    assert!(
+        graph.contains("tensor<4x16x4xf32>"),
+        "the selected chunk must appear"
+    );
+    assert!(
+        !graph.contains("tensor<9x16x4xf32>"),
+        "the full capacity-sized diagonal state must never materialize"
+    );
+    assert!(sig.contains("-> (tensor<9x8xf32>, tensor<16x4xf32>, tensor<3x16xf32>)"));
+    assert_lowerable(&graph);
+
+    let decode = emit_ssm_probe(&c, 8, 3, ProbeMode::Decode);
+    assert!(signature(&decode).contains("tensor<3x16x4xf32> loc(\"ssm.h0\")"));
+    assert!(
+        signature(&decode).contains("-> (tensor<3x8xf32>, tensor<3x16x4xf32>, tensor<3x3x16xf32>)")
+    );
+}
+
+#[test]
+fn falcon_mamba_probe_adds_weightless_bcdt_norms() {
+    let plain = emit_ssm_probe(&SsmConfig::tiny_mamba1(false), 8, 3, ProbeMode::Decode);
+    let falcon = emit_ssm_probe(&SsmConfig::tiny_mamba1(true), 8, 3, ProbeMode::Decode);
+    assert_eq!(plain.matches("stablehlo.rsqrt").count(), 0);
+    assert_eq!(falcon.matches("stablehlo.rsqrt").count(), 3);
+}
+
+#[test]
+fn diagonal_scan_returns_each_readout_and_final_state() {
+    let mut b = Builder::new();
+    let log_a = Builder::arg(0, Ty::f32(vec![5, 3, 2]));
+    let bx = Builder::arg(1, Ty::f32(vec![5, 3, 2]));
+    let readout = Builder::arg(2, Ty::f32(vec![5, 2]));
+    let h0 = Builder::arg(3, Ty::f32(vec![3, 2]));
+    let (y, h) = ssm::diag_scan_prefill(&mut b, &log_a, &bx, Some(&readout), &h0, 2);
+    assert_eq!(y.ty.shape, vec![5, 3]);
+    assert_eq!(h.ty.shape, vec![3, 2]);
+    let step = ssm::diag_scan_step(
+        &mut b,
+        &Builder::arg(4, Ty::f32(vec![3, 2])),
+        &Builder::arg(5, Ty::f32(vec![3, 2])),
+        &h,
+    );
+    assert_eq!(step.ty.shape, vec![3, 2]);
 }
 
 #[test]

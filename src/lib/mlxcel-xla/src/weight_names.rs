@@ -206,7 +206,7 @@ pub(crate) fn scheme_names(scheme: WeightScheme) -> SchemeNames {
         // (`input_layernorm`); its mixer tensors are named by
         // `weights::push_ssm_layer_specs`. The attention / MLP names are never
         // emitted for this scheme.
-        WeightScheme::Mamba2 => SchemeNames {
+        WeightScheme::Mamba2 | WeightScheme::Mamba1 => SchemeNames {
             embed: "backbone.embeddings.weight",
             final_norm: "backbone.norm_f.weight",
             lm_head: "lm_head.weight",
