@@ -173,3 +173,39 @@ Decision: recurrent configs are now pinned to f32 on every device, like MLA, for
 | server, 4 concurrent `/v1/completions` at temperature 0 vs `mlxcel generate` | 4/4 |
 
 The pin costs throughput on this 130M model: the serve gate ran at 285.6 tok/s batched at f16 and 123.7 tok/s at f32.
+
+## IREE-CUDA validation on GB10 (issue #3342)
+
+Validation ran on `NVIDIA GB10` (`sm_121`, driver 580.178.04) from main at `fc10c852`, with IREE `3.12.0rc20260721` at `dc9601f` and `AntonV/mamba2-130m-hf` at `05e8773f`. Every GPU command ran through `gpu-lock run --tag xla-ssm`. Recurrent precision resolved to f32, matching the ROCm decision above.
+
+The single-layer HF fp32 probe passed all four required boundaries at tolerance `5e-5`.
+
+| case | rows / real length | compile s | run s | max-abs y | max-abs h | max-abs conv |
+|------|-------------------:|----------:|------:|----------:|----------:|-------------:|
+| decode step | 1 / 1 | 1.22 | 0.009 | 2.623e-6 | 2.384e-7 | 6.557e-7 |
+| padded prefill | 256 / 224 | 1.82 | 0.009 | 2.503e-6 | 1.583e-7 | 5.960e-7 |
+| full prefill | 256 / 256 | cached | 0.006 | 2.503e-6 | 1.118e-7 | 7.153e-7 |
+| shorter than `K-1` | 256 / 2 | cached | 0.009 | 2.027e-6 | 1.118e-8 | 6.557e-7 |
+
+The exact production StableHLO modules emitted at capacity 256 were recompiled uncached with `--iree-hal-dump-executable-sources-to`. The single-sequence decode and ragged decode compiles retained the production aggressive-fusion flag. None of the three dispatch dumps contains `iree_linalg_ext.scatter`.
+
+| module | compile s | peak compiler RSS MiB | scatter count |
+|--------|----------:|----------------------:|--------------:|
+| prefill | 4.57 | 213.2 | 0 |
+| decode | 3.18 | 214.9 | 0 |
+| ragged decode B=4 | 4.72 | 185.1 | 0 |
+
+`validate_arch.sh --batch 4 --requests 8 --maxcap 24` passed its structural, HF token-exact, and serve reference-exact gates. The CLI generated the required 40-token continuation at 140.70 tok/s and matched the HF fp32 oracle 40/40. The production continuous-batching runs remained reference-exact across slot recycling, cancellation, capacity routing, and both bundled batch widths.
+
+| execution gate | result | decode throughput |
+|----------------|--------|------------------:|
+| CLI B=1, 40 tokens | HF token-exact 40/40 | 140.70 tok/s |
+| B=4, 8 requests | reference-exact | 88.71 tok/s |
+| B=4, cancel 2 | 2/2 cancelled and remaining streams reference-exact | 89.22 tok/s before cancellation pass |
+| B=4, buckets 256 and 512 | both buckets routed and reference-exact | 77.00 tok/s |
+| B=8, 16 requests | reference-exact | 81.36 tok/s |
+| server, 4 concurrent `/v1/completions` | four 24-token streams equal their independent CLI references | 4/4 exact |
+
+The server gate used four distinct prompts of 5, 8, 13, and 5 tokens with `--ctx-size 2048 --max-batch-size 4`. It disabled recurrent prefix caching as designed, compiled the 256 and 4096 capacity buckets, and loaded in 10.43 s. All responses finished by the requested length.
+
+The existing chunked SSD lowering therefore needs no CUDA-specific change. This PR changes only the findings record, so it does not require another ROCm gate beyond the already recorded #3339 and #3340 runs.
