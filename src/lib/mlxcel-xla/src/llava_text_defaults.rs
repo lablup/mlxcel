@@ -24,10 +24,13 @@
 
 use serde_json::{Map, Value, json};
 
+/// One `(field, default constructor)` row of the default table.
+type DefaultRow = (&'static str, fn() -> Value);
+
 /// The `transformers.LlamaConfig` constructor defaults for the fields the
 /// OpenXLA text graph and vision preprocessor read. `num_key_value_heads` is
 /// resolved separately because it defaults to `num_attention_heads`.
-const LLAMA_DEFAULTS: &[(&str, fn() -> Value)] = &[
+const LLAMA_DEFAULTS: &[DefaultRow] = &[
     ("vocab_size", || json!(32_000)),
     ("hidden_size", || json!(4096)),
     ("intermediate_size", || json!(11_008)),
