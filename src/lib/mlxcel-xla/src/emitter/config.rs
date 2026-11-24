@@ -821,6 +821,11 @@ impl Config {
                     text.entry(name.to_string()).or_insert(value);
                 }
             }
+            if crate::llava_text_defaults::is_llava_text_defaults_wrapper(wrapper_model_type) {
+                // LLaVA-1.5-7B conversions leave the Llama architecture fields
+                // implicit; resolve the declared model type's HF defaults (#3366).
+                crate::llava_text_defaults::apply_llava_text_config_defaults(&mut text);
+            }
             // mlx-community quantized VLMs commonly keep the affine scheme at
             // the wrapper level even though the tensors belong to the nested
             // language model.
@@ -2393,6 +2398,37 @@ mod tests {
                 group_size: 64
             })
         );
+    }
+
+    fn implicit_llama_llava_json(wrapper: &str, tie: Option<bool>) -> String {
+        let mut text = serde_json::json!({"model_type": "llama", "vocab_size": 32064});
+        if let Some(tie) = tie {
+            text["tie_word_embeddings"] = serde_json::json!(tie);
+        }
+        serde_json::json!({
+            "model_type": wrapper,
+            "vision_config": {"model_type": "clip_vision_model"},
+            "text_config": text
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn llava_and_llava_next_implicit_llama_text_config_resolve_alike() {
+        for wrapper in ["llava", "llava_next"] {
+            let config = Config::from_json_str(&implicit_llama_llava_json(wrapper, None))
+                .unwrap_or_else(|error| panic!("{wrapper}: {error}"));
+            assert_eq!(config.hidden, 4096, "{wrapper}");
+            assert!(!config.tie_word_embeddings, "{wrapper}");
+            assert_eq!(config.vocab, 32064, "{wrapper}");
+        }
+    }
+
+    #[test]
+    fn llava_explicit_tie_flag_wins_over_llama_default() {
+        let config = Config::from_json_str(&implicit_llama_llava_json("llava_next", Some(true)))
+            .expect("explicit tie parses");
+        assert!(config.tie_word_embeddings);
     }
 
     #[test]
