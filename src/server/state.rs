@@ -471,6 +471,16 @@ pub struct ModelMediaSupport {
     /// is the worker-side sibling and the backstop for routes that skip the
     /// boundary.
     pub video_with_audio: bool,
+    /// The refusal text for an `input_audio` part when this checkpoint is a
+    /// multimodal family that is known to have no audio encoder at all
+    /// (Inkling 2, issue #3376). `None` for every other checkpoint, which keeps
+    /// the generic per-kind wording. Always paired with `audio: false`: the
+    /// field only chooses what the refusal says, never whether audio is
+    /// admitted.
+    ///
+    /// Carried here, rather than recovered from the model id string, so each
+    /// route that reads `ModelMediaSupport` answers with the same sentence.
+    pub audio_refusal: Option<&'static str>,
 }
 
 impl ModelMediaSupport {
@@ -489,6 +499,7 @@ impl ModelMediaSupport {
             video_native: false,
             video_frames_fallback: false,
             video_with_audio: false,
+            audio_refusal: None,
         }
     }
 

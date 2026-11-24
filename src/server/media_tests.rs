@@ -1373,6 +1373,7 @@ fn media_capability_rejection_admits_what_the_checkpoint_supports() {
         video_native: false,
         video_frames_fallback: false,
         video_with_audio: false,
+        audio_refusal: None,
     };
     let image_request = build_chat_request(vec![ContentPart::ImageUrl {
         image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
@@ -1439,6 +1440,7 @@ fn media_capability_rejection_refuses_video_plus_audio_unless_the_model_merges_b
         video_native: true,
         video_frames_fallback: false,
         video_with_audio: false,
+        audio_refusal: None,
     };
     let rejection =
         super::media_capability_rejection(&build_chat_request(combined.clone()), each_alone, "m")
@@ -1453,6 +1455,7 @@ fn media_capability_rejection_refuses_video_plus_audio_unless_the_model_merges_b
     // Gemma 4 Unified merges both, so the same request is admitted.
     let unified = ModelMediaSupport {
         video_with_audio: true,
+        audio_refusal: None,
         ..each_alone
     };
     assert!(
@@ -1477,6 +1480,7 @@ fn media_capability_rejection_leaves_single_modality_requests_alone() {
         video_native: true,
         video_frames_fallback: false,
         video_with_audio: false,
+        audio_refusal: None,
     };
     let audio_only = build_chat_request(vec![ContentPart::InputAudio {
         input_audio: InputAudio {
@@ -1607,3 +1611,98 @@ mod url_disclosure;
 
 #[path = "media_net_proxy_tests.rs"]
 mod net_proxy;
+
+// ── Inkling 2 has no audio encoder (issue #3376) ────────────────────────────
+
+fn inkling2_support() -> crate::server::state::ModelMediaSupport {
+    crate::server::state::ModelMediaSupport {
+        image: true,
+        audio: false,
+        video_frames_fallback: true,
+        audio_refusal: Some(super::INKLING2_AUDIO_REFUSAL),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn inkling2_audio_refusal_uses_the_shared_message_for_input_audio_and_audio_url() {
+    let input_audio = build_chat_request(vec![ContentPart::InputAudio {
+        input_audio: InputAudio {
+            data: "aGVsbG8=".to_string(),
+            format: "wav".to_string(),
+        },
+    }]);
+    let audio_url = build_chat_request(vec![ContentPart::AudioUrl {
+        audio_url: crate::server::types::request::AudioUrl {
+            url: "file:///clip.wav".to_string(),
+        },
+    }]);
+    for request in [&input_audio, &audio_url] {
+        let rejection = super::media_capability_rejection(request, inkling2_support(), "inkling-2")
+            .expect("Inkling 2 refuses audio");
+        assert_eq!(rejection.status, axum::http::StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(rejection.error.error_type, "not_supported_error");
+        assert_eq!(rejection.error.message, super::INKLING2_AUDIO_REFUSAL);
+    }
+    assert!(super::INKLING2_AUDIO_REFUSAL.starts_with("audio input is not supported - hint: "));
+}
+
+#[test]
+fn inkling2_still_admits_image_and_refuses_audio_beside_it() {
+    let image = build_chat_request(vec![ContentPart::ImageUrl {
+        image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
+    }]);
+    assert!(super::media_capability_rejection(&image, inkling2_support(), "m").is_none());
+
+    let mixed = build_chat_request(vec![
+        ContentPart::ImageUrl {
+            image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
+        },
+        ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: "aGVsbG8=".to_string(),
+                format: "wav".to_string(),
+            },
+        },
+    ]);
+    let rejection = super::media_capability_rejection(&mixed, inkling2_support(), "m")
+        .expect("audio beside an image is still refused");
+    assert_eq!(rejection.error.message, super::INKLING2_AUDIO_REFUSAL);
+}
+
+#[test]
+fn no_mmproj_keeps_its_own_audio_hint_over_the_inkling2_reason() {
+    // `ModelMediaSupport::none()` carries no refusal text, so the operator's
+    // `--no-mmproj` wording is what a client reads.
+    let request = build_chat_request(vec![ContentPart::InputAudio {
+        input_audio: InputAudio {
+            data: "aGVsbG8=".to_string(),
+            format: "wav".to_string(),
+        },
+    }]);
+    let rejection = super::media_capability_rejection(
+        &request,
+        crate::server::state::ModelMediaSupport::none(),
+        "m",
+    )
+    .expect("refused");
+    assert_ne!(rejection.error.message, super::INKLING2_AUDIO_REFUSAL);
+}
+
+#[test]
+fn audio_url_on_an_audio_capable_checkpoint_is_a_request_error() {
+    let request = build_chat_request(vec![ContentPart::AudioUrl {
+        audio_url: crate::server::types::request::AudioUrl {
+            url: "file:///clip.wav".to_string(),
+        },
+    }]);
+    let capable = crate::server::state::ModelMediaSupport {
+        image: true,
+        audio: true,
+        ..Default::default()
+    };
+    let rejection = super::media_capability_rejection(&request, capable, "gemma-3n")
+        .expect("no checkpoint reads an audio_url part");
+    assert_eq!(rejection.status, axum::http::StatusCode::BAD_REQUEST);
+    assert!(rejection.error.message.contains("input_audio"));
+}
