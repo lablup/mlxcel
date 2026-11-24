@@ -146,7 +146,7 @@ constexpr const char* PAGED_ATTENTION_V2_PARTIAL_SOURCE = R"(
         for (uint j = 0; j < dpt; j++) {
             uint d = d0 + j;
             q_reg[g * dpt + j] = (h < hq_count && d < dim)
-                ? q[(r * hq_count + h) * dim + d]
+                ? (float)q[(r * hq_count + h) * dim + d]
                 : 0.0f;
         }
     }
@@ -344,7 +344,7 @@ constexpr const char* PAGED_ATTENTION_V2_PARTIAL_CUDA_SOURCE = R"(
         for (uint32_t j = 0; j < dpt; j++) {
             uint32_t d = d0 + j;
             q_reg[g * dpt + j] = (h < hq_count && d < dim)
-                ? q[(r * hq_count + h) * dim + d]
+                ? (float)q[(r * hq_count + h) * dim + d]
                 : 0.0f;
         }
     }
@@ -716,9 +716,12 @@ std::vector<mlx::core::array> paged_attention_decode_v2_partial(
     };
 
     // Pack scale into a 1-element f32 array (metal_kernel inputs must be
-    // arrays; ScalarArg is reserved for the precompiled-kernel path).
+    // arrays; ScalarArg is reserved for the precompiled-kernel path). The
+    // array is built from host data rather than `full`, so it carries no
+    // primitive: `full` added a fill kernel to every launch, one per layer per
+    // decode step (lablup/mlxcel#3256).
     auto scale_arr =
-        mlx::core::full(mlx::core::Shape{1}, scale, mlx::core::float32);
+        mlx::core::array(&scale, mlx::core::Shape{1}, mlx::core::float32);
 
     std::vector<mlx::core::array> inputs = {
         q,
