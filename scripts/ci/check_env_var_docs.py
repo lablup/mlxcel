@@ -154,6 +154,7 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
      "mlxcel-xla/src/validation.rs rewrite the committed StableHLO goldens", (
         "MLXCEL_FREEZE_GOLDENS",
         "MLXCEL_FREEZE_MOE",
+        "MLXCEL_FREEZE_NEMOTRON_H",
     )),
     ("fixture-authoring: input or output of the opt-in #[ignore] StableHLO "
      "graph-dump tests in mlxcel-xla/src/emitter/mod.rs", (
