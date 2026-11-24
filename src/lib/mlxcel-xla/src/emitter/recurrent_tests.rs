@@ -632,3 +632,20 @@ fn recurrent_config_pins_f32_unless_precision_is_explicit() {
     );
     assert!(resolve("hip", false, Some("fp8")).is_err());
 }
+
+/// The server's prompt-cache guard asks the crate root whether a checkpoint
+/// threads recurrent state (issue #3341); it must agree with the config.
+#[test]
+fn config_json_has_recurrent_state_matches_the_config() {
+    assert_eq!(
+        crate::config_json_has_recurrent_state(TINY_MAMBA2),
+        Ok(true)
+    );
+    let dense = r#"{"model_type": "llama", "hidden_size": 16, "intermediate_size": 32,
+        "num_hidden_layers": 2, "num_attention_heads": 2,
+        "num_key_value_heads": 2, "rms_norm_eps": 1e-6,
+        "rope_theta": 10000.0, "vocab_size": 32}"#;
+    assert_eq!(crate::config_json_has_recurrent_state(dense), Ok(false));
+    // An unsupported family is an error, so the caller's list decides.
+    assert!(crate::config_json_has_recurrent_state(r#"{"model_type": "jamba"}"#).is_err());
+}

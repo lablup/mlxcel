@@ -536,7 +536,10 @@ These variables are applied when the corresponding CLI flag is absent.
 Automatic Prefix Caching is on by default; pass `--apc-enabled=false` or set
 `APC_ENABLED=false` to fall back to whole-prefix matching only (a stored prefix
 is then reusable only when it is fully contained in the new request). The
-`APC_*` names mirror the upstream `mlx-vlm` env surface.
+`APC_*` names mirror the upstream `mlx-vlm` env surface. Startup turns APC off
+for recurrent and hybrid SSM / linear-attention families whatever these say
+(Qwen 3.5, Granite 4.0-H, Falcon-H1 and PLaMo 2 joined that list in #3341), and
+on the OpenXLA backend a recurrent model gets no prompt cache at all.
 
 When `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` and
 `--prompt-cache-snapshot-capacity-bytes` are both absent, startup may raise the

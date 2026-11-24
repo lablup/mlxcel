@@ -2146,10 +2146,10 @@ struct ServerArgs {
     ///
     /// APC layers on top of the existing prompt-prefix cache to enable
     /// finer-grained KV reuse with chained `(parent_hash, tokens, extra_hash)`
-    /// per block. When enabled on a hybrid SSM/attention model (jamba, mamba,
-    /// mamba2, nemotron_h, gated_delta, kimi_linear, qwen3_next), APC is
-    /// automatically disabled at runtime since SSM state cannot be decomposed
-    /// into hashable blocks.
+    /// per block. When enabled on a recurrent or hybrid SSM / linear-attention
+    /// model (Mamba, Jamba, Nemotron-H, Qwen3-Next, Qwen 3.5, Granite 4.0-H,
+    /// Falcon-H1, PLaMo 2, ...), APC is automatically disabled at runtime
+    /// since recurrent state cannot be decomposed into hashable blocks.
     ///
     /// Also reads `APC_ENABLED`.
     #[arg(
