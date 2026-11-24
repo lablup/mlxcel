@@ -332,7 +332,11 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                     end,
                 });
             } else if cfg.dense_mlp {
-                out.push(WeightSpec::Whole(format!("{p}mlp.c_fc.weight")));
+                // `c_fc` is a projection like `c_proj`: the emitter takes it
+                // through `take_weight`, so the loader must follow the graph's
+                // layout and f16-resident rule for it (issue #2859; a `Whole`
+                // spec here broke the single-sequence StarCoder2 engine).
+                push_proj(&mut out, format!("{p}mlp.c_fc.weight"), quant);
             } else {
                 push_proj(
                     &mut out,
@@ -1597,6 +1601,212 @@ mod tests {
         assert!(names.iter().any(|n| n.ends_with("self_attn.o_proj.bias")));
         assert!(names.iter().any(|n| n.ends_with("mlp.c_fc.bias")));
         assert!(names.iter().any(|n| n.ends_with("mlp.c_proj.bias")));
+    }
+
+    /// The `(loc, shape, element type)` of every weight argument of the
+    /// graph's `@main`, in declaration order (the loader's upload order).
+    fn main_weight_args(graph: &str) -> Vec<(String, Vec<usize>, String)> {
+        let signature = graph
+            .split("func.func public @main(")
+            .nth(1)
+            .and_then(|rest| rest.split(") -> ").next())
+            .expect("graph has a public @main");
+        let mut args = Vec::new();
+        for segment in signature.split("%arg").skip(1) {
+            let Some(ty) = segment.split("tensor<").nth(1) else {
+                continue;
+            };
+            let ty = ty.split('>').next().unwrap_or_default();
+            let Some(loc) = segment.split("loc(\"").nth(1) else {
+                continue;
+            };
+            let loc = loc.split("\")").next().unwrap_or_default();
+            if !loc.starts_with("params[") {
+                continue;
+            }
+            let mut parts: Vec<&str> = ty.split('x').collect();
+            let elt = parts.pop().unwrap_or_default().to_string();
+            let shape = parts
+                .iter()
+                .map(|d| d.parse().expect("static dim"))
+                .collect();
+            args.push((loc.to_string(), shape, elt));
+        }
+        args
+    }
+
+    /// Issues #3364 / #3362 / #2859: in every family, each weight argument the
+    /// emitter declares must match what the loader uploads for its spec. The
+    /// `OutIn` graphs (the gated batch engine) upload every tensor in its
+    /// checkpoint layout, so their declarations are the checkpoint shapes; the
+    /// `InOut` loader transposes exactly the `Proj` / `Rows` specs and keeps
+    /// every other spec as stored, and it uploads only `Proj` / `Rows` specs
+    /// f16-resident. StarCoder2's `c_fc` was a `Whole` spec declared through
+    /// `take_weight`, so the CLI failed with `expected 3072x12288, actual
+    /// 12288x3072` (local-task) and an f16 vs f32 mismatch (cuda).
+    #[test]
+    fn every_family_declares_weights_the_way_the_loader_uploads_them() {
+        let youtu = r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
+            "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
+            "kv_lora_rank":12,"q_lora_rank":24,"qk_nope_head_dim":8,
+            "qk_rope_head_dim":4,"v_head_dim":6,"rope_interleave":true,
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#;
+        let mamba2 = r#"{"model_type":"mamba2","hidden_size":16,"num_hidden_layers":2,
+            "vocab_size":40,"num_heads":4,"head_dim":8,"state_size":16,"n_groups":2,
+            "conv_kernel":4,"expand":2,"use_conv_bias":true,"use_bias":false,
+            "layer_norm_epsilon":1e-05,"chunk_size":256,"rms_norm":true,
+            "hidden_act":"silu","tie_word_embeddings":true}"#;
+        let families: Vec<(&str, String)> = vec![
+            (
+                "cohere",
+                include_str!("../assets/cohere/config.json").into(),
+            ),
+            (
+                "cohere2",
+                include_str!("../assets/cohere2/config.json").into(),
+            ),
+            (
+                "exaone",
+                include_str!("../assets/exaone/config.json").into(),
+            ),
+            (
+                "granite",
+                include_str!("../assets/granite/config.json").into(),
+            ),
+            (
+                "internlm3",
+                include_str!("../assets/internlm3/config.json").into(),
+            ),
+            (
+                "llama",
+                include_str!("../assets/llama-3.2-1b/config.json").into(),
+            ),
+            ("mimo", include_str!("../assets/mimo/config.json").into()),
+            (
+                "minicpm",
+                include_str!("../assets/minicpm/config.json").into(),
+            ),
+            (
+                "olmoe",
+                include_str!("../assets/olmoe-tiny/config.json").into(),
+            ),
+            ("phi3", include_str!("../assets/phi3/config.json").into()),
+            (
+                "qwen2",
+                include_str!("../assets/qwen2.5-0.5b/config.json").into(),
+            ),
+            (
+                "qwen2_moe",
+                include_str!("../assets/qwen2-moe-tiny/config.json").into(),
+            ),
+            (
+                "qwen3_moe",
+                include_str!("../assets/qwen3-moe-tiny/config.json").into(),
+            ),
+            (
+                "seed_oss",
+                include_str!("../assets/seed_oss/config.json").into(),
+            ),
+            (
+                "stablelm",
+                include_str!("../assets/stablelm/config.json").into(),
+            ),
+            (
+                "starcoder2",
+                include_str!("../assets/starcoder2/config.json").into(),
+            ),
+            ("youtu_vl", youtu.into()),
+            ("mamba2", mamba2.into()),
+        ];
+        for (family, json) in &families {
+            let base = Config::from_json_str(json)
+                .unwrap_or_else(|e| panic!("{family}: {e}"))
+                .with_context_capacity(16)
+                .expect("context capacity");
+            assert_layouts_agree(family, &base);
+        }
+    }
+
+    fn assert_layouts_agree(family: &str, base: &Config) {
+        use crate::emitter::{
+            Precision, emit_decode_ragged_with, emit_decode_with, emit_prefill_with,
+        };
+        type Emit = fn(&Config, Precision) -> Option<String>;
+        let kinds: [(&str, Emit); 3] = [
+            ("prefill", |c, p| Some(emit_prefill_with(c, false, p))),
+            ("decode", |c, p| Some(emit_decode_with(c, false, p))),
+            ("ragged", |c, p| {
+                emit_decode_ragged_with(c, 2, false, p).ok()
+            }),
+        ];
+        let mut outin = base.clone();
+        outin.projection_layout = ProjectionLayout::OutIn;
+        let mut inout = base.clone();
+        inout.projection_layout = ProjectionLayout::InOut;
+        for (kind, emit) in kinds {
+            let Some(reference) = emit(&outin, Precision::F32) else {
+                continue;
+            };
+            // The checkpoint shape of every tensor, keyed by its argument.
+            let checkpoint: std::collections::HashMap<String, Vec<usize>> =
+                main_weight_args(&reference)
+                    .into_iter()
+                    .map(|(loc, shape, _)| (loc, shape))
+                    .collect();
+            for precision in [Precision::F32, Precision::F16] {
+                for c in [&outin, &inout] {
+                    let layout = c.projection_layout;
+                    let Some(graph) = emit(c, precision) else {
+                        continue;
+                    };
+                    let args = main_weight_args(&graph);
+                    let specs = weight_specs(c);
+                    assert_eq!(
+                        args.len(),
+                        specs.len(),
+                        "{family} {kind} {layout:?}: one weight arg per spec"
+                    );
+                    let resident_f16 = precision == Precision::F16 && c.supports_f16_resident();
+                    for ((loc, shape, elt), spec) in args.iter().zip(&specs) {
+                        let projection =
+                            matches!(spec, WeightSpec::Proj(_) | WeightSpec::Rows { .. });
+                        // The tied InOut head reads the embedding tensor again.
+                        let stored = checkpoint
+                            .get(loc)
+                            .or_else(|| checkpoint.get("params['embed']"))
+                            .unwrap_or_else(|| {
+                                panic!("{family} {kind}: no checkpoint shape for {loc}")
+                            });
+                        let uploaded: Vec<usize> =
+                            if projection && matches!(layout, ProjectionLayout::InOut) {
+                                stored.iter().rev().copied().collect()
+                            } else {
+                                stored.clone()
+                            };
+                        assert_eq!(
+                            shape,
+                            &uploaded,
+                            "{family} {kind} {layout:?} {precision:?}: {loc} ({}) is declared \
+                             {shape:?} but the loader uploads {uploaded:?}",
+                            spec.tensor_name()
+                        );
+                        let uploaded_elt = if projection && resident_f16 {
+                            "f16"
+                        } else {
+                            "f32"
+                        };
+                        assert_eq!(
+                            elt,
+                            uploaded_elt,
+                            "{family} {kind} {layout:?} {precision:?}: {loc} ({}) is declared \
+                             {elt} but the loader uploads {uploaded_elt}",
+                            spec.tensor_name()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Cohere is tied, LayerNorm (no norm bias), parallel (no post-attn norm).
