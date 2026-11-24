@@ -446,3 +446,55 @@ fn apc_chain_is_recomputable_from_entry_tokens_and_request_mm_digest() {
     // 48 tokens / 16 = 3 full blocks; chain length matches.
     assert_eq!(stored.len(), 3);
 }
+
+/// #3341 turns APC off for Qwen3.5, Granite 4.0-H, Falcon-H1 and PLaMo 2.
+/// Their recurrent state is restored through whole snapshots and #3047
+/// turn-boundary checkpoints, so those must not depend on the APC flag: the
+/// same history yields the same checkpoint hit with APC on and off.
+#[test]
+fn state_checkpoints_do_not_depend_on_apc() {
+    use crate::server::prompt_cache::entry::{ModelSnapshotEntry, SnapshotOrigin};
+    use crate::server::prompt_cache::lineage::SnapshotLineage;
+    use crate::server::prompt_cache::store::SnapshotLookupOutcome;
+
+    let run = |apc_on: bool| {
+        let config = PromptCacheConfig::new(true, 1 << 20, 64, Duration::from_secs(3600), 4)
+            .with_snapshot_limits(1 << 20, 64, Duration::from_secs(3600))
+            .with_state_checkpoint_capacity_bytes(1 << 20)
+            .with_apc(ApcConfig {
+                enabled: apc_on,
+                block_size: 4,
+                ..ApcConfig::default()
+            });
+        assert_eq!(config.apc_enabled(), apc_on);
+        let store = PromptCacheStore::with_config(config);
+        fn key(t: &[i32]) -> PromptCacheKey<'_> {
+            PromptCacheKey::new_full("m", None, "tpl", Some("s"), MultimodalDigest::empty(), t)
+        }
+        let mut lineage = SnapshotLineage::default();
+        for turn in 1..=4usize {
+            let tokens: Vec<i32> = (0..(10 * turn) as i32).collect();
+            lineage = lineage.extended(10 * turn, turn as u64);
+            let entry = |bytes| {
+                ModelSnapshotEntry::new_for_test(tokens.clone(), "qwen3_5", bytes)
+                    .with_origin(SnapshotOrigin::Boundary)
+                    .with_lineage(lineage.clone())
+            };
+            store
+                .insert_snapshot(&&key(&tokens), entry(10_000))
+                .unwrap();
+            store
+                .insert_state_checkpoint(&&key(&tokens), entry(100))
+                .unwrap();
+        }
+        // Edit the history after turn 2: only its checkpoint can serve.
+        let mut edited: Vec<i32> = (0..45).collect();
+        edited[22..].iter_mut().for_each(|t| *t += 1000);
+        match store.lookup_snapshot_outcome(&&key(&edited), &edited, |_, _| false) {
+            SnapshotLookupOutcome::CheckpointHit { matched_len, .. } => matched_len,
+            other => panic!("apc {apc_on}: expected a checkpoint hit, got {other:?}"),
+        }
+    };
+    assert_eq!(run(false), 20);
+    assert_eq!(run(true), run(false));
+}

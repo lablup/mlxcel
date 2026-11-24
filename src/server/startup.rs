@@ -3536,6 +3536,18 @@ pub(super) fn resolve_prompt_cache_store(
     model_path: &Path,
     batch_metrics: &Arc<BatchMetrics>,
 ) -> Option<Arc<crate::server::prompt_cache::PromptCacheStore>> {
+    // A recurrent model on the OpenXLA backend never shares prefixes (#3341):
+    // no store is built, so neither the provider nor `AppState` holds one.
+    #[cfg(feature = "xla-iree")]
+    if crate::server::xla_prompt_cache_guard::xla_serve_backend_selected()
+        && crate::server::xla_prompt_cache_guard::disable_prompt_cache_for_xla_recurrent(
+            &mut config.prompt_cache,
+            model_path,
+        )
+        .is_some()
+    {
+        return None;
+    }
     // `--ctx-checkpoints` / `--checkpoint-min-step` over the environment
     // switches (#3255). Resolved before sizing so the default budget can make
     // room for the extra snapshot per conversation keep-previous-turn holds
@@ -3632,18 +3644,7 @@ pub(super) fn resolve_prompt_cache_store(
     // Detect by reading model_type / architectures from config.json and
     // force-disable APC at runtime (the whole-prefix prompt cache is still
     // safe and stays enabled).
-    if config.prompt_cache.apc.enabled
-        && let Ok(Some(family)) =
-            crate::server::prompt_cache::detect_hybrid_ssm_from_path(model_path)
-    {
-        tracing::warn!(
-            model_type = %family,
-            "Detected hybrid SSM / linear-attention model family ({family}); \
-             auto-disabling APC because recurrent state cannot decompose \
-             into hashable blocks. Whole-prefix prompt cache is unaffected."
-        );
-        config.prompt_cache.apc.enabled = false;
-    }
+    crate::server::prompt_cache::disable_apc_for_hybrid_ssm(&mut config.prompt_cache, model_path);
 
     // Cross-request prompt-prefix KV cache store.
     // Gated on the config flag so a disabled policy reserves zero memory.

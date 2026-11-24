@@ -654,7 +654,16 @@ Recurrent and hybrid SSM / linear-attention families cannot safely reuse
 arbitrary KV blocks, so they keep the hybrid-SSM/APC exclusion. Baichuan-M1 is
 a dense family that joins this exclusion (#2567): its K/V convolution state is
 model-owned per sequence and a restored KV prefix would not carry it, so the
-whole-prefix store, APC and the KV handoff all decline it. Families that
+whole-prefix store, APC and the KV handoff all decline it. Since #3341 the
+exclusion list (`HYBRID_SSM_MODEL_TYPES`) also names Qwen 3.5 (`qwen3_5`,
+`qwen3_5_moe` and their `_text` spellings), Granite 4.0-H (`granitemoehybrid`),
+Falcon-H1 (`falcon_h1`) and PLaMo 2 (`plamo2`, `plamo2vl`). On the MLX backend
+this only turns APC off at startup: those families already keep their state
+outside the KV slice, so they never reached the block-hash store, and their
+snapshots and turn-boundary checkpoints do not read the APC flag. On the
+OpenXLA backend (`MLXCEL_BACKEND=xla`) a recurrent model gets no prompt-cache
+store at all (`Config::has_recurrent_state()` or the same list), because that
+engine has no state snapshot to restore. Families that
 opt into `supports_snapshot_reuse()` instead use a separate exact-prefix
 snapshot bucket: the scheduler copies the model-owned state (at the end of
 the prefill since #3040, or not at all for a chat turn whose history-boundary
