@@ -66,6 +66,7 @@ mod molmo2_config;
 mod molmo2_vision;
 mod molmo_vision;
 mod molmo_vision_config;
+mod molmo_vision_f16;
 mod molmo_vision_ops;
 pub(crate) mod numeric_ops;
 mod phi4_audio;

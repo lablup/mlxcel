@@ -56,9 +56,10 @@ pub(super) const EXACT: Tolerance = Tolerance {
     atol: 0.0,
     rtol: 0.0,
 };
-// The pinned host path retains F16 checkpoint rounding while the local-task
-// StableHLO graph accumulates in F32. This is the existing #870 prepared-visual
-// envelope, now applied at the first observable internal boundary.
+// The StableHLO graph rounds to F16 where the eager host path stores an F16
+// tensor (#3390), so what remains is GEMM and reduction summation order. This
+// is the existing #870 prepared-visual envelope, applied at the first
+// observable internal boundary.
 pub(super) const VISION: Tolerance = Tolerance {
     atol: 0.25,
     rtol: 0.05,
@@ -68,6 +69,9 @@ pub(super) fn progress(stage: &str) {
     eprintln!("[molmo-v1-boundary] {stage}");
     io::stderr().flush().expect("flush diagnostic progress");
 }
+
+/// Failing elements `compare_stage` lists after its summary line.
+const LISTED_FAILURES: usize = 16;
 
 pub(super) fn compare_stage(
     stage: &str,
@@ -86,10 +90,14 @@ pub(super) fn compare_stage(
     let mut max_rel = 0.0f64;
     let mut failures = 0usize;
     let mut first_failure = None;
+    let mut listed = Vec::new();
     for (index, (&observed, &reference)) in observed.iter().zip(reference).enumerate() {
         if !observed.is_finite() || !reference.is_finite() {
             failures += 1;
             first_failure.get_or_insert(index);
+            if listed.len() < LISTED_FAILURES {
+                listed.push((index, observed, reference));
+            }
             continue;
         }
         let absolute = f64::from((observed - reference).abs());
@@ -99,6 +107,9 @@ pub(super) fn compare_stage(
         if absolute > tolerance.atol + tolerance.rtol * f64::from(reference.abs()) {
             failures += 1;
             first_failure.get_or_insert(index);
+            if listed.len() < LISTED_FAILURES {
+                listed.push((index, observed, reference));
+            }
         }
     }
     let status = if failures == 0 { "PASS" } else { "FAIL" };
@@ -110,6 +121,14 @@ pub(super) fn compare_stage(
         tolerance.atol,
         tolerance.rtol,
     );
+    // The first failing elements, so a failure can be traced to a crop, row
+    // and channel without rerunning the gate under a debugger.
+    for (index, observed, reference) in listed {
+        eprintln!(
+            "[molmo-v1-boundary] stage={stage} failure index={index} \
+             observed={observed:.6e} reference={reference:.6e}"
+        );
+    }
     io::stderr().flush().expect("flush diagnostic stage");
     if failures != 0 {
         first_divergence.get_or_insert_with(|| {

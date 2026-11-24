@@ -237,6 +237,13 @@ fn molmo_pool_and_projector() -> Vec<DeclaredOperator> {
 
 /// `molmo_vision_runtime.rs` (`emitter/molmo_vision.rs`). Every projection
 /// weight stays packed and `Builder::dequant_affine` unpacks it in the graph.
+///
+/// The graph rounds to F16 where eager MLX stores an F16 tensor for the F16
+/// checkpoint (`emitter/molmo_vision_f16.rs`, #3390): the dequantized weight,
+/// every linear product and bias add, the patch embedding, LayerNorm,
+/// quick_gelu, the encoder attention context and the residual adds. The
+/// attention scores and softmax, and the whole pooling attention up to its
+/// output projection, stay f32 as eager computes them.
 pub(crate) fn molmo_vision_operators(bits: usize) -> Vec<DeclaredOperator> {
     let dequantize = if bits == 4 {
         OperatorClass::AffineQ4Dequantize
@@ -259,7 +266,18 @@ pub(crate) fn molmo_vision_operators(bits: usize) -> Vec<DeclaredOperator> {
         false,
     ));
     operators.extend(molmo_pool_and_projector());
+    let f16 = NumericDType::F16;
     operators
+        .into_iter()
+        .map(|operator| match operator.id {
+            "encoder.attention-scores"
+            | "encoder.attention-softmax"
+            | "pool.attention-scores"
+            | "pool.attention-softmax"
+            | "pool.attention-context" => operator,
+            _ => operator.rounded_to(f16),
+        })
+        .collect()
 }
 
 /// `molmo2_vision_runtime.rs` (`emitter/molmo2_vision.rs`).
