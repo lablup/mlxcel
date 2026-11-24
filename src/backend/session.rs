@@ -146,20 +146,28 @@ impl XlaBackendSession {
         let preprocessor = self.image_preprocessor.as_ref().ok_or_else(|| {
             "the loaded OpenXLA model/runtime bundle does not support image input".to_string()
         })?;
-        let eos = self.engine.eos_token_ids().to_vec();
-        if let Some(request) = preprocessor
-            .prepare_deepstack(token_ids, images)
-            .map_err(|error| error.to_string())?
-        {
-            return self
-                .engine
-                .generate_deepstack_prepared_greedy(&request, max_tokens, &eos);
-        }
-        let prepared = preprocessor
-            .prepare(token_ids, images)
+        let request = crate::prepare_image_prefill(preprocessor.as_ref(), token_ids, images)
             .map_err(|error| error.to_string())?;
-        self.engine
-            .generate_prepared_greedy(&prepared, max_tokens, &eos)
+        self.generate_prepared_image_greedy(&request, max_tokens)
+    }
+
+    /// Execute an image request that was prepared before this session was
+    /// built, which is how the CLI sizes the shape from the processed media
+    /// (issue #3361).
+    pub fn generate_prepared_image_greedy(
+        &mut self,
+        request: &crate::PreparedImagePrefill,
+        max_tokens: usize,
+    ) -> Result<Vec<i32>, String> {
+        let eos = self.engine.eos_token_ids().to_vec();
+        match request {
+            crate::PreparedImagePrefill::Standard(prepared) => self
+                .engine
+                .generate_prepared_greedy(prepared, max_tokens, &eos),
+            crate::PreparedImagePrefill::DeepStack(request) => self
+                .engine
+                .generate_deepstack_prepared_greedy(request, max_tokens, &eos),
+        }
     }
 }
 

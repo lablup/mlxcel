@@ -357,6 +357,12 @@ pub fn load_xla_image_preprocessor(
 /// without a formula here, or a config this cannot read, falls through without
 /// a capacity guard rather than inventing a number.
 ///
+/// This bound only decides which shapes a server compiles before any request
+/// is seen, and the startup guard for an unsized session. A request with an
+/// image is sized and admitted on its processed length instead
+/// ([`crate::multimodal::xla_image_prefill`], issue #3361), so the worst case
+/// is never added on top of a real expansion.
+///
 /// # Molmo2
 ///
 /// The prompt carries one pooled token per pooled patch, plus one column token
