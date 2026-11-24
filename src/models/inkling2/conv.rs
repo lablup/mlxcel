@@ -321,7 +321,9 @@ impl DynamicShortConv {
         let xf = f32(x);
         let (context, next) = context_and_next(state, &xf, k);
         *state = Some(next);
-        let dynamic = f32(&self.weight_proj.forward(dynamic_input));
+        let dynamic = f32(&mlxcel_core::row_invariant::per_row(dynamic_input, |x| {
+            self.weight_proj.forward(x)
+        }));
         let dynamic = mlxcel_core::reshape(&dynamic, &[batch, length, self.heads, 1, k]);
         let weights = mlxcel_core::add(&self.static_weight, &dynamic);
         let mut out: Option<UniquePtr<MlxArray>> = None;

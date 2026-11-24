@@ -35,6 +35,7 @@ mod layer;
 mod moe;
 pub mod quant;
 mod residual;
+use mlxcel_core::row_invariant;
 mod runtime;
 pub(crate) mod sanitize;
 /// DSpark speculative-decoding target hooks (issue #3374): the verify forward
@@ -80,6 +81,10 @@ pub struct Inkling2Model {
     final_input: AttentionResidual,
     norm: RMSNorm,
     head: Head,
+    /// Build dense products with the row-invariant kernel (issue #3280), so
+    /// a verify block reproduces decode steps; [`kernels::KERNELS_ENV`] at
+    /// build time.
+    row_kernel: bool,
     eos_token_ids: Vec<i32>,
     sequence_state: ModelOwnedSequenceState<InklingLayerCache>,
 }
@@ -249,8 +254,19 @@ impl Inkling2Model {
             final_input,
             norm,
             head,
+            row_kernel: kernels::enabled(),
             eos_token_ids,
             sequence_state: ModelOwnedSequenceState::new(state),
+        })
+    }
+
+    /// The row-invariant product scope of a forward over `shape`: every
+    /// Inkling 2 text forward enters one, so decode steps and verify blocks
+    /// form their dense products alike (issue #3280).
+    fn row_invariant_scope(&self, shape: &[i32]) -> row_invariant::Scope {
+        row_invariant::Scope::enter(row_invariant::Mode {
+            kernel: self.row_kernel,
+            verify_block: row_invariant::is_verify_block(shape),
         })
     }
 
@@ -326,6 +342,7 @@ impl Inkling2Model {
                 .all(|caches| caches.len() == self.layer_indices.len()),
             "Inkling 2 needs one cache per layer visit"
         );
+        let _rows = self.row_invariant_scope(&mlxcel_core::array_shape(embeddings));
         let mut x = mlxcel_core::copy(embeddings);
         let mut blocks: Vec<UniquePtr<MlxArray>> = Vec::new();
         let mut prelude: Option<(UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>)> = None;
@@ -356,13 +373,13 @@ impl Inkling2Model {
             let messages = match (self.loop_config, &bank) {
                 (Some(lc), Some(bank)) if index < lc.core_end => {
                     let query = &self.message_queries[index - lc.core_start];
-                    let scores = mlxcel_core::matmul(query, &mlxcel_core::swap_axes(bank, -1, -2));
-                    let scores =
-                        mlxcel_core::multiply_scalar(&scores, attention::inverse_sqrt(hidden));
-                    Some(mlxcel_core::matmul(
-                        &mlxcel_core::softmax(&scores, -1),
-                        bank,
-                    ))
+                    Some(row_invariant::per_position(bank, |bank| {
+                        let scores =
+                            mlxcel_core::matmul(query, &mlxcel_core::swap_axes(bank, -1, -2));
+                        let scores =
+                            mlxcel_core::multiply_scalar(&scores, attention::inverse_sqrt(hidden));
+                        mlxcel_core::matmul(&mlxcel_core::softmax(&scores, -1), bank)
+                    }))
                 }
                 _ => None,
             };
@@ -403,9 +420,10 @@ impl Inkling2Model {
             &mlxcel_core::astype(&h, mlxcel_core::array_dtype(&self.embed_norm.weight)),
             dtype::FLOAT32,
         );
+        let _rows = self.row_invariant_scope(&mlxcel_core::array_shape(&h));
         let mut logits = match &self.head {
-            Head::Dense(weight) => mlxcel_core::matmul(&h, &mlxcel_core::transpose(weight)),
-            Head::Quantized(head) => head.forward(&h),
+            Head::Dense(weight) => row_invariant::dense(&h, weight),
+            Head::Quantized(head) => row_invariant::per_row(&h, |h| head.forward(h)),
         };
         let cap = text.final_logit_softcapping;
         if cap > 0.0 {
@@ -475,6 +493,8 @@ fn copy_all(values: &[UniquePtr<MlxArray>]) -> Vec<UniquePtr<MlxArray>> {
 #[cfg(test)]
 #[path = "inkling2/batched_tests.rs"]
 mod batched_tests;
+#[cfg(test)]
+mod exactness_diag_tests;
 #[cfg(test)]
 mod tiny_tests;
 #[cfg(test)]

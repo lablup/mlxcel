@@ -132,18 +132,10 @@ impl MessageController {
             -1,
         );
         let pair = mlxcel_core::astype(&pair, mlxcel_core::array_dtype(&self.down));
-        let hidden = f32(&mlxcel_core::matmul(
-            &pair,
-            &mlxcel_core::transpose(&self.down),
-        ));
-        let forget = mlxcel_core::tanh(&mlxcel_core::matmul(
-            &hidden,
-            &mlxcel_core::transpose(&self.forget),
-        ));
-        let gain = mlxcel_core::tanh(&mlxcel_core::matmul(
-            &hidden,
-            &mlxcel_core::transpose(&self.gain),
-        ));
+        let rw = mlxcel_core::row_invariant::dense;
+        let hidden = f32(&rw(&pair, &self.down));
+        let forget = mlxcel_core::tanh(&rw(&hidden, &self.forget));
+        let gain = mlxcel_core::tanh(&rw(&hidden, &self.gain));
         let keep = mlxcel_core::subtract(&mlxcel_core::from_slice_f32(&[1.0], &[1]), &forget);
         mlxcel_core::add(
             &mlxcel_core::multiply(&keep, x),
