@@ -857,6 +857,29 @@ mod ffi {
         /// decode kernel runs here (#3156): same rule as the dense one.
         fn mla_absorbed_decode_fused_quantized_available() -> bool;
 
+        /// Whether the fused absorbed-MLA partial pass evaluates at this
+        /// `(dtype, rank, rope)` on this device. A Metal pipeline's thread
+        /// limit is fixed per chip when it compiles, and the partial pass
+        /// always launches 1024 threads (an M1 Ultra caps it at 768 at rank
+        /// 512), so the launcher runs it once on a one-key window and caches
+        /// the answer per geometry. False wherever the kernel has no port.
+        /// Used by: `mla::decode::fused_absorbed_decode`, `mla::default_absorbs`.
+        fn mla_absorbed_decode_fused_supported(dtype: i32, rank: i32, rope: i32) -> bool;
+
+        /// `mla_absorbed_decode_fused_supported` for the quantized variant,
+        /// whose pipeline also depends on the rope window's and the scales'
+        /// dtypes, the group size and the bit width.
+        /// Used by: `mla::decode::fused_absorbed_decode_quantized`.
+        fn mla_absorbed_decode_fused_quantized_supported(
+            dtype: i32,
+            kpe_dtype: i32,
+            scales_dtype: i32,
+            rank: i32,
+            rope: i32,
+            group_size: i32,
+            bits: i32,
+        ) -> bool;
+
         /// `mla_absorbed_decode_fused` over an affine-quantized latent window
         /// (#3156). `ckv_q [B, 1, S, R * bits / 32]` uint32, `scales` and
         /// `biases` `[B, 1, S, R / group_size]`, `kpe [B, 1, S, P]`; returns

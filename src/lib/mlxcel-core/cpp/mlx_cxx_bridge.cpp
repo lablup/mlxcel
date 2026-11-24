@@ -2057,6 +2057,25 @@ bool mla_absorbed_decode_fused_quantized_available() {
     return mlxcel::turbo::mla_absorbed_decode_quantized_available();
 }
 
+// Whether the fused kernels evaluate at a geometry on this device: the
+// pipeline's thread limit is per chip and per template geometry, so the
+// launcher probes it once (see `mla_absorbed_decode_supported`).
+bool mla_absorbed_decode_fused_supported(int32_t dtype, int32_t rank, int32_t rope) {
+    return mlxcel::turbo::mla_absorbed_decode_supported(to_dtype(dtype), rank, rope);
+}
+
+bool mla_absorbed_decode_fused_quantized_supported(
+    int32_t dtype,
+    int32_t kpe_dtype,
+    int32_t scales_dtype,
+    int32_t rank,
+    int32_t rope,
+    int32_t group_size,
+    int32_t bits) {
+    return mlxcel::turbo::mla_absorbed_decode_quantized_supported(
+        to_dtype(dtype), to_dtype(kpe_dtype), to_dtype(scales_dtype), rank, rope, group_size, bits);
+}
+
 // Inkling 2 Mini Metal kernels (#3359). Each launcher throws off-Metal or
 // outside its contract, and the Rust declarations are `-> Result`, so a
 // refusal sends the caller back to the ops path.

@@ -47,6 +47,7 @@ What would change the decision is removing that fixed cost. Issue #3121 removed 
 
 - The folds now run quantized.
 - Unmasked single-query absorbed attention runs on a fused Metal kernel for windows up to 8192 keys (`MLXCEL_MLA_FUSED_DECODE`, on by default). An int8 latent window takes the kernel's quantized variant up to 2048 keys (#3156, see the quantized latent section).
+- The kernel's partial pass launches 1024 threads per threadgroup, and Metal sets each pipeline's thread limit per chip from the kernel's register use. On an M1 Ultra the pipeline at latent rank 512 is capped at 768 threads (640 for the int8 variant), so the kernel cannot run there. Before either variant is taken at a geometry (dtype, latent rank, rope width, and for int8 the sidecar dtypes), it is launched once on a one-key window and evaluated; where that fails, the step takes the composed path, and the DeepSeek V2 layout default (probed at rank 512, rope width 64) stays decompressed. Without this check the step failed at eval with `Thread group size (1024) is greater than the maximum allowed threads per threadgroup (768)`.
 
 Re-measured on the same checkpoint (2026-11-16):
 

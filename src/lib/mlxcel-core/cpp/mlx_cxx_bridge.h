@@ -622,6 +622,15 @@ std::unique_ptr<MlxArray> mla_absorbed_decode_fused(
 
 // The fused decode kernel over an affine-quantized latent window (#3156).
 bool mla_absorbed_decode_fused_quantized_available();
+bool mla_absorbed_decode_fused_supported(int32_t dtype, int32_t rank, int32_t rope);
+bool mla_absorbed_decode_fused_quantized_supported(
+    int32_t dtype,
+    int32_t kpe_dtype,
+    int32_t scales_dtype,
+    int32_t rank,
+    int32_t rope,
+    int32_t group_size,
+    int32_t bits);
 std::unique_ptr<MlxArray> mla_absorbed_decode_fused_quantized(
     const MlxArray& q_abs,
     const MlxArray& q_pe,
