@@ -2,6 +2,7 @@ source_head=93ddebad382478540fdfc987fbca655744be941d
 device=cuda
 precision=f32
 
+target=xla_ssm_single_seq
 running 6 tests
 test consecutive_requests_start_from_a_fresh_state ... ok
 test empty_prefix_and_refused_prefill_never_reuse_state ... ok
@@ -11,6 +12,7 @@ test prefill_to_decode_handoff_agrees_across_routes ... ok
 test request_refused_in_rust_drops_the_previous_state ... ok
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 5.29s
 
+target=xla_ssm_state_carry
 running 5 tests
 test half_full_and_full_batches_give_identical_per_request_ids ... ok
 test mid_stream_admit_into_a_recycled_slot_matches_the_reference ... ok
@@ -19,6 +21,16 @@ test state_allocation_counters_show_one_allocation_per_reset ... ok
 test torn_state_store_leaves_the_slot_invalid_and_the_next_admit_recovers ... ok
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.21s
 
+target=xla_hybrid_nemotron_h
+running 5 tests
+test half_full_and_full_batches_give_identical_per_request_ids ... ok
+test mid_stream_admit_into_a_recycled_slot_matches_the_reference ... ok
+test refused_requests_and_failed_decodes_invalidate_slot_state ... ok
+test state_allocation_counters_show_one_allocation_per_reset ... ok
+test torn_state_store_leaves_the_slot_invalid_and_the_next_admit_recovers ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.80s
+
+target=server::xla_prompt_cache_guard::tests::an_emitter_loadable_nemotron_h_gets_no_prompt_cache_or_apc
 running 1 test
 test server::xla_prompt_cache_guard::tests::an_emitter_loadable_nemotron_h_gets_no_prompt_cache_or_apc ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13127 filtered out; finished in 0.01s

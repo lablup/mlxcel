@@ -48,7 +48,7 @@ The real-checkpoint CUDA batch gate also served eight requests at B=4 and matche
 
 The test-fast CLI matched all 40 HF oracle token IDs exactly. Four HTTP requests overlapped for 16.958 seconds and each returned 24 completion tokens whose text and counts matched a separately captured CLI reference. The server API does not expose token IDs, so HTTP acceptance establishes rendered-text and count parity. The successful server used `--ctx-size 2048`, B=4, explicit XLA capacity 256, and prompt cache/APC disabled; a prior `--ctx-size 1024` attempt was correctly rejected because its 256 tokens per slot fell below the 512-token minimum.
 
-Six CUDA Mamba2 state-carry tests, five hybrid state-carry tests, and one Nemotron-H prompt-cache exclusion unit test passed. The validation binaries came from `93ddebad`; CLI/server evidence was captured from the documentation-only checkout `d7e8a040`. Raw evidence and binary hashes are included under `spike/openxla/nemotron_h_reference/`.
+On CUDA, `xla_ssm_single_seq` passed six tests, `xla_ssm_state_carry` passed five tests, and the separate `xla_hybrid_nemotron_h` target passed five tests. The Nemotron-H prompt-cache exclusion unit test also passed. The validation binaries came from `93ddebad`; CLI/server evidence was captured from the documentation-only checkout `d7e8a040`. Raw evidence and binary hashes are included under `spike/openxla/nemotron_h_reference/`.
 
 All ROCm gfx1151 gates remain pending. Remote CI was cancelled under the run's local-validation policy; cancellation is not passing CI evidence. The PR remains a draft and #3344 remains open at `status:review`.
 

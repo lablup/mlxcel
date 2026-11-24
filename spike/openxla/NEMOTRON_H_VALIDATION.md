@@ -15,7 +15,7 @@ The implementation was validated on NVIDIA GB10 with driver 580.178.04, f32 recu
 - The CLI printed the same 40 token IDs as the HF oracle.
 - Four overlapping HTTP completions each matched a separately captured CLI reference in rendered text and token counts, with 24 completion tokens per request. The HTTP API does not expose token IDs, so this is text and count parity rather than ID parity.
 - The server started with `--ctx-size 2048`, B=4, an explicit XLA capacity of 256, and prompt cache/APC disabled. The earlier `--ctx-size 1024` attempt was correctly rejected because 256 tokens per slot is below the server's 512-token minimum.
-- Six Mamba2 state-carry tests, five hybrid state-carry tests, and the Nemotron-H prompt-cache exclusion unit test passed on the tested source.
+- The `xla_ssm_single_seq` target passed six tests, `xla_ssm_state_carry` passed five tests, the separate `xla_hybrid_nemotron_h` target passed five tests, and the Nemotron-H prompt-cache exclusion unit test passed on the tested source.
 
 The raw oracle, batch, CLI/server, concurrency, provenance, and focused regression outputs are in `nemotron_h_reference/`. The test-fast throughput values are informational and are not release-build performance claims. No ROCm acceptance result is recorded yet.
 
@@ -27,6 +27,7 @@ gpu-lock run --tag issue-3344-cuda-real-oracle -- env MLXCEL_XLA_DEVICE=cuda MLX
 gpu-lock run --tag issue-3344-cuda-real-batch -- env MLXCEL_XLA_DEVICE=cuda MLXCEL_XLA_PRECISION=f32 MLXCEL_CACHE_DIR=/tmp/epic564-cache-cuda target/test-fast/examples/xla_batch_bench --model models/hf/nemotron-h-4b --prompts spike/openxla/nemotron_h_reference/hf-f32-oracle.json --device cuda --batch 4 --requests 8 --maxcap 24
 gpu-lock run --tag issue3344-cli-server -- env MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=cuda MLXCEL_XLA_PRECISION=f32 MLXCEL_XLA_CONTEXT_CAPACITY=256 MLXCEL_CACHE_DIR=/tmp/epic564-cache-cuda target/test-fast/mlxcel generate -m models/hf/nemotron-h-4b -p 'The capital of France is' -n 40 --temp 0 --no-chat-template
 gpu-lock run --tag issue3344-cli-server -- env MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=cuda MLXCEL_XLA_PRECISION=f32 MLXCEL_XLA_CONTEXT_CAPACITY=256 MLXCEL_CACHE_DIR=/tmp/epic564-cache-cuda target/test-fast/mlxcel-server -m models/hf/nemotron-h-4b --host 127.0.0.1 --port 59511 --max-batch-size 4 --ctx-size 2048
+gpu-lock run --tag issue-3344-cuda-mamba-regressions -- env MLXCEL_XLA_DEVICE=cuda MLXCEL_XLA_PRECISION=f32 cargo test --profile test-fast --features xla-iree,test-utils --test xla_ssm_single_seq -- --ignored --test-threads=1
 gpu-lock run --tag issue-3344-cuda-mamba-regressions -- env MLXCEL_XLA_DEVICE=cuda MLXCEL_XLA_PRECISION=f32 cargo test --profile test-fast --features xla-iree,test-utils --test xla_ssm_state_carry -- --ignored --test-threads=1
 gpu-lock run --tag issue-3344-cuda-mamba-regressions -- env MLXCEL_XLA_DEVICE=cuda MLXCEL_XLA_PRECISION=f32 cargo test --profile test-fast --features xla-iree,test-utils --test xla_hybrid_nemotron_h -- --ignored --test-threads=1
 cargo test --profile test-fast -p mlxcel --lib server::xla_prompt_cache_guard::tests::an_emitter_loadable_nemotron_h_gets_no_prompt_cache_or_apc -- --exact

@@ -48,7 +48,7 @@ Parser는 표준 `chunk_size`를 읽고 기존 `mamba_chunk_size` fallback을 �
 
 Test-fast CLI는 HF oracle token ID 40개와 모두 정확히 일치했다. HTTP 요청 4개는 16.958초 동안 겹쳐 실행됐고, 각 요청의 completion token 24개에 대한 text와 count가 별도로 캡처한 CLI reference와 일치했다. Server API는 token ID를 노출하지 않으므로 HTTP 검증은 rendered text 및 count 일치를 입증한다. 성공한 server는 `--ctx-size 2048`, B=4, 명시적 XLA capacity 256, prompt cache/APC 비활성화 조건을 사용했다. 앞선 `--ctx-size 1024` 시도는 slot당 256 token이 최소값 512보다 작아 정상적으로 거부됐다.
 
-CUDA에서 Mamba2 state-carry 테스트 6개, hybrid state-carry 테스트 5개, Nemotron-H prompt-cache 제외 unit test 1개가 통과했다. 검증 binary는 `93ddebad` 소스에서 빌드했고 CLI/server 증거는 문서만 변경된 `d7e8a040` checkout에서 캡처했다. 원시 증거와 binary hash는 `spike/openxla/nemotron_h_reference/`에 포함한다.
+CUDA에서 `xla_ssm_single_seq` 테스트 6개, `xla_ssm_state_carry` 테스트 5개, 별도의 `xla_hybrid_nemotron_h` 테스트 5개가 통과했다. Nemotron-H prompt-cache 제외 unit test도 통과했다. 검증 binary는 `93ddebad` 소스에서 빌드했고 CLI/server 증거는 문서만 변경된 `d7e8a040` checkout에서 캡처했다. 원시 증거와 binary hash는 `spike/openxla/nemotron_h_reference/`에 포함한다.
 
 ROCm gfx1151 전체 gate는 아직 검증되지 않았다. 이번 실행의 local-validation 정책에 따라 원격 CI는 취소했으며, 취소를 CI 통과 증거로 간주하지 않는다. PR은 draft이고 #3344는 `status:review` 상태로 열려 있다.
 
