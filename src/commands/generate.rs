@@ -1834,7 +1834,11 @@ fn generate_xla(
         &images,
         audio_path,
     )?;
-    let preparation_time = preparation_start.elapsed();
+    // The vision weight load and compile used to sit in untimed session
+    // creation, so keep them out of the reported preparation time.
+    let preparation_time = preparation_start
+        .elapsed()
+        .saturating_sub(media.untimed_load());
     let effective_prompt_len = media.effective_prompt_len(prompt_tokens.len());
     let required_positions = mlxcel::xla_request_positions(effective_prompt_len, sizing_budget);
     let mut session = match media.take_preprocessor() {

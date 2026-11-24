@@ -92,13 +92,46 @@ fn qwen2_vl_sizes_the_fixture_from_its_64_merged_tokens() {
 }
 
 #[test]
-fn qwen2_vl_sizes_a_large_image_from_its_resized_grid() {
+fn qwen2_vl_refuses_a_large_image_at_its_256_patch_vision_bucket() {
+    // The Qwen2-VL and Qwen2.5-VL IREE vision towers pack every image into at
+    // most 256 patches (`QWEN2_VL_PATCH_BUCKETS = [16, 64, 256]`), which is 64
+    // merged tokens with the 2x2 merge. The fixture sits exactly at the cap.
     let processor = Qwen2VLProcessor::new(14, 2, 2);
-    let (image_tokens, len) = qwen_expanded_len(&processor, &image(2048, 1536));
-    // smart_resize keeps the area under the cap and rounds to 28px.
-    assert_eq!(image_tokens, (1540 / 28) * (2044 / 28));
-    assert!(image_tokens < 16_384);
-    assert_eq!(request_shape(len), 4096);
+    let packed_patches = |images: &[DynamicImage]| {
+        processor
+            .compute_grid_thw(images)
+            .iter()
+            .map(|&(t, h, w)| (t * h * w) as usize)
+            .sum::<usize>()
+    };
+    assert_eq!(packed_patches(&[fixture()]), 256);
+
+    // A 2048x1536 image keeps its resolution up to the pixel cap, so its grid
+    // is far past that bucket and the preprocessor refuses it before any
+    // context shape is compiled. The context shape sizing would have admitted
+    // it, so the bound is the vision tower's.
+    let patches = packed_patches(&[image(2048, 1536)]);
+    assert_eq!(patches, (1540 / 14) * (2044 / 14));
+    assert!(patches > 256);
+}
+
+#[test]
+fn qwen2_5_vl_counts_both_images_of_a_multi_image_request() {
+    const START: i32 = 151_652;
+    const PAD: i32 = 151_655;
+    const END: i32 = 151_653;
+    let processor = Qwen2VLProcessor::new(14, 2, 2);
+    // Two image blocks, 64 merged tokens each, one placeholder per block.
+    let mut tokens = vec![1, START, PAD, END, START, PAD, END, 2, 3];
+    let text_len = tokens.len();
+    let grids = processor.compute_grid_thw(&[fixture(), fixture()]);
+    let inserted =
+        insert_qwen_vl_image_tokens(&mut tokens, &grids, 2, START, PAD).expect("two image blocks");
+    assert_eq!(inserted.image_blocks, 2);
+    assert_eq!(tokens.iter().filter(|&&token| token == PAD).count(), 128);
+    assert_eq!(tokens.len(), text_len - 2 + 128);
+    // Both expansions count: 135 tokens plus the budget fit the 256 floor.
+    assert_eq!(request_shape(tokens.len()), 256);
 }
 
 #[test]

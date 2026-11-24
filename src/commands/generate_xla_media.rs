@@ -21,6 +21,7 @@
 //! family bounds that stay fail-closed.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, ensure};
 use image::DynamicImage;
@@ -42,6 +43,10 @@ pub(super) enum XlaCliMedia {
     Image {
         preprocessor: Option<Box<dyn HostMultimodalPreprocessor>>,
         request: PreparedImagePrefill,
+        /// Time spent loading the vision weights and compiling the vision
+        /// graph, which sat in untimed session creation before the request was
+        /// prepared first. It is not part of the reported preparation time.
+        load_time: Duration,
     },
     /// Phi4MM image and/or audio, prepared by its own producer.
     #[cfg(feature = "xla-iree")]
@@ -56,6 +61,14 @@ impl XlaCliMedia {
             Self::Image { request, .. } => request.sequence_len(),
             #[cfg(feature = "xla-iree")]
             Self::Phi4mm(prepared) => prepared.sequence_len,
+        }
+    }
+
+    /// One-time preprocessor load time, to leave out of the preparation time.
+    pub(super) fn untimed_load(&self) -> Duration {
+        match self {
+            Self::Image { load_time, .. } => *load_time,
+            _ => Duration::ZERO,
         }
     }
 
@@ -93,30 +106,39 @@ pub(super) fn prepare_xla_cli_media(
     if images.is_empty() {
         return Ok(XlaCliMedia::Text);
     }
+    let load_start = Instant::now();
     let preprocessor = mlxcel::load_xla_image_preprocessor(model_path)
         .map_err(|error| anyhow!("OpenXLA image preprocessor load failed: {error}"))?
         .ok_or_else(|| {
             anyhow!("the loaded OpenXLA model/runtime bundle does not support image input")
         })?;
+    let load_time = load_start.elapsed();
     let request = mlxcel::prepare_image_prefill(preprocessor.as_ref(), prompt_tokens, images)
         .map_err(|error| anyhow!("OpenXLA image preprocessing failed: {error}"))?;
     Ok(XlaCliMedia::Image {
         preprocessor: Some(preprocessor),
         request,
+        load_time,
     })
 }
 
 /// The sequence bound the Phi4MM producer enforces while preparing.
 ///
 /// A pinned capacity keeps its early, specific refusal. Unpinned, the producer
-/// is bounded only by the checkpoint window (it takes the minimum of the two),
-/// and the shape compiled afterwards is sized from what it produced.
+/// is bounded by `min(checkpoint window, top of the context ladder)` (it takes
+/// the minimum with the window), and the shape compiled afterwards is sized
+/// from what it produced.
 #[cfg(feature = "xla-iree")]
 fn phi4mm_preparation_capacity() -> Result<usize> {
     if std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_some() {
         mlxcel_xla::context_capacity_from_env().map_err(anyhow::Error::msg)
     } else {
-        Ok(usize::MAX)
+        // Bound by the top of the context ladder so a prompt no shape could
+        // hold is refused before the producer computes its embeddings.
+        Ok(mlxcel_xla::CONTEXT_CAPACITY_LADDER
+            .last()
+            .copied()
+            .unwrap_or(mlxcel_xla::DEFAULT_CONTEXT_CAPACITY))
     }
 }
 

@@ -179,8 +179,9 @@ impl ComputeBackend for XlaBackend {
         // Match the server path: reject a graph that could never admit one
         // image before generation starts, instead of after the vision tower has
         // already run on the first image request. The request-sized path below
-        // includes the image expansion in its hint, so the guard is only needed
-        // here, where the request is unknown.
+        // is sized from the prompt the preprocessor already produced and
+        // admission checks it, so the guard is only needed here, where the
+        // request is unknown.
         let context_capacity =
             mlxcel_xla::context_capacity_from_env().map_err(|e| anyhow::anyhow!(e))?;
         crate::ensure_xla_image_context_capacity(

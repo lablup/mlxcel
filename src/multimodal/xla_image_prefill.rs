@@ -42,7 +42,11 @@
 //! compiled. Raising that bound needs a larger vision bucket, not a larger
 //! context shape. Youtu-VL's vision buckets top out at 256 patches instead,
 //! and its processor shrinks a larger image until it fits, so one image never
-//! expands past 64 tokens there.
+//! expands past 64 tokens there. The Qwen2-VL and Qwen2.5-VL vision towers are
+//! compiled for packed patch buckets of 16, 64 and 256 patches
+//! (`QWEN2_VL_PATCH_BUCKETS`), so their images (summed across the request) are
+//! refused past 256 patches, 64 merged tokens, with "exceeding qualified
+//! capacity 256". A 224x224 image sits exactly at that cap.
 
 use image::DynamicImage;
 use mlxcel_core::session::PreparedPrefill;
