@@ -142,6 +142,15 @@ impl Config {
         !self.state_tensors().is_empty()
     }
 
+    /// Whether this config's runtime precision defaults to F32 on every device.
+    /// MLA and recurrent-state configs do: an f16 recurrent state is not
+    /// token-exact (on hip the single-sequence Mamba2 path drifts from the HF
+    /// fp32 reference after about 16 tokens on some prompts, issue #3340).
+    #[must_use]
+    pub fn pins_f32_precision(&self) -> bool {
+        self.mla.is_some() || self.has_recurrent_state()
+    }
+
     /// The family name of the first recurrent mixer, for error messages.
     pub(crate) fn recurrent_family(&self) -> Option<&'static str> {
         (0..self.n_layers)

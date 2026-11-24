@@ -64,8 +64,8 @@ use crate::emitter::{
     emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with_qmv,
     emit_gemma3n_prefill_embeddings_ple_with_qmv, emit_gemma3n_prefill_with_qmv,
     emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
-    gemma3n_qmv_artifact_identity, gemma3n_qmv_is_available, gemma3n_weight_specs,
-    precision_env_override, quant_in_graph, resolve_precision_checked, resolve_quant_scale_dtype,
+    gemma3n_qmv_artifact_identity, gemma3n_qmv_is_available, gemma3n_weight_specs, quant_in_graph,
+    resolve_pinned_precision_with_override, resolve_quant_scale_dtype,
 };
 #[cfg(feature = "diagnostics")]
 use crate::emitter::{
@@ -1322,16 +1322,31 @@ mod gemma3_vlm_compatibility_tests {
     }
 }
 
+/// The precision a runtime bundle is emitted, compiled and uploaded at.
+///
+/// MLA configs and recurrent-state configs (Mamba2, issue #3340) default to F32
+/// on every device. An f16 recurrent state is not token-exact: on hip the
+/// single-sequence path diverges from the HF fp32 reference after about 16
+/// tokens on some prompts, while F32 matches it. An explicit
+/// `MLXCEL_XLA_PRECISION` still wins for both, for measurement.
 fn effective_precision(device: &str, cfg: &RuntimeConfig) -> Result<Precision, String> {
+    let raw = std::env::var("MLXCEL_XLA_PRECISION").ok();
+    effective_precision_with_override(device, cfg, raw.as_deref())
+}
+
+/// [`effective_precision`] with the raw `MLXCEL_XLA_PRECISION` value passed in,
+/// so unit tests cover the override branches without mutating the process env.
+fn effective_precision_with_override(
+    device: &str,
+    cfg: &RuntimeConfig,
+    raw_override: Option<&str>,
+) -> Result<Precision, String> {
     match cfg {
-        RuntimeConfig::Dense(config) if config.mla.is_some() => {
-            if precision_env_override().is_some() {
-                resolve_precision_checked(device)
-            } else {
-                Ok(Precision::F32)
-            }
-        }
-        RuntimeConfig::Dense(_) => resolve_precision_checked(device),
+        RuntimeConfig::Dense(config) => resolve_pinned_precision_with_override(
+            device,
+            config.pins_f32_precision(),
+            raw_override,
+        ),
         RuntimeConfig::Gemma3n(_) if device == "metal" => Err(
             "Gemma3n uses an exact BF16 activation stream with F32 AltUp coefficient islands, \
              but the Metal target cannot lower BF16. Use CUDA or a CPU local-task/local-sync \
@@ -2306,14 +2321,71 @@ mod checkpoint_name_tests {
             .unwrap(),
         ));
         assert!(!cfg.supports_f16_resident());
-        if precision_env_override().is_none() {
-            assert_eq!(effective_precision("hip", &cfg).unwrap(), Precision::F32);
-            assert_eq!(effective_precision("cuda", &cfg).unwrap(), Precision::F32);
+        for device in ["hip", "cuda", "local-task"] {
             assert_eq!(
-                effective_precision("local-task", &cfg).unwrap(),
+                effective_precision_with_override(device, &cfg, None).unwrap(),
                 Precision::F32
             );
         }
+    }
+
+    #[test]
+    fn recurrent_runtime_pins_f32_unless_precision_is_explicit() {
+        // Issue #3340: an f16 Mamba2 state drifts from the HF fp32 reference on
+        // hip, so recurrent configs default to F32 like MLA configs.
+        let cfg = RuntimeConfig::Dense(Box::new(
+            Config::from_json_str(
+                r#"{"model_type": "mamba2", "hidden_size": 16, "num_hidden_layers": 2,
+                    "vocab_size": 40, "num_heads": 4, "head_dim": 8, "state_size": 16,
+                    "n_groups": 2, "conv_kernel": 4, "expand": 2, "use_conv_bias": true,
+                    "use_bias": false, "time_step_limit": [0.0, Infinity],
+                    "layer_norm_epsilon": 1e-05, "chunk_size": 256, "rms_norm": true,
+                    "hidden_act": "silu", "tie_word_embeddings": true}"#,
+            )
+            .unwrap()
+            .with_context_capacity(8)
+            .unwrap(),
+        ));
+        assert!(cfg.has_recurrent_state());
+        for device in ["hip", "cuda", "metal", "local-task"] {
+            for raw in [None, Some(""), Some("fp8")] {
+                assert_eq!(
+                    effective_precision_with_override(device, &cfg, raw).unwrap(),
+                    Precision::F32,
+                    "{device} {raw:?}"
+                );
+            }
+        }
+        assert_eq!(
+            effective_precision_with_override("hip", &cfg, Some("f16")).unwrap(),
+            Precision::F16
+        );
+        assert_eq!(
+            effective_precision_with_override("cuda", &cfg, Some(" bf16 ")).unwrap(),
+            Precision::Bf16
+        );
+        assert!(effective_precision_with_override("metal", &cfg, Some("bf16")).is_err());
+
+        // A dense attention-only config keeps the per-device default.
+        let dense = RuntimeConfig::Dense(Box::new(
+            Config::from_json_str(
+                &serde_json::json!({
+                    "model_type": "llama", "hidden_size": 16, "intermediate_size": 32,
+                    "num_hidden_layers": 2, "num_attention_heads": 2,
+                    "num_key_value_heads": 2, "rms_norm_eps": 1e-6,
+                    "rope_theta": 10000.0, "vocab_size": 32
+                })
+                .to_string(),
+            )
+            .unwrap()
+            .with_context_capacity(8)
+            .unwrap(),
+        ));
+        assert!(!dense.has_recurrent_state());
+        assert_eq!(
+            effective_precision_with_override("hip", &dense, None).unwrap(),
+            Precision::F16
+        );
     }
 
     #[test]

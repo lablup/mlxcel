@@ -198,7 +198,8 @@ pub(crate) use ssm_scan::SsmPrefillForm;
 #[allow(unused_imports)]
 pub(crate) use builder::{
     Precision, ProjectionLayout, check_packed_supported, default_precision, precision_env_override,
-    quant_in_graph, resolve_precision, resolve_precision_checked, target_flags_with_rocm_target,
+    quant_in_graph, resolve_pinned_precision_with_override, resolve_precision,
+    resolve_precision_checked, target_flags_with_rocm_target,
 };
 /// Test support only (issue #3060): toggle the single-sequence decode scalar ABI
 /// per thread so the device gate can compile and run both the scalar and the

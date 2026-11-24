@@ -215,6 +215,24 @@ pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
     resolve_precision_checked_with_override(device, raw.as_deref())
 }
 
+/// [`resolve_precision_checked_with_override`] for a config whose default is
+/// pinned to F32 on every device (`pin_f32`: MLA, and recurrent state since
+/// issue #3340). Only a recognised explicit override (`f16`, `bf16`, `f32`,
+/// as in [`precision_env_override`]) replaces the pin; an unset or unrecognised
+/// value keeps F32. Without the pin this is the ordinary checked resolver.
+pub fn resolve_pinned_precision_with_override(
+    device: &str,
+    pin_f32: bool,
+    raw_override: Option<&str>,
+) -> Result<Precision, String> {
+    let explicit = raw_override.is_some_and(|raw| matches!(raw.trim(), "f16" | "bf16" | "f32"));
+    if pin_f32 && !explicit {
+        Ok(Precision::F32)
+    } else {
+        resolve_precision_checked_with_override(device, raw_override)
+    }
+}
+
 /// Whether a packed int8 in-graph-dequant build can execute on `device`.
 /// `packed_active` is whether the packed path is actually taken (the config's
 /// resolved `packed_args && supports_packed_quant()`, set by
