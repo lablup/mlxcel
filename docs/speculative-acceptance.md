@@ -93,6 +93,7 @@ acceptance-optimal rule: see the next section.
 | Gemma 4 MTP round loop | argmax (lossless here) | argmax-against-argmax (**biased**) |
 | DFlash round loop (Qwen 3.5 DFlash drafter) | argmax (lossless here) | argmax-against-argmax (**biased**) |
 | DFlash round loop (LFM2 DSpark drafter) | argmax (lossless here, probe-gated) | declines to classic decode |
+| DFlash round loop (Inkling 2 bundled DSpark drafter, #3374) | argmax (lossless here, probe-gated) | refused offline, declines to classic decode in the server |
 | DFlash round loop (Muse Glimmer assistant drafter) | argmax (lossless here, probe-gated) | argmax-against-argmax (**biased**) |
 
 "Classic decode" on this page means plain non-speculative decoding. The MTP and DFlash verify paths select the target token with
@@ -159,7 +160,10 @@ A DFlash or DSpark drafter on a target without an offline arm gets the same
 refusal plus a pointer to `mlxcel-server`, which drives the DFlash round loop for
 more targets (#1168). These checkpoints ship no `embed_tokens` and no `lm_head`,
 because they borrow both from the target when they bind. The LFM2 DSpark drafters
-(#1339) and the Muse Glimmer assistant (#1343) have the same shape.
+(#1339) and the Muse Glimmer assistant (#1343) have the same shape. Laguna and
+Inkling 2 have offline arms; Inkling 2's drafter is the `mtp.safetensors` shipped
+in the target checkpoint, so `--draft-model` names the target directory itself
+and the pairing is detected from its `mtp_config` (#3374).
 
 The discriminator is structural (a `dflash_config` block and/or
 `architectures: ["DFlashDraftModel"]` or `["Lfm2DSparkDraftModel"]` in the

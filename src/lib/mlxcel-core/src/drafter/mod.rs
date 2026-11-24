@@ -67,7 +67,7 @@
 //! | Variant | Concrete impl | Wired by |
 //! |---------|---------------|----------|
 //! | [`DrafterKind::Mtp`] | `Gemma4AssistantDraftModel`, and (since issue #1165) `Qwen35MtpDraftModel` (`qwen3_5_mtp` model_type); the `glm4_moe_lite_mtp` drafter resolves to this kind here but is built by the binary crate's `mlxcel::models::drafter_loader` (issue #1326) | |
-//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` (Qwen 3.5 DFlash and LFM2 DSpark), and (since issue #1343) `MuseAssistantDrafter` (`muse_glimmer_assistant` model_type), and (since issue #1351) `LagunaDFlashDrafter` (`laguna` model_type) | |
+//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` (Qwen 3.5 DFlash and LFM2 DSpark), and (since issue #1343) `MuseAssistantDrafter` (`muse_glimmer_assistant` model_type), and (since issue #1351) `LagunaDFlashDrafter` (`laguna` model_type), and (since issue #3374) `Inkling2DsparkDraftModel` (an Inkling 2 checkpoint with `mtp.safetensors`) | |
 //! | [`DrafterKind::InternalMtp`] | `InternalMtpDrafter` | |
 //!
 //! Until those land, [`load_drafter`] returns a typed
@@ -94,6 +94,7 @@ pub mod dflash;
 /// [`load_drafter`]'s `Mtp` arm.
 pub mod gemma4_assistant;
 /// Native Inkling chained-MTP head loaded from `model.mtp.layers.*` tensors.
+pub mod inkling2_dspark;
 pub mod inkling_mtp;
 /// Centroid-routed sparse softmax LM head used by Gemma 4 E2B / E4B
 /// assistant drafters. Wired into `Gemma4AssistantDraftModel` in sub-3
@@ -698,6 +699,15 @@ pub fn peek_inkling_mtp_configured_block_size(model_path: &Path) -> Option<usize
     Some(config.block_size())
 }
 
+/// Default verify width of the DSpark drafter bundled with the Inkling 2
+/// checkpoint at `model_path` (issue #3374): its trained `block_size`, one
+/// anchor and `block_size - 1` proposals. `None` for any other directory.
+///
+/// Used by: `resolve_draft_block_size` in the `mlxcel` binary crate.
+pub fn peek_inkling2_dspark_configured_block_size(model_path: &Path) -> Option<usize> {
+    inkling2_dspark::peek_configured_block_size(model_path)
+}
+
 /// Read the default verify width of an LFM2 DSpark drafter at `model_path`
 /// (issue #1339): `min(block_size + 1, runtime_block_size)`, with a missing
 /// `runtime_block_size` reading as the eight-row default
@@ -773,6 +783,23 @@ pub fn resolve_drafter_kind(
             "Auto-detected Inkling MTP from model.mtp.layers.* tensors"
         );
         return Ok(DrafterKind::Mtp);
+    }
+
+    // An Inkling 2 checkpoint passed as its own drafter (issue #3374): its
+    // bundled DSpark is a DFlash-kind drafter, detected by `mtp_config` and
+    // `mtp.safetensors` as upstream's `load_drafter` does.
+    if kind.is_none()
+        && model_type
+            .as_deref()
+            .is_some_and(|mt| inkling2_dspark::INKLING2_MODEL_TYPES.contains(&mt))
+        && inkling2_dspark::is_inkling2_dspark_dir(model_path)
+    {
+        tracing::info!(
+            drafter = %model_path.display(),
+            resolved = %DrafterKind::Dflash,
+            "Auto-detected the Inkling 2 bundled DSpark drafter from mtp_config and mtp.safetensors"
+        );
+        return Ok(DrafterKind::Dflash);
     }
 
     // A `qwen4_exp` target checkpoint passed as its own drafter (issue
@@ -1332,6 +1359,14 @@ pub trait Drafter {
         false
     }
 
+    /// Whether this drafter is the DSpark drafter bundled with an Inkling 2
+    /// checkpoint (issue #3374). Same role as [`Self::is_laguna_dflash`]: it
+    /// reads Inkling 2 pre-layer captures, so the target gate pairs it with
+    /// an Inkling 2 target only.
+    fn is_inkling2_dspark(&self) -> bool {
+        false
+    }
+
     /// Produce a draft block of proposal tokens.
     ///
     /// Semantics are kind-specific:
@@ -1517,6 +1552,12 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
             }
             if laguna_dflash::LagunaDFlashConfig::is_laguna_dflash_dir(path) {
                 let drafter = laguna_dflash::LagunaDFlashDrafter::load(path)?;
+                return Ok((Box::new(drafter), resolved));
+            }
+            // An Inkling 2 checkpoint passed as its own drafter: the bundled
+            // `mtp.safetensors` DSpark (issue #3374).
+            if inkling2_dspark::is_inkling2_dspark_dir(path) {
+                let drafter = inkling2_dspark::Inkling2DsparkDraftModel::from_path(path)?;
                 return Ok((Box::new(drafter), resolved));
             }
             let drafter = dflash::drafter::DFlashDrafter::load(path)?;
