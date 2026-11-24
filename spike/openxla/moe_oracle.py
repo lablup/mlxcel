@@ -7,14 +7,16 @@ router + top-k expert dispatch + weighted combine (+ shared expert), with no
 attention, no pre-norm, and no residual, so it lines up exactly with an HF MoE
 block's forward and can be compared directly.
 
-Families checked (issue #501 extends #500's Qwen2-MoE / Mixtral):
+Families checked (issues #501 / #3345 extend #500's Qwen2-MoE / Mixtral):
   - Qwen2-MoE: gated shared expert, softmax-before-top-k, norm_topk_prob.
   - Mixtral: no shared expert, always renormalized.
   - Qwen3-MoE: no shared expert, norm_topk_prob (its qk-norm attention is validated
     separately; the FFN block is identical routing to Mixtral).
   - OLMoE: no shared expert, norm_topk_prob, experts use `intermediate_size`.
-All four share the exact softmax-over-all-experts -> top-k -> renorm router, so the
-one primitive is proven across the family.
+  - Nemotron-H: correction-biased grouped sigmoid top-k, relu2 routed and shared
+    experts, with combine weights gathered from the uncorrected sigmoid scores.
+The first four share the exact softmax-over-all-experts -> top-k -> renorm router;
+Nemotron-H exercises the independent sigmoid router and relu2 projection schema.
 
 Method (identical weights fed to both sides):
   1. Build one small HF MoE block (Qwen2-MoE with a gated shared expert; Mixtral /
@@ -29,15 +31,20 @@ Method (identical weights fed to both sides):
      and run it on those weights + `hn`.
   5. Compare the IREE block output to the HF block output (max abs diff).
 
-The HF router is softmax-over-all-experts -> top-k -> `norm_topk_prob` renorm, which
-is exactly the emitter's primitive, so a token-exact match proves the routing math.
+The HF block for each case is the independent routing and expert oracle. A close
+fp32 match proves both selection semantics and the emitted expert projection schema.
 
 Run (from the repo, using the spike venv's python):
     spike/openxla/.venv/bin/python spike/openxla/moe_oracle.py
 
+ROCm (after `eval "$(scripts/iree/setup-rocm.sh --env)"`, under the host guard):
+    spike/openxla/.venv/bin/python spike/openxla/moe_oracle.py \
+        --device hip --rocm-target gfx1151
+
 Exit 0 = PASS. Tiny dims, CPU target, streams progress (watchdog-safe).
 """
 
+import argparse
 import json
 import os
 import subprocess
@@ -55,6 +62,8 @@ WORKTREE = os.environ.get(
 )
 TOL = 5e-5  # both sides fp32; only softmax / combine reduction-order noise differs
 SEED = 0
+DEVICE = "local-task"
+ROCM_TARGET = None
 
 
 def randomize(module):
@@ -82,6 +91,8 @@ def emit_probe(cfg_json, n, tag):
         [
             "cargo",
             "test",
+            "--profile",
+            "test-fast",
             "-p",
             "mlxcel-xla",
             "--lib",
@@ -100,14 +111,31 @@ def emit_probe(cfg_json, n, tag):
         check=True,
     )
 
-    print(f"[compile] {tag}: iree-compile (llvm-cpu) ...", flush=True)
+    if DEVICE == "hip":
+        if not ROCM_TARGET:
+            raise RuntimeError(
+                "--device hip requires --rocm-target or MLXCEL_XLA_ROCM_TARGET"
+            )
+        backend = "rocm"
+        extra_args = [
+            "--iree-hal-target-device=hip",
+            f"--iree-rocm-target={ROCM_TARGET}",
+        ]
+    else:
+        backend = "llvm-cpu"
+        extra_args = [
+            "--iree-hal-target-device=local",
+            "--iree-hal-local-target-device-backends=llvm-cpu",
+        ]
+    print(f"[compile] {tag}: iree-compile ({backend}, driver={DEVICE}) ...", flush=True)
     compile_file(
         mlir_path,
         output_file=vmfb_path,
         input_type="stablehlo",
-        target_backends=["llvm-cpu"],
+        target_backends=[backend],
+        extra_args=extra_args,
     )
-    return load_vm_flatbuffer_file(vmfb_path, driver="local-task")
+    return load_vm_flatbuffer_file(vmfb_path, driver=DEVICE)
 
 
 def np32(t):
@@ -341,6 +369,93 @@ def check_olmoe():
     return compare("olmoe (no shared, norm_topk_prob, expert intermediate_size)", out, np32(ref))
 
 
+def check_nemotron_h(k=2, norm_topk_prob=True, tag="nemotron_h"):
+    from transformers import NemotronHConfig
+    from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHMoE
+
+    h, i, ish, e, n = 16, 6, 10, 8, 5
+    cfg = NemotronHConfig(
+        hidden_size=h,
+        intermediate_size=32,
+        layers_block_type=["moe"],
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        n_routed_experts=e,
+        num_experts_per_tok=k,
+        moe_intermediate_size=i,
+        n_shared_experts=1,
+        moe_shared_expert_intermediate_size=ish,
+        n_group=2,
+        topk_group=1,
+        norm_topk_prob=norm_topk_prob,
+        routed_scaling_factor=1.25,
+        mlp_hidden_act="relu2",
+        use_mamba_kernels=False,
+    )
+    block = NemotronHMoE(cfg).float().eval()
+    randomize(block)
+    # The correction is a registered buffer, not a parameter, so `randomize`
+    # intentionally does not touch it. Make it nonzero and non-symmetric to prove
+    # it changes selection while combine weights still come from raw sigmoid.
+    with torch.no_grad():
+        block.gate.e_score_correction_bias.copy_(
+            torch.tensor([0.07, -0.03, 0.02, -0.06, -0.01, 0.05, -0.04, 0.03])
+        )
+    sd = block.state_dict()
+
+    torch.manual_seed(SEED + 5)
+    hn = torch.randn(1, n, h)
+    with torch.no_grad():
+        ref = block(hn).reshape(n, h)
+
+    # Probe arg order: router, correction bias, routed up/down, shared up/down, hn.
+    args = [
+        np32(sd["gate.weight"]),
+        np32(sd["gate.e_score_correction_bias"]),
+        np32(sd["experts.up_proj"]),
+        np32(sd["experts.down_proj"]),
+        np32(sd["shared_experts.up_proj.weight"]),
+        np32(sd["shared_experts.down_proj.weight"]),
+        np32(hn.reshape(n, h)),
+    ]
+    cfg_json = dict(
+        model_type="nemotron_h",
+        hidden_size=h,
+        intermediate_size=32,
+        hybrid_override_pattern="E",
+        num_hidden_layers=1,
+        vocab_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        attention_head_dim=8,
+        mamba_num_heads=4,
+        mamba_head_dim=4,
+        ssm_state_size=4,
+        n_groups=1,
+        conv_kernel=4,
+        n_routed_experts=e,
+        num_experts_per_tok=k,
+        moe_intermediate_size=i,
+        n_shared_experts=1,
+        moe_shared_expert_intermediate_size=ish,
+        n_group=2,
+        topk_group=1,
+        norm_topk_prob=norm_topk_prob,
+        routed_scaling_factor=1.25,
+        mlp_hidden_act="relu2",
+        layer_norm_epsilon=1e-5,
+        tie_word_embeddings=False,
+    )
+    mod = emit_probe(cfg_json, n, tag)
+    out = run_probe(mod, args)
+    return compare(
+        f"{tag} (grouped sigmoid, top-{k}, norm={norm_topk_prob}, relu2+shared)",
+        out,
+        np32(ref),
+    )
+
+
 def compare(name, iree_out, hf_out):
     diff = float(np.max(np.abs(iree_out - hf_out)))
     rel = diff / (float(np.max(np.abs(hf_out))) + 1e-12)
@@ -353,11 +468,32 @@ def compare(name, iree_out, hf_out):
 
 
 def main():
+    global DEVICE, ROCM_TARGET
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--device",
+        choices=("local-task", "hip"),
+        default=os.environ.get("MLXCEL_XLA_DEVICE", "local-task"),
+    )
+    parser.add_argument(
+        "--rocm-target",
+        default=os.environ.get("MLXCEL_XLA_ROCM_TARGET"),
+        help="AMD architecture for --device hip, for example gfx1151",
+    )
+    args = parser.parse_args()
+    DEVICE = args.device
+    ROCM_TARGET = args.rocm_target
     ok = True
     ok = check_qwen2_moe() and ok
     ok = check_mixtral() and ok
     ok = check_qwen3_moe() and ok
     ok = check_olmoe() and ok
+    ok = check_nemotron_h() and ok
+    # HF normalizes whenever the flag is true, including top-k=1. The paired
+    # unnormalized case prevents the probe from accidentally treating the flag as
+    # a no-op for one selected expert (MLX eager currently differs here).
+    ok = check_nemotron_h(1, True, "nemotron_h_top1_norm") and ok
+    ok = check_nemotron_h(1, False, "nemotron_h_top1_raw") and ok
     print("RESULT:", "PASS" if ok else "FAIL", flush=True)
     return 0 if ok else 1
 

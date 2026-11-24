@@ -1,10 +1,25 @@
 // Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
 // SPDX-License-Identifier: Apache-2.0
 
-use super::config::{Config, DenseMlpActivation, MixerKind};
+use super::config::{Config, DenseMlpActivation, ExpertAct, MixerKind, MoeScoring};
 use super::{emit_decode, emit_decode_ragged, emit_prefill};
 
 const TINY: &str = include_str!("../../assets/nemotron_h/config.json");
+
+fn tiny_moe_json() -> serde_json::Value {
+    let mut v: serde_json::Value = serde_json::from_str(TINY).unwrap();
+    v["hybrid_override_pattern"] = serde_json::json!("M*EM-");
+    v["n_routed_experts"] = serde_json::json!(8);
+    v["num_experts_per_tok"] = serde_json::json!(2);
+    v["moe_intermediate_size"] = serde_json::json!(12);
+    v["n_group"] = serde_json::json!(2);
+    v["topk_group"] = serde_json::json!(1);
+    v["norm_topk_prob"] = serde_json::json!(true);
+    v["routed_scaling_factor"] = serde_json::json!(1.25);
+    v["n_shared_experts"] = serde_json::json!(1);
+    v["moe_shared_expert_intermediate_size"] = serde_json::json!(20);
+    v
+}
 
 #[test]
 fn nemotron_h_schedule_and_independent_widths() {
@@ -92,7 +107,6 @@ fn nemotron_h_block_aliases_and_rejections() {
     v["hybrid_override_pattern"] = serde_json::json!(["M", "*", "-", "M", "-"]);
     assert_eq!(Config::from_json_str(&v.to_string()).unwrap().n_layers, 5);
     for (key, value, message) in [
-        ("hybrid_override_pattern", serde_json::json!("ME"), "#3345"),
         (
             "hybrid_override_pattern",
             serde_json::json!("M?"),
@@ -117,6 +131,119 @@ fn nemotron_h_block_aliases_and_rejections() {
             Config::from_json_str(&v.to_string())
                 .unwrap_err()
                 .contains(message)
+        );
+    }
+}
+
+#[test]
+fn nemotron_h_moe_schedule_router_and_weight_schema() {
+    let v = tiny_moe_json();
+    let c = Config::from_json_str(&v.to_string()).unwrap();
+    assert_eq!(
+        c.layer_mixers,
+        [
+            MixerKind::Mamba2,
+            MixerKind::Attention,
+            MixerKind::None,
+            MixerKind::Mamba2,
+            MixerKind::None,
+        ]
+    );
+    assert_eq!(
+        (0..c.n_layers)
+            .map(|li| c.is_moe_layer(li))
+            .collect::<Vec<_>>(),
+        [false, false, true, false, false]
+    );
+    assert_eq!(
+        (0..c.n_layers)
+            .map(|li| c.layer_has_ffn(li))
+            .collect::<Vec<_>>(),
+        [false, false, true, false, true]
+    );
+    let moe = c.moe.as_ref().unwrap();
+    assert_eq!(moe.n_experts, 8);
+    assert_eq!(moe.top_k, 2);
+    assert_eq!(moe.intermediate, 12);
+    assert_eq!(moe.expert_act, ExpertAct::Relu2);
+    assert_eq!(
+        moe.scoring,
+        MoeScoring::Sigmoid {
+            correction_bias: true,
+            n_group: 2,
+            topk_group: 1,
+            routed_scaling_factor: 1.25,
+            norm_topk_prob: true,
+        }
+    );
+    assert_eq!(moe.shared.unwrap().intermediate, 20);
+
+    let names = crate::weight_names::weight_names(&c);
+    for expected in [
+        "backbone.layers.2.mixer.gate.weight",
+        "backbone.layers.2.mixer.gate.e_score_correction_bias",
+        "backbone.layers.2.mixer.switch_mlp.fc1.weight",
+        "backbone.layers.2.mixer.switch_mlp.fc2.weight",
+        "backbone.layers.2.mixer.shared_experts.up_proj.weight",
+        "backbone.layers.2.mixer.shared_experts.down_proj.weight",
+    ] {
+        assert!(
+            names.iter().any(|name| name == expected),
+            "missing {expected}"
+        );
+    }
+    assert!(
+        !names.iter().any(|name| {
+            name.contains("layers.2.mixer.switch_mlp.gate_proj")
+                || name.contains("layers.2.mixer.shared_experts.gate_proj")
+        }),
+        "relu2 experts have no gate projection"
+    );
+
+    let graph = emit_prefill(&c, false);
+    for location in [
+        "params['layers'][2]['moe_router']",
+        "params['layers'][2]['moe_correction_bias']",
+        "params['layers'][2]['moe_up']",
+        "params['layers'][2]['moe_down']",
+        "params['layers'][2]['moe_shared_up']",
+        "params['layers'][2]['moe_shared_down']",
+    ] {
+        assert!(
+            graph.contains(location),
+            "missing graph argument {location}"
+        );
+    }
+    assert!(!graph.contains("params['layers'][2]['moe_gate']"));
+    assert!(graph.contains("stablehlo.logistic") || graph.contains("stablehlo.exponential"));
+    assert!(graph.contains("stablehlo.maximum"), "relu2 maximum");
+}
+
+#[test]
+fn nemotron_h_moe_rejects_invalid_group_and_shared_shapes() {
+    for (key, value, message) in [
+        ("n_routed_experts", serde_json::json!(7), "divisible"),
+        ("n_group", serde_json::json!(8), "at least two"),
+        ("topk_group", serde_json::json!(3), "between 1"),
+        (
+            "num_experts_per_tok",
+            serde_json::json!(5),
+            "grouped candidate capacity 4",
+        ),
+        ("moe_latent_size", serde_json::json!(8), "unsupported"),
+        (
+            "moe_shared_expert_intermediate_size",
+            serde_json::json!(0),
+            "positive",
+        ),
+    ] {
+        let mut v = tiny_moe_json();
+        v[key] = value;
+        assert!(
+            Config::from_json_str(&v.to_string())
+                .unwrap_err()
+                .contains(message),
+            "{key} should report {message}"
         );
     }
 }

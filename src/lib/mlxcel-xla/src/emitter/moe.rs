@@ -307,6 +307,12 @@ fn sigmoid_topk_combine(
         for value in &vals[1..] {
             denom = b.add(&denom, value);
         }
+        // HF/MLX add this guard before dividing. It is normally invisible for
+        // sigmoid scores, but keeps the graph defined when very negative f32
+        // logits underflow every selected score to zero.
+        let epsilon = b.const_f32(1e-20);
+        let epsilon = b.broadcast(&epsilon, &[], vec![n]);
+        denom = b.add(&denom, &epsilon);
         vals.iter()
             .map(|value| b.divide(value, &denom))
             .collect::<Vec<_>>()

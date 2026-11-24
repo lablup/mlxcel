@@ -149,6 +149,12 @@ pub(super) fn from_json(v: &Value, quantization: Option<QuantConfig>) -> Result<
         }
     }
     let moe = if moe_layer_mask.iter().any(|&is_moe| is_moe) {
+        if get("moe_latent_size").is_some() {
+            return Err(
+                "nemotron_h MoE `moe_latent_size` is unsupported (latent projections are not emitted)"
+                    .to_string(),
+            );
+        }
         let n_experts = uint("n_routed_experts", None)?;
         let top_k = uint("num_experts_per_tok", None)?;
         let intermediate = uint("moe_intermediate_size", Some(inter))?;
@@ -175,6 +181,14 @@ pub(super) fn from_json(v: &Value, quantization: Option<QuantConfig>) -> Result<
                 "nemotron_h MoE topk_group={topk_group} must be between 1 and n_group={n_group}"
             ));
         }
+        let candidate_capacity = topk_group
+            .checked_mul(experts_per_group)
+            .ok_or("nemotron_h MoE grouped candidate capacity overflow")?;
+        if top_k > candidate_capacity {
+            return Err(format!(
+                "nemotron_h MoE num_experts_per_tok={top_k} exceeds grouped candidate capacity {candidate_capacity} (topk_group={topk_group}, experts_per_group={experts_per_group})"
+            ));
+        }
         let routed_scaling_factor = get("routed_scaling_factor")
             .map_or(Ok(1.0), |value| json_f32(value, "routed_scaling_factor"))?;
         if !routed_scaling_factor.is_finite() {
@@ -185,8 +199,14 @@ pub(super) fn from_json(v: &Value, quantization: Option<QuantConfig>) -> Result<
         let shared = if n_shared == 0 {
             None
         } else {
+            let intermediate = uint("moe_shared_expert_intermediate_size", None)?;
+            if intermediate == 0 {
+                return Err(
+                    "nemotron_h MoE shared expert intermediate size must be positive".to_string(),
+                );
+            }
             Some(SharedExpertConfig {
-                intermediate: uint("moe_shared_expert_intermediate_size", None)?,
+                intermediate,
                 gated: false,
             })
         };
