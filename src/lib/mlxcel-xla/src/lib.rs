@@ -247,6 +247,10 @@ pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
 /// Test support only (issue #2923): batch-KV allocation instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters};
+/// Test support only (issue #3340): per-slot recurrent-state allocation
+/// instrumentation.
+#[cfg(feature = "test-support")]
+pub use iree::{batch_state_allocation_counters, reset_batch_state_allocation_counters};
 /// Test support only (issue #3028): decode-step scalar reuse instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{decode_scalar_counters, reset_decode_scalar_counters};

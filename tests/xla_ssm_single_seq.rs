@@ -463,10 +463,10 @@ fn request_refused_in_rust_drops_the_previous_state() {
     );
 }
 
-/// The ragged, slot and embeddings entry points have no recurrent-state
-/// contract (issue #3340): they admit only a KV-only bundle and refuse a hybrid
-/// one, which would otherwise adopt a new KV next to the previous request's
-/// state. Needs no device.
+/// The embeddings and diagnostics prefills have no recurrent-state contract
+/// (the ragged and slot paths thread per-slot state since issue #3340): they
+/// admit only a KV-only bundle and refuse a hybrid one, which would otherwise
+/// adopt a new KV next to the previous request's state. Needs no device.
 #[test]
 fn kv_only_entry_points_refuse_any_recurrent_state() {
     assert_eq!(IreeLlama::test_kv_only_entries_refuse(true, 0), Some(false));

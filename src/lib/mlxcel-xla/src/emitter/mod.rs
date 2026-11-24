@@ -90,6 +90,8 @@ mod youtu_vl_plan;
 #[cfg(test)]
 mod context_tests;
 #[cfg(test)]
+mod recurrent_ragged_tests;
+#[cfg(test)]
 mod recurrent_tests;
 
 #[allow(unused_imports)]

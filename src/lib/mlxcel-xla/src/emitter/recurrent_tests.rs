@@ -20,8 +20,8 @@ use super::config::{
     Config, MixerKind, QuantConfig, SsmConfig, StateElem, StateTensorSpec, WeightScheme,
 };
 use super::model::{
-    emit_decode, emit_decode_batched, emit_decode_ragged, emit_decode_with, emit_prefill,
-    emit_prefill_embeddings, emit_prefill_embeddings_deepstack_with, emit_prefill_with,
+    emit_decode, emit_decode_batched, emit_decode_with, emit_prefill, emit_prefill_embeddings,
+    emit_prefill_embeddings_deepstack_with, emit_prefill_with,
 };
 use crate::hf_json::quote_non_finite_json;
 use crate::weights::{WeightSpec, weight_specs_q};
@@ -312,7 +312,6 @@ fn graphs_without_a_state_contract_reject_mamba2() {
     let c = tiny();
     let errors = [
         emit_decode_batched(&c, 4, false).expect_err("batched"),
-        emit_decode_ragged(&c, 4, false).expect_err("ragged"),
         emit_prefill_embeddings(&c, false).expect_err("embeddings"),
         emit_prefill_embeddings_deepstack_with(&c, false, Precision::F32).expect_err("deepstack"),
     ];

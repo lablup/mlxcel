@@ -7,7 +7,9 @@
 #                pre-gate that the registered fixtures still emit their goldens.
 #   [gate 1/2]   token-exact single-sequence vs an HF fp32 oracle (xla_oracle_check).
 #   [gate 2/2]   serve reference-exact: every batched request equals its single-seq
-#                reference (xla_batch_bench).
+#                reference (xla_batch_bench). Recurrent models (Mamba2) run it too:
+#                their per-slot state is carried by the continuous-batching engine
+#                (issue #3340).
 #
 # The oracle is produced here too: spike/openxla/oracle_continuation.py loads the
 # checkpoint in fp32 (dequantizing an MLX 4-bit/8-bit checkpoint offline first) and
@@ -39,8 +41,7 @@
 #   --oracle <json>     oracle JSON path (default: a temp file)
 #   --skip-structural   skip the byte-exact pre-gate
 #   --structural-only   run only the byte-exact pre-gate (no IREE build, no GPU)
-#   --single-only       run the pre-gate and gate 1 only (no serve gate); for
-#                       recurrent models, which serve only after issue #3340
+#   --single-only       run the pre-gate and gate 1 only (no serve gate)
 #   -h, --help          this help
 #
 # Exit status: 0 only if every run gate passes.

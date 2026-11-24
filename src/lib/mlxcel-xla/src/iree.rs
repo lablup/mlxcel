@@ -378,6 +378,18 @@ unsafe extern "C" {
     /// Record the ragged batch size baked into this context's decode graph.
     /// Must be called before the first `xla_llama_ragged_reset`.
     fn xla_llama_ragged_bind(c: *mut XlaCtx, compiled_b: c_int) -> c_int;
+    /// Mark one batch slot invalid before a request is admitted into it, so a
+    /// request refused on the Rust side never leaves the slot's previous KV or
+    /// recurrent state live for the ragged decode (issue #3340).
+    fn xla_llama_slot_invalidate(c: *mut XlaCtx, slot: c_int) -> c_int;
+    /// Test support (issue #3340): allocations of the per-slot recurrent-state
+    /// set and their device bytes.
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_state_allocs() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_state_bytes() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_state_reset_counters();
     /// Test support (issue #2923): host-mirror and host-to-device byte counters
     /// for the lazy rank-5 batch-KV allocation path.
     #[cfg(feature = "test-support")]
@@ -652,6 +664,25 @@ pub fn batch_kv_allocation_counters() -> (u64, u64) {
             xla_test_batch_kv_h2d_bytes(),
         )
     }
+}
+
+/// Test support (issue #3340): reset the shim's per-slot recurrent-state
+/// allocation counters.
+#[cfg(feature = "test-support")]
+pub fn reset_batch_state_allocation_counters() {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { xla_test_batch_state_reset_counters() };
+}
+
+/// Test support (issue #3340): `(allocations, device_bytes)` of the per-slot
+/// recurrent-state set since the last reset. The set is allocated zeroed on
+/// the first slot store after each ragged reset, so one reset followed by any
+/// number of admits counts one allocation.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn batch_state_allocation_counters() -> (u64, u64) {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { (xla_test_batch_state_allocs(), xla_test_batch_state_bytes()) }
 }
 
 /// Test support (issue #2961): reset the shim's resident-weight upload counters
@@ -3686,9 +3717,11 @@ impl IreeLlama {
         (status >= 0).then_some((status & 1 != 0, status & 2 != 0))
     }
 
-    /// Test support (issue #3339): whether the shim's ragged, slot and
-    /// embeddings entry points refuse a context with this KV/state layout
-    /// (`None` when the hook rejects `n_state`). Needs no device or bundle.
+    /// Test support (issue #3339): whether the shim's KV-only entry points
+    /// (the embeddings and diagnostics prefills; the ragged and slot paths
+    /// thread per-slot state since #3340) refuse a context with this KV/state
+    /// layout (`None` when the hook rejects `n_state`). Needs no device or
+    /// bundle.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn test_kv_only_entries_refuse(has_kv: bool, n_state: i32) -> Option<bool> {
@@ -3949,12 +3982,14 @@ impl IreeRaggedLlama {
         );
         let load_started = std::time::Instant::now();
         let mut cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
-        if cfg.has_recurrent_state() {
-            // Issue #3339 ships the single-sequence state handoff only; the
-            // per-slot state carry the ragged engine needs is issue #3340.
+        // Issue #3340: an attention-free recurrent model (Mamba2) carries its
+        // state per slot. A hybrid (KV plus state) is refused until its
+        // attention and recurrent layers are validated together (#3344); the
+        // ragged emitter refuses it too, so this only names the model.
+        if cfg.has_recurrent_state() && cfg.has_kv() {
             return Err(format!(
-                "{} threads recurrent state, which the OpenXLA continuous-batching \
-                 engine does not carry yet; generate single-sequence instead",
+                "{} mixes attention and recurrent layers, which the OpenXLA \
+                 continuous-batching engine does not serve yet",
                 model_dir.display()
             ));
         }
@@ -4034,9 +4069,16 @@ impl IreeRaggedLlama {
                         device,
                         config.packed_args && config.supports_packed_quant(),
                     )?;
+                    // A recurrent bundle has no embeddings prefill (its graph
+                    // has no state contract), as on the single-sequence path.
+                    let prefill_embeddings = if config.has_recurrent_state() {
+                        None
+                    } else {
+                        Some(emit_prefill_embeddings_with(config, false, precision)?)
+                    };
                     (
                         emit_prefill_with(config, false, precision),
-                        emit_prefill_embeddings_with(config, false, precision)?,
+                        prefill_embeddings,
                         config
                             .deepstack
                             .as_ref()
@@ -4055,9 +4097,9 @@ impl IreeRaggedLlama {
                 }
                 RuntimeConfig::Gemma3n(config) => (
                     emit_gemma3n_prefill_with_qmv(config, false, precision, native_qmv),
-                    emit_gemma3n_prefill_embeddings_ple_with_qmv(
+                    Some(emit_gemma3n_prefill_embeddings_ple_with_qmv(
                         config, false, precision, native_qmv,
-                    ),
+                    )),
                     None,
                     emit_gemma3n_decode_ragged_with_qmv(
                         config, b_max, false, precision, native_qmv,
@@ -4075,10 +4117,9 @@ impl IreeRaggedLlama {
             false,
             &prefill_mlir,
             "prefill_logits",
-            Some((
-                prefill_embeddings_mlir.as_str(),
-                "prefill_embeddings_logits",
-            )),
+            prefill_embeddings_mlir
+                .as_deref()
+                .map(|mlir| (mlir, "prefill_embeddings_logits")),
             prefill_embeddings_deepstack_mlir
                 .as_deref()
                 .map(|mlir| (mlir, "prefill_embeddings_deepstack_logits")),
@@ -4207,6 +4248,23 @@ impl IreeRaggedLlama {
         self.b_max
     }
 
+    /// Validate `slot` and mark it invalid before a request is admitted into
+    /// it (issue #3340). Every slot-prefill entry calls this first, so a
+    /// request refused here, before the shim runs a graph, cannot leave the
+    /// slot's previous KV or recurrent state valid for the ragged decode; the
+    /// shim sets the flag again only after the new prefill stored every result.
+    fn begin_slot_prefill(&mut self, slot: usize) -> Result<(), String> {
+        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        let slot = checked_ffi_int(slot, "slot")?;
+        // Safety: `self.ctx` remains valid for the lifetime of this engine and
+        // the call only clears one byte of this ctx's slot flags.
+        let rc = unsafe { xla_llama_slot_invalidate(self.ctx, slot) };
+        if rc != 0 {
+            return Err(format!("xla_llama_slot_invalidate failed (status {rc})"));
+        }
+        Ok(())
+    }
+
     /// Test support (issue #2961): weight slots this engine declares. One base
     /// load must issue exactly this many `xla_llama_upload_weight` calls.
     #[cfg(feature = "test-support")]
@@ -4248,8 +4306,9 @@ impl IreeRaggedLlama {
     }
 
     /// Test support (issue #2923): make the next prefill slot store fail after
-    /// its K transfer, so the caller can observe the slot's validity state. A
-    /// `false` call restores the normal path.
+    /// its first transfer (the K transfer, or the first state transfer of an
+    /// attention-free model, issue #3340), so the caller can observe the
+    /// slot's validity state. A `false` call restores the normal path.
     #[cfg(feature = "test-support")]
     pub fn test_set_slot_store_failure(&mut self, fail: bool) {
         // Safety: `self.ctx` remains valid for the lifetime of this engine.
@@ -4286,7 +4345,7 @@ impl IreeRaggedLlama {
         positions: &[i32],
         real_len: usize,
     ) -> Result<Vec<f32>, String> {
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        self.begin_slot_prefill(slot)?;
         let axes = match self.position_mode {
             PreparedPositionMode::OneD => 1,
             PreparedPositionMode::Mrope3D => 3,
@@ -4404,7 +4463,7 @@ impl IreeRaggedLlama {
         slot: usize,
         prompt: &[i32],
     ) -> Result<Vec<f32>, String> {
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        self.begin_slot_prefill(slot)?;
         if prompt.is_empty() || prompt.len() > self.context_capacity {
             return Err(format!(
                 "diagnostic prompt length {} is outside 1..={}",
@@ -4453,7 +4512,7 @@ impl IreeRaggedLlama {
     /// untouched, so a mid-stream admit does not disturb live sequences. The caller
     /// samples the first token from the returned logits.
     pub fn prefill_slot_logits(&mut self, slot: usize, prompt: &[i32]) -> Result<Vec<f32>, String> {
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        self.begin_slot_prefill(slot)?;
         if prompt.is_empty() {
             return Err("prefill_slot_logits requires a non-empty prompt".to_string());
         }
@@ -4504,12 +4563,12 @@ impl IreeRaggedLlama {
         slot: usize,
         prepared: &PreparedIreePrefill,
     ) -> Result<Vec<f32>, String> {
+        self.begin_slot_prefill(slot)?;
         if self.dense_ple_shape.is_some() {
             return Err(
                 "Gemma3n requires the distinct embeddings-plus-dense-PLE prefill entry".to_string(),
             );
         }
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
         if prepared.hidden_size != self.hidden_size
             || prepared.context_capacity != self.context_capacity
             || prepared.effective_len == 0
@@ -4572,7 +4631,7 @@ impl IreeRaggedLlama {
                 "LLaVA diagnostics require the ordinary embeddings prefill entry".to_string(),
             );
         }
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        self.begin_slot_prefill(slot)?;
         if prepared.hidden_size != self.hidden_size
             || prepared.context_capacity != self.context_capacity
             || prepared.effective_len == 0
@@ -4642,11 +4701,11 @@ impl IreeRaggedLlama {
         prepared: &PreparedIreePrefill,
         deepstack: &PreparedDeepStack,
     ) -> Result<Vec<f32>, String> {
+        self.begin_slot_prefill(slot)?;
         let schema = self.deepstack_schema.as_ref().ok_or_else(|| {
             "DeepStack prefill was requested from a runtime bundle without that capability"
                 .to_string()
         })?;
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
         if prepared.hidden_size != self.hidden_size
             || prepared.context_capacity != self.context_capacity
             || prepared.effective_len == 0
@@ -4710,11 +4769,11 @@ impl IreeRaggedLlama {
         prepared: &PreparedIreePrefill,
         deepstack: &PreparedDeepStack,
     ) -> Result<DeepStackPrefillDiagnostics, String> {
+        self.begin_slot_prefill(slot)?;
         let schema = self.deepstack_schema.as_ref().ok_or_else(|| {
             "DeepStack diagnostics were requested from a runtime without that capability"
                 .to_string()
         })?;
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
         if prepared.hidden_size != self.hidden_size
             || prepared.context_capacity != self.context_capacity
             || prepared.effective_len == 0
@@ -4794,7 +4853,7 @@ impl IreeRaggedLlama {
         prepared: &PreparedIreePrefill,
         dense_ple: &Gemma3nDensePle,
     ) -> Result<Vec<f32>, String> {
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        self.begin_slot_prefill(slot)?;
         let expected = self.dense_ple_shape.ok_or_else(|| {
             "dense Gemma3n PLE prefill was requested from a non-Gemma3n bundle".to_string()
         })?;

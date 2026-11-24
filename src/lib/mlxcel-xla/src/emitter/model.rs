@@ -3723,8 +3723,12 @@ struct RaggedArgs {
     token: Val,     // [B] i32
     pos: Val,       // [B] i32 (per row)
     cache_len: Val, // [B] i32 (per row)
-    kcache: Val,    // [B, L, context_capacity, nkv, d]
-    vcache: Val,
+    /// `[B, L, context_capacity, nkv, d]` K and V; `None` for an
+    /// attention-free model, whose ragged graph has no KV at all (#3340).
+    kv: Option<(Val, Val)>,
+    /// One `[B, ...dims]` tensor per [`Config::state_tensors`] entry, after the
+    /// KV inputs; empty for an attention-only model.
+    state: Vec<Val>,
 }
 
 fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgDecl>, RaggedArgs) {
@@ -3787,30 +3791,19 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
         Ty::new(vec![bsz], "i32"),
         "cache_len".into(),
     );
-    let kcache = take_arg(
-        &mut decls,
-        &mut idx,
-        Ty::f32(vec![
+    let kv = c.has_kv_cache().then(|| {
+        let cache_ty = Ty::f32(vec![
             bsz,
             c.n_layers,
             c.context_capacity,
             c.cache_heads(),
             c.cache_dim(),
-        ]),
-        "kcache".into(),
-    );
-    let vcache = take_arg(
-        &mut decls,
-        &mut idx,
-        Ty::f32(vec![
-            bsz,
-            c.n_layers,
-            c.context_capacity,
-            c.cache_heads(),
-            c.cache_dim(),
-        ]),
-        "vcache".into(),
-    );
+        ]);
+        let kcache = take_arg(&mut decls, &mut idx, cache_ty.clone(), "kcache".into());
+        let vcache = take_arg(&mut decls, &mut idx, cache_ty, "vcache".into());
+        (kcache, vcache)
+    });
+    let state = recurrent::take_batched_state_args(&mut decls, &mut idx, c, bsz);
 
     (
         decls,
@@ -3824,8 +3817,8 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
             token,
             pos,
             cache_len,
-            kcache,
-            vcache,
+            kv,
+            state,
         },
     )
 }
@@ -3855,7 +3848,9 @@ pub fn emit_decode_ragged_with(
 /// every activation row against one weight read; when it is absent the graph is
 /// the same f16 one emitted before this issue.
 ///
-/// A recurrent-state config is an `Err` until per-slot state lands (#3340).
+/// An attention-free recurrent config (Mamba2) threads its per-slot state
+/// through the graph (issue #3340). A hybrid (KV plus state) is an `Err` until
+/// its attention and recurrent layers are validated together (#3344).
 pub fn emit_decode_ragged_with_native(
     c: &Config,
     bsz: usize,
@@ -3863,7 +3858,9 @@ pub fn emit_decode_ragged_with_native(
     precision: Precision,
     native: Option<(&str, &str)>,
 ) -> Result<String, String> {
-    c.reject_recurrent("ragged decode")?;
+    if c.has_kv_cache() {
+        c.reject_recurrent("ragged decode")?;
+    }
     Ok(emit_decode_ragged_impl(c, bsz, sample, precision, native))
 }
 
@@ -3889,6 +3886,7 @@ fn emit_decode_ragged_impl(
 
     let h = c.hidden;
     let seq = c.context_capacity;
+    let has_kv = a.kv.is_some();
 
     // --- head: per-row embed gather, per-row rope gather, per-row key mask ---
     let tok_idx = b.reshape(&a.token, vec![bsz, 1]);
@@ -3896,7 +3894,11 @@ fn emit_decode_ragged_impl(
     let mut x = scale_embedding(&mut b, c, emb, vec![bsz, h]);
 
     // each row's rope vectors come from its own position: gather [B,d] by pos[B]
-    let (cos, sin, cos_local, sin_local) = if c.uses_mrope() {
+    // An attention-free config reads no RoPE vector and no key mask; its
+    // `Ragged` layout carries unread scalar placeholders instead (#3340).
+    let (cos, sin, cos_local, sin_local) = if !has_kv {
+        (k.zero.clone(), k.zero.clone(), None, None)
+    } else if c.uses_mrope() {
         let positions = b.transpose(&a.pos, &[1, 0]);
         let (cos, sin) = mrope_cos_sin(&mut b, c, &positions, bsz);
         (cos, sin, None, None)
@@ -3913,24 +3915,30 @@ fn emit_decode_ragged_impl(
     };
 
     // per-row key mask [B,S]: key s valid for row b iff s <= cache_len[b]
-    let ii = b.iota(seq); // [S]
-    let ii_b = b.broadcast(&ii, &[1], vec![bsz, seq]); // entry[b,s] = s
-    let clen_b = b.broadcast(&a.cache_len, &[0], vec![bsz, seq]); // entry[b,s] = cache_len[b]
-    let valid = b.compare("LE", &ii_b, &clen_b, "SIGNED");
-    let zeros = b.broadcast(&k.zero, &[], vec![bsz, seq]);
-    let negs = b.broadcast(&k.neg_big, &[], vec![bsz, seq]);
-    let kmask = b.select(&valid, &zeros, &negs); // [B, S]
-    // Gemma2 local (sliding-window) mask (issue #495), per row: keep key s for row
-    // b iff `cache_len[b] - s < W`. And it into the causal `kmask` with one more
-    // `select`. Emitted only for a windowed config (Gemma2); reused by every local
-    // layer. No-op on the value when `W >= context_capacity` (short-context parity).
-    let kmask_local = c.sliding_window.map(|w| {
-        let wc = b.const_i32(w as i32);
-        let wb = b.broadcast(&wc, &[], vec![bsz, seq]);
-        let age = b.subtract(&clen_b, &ii_b); // cache_len[b] - s
-        let within = b.compare("LT", &age, &wb, "SIGNED");
-        b.select(&within, &kmask, &negs)
-    });
+    let (kmask, kmask_local) = if has_kv {
+        let ii = b.iota(seq); // [S]
+        let ii_b = b.broadcast(&ii, &[1], vec![bsz, seq]); // entry[b,s] = s
+        let clen_b = b.broadcast(&a.cache_len, &[0], vec![bsz, seq]); // entry[b,s] = cache_len[b]
+        let valid = b.compare("LE", &ii_b, &clen_b, "SIGNED");
+        let zeros = b.broadcast(&k.zero, &[], vec![bsz, seq]);
+        let negs = b.broadcast(&k.neg_big, &[], vec![bsz, seq]);
+        let kmask = b.select(&valid, &zeros, &negs); // [B, S]
+        // Gemma2 local (sliding-window) mask (issue #495), per row: keep key s for
+        // row b iff `cache_len[b] - s < W`. And it into the causal `kmask` with one
+        // more `select`. Emitted only for a windowed config (Gemma2); reused by
+        // every local layer. No-op on the value when `W >= context_capacity`
+        // (short-context parity).
+        let kmask_local = c.sliding_window.map(|w| {
+            let wc = b.const_i32(w as i32);
+            let wb = b.broadcast(&wc, &[], vec![bsz, seq]);
+            let age = b.subtract(&clen_b, &ii_b); // cache_len[b] - s
+            let within = b.compare("LT", &age, &wb, "SIGNED");
+            b.select(&within, &kmask, &negs)
+        });
+        (kmask, kmask_local)
+    } else {
+        (k.zero.clone(), None)
+    };
 
     let layout = AttnLayout::Ragged {
         bsz,
@@ -3952,9 +3960,11 @@ fn emit_decode_ragged_impl(
         row_idx,
     };
 
-    let mut kcache = a.kcache.clone();
-    let mut state = RecurrentLayers::none();
-    let mut vcache = a.vcache.clone();
+    // An attention-free model never touches these placeholders.
+    let (mut kcache, mut vcache) =
+        a.kv.clone()
+            .unwrap_or_else(|| (k.zero.clone(), k.zero.clone()));
+    let mut state = RecurrentLayers::split_rows(&mut b, c, &a.state, bsz);
 
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
@@ -3995,19 +4005,29 @@ fn emit_decode_ragged_impl(
         (logits.name, Ty::f32(vec![bsz, c.vocab]).render())
     };
 
+    // Results: the token or logits, then K and V when the model has attention,
+    // then one `[B, ...dims]` result per state tensor in spec order.
+    let mut results = vec![(out_val, out_ty)];
+    if has_kv {
+        let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.cache_heads(), c.cache_dim()]).render();
+        results.push((kcache.name.clone(), cache_ty.clone()));
+        results.push((vcache.name.clone(), cache_ty));
+    }
+    for value in state.join_rows(&mut b, &a.state) {
+        let ty = value.ty.render();
+        results.push((value.name, ty));
+    }
+    let names: Vec<&str> = results.iter().map(|(name, _)| name.as_str()).collect();
+    let types: Vec<&str> = results.iter().map(|(_, ty)| ty.as_str()).collect();
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.cache_heads(), c.cache_dim()]).render();
     format!(
-        "{alias}module @decode_step {{\n{native}  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+        "{alias}module @decode_step {{\n{native}  func.func public @main({sig}) -> ({tys}) {{\n{body}    return {vals} : {tys}\n  }}\n}}\n",
         alias = native.map(|(alias, _)| alias).unwrap_or(""),
         native = native.map(|(_, source)| source).unwrap_or(""),
         sig = sig,
-        out_ty = out_ty,
-        cache_ty = cache_ty,
+        tys = types.join(", "),
         body = b.body(),
-        l = out_val,
-        kc = kcache.name,
-        vc = vcache.name,
+        vals = names.join(", "),
     )
 }
 

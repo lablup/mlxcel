@@ -162,13 +162,23 @@ impl Gemma3nXlaAudioConfig {
     }
 
     pub fn from_json_str(text: &str) -> Result<Option<Self>, String> {
-        let root: serde_json::Value =
-            serde_json::from_str(text).map_err(|error| format!("parse config JSON: {error}"))?;
+        // The serve worker asks every OpenXLA checkpoint for an audio tower,
+        // and HF writes a bare `Infinity` into some configs (Mamba2's
+        // `time_step_limit`, issue #3340), which strict JSON rejects.
+        let (root, quoted) = crate::hf_json::parse_hf_config_json_tracked(text)
+            .map_err(|error| format!("parse config JSON: {error}"))?;
         let Some(value) = root.get("audio_config") else {
             return Ok(None);
         };
         if value.is_null() {
             return Ok(None);
+        }
+        if quoted {
+            // A quoted non-finite number would read as a missing field and take
+            // its default, so a config with an audio tower must be strict JSON.
+            return Err(
+                "a Gemma3n config with audio_config must not contain non-finite numbers".into(),
+            );
         }
         if value.get("model_type").and_then(serde_json::Value::as_str) != Some("gemma3n_audio") {
             return Err("Gemma3n audio_config.model_type must be `gemma3n_audio`".into());
@@ -401,6 +411,18 @@ mod tests {
         assert!(first.contains(GEMMA3N_AUDIO_GRAPH_ABI));
         assert!(first.contains("bucket=2997"));
         assert!(first.contains("dtype=bf16-accum-f32"));
+    }
+
+    #[test]
+    fn non_finite_numbers_outside_an_audio_tower_mean_no_audio() {
+        let mamba2 = r#"{"model_type":"mamba2","time_step_limit":[0.0, Infinity]}"#;
+        assert!(
+            Gemma3nXlaAudioConfig::from_json_str(mamba2)
+                .unwrap()
+                .is_none()
+        );
+        let audio = r#"{"model_type":"gemma3n","x":Infinity,"audio_config":{"model_type":"gemma3n_audio"}}"#;
+        assert!(Gemma3nXlaAudioConfig::from_json_str(audio).is_err());
     }
 
     #[test]

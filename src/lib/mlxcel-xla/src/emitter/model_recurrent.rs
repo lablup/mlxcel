@@ -26,6 +26,10 @@
 //! - The single-sequence decode keeps each state tensor in a
 //!   `util.global private mutable` named after it; `@state_import` seeds the
 //!   globals from the prefill result, as `@kv_import` seeds the KV cache.
+//! - The ragged (continuous-batching) decode takes one `[B, ...dims]` input per
+//!   state tensor after the KV inputs and returns the advanced `[B, ...dims]`
+//!   tensors after the KV results (issue #3340). Rows are independent: an
+//!   inactive row is advanced like any other and the shim discards it.
 
 use super::*;
 
@@ -82,6 +86,58 @@ impl RecurrentLayers {
             })
             .collect();
         Self { layers, real_len }
+    }
+
+    /// Split per-slot state tensors (`[B, L_ssm, ...]`, the ragged decode
+    /// inputs, in [`Config::state_tensors`] order) into per-layer `[B, ...]`
+    /// states for the batched mixer step.
+    pub(super) fn split_rows(b: &mut Builder, c: &Config, tensors: &[Val], bsz: usize) -> Self {
+        let Some(ssm) = c.ssm.as_ref().filter(|_| !tensors.is_empty()) else {
+            return Self::none();
+        };
+        let [h_all, conv_all] = tensors else {
+            panic!("a Mamba2 config threads exactly two state tensors");
+        };
+        let (hh, p, n) = (ssm.n_heads, ssm.head_dim, ssm.state_size);
+        let (k1, cd) = (ssm.conv_kernel - 1, ssm.conv_dim);
+        let layers = (0..c.recurrent_layer_count())
+            .map(|s| {
+                let h = b.slice(h_all, &[(0, bsz), (s, s + 1), (0, hh), (0, p), (0, n)]);
+                let conv = b.slice(conv_all, &[(0, bsz), (s, s + 1), (0, k1), (0, cd)]);
+                SsmLayerState {
+                    h: b.reshape(&h, vec![bsz, hh, p, n]),
+                    conv: b.reshape(&conv, vec![bsz, k1, cd]),
+                }
+            })
+            .collect();
+        Self {
+            layers,
+            real_len: None,
+        }
+    }
+
+    /// Write every advanced `[B, ...]` layer state back into its row of the
+    /// per-slot tensors `base` (`[B, L_ssm, ...]`), in [`Config::state_tensors`]
+    /// order.
+    pub(super) fn join_rows(&self, b: &mut Builder, base: &[Val]) -> Vec<Val> {
+        let [h_all, conv_all] = base else {
+            return Vec::new();
+        };
+        let mut h_all = h_all.clone();
+        let mut conv_all = conv_all.clone();
+        let zero = b.const_i32(0);
+        for (s, layer) in self.layers.iter().enumerate() {
+            let row = b.const_i32(i32::try_from(s).expect("recurrent layer index fits i32"));
+            let mut h_shape = vec![h_all.ty.shape[0], 1];
+            h_shape.extend(&h_all.ty.shape[2..]);
+            let mut conv_shape = vec![conv_all.ty.shape[0], 1];
+            conv_shape.extend(&conv_all.ty.shape[2..]);
+            let h = b.reshape(&layer.h, h_shape);
+            let conv = b.reshape(&layer.conv, conv_shape);
+            h_all = b.dynamic_update_slice(&h_all, &h, &[&zero, &row, &zero, &zero, &zero]);
+            conv_all = b.dynamic_update_slice(&conv_all, &conv, &[&zero, &row, &zero, &zero]);
+        }
+        vec![h_all, conv_all]
     }
 
     /// Write every advanced layer state back into the stacked tensors `base`
@@ -241,7 +297,10 @@ pub(super) fn emit_mamba2_block(
             b.reshape(&y, vec![c.hidden])
         }
         AttnLayout::Ragged { .. } => {
-            unreachable!("the ragged decode rejects recurrent configs until #3340")
+            // `[B, hidden]` rows, one per slot, each advancing its own state row.
+            let (y, next) = ssm::mamba2_mixer_step(b, ssm, w, &hn, &state.layers[s]);
+            state.layers[s] = next;
+            y
         }
     };
     b.add(x, &mixed)
@@ -252,6 +311,23 @@ pub(super) fn take_state_args(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Con
     c.state_tensors()
         .into_iter()
         .map(|spec| take_arg(decls, idx, Ty::f32(spec.dims), spec.name.to_string()))
+        .collect()
+}
+
+/// Declare one ragged-decode input per state tensor, at `[B, ...dims]`.
+pub(super) fn take_batched_state_args(
+    decls: &mut Vec<ArgDecl>,
+    idx: &mut usize,
+    c: &Config,
+    bsz: usize,
+) -> Vec<Val> {
+    c.state_tensors()
+        .into_iter()
+        .map(|spec| {
+            let mut dims = vec![bsz];
+            dims.extend(spec.dims);
+            take_arg(decls, idx, Ty::f32(dims), spec.name.to_string())
+        })
         .collect()
 }
 

@@ -140,3 +140,20 @@ The shim now carries the state from `prefill.main` into `decode_step` (`@state_i
 A one-token prompt ("The", 10 tokens), which takes the state-reset path instead of a `real_len = 0` prefill, also matches the oracle on hip. The f16 drift measured above (0.42 max-abs on logits) did not move a greedy token here, so recurrent configs keep the per-device default precision rather than being pinned to f32 like MLA.
 
 Refusals: a request refused in Rust or failed in the shim (including a failed state reset) drops the stored state, so a decode refuses until a prefill or reset succeeds. The KV-only entry points (ragged, slot, embeddings) refuse any recurrent state until #3340, and pure `mamba2` with `n_groups > 1` is refused. The CLI omits the `KV cache mode` banner for Mamba2 on xla.
+
+## Per-slot state carry and serving (issue #3340)
+
+The continuous-batching engine now carries each slot's Mamba2 state: the ragged decode takes and returns `[B, ...]` state, the shim keeps `sscache_b[]` per slot under the KV's `rg_valid` flag, and `mlxcel-server` serves `AntonV/mamba2-130m-hf` @ `05e8773f` on `hip`.
+
+| check | precision | result |
+|-------|-----------|--------|
+| `validate_arch.sh --batch 4 --requests 8 --maxcap 24` (structural, oracle, serve) | f16 (hip default) | PASS |
+| `xla_batch_bench`, oracle prompt, `--cancel 2` | f16 | PASS (2/2 cancelled) |
+| `xla_batch_bench`, oracle prompt, `--buckets 256,512` | f16 | PASS |
+| `xla_batch_bench`, B=8, 16 requests, 64-token prompt | f16 | PASS |
+| `xla_batch_bench`, B=4, 8 requests, 64-token prompt | f16 | 7/8; request 6 differs from token 17 |
+| same | f32 | PASS |
+| server, 4 concurrent `/v1/completions` at temperature 0 vs `mlxcel generate` | f16 | 3/4 |
+| same | f32 | 4/4 |
+
+The two f16 differences are rounding between the batched (`[B, hidden]`) and single-sequence projections, not state handling: the same workloads are exact at f32. On the server prompt that differs ("In computer science, a linked list is"), the batched f16 stream equals the HF fp32 oracle and the f32 streams, and it is the single-sequence f16 decode that departs from the oracle after 16 tokens. Recurrent configs keep the per-device default precision from #3339; pinning them to f32 on GPU would make both paths oracle-exact on these prompts.
