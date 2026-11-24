@@ -2,7 +2,7 @@
 
 **Date**: 2026-11-25
 
-**Status**: Partial; CUDA CLI/server and ROCm acceptance pending
+**Status**: Partial; ROCm acceptance pending
 
 ## Executive Summary
 
@@ -46,7 +46,11 @@ The real 4B CUDA check at the same commit matched all 40 committed HF fp32 oracl
 
 The real-checkpoint CUDA batch gate also served eight requests at B=4 and matched all 170 generated tokens against per-request single-sequence references with context 256 and fp32. Its test-fast informational throughput was 4.974 tok/s batched versus 6.02 tok/s sequential (0.8x); this is not a release benchmark or a performance-improvement claim. Raw oracle and batch outputs are included under `spike/openxla/nemotron_h_reference/`.
 
-The following acceptance evidence is still pending: CLI and concurrent-server parity, CUDA Mamba2 hardware regressions, and all ROCm gfx1151 gates. Remote CI was cancelled under the run's local-validation policy; cancellation is not passing CI evidence. The PR remains a draft and #3344 remains open at `status:review`.
+The test-fast CLI matched all 40 HF oracle token IDs exactly. Four HTTP requests overlapped for 16.958 seconds and each returned 24 completion tokens whose text and counts matched a separately captured CLI reference. The server API does not expose token IDs, so HTTP acceptance establishes rendered-text and count parity. The successful server used `--ctx-size 2048`, B=4, explicit XLA capacity 256, and prompt cache/APC disabled; a prior `--ctx-size 1024` attempt was correctly rejected because its 256 tokens per slot fell below the 512-token minimum.
+
+Six CUDA Mamba2 state-carry tests, five hybrid state-carry tests, and one Nemotron-H prompt-cache exclusion unit test passed. The validation binaries came from `93ddebad`; CLI/server evidence was captured from the documentation-only checkout `d7e8a040`. Raw evidence and binary hashes are included under `spike/openxla/nemotron_h_reference/`.
+
+All ROCm gfx1151 gates remain pending. Remote CI was cancelled under the run's local-validation policy; cancellation is not passing CI evidence. The PR remains a draft and #3344 remains open at `status:review`.
 
 ## Learning Points
 
@@ -56,8 +60,6 @@ An internal single-sequence reference proves batch consistency but cannot prove 
 
 ## Follow-up Actions
 
-- [ ] Run CLI and four-concurrent-request server parity on CUDA.
-- [ ] Run the Mamba2 single-sequence and state-carry regressions on CUDA hardware.
 - [ ] Record the same real-model, batching, server, and Mamba2 evidence on ROCm gfx1151 at the exact tested PR SHA.
 - [ ] Implement and validate `E` blocks in #3345 before enabling Nemotron-H MoE schedules.
 

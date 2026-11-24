@@ -2,7 +2,7 @@
 
 **작성일**: 2026-11-25
 
-**상태**: 부분 완료, CUDA CLI/server 및 ROCm 검증 대기
+**상태**: 부분 완료, ROCm 검증 대기
 
 ## 요약
 
@@ -46,7 +46,11 @@ Parser는 표준 `chunk_size`를 읽고 기존 `mamba_chunk_size` fallback을 �
 
 실제 체크포인트 CUDA batch gate도 B=4에서 요청 8개를 처리하고 context 256 및 fp32 조건에서 생성한 170개 token을 요청별 단일 시퀀스 reference와 모두 일치시켰다. Test-fast의 참고용 처리량은 batch 4.974 tok/s, sequential 6.02 tok/s(0.8x)였으며 release benchmark 또는 성능 개선 근거가 아니다. 원시 oracle 및 batch 출력은 `spike/openxla/nemotron_h_reference/`에 포함한다.
 
-CLI 및 동시 server 일치, CUDA Mamba2 hardware 회귀, ROCm gfx1151 전체 gate는 아직 검증되지 않았다. 이번 실행의 local-validation 정책에 따라 원격 CI는 취소했으며, 취소를 CI 통과 증거로 간주하지 않는다. PR은 draft이고 #3344는 `status:review` 상태로 열려 있다.
+Test-fast CLI는 HF oracle token ID 40개와 모두 정확히 일치했다. HTTP 요청 4개는 16.958초 동안 겹쳐 실행됐고, 각 요청의 completion token 24개에 대한 text와 count가 별도로 캡처한 CLI reference와 일치했다. Server API는 token ID를 노출하지 않으므로 HTTP 검증은 rendered text 및 count 일치를 입증한다. 성공한 server는 `--ctx-size 2048`, B=4, 명시적 XLA capacity 256, prompt cache/APC 비활성화 조건을 사용했다. 앞선 `--ctx-size 1024` 시도는 slot당 256 token이 최소값 512보다 작아 정상적으로 거부됐다.
+
+CUDA에서 Mamba2 state-carry 테스트 6개, hybrid state-carry 테스트 5개, Nemotron-H prompt-cache 제외 unit test 1개가 통과했다. 검증 binary는 `93ddebad` 소스에서 빌드했고 CLI/server 증거는 문서만 변경된 `d7e8a040` checkout에서 캡처했다. 원시 증거와 binary hash는 `spike/openxla/nemotron_h_reference/`에 포함한다.
+
+ROCm gfx1151 전체 gate는 아직 검증되지 않았다. 이번 실행의 local-validation 정책에 따라 원격 CI는 취소했으며, 취소를 CI 통과 증거로 간주하지 않는다. PR은 draft이고 #3344는 `status:review` 상태로 열려 있다.
 
 ## 학습 포인트
 
@@ -56,8 +60,6 @@ CLI 및 동시 server 일치, CUDA Mamba2 hardware 회귀, ROCm gfx1151 전체 g
 
 ## 후속 조치
 
-- [ ] CUDA에서 CLI와 4개 동시 요청의 server 일치를 검증한다.
-- [ ] CUDA hardware에서 Mamba2 단일 시퀀스 및 state-carry 회귀를 실행한다.
 - [ ] 정확한 PR SHA를 기록하고 ROCm gfx1151에서 동일한 실제 모델, batching, server, Mamba2 증거를 남긴다.
 - [ ] Nemotron-H MoE 스케줄을 활성화하기 전에 #3345에서 `E` 블록을 구현하고 검증한다.
 

@@ -1,0 +1,9 @@
+attempt 1: --ctx-size 1024 --max-batch-size 4
+Error: --ctx-size 1024 divided across 4 active slot(s) gives 256 tokens per slot, below the minimum supported per-slot context size of 512; increase --ctx-size, reduce --parallel/--max-batch-size, or use --no-batch for single-slot serving
+
+attempt 2: --ctx-size 2048 --max-batch-size 4, MLXCEL_XLA_CONTEXT_CAPACITY=256
+resolved context and batch geometry: ctx_size=2048 ctx_size_per_slot=512 context_slots=4 n_parallel=4
+OpenXLA recurrent model (nemotron_h): prompt cache and APC disabled
+OpenXLA serve worker: B_max=4, capacities=[256], device=cuda
+Warmup complete
+Starting mlxcel server on http://127.0.0.1:59511
