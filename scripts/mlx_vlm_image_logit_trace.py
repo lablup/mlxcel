@@ -27,7 +27,8 @@ Usage:
     mlx_vlm_image_logit_trace.py MODEL_DIR IMAGE MLXCEL_TRACE.tsv
         [--prompt "Describe the image."] [--topk 8] [--float32]
         [--mlxcel-prompt] [--enable-thinking {true,false}]
-        [--inkling2-mlx-community [--inkling2-native-dir DIR]] > reference.tsv
+        [--inkling2-mlx-community [--inkling2-native-dir DIR]] [--bounded-load]
+        > reference.tsv
 
 Needs `mlx`, `mlx-vlm`, `mlx-lm` and `numpy`. By default mlx-vlm runs in the
 checkpoint's own activation dtype, a same-precision reference. With
@@ -51,6 +52,12 @@ mlx-vlm cannot read as shipped, through `scripts/inkling2_mlx_community_remap.py
 export has no `processor_config.json`, so the missing processor files come from
 `--inkling2-native-dir` (default: a sibling `inkling-2-mini`).
 
+`--bounded-load` loads the checkpoint lazily with MLX's allocation cache
+disabled and evaluates the vision tower, then each decoder layer, then the
+rest, the procedure mlx-vlm's Inkling 2 README gives for Small (about 390 GB of
+target weights on a 512 GB host, #3373). One `mx.eval` over every parameter
+holds the transient copies of all layers at once and does not fit.
+
 `--enable-thinking` passes `enable_thinking` to the chat template. Unset, mlx-vlm
 renders with it off, while mlxcel turns it on for a tokenizer with think markers
 (the server-wide default); pair `--enable-thinking false` with
@@ -69,6 +76,23 @@ import numpy as np
 from mlx_vlm import load
 from mlx_vlm.prompt_utils import apply_chat_template
 from mlx_vlm.utils import prepare_inputs
+
+
+def bounded_load(load_dir: str):
+    """Load the way mlx-vlm's Inkling 2 README loads Small: lazily, with the
+    allocation cache off, one layer's parameters evaluated at a time."""
+    cache_limit = mx.set_cache_limit(0)
+    try:
+        model, processor = load(load_dir, lazy=True)
+        vision = getattr(model, "vision_tower", None)
+        if vision is not None:
+            mx.eval(vision.parameters())
+        for layer in getattr(model, "layers", []):
+            mx.eval(layer.parameters())
+        mx.eval(model.parameters())
+    finally:
+        mx.set_cache_limit(cache_limit)
+    return model, processor
 
 
 def read_targets(path: str) -> list[int]:
@@ -183,6 +207,12 @@ def main() -> None:
         "--inkling2-native-dir",
         help="native Inkling 2 checkpoint that supplies the processor files the export lacks",
     )
+    ap.add_argument(
+        "--bounded-load",
+        action="store_true",
+        help="load lazily and evaluate the vision tower and each layer in turn with the MLX "
+        "cache disabled (Inkling 2 Small on a 512 GB host)",
+    )
     args = ap.parse_args()
     template_kwargs = {}
     if args.enable_thinking is not None:
@@ -193,7 +223,10 @@ def main() -> None:
         from inkling2_mlx_community_remap import prepare_model_dir
 
         load_dir = str(prepare_model_dir(args.model_dir, native_dir=args.inkling2_native_dir))
-    model, processor = load(load_dir)
+    if args.bounded_load:
+        model, processor = bounded_load(load_dir)
+    else:
+        model, processor = load(load_dir)
     if args.float32:
         from mlx.utils import tree_map
         from mlx_lm.utils import dequantize_model

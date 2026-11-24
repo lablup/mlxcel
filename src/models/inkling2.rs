@@ -141,6 +141,7 @@ impl Inkling2Model {
         }
         let text = config.text_config.clone();
         text.validate()?;
+        kernels::log_model_gates(&text);
         let weights = sanitize::sanitize_weights(weights, text.hidden_size)?;
         let quant = dense_quantization(&config);
         let embed_tokens = UnifiedEmbedding::from_weights(
