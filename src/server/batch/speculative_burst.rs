@@ -91,6 +91,12 @@
 //!   one warning), B = 1 only, and gated on the block-versus-chain
 //!   exactness probe (`Lfm2Model::dflash_exactness_allows`) like the MTP
 //!   arms. The per-target plumbing lives in [`super::dflash_target`].
+//! - **DSpark / Inkling 2** (issue #3374): text-only requests on
+//!   [`crate::LoadedModel::Inkling2VLM`], paired with the DSpark drafter
+//!   bundled in the checkpoint's own `mtp.safetensors` (`--model-draft` is the
+//!   target directory). Greedy only, B = 1 only, gated on the exactness probe
+//!   (`Inkling2Model::dflash_exactness_allows`); image requests keep classic
+//!   decode through the multimodal gate.
 //! - **DFlash / Muse Glimmer** (issue #1343): text-only requests on
 //!   [`crate::LoadedModel::MuseGlimmerVLM`], paired with the Muse Glimmer
 //!   assistant drafter (`muse_glimmer_assistant`) through the same
@@ -1750,6 +1756,7 @@ pub(crate) fn dflash_target_exactness_allows(
         LoadedModel::Lfm2VL(m) => m.exactness_allows(bs),
         LoadedModel::MuseGlimmerVLM(m) => m.exactness_allows(bs),
         LoadedModel::Laguna(m) => m.exactness_allows(bs),
+        LoadedModel::Inkling2VLM(m) => m.exactness_allows(bs),
         _ => return None,
     })
 }
@@ -1780,6 +1787,9 @@ pub(crate) fn dflash_target_supports_batched(model: &LoadedModel) -> Option<bool
         }
         LoadedModel::Laguna(_) => {
             <crate::models::LagunaWrapper as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Inkling2VLM(_) => {
+            <crate::vision::Inkling2VlModel as DFlashTargetModel>::supports_batched()
         }
         _ => return None,
     })
@@ -1882,7 +1892,8 @@ fn run_dflash_burst(
             "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
              text or VLM-wrapped text-only (DFlash drafter), LFM2 / LFM2.5 text or \
              LFM2-VL text-only (DSpark drafter), Muse Glimmer text-only (Muse Glimmer \
-             assistant drafter), or Laguna (Laguna DFlash drafter); falling back to \
+             assistant drafter), Laguna (Laguna DFlash drafter), or Inkling 2 (its bundled \
+             DSpark drafter); falling back to \
              classic decode",
             model_variant_label(ctx.model),
         );
@@ -1999,6 +2010,7 @@ fn run_dflash_burst(
         LoadedModel::Lfm2VL(m) => drive!(m),
         LoadedModel::MuseGlimmerVLM(m) => drive!(m),
         LoadedModel::Laguna(m) => drive!(m),
+        LoadedModel::Inkling2VLM(m) => drive!(m),
         _ => {
             // Unreachable per the variant gate above. Defensive arm
             // rather than `unreachable!()` so a future LoadedModel
@@ -3140,6 +3152,7 @@ pub fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Lfm2Moe(_) => "Lfm2Moe",
         LoadedModel::Lfm2VL(_) => "Lfm2VL",
         LoadedModel::Laguna(_) => "Laguna",
+        LoadedModel::Inkling2VLM(_) => "Inkling2VLM",
         LoadedModel::Glm4MoeLite(_) => "Glm4MoeLite",
         LoadedModel::MuseGlimmerVLM(_) => "MuseGlimmerVLM",
         _ => "other",

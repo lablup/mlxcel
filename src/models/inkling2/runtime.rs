@@ -261,6 +261,12 @@ impl LanguageModel for Inkling2Model {
         Some(self.embed_tokens.clone_shared())
     }
 
+    fn inkling2_dspark_binding(
+        &self,
+    ) -> Option<mlxcel_core::drafter::inkling2_dspark::Inkling2DsparkBinding> {
+        Some(self.dspark_binding())
+    }
+
     fn supports_snapshot_reuse(&self) -> bool {
         true
     }

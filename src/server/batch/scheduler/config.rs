@@ -665,7 +665,9 @@ impl BatchScheduler {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "unknown-drafter".to_string());
-            let target_id = target_model_id.unwrap_or_else(|| "unknown-target".to_string());
+            let target_id = target_model_id
+                .clone()
+                .unwrap_or_else(|| "unknown-target".to_string());
             let block = *block_size as usize;
             if block >= 2
                 && !crate::server::batch::speculative_burst::mtp_capable_target(
@@ -690,6 +692,39 @@ impl BatchScheduler {
         } else {
             false
         };
+        // A DFlash dispatch (issue #3374) has no adaptive policy, but the
+        // endpoint still names the pairing, and its exactness verdict, so a
+        // consumer can tell a served DFlash pairing from "no drafter". The
+        // probe is memoized per (model, width): running it here moves it off
+        // the first request, as the MTP warm-up above does.
+        if let crate::server::SpeculativeDispatch::DFlash {
+            draft_model_path,
+            block_size,
+            ..
+        } = &self.speculative_dispatch
+        {
+            let drafter_id = draft_model_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown-drafter".to_string());
+            let target_id = target_model_id
+                .clone()
+                .unwrap_or_else(|| "unknown-target".to_string());
+            let exact = crate::server::batch::speculative_burst::dflash_target_exactness_allows(
+                self.engine.model(),
+                *block_size as usize,
+            );
+            exactness_veto = Some(if exact == Some(false) {
+                MtpPolicySnapshot::exactness_declined(
+                    target_id,
+                    drafter_id,
+                    *block_size,
+                    crate::models::speculative_exactness::decline_reason(*block_size),
+                )
+            } else {
+                MtpPolicySnapshot::dflash_dispatch(target_id, drafter_id, *block_size)
+            });
+        }
         // Publish the resolved policy state for the supported read interface
         // (issue #1257). Doing it here, rather than letting the endpoint reach
         // into `self.mtp_policy`, is what keeps `MtpPolicy` single-threaded and

@@ -1277,6 +1277,10 @@ fn wire_labels_are_stable() {
         "no_mtp_dispatch"
     );
     assert_eq!(
+        MtpPolicyUnavailableReason::DflashDispatch.as_str(),
+        "dflash_dispatch"
+    );
+    assert_eq!(
         MtpPolicyUnavailableReason::AdaptiveDisabled.as_str(),
         "adaptive_disabled"
     );
@@ -1284,4 +1288,27 @@ fn wire_labels_are_stable() {
         MtpPolicyUnavailableReason::WorkerNotReady.as_str(),
         "worker_not_ready"
     );
+}
+
+#[test]
+fn a_dflash_pairing_is_named_without_a_policy() {
+    // Issue #3374: a DFlash dispatch has no adaptive policy, but the endpoint
+    // still names the pairing so a consumer can show what is served.
+    let snapshot = MtpPolicySnapshot::dflash_dispatch(
+        "inkling-2-mini".to_string(),
+        "inkling-2-mini".to_string(),
+        8,
+    );
+    assert_eq!(snapshot.status, MtpPolicyStatus::Unavailable);
+    assert_eq!(
+        snapshot.reason,
+        Some(MtpPolicyUnavailableReason::DflashDispatch)
+    );
+    assert_eq!(snapshot.target.as_deref(), Some("inkling-2-mini"));
+    assert_eq!(snapshot.drafter.as_deref(), Some("inkling-2-mini"));
+    assert_eq!(snapshot.block_size, Some(8));
+    assert!(snapshot.hardware.is_some());
+    assert_eq!(snapshot.mtp_enabled, Some(false));
+    assert_eq!(snapshot.verdict, None);
+    assert_eq!(snapshot.samples, 0);
 }

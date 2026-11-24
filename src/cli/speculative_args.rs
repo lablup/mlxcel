@@ -303,6 +303,16 @@ pub fn resolve_draft_block_size_detailed(
     {
         return from_checkpoint(n, "the GLM 4 MoE Lite MTP drafter's configured block size");
     }
+    // The DSpark drafter bundled with an Inkling 2 checkpoint (issue #3374)
+    // runs at its trained block (one anchor and `block_size - 1` proposals,
+    // 8 rows on both releases); it cannot serve a wider one.
+    if kind == DrafterKind::Dflash
+        && let Some(configured) =
+            mlxcel_core::drafter::peek_inkling2_dspark_configured_block_size(model_path)
+        && let Ok(n) = u32::try_from(configured)
+    {
+        return from_checkpoint(n, "the Inkling 2 DSpark drafter's trained block size");
+    }
     // An LFM2 DSpark drafter (issue #1339) counts proposals in `block_size`
     // and runs at `min(block_size + 1, runtime_block_size)` rows by default
     // (8 on the published checkpoints); the flat DFlash default of 16 would

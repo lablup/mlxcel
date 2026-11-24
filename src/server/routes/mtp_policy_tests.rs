@@ -136,6 +136,10 @@ fn unavailable_reasons_are_distinguishable() {
     let cases = [
         (MtpPolicyUnavailableReason::NoMtpDispatch, "no_mtp_dispatch"),
         (
+            MtpPolicyUnavailableReason::DflashDispatch,
+            "dflash_dispatch",
+        ),
+        (
             MtpPolicyUnavailableReason::AdaptiveDisabled,
             "adaptive_disabled",
         ),
