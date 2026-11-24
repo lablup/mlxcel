@@ -935,7 +935,7 @@ impl ModelProvider {
         // speculative dispatch, prompt cache) does not apply; `max_batch_size`
         // maps to the engine's bundled slot count.
         #[cfg(feature = "xla-iree")]
-        if std::env::var("MLXCEL_BACKEND").ok().as_deref() == Some("xla") {
+        if crate::server::xla_prompt_cache_guard::xla_serve_backend_selected() {
             if config.no_batch {
                 tracing::warn!(
                     "--no-batch is ignored by the OpenXLA backend; it serves through the \
@@ -943,6 +943,14 @@ impl ModelProvider {
                 );
             }
             let b_max = xla_serve_b_max(config.max_batch_size);
+            // Recurrent models never get a store, so no prompt-cache or APC
+            // hook can reach them (#3341). Startup already built none for
+            // them; this covers any other caller that passes one.
+            let prompt_cache_store =
+                crate::server::xla_prompt_cache_guard::xla_provider_prompt_cache(
+                    &model_path,
+                    prompt_cache_store,
+                );
             let mut provider = Self::new_with_xla_worker(
                 model_path,
                 b_max,

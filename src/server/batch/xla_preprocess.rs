@@ -24,9 +24,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
-use mlxcel_core::session::PreparedPrefill;
-use mlxcel_xla::DeepStackPreparedPrefill;
-
 use crate::{
     HostMultimodalPreprocessor, XlaVisionBackend, load_xla_image_preprocessor,
     server::model_provider::model_worker::decode_request_images,
@@ -44,20 +41,9 @@ pub(super) struct ImagePreprocessJob {
     pub cancelled: Arc<AtomicBool>,
 }
 
-pub(super) enum PreparedImagePrefill {
-    Standard(PreparedPrefill),
-    DeepStack(DeepStackPreparedPrefill),
-}
-
-impl PreparedImagePrefill {
-    #[must_use]
-    pub(super) fn sequence_len(&self) -> usize {
-        match self {
-            Self::Standard(prepared) => prepared.sequence_len,
-            Self::DeepStack(request) => request.prepared().sequence_len,
-        }
-    }
-}
+/// Admission routes on [`PreparedImagePrefill::sequence_len`], the same
+/// processed-media length the CLI sizes its single shape from (issue #3361).
+pub(super) use crate::PreparedImagePrefill;
 
 pub(super) enum ImagePreprocessOutcome {
     Prepared(PreparedImagePrefill),
@@ -204,17 +190,8 @@ fn process_job(
         if cancelled.load(Ordering::Acquire) {
             return Err("request cancelled during image decoding".to_string());
         }
-        if let Some(request) = preprocessor
-            .prepare_deepstack(&token_ids, &decoded)
-            .map_err(|error| error.to_string())?
-        {
-            Ok(PreparedImagePrefill::DeepStack(request))
-        } else {
-            preprocessor
-                .prepare(&token_ids, &decoded)
-                .map(PreparedImagePrefill::Standard)
-                .map_err(|error| error.to_string())
-        }
+        crate::prepare_image_prefill(preprocessor, &token_ids, &decoded)
+            .map_err(|error| error.to_string())
     }));
 
     let outcome = if cancelled.load(Ordering::Acquire) {
