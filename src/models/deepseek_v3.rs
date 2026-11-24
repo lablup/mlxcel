@@ -21,6 +21,7 @@
 //! - First k layers are dense (no MoE)
 
 use crate::models::mla_rope::MlaRope;
+use crate::models::speculative_exactness_diag as diag;
 use crate::models::switch_layers::validate_expert_quantization_params;
 use crate::models::switch_layers::{
     EXPERT_PLANE_LEAVES, refuse_mismatched_expert_parts, stack_expert_leaf,
@@ -1453,6 +1454,8 @@ impl DeepSeekV3Model {
         // Pass through layers
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask.as_deref());
+            // Recorded only under the block-versus-chain diagnostic (#3409).
+            diag::capture(i, "mla", "layer output", &h);
         }
         let h = mlxcel_core::generate::select_row(h, row);
 

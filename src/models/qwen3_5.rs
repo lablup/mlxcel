@@ -41,6 +41,7 @@ use crate::models::qwen3_next::{
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
+use crate::models::speculative_exactness_draws as draws;
 use mlxcel_core::cache::{
     KVCacheMode, LayerState, LayerStateEncoding, LayerStateForward, LayerStateKind,
     LayerStateSnapshotSpec, SequenceId,
@@ -1936,19 +1937,11 @@ impl Qwen35Model {
     /// Used by: [`Self::mtp_exactness_allows`], and the
     /// `metal_block_vs_chain_op_parity` diagnostic's model-level sibling.
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
-        if block_size < 2 {
-            return BlockChainExactness::NotRun("block width below 2 drafts nothing");
-        }
-        let vocab = self.config.vocab_size;
-        if vocab < 2 {
-            return BlockChainExactness::NotRun("degenerate vocabulary");
-        }
-
-        for draw in 0..PROBE_DRAWS {
-            let verdict = self.probe_one_draw(block_size, vocab, draw);
-            if !verdict.is_equal() {
-                return verdict;
-            }
+        // No sliding layer in this family, so no long draw of its own.
+        let lengths = draws::prompt_lengths(probe_prompt_len_for_host(), PROBE_DRAWS, None);
+        let verdict = self.probe_block_chain_exactness_at(block_size, &lengths);
+        if !verdict.is_equal() {
+            return verdict;
         }
         // On CUDA a verify block can match the chain right after prefill and
         // still part from it dozens of tokens later: a block-only kernel
@@ -1959,13 +1952,40 @@ impl Qwen35Model {
         // served path diverged, so CUDA also walks blocks and the chain
         // together well past the prompt. Metal keeps the short draws only.
         if mlxcel_core::cuda_is_available() {
-            return self.probe_long_walk(block_size, vocab);
+            return self.probe_long_walk(block_size, self.config.vocab_size);
         }
         BlockChainExactness::Equal
     }
 
+    /// The short draws of [`Self::probe_block_chain_exactness`] at the given
+    /// prompt lengths, one draw per entry.
+    ///
+    /// Used by: [`Self::probe_block_chain_exactness`] and the exactness survey test.
+    pub fn probe_block_chain_exactness_at(
+        &self,
+        block_size: usize,
+        prompt_lengths: &[usize],
+    ) -> BlockChainExactness {
+        if block_size < 2 {
+            return BlockChainExactness::NotRun("block width below 2 drafts nothing");
+        }
+        let vocab = self.config.vocab_size;
+        if vocab < 2 {
+            return BlockChainExactness::NotRun("degenerate vocabulary");
+        }
+        draws::run_draws(prompt_lengths, |draw, prompt_len| {
+            self.probe_one_draw(block_size, vocab, draw, prompt_len)
+        })
+    }
+
     /// One (prompt, block) draw of [`Self::probe_block_chain_exactness`].
-    fn probe_one_draw(&self, block_size: usize, vocab: usize, draw: usize) -> BlockChainExactness {
+    fn probe_one_draw(
+        &self,
+        block_size: usize,
+        vocab: usize,
+        draw: usize,
+        prompt_len: usize,
+    ) -> BlockChainExactness {
         // Synthetic ids, varied per draw. Kernel *dispatch* does not
         // depend on the values (it is a function of shape, dtype,
         // quantization mode and `M`), but whether a small last-ulp
@@ -1975,9 +1995,7 @@ impl Qwen35Model {
         let salt = draw * 977 + 1;
         let wrap =
             |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
-        let prompt: Vec<i32> = (0..probe_prompt_len_for_host())
-            .map(|i| wrap(i, 7, 1))
-            .collect();
+        let prompt: Vec<i32> = (0..prompt_len).map(|i| wrap(i, 7, 1)).collect();
         let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
         let as_input =
