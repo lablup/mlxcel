@@ -199,6 +199,8 @@ pub enum WeightScheme {
     Mamba1,
     /// Nemotron-H hybrid backbone with one mixer or FFN per block.
     NemotronH,
+    /// Falcon-H1 parallel attention and Mamba2 blocks.
+    FalconH1,
 }
 
 /// MLX affine weight quantization (`config.json` `quantization`). The linear /
@@ -760,6 +762,8 @@ pub struct Config {
     /// The selective state-space mixer parameters (`Some` for a model with a
     /// Mamba2 layer, epic #564); `None` for every attention-only family.
     pub ssm: Option<SsmConfig>,
+    /// Raw-HF Falcon-H1 branch multipliers and gated normalization.
+    pub falcon_h1: Option<super::falcon_h1_config::FalconH1Config>,
     /// The mixer of each layer (`len == n_layers`); `[Attention; n_layers]` for
     /// every attention-only family. Read through [`Config::layer_mixer`].
     pub layer_mixers: Vec<MixerKind>,
@@ -829,6 +833,7 @@ impl Config {
             native_head: false,
             quant_scale_dtype: super::QuantScaleDtype::F16,
             ssm: None,
+            falcon_h1: None,
             layer_mixers: vec![MixerKind::Attention; 16],
         }
     }
@@ -990,6 +995,9 @@ impl Config {
 
         // Mamba2 (issue #3338) has no attention fields at all; its config is
         // built by its own reader.
+        if model_type == Some("falcon_h1") {
+            return super::falcon_h1_config::from_json(&v, quantization);
+        }
         if model_type == Some("nemotron_h") {
             return super::nemotron_h_config::from_json(&v, quantization);
         }
@@ -2011,6 +2019,7 @@ impl Config {
             native_head: false,
             quant_scale_dtype: super::QuantScaleDtype::F16,
             ssm: None,
+            falcon_h1: None,
             layer_mixers: vec![MixerKind::Attention; n_layers],
         })
     }

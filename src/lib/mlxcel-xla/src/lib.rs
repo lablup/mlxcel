@@ -1380,3 +1380,6 @@ mod eos_resolution_tests {
         assert_eq!(config_eos_token_ids(dir.path()), vec![151645, 151643]);
     }
 }
+
+#[cfg(all(test, feature = "iree"))]
+mod falcon_h1_device_tests;

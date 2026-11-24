@@ -684,7 +684,10 @@ fn take_layer_weights(
     c: &Config,
     li: usize,
 ) -> LayerW {
-    if c.layer_mixer(li).is_recurrent() {
+    if matches!(
+        c.layer_mixer(li),
+        super::config::MixerKind::Mamba2 | super::config::MixerKind::Mamba1
+    ) {
         return recurrent::take_ssm_layer_weights(b, decls, idx, c, li);
     }
     let h = c.hidden;
@@ -902,7 +905,10 @@ fn take_layer_weights(
         up_bias,
         moe,
         phi4_lora,
-        ssm: None,
+        ssm: c
+            .falcon_h1
+            .as_ref()
+            .map(|_| recurrent::take_ssm_mixer_weights(b, decls, idx, c, li)),
     }
 }
 
@@ -1614,6 +1620,10 @@ fn emit_mlp_body(
             }
         }
     };
+    let gate = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| gate.clone(), |f| super::ssm::scale(b, &gate, f.mlp[0]));
     let act = if c.mlp_geglu {
         gelu_tanh(b, &gate)
     } else {
@@ -1629,6 +1639,10 @@ fn emit_mlp_body(
         None => down,
     };
     let down = layout.add_bias(b, down, lw.down_bias.as_ref());
+    let down = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| down.clone(), |f| super::ssm::scale(b, &down, f.mlp[1]));
     if c.has_post_ff_norm() {
         let w = norm_w(
             b,
@@ -2963,7 +2977,15 @@ fn emit_attention(
         return emit_mla_attention(b, c, k, lw, li, x, layout, kcache, vcache);
     }
     let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
-    let (q, kk, vv) = layout.project_qkv(b, c, &hn, lw);
+    let attn_in = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| hn.clone(), |f| super::ssm::scale(b, &hn, f.attention_in));
+    let (q, kk, vv) = layout.project_qkv(b, c, &attn_in, lw);
+    let kk = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| kk.clone(), |f| super::ssm::scale(b, &kk, f.key));
     // q/k-norm hook (issue #494): Qwen3 / Gemma3 norm each head over head_dim,
     // OLMo2/3 norm the whole flat projection; both before RoPE, applied once here so
     // they reach the single / ragged / prefill paths together. A config without
@@ -2986,6 +3008,10 @@ fn emit_attention(
     let o = layout.context(b, c, &attn, &vslab);
     let attn_out = layout.o_proj(b, &o, lw);
     let attn_out = post_attn_norm(b, c, k, layout, attn_out, lw);
+    let attn_out = c.falcon_h1.as_ref().map_or_else(
+        || attn_out.clone(),
+        |f| super::ssm::scale(b, &attn_out, f.attention_out),
+    );
     (hn, attn_out)
 }
 
@@ -3000,7 +3026,7 @@ fn emit_attention(
 ///
 /// The layer's mixer comes from `c.layer_mixer(li)` (issue #3338): an attention
 /// layer runs the block below and writes the KV cache; a recurrent layer runs
-/// [`recurrent::emit_mamba2_block`] and advances its row of `state` instead.
+/// [`recurrent::emit_recurrent_block`] and advances its row of `state` instead.
 #[allow(clippy::too_many_arguments)]
 fn emit_transformer_layer(
     b: &mut Builder,
@@ -3014,8 +3040,20 @@ fn emit_transformer_layer(
     vcache: &mut Val,
     state: &mut RecurrentLayers,
 ) -> Val {
-    if c.layer_mixer(li).is_recurrent() {
+    if matches!(
+        c.layer_mixer(li),
+        super::config::MixerKind::Mamba2 | super::config::MixerKind::Mamba1
+    ) {
         return recurrent::emit_recurrent_block(b, c, k, lw, li, x, layout, state);
+    }
+    if c.layer_mixer(li) == super::config::MixerKind::ParallelMamba2Attention {
+        let (hn, attn) = emit_attention(b, c, k, lw, li, x, layout, kcache, vcache);
+        let ssm = recurrent::emit_recurrent_mixer(b, c, lw, li, &hn, layout, state);
+        let mixed = b.add(&ssm, &attn);
+        let x1 = b.add(x, &mixed);
+        let hn2 = mlp_pre_norm(b, c, k, layout, &x1, lw);
+        let down = emit_ffn_body(b, c, k, layout, &hn2, lw, li);
+        return b.add(&x1, &down);
     }
     if c.layer_mixer(li) == super::config::MixerKind::None {
         let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
@@ -5005,7 +5043,8 @@ pub(crate) fn emit_ssm_probe_with(
                 dt_bias,
                 a_log,
                 d,
-                norm_w,
+                norm_w: Some(norm_w),
+                falcon: None,
                 out_proj,
                 out_proj_b,
             })

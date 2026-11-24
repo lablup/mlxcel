@@ -190,6 +190,14 @@ pub(crate) fn scheme_names(scheme: WeightScheme) -> SchemeNames {
             pre_ff_norm: "unused.pre_ff_norm.weight",
             post_ff_norm: "unused.post_ff_norm.weight",
         },
+        WeightScheme::FalconH1 => SchemeNames {
+            final_norm: "model.final_layernorm.weight",
+            down: "feed_forward.down_proj.weight",
+            gate: "feed_forward.gate_proj.weight",
+            up: "feed_forward.up_proj.weight",
+            post_attention_layernorm: "pre_ff_layernorm.weight",
+            ..scheme_names(WeightScheme::Llama)
+        },
         WeightScheme::NemotronH => SchemeNames {
             down: "mixer.down_proj.weight",
             up: "mixer.up_proj.weight",
