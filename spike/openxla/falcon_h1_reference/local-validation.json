@@ -1,0 +1,53 @@
+{
+  "runtime_source_head": "205d0a3dd2d92eca2dbcba3dffcefba54e825eca",
+  "iree_version": "3.12.0rc20260721",
+  "profile": "test-fast",
+  "core_crate_tests": {
+    "passed": 544,
+    "failed": 0,
+    "ignored": 22,
+    "command": "cargo test --profile test-fast -p mlxcel-xla --lib"
+  },
+  "clippy": {
+    "passed": true,
+    "command": "cargo clippy --profile test-fast -p mlxcel-xla --lib --tests -- -D warnings"
+  },
+  "formatting_passed": true,
+  "registered_goldens_byte_exact": true,
+  "synthetic_hf_fp32": {
+    "devices": [
+      "local-task",
+      "cuda"
+    ],
+    "norm_modes": [
+      "none",
+      "before",
+      "after"
+    ],
+    "trajectories_per_mode": 4,
+    "tokens_per_trajectory": 8,
+    "logit_absolute_tolerance": 0.0003,
+    "argmax_exact": true,
+    "slot_readmission_passed": true
+  },
+  "real_checkpoint_oracle_tokens": {
+    "local-task": 40,
+    "cuda_engine": 40,
+    "cuda_cli": 40
+  },
+  "cuda_batch": {
+    "slots": 4,
+    "requests": 8,
+    "maxcap": 24,
+    "tokens": 170,
+    "reference_exact": true
+  },
+  "cuda_http": {
+    "concurrent_requests": 4,
+    "exact_text_and_counts": true,
+    "direct_token_ids_available": false,
+    "server_reaped": true
+  },
+  "hip_acceptance": "pending external measurement",
+  "hosted_ci": "own draft runs canceled per local-validation policy"
+}

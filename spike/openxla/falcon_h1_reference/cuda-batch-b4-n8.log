@@ -1,0 +1,13 @@
+model = /tmp/epic564-models/falcon-h1
+device = cuda, slots B_max = 4, requests N = 8, full prompt = 5, buckets = None, eos = [228, 11]
+  req 0: len 5 cap 12  req 1: len 5 cap 23  req 2: len 5 cap 24  req 3: len 5 cap 17
+  req 4: len 5 cap 24  req 5: len 5 cap 24  req 6: len 5 cap 22  req 7: len 5 cap 24
+
+phase 1 load: reference engine (B_max=4, capacity 256) 0.63 s
+phase 1: captured 8 single-seq references (170 tokens, 67.58 tok/s sequential baseline, generation only)
+phase 2 load: batch engine (B_max=4, capacity 256) 0.44 s
+
+phase 2: 46 pump steps, 8 requests served, 170 tokens
+throughput: 102.21 tok/s batched (vs 67.58 tok/s sequential baseline, 1.5x)
+RESULT: REFERENCE-EXACT PASS (every request matches its single-seq reference)
+BENCH	device=cuda	B=4	N=8	tok_s=102.207	pass=true

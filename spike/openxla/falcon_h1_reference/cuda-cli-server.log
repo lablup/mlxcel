@@ -1,0 +1,17 @@
+cli-oracle40: starting CLI
+cli-oracle40: exit0, 40 tokens, 17.64s
+CLI/HF ORACLE: 40/40 TOKEN-EXACT PASS
+cli-ref-0: starting CLI
+cli-ref-0: exit0, 24 tokens, 1.27s
+cli-ref-1: starting CLI
+cli-ref-1: exit0, 24 tokens, 1.27s
+cli-ref-2: starting CLI
+cli-ref-2: exit0, 24 tokens, 1.27s
+cli-ref-3: starting CLI
+cli-ref-3: exit0, 24 tokens, 1.27s
+Server ready at http://127.0.0.1:36717; issuing four requests concurrently
+request0: text_exact=True counts_exact=True
+request1: text_exact=True counts_exact=True
+request2: text_exact=True counts_exact=True
+request3: text_exact=True counts_exact=True
+SERVER/CLI: 4/4 EXACT-TEXT AND TOKEN-COUNT PASS

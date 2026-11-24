@@ -41,3 +41,13 @@ scripts/rocm_gpu_guard.sh --hold -- scripts/xla/validate_arch.sh \
 ```
 
 The integration suite prints the selected device for real-checkpoint token parity. Keep the requested CLI and four concurrent server-completion checks as separate acceptance evidence; direct engine parity does not prove HTTP serving or chat-template/tokenization behavior.
+
+## Measured results (2026-11-25)
+
+At source head `205d0a3dd2d92eca2dbcba3dffcefba54e825eca`, pinned IREE `3.12.0rc20260721` passed the independent synthetic gate on both `local-task` and NVIDIA GB10 `cuda`: all three normalization modes, four unequal-length trajectories each, eight generated tokens each, per-step ragged logits within `3e-4` absolute error with matching argmax, and slot re-admission. Original Tiny90M engine generation matched all 40 committed HF fp32 oracle tokens on both devices. Focused emitter/configuration tests, all registered byte-exact goldens, every-family weight-layout agreement, 27 recurrent regression tests, five Nemotron-H tests, original-checkpoint shape validation, formatting, and narrow core-crate clippy passed. These are local results; HIP acceptance remains external.
+
+The CUDA CLI also matched the independent 40-token oracle with `--no-chat-template`, temperature zero, and printed token IDs. Four simultaneous `/v1/completions` requests then matched their separate 24-token CLI references in exact response text and prompt/completion token counts. The response intervals overlapped and the owned server process was reaped afterward. The HTTP API does not expose generated token IDs, so this HTTP result is text/count parity, not a direct HTTP token-ID observation. Command/environment and binary hashes are recorded in `falcon_h1_reference/cuda-cli-server-provenance.json`.
+
+The CUDA `xla_batch_bench` gate passed with batch 4, requests 8, maximum per-request budget 24, and context capacity 256: all 170 emitted tokens across staggered requests and reused slots were reference-exact. The local test-fast run measured 102.21 tokens/s batched versus 67.58 tokens/s sequential (1.5x); these are bounded acceptance measurements rather than release-build performance claims. The exact output is in `falcon_h1_reference/cuda-batch-b4-n8.log`.
+
+The final core-crate regression run passed 544 tests with 22 ignored and zero failures. The ignored real-checkpoint and synthetic IREE gates were executed separately as recorded above. `local-validation.json` summarizes the measured source and evidence boundaries.
