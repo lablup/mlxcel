@@ -386,15 +386,35 @@ fn require_llava_host_family(config: &VLMConfig) -> Result<(), HostPreprocessorE
 /// defaults applied, shared with the OpenXLA text graph and vision config so the
 /// host preprocessor and the device graph agree (#3366).
 fn resolve_llava_host_text_config(vlm_config: &VLMConfig) -> serde_json::Map<String, Value> {
+    #[cfg_attr(not(feature = "xla-backend"), allow(unused_mut))]
     let mut text_config = vlm_config
         .text_config
         .as_object()
         .cloned()
         .unwrap_or_default();
+    #[cfg(feature = "xla-backend")]
     if mlxcel_xla::is_llava_text_defaults_wrapper(Some(vlm_config.model_type.as_str())) {
         mlxcel_xla::apply_llava_text_config_defaults(&mut text_config);
     }
     text_config
+}
+
+/// The error for a required LLaVA `text_config` field the defaults table could
+/// not supply. Without the OpenXLA crate there is no table, so the message only
+/// names the field.
+fn llava_host_text_field_missing(
+    field: &str,
+    text_config: &serde_json::Map<String, Value>,
+) -> String {
+    #[cfg(feature = "xla-backend")]
+    {
+        mlxcel_xla::llava_text_field_missing(field, text_config)
+    }
+    #[cfg(not(feature = "xla-backend"))]
+    {
+        let _ = text_config;
+        format!("LLaVA text_config.{field} is required")
+    }
 }
 
 /// Load only the host-side components needed to prepare LLaVA embeddings for
@@ -484,7 +504,7 @@ pub(crate) fn load_llava_host_preprocessor(
         .and_then(Value::as_u64)
         .or_else(|| full_config.get("hidden_size").and_then(Value::as_u64))
         .ok_or_else(|| {
-            HostPreprocessorError::InvalidConfig(mlxcel_xla::llava_text_field_missing(
+            HostPreprocessorError::InvalidConfig(llava_host_text_field_missing(
                 "hidden_size",
                 &text_config,
             ))
@@ -577,7 +597,7 @@ pub(crate) fn load_llava_iree_host_preprocessor(
         .and_then(Value::as_u64)
         .or_else(|| full_config.get("hidden_size").and_then(Value::as_u64))
         .ok_or_else(|| {
-            HostPreprocessorError::InvalidConfig(mlxcel_xla::llava_text_field_missing(
+            HostPreprocessorError::InvalidConfig(llava_host_text_field_missing(
                 "hidden_size",
                 &text_config,
             ))
