@@ -22,11 +22,17 @@ runtime imports this file.
 
 Usage:
     mlx_lm_logit_trace.py MODEL_DIR TEXT_FILE [CHUNK_TOKENS=256] [MAX_CHUNKS=4]
-        [TOPK=8] [PREFILL=0] [--no-prefix-sharing] [--mlx-vlm] > reference.tsv
+        [TOPK=8] [PREFILL=0] [--no-prefix-sharing] [--mlx-vlm]
+        [--inkling2-mlx-community] > reference.tsv
 
 `--mlx-vlm` loads the checkpoint with mlx-vlm instead and traces its language
 model. It is for text checkpoints that only mlx-vlm implements, such as Hy4
 (`hy_v4`, #2354), and needs `mlx-vlm` in place of `mlx-lm`.
+
+`--inkling2-mlx-community` (implies `--mlx-vlm`) traces the mlx-community
+Inkling 2 4-bit export, which mlx-vlm cannot read as shipped: the export is
+rewritten into mlx-vlm's layout first by `scripts/inkling2_mlx_community_remap.py`
+(#3378), once, into a temporary directory that later runs reuse.
 
 Needs `mlx` and `mlx-lm` (with the `mlx-cuda-13` wheel on a CUDA host) plus
 `tokenizers` and `numpy`. The tokenizer, the BOS anchor and the chunk plan
@@ -145,7 +151,15 @@ def main(argv: list[str] | None = None) -> int:
         help="load with mlx-vlm and trace its language model (text checkpoints only mlx-vlm "
         "implements, such as hy_v4)",
     )
+    ap.add_argument(
+        "--inkling2-mlx-community",
+        action="store_true",
+        help="trace the mlx-community Inkling 2 4-bit export through the committed remap "
+        "(implies --mlx-vlm)",
+    )
     args = ap.parse_args(argv)
+    if args.inkling2_mlx_community:
+        args.mlx_vlm = True
 
     chunk_tokens = usize_arg(args.chunk_tokens, 256)
     max_chunks = usize_arg(args.max_chunks, 4)
@@ -193,7 +207,13 @@ def main(argv: list[str] | None = None) -> int:
             # Load lazily and evaluate the parameters in slices: one eval over
             # a 400 GB checkpoint is a single Metal command buffer, which hits
             # the GPU watchdog timeout (seen on Hy4, #2354).
-            language_model = load_model(model_dir, lazy=True).language_model
+            load_dir = model_dir
+            if args.inkling2_mlx_community:
+                from inkling2_mlx_community_remap import prepare_model_dir
+
+                load_dir = prepare_model_dir(model_dir)
+                log(f"mlx-community export remapped for mlx-vlm at {load_dir}")
+            language_model = load_model(load_dir, lazy=True).language_model
             from mlx.utils import tree_flatten
 
             params = tree_flatten(language_model.parameters())
