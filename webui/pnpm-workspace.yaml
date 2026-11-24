@@ -7,4 +7,4 @@ allowBuilds:
 # @astryxdesign/lab peers on a core canary; without this the lab Drawer runs on a second
 # copy of @astryxdesign/core with its own theme and layer contexts.
 overrides:
-  "@astryxdesign/lab>@astryxdesign/core": "0.7.0"
+  "@astryxdesign/lab>@astryxdesign/core": "0.7.11"

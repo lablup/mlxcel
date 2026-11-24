@@ -37,7 +37,8 @@ describe('published ui-common adapters', () => {
     const clicked = vi.fn();
     render(<><Button busy onClick={clicked}>Wait</Button><IconButton busy icon="close" label="Close" onClick={clicked} /></>);
     for (const button of host.querySelectorAll('button')) {
-      expect(button.disabled).toBe(true); expect(button.getAttribute('aria-busy')).toBe('true');
+      // Astryx 0.7.11 marks a busy-only button aria-disabled, not native disabled, so it keeps focus.
+      expect(button.disabled).toBe(false); expect(button.getAttribute('aria-disabled')).toBe('true'); expect(button.getAttribute('aria-busy')).toBe('true');
       act(() => button.click());
     }
     expect(clicked).not.toHaveBeenCalled();
