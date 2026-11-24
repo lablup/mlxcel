@@ -624,6 +624,18 @@ pub trait LanguageModel {
         None
     }
 
+    /// The embedding, `embed_norm`, LM head and shape an Inkling 2 target
+    /// lends its bundled DSpark drafter (issue #3374). `None` for every other
+    /// family, which the drafter's bind refuses by name.
+    ///
+    /// Used by: `drafter::inkling2_dspark::Inkling2DsparkDraftModel` (bind and
+    /// `validate_target_compat`); implemented by Inkling 2 and its VL wrapper.
+    fn inkling2_dspark_binding(
+        &self,
+    ) -> Option<crate::drafter::inkling2_dspark::Inkling2DsparkBinding> {
+        None
+    }
+
     /// Called once after prefill completes and before decode starts.
     /// Used by models that need to adjust internal state between phases.
     ///

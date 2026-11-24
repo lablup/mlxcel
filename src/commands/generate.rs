@@ -2178,15 +2178,11 @@ pub(super) fn run_generation_mode(
                 );
             }
             // issue #1351: a DFlash drafter paired with a target that has an
-            // offline DFlash arm (Laguna), explicit or auto-detected alike.
+            // offline DFlash arm (Laguna, Inkling 2), explicit or auto-detected
+            // alike.
+            // The multimodal refusal is per target there: Inkling 2 (#3374)
+            // prefills an image prompt from its merged embeddings.
             OfflineDraftRoute::Dflash => {
-                if vlm_embeddings.is_some() {
-                    return Err(anyhow!(
-                        "--draft-kind dflash does not support multimodal input in the offline \
-                         `mlxcel generate` path; rerun with a text-only prompt, or omit \
-                         --draft-model"
-                    ));
-                }
                 return super::generate_dflash::run_offline_dflash(
                     model,
                     draft_model_path,
@@ -2195,6 +2191,7 @@ pub(super) fn run_generation_mode(
                     sampling_config,
                     block_size as usize,
                     token_bias,
+                    vlm_embeddings,
                 );
             }
             // #2757: an ordinary full model drafting on the engine's

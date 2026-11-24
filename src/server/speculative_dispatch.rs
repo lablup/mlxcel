@@ -409,6 +409,24 @@ impl SpeculativeDispatch {
         // - any other kind (`InternalMtp`, which no drafter `model_type` maps
         //   to, or a future `#[non_exhaustive]` variant) has no server-side
         //   round loop and is refused at startup.
+        // The Inkling 2 bundled DSpark (issue #3374) serves 2..=block_size
+        // verify rows; refuse a wider or narrower override at startup rather
+        // than on every request.
+        if resolved_kind == DrafterKind::Dflash
+            && mlxcel_core::drafter::inkling2_dspark::is_inkling2_dspark_dir(&draft_model_path)
+        {
+            let config = mlxcel_core::drafter::inkling2_dspark::Inkling2DsparkConfig::from_dir(
+                &draft_model_path,
+            )
+            .map_err(|message| SpeculativeDispatchError::DrafterConfig {
+                path: draft_model_path.clone(),
+                message,
+            })?;
+            if let Some(message) = config.verify_width_error(block_size.width as usize) {
+                return Err(SpeculativeDispatchError::InvalidKind { message });
+            }
+        }
+
         match resolved_kind {
             DrafterKind::Mtp => Ok(Self::Mtp {
                 draft_model_path,

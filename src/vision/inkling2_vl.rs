@@ -192,6 +192,12 @@ impl LanguageModel for Inkling2VlModel {
         Some(self.text.normalized_input_embeddings(input_ids))
     }
 
+    fn inkling2_dspark_binding(
+        &self,
+    ) -> Option<mlxcel_core::drafter::inkling2_dspark::Inkling2DsparkBinding> {
+        LanguageModel::inkling2_dspark_binding(&self.text)
+    }
+
     fn reset_runtime_state(&self) {
         LanguageModel::reset_runtime_state(&self.text);
     }
