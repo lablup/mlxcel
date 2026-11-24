@@ -19,9 +19,9 @@
 //! (`mlx_vlm/models/inkling2/language.py`, MIT).
 //!
 //! The expert matvec runs through [`expert_projections`] (the gather path),
-//! except inside a short speculative verify forward of a looped model, where
-//! the grouped Metal kernel (mlx-vlm `grouped_experts.py`, issue #3359; gate
-//! in `super::kernels`) decodes each expert's weights once for all its routes.
+//! except inside a short speculative verify forward, where the grouped Metal
+//! kernel (mlx-vlm `grouped_experts.py`, issue #3359; gate in
+//! `super::kernels`) decodes each expert's weights once for all its routes.
 
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
@@ -38,8 +38,8 @@ pub struct Inkling2Moe {
     experts: SwitchGLU,
     top_k: i32,
     route_scale: f32,
-    /// Grouped verify kernel (issue #3359): a looped model whose three planes
-    /// the kernel decodes, kernels on at load.
+    /// Grouped verify kernel (issue #3359): three planes the kernel decodes,
+    /// kernels on at load. Mini and Small alike since issue #3410.
     grouped: bool,
 }
 
@@ -167,7 +167,7 @@ impl Inkling2Moe {
             beta: config.mlp_gate_softcap,
             linear_beta: Some(config.mlp_up_softcap),
         });
-        let grouped = super::kernels::loop_kernels_wanted(config, super::kernels::enabled())
+        let grouped = super::kernels::grouped_experts_wanted(config, super::kernels::enabled())
             && super::kernels::grouped_experts_supported(&experts_glu);
         Ok(Self {
             gate_weight: mlxcel_core::astype(gate_weight, dtype::FLOAT32),

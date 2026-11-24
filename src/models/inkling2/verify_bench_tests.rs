@@ -26,7 +26,8 @@
 //! ```
 //!
 //! It reads `models/inkling-2-mini` (override with `INKLING2_VERIFY_MODEL`)
-//! and skips when the checkpoint is absent. Each width is also timed as a
+//! and skips when the checkpoint is absent. `INKLING2_VERIFY_WIDTHS` takes a
+//! comma-separated width list (default `4,8`); width 1 times a decode step. Each width is also timed as a
 //! plain multi-token forward (no speculative scope), which runs the other two
 //! kernels but not the grouped one, so the kernels-on arm isolates the
 //! grouped kernel's share. The printed argmax digest of every forward must
@@ -40,6 +41,14 @@ use mlxcel_core::generate::LanguageModel;
 use super::Inkling2Model;
 
 const WIDTHS: [i32; 2] = [4, 8];
+
+fn widths() -> Vec<i32> {
+    std::env::var("INKLING2_VERIFY_WIDTHS")
+        .ok()
+        .map(|v| v.split(',').filter_map(|w| w.trim().parse().ok()).collect())
+        .filter(|w: &Vec<i32>| !w.is_empty())
+        .unwrap_or_else(|| WIDTHS.to_vec())
+}
 const WARMUP: usize = 3;
 const ROUNDS: usize = 30;
 
@@ -52,12 +61,15 @@ fn verify_round_timing() {
         eprintln!("skipping: {path} is not present");
         return;
     }
+    // The wired limit the CLI sets: without it a checkpoint the size of
+    // Small (363 GiB) is not kept resident and a forward takes seconds.
+    let _ = crate::execution::runtime::initialize_runtime();
     let (model, _) = Inkling2Model::load(&path).unwrap();
     let mut caches = model.make_caches();
     let prompt: Vec<i32> = (0..96).map(|i| 1000 + (i * 37) % 5000).collect();
     let input = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
     mlxcel_core::eval(&model.forward(&input, &mut caches, None));
-    for (width, verify) in WIDTHS.iter().flat_map(|&w| [(w, true), (w, false)]) {
+    for (width, verify) in widths().into_iter().flat_map(|w| [(w, true), (w, false)]) {
         let block: Vec<i32> = (0..width).map(|i| 2000 + i * 11).collect();
         let input = mlxcel_core::from_slice_i32(&block, &[1, width]);
         let mut times = Vec::with_capacity(ROUNDS);

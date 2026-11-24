@@ -43,6 +43,9 @@ fn verify_block_vs_chain_per_visit() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(8);
     let verify = std::env::var("INKLING2_DIAG_VERIFY").map_or(true, |v| v != "0");
+    // The wired limit the CLI sets: without it a checkpoint the size of
+    // Small (363 GiB) is not kept resident and a forward takes seconds.
+    let _ = crate::execution::runtime::initialize_runtime();
     let (model, _) = Inkling2Model::load(&path).unwrap();
     report(&model, &path, width, verify);
 }

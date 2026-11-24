@@ -30,12 +30,15 @@
 //! The scheduler-owned per-sequence state is never touched: a burst builds
 //! its own visit caches.
 
+use std::ops::Range;
+
 use mlxcel_core::cache::DecodeLookaheadAppendScope;
 use mlxcel_core::drafter::dflash::SpeculativeTarget;
 use mlxcel_core::drafter::inkling2_dspark::{Inkling2DsparkBinding, Inkling2TargetShape};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::inkling_layer::InklingLayerCache;
 use mlxcel_core::layers::{Linear, RMSNorm, UnifiedLinear};
+use mlxcel_core::prefill_plan::{PrefillPlan, PrefillSplits};
 use mlxcel_core::sampling::{TokenBiasMap, apply_token_bias};
 use mlxcel_core::{MlxArray, UniquePtr, concatenate_many};
 
@@ -252,15 +255,11 @@ pub(crate) fn concat_captures(verify_out: &Inkling2VerifyOutput) -> UniquePtr<Ml
     concatenate_many(&slabs, -1)
 }
 
-/// The text model as a DFlash target; it suppresses whatever its own
-/// `output_suppressed_token_ids` names (nothing today).
+/// The speculative prompt prefill, cut the way classic decode cuts it.
 impl Inkling2Model {
-    /// The prompt goes through in the chunks classic decode prefills with
-    /// (`MLXCEL_PREFILL_CHUNK`, default 2048), so a long prompt leaves the
-    /// same caches, and the drafter-on run the same text, as classic decode
-    /// (issue #3280); one forward over a longer prompt sums its attention in
-    /// another order. Only the last chunk's logits are kept (the round loop
-    /// samples the last row); the captures are concatenated.
+    /// The CLI prefill: classic decode's chunks (`MLXCEL_PREFILL_CHUNK`,
+    /// default 2048), so a long prompt leaves the same caches, and the
+    /// drafter-on run the same text, as classic decode (issue #3280).
     pub(crate) fn prefill_speculative(
         &self,
         verify_input: &MlxArray,
@@ -268,9 +267,70 @@ impl Inkling2Model {
         capture_layer_ids: &[usize],
         suppressed: &TokenBiasMap,
     ) -> Inkling2VerifyOutput {
-        let length = mlxcel_core::array_shape(verify_input)[1];
-        let chunk = mlxcel_core::prefill_plan::prefill_chunk_len() as i32;
-        if chunk == 0 || length <= chunk {
+        let chunk = mlxcel_core::prefill_plan::prefill_chunk_len();
+        let ranges = self.classic_prefill_ranges(verify_input, chunk, PrefillSplits::NONE);
+        self.prefill_speculative_ranges(
+            verify_input,
+            caches,
+            capture_layer_ids,
+            suppressed,
+            &ranges,
+        )
+    }
+
+    /// The server burst's prefill: the scheduler's classic partition, its
+    /// `--prefill-chunk-size` chunks and the prompt-cache snapshot splits in
+    /// `boundary` (issue #3410). A server started with a non-default chunk
+    /// size otherwise left caches classic decode never builds for a prompt
+    /// longer than one chunk.
+    ///
+    /// Used by: the server DFlash burst (`DFlashTargetModel::prefill_burst`).
+    pub fn prefill_speculative_planned(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [InklingLayerCache],
+        capture_layer_ids: &[usize],
+        suppressed: &TokenBiasMap,
+        chunk: usize,
+        boundary: PrefillSplits,
+    ) -> Inkling2VerifyOutput {
+        let ranges = self.classic_prefill_ranges(verify_input, chunk, boundary);
+        self.prefill_speculative_ranges(
+            verify_input,
+            caches,
+            capture_layer_ids,
+            suppressed,
+            &ranges,
+        )
+    }
+
+    /// The pieces a classic token prefill of `verify_input` forwards. No
+    /// tile padding: the speculative forward pads nothing.
+    fn classic_prefill_ranges(
+        &self,
+        verify_input: &MlxArray,
+        chunk: usize,
+        boundary: PrefillSplits,
+    ) -> Vec<Range<usize>> {
+        let length = mlxcel_core::array_shape(verify_input)[1].max(0) as usize;
+        let caps = mlxcel_core::prefill_plan::PrefillCaps::for_model(self, false);
+        PrefillPlan::with_prefix(length, 0, boundary, chunk, caps).ranges()
+    }
+
+    /// One forward per range, each evaluated before the next builds on its
+    /// caches, as the classic chunked prefill does; one forward over a longer
+    /// prompt sums its attention in another order. Only the last range's
+    /// logits are kept (the round loop samples the last row); the captures
+    /// are concatenated.
+    fn prefill_speculative_ranges(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [InklingLayerCache],
+        capture_layer_ids: &[usize],
+        suppressed: &TokenBiasMap,
+        ranges: &[Range<usize>],
+    ) -> Inkling2VerifyOutput {
+        if ranges.len() <= 1 {
             return self.forward_speculative(
                 verify_input,
                 caches,
@@ -281,14 +341,15 @@ impl Inkling2Model {
         }
         let mut parts: Vec<Vec<UniquePtr<MlxArray>>> = Vec::new();
         let mut logits = None;
-        let mut start = 0;
-        while start < length {
-            let end = (start + chunk).min(length);
-            let piece = mlxcel_core::utils::slice_axis(verify_input, 1, start, end);
+        for range in ranges {
+            let piece = mlxcel_core::utils::slice_axis(
+                verify_input,
+                1,
+                range.start as i32,
+                range.end as i32,
+            );
             let out =
                 self.forward_speculative(&piece, caches, capture_layer_ids, false, suppressed);
-            // Materialize the chunk before the next one builds on its caches,
-            // as the classic chunked prefill does.
             let mut live: Vec<*const MlxArray> = out
                 .hidden_states
                 .iter()
@@ -300,7 +361,6 @@ impl Inkling2Model {
             unsafe { mlxcel_core::eval_all(&live) };
             parts.push(out.hidden_states);
             logits = Some(out.logits);
-            start = end;
         }
         let captures = parts[0].len();
         let hidden_states = (0..captures)
@@ -316,6 +376,8 @@ impl Inkling2Model {
     }
 }
 
+/// The text model as a DFlash target; it suppresses whatever its own
+/// `output_suppressed_token_ids` names (nothing today).
 impl SpeculativeTarget for Inkling2Model {
     type Cache = InklingLayerCache;
     type VerifyOut = Inkling2VerifyOutput;
@@ -351,6 +413,12 @@ impl SpeculativeTarget for Inkling2Model {
     ) -> Self::VerifyOut {
         let suppressed = suppression_map(&LanguageModel::output_suppressed_token_ids(self));
         self.prefill_speculative(verify_input, caches, capture_layer_ids, &suppressed)
+    }
+
+    fn exact_at_every_verify_width(&self) -> bool {
+        // Every product is row-invariant for 1 to 16 rows (#3280), so any
+        // width up to the drafter's 8, a single row included, is exact.
+        true
     }
 
     fn rollback_partial(
@@ -416,6 +484,10 @@ impl SpeculativeTarget for crate::vision::Inkling2VlModel {
         let suppressed = suppression_map(&LanguageModel::output_suppressed_token_ids(self));
         self.text
             .prefill_speculative(verify_input, caches, capture_layer_ids, &suppressed)
+    }
+
+    fn exact_at_every_verify_width(&self) -> bool {
+        self.text.exact_at_every_verify_width()
     }
 
     fn rollback_partial(

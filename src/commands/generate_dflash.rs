@@ -409,11 +409,12 @@ where
     // (MLX evaluates lazily); the device work of a round is synchronized in
     // `verify_sync_ms`, so the three together are where a round's time goes.
     println!(
-        "DFlash: rounds={} proposed={} accepted={} mean_accepted_length={mean_accepted:.2} \
+        "DFlash: rounds={} classic_steps={} proposed={} accepted={} mean_accepted_length={mean_accepted:.2} \
          acceptance_rate={:.3} emitted_per_verify={:.2} draft_ms={:.1} verify_ms={:.1} \
          verify_graph_ms={:.1} verify_sync_ms={:.1} hidden_concat_ms={:.1} walk_ms={:.1} \
          rollback_ms={:.1} decode_ms={:.1}",
         d.rounds,
+        d.classic_steps,
         d.proposed_tokens,
         d.accepted_tokens,
         d.acceptance_rate(),
