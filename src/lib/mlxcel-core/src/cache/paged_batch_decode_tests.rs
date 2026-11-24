@@ -611,3 +611,48 @@ fn an_unservable_batch_declines_without_touching_the_pool() {
     assert_eq!(states[0].borrow().layer(0).unwrap().len, 0);
     assert_eq!(pool.borrow().allocated_block_count(), 0);
 }
+
+/// The fused read hands Q to the kernel in its own dtype (no cast kernel per
+/// launch). Widening fp16 to f32 is exact, so the result is the same bytes as
+/// launching with Q cast to f32 first and casting the f32 result back.
+#[test]
+fn an_fp16_query_reads_the_same_bytes_as_its_f32_cast() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
+    let (q_heads, kv_heads, head_dim) = (4i32, 1i32, 256i32);
+    let (pool, states) = fresh_pool(1, kv_heads as usize, head_dim as usize);
+    let mut rng = Rng::new(0x3256_0003);
+    let prompts = [4096usize, 4100];
+    for (state, &len) in states.iter().zip(&prompts) {
+        let mut cache = KVCache::new_paged(pool.clone(), state.clone(), 0);
+        let k = random_array(&mut rng, &[1, kv_heads, len as i32, head_dim]);
+        let v = random_array(&mut rng, &[1, kv_heads, len as i32, head_dim]);
+        cache.update(k, v);
+    }
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    for batch in [1usize, 2] {
+        let q = random_array(&mut rng, &[batch as i32, q_heads, 1, head_dim]);
+        let q_f32 = ffi::astype(&q, dtype::FLOAT32);
+        let borrowed: Vec<_> = states[..batch].iter().map(|s| s.borrow()).collect();
+        let refs: Vec<&PagedSequenceState> = borrowed.iter().map(|s| &**s).collect();
+        let mut pool = pool.borrow_mut();
+        let (half, _) = pool
+            .paged_decode_batched(&q, &refs, 0, scale)
+            .expect("launch");
+        let (wide, _) = pool
+            .paged_decode_batched(&q_f32, &refs, 0, scale)
+            .expect("launch");
+        let half = half.expect("fused read served the fp16 query");
+        let wide = ffi::astype(
+            &wide.expect("fused read served the f32 query"),
+            dtype::FLOAT16,
+        );
+        ffi::eval(&half);
+        ffi::eval(&wide);
+        assert_eq!(ffi::array_dtype(&half), dtype::FLOAT16);
+        assert_eq!(
+            ffi::array_to_raw_bytes(&half),
+            ffi::array_to_raw_bytes(&wide),
+            "batch {batch}: fp16 Q and its f32 cast gave different bytes"
+        );
+    }
+}

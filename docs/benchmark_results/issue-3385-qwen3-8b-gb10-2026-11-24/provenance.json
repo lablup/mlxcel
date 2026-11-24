@@ -1,0 +1,14 @@
+{
+  "server-main": {
+    "path": "/tmp/claude-1000/-home-inureyes-Development-mlxcel-2/bf022a4d-fe12-4967-966d-0fbe77ddba67/scratchpad/split/server-main",
+    "sha256": "44a603027c3a37600240d3ffcf729279d902a8fc19415ea5231a8710732b716b"
+  },
+  "server-branch": {
+    "path": "/tmp/claude-1000/-home-inureyes-Development-mlxcel-2/bf022a4d-fe12-4967-966d-0fbe77ddba67/scratchpad/split/server-branch",
+    "sha256": "f14950361c8043e9f7b00bbc7ca813426d639c9d61bebbb485bd9e480576f44c"
+  },
+  "server-budget": {
+    "path": "/tmp/claude-1000/-home-inureyes-Development-mlxcel-2/bf022a4d-fe12-4967-966d-0fbe77ddba67/scratchpad/split/server-budget",
+    "sha256": "5a05bde9b29e0af9cac52a6654dac080610e11a188ec66e22240bf0d450ebce9"
+  }
+}
