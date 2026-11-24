@@ -262,6 +262,7 @@ pub(crate) fn run_indic_ocr_pipeline(args: &GenerateArgs) -> Result<()> {
                 video_frame_groups: Vec::new(),
                 videos: 0,
                 audios: 0,
+                reasoning_effort: None,
             },
         )?;
         let mut prompt_tokens: Vec<i32> = tokenizer

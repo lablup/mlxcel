@@ -1652,6 +1652,75 @@ pub(crate) fn compile_one<S: AsRef<str>>(
     Ok(vmfb_path)
 }
 
+/// The `iree-compile` flags every member of a runtime bundle shares: the
+/// device target, the CUDA PTX target when the graph embeds one of the native
+/// kernels, and the ROCm tuning spec for the Dense graphs on `hip`.
+fn bundle_compile_flags(
+    device: &str,
+    cfg: &RuntimeConfig,
+    embeds_cuda_ptx: bool,
+    cache: &Path,
+) -> Result<Vec<String>, String> {
+    let mut flags = target_flags(device)?;
+    // Both embedded CUDA kernels are PTX built for compute_80, so a graph that
+    // carries one is compiled for the same target (issue #2905 for the native
+    // 4-bit GEMV).
+    if embeds_cuda_ptx {
+        flags.push(format!(
+            "--iree-cuda-target=sm_{}",
+            crate::native_qmv::CUDA_MIN_SM
+        ));
+    }
+    // issue #2873: the ROCm lowering tuning spec for the narrow single-row
+    // vecmats (any K, 128 <= N <= 8192), the wide long-K fallback (N >= 8193,
+    // K >= 4096) and, since issues #2921 and #2956, the grouped-query decode
+    // score and context contractions. Gemma3n has its own emitters (some with
+    // native qmv) and was not measured with it, so it stays on the compiler
+    // defaults.
+    if device == "hip" && matches!(cfg, RuntimeConfig::Dense(_)) {
+        flags.push(crate::tuning::rocm_tuning_spec_flag_in(cache)?);
+    }
+    Ok(flags)
+}
+
+/// IREE's aggressive dispatch fusion, enabled for the Dense decode compile.
+const AGGRESSIVE_FUSION_FLAG: &str = "--iree-dispatch-creation-enable-aggressive-fusion";
+
+/// The decode compile's flags: the shared bundle `flags`, plus aggressive
+/// fusion for the Dense decode graph.
+///
+/// issue #3043: the Dense decode step is a long chain of small elementwise and
+/// reduction dispatches whose cost is dominated by per-dispatch launch latency
+/// (about 2.5 us each on gfx1151, 0.79 ms per step in total). Aggressive fusion
+/// removes two dispatches per layer on this graph (309 to 277) without changing
+/// the results, so the Dense decode compile turns it on and the prefill
+/// compiles keep the defaults.
+///
+/// issue #3363: the Gemma3n decode stays on the compiler defaults. Its AltUp
+/// magnitude and the RMSNorm that follows square the same activation, so IREE
+/// shares one `x * x` between the plain sum the RMSNorm reduces and the
+/// bf16-rounded copy the magnitude consumes. Aggressive fusion pulls that
+/// multi-use producer into the RMSNorm reduction dispatch as a second,
+/// unreduced result (`main_dispatch_10_reduction_2048_f32` on gemma-3n-e2b),
+/// and the CUDA `VectorDistribute` pipeline cannot distribute that extra store,
+/// so iree-compile fails with `'func.func' op failed to distribute` (IREE
+/// 3.12.0rc20260721; local-task compiles it). The flag was only ever measured
+/// on the Dense graph, so the exemption covers the Gemma3n family on every
+/// device. Revisit it on an IREE upgrade by compiling the Gemma3n decode with
+/// the flag (`decode_flags_tests::gemma3n_cuda_decode_compiles`).
+fn decode_compile_flags(cfg: &RuntimeConfig, flags: &[String]) -> Vec<String> {
+    let mut decode_flags = flags.to_vec();
+    match cfg {
+        RuntimeConfig::Dense(_) => decode_flags.push(AGGRESSIVE_FUSION_FLAG.to_string()),
+        RuntimeConfig::Gemma3n(_) => {}
+    }
+    decode_flags
+}
+
+#[cfg(test)]
+#[path = "iree_decode_flags_tests.rs"]
+mod decode_flags_tests;
+
 /// Compatible entry modules loaded atomically into one runtime session.
 struct CompiledBundle {
     prefill_vmfb: PathBuf,
@@ -1689,34 +1758,9 @@ fn compile_bundle(
             iree_compile.display()
         ));
     }
-    let mut flags = target_flags(device)?;
-    // Both embedded CUDA kernels are PTX built for compute_80, so a graph that
-    // carries one is compiled for the same target (issue #2905 for the native
-    // 4-bit GEMV).
-    if gemma3n_qmv || native_cuda_ptx {
-        flags.push(format!(
-            "--iree-cuda-target=sm_{}",
-            crate::native_qmv::CUDA_MIN_SM
-        ));
-    }
     let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Vmfb)?;
-    // issue #2873: the ROCm lowering tuning spec for the narrow single-row
-    // vecmats (any K, 128 <= N <= 8192), the wide long-K fallback (N >= 8193,
-    // K >= 4096) and, since issues #2921 and #2956, the grouped-query decode
-    // score and context contractions. Gemma3n has its own emitters (some with
-    // native qmv) and was not measured with it, so it stays on the compiler
-    // defaults.
-    if device == "hip" && matches!(cfg, RuntimeConfig::Dense(_)) {
-        flags.push(crate::tuning::rocm_tuning_spec_flag_in(&cache)?);
-    }
-    // issue #3043: the decode step is a long chain of small elementwise and
-    // reduction dispatches whose cost is dominated by per-dispatch launch
-    // latency (about 2.5 us each on gfx1151, 0.79 ms per step in total).
-    // Aggressive fusion removes two dispatches per layer on this graph (309 to
-    // 277) without changing the results, so the decode compile turns it on and
-    // the prefill compiles keep the defaults.
-    let mut decode_flags = flags.clone();
-    decode_flags.push("--iree-dispatch-creation-enable-aggressive-fusion".to_string());
+    let flags = bundle_compile_flags(device, cfg, gemma3n_qmv || native_cuda_ptx, &cache)?;
+    let decode_flags = decode_compile_flags(cfg, &flags);
     let pre = compile_one(
         &iree_compile,
         prefill_mlir,

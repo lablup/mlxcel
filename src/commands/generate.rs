@@ -45,6 +45,7 @@ use mlxcel::{
     server::chat_template::{
         ChatMessage, ChatTemplateProcessor, flatten_template_text, template_rejection_message,
     },
+    server::chat_template_kwargs::ChatTemplateKwargs,
     tokenizer::load_tokenizer,
     vision::merge::InputEmbeddings,
     vlm_runtime::prepared_embedding_refs,
@@ -494,21 +495,111 @@ fn resolve_cli_pipeline_num_layers(model_dir: &Path) -> Result<usize> {
     resolve_in_process_pipeline_num_layers(model_dir).map_err(|err| anyhow!("{err}"))
 }
 
+/// What the KV banner counts layers over: the layer count and, for a loaded
+/// model that reports it, what each cache really stores (issue #3378).
+#[derive(Debug, Clone, Copy)]
+struct BannerLayers<'a> {
+    num_layers: usize,
+    storage_modes: Option<&'a [Option<KVCacheMode>]>,
+}
+
+/// Print the `KV cache mode:` line (and its `applied to N of M layers` suffix).
+fn print_kv_cache_mode_banner(
+    args: &GenerateArgs,
+    requested_kv_cache_mode: KVCacheMode,
+    kv_cache_mode: KVCacheMode,
+    layers: BannerLayers<'_>,
+) {
+    let kv_cache_mode_suffix =
+        kv_cache_mode_banner_suffix(requested_kv_cache_mode, kv_cache_mode, layers);
+
+    match kv_cache_mode {
+        KVCacheMode::Int8 => {
+            // The same flag selects two codecs: the affine group-64 latent on
+            // an absorbed MLA cache (issue #3155), per-token absmax elsewhere.
+            let codec = match mlxcel::cli::mla_latent_option::model_latent_bits(
+                kv_cache_mode,
+                std::path::Path::new(&args.model.model),
+            ) {
+                Some(bits) => mlxcel::cli::mla_latent_option::latent_codec_label(bits),
+                None => "per-token absmax quantization".to_string(),
+            };
+            println!("KV cache mode: int8 ({codec}){kv_cache_mode_suffix}");
+        }
+        KVCacheMode::Turbo4Asym => {
+            println!(
+                "KV cache mode: fp16+turbo4 (asymmetric Fp16-K + Turbo4-V, ~26% KV savings){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Turbo4 => {
+            // Reached only when the family is on
+            // `ALLOWED_SYMMETRIC_TURBO_FAMILIES`: a non-allowlisted request was
+            // already resolved to Turbo4Asym above, which is why this line no
+            // longer describes a fallback that had never been performed.
+            println!(
+                "KV cache mode: turbo4 (symmetric Turbo4-K + Turbo4-V, ~73% KV savings; \
+                 this family is on the symmetric-Turbo4 allowlist){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Turbo4Delegated => {
+            println!(
+                "KV cache mode: turbo4-delegated (Fp16-K + Turbo4-V with hot/cold split, \
+                 ~26% KV savings + 97-100% FP16 decode speed at long context){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Turbo3Asym => {
+            println!(
+                "KV cache mode: fp16+turbo3 (asymmetric Fp16-K + Turbo3-V, \
+                 ~5.1x total KV savings){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Fp16 => {
+            // Fp16 is the default and normally announces nothing. When it is
+            // the *result* of a substitution the operator asked for something
+            // else, so name the mode actually in force (issue #1350). The
+            // reason was printed to stderr by
+            // `resolve_and_announce_kv_cache_mode`.
+            println!("KV cache mode: fp16{kv_cache_mode_suffix}");
+        }
+    }
+}
+
 fn kv_cache_mode_banner_suffix(
     requested: KVCacheMode,
     effective: KVCacheMode,
-    num_layers: usize,
+    layers: BannerLayers<'_>,
 ) -> String {
-    let boundary = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
-    let modes = mlxcel_core::cache::turbo::resolve_layer_modes(effective, num_layers, boundary);
-    let applied = modes.iter().filter(|mode| **mode == effective).count();
+    // A model that reports what each cache stores is counted by that table, one
+    // entry per cache it keeps (Inkling 2 keeps one per layer visit, 48 for
+    // Mini, not the 24 physical layers in `config.json`), and a cache that
+    // stores FP16 under a quantized request does not count as applied.
+    let (applied, total) = match layers.storage_modes {
+        Some(stored) => (
+            stored
+                .iter()
+                .filter(|mode| **mode == Some(effective))
+                .count(),
+            stored.len(),
+        ),
+        None => {
+            let boundary = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
+            let modes = mlxcel_core::cache::turbo::resolve_layer_modes(
+                effective,
+                layers.num_layers,
+                boundary,
+            );
+            (
+                modes.iter().filter(|mode| **mode == effective).count(),
+                modes.len(),
+            )
+        }
+    };
     if requested != effective {
         format!(
-            " (requested {requested}; effective {effective}; applied to {applied} of {} layers)",
-            modes.len()
+            " (requested {requested}; effective {effective}; applied to {applied} of {total} layers)"
         )
     } else {
-        format!(" (applied to {applied} of {} layers)", modes.len())
+        format!(" (applied to {applied} of {total} layers)")
     }
 }
 
@@ -692,22 +783,40 @@ fn template_rejection_cli_error(err: &anyhow::Error) -> Option<anyhow::Error> {
         .map(|message| anyhow!("Chat template rejected the request: {message}"))
 }
 
+/// The template kwargs the CLI sets for one render: `--reasoning-effort`, run
+/// through the server's own request-to-kwargs resolution (issue #3378). Empty
+/// when the flag is absent, which keeps every render byte-identical.
+fn cli_template_kwargs(
+    processor: &ChatTemplateProcessor,
+    media: &CliPromptMedia,
+) -> Result<ChatTemplateKwargs> {
+    match media.reasoning_effort.as_deref() {
+        Some(level) => {
+            mlxcel::server::in_process::reasoning_effort::cli_template_kwargs(processor, level)
+        }
+        None => Ok(ChatTemplateKwargs::new()),
+    }
+}
+
 fn apply_user_chat_template(
     processor: &ChatTemplateProcessor,
     user_prompt: &str,
+    kwargs: &ChatTemplateKwargs,
 ) -> Result<String> {
     let messages = [ChatMessage {
         role: "user".to_string(),
         content: user_prompt.to_string(),
     }];
 
-    processor.apply(&messages, None).or_else(|err| {
-        if let Some(rejection) = template_rejection_cli_error(&err) {
-            Err(rejection)
-        } else {
-            Ok(user_prompt.to_string())
-        }
-    })
+    processor
+        .apply_with_kwargs(&messages, None, kwargs)
+        .or_else(|err| {
+            if let Some(rejection) = template_rejection_cli_error(&err) {
+                Err(rejection)
+            } else {
+                Ok(user_prompt.to_string())
+            }
+        })
 }
 
 /// Where one clip the video-frames fallback turned into stills sits in the
@@ -742,6 +851,9 @@ pub(crate) struct CliPromptMedia {
     pub(crate) videos: usize,
     /// `--audio` inputs.
     pub(crate) audios: usize,
+    /// `--reasoning-effort`, normalized (issue #3378). Rendered through the
+    /// template's `reasoning_effort` kwarg; `None` keeps the template default.
+    pub(crate) reasoning_effort: Option<String>,
 }
 
 impl CliPromptMedia {
@@ -805,8 +917,9 @@ fn apply_vlm_chat_template(
     let emit_image = processor.supports_image_content();
     let emit_video = media.videos > 0 && processor.supports_video_content();
     let emit_audio = media.audios > 0 && processor.supports_audio_content();
+    let kwargs = cli_template_kwargs(processor, media)?;
     if !(emit_image || processor.supports_video_content() || processor.supports_audio_content()) {
-        return apply_user_chat_template(processor, &media.flattened_text(user_prompt));
+        return apply_user_chat_template(processor, &media.flattened_text(user_prompt), &kwargs);
     }
 
     // Build a multimodal content list:
@@ -868,14 +981,16 @@ fn apply_vlm_chat_template(
         "content": content_parts,
     }]);
 
-    processor.apply_raw(&messages, None).or_else(|err| {
-        if let Some(rejection) = template_rejection_cli_error(&err) {
-            Err(rejection)
-        } else {
-            // Fallback: text-only template
-            apply_user_chat_template(processor, &media.flattened_text(user_prompt))
-        }
-    })
+    processor
+        .apply_raw_with_kwargs(&messages, None, &kwargs)
+        .or_else(|err| {
+            if let Some(rejection) = template_rejection_cli_error(&err) {
+                Err(rejection)
+            } else {
+                // Fallback: text-only template
+                apply_user_chat_template(processor, &media.flattened_text(user_prompt), &kwargs)
+            }
+        })
 }
 
 fn resolve_cli_prompt(
@@ -891,6 +1006,7 @@ fn resolve_cli_prompt(
     processor.map_or_else(
         || Ok(media.flattened_text(user_prompt)),
         |processor| {
+            let kwargs = cli_template_kwargs(processor, media)?;
             // Route an audio-bearing request through the VLM template only when
             // the template actually renders audio content items. This keeps the
             // prompt byte-identical to the text-only path for every model whose
@@ -902,7 +1018,7 @@ fn resolve_cli_prompt(
             if media.image_placeholders() > 0 || media.videos > 0 || emit_audio {
                 apply_vlm_chat_template(processor, user_prompt, media)
             } else {
-                apply_user_chat_template(processor, &media.flattened_text(user_prompt))
+                apply_user_chat_template(processor, &media.flattened_text(user_prompt), &kwargs)
             }
         },
     )
@@ -2954,6 +3070,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         &super::cli_server::cli_flag_was_set,
     );
     server.adapter = args.model.adapter.clone();
+    server.reasoning_effort = args.generation.reasoning_effort.clone();
     if let Some((draft_model, draft_kind)) = repl_drafter(args) {
         server.draft_model = Some(draft_model);
         server.draft_kind = draft_kind;
@@ -3279,6 +3396,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             video_frame_groups,
             videos: cli_video_content_part_count(&args.model.model, args.generation.video.len()),
             audios: usize::from(args.generation.audio.is_some()),
+            reasoning_effort: args.generation.reasoning_effort.clone(),
         },
     )?;
     let mut prompt_tokens = tokenize_prompt(&tokenizer, &prompt)?;
@@ -3379,63 +3497,22 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         println!("Boundary-V: protecting {boundary} layer(s) on each end at Fp16");
     }
     // An attention-free model on the OpenXLA backend has no KV cache, so the
-    // banner below would claim a mode for layers that do not exist (issue #3339).
-    if !xla_model_has_no_kv_cache(&args.model.model) {
-        let kv_cache_mode_suffix = kv_cache_mode_banner_suffix(
+    // banner would claim a mode for layers that do not exist (issue #3339).
+    // The pipeline and OpenXLA paths load no `LoadedModel`, so they print now
+    // with the config's layer count; every other path prints after the load,
+    // from the model's own per-cache storage (issue #3378).
+    let banner_before_load = pipeline_requested || select_backend().name() == "xla";
+    let print_banner = !xla_model_has_no_kv_cache(&args.model.model);
+    if print_banner && banner_before_load {
+        print_kv_cache_mode_banner(
+            &args,
             requested_kv_cache_mode,
             kv_cache_mode,
-            resolve_cli_pipeline_num_layers(&args.model.model).unwrap_or(0),
+            BannerLayers {
+                num_layers: resolve_cli_pipeline_num_layers(&args.model.model).unwrap_or(0),
+                storage_modes: None,
+            },
         );
-
-        match kv_cache_mode {
-            KVCacheMode::Int8 => {
-                // The same flag selects two codecs: the affine group-64 latent on
-                // an absorbed MLA cache (issue #3155), per-token absmax elsewhere.
-                let codec = match mlxcel::cli::mla_latent_option::model_latent_bits(
-                    kv_cache_mode,
-                    std::path::Path::new(&args.model.model),
-                ) {
-                    Some(bits) => mlxcel::cli::mla_latent_option::latent_codec_label(bits),
-                    None => "per-token absmax quantization".to_string(),
-                };
-                println!("KV cache mode: int8 ({codec}){kv_cache_mode_suffix}");
-            }
-            KVCacheMode::Turbo4Asym => {
-                println!(
-                    "KV cache mode: fp16+turbo4 (asymmetric Fp16-K + Turbo4-V, ~26% KV savings){kv_cache_mode_suffix}"
-                );
-            }
-            KVCacheMode::Turbo4 => {
-                // Reached only when the family is on
-                // `ALLOWED_SYMMETRIC_TURBO_FAMILIES`: a non-allowlisted request was
-                // already resolved to Turbo4Asym above, which is why this line no
-                // longer describes a fallback that had never been performed.
-                println!(
-                    "KV cache mode: turbo4 (symmetric Turbo4-K + Turbo4-V, ~73% KV savings; \
-                     this family is on the symmetric-Turbo4 allowlist){kv_cache_mode_suffix}"
-                );
-            }
-            KVCacheMode::Turbo4Delegated => {
-                println!(
-                    "KV cache mode: turbo4-delegated (Fp16-K + Turbo4-V with hot/cold split, \
-                     ~26% KV savings + 97-100% FP16 decode speed at long context){kv_cache_mode_suffix}"
-                );
-            }
-            KVCacheMode::Turbo3Asym => {
-                println!(
-                    "KV cache mode: fp16+turbo3 (asymmetric Fp16-K + Turbo3-V, \
-                     ~5.1x total KV savings){kv_cache_mode_suffix}"
-                );
-            }
-            KVCacheMode::Fp16 => {
-                // Fp16 is the default and normally announces nothing. When it is
-                // the *result* of a substitution the operator asked for something
-                // else, so name the mode actually in force (issue #1350). The
-                // reason was printed to stderr by
-                // `resolve_and_announce_kv_cache_mode`.
-                println!("KV cache mode: fp16{kv_cache_mode_suffix}");
-            }
-        }
     }
 
     // OpenXLA backend (issue #449): the engine drives generation from its own
@@ -3511,6 +3588,18 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         )?
     } else {
         let (model, _loaded_tokenizer) = load_generation_model(&args, preflight_estimate.as_ref())?;
+        if print_banner && !banner_before_load {
+            let storage_modes = LanguageModel::kv_cache_storage_modes(&model);
+            print_kv_cache_mode_banner(
+                &args,
+                requested_kv_cache_mode,
+                kv_cache_mode,
+                BannerLayers {
+                    num_layers: LanguageModel::num_layers(&model),
+                    storage_modes: storage_modes.as_deref(),
+                },
+            );
+        }
         // --output-audio (issue #665): fail before generation when the loaded
         // model carries no talker/code2wav speech stack.
         if args.generation.output_audio.is_some()

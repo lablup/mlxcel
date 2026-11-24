@@ -26,7 +26,8 @@ runtime imports this file.
 Usage:
     mlx_vlm_image_logit_trace.py MODEL_DIR IMAGE MLXCEL_TRACE.tsv
         [--prompt "Describe the image."] [--topk 8] [--float32]
-        [--mlxcel-prompt] [--enable-thinking {true,false}] > reference.tsv
+        [--mlxcel-prompt] [--enable-thinking {true,false}]
+        [--inkling2-mlx-community [--inkling2-native-dir DIR]] > reference.tsv
 
 Needs `mlx`, `mlx-vlm`, `mlx-lm` and `numpy`. By default mlx-vlm runs in the
 checkpoint's own activation dtype, a same-precision reference. With
@@ -43,6 +44,12 @@ mlx-vlm's render, so the arms differ only in the forward pass: mlx-vlm still
 preprocesses the image, its image-token count must equal the trace's, and
 MiniCPM-V's `image_bound` is recomputed from the substituted ids. mlx-vlm's
 own prompt length is then printed as `# mlx_vlm_prompt_tokens`.
+
+`--inkling2-mlx-community` loads the mlx-community Inkling 2 4-bit export, which
+mlx-vlm cannot read as shipped, through `scripts/inkling2_mlx_community_remap.py`
+(#3378). The remapped directory is built once into a temporary directory; the
+export has no `processor_config.json`, so the missing processor files come from
+`--inkling2-native-dir` (default: a sibling `inkling-2-mini`).
 
 `--enable-thinking` passes `enable_thinking` to the chat template. Unset, mlx-vlm
 renders with it off, while mlxcel turns it on for a tokenizer with think markers
@@ -167,12 +174,26 @@ def main() -> None:
         default=None,
         help="pass enable_thinking to the chat template (unset: mlx-vlm's default, off)",
     )
+    ap.add_argument(
+        "--inkling2-mlx-community",
+        action="store_true",
+        help="load the mlx-community Inkling 2 4-bit export through the committed remap",
+    )
+    ap.add_argument(
+        "--inkling2-native-dir",
+        help="native Inkling 2 checkpoint that supplies the processor files the export lacks",
+    )
     args = ap.parse_args()
     template_kwargs = {}
     if args.enable_thinking is not None:
         template_kwargs["enable_thinking"] = args.enable_thinking == "true"
 
-    model, processor = load(args.model_dir)
+    load_dir = args.model_dir
+    if args.inkling2_mlx_community:
+        from inkling2_mlx_community_remap import prepare_model_dir
+
+        load_dir = str(prepare_model_dir(args.model_dir, native_dir=args.inkling2_native_dir))
+    model, processor = load(load_dir)
     if args.float32:
         from mlx.utils import tree_map
         from mlx_lm.utils import dequantize_model
