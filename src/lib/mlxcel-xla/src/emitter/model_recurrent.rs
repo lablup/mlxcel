@@ -142,8 +142,8 @@ impl RecurrentLayers {
         };
         let mut h_all = h_all.clone();
         let mut conv_all = conv_all.clone();
+        let zero = b.const_i32(0);
         for (s, layer) in self.layers.iter().enumerate() {
-            let zero = b.const_i32(0);
             let row = b.const_i32(i32::try_from(s).expect("recurrent layer index fits i32"));
             let mut h_shape = vec![h_all.ty.shape[0], 1];
             h_shape.extend(&h_all.ty.shape[2..]);
@@ -155,7 +155,7 @@ impl RecurrentLayers {
             h_starts[1] = row.clone();
             let h_starts = h_starts.iter().collect::<Vec<_>>();
             h_all = b.dynamic_update_slice(&h_all, &h, &h_starts);
-            let mut conv_starts = vec![zero; conv_all.ty.shape.len()];
+            let mut conv_starts = vec![zero.clone(); conv_all.ty.shape.len()];
             conv_starts[1] = row;
             let conv_starts = conv_starts.iter().collect::<Vec<_>>();
             conv_all = b.dynamic_update_slice(&conv_all, &conv, &conv_starts);
@@ -172,8 +172,8 @@ impl RecurrentLayers {
         };
         let mut h_all = h_all.clone();
         let mut conv_all = conv_all.clone();
+        let zero = b.const_i32(0);
         for (s, layer) in self.layers.iter().enumerate() {
-            let zero = b.const_i32(0);
             let row = b.const_i32(i32::try_from(s).expect("recurrent layer index fits i32"));
             let mut h_shape = vec![1];
             h_shape.extend(&h_all.ty.shape[1..]);
@@ -185,7 +185,7 @@ impl RecurrentLayers {
             h_starts[0] = row.clone();
             let h_starts = h_starts.iter().collect::<Vec<_>>();
             h_all = b.dynamic_update_slice(&h_all, &h, &h_starts);
-            let mut conv_starts = vec![zero; conv_all.ty.shape.len()];
+            let mut conv_starts = vec![zero.clone(); conv_all.ty.shape.len()];
             conv_starts[0] = row;
             let conv_starts = conv_starts.iter().collect::<Vec<_>>();
             conv_all = b.dynamic_update_slice(&conv_all, &conv, &conv_starts);
