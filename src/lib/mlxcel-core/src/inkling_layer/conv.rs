@@ -152,8 +152,14 @@ impl InklingShortConv {
         } else {
             crate::conv1d(&padded, &self.weight, 1, 0, 1, shape[2])
         };
+        // A speculative append wider than the row-invariant scope still
+        // records its window, so a prompt-lookup round past 16 rows can
+        // drop its rejected tail (issue #3422); only its rows are not
+        // byte-identical to the chain.
+        let record = verify_block
+            || (shape[0] == 1 && shape[1] > 1 && crate::cache::speculative_append_active());
         if let Some(tail) = tail {
-            *tail = verify_block.then_some(padded);
+            *tail = record.then_some(padded);
         }
         let inner = crate::add(&convolved, &input_f32);
         let inner = crate::astype(&inner, input_dtype);

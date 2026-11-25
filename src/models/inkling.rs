@@ -450,7 +450,8 @@ impl InklingModel {
 
     /// Marks the forwards run while the guard lives as verify blocks.
     ///
-    /// Used by: the MTP verify forward and the exactness probe's block arm.
+    /// Used by: the MTP verify forward, the exactness probe's block arm and
+    /// the token-only verify forward (`forward_with_sequence_id`).
     fn verify_block_scope(&self) -> row_invariant::Scope {
         row_invariant::Scope::enter(row_invariant::Mode {
             kernel: self.row_kernel,
@@ -730,6 +731,8 @@ fn weight(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String
         .ok_or_else(|| format!("Weight not found: {name}"))
 }
 
+#[cfg(test)]
+mod prompt_lookup_tests;
 #[cfg(test)]
 #[path = "inkling_tests.rs"]
 mod tests;

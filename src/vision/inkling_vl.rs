@@ -340,6 +340,14 @@ impl LanguageModel for InklingVlModel {
         LanguageModel::supports_padded_prefill(&self.text)
     }
 
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        LanguageModel::supports_speculative_verify_rewind(&self.text)
+    }
+
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        LanguageModel::rewind_decode_appends(&self.text, seq_id, n)
+    }
+
     fn forward_with_sequence_id(
         &self,
         input_ids: &MlxArray,

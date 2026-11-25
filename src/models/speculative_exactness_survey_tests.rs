@@ -93,7 +93,9 @@ fn family_probe(
 /// Block versus chain through the plain `LanguageModel` forward on external
 /// KV caches, which is what the engine's token-only verify round runs (prompt
 /// lookup, a full-model drafter). `NotRun` for a family that keeps sequence
-/// state outside those caches.
+/// state outside those caches, except first-generation Inkling, whose verify
+/// rounds rewind its own state (issue #3422) and whose `make_caches` resets
+/// the default state both arms run on.
 fn engine_probe(
     model: &LoadedModel,
     width: usize,
@@ -101,10 +103,12 @@ fn engine_probe(
     prompt_len: usize,
     trace: bool,
 ) -> (BlockChainExactness, Option<Vec<String>>) {
-    if model
+    let own_state_probed = matches!(model, LoadedModel::Inkling(_) | LoadedModel::InklingVLM(_));
+    if (model
         .sequence_state_layout()
         .backend
         .keeps_state_outside_kv_slice()
+        && !own_state_probed)
         || mlxcel_core::speculative::prompt_lookup::prompt_lookup_unsupported_reason(model)
             .is_some()
     {

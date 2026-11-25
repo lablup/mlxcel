@@ -173,6 +173,8 @@ With the switch on and the narrow kernel, `--prompt-lookup` text equalled plain 
 
 The Gemma 4 26B A4B MoE checkpoint is a different case, because its MTP path is gated: its verify block now runs the routed experts per position and its attention row-wise, so the startup probe passes on the narrow kernel and the drafter engages as it does on the 12B and 31B checkpoints (`MLXCEL_GEMMA4_MOE_VERIFY_PER_POSITION`).
 
+First-generation Inkling (`inkling`, `inkling_mm_model`, issue #3422) now takes token-only verify rounds (`--prompt-lookup`, the server's `--draft-kind prompt-lookup` and the full-model drafter). Its state is model-owned, so a round is admitted on `supports_speculative_verify_rewind`, which follows `MLXCEL_INKLING_ROW_INVARIANT` (on by default): a verify block of 2 to 16 rows runs in the MTP verify scope, is byte-identical to the single-token chain, and records each convolution's input window, and `rewind_decode_appends` drops the rejected tail (the whole block on a failed round or a width warm-up) by trimming the KV tail and taking each convolution state from that window. A block wider than 16 rows also records its windows and rewinds, but its rows are not byte-identical to the chain. With the variable off the gate refuses the family as before. Measurements are in [inkling-prompt-lookup-m3ultra-2026-11-25.md](benchmark_results/inkling-prompt-lookup-m3ultra-2026-11-25.md).
+
 A DFlash or DSpark drafter on a target without an offline arm gets the same
 refusal plus a pointer to `mlxcel-server`, which drives the DFlash round loop for
 more targets (#1168). These checkpoints ship no `embed_tokens` and no `lm_head`,
