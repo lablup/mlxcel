@@ -35,15 +35,26 @@ pub enum MixerKind {
     Mamba2,
     /// Mamba1 diagonal selective state-space mixer ([`SsmConfig`]).
     Mamba1,
+    /// Attention and Mamba2 sharing an input norm, followed by a separate FFN.
+    ParallelMamba2Attention,
     /// A feed-forward-only block (no token mixer or persistent state).
     None,
 }
 
 impl MixerKind {
-    /// Whether the mixer carries recurrent state instead of a KV cache.
+    /// Whether the mixer carries recurrent state (possibly alongside a KV cache).
     #[must_use]
     pub fn is_recurrent(self) -> bool {
-        matches!(self, MixerKind::Mamba2 | MixerKind::Mamba1)
+        matches!(
+            self,
+            Self::Mamba2 | Self::Mamba1 | Self::ParallelMamba2Attention
+        )
+    }
+
+    /// Whether the mixer writes a KV cache row.
+    #[must_use]
+    pub fn has_attention(self) -> bool {
+        matches!(self, Self::Attention | Self::ParallelMamba2Attention)
     }
 
     /// The HF `model_type` of the family this mixer comes from, for errors.
@@ -53,6 +64,7 @@ impl MixerKind {
             MixerKind::Attention => "attention",
             MixerKind::Mamba2 => "mamba2",
             MixerKind::Mamba1 => "mamba",
+            MixerKind::ParallelMamba2Attention => "falcon_h1",
             MixerKind::None => "ffn",
         }
     }
@@ -91,7 +103,7 @@ impl Config {
         if self.weight_scheme == WeightScheme::NemotronH {
             self.layer_mixer(li) == MixerKind::None
         } else {
-            self.layer_mixer(li) == MixerKind::Attention
+            self.layer_mixer(li).has_attention()
         }
     }
 
@@ -99,19 +111,19 @@ impl Config {
     #[must_use]
     pub fn attn_layer_count(&self) -> usize {
         (0..self.n_layers)
-            .filter(|&li| self.layer_mixer(li) == MixerKind::Attention)
+            .filter(|&li| self.layer_mixer(li).has_attention())
             .count()
     }
 
     /// Compact KV row for an attention layer; attention-only models keep `li`.
     #[must_use]
     pub fn attn_layer_index(&self, li: usize) -> Option<usize> {
-        if li >= self.n_layers || self.layer_mixer(li) != MixerKind::Attention {
+        if li >= self.n_layers || !self.layer_mixer(li).has_attention() {
             return None;
         }
         Some(
             (0..li)
-                .filter(|&i| self.layer_mixer(i) == MixerKind::Attention)
+                .filter(|&i| self.layer_mixer(i).has_attention())
                 .count(),
         )
     }
@@ -141,7 +153,7 @@ impl Config {
     /// Whether any layer is attention, i.e. whether the graphs carry a KV cache.
     #[must_use]
     pub fn has_kv_cache(&self) -> bool {
-        (0..self.n_layers).any(|li| self.layer_mixer(li) == MixerKind::Attention)
+        (0..self.n_layers).any(|li| self.layer_mixer(li).has_attention())
     }
 
     /// The threaded state tensors, in graph-argument order. Empty for every

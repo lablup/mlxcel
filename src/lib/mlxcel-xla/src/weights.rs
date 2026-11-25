@@ -205,8 +205,12 @@ fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant:
         .ssm
         .as_ref()
         .expect("a recurrent layer implies an SsmConfig");
-    let m = format!("{p}mixer.");
-    out.push(WeightSpec::Whole(format!("{p}norm.weight")));
+    let m = if cfg.falcon_h1.is_some() {
+        format!("{p}mamba.")
+    } else {
+        out.push(WeightSpec::Whole(format!("{p}norm.weight")));
+        format!("{p}mixer.")
+    };
     push_proj(out, format!("{m}in_proj.weight"), quant);
     if ssm.use_bias {
         out.push(WeightSpec::Whole(format!("{m}in_proj.bias")));
@@ -217,8 +221,11 @@ fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant:
     }
     match ssm.kind {
         crate::emitter::SsmKind::Mamba2 => {
-            for name in ["dt_bias", "A_log", "D", "norm.weight"] {
+            for name in ["dt_bias", "A_log", "D"] {
                 out.push(WeightSpec::Whole(format!("{m}{name}")));
+            }
+            if cfg.falcon_h1.as_ref().is_none_or(|f| f.rms_norm) {
+                out.push(WeightSpec::Whole(format!("{m}norm.weight")));
             }
         }
         crate::emitter::SsmKind::Mamba1 { .. } => {
@@ -231,7 +238,7 @@ fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant:
         }
     }
     push_proj(out, format!("{m}out_proj.weight"), quant);
-    if ssm.use_bias {
+    if cfg.falcon_h1.as_ref().map_or(ssm.use_bias, |f| f.out_bias) {
         out.push(WeightSpec::Whole(format!("{m}out_proj.bias")));
     }
 }
@@ -288,7 +295,10 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     for i in 0..cfg.n_layers {
         let p = format!("{}{i}.", s.layer_stem);
         // A recurrent (Mamba2) layer has its own tensor list (issue #3338).
-        if cfg.layer_mixer(i).is_recurrent() {
+        if matches!(
+            cfg.layer_mixer(i),
+            crate::emitter::MixerKind::Mamba2 | crate::emitter::MixerKind::Mamba1
+        ) {
             push_ssm_layer_specs(&mut out, cfg, &p, quant);
             continue;
         }
@@ -479,16 +489,38 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             } else {
                 format!(
                     "{p}{}.down_proj.bias",
-                    if nemotron { "mixer" } else { "mlp" }
+                    if nemotron {
+                        "mixer"
+                    } else if cfg.falcon_h1.is_some() {
+                        "feed_forward"
+                    } else {
+                        "mlp"
+                    }
                 )
             }));
             if gated {
-                out.push(WeightSpec::Whole(format!("{p}mlp.gate_proj.bias")));
+                out.push(WeightSpec::Whole(format!(
+                    "{p}{}.gate_proj.bias",
+                    if cfg.falcon_h1.is_some() {
+                        "feed_forward"
+                    } else {
+                        "mlp"
+                    }
+                )));
             }
             out.push(WeightSpec::Whole(if cfg.dense_mlp && !nemotron {
                 format!("{p}mlp.c_fc.bias")
             } else {
-                format!("{p}{}.up_proj.bias", if nemotron { "mixer" } else { "mlp" })
+                format!(
+                    "{p}{}.up_proj.bias",
+                    if nemotron {
+                        "mixer"
+                    } else if cfg.falcon_h1.is_some() {
+                        "feed_forward"
+                    } else {
+                        "mlp"
+                    }
+                )
             }));
         }
         // MoE expert bank (issue #500), last in the layer: the router, the stacked
@@ -549,6 +581,9 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                     )));
                 }
             }
+        }
+        if cfg.falcon_h1.is_some() {
+            push_ssm_layer_specs(&mut out, cfg, &p, quant);
         }
         if cfg.phi4_lora.is_some() {
             for stem in [
@@ -1763,6 +1798,10 @@ mod tests {
             ),
             ("youtu_vl", youtu.into()),
             ("mamba2", mamba2.into()),
+            (
+                "falcon_h1",
+                include_str!("../assets/falcon_h1/config.json").into(),
+            ),
         ];
         for (family, json) in &families {
             let base = Config::from_json_str(json)

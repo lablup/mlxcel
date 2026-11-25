@@ -47,6 +47,7 @@
 
 mod builder;
 mod config;
+mod falcon_h1_config;
 mod gemma3n;
 mod gemma3n_audio_attention;
 mod gemma3n_audio_emit;
@@ -92,6 +93,8 @@ mod youtu_vl_plan;
 
 #[cfg(test)]
 mod context_tests;
+#[cfg(test)]
+mod falcon_h1_tests;
 #[cfg(test)]
 mod nemotron_h_tests;
 #[cfg(test)]

@@ -259,7 +259,7 @@ impl Config {
         let scheme_matches_kind = match ssm.kind {
             SsmKind::Mamba2 => matches!(
                 self.weight_scheme,
-                WeightScheme::Mamba2 | WeightScheme::NemotronH
+                WeightScheme::Mamba2 | WeightScheme::NemotronH | WeightScheme::FalconH1
             ),
             SsmKind::Mamba1 { .. } => self.weight_scheme == WeightScheme::Mamba1,
         };
@@ -336,16 +336,32 @@ impl Config {
                 ssm.in_proj_dim()
             ));
         }
-        proj("backbone.embeddings.weight", self.vocab, h)?;
-        vector("backbone.norm_f.weight", h)?;
+        let names = crate::weight_names::scheme_names(self.weight_scheme);
+        proj(names.embed, self.vocab, h)?;
+        vector(names.final_norm, h)?;
         if !self.tie_word_embeddings {
             proj("lm_head.weight", self.vocab, h)?;
         }
         for li in 0..self.n_layers {
-            let p = format!("backbone.layers.{li}.");
-            vector(&format!("{p}norm.weight"), h)?;
-            let m = format!("{p}mixer.");
+            let p = format!("{}{li}.", names.layer_stem);
+            vector(&format!("{p}{}", names.input_layernorm), h)?;
+            let m = format!(
+                "{p}{}.",
+                if self.falcon_h1.is_some() {
+                    "mamba"
+                } else {
+                    "mixer"
+                }
+            );
             if self.attn_layer_index(li).is_some() {
+                let m = format!(
+                    "{p}{}.",
+                    if self.falcon_h1.is_some() {
+                        "self_attn"
+                    } else {
+                        "mixer"
+                    }
+                );
                 for (name, out, input) in [
                     ("q_proj", self.n_q * self.head_dim, h),
                     ("k_proj", self.n_kv * self.head_dim, h),
@@ -357,7 +373,20 @@ impl Config {
                         vector(&format!("{m}{name}.bias"), out)?;
                     }
                 }
-                continue;
+                if self.falcon_h1.is_none() {
+                    continue;
+                }
+                vector(&format!("{p}pre_ff_layernorm.weight"), h)?;
+                for (name, out, input) in [
+                    ("gate_proj", self.inter, h),
+                    ("up_proj", self.inter, h),
+                    ("down_proj", h, self.inter),
+                ] {
+                    proj(&format!("{p}feed_forward.{name}.weight"), out, input)?;
+                    if self.mlp_bias {
+                        vector(&format!("{p}feed_forward.{name}.bias"), out)?;
+                    }
+                }
             }
             if self.is_moe_layer(li) {
                 let moe = self
@@ -449,6 +478,8 @@ impl Config {
             proj(&format!("{m}out_proj.weight"), h, di)?;
             if ssm.use_bias {
                 vector(&format!("{m}in_proj.bias"), ssm.in_proj_dim())?;
+            }
+            if self.falcon_h1.as_ref().map_or(ssm.use_bias, |f| f.out_bias) {
                 vector(&format!("{m}out_proj.bias"), h)?;
             }
             // torch `[C, 1, K]`, or the MLX conversion's `[C, K, 1]` (same bytes).
@@ -464,7 +495,9 @@ impl Config {
                     for name in ["dt_bias", "A_log", "D"] {
                         vector(&format!("{m}{name}"), ssm.n_heads)?;
                     }
-                    vector(&format!("{m}norm.weight"), di)?;
+                    if self.falcon_h1.as_ref().is_none_or(|f| f.rms_norm) {
+                        vector(&format!("{m}norm.weight"), di)?;
+                    }
                 }
                 SsmKind::Mamba1 { dt_rank, .. } => {
                     proj(

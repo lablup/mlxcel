@@ -620,6 +620,9 @@ enum FilterState {
 /// any remaining buffered content.
 pub struct StreamFilter {
     state: FilterState,
+    /// A consumed structural delimiter or a prompt-primed reasoning channel
+    /// means this is structured output, rather than an untouched raw reply.
+    saw_structure: bool,
     buffer: String,
     /// Per-feed byte-length queue used to count how many token positions
     /// (i.e. `feed()` calls) contributed to the bytes currently in `buffer`.
@@ -818,6 +821,7 @@ impl StreamFilter {
 
         Self {
             state: FilterState::Content,
+            saw_structure: false,
             buffer: String::new(),
             fragment_lengths: std::collections::VecDeque::new(),
             max_delim_len,
@@ -864,6 +868,7 @@ impl StreamFilter {
     pub fn new_primed_open_thinking() -> Self {
         let mut s = Self::new();
         s.state = FilterState::Thinking;
+        s.saw_structure = true;
         s.muse_boundary = false;
         s
     }
@@ -907,6 +912,19 @@ impl StreamFilter {
     /// anything inside `ToolCall` is discarded (tool-call deltas are emitted
     /// via the parser path, not here).
     pub fn flush(&mut self) -> FilterOutput {
+        self.flush_inner(false)
+    }
+
+    /// Flush for a raw-completion display that must preserve plain text byte
+    /// for byte. Retain trailing whitespace only when no structural delimiter
+    /// was consumed and the prompt did not prime a reasoning channel. Reasoning,
+    /// tool calls, and structured messages keep the usual cleanup policy.
+    /// Chat callers should continue using [`Self::flush`].
+    pub fn flush_preserving_plain_whitespace(&mut self) -> FilterOutput {
+        self.flush_inner(true)
+    }
+
+    fn flush_inner(&mut self, preserve_plain_whitespace: bool) -> FilterOutput {
         if self.buffer.is_empty()
             && self.held_ws.is_empty()
             && self.harmony_reasoning.held.is_empty()
@@ -942,7 +960,14 @@ impl StreamFilter {
         // Whitespace still held never reached visible text, so it is trailing
         // whitespace the non-streamed answer (and Harmony body) trims.
         self.take_post_close_gap(&mut acc);
-        self.drop_held_ws(&mut acc);
+        if preserve_plain_whitespace && !self.saw_structure {
+            acc.content.push_str(&self.held_ws);
+            acc.consumed_positions += self.held_ws_positions;
+            self.held_ws.clear();
+            self.held_ws_positions = 0;
+        } else {
+            self.drop_held_ws(&mut acc);
+        }
         self.drop_held_reasoning_ws(&mut acc);
         self.fragment_lengths.clear();
         acc.into_output()
@@ -1035,6 +1060,7 @@ impl StreamFilter {
 
             match self.find_earliest_delimiter(end_of_stream) {
                 Some((pos, delim_len, action)) => {
+                    self.saw_structure = true;
                     // Text before the delimiter is attributed to the current
                     // state so thinking fragments surface as reasoning and
                     // regular fragments surface as content.

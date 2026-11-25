@@ -53,7 +53,8 @@ pub(crate) struct Mamba2MixerW {
     /// `[H]`.
     pub d: Val,
     /// `[d_inner]`.
-    pub norm_w: Val,
+    pub norm_w: Option<Val>,
+    pub falcon: Option<super::falcon_h1_config::FalconH1Config>,
     pub out_proj: Val,
     pub out_proj_b: Option<Val>,
 }
@@ -87,6 +88,15 @@ pub(super) fn to_f32(b: &mut Builder, v: &Val) -> Val {
 pub(super) fn splat(b: &mut Builder, value: f32, shape: &[usize]) -> Val {
     let scalar = b.const_f32(value);
     b.broadcast(&scalar, &[], shape.to_vec())
+}
+
+/// Multiply without adding operations to existing families when the factor is one.
+pub(super) fn scale(b: &mut Builder, x: &Val, factor: f32) -> Val {
+    if factor == 1.0 {
+        return x.clone();
+    }
+    let f = splat(b, factor, &x.ty.shape);
+    b.multiply(x, &f)
 }
 
 fn sigmoid(b: &mut Builder, x: &Val) -> Val {
@@ -300,10 +310,34 @@ pub(crate) fn selective_scan_prefill(
 fn in_projection(b: &mut Builder, c: &SsmConfig, w: &Mamba2MixerW, x: &Val) -> (Val, Val, Val) {
     let rows = x.ty.shape[0];
     let x = to_f32(b, x);
+    let x = w
+        .falcon
+        .as_ref()
+        .map_or_else(|| x.clone(), |f| scale(b, &x, f.ssm_in));
     let zxbcdt = b.linear_seq_proj(&x, &w.in_proj);
     let zxbcdt = match &w.in_proj_b {
         Some(bias) => add_last(b, &zxbcdt, bias),
         None => zxbcdt,
+    };
+    let zxbcdt = if let Some(f) = &w.falcon {
+        let gn = c.n_groups * c.state_size;
+        let mut start = 0;
+        let mut pieces = Vec::new();
+        for (len, factor) in [c.d_inner(), c.d_inner(), gn, gn, c.n_heads]
+            .into_iter()
+            .zip(f.ssm_channels)
+        {
+            let part = b.slice(&zxbcdt, &[(0, rows), (start, start + len)]);
+            pieces.push(scale(b, &part, factor));
+            start += len;
+        }
+        let mut joined = pieces[0].clone();
+        for part in &pieces[1..] {
+            joined = b.concatenate(&joined, part, 1);
+        }
+        joined
+    } else {
+        zxbcdt
     };
     let (di, cd) = (c.d_inner(), c.conv_dim);
     let z = b.slice(&zxbcdt, &[(0, rows), (0, di)]);
@@ -355,29 +389,46 @@ fn gated_norm_out(b: &mut Builder, c: &SsmConfig, w: &Mamba2MixerW, y: &Val, z: 
     let (di, gs) = (c.d_inner(), c.norm_group_size);
     let y = b.reshape(y, vec![rows, di]);
     let gate = silu(b, z);
-    let g = b.multiply(&y, &gate);
-    let grouped = b.reshape(&g, vec![rows, di / gs, gs]);
-    let square = b.multiply(&grouped, &grouped);
-    let zero = b.const_f32(0.0);
-    let sum = b.reduce_add(&square, 2, &zero);
-    let width = splat(b, gs as f32, &sum.ty.shape);
-    let mean = b.divide(&sum, &width);
-    let eps = splat(b, c.norm_eps, &mean.ty.shape);
-    let stabilized = b.add(&mean, &eps);
-    let inverse = b.rsqrt(&stabilized);
-    let inverse = b.broadcast(&inverse, &[0, 1], grouped.ty.shape.clone());
-    let normed = b.multiply(&grouped, &inverse);
-    let normed = b.reshape(&normed, vec![rows, di]);
-    let weighted = {
-        let norm_w = to_f32(b, &w.norm_w);
-        let norm_w = b.broadcast(&norm_w, &[1], vec![rows, di]);
-        b.multiply(&normed, &norm_w)
+    let before = w.falcon.as_ref().is_some_and(|f| f.norm_before_gate);
+    let g = if before && w.norm_w.is_some() {
+        y
+    } else {
+        b.multiply(&y, &gate)
+    };
+    let weighted = if let Some(norm_w) = &w.norm_w {
+        let grouped = b.reshape(&g, vec![rows, di / gs, gs]);
+        let square = b.multiply(&grouped, &grouped);
+        let zero = b.const_f32(0.0);
+        let sum = b.reduce_add(&square, 2, &zero);
+        let width = splat(b, gs as f32, &sum.ty.shape);
+        let mean = b.divide(&sum, &width);
+        let eps = splat(b, c.norm_eps, &mean.ty.shape);
+        let stabilized = b.add(&mean, &eps);
+        let inverse = b.rsqrt(&stabilized);
+        let inverse = b.broadcast(&inverse, &[0, 1], grouped.ty.shape.clone());
+        let normed = b.multiply(&grouped, &inverse);
+        let normed = b.reshape(&normed, vec![rows, di]);
+        let weighted = {
+            let norm_w = to_f32(b, norm_w);
+            let norm_w = b.broadcast(&norm_w, &[1], vec![rows, di]);
+            b.multiply(&normed, &norm_w)
+        };
+        if before {
+            b.multiply(&weighted, &gate)
+        } else {
+            weighted
+        }
+    } else {
+        g
     };
     let out = b.linear_seq_proj(&weighted, &w.out_proj);
-    match &w.out_proj_b {
+    let out = match &w.out_proj_b {
         Some(bias) => add_last(b, &out, bias),
         None => out,
-    }
+    };
+    w.falcon
+        .as_ref()
+        .map_or_else(|| out.clone(), |f| scale(b, &out, f.ssm_out))
 }
 
 /// One Mamba2 mixer layer over a padded prompt `x [T, hidden]` with `real_len`

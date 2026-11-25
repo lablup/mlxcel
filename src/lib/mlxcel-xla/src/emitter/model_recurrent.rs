@@ -204,6 +204,47 @@ pub(super) fn take_ssm_layer_weights(
     c: &Config,
     li: usize,
 ) -> LayerW {
+    let p = format!("params['layers'][{li}]['in_ln']");
+    let in_ln = take_arg(decls, idx, Ty::f32(vec![c.hidden]), p);
+    let mixer = take_ssm_mixer_weights(b, decls, idx, c, li);
+    LayerW {
+        down: None,
+        gate: None,
+        in_ln: Some(in_ln),
+        post_ln: None,
+        up: None,
+        wk: None,
+        wo: None,
+        wq: None,
+        wv: None,
+        mla: None,
+        bk: None,
+        bq: None,
+        bv: None,
+        q_norm: None,
+        k_norm: None,
+        pre_ff_ln: None,
+        post_ff_ln: None,
+        in_ln_bias: None,
+        post_ln_bias: None,
+        wo_bias: None,
+        down_bias: None,
+        gate_bias: None,
+        up_bias: None,
+        moe: None,
+        phi4_lora: None,
+        ssm: Some(mixer),
+    }
+}
+
+/// Mixer weights without a block norm, also used by parallel hybrid blocks.
+pub(super) fn take_ssm_mixer_weights(
+    b: &mut Builder,
+    decls: &mut Vec<ArgDecl>,
+    idx: &mut usize,
+    c: &Config,
+    li: usize,
+) -> SsmMixerW {
     let ssm = c
         .ssm
         .as_ref()
@@ -211,7 +252,6 @@ pub(super) fn take_ssm_layer_weights(
     let h = c.hidden;
     let (di, cd) = (ssm.d_inner(), ssm.conv_dim);
     let p = |k: &str| format!("params['layers'][{li}]['{k}']");
-    let in_ln = take_arg(decls, idx, Ty::f32(vec![h]), p("in_ln"));
     let in_proj = take_weight(b, decls, idx, c, ssm.in_proj_dim(), h, p("ssm.in_proj"));
     let in_proj_b = ssm.use_bias.then(|| {
         take_arg(
@@ -230,13 +270,17 @@ pub(super) fn take_ssm_layer_weights(
     let conv_b = ssm
         .use_conv_bias
         .then(|| take_arg(decls, idx, Ty::f32(vec![cd]), p("ssm.conv_b")));
-    let mixer = match ssm.kind {
+    match ssm.kind {
         SsmKind::Mamba2 => {
             let nh = ssm.n_heads;
             let dt_bias = take_arg(decls, idx, Ty::f32(vec![nh]), p("ssm.dt_bias"));
             let a_log = take_arg(decls, idx, Ty::f32(vec![nh]), p("ssm.a_log"));
             let d = take_arg(decls, idx, Ty::f32(vec![nh]), p("ssm.d"));
-            let norm_w = take_arg(decls, idx, Ty::f32(vec![di]), p("ssm.norm_w"));
+            let norm_w = c
+                .falcon_h1
+                .as_ref()
+                .is_none_or(|f| f.rms_norm)
+                .then(|| take_arg(decls, idx, Ty::f32(vec![di]), p("ssm.norm_w")));
             SsmMixerW::Mamba2(Mamba2MixerW {
                 in_proj,
                 in_proj_b,
@@ -246,9 +290,12 @@ pub(super) fn take_ssm_layer_weights(
                 a_log,
                 d,
                 norm_w,
+                falcon: c.falcon_h1.clone(),
                 out_proj: take_weight(b, decls, idx, c, h, di, p("ssm.out_proj")),
-                out_proj_b: ssm
-                    .use_bias
+                out_proj_b: c
+                    .falcon_h1
+                    .as_ref()
+                    .map_or(ssm.use_bias, |f| f.out_bias)
                     .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("ssm.out_proj_b"))),
             })
         }
@@ -287,34 +334,6 @@ pub(super) fn take_ssm_layer_weights(
                     .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("ssm.out_proj_b"))),
             })
         }
-    };
-    LayerW {
-        down: None,
-        gate: None,
-        in_ln: Some(in_ln),
-        post_ln: None,
-        up: None,
-        wk: None,
-        wo: None,
-        wq: None,
-        wv: None,
-        mla: None,
-        bk: None,
-        bq: None,
-        bv: None,
-        q_norm: None,
-        k_norm: None,
-        pre_ff_ln: None,
-        post_ff_ln: None,
-        in_ln_bias: None,
-        post_ln_bias: None,
-        wo_bias: None,
-        down_bias: None,
-        gate_bias: None,
-        up_bias: None,
-        moe: None,
-        phi4_lora: None,
-        ssm: Some(mixer),
     }
 }
 
@@ -332,6 +351,22 @@ pub(super) fn emit_recurrent_block(
     layout: &AttnLayout,
     state: &mut RecurrentLayers,
 ) -> Val {
+    let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, None);
+    let mixed = emit_recurrent_mixer(b, c, lw, li, &hn, layout, state);
+    b.add(x, &mixed)
+}
+
+/// Advance only the mixer from an already normalized input.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_recurrent_mixer(
+    b: &mut Builder,
+    c: &Config,
+    lw: &LayerW,
+    li: usize,
+    hn: &Val,
+    layout: &AttnLayout,
+    state: &mut RecurrentLayers,
+) -> Val {
     let ssm = c
         .ssm
         .as_ref()
@@ -343,9 +378,7 @@ pub(super) fn emit_recurrent_block(
     let s = c
         .state_layer_index(li)
         .expect("a recurrent layer has a state row");
-    debug_assert!(!c.layer_has_ffn(li), "a Mamba block has no FFN");
-    let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, None);
-    let mixed = match layout {
+    match layout {
         AttnLayout::Prefill { .. } => {
             let real_len = state
                 .real_len
@@ -354,17 +387,17 @@ pub(super) fn emit_recurrent_block(
             let current = &state.layers[s];
             let (y, h, conv) = match w {
                 SsmMixerW::Mamba2(w) => {
-                    ssm::mamba2_mixer_prefill(b, ssm, w, &hn, &real_len, &current.h, &current.conv)
+                    ssm::mamba2_mixer_prefill(b, ssm, w, hn, &real_len, &current.h, &current.conv)
                 }
                 SsmMixerW::Mamba1(w) => {
-                    ssm::mamba1_mixer_prefill(b, ssm, w, &hn, &real_len, &current.h, &current.conv)
+                    ssm::mamba1_mixer_prefill(b, ssm, w, hn, &real_len, &current.h, &current.conv)
                 }
             };
             state.layers[s] = SsmLayerState { h, conv };
             y
         }
         AttnLayout::Single { .. } => {
-            let row = b.reshape(&hn, vec![1, c.hidden]);
+            let row = b.reshape(hn, vec![1, c.hidden]);
             let (y, next) = match w {
                 SsmMixerW::Mamba2(w) => ssm::mamba2_mixer_step(b, ssm, w, &row, &state.layers[s]),
                 SsmMixerW::Mamba1(w) => ssm::mamba1_mixer_step(b, ssm, w, &row, &state.layers[s]),
@@ -375,14 +408,13 @@ pub(super) fn emit_recurrent_block(
         AttnLayout::Ragged { .. } => {
             // `[B, hidden]` rows, one per slot, each advancing its own state row.
             let (y, next) = match w {
-                SsmMixerW::Mamba2(w) => ssm::mamba2_mixer_step(b, ssm, w, &hn, &state.layers[s]),
-                SsmMixerW::Mamba1(w) => ssm::mamba1_mixer_step(b, ssm, w, &hn, &state.layers[s]),
+                SsmMixerW::Mamba2(w) => ssm::mamba2_mixer_step(b, ssm, w, hn, &state.layers[s]),
+                SsmMixerW::Mamba1(w) => ssm::mamba1_mixer_step(b, ssm, w, hn, &state.layers[s]),
             };
             state.layers[s] = next;
             y
         }
-    };
-    b.add(x, &mixed)
+    }
 }
 
 /// Declare one prefill input per state tensor, at its per-sequence shape.

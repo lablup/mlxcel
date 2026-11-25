@@ -592,8 +592,39 @@ pub(crate) static NEMOTRON_H: ArchFixture = ArchFixture {
     ],
 };
 
+pub(crate) static FALCON_H1: ArchFixture = ArchFixture {
+    arch: "falcon_h1",
+    config_json: include_str!("../assets/falcon_h1/config.json"),
+    graphs: &[
+        GraphFixture {
+            kind: GraphKind::Decode { sample: true },
+            golden_name: "decode.mlir",
+            golden: include_str!("../assets/falcon_h1/decode.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: true },
+            golden_name: "prefill.mlir",
+            golden: include_str!("../assets/falcon_h1/prefill.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: false },
+            golden_name: "prefill_logits.mlir",
+            golden: include_str!("../assets/falcon_h1/prefill_logits.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::DecodeRagged {
+                b_max: 4,
+                sample: false,
+            },
+            golden_name: "decode_ragged_logits_b4.mlir",
+            golden: include_str!("../assets/falcon_h1/decode_ragged_logits_b4.mlir"),
+        },
+    ],
+};
+
 pub(crate) static REGISTERED: &[&ArchFixture] = &[
     &NEMOTRON_H,
+    &FALCON_H1,
     &LLAMA_3_2_1B,
     &COHERE,
     &COHERE2,

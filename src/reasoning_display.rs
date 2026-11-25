@@ -89,6 +89,8 @@ fn render_output(out: &FilterOutput, show_reasoning: bool, dim: bool, into: &mut
 /// terminal-visible text: content always, reasoning (dimmed when `dim`) only
 /// with `show_reasoning`. `primed_open` starts the filter inside the
 /// reasoning channel, for a prompt that primed the open marker.
+/// Plain replies retain their trailing whitespace, matching raw completions;
+/// structured replies retain the filter's reasoning/tool cleanup policy.
 #[must_use]
 pub fn render_full(text: &str, primed_open: bool, show_reasoning: bool, dim: bool) -> String {
     let mut filter = if primed_open {
@@ -98,7 +100,12 @@ pub fn render_full(text: &str, primed_open: bool, show_reasoning: bool, dim: boo
     };
     let mut out = String::new();
     render_output(&filter.feed(text), show_reasoning, dim, &mut out);
-    render_output(&filter.flush(), show_reasoning, dim, &mut out);
+    render_output(
+        &filter.flush_preserving_plain_whitespace(),
+        show_reasoning,
+        dim,
+        &mut out,
+    );
     out
 }
 
