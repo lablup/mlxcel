@@ -215,8 +215,20 @@ fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant:
     if ssm.use_conv_bias {
         out.push(WeightSpec::Whole(format!("{m}conv1d.bias")));
     }
-    for name in ["dt_bias", "A_log", "D", "norm.weight"] {
-        out.push(WeightSpec::Whole(format!("{m}{name}")));
+    match ssm.kind {
+        crate::emitter::SsmKind::Mamba2 => {
+            for name in ["dt_bias", "A_log", "D", "norm.weight"] {
+                out.push(WeightSpec::Whole(format!("{m}{name}")));
+            }
+        }
+        crate::emitter::SsmKind::Mamba1 { .. } => {
+            push_proj(out, format!("{m}x_proj.weight"), quant);
+            push_proj(out, format!("{m}dt_proj.weight"), quant);
+            out.push(WeightSpec::Whole(format!("{m}dt_proj.bias")));
+            for name in ["A_log", "D"] {
+                out.push(WeightSpec::Whole(format!("{m}{name}")));
+            }
+        }
     }
     push_proj(out, format!("{m}out_proj.weight"), quant);
     if ssm.use_bias {

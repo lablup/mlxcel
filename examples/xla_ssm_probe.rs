@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Single-layer Mamba2 mixer execution check (issue #3337).
+//! Single-layer Mamba2/Mamba1/Falcon-Mamba execution check (issues #3337, #3348).
 //!
 //! Reads the inputs `spike/openxla/ssm_oracle.py --emit-inputs DIR` wrote,
 //! compiles the emitter's SSM probe for `--device`, runs it through the IREE
@@ -134,6 +134,11 @@ fn spec_from_meta(meta: &Value, args: &Args) -> Result<SsmProbeSpec, String> {
         .ok_or("meta.json norm_eps is not a number")? as f32;
     let flag = |key: &str| field(meta, key).map(|v| v.as_bool().unwrap_or(false));
     Ok(SsmProbeSpec {
+        kind: meta
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("mamba2")
+            .to_string(),
         hidden: usize_field(meta, "hidden")?,
         n_heads: usize_field(meta, "n_heads")?,
         head_dim: usize_field(meta, "head_dim")?,
@@ -149,6 +154,11 @@ fn spec_from_meta(meta: &Value, args: &Args) -> Result<SsmProbeSpec, String> {
             Some(size) => size,
             None => usize_field(meta, "chunk_size")?,
         },
+        dt_rank: meta.get("dt_rank").and_then(Value::as_u64).unwrap_or(0) as usize,
+        bcdt_norm: meta
+            .get("bcdt_norm")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         rows: usize_field(meta, "rows")?,
         decode: field(meta, "mode")?.as_str() == Some("decode"),
         form: args.form.clone().unwrap_or_else(|| "chunked".to_string()),

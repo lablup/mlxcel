@@ -60,6 +60,7 @@ mod gemma3n_math;
 mod gemma3n_qmv;
 mod gemma3n_schema;
 mod gemma3n_weights;
+mod mamba1_config;
 mod model;
 mod moe;
 mod molmo2_config;
@@ -80,6 +81,7 @@ mod recurrent_checkpoint;
 mod recurrent_config;
 mod rope;
 mod ssm;
+mod ssm_mamba1;
 mod ssm_scan;
 #[cfg(test)]
 mod ssm_tests;
@@ -186,7 +188,7 @@ pub(crate) use qwen3_vl::{
 pub(crate) use config::{ExpertAct, MoeConfig, MoeScoring, SharedExpertConfig};
 // SSM mixer types (issue #3337), consumed by the probe runner and #3338.
 #[allow(unused_imports)]
-pub(crate) use config::{SSM_DEFAULT_CHUNK_SIZE, SsmConfig};
+pub(crate) use config::{SSM_DEFAULT_CHUNK_SIZE, SsmConfig, SsmKind};
 // Per-layer mixer schedule and the threaded recurrent-state ABI (issue #3338),
 // consumed by the IREE runtime (#3339) and the SSM model check.
 #[allow(unused_imports)]
@@ -540,21 +542,11 @@ mod tests {
         assert_eq!(c.eps, 1e-6);
     }
 
-    /// An unsupported `model_type` and an unsupported `rope_scaling` are each
-    /// rejected with a clear message rather than mis-emitted. (Untied embeddings and
-    /// the Gemma / Qwen3 / SmolLM3 / OLMo2/3 families are now accepted; see their
+    /// An unsupported `rope_scaling` is rejected with a clear message rather
+    /// than mis-emitted. (Mamba1 and the other supported families have their
     /// own parse tests.)
     #[test]
     fn from_json_rejects_unsupported_configs() {
-        let mamba = r#"{"model_type":"mamba","tie_word_embeddings":true,"hidden_size":8,
-            "num_attention_heads":2,"intermediate_size":16,"num_hidden_layers":2,
-            "num_key_value_heads":1,"rms_norm_eps":1e-6,"rope_theta":1e4,"vocab_size":10}"#;
-        assert!(
-            Config::from_json_str(mamba)
-                .unwrap_err()
-                .contains("model_type")
-        );
-
         // yarn RoPE (e.g. OLMo3 at full size) is not supported yet.
         let yarn = r#"{"model_type":"qwen2","tie_word_embeddings":true,"hidden_size":8,
             "num_attention_heads":2,"intermediate_size":16,"num_hidden_layers":2,

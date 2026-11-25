@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use super::config::{Config, ExpertAct, MoeScoring, QuantConfig, WeightScheme};
+use super::config::{Config, ExpertAct, MoeScoring, QuantConfig, SsmKind, WeightScheme};
 use crate::shard_path::index_shard_path;
 
 /// Largest safetensors header this check reads (the format caps it at 100 MB).
@@ -256,18 +256,25 @@ impl Config {
         let Some(ssm) = self.ssm.as_ref().filter(|_| self.has_recurrent_state()) else {
             return Ok(());
         };
-        if !matches!(
-            self.weight_scheme,
-            WeightScheme::Mamba2 | WeightScheme::NemotronH
-        ) {
-            return Err("a recurrent config must use the Mamba2 weight scheme".into());
+        let scheme_matches_kind = match ssm.kind {
+            SsmKind::Mamba2 => matches!(
+                self.weight_scheme,
+                WeightScheme::Mamba2 | WeightScheme::NemotronH
+            ),
+            SsmKind::Mamba1 { .. } => self.weight_scheme == WeightScheme::Mamba1,
+        };
+        if !scheme_matches_kind {
+            return Err(format!(
+                "a {:?} recurrent config cannot use the {:?} weight scheme",
+                ssm.kind, self.weight_scheme
+            ));
         }
         let mut shapes = HashMap::new();
         for file in checkpoint_files(model_dir)? {
             shapes.extend(header_shapes(&file)?);
         }
         let quant = self.quantization;
-        let (h, di, cd, nh) = (self.hidden, ssm.d_inner(), ssm.conv_dim, ssm.n_heads);
+        let (h, di, cd) = (self.hidden, ssm.d_inner(), ssm.conv_dim);
         let k = ssm.conv_kernel;
         let shape = |name: &str| -> Result<&Vec<usize>, String> {
             shapes
@@ -323,7 +330,7 @@ impl Config {
         let in_proj = ssm.in_proj_dim().checked_mul(h);
         if !matches!((state, in_proj), (Some(state), Some(in_proj)) if state <= in_proj) {
             return Err(format!(
-                "mamba2 state H*P*N = {di} * {} exceeds the in_proj weight \
+                "SSM state D*N = {di} * {} exceeds the in_proj weight \
                  [{}, {h}] it is derived from",
                 ssm.state_size,
                 ssm.in_proj_dim()
@@ -452,10 +459,30 @@ impl Config {
             if ssm.use_conv_bias {
                 vector(&format!("{m}conv1d.bias"), cd)?;
             }
-            for name in ["dt_bias", "A_log", "D"] {
-                vector(&format!("{m}{name}"), nh)?;
+            match ssm.kind {
+                SsmKind::Mamba2 => {
+                    for name in ["dt_bias", "A_log", "D"] {
+                        vector(&format!("{m}{name}"), ssm.n_heads)?;
+                    }
+                    vector(&format!("{m}norm.weight"), di)?;
+                }
+                SsmKind::Mamba1 { dt_rank, .. } => {
+                    proj(
+                        &format!("{m}x_proj.weight"),
+                        dt_rank + 2 * ssm.state_size,
+                        di,
+                    )?;
+                    proj(&format!("{m}dt_proj.weight"), di, dt_rank)?;
+                    vector(&format!("{m}dt_proj.bias"), di)?;
+                    let a_log = format!("{m}A_log");
+                    expect(
+                        &a_log,
+                        shape(&a_log)?.as_slice() == [di, ssm.state_size],
+                        format!("[{di}, {}]", ssm.state_size),
+                    )?;
+                    vector(&format!("{m}D"), di)?;
+                }
             }
-            vector(&format!("{m}norm.weight"), di)?;
         }
         Ok(())
     }

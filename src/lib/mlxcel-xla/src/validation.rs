@@ -487,6 +487,22 @@ pub(crate) static OLMOE_TINY: ArchFixture = ArchFixture {
     ],
 };
 
+/// Mamba1 (synthetic tiny): a whole-model decode golden for the diagonal
+/// `[D,N]` recurrent state, low-rank dt projection, Mamba1 weight order, linear
+/// biases, and untied LM head (issue #3348). Prefill's chunk-bounded recurrence
+/// shape is guarded separately by the focused emitter tests; freezing a
+/// context-capacity-sized sequential scan would add a disproportionately large
+/// asset without covering a distinct model ABI.
+pub(crate) static MAMBA_TINY: ArchFixture = ArchFixture {
+    arch: "mamba-tiny",
+    config_json: include_str!("../assets/mamba-tiny/config.json"),
+    graphs: &[GraphFixture {
+        kind: GraphKind::Decode { sample: false },
+        golden_name: "decode.mlir",
+        golden: include_str!("../assets/mamba-tiny/decode.mlir"),
+    }],
+};
+
 /// A dense-pack fixture: a small synthetic `config.json` and the frozen decode +
 /// prefill goldens for a family. `$sample` selects the graph tail the goldens were
 /// frozen with: `true` returns the on-device argmax token (the issue #499 pack:
@@ -593,6 +609,7 @@ pub(crate) static REGISTERED: &[&ArchFixture] = &[
     &QWEN2_MOE_TINY,
     &QWEN3_MOE_TINY,
     &OLMOE_TINY,
+    &MAMBA_TINY,
 ];
 
 /// A golden-less structural fixture (issue #497): a small synthetic `config.json`
@@ -961,6 +978,24 @@ mod tests {
                     .unwrap_or_else(|e| panic!("write {}: {e}", p.display()));
                 eprintln!("froze {}", p.display());
             }
+        }
+    }
+
+    /// Author the first Mamba1 whole-model golden. This remains opt-in so an
+    /// ordinary test run never writes the source tree.
+    #[test]
+    fn freeze_mamba1_goldens() {
+        if std::env::var("MLXCEL_FREEZE_MAMBA1").as_deref() != Ok("1") {
+            return;
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/mamba-tiny");
+        for (name, mlir) in MAMBA_TINY
+            .emit_all()
+            .unwrap_or_else(|e| panic!("mamba-tiny: {e}"))
+        {
+            let p = root.join(name);
+            std::fs::write(&p, mlir).unwrap_or_else(|e| panic!("write {}: {e}", p.display()));
+            eprintln!("froze {}", p.display());
         }
     }
 

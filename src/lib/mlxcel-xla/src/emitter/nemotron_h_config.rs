@@ -5,8 +5,8 @@
 
 use super::config::{
     Config, DenseMlpActivation, ExpertAct, MixerKind, MoeConfig, MoeScoring, NormStyle,
-    QuantConfig, RopeScaling, SSM_DEFAULT_CHUNK_SIZE, SharedExpertConfig, SsmConfig, WeightScheme,
-    check_layer_count,
+    QuantConfig, RopeScaling, SSM_DEFAULT_CHUNK_SIZE, SharedExpertConfig, SsmConfig, SsmKind,
+    WeightScheme, check_layer_count,
 };
 use super::recurrent_config::json_f32;
 use serde_json::Value;
@@ -233,6 +233,7 @@ pub(super) fn from_json(v: &Value, quantization: Option<QuantConfig>) -> Result<
         None
     };
     let ssm = SsmConfig {
+        kind: SsmKind::Mamba2,
         n_heads,
         head_dim: ssm_head_dim,
         state_size,

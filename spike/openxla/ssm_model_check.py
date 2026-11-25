@@ -1,6 +1,6 @@
-"""Whole-model Mamba2 check against HF `Mamba2ForCausalLM` in fp32 (issue #3338).
+"""Whole-model Mamba-family check against Transformers in fp32 (issues #3338/#3348).
 
-Runs the mlxcel-xla state-threaded token prefill for a Mamba2 checkpoint
+Runs the mlxcel-xla state-threaded token prefill for a Mamba-family checkpoint
 through the real IREE shim (`examples/xla_ssm_model_check.rs`, which loads the
 checkpoint with the production config reader and weight loader) and compares
 the last-token logits with HF's slow path (`torch_forward`, no `mamba_ssm`
@@ -12,6 +12,9 @@ decode graph are checked against the same oracle.
     cargo build --release --features xla-iree --example xla_ssm_model_check
     # a seeded two-layer synthetic model (n_groups = 2 < num_heads, biased, untied):
     $PY spike/openxla/ssm_model_check.py --synthetic OUT/synthetic --device local-task
+    # a seeded Falcon-Mamba with weightless B/C/dt RMSNorms:
+    $PY spike/openxla/ssm_model_check.py --synthetic OUT/falcon --synthetic-kind falcon_mamba \
+        --device local-task
     # a real checkpoint:
     scripts/rocm_gpu_guard.sh --hold -- $PY spike/openxla/ssm_model_check.py \
         --model models/hf/mamba2-130m --device hip --tokens 200 --capacity 256
@@ -35,36 +38,60 @@ RUNNER = ROOT / "target" / "release" / "examples" / "xla_ssm_model_check"
 TOL = 3e-2
 
 
-def build_synthetic(out: Path, seed: int) -> Path:
-    """Save a small seeded Mamba2ForCausalLM with every optional tensor."""
-    from transformers import Mamba2Config, Mamba2ForCausalLM
+def build_synthetic(out: Path, seed: int, kind: str) -> Path:
+    """Save a small seeded Mamba-family model with every optional tensor."""
+    from transformers import (
+        FalconMambaConfig,
+        FalconMambaForCausalLM,
+        Mamba2Config,
+        Mamba2ForCausalLM,
+    )
 
     torch.manual_seed(seed)
-    config = Mamba2Config(
-        vocab_size=96,
-        hidden_size=64,
-        num_hidden_layers=2,
-        num_heads=8,
-        head_dim=16,
-        expand=2,
-        state_size=16,
-        n_groups=2,
-        conv_kernel=4,
-        use_bias=True,
-        use_conv_bias=True,
-        tie_word_embeddings=False,
-        chunk_size=256,
-    )
-    model = Mamba2ForCausalLM(config).float().eval()
+    if kind == "mamba2":
+        config = Mamba2Config(
+            vocab_size=96,
+            hidden_size=64,
+            num_hidden_layers=2,
+            num_heads=8,
+            head_dim=16,
+            expand=2,
+            state_size=16,
+            n_groups=2,
+            conv_kernel=4,
+            use_bias=True,
+            use_conv_bias=True,
+            tie_word_embeddings=False,
+            chunk_size=256,
+        )
+        model = Mamba2ForCausalLM(config).float().eval()
+    else:
+        config = FalconMambaConfig(
+            vocab_size=96,
+            hidden_size=32,
+            num_hidden_layers=2,
+            state_size=4,
+            expand=2,
+            conv_kernel=4,
+            time_step_rank=4,
+            use_bias=True,
+            use_conv_bias=True,
+            tie_word_embeddings=False,
+            # Force Transformers' independent sequential recurrence.
+            use_associative_scan=False,
+        )
+        model = FalconMambaForCausalLM(config).float().eval()
     with torch.no_grad():
         # The default init leaves dt_bias / D near constant; spread them so a
         # mixed-up head order shows up in the logits.
         for layer in model.backbone.layers:
             mixer = layer.mixer
-            mixer.dt_bias.uniform_(-3.0, 0.0)
+            dt_bias = mixer.dt_bias if kind == "mamba2" else mixer.dt_proj.bias
+            dt_bias.uniform_(-3.0, 0.0)
             mixer.D.uniform_(0.5, 1.5)
             mixer.A_log.uniform_(0.0, 1.5)
-            mixer.norm.weight.uniform_(0.5, 1.5)
+            if kind == "mamba2":
+                mixer.norm.weight.uniform_(0.5, 1.5)
             layer.norm.weight.uniform_(0.5, 1.5)
     out.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(out, safe_serialization=True)
@@ -72,11 +99,11 @@ def build_synthetic(out: Path, seed: int) -> Path:
 
 
 def hf_logits(model_dir: Path, tokens: list[int]) -> np.ndarray:
-    from transformers import Mamba2ForCausalLM
+    from transformers import AutoModelForCausalLM
 
     # safetensors only: a pickled `pytorch_model.bin` in an untrusted
     # checkpoint directory must not be unpickled.
-    model = Mamba2ForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_dir, torch_dtype=torch.float32, use_safetensors=True
     ).eval()
     with torch.no_grad():
@@ -115,8 +142,14 @@ def compare(name: str, got: np.ndarray, want: np.ndarray) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     src = ap.add_mutually_exclusive_group(required=True)
-    src.add_argument("--model", help="a Mamba2 checkpoint directory")
+    src.add_argument("--model", help="a Mamba-family checkpoint directory")
     src.add_argument("--synthetic", metavar="DIR", help="build a seeded model here")
+    ap.add_argument(
+        "--synthetic-kind",
+        default="mamba2",
+        choices=["mamba2", "falcon_mamba"],
+        help="architecture built by --synthetic (default: mamba2)",
+    )
     ap.add_argument("--device", default="local-task")
     ap.add_argument("--precision", default="f32", choices=["f32", "f16", "bf16"])
     # `inout` is what the single-sequence runtime (`IreeLlama`) emits and
@@ -132,7 +165,7 @@ def main() -> int:
     args = ap.parse_args()
 
     model_dir = (
-        build_synthetic(Path(args.synthetic), args.seed)
+        build_synthetic(Path(args.synthetic), args.seed, args.synthetic_kind)
         if args.synthetic
         else Path(args.model)
     )
