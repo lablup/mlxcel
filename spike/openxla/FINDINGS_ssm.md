@@ -302,7 +302,8 @@ Real `mamba2-130m` mixer dimensions against the HF fp32 oracle, tolerance `5e-5`
 | shorter than `K-1` | 256 / 2 | metal | f32 | cached | 0.196 | 8.345e-7 | 1.676e-8 | 0 |
 | long prefill | 4096 / 3584 | metal | f32 | 5.38 | 0.336 | 1.490e-6 | 2.123e-7 | 0 |
 | decode step | 1 / 1 | metal | f16 | 0.93 | 0.013 | 8.343e-4 | 1.559e-4 | 6.096e-4 |
-| padded prefill, before the fix | 256 / 224 | metal | f16 | cached | 0.235 | 3.311 | 8.674e28 | 6.557e-4 |
+| padded prefill, before the fix | 256 / 224 | metal | f16 | 4.84 | 0.210 | NaN | NaN | 6.557e-4 |
+| full prefill, before the fix | 256 / 256 | metal | f16 | cached | 0.204 | 3.311 | 8.674e28 | 6.317e-4 |
 | padded prefill | 256 / 224 | metal | f16 | 5.34 | 0.194 | 1.511e-3 | 2.684e-5 | 6.557e-4 |
 | full prefill | 256 / 256 | metal | f16 | cached | 0.198 | 1.511e-3 | 2.347e-5 | 6.317e-4 |
 | shorter than `K-1` | 256 / 2 | metal | f16 | cached | 0.203 | 7.685e-4 | 9.151e-6 | 6.514e-4 |

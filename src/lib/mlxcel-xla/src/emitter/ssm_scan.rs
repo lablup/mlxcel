@@ -106,8 +106,9 @@ fn shift_along(b: &mut Builder, v: &Val, axis: usize, by: usize, fill: f32) -> V
 ///
 /// This replaces the left-padded `stablehlo.reduce_window` cumsum, which
 /// IREE-Metal miscompiles at rank 2 and above (issue #3343, see the module
-/// docs). The pairwise association also carries less rounding error than the
-/// sequential fold that `reduce_window` lowered to.
+/// docs). The association is pairwise rather than a sequential fold, so values
+/// move in the last bits on every backend; the error against the HF fp32
+/// reference stays of the same order (FINDINGS_ssm.md).
 // Used by: Mamba2, Nemotron-H, Falcon-H1 (chunked SSD prefill: `exp_segsum`,
 // `chunked_ssd`).
 pub(super) fn prefix_add(b: &mut Builder, v: &Val, axis: usize) -> Val {

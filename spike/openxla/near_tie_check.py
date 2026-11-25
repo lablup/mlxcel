@@ -13,6 +13,9 @@ The oracle JSON must come from ``oracle_continuation.py --top2``. The stream is
 given as token ids (``--ids 1,2,3`` or ``--ids-json FILE [--ids-key KEY]``) or
 as generated text (``--text`` / ``--text-file``, which needs ``--model`` for the
 tokenizer and is matched against the decoded oracle prefix token by token).
+Text cannot show token boundaries, so a text divergence that falls inside a
+word (the stream may have emitted one longer token where the oracle emitted
+two) is reported as ambiguous with exit 2; pass the ids instead.
 ``--mlxcel-cli`` says the text is the captured stdout of ``mlxcel generate``:
 the banner lines, the echoed prompt and the trailing statistics are dropped.
 
@@ -23,7 +26,7 @@ Usage:
         --oracle oracle.json --model models/hf/mamba2-130m --text-file out.txt
 
 Exit status: 0 token-exact, 3 diverged at a near-tie only, 1 diverged elsewhere,
-2 usage error.
+2 usage error, an empty stream, or an ambiguous text divergence.
 """
 
 from __future__ import annotations
@@ -86,8 +89,22 @@ def first_divergence_text(text: str, ref: list[int], decode) -> tuple[int | None
         if prefix.startswith(text):
             # The stream ended inside this token: nothing left to compare.
             return None, count - 1
-        return count - 1, count - 1
+        index = count - 1
+        if index > 0:
+            # If the matched oracle prefix ends mid-word and the stream goes on
+            # with more word characters, the stream token may have extended
+            # the previous oracle token (oracle "the" + " cat", stream
+            # "there"), so the real divergence can be earlier than `index`.
+            before = decode(ref[:index]).lstrip()
+            after = text[len(before) : len(before) + 1]
+            if before and not before[-1].isspace() and after and not after.isspace():
+                raise AmbiguousDivergence(index)
+        return index, index
     return None, len(ref)
+
+
+class AmbiguousDivergence(Exception):
+    """A text divergence whose token position text alone cannot fix."""
 
 
 def judge(oracle: dict, index: int | None, tolerance: float) -> tuple[int, str]:
@@ -157,9 +174,21 @@ def main() -> int:
         from transformers import AutoTokenizer
 
         tok = AutoTokenizer.from_pretrained(args.model)
-        index, compared = first_divergence_text(text, ref, tok.decode)
+        try:
+            index, compared = first_divergence_text(text, ref, tok.decode)
+        except AmbiguousDivergence as error:
+            print(
+                f"[near-tie] {args.label}: AMBIGUOUS (the text leaves the oracle inside a "
+                f"word near token {error.args[0]}; give the stream as --ids)",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
     else:
         ap.error("give the stream as --ids, --ids-json, --text or --text-file")
+
+    if compared == 0 and index is None:
+        print(f"[near-tie] {args.label}: no tokens to compare (empty stream)", file=sys.stderr)
+        return EXIT_USAGE
 
     status, verdict = judge(oracle, index, args.tolerance)
     print(f"[near-tie] {args.label}: {verdict} ({compared} tokens compared)")
