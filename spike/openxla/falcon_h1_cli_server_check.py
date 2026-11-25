@@ -32,6 +32,7 @@ parser.add_argument('--out', type=Path, required=True)
 parser.add_argument('--device', choices=['local-task', 'cuda', 'hip'], required=True)
 parser.add_argument('--bin-dir', type=Path, default=ROOT / 'target/test-fast')
 parser.add_argument('--binary-source-head', required=True)
+parser.add_argument('--http-mode', choices=['nonstream', 'sse', 'both'], default='both')
 args = parser.parse_args()
 OUT, MODEL, ORACLE = args.out.resolve(), args.model.resolve(), args.oracle.resolve()
 PROMPTS = [
@@ -119,6 +120,37 @@ def request_json(url: str, payload: dict[str, object] | None = None, timeout: in
         return json.load(response)
 
 
+def request_completion(url: str, payload: dict[str, object]) -> object:
+    if not payload['stream']:
+        return request_json(url, payload, timeout=300)
+    request = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                     headers={'Content-Type': 'application/json'})
+    events, text, usage, finish = [], [], None, None
+    done = False
+    with HTTP.open(request, timeout=300) as response:
+        for line in response:
+            if not line.startswith(b'data: '):
+                continue
+            data = line[6:].rstrip(b'\r\n')
+            if data == b'[DONE]':
+                done = True
+                break
+            event = json.loads(data)
+            events.append(event)
+            if 'error' in event:
+                raise RuntimeError(f'SSE error: {event["error"]}')
+            if event.get('usage') is not None:
+                usage = event['usage']
+            for choice in event.get('choices', []):
+                text.append(choice.get('text', ''))
+                if choice.get('finish_reason') is not None:
+                    finish = choice['finish_reason']
+    if not done or usage is None or finish is None:
+        raise RuntimeError('SSE response missing DONE, usage, or finish reason')
+    return {'choices': [{'text': ''.join(text), 'finish_reason': finish}],
+            'usage': usage, 'sse_events': events}
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
@@ -126,6 +158,7 @@ def main() -> None:
         'head': head, 'binary_source_head': args.binary_source_head, 'server_ctx_size': 2048, 'checkpoint_revision': 'e6389502a0b12cd8da894b395ba5bf7436873b16',
         'model': str(MODEL), 'precision': 'f32', 'device': args.device,
         'context_capacity_override': 256, 'max_batch_size': 4,
+        'http_mode': args.http_mode,
         'scope': 'CLI 40-token oracle and four concurrent completions versus separate 40-token displayed CLI references',
         'gpu_guard': 'caller must hold gpu-lock on GB10 or rocm_gpu_guard on ROCm',
         'binary_sha256': {name: hashlib.sha256((args.bin_dir / name).read_bytes()).hexdigest()
@@ -167,42 +200,51 @@ def main() -> None:
                     if time.monotonic() >= deadline:
                         raise RuntimeError('Server readiness timeout')
                     time.sleep(1)
-            print(f'Server ready at {base}; issuing four requests concurrently', flush=True)
+            print(f'Server ready at {base}; issuing four requests concurrently per transport', flush=True)
             barrier = threading.Barrier(4)
 
             def complete(i: int) -> dict[str, object]:
                 payload = {'model': model_id, 'prompt': PROMPTS[i], 'temperature': 0,
-                           'max_tokens': 40, 'stream': False}
-                save(f'request-{i}.json', payload)
+                           'max_tokens': 40, 'stream': mode == 'sse'}
+                if mode == 'sse':
+                    payload['stream_options'] = {'include_usage': True}
+                save(f'{mode}-request-{i}.json', payload)
                 barrier.wait(timeout=10)
                 started = time.time()
-                body = request_json(base+'/v1/completions', payload, timeout=300)
-                result = {'request': i, 'started': started, 'ended': time.time(), 'body': body}
-                save(f'response-{i}.json', result)
+                body = request_completion(base+'/v1/completions', payload)
+                result = {'request': i, 'mode': mode, 'started': started, 'ended': time.time(), 'body': body}
+                save(f'{mode}-response-{i}.json', result)
                 return result
 
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                results = list(executor.map(complete, range(4)))
+            all_results = []
+            overlaps = {}
+            modes = ['nonstream', 'sse'] if args.http_mode == 'both' else [args.http_mode]
+            for mode in modes:
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    results = list(executor.map(complete, range(4)))
+                overlaps[mode] = max(r['started'] for r in results) < min(r['ended'] for r in results)
+                all_results.extend(results)
             comparisons = []
-            for i, (result, reference) in enumerate(zip(results, references, strict=True)):
+            for result in all_results:
+                i, mode = result['request'], result['mode']
+                reference = references[i]
                 body = result['body']
                 actual = body['choices'][0]['text']
                 usage = body['usage']
                 match = actual == reference['text']
                 counts = (usage['prompt_tokens'] == len(reference['prompt_ids'])
                           and usage['completion_tokens'] == len(reference['token_ids']))
-                comparisons.append({'request': i, 'text_exact': match, 'counts_exact': counts,
+                comparisons.append({'request': i, 'mode': mode, 'text_exact': match, 'counts_exact': counts,
                     'expected_text': reference['text'], 'actual_text': actual, 'usage': usage,
                     'cli_token_ids': reference['token_ids'], 'finish_reason': body['choices'][0]['finish_reason']})
-                print(f'request{i}: text_exact={match} counts_exact={counts}', flush=True)
-            overlap = max(r['started'] for r in results) < min(r['ended'] for r in results)
-            passed = overlap and all(c['text_exact'] and c['counts_exact'] for c in comparisons)
+                print(f'{mode} request{i}: text_exact={match} counts_exact={counts}', flush=True)
+            passed = all(overlaps.values()) and all(c['text_exact'] and c['counts_exact'] for c in comparisons)
             save('result.json', {'head': head, 'passed': passed, 'cli_oracle_40_token_exact': True,
-                'four_requests_overlapped': overlap, 'server_cli_comparisons': comparisons,
+                'four_requests_overlapped_by_transport': overlaps, 'server_cli_comparisons': comparisons,
                 'evidence_boundary': f'{args.device} HTTP versus displayed CLI text and token-count parity; server API does not expose token IDs.'})
             if not passed:
                 raise RuntimeError('Concurrent server/CLI parity failed; inspect result.json')
-            print('SERVER/CLI: 4/4 EXACT-TEXT AND TOKEN-COUNT PASS', flush=True)
+            print(f'SERVER/CLI: {len(comparisons)}/{len(comparisons)} EXACT-TEXT AND TOKEN-COUNT PASS ({modes})', flush=True)
         finally:
             stop_owned(process)
             save('server-exit.json', {'pid': process.pid, 'returncode': process.returncode,

@@ -58,7 +58,7 @@ External ROCm acceptance at `852129eb1b4bf45d957f4c63b082d9d0276e4951` passed th
 
 `StreamFilter::flush` intentionally trims chat and structured-message whitespace. Full CLI display now opts into preserving plain completion whitespace, restoring its documented byte-preserving behavior. Consumed reasoning/tool/Harmony/Muse delimiters and prompt-primed reasoning still select the existing cleanup policy; chat callers keep the default flush. Raw streaming CLI already forwards text unchanged. CPU regressions cover the exact `"  \n"` suffix, whitespace-only and Unicode replies, chunk accounting, and structured-message cleanup.
 
-The portable replay compares actual displayed CLI stdout with four concurrent 40-token HTTP completions, including the Germany prompt. It removes only the CLI preamble and two framing newlines, without trimming model text, and separately verifies the original 40-token HF oracle. After rebuilding both binaries at the candidate head, external ROCm replay must explicitly select HIP:
+The portable replay compares actual displayed CLI stdout with four concurrent 40-token HTTP completions per transport (non-streaming and SSE), including the Germany prompt. It removes only the CLI preamble and two framing newlines, without trimming model text, and separately verifies the original 40-token HF oracle. SSE text chunks are concatenated unchanged, with usage and stream termination checked separately. After rebuilding both binaries at the candidate head, external ROCm replay must explicitly select HIP:
 
 ```sh
 eval "$(scripts/iree/setup-rocm.sh --env)"
