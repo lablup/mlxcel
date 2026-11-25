@@ -1,0 +1,8 @@
+
+running 2 tests
+test falcon_h1_hf_synthetic_parity ... ok
+test falcon_h1_original_checkpoint_oracle_tokens ... Falcon-H1 40 oracle tokens match on cuda
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.90s
+

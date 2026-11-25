@@ -1,0 +1,19 @@
+
+running 6 tests
+test consecutive_requests_start_from_a_fresh_state ... ok
+test empty_prefix_and_refused_prefill_never_reuse_state ... xla_llama_prefill: lp=24 real_len=0 context_capacity=24 n_state=2
+xla_llama_decode: mode=0 bundle_mode=0 cache_len=0 context_capacity=24 or KV/state is uninitialized
+ok
+test failed_state_reset_drops_the_previous_state ... xla_llama_state_reset: preparing the zero state failed:
+csrc/xla_iree.c:849: INTERNAL; test hook: zero-state preparation forced to fail
+xla_llama_decode: mode=0 bundle_mode=0 cache_len=0 context_capacity=24 or KV/state is uninitialized
+ok
+test prefill_at_full_capacity_matches_the_decode_route ... ok
+test prefill_to_decode_handoff_agrees_across_routes ... ok
+test request_refused_in_rust_drops_the_previous_state ... xla_llama_decode: mode=0 bundle_mode=0 cache_len=0 context_capacity=24 or KV/state is uninitialized
+xla_llama_decode: mode=0 bundle_mode=0 cache_len=13 context_capacity=24 or KV/state is uninitialized
+xla_llama_decode: mode=0 bundle_mode=0 cache_len=13 context_capacity=24 or KV/state is uninitialized
+ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 5.03s
+
