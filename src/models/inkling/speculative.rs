@@ -50,8 +50,12 @@ impl InklingModel {
         )
     }
 
-    /// Forward a B=1 verify block after capturing every layer's exact KV and
-    /// four-convolution pre-forward state.
+    /// Forward a B=1 verify block. A block the row-invariant scope covers
+    /// records its own rewind data (see
+    /// [`Self::keep_verified_prefix_for_sequence`]) and returns an empty
+    /// snapshot; any other block first captures every layer's exact KV and
+    /// four-convolution pre-forward state for
+    /// [`Self::restore_and_replay_speculative_for_sequence`].
     pub(crate) fn forward_speculative_for_sequence(
         &self,
         input: &MlxArray,
@@ -67,9 +71,11 @@ impl InklingModel {
             || self.make_internal_caches(),
             |caches| {
                 let mut snapshot_tensors = Vec::new();
-                let mut snapshot_scalars = Vec::with_capacity(caches.len() * 2);
-                for cache in caches.iter() {
-                    cache.capture_flat(&mut snapshot_tensors, &mut snapshot_scalars);
+                let mut snapshot_scalars = Vec::new();
+                if !self.verify_block_rewinds_in_place(input) {
+                    for cache in caches.iter() {
+                        cache.capture_flat(&mut snapshot_tensors, &mut snapshot_scalars);
+                    }
                 }
                 let _verify = self.verify_block_scope();
                 let embeddings = self.embed_tokens.forward(input);
@@ -77,6 +83,46 @@ impl InklingModel {
                 let hidden_post = self.norm.forward(&hidden_pre);
                 let logits = self.project_hidden(&hidden_post);
                 (logits, hidden_pre, snapshot_tensors, snapshot_scalars)
+            },
+        )
+    }
+
+    /// Whether a verify forward over `input [1, L]` records the convolution
+    /// windows [`Self::keep_verified_prefix_for_sequence`] rewinds from, so
+    /// no pre-verify snapshot is needed.
+    fn verify_block_rewinds_in_place(&self, input: &MlxArray) -> bool {
+        let shape = mlxcel_core::array_shape(input);
+        self.row_kernel_enabled()
+            && shape.len() == 2
+            && shape[0] == 1
+            && (2..=mlxcel_core::row_invariant::MAX_ROWS).contains(&shape[1])
+    }
+
+    /// After a verify block of `appended` rows, keep its first `kept` rows in
+    /// place: every layer trims its KV tail and takes its convolution states
+    /// from the block's own input windows. A row-invariant verify block
+    /// equals the single-token chain, so the result is the chain's state
+    /// after those rows; the replay of the accepted prefix it replaces ran
+    /// outside the verify scope and was a second target forward per round
+    /// (issue #3280). Refused, with nothing changed, unless every layer
+    /// recorded its windows.
+    pub(crate) fn keep_verified_prefix_for_sequence(
+        &self,
+        seq_id: Option<SequenceId>,
+        appended: usize,
+        kept: usize,
+    ) -> Result<(), String> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| {
+                if !caches.iter().all(|cache| cache.holds_block_tails()) {
+                    return Err("an Inkling layer recorded no verify-block windows".into());
+                }
+                for cache in caches.iter_mut() {
+                    cache.keep_verified_prefix(appended as i32, kept as i32)?;
+                }
+                Ok(())
             },
         )
     }
@@ -144,7 +190,11 @@ impl InklingModel {
     /// `inkling-0.6b` checkpoint at widths 2, 4 and 8 on an M3 Ultra, also
     /// after prompts past the sliding window. The probe adds a long draw past
     /// that window. `MLXCEL_INKLING_ROW_INVARIANT=0` restores the old
-    /// products, under which the probe declines.
+    /// products, under which the probe declines. On `Inkling-Small-mlx-4bit`
+    /// the probe passed at widths 2, 3, 4 and 8 but declined at 10, the MTP
+    /// default, from layer 0 on: past 8 queries MLX's SDPA leaves its
+    /// per-query kernel, so a verify block now attends in groups of at most 8
+    /// rows (issue #3280).
     ///
     /// Used by: `speculative_burst::mtp_capable_target`, the offline
     /// `run_offline_mtp` gate.

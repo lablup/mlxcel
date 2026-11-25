@@ -443,6 +443,11 @@ impl InklingModel {
         self.row_kernel = on;
     }
 
+    /// Whether the row-invariant products are on (`MLXCEL_INKLING_ROW_INVARIANT`).
+    pub(crate) fn row_kernel_enabled(&self) -> bool {
+        self.row_kernel
+    }
+
     /// Marks the forwards run while the guard lives as verify blocks.
     ///
     /// Used by: the MTP verify forward and the exactness probe's block arm.

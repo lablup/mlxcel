@@ -20,6 +20,11 @@ use crate::{MlxArray, UniquePtr};
 pub struct InklingLayerCache {
     pub kv: KVCache,
     pub conv: [Option<UniquePtr<MlxArray>>; 4],
+    /// Each convolution's whole `[1, kernel - 1 + L, C]` input window from
+    /// the last forward when it was a verify block of `L` rows, so
+    /// [`Self::keep_verified_prefix`] can rewind to any accepted prefix
+    /// without replaying it; `None` after any other forward.
+    pub block_tails: [Option<UniquePtr<MlxArray>>; 4],
 }
 
 impl InklingLayerCache {
@@ -27,7 +32,49 @@ impl InklingLayerCache {
         Self {
             kv: KVCache::new(),
             conv: std::array::from_fn(|_| None),
+            block_tails: std::array::from_fn(|_| None),
         }
+    }
+
+    /// Whether the last forward was a verify block whose rows can be dropped
+    /// by [`Self::keep_verified_prefix`].
+    pub fn holds_block_tails(&self) -> bool {
+        self.conv
+            .iter()
+            .zip(&self.block_tails)
+            .all(|(state, tail)| state.is_none() || tail.is_some())
+            && self.block_tails.iter().any(Option::is_some)
+    }
+
+    /// Keep the first `kept` of the `appended` rows the last verify block
+    /// added: the KV tail is trimmed and each convolution state becomes the
+    /// `kernel - 1` input rows before row `kept`, which is the state the
+    /// single-token chain holds after those rows (issue #3280). Refused, with
+    /// nothing changed, when the last forward recorded no tails.
+    ///
+    /// Used by: `InklingModel::keep_verified_prefix_for_sequence`.
+    pub fn keep_verified_prefix(&mut self, appended: i32, kept: i32) -> Result<(), String> {
+        if !self.holds_block_tails() {
+            return Err("the last Inkling forward was not a verify block".into());
+        }
+        if !(1..=appended).contains(&kept) {
+            return Err(format!("cannot keep {kept} of {appended} verify rows"));
+        }
+        for tail in self.block_tails.iter().flatten() {
+            let rows = crate::array_shape(tail)[1];
+            if rows <= appended {
+                return Err(format!("verify tail of {rows} rows for {appended} rows"));
+            }
+        }
+        for (state, tail) in self.conv.iter_mut().zip(self.block_tails.iter_mut()) {
+            if let Some(tail) = tail.take() {
+                let keep = crate::array_shape(&tail)[1] - appended;
+                let kept_state = crate::utils::slice_axis(&tail, 1, kept, kept + keep);
+                *state = Some(crate::contiguous(&kept_state, false));
+            }
+        }
+        self.kv.trim(appended - kept);
+        Ok(())
     }
 
     pub fn snapshot_into(&self, snapshot: &mut ModelStateSnapshot, prefix: &str) {

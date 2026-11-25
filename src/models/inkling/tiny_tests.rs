@@ -262,6 +262,8 @@ fn mtp_verify_argmax_matches_the_incremental_target_chain() {
     assert_eq!(verify.target_tokens, expected);
 }
 
+/// Without the row-invariant products a verify block keeps a pre-verify
+/// snapshot, and a partial accept restores it and replays the kept prefix.
 #[test]
 fn mtp_partial_accept_restores_then_replays_kv_and_conv_state_exactly() {
     // Exact comparison of two computations: both must run on one default
@@ -270,7 +272,8 @@ fn mtp_partial_accept_restores_then_replays_kv_and_conv_state_exactly() {
     let prompt = [1, 2, 3];
     let verify_input = [4, 5, 6];
     let accepted = 1;
-    let model = tiny_model();
+    let mut model = tiny_model();
+    model.set_row_invariant_for_test(false);
     let _ = model.make_caches();
     let adapter = crate::models::inkling_mtp_target::InklingMtpTargetAdapter::new(&model, None);
     let sampler = mlxcel_core::generate::SamplingConfig::greedy();
@@ -280,7 +283,8 @@ fn mtp_partial_accept_restores_then_replays_kv_and_conv_state_exactly() {
     let finalized = adapter.verify_finalize(accepted, verify_input.len(), verify.captured);
     assert_eq!(finalized.kv_offset, prompt.len() + accepted + 1);
 
-    let reference = tiny_model();
+    let mut reference = tiny_model();
+    reference.set_row_invariant_for_test(false);
     let _ = reference.make_caches();
     let prompt_arr = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
     let _ = reference.forward_prefill_with_hidden_for_sequence(&prompt_arr, None);
@@ -298,6 +302,62 @@ fn mtp_partial_accept_restores_then_replays_kv_and_conv_state_exactly() {
     mlxcel_core::eval(&hidden_equal);
     assert!(mlxcel_core::item_bool(&logits_equal));
     assert!(mlxcel_core::item_bool(&hidden_equal));
+}
+
+/// Issue #3280: a partial accept keeps the verify block's own state in
+/// place (KV tail trim, convolution windows from the block), so the next
+/// step equals classic decode, which fed every kept token alone. The replay
+/// it replaces ran the kept prefix as one forward outside the verify scope,
+/// whose products and convolution are not the single-token step's, and was
+/// a second target forward per round. Widths 3 and 10 (the Inkling-Small
+/// MTP default, past the 8 queries MLX's SDPA runs per query).
+#[test]
+fn mtp_partial_accept_keeps_the_single_token_chain_state_on_metal() {
+    if !mlxcel_core::row_invariant::available() {
+        eprintln!("skipping: the row-invariant kernel needs the Metal device");
+        return;
+    }
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let sampler = mlxcel_core::generate::SamplingConfig::greedy();
+    let logprobs = LogprobsConfig::default();
+    let prompt: Vec<i32> = (0..8).map(|i| (i * 5 + 1) % 32).collect();
+    let step = |model: &InklingModel, tokens: &[i32]| {
+        let input = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+        model.forward_prefill_with_hidden_for_sequence(&input, None)
+    };
+    for width in [3_usize, 10] {
+        let verify_input: Vec<i32> = (0..width as i32).map(|i| (i * 7 + 3) % 32).collect();
+        for accepted in 0..width {
+            let model = tiny_model_with_real_heads();
+            let adapter =
+                crate::models::inkling_mtp_target::InklingMtpTargetAdapter::new(&model, None);
+            let _ = adapter.prefill_and_seed(&prompt, &sampler, &prompt, &logprobs);
+            let verify = adapter.verify_forward(&verify_input, &sampler, &logprobs);
+            let finalized = adapter.verify_finalize(accepted, width, verify.captured);
+            assert_eq!(finalized.kv_offset, prompt.len() + accepted + 1);
+
+            let chain = tiny_model_with_real_heads();
+            let _ = step(&chain, &prompt);
+            for token in &verify_input[..=accepted] {
+                let _ = step(&chain, &[*token]);
+            }
+            for next in [9, 17] {
+                let (actual_logits, actual_hidden) = step(&model, &[next]);
+                let (expected_logits, expected_hidden) = step(&chain, &[next]);
+                let context = format!("width {width}, accepted {accepted}, next {next}");
+                assert_eq!(
+                    crate::models::speculative_exactness_draws::position_bytes(&actual_logits, 0),
+                    crate::models::speculative_exactness_draws::position_bytes(&expected_logits, 0),
+                    "logits, {context}"
+                );
+                assert_eq!(
+                    crate::models::speculative_exactness_draws::position_bytes(&actual_hidden, 0),
+                    crate::models::speculative_exactness_draws::position_bytes(&expected_hidden, 0),
+                    "hidden, {context}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -365,7 +425,7 @@ fn the_verify_block_matches_the_chain_on_metal() {
         return;
     }
     let model = tiny_model_with_real_heads();
-    for width in [2, 4, 8] {
+    for width in [2, 4, 8, 10, 16] {
         assert_eq!(
             model.probe_block_chain_exactness(width),
             BlockChainExactness::Equal,
@@ -390,7 +450,9 @@ fn the_verify_block_matches_the_chain_on_metal() {
 /// Issue #3409 on a real checkpoint: without the row-invariant products the
 /// probe declines Inkling at every width (the state before the change) and
 /// names layer 0; with them the block is byte-identical, also after prompts
-/// past the 512-token sliding window and the 2048-token prefill chunk.
+/// past the 512-token sliding window and the 2048-token prefill chunk, and
+/// at width 10, the Inkling-Small MTP default (issue #3280; passes on
+/// `models/inkling-small-mlx-4bit` too).
 /// Ignored; run under the GPU lock. `INKLING_PROBE_MODEL` picks the
 /// checkpoint (default `models/inkling-0.6b-a0.6b`).
 #[test]
@@ -404,7 +466,7 @@ fn real_checkpoint_probe_fails_without_row_invariant_and_passes_with_it() {
         return;
     }
     let (mut model, _) = InklingModel::load(&path).unwrap();
-    for width in [2, 4, 8] {
+    for width in [2, 4, 8, 10] {
         model.set_row_invariant_for_test(false);
         let before = model.probe_block_chain_exactness(width);
         assert!(

@@ -152,15 +152,23 @@ impl MtpTarget for InklingMtpTargetAdapter<'_> {
             accepted < shape[1] as usize,
             "accepted prefix exceeds verify input"
         );
-        let replay = mlxcel_core::slice(&verify_input, &[0, 0], &[shape[0], accepted as i32 + 1]);
-        self.model
-            .restore_and_replay_speculative_for_sequence(
-                &replay,
-                self.seq_id,
-                snapshot_tensors,
-                &scalars,
-            )
-            .expect("Inkling MTP snapshot must restore exactly");
+        if scalars.is_empty() {
+            // A row-invariant verify block rewinds in place (issue #3280).
+            self.model
+                .keep_verified_prefix_for_sequence(self.seq_id, shape[1] as usize, accepted + 1)
+                .expect("Inkling verify block must keep its accepted prefix");
+        } else {
+            let replay =
+                mlxcel_core::slice(&verify_input, &[0, 0], &[shape[0], accepted as i32 + 1]);
+            self.model
+                .restore_and_replay_speculative_for_sequence(
+                    &replay,
+                    self.seq_id,
+                    snapshot_tensors,
+                    &scalars,
+                )
+                .expect("Inkling MTP snapshot must restore exactly");
+        }
         let next_hidden = Gemma4MtpTargetAdapter::hidden_at_position(&hidden_pre, accepted);
         let kv_offset = self
             .model

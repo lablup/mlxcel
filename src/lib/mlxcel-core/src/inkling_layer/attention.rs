@@ -14,121 +14,14 @@
 
 use crate::layers::{RMSNorm, UnifiedLinear};
 use crate::weights::WeightMap;
-use crate::{MlxArray, UniquePtr, dtype, row_invariant};
+use crate::{MlxArray, UniquePtr, row_invariant};
 
+use super::conv::InklingShortConv;
 use super::{InklingLayerCache, InklingLayerSpec, weight};
 
-/// Causal depth-wise convolution shared by Inkling target and MTP layers.
-pub struct InklingShortConv {
-    weight: UniquePtr<MlxArray>,
-    decode_weight: UniquePtr<MlxArray>,
-    kernel: i32,
-}
-
-impl InklingShortConv {
-    pub(super) fn forward_batched_decode(
-        &self,
-        input: &MlxArray,
-        caches: &mut [&mut InklingLayerCache],
-        slot: usize,
-        residual: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        let channels = crate::array_shape(input)[2];
-        // The scalar path pads absent state with zeros in float32 too.
-        let states: Vec<_> = caches
-            .iter()
-            .map(|cache| match &cache.conv[slot] {
-                Some(state) => crate::copy(state),
-                None => crate::zeros(&[1, self.kernel - 1, channels], dtype::FLOAT32),
-            })
-            .collect();
-        let state_refs: Vec<_> = states.iter().map(|state| &**state).collect();
-        let mut stacked = Some(crate::concatenate_many(&state_refs, 0));
-        let out = self.forward(input, &mut stacked, residual);
-        let state = stacked.expect("convolution retains its tail");
-        let rows = crate::array_shape(input)[1];
-        for (i, cache) in caches.iter_mut().enumerate() {
-            // Per-row slice along axis 0 of the already-scheduled tail, so it
-            // stays a slice plus `contiguous` and is scheduled explicitly.
-            let row = crate::contiguous(
-                &crate::utils::slice_axis(&state, 0, i as i32, i as i32 + 1),
-                false,
-            );
-            crate::utils::schedule_prefill_state(&row, rows);
-            cache.conv[slot] = Some(row);
-        }
-        out
-    }
-
-    pub fn from_weights(weights: &WeightMap, name: &str, kernel: usize) -> Result<Self, String> {
-        let raw = weight(weights, name)?;
-        let shape = crate::array_shape(&raw);
-        if shape.len() != 3 || shape[1] != kernel as i32 || shape[2] != 1 {
-            return Err(format!(
-                "{name}: expected [channels, {kernel}, 1], got {shape:?}"
-            ));
-        }
-        let weight = crate::astype(&raw, dtype::FLOAT32);
-        let decode_weight = crate::transpose_axes(&weight, &[2, 1, 0]);
-        let decode_weight = crate::contiguous(&decode_weight, false);
-        crate::eval(&decode_weight);
-        Ok(Self {
-            weight,
-            decode_weight,
-            kernel: kernel as i32,
-        })
-    }
-
-    pub fn forward(
-        &self,
-        input: &MlxArray,
-        state: &mut Option<UniquePtr<MlxArray>>,
-        residual: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        let input_dtype = crate::array_dtype(input);
-        let input_f32 = crate::astype(input, dtype::FLOAT32);
-        let shape = crate::array_shape(&input_f32);
-        let keep = self.kernel - 1;
-        let padded = match state.as_ref().and_then(|value| value.as_ref()) {
-            Some(previous) => crate::concatenate(previous, &input_f32, 1),
-            None => {
-                let zeros = crate::zeros(&[shape[0], keep, shape[2]], dtype::FLOAT32);
-                crate::concatenate(&zeros, &input_f32, 1)
-            }
-        };
-        let padded_len = crate::array_shape(&padded)[1];
-        // A fresh buffer, scheduled now on a long prefill so `padded` is not
-        // held until the caches are evaluated.
-        *state = Some(crate::utils::materialized_state_tail(&padded, keep));
-
-        // One position: the window times the taps, summed. A verify block
-        // repeats that per position instead of taking `conv1d`, whose
-        // summation order is not the step's (issue #3409).
-        let step = |end: i32| {
-            let window = crate::utils::slice_axis(&padded, 1, end - self.kernel, end);
-            let multiplied = crate::multiply(&window, &self.decode_weight);
-            crate::sum_axis(&multiplied, 1, true)
-        };
-        let convolved = if shape[1] == 1 {
-            step(padded_len)
-        } else if shape[0] == 1
-            && shape[1] <= crate::row_invariant::MAX_ROWS
-            && crate::row_invariant::in_verify_block()
-        {
-            let parts: Vec<_> = (0..shape[1]).map(|i| step(keep + i + 1)).collect();
-            let refs: Vec<&MlxArray> = parts.iter().map(|part| &**part).collect();
-            crate::concatenate_many(&refs, 1)
-        } else {
-            crate::conv1d(&padded, &self.weight, 1, 0, 1, shape[2])
-        };
-        let inner = crate::add(&convolved, &input_f32);
-        let inner = crate::astype(&inner, input_dtype);
-        match residual {
-            Some(residual) => crate::add(residual, &inner),
-            None => inner,
-        }
-    }
-}
+/// The most queries MLX's fused SDPA runs through its per-query vector
+/// kernel, the one a single-token decode step takes.
+const SDPA_VECTOR_ROWS: i32 = 8;
 
 /// Inkling NoPE attention with learned banded relative logits.
 pub struct InklingAttention {
@@ -226,8 +119,8 @@ impl InklingAttention {
         let k = row_invariant::linear(&self.k_proj, input);
         let v = row_invariant::linear(&self.v_proj, input);
         let r = row_invariant::linear(&self.r_proj, input);
-        let k = self.k_sconv.forward(&k, &mut cache.conv[0], None);
-        let v = self.v_sconv.forward(&v, &mut cache.conv[1], None);
+        let k = self.k_sconv.forward_in_cache(&k, cache, 0, None);
+        let v = self.v_sconv.forward_in_cache(&v, cache, 1, None);
 
         let q = crate::reshape(&q, &[batch, length, self.n_heads, self.head_dim]);
         let k = crate::reshape(&k, &[batch, length, self.n_kv, self.head_dim]);
@@ -307,6 +200,23 @@ impl InklingAttention {
                         |value: &MlxArray| crate::utils::slice_axis(value, 2, start, source);
                     let mask = crate::utils::slice_axis(&rows(&mask), 3, start, source);
                     self.sdpa(&rows(&q), &window(&keys), &window(&values), &mask)
+                })
+                .collect();
+            let refs: Vec<&MlxArray> = outputs.iter().map(|output| &**output).collect();
+            return crate::concatenate_many(&refs, 2);
+        }
+        // MLX's fused SDPA treats each query alone (the decode step's vector
+        // kernel) only up to `SDPA_VECTOR_ROWS` queries and switches to its
+        // tiled kernel past that, which orders the key reduction differently.
+        // A wider verify block (the MTP default is 10 rows on Inkling-Small)
+        // therefore attends in groups of at most that many rows (issue #3280).
+        if length > SDPA_VECTOR_ROWS && row_invariant::in_verify_block() {
+            let outputs: Vec<_> = (0..length)
+                .step_by(SDPA_VECTOR_ROWS as usize)
+                .map(|start| {
+                    let end = (start + SDPA_VECTOR_ROWS).min(length);
+                    let rows = |value: &MlxArray| crate::utils::slice_axis(value, 2, start, end);
+                    self.sdpa(&rows(&q), &keys, &values, &rows(&mask))
                 })
                 .collect();
             let refs: Vec<&MlxArray> = outputs.iter().map(|output| &**output).collect();
