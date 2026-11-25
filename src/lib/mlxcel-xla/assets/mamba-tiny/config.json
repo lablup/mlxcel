@@ -1,0 +1,14 @@
+{
+  "model_type": "mamba",
+  "hidden_size": 8,
+  "intermediate_size": 16,
+  "num_hidden_layers": 1,
+  "vocab_size": 12,
+  "state_size": 4,
+  "time_step_rank": 2,
+  "conv_kernel": 4,
+  "use_conv_bias": true,
+  "use_bias": true,
+  "tie_word_embeddings": false,
+  "layer_norm_epsilon": 1e-5
+}

@@ -14,11 +14,12 @@
 
 //! Selective state-space mixer primitives (epic #564, issue #3337).
 //!
-//! A Mamba2 mixer layer is a causal depthwise conv1d followed by a selective
-//! scan over a fixed-size f32 state `h [H, P, N]`. Both come in a one-step
-//! decode form (with an explicit leading batch axis `B`) and a whole-prompt
-//! prefill form over the padded `context_capacity` rows. The reference is HF
-//! `Mamba2Mixer.torch_forward`; `spike/openxla/ssm_oracle.py` checks it.
+//! A Mamba mixer layer is a causal depthwise conv1d followed by a selective
+//! scan over a fixed-size f32 state: Mamba2 uses `h [H,P,N]`, while Mamba1 and
+//! Falcon-Mamba use a diagonal `h [D,N]`. Both come in a one-step decode form
+//! (with an explicit leading batch axis `B`) and a whole-prompt prefill form
+//! over the padded `context_capacity` rows. `spike/openxla/ssm_oracle.py`
+//! checks both families against their independent Transformers slow paths.
 //!
 //! Prefill invariants: rows `t >= real_len` get `dt = 0`, so their decay is
 //! `exp(0) = 1` and their input term vanishes; the state passes through them
@@ -30,7 +31,11 @@
 //! alternatives are recorded in `spike/openxla/FINDINGS_ssm.md`.
 
 use super::builder::{Builder, Ty, Val};
-use super::config::SsmConfig;
+use super::config::{SsmConfig, SsmKind};
+#[allow(unused_imports)] // Public within the emitter for #3349/#3356 reuse.
+pub(crate) use super::ssm_mamba1::{
+    Mamba1MixerW, diag_scan_prefill, diag_scan_step, mamba1_mixer_prefill, mamba1_mixer_step,
+};
 use super::ssm_scan::{SsmPrefillForm, selective_scan_prefill_form};
 
 /// One Mamba2 mixer layer's weights, in the HF checkpoint layout.
@@ -48,15 +53,23 @@ pub(crate) struct Mamba2MixerW {
     /// `[H]`.
     pub d: Val,
     /// `[d_inner]`.
-    pub norm_w: Val,
+    pub norm_w: Option<Val>,
+    pub falcon: Option<super::falcon_h1_config::FalconH1Config>,
     pub out_proj: Val,
     pub out_proj_b: Option<Val>,
+}
+
+/// Recurrent mixer weights carried by one model layer.
+#[derive(Clone, Debug)]
+pub(crate) enum SsmMixerW {
+    Mamba2(Mamba2MixerW),
+    Mamba1(Mamba1MixerW),
 }
 
 /// One recurrent layer's carried state.
 #[derive(Clone, Debug)]
 pub(crate) struct SsmLayerState {
-    /// `[B, H, P, N]` f32.
+    /// Mamba2: `[B,H,P,N]`; Mamba1/Falcon-Mamba: `[B,D,N]`. Always f32.
     pub h: Val,
     /// `[B, K-1, C]` f32, the last `K-1` pre-conv inputs.
     pub conv: Val,
@@ -77,6 +90,15 @@ pub(super) fn splat(b: &mut Builder, value: f32, shape: &[usize]) -> Val {
     b.broadcast(&scalar, &[], shape.to_vec())
 }
 
+/// Multiply without adding operations to existing families when the factor is one.
+pub(super) fn scale(b: &mut Builder, x: &Val, factor: f32) -> Val {
+    if factor == 1.0 {
+        return x.clone();
+    }
+    let f = splat(b, factor, &x.ty.shape);
+    b.multiply(x, &f)
+}
+
 fn sigmoid(b: &mut Builder, x: &Val) -> Val {
     let negative = b.negate(x);
     let exponential = b.exponential(&negative);
@@ -85,13 +107,13 @@ fn sigmoid(b: &mut Builder, x: &Val) -> Val {
     b.divide(&one, &denominator)
 }
 
-fn silu(b: &mut Builder, x: &Val) -> Val {
+pub(super) fn silu(b: &mut Builder, x: &Val) -> Val {
     let gate = sigmoid(b, x);
     b.multiply(x, &gate)
 }
 
 /// `softplus(x) = max(x, 0) + log1p(exp(-|x|))`, finite for every input.
-fn softplus(b: &mut Builder, x: &Val) -> Val {
+pub(super) fn softplus(b: &mut Builder, x: &Val) -> Val {
     let zero = splat(b, 0.0, &x.ty.shape);
     let positive = b.maximum(x, &zero);
     let magnitude = b.abs(x);
@@ -122,7 +144,7 @@ pub(super) fn heads_from_groups(b: &mut Builder, v: &Val, n_heads: usize) -> Val
 }
 
 /// Add a `[C]` bias over the last axis.
-fn add_last(b: &mut Builder, x: &Val, bias: &Val) -> Val {
+pub(super) fn add_last(b: &mut Builder, x: &Val, bias: &Val) -> Val {
     let last = x.ty.shape.len() - 1;
     let bias = to_f32(b, bias);
     let bias = b.broadcast(&bias, &[last], x.ty.shape.clone());
@@ -137,7 +159,7 @@ fn add_last(b: &mut Builder, x: &Val, bias: &Val) -> Val {
 /// on every precision path: `Builder::convolution` demotes its operands on the
 /// f16 path, and a mixed-type depthwise convolution does not compile
 /// (`spike/openxla/FINDINGS_ssm.md`).
-fn conv1d_over_left_context(
+pub(super) fn conv1d_over_left_context(
     b: &mut Builder,
     xp: &Val,
     w: &Val,
@@ -185,7 +207,7 @@ pub(crate) fn conv1d_causal_prefill(
 }
 
 /// The last `K-1` pre-conv rows of `xp [T+K-1, C]` ending at `real_len`.
-fn tail_of_left_context(b: &mut Builder, xp: &Val, real_len: &Val, k: usize) -> Val {
+pub(super) fn tail_of_left_context(b: &mut Builder, xp: &Val, real_len: &Val, k: usize) -> Val {
     let channels = xp.ty.shape[1];
     let zero = b.const_i32(0);
     b.dynamic_slice(xp, &[real_len, &zero], vec![k - 1, channels])
@@ -288,10 +310,34 @@ pub(crate) fn selective_scan_prefill(
 fn in_projection(b: &mut Builder, c: &SsmConfig, w: &Mamba2MixerW, x: &Val) -> (Val, Val, Val) {
     let rows = x.ty.shape[0];
     let x = to_f32(b, x);
+    let x = w
+        .falcon
+        .as_ref()
+        .map_or_else(|| x.clone(), |f| scale(b, &x, f.ssm_in));
     let zxbcdt = b.linear_seq_proj(&x, &w.in_proj);
     let zxbcdt = match &w.in_proj_b {
         Some(bias) => add_last(b, &zxbcdt, bias),
         None => zxbcdt,
+    };
+    let zxbcdt = if let Some(f) = &w.falcon {
+        let gn = c.n_groups * c.state_size;
+        let mut start = 0;
+        let mut pieces = Vec::new();
+        for (len, factor) in [c.d_inner(), c.d_inner(), gn, gn, c.n_heads]
+            .into_iter()
+            .zip(f.ssm_channels)
+        {
+            let part = b.slice(&zxbcdt, &[(0, rows), (start, start + len)]);
+            pieces.push(scale(b, &part, factor));
+            start += len;
+        }
+        let mut joined = pieces[0].clone();
+        for part in &pieces[1..] {
+            joined = b.concatenate(&joined, part, 1);
+        }
+        joined
+    } else {
+        zxbcdt
     };
     let (di, cd) = (c.d_inner(), c.conv_dim);
     let z = b.slice(&zxbcdt, &[(0, rows), (0, di)]);
@@ -343,29 +389,46 @@ fn gated_norm_out(b: &mut Builder, c: &SsmConfig, w: &Mamba2MixerW, y: &Val, z: 
     let (di, gs) = (c.d_inner(), c.norm_group_size);
     let y = b.reshape(y, vec![rows, di]);
     let gate = silu(b, z);
-    let g = b.multiply(&y, &gate);
-    let grouped = b.reshape(&g, vec![rows, di / gs, gs]);
-    let square = b.multiply(&grouped, &grouped);
-    let zero = b.const_f32(0.0);
-    let sum = b.reduce_add(&square, 2, &zero);
-    let width = splat(b, gs as f32, &sum.ty.shape);
-    let mean = b.divide(&sum, &width);
-    let eps = splat(b, c.norm_eps, &mean.ty.shape);
-    let stabilized = b.add(&mean, &eps);
-    let inverse = b.rsqrt(&stabilized);
-    let inverse = b.broadcast(&inverse, &[0, 1], grouped.ty.shape.clone());
-    let normed = b.multiply(&grouped, &inverse);
-    let normed = b.reshape(&normed, vec![rows, di]);
-    let weighted = {
-        let norm_w = to_f32(b, &w.norm_w);
-        let norm_w = b.broadcast(&norm_w, &[1], vec![rows, di]);
-        b.multiply(&normed, &norm_w)
+    let before = w.falcon.as_ref().is_some_and(|f| f.norm_before_gate);
+    let g = if before && w.norm_w.is_some() {
+        y
+    } else {
+        b.multiply(&y, &gate)
+    };
+    let weighted = if let Some(norm_w) = &w.norm_w {
+        let grouped = b.reshape(&g, vec![rows, di / gs, gs]);
+        let square = b.multiply(&grouped, &grouped);
+        let zero = b.const_f32(0.0);
+        let sum = b.reduce_add(&square, 2, &zero);
+        let width = splat(b, gs as f32, &sum.ty.shape);
+        let mean = b.divide(&sum, &width);
+        let eps = splat(b, c.norm_eps, &mean.ty.shape);
+        let stabilized = b.add(&mean, &eps);
+        let inverse = b.rsqrt(&stabilized);
+        let inverse = b.broadcast(&inverse, &[0, 1], grouped.ty.shape.clone());
+        let normed = b.multiply(&grouped, &inverse);
+        let normed = b.reshape(&normed, vec![rows, di]);
+        let weighted = {
+            let norm_w = to_f32(b, norm_w);
+            let norm_w = b.broadcast(&norm_w, &[1], vec![rows, di]);
+            b.multiply(&normed, &norm_w)
+        };
+        if before {
+            b.multiply(&weighted, &gate)
+        } else {
+            weighted
+        }
+    } else {
+        g
     };
     let out = b.linear_seq_proj(&weighted, &w.out_proj);
-    match &w.out_proj_b {
+    let out = match &w.out_proj_b {
         Some(bias) => add_last(b, &out, bias),
         None => out,
-    }
+    };
+    w.falcon
+        .as_ref()
+        .map_or_else(|| out.clone(), |f| scale(b, &out, f.ssm_out))
 }
 
 /// One Mamba2 mixer layer over a padded prompt `x [T, hidden]` with `real_len`
@@ -448,8 +511,12 @@ pub(crate) fn mamba2_mixer_step(
 
 /// The decode state type for `batch` rows.
 pub(crate) fn ssm_state_types(c: &SsmConfig, batch: usize) -> (Ty, Ty) {
+    let h = match c.kind {
+        SsmKind::Mamba2 => vec![batch, c.n_heads, c.head_dim, c.state_size],
+        SsmKind::Mamba1 { .. } => vec![batch, c.d_inner(), c.state_size],
+    };
     (
-        Ty::f32(vec![batch, c.n_heads, c.head_dim, c.state_size]),
+        Ty::f32(h),
         Ty::f32(vec![batch, c.conv_kernel - 1, c.conv_dim]),
     )
 }

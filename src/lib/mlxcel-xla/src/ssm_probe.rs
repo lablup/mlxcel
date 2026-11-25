@@ -14,11 +14,12 @@
 
 //! Single-layer SSM mixer probe runner (issue #3337).
 //!
-//! Emits one Mamba2 mixer layer ([`crate::emitter::emit_ssm_probe_with`]),
-//! compiles it for a device, and runs it through the auxiliary IREE ABI with
-//! the mixer weights resident and the activations and state as inputs. The
-//! `xla_ssm_probe` example feeds it the inputs `spike/openxla/ssm_oracle.py`
-//! wrote and hands the outputs back to the oracle for comparison.
+//! Emits one Mamba2, Mamba1, or Falcon-Mamba mixer layer
+//! ([`crate::emitter::emit_ssm_probe_with`]), compiles it for a device, and runs
+//! it through the auxiliary IREE ABI with the mixer weights resident and the
+//! activations and state as inputs. The `xla_ssm_probe` example feeds it the
+//! inputs `spike/openxla/ssm_oracle.py` wrote and hands the outputs back to the
+//! oracle for comparison.
 
 #[cfg(feature = "iree")]
 use std::process::Command;
@@ -33,7 +34,8 @@ use crate::auxiliary::{
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::emitter::{
-    Precision, ProbeMode, SsmConfig, SsmPrefillForm, emit_ssm_probe_with, precision_env_override,
+    Precision, ProbeMode, SsmConfig, SsmKind, SsmPrefillForm, emit_ssm_probe_with,
+    precision_env_override,
 };
 #[cfg(feature = "iree")]
 use crate::iree::{compile_one, iree_compile_bin, target_flags};
@@ -41,6 +43,8 @@ use crate::iree::{compile_one, iree_compile_bin, target_flags};
 /// The probe's dimensions and mode, as `ssm_oracle.py` records them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SsmProbeSpec {
+    /// `mamba2` or `mamba1`.
+    pub kind: String,
     pub hidden: usize,
     pub n_heads: usize,
     pub head_dim: usize,
@@ -53,6 +57,10 @@ pub struct SsmProbeSpec {
     pub norm_eps: f32,
     pub norm_group_size: usize,
     pub chunk_size: usize,
+    /// Mamba1 low-rank dt projection width (ignored by Mamba2).
+    pub dt_rank: usize,
+    /// Falcon-Mamba's weightless RMSNorm on dt, B, and C.
+    pub bcdt_norm: bool,
     /// Prefill: the padded capacity `T`. Decode: the batch rows `B`.
     pub rows: usize,
     /// `true` for one decode step, `false` for a padded prefill.
@@ -74,17 +82,30 @@ impl SsmProbeSpec {
         if i32::try_from(self.rows).is_err() {
             return Err(format!("SSM probe rows={} do not fit i32", self.rows));
         }
-        let conv_dim = self
+        let d_inner = self
             .n_heads
             .checked_mul(self.head_dim)
-            .and_then(|d_inner| {
+            .ok_or("SSM probe d_inner overflows usize")?;
+        let (kind, conv_dim) = match self.kind.as_str() {
+            "mamba2" => (
+                SsmKind::Mamba2,
                 self.n_groups
-                    .checked_mul(self.state_size)?
-                    .checked_mul(2)?
-                    .checked_add(d_inner)
-            })
-            .ok_or("SSM probe conv_dim overflows usize")?;
+                    .checked_mul(self.state_size)
+                    .and_then(|gn| gn.checked_mul(2))
+                    .and_then(|bc| bc.checked_add(d_inner))
+                    .ok_or("SSM probe conv_dim overflows usize")?,
+            ),
+            "mamba1" => (
+                SsmKind::Mamba1 {
+                    dt_rank: self.dt_rank,
+                    bcdt_norm: self.bcdt_norm,
+                },
+                d_inner,
+            ),
+            other => return Err(format!("unknown SSM probe kind {other:?}")),
+        };
         let config = SsmConfig {
+            kind,
             n_heads: self.n_heads,
             head_dim: self.head_dim,
             state_size: self.state_size,
@@ -114,13 +135,22 @@ impl SsmProbeSpec {
         if c.use_conv_bias {
             layout.push(("conv_b", vec![cd]));
         }
-        layout.extend([
-            ("dt_bias", vec![h]),
-            ("a_log", vec![h]),
-            ("d", vec![h]),
-            ("norm_w", vec![c.d_inner()]),
-            ("out_proj", vec![self.hidden, c.d_inner()]),
-        ]);
+        match c.kind {
+            SsmKind::Mamba2 => layout.extend([
+                ("dt_bias", vec![h]),
+                ("a_log", vec![h]),
+                ("d", vec![h]),
+                ("norm_w", vec![c.d_inner()]),
+            ]),
+            SsmKind::Mamba1 { dt_rank, .. } => layout.extend([
+                ("x_proj", vec![dt_rank + 2 * c.state_size, c.d_inner()]),
+                ("dt_proj", vec![c.d_inner(), dt_rank]),
+                ("dt_proj_b", vec![c.d_inner()]),
+                ("a_log", vec![c.d_inner(), c.state_size]),
+                ("d", vec![c.d_inner()]),
+            ]),
+        }
+        layout.push(("out_proj", vec![self.hidden, c.d_inner()]));
         if c.use_bias {
             layout.push(("out_proj_b", vec![self.hidden]));
         }
@@ -132,19 +162,18 @@ impl SsmProbeSpec {
         let c = self.config()?;
         let (h, p, n) = (c.n_heads, c.head_dim, c.state_size);
         let tail = c.conv_kernel - 1;
-        Ok(if self.decode {
-            [
-                vec![self.rows, self.hidden],
-                vec![self.rows, h, p, n],
-                vec![self.rows, tail, c.conv_dim],
-            ]
+        let h_shape = match (c.kind, self.decode) {
+            (SsmKind::Mamba2, true) => vec![self.rows, h, p, n],
+            (SsmKind::Mamba2, false) => vec![h, p, n],
+            (SsmKind::Mamba1 { .. }, true) => vec![self.rows, c.d_inner(), n],
+            (SsmKind::Mamba1 { .. }, false) => vec![c.d_inner(), n],
+        };
+        let conv_shape = if self.decode {
+            vec![self.rows, tail, c.conv_dim]
         } else {
-            [
-                vec![self.rows, self.hidden],
-                vec![h, p, n],
-                vec![tail, c.conv_dim],
-            ]
-        })
+            vec![tail, c.conv_dim]
+        };
+        Ok([vec![self.rows, self.hidden], h_shape, conv_shape])
     }
 
     /// The probe's StableHLO text. f32 contractions (the HF fp32 gate) unless
@@ -450,6 +479,7 @@ mod tests {
 
     fn tiny_spec() -> SsmProbeSpec {
         SsmProbeSpec {
+            kind: "mamba2".to_string(),
             hidden: 16,
             n_heads: 4,
             head_dim: 8,
@@ -462,6 +492,8 @@ mod tests {
             norm_eps: 1e-5,
             norm_group_size: 32,
             chunk_size: 8,
+            dt_rank: 0,
+            bcdt_norm: false,
             rows: 16,
             decode: false,
             form: "chunked".to_string(),

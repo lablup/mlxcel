@@ -34,10 +34,12 @@
 //! is byte-identical to before.
 
 use super::builder::{Builder, Precision, ProjectionLayout, Ty, Val, precision_from_env};
-use super::config::{Config, DeepStackConfig, MropeLayout, NormStyle, SsmConfig};
+use super::config::{
+    Config, DeepStackConfig, ExpertAct, MoeScoring, MropeLayout, NormStyle, SsmConfig, SsmKind,
+};
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
-use super::ssm::{self, Mamba2MixerW, SsmLayerState};
+use super::ssm::{self, Mamba1MixerW, Mamba2MixerW, SsmLayerState, SsmMixerW};
 use super::ssm_scan::SsmPrefillForm;
 
 #[path = "model_recurrent.rs"]
@@ -283,9 +285,9 @@ struct LayerW {
     /// Phi4MM's immutable speech/vision adapter pairs. The request's numeric
     /// mode gates their deltas per row; the base weights are never mutated.
     phi4_lora: Option<Phi4LayerLoraW>,
-    /// The Mamba2 mixer of a recurrent layer (issue #3338); `None` on every
-    /// attention layer. A recurrent layer sets only this and `in_ln`.
-    ssm: Option<Mamba2MixerW>,
+    /// The SSM mixer of a recurrent layer; `None` on every attention layer. A
+    /// recurrent layer sets only this and `in_ln`.
+    ssm: Option<SsmMixerW>,
 }
 
 struct MlaLayerW {
@@ -682,7 +684,10 @@ fn take_layer_weights(
     c: &Config,
     li: usize,
 ) -> LayerW {
-    if c.layer_mixer(li).is_recurrent() {
+    if matches!(
+        c.layer_mixer(li),
+        super::config::MixerKind::Mamba2 | super::config::MixerKind::Mamba1
+    ) {
         return recurrent::take_ssm_layer_weights(b, decls, idx, c, li);
     }
     let h = c.hidden;
@@ -900,7 +905,10 @@ fn take_layer_weights(
         up_bias,
         moe,
         phi4_lora,
-        ssm: None,
+        ssm: c
+            .falcon_h1
+            .as_ref()
+            .map(|_| recurrent::take_ssm_mixer_weights(b, decls, idx, c, li)),
     }
 }
 
@@ -916,12 +924,22 @@ fn take_moe_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li: u
     let i = m.intermediate;
     let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
     let router = take_arg(decls, idx, Ty::f32(vec![e, h]), p("moe_router"));
-    let w_gate = take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_gate"));
+    let correction_bias = matches!(
+        m.scoring,
+        MoeScoring::Sigmoid {
+            correction_bias: true,
+            ..
+        }
+    )
+    .then(|| take_arg(decls, idx, Ty::f32(vec![e]), p("moe_correction_bias")));
+    let w_gate = (m.expert_act == ExpertAct::SwiGlu)
+        .then(|| take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_gate")));
     let w_up = take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_up"));
     let w_down = take_arg(decls, idx, Ty::f32(vec![e, h, i]), p("moe_down"));
     let shared = if let Some(sh) = m.shared {
         let is = sh.intermediate;
-        let gate = take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_gate"));
+        let gate = (m.expert_act == ExpertAct::SwiGlu)
+            .then(|| take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_gate")));
         let up = take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_up"));
         let down = take_arg(decls, idx, Ty::f32(vec![h, is]), p("moe_shared_down"));
         let expert_gate = if sh.gated {
@@ -945,6 +963,7 @@ fn take_moe_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li: u
     };
     MoeLayerW {
         router,
+        correction_bias,
         w_gate,
         w_up,
         w_down,
@@ -1601,6 +1620,10 @@ fn emit_mlp_body(
             }
         }
     };
+    let gate = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| gate.clone(), |f| super::ssm::scale(b, &gate, f.mlp[0]));
     let act = if c.mlp_geglu {
         gelu_tanh(b, &gate)
     } else {
@@ -1616,6 +1639,10 @@ fn emit_mlp_body(
         None => down,
     };
     let down = layout.add_bias(b, down, lw.down_bias.as_ref());
+    let down = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| down.clone(), |f| super::ssm::scale(b, &down, f.mlp[1]));
     if c.has_post_ff_norm() {
         let w = norm_w(
             b,
@@ -2950,7 +2977,15 @@ fn emit_attention(
         return emit_mla_attention(b, c, k, lw, li, x, layout, kcache, vcache);
     }
     let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
-    let (q, kk, vv) = layout.project_qkv(b, c, &hn, lw);
+    let attn_in = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| hn.clone(), |f| super::ssm::scale(b, &hn, f.attention_in));
+    let (q, kk, vv) = layout.project_qkv(b, c, &attn_in, lw);
+    let kk = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| kk.clone(), |f| super::ssm::scale(b, &kk, f.key));
     // q/k-norm hook (issue #494): Qwen3 / Gemma3 norm each head over head_dim,
     // OLMo2/3 norm the whole flat projection; both before RoPE, applied once here so
     // they reach the single / ragged / prefill paths together. A config without
@@ -2973,6 +3008,10 @@ fn emit_attention(
     let o = layout.context(b, c, &attn, &vslab);
     let attn_out = layout.o_proj(b, &o, lw);
     let attn_out = post_attn_norm(b, c, k, layout, attn_out, lw);
+    let attn_out = c.falcon_h1.as_ref().map_or_else(
+        || attn_out.clone(),
+        |f| super::ssm::scale(b, &attn_out, f.attention_out),
+    );
     (hn, attn_out)
 }
 
@@ -2987,7 +3026,7 @@ fn emit_attention(
 ///
 /// The layer's mixer comes from `c.layer_mixer(li)` (issue #3338): an attention
 /// layer runs the block below and writes the KV cache; a recurrent layer runs
-/// [`recurrent::emit_mamba2_block`] and advances its row of `state` instead.
+/// [`recurrent::emit_recurrent_block`] and advances its row of `state` instead.
 #[allow(clippy::too_many_arguments)]
 fn emit_transformer_layer(
     b: &mut Builder,
@@ -3001,8 +3040,20 @@ fn emit_transformer_layer(
     vcache: &mut Val,
     state: &mut RecurrentLayers,
 ) -> Val {
-    if c.layer_mixer(li).is_recurrent() {
-        return recurrent::emit_mamba2_block(b, c, k, lw, li, x, layout, state);
+    if matches!(
+        c.layer_mixer(li),
+        super::config::MixerKind::Mamba2 | super::config::MixerKind::Mamba1
+    ) {
+        return recurrent::emit_recurrent_block(b, c, k, lw, li, x, layout, state);
+    }
+    if c.layer_mixer(li) == super::config::MixerKind::ParallelMamba2Attention {
+        let (hn, attn) = emit_attention(b, c, k, lw, li, x, layout, kcache, vcache);
+        let ssm = recurrent::emit_recurrent_mixer(b, c, lw, li, &hn, layout, state);
+        let mixed = b.add(&ssm, &attn);
+        let x1 = b.add(x, &mixed);
+        let hn2 = mlp_pre_norm(b, c, k, layout, &x1, lw);
+        let down = emit_ffn_body(b, c, k, layout, &hn2, lw, li);
+        return b.add(&x1, &down);
     }
     if c.layer_mixer(li) == super::config::MixerKind::None {
         let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
@@ -4976,23 +5027,50 @@ pub(crate) fn emit_ssm_probe_with(
     let in_proj_b = c.use_bias.then(|| arg(vec![c.in_proj_dim()], "in_proj_b"));
     let conv_w = arg(vec![cd, 1, k], "conv_w");
     let conv_b = c.use_conv_bias.then(|| arg(vec![cd], "conv_b"));
-    let dt_bias = arg(vec![hh], "dt_bias");
-    let a_log = arg(vec![hh], "a_log");
-    let d = arg(vec![hh], "d");
-    let norm_w = arg(vec![di], "norm_w");
-    let out_proj = arg(vec![hidden, di], "out_proj");
-    let out_proj_b = c.use_bias.then(|| arg(vec![hidden], "out_proj_b"));
-    let w = Mamba2MixerW {
-        in_proj,
-        in_proj_b,
-        conv_w,
-        conv_b,
-        dt_bias,
-        a_log,
-        d,
-        norm_w,
-        out_proj,
-        out_proj_b,
+    let w = match c.kind {
+        SsmKind::Mamba2 => {
+            let dt_bias = arg(vec![hh], "dt_bias");
+            let a_log = arg(vec![hh], "a_log");
+            let d = arg(vec![hh], "d");
+            let norm_w = arg(vec![di], "norm_w");
+            let out_proj = arg(vec![hidden, di], "out_proj");
+            let out_proj_b = c.use_bias.then(|| arg(vec![hidden], "out_proj_b"));
+            SsmMixerW::Mamba2(Mamba2MixerW {
+                in_proj,
+                in_proj_b,
+                conv_w,
+                conv_b,
+                dt_bias,
+                a_log,
+                d,
+                norm_w: Some(norm_w),
+                falcon: None,
+                out_proj,
+                out_proj_b,
+            })
+        }
+        SsmKind::Mamba1 { dt_rank, .. } => {
+            let x_proj = arg(vec![dt_rank + 2 * n, di], "x_proj");
+            let dt_proj = arg(vec![di, dt_rank], "dt_proj");
+            let dt_proj_b = arg(vec![di], "dt_proj_b");
+            let a_log = arg(vec![di, n], "a_log");
+            let d = arg(vec![di], "d");
+            let out_proj = arg(vec![hidden, di], "out_proj");
+            let out_proj_b = c.use_bias.then(|| arg(vec![hidden], "out_proj_b"));
+            SsmMixerW::Mamba1(Mamba1MixerW {
+                in_proj,
+                in_proj_b,
+                conv_w,
+                conv_b,
+                x_proj,
+                dt_proj,
+                dt_proj_b,
+                a_log,
+                d,
+                out_proj,
+                out_proj_b,
+            })
+        }
     };
     let x = arg(vec![t, hidden], "x");
 
@@ -5005,25 +5083,38 @@ pub(crate) fn emit_ssm_probe_with(
                 Ty::scalar("i32"),
                 "ssm.real_len".into(),
             );
-            let h0 = take_arg(
-                &mut decls,
-                &mut idx,
-                Ty::f32(vec![hh, p, n]),
-                "ssm.h0".into(),
-            );
+            let h_shape = match c.kind {
+                SsmKind::Mamba2 => vec![hh, p, n],
+                SsmKind::Mamba1 { .. } => vec![di, n],
+            };
+            let h0 = take_arg(&mut decls, &mut idx, Ty::f32(h_shape), "ssm.h0".into());
             let conv0 = take_arg(
                 &mut decls,
                 &mut idx,
                 Ty::f32(vec![k - 1, cd]),
                 "ssm.conv0".into(),
             );
-            ssm::mamba2_mixer_prefill_form(&mut b, c, form, &w, &x, &real_len, &h0, &conv0)
+            match &w {
+                SsmMixerW::Mamba2(w) => {
+                    ssm::mamba2_mixer_prefill_form(&mut b, c, form, w, &x, &real_len, &h0, &conv0)
+                }
+                SsmMixerW::Mamba1(w) => {
+                    ssm::mamba1_mixer_prefill(&mut b, c, w, &x, &real_len, &h0, &conv0)
+                }
+            }
         }
         ProbeMode::Decode => {
             let (h_ty, conv_ty) = ssm::ssm_state_types(c, t);
             let h = take_arg(&mut decls, &mut idx, h_ty, "ssm.h0".into());
             let conv = take_arg(&mut decls, &mut idx, conv_ty, "ssm.conv0".into());
-            let (y, st) = ssm::mamba2_mixer_step(&mut b, c, &w, &x, &SsmLayerState { h, conv });
+            let (y, st) = match &w {
+                SsmMixerW::Mamba2(w) => {
+                    ssm::mamba2_mixer_step(&mut b, c, w, &x, &SsmLayerState { h, conv })
+                }
+                SsmMixerW::Mamba1(w) => {
+                    ssm::mamba1_mixer_step(&mut b, c, w, &x, &SsmLayerState { h, conv })
+                }
+            };
             (y, st.h, st.conv)
         }
     };

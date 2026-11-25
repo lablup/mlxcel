@@ -1,0 +1,26 @@
+{
+  "request": 2,
+  "mode": "nonstream",
+  "started": 1795592209.2348268,
+  "ended": 1795592210.3512971,
+  "body": {
+    "id": "cmpl-8d4f68bc-8232-4482-ab01-f95a7714bfef",
+    "object": "text_completion",
+    "created": 1795592210,
+    "model": "falcon-h1",
+    "system_fingerprint": null,
+    "choices": [
+      {
+        "index": 0,
+        "text": " 100% of the country's GDP.\n\n**Q2: What is the significance of the 1990s in the context of Germany's economic development?**  \n",
+        "finish_reason": "length",
+        "logprobs": null
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 5,
+      "completion_tokens": 40,
+      "total_tokens": 45
+    }
+  }
+}

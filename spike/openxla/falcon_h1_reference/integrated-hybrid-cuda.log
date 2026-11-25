@@ -1,0 +1,16 @@
+
+running 5 tests
+test half_full_and_full_batches_give_identical_per_request_ids ... ok
+test mid_stream_admit_into_a_recycled_slot_matches_the_reference ... ok
+test refused_requests_and_failed_decodes_invalidate_slot_state ... xla_llama_decode_ragged_logits: row=2 token=32 outside [0,32)
+xla_llama_decode_ragged_logits: row=2 slot=2 token=1 cache_len=1 is active but its KV slot is not valid
+ok
+test state_allocation_counters_show_one_allocation_per_reset ... ok
+test torn_state_store_leaves_the_slot_invalid_and_the_next_admit_recovers ... xla_iree: test hook: simulated V slot store failure at slot=0
+xla_llama_decode_ragged_logits: row=0 slot=0 token=7 cache_len=6 is active but its KV slot is not valid
+xla_iree: test hook: simulated state slot store failure at slot=0
+xla_llama_decode_ragged_logits: row=0 slot=0 token=7 cache_len=6 is active but its KV slot is not valid
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.15s
+

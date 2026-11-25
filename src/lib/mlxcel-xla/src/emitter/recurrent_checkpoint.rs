@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use super::config::{Config, QuantConfig, WeightScheme};
+use super::config::{Config, ExpertAct, MoeScoring, QuantConfig, SsmKind, WeightScheme};
 use crate::shard_path::index_shard_path;
 
 /// Largest safetensors header this check reads (the format caps it at 100 MB).
@@ -188,6 +188,67 @@ fn is_projection(shape: &[usize], out: usize, in_: usize, quant: Option<QuantCon
     }
 }
 
+/// Whether a rank-2 or stacked rank-3 projection is stored in MLX affine-packed
+/// form. The leading dimensions are empty for `[out, in]` and `[experts]` for
+/// `[experts, out, in]`.
+fn is_packed_projection(
+    shape: &[usize],
+    leading: &[usize],
+    out: usize,
+    in_: usize,
+    quant: Option<QuantConfig>,
+) -> bool {
+    let Some(q) = quant.filter(|q| q.bits > 0) else {
+        return false;
+    };
+    let Some(width_bits) = in_.checked_mul(q.bits) else {
+        return false;
+    };
+    if !width_bits.is_multiple_of(32) {
+        return false;
+    }
+    let mut expected = leading.to_vec();
+    expected.extend([out, width_bits / 32]);
+    shape == expected
+}
+
+/// Validate the affine metadata paired with a packed projection. The loader
+/// consumes both companions and dequantizes the whole rank-2 or rank-3 tensor,
+/// so accepting only the packed base shape would still defer a malformed expert
+/// bank until runtime.
+fn validate_affine_metadata(
+    shapes: &HashMap<String, Vec<usize>>,
+    name: &str,
+    leading: &[usize],
+    out: usize,
+    in_: usize,
+    quant: QuantConfig,
+) -> Result<(), String> {
+    if quant.group_size == 0 || !in_.is_multiple_of(quant.group_size) {
+        return Err(format!(
+            "checkpoint tensor {name} is affine-packed but config.json group_size={} does not divide input width {in_}",
+            quant.group_size
+        ));
+    }
+    let stem = name
+        .strip_suffix(".weight")
+        .ok_or_else(|| format!("affine-packed checkpoint tensor {name} is not a `.weight`"))?;
+    let mut expected = leading.to_vec();
+    expected.extend([out, in_ / quant.group_size]);
+    for suffix in ["scales", "biases"] {
+        let companion = format!("{stem}.{suffix}");
+        let got = shapes
+            .get(&companion)
+            .ok_or_else(|| format!("checkpoint has no tensor {companion}"))?;
+        if got != &expected {
+            return Err(format!(
+                "checkpoint tensor {companion} has shape {got:?}, config.json implies {expected:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     /// Check every SSM dim against the checkpoint in `model_dir` (a no-op for
     /// a config without recurrent state). Called by [`Config::from_json`].
@@ -195,18 +256,25 @@ impl Config {
         let Some(ssm) = self.ssm.as_ref().filter(|_| self.has_recurrent_state()) else {
             return Ok(());
         };
-        if !matches!(
-            self.weight_scheme,
-            WeightScheme::Mamba2 | WeightScheme::NemotronH
-        ) {
-            return Err("a recurrent config must use the Mamba2 weight scheme".into());
+        let scheme_matches_kind = match ssm.kind {
+            SsmKind::Mamba2 => matches!(
+                self.weight_scheme,
+                WeightScheme::Mamba2 | WeightScheme::NemotronH | WeightScheme::FalconH1
+            ),
+            SsmKind::Mamba1 { .. } => self.weight_scheme == WeightScheme::Mamba1,
+        };
+        if !scheme_matches_kind {
+            return Err(format!(
+                "a {:?} recurrent config cannot use the {:?} weight scheme",
+                ssm.kind, self.weight_scheme
+            ));
         }
         let mut shapes = HashMap::new();
         for file in checkpoint_files(model_dir)? {
             shapes.extend(header_shapes(&file)?);
         }
         let quant = self.quantization;
-        let (h, di, cd, nh) = (self.hidden, ssm.d_inner(), ssm.conv_dim, ssm.n_heads);
+        let (h, di, cd) = (self.hidden, ssm.d_inner(), ssm.conv_dim);
         let k = ssm.conv_kernel;
         let shape = |name: &str| -> Result<&Vec<usize>, String> {
             shapes
@@ -224,9 +292,29 @@ impl Config {
             }
         };
         let proj = |name: &str, out: usize, in_: usize| -> Result<(), String> {
-            let ok = is_projection(shape(name)?, out, in_, quant);
-            expect(name, ok, format!("[{out}, {in_}]"))
+            let got = shape(name)?;
+            let packed = is_packed_projection(got, &[], out, in_, quant);
+            expect(
+                name,
+                is_projection(got, out, in_, quant),
+                format!("[{out}, {in_}]"),
+            )?;
+            if packed {
+                validate_affine_metadata(&shapes, name, &[], out, in_, quant.unwrap())?;
+            }
+            Ok(())
         };
+        let stacked_proj =
+            |name: &str, experts: usize, out: usize, in_: usize| -> Result<(), String> {
+                let got = shape(name)?;
+                let packed = is_packed_projection(got, &[experts], out, in_, quant);
+                let plain = got.as_slice() == [experts, out, in_];
+                expect(name, plain || packed, format!("[{experts}, {out}, {in_}]"))?;
+                if packed {
+                    validate_affine_metadata(&shapes, name, &[experts], out, in_, quant.unwrap())?;
+                }
+                Ok(())
+            };
         let vector = |name: &str, len: usize| -> Result<(), String> {
             let ok = shape(name)?.as_slice() == [len];
             expect(name, ok, format!("[{len}]"))
@@ -242,22 +330,38 @@ impl Config {
         let in_proj = ssm.in_proj_dim().checked_mul(h);
         if !matches!((state, in_proj), (Some(state), Some(in_proj)) if state <= in_proj) {
             return Err(format!(
-                "mamba2 state H*P*N = {di} * {} exceeds the in_proj weight \
+                "SSM state D*N = {di} * {} exceeds the in_proj weight \
                  [{}, {h}] it is derived from",
                 ssm.state_size,
                 ssm.in_proj_dim()
             ));
         }
-        proj("backbone.embeddings.weight", self.vocab, h)?;
-        vector("backbone.norm_f.weight", h)?;
+        let names = crate::weight_names::scheme_names(self.weight_scheme);
+        proj(names.embed, self.vocab, h)?;
+        vector(names.final_norm, h)?;
         if !self.tie_word_embeddings {
             proj("lm_head.weight", self.vocab, h)?;
         }
         for li in 0..self.n_layers {
-            let p = format!("backbone.layers.{li}.");
-            vector(&format!("{p}norm.weight"), h)?;
-            let m = format!("{p}mixer.");
+            let p = format!("{}{li}.", names.layer_stem);
+            vector(&format!("{p}{}", names.input_layernorm), h)?;
+            let m = format!(
+                "{p}{}.",
+                if self.falcon_h1.is_some() {
+                    "mamba"
+                } else {
+                    "mixer"
+                }
+            );
             if self.attn_layer_index(li).is_some() {
+                let m = format!(
+                    "{p}{}.",
+                    if self.falcon_h1.is_some() {
+                        "self_attn"
+                    } else {
+                        "mixer"
+                    }
+                );
                 for (name, out, input) in [
                     ("q_proj", self.n_q * self.head_dim, h),
                     ("k_proj", self.n_kv * self.head_dim, h),
@@ -267,6 +371,96 @@ impl Config {
                     proj(&format!("{m}{name}.weight"), out, input)?;
                     if self.qkv_bias {
                         vector(&format!("{m}{name}.bias"), out)?;
+                    }
+                }
+                if self.falcon_h1.is_none() {
+                    continue;
+                }
+                vector(&format!("{p}pre_ff_layernorm.weight"), h)?;
+                for (name, out, input) in [
+                    ("gate_proj", self.inter, h),
+                    ("up_proj", self.inter, h),
+                    ("down_proj", h, self.inter),
+                ] {
+                    proj(&format!("{p}feed_forward.{name}.weight"), out, input)?;
+                    if self.mlp_bias {
+                        vector(&format!("{p}feed_forward.{name}.bias"), out)?;
+                    }
+                }
+            }
+            if self.is_moe_layer(li) {
+                let moe = self
+                    .moe
+                    .as_ref()
+                    .ok_or("a Nemotron-H E block has no MoE configuration")?;
+                let mp = format!("{p}{}.", moe.weight_prefix);
+                proj(&format!("{mp}gate.weight"), moe.n_experts, h)?;
+                if matches!(
+                    moe.scoring,
+                    MoeScoring::Sigmoid {
+                        correction_bias: true,
+                        ..
+                    }
+                ) {
+                    vector(&format!("{mp}gate.e_score_correction_bias"), moe.n_experts)?;
+                }
+                match moe.expert_act {
+                    ExpertAct::SwiGlu => {
+                        for projection in ["gate_proj", "up_proj"] {
+                            stacked_proj(
+                                &format!("{mp}switch_mlp.{projection}.weight"),
+                                moe.n_experts,
+                                moe.intermediate,
+                                h,
+                            )?;
+                        }
+                        stacked_proj(
+                            &format!("{mp}switch_mlp.down_proj.weight"),
+                            moe.n_experts,
+                            h,
+                            moe.intermediate,
+                        )?;
+                    }
+                    ExpertAct::Relu2 => {
+                        stacked_proj(
+                            &format!("{mp}switch_mlp.fc1.weight"),
+                            moe.n_experts,
+                            moe.intermediate,
+                            h,
+                        )?;
+                        stacked_proj(
+                            &format!("{mp}switch_mlp.fc2.weight"),
+                            moe.n_experts,
+                            h,
+                            moe.intermediate,
+                        )?;
+                    }
+                }
+                if let Some(shared) = moe.shared {
+                    let stem = if moe.expert_act == ExpertAct::Relu2 {
+                        "shared_experts"
+                    } else {
+                        "shared_expert"
+                    };
+                    if moe.expert_act == ExpertAct::SwiGlu {
+                        proj(
+                            &format!("{mp}{stem}.gate_proj.weight"),
+                            shared.intermediate,
+                            h,
+                        )?;
+                    }
+                    proj(
+                        &format!("{mp}{stem}.up_proj.weight"),
+                        shared.intermediate,
+                        h,
+                    )?;
+                    proj(
+                        &format!("{mp}{stem}.down_proj.weight"),
+                        h,
+                        shared.intermediate,
+                    )?;
+                    if shared.gated {
+                        proj(&format!("{mp}shared_expert_gate.weight"), 1, h)?;
                     }
                 }
                 continue;
@@ -284,6 +478,8 @@ impl Config {
             proj(&format!("{m}out_proj.weight"), h, di)?;
             if ssm.use_bias {
                 vector(&format!("{m}in_proj.bias"), ssm.in_proj_dim())?;
+            }
+            if self.falcon_h1.as_ref().map_or(ssm.use_bias, |f| f.out_bias) {
                 vector(&format!("{m}out_proj.bias"), h)?;
             }
             // torch `[C, 1, K]`, or the MLX conversion's `[C, K, 1]` (same bytes).
@@ -294,10 +490,32 @@ impl Config {
             if ssm.use_conv_bias {
                 vector(&format!("{m}conv1d.bias"), cd)?;
             }
-            for name in ["dt_bias", "A_log", "D"] {
-                vector(&format!("{m}{name}"), nh)?;
+            match ssm.kind {
+                SsmKind::Mamba2 => {
+                    for name in ["dt_bias", "A_log", "D"] {
+                        vector(&format!("{m}{name}"), ssm.n_heads)?;
+                    }
+                    if self.falcon_h1.as_ref().is_none_or(|f| f.rms_norm) {
+                        vector(&format!("{m}norm.weight"), di)?;
+                    }
+                }
+                SsmKind::Mamba1 { dt_rank, .. } => {
+                    proj(
+                        &format!("{m}x_proj.weight"),
+                        dt_rank + 2 * ssm.state_size,
+                        di,
+                    )?;
+                    proj(&format!("{m}dt_proj.weight"), di, dt_rank)?;
+                    vector(&format!("{m}dt_proj.bias"), di)?;
+                    let a_log = format!("{m}A_log");
+                    expect(
+                        &a_log,
+                        shape(&a_log)?.as_slice() == [di, ssm.state_size],
+                        format!("[{di}, {}]", ssm.state_size),
+                    )?;
+                    vector(&format!("{m}D"), di)?;
+                }
             }
-            vector(&format!("{m}norm.weight"), di)?;
         }
         Ok(())
     }
@@ -327,5 +545,32 @@ mod tests {
         assert_eq!(tensor_bytes("F4", &[3]), None, "a partial byte");
         assert_eq!(tensor_bytes("F32", &[usize::MAX, 2]), None, "overflow");
         assert_eq!(tensor_bytes("Q4_K", &[4]), None, "unknown dtype");
+    }
+
+    #[test]
+    fn stacked_affine_projection_requires_exact_companion_shapes() {
+        let quant = QuantConfig {
+            bits: 4,
+            group_size: 8,
+        };
+        let name = "backbone.layers.2.mixer.switch_mlp.fc1.weight";
+        let stem = name.strip_suffix(".weight").unwrap();
+        let mut shapes = HashMap::from([
+            (name.to_string(), vec![8, 12, 2]),
+            (format!("{stem}.scales"), vec![8, 12, 2]),
+            (format!("{stem}.biases"), vec![8, 12, 2]),
+        ]);
+        assert!(is_packed_projection(
+            shapes.get(name).unwrap(),
+            &[8],
+            12,
+            16,
+            Some(quant)
+        ));
+        validate_affine_metadata(&shapes, name, &[8], 12, 16, quant).unwrap();
+
+        shapes.insert(format!("{stem}.scales"), vec![8, 12, 1]);
+        let error = validate_affine_metadata(&shapes, name, &[8], 12, 16, quant).unwrap_err();
+        assert!(error.contains("scales") && error.contains("[8, 12, 2]"));
     }
 }

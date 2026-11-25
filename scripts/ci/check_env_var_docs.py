@@ -153,12 +153,22 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("fixture-authoring: makes a #[cfg(test)] test in "
      "mlxcel-xla/src/validation.rs rewrite the committed StableHLO goldens", (
         "MLXCEL_FREEZE_GOLDENS",
+        "MLXCEL_FREEZE_MAMBA1",
         "MLXCEL_FREEZE_MOE",
     )),
     ("fixture-authoring: makes a #[cfg(test)] test in "
      "mlxcel-xla/src/emitter/nemotron_h_tests.rs rewrite the committed "
      "Nemotron-H StableHLO goldens", (
         "MLXCEL_FREEZE_NEMOTRON_H",
+    )),
+    ("fixture-authoring: makes a #[cfg(test)] test in "
+     "mlxcel-xla/src/emitter/falcon_h1_tests.rs rewrite the committed "
+     "Falcon-H1 StableHLO goldens", (
+        "MLXCEL_FREEZE_FALCON_H1",
+    )),
+    ("test-only: original checkpoint path for the ignored Falcon-H1 "
+     "shape-validation test in mlxcel-xla/src/emitter/falcon_h1_tests.rs", (
+        "MLXCEL_FALCON_H1_MODEL",
     )),
     ("fixture-authoring: input or output of the opt-in #[ignore] StableHLO "
      "graph-dump tests in mlxcel-xla/src/emitter/mod.rs", (

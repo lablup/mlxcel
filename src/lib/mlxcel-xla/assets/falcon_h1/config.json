@@ -1,0 +1,42 @@
+{
+  "model_type": "falcon_h1",
+  "hidden_size": 16,
+  "intermediate_size": 24,
+  "num_hidden_layers": 2,
+  "vocab_size": 32,
+  "num_attention_heads": 4,
+  "num_key_value_heads": 2,
+  "head_dim": 4,
+  "mamba_d_ssm": 24,
+  "mamba_n_heads": 4,
+  "mamba_d_head": 6,
+  "mamba_n_groups": 2,
+  "mamba_d_state": 4,
+  "mamba_d_conv": 4,
+  "mamba_chunk_size": 128,
+  "mamba_rms_norm": false,
+  "mamba_norm_before_gate": false,
+  "mamba_proj_bias": false,
+  "projectors_bias": false,
+  "tie_word_embeddings": true,
+  "rms_norm_eps": 1e-05,
+  "embedding_multiplier": 0.75,
+  "lm_head_multiplier": 0.625,
+  "attention_in_multiplier": 0.5,
+  "attention_out_multiplier": 0.875,
+  "key_multiplier": 1.25,
+  "ssm_in_multiplier": 1.5,
+  "ssm_out_multiplier": 0.375,
+  "ssm_multipliers": [
+    0.5,
+    1.25,
+    0.75,
+    1.5,
+    0.875
+  ],
+  "mlp_multipliers": [
+    1.125,
+    0.25
+  ],
+  "rope_theta": 10000.0
+}

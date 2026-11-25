@@ -1,0 +1,24 @@
+{
+  "head": "205d0a3dd2d92eca2dbcba3dffcefba54e825eca",
+  "binary_source_head": "205d0a3dd2d92eca2dbcba3dffcefba54e825eca",
+  "server_ctx_size": 2048,
+  "checkpoint_revision": "e6389502a0b12cd8da894b395ba5bf7436873b16",
+  "model": "/tmp/epic564-models/falcon-h1",
+  "precision": "f32",
+  "device": "cuda",
+  "context_capacity_override": 256,
+  "max_batch_size": 4,
+  "scope": "CLI 40-token oracle and four concurrent completions versus separate 24-token CLI references",
+  "gpu_lock": "outer gpu-lock run --tag issue3346-cli-server",
+  "binary_sha256": {
+    "mlxcel": "4141f8432ff5c3e619a19aec6162e8c0c061e66f2c0646eb0b7217767060140f",
+    "mlxcel-server": "0efad0c8da1985fb1947468834555e54d85232930b0bab7572be58a4d76f19f9"
+  },
+  "environment": {
+    "MLXCEL_BACKEND": "xla",
+    "MLXCEL_XLA_DEVICE": "cuda",
+    "MLXCEL_XLA_PRECISION": "f32",
+    "MLXCEL_XLA_CONTEXT_CAPACITY": "256",
+    "MLXCEL_CACHE_DIR": "/tmp/3346-cache-cuda"
+  }
+}

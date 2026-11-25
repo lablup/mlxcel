@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The ragged (continuous-batching) decode for recurrent configs (issue
-//! #3340): per-slot `[B, ...dims]` state inputs and results, no KV for an
-//! attention-free model. Hybrid coverage is in `nemotron_h_tests`.
+//! The ragged (continuous-batching) decode for recurrent configs (issues #3340,
+//! #3348): per-slot `[B, ...dims]` state inputs and results, and no KV for an
+//! attention-free Mamba1/Mamba2 model. Hybrid coverage is in `nemotron_h_tests`.
 
 use super::builder::Precision;
 use super::config::Config;
@@ -29,8 +29,19 @@ const TINY_MAMBA2: &str = r#"{
   "hidden_act": "silu", "tie_word_embeddings": true
 }"#;
 
+const TINY_MAMBA1: &str = r#"{
+  "model_type": "mamba", "hidden_size": 8, "intermediate_size": 16,
+  "num_hidden_layers": 2, "vocab_size": 40, "state_size": 4,
+  "time_step_rank": 2, "conv_kernel": 4, "use_conv_bias": true,
+  "use_bias": false, "tie_word_embeddings": true, "layer_norm_epsilon": 1e-5
+}"#;
+
 fn tiny() -> Config {
     Config::from_json_str(TINY_MAMBA2).expect("tiny mamba2 parses")
+}
+
+fn tiny_mamba1() -> Config {
+    Config::from_json_str(TINY_MAMBA1).expect("tiny mamba1 parses")
 }
 
 fn main_signature(graph: &str) -> &str {
@@ -87,6 +98,22 @@ fn mamba2_ragged_decode_samples_and_emits_at_every_precision() {
             "the recurrence stays f32 at {precision:?}: {sig}"
         );
     }
+}
+
+#[test]
+fn mamba1_ragged_decode_threads_per_slot_diagonal_state() {
+    let graph = emit_decode_ragged(&tiny_mamba1(), 4, false).expect("ragged Mamba1 emits");
+    let sig = main_signature(&graph);
+    assert!(sig.contains("tensor<4x2x16x4xf32> loc(\"ssm_h\")"), "{sig}");
+    assert!(
+        sig.contains("tensor<4x2x3x16xf32> loc(\"ssm_conv\")"),
+        "{sig}"
+    );
+    assert!(
+        sig.ends_with("-> (tensor<4x40xf32>, tensor<4x2x16x4xf32>, tensor<4x2x3x16xf32>) {"),
+        "{sig}"
+    );
+    assert!(!graph.contains("kcache"));
 }
 
 /// Each slot's state row is written back at its own layer row with the batch
