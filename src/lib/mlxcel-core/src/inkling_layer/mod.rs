@@ -20,16 +20,16 @@
 
 mod attention;
 mod cache;
+mod conv;
 mod dense_mlp;
 
 use crate::layers::RMSNorm;
 use crate::weights::WeightMap;
 use crate::{MlxArray, UniquePtr};
 
-pub use attention::{
-    InklingAttention, InklingShortConv, banded_additive_mask, log_scaling_tau, repeat_kv_heads,
-};
+pub use attention::{InklingAttention, banded_additive_mask, log_scaling_tau, repeat_kv_heads};
 pub use cache::InklingLayerCache;
+pub use conv::InklingShortConv;
 pub use dense_mlp::InklingDenseMlp;
 
 /// Runtime parameters shared by one target or MTP decoder layer.
@@ -144,11 +144,11 @@ impl<M: InklingFeedForward> InklingDecoderLayer<M> {
         let attended = self.attention.forward(&normed, cache);
         let hidden = self
             .attention_conv
-            .forward(&attended, &mut cache.conv[2], Some(input));
+            .forward_in_cache(&attended, cache, 2, Some(input));
         let normed = self.post_attention_norm.forward(&hidden);
         let projected = self.mlp.forward(&normed);
         self.mlp_conv
-            .forward(&projected, &mut cache.conv[3], Some(&hidden))
+            .forward_in_cache(&projected, cache, 3, Some(&hidden))
     }
 }
 
