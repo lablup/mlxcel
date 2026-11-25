@@ -211,6 +211,29 @@ The default stays off for the reason section 2 gives: the round's contract does 
   models::speculative_exactness_survey_tests -- --ignored --nocapture
 ```
 
+## 4. Prompt lookup throughput with the variable on (issue #3425)
+
+Sections 2 and 3 measured prompt lookup with the variable on only on the DeepSeek V3 family. This section adds the four checkpoints #3421 put in the switch. `mlxcel generate --temp 0 --profile -n 256 --prompt-lookup`, one build, one locked block, the arms of a checkpoint interleaved in 2 cycles; load average 2.6 to 7.6. Prompt "copy" asks to reprint a 17-line Python function with one variable renamed; prompt "prose" is `Explain in three short paragraphs why the sky is blue.` Arms: plain decode, lookup with `MLXCEL_MLA_ROW_INVARIANT` unset ("off") and set ("on"); the 4-bit checkpoints repeat all three with `MLXCEL_QMV_WIDE=0` ("narrow"). Values are the mean decode tok/s of the 2 runs; "text" compares the 256 tokens with plain decode on the same kernel.
+
+| Checkpoint | Prompt | Kernel | Plain | Lookup, off | Lookup, on | On against off | Text, off | Text, on | Acceptance |
+|---|---|---|---|---|---|---|---|---|---|
+| deepseek-v2-lite-chat-4bit-mlx | copy | wide | 166.8 | 278.6 | 244.2 | -12.3% | equal | equal | 0.63 |
+| deepseek-v2-lite-chat-4bit-mlx | copy | narrow | 169.5 | 279.4 | 246.9 | -11.6% | equal | equal | 0.63 |
+| deepseek-v2-lite-chat-4bit-mlx | prose | wide | 173.2 | 146.7 | 146.3 | -0.3% | differs | differs | 0.10 |
+| deepseek-v2-lite-chat-4bit-mlx | prose | narrow | 173.7 | 148.5 | 150.0 | +1.1% | differs | **equal** | 0.09 |
+| afm-4.5b (Arcee, bf16) | copy | | 64.5 | 228.4 | 208.1 | -8.9% | equal | equal | 0.68 |
+| afm-4.5b (Arcee, bf16) | prose | | 65.1 | 64.6 | 66.3 | +2.6% | equal | equal | 0.05 |
+| k2-horizon-0.9b (`Llama3Model`, bf16) | copy | | 212.5 | 243.9 | 232.5 | -4.7% | equal | equal | 0.38 |
+| k2-horizon-0.9b (`Llama3Model`, bf16) | prose | | 213.9 | 217.3 | 214.1 | -1.5% | equal | equal | 0.26 |
+| olmoe-1b-7b-0125-4bit | copy | wide | 402.1 | 700.4 | 464.6 | -33.7% | equal | equal | 0.60 |
+| olmoe-1b-7b-0125-4bit | copy | narrow | 403.2 | 702.3 | 463.7 | -34.0% | equal | equal | 0.60 |
+| olmoe-1b-7b-0125-4bit | prose | wide | 414.4 | 363.3 | 353.8 | -2.6% | differs | differs | 0.08 |
+| olmoe-1b-7b-0125-4bit | prose | narrow | 414.6 | 364.7 | 354.6 | -2.8% | equal | equal | 0.08 |
+
+OLMoE's copy plain value drops a cold first run (351.1); with it the mean is 376.6. The prose texts that differ part from plain decode within the 256 tokens. On the wide kernel OLMoE's lookup text equals the narrow plain text (a verify block of a few rows takes the narrow quantized kernel), while DeepSeek V2's equals neither. On the narrow kernel with the variable on, lookup text equals plain decode in all four quantized cells, and on bf16 all eight cells are equal with the variable on or off.
+
+The variable costs most where acceptance is high and the per-row block replaces a batched kernel the decode step does not use: OLMoE loses a third of its copy throughput (the per-position experts replace one `gather_qmm` over the block), DeepSeek V2 about 12%, the dense bf16 families 5 to 9%. Exact lookup stays faster than plain decode on every copy cell (1.09x to 3.23x). On prose, acceptance is under 0.1 on DeepSeek V2 and OLMoE and lookup is slower than plain decode with the variable on or off (DeepSeek V2 0.84x to 0.86x, OLMoE 0.85x); the variable itself moves prose by under 3%. On the bf16 families prose lookup is within 3% of plain decode either way.
+
 ## Commands
 
 ```bash
@@ -232,6 +255,10 @@ The default stays off for the reason section 2 gives: the round's contract does 
 # Byte-identical prompt lookup on a quantized DeepSeek V3 checkpoint
 MLXCEL_MLA_ROW_INVARIANT=1 MLXCEL_QMV_WIDE=0 \
   mlxcel generate -m models/gigachat3-10b-a1.8b-mlx-8bit --temp 0 --prompt-lookup -p "..."
+# Prompt lookup throughput with the exact block (section 4)
+/usr/bin/lockf -k /Users/devops/Development/.mlxcel-gpu.lock \
+  env MLXCEL_MLA_ROW_INVARIANT=1 MLXCEL_QMV_WIDE=0 \
+  mlxcel generate -m models/olmoe-1b-7b-0125-4bit --temp 0 --profile -n 256 --prompt-lookup -p "..."
 ```
 
 The decode and prompt-lookup tables, and the survey verdicts, were first taken on a build in which the row-invariant scope was on by default and `MLXCEL_DEEPSEEK_V3_ROW_INVARIANT=0` turned it off (`verify` selected the dropped third arm); the variable was then renamed and its default inverted without touching either code path. On the final build the checks were repeated in part: the survey gave the same verdicts for Gemma 4 26B A4B (all 18 rows), gigachat3 bf16 with the variable on (9 cells equal) and off (width 4, differs), gigachat3 8-bit with it on (widths 2 and 8) and GLM-4.7-Flash with it on (width 4); prompt lookup on gigachat3 bf16 ran at 264.9 tok/s by default and 149.8 with the variable on (2 cycles, another build running); and on the long prompt gigachat3 8-bit again left plain decode by default and matched it with the variable on, both with `MLXCEL_QMV_WIDE=0`. The Xing4.0 rows are from the final build, after the hyper-connection change (9 of 9 cells on each checkpoint with the variable on; the 8-bit checkpoint differs on both kernels with it off).

@@ -53,7 +53,7 @@ impl InklingModel {
     /// Forward a B=1 verify block. A block the row-invariant scope covers
     /// records its own rewind data (see
     /// [`Self::keep_verified_prefix_for_sequence`]) and returns an empty
-    /// snapshot; any other block first captures every layer's exact KV and
+    /// snapshot, as does a one-row block; any other block first captures every layer's exact KV and
     /// four-convolution pre-forward state for
     /// [`Self::restore_and_replay_speculative_for_sequence`].
     pub(crate) fn forward_speculative_for_sequence(
@@ -72,7 +72,7 @@ impl InklingModel {
             |caches| {
                 let mut snapshot_tensors = Vec::new();
                 let mut snapshot_scalars = Vec::new();
-                if !self.verify_block_rewinds_in_place(input) {
+                if !self.verify_block_needs_no_snapshot(input) {
                     for cache in caches.iter() {
                         cache.capture_flat(&mut snapshot_tensors, &mut snapshot_scalars);
                     }
@@ -87,15 +87,19 @@ impl InklingModel {
         )
     }
 
-    /// Whether a verify forward over `input [1, L]` records the convolution
-    /// windows [`Self::keep_verified_prefix_for_sequence`] rewinds from, so
-    /// no pre-verify snapshot is needed.
-    fn verify_block_rewinds_in_place(&self, input: &MlxArray) -> bool {
+    /// Whether a verify forward over `input [1, L]` needs no pre-verify
+    /// snapshot: a block of 2 to 16 rows records the convolution windows
+    /// [`Self::keep_verified_prefix_for_sequence`] rewinds from, and a
+    /// one-row block keeps its only row (the MTP round loop finalizes it as
+    /// a classic decode step, issue #3425), so a snapshot would only cost a
+    /// copy of every layer's state and a replay.
+    fn verify_block_needs_no_snapshot(&self, input: &MlxArray) -> bool {
         let shape = mlxcel_core::array_shape(input);
-        self.row_kernel_enabled()
-            && shape.len() == 2
+        shape.len() == 2
             && shape[0] == 1
-            && (2..=mlxcel_core::row_invariant::MAX_ROWS).contains(&shape[1])
+            && (shape[1] == 1
+                || (self.row_kernel_enabled()
+                    && (2..=mlxcel_core::row_invariant::MAX_ROWS).contains(&shape[1])))
     }
 
     /// After a verify block of `appended` rows, keep its first `kept` rows in

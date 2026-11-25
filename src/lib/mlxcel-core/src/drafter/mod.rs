@@ -1262,6 +1262,35 @@ pub trait Drafter {
         Ok(())
     }
 
+    /// Whether [`Self::extend_history`] keeps this drafter's own history in
+    /// step with the target after classic decode steps that no round drafted
+    /// (issue #3425). The MTP round loop falls back to classic decode only
+    /// for a drafter that says yes. The default says no.
+    fn extends_history_without_draft(&self) -> bool {
+        false
+    }
+
+    /// Append target-emitted tokens that no round drafted: the classic decode
+    /// steps the MTP round loop ran instead of a round (issue #3425).
+    /// `hidden` (`[1, n, H]`) holds the target's hidden at each step's input
+    /// position and `tokens` (`n` ids) the token each step emitted, so row
+    /// `i` pairs with `tokens[i]` as [`Self::accept_verified_tokens`] pairs a
+    /// verify row with the token after it. The drafter appends them and
+    /// precomputes the next round's seed. Called only when
+    /// [`Self::extends_history_without_draft`] is true; failures degrade
+    /// draft quality only.
+    #[allow(unused_variables)]
+    fn extend_history(
+        &mut self,
+        hidden: &MlxArray,
+        tokens: &[i32],
+        sampler: &crate::generate::SamplingConfig,
+    ) -> Result<(), DrafterError> {
+        Err(DrafterError::DraftFailed {
+            reason: "this drafter has no history to extend".to_string(),
+        })
+    }
+
     /// Reset the drafter's own KV cache between full generation calls.
     ///
     /// **DFlash- and InternalMtp-only** by original design; this trait

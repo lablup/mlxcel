@@ -47,7 +47,7 @@ pub(crate) fn tiny_audio_model() -> InklingModel {
 /// fused SDPA does not take a 2-wide head and falls back to an unfused path
 /// whose arithmetic depends on the block length, which no checkpoint takes
 /// (the Inkling 2 tiny model needed the same, issue #3280).
-pub(super) fn tiny_model_with_real_heads() -> InklingModel {
+pub(crate) fn tiny_model_with_real_heads() -> InklingModel {
     tiny_model_impl(false, 128, 64, 32)
 }
 
