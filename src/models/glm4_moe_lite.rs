@@ -1146,6 +1146,16 @@ impl Glm4MoeLiteModel {
         caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        // With `MLXCEL_MLA_ROW_INVARIANT` on, a verify block of the engine's
+        // token-only round (prompt lookup, a full-model drafter) takes the
+        // row-wise verify forward the MTP gate already probes, so it equals
+        // the decode steps it stands for wherever that probe passes (issue
+        // #3418).
+        if crate::models::mla_batched::row_invariant_mode().is_some()
+            && mlxcel_core::row_invariant::is_verify_block(&mlxcel_core::array_shape(input_ids))
+        {
+            return self.forward_verify(input_ids, caches).0;
+        }
         self.forward_with_hidden(input_ids, caches).0
     }
 

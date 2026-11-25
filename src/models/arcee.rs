@@ -636,6 +636,8 @@ impl ArceeModel {
         let n = self.layers.len();
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
+            // Recorded only under the block-versus-chain diagnostic (#3418).
+            crate::models::speculative_exactness_diag::capture(i, "arcee", "layer output", &h);
             pipeline_hint(&h, i, n);
         }
         self.norm.forward(&h)

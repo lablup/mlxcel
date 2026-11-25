@@ -198,6 +198,32 @@ pub fn linear(layer: &UnifiedLinear, x: &MlxArray) -> UniquePtr<MlxArray> {
     }
 }
 
+/// [`linear`] for a model that leaves a quantized projection as one product
+/// over the whole block: inside a [`Scope`], a plain bias-free dense layer
+/// without an active runtime LoRA goes through [`dense`], anything else
+/// through its own forward. MLX's quantized product is already row-invariant
+/// unless `qmv_wide` is on (`set_qmv_wide`), and splitting it would read the
+/// weight once per row, which a verify round without an exactness gate
+/// should not pay (issue #3418). Outside a scope this is the layer's own
+/// forward, call for call, so a model that enters the scope only on request
+/// is otherwise untouched.
+///
+/// Used by: the DeepSeek V3 decoder (`models::deepseek_v3`) and
+/// `models::xing4_0`.
+pub fn linear_whole_block(layer: &UnifiedLinear, x: &MlxArray) -> UniquePtr<MlxArray> {
+    if mode().is_none() {
+        return layer.forward(x);
+    }
+    match layer {
+        UnifiedLinear::Regular(linear)
+            if linear.bias.is_none() && !layer.has_active_runtime_lora() =>
+        {
+            dense(x, &linear.weight)
+        }
+        _ => layer.forward(x),
+    }
+}
+
 #[cfg(test)]
 #[path = "row_invariant_tests.rs"]
 mod tests;

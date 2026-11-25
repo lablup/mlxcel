@@ -281,8 +281,12 @@ impl XingHyperConnection {
         let flat = mlxcel_core::astype(&flat, f32_);
         let flat = mlxcel_core::fast_rms_norm_no_weight(&flat, self.norm_eps);
         let flat = mlxcel_core::astype(&flat, x_dtype);
-        let fn_t = mlxcel_core::transpose(&mlxcel_core::astype(&self.hc_fn, x_dtype));
-        let mix = mlxcel_core::astype(&mlxcel_core::matmul(&flat, &fn_t), f32_);
+        // `dense` is `matmul(flat, fn.T)` outside a row-invariant scope and
+        // the row-invariant product inside one (issue #3418).
+        let mix = mlxcel_core::astype(
+            &mlxcel_core::row_invariant::dense(&flat, &mlxcel_core::astype(&self.hc_fn, x_dtype)),
+            f32_,
+        );
 
         let pre = slice_axis(&mix, -1, 0, hc);
         let post = slice_axis(&mix, -1, hc, 2 * hc);
@@ -328,7 +332,20 @@ pub(crate) fn hc_expand(
     let post = mlxcel_core::expand_dims(post, -1);
     let out = mlxcel_core::expand_dims(out, 2);
     let gated = mlxcel_core::multiply(&post, &out);
-    let mixed = mlxcel_core::matmul(comb, x);
+    // A batched matmul over the positions: inside a verify block each
+    // position is multiplied alone, as its decode step multiplies it.
+    let length = mlxcel_core::array_shape(x)[1];
+    let mixed = if length > 1 && mlxcel_core::row_invariant::in_verify_block() {
+        let parts: Vec<UniquePtr<MlxArray>> = (0..length)
+            .map(|i| {
+                mlxcel_core::matmul(&slice_axis(comb, 1, i, i + 1), &slice_axis(x, 1, i, i + 1))
+            })
+            .collect();
+        let refs: Vec<&MlxArray> = parts.iter().map(|part| &**part).collect();
+        mlxcel_core::concatenate_many(&refs, 1)
+    } else {
+        mlxcel_core::matmul(comb, x)
+    };
     mlxcel_core::add(&gated, &mixed)
 }
 
@@ -468,13 +485,22 @@ impl Xing40Model {
         row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
+        // The DeepSeek V3 layers' row-invariant scope, when
+        // `MLXCEL_MLA_ROW_INVARIANT` is on (issue #3418): a verify block of
+        // the engine's token-only round runs its MLA per row.
+        let _row_invariant = crate::models::mla_batched::row_invariant_scope(
+            &mlxcel_core::array_shape(&h),
+            mask.is_some(),
+        );
         let mut h = hc_widen(&h, self.config.hc_mult as i32);
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+        for (i, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
             h = layer.forward(&h, cache, mask);
+            // Recorded only under the block-versus-chain diagnostic (#3418).
+            crate::models::speculative_exactness_diag::capture(i, "mla", "layer output", &h);
         }
         let h = mlxcel_core::generate::select_row(hc_head(&h), row);
         let h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        crate::models::deepseek_v3::row_linear(&self.lm_head, &h)
     }
 
     pub fn forward_impl(

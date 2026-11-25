@@ -511,6 +511,8 @@ impl OlmoeModel {
         // Pass through transformer layers
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
+            // Recorded only under the block-versus-chain diagnostic (#3418).
+            crate::models::speculative_exactness_diag::capture(i, "olmoe", "layer output", &h);
         }
 
         let h = mlxcel_core::generate::select_row(h, row);
