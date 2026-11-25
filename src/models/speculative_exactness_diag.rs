@@ -76,8 +76,8 @@ pub fn capturing() -> bool {
 ///
 /// Used by: the Gemma 4 decoder layers (including the MoE feed-forward
 /// stages) and startup probe, the Inkling layer loop and startup probe, and
-/// the DeepSeek V3, Xing4.0, Arcee, OLMoE and Llama 3 (K2 Horizon) layer
-/// loops (survey diagnostic).
+/// the DeepSeek V3, V3.2 and V2, Xing4.0, Arcee, OLMoE and Llama 3 (K2
+/// Horizon) layer loops (survey diagnostic).
 pub fn capture(layer: usize, kind: &str, op: &'static str, tensor: &MlxArray) {
     CAPTURE.with(|slot| {
         let mut slot = slot.borrow_mut();

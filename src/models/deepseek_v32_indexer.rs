@@ -133,7 +133,7 @@ impl Indexer {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
         let s = shape[1];
-        let k = self.wk.forward(x);
+        let k = mlxcel_core::row_invariant::linear_whole_block(&self.wk, x);
         let k = self.k_norm.forward(&k);
         let k = mlxcel_core::reshape(&k, &[b, 1, s, self.head_dim]);
         self.rope.apply(&k, self.rope_traditional, offset)
@@ -146,7 +146,7 @@ impl Indexer {
         let shape = mlxcel_core::array_shape(qr);
         let b = shape[0];
         let s = shape[1];
-        let q = self.wq_b.forward(qr);
+        let q = mlxcel_core::row_invariant::linear_whole_block(&self.wq_b, qr);
         let q = mlxcel_core::reshape(&q, &[b, s, self.n_heads, self.head_dim]);
         let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
         self.rope.apply(&q, self.rope_traditional, offset)
@@ -156,7 +156,7 @@ impl Indexer {
     /// The `n_heads**-0.5 * head_dim**-0.5` scaling is applied inside
     /// [`indexer_top_indices`].
     pub(super) fn weights(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        self.weights_proj.forward(x)
+        mlxcel_core::row_invariant::linear_whole_block(&self.weights_proj, x)
     }
 
     /// Select the top-`index_topk` key positions for each query. Returns `None`

@@ -46,6 +46,7 @@
 use mlxcel_core::cache::{BatchedAttentionMetadata, SequenceId};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::row_invariant::linear_whole_block as row_linear;
 use mlxcel_core::utils::{pipeline_hint, relu_squared};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -486,8 +487,11 @@ pub struct ArceeMLP {
 
 impl ArceeMLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        self.down_proj
-            .forward(&relu_squared(&self.up_proj.forward(x)))
+        // Row-invariant products inside the model's scope (#3421).
+        row_linear(
+            &self.down_proj,
+            &relu_squared(&row_linear(&self.up_proj, x)),
+        )
     }
 
     pub fn from_weights(
@@ -629,6 +633,7 @@ impl ArceeModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let _row_invariant = llama3::verify_scope(input_ids, input_embeddings, mask);
         let mut h = match input_embeddings {
             Some(embeds) => mlxcel_core::copy(embeds),
             None => self.embed_tokens.forward(input_ids),
@@ -652,9 +657,10 @@ impl ArceeModel {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
+        let _row_invariant = llama3::verify_scope(input_ids, input_embeddings, mask);
         let h = self.hidden_states(input_ids, input_embeddings, caches, mask);
         let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
-        self.lm_head.forward(&row)
+        row_linear(&self.lm_head, &row)
     }
 
     pub fn forward(
@@ -663,8 +669,9 @@ impl ArceeModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let _row_invariant = llama3::verify_scope(input_ids, None, mask);
         let h = self.hidden_states(input_ids, None, caches, mask);
-        self.lm_head.forward(&h)
+        row_linear(&self.lm_head, &h)
     }
 
     /// Batched forward: batched embedding, norms, projections and MLP,
@@ -759,8 +766,9 @@ impl LanguageModel for ArceeModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let _row_invariant = llama3::verify_scope(input_ids, input_embeddings, mask);
         let h = self.hidden_states(input_ids, input_embeddings, caches, mask);
-        self.lm_head.forward(&h)
+        row_linear(&self.lm_head, &h)
     }
 
     fn last_row_logits(

@@ -137,7 +137,8 @@ fn a_verify_block_matches_the_single_token_chain_on_metal() {
 
 /// The two geometries above cover both single-query paths: every row of a
 /// verify block takes the fused kernel at rope 32 and the composed form at
-/// rope 16, as its decode step does.
+/// rope 16, as its decode step does. The block counts as one call per layer
+/// on that path (#3421), and a decode step still counts one.
 #[test]
 fn verify_block_rows_take_the_single_query_paths_on_metal() {
     use mlxcel_core::mla::MlaDecodePath;
@@ -157,13 +158,22 @@ fn verify_block_rows_take_the_single_query_paths_on_metal() {
             let logits = model.forward_impl(&input(&[9, 4, 13, 8]), &mut caches, None);
             mlxcel_core::eval(&logits);
         });
+        let layers = model.layers.len() as u64;
         assert_eq!(
             counts.get(path),
-            4 * model.layers.len() as u64,
-            "rope {rope}: one single-query step per row and layer"
+            layers,
+            "rope {rope}: one record per verify block and layer, not one per row"
         );
-        assert_eq!(counts.get(MlaDecodePath::AbsorbedPrefill), 0, "rope {rope}");
-        assert_eq!(counts.get(MlaDecodePath::Decompressed), 0, "rope {rope}");
+        assert_eq!(counts.total(), layers, "rope {rope}: {counts:?}");
+
+        let (_, decode) = mlxcel_core::mla::stats::scoped(|| {
+            for token in [10, 12] {
+                let logits = model.forward_impl(&input(&[token]), &mut caches, None);
+                mlxcel_core::eval(&logits);
+            }
+        });
+        assert_eq!(decode.get(path), 2 * layers, "rope {rope}: decode steps");
+        assert_eq!(decode.total(), 2 * layers, "rope {rope}: {decode:?}");
     }
 }
 

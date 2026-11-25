@@ -384,18 +384,21 @@ impl DeepSeekV3Attention {
         // token-only verify round (prompt lookup, a full-model drafter) read
         // different logits than plain decode from layer 0 on. The latent of
         // the whole block is already stored, so row `r` reads a prefix of it.
+        // The rows count as one MLA call in the path stats (#3421).
         if b == 1 && mask.is_none() && mlxcel_core::row_invariant::in_verify_block() {
             let total = window.seq_len();
-            let rows: Vec<UniquePtr<MlxArray>> = (0..l)
-                .map(|r| {
-                    self.single_query_attention(
-                        &slice_axis(&q_nope, 2, r, r + 1),
-                        &slice_axis(&q_pe, 2, r, r + 1),
-                        super::mla_batched::latent_window_prefix(&window, total - l + r + 1),
-                        None,
-                    )
-                })
-                .collect();
+            let rows: Vec<UniquePtr<MlxArray>> = mlxcel_core::mla::stats::as_one_call(|| {
+                (0..l)
+                    .map(|r| {
+                        self.single_query_attention(
+                            &slice_axis(&q_nope, 2, r, r + 1),
+                            &slice_axis(&q_pe, 2, r, r + 1),
+                            super::mla_batched::latent_window_prefix(&window, total - l + r + 1),
+                            None,
+                        )
+                    })
+                    .collect()
+            });
             let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
             let output = mlxcel_core::concatenate_many(&refs, 2);
             return self.project_attention_output(&output, b, l);

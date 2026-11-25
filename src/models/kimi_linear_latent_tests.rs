@@ -460,3 +460,16 @@ fn a_forced_int4_latent_stores_four_bit_rows_and_decodes_composed() {
         );
     });
 }
+
+/// The token-only verify round (prompt lookup, a full-model drafter) refuses
+/// this model: its KDA state is model-owned and a cache trim cannot roll it
+/// back. So it never runs a verify block, and the exact MLA verify scope
+/// (`MLXCEL_MLA_ROW_INVARIANT`) is not extended to it (#3421). If this starts
+/// failing, the round takes the model and its MLA split needs the scope.
+#[test]
+fn the_token_only_verify_round_refuses_this_model() {
+    let model = model(64, None);
+    assert!(
+        mlxcel_core::speculative::prompt_lookup::prompt_lookup_unsupported_reason(&model).is_some()
+    );
+}

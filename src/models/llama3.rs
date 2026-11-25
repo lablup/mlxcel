@@ -20,7 +20,8 @@
 use mlxcel_core::cache::{BatchedAttentionMetadata, SequenceId};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel};
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::pipeline_hint;
+use mlxcel_core::row_invariant::linear_whole_block as row_linear;
+use mlxcel_core::utils::{pipeline_hint, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -416,6 +417,22 @@ fn report_fused_rope_bypass_once(reasons: &[&str], bypasses_rope_append: bool) {
 }
 
 // Attention.
+/// The row-invariant scope of one single-sequence forward over `input_ids
+/// [B, L]` (or `input_embeddings [B, L, D]`), when `MLXCEL_MLA_ROW_INVARIANT`
+/// is on (#3421): a token-only verify block then equals the decode steps it
+/// stands for, as on the DeepSeek V3 family. `None`, and nothing changes,
+/// when the variable is unset.
+///
+/// Used by: [`Llama3Model`] and `models::arcee::ArceeModel`.
+pub(crate) fn verify_scope(
+    input_ids: &MlxArray,
+    input_embeddings: Option<&MlxArray>,
+    mask: Option<&MlxArray>,
+) -> Option<mlxcel_core::row_invariant::Scope> {
+    let shape = mlxcel_core::array_shape(input_embeddings.unwrap_or(input_ids));
+    crate::models::mla_batched::row_invariant_scope(&shape, mask.is_some())
+}
+
 pub struct Attention {
     /// Fused QKV projection: Q, K, V weights concatenated along output dim.
     /// Replaces separate q_proj, k_proj, v_proj for better NA utilization.
@@ -693,7 +710,13 @@ impl Attention {
         let l = shape[1];
         let offset = cache.offset;
 
+        // Inside a row-invariant scope (`MLXCEL_MLA_ROW_INVARIANT=1`, #3421)
+        // every step takes the composed graph below, whose projections are
+        // row-invariant there; the fused launchers form their own products.
+        let row_invariant = mlxcel_core::row_invariant::active();
+
         if l > 1
+            && !row_invariant
             && mask.is_none()
             && cache.is_empty()
             && self.fused_rope_launchers_usable()
@@ -733,7 +756,7 @@ impl Attention {
             return output;
         }
 
-        let fused_split_rope = if self.fused_rope_launchers_usable() {
+        let fused_split_rope = if self.fused_rope_launchers_usable() && !row_invariant {
             self.qkv_proj
                 .forward_split_rope(x, self.rope_dims, self.rope_base, offset)
         } else {
@@ -753,21 +776,22 @@ impl Attention {
         // belongs to the batched paged decode path (#899) and is deliberately
         // not wired here. `MLXCEL_FUSED_ROPE_APPEND=0` falls back to the
         // reshape / transpose / `fast_rope` graph below.
-        let fused_rope_append = if fused_split_rope.is_some() || self.rope_freqs.is_some() {
-            // A `rope_scaling` table has no route into this kernel either: it
-            // takes `rope_base` and builds its own frequencies in Metal.
-            None
-        } else {
-            self.qkv_proj.forward_fused_rope_append(
-                x,
-                self.rope_dims,
-                self.rope_base,
-                self.rope_scale,
-                self.rope_traditional,
-                offset,
-                mlxcel_core::layers::FusedRopeDestLayout::DenseSlab,
-            )
-        };
+        let fused_rope_append =
+            if fused_split_rope.is_some() || self.rope_freqs.is_some() || row_invariant {
+                // A `rope_scaling` table has no route into this kernel either: it
+                // takes `rope_base` and builds its own frequencies in Metal.
+                None
+            } else {
+                self.qkv_proj.forward_fused_rope_append(
+                    x,
+                    self.rope_dims,
+                    self.rope_base,
+                    self.rope_scale,
+                    self.rope_traditional,
+                    offset,
+                    mlxcel_core::layers::FusedRopeDestLayout::DenseSlab,
+                )
+            };
 
         let (q, k, v) = if let Some((q, k, v)) = fused_split_rope {
             (q, k, v)
@@ -796,14 +820,35 @@ impl Attention {
         // behind it (the pooled paged entry at a single unmasked token, the
         // Turbo dequant-first variants, or fused SDPA). Prefill (l > 1) and
         // masked steps never take the paged single-token kernel.
-        let attn_out = cache.attend(&q, k, v, self.scale, mask);
+        //
+        // A verify block in the row-invariant scope (#3421) appends and attends
+        // one row at a time, as the decode steps it stands for do: a block
+        // query count takes another SDPA kernel than one query.
+        let attn_out =
+            if b == 1 && l > 1 && mask.is_none() && mlxcel_core::row_invariant::in_verify_block() {
+                let rows: Vec<UniquePtr<MlxArray>> = (0..l)
+                    .map(|r| {
+                        cache.attend(
+                            &slice_axis(&q, 2, r, r + 1),
+                            slice_axis(&k, 2, r, r + 1),
+                            slice_axis(&v, 2, r, r + 1),
+                            self.scale,
+                            None,
+                        )
+                    })
+                    .collect();
+                let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
+                mlxcel_core::concatenate_many(&refs, 2)
+            } else {
+                cache.attend(&q, k, v, self.scale, mask)
+            };
 
         // Transpose back and reshape
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
 
         // Output projection
-        self.o_proj.forward(&attn_out)
+        row_linear(&self.o_proj, &attn_out)
     }
 
     /// Build the dense attention block from a checkpoint.
@@ -936,6 +981,14 @@ pub struct MLP {
 impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         // SwiGLU: down_proj(silu(gate_proj(x)) * up_proj(x))
+        // Inside a row-invariant scope (#3421) the composed form below takes
+        // the row-invariant products.
+        if mlxcel_core::row_invariant::active() {
+            let gate = row_linear(&self.gate_proj, x);
+            let up = row_linear(&self.up_proj, x);
+            let activated = mlxcel_core::compiled_swiglu_activation(&gate, &up);
+            return row_linear(&self.down_proj, &activated);
+        }
         // Non-quantized path: fused compiled FP MLP (single compiled graph)
         if let Some(result) = mlxcel_core::layers::compiled_swiglu_mlp_fp16(
             x,
@@ -1136,6 +1189,7 @@ impl Llama3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let _row_invariant = verify_scope(input_ids, input_embeddings, mask);
         // Use provided embeddings or compute from input_ids
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
@@ -1172,9 +1226,10 @@ impl Llama3Model {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
+        let _row_invariant = verify_scope(input_ids, input_embeddings, mask);
         let h = self.hidden_states(input_ids, input_embeddings, caches, mask);
         let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
-        self.lm_head.forward(&row)
+        row_linear(&self.lm_head, &row)
     }
 
     /// Forward pass through the entire model
@@ -1184,8 +1239,9 @@ impl Llama3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let _row_invariant = verify_scope(input_ids, None, mask);
         let h = self.hidden_states(input_ids, None, caches, mask);
-        self.lm_head.forward(&h)
+        row_linear(&self.lm_head, &h)
     }
 
     /// Forward pass with optional pre-computed embeddings (for VLM support)
@@ -1196,8 +1252,9 @@ impl Llama3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let _row_invariant = verify_scope(input_ids, input_embeddings, mask);
         let h = self.hidden_states(input_ids, input_embeddings, caches, mask);
-        self.lm_head.forward(&h)
+        row_linear(&self.lm_head, &h)
     }
 
     /// Batched forward pass: batch compute-bound layers, per-sequence attention.
