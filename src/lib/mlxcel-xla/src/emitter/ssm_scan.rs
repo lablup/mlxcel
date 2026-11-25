@@ -108,7 +108,8 @@ fn shift_along(b: &mut Builder, v: &Val, axis: usize, by: usize, fill: f32) -> V
 /// IREE-Metal miscompiles at rank 2 and above (issue #3343, see the module
 /// docs). The pairwise association also carries less rounding error than the
 /// sequential fold that `reduce_window` lowered to.
-// Used by: Mamba2 chunked SSD prefill (`exp_segsum`, `chunked_ssd`).
+// Used by: Mamba2, Nemotron-H, Falcon-H1 (chunked SSD prefill: `exp_segsum`,
+// `chunked_ssd`).
 pub(super) fn prefix_add(b: &mut Builder, v: &Val, axis: usize) -> Val {
     assert_eq!(v.ty.elt, "f32", "the scan accumulates in f32");
     let len = v.ty.shape[axis];

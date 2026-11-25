@@ -285,7 +285,7 @@ The `-inf` mask in `exp_segsum` was the first suspect and is not the cause. Repl
 
 `ssm_scan.rs` no longer emits `reduce_window`. Both prefix sums of the chunked scan, the per-chunk `acum` and the masked segment sum inside `exp_segsum`, are built by `prefix_add`: `ceil(log2(len))` levels of `slice`, `pad` and `add` in f32 (7 levels at `Q = 128`). The masked-rows structure of `exp_segsum` is unchanged, so near-diagonal decays still carry no cancellation error. `Builder::reduce_window_prefix_add` had no other caller and was removed.
 
-The form is device-agnostic, so the emitted StableHLO changes on every backend, not only on Metal. At the real mixer dimensions and capacity 256 the prefill probe goes from 191 to 237 lines: the 3 `reduce_window` ops (7, 7 and 2 levels) become 16 levels of `slice`, `pad` and `add`; nothing else moves, and the decode graphs are byte-identical. The summation is pairwise instead of a sequential fold, so prefill results move in the last bits. On `local-task` at f32 the output changes by at most 7.2e-7 (`y`) and 4.3e-7 (`h`) across the four cases below, the decode and `K-1` cases are bitwise identical, and the error against HF stays in the same order (3.3e-6 before, 3.6e-6 after on `y`). The `nemotron_h` and `falcon_h1` prefill goldens were regenerated because those hybrids share the scan. ROCm and CUDA were not re-run on this host.
+The form is device-agnostic, so the emitted StableHLO changes on every backend, not only on Metal. At the real mixer dimensions and capacity 256 the prefill probe goes from 191 to 237 lines: the 3 `reduce_window` ops (7, 7 and 2 levels) become 16 levels of `slice`, `pad` and `add`; nothing else moves, and the decode graphs are byte-identical. The summation is pairwise instead of a sequential fold, so prefill results move in the last bits. On `local-task` at f32 the output changes by at most 7.2e-7 (`y`) and 4.3e-7 (`h`) across the four cases below, the decode and `K-1` cases are bitwise identical, and the error against HF stays in the same order (3.34e-6 before, 3.58e-6 after on `y`). The `nemotron_h` and `falcon_h1` prefill goldens were regenerated because those hybrids share the scan; neither hybrid was executed here, and the Mamba1 goldens are unchanged. The `local-task` prefill probe run time at capacity 256 went from 0.016 to 0.020 s before to 0.023 to 0.025 s after. ROCm and CUDA were not re-run on this host.
 
 ### Single-layer probe
 
@@ -297,21 +297,21 @@ Real `mamba2-130m` mixer dimensions against the HF fp32 oracle, tolerance `5e-5`
 | padded prefill, before the fix | 256 / 224 | metal | f32 | 4.83 | 0.227 | NaN | 7.422e-1 | 0 |
 | padded prefill | 256 / 224 | metal | f32 | 5.17 | 0.192 | 1.431e-6 | 5.662e-7 | 0 |
 | full prefill, before the fix | 256 / 256 | metal | f32 | cached | 0.220 | NaN | 8.108e-1 | 0 |
-| full prefill | 256 / 256 | metal | f32 | cached | 0.195 | 1.431e-6 | 3.464e-7 | 0 |
-| shorter than `K-1`, before the fix | 256 / 2 | metal | f32 | cached | 0.236 | 7.26e-3 | 1.145e-2 | 0 |
-| shorter than `K-1` | 256 / 2 | metal | f32 | cached | 0.196 | 8.34e-7 | 1.68e-8 | 0 |
+| full prefill | 256 / 256 | metal | f32 | cached | 0.195 | 1.431e-6 | 3.465e-7 | 0 |
+| shorter than `K-1`, before the fix | 256 / 2 | metal | f32 | cached | 0.236 | 7.257e-3 | 1.145e-2 | 0 |
+| shorter than `K-1` | 256 / 2 | metal | f32 | cached | 0.196 | 8.345e-7 | 1.676e-8 | 0 |
 | long prefill | 4096 / 3584 | metal | f32 | 5.38 | 0.336 | 1.490e-6 | 2.123e-7 | 0 |
-| decode step | 1 / 1 | metal | f16 | 0.93 | 0.013 | 8.34e-4 | 1.559e-4 | 6.096e-4 |
-| padded prefill, before the fix | 256 / 224 | metal | f16 | cached | 0.235 | 3.31 | 8.674e28 | 6.557e-4 |
-| padded prefill | 256 / 224 | metal | f16 | 5.34 | 0.194 | 1.51e-3 | 2.68e-5 | 6.56e-4 |
-| full prefill | 256 / 256 | metal | f16 | cached | 0.198 | 1.51e-3 | 2.35e-5 | 6.32e-4 |
-| shorter than `K-1` | 256 / 2 | metal | f16 | cached | 0.203 | 7.69e-4 | 9.15e-6 | 6.51e-4 |
+| decode step | 1 / 1 | metal | f16 | 0.93 | 0.013 | 8.343e-4 | 1.559e-4 | 6.096e-4 |
+| padded prefill, before the fix | 256 / 224 | metal | f16 | cached | 0.235 | 3.311 | 8.674e28 | 6.557e-4 |
+| padded prefill | 256 / 224 | metal | f16 | 5.34 | 0.194 | 1.511e-3 | 2.684e-5 | 6.557e-4 |
+| full prefill | 256 / 256 | metal | f16 | cached | 0.198 | 1.511e-3 | 2.347e-5 | 6.317e-4 |
+| shorter than `K-1` | 256 / 2 | metal | f16 | cached | 0.203 | 7.685e-4 | 9.151e-6 | 6.514e-4 |
 | long prefill | 4096 / 3584 | metal | f16 | 5.56 | 0.341 | 1.593e-3 | 3.846e-5 | 7.537e-4 |
-| padded prefill, before the fix | 256 / 224 | local-task | f32 | cached | 0.020 | 3.34e-6 | 1.60e-7 | 0 |
-| padded prefill | 256 / 224 | local-task | f32 | 1.44 | 0.023 | 3.58e-6 | 1.70e-7 | 0 |
-| padded prefill | 256 / 224 | local-task | f16 | 1.13 | 0.019 | 1.51e-3 | 2.68e-5 | 6.56e-4 |
+| padded prefill, before the fix | 256 / 224 | local-task | f32 | cached | 0.020 | 3.338e-6 | 1.602e-7 | 0 |
+| padded prefill | 256 / 224 | local-task | f32 | 1.44 | 0.023 | 3.576e-6 | 1.695e-7 | 0 |
+| padded prefill | 256 / 224 | local-task | f16 | 1.13 | 0.019 | 1.511e-3 | 2.680e-5 | 6.562e-4 |
 
-All f32 rows on `metal` pass after the fix. The f16 rows are above the f32 tolerance by design (f16 projections around an f32 scan); the fixed `metal` numbers equal the `local-task` f16 numbers to three digits and carry no NaN.
+All f32 rows on `metal` pass after the fix. The f16 rows are above the f32 tolerance by design (f16 projections around an f32 scan); the fixed `metal` numbers are within 1% of the `local-task` f16 numbers on every case (for example `y` 7.685e-4 against 7.653e-4 on the `K-1` case) and carry no NaN.
 
 `spike/openxla/ssm_gate.sh OUT local-task metal` (tiny mixer, 11 cases) at f32: `local-task` 11/11 before and after, `metal` 6/11 before (five of the six prefill cases with real rows failed, up to 1.97 on `y`) and 11/11 after, worst `y` 2.80e-6 and worst `h` 1.43e-6. At f16 the script reports FAIL on both devices because it applies the f32 tolerance; after the fix the worst `metal` errors are `y` 1.85e-3 and `h` 2.52e-5, matching `local-task` (1.85e-3 and 2.49e-5), against `h` errors up to 1.1e6 before.
 
