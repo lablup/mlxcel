@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **WebUI opens at `localhost` again** (#TBD). `mlxcel serve --webui` and `mlxcel-server --webui` on a loopback address replaced the WebUI Host and Origin allow-list with the bound address after bind, so `http://localhost:<port>/webui/` and `[::1]` were refused with 403 `Host header is not allowed`; only `127.0.0.1` worked. The startup names are now kept and moved to the bound port, so `--port 0` still gets the real port, and unknown hosts are still refused.
+- **WebUI opens at `localhost` again** (#3433). `mlxcel serve --webui` and `mlxcel-server --webui` on a loopback address replaced the WebUI Host and Origin allow-list with the bound address after bind, so `http://localhost:<port>/webui/` and `[::1]` were refused with 403 `Host header is not allowed`; only `127.0.0.1` worked. The startup names are now kept and moved to the bound port, so `--port 0` still gets the real port, and unknown hosts are still refused.
 
 ## [v0.9.0-beta.2] - 2026-11-25
 
