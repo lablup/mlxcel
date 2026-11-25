@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 EXIT_EXACT = 0
@@ -114,8 +115,23 @@ def judge(oracle: dict, index: int | None, tolerance: float) -> tuple[int, str]:
     gaps = oracle.get("ref_top2_gaps")
     if gaps is None:
         return EXIT_USAGE, "oracle has no ref_top2_gaps; regenerate it with --top2"
-    gap = float(gaps[index])
-    runner = oracle.get("ref_top2_ids", [None] * len(gaps))[index]
+    ids = oracle.get("ref_top2_ids")
+    ref_ids = oracle["ref_token_ids"]
+    if (
+        not isinstance(gaps, list)
+        or len(gaps) != len(ref_ids)
+        or (ids is not None and (not isinstance(ids, list) or len(ids) != len(ref_ids)))
+        or not 0 <= index < len(gaps)
+    ):
+        return EXIT_USAGE, (
+            f"malformed oracle: ref_top2_gaps/ref_top2_ids must match ref_token_ids "
+            f"in length ({len(ref_ids)}); regenerate it with --top2"
+        )
+    try:
+        gap = float(gaps[index])
+    except (TypeError, ValueError):
+        return EXIT_USAGE, f"malformed oracle: ref_top2_gaps[{index}] is not a number"
+    runner = ids[index] if ids is not None else None
     detail = (
         f"first divergence at token {index}: oracle id {oracle['ref_token_ids'][index]}, "
         f"runner-up id {runner}, top-2 logit gap {gap:.6f}"
@@ -171,9 +187,15 @@ def main() -> int:
             except ValueError as error:
                 print(f"[near-tie] {args.label}: {error}", file=sys.stderr)
                 return EXIT_USAGE
+        if not os.path.isdir(args.model):
+            print(
+                f"[near-tie] {args.label}: --model must be a local checkpoint directory",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
         from transformers import AutoTokenizer
 
-        tok = AutoTokenizer.from_pretrained(args.model)
+        tok = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
         try:
             index, compared = first_divergence_text(text, ref, tok.decode)
         except AmbiguousDivergence as error:

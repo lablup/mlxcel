@@ -116,6 +116,10 @@ scripts/rocm_gpu_guard.sh --hold -- target/release/examples/xla_ssm_model_check 
     --model models/hf/mamba2-130m --device hip --capacity 256 --compile-times "$WORK/compile-hip"
 ```
 
+### Near-tie rule for reduced-precision runs (issue #3343)
+
+`oracle_continuation.py --top2` also records the oracle's runner-up id and its top-1 minus top-2 logit gap at every generated position (`ref_top2_ids`, `ref_top2_gaps`). `near_tie_check.py` judges a stream against that oracle: token-exact passes, and a stream that leaves the oracle at a position whose gap is below `--tolerance` (default 0.01) is reported as a near-tie (exit 3). Only the first divergence counts. The stream is given as `--ids`, `--ids-json`, or text (`--text`, `--text-file`, optionally `--mlxcel-cli` for captured `mlxcel generate` output); text needs `--model` as a local checkpoint directory and never downloads a tokenizer. `test_near_tie_check.py` covers the judge without a model (`python3 -m unittest spike/openxla/test_near_tie_check.py`). The IREE-Metal Mamba2 results that use it are in `FINDINGS_ssm.md`.
+
 ## Run
 
 ```bash
