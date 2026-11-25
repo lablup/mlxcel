@@ -102,15 +102,25 @@ pub use round_loop_batched::{DFlashBatchedGenerator, DFlashBatchedRunOutput};
 
 use crate::ffi::{self, MlxArray};
 
-/// Materialize an integer argmax tensor into host token ids with one
-/// contiguous copy.
+/// Materialize an integer argmax tensor into host token ids.
+///
+/// The read waits on `argmax`'s own completion event and enqueues no op
+/// ([`ffi::array_evaluated_bytes`]), so a forward already queued behind it
+/// on the same stream keeps running. A `contiguous()` copy (what
+/// [`ffi::array_to_raw_bytes`] adds) would be ordered after that forward and
+/// make the read wait for it, which turned the pipelined classic steps of
+/// the MTP and DFlash round loops into synchronous decode (issue #3430). A
+/// non-row-contiguous `argmax` still takes the copy.
 ///
 /// Used by: `DFlashDrafter::draft_block`, `DFlashDrafter::draft_block_batched`,
 /// `DFlashDraftModel::draft_block`, `DFlashGenerator::run`,
-/// `MuseAssistantModel::draft_block`, `MuseAssistantDrafter::draft_block`.
+/// `MuseAssistantModel::draft_block`, `MuseAssistantDrafter::draft_block`,
+/// the pipelined classic steps (`dflash::classic_steps`,
+/// `speculative::mtp::classic_fallback`) and the engine verify round.
 pub(crate) fn materialize_argmax_i32_vec(argmax: &MlxArray, expected_len: usize) -> Vec<i32> {
     let itemsize = ffi::array_itemsize(argmax);
-    let bytes = ffi::array_to_raw_bytes(argmax);
+    let bytes = ffi::array_evaluated_bytes(argmax)
+        .unwrap_or_else(|err| panic!("reading an argmax back failed: {err}"));
     match itemsize {
         4 => bytes
             .chunks_exact(4)
@@ -138,3 +148,7 @@ pub(crate) fn materialize_argmax_i32_vec(argmax: &MlxArray, expected_len: usize)
         }
     }
 }
+
+#[cfg(test)]
+#[path = "readback_tests.rs"]
+mod readback_tests;
