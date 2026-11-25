@@ -13,6 +13,8 @@ The oracle JSON must come from ``oracle_continuation.py --top2``. The stream is
 given as token ids (``--ids 1,2,3`` or ``--ids-json FILE [--ids-key KEY]``) or
 as generated text (``--text`` / ``--text-file``, which needs ``--model`` for the
 tokenizer and is matched against the decoded oracle prefix token by token).
+``--mlxcel-cli`` says the text is the captured stdout of ``mlxcel generate``:
+the banner lines, the echoed prompt and the trailing statistics are dropped.
 
 Usage:
     spike/openxla/.venv/bin/python spike/openxla/oracle_continuation.py \\
@@ -48,15 +50,37 @@ def first_divergence_ids(got: list[int], ref: list[int]) -> int | None:
     return None
 
 
+def strip_mlxcel_cli(stdout: str, prompt: str) -> str:
+    """The generated text inside captured ``mlxcel generate`` stdout.
+
+    The CLI prints banner lines, echoes the prompt, may print an
+    ``OpenXLA context capacity`` notice on the prompt's line, then streams the
+    continuation and ends with a ``[Generated N tokens ...]`` line.
+    """
+    at = stdout.find(prompt)
+    if at < 0:
+        raise ValueError("the prompt is not echoed in the captured CLI output")
+    rest = stdout[at + len(prompt) :]
+    if rest.startswith("OpenXLA context capacity"):
+        rest = rest.split("\n", 1)[1] if "\n" in rest else ""
+    end = rest.rfind("\n[Generated ")
+    return rest if end < 0 else rest[:end]
+
+
 def first_divergence_text(text: str, ref: list[int], decode) -> tuple[int | None, int]:
     """First oracle token whose decoded prefix ``text`` does not follow.
 
     Returns ``(index, compared)``: ``index`` is ``None`` when ``text`` follows
     the oracle for all ``compared`` tokens it covers.
+
+    Leading whitespace is ignored on both sides and trailing whitespace only on
+    ``text`` (a capture may add or drop a final newline). The oracle prefix
+    keeps its trailing whitespace, so a whitespace token such as a newline
+    still counts as a position that can diverge.
     """
     text = text.strip()
     for count in range(1, len(ref) + 1):
-        prefix = decode(ref[:count]).strip()
+        prefix = decode(ref[:count]).lstrip()
         if text.startswith(prefix):
             continue
         if prefix.startswith(text):
@@ -91,7 +115,14 @@ def main() -> int:
     ap.add_argument("--ids-json", help="JSON file holding the generated ids")
     ap.add_argument("--ids-key", default=None, help="key of the id array in --ids-json")
     ap.add_argument("--text", help="generated text (needs --model)")
-    ap.add_argument("--text-file", help="file holding the generated text (needs --model)")
+    ap.add_argument(
+        "--text-file", help="file holding the generated text (needs --model)"
+    )
+    ap.add_argument(
+        "--mlxcel-cli",
+        action="store_true",
+        help="the text is captured `mlxcel generate` stdout; keep only the continuation",
+    )
     ap.add_argument("--model", help="checkpoint directory, for the tokenizer")
     ap.add_argument("--tolerance", type=float, default=0.01)
     ap.add_argument("--label", default="stream")
@@ -117,6 +148,12 @@ def main() -> int:
         if text is None:
             with open(args.text_file) as f:
                 text = f.read()
+        if args.mlxcel_cli:
+            try:
+                text = strip_mlxcel_cli(text, oracle["prompt_text"])
+            except ValueError as error:
+                print(f"[near-tie] {args.label}: {error}", file=sys.stderr)
+                return EXIT_USAGE
         from transformers import AutoTokenizer
 
         tok = AutoTokenizer.from_pretrained(args.model)

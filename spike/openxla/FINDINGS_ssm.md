@@ -12,7 +12,7 @@ The scan stays f32 on the f16 path: every scan contraction goes through `Builder
 
 All three forms share the probe interface and the same mixer around the scan; only `selective_scan_prefill_form` differs.
 
-- Chunked SSD (`SsmPrefillForm::ChunkedSsd`). Rows are grouped into chunks of `Q`. Within a chunk the scan is `(C B^T o L) (x dt)` as two batched `dot_general`s, where `L = exp(segsum(dt A))` is built as HF's `segment_sum` does: a masked prefix sum with `reduce_window_prefix_add`, then a `-inf` mask above the diagonal, so near-diagonal decays carry no cancellation error. Each chunk's own end state is a third `dot_general`. The carry across chunks is one more `dot_general` against the chunk-level `exp(segsum)` matrix `[H, nc+1, nc+1]` (HF's form) instead of the unrolled sequence the issue suggested: the same math with no unroll, so the op count stays flat in `T`. The fifth contraction reads `C` against the state entering each chunk.
+- Chunked SSD (`SsmPrefillForm::ChunkedSsd`). Rows are grouped into chunks of `Q`. Within a chunk the scan is `(C B^T o L) (x dt)` as two batched `dot_general`s, where `L = exp(segsum(dt A))` is built as HF's `segment_sum` does: a masked prefix sum (originally `reduce_window_prefix_add`, a log-depth shifted-add chain since #3343, see the IREE-Metal section), then a `-inf` mask above the diagonal, so near-diagonal decays carry no cancellation error. Each chunk's own end state is a third `dot_general`. The carry across chunks is one more `dot_general` against the chunk-level `exp(segsum)` matrix `[H, nc+1, nc+1]` (HF's form) instead of the unrolled sequence the issue suggested: the same math with no unroll, so the op count stays flat in `T`. The fifth contraction reads `C` against the state entering each chunk.
 - Associative (`SsmPrefillForm::Associative`). Hillis-Steele inclusive scan over `(exp(dt A), dt x outer B)` pairs: `log2(T)` levels of pad/slice shifts and elementwise combines on `[T, H, P, N]`.
 - Sequential (`SsmPrefillForm::Sequential`). `T` unrolled decode steps (`selective_scan_step`), outputs placed with `dynamic_update_slice`.
 
@@ -268,3 +268,110 @@ $PY spike/openxla/ssm_oracle.py --check /tmp/mamba1-out
 
 These are CPU execution results only. The required `hip` probe and whole-model
 rows, CLI, server, cancellation, and slot-recycling evidence remain pending.
+
+## IREE-Metal validation on macOS (issue #3343)
+
+Validation ran on an Apple M1 Ultra (macOS 27.2) from main at `66bf600a` plus this change, with IREE `3.12.0rc20260721` at `dc9601f` and `AntonV/mamba2-130m-hf` at `05e8773f`. The oracle venv used plain `torch==2.12.1` with transformers 5.12.1, because the `+cpu` wheel pinned in `requirements.lock` does not exist for macOS arm64. `metal-spirv` cannot lower bf16, so every gate ran at f32 and at f16 (`MLXCEL_XLA_PRECISION=f16`).
+
+### Root cause: `iree_linalg_ext.scan` on IREE-Metal
+
+Before this change the production chunked prefill failed on `metal` at f32 while `local-task` passed on the same inputs: `y` was NaN and `h_T` was off by 0.74 against a reference maximum of 0.10 on the padded case. The associative and sequential forms passed on `metal`, and so did the decode step.
+
+Running the probe's StableHLO through `iree-run-module` on both devices and comparing intermediates puts the first divergence at the first `stablehlo.reduce_window`, the per-chunk prefix sum of `dt A`. Its input matches `local-task` to 2.5e-7 and its output is off by 1.4, and every value downstream inherits that. IREE rewrites a left-padded prefix-sum `reduce_window` into `iree_linalg_ext.scan`, and the Metal target returns values unrelated to the input for that op on any tensor of rank 2 or more. A standalone module with one such `reduce_window` reproduces it without mlxcel: rank 1 is correct at widths 8 and 128, and `[3,3]`, `[128,4]`, `[4,128]`, `[2,128,4]`, `[2,4,128]` and `[4,3,3]` are wrong along every axis (max-abs error 1.5 to 28 on unit-normal input). The SPIR-V IREE emits for the `[3,3]` dispatch looks correct; it binds the input at 0 and the output at 2 and leaves the accumulator binding 1 unused. Which later stage breaks it (SPIRV-Cross, the argument-buffer binding, or the Metal compiler) was not determined.
+
+The `-inf` mask in `exp_segsum` was the first suspect and is not the cause. Replacing `-inf` with a large finite value, or taking `exp` before the mask, left the Metal error unchanged to four digits, and the fixed graph still carries the `-inf` select.
+
+### Fix
+
+`ssm_scan.rs` no longer emits `reduce_window`. Both prefix sums of the chunked scan, the per-chunk `acum` and the masked segment sum inside `exp_segsum`, are built by `prefix_add`: `ceil(log2(len))` levels of `slice`, `pad` and `add` in f32 (7 levels at `Q = 128`). The masked-rows structure of `exp_segsum` is unchanged, so near-diagonal decays still carry no cancellation error. `Builder::reduce_window_prefix_add` had no other caller and was removed.
+
+The form is device-agnostic, so the emitted StableHLO changes on every backend, not only on Metal. At the real mixer dimensions and capacity 256 the prefill probe goes from 191 to 237 lines: the 3 `reduce_window` ops (7, 7 and 2 levels) become 16 levels of `slice`, `pad` and `add`; nothing else moves, and the decode graphs are byte-identical. The summation is pairwise instead of a sequential fold, so prefill results move in the last bits. On `local-task` at f32 the output changes by at most 7.2e-7 (`y`) and 4.3e-7 (`h`) across the four cases below, the decode and `K-1` cases are bitwise identical, and the error against HF stays in the same order (3.3e-6 before, 3.6e-6 after on `y`). The `nemotron_h` and `falcon_h1` prefill goldens were regenerated because those hybrids share the scan. ROCm and CUDA were not re-run on this host.
+
+### Single-layer probe
+
+Real `mamba2-130m` mixer dimensions against the HF fp32 oracle, tolerance `5e-5`. Compile times are uncached; the three prefill cases share one compiled graph.
+
+| case | rows / real length | device | precision | compile s | run s | max-abs y | max-abs h | max-abs conv |
+|------|-------------------:|--------|-----------|----------:|------:|----------:|----------:|-------------:|
+| decode step | 1 / 1 | metal | f32 | 0.89 | 0.013 | 1.431e-6 | 2.027e-6 | 3.576e-7 |
+| padded prefill, before the fix | 256 / 224 | metal | f32 | 4.83 | 0.227 | NaN | 7.422e-1 | 0 |
+| padded prefill | 256 / 224 | metal | f32 | 5.17 | 0.192 | 1.431e-6 | 5.662e-7 | 0 |
+| full prefill, before the fix | 256 / 256 | metal | f32 | cached | 0.220 | NaN | 8.108e-1 | 0 |
+| full prefill | 256 / 256 | metal | f32 | cached | 0.195 | 1.431e-6 | 3.464e-7 | 0 |
+| shorter than `K-1`, before the fix | 256 / 2 | metal | f32 | cached | 0.236 | 7.26e-3 | 1.145e-2 | 0 |
+| shorter than `K-1` | 256 / 2 | metal | f32 | cached | 0.196 | 8.34e-7 | 1.68e-8 | 0 |
+| long prefill | 4096 / 3584 | metal | f32 | 5.38 | 0.336 | 1.490e-6 | 2.123e-7 | 0 |
+| decode step | 1 / 1 | metal | f16 | 0.93 | 0.013 | 8.34e-4 | 1.559e-4 | 6.096e-4 |
+| padded prefill, before the fix | 256 / 224 | metal | f16 | cached | 0.235 | 3.31 | 8.674e28 | 6.557e-4 |
+| padded prefill | 256 / 224 | metal | f16 | 5.34 | 0.194 | 1.51e-3 | 2.68e-5 | 6.56e-4 |
+| full prefill | 256 / 256 | metal | f16 | cached | 0.198 | 1.51e-3 | 2.35e-5 | 6.32e-4 |
+| shorter than `K-1` | 256 / 2 | metal | f16 | cached | 0.203 | 7.69e-4 | 9.15e-6 | 6.51e-4 |
+| long prefill | 4096 / 3584 | metal | f16 | 5.56 | 0.341 | 1.593e-3 | 3.846e-5 | 7.537e-4 |
+| padded prefill, before the fix | 256 / 224 | local-task | f32 | cached | 0.020 | 3.34e-6 | 1.60e-7 | 0 |
+| padded prefill | 256 / 224 | local-task | f32 | 1.44 | 0.023 | 3.58e-6 | 1.70e-7 | 0 |
+| padded prefill | 256 / 224 | local-task | f16 | 1.13 | 0.019 | 1.51e-3 | 2.68e-5 | 6.56e-4 |
+
+All f32 rows on `metal` pass after the fix. The f16 rows are above the f32 tolerance by design (f16 projections around an f32 scan); the fixed `metal` numbers equal the `local-task` f16 numbers to three digits and carry no NaN.
+
+`spike/openxla/ssm_gate.sh OUT local-task metal` (tiny mixer, 11 cases) at f32: `local-task` 11/11 before and after, `metal` 6/11 before (five of the six prefill cases with real rows failed, up to 1.97 on `y`) and 11/11 after, worst `y` 2.80e-6 and worst `h` 1.43e-6. At f16 the script reports FAIL on both devices because it applies the f32 tolerance; after the fix the worst `metal` errors are `y` 1.85e-3 and `h` 2.52e-5, matching `local-task` (1.85e-3 and 2.49e-5), against `h` errors up to 1.1e6 before.
+
+### f32 scan on the f16 path
+
+The capacity-256 probe emitted with `MLXCEL_XLA_PRECISION=f16` has `xf16` operands on exactly two contractions, `in_proj` (`256x768xf16` by `3352x768xf16`) and `out_proj` (`256x1536xf16` by `768x1536xf16`). The five scan contractions are f32 on both operands: `C B^T` (`2x128x1x128xf32`), the intra-chunk output (`2x24x128x128xf32` by `2x128x24x64xf32`), the chunk end states (`2x128x24x64xf32` by `2x128x24x128xf32`), the chunk carry (`24x3x3xf32` by `3x24x8192xf32`) and the off-diagonal output (`2x128x24x128xf32` by `2x24x64x128xf32`). All 16 prefix-sum adds are on `2x128x24xf32`, `2x24x128x128xf32` or `24x3x3xf32`. The production prefill graph that the f16 model gates compiled has 49 contractions with f16 operands (two projections per layer and the head), 120 f32-only contractions (five per layer), 384 f32 prefix-sum adds, and no `reduce_window`.
+
+Recurrent configs pin f32 (`Config::pins_f32_precision`), and `metal` follows it: with `MLXCEL_XLA_PRECISION` unset the emitted prefill and decode graphs contain no `xf16`. Setting it to `f16` takes effect, as counted above.
+
+### Model gates
+
+Uncached `iree-compile` of the production graphs for `metal` (24 layers):
+
+| module | f32 compile s | f16 compile s | peak compiler RSS MiB |
+|--------|--------------:|--------------:|----------------------:|
+| prefill, capacity 256 | 9.41 | 9.24 | 214 |
+| prefill, capacity 4096 | 9.69 | 9.69 | 225 |
+| decode (aggressive fusion) | 3.46 | 3.52 | 179 |
+| ragged decode B=4 | 7.04 | 7.15 | 173 |
+
+At f16 the server loaded both capacity buckets (256 and 4096) uncached in 18.6 s.
+
+| gate | f32 | f16 |
+|------|-----|-----|
+| `validate_arch.sh --batch 4 --requests 8 --maxcap 24` | exit 0: structural, HF token-exact, serve reference-exact | exit 0 with `--skip-structural` (the goldens are f32 graphs): HF token-exact, serve reference-exact |
+| B=4 batch bench inside it, 8 requests | 16.60 tok/s batched, 14.93 tok/s sequential baseline | 17.01 tok/s batched, 11.16 tok/s sequential baseline |
+| `xla_oracle_check`, 40 tokens, five prompts | 5/5 token-exact | 4/5 token-exact, 1 near-tie |
+| `mlxcel generate -n 40`, five prompts, B=1 | 5/5 token-exact, 49.3 to 53.9 tok/s | 4/5 token-exact, 1 near-tie, 53.9 to 56.6 tok/s |
+| server, 4 concurrent `/v1/completions`, 24 tokens, temperature 0 | 4/4 equal their CLI streams and the oracle | 3/4 equal their CLI streams; 4/4 token-exact against the oracle |
+
+The five prompts are the #3340 set: "The capital of France is", "In computer science, a linked list is", "Once upon a time, in a small village by the sea,", "The three primary colors are", "Water boils at a temperature of". The server ran with `--ctx-size 2048 --max-batch-size 4` on the first four (5, 8, 13 and 5 prompt tokens) and every response finished by length.
+
+There is one f16 divergence from the oracle, and it is a near-tie. On "In computer science, a linked list is" the single-sequence f16 stream (`mlxcel generate` and `xla_oracle_check`) leaves the oracle at token 14: the oracle picks id 187 (a newline) and the stream picks the runner-up id 380, where the oracle's top-2 logit gap is 0.004593, below the 0.01 tolerance. The batched f16 stream for the same prompt (server) follows the oracle for all 24 tokens, which is why that one server stream differs from its CLI stream. This is the same prompt and the same batched versus single-sequence f16 rounding that #3340 recorded on `hip`; at f32 both paths are exact. The smallest top-2 gaps of the other four oracles over 40 tokens are 0.047, 0.057, 0.100 and 0.034, and no f16 stream diverged on them.
+
+The gap comes from `oracle_continuation.py --top2`, which writes `ref_top2_ids` and `ref_top2_gaps` into the oracle JSON. `near_tie_check.py` applies the rule to a stream (only the first divergence counts), and `xla_oracle_check` prints the gap at its first divergence while keeping its strict exit status.
+
+Reproduce (after `eval "$(scripts/iree/setup-macos.sh --env)"`):
+
+```bash
+PY=spike/openxla/.venv/bin/python
+M=models/hf/mamba2-130m
+cargo build --release --features xla-iree --bin mlxcel --bin mlxcel-server \
+  --example xla_ssm_probe --example xla_oracle_check --example xla_batch_bench --example xla_traj_dump
+
+# probe, one case (set MLXCEL_XLA_PRECISION=f16 for the f16 rows)
+$PY spike/openxla/ssm_oracle.py --emit-inputs out/padded/inputs --dims mamba2-130m \
+  --mode prefill --capacity 256 --real-len 224
+target/release/examples/xla_ssm_probe --inputs out/padded/inputs --device metal --out out/padded/metal
+$PY spike/openxla/ssm_oracle.py --check out/padded/metal
+spike/openxla/ssm_gate.sh out/gate local-task metal
+
+# model gates
+MLXCEL_XLA_PRECISION=f32 scripts/xla/validate_arch.sh --model $M --device metal --batch 4 --requests 8 --maxcap 24
+MLXCEL_XLA_PRECISION=f16 scripts/xla/validate_arch.sh --model $M --device metal --batch 4 --requests 8 --maxcap 24 --skip-structural
+
+# near-tie rule on one f16 stream
+$PY spike/openxla/oracle_continuation.py --model $M --out out/oracle.json --top2 \
+  --prompt "In computer science, a linked list is" --max-new 40
+MLXCEL_XLA_PRECISION=f16 target/release/examples/xla_oracle_check --model $M --oracle out/oracle.json --device metal
+MLXCEL_XLA_PRECISION=f16 MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=metal target/release/mlxcel generate \
+  -m $M -p "In computer science, a linked list is" -n 40 > out/cli.txt
+$PY spike/openxla/near_tie_check.py --oracle out/oracle.json --model $M --text-file out/cli.txt --mlxcel-cli
+```
