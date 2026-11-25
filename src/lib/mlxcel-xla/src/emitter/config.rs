@@ -42,6 +42,10 @@
 //! are rejected rather than mis-emitted.
 
 use super::builder::ProjectionLayout;
+use super::mamba1_config::mamba1_from_json;
+use super::recurrent_config::mamba2_from_json;
+pub use super::recurrent_config::{MixerKind, StateElem, StateTensorSpec};
+use crate::hf_json::parse_hf_config_json_tracked;
 
 /// How the RoPE inverse-frequency table is computed. Both kinds share the
 /// `outer(pos, inv_freq)` table build (see [`rope`](super::rope)); they differ
@@ -96,6 +100,13 @@ pub enum NormStyle {
     /// `post_feedforward_layernorm` normalize each sublayer's OUTPUT before its
     /// residual add. Two norms per layer, both on the output side.
     OlmoPost,
+}
+
+/// Activation for non-gated feed-forward blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DenseMlpActivation {
+    Gelu,
+    Relu2,
 }
 
 /// Optional q/k normalization applied to the projected query / key before RoPE.
@@ -179,6 +190,17 @@ pub enum WeightScheme {
     /// Molmo v1's OLMo-style decoder layout under `language_model.model`, with
     /// fused `att_proj` QKV and fused `ff_proj` gate/up projections.
     Molmo,
+    /// HF `Mamba2ForCausalLM` names (`backbone.embeddings`, `backbone.layers.{i}.norm`
+    /// and `.mixer.*`, `backbone.norm_f`, issue #3338). MLX conversions keep them.
+    Mamba2,
+    /// HF `MambaForCausalLM` / `FalconMambaForCausalLM` names. The outer model
+    /// names match Mamba2, but the mixer has separate `x_proj` and `dt_proj`
+    /// tensors and a per-channel `A_log [d_inner, N]` (issue #3348).
+    Mamba1,
+    /// Nemotron-H hybrid backbone with one mixer or FFN per block.
+    NemotronH,
+    /// Falcon-H1 parallel attention and Mamba2 blocks.
+    FalconH1,
 }
 
 /// MLX affine weight quantization (`config.json` `quantization`). The linear /
@@ -205,15 +227,37 @@ pub struct SharedExpertConfig {
     pub gated: bool,
 }
 
-/// Mixture-of-Experts FFN parameters (issue #500). The router linear scores the
-/// `n_experts`, a softmax over ALL experts forms routing probabilities, the top
-/// `top_k` are selected, their probabilities are renormalized to sum to one when
-/// `norm_topk_prob`, scaled by `routed_scaling_factor`, and used to combine the
-/// selected experts' SwiGLU outputs (Mixtral / Qwen2-MoE / DeepSeek
-/// `scoring_func = "softmax"`, softmax-before-top-k). Experts are a stacked SwiGLU
-/// of `intermediate` width (mlx-lm `switch_mlp`, one `[n_experts, out, in]` tensor
-/// per projection). `shared` is the shared-expert branch when the family has one.
+/// How the router scores and selects experts. The softmax form preserves the
+/// issue-#500 router byte-for-byte. The sigmoid form is Nemotron-H / DeepSeek-style:
+/// selection may add a correction bias and restrict candidates to the best expert
+/// groups, while the combine weights always come from the uncorrected sigmoid.
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MoeScoring {
+    Softmax,
+    Sigmoid {
+        correction_bias: bool,
+        n_group: usize,
+        topk_group: usize,
+        routed_scaling_factor: f32,
+        norm_topk_prob: bool,
+    },
+}
+
+/// The routed and shared experts' feed-forward activation and tensor schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpertAct {
+    /// `down(silu(gate(x)) * up(x))`, with gate/up/down projections.
+    SwiGlu,
+    /// `down(relu(up(x))^2)`, with only up/down projections.
+    Relu2,
+}
+
+/// Mixture-of-Experts FFN parameters (issues #500 / #3345). Existing families
+/// use softmax routing and stacked SwiGLU experts. Nemotron-H uses grouped sigmoid
+/// routing and stacked relu2 experts. `shared` is the always-on expert branch when
+/// the family has one; `layer_mask` distinguishes Nemotron-H's `E` blocks from its
+/// ordinary `-` FFN blocks, which both have [`MixerKind::None`].
+#[derive(Clone, Debug, PartialEq)]
 pub struct MoeConfig {
     /// Total number of routed experts (`num_experts` / `num_local_experts`).
     pub n_experts: usize,
@@ -228,15 +272,250 @@ pub struct MoeConfig {
     /// Scale applied to the routed combine weights (`routed_scaling_factor`, 1.0
     /// for Mixtral / Qwen2-MoE). Emitted only when not exactly 1.0.
     pub routed_scaling_factor: f64,
+    /// Router scoring and candidate-selection semantics.
+    pub scoring: MoeScoring,
+    /// Routed and shared expert activation / projection schema.
+    pub expert_act: ExpertAct,
     /// The shared-expert branch, when the family has one (Qwen2-MoE / DeepSeek).
     pub shared: Option<SharedExpertConfig>,
     /// Layers with index `< first_k_dense` are ordinary dense SwiGLU MLP layers
     /// (DeepSeek `first_k_dense_replace`); 0 for an all-MoE model (Mixtral,
     /// Qwen2-MoE). A dense layer takes the dense `mlp.{gate,up,down}_proj` weights.
     pub first_k_dense: usize,
+    /// Optional exact per-layer MoE mask. `None` uses `first_k_dense`; Nemotron-H
+    /// stores one entry per hybrid block so dense `-` and MoE `E` stay distinct.
+    pub layer_mask: Option<Vec<bool>>,
     /// The checkpoint's per-layer MoE weight-name prefix: `block_sparse_moe`
     /// (Mixtral) or `mlp` (Qwen2-MoE / DeepSeek). Read by the weight loader only.
     pub weight_prefix: &'static str,
+}
+
+/// Selective state-space mixer family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SsmKind {
+    /// Mamba2's head/group SSD form.
+    Mamba2,
+    /// Mamba1's diagonal recurrence. Falcon-Mamba enables weightless RMSNorm
+    /// on the projected dt, B, and C tensors.
+    Mamba1 { dt_rank: usize, bcdt_norm: bool },
+}
+
+/// Selective state-space mixer parameters (epic #564).
+///
+/// One recurrent mixer layer folds each token into a fixed-size f32 state
+/// (`h [H,P,N]` for Mamba2, `h [D,N]` for Mamba1) and carries the last `K-1`
+/// pre-conv inputs as the conv tail. `emitter/ssm.rs` reads this.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SsmConfig {
+    /// The recurrence and projection layout this config uses.
+    pub kind: SsmKind,
+    /// H (HF `num_heads`).
+    pub n_heads: usize,
+    /// P (HF `head_dim`); `d_inner = H * P`.
+    pub head_dim: usize,
+    /// N (HF `state_size`, or `ssm_state_size`).
+    pub state_size: usize,
+    /// G (HF `n_groups`); head `h` reads B/C group `h / (H / G)`.
+    pub n_groups: usize,
+    /// K (HF `conv_kernel`).
+    pub conv_kernel: usize,
+    /// Mamba2: `d_inner + 2 * G * N`; Mamba1: `d_inner`.
+    pub conv_dim: usize,
+    /// HF `use_conv_bias`.
+    pub use_conv_bias: bool,
+    /// HF `use_bias` (in_proj / out_proj bias).
+    pub use_bias: bool,
+    /// Clamp applied to dt after softplus; `(0.0, f32::INFINITY)` means no clamp.
+    pub time_step_limit: (f32, f32),
+    /// Gated RMSNorm eps (HF `layer_norm_epsilon`).
+    pub norm_eps: f32,
+    /// `d_inner` for Mamba2 (one group); `d_inner / n_groups` for Nemotron-H.
+    pub norm_group_size: usize,
+    /// Prefill chunk length of the chunked-SSD scan (recorded in
+    /// `spike/openxla/FINDINGS_ssm.md`).
+    pub chunk_size: usize,
+}
+
+/// The prefill chunk length chosen by the #3337 lowering spike.
+pub(crate) const SSM_DEFAULT_CHUNK_SIZE: usize = 128;
+
+/// Largest `num_hidden_layers` a `config.json` may declare. The parser sizes
+/// `Config::layer_mixers` by it before any checkpoint is read, so an unbounded
+/// count from an untrusted config would be an allocation of that many bytes
+/// (issue #3338). Released models stay far below this (126 for Llama 3.1 405B).
+pub(crate) const MAX_CONFIG_LAYERS: usize = 1024;
+
+/// `n_layers` when it is within [`MAX_CONFIG_LAYERS`].
+pub(crate) fn check_layer_count(n_layers: usize) -> Result<usize, String> {
+    if n_layers > MAX_CONFIG_LAYERS {
+        return Err(format!(
+            "config.json declares {n_layers} layers; at most {MAX_CONFIG_LAYERS} are supported"
+        ));
+    }
+    Ok(n_layers)
+}
+
+impl SsmConfig {
+    /// `d_inner = H * P`, the gated-norm and out_proj width.
+    #[must_use]
+    pub fn d_inner(&self) -> usize {
+        self.n_heads * self.head_dim
+    }
+
+    /// The input projection width. Mamba2 uses
+    /// `[z: d_inner, xBC: conv_dim, dt: H]`; Mamba1 uses `[x, z]`.
+    #[must_use]
+    pub fn in_proj_dim(&self) -> usize {
+        match self.kind {
+            SsmKind::Mamba2 => self.d_inner() + self.conv_dim + self.n_heads,
+            SsmKind::Mamba1 { .. } => 2 * self.d_inner(),
+        }
+    }
+
+    /// Structural checks every emitter entry point relies on.
+    pub fn validate(&self) -> Result<(), String> {
+        let positive = [
+            ("n_heads", self.n_heads),
+            ("head_dim", self.head_dim),
+            ("state_size", self.state_size),
+            ("n_groups", self.n_groups),
+            ("conv_kernel", self.conv_kernel),
+            ("norm_group_size", self.norm_group_size),
+            ("chunk_size", self.chunk_size),
+        ];
+        if let Some((name, _)) = positive.iter().find(|(_, value)| *value == 0) {
+            return Err(format!("SsmConfig.{name} must be positive"));
+        }
+        if self.conv_kernel < 2 {
+            return Err("SsmConfig.conv_kernel must be at least 2 (the tail is K-1 rows)".into());
+        }
+        if !self.n_heads.is_multiple_of(self.n_groups) {
+            return Err(format!(
+                "SsmConfig.n_heads={} is not a multiple of n_groups={}",
+                self.n_heads, self.n_groups
+            ));
+        }
+        // Every width below is checked: the dims will come from an untrusted
+        // config.json (#3338), and a wrapped product could otherwise satisfy
+        // the conv_dim equation with absurd values.
+        let overflow = |what: &str| format!("SsmConfig {what} overflows usize");
+        let d_inner = self
+            .n_heads
+            .checked_mul(self.head_dim)
+            .ok_or_else(|| overflow("d_inner = n_heads * head_dim"))?;
+        let expected = match self.kind {
+            SsmKind::Mamba2 => {
+                let expected = self
+                    .n_groups
+                    .checked_mul(self.state_size)
+                    .and_then(|gn| gn.checked_mul(2))
+                    .and_then(|bc| bc.checked_add(d_inner))
+                    .ok_or_else(|| overflow("conv_dim = d_inner + 2*G*N"))?;
+                expected
+                    .checked_add(d_inner)
+                    .and_then(|width| width.checked_add(self.n_heads))
+                    .ok_or_else(|| overflow("Mamba2 in_proj_dim"))?;
+                expected
+            }
+            SsmKind::Mamba1 { dt_rank, .. } => {
+                if dt_rank == 0 {
+                    return Err("SsmConfig Mamba1 dt_rank must be positive".into());
+                }
+                d_inner
+                    .checked_mul(2)
+                    .ok_or_else(|| overflow("Mamba1 in_proj_dim = 2*d_inner"))?;
+                self.state_size
+                    .checked_mul(2)
+                    .and_then(|bc| bc.checked_add(dt_rank))
+                    .ok_or_else(|| overflow("Mamba1 x_proj_dim = dt_rank + 2*state_size"))?;
+                d_inner
+            }
+        };
+        if self.conv_dim != expected {
+            return Err(format!(
+                "SsmConfig.conv_dim={} != the {:?} expected width {expected}",
+                self.conv_dim, self.kind
+            ));
+        }
+        if !d_inner.is_multiple_of(self.norm_group_size) {
+            return Err(format!(
+                "SsmConfig.norm_group_size={} does not divide d_inner={d_inner}",
+                self.norm_group_size
+            ));
+        }
+        d_inner
+            .checked_mul(self.state_size)
+            .ok_or_else(|| overflow("state H*P*N"))?;
+        (self.conv_kernel - 1)
+            .checked_mul(self.conv_dim)
+            .ok_or_else(|| overflow("conv tail (K-1)*conv_dim"))?;
+        let (low, high) = self.time_step_limit;
+        // dt is clamped into [low, high]; a +inf floor or a -inf ceiling makes
+        // every dt infinite and the state NaN.
+        if low.is_nan()
+            || high.is_nan()
+            || low > high
+            || low == f32::INFINITY
+            || high == f32::NEG_INFINITY
+        {
+            return Err(format!(
+                "SsmConfig.time_step_limit {low}..{high} is invalid"
+            ));
+        }
+        if !self.norm_eps.is_finite() || self.norm_eps <= 0.0 {
+            return Err(format!(
+                "SsmConfig.norm_eps={} must be finite and positive",
+                self.norm_eps
+            ));
+        }
+        Ok(())
+    }
+
+    /// A small Mamba2 mixer for the pure-Rust emitter tests.
+    #[cfg(test)]
+    pub(crate) fn tiny_mamba2() -> Self {
+        let (n_heads, head_dim, state_size, n_groups) = (4, 8, 16, 2);
+        let d_inner = n_heads * head_dim;
+        Self {
+            kind: SsmKind::Mamba2,
+            n_heads,
+            head_dim,
+            state_size,
+            n_groups,
+            conv_kernel: 4,
+            conv_dim: d_inner + 2 * n_groups * state_size,
+            use_conv_bias: true,
+            use_bias: false,
+            time_step_limit: (0.0, f32::INFINITY),
+            norm_eps: 1e-5,
+            norm_group_size: d_inner,
+            chunk_size: 8,
+        }
+    }
+
+    /// A small Mamba1 mixer for pure-Rust emitter tests.
+    #[cfg(test)]
+    pub(crate) fn tiny_mamba1(bcdt_norm: bool) -> Self {
+        let (d_inner, state_size) = (16, 4);
+        Self {
+            kind: SsmKind::Mamba1 {
+                dt_rank: 2,
+                bcdt_norm,
+            },
+            n_heads: 1,
+            head_dim: d_inner,
+            state_size,
+            n_groups: 1,
+            conv_kernel: 4,
+            conv_dim: d_inner,
+            use_conv_bias: true,
+            use_bias: false,
+            time_step_limit: (0.0, f32::INFINITY),
+            norm_eps: if bcdt_norm { 1e-6 } else { 1e-5 },
+            norm_group_size: d_inner,
+            chunk_size: 4,
+        }
+    }
 }
 
 /// Static DeepStack schema declared by an architecture.
@@ -414,6 +693,8 @@ pub struct Config {
     /// Dense (non-gated) MLP: `c_proj(act(c_fc(x)))` with a `gelu_tanh` activation
     /// and no gate projection (StarCoder2). `false` keeps the SwiGLU/GeGLU gated MLP.
     pub dense_mlp: bool,
+    /// Activation of a non-gated dense MLP (StarCoder2 defaults to GELU).
+    pub dense_mlp_activation: DenseMlpActivation,
     /// Interleaved ("traditional" / GPT-J) RoPE: adjacent dims `(2i, 2i+1)` rotate
     /// together (Cohere/Cohere2, `position_embedding_type = rope_gptj`). `false` is
     /// the half-split (GPT-NeoX / Llama) convention, so the Llama family is unchanged.
@@ -473,6 +754,19 @@ pub struct Config {
     /// prefill dequantizes the same tensors in the graph. Set by the loader after
     /// inspecting the head tensor's dtype; off everywhere else.
     pub native_head: bool,
+    /// Element type of the packed `scales` / `biases` args (issue #603). The
+    /// loader resolves it from the safetensors header when it turns on
+    /// `packed_args`, and reads it again for the upload dtype, so the declared
+    /// arg and the uploaded buffer share one source. f16 everywhere else.
+    pub quant_scale_dtype: super::QuantScaleDtype,
+    /// The selective state-space mixer parameters (`Some` for a model with a
+    /// Mamba2 layer, epic #564); `None` for every attention-only family.
+    pub ssm: Option<SsmConfig>,
+    /// Raw-HF Falcon-H1 branch multipliers and gated normalization.
+    pub falcon_h1: Option<super::falcon_h1_config::FalconH1Config>,
+    /// The mixer of each layer (`len == n_layers`); `[Attention; n_layers]` for
+    /// every attention-only family. Read through [`Config::layer_mixer`].
+    pub layer_mixers: Vec<MixerKind>,
 }
 
 impl Config {
@@ -522,6 +816,7 @@ impl Config {
             attn_o_bias: false,
             mlp_bias: false,
             dense_mlp: false,
+            dense_mlp_activation: DenseMlpActivation::Gelu,
             rope_interleaved: false,
             rotary_dim: None,
             rope_on_sliding_only: false,
@@ -536,6 +831,10 @@ impl Config {
             projection_layout: ProjectionLayout::OutIn,
             packed_args: false,
             native_head: false,
+            quant_scale_dtype: super::QuantScaleDtype::F16,
+            ssm: None,
+            falcon_h1: None,
+            layer_mixers: vec![MixerKind::Attention; 16],
         }
     }
 
@@ -553,8 +852,11 @@ impl Config {
     /// a `rope_scaling` whose `rope_type` is not `llama3` (e.g. yarn), or MiniCPM3's
     /// MLA attention.
     pub fn from_json_str(s: &str) -> Result<Self, String> {
-        let root: serde_json::Value =
-            serde_json::from_str(s).map_err(|e| format!("parse config.json: {e}"))?;
+        // HF writes Python's bare `Infinity` into some configs (Mamba2's
+        // `time_step_limit`); quote it only when the strict parse fails, so
+        // every other config is parsed from its unchanged text.
+        let (root, quoted_non_finite) =
+            parse_hf_config_json_tracked(s).map_err(|e| format!("parse config.json: {e}"))?;
         let wrapper_model_type = root.get("model_type").and_then(serde_json::Value::as_str);
         let is_phi4mm = wrapper_model_type == Some("phi4mm");
         let is_molmo2 = wrapper_model_type == Some("molmo2");
@@ -629,6 +931,11 @@ impl Config {
                     text.entry(name.to_string()).or_insert(value);
                 }
             }
+            if crate::llava_text_defaults::is_llava_text_defaults_wrapper(wrapper_model_type) {
+                // LLaVA-1.5-7B conversions leave the Llama architecture fields
+                // implicit; resolve the declared model type's HF defaults (#3366).
+                crate::llava_text_defaults::apply_llava_text_config_defaults(&mut text);
+            }
             // mlx-community quantized VLMs commonly keep the affine scheme at
             // the wrapper level even though the tensors belong to the nested
             // language model.
@@ -686,6 +993,32 @@ impl Config {
             }
         };
 
+        // Mamba2 (issue #3338) has no attention fields at all; its config is
+        // built by its own reader.
+        if model_type == Some("falcon_h1") {
+            return super::falcon_h1_config::from_json(&v, quantization);
+        }
+        if model_type == Some("nemotron_h") {
+            return super::nemotron_h_config::from_json(&v, quantization);
+        }
+        if model_type == Some("mamba2") {
+            return mamba2_from_json(&v, quantization);
+        }
+        if matches!(model_type, Some("mamba" | "falcon_mamba")) {
+            return mamba1_from_json(&v, quantization);
+        }
+        // Only the Mamba2 reader understands the quoted `Infinity`/`NaN`
+        // spelling. Every reader below would see a string where a number was
+        // written, treat an optional field as absent and take its default, so
+        // refuse the document rather than load it with a changed value.
+        if quoted_non_finite {
+            return Err(format!(
+                "config.json has a bare Infinity or NaN number, which model_type {} \
+                 does not accept",
+                model_type.unwrap_or("(unset)")
+            ));
+        }
+
         let u = |k: &str| -> Result<usize, String> {
             v.get(k)
                 .and_then(serde_json::Value::as_u64)
@@ -718,7 +1051,7 @@ impl Config {
         // head_dim is explicit in recent configs; otherwise it is hidden / heads.
         let mut head_dim = ou("head_dim").unwrap_or(hidden / n_q.max(1));
         // ExaOne 3.x uses `num_layers` in place of `num_hidden_layers`.
-        let n_layers = u_any(&["num_hidden_layers", "num_layers"])?;
+        let n_layers = check_layer_count(u_any(&["num_hidden_layers", "num_layers"])?)?;
         let declared_deepstack = match (
             v.get("deepstack_language_layer_indices"),
             v.get("deepstack_max_visual_positions"),
@@ -1498,8 +1831,11 @@ impl Config {
                 // Mixtral always renormalizes the selected top-k routing weights.
                 norm_topk_prob: true,
                 routed_scaling_factor: 1.0,
+                scoring: MoeScoring::Softmax,
+                expert_act: ExpertAct::SwiGlu,
                 shared: None,
                 first_k_dense: 0,
+                layer_mask: None,
                 weight_prefix: "block_sparse_moe",
             }),
             Some("qwen2_moe") => Some(MoeConfig {
@@ -1511,12 +1847,15 @@ impl Config {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
                 routed_scaling_factor: 1.0,
+                scoring: MoeScoring::Softmax,
+                expert_act: ExpertAct::SwiGlu,
                 shared: Some(SharedExpertConfig {
                     intermediate: u("shared_expert_intermediate_size")?,
                     // Qwen2-MoE gates the shared expert by sigmoid(x @ Wg^T).
                     gated: true,
                 }),
                 first_k_dense: 0,
+                layer_mask: None,
                 weight_prefix: "mlp",
             }),
             Some("qwen3_moe") => {
@@ -1546,9 +1885,12 @@ impl Config {
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
                     routed_scaling_factor: 1.0,
+                    scoring: MoeScoring::Softmax,
+                    expert_act: ExpertAct::SwiGlu,
                     // Qwen3-MoE has no shared expert.
                     shared: None,
                     first_k_dense: 0,
+                    layer_mask: None,
                     weight_prefix: "mlp",
                 })
             }
@@ -1562,9 +1904,12 @@ impl Config {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
                 routed_scaling_factor: 1.0,
+                scoring: MoeScoring::Softmax,
+                expert_act: ExpertAct::SwiGlu,
                 // OLMoE has no shared expert.
                 shared: None,
                 first_k_dense: 0,
+                layer_mask: None,
                 weight_prefix: "mlp",
             }),
             _ => None,
@@ -1657,6 +2002,7 @@ impl Config {
             attn_o_bias,
             mlp_bias,
             dense_mlp,
+            dense_mlp_activation: DenseMlpActivation::Gelu,
             rope_interleaved,
             rotary_dim,
             rope_on_sliding_only,
@@ -1671,6 +2017,10 @@ impl Config {
             projection_layout: ProjectionLayout::OutIn,
             packed_args: false,
             native_head: false,
+            quant_scale_dtype: super::QuantScaleDtype::F16,
+            ssm: None,
+            falcon_h1: None,
+            layer_mixers: vec![MixerKind::Attention; n_layers],
         })
     }
 
@@ -1678,7 +2028,9 @@ impl Config {
     pub fn from_json(model_dir: &std::path::Path) -> Result<Self, String> {
         let p = model_dir.join("config.json");
         let s = std::fs::read_to_string(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
-        Self::from_json_str(&s).map_err(|e| format!("{}: {e}", p.display()))
+        let config = Self::from_json_str(&s).map_err(|e| format!("{}: {e}", p.display()))?;
+        config.validate_recurrent_checkpoint(model_dir)?;
+        Ok(config)
     }
 
     /// Select the static sequence shape used by all emitted graphs and caches.
@@ -1690,8 +2042,9 @@ impl Config {
         Ok(self)
     }
 
+    /// Query heads per KV head; 0 for an attention-free config (no KV heads).
     pub fn group(&self) -> usize {
-        self.n_q / self.n_kv
+        self.n_q.checked_div(self.n_kv).unwrap_or(0)
     }
 
     /// Whether the issue #516 packed in-graph dequant path can apply: an MLX
@@ -1707,6 +2060,9 @@ impl Config {
             && !self.dense_mlp
             && self.moe.is_none()
             && self.mla.is_none()
+            // The SSM mixer contracts in_proj / out_proj with the sequence
+            // helpers, which have no single-row native path (issue #3338).
+            && self.ssm.is_none()
     }
 
     /// Whether the checkpoint's packing matches the native ROCm GEMV kernel
@@ -1845,7 +2201,12 @@ impl Config {
     /// like DeepSeek keeps as ordinary MLP). A dense config returns `false` for
     /// every layer, so its graphs emit no MoE op and stay byte-for-byte unchanged.
     pub fn is_moe_layer(&self, li: usize) -> bool {
-        self.moe.as_ref().is_some_and(|m| li >= m.first_k_dense)
+        self.moe.as_ref().is_some_and(|m| {
+            m.layer_mask
+                .as_ref()
+                .and_then(|mask| mask.get(li).copied())
+                .unwrap_or(li >= m.first_k_dense)
+        })
     }
 }
 
@@ -2175,6 +2536,37 @@ mod tests {
                 group_size: 64
             })
         );
+    }
+
+    fn implicit_llama_llava_json(wrapper: &str, tie: Option<bool>) -> String {
+        let mut text = serde_json::json!({"model_type": "llama", "vocab_size": 32064});
+        if let Some(tie) = tie {
+            text["tie_word_embeddings"] = serde_json::json!(tie);
+        }
+        serde_json::json!({
+            "model_type": wrapper,
+            "vision_config": {"model_type": "clip_vision_model"},
+            "text_config": text
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn llava_and_llava_next_implicit_llama_text_config_resolve_alike() {
+        for wrapper in ["llava", "llava_next"] {
+            let config = Config::from_json_str(&implicit_llama_llava_json(wrapper, None))
+                .unwrap_or_else(|error| panic!("{wrapper}: {error}"));
+            assert_eq!(config.hidden, 4096, "{wrapper}");
+            assert!(!config.tie_word_embeddings, "{wrapper}");
+            assert_eq!(config.vocab, 32064, "{wrapper}");
+        }
+    }
+
+    #[test]
+    fn llava_explicit_tie_flag_wins_over_llama_default() {
+        let config = Config::from_json_str(&implicit_llama_llava_json("llava_next", Some(true)))
+            .expect("explicit tie parses");
+        assert!(config.tie_word_embeddings);
     }
 
     #[test]

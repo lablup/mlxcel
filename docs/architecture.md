@@ -41,8 +41,14 @@ src/
   that picks the dense or paged kernel from the storage behind the cache
   ([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md)), plus the
   `KvAttention` trait, `RotatingKVCache::attend`, `ChunkedKVCache::attend` and
-  `cache::attend_batched_rows` that the model-owned families (Gemma 3, Llama 4)
-  attend through ([ADR 0009](adr/0009-engine-step-api.md)).
+  `cache::attend_batched_rows` that the model-owned families (Llama 4) and the
+  scheduler-owned ones (Gemma 3) attend through
+  ([ADR 0009](adr/0009-engine-step-api.md)).
+- `src/lib/mlxcel-core/src/cache/layer_state.rs`: `LayerStateKind`,
+  `LayerState` and `RecurrentState`, the per-layer sequence state the pool
+  owns for a scheduler-owned family and hands to
+  `LanguageModel::forward_layer_state`
+  ([ADR 0010](adr/0010-scheduler-owned-sequence-state.md)).
 - `src/lib/mlxcel-core/src/ops.rs`, `src/lib/mlxcel-core/src/dtype.rs`, `src/lib/mlxcel-core/src/streams.rs` — wrappers around common MLX
   operations and runtime concepts.
 - `src/lib/mlxcel-core/src/sampling.rs` — penalties and token sampling shared by CLI/server paths.

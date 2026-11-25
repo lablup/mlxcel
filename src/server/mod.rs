@@ -108,6 +108,8 @@ pub mod types;
 #[cfg(feature = "webui")]
 pub mod webui;
 pub mod whisper_stt;
+#[cfg(feature = "xla-iree")]
+pub(crate) mod xla_prompt_cache_guard;
 
 pub use app::create_app;
 pub use audio_model::{
@@ -150,8 +152,8 @@ pub use config::{
 pub use cors::{CorsPolicy, OriginPolicy};
 pub use media::{
     DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES, DEFAULT_MAX_IMAGE_HEIGHT, DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
-    DEFAULT_MAX_IMAGE_WIDTH, DEFAULT_MAX_IMAGES_PER_REQUEST, ImageInputLimits,
-    configure_media_admission, media_admission_disabled,
+    DEFAULT_MAX_IMAGE_WIDTH, DEFAULT_MAX_IMAGES_PER_REQUEST, INKLING2_AUDIO_REFUSAL,
+    ImageInputLimits, configure_media_admission, media_admission_disabled,
 };
 pub(crate) use media::{
     current_image_input_limits, is_combined_video_audio_rejection, media_capability_rejection,
@@ -209,6 +211,9 @@ mod reasoning_effort_tests;
 
 #[cfg(test)]
 mod k2_horizon_reasoning_tests;
+
+#[cfg(test)]
+mod hy_v4_reasoning_tests;
 
 #[cfg(test)]
 mod store_budget_tests;

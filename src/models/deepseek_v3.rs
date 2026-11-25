@@ -21,8 +21,11 @@
 //! - First k layers are dense (no MoE)
 
 use crate::models::mla_rope::MlaRope;
+use crate::models::speculative_exactness_diag as diag;
 use crate::models::switch_layers::validate_expert_quantization_params;
-use crate::models::switch_layers::{EXPERT_PLANE_LEAVES, stack_expert_leaf};
+use crate::models::switch_layers::{
+    EXPERT_PLANE_LEAVES, refuse_mismatched_expert_parts, stack_expert_leaf,
+};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::slice_axis;
@@ -310,12 +313,14 @@ impl DeepSeekV3Attention {
         // Compute Q: direct projection when `q_lora_rank` is null, otherwise the
         // LoRA-style chain q_a_proj -> q_a_layernorm -> q_b_proj. `from_weights`
         // guarantees exactly one form is populated.
+        // The projections go through `row_linear`, which is the layer's own
+        // forward unless the model entered a row-invariant scope (#3418).
         let q = if let Some(ref q_proj) = self.q_proj {
-            q_proj.forward(x)
+            row_linear(q_proj, x)
         } else {
-            let q_a = self.q_a_proj.as_ref().unwrap().forward(x);
+            let q_a = row_linear(self.q_a_proj.as_ref().unwrap(), x);
             let q_a_norm = self.q_a_layernorm.as_ref().unwrap().forward(&q_a);
-            self.q_b_proj.as_ref().unwrap().forward(&q_a_norm)
+            row_linear(self.q_b_proj.as_ref().unwrap(), &q_a_norm)
         };
 
         // Reshape Q to [batch, seq, heads, head_dim] then transpose
@@ -327,7 +332,7 @@ impl DeepSeekV3Attention {
         let q_pe = slice_axis(&q, -1, self.qk_nope_head_dim, -1);
 
         // Compute KV with compression
-        let compressed_kv = self.kv_a_proj_with_mqa.forward(x);
+        let compressed_kv = row_linear(&self.kv_a_proj_with_mqa, x);
 
         // Split into compressed and k_pe
         let compressed = slice_axis(&compressed_kv, -1, 0, self.kv_lora_rank);
@@ -364,10 +369,44 @@ impl DeepSeekV3Attention {
             true,
         );
 
-        // Cost-model gate (issue #2408): one query is always absorbed, and a
-        // multi-token step behind a long enough cache can be cheaper absorbed
-        // than up-projecting the whole window. A cold prefill stays on the
-        // materializing side. Computed once so nothing below gates on `l`.
+        // One query is its own path: the fused kernel or the composed decode,
+        // always absorbed, over a dense or a quantized window.
+        if l == 1 {
+            let output = self.single_query_attention(&q_nope, &q_pe, window, mask);
+            return self.project_attention_output(&output, b, l);
+        }
+
+        // A verify block in the row-invariant scope (issue #3418) runs every
+        // row as the single query its decode step would run, over the keys
+        // that step would see. The block
+        // forms below pick absorbed or materialized SDPA by a cost model, and
+        // neither equals the fused single-query kernel bit for bit, so a
+        // token-only verify round (prompt lookup, a full-model drafter) read
+        // different logits than plain decode from layer 0 on. The latent of
+        // the whole block is already stored, so row `r` reads a prefix of it.
+        // The rows count as one MLA call in the path stats (#3421).
+        if b == 1 && mask.is_none() && mlxcel_core::row_invariant::in_verify_block() {
+            let total = window.seq_len();
+            let rows: Vec<UniquePtr<MlxArray>> = mlxcel_core::mla::stats::as_one_call(|| {
+                (0..l)
+                    .map(|r| {
+                        self.single_query_attention(
+                            &slice_axis(&q_nope, 2, r, r + 1),
+                            &slice_axis(&q_pe, 2, r, r + 1),
+                            super::mla_batched::latent_window_prefix(&window, total - l + r + 1),
+                            None,
+                        )
+                    })
+                    .collect()
+            });
+            let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
+            let output = mlxcel_core::concatenate_many(&refs, 2);
+            return self.project_attention_output(&output, b, l);
+        }
+
+        // Cost-model gate (issue #2408): a multi-token step behind a long
+        // enough cache can be cheaper absorbed than up-projecting the whole
+        // window. A cold prefill stays on the materializing side.
         let absorbed = mlxcel_core::mla::use_absorbed_mla(
             l as usize,
             cache.seq_len() as usize,
@@ -375,55 +414,21 @@ impl DeepSeekV3Attention {
             self.qk_nope_head_dim as usize,
             self.v_head_dim as usize,
         );
-        // A single absorbed query records its own path below, since it is
-        // either the fused kernel or the composed fallback.
-        if !(absorbed && l == 1) {
-            mlxcel_core::mla::stats::record(if absorbed {
-                mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
-            } else {
-                mlxcel_core::mla::MlaDecodePath::Decompressed
-            });
-        }
+        mlxcel_core::mla::stats::record(if absorbed {
+            mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
+        } else {
+            mlxcel_core::mla::MlaDecodePath::Decompressed
+        });
 
-        // A quantized window's one absorbed query goes to
-        // `quantized_absorbed_attention`, which runs the fused kernel's
-        // quantized variant where it applies (Metal, unmasked, up to
-        // `FUSED_DECODE_QUANTIZED_MAX_KEYS` keys, #3156; records
-        // `AbsorbedFused`) and the #3155 composed decode on the packed rows
-        // otherwise (records `AbsorbedComposed`). Every other step over a
-        // quantized window dequantizes it once and runs the fp16 code below.
-        let (kv_latent, k_pe) = match window {
-            mlxcel_core::mla::LatentWindow::Quantized {
-                ckv_q,
-                scales,
-                biases,
-                kpe,
-                bits,
-                group_size,
-            } if absorbed && l == 1 => {
-                let q_projected = self.embed_q.forward(&q_nope);
-                let output = mlxcel_core::mla::quantized_absorbed_attention(
-                    &q_projected,
-                    &q_pe,
-                    &ckv_q,
-                    &scales,
-                    &biases,
-                    &kpe,
-                    bits,
-                    group_size,
-                    self.scale,
-                    mask,
-                );
-                return self.project_attention_output(&self.unembed_out.forward(&output), b, l);
-            }
-            // The dequantized window is FP16; cast it to the query dtype so a
-            // bf16 checkpoint's step is not promoted to float32 (#3177).
-            window => super::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe)),
-        };
+        // A multi-token step over a quantized window dequantizes it once. The
+        // dequantized window is FP16; cast it to the query dtype so a bf16
+        // checkpoint's step is not promoted to float32 (#3177).
+        let (kv_latent, k_pe) =
+            super::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe));
 
         // MLA attention: absorbed or materializing, chosen by the cost model
         // above rather than by the query count alone.
-        let output = if l > 1 {
+        let output = {
             // Multi-token step (issue #3071): fold the rope half into the SDPA
             // head dim, `[q_nope | q_pe] . [k | k_pe]`, instead of building the
             // dense `[B, H, L, S]` rope-score tensor and handing it to SDPA as
@@ -476,82 +481,107 @@ impl DeepSeekV3Attention {
                     folded_mask,
                 )
             }
-        } else if let Some(output) = (absorbed && mask.is_none())
-            .then(|| self.embed_q.forward(&q_nope))
-            .and_then(|q_projected| {
-                // Unmasked single-token decode on the fused kernel (#3121):
-                // both score halves, the softmax and the latent sum in one
-                // pass plus a merge. `None` keeps the composed form below.
-                mlxcel_core::mla::fused_absorbed_decode(
-                    &q_projected,
-                    &q_pe,
-                    &kv_latent,
-                    &k_pe,
-                    self.scale,
-                )
-            })
-        {
-            self.unembed_out.forward(&output)
-        } else {
-            if absorbed {
-                mlxcel_core::mla::stats::record(mlxcel_core::mla::MlaDecodePath::AbsorbedComposed);
-            }
-            // Single-token decode keeps the rope term as an additive mask: its
-            // score row is one `[B, H, 1, S]` slice, and the cost model always
-            // absorbs a single query.
-            // pe_scores = (q_pe * scale) @ k_pe.T
-            let scale_scalar =
-                mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
-            let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
-            let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
-            let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
-            let pe_scores = match mask {
-                // mask has 0 for attend, -inf for blocked
-                Some(m) => mlxcel_core::add(&pe_scores, m),
-                None => pe_scores,
-            };
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            if absorbed {
-                let q_projected = self.embed_q.forward(&q_nope);
-                // SAFETY: `pe_scores` outlives this call.
-                let output = unsafe {
-                    mlxcel_core::layers::attention_from_ptr(
-                        &q_projected,
-                        &kv_latent,
-                        &kv_latent,
-                        self.scale,
-                        pe_mask_ptr,
-                        0.0,
-                        0,
-                    )
-                };
-                self.unembed_out.forward(&output)
-            } else {
-                let k = self.embed_q.forward_no_transpose(&kv_latent);
-                let v = self.unembed_out.forward(&kv_latent);
-                // SAFETY: `pe_scores` outlives this call.
-                unsafe {
-                    mlxcel_core::layers::attention_from_ptr(
-                        &q_nope,
-                        &k,
-                        &v,
-                        self.scale,
-                        pe_mask_ptr,
-                        0.0,
-                        0,
-                    )
-                }
-            }
         };
 
         self.project_attention_output(&output, b, l)
+    }
+
+    /// One query `[B, H, 1, ..]` against a latent `window`, absorbed: the
+    /// output `[B, H, 1, v_head_dim]` after `unembed_out`.
+    ///
+    /// A quantized window goes to `quantized_absorbed_attention`, which runs
+    /// the fused kernel's quantized variant where it applies (Metal, unmasked,
+    /// up to `FUSED_DECODE_QUANTIZED_MAX_KEYS` keys, #3156; records
+    /// `AbsorbedFused`) and the #3155 composed decode on the packed rows
+    /// otherwise (records `AbsorbedComposed`). A dense window takes the fused
+    /// kernel when unmasked (#3121) and the composed form otherwise.
+    ///
+    /// Used by: [`Self::forward`], for a decode step and for every row of a
+    /// verify block.
+    fn single_query_attention(
+        &self,
+        q_nope: &MlxArray,
+        q_pe: &MlxArray,
+        window: mlxcel_core::mla::LatentWindow,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (kv_latent, k_pe) = match window {
+            mlxcel_core::mla::LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } => {
+                let q_projected = self.embed_q.forward(q_nope);
+                let output = mlxcel_core::mla::quantized_absorbed_attention(
+                    &q_projected,
+                    q_pe,
+                    &ckv_q,
+                    &scales,
+                    &biases,
+                    &kpe,
+                    bits,
+                    group_size,
+                    self.scale,
+                    mask,
+                );
+                return self.unembed_out.forward(&output);
+            }
+            window => super::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(q_pe)),
+        };
+
+        // Unmasked single-token decode on the fused kernel (#3121): both
+        // score halves, the softmax and the latent sum in one pass plus a
+        // merge. `None` keeps the composed form below.
+        if mask.is_none() {
+            let q_projected = self.embed_q.forward(q_nope);
+            if let Some(output) = mlxcel_core::mla::fused_absorbed_decode(
+                &q_projected,
+                q_pe,
+                &kv_latent,
+                &k_pe,
+                self.scale,
+            ) {
+                return self.unembed_out.forward(&output);
+            }
+        }
+        mlxcel_core::mla::stats::record(mlxcel_core::mla::MlaDecodePath::AbsorbedComposed);
+        // The composed form keeps the rope term as an additive mask: its
+        // score row is one `[B, H, 1, S]` slice.
+        // pe_scores = (q_pe * scale) @ k_pe.T
+        let scale_scalar = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(q_pe));
+        let q_pe_scaled = mlxcel_core::multiply(q_pe, &scale_scalar);
+        let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
+        let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
+        let pe_scores = match mask {
+            // mask has 0 for attend, -inf for blocked
+            Some(m) => mlxcel_core::add(&pe_scores, m),
+            None => pe_scores,
+        };
+        let pe_mask_ptr = &*pe_scores as *const MlxArray;
+        let q_projected = self.embed_q.forward(q_nope);
+        // SAFETY: `pe_scores` outlives this call.
+        let output = unsafe {
+            mlxcel_core::layers::attention_from_ptr(
+                &q_projected,
+                &kv_latent,
+                &kv_latent,
+                self.scale,
+                pe_mask_ptr,
+                0.0,
+                0,
+            )
+        };
+        self.unembed_out.forward(&output)
     }
 
     /// `[B, H, L, v_head_dim]` attention output to `[B, L, hidden]`.
     fn project_attention_output(&self, output: &MlxArray, b: i32, l: i32) -> UniquePtr<MlxArray> {
         let output = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
-        self.o_proj.forward(&output)
+        row_linear(&self.o_proj, &output)
     }
 
     /// Native multi-sequence single-token decode. Projections stay batched;
@@ -728,10 +758,10 @@ pub struct DenseMLP {
 
 impl DenseMLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let gate = self.gate_proj.forward(x);
-        let up = self.up_proj.forward(x);
+        let gate = row_linear(&self.gate_proj, x);
+        let up = row_linear(&self.up_proj, x);
         let activated = mlxcel_core::compiled_swiglu_activation(&gate, &up);
-        self.down_proj.forward(&activated)
+        row_linear(&self.down_proj, &activated)
     }
 
     pub fn from_weights(
@@ -765,6 +795,14 @@ impl DenseMLP {
     }
 }
 
+/// A projection of the decoder: the layer's own forward, or the
+/// row-invariant dense product inside the model's scope (issue #3418).
+///
+/// Used by: this decoder and `models::xing4_0`, which runs the same layers.
+pub(crate) fn row_linear(layer: &UnifiedLinear, x: &MlxArray) -> UniquePtr<MlxArray> {
+    mlxcel_core::row_invariant::linear_whole_block(layer, x)
+}
+
 // MoE Gate.
 pub struct MoEGate {
     pub weight: UniquePtr<MlxArray>,
@@ -780,9 +818,8 @@ pub struct MoEGate {
 impl MoEGate {
     /// Forward pass returns (expert_indices, expert_scores)
     pub fn forward(&self, x: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        // gates = x @ weight.T
-        let weight_t = mlxcel_core::transpose(&self.weight);
-        let gates = mlxcel_core::matmul(x, &weight_t);
+        // gates = x @ weight.T (row-invariant inside the model's scope, #3418)
+        let gates = mlxcel_core::row_invariant::dense(x, &self.weight);
 
         // Sigmoid scoring in float32, mirroring the reference
         // `mx.sigmoid(gates.astype(mx.float32))` (mlx-lm deepseek_v3.py and
@@ -886,8 +923,8 @@ pub(crate) fn clipped_swiglu(gate: &MlxArray, up: &MlxArray) -> UniquePtr<MlxArr
     mlxcel_core::multiply(&clipped, up)
 }
 
-// SwitchGLU (MoE expert layer using gather_qmm).
-pub struct SwitchGLU {
+// Quantized routed experts (three affine `gather_qmm` calls).
+pub struct QuantizedSwitchGLU {
     // Expert weights: [num_experts, output_dim, input_dim]
     pub gate_weight: UniquePtr<MlxArray>,
     pub gate_scales: UniquePtr<MlxArray>,
@@ -908,7 +945,7 @@ pub struct SwitchGLU {
     pub down_bits: i32,
 }
 
-impl SwitchGLU {
+impl QuantizedSwitchGLU {
     pub fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
         // `x` is `[..., hidden]` with one or more leading token axes: a flat
         // `[n_tokens, hidden]` stream in the text-only path, or a 3D
@@ -1013,7 +1050,7 @@ impl SwitchGLU {
         let group_size = args.group_size();
         let bits = args.bits();
 
-        // This SwitchGLU is unconditionally quantized (it requires scales and
+        // This variant is unconditionally quantized (it requires scales and
         // biases for all three projections below) and hands the stored pair to
         // three `gather_qmm` calls without ever reaching
         // `reconcile_quantization_layout`, so the bound lives here (issue #958).
@@ -1022,7 +1059,7 @@ impl SwitchGLU {
         // This expert path runs affine `gather_qmm` only. A ModelOpt NVFP4
         // plane (no zero points, a stacked `inv_global_scale` multiplier) is
         // refused by name rather than as a missing `.biases` key (issue #2351).
-        for proj in ["gate_proj", "up_proj", "down_proj"] {
+        for proj in SWITCH_GLU_PLANES {
             let plane = format!("{prefix}.{proj}");
             if weights.contains_key(&format!("{plane}.inv_global_scale"))
                 || (weights.contains_key(&format!("{plane}.scales"))
@@ -1108,6 +1145,139 @@ impl SwitchGLU {
     }
 }
 
+/// Routed experts of one DeepSeek-V3 MoE block (`mlp.switch_mlp`).
+///
+/// A quantized export stores every expert plane with affine `.scales` and
+/// `.biases` and runs three `gather_qmm` calls ([`QuantizedSwitchGLU`]). An
+/// unquantized (bf16 / f16 / f32) export stores bare `[E, out, in]` planes,
+/// which run `gather_mm` through the shared `SwitchLinear` ([`FloatSwitchGLU`],
+/// issue #3319). Both apply [`clipped_swiglu`], which the shared
+/// `switch_layers::SwitchGLU` does not offer, so this block is kept local.
+/// The variant is decided per block from the presence of `.scales`.
+pub enum SwitchGLU {
+    Quantized(QuantizedSwitchGLU),
+    Float(FloatSwitchGLU),
+}
+
+const SWITCH_GLU_PLANES: [&str; 3] = ["gate_proj", "up_proj", "down_proj"];
+
+impl SwitchGLU {
+    pub fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Quantized(q) => q.forward(x, indices),
+            Self::Float(f) => f.forward(x, indices),
+        }
+    }
+
+    pub fn from_weights(
+        weights: &WeightMap,
+        args: &DeepSeekV3Config,
+        prefix: &str,
+    ) -> Result<Self, String> {
+        let (quantized, float): (Vec<&str>, Vec<&str>) = SWITCH_GLU_PLANES
+            .into_iter()
+            .partition(|proj| weights.contains_key(&format!("{prefix}.{proj}.scales")));
+        if quantized.is_empty() {
+            return FloatSwitchGLU::from_weights(weights, args, prefix).map(Self::Float);
+        }
+        if !float.is_empty() {
+            return Err(format!(
+                "{prefix}: DeepSeek-V3 routed experts mix quantized and float planes ({} \
+                 quantized, {} float)",
+                quantized.join("/"),
+                float.join("/")
+            ));
+        }
+        QuantizedSwitchGLU::from_weights(weights, args, prefix).map(Self::Quantized)
+    }
+}
+
+/// Unquantized routed experts: three `Regular` `SwitchLinear` planes
+/// (`gate_proj` / `up_proj` `[E, inter, hidden]`, `down_proj`
+/// `[E, hidden, inter]`) driven through `gather_mm` with the clipped SwiGLU
+/// activation (issue #3319).
+pub struct FloatSwitchGLU {
+    pub gate_proj: crate::models::switch_layers::SwitchLinear,
+    pub up_proj: crate::models::switch_layers::SwitchLinear,
+    pub down_proj: crate::models::switch_layers::SwitchLinear,
+}
+
+impl FloatSwitchGLU {
+    pub fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
+        // Same gather layout as the quantized path: `[..., hidden]` ->
+        // `[..., 1, 1, hidden]` for any number of leading token axes. The
+        // gather indices are built once and shared by the three planes.
+        let x_exp = mlxcel_core::expand_dims_multi(x, &[-3, -2]);
+        let gi = crate::models::switch_layers::prepare_gather_indices(&x_exp, indices);
+        let lhs = gi.lhs.as_deref();
+        let x_gate = self.gate_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+        let x_up = self.up_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+        let activated = clipped_swiglu(&x_gate, &x_up);
+        // `activated` is `[..., top_k, 1, inter]`, whose batch axes no longer
+        // match the lhs built for `x_exp`, so MLX builds its own default.
+        let output = self
+            .down_proj
+            .forward_indexed(&activated, None, &gi.rhs, false);
+        mlxcel_core::squeeze_axis(&output, -2)
+    }
+
+    pub fn from_weights(
+        weights: &WeightMap,
+        args: &DeepSeekV3Config,
+        prefix: &str,
+    ) -> Result<Self, String> {
+        let load = |proj: &str| -> Result<crate::models::switch_layers::SwitchLinear, String> {
+            let plane = format!("{prefix}.{proj}");
+            // Zero-point biases with no scales are what a quantized export
+            // looks like after its `.scales` were lost; its packed integer
+            // weight would otherwise load here and abort in `gather_mm`.
+            if weights.contains_key(&format!("{plane}.biases")) {
+                return Err(format!(
+                    "{plane}: expert plane has quantization `.biases` but no `.scales`; a float \
+                     plane carries neither"
+                ));
+            }
+            let linear = crate::models::switch_layers::SwitchLinear::from_weights(
+                weights,
+                &plane,
+                args.group_size(),
+                args.bits(),
+            )?;
+            match &linear {
+                crate::models::switch_layers::SwitchLinear::Regular { weight } => {
+                    let dt = mlxcel_core::array_dtype(weight);
+                    if ![
+                        mlxcel_core::dtype::FLOAT16,
+                        mlxcel_core::dtype::BFLOAT16,
+                        mlxcel_core::dtype::FLOAT32,
+                    ]
+                    .contains(&dt)
+                    {
+                        return Err(format!(
+                            "{plane}: float expert plane has dtype {dt}; an unquantized plane \
+                             must be f16, bf16 or f32 (a packed quantized plane without \
+                             `.scales`?)"
+                        ));
+                    }
+                    Ok(linear)
+                }
+                // Reachable only through `SwitchLinear`'s per-expert stacking
+                // fallback (unstacked `experts.{e}.*.scales`), which sanitize
+                // normally stacks first.
+                _ => Err(format!(
+                    "{plane}: expected a float expert plane (no `.scales`), but it loaded as \
+                     quantized"
+                )),
+            }
+        };
+        Ok(Self {
+            gate_proj: load("gate_proj")?,
+            up_proj: load("up_proj")?,
+            down_proj: load("down_proj")?,
+        })
+    }
+}
+
 // MoE Block.
 pub struct MoEBlock {
     pub gate: MoEGate,
@@ -1119,8 +1289,29 @@ impl MoEBlock {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let (indices, scores) = self.gate.forward(x);
 
-        // Expert computation
-        let y = self.switch_mlp.forward(x, &indices);
+        // Expert computation. Float experts multiply through `gather_mm`,
+        // which, like `matmul`, takes one kernel for a single token and
+        // another for several, so a verify block runs them one position at a
+        // time (issue #3418). The quantized gather is left whole.
+        let shape = mlxcel_core::array_shape(x);
+        let per_position = matches!(self.switch_mlp, SwitchGLU::Float(_))
+            && shape.len() == 3
+            && shape[1] > 1
+            && mlxcel_core::row_invariant::in_verify_block();
+        let y = if per_position {
+            let parts: Vec<UniquePtr<MlxArray>> = (0..shape[1])
+                .map(|i| {
+                    self.switch_mlp.forward(
+                        &slice_axis(x, 1, i, i + 1),
+                        &slice_axis(&indices, 1, i, i + 1),
+                    )
+                })
+                .collect();
+            let refs: Vec<&MlxArray> = parts.iter().map(|part| &**part).collect();
+            mlxcel_core::concatenate_many(&refs, 1)
+        } else {
+            self.switch_mlp.forward(x, &indices)
+        };
 
         let mut result = crate::models::switch_layers::moe_weighted_sum(
             &y,
@@ -1315,15 +1506,24 @@ impl DeepSeekV3Model {
         // attention stack use its implicit causal path for standard prefill.
         let mask = mask.map(mlxcel_core::copy);
 
+        // Row-invariant products for this forward when
+        // `MLXCEL_MLA_ROW_INVARIANT` is on (issue #3418): a verify block of
+        // the engine's token-only round then equals the decode steps it
+        // stands for. A masked block is a padded prefill, never a verify.
+        let _row_invariant =
+            super::mla_batched::row_invariant_scope(&mlxcel_core::array_shape(&h), mask.is_some());
+
         // Pass through layers
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask.as_deref());
+            // Recorded only under the block-versus-chain diagnostic (#3409).
+            diag::capture(i, "mla", "layer output", &h);
         }
         let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm and lm_head
         let h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        row_linear(&self.lm_head, &h)
     }
 
     /// Logits `[B, 1, vocab]` for position `last_pos` only, from token ids or
@@ -1504,18 +1704,29 @@ impl DeepSeekV3Model {
                         for k in EXPERT_PLANE_LEAVES {
                             let check_key = format!("{}.mlp.experts.0.{}.{}", prefix, m, k);
                             if weights.contains_key(&check_key) {
-                                let mut expert_ptrs: Vec<*const MlxArray> = Vec::new();
-                                for e in 0..n_routed {
-                                    let key = format!("{}.mlp.experts.{}.{}.{}", prefix, e, m, k);
-                                    if let Some(w) = weights.get(&key) {
-                                        expert_ptrs.push(
-                                            w.as_ref().expect("weight map holds no null handles")
-                                                as *const MlxArray,
-                                        );
-                                    }
-                                }
+                                let expert_key =
+                                    |e: usize| format!("{}.mlp.experts.{}.{}.{}", prefix, e, m, k);
+                                let parts: Vec<(usize, &MlxArray)> = (0..n_routed)
+                                    .filter_map(|e| {
+                                        weights.get(&expert_key(e)).map(|w| {
+                                            (
+                                                e,
+                                                w.as_ref()
+                                                    .expect("weight map holds no null handles"),
+                                            )
+                                        })
+                                    })
+                                    .collect();
 
-                                if !expert_ptrs.is_empty() {
+                                if !parts.is_empty() {
+                                    // `stack` aborts on a shape mismatch, so
+                                    // refuse one before it runs (issue #3320).
+                                    // The sidecar is concatenated, not stacked.
+                                    if k != "global_scale" {
+                                        refuse_mismatched_expert_parts(&parts, expert_key)?;
+                                    }
+                                    let expert_ptrs: Vec<*const MlxArray> =
+                                        parts.iter().map(|(_, w)| *w as *const MlxArray).collect();
                                     // Stacked before any expert key is removed,
                                     // and the stack holds its own handles.
                                     let (leaf, stacked) = stack_expert_leaf(k, &expert_ptrs);
@@ -1759,6 +1970,10 @@ impl LanguageModel for DeepSeekV3Model {
 mod latent_tests;
 
 #[cfg(test)]
+#[path = "deepseek_v3_verify_block_tests.rs"]
+mod verify_block_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
@@ -1858,7 +2073,7 @@ pub(crate) mod tests {
             gs,
             bits,
         );
-        SwitchGLU {
+        SwitchGLU::Quantized(QuantizedSwitchGLU {
             gate_weight,
             gate_scales,
             gate_biases,
@@ -1872,7 +2087,7 @@ pub(crate) mod tests {
             bits,
             up_bits: bits,
             down_bits: bits,
-        }
+        })
     }
 
     fn tiny_gate(e: i32, hidden: i32, top_k: i32) -> MoEGate {
@@ -1948,6 +2163,187 @@ pub(crate) mod tests {
         let y3 = glu.forward(&x3, &idx3);
         mlxcel_core::eval(&y3);
         assert_eq!(mlxcel_core::array_shape(&y3), vec![1, 3, top_k, hidden]);
+    }
+
+    // ---- Unquantized routed experts (issue #3319) -------------------------
+    //
+    // A bf16 / f16 / f32 export stacks `mlp.experts.{e}.*` into bare
+    // `switch_mlp.{gate,up,down}_proj.weight` planes with no `.scales`. The
+    // expert block used to require `.scales` on every plane and failed the
+    // load with `Weight not found: ...switch_mlp.gate_proj.scales`.
+
+    /// Stacked float plane `[e, out, inp]` filled with a deterministic ramp,
+    /// returned both as the weight-map tensor and as the host values.
+    fn float_plane(
+        e: i32,
+        out: i32,
+        inp: i32,
+        scale: f32,
+        salt: usize,
+    ) -> (Vec<f32>, UniquePtr<MlxArray>) {
+        let data: Vec<f32> = (0..(e * out * inp) as usize)
+            .map(|i| (((i * 29 + salt * 13 + 7) % 53) as f32 - 26.0) * 0.02 * scale)
+            .collect();
+        let arr = mlxcel_core::from_slice_f32(&data, &[e, out, inp]);
+        (data, arr)
+    }
+
+    #[test]
+    fn float_switch_glu_matches_per_expert_clipped_swiglu_reference() {
+        let _runtime = crate::initialize_runtime();
+        let (e, hidden, inter) = (3i32, 4i32, 5i32);
+        let (h, n) = (hidden as usize, inter as usize);
+        // Expert 2's gate plane is scaled so `silu(gate)` passes 100 for some
+        // rows and the clip is exercised, not just the identity range.
+        let gate: Vec<f32> = float_plane(e, inter, hidden, 1.0, 1)
+            .0
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i / (n * h) == 2 { v * 400.0 } else { *v })
+            .collect();
+        let gate_arr = mlxcel_core::from_slice_f32(&gate, &[e, inter, hidden]);
+        let (up, up_arr) = float_plane(e, inter, hidden, 1.0, 2);
+        let (down, down_arr) = float_plane(e, hidden, inter, 1.0, 3);
+
+        let mut weights = WeightMap::new();
+        weights.insert("p.gate_proj.weight".to_string(), gate_arr);
+        weights.insert("p.up_proj.weight".to_string(), up_arr);
+        weights.insert("p.down_proj.weight".to_string(), down_arr);
+        let glu = SwitchGLU::from_weights(&weights, &test_config_moe(), "p")
+            .expect("a float expert block loads without `.scales`");
+        assert!(matches!(glu, SwitchGLU::Float(_)));
+
+        let (n_tokens, top_k) = (2usize, 2usize);
+        let x: Vec<f32> = (0..n_tokens * h).map(|i| (i as f32 - 3.0) * 0.25).collect();
+        let picks = [2i32, 0, 1, 2];
+        let x_arr = mlxcel_core::from_slice_f32(&x, &[n_tokens as i32, hidden]);
+        let idx = mlxcel_core::from_slice_i32(&picks, &[n_tokens as i32, top_k as i32]);
+        let y = glu.forward(&x_arr, &idx);
+        mlxcel_core::eval(&y);
+        assert_eq!(
+            mlxcel_core::array_shape(&y),
+            vec![n_tokens as i32, top_k as i32, hidden]
+        );
+        let got = mlxcel_core::utils::array_to_vec_f32(&y);
+
+        let mut clipped_any = false;
+        for t in 0..n_tokens {
+            for k in 0..top_k {
+                let ex = picks[t * top_k + k] as usize;
+                let xt = &x[t * h..(t + 1) * h];
+                let act: Vec<f64> = (0..n)
+                    .map(|j| {
+                        let row = |w: &[f32]| -> f64 {
+                            (0..h)
+                                .map(|c| w[(ex * n + j) * h + c] as f64 * xt[c] as f64)
+                                .sum()
+                        };
+                        let g = row(&gate);
+                        let silu = g / (1.0 + (-g).exp());
+                        clipped_any |= silu > 100.0;
+                        silu.clamp(-100.0, 100.0) * row(&up)
+                    })
+                    .collect();
+                for o in 0..h {
+                    let want: f64 = (0..n)
+                        .map(|j| down[(ex * h + o) * n + j] as f64 * act[j])
+                        .sum();
+                    let have = got[(t * top_k + k) * h + o] as f64;
+                    let tol = 1e-4 * want.abs().max(1.0);
+                    assert!(
+                        (have - want).abs() <= tol,
+                        "token {t} pick {k} (expert {ex}) out {o}: {have} vs {want}"
+                    );
+                }
+            }
+        }
+        assert!(clipped_any, "the reference must exercise the clip");
+
+        // The VLM embeddings path feeds `[batch, seq, hidden]`; the rank is kept.
+        let x3 = mlxcel_core::from_slice_f32(&x, &[1, n_tokens as i32, hidden]);
+        let idx3 = mlxcel_core::from_slice_i32(&picks, &[1, n_tokens as i32, top_k as i32]);
+        let y3 = glu.forward(&x3, &idx3);
+        mlxcel_core::eval(&y3);
+        assert_eq!(
+            mlxcel_core::array_shape(&y3),
+            vec![1, n_tokens as i32, top_k as i32, hidden]
+        );
+        let got3 = mlxcel_core::utils::array_to_vec_f32(&y3);
+        for (a, b) in got.iter().zip(&got3) {
+            assert!((a - b).abs() <= 1e-5 * a.abs().max(1.0), "{a} vs {b}");
+        }
+    }
+
+    /// A quantized export that lost every `.scales` key must not load its
+    /// packed `uint32` planes as float weights (that would abort in
+    /// `gather_mm` at the first routed forward pass).
+    #[test]
+    fn float_switch_glu_refuses_planes_that_lost_their_scales() {
+        let _runtime = crate::initialize_runtime();
+        let (e, hidden, inter) = (2i32, 64i32, 64i32);
+        let plane =
+            |shape: &[i32]| quantized_triple(&ramp((e * inter * hidden) as usize), shape, 64, 4);
+        let mut with_biases = WeightMap::new();
+        let mut packed_only = WeightMap::new();
+        for (proj, shape) in [
+            ("gate_proj", [e, inter, hidden]),
+            ("up_proj", [e, inter, hidden]),
+            ("down_proj", [e, hidden, inter]),
+        ] {
+            let (w, _s, b) = plane(&shape);
+            packed_only.insert(format!("p.{proj}.weight"), mlxcel_core::copy(&w));
+            with_biases.insert(format!("p.{proj}.weight"), w);
+            with_biases.insert(format!("p.{proj}.biases"), b);
+        }
+        let err = match SwitchGLU::from_weights(&with_biases, &test_config_moe(), "p") {
+            Ok(_) => panic!("orphan `.biases` must be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("p.gate_proj") && err.contains("no `.scales`"),
+            "{err}"
+        );
+        let err = match SwitchGLU::from_weights(&packed_only, &test_config_moe(), "p") {
+            Ok(_) => panic!("a packed integer plane must be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("p.gate_proj") && err.contains("f16, bf16 or f32"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn switch_glu_refuses_mixed_quantized_and_float_planes() {
+        let _runtime = crate::initialize_runtime();
+        let (e, hidden, inter) = (2i32, 64i32, 64i32);
+        let mut weights = WeightMap::new();
+        let (w, s, b) = quantized_triple(
+            &ramp((e * inter * hidden) as usize),
+            &[e, inter, hidden],
+            64,
+            4,
+        );
+        weights.insert("p.gate_proj.weight".to_string(), w);
+        weights.insert("p.gate_proj.scales".to_string(), s);
+        weights.insert("p.gate_proj.biases".to_string(), b);
+        weights.insert(
+            "p.up_proj.weight".to_string(),
+            float_plane(e, inter, hidden, 1.0, 2).1,
+        );
+        weights.insert(
+            "p.down_proj.weight".to_string(),
+            float_plane(e, hidden, inter, 1.0, 3).1,
+        );
+        let err = match SwitchGLU::from_weights(&weights, &quant_config(64, 4), "p") {
+            Ok(_) => panic!("a block mixing quantized and float planes must be refused"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err,
+            "p: DeepSeek-V3 routed experts mix quantized and float planes (gate_proj quantized, \
+             up_proj/down_proj float)"
+        );
     }
 
     #[test]
@@ -2046,6 +2442,30 @@ pub(crate) mod tests {
         weights.insert(
             key.to_string(),
             mlxcel_core::zeros(&[1], mlxcel_core::dtype::FLOAT32),
+        );
+    }
+
+    /// One expert whose plane differs in shape from expert 0's is a load
+    /// error naming its key and both shapes, not an MLX `[stack]` abort
+    /// (issue #3320).
+    #[test]
+    fn sanitize_weights_refuses_a_mismatched_expert_plane() {
+        let config = test_config_moe();
+        let mut weights = WeightMap::new();
+        for (e, cols) in [(0usize, 8i32), (1, 6)] {
+            weights.insert(
+                format!("model.layers.0.mlp.experts.{e}.gate_proj.weight"),
+                mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols as usize], &[4, cols]),
+            );
+        }
+        let err = DeepSeekV3Model::sanitize_weights(weights, &config)
+            .err()
+            .expect("a mismatched expert must be refused");
+        assert!(
+            err.contains("model.layers.0.mlp.experts.1.gate_proj.weight")
+                && err.contains("[4, 6]")
+                && err.contains("[4, 8]"),
+            "{err}"
         );
     }
 

@@ -41,7 +41,7 @@ use crate::emitter::{
     emit_qwen3_vl_diagnostics,
 };
 use crate::emitter::{
-    QWEN3_VL_VISION_PRECISION, Qwen3VlConfig, Qwen3VlHostInputs, prepare_qwen3_vl_host_inputs,
+    Qwen3VlConfig, Qwen3VlHostInputs, prepare_qwen3_vl_host_inputs, qwen3_vl_vision_precision,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::iree_identity::{
@@ -635,10 +635,11 @@ fn compile_and_load(
     processor_identity: &str,
     patch_bucket: usize,
 ) -> Result<IreeAuxiliaryModule, String> {
+    let precision = qwen3_vl_vision_precision(device);
     #[cfg(not(feature = "diagnostics"))]
-    let mlir = emit_qwen3_vl(config, patch_bucket);
+    let mlir = emit_qwen3_vl(config, patch_bucket, precision);
     #[cfg(feature = "diagnostics")]
-    let mlir = emit_qwen3_vl_diagnostics(config, patch_bucket);
+    let mlir = emit_qwen3_vl_diagnostics(config, patch_bucket, precision);
     let compiler = iree_compile_bin()?;
     if !compiler.is_file() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
@@ -662,7 +663,7 @@ fn compile_and_load(
         &ProductionNumerics {
             family: "qwen3-vl-vision",
             operators: &operators,
-            precision: QWEN3_VL_VISION_PRECISION,
+            precision,
             weights: observer.resolve(AffineExecution::Host)?,
         },
     )?;

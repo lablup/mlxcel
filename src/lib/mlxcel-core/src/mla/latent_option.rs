@@ -365,6 +365,22 @@ pub static EXPERIMENTAL_LATENT_NOTES: &[ExperimentalLatentNote] = &[
                (docs/benchmark_results/mla-quantized-latent-dsa-m3ultra-2026-11-19.md)",
     },
     ExperimentalLatentNote {
+        families: &["hy_v4"],
+        bits: &[8],
+        text: "Hy4-preview-4bit with an int8 key slot had 0 decided-position disagreements of \
+               124 against the fp16 latent behind 512 tokens (98.0% top-1 agreement, perplexity \
+               +1.00%), a context at which the DSA indexer selects nothing; its top-k overlap \
+               over a quantized slot, which DeepSeek-V3.2 missed, is unmeasured on Hy4 (PR #3281)",
+    },
+    ExperimentalLatentNote {
+        families: &["hy_v4"],
+        bits: &[4],
+        text: "Hy4-preview-4bit with an int4 latent had 0 decided-position disagreements of 124 \
+               against the fp16 latent behind 512 tokens (95.7% top-1 agreement, perplexity \
+               +0.68%), a context at which the DSA indexer selects nothing; its top-k overlap \
+               over a quantized slot is unmeasured on Hy4",
+    },
+    ExperimentalLatentNote {
         families: &["longcat_flash_sparse"],
         bits: &[4],
         text: "LongCat-Flash-Lite-Sparse with an int4 latent showed 6 decided-position \

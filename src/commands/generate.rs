@@ -45,6 +45,7 @@ use mlxcel::{
     server::chat_template::{
         ChatMessage, ChatTemplateProcessor, flatten_template_text, template_rejection_message,
     },
+    server::chat_template_kwargs::ChatTemplateKwargs,
     tokenizer::load_tokenizer,
     vision::merge::InputEmbeddings,
     vlm_runtime::prepared_embedding_refs,
@@ -494,21 +495,111 @@ fn resolve_cli_pipeline_num_layers(model_dir: &Path) -> Result<usize> {
     resolve_in_process_pipeline_num_layers(model_dir).map_err(|err| anyhow!("{err}"))
 }
 
+/// What the KV banner counts layers over: the layer count and, for a loaded
+/// model that reports it, what each cache really stores (issue #3378).
+#[derive(Debug, Clone, Copy)]
+struct BannerLayers<'a> {
+    num_layers: usize,
+    storage_modes: Option<&'a [Option<KVCacheMode>]>,
+}
+
+/// Print the `KV cache mode:` line (and its `applied to N of M layers` suffix).
+fn print_kv_cache_mode_banner(
+    args: &GenerateArgs,
+    requested_kv_cache_mode: KVCacheMode,
+    kv_cache_mode: KVCacheMode,
+    layers: BannerLayers<'_>,
+) {
+    let kv_cache_mode_suffix =
+        kv_cache_mode_banner_suffix(requested_kv_cache_mode, kv_cache_mode, layers);
+
+    match kv_cache_mode {
+        KVCacheMode::Int8 => {
+            // The same flag selects two codecs: the affine group-64 latent on
+            // an absorbed MLA cache (issue #3155), per-token absmax elsewhere.
+            let codec = match mlxcel::cli::mla_latent_option::model_latent_bits(
+                kv_cache_mode,
+                std::path::Path::new(&args.model.model),
+            ) {
+                Some(bits) => mlxcel::cli::mla_latent_option::latent_codec_label(bits),
+                None => "per-token absmax quantization".to_string(),
+            };
+            println!("KV cache mode: int8 ({codec}){kv_cache_mode_suffix}");
+        }
+        KVCacheMode::Turbo4Asym => {
+            println!(
+                "KV cache mode: fp16+turbo4 (asymmetric Fp16-K + Turbo4-V, ~26% KV savings){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Turbo4 => {
+            // Reached only when the family is on
+            // `ALLOWED_SYMMETRIC_TURBO_FAMILIES`: a non-allowlisted request was
+            // already resolved to Turbo4Asym above, which is why this line no
+            // longer describes a fallback that had never been performed.
+            println!(
+                "KV cache mode: turbo4 (symmetric Turbo4-K + Turbo4-V, ~73% KV savings; \
+                 this family is on the symmetric-Turbo4 allowlist){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Turbo4Delegated => {
+            println!(
+                "KV cache mode: turbo4-delegated (Fp16-K + Turbo4-V with hot/cold split, \
+                 ~26% KV savings + 97-100% FP16 decode speed at long context){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Turbo3Asym => {
+            println!(
+                "KV cache mode: fp16+turbo3 (asymmetric Fp16-K + Turbo3-V, \
+                 ~5.1x total KV savings){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Fp16 => {
+            // Fp16 is the default and normally announces nothing. When it is
+            // the *result* of a substitution the operator asked for something
+            // else, so name the mode actually in force (issue #1350). The
+            // reason was printed to stderr by
+            // `resolve_and_announce_kv_cache_mode`.
+            println!("KV cache mode: fp16{kv_cache_mode_suffix}");
+        }
+    }
+}
+
 fn kv_cache_mode_banner_suffix(
     requested: KVCacheMode,
     effective: KVCacheMode,
-    num_layers: usize,
+    layers: BannerLayers<'_>,
 ) -> String {
-    let boundary = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
-    let modes = mlxcel_core::cache::turbo::resolve_layer_modes(effective, num_layers, boundary);
-    let applied = modes.iter().filter(|mode| **mode == effective).count();
+    // A model that reports what each cache stores is counted by that table, one
+    // entry per cache it keeps (Inkling 2 keeps one per layer visit, 48 for
+    // Mini, not the 24 physical layers in `config.json`), and a cache that
+    // stores FP16 under a quantized request does not count as applied.
+    let (applied, total) = match layers.storage_modes {
+        Some(stored) => (
+            stored
+                .iter()
+                .filter(|mode| **mode == Some(effective))
+                .count(),
+            stored.len(),
+        ),
+        None => {
+            let boundary = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
+            let modes = mlxcel_core::cache::turbo::resolve_layer_modes(
+                effective,
+                layers.num_layers,
+                boundary,
+            );
+            (
+                modes.iter().filter(|mode| **mode == effective).count(),
+                modes.len(),
+            )
+        }
+    };
     if requested != effective {
         format!(
-            " (requested {requested}; effective {effective}; applied to {applied} of {} layers)",
-            modes.len()
+            " (requested {requested}; effective {effective}; applied to {applied} of {total} layers)"
         )
     } else {
-        format!(" (applied to {applied} of {} layers)", modes.len())
+        format!(" (applied to {applied} of {total} layers)")
     }
 }
 
@@ -692,22 +783,40 @@ fn template_rejection_cli_error(err: &anyhow::Error) -> Option<anyhow::Error> {
         .map(|message| anyhow!("Chat template rejected the request: {message}"))
 }
 
+/// The template kwargs the CLI sets for one render: `--reasoning-effort`, run
+/// through the server's own request-to-kwargs resolution (issue #3378). Empty
+/// when the flag is absent, which keeps every render byte-identical.
+fn cli_template_kwargs(
+    processor: &ChatTemplateProcessor,
+    media: &CliPromptMedia,
+) -> Result<ChatTemplateKwargs> {
+    match media.reasoning_effort.as_deref() {
+        Some(level) => {
+            mlxcel::server::in_process::reasoning_effort::cli_template_kwargs(processor, level)
+        }
+        None => Ok(ChatTemplateKwargs::new()),
+    }
+}
+
 fn apply_user_chat_template(
     processor: &ChatTemplateProcessor,
     user_prompt: &str,
+    kwargs: &ChatTemplateKwargs,
 ) -> Result<String> {
     let messages = [ChatMessage {
         role: "user".to_string(),
         content: user_prompt.to_string(),
     }];
 
-    processor.apply(&messages, None).or_else(|err| {
-        if let Some(rejection) = template_rejection_cli_error(&err) {
-            Err(rejection)
-        } else {
-            Ok(user_prompt.to_string())
-        }
-    })
+    processor
+        .apply_with_kwargs(&messages, None, kwargs)
+        .or_else(|err| {
+            if let Some(rejection) = template_rejection_cli_error(&err) {
+                Err(rejection)
+            } else {
+                Ok(user_prompt.to_string())
+            }
+        })
 }
 
 /// Where one clip the video-frames fallback turned into stills sits in the
@@ -742,6 +851,9 @@ pub(crate) struct CliPromptMedia {
     pub(crate) videos: usize,
     /// `--audio` inputs.
     pub(crate) audios: usize,
+    /// `--reasoning-effort`, normalized (issue #3378). Rendered through the
+    /// template's `reasoning_effort` kwarg; `None` keeps the template default.
+    pub(crate) reasoning_effort: Option<String>,
 }
 
 impl CliPromptMedia {
@@ -805,8 +917,9 @@ fn apply_vlm_chat_template(
     let emit_image = processor.supports_image_content();
     let emit_video = media.videos > 0 && processor.supports_video_content();
     let emit_audio = media.audios > 0 && processor.supports_audio_content();
+    let kwargs = cli_template_kwargs(processor, media)?;
     if !(emit_image || processor.supports_video_content() || processor.supports_audio_content()) {
-        return apply_user_chat_template(processor, &media.flattened_text(user_prompt));
+        return apply_user_chat_template(processor, &media.flattened_text(user_prompt), &kwargs);
     }
 
     // Build a multimodal content list:
@@ -868,14 +981,16 @@ fn apply_vlm_chat_template(
         "content": content_parts,
     }]);
 
-    processor.apply_raw(&messages, None).or_else(|err| {
-        if let Some(rejection) = template_rejection_cli_error(&err) {
-            Err(rejection)
-        } else {
-            // Fallback: text-only template
-            apply_user_chat_template(processor, &media.flattened_text(user_prompt))
-        }
-    })
+    processor
+        .apply_raw_with_kwargs(&messages, None, &kwargs)
+        .or_else(|err| {
+            if let Some(rejection) = template_rejection_cli_error(&err) {
+                Err(rejection)
+            } else {
+                // Fallback: text-only template
+                apply_user_chat_template(processor, &media.flattened_text(user_prompt), &kwargs)
+            }
+        })
 }
 
 fn resolve_cli_prompt(
@@ -891,6 +1006,7 @@ fn resolve_cli_prompt(
     processor.map_or_else(
         || Ok(media.flattened_text(user_prompt)),
         |processor| {
+            let kwargs = cli_template_kwargs(processor, media)?;
             // Route an audio-bearing request through the VLM template only when
             // the template actually renders audio content items. This keeps the
             // prompt byte-identical to the text-only path for every model whose
@@ -902,7 +1018,7 @@ fn resolve_cli_prompt(
             if media.image_placeholders() > 0 || media.videos > 0 || emit_audio {
                 apply_vlm_chat_template(processor, user_prompt, media)
             } else {
-                apply_user_chat_template(processor, &media.flattened_text(user_prompt))
+                apply_user_chat_template(processor, &media.flattened_text(user_prompt), &kwargs)
             }
         },
     )
@@ -1536,14 +1652,36 @@ fn generate_with_embeddings<M: LanguageModel>(
     ))
 }
 
+/// Whether the OpenXLA backend runs this model without a KV cache. Only
+/// `mamba2` qualifies today (attention-free, state threaded instead); a hybrid
+/// would need its own check. Always false off the XLA backend.
+#[cfg(feature = "xla-backend")]
+fn xla_model_has_no_kv_cache(model_dir: &Path) -> bool {
+    select_backend().name() == "xla"
+        && std::fs::read_to_string(model_dir.join("config.json"))
+            .ok()
+            .and_then(|s| mlxcel_xla::parse_hf_config_json(&s).ok())
+            .is_some_and(|v| {
+                v.get("model_type").and_then(serde_json::Value::as_str) == Some("mamba2")
+            })
+}
+
+#[cfg(not(feature = "xla-backend"))]
+fn xla_model_has_no_kv_cache(_model_dir: &Path) -> bool {
+    false
+}
+
 /// Read `num_hidden_layers` from a model directory's `config.json` (0 if absent
 /// or unparsable). The OpenXLA session stores it as metadata; the bundled graph
-/// fixes the architecture, so a best-effort value is sufficient.
+/// fixes the architecture, so a best-effort value is sufficient. The parse
+/// accepts HF's bare `Infinity` (a Mamba2 `time_step_limit`), and the count
+/// needs no attention-head fields, so an attention-free model reads its layer
+/// count like any other (issue #3339).
 #[cfg(feature = "xla-backend")]
 fn xla_num_layers(model_dir: &Path) -> usize {
     std::fs::read_to_string(model_dir.join("config.json"))
         .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|s| mlxcel_xla::parse_hf_config_json(&s).ok())
         .and_then(|v| {
             v.get("num_hidden_layers")
                 .and_then(serde_json::Value::as_u64)
@@ -1636,20 +1774,6 @@ fn xla_sizing_budget(max_tokens: usize, budget_was_unlimited: bool) -> usize {
     }
 }
 
-/// The positions a request needs from an OpenXLA static shape: prompt plus
-/// generation budget plus any worst-case image expansion the checkpoint
-/// declares.
-#[cfg(feature = "xla-backend")]
-fn xla_required_positions(
-    prompt_len: usize,
-    sizing_budget: usize,
-    image_expansion: usize,
-) -> usize {
-    prompt_len
-        .saturating_add(sizing_budget)
-        .saturating_add(image_expansion)
-}
-
 /// One `MLXCEL_PRINT_TOKEN_IDS` line: `[<label> (<count>): <id> <id> ...]`.
 fn token_ids_line(label: &str, ids: &[i32]) -> String {
     format!(
@@ -1676,12 +1800,6 @@ fn print_token_ids_if_requested(prompt_tokens: &[i32], generated_tokens: &[i32])
     }
 }
 
-/// The worst-case image expansion to include in an OpenXLA sizing hint.
-#[cfg(feature = "xla-backend")]
-fn xla_image_expansion(model_path: &Path, image_count: usize) -> usize {
-    image_count.saturating_mul(mlxcel::xla_image_context_floor(model_path).unwrap_or(0))
-}
-
 #[cfg(feature = "xla-backend")]
 #[allow(clippy::too_many_arguments)]
 fn generate_xla(
@@ -1702,18 +1820,42 @@ fn generate_xla(
         !has_video,
         "the OpenXLA backend does not support video input yet"
     );
-    let required_positions = xla_required_positions(
-        prompt_tokens.len(),
-        sizing_budget,
-        xla_image_expansion(model_path, image_paths.len()),
-    );
-    let mut session = select_backend().create_session_for_request(
+    // Media is prepared before the shape is compiled, so the shape and the
+    // admission check use the prompt the preprocessor actually produced rather
+    // than a per-family worst case (issue #3361). The serve worker routes on
+    // the same length. Its time still counts toward the run.
+    let preparation_start = Instant::now();
+    let images = decode_xla_cli_images(image_paths)?;
+    let mut media = super::generate_xla_media::prepare_xla_cli_media(
         model_path,
-        num_layers,
-        kv_cache_mode,
-        token_bias,
-        Some(required_positions),
+        prompt,
+        prompt_tokens,
+        tokenizer,
+        &images,
+        audio_path,
     )?;
+    // The vision weight load and compile used to sit in untimed session
+    // creation, so keep them out of the reported preparation time.
+    let preparation_time = preparation_start
+        .elapsed()
+        .saturating_sub(media.untimed_load());
+    let effective_prompt_len = media.effective_prompt_len(prompt_tokens.len());
+    let required_positions = mlxcel::xla_request_positions(effective_prompt_len, sizing_budget);
+    let mut session = match media.take_preprocessor() {
+        Some(preprocessor) => mlxcel::backend::xla::create_prepared_xla_session(
+            model_path,
+            num_layers,
+            required_positions,
+            Some(preprocessor),
+        )?,
+        None => select_backend().create_session_for_request(
+            model_path,
+            num_layers,
+            kv_cache_mode,
+            token_bias,
+            Some(required_positions),
+        )?,
+    };
     let start_time = Instant::now();
     // The plain text path reports its two phases from the session's own
     // windows. Every other XLA path keeps the whole-run accounting, which
@@ -1723,13 +1865,10 @@ fn generate_xla(
         mlxcel::Session::Xla(s) => {
             let capacity = s.context_capacity();
             let requested_budget = max_tokens;
-            // The prompt the graph actually admits: image placeholders expand
-            // inside the session, so their worst case is part of the room the
-            // generation budget may use.
-            let effective_prompt_len = required_positions.saturating_sub(sizing_budget);
             // The shape is static, so an unlimited (or over-wide) budget has to
-            // be clamped to the room it leaves after the prompt. The work the
-            // request asks for is unchanged: generation still stops at EOS.
+            // be clamped to the room it leaves after the expanded prompt. The
+            // work the request asks for is unchanged: generation still stops at
+            // EOS.
             let admitted = requested_budget.min(capacity.saturating_sub(effective_prompt_len));
             if std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_none() {
                 println!(
@@ -1750,154 +1889,46 @@ fn generate_xla(
                 );
             }
             let eos = s.eos_token_ids().to_vec();
-            let phi4mm_media = mlxcel::models::get_model_type(model_path)?
-                == mlxcel::models::ModelType::Phi4MMVLM
-                && (audio_path.is_some() || !image_paths.is_empty());
-            if phi4mm_media {
-                #[cfg(not(feature = "xla-iree"))]
-                {
-                    let _ = (audio_path, prompt, tokenizer, image_paths);
-                    anyhow::bail!(
-                        "OpenXLA Phi4MM media input requires a build with the xla-iree feature"
-                    );
-                }
+            match &media {
                 #[cfg(feature = "xla-iree")]
-                {
-                    let mut tokenization_error = None;
-                    let normalized = mlxcel::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
-                        prompt,
-                        image_paths.len(),
-                        usize::from(audio_path.is_some()),
-                        |text, add_special| match tokenizer.encode(text, add_special) {
-                            Ok(tokens) => tokens.into_iter().map(|token| token as i32).collect(),
-                            Err(error) => {
-                                tokenization_error = Some(error.to_string());
-                                Vec::new()
-                            }
-                        },
-                    )
-                    .map_err(|error| anyhow!("Phi4MM prompt normalization failed: {error}"))?;
-                    if let Some(error) = tokenization_error {
-                        return Err(anyhow!("Phi4MM tokenization failed: {error}"));
-                    }
-                    let cancelled = std::sync::atomic::AtomicBool::new(false);
-                    let images = decode_xla_cli_images(image_paths)?;
-                    let device = std::env::var("MLXCEL_XLA_DEVICE")
-                        .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
-                    let mut producer = if images.is_empty() {
-                        mlxcel::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load(
-                            model_path,
-                            &device,
-                            s.context_capacity(),
-                        )
-                    } else {
-                        mlxcel::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load_multimodal(
-                            model_path,
-                            &device,
-                            s.context_capacity(),
-                        )
-                    }
-                    .map_err(anyhow::Error::msg)?;
-                    let prepared = if let Some(audio_path) = audio_path {
-                        let policy =
-                            mlxcel::multimodal::phi4mm_xla_audio::load_phi4mm_audio_policy(
-                                model_path,
-                            )
-                            .map_err(anyhow::Error::msg)?;
-                        let waveforms =
-                            mlxcel::audio::preprocess_wav_file(audio_path, policy, &cancelled)
-                                .map_err(|error| {
-                                    anyhow!("OpenXLA audio waveform preprocessing failed: {error}")
-                                })?;
-                        producer.prepare_media(waveforms, normalized.tokens, &images, &cancelled)
-                    } else {
-                        producer.prepare_images(normalized.tokens, &images, &cancelled)
-                    }
-                    .map_err(|error| {
-                        anyhow!("OpenXLA Phi4MM media preprocessing failed: {error}")
-                    })?;
-                    s.generate_prepared_greedy(&prepared, max_tokens, &eos)
-                        .map_err(|error| {
-                            anyhow!("OpenXLA Phi4MM media generation failed: {error}")
-                        })?
-                }
-            } else if let Some(audio_path) = audio_path {
-                ensure!(
-                    image_paths.is_empty(),
-                    "the loaded OpenXLA Gemma3n runtime has not qualified mixed image+audio requests"
-                );
-                #[cfg(feature = "xla-iree")]
-                {
-                    let preparer = mlxcel::audio::gemma3n::Gemma3nXlaAudioPreparer::from_model(
+                super::generate_xla_media::XlaCliMedia::Phi4mm(prepared) => s
+                    .generate_prepared_greedy(prepared, max_tokens, &eos)
+                    .map_err(|error| anyhow!("OpenXLA Phi4MM media generation failed: {error}"))?,
+                super::generate_xla_media::XlaCliMedia::Gemma3nAudio => {
+                    let audio_path = audio_path
+                        .ok_or_else(|| anyhow!("OpenXLA audio request lost its audio path"))?;
+                    super::generate_xla_media::generate_xla_gemma3n_audio(
+                        s,
                         model_path,
-                        s.context_capacity(),
+                        prompt_tokens,
                         tokenizer,
-                    )
-                    .map_err(|error| anyhow!("OpenXLA audio configuration failed: {error}"))?
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "the loaded OpenXLA model/runtime bundle does not support audio input"
-                        )
-                    })?;
-                    let cancelled = std::sync::atomic::AtomicBool::new(false);
-                    let waveforms = mlxcel::audio::preprocess_wav_file(
                         audio_path,
-                        preparer.policy(),
-                        &cancelled,
-                    )
-                    .map_err(|error| anyhow!("OpenXLA audio preprocessing failed: {error}"))?;
-                    let prepared_input = preparer
-                        .prepare(
-                            &mlxcel::audio::gemma3n::Gemma3nAudioFeatureExtractor::new(),
-                            waveforms,
-                            prompt_tokens.to_vec(),
-                            &cancelled,
-                        )
-                        .map_err(|error| {
-                            anyhow!("OpenXLA audio feature preparation failed: {error}")
-                        })?;
-                    let mut runtime = s
-                        .load_gemma3n_audio(
-                            prepared_input.input.frame_bucket(),
-                            prepared_input.clips,
-                        )
-                        .map_err(|error| anyhow!("OpenXLA audio runtime load failed: {error}"))?;
-                    let prepared = runtime
-                        .invoke_prepared(
-                            &prepared_input.input,
-                            prepared_input.token_ids,
-                            preparer.audio_token_id(),
-                        )
-                        .map_err(|error| anyhow!("OpenXLA audio execution failed: {error}"))?;
-                    s.generate_gemma3n_prepared_greedy(prepared.request(), max_tokens, &eos)
-                        .map_err(|error| anyhow!("OpenXLA audio generation failed: {error}"))?
+                        max_tokens,
+                        &eos,
+                    )?
                 }
-                #[cfg(not(feature = "xla-iree"))]
-                {
-                    let _ = (audio_path, tokenizer);
-                    anyhow::bail!("OpenXLA audio execution requires the xla-iree feature");
+                super::generate_xla_media::XlaCliMedia::Text => {
+                    let (tokens, timing) = s
+                        .generate_streaming_greedy_timed(prompt_tokens, max_tokens, &eos, |_| true)
+                        .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?;
+                    xla_timing = Some(timing);
+                    tokens
                 }
-            } else if image_paths.is_empty() {
-                let (tokens, timing) = s
-                    .generate_streaming_greedy_timed(prompt_tokens, max_tokens, &eos, |_| true)
-                    .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?;
-                xla_timing = Some(timing);
-                tokens
-            } else {
-                ensure!(
-                    s.supports_images(),
-                    "the loaded OpenXLA model/runtime bundle does not support image input"
-                );
-                let images = decode_xla_cli_images(image_paths)?;
-                s.generate_images_greedy(prompt_tokens, &images, max_tokens)
-                    .map_err(|error| anyhow!("OpenXLA image generation failed: {error}"))?
+                super::generate_xla_media::XlaCliMedia::Image { request, .. } => {
+                    ensure!(
+                        s.supports_images(),
+                        "the loaded OpenXLA model/runtime bundle does not support image input"
+                    );
+                    s.generate_prepared_image_greedy(request, max_tokens)
+                        .map_err(|error| anyhow!("OpenXLA image generation failed: {error}"))?
+                }
             }
         }
         // `select_backend()` returned the XLA backend, so its `create_session`
         // yields an XLA session; any other variant would be a wiring bug.
         _ => anyhow::bail!("the OpenXLA backend did not produce an XLA session"),
     };
-    let total_time = start_time.elapsed();
+    let total_time = start_time.elapsed() + preparation_time;
     let generated_len = tokens.len();
     if let Some(timing) = xla_timing {
         // The OpenXLA session's decode window already contains the first
@@ -2040,15 +2071,11 @@ pub(super) fn run_generation_mode(
                 );
             }
             // issue #1351: a DFlash drafter paired with a target that has an
-            // offline DFlash arm (Laguna), explicit or auto-detected alike.
+            // offline DFlash arm (Laguna, Inkling 2), explicit or auto-detected
+            // alike.
+            // The multimodal refusal is per target there: Inkling 2 (#3374)
+            // prefills an image prompt from its merged embeddings.
             OfflineDraftRoute::Dflash => {
-                if vlm_embeddings.is_some() {
-                    return Err(anyhow!(
-                        "--draft-kind dflash does not support multimodal input in the offline \
-                         `mlxcel generate` path; rerun with a text-only prompt, or omit \
-                         --draft-model"
-                    ));
-                }
                 return super::generate_dflash::run_offline_dflash(
                     model,
                     draft_model_path,
@@ -2057,6 +2084,7 @@ pub(super) fn run_generation_mode(
                     sampling_config,
                     block_size as usize,
                     token_bias,
+                    vlm_embeddings,
                 );
             }
             // #2757: an ordinary full model drafting on the engine's
@@ -2613,9 +2641,9 @@ fn run_offline_mtp(
 
     // Inkling exactness gate (#1549): the same single call the server's
     // `mtp_capable_target` makes. No static kernel prerequisite; the measured
-    // block-vs-chain probe is the whole condition. On an M3 Ultra it declines
-    // even after the `qmv_wide` retry, so MTP there needs
-    // `MLXCEL_MTP_ALLOW_INEXACT=1`.
+    // block-vs-chain probe is the whole condition. Before #3409 it declined
+    // on an M3 Ultra even after the `qmv_wide` retry; with the row-invariant
+    // verify block it passes on the bf16 0.6B checkpoint there.
     let inkling_text = match model {
         LoadedModel::Inkling(inkling) => Some(inkling),
         LoadedModel::InklingVLM(vlm) => Some(&vlm.text),
@@ -2775,7 +2803,7 @@ fn run_offline_mtp(
         // internal fallback cache slot, the documented offline / single-row
         // CLI shape.
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => drive_offline_mtp(
-            mlxcel::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(qwen, None),
+            mlxcel::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::fallback(qwen),
             drafter,
             prompt_tokens,
             max_tokens,
@@ -2784,7 +2812,7 @@ fn run_offline_mtp(
             block_size,
         ),
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => drive_offline_mtp(
-            mlxcel::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(vlm, None),
+            mlxcel::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::fallback(vlm),
             drafter,
             prompt_tokens,
             max_tokens,
@@ -2932,6 +2960,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         &super::cli_server::cli_flag_was_set,
     );
     server.adapter = args.model.adapter.clone();
+    server.reasoning_effort = args.generation.reasoning_effort.clone();
     if let Some((draft_model, draft_kind)) = repl_drafter(args) {
         server.draft_model = Some(draft_model);
         server.draft_kind = draft_kind;
@@ -2960,6 +2989,27 @@ fn repl_drafter(args: &GenerateArgs) -> Option<(std::path::PathBuf, Option<Strin
     Some((draft_model, args.speculative.draft_kind.clone()))
 }
 
+/// Refuse `--audio` for a checkpoint that has no audio encoder (Inkling 2),
+/// before its weights load.
+///
+/// Without this the run rendered the chat template, which raises its own
+/// `Inkling 2 does not accept audio input`, and surfaced that as a template
+/// error. The text is the one the server answers with
+/// ([`mlxcel::server::INKLING2_AUDIO_REFUSAL`]), so both fronts agree.
+/// `model_path` is a resolved local directory; a path whose type cannot be
+/// read is left to the later load to report (issue #3376).
+fn refuse_audio_without_encoder(model_path: &Path, has_audio: bool) -> Result<()> {
+    if has_audio
+        && matches!(
+            mlxcel::models::get_model_type(model_path),
+            Ok(mlxcel::models::ModelType::Inkling2VLM)
+        )
+    {
+        anyhow::bail!("{}", mlxcel::server::INKLING2_AUDIO_REFUSAL);
+    }
+    Ok(())
+}
+
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // Epic #92 / issue #96: no `-p/--prompt` means "interactive chat". Route to
     // the reusable REPL entry point before any one-shot-only setup. The REPL
@@ -2980,6 +3030,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
             args.model.models_dir.as_deref(),
             args.model.revision.as_deref(),
         )?;
+        refuse_audio_without_encoder(&resolved, args.generation.audio.is_some())?;
         if super::generate_voicechat::is_voicechat_checkpoint(&resolved) {
             ensure!(
                 args.generation.audio.is_some(),
@@ -3090,6 +3141,10 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             .with_context(|| format!("resolving --draft-model {}", draft.display()))?,
         );
     }
+
+    // `--audio` for a family with no audio encoder is refused before anything
+    // loads, with the message the server gives (issue #3376).
+    refuse_audio_without_encoder(&args.model.model, args.generation.audio.is_some())?;
 
     // Nemotron VoiceChat (issue #1374) is a full-duplex speech model with
     // its own timeline loop: `-p` is its system prompt and the output length
@@ -3257,6 +3312,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             video_frame_groups,
             videos: cli_video_content_part_count(&args.model.model, args.generation.video.len()),
             audios: usize::from(args.generation.audio.is_some()),
+            reasoning_effort: args.generation.reasoning_effort.clone(),
         },
     )?;
     let mut prompt_tokens = tokenize_prompt(&tokenizer, &prompt)?;
@@ -3356,60 +3412,23 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     {
         println!("Boundary-V: protecting {boundary} layer(s) on each end at Fp16");
     }
-    let kv_cache_mode_suffix = kv_cache_mode_banner_suffix(
-        requested_kv_cache_mode,
-        kv_cache_mode,
-        resolve_cli_pipeline_num_layers(&args.model.model).unwrap_or(0),
-    );
-
-    match kv_cache_mode {
-        KVCacheMode::Int8 => {
-            // The same flag selects two codecs: the affine group-64 latent on
-            // an absorbed MLA cache (issue #3155), per-token absmax elsewhere.
-            let codec = match mlxcel::cli::mla_latent_option::model_latent_bits(
-                kv_cache_mode,
-                std::path::Path::new(&args.model.model),
-            ) {
-                Some(bits) => mlxcel::cli::mla_latent_option::latent_codec_label(bits),
-                None => "per-token absmax quantization".to_string(),
-            };
-            println!("KV cache mode: int8 ({codec}){kv_cache_mode_suffix}");
-        }
-        KVCacheMode::Turbo4Asym => {
-            println!(
-                "KV cache mode: fp16+turbo4 (asymmetric Fp16-K + Turbo4-V, ~26% KV savings){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Turbo4 => {
-            // Reached only when the family is on
-            // `ALLOWED_SYMMETRIC_TURBO_FAMILIES`: a non-allowlisted request was
-            // already resolved to Turbo4Asym above, which is why this line no
-            // longer describes a fallback that had never been performed.
-            println!(
-                "KV cache mode: turbo4 (symmetric Turbo4-K + Turbo4-V, ~73% KV savings; \
-                 this family is on the symmetric-Turbo4 allowlist){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Turbo4Delegated => {
-            println!(
-                "KV cache mode: turbo4-delegated (Fp16-K + Turbo4-V with hot/cold split, \
-                 ~26% KV savings + 97-100% FP16 decode speed at long context){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Turbo3Asym => {
-            println!(
-                "KV cache mode: fp16+turbo3 (asymmetric Fp16-K + Turbo3-V, \
-                 ~5.1x total KV savings){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Fp16 => {
-            // Fp16 is the default and normally announces nothing. When it is
-            // the *result* of a substitution the operator asked for something
-            // else, so name the mode actually in force (issue #1350). The
-            // reason was printed to stderr by
-            // `resolve_and_announce_kv_cache_mode`.
-            println!("KV cache mode: fp16{kv_cache_mode_suffix}");
-        }
+    // An attention-free model on the OpenXLA backend has no KV cache, so the
+    // banner would claim a mode for layers that do not exist (issue #3339).
+    // The pipeline and OpenXLA paths load no `LoadedModel`, so they print now
+    // with the config's layer count; every other path prints after the load,
+    // from the model's own per-cache storage (issue #3378).
+    let banner_before_load = pipeline_requested || select_backend().name() == "xla";
+    let print_banner = !xla_model_has_no_kv_cache(&args.model.model);
+    if print_banner && banner_before_load {
+        print_kv_cache_mode_banner(
+            &args,
+            requested_kv_cache_mode,
+            kv_cache_mode,
+            BannerLayers {
+                num_layers: resolve_cli_pipeline_num_layers(&args.model.model).unwrap_or(0),
+                storage_modes: None,
+            },
+        );
     }
 
     // OpenXLA backend (issue #449): the engine drives generation from its own
@@ -3485,6 +3504,18 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         )?
     } else {
         let (model, _loaded_tokenizer) = load_generation_model(&args, preflight_estimate.as_ref())?;
+        if print_banner && !banner_before_load {
+            let storage_modes = LanguageModel::kv_cache_storage_modes(&model);
+            print_kv_cache_mode_banner(
+                &args,
+                requested_kv_cache_mode,
+                kv_cache_mode,
+                BannerLayers {
+                    num_layers: LanguageModel::num_layers(&model),
+                    storage_modes: storage_modes.as_deref(),
+                },
+            );
+        }
         // --output-audio (issue #665): fail before generation when the loaded
         // model carries no talker/code2wav speech stack.
         if args.generation.output_audio.is_some()

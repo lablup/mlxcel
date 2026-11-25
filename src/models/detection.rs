@@ -423,6 +423,22 @@ pub(crate) fn checkpoint_weight_prefix_scan(model_path: &Path, prefixes: &[&str]
     )
 }
 
+/// An Inkling 2 directory whose only tensors are the MTP head
+/// (`mtp.safetensors`, `layers.*` / `fuse_weight` keys): no decoder layer under
+/// any published layout. An unreadable directory is not MTP-only, so the
+/// loader reports the real problem.
+pub(crate) fn inkling2_dir_is_mtp_only(model_path: &Path) -> bool {
+    if !model_path.join("mtp.safetensors").is_file() {
+        return false;
+    }
+    let has_target = mlxcel_core::weights::dir_has_tensor_name(model_path, |key| {
+        key.starts_with("model.llm.layers.")
+            || key.starts_with("model.language_model.layers.")
+            || key.starts_with("language_model.model.layers.")
+    });
+    matches!(has_target, Ok(false))
+}
+
 pub(crate) fn inkling_has_vision_weights(model_path: &Path) -> bool {
     checkpoint_has_weight_prefix(model_path, "model.visual.")
 }
@@ -1006,6 +1022,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // `deepseek_v3` (#2384).
         "deepseek_v3" | "kimi_k2" | "joyai_llm_flash" => Ok(ModelType::DeepSeekV3),
         "deepseek_v32" | "deepseek_v3.2" => Ok(ModelType::DeepSeekV32),
+        "hy_v4" => Ok(ModelType::HyV4),
         "deepseek_v4" => Ok(ModelType::DeepSeekV4),
         "xing4_0" => Ok(ModelType::Xing40),
         "dots1" => Ok(ModelType::Dots1),
@@ -1093,6 +1110,18 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "lfm2" => Ok(ModelType::Lfm2),
         "lfm2_vl" | "lfm2-vl" => Ok(ModelType::Lfm2VL),
         "lfm2_moe" => Ok(ModelType::Lfm2Moe),
+        // A directory holding only the native `mtp.safetensors` head (no
+        // decoder shards) is a drafter, which Inkling 2 does not support.
+        "inkling2" | "inkling2_loop" => {
+            if inkling2_dir_is_mtp_only(model_path) {
+                return Err(anyhow::anyhow!(
+                    "{} holds only an Inkling 2 MTP head (mtp.safetensors), not a target model; \
+                     Inkling 2 speculative decoding is not supported",
+                    model_path.display()
+                ));
+            }
+            Ok(ModelType::Inkling2VLM)
+        }
         "inkling_mm_model" | "inkling" => {
             if has_vision_config(v) && probes.inkling_has_vision_weights(model_path, v)? {
                 Ok(ModelType::InklingVLM)
@@ -1267,11 +1296,42 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
             "clef is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model` (checkpoint {})",
             model_path.display()
         )),
+        // A split-out MTP drafter (`gemma4_assistant`, `gemma4_unified_assistant`,
+        // `qwen3_5_mtp`, ...) only runs bound to its target, through
+        // `--draft-model`. Name that instead of "Unsupported model type".
+        // Checked in the fall-through arm so it never changes how a config
+        // that loads today is routed.
+        _ if is_mtp_drafter_model_type(&model_type) => {
+            Err(mtp_drafter_not_standalone_error(model_path, model_type_raw))
+        }
         _ => Err(anyhow::anyhow!(
             "Unsupported model type: {}",
             model_type_raw
         )),
     }
+}
+
+/// Whether `model_type` is a speculative MTP drafter registered in
+/// [`mlxcel_core::drafter::drafter_kind_by_model_type`].
+fn is_mtp_drafter_model_type(model_type: &str) -> bool {
+    matches!(
+        mlxcel_core::drafter::drafter_kind_by_model_type().get(model_type),
+        Some(mlxcel_core::drafter::DrafterKind::Mtp)
+    )
+}
+
+/// Canonical error for "this directory is an MTP speculative drafter, not a
+/// model you can load standalone". The MTP counterpart of
+/// [`dflash_drafter_not_standalone_error`].
+fn mtp_drafter_not_standalone_error(model_path: &Path, model_type_raw: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{path} is an MTP speculative drafter checkpoint (model_type `{model_type_raw}`), \
+         not a standalone model. It predicts draft tokens from the hidden states of its \
+         target model and cannot generate on its own. Pass the target model to -m \
+         (for a Gemma 4 assistant, the matching Gemma 4 checkpoint) and pass this \
+         directory to --draft-model to use it for speculative decoding.",
+        path = model_path.display(),
+    )
 }
 
 /// Detect model type from config.json

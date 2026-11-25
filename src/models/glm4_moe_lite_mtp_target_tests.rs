@@ -677,3 +677,54 @@ fn glm4_moe_lite_last_row_logits_match_the_full_forward() {
         crate::models::last_row_logits_harness::TOKENS,
     );
 }
+
+/// The engine's token-only verify round (prompt lookup, a full-model
+/// drafter) calls the plain forward inside the speculative append scope. A
+/// block of 2 to 16 tokens there takes the row-wise verify forward the MTP
+/// gate probes (issue #3418); outside the scope, or with the mode off, the
+/// same call stays the classic multi-token forward.
+#[test]
+fn a_token_only_verify_block_takes_the_row_wise_verify_forward() {
+    use crate::models::mla_batched::ROW_INVARIANT_TEST_MODE;
+    use mlxcel_core::cache::DecodeLookaheadAppendScope;
+
+    let model = tiny_model();
+    let prompt = [3_i32, 5, 7, 2, 11, 6];
+    let block = [9_i32, 4, 13];
+    let prefilled = || {
+        let mut caches = model.make_caches();
+        let _ = model.forward(&ids(&prompt), &mut caches, None);
+        caches
+    };
+    let bytes = |logits: &MlxArray| mlxcel_core::array_to_raw_bytes(logits);
+
+    let mut verify_caches = prefilled();
+    let verify = bytes(&model.forward_verify(&ids(&block), &mut verify_caches).0);
+    let mut classic_caches = prefilled();
+    let classic = bytes(
+        &model
+            .forward_with_hidden(&ids(&block), &mut classic_caches)
+            .0,
+    );
+
+    let in_scope = |mode: Option<Option<bool>>| {
+        ROW_INVARIANT_TEST_MODE.with(|cell| cell.set(mode));
+        let mut caches = prefilled();
+        let logits = {
+            let _speculative = DecodeLookaheadAppendScope::enter();
+            model.forward(&ids(&block), &mut caches, None)
+        };
+        ROW_INVARIANT_TEST_MODE.with(|cell| cell.set(None));
+        bytes(&logits)
+    };
+    assert_eq!(in_scope(Some(Some(true))), verify, "kernel mode");
+    assert_eq!(in_scope(Some(Some(false))), verify, "verify mode");
+    assert_eq!(in_scope(Some(None)), classic, "mode off");
+
+    // Not a verify round: the classic forward, whatever the mode.
+    let mut caches = prefilled();
+    assert_eq!(
+        bytes(&model.forward(&ids(&block), &mut caches, None)),
+        classic
+    );
+}

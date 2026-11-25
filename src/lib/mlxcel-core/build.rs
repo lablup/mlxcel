@@ -165,6 +165,11 @@ fn main() {
         // only. Forwards `mlxcel::turbo::mla_absorbed_decode` into the
         // cxx-bridge ABI.
         .file("../mlxcelverse/kernels/mla_absorbed_decode.cpp")
+        // Inkling 2 Mini short convolution, attention head preparation and
+        // grouped expert matvec kernels (#3359), Metal only.
+        .file("../mlxcelverse/kernels/inkling2_kernels.cpp")
+        .file("../mlxcelverse/kernels/inkling2_grouped_experts.cpp")
+        .file("../mlxcelverse/kernels/row_invariant_matvec.cpp")
         // Fused Turbo4Delegated cold-V weighted-sum kernel
         // launcher. Reads the packed cold V directly so the dequantised
         // FP16 cold body never materialises in global memory; the host
@@ -489,6 +494,11 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/gelu_tanh_f32.cpp");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/mla_absorbed_decode.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/mla_absorbed_decode.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/inkling2_kernels.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/inkling2_kernels.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/inkling2_grouped_experts.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/row_invariant_matvec.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/row_invariant_matvec.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=MLX_ROCM_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=ROCM_PATH");

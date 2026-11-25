@@ -58,9 +58,18 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   Llama 4, Qwen 3, Gemma 3, Gemma 3n text/VLM, Gemma 4 text/VLM/Unified,
   Helium, Qwen3-MoE, Ministral 3, ExaOne 4, Mellum, Laguna, Step 3.5,
   Step 3.7 VLM text decode, AFMoE (Trinity), Kolibri-1, DeepSeek V4,
-  IQuestLoopCoder, and Inkling text/VLM. The latter five model-owned families batch projections and
+  IQuestLoopCoder, Inkling text/VLM, and Inkling 2 text/VLM. The latter six model-owned families batch projections and
   feed-forward operations while retaining sequence-local attention caches;
   Inkling stacks convolution tails and DeepSeek V4 updates pooling per row.
+  Inkling 2 (#3377) runs one forward over every row, including Mini's three
+  loop passes and their message controllers; only the attention core
+  (relative mask, sliding window, sink, log scaling) runs per row, and each
+  convolution stacks the rows' histories left-padded to the longest and hands
+  each row back the history its own forward keeps, so per-row trims stay
+  exact. Inkling 2 also batches a cohort of cold prompts in one padded
+  prefill: rows are right-padded and every mask and convolution is causal, and
+  a batched forward of more than one token keeps as many convolution rows as
+  it appends, so `trim_state` removes any row's padding exactly.
   AFMoE and Kolibri-1 keep their full-fused B=1 expert implementation per row when that
   kernel is active, while unsupported or disabled configurations retain the
   native whole-batch expert graph.
@@ -140,7 +149,7 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   index-augmented key-head count and could produce a K/V head-shape failure.
   Batched decode projects index keys and queries once for the full batch, then
   slices them by row after each row's cached prefill.
-  At startup the worker reports either `decode path: native batched forward` or `decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)` for every batching-capable model. Qwen 4 Exp and Muse Glimmer currently report the fallback because their serving decode-width paths still dispatch identified rows sequentially; an anonymous-batch or batched-prefill override does not make serving decode native.
+  At startup the worker reports either `decode path: native batched forward` or `decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)` for every batching-capable model. Qwen 4 Exp and Muse Glimmer currently report the fallback because their serving decode-width paths still dispatch identified rows sequentially; an anonymous-batch or batched-prefill override does not make serving decode native. Hy4 (`hy_v4`) reports it as well: its attention sinks rule out the shared batched MLA decode rows, so every attention step is per sequence (#2354).
 - `--max-batch-prefill 4`: batch up to 4 pending prompts into one prefill pass.
   Only families that opt into `supports_batched_prefill()` (Llama 3, Qwen 3,
   Qwen 3.5, and aliases such as Qwen 2.5) use it; others fall back to sequential
@@ -551,7 +560,8 @@ shared projections and MLPs, then update and attend through each request's
 ragged cache row. DeepSeek V3.2 and GLM MoE DSA likewise apply the DSA indexer
 selection independently to each row after the batched index projections. The model-owned families hold
 their per-sequence state in their own cache enums and attend through the same
-rule: Gemma 3's `Cache::attend` routes a global layer to `KVCache::attend` and
+rule, and so does the scheduler-owned `LayerState` Gemma 3 runs on since #3254
+([ADR 0010](adr/0010-scheduler-owned-sequence-state.md)): `LayerState::attend` routes a global layer to `KVCache::attend` and
 a sliding layer to `RotatingKVCache::attend` (whose write path stays
 `update_and_fetch`, where the #2182 decode undo log records every speculative
 write), and Llama 4's `Llama4Cache::attend` routes a chunked layer to
@@ -559,15 +569,17 @@ write), and Llama 4's `Llama4Cache::attend` routes a chunked layer to
 `cache::attend_batched_rows`, one attention per row through the row's own
 cache. No model reads `is_paged_backed()`, and the scheduler no longer builds a
 per-step `DecodeBatchContext`: `forward_batched_with_ids` takes the ids and the
-caches only, and the storage policy is whatever `CachePool` wired when the
-sequence was opened.
+caches only (`forward_layer_state` takes the rows' layer state for a
+scheduler-owned family), and the storage policy is whatever `CachePool` wired
+when the sequence was opened.
 
 - The pooled launch keys on `caches[0].is_paged_backed()` at an unmasked
   single-token step, so every batched caller (the synchronous step, the
   lookahead prime, `forward_batched`) reaches the fused launch the same way. A
   batch that mixes pool-backed and dense rows declines before it writes and
   runs each row through `attend` on its own storage.
-- Model-owned state is never pool-backed, so Gemma 3 and Llama 4 always take
+- Model-owned state is never pool-backed, and neither is scheduler-owned
+  layer state yet, so Gemma 3 and Llama 4 always take
   the dense rows of the table whichever `--decode-storage-backend` the server
   runs. The dense-pointer `paged_decode_attention_dense_compat` and
   `_rotating_compat` routes they used to select on the paged backend were
@@ -651,7 +663,16 @@ Recurrent and hybrid SSM / linear-attention families cannot safely reuse
 arbitrary KV blocks, so they keep the hybrid-SSM/APC exclusion. Baichuan-M1 is
 a dense family that joins this exclusion (#2567): its K/V convolution state is
 model-owned per sequence and a restored KV prefix would not carry it, so the
-whole-prefix store, APC and the KV handoff all decline it. Families that
+whole-prefix store, APC and the KV handoff all decline it. Since #3341 the
+exclusion list (`HYBRID_SSM_MODEL_TYPES`) also names Qwen 3.5 (`qwen3_5`,
+`qwen3_5_moe` and their `_text` spellings), Granite 4.0-H (`granitemoehybrid`),
+Falcon-H1 (`falcon_h1`) and PLaMo 2 (`plamo2`, `plamo2vl`). On the MLX backend
+this only turns APC off at startup: those families already keep their state
+outside the KV slice, so they never reached the block-hash store, and their
+snapshots and turn-boundary checkpoints do not read the APC flag. On the
+OpenXLA backend (`MLXCEL_BACKEND=xla`) a recurrent model gets no prompt-cache
+store at all (`Config::has_recurrent_state()` or the same list), because that
+engine has no state snapshot to restore. Families that
 opt into `supports_snapshot_reuse()` instead use a separate exact-prefix
 snapshot bucket: the scheduler copies the model-owned state (at the end of
 the prefill since #3040, or not at all for a chat turn whose history-boundary
@@ -672,7 +693,9 @@ The most common history edit, replacing or compacting the last user message, nee
 
 An edit further back needs the history boundary of an older turn, and a whole snapshot per turn does not fit: at 28K tokens one Qwen 3.5 / 3.8 snapshot is 1 to 1.8 GB, almost all of it attention KV. Turn-boundary state checkpoints (#3047, on by default for Qwen 3.5, Qwen3-Next and Qwen4-Exp) keep, at every history boundary, only what a longer snapshot cannot give back: the GatedDeltaNet state and convolution windows (and the PLE window and n-gram contexts on Qwen4-Exp), tens to a few hundred megabytes. The attention KV and the Qwen4-Exp QSA index rows for that prefix are the leading rows of the conversation's newest whole snapshot, so a request that edits an earlier turn restores the newest snapshot, cuts its attention layers back to the checkpoint with the same trim a speculative rollback uses, and installs the checkpoint's recurrent state. A whole snapshot that reaches further always wins. The rebuild is exact only when the newest snapshot's rows over the checkpoint were computed by the same sequences that produced the checkpoint, so every snapshot records which sequence computed each span of its rows (its lineage, inherited through every restore), and a checkpoint is only rebuilt over a snapshot whose lineage agrees over the checkpoint's length. Checkpoints have their own byte budget and LRU, separate from whole snapshots: by default 12 checkpoints of the model's recurrent state, capped at an eighth of the memory left after the model, or `MLXCEL_PROMPT_CACHE_STATE_CHECKPOINT_CAPACITY_BYTES` (`0` turns them off). When a snapshot leaves the store, the checkpoints of its conversation that no remaining snapshot can rebuild are dropped with it; the check looks only at that conversation, so its cost does not grow with other sessions' checkpoints (#3058). If the model still fails to rebuild a checkpoint, that checkpoint is discarded and the lookup is repeated without checkpoints, so the request adopts the best shorter whole snapshot instead of prefilling cold; the failed rebuild is not counted as a hit. Checkpoint bytes count in the store's `bytes` and `entries` (and the prompt-cache gauges), and their growth is refused under the same host-memory guardrail as whole snapshots. `/v1/cache/stats` also reports them separately as `state_checkpoint_*`.
 
-The sliding-window families (Gemma 3, Gemma 4, AFMoE) have the same problem in another form (#3255). Their whole snapshot cuts back to a shorter prefix only while every sliding ring is unwrapped (#1145), and past the window the rings have wrapped, so an edit before the end of the newest snapshot is a full miss. Their full-attention layers still truncate, so the part a longer snapshot cannot give back is the rings: a ring checkpoint keeps every sliding layer's ring at a history boundary. A ring captured right after a prefill piece holds the newest `window - 1` rows plus the whole piece, so on `gemma-4-12b-it` at the default 2,048-token chunk a checkpoint is up to 960 MiB (the window alone is 320 MiB), against about 1 GB for a whole snapshot at 14K tokens, and a restore takes the sliding layers from the checkpoint and the full-attention layers from the newest snapshot cut back, under the same donor and lineage rules. No checkpoint is stored while every ring is still unwrapped, since the whole snapshot truncates then. The default budget is 12 such checkpoints, sized from the window plus the prefill chunk and capped at an eighth of the memory left after the model. Ring checkpoints are off by default and turned on with `--ctx-checkpoints N` (`N > 0`), which also keeps the previous turn's restore point and caps a conversation at `N` state checkpoints; `--checkpoint-min-step M` sets the periodic checkpoint interval and the minimum spacing between state checkpoints. See [llama-server-compat.md](llama-server-compat.md) for the flags' precedence over the environment switches.
+Gemma 3 and Qwen 3.5 are scheduler-owned since #3254 ([ADR 0010](adr/0010-scheduler-owned-sequence-state.md)): their per-sequence state is a `LayerState` vector in the sequence's pool entry, and the snapshot, the truncating restore, the turn-boundary checkpoint and its rebuild are one implementation over that vector (`src/server/prompt_cache/state_snapshot.rs`) with the encoders the model-owned families use, so the tensors stored are the ones these two families stored before. Every other family in this section still copies its state through its own hooks.
+
+The sliding-window families (Gemma 3, Gemma 4, AFMoE) have the same problem in another form (#3255). Their whole snapshot cuts back to a shorter prefix only while every sliding ring is unwrapped (#1145), and past the window the rings have wrapped, so an edit before the end of the newest snapshot is a full miss. Their full-attention layers still truncate, so the part a longer snapshot cannot give back is the rings: a ring checkpoint keeps every sliding layer's ring at a history boundary. A ring captured right after a prefill piece holds the newest `window - 1` rows plus the whole piece, so on `gemma-4-12b-it` at the default 2,048-token chunk a checkpoint is up to 960 MiB (the window alone is 320 MiB), against about 1 GB for a whole snapshot at 14K tokens, and a restore takes the sliding layers from the checkpoint and the full-attention layers from the newest snapshot cut back, under the same donor and lineage rules. No checkpoint is stored while every ring is still unwrapped, since the whole snapshot truncates then. The default budget is 12 such checkpoints, sized from the window plus the prefill chunk and capped at an eighth of the memory left after the model. Ring checkpoints are off by default and turned on with `--ctx-checkpoints N` (`N > 0`), which also keeps the previous turn's restore point and caps each branch of a conversation at `N` state checkpoints (a regenerated turn forks the conversation, and a fork keeps up to `N` per branch, with the checkpoint byte budget as the bound across branches); `--checkpoint-min-step M` sets the periodic checkpoint interval and the minimum spacing between state checkpoints. See [llama-server-compat.md](llama-server-compat.md) for the flags' precedence over the environment switches.
 
 On the live-replies replay (M3 Ultra, `--turn-tokens 3072 --edit-turn 9`), an edit one turn back drops from 17.1 to 1.7 s TTFT on `qwen3.5-4b-4bit` at a 16 GB limit and from 87.0 to 7.9 s on `qwen3.8-27b-4bit` at 32 GB. An edit three turns back drops from 16.8 to 5.2 s and from 85.6 to 25.0 s. The checkpoints hold 151 MB and 449 MB, and the whole-snapshot budget is unchanged. Served completions match a run that held the whole snapshot byte for byte, and on `Qwen3.8-Flash-Next-OptiQ-2bit` all 16 match their cold runs; raw rows in [the #3047 replay](benchmark_results/hybrid-turn-state-checkpoints-replay-m3ultra-2026-11-15.md).
 

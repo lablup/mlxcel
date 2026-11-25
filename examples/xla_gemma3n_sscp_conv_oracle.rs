@@ -19,6 +19,9 @@
 //! boundary is F32 processor features -> BF16 input, BF16 checkpoint weights,
 //! a 3x3 contraction, and a materialized BF16 output.
 
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -287,6 +290,7 @@ fn schedule_outcomes(input: &[f32], weights: &[f32]) -> Vec<f32> {
 }
 
 fn main() -> Result<(), String> {
+    mlx_reference_policy::pin_mlx_tf32_disabled()?;
     let mlx = mlx_output()?;
     let iree = iree_output()?;
     if mlx.len() != OUTPUT_SHAPE.iter().product::<usize>()

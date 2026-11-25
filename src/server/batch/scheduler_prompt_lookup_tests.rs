@@ -147,7 +147,7 @@ fn scheduler_with_storage(
     sched
 }
 
-fn enqueue(
+pub(super) fn enqueue(
     sched: &mut BatchScheduler,
     prompt: &[i32],
     max_tokens: usize,
@@ -198,6 +198,7 @@ fn enqueue_with_sampling(
         logprobs: Default::default(),
         reasoning_budget: ReasoningBudgetOverride::InheritServerDefault,
         thinking_enter_block_on_start: false,
+        thinking_primed_close: None,
         reasoning_control: None,
         prompt_cache_ctx: None,
         structured: None,
@@ -319,7 +320,7 @@ fn completion(rx: &mpsc::Receiver<GenerateEvent>) -> crate::server::GenerationRe
 
 /// The Done result's prompt-lookup acceptance counters `(proposed,
 /// accepted)`, `None` when it reports no drafter.
-fn acceptance(rx: &mpsc::Receiver<GenerateEvent>) -> Option<(usize, usize)> {
+pub(super) fn acceptance(rx: &mpsc::Receiver<GenerateEvent>) -> Option<(usize, usize)> {
     acceptance_of(rx, mlxcel_core::drafter::DrafterKind::PromptLookup)
 }
 

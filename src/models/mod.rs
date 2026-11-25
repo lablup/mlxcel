@@ -24,6 +24,8 @@ pub(crate) mod batched_decode_harness;
 #[cfg(test)]
 pub(crate) mod deepstack_state_test_support;
 #[cfg(test)]
+mod dense_verify_block_tests;
+#[cfg(test)]
 mod last_row_logits_coverage_tests;
 #[cfg(test)]
 pub(crate) mod last_row_logits_harness;
@@ -62,16 +64,19 @@ pub(crate) mod embedding_sanitize;
 pub(crate) mod embedding_test_support;
 mod gemma3n_helpers;
 pub(crate) mod headless_llama;
-mod kv_ring_checkpoint;
-mod kv_snapshot;
+pub(crate) mod hybrid_snapshot;
+pub(crate) mod kv_ring_checkpoint;
+pub(crate) mod kv_snapshot;
 mod llama4_helpers;
 pub(crate) mod model_owned;
 pub mod multimodal_placeholders;
+pub mod pooled_model;
 pub(crate) mod qwen_mrope_state;
 pub(crate) mod recurrent_batch;
-mod recurrent_snapshot;
+pub(crate) mod recurrent_snapshot;
 pub mod registry;
 mod sanitize;
+mod sliding_hybrid_lm;
 #[cfg(test)]
 pub(crate) mod ssm_test_support;
 
@@ -226,6 +231,7 @@ pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_vl;
 pub mod inkling;
+pub mod inkling2;
 pub mod inkling_mtp_target;
 pub mod internlm2;
 pub mod internlm3;
@@ -310,6 +316,7 @@ pub mod qwen2_moe;
 pub mod qwen2_vl;
 pub mod qwen3;
 pub mod qwen3_5;
+pub(crate) mod qwen3_5_layer_state;
 pub mod qwen3_5_mtp_target;
 pub mod qwen3_embedding;
 pub mod qwen3_moe;
@@ -329,6 +336,10 @@ pub mod smollm3;
 pub mod solar_open;
 /// Runtime block-vs-chain exactness gate shared by the MTP speculative paths.
 pub mod speculative_exactness;
+pub mod speculative_exactness_diag;
+pub mod speculative_exactness_draws;
+#[cfg(test)]
+mod speculative_exactness_survey_tests;
 pub mod stablelm;
 pub mod starcoder2;
 pub mod step3p5;
@@ -363,6 +374,8 @@ pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v4::DeepSeekV4Model;
 pub use deepseek_v32::DeepSeekV32Model;
+pub use deepseek_v32::hy_v4;
+pub use deepseek_v32::hy_v4::HyV4Model;
 pub(crate) use detection::is_longcat_sparse_architecture;
 pub(crate) use detection::is_sequence_classification_architecture;
 pub(crate) use detection::vlm_has_vision;
@@ -411,6 +424,7 @@ pub use helium::HeliumModel;
 pub use hunyuan_moe::HunyuanMoeModel;
 pub use hunyuan_v1_dense::HunyuanV1DenseModel;
 pub use inkling::InklingModel;
+pub use inkling2::Inkling2Model;
 pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
 pub use iquestloopcoder_model::{IQuestLoopCoderModel, IQuestLoopCoderWrapper};
@@ -647,6 +661,9 @@ pub enum ModelType {
     DeepSeekV2,
     DeepSeekV3,
     DeepSeekV32,
+    /// Tencent Hy4 (DeepSeek-V3.2 MLA + DSA with identity hyper connections,
+    /// a gated sink attention and shared indexers).
+    HyV4,
     /// DeepSeek-V4 (HyperConnections, pooled-KV compression, HiSA, hash-routed MoE).
     DeepSeekV4,
     /// Xing4.0 (DeepSeek-V3 MLA + MoE inside a manifold hyper-connection stream).
@@ -776,6 +793,8 @@ pub enum ModelType {
     // Thinking Machines Inkling text and HMLP vision-language model
     Inkling,
     InklingVLM,
+    // Thinking Machines Inkling 2 (Small `inkling2`, looped Mini `inkling2_loop`)
+    Inkling2VLM,
 
     // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
     Plamo2,
@@ -948,6 +967,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekV2,
     ModelType::DeepSeekV3,
     ModelType::DeepSeekV32,
+    ModelType::HyV4,
     ModelType::DeepSeekV4,
     ModelType::Xing40,
     ModelType::Dots1,
@@ -1031,6 +1051,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Lfm2VL,
     ModelType::Inkling,
     ModelType::InklingVLM,
+    ModelType::Inkling2VLM,
     // Preferred Networks PLaMo 2
     ModelType::Plamo2,
     ModelType::Plamo2VLM,
@@ -1197,6 +1218,7 @@ impl ModelType {
             ModelType::DeepSeekV2 => ("DeepSeek v2", "DeepSeek"),
             ModelType::DeepSeekV3 => ("DeepSeek v3 / R1", "DeepSeek"),
             ModelType::DeepSeekV32 => ("DeepSeek v3.2", "DeepSeek"),
+            ModelType::HyV4 => ("Hy4", "Tencent"),
             ModelType::DeepSeekV4 => ("DeepSeek v4", "DeepSeek"),
             ModelType::Xing40 => (
                 "Xing4.0 (DeepSeek-V3 MoE, hyper-connection stream)",
@@ -1321,6 +1343,10 @@ impl ModelType {
             ),
             ModelType::InklingVLM => (
                 "Inkling VLM (HMLP vision + relative-bias MoE text)",
+                "Inkling",
+            ),
+            ModelType::Inkling2VLM => (
+                "Inkling 2 (attention-residual MoE, looped core in Mini, 2-D RoPE ViT)",
                 "Inkling",
             ),
 
@@ -1645,6 +1671,7 @@ mod metadata_tests {
             DeepSeekV2,
             DeepSeekV3,
             DeepSeekV32,
+            HyV4,
             DeepSeekV4,
             Xing40,
             Dots1,
@@ -1714,6 +1741,7 @@ mod metadata_tests {
             Lfm2VL,
             Inkling,
             InklingVLM,
+            Inkling2VLM,
             Plamo2,
             Plamo2VLM,
             GraniteMoeHybrid,

@@ -1,0 +1,25 @@
+{
+  "head": "8c7b4412d37b91807f8d688ba2f3febbc7a7e41f",
+  "binary_source_head": "8c7b4412d37b91807f8d688ba2f3febbc7a7e41f",
+  "server_ctx_size": 2048,
+  "checkpoint_revision": "e6389502a0b12cd8da894b395ba5bf7436873b16",
+  "model": "/tmp/epic564-models/falcon-h1",
+  "precision": "f32",
+  "device": "cuda",
+  "context_capacity_override": 256,
+  "max_batch_size": 4,
+  "http_mode": "both",
+  "scope": "CLI 40-token oracle and four concurrent completions versus separate 40-token displayed CLI references",
+  "gpu_guard": "caller must hold gpu-lock on GB10 or rocm_gpu_guard on ROCm",
+  "binary_sha256": {
+    "mlxcel": "471fe96921ec3b711ab4b3b54fe0fdcf44807fc9201d29bce2fe8f36d25a6755",
+    "mlxcel-server": "796c430ec586b634af6559825feed74c9e0038a2cbb5737ac3dde78ee99bcd80"
+  },
+  "environment": {
+    "MLXCEL_BACKEND": "xla",
+    "MLXCEL_XLA_DEVICE": "cuda",
+    "MLXCEL_XLA_PRECISION": "f32",
+    "MLXCEL_XLA_CONTEXT_CAPACITY": "256",
+    "MLXCEL_CACHE_DIR": "/tmp/3346-displayed-cuda-integrated-8c7b4412/cache"
+  }
+}

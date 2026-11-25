@@ -210,6 +210,18 @@ pub trait SpeculativeTarget {
         self.verify_forward_with_capture_layers(verify_input, caches, capture_layer_ids)
     }
 
+    /// Whether a verify block of ANY width from 1 up to the requested one
+    /// reproduces that many single-token decode steps bit for bit, so the
+    /// round loop may narrow the block, or run a one-row classic step with
+    /// no draft, without leaving classic decode's text (issue #3410). The
+    /// exactness probe runs at the requested width only, so a target says
+    /// this only when its forward is row-invariant by construction. `true`
+    /// lets [`super::width_policy::ExpectedThroughputWidth`] pick each
+    /// round's width; the default keeps the requested width.
+    fn exact_at_every_verify_width(&self) -> bool {
+        false
+    }
+
     /// Rewind the target's caches to the accepted-prefix position.
     ///
     /// Called only when `accepted < block_size - 1`. The implementation
@@ -620,6 +632,9 @@ pub struct DFlashDiagnostics {
     pub partial_accept_rounds: usize,
     /// Rounds with every proposal accepted.
     pub full_accept_rounds: usize,
+    /// Rounds the acceptance-aware width policy ran as a one-row classic
+    /// decode step, with no draft (issue #3410). Counted in [`Self::rounds`].
+    pub classic_steps: usize,
     /// Time spent binding/resetting the drafter at the start of the run.
     pub bind_reset_time_ms: f64,
     /// Time spent inside drafter `draft_block`.
@@ -806,8 +821,21 @@ impl DFlashGenerator {
                     BlockThroughputController::new(block_size_cfg, depth)
                 })
         };
+        // Acceptance-aware width (issue #3410): for a target exact at every
+        // width, each round's width maximizes expected tokens per measured
+        // millisecond, down to a one-row classic step when no draft pays.
+        let mut width_policy = (target.exact_at_every_verify_width()
+            && super::width_policy::adaptive_width_enabled()
+            && block_size_cfg > 1)
+            .then(|| {
+                width_controller = None;
+                super::width_policy::ExpectedThroughputWidth::new(block_size_cfg)
+            });
         let mut bonus = first_bonus;
+        // Committed target hidden rows the drafter has not consumed yet: the
+        // last drafted round's accepted rows, then one row per classic step.
         let mut hidden: UniquePtr<MlxArray> = first_hidden;
+        let mut classic_hidden: Vec<UniquePtr<MlxArray>> = Vec::new();
         // `emitted` counts ALL tokens the caller will see, including
         // `first_bonus`. The round-loop body has already advanced
         // `emitted` from 0 → 1 conceptually (the first bonus is
@@ -834,16 +862,76 @@ impl DFlashGenerator {
             }
             // Upstream: bs = min(block_total, max_tokens - emitted + 1)
             let remaining_plus_one = max_tokens - emitted + 1;
-            let bs = match &width_controller {
-                Some(controller) => controller.decide(remaining_plus_one),
-                None => block_size_cfg.min(remaining_plus_one),
+            let bs = match (&width_policy, &width_controller) {
+                (Some(policy), _) => policy.decide(remaining_plus_one),
+                (None, Some(controller)) => controller.decide(remaining_plus_one),
+                (None, None) => block_size_cfg.min(remaining_plus_one),
             };
-            if bs <= 1 {
+            // A one-row round is a classic decode step, which only the width
+            // policy asks for; otherwise a width of 1 drafts nothing.
+            let classic_step = bs == 1 && width_policy.is_some();
+            if bs <= 1 && !classic_step {
                 break;
             }
+
+            // ---- Classic steps ----
+            // The width policy found no draft width that pays: run classic
+            // decode steps back to back, pipelined, up to its next re-try
+            // of the drafter. Their hidden rows queue for that draft.
+            if classic_step {
+                let steps = width_policy
+                    .as_ref()
+                    .map_or(1, |p| p.classic_run_len())
+                    .min(max_tokens - emitted);
+                let run = super::classic_steps::run_classic_steps(
+                    target,
+                    caches,
+                    &capture_layer_ids,
+                    bonus,
+                    steps,
+                    eos_token_ids,
+                    cancel,
+                    logprobs_config,
+                );
+                diagnostics.verify_time_ms += run.elapsed_ms;
+                let ran = run.tokens.len();
+                diagnostics.rounds += ran;
+                diagnostics.classic_steps += ran;
+                diagnostics.zero_accept_rounds += ran;
+                self.accept_lens.extend(std::iter::repeat_n(0, ran));
+                if let Some(policy) = &mut width_policy {
+                    policy.record_classic_steps(ran, run.step_ms);
+                }
+                classic_hidden.extend(run.hidden);
+                if logprobs_config.enabled {
+                    logprobs.extend(run.logprobs);
+                }
+                self.generated_tokens.extend_from_slice(&run.tokens);
+                emitted += ran;
+                if let Some(last) = run.tokens.last() {
+                    bonus = *last;
+                }
+                if run.hit_eos || ran == 0 || emitted >= max_tokens {
+                    break;
+                }
+                if crate::memory::should_clear_cache_at(
+                    emitted,
+                    crate::memory::cache_clear_interval(),
+                ) {
+                    ffi::clear_memory_cache();
+                }
+                continue;
+            }
+
             let round_started = Instant::now();
 
             // ---- Draft ----
+            if !classic_hidden.is_empty() {
+                let mut rows: Vec<&MlxArray> = vec![&hidden];
+                rows.extend(classic_hidden.iter().map(|row| &**row));
+                hidden = crate::concatenate_many(&rows, 1);
+                classic_hidden.clear();
+            }
             let phase_start = Instant::now();
             let draft_tokens_arr = self.drafter.draft_block_array(
                 bonus,
@@ -997,6 +1085,9 @@ impl DFlashGenerator {
                     round_started.elapsed().as_secs_f64() * 1000.0,
                 );
             }
+            if let Some(policy) = &mut width_policy {
+                policy.record_round(bs, accepted, round_started.elapsed().as_secs_f64() * 1000.0);
+            }
             if hit_eos {
                 break;
             }
@@ -1024,21 +1115,21 @@ impl DFlashGenerator {
             // Full-accept keeps the already-built [1, bs, dim] tensor;
             // partial-accept slices to [1, accepted+1, dim] so the drafter's
             // cross-attention only sees the validated context.
-            hidden = if (accepted as i32) < (bs as i32) - 1 {
+            if (accepted as i32) < (bs as i32) - 1 {
                 let full_shape = ffi::array_shape(&full_hidden);
                 debug_assert_eq!(
                     full_shape.len(),
                     3,
                     "concat_hidden_for_drafter must return a 3D [1, bs, dim] tensor"
                 );
-                ffi::slice(
+                hidden = ffi::slice(
                     &full_hidden,
                     &[0, 0, 0],
                     &[full_shape[0], accepted as i32 + 1, full_shape[2]],
-                )
+                );
             } else {
-                full_hidden
-            };
+                hidden = full_hidden;
+            }
 
             // ---- Rollback (only on partial acceptance) ----
             //
@@ -1067,6 +1158,9 @@ impl DFlashGenerator {
             }
         }
 
+        if let Some(policy) = &width_policy {
+            tracing::debug!(policy = %policy.summary(), "DFlash acceptance-aware verify width");
+        }
         let decode_elapsed = decode_start.elapsed();
         diagnostics.emitted_tokens = self.generated_tokens.len();
         diagnostics.total_decode_time_ms = decode_elapsed.as_secs_f64() * 1000.0;
@@ -1105,7 +1199,7 @@ impl DFlashGenerator {
 /// the Gemma 4 MTP verify forward does before its per-position argmax — so
 /// that suppressed placeholder token ids cannot win a verify position and
 /// reintroduce the #350 leak.
-fn argmax_logits_to_array(logits: &MlxArray, seq_len: i32) -> UniquePtr<MlxArray> {
+pub(super) fn argmax_logits_to_array(logits: &MlxArray, seq_len: i32) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(logits);
     debug_assert!(shape.len() == 3, "expected [1, seq_len, vocab] logits");
     debug_assert_eq!(shape[1], seq_len, "logits seq dim must match block_size");
@@ -1149,7 +1243,7 @@ fn materialize_draft_and_target_tokens(
 ///
 /// Returns `None` when `logprobs_config.enabled` is false (the
 /// zero-overhead path — no slicing, no log-softmax).
-fn per_position_logprobs(
+pub(super) fn per_position_logprobs(
     logits: &MlxArray,
     target_tokens: &[i32],
     logprobs_config: &crate::sampling::LogprobsConfig,

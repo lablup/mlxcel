@@ -27,6 +27,7 @@ use mlxcel_core::cache::attend_batched;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::mla::{self, MlaAbsorbedProjections, MlaDecodePath, MlaGeometry, MlaLatentCache};
+use mlxcel_core::row_invariant::linear_whole_block as row_linear;
 use mlxcel_core::utils::{repeat_kv, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
@@ -419,11 +420,11 @@ impl MLAAttention {
 
         // Compute Q (direct or LoRA-style)
         let q = if let Some(ref q_proj) = self.q_proj {
-            q_proj.forward(x)
+            row_linear(q_proj, x)
         } else {
-            let q_a = self.q_a_proj.as_ref().unwrap().forward(x);
+            let q_a = row_linear(self.q_a_proj.as_ref().unwrap(), x);
             let q_a_norm = self.q_a_layernorm.as_ref().unwrap().forward(&q_a);
-            self.q_b_proj.as_ref().unwrap().forward(&q_a_norm)
+            row_linear(self.q_b_proj.as_ref().unwrap(), &q_a_norm)
         };
 
         let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads as i32, self.q_head_dim as i32]);
@@ -434,7 +435,7 @@ impl MLAAttention {
         let q_pe = slice_axis(&q, -1, self.qk_nope_head_dim as i32, -1);
 
         // Compute KV with compression
-        let compressed_kv = self.kv_a_proj_with_mqa.forward(x);
+        let compressed_kv = row_linear(&self.kv_a_proj_with_mqa, x);
         let compressed = slice_axis(&compressed_kv, -1, 0, self.kv_lora_rank as i32);
         let k_pe = slice_axis(&compressed_kv, -1, self.kv_lora_rank as i32, -1);
 
@@ -460,7 +461,7 @@ impl MLAAttention {
         mla::stats::record(MlaDecodePath::Decompressed);
 
         // Decompress KV
-        let kv = self.kv_b_proj.forward(&ckv);
+        let kv = row_linear(&self.kv_b_proj, &ckv);
         let kv = mlxcel_core::reshape(&kv, &[b, l, self.num_heads as i32, -1]);
         let kv = mlxcel_core::transpose_axes(&kv, &[0, 2, 1, 3]);
 
@@ -483,6 +484,25 @@ impl MLAAttention {
         // the superseded per-head K/V buffer inside the shared FP16 growth
         // rather than parking it in MLX's allocator cache for the rest of the
         // prefill piece (issues #3084, #3092).
+        // A verify block in the row-invariant scope (#3421) appends and
+        // attends one row at a time, as the decode steps it stands for do.
+        if b == 1 && mask.is_none() && l > 1 && mlxcel_core::row_invariant::in_verify_block() {
+            let rows: Vec<UniquePtr<MlxArray>> = (0..l)
+                .map(|r| {
+                    let (keys, values) = cache.update_and_fetch(
+                        slice_axis(&keys, 2, r, r + 1),
+                        slice_axis(&values, 2, r, r + 1),
+                    );
+                    let query = slice_axis(&queries, 2, r, r + 1);
+                    mlxcel_core::causal_attention(&query, &keys, &values, self.scale, 0.0, 0)
+                })
+                .collect();
+            let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
+            let output = mlxcel_core::concatenate_many(&refs, 2);
+            let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+            let output = mlxcel_core::reshape(&output, &[b, l, -1]);
+            return row_linear(&self.o_proj, &output);
+        }
         let (keys, values) = cache.update_and_fetch(keys, values);
 
         // Scaled dot product attention.
@@ -514,7 +534,7 @@ impl MLAAttention {
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
 
-        self.o_proj.forward(&output)
+        row_linear(&self.o_proj, &output)
     }
 
     /// Attention over the compressed-latent cache (issue #907).
@@ -552,6 +572,33 @@ impl MLAAttention {
 
         let mut view = MlaLatentCache::wrap(cache, geometry)
             .expect("supports() was checked immediately before this wrap");
+
+        // A verify block in the row-invariant scope (#3421) runs every row as
+        // its decode step does: append that row's latent, attend with the one
+        // query over everything stored so far. The rows count as one MLA call
+        // in the path stats.
+        if b == 1 && mask.is_none() && l > 1 && mlxcel_core::row_invariant::in_verify_block() {
+            let rows: Vec<UniquePtr<MlxArray>> = mla::stats::as_one_call(|| {
+                (0..l)
+                    .map(|r| {
+                        view.attend(
+                            &slice_axis(q_nope, 2, r, r + 1),
+                            &slice_axis(&q_pe, 2, r, r + 1),
+                            slice_axis(&ckv, 2, r, r + 1),
+                            slice_axis(&k_pe, 2, r, r + 1),
+                            proj,
+                            self.scale,
+                            None,
+                        )
+                    })
+                    .collect()
+            });
+            let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
+            let output = mlxcel_core::concatenate_many(&refs, 2);
+            let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+            let output = mlxcel_core::reshape(&output, &[b, l, -1]);
+            return row_linear(&self.o_proj, &output);
+        }
 
         // Cost-model gate (issue #2408): one query is always absorbed, and a
         // multi-token step behind a long enough cache can be cheaper absorbed
@@ -628,7 +675,7 @@ impl MLAAttention {
 
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
-        self.o_proj.forward(&output)
+        row_linear(&self.o_proj, &output)
     }
 
     fn forward_batched_decode(
@@ -805,10 +852,10 @@ struct DenseMLP {
 
 impl DenseMLP {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let gate = silu(&self.gate_proj.forward(x));
-        let up = self.up_proj.forward(x);
+        let gate = silu(&row_linear(&self.gate_proj, x));
+        let up = row_linear(&self.up_proj, x);
         let h = mlxcel_core::multiply(&gate, &up);
-        self.down_proj.forward(&h)
+        row_linear(&self.down_proj, &h)
     }
 }
 
@@ -820,9 +867,8 @@ struct MoEGate {
 
 impl MoEGate {
     fn forward(&self, x: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        // gates = x @ weight.T
-        let weight_t = mlxcel_core::transpose(&self.weight);
-        let gates = mlxcel_core::matmul(x, &weight_t);
+        // gates = x @ weight.T (row-invariant inside the model's scope, #3421)
+        let gates = mlxcel_core::row_invariant::dense(x, &self.weight);
         let scores = mlxcel_core::softmax(&gates, -1);
 
         // Top-k selection
@@ -923,7 +969,28 @@ struct MoEBlock {
 impl MoEBlock {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let (indices, scores) = self.gate.forward(x);
-        let y = self.experts.forward(x, &indices);
+        // Float experts multiply through `gather_mm`, which picks its kernel
+        // by the token count, so a verify block runs them one position at a
+        // time (#3421). The quantized gather is left whole.
+        let shape = mlxcel_core::array_shape(x);
+        let per_position = matches!(self.experts.gate_proj, SwitchLinear::Regular { .. })
+            && shape.len() == 3
+            && shape[1] > 1
+            && mlxcel_core::row_invariant::in_verify_block();
+        let y = if per_position {
+            let parts: Vec<UniquePtr<MlxArray>> = (0..shape[1])
+                .map(|i| {
+                    self.experts.forward(
+                        &slice_axis(x, 1, i, i + 1),
+                        &slice_axis(&indices, 1, i, i + 1),
+                    )
+                })
+                .collect();
+            let refs: Vec<&MlxArray> = parts.iter().map(|part| &**part).collect();
+            mlxcel_core::concatenate_many(&refs, 1)
+        } else {
+            self.experts.forward(x, &indices)
+        };
 
         // Weighted sum over experts: [B, L, k, D] * [B, L, k, 1] -> sum over k -> [B, L, D]
         let scores_expanded = mlxcel_core::expand_dims(&scores, -1);
@@ -1028,15 +1095,24 @@ impl DeepSeekV2Model {
 
         let mask = mask.map(mlxcel_core::copy);
 
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+        // Row-invariant products for this forward when
+        // `MLXCEL_MLA_ROW_INVARIANT` is on (#3421), as in the DeepSeek V3
+        // decoder: a verify block of the token-only round then equals the
+        // decode steps it stands for.
+        let _row_invariant =
+            super::mla_batched::row_invariant_scope(&mlxcel_core::array_shape(&h), mask.is_some());
+
+        for (i, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
             h = layer.forward(&h, mask.as_deref(), cache);
+            // Recorded only under the block-versus-chain diagnostic (#3421).
+            super::speculative_exactness_diag::capture(i, "mla", "layer output", &h);
         }
         let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
 
         if let Some(ref head) = self.lm_head {
-            head.forward(&h)
+            row_linear(head, &h)
         } else {
             self.embed_tokens.as_linear(&h)
         }
@@ -1563,3 +1639,7 @@ impl LanguageModel for DeepSeekV2Model {
 #[cfg(test)]
 #[path = "deepseek_v2_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "deepseek_v2_verify_tests.rs"]
+mod verify_tests;

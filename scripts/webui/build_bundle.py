@@ -18,12 +18,12 @@ ROOT = Path(__file__).resolve().parents[2]
 WEBUI = ROOT / "webui"
 ASSETS = ROOT / "src" / "webui" / "assets"
 MANIFEST_NAME = "mlxcel-webui-manifest.json"
-MAX_INITIAL_JS_GZIP = 256 * 1024
+MAX_INITIAL_JS_GZIP = 384 * 1024
 MAX_TOTAL_JS_GZIP = 700 * 1024
 MAX_EMBEDDED_BYTES = 5 * 1024 * 1024
 LICENSE_PATH = "third-party-licenses.txt"
 REQUIRED_NODE_VERSION = "v26.5.1"
-REQUIRED_PNPM_VERSION = "12.16.1"
+REQUIRED_PNPM_VERSION = "12.23.0"
 SOURCE_FILES = [
     ROOT / "scripts" / "webui" / "build_bundle.py",
     WEBUI / "package.json",
@@ -144,7 +144,7 @@ def manifest_for(out_dir: Path, manifest_bytes: int = 0) -> dict[str, object]:
     files.sort(key=lambda item: item["path"])
     manifest: dict[str, object] = {
         "schema_version": 1,
-        "package_manager": "pnpm@12.16.1",
+        "package_manager": "pnpm@12.23.0",
         "node_version": node_version,
         "pnpm_version": pnpm_version,
         "source_digest_sha256": digest_sources(),

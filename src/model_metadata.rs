@@ -199,6 +199,7 @@ macro_rules! for_each_model_registration {
             DeepSeekV2 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::DeepSeekV2Model::load, args: models::deepseek_v2::ModelArgs, weight_builder: models::DeepSeekV2Model::from_weights, wrap: LoadedModel::DeepSeekV2 } };
             DeepSeekV3 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::DeepSeekV3Model::load, args: models::deepseek_v3::DeepSeekV3Config, weight_builder: models::DeepSeekV3Model::from_weights, wrap: LoadedModel::DeepSeekV3 } };
             DeepSeekV32 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::DeepSeekV32Model::load, args: models::deepseek_v32::ModelArgs, weight_builder: models::DeepSeekV32Model::from_weights, wrap: LoadedModel::DeepSeekV32 } };
+            HyV4 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::HyV4Model::load, args: models::hy_v4::HyV4Config, weight_builder: models::HyV4Model::from_weights, wrap: LoadedModel::HyV4 } };
             DeepSeekV4 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::DeepSeekV4Model::load, args: models::deepseek_v4::ModelArgs, weight_builder: models::DeepSeekV4Model::from_weights, wrap: LoadedModel::DeepSeekV4 } };
             Xing40 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Xing40Model::load, args: models::xing4_0::Xing40Config, weight_builder: models::Xing40Model::from_weights, wrap: LoadedModel::Xing40 } };
             Dots1 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Dots1Model::load, args: models::dots1::ModelArgs, weight_builder: models::Dots1Model::from_weights, wrap: LoadedModel::Dots1 } };
@@ -264,6 +265,7 @@ macro_rules! for_each_model_registration {
             Lfm2Moe => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             Inkling => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             InklingVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Inkling VLM cannot be loaded with LoRA adapters yet") };
+            Inkling2VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Inkling 2 cannot be loaded with LoRA adapters yet") };
             Plamo2 => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             GraniteMoeHybrid => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             NemotronH => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };

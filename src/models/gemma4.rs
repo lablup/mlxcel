@@ -26,8 +26,6 @@
 
 #[path = "gemma4_batched.rs"]
 mod batched;
-#[path = "gemma4_probe.rs"]
-mod probe_trace;
 #[path = "gemma4_attention.rs"]
 mod verify_attention;
 #[path = "gemma4_verify_rows.rs"]
@@ -40,11 +38,13 @@ use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::kv_ring_checkpoint;
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
+use crate::models::speculative_exactness_diag as probe_trace;
 use crate::models::switch_layers::{SwitchLinear, gather_sort};
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{
@@ -285,6 +285,10 @@ impl TextConfig {
     /// by the existing CUDA policy or the measured active Metal path. Buffered
     /// chronological keys and batched full attention do not reproduce
     /// classic decode's physical-ring reduction and maskless M=1 dispatch.
+    /// The 26B A4B geometry (16 / 8 / 2 heads) joins on the active Metal path:
+    /// once its routed experts run per position, the batched block's
+    /// attention is what still parts from the chain (issue #3418,
+    /// `docs/benchmark_results/speculative-exactness-followup-m3ultra-2026-11-25.md`).
     /// The 12B Metal localization and staged correction are recorded in
     /// `docs/benchmark_results/versions/v0.8.0.md#gemma4-12b-mtp-exactness-m1-ultra-2026-10-15`.
     pub(crate) fn mtp_requires_linear_singleton(&self) -> bool {
@@ -311,18 +315,23 @@ impl TextConfig {
                 && self.head_dim == 256
                 && self.global_head_dim == Some(512)
         };
+        // 26B A4B (16 / 8 / 2 heads): measured on Metal only (issue #3418).
+        // With the routed experts split per position, the narrow-kernel
+        // divergence moved to the attention output of the batched block.
         geometry(32, 16, 4)
             || ((cuda_available || (metal_available && default_is_gpu)) && geometry(16, 8, 1))
+            || (metal_available && default_is_gpu && geometry(16, 8, 2))
     }
 
     pub(crate) fn mtp_probe_prompt_lengths(&self) -> Vec<usize> {
         // Preserve the original three short draws for other Gemma variants.
         // The long buffered draw validates the measured 31B and 12B corrections.
-        let mut lengths = vec![8; 3];
-        if self.mtp_requires_linear_singleton() {
-            lengths.push(self.sliding_window.saturating_add(32).min(1536));
-        }
-        lengths
+        // Through the shared plan, so `MLXCEL_MTP_PROBE_LONG_CONTEXT` moves
+        // this family's long draw like every other's (#3409).
+        let long = self
+            .mtp_requires_linear_singleton()
+            .then(|| self.sliding_window.saturating_add(32).min(1536));
+        crate::models::speculative_exactness_draws::prompt_lengths(8, 3, long)
     }
 
     fn group_size(&self) -> i32 {
@@ -1110,7 +1119,58 @@ pub struct Experts {
     switch_geglu: SwitchGeGLU,
 }
 
+/// Whether an MTP verify block runs the routed experts one position at a
+/// time (issue #3418). On by default; `MLXCEL_GEMMA4_MOE_VERIFY_PER_POSITION=0`
+/// restores the block-wide expert product, which is not byte-identical to
+/// single-token decode, so the exactness probe then declines the drafter.
+fn moe_verify_per_position_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("MLXCEL_GEMMA4_MOE_VERIFY_PER_POSITION")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("0" | "false" | "off" | "no")
+        )
+    })
+}
+
 impl Experts {
+    /// [`Self::forward`] for a `[1, K, D]` MTP verify block: every position
+    /// alone, so each takes the kernel its single-token decode step takes.
+    ///
+    /// `forward` picks its kernel by the token count (the fused GeGLU kernel
+    /// for one token, the compiled `gather_qmm` graph below 64 routed pairs,
+    /// the sorted gather from there), and the three do not agree bit for bit,
+    /// which is what kept the 26B A4B checkpoint out of the exactness probe
+    /// (issue #3418). A block of K tokens reads K sets of routed experts
+    /// either way, so splitting it costs kernel launches, not weight reads.
+    ///
+    /// Used by: `DecoderLayer::ffn_branch` inside an MTP verify block.
+    pub(crate) fn forward_verify_block(
+        &self,
+        x: &MlxArray,
+        top_k_indices: &MlxArray,
+        top_k_weights: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        if shape[0] != 1 || shape[1] < 2 || !moe_verify_per_position_enabled() {
+            return self.forward(x, top_k_indices, top_k_weights);
+        }
+        let parts: Vec<_> = (0..shape[1])
+            .map(|i| {
+                self.forward(
+                    &slice_axis(x, 1, i, i + 1),
+                    &slice_axis(top_k_indices, 1, i, i + 1),
+                    &slice_axis(top_k_weights, 1, i, i + 1),
+                )
+            })
+            .collect();
+        let refs: Vec<&MlxArray> = parts.iter().map(|p| &**p).collect();
+        mlxcel_core::concatenate_many(&refs, 1)
+    }
+
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
@@ -2942,6 +3002,7 @@ impl DecoderLayer {
             &mut timer,
             capture_probe,
             layer_idx,
+            mtp_verify,
         );
         (h, stored_kv)
     }
@@ -2949,7 +3010,9 @@ impl DecoderLayer {
     /// Everything after self-attention: post-attention norm and residual, the
     /// feed-forward branch, the optional per-layer input gate and the layer
     /// scalar. Shared by the ordinary forward and the per-batch-row verify
-    /// forward (issue #2190), which calls it once per row.
+    /// forward (issue #2190), which calls it once per row. `verify_block`
+    /// says `x` is a `[1, K, D]` MTP verify block (issue #3418).
+    #[allow(clippy::too_many_arguments)]
     fn finish_layer(
         &self,
         x: &MlxArray,
@@ -2958,13 +3021,19 @@ impl DecoderLayer {
         timer: &mut SubopTimer,
         capture_probe: bool,
         layer_idx: usize,
+        verify_block: bool,
     ) -> UniquePtr<MlxArray> {
         let h_attn = self.post_attention_layernorm.forward(h_attn);
         timer.tick("post_attention_layernorm", &h_attn);
         let after_attn = mlxcel_core::add(x, &h_attn);
         timer.tick("attn_residual_add", &after_attn);
 
-        let ffn_out = self.ffn_branch(&after_attn, timer);
+        let ffn_out = self.ffn_branch(
+            &after_attn,
+            timer,
+            capture_probe.then_some(layer_idx),
+            verify_block,
+        );
         if capture_probe {
             probe_trace::capture(layer_idx, &self.layer_type, "MLP output", &ffn_out);
         }
@@ -3049,12 +3118,28 @@ impl DecoderLayer {
     /// encoder/canvas forwards (issue #217) reuse the identical op sequence;
     /// the hot autoregressive path calls this with its own timer and is
     /// byte-identical to the pre-extraction code.
-    fn ffn_branch(&self, after_attn: &MlxArray, timer: &mut SubopTimer) -> UniquePtr<MlxArray> {
+    fn ffn_branch(
+        &self,
+        after_attn: &MlxArray,
+        timer: &mut SubopTimer,
+        probe: Option<usize>,
+        verify_block: bool,
+    ) -> UniquePtr<MlxArray> {
+        // `verify_block` marks a `[1, K, D]` MTP verify block, whose routed
+        // experts run per position to match single-token decode. `probe` is the layer index when the exactness probe is tracing
+        // (issue #3418): each MoE product is recorded so a block that parts
+        // from the chain names the product, not only "MLP output".
+        let trace = |op: &'static str, tensor: &MlxArray| {
+            if let Some(layer_idx) = probe {
+                probe_trace::capture(layer_idx, &self.layer_type, op, tensor);
+            }
+        };
         if let (Some(router), Some(experts)) = (&self.router, &self.experts) {
             let h1 = self.pre_feedforward_layernorm.forward(after_attn);
             timer.tick("pre_ffn_ln_shared_mlp", &h1);
             let h1 = self.mlp.forward(&h1);
             timer.tick("shared_mlp", &h1);
+            trace("MoE shared MLP", &h1);
             let h1 = self
                 .post_feedforward_layernorm_1
                 .as_ref()
@@ -3064,14 +3149,21 @@ impl DecoderLayer {
 
             let (top_k_indices, top_k_weights) = router.forward(after_attn);
             timer.tick("router", &top_k_indices);
+            trace("MoE router indices", &top_k_indices);
+            trace("MoE router weights", &top_k_weights);
             let h2 = self
                 .pre_feedforward_layernorm_2
                 .as_ref()
                 .expect("Missing Gemma4 MoE pre_feedforward_layernorm_2")
                 .forward(after_attn);
             timer.tick("pre_moe_ln", &h2);
-            let h2 = experts.forward(&h2, &top_k_indices, &top_k_weights);
+            let h2 = if verify_block {
+                experts.forward_verify_block(&h2, &top_k_indices, &top_k_weights)
+            } else {
+                experts.forward(&h2, &top_k_indices, &top_k_weights)
+            };
             timer.tick("experts", &h2);
+            trace("MoE experts", &h2);
             let h2 = self
                 .post_feedforward_layernorm_2
                 .as_ref()
@@ -3080,6 +3172,7 @@ impl DecoderLayer {
             timer.tick("post_moe_ln", &h2);
             let combined = mlxcel_core::add(&h1, &h2);
             timer.tick("moe_shared_add", &combined);
+            trace("MoE combine", &combined);
             combined
         } else {
             let h_norm = self.pre_feedforward_layernorm.forward(after_attn);
@@ -3114,7 +3207,7 @@ impl DecoderLayer {
         let h_attn = self.post_attention_layernorm.forward(&h_attn);
         let after_attn = mlxcel_core::add(x, &h_attn);
 
-        let ffn_out = self.ffn_branch(&after_attn, &mut timer);
+        let ffn_out = self.ffn_branch(&after_attn, &mut timer, None, false);
         let ffn_out = self.post_feedforward_layernorm.forward(&ffn_out);
         let after_ffn = mlxcel_core::add(&after_attn, &ffn_out);
 
@@ -3141,7 +3234,7 @@ impl DecoderLayer {
         let h_attn = self.post_attention_layernorm.forward(&h_attn);
         let after_attn = mlxcel_core::add(x, &h_attn);
 
-        let ffn_out = self.ffn_branch(&after_attn, &mut timer);
+        let ffn_out = self.ffn_branch(&after_attn, &mut timer, None, false);
         let ffn_out = self.post_feedforward_layernorm.forward(&ffn_out);
         let after_ffn = mlxcel_core::add(&after_attn, &ffn_out);
 
@@ -5811,13 +5904,26 @@ impl Gemma4Wrapper {
     /// `M = K` versus `M = 1` dispatch of the head projection as well as
     /// the decoder layers, exactly as the Qwen probe does.
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
-        let verdict = self.probe_block_chain_exactness_impl(block_size, false);
+        let lengths = self.model.config.mtp_probe_prompt_lengths();
+        self.probe_block_chain_exactness_at(block_size, &lengths)
+    }
+
+    /// [`Self::probe_block_chain_exactness`] over draws of the given prompt
+    /// lengths, one draw per entry.
+    ///
+    /// Used by: [`Self::probe_block_chain_exactness`] and the exactness survey test.
+    pub fn probe_block_chain_exactness_at(
+        &self,
+        block_size: usize,
+        prompt_lengths: &[usize],
+    ) -> BlockChainExactness {
+        let verdict = self.probe_block_chain_exactness_impl(block_size, prompt_lengths, false);
         if verdict.is_equal() || matches!(verdict, BlockChainExactness::NotRun(_)) {
             return verdict;
         }
         // Capture only a failed startup probe, never a serving forward. The
         // ordinary probe remains unsynchronized between sub-operations.
-        let localized = self.probe_block_chain_exactness_impl(block_size, true);
+        let localized = self.probe_block_chain_exactness_impl(block_size, prompt_lengths, true);
         if matches!(localized, BlockChainExactness::Localized { .. }) {
             localized
         } else {
@@ -5828,6 +5934,7 @@ impl Gemma4Wrapper {
     fn probe_block_chain_exactness_impl(
         &self,
         block_size: usize,
+        prompt_lengths: &[usize],
         trace: bool,
     ) -> BlockChainExactness {
         if block_size < 2 {
@@ -5849,13 +5956,7 @@ impl Gemma4Wrapper {
         // The short draws catch projection dispatch changes. One draw past
         // the standard sliding window also tests real buffered verify keys;
         // a short-only pass does not establish long-context parity (#1983).
-        for (draw, prompt_len) in self
-            .model
-            .config
-            .mtp_probe_prompt_lengths()
-            .into_iter()
-            .enumerate()
-        {
+        for (draw, prompt_len) in prompt_lengths.iter().copied().enumerate() {
             // Synthetic ids, varied per draw: dispatch depends only on shape
             // and `M`, but whether a last-ulp kernel difference lands on a
             // differing byte depends on the values (see the false-pass note
@@ -6936,7 +7037,7 @@ impl LanguageModel for Gemma4Wrapper {
                 .get(layer_idx)
                 .is_some_and(|layer_type| layer_type != "full_attention")
                 .then_some(window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 
@@ -8734,3 +8835,6 @@ pub(crate) mod gemma4_stage_tests;
 #[cfg(test)]
 #[path = "gemma4_stage_width_tests.rs"]
 mod gemma4_stage_width_tests;
+#[cfg(test)]
+#[path = "gemma4_moe_verify_tests.rs"]
+mod moe_verify_tests;

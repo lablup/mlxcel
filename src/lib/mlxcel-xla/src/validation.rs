@@ -82,12 +82,14 @@ pub(crate) enum GraphKind {
 }
 
 impl GraphKind {
-    /// Emit this graph for `cfg`, at the ambient `MLXCEL_XLA_PRECISION`.
-    fn emit(self, cfg: &Config) -> String {
+    /// Emit this graph for `cfg`, at the ambient `MLXCEL_XLA_PRECISION`. A
+    /// graph kind with no recurrent-state contract is an `Err` for a
+    /// recurrent config (issue #3338).
+    fn emit(self, cfg: &Config) -> Result<String, String> {
         match self {
-            GraphKind::Prefill { sample } => emit_prefill(cfg, sample),
+            GraphKind::Prefill { sample } => Ok(emit_prefill(cfg, sample)),
             GraphKind::PrefillEmbeddings { sample } => emit_prefill_embeddings(cfg, sample),
-            GraphKind::Decode { sample } => emit_decode(cfg, sample),
+            GraphKind::Decode { sample } => Ok(emit_decode(cfg, sample)),
             GraphKind::DecodeRagged { b_max, sample } => emit_decode_ragged(cfg, b_max, sample),
             GraphKind::DecodeBatched { b_max, sample } => emit_decode_batched(cfg, b_max, sample),
         }
@@ -146,11 +148,10 @@ impl ArchFixture {
     pub fn emit_all(&self) -> Result<Vec<(&'static str, String)>, String> {
         let cfg =
             Config::from_json_str(self.config_json).map_err(|e| format!("{}: {e}", self.arch))?;
-        Ok(self
-            .graphs
+        self.graphs
             .iter()
-            .map(|g| (g.golden_name, g.kind.emit(&cfg)))
-            .collect())
+            .map(|g| Ok((g.golden_name, g.kind.emit(&cfg)?)))
+            .collect()
     }
 }
 
@@ -165,7 +166,7 @@ pub(crate) fn emit_graphs(
     kinds: &[GraphKind],
 ) -> Result<Vec<(GraphKind, String)>, String> {
     let cfg = Config::from_json_str(config_json)?;
-    Ok(kinds.iter().map(|&k| (k, k.emit(&cfg))).collect())
+    kinds.iter().map(|&k| Ok((k, k.emit(&cfg)?))).collect()
 }
 
 /// The first line at which two MLIR texts differ (1-based), with both sides, so a
@@ -286,14 +287,14 @@ pub(crate) fn check_arch(fx: &ArchFixture) -> Result<ArchReport, String> {
         .graphs
         .iter()
         .map(|g| {
-            let emitted = g.kind.emit(&cfg);
-            GraphOutcome {
+            let emitted = g.kind.emit(&cfg)?;
+            Ok(GraphOutcome {
                 kind: g.kind,
                 golden_name: g.golden_name,
                 diff: first_line_diff(g.golden, &emitted),
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(ArchReport {
         arch: fx.arch,
         graphs,
@@ -486,6 +487,22 @@ pub(crate) static OLMOE_TINY: ArchFixture = ArchFixture {
     ],
 };
 
+/// Mamba1 (synthetic tiny): a whole-model decode golden for the diagonal
+/// `[D,N]` recurrent state, low-rank dt projection, Mamba1 weight order, linear
+/// biases, and untied LM head (issue #3348). Prefill's chunk-bounded recurrence
+/// shape is guarded separately by the focused emitter tests; freezing a
+/// context-capacity-sized sequential scan would add a disproportionately large
+/// asset without covering a distinct model ABI.
+pub(crate) static MAMBA_TINY: ArchFixture = ArchFixture {
+    arch: "mamba-tiny",
+    config_json: include_str!("../assets/mamba-tiny/config.json"),
+    graphs: &[GraphFixture {
+        kind: GraphKind::Decode { sample: false },
+        golden_name: "decode.mlir",
+        golden: include_str!("../assets/mamba-tiny/decode.mlir"),
+    }],
+};
+
 /// A dense-pack fixture: a small synthetic `config.json` and the frozen decode +
 /// prefill goldens for a family. `$sample` selects the graph tail the goldens were
 /// frozen with: `true` returns the on-device argmax token (the issue #499 pack:
@@ -545,7 +562,69 @@ dense_fixture!(EXAONE, "exaone", true);
 /// Every registered structural fixture. Append a family here to add it to the
 /// byte-exact gate; see the module docs for the freeze workflow. The MoE fixtures
 /// (issues #500 / #501) ride the same byte-exact gate as the dense families.
+pub(crate) static NEMOTRON_H: ArchFixture = ArchFixture {
+    arch: "nemotron_h",
+    config_json: include_str!("../assets/nemotron_h/config.json"),
+    graphs: &[
+        GraphFixture {
+            kind: GraphKind::Decode { sample: true },
+            golden_name: "decode.mlir",
+            golden: include_str!("../assets/nemotron_h/decode.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: true },
+            golden_name: "prefill.mlir",
+            golden: include_str!("../assets/nemotron_h/prefill.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: false },
+            golden_name: "prefill_logits.mlir",
+            golden: include_str!("../assets/nemotron_h/prefill_logits.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::DecodeRagged {
+                b_max: 4,
+                sample: false,
+            },
+            golden_name: "decode_ragged_logits_b4.mlir",
+            golden: include_str!("../assets/nemotron_h/decode_ragged_logits_b4.mlir"),
+        },
+    ],
+};
+
+pub(crate) static FALCON_H1: ArchFixture = ArchFixture {
+    arch: "falcon_h1",
+    config_json: include_str!("../assets/falcon_h1/config.json"),
+    graphs: &[
+        GraphFixture {
+            kind: GraphKind::Decode { sample: true },
+            golden_name: "decode.mlir",
+            golden: include_str!("../assets/falcon_h1/decode.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: true },
+            golden_name: "prefill.mlir",
+            golden: include_str!("../assets/falcon_h1/prefill.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: false },
+            golden_name: "prefill_logits.mlir",
+            golden: include_str!("../assets/falcon_h1/prefill_logits.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::DecodeRagged {
+                b_max: 4,
+                sample: false,
+            },
+            golden_name: "decode_ragged_logits_b4.mlir",
+            golden: include_str!("../assets/falcon_h1/decode_ragged_logits_b4.mlir"),
+        },
+    ],
+};
+
 pub(crate) static REGISTERED: &[&ArchFixture] = &[
+    &NEMOTRON_H,
+    &FALCON_H1,
     &LLAMA_3_2_1B,
     &COHERE,
     &COHERE2,
@@ -561,6 +640,7 @@ pub(crate) static REGISTERED: &[&ArchFixture] = &[
     &QWEN2_MOE_TINY,
     &QWEN3_MOE_TINY,
     &OLMOE_TINY,
+    &MAMBA_TINY,
 ];
 
 /// A golden-less structural fixture (issue #497): a small synthetic `config.json`
@@ -745,8 +825,8 @@ mod tests {
                 ),
                 (
                     "ragged",
-                    emit_decode_ragged(&fam, 4, false),
-                    emit_decode_ragged(&refc, 4, false),
+                    emit_decode_ragged(&fam, 4, false).unwrap(),
+                    emit_decode_ragged(&refc, 4, false).unwrap(),
                 ),
             ];
             for (name, got, want) in pairs {
@@ -929,6 +1009,24 @@ mod tests {
                     .unwrap_or_else(|e| panic!("write {}: {e}", p.display()));
                 eprintln!("froze {}", p.display());
             }
+        }
+    }
+
+    /// Author the first Mamba1 whole-model golden. This remains opt-in so an
+    /// ordinary test run never writes the source tree.
+    #[test]
+    fn freeze_mamba1_goldens() {
+        if std::env::var("MLXCEL_FREEZE_MAMBA1").as_deref() != Ok("1") {
+            return;
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/mamba-tiny");
+        for (name, mlir) in MAMBA_TINY
+            .emit_all()
+            .unwrap_or_else(|e| panic!("mamba-tiny: {e}"))
+        {
+            let p = root.join(name);
+            std::fs::write(&p, mlir).unwrap_or_else(|e| panic!("write {}: {e}", p.display()));
+            eprintln!("froze {}", p.display());
         }
     }
 

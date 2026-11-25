@@ -839,6 +839,10 @@ fn served_burst_wrapper_with_real_drafter_matches_the_chain() {
             &mut slot,
             &cancel,
             &logprobs,
+            (
+                mlxcel_core::prefill_plan::DEFAULT_PREFILL_CHUNK,
+                mlxcel_core::prefill_plan::PrefillSplits::NONE,
+            ),
         );
         let run = match run {
             Ok(r) => r,

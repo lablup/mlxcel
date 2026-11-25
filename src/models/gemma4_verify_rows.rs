@@ -106,6 +106,7 @@ impl DecoderLayer {
                     &mut timer,
                     false,
                     layer_idx,
+                    true,
                 )
             })
             .collect();

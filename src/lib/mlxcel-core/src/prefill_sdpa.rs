@@ -90,7 +90,8 @@ pub fn causal_window_arg(window: i32, k_len: i32) -> i32 {
 /// builds its own mask per forward calls it instead of building one.
 ///
 /// Used by: GptOss (full and sliding layers), Laguna, FalconOcr, MiMoV2Flash
-/// (sink layers), DeepSeekV4 (local layers).
+/// (sink layers), DeepSeekV4 (local layers), HyV4 (the maskless multi-token
+/// step of its sink MLA).
 pub fn causal_prefill_attention(
     q: &MlxArray,
     k: &MlxArray,

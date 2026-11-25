@@ -697,6 +697,8 @@ python3 scripts/compare_logit_traces.py ref.tsv fixed.tsv --decided 2
 python3 scripts/mlx_vlm_image_logit_trace.py MODEL tests/fixtures/test_image_shapes.png fixed.tsv --float32 --mlxcel-prompt > ref.tsv
 ```
 
+The mlx-community Inkling 2 4-bit export is in the Transformers layout, which mlx-vlm 466069f5 cannot load. Pass `--inkling2-mlx-community` to `scripts/mlx_lm_logit_trace.py` (text) or `scripts/mlx_vlm_image_logit_trace.py` (image) to score it: the flag rewrites the export once, through `scripts/inkling2_mlx_community_remap.py`, into a temporary directory (`INKLING2_REMAP_DIR` moves it) and loads that. The rewrite only renames tensors, splits the fused `gate_up_proj`, sets `weight_scale_2 = global_scale / 2688` and declares each expert projection's NVFP4 or MXFP8 mode. The export has no `processor_config.json`, so the image script takes the missing processor files from `--inkling2-native-dir` (default: a sibling `inkling-2-mini`). Results: `docs/benchmark_results/inkling2-mini-4bit-image-trace-m3ultra-2026-11-24.md`.
+
 Image prompts against mlx-vlm 0.7.8 and transformers (#2547), for `tests/fixtures/test_image_shapes.png` (448x448) and `Describe the image.`:
 
 | Checkpoint | mlxcel | mlx-vlm | transformers | Remaining difference |

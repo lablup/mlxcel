@@ -1311,6 +1311,29 @@ where
                 }),
             }))
         }
+        VlmRuntimeRef::Inkling2(model) => {
+            let refs: Vec<&DynamicImage> = images.iter().collect();
+            let processed = model
+                .preprocess_image_refs(&refs)
+                .map_err(anyhow::Error::msg)?;
+            // One template placeholder per image becomes `rows * cols` slots.
+            let stats = expand_inkling_image_tokens(
+                prompt_tokens,
+                model.image_token_id(),
+                &processed.tiles_per_image(),
+            )?;
+            let input_ids = prompt_ids_array(prompt_tokens);
+            let embeddings = model
+                .prepare_input_embeddings(&input_ids, &processed)
+                .map_err(anyhow::Error::msg)?;
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::Inkling {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                }),
+            }))
+        }
         VlmRuntimeRef::MuseGlimmer(model) => {
             crate::multimodal::muse_glimmer_runtime::prepare_muse_glimmer_vlm_embeddings(
                 model,

@@ -251,7 +251,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          # HELP mlxcel_prompt_cache_hits_total Successful prompt-prefix cache adoptions\n\
          # TYPE mlxcel_prompt_cache_hits_total counter\n\
          mlxcel_prompt_cache_hits_total {pc_hits}\n\
-         # HELP mlxcel_prompt_cache_misses_total Prompt-prefix cache lookups that produced no match\n\
+         # HELP mlxcel_prompt_cache_misses_total Dense prompt-prefix cache lookups that adopted no prefix\n\
          # TYPE mlxcel_prompt_cache_misses_total counter\n\
          mlxcel_prompt_cache_misses_total {pc_misses}\n\
          # HELP mlxcel_prompt_cache_prefix_tokens_reused_total Total prompt tokens reused from prefix cache\n\

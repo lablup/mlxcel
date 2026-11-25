@@ -622,6 +622,15 @@ std::unique_ptr<MlxArray> mla_absorbed_decode_fused(
 
 // The fused decode kernel over an affine-quantized latent window (#3156).
 bool mla_absorbed_decode_fused_quantized_available();
+bool mla_absorbed_decode_fused_supported(int32_t dtype, int32_t rank, int32_t rope);
+bool mla_absorbed_decode_fused_quantized_supported(
+    int32_t dtype,
+    int32_t kpe_dtype,
+    int32_t scales_dtype,
+    int32_t rank,
+    int32_t rope,
+    int32_t group_size,
+    int32_t bits);
 std::unique_ptr<MlxArray> mla_absorbed_decode_fused_quantized(
     const MlxArray& q_abs,
     const MlxArray& q_pe,
@@ -632,6 +641,48 @@ std::unique_ptr<MlxArray> mla_absorbed_decode_fused_quantized(
     float scale,
     int32_t group_size,
     int32_t bits);
+
+// Inkling 2 Mini Metal kernels (#3359), Metal only. Each throws off-Metal or
+// outside its contract; the Rust declarations are `-> Result`.
+bool inkling2_kernels_available();
+void inkling2_short_convolution(
+    const MlxArray& history,
+    const MlxArray& weight,
+    const MlxArray& x,
+    const MlxArray* residual,
+    int32_t output_dtype,
+    int32_t margin,
+    std::unique_ptr<MlxArray>& out,
+    std::unique_ptr<MlxArray>& next_history);
+void inkling2_prepare_attention_heads(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    const MlxArray& r,
+    const MlxArray& q_scale,
+    const MlxArray& r_scale,
+    float clip,
+    float rel_clip,
+    float eps,
+    std::unique_ptr<MlxArray>& q_out,
+    std::unique_ptr<MlxArray>& k_out,
+    std::unique_ptr<MlxArray>& v_out,
+    std::unique_ptr<MlxArray>& r_out);
+std::unique_ptr<MlxArray> inkling2_grouped_expert_qmv(
+    const MlxArray& x,
+    const MlxArray& w,
+    const MlxArray& scales,
+    const MlxArray* global_scale,
+    const MlxArray& experts,
+    const MlxArray& source,
+    const MlxArray& destination,
+    int32_t bits,
+    int32_t group_size);
+bool row_invariant_matvec_available();
+std::unique_ptr<MlxArray> row_invariant_matvec(
+    const MlxArray& x,
+    const MlxArray& w,
+    int32_t output_dtype);
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
 // gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype (#2548)

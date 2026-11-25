@@ -771,6 +771,7 @@ impl ModelType {
             ModelType::DeepSeekV2 => "deepseek_v2",
             ModelType::DeepSeekV3 => "deepseek_v3",
             ModelType::DeepSeekV32 => "deepseek_v32",
+            ModelType::HyV4 => "hy_v4",
             ModelType::DeepSeekV4 => "deepseek_v4",
             ModelType::Xing40 => "xing4_0",
             ModelType::Dots1 => "dots1",
@@ -840,6 +841,7 @@ impl ModelType {
             ModelType::Lfm2VL => "lfm2_vl",
             ModelType::Inkling => "inkling",
             ModelType::InklingVLM => "inkling_vlm",
+            ModelType::Inkling2VLM => "inkling2_vlm",
             ModelType::Plamo2 => "plamo2",
             ModelType::Plamo2VLM => "plamo2_vlm",
             ModelType::GraniteMoeHybrid => "granitemoehybrid",
@@ -1025,6 +1027,7 @@ impl ModelType {
             | ModelType::DeepSeekV2
             | ModelType::DeepSeekV3
             | ModelType::DeepSeekV32
+            | ModelType::HyV4
             | ModelType::DeepSeekV4
             | ModelType::Xing40
             | ModelType::Dots1
@@ -1174,6 +1177,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::DeepSeekV2 => &["deepseek_v2"],
         ModelType::DeepSeekV3 => &["deepseek_v3", "kimi_k2", "joyai_llm_flash"],
         ModelType::DeepSeekV32 => &["deepseek_v32", "deepseek_v3.2"],
+        ModelType::HyV4 => &["hy_v4"],
         ModelType::DeepSeekV4 => &["deepseek_v4"],
         ModelType::Xing40 => &["xing4_0"],
         ModelType::Dots1 => &["dots1"],
@@ -1240,6 +1244,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::Lfm2VL => &["lfm2_vl", "lfm2-vl"],
         ModelType::Lfm2Moe => &["lfm2_moe"],
         ModelType::Inkling | ModelType::InklingVLM => &["inkling_mm_model", "inkling"],
+        ModelType::Inkling2VLM => &["inkling2", "inkling2_loop"],
         ModelType::Plamo2 => &["plamo2"],
         ModelType::Plamo2VLM => &["plamo2vl"],
         ModelType::GraniteMoeHybrid => &["granitemoehybrid"],
@@ -1862,6 +1867,7 @@ mod tests {
     fn mla_latent_cache_families_report_fp16_only_kv_modes() {
         for model_type in [
             ModelType::DeepSeekV32,
+            ModelType::HyV4,
             ModelType::Glm4MoeLite,
             ModelType::GlmMoeDsa,
         ] {

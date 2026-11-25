@@ -2936,3 +2936,39 @@ fn prompt_cache_sizing_uses_the_mode_the_scheduler_builds() {
     assert_eq!(sizing.mode, KVCacheMode::Int8);
     assert!(sizing.fp16_last_layer);
 }
+
+#[test]
+fn media_support_refuses_audio_for_inkling2_with_its_reason() {
+    // Inkling 2 is multimodal (vision tower) with no audio encoder, so the
+    // boundary keeps image and video and refuses audio with the family's own
+    // sentence (issue #3376).
+    let support = media_support_for_config(
+        "media-inkling2-no-audio",
+        serde_json::json!({
+            "model_type": "inkling2",
+            "architectures": ["Inkling2ForCausalLM"],
+            "vision_config": { "model_type": "inkling2_vision" }
+        }),
+    );
+    assert!(support.image, "{support:?}");
+    assert!(support.video(), "{support:?}");
+    assert!(!support.audio, "{support:?}");
+    assert_eq!(
+        support.audio_refusal,
+        Some(crate::server::media::INKLING2_AUDIO_REFUSAL)
+    );
+
+    // An audio-capable multimodal family is unchanged.
+    let gemma = media_support_for_config(
+        "media-gemma3n-audio",
+        serde_json::json!({
+            "model_type": "gemma3n",
+            "architectures": ["Gemma3nForConditionalGeneration"],
+            "text_config": { "model_type": "gemma3n_text" },
+            "vision_config": { "model_type": "gemma3n_vision" },
+            "audio_config": { "model_type": "gemma3n_audio" }
+        }),
+    );
+    assert!(gemma.audio, "{gemma:?}");
+    assert_eq!(gemma.audio_refusal, None);
+}

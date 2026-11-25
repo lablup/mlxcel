@@ -142,6 +142,33 @@ fn deepseek_v4_model_type_is_detected() {
     fs::remove_dir_all(model_dir).unwrap();
 }
 
+/// Hy4 (#2354) is detected from its `model_type`, and the registry that
+/// `mlxcel arch` prints carries it as a MoE text family.
+#[test]
+fn hy_v4_model_type_is_detected_and_registered() {
+    let model_dir = temp_path("hy_v4");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "hy_v4",
+            "architectures": ["HYV4ForCausalLM"],
+            "vocab_size": 120832,
+            "hidden_size": 6144,
+            "num_hidden_layers": 78
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::HyV4);
+    assert_eq!(detected.registry_id(), "hy_v4");
+    let registry = super::registry::build_architecture_registry("test");
+    assert!(registry.families.iter().any(|family| family.id == "hy_v4"));
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
 #[test]
 fn whisper_model_type_is_detected() {
     let model_dir = temp_path("whisper_asr");
@@ -1293,6 +1320,46 @@ const DFLASH_DRAFTER_CONFIG: &str = r#"{
     "num_target_layers": 64,
     "vocab_size": 248320
 }"#;
+
+// `mlx-community/gemma-4-12B-it-assistant` declares
+// `model_type: gemma4_unified_assistant`. Served as `-m` it used to fail with
+// "Unsupported model type: gemma4_unified_assistant", which hides that the
+// checkpoint is a drafter and that `--draft-model` is the flag that takes it.
+#[test]
+fn mtp_drafters_are_rejected_as_standalone_models_with_a_draft_model_hint() {
+    for model_type in [
+        "gemma4_unified_assistant",
+        "gemma4_assistant",
+        "qwen3_5_mtp",
+        "Gemma4_Unified_Assistant",
+    ] {
+        let model_dir = temp_path(&format!("mtp_drafter_{model_type}"));
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            format!(r#"{{"model_type": "{model_type}", "text_config": {{"model_type": "gemma4_text"}}}}"#),
+        )
+        .unwrap();
+
+        let error = super::detection::get_model_type(&model_dir)
+            .expect_err("an MTP drafter is not a standalone model")
+            .to_string();
+
+        assert!(
+            error.contains("MTP speculative drafter"),
+            "{model_type}: the error must name the real problem, got: {error}",
+        );
+        assert!(
+            error.contains("--draft-model"),
+            "{model_type}: the error must point at --draft-model, got: {error}",
+        );
+        assert!(
+            !error.contains("Unsupported model type"),
+            "{model_type}: got the generic error: {error}",
+        );
+        let _ = fs::remove_dir_all(&model_dir);
+    }
+}
 
 #[test]
 fn dflash_drafter_is_rejected_as_a_standalone_model() {

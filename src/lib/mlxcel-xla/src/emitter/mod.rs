@@ -47,6 +47,7 @@
 
 mod builder;
 mod config;
+mod falcon_h1_config;
 mod gemma3n;
 mod gemma3n_audio_attention;
 mod gemma3n_audio_emit;
@@ -60,19 +61,32 @@ mod gemma3n_math;
 mod gemma3n_qmv;
 mod gemma3n_schema;
 mod gemma3n_weights;
+mod mamba1_config;
 mod model;
 mod moe;
 mod molmo2_config;
 mod molmo2_vision;
 mod molmo_vision;
 mod molmo_vision_config;
+mod molmo_vision_f16;
 mod molmo_vision_ops;
+mod nemotron_h_config;
 pub(crate) mod numeric_ops;
 mod phi4_audio;
+pub(crate) mod production_probe_ops;
+mod quant_scale;
 mod qwen2_5_vl;
 mod qwen2_vl;
 mod qwen3_vl;
+mod qwen3_vl_ops;
+mod recurrent_checkpoint;
+mod recurrent_config;
 mod rope;
+mod ssm;
+mod ssm_mamba1;
+mod ssm_scan;
+#[cfg(test)]
+mod ssm_tests;
 mod vision;
 mod vision_config;
 mod youtu_vl;
@@ -80,6 +94,14 @@ mod youtu_vl_plan;
 
 #[cfg(test)]
 mod context_tests;
+#[cfg(test)]
+mod falcon_h1_tests;
+#[cfg(test)]
+mod nemotron_h_tests;
+#[cfg(test)]
+mod recurrent_ragged_tests;
+#[cfg(test)]
+mod recurrent_tests;
 
 #[allow(unused_imports)]
 pub(crate) use config::{
@@ -143,6 +165,8 @@ pub(crate) use phi4_audio::{
     emit_phi4_audio_diagnostic_with, emit_phi4_audio_with, phi4_audio_diagnostic_specs,
     phi4_audio_weight_specs, validate_phi4_audio_weight_shapes,
 };
+#[allow(unused_imports)]
+pub(crate) use quant_scale::{QuantScaleDtype, resolve_quant_scale_dtype};
 #[cfg(feature = "diagnostics")]
 pub(crate) use qwen2_5_vl::{Qwen25VlVisionDiagnosticLayout, emit_qwen2_5_vl_diagnostics};
 #[allow(unused_imports)]
@@ -165,7 +189,16 @@ pub(crate) use qwen3_vl::{
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.
 #[allow(unused_imports)]
-pub(crate) use config::{MoeConfig, SharedExpertConfig};
+pub(crate) use config::{ExpertAct, MoeConfig, MoeScoring, SharedExpertConfig};
+// SSM mixer types (issue #3337), consumed by the probe runner and #3338.
+#[allow(unused_imports)]
+pub(crate) use config::{SSM_DEFAULT_CHUNK_SIZE, SsmConfig, SsmKind};
+// Per-layer mixer schedule and the threaded recurrent-state ABI (issue #3338),
+// consumed by the IREE runtime (#3339) and the SSM model check.
+#[allow(unused_imports)]
+pub(crate) use config::{MixerKind, StateElem, StateTensorSpec};
+#[allow(unused_imports)]
+pub(crate) use ssm_scan::SsmPrefillForm;
 // `resolve_precision` and the precision-taking `*_with` emit variants are consumed
 // by the IREE execution path; the f32-default `emit_*` wrappers by the byte-exact
 // regression tests. Which set is live depends on the build cfg (`iree` vs `test`),
@@ -174,7 +207,8 @@ pub(crate) use config::{MoeConfig, SharedExpertConfig};
 #[allow(unused_imports)]
 pub(crate) use builder::{
     Precision, ProjectionLayout, check_packed_supported, default_precision, precision_env_override,
-    quant_in_graph, resolve_precision, resolve_precision_checked, target_flags_with_rocm_target,
+    quant_in_graph, resolve_pinned_precision_with_override, resolve_precision,
+    resolve_precision_checked, target_flags_with_rocm_target,
 };
 /// Test support only (issue #3060): toggle the single-sequence decode scalar ABI
 /// per thread so the device gate can compile and run both the scalar and the
@@ -184,11 +218,12 @@ pub(crate) use model::set_decode_scalar_abi_for_thread;
 #[allow(unused_imports)]
 pub(crate) use model::{
     PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
-    PrefillEmbeddingsInputMetadata, emit_decode, emit_decode_batched, emit_decode_ragged,
-    emit_decode_ragged_with, emit_decode_ragged_with_native, emit_decode_with,
-    emit_decode_with_native, emit_moe_probe, emit_moe_probe_with, emit_prefill,
-    emit_prefill_embeddings, emit_prefill_embeddings_deepstack_diagnostics_with,
-    emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
+    PrefillEmbeddingsInputMetadata, ProbeMode, emit_decode, emit_decode_batched,
+    emit_decode_buffer_abi, emit_decode_ragged, emit_decode_ragged_with,
+    emit_decode_ragged_with_native, emit_decode_with, emit_decode_with_native, emit_moe_probe,
+    emit_moe_probe_with, emit_prefill, emit_prefill_embeddings,
+    emit_prefill_embeddings_deepstack_diagnostics_with, emit_prefill_embeddings_deepstack_with,
+    emit_prefill_embeddings_with, emit_prefill_with, emit_ssm_probe, emit_ssm_probe_with,
     mrope_axis_selector, validate_prefill_embeddings_attention_bias,
     validate_prefill_embeddings_metadata,
 };
@@ -213,7 +248,7 @@ pub(crate) use molmo_vision::MOLMO_VISION_PRECISION;
 #[allow(unused_imports)]
 pub(crate) use molmo2_vision::MOLMO2_VISION_PRECISION;
 #[allow(unused_imports)]
-pub(crate) use qwen3_vl::QWEN3_VL_VISION_PRECISION;
+pub(crate) use qwen3_vl::qwen3_vl_vision_precision;
 #[allow(unused_imports)]
 pub(crate) use vision::LLAVA_VISION_PRECISION;
 #[allow(unused_imports)]
@@ -337,7 +372,7 @@ mod tests {
         let config = phi4_like();
         let prefill = emit_prefill(&config, false);
         let decode = emit_decode(&config, false);
-        let ragged = emit_decode_ragged(&config, 4, false);
+        let ragged = emit_decode_ragged(&config, 4, false).unwrap();
         assert!(prefill.contains("tensor<i32> loc(\"adapter_mode\")"));
         assert!(decode.contains("tensor<i32> loc(\"adapter_mode\")"));
         assert!(ragged.contains("tensor<4xi32> loc(\"adapter_mode\")"));
@@ -368,7 +403,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Phi4MM requires per-row ragged decode")]
     fn phi4mm_rejects_uniform_batched_decode() {
-        let _ = emit_decode_batched(&phi4_like(), 4, false);
+        let _ = emit_decode_batched(&phi4_like(), 4, false).unwrap();
     }
 
     fn mrope_qwen(layout: MropeLayout) -> Config {
@@ -450,6 +485,8 @@ mod tests {
                 intermediate: 12,
                 norm_topk_prob: true,
                 routed_scaling_factor: 1.0,
+                scoring: MoeScoring::Softmax,
+                expert_act: ExpertAct::SwiGlu,
                 shared: if shared {
                     Some(SharedExpertConfig {
                         intermediate: 10,
@@ -459,6 +496,7 @@ mod tests {
                     None
                 },
                 first_k_dense: 0,
+                layer_mask: None,
                 weight_prefix: "mlp",
             }),
             // sliding_pattern (2), use_rope_layers, weight_scheme, and the #498
@@ -508,21 +546,11 @@ mod tests {
         assert_eq!(c.eps, 1e-6);
     }
 
-    /// An unsupported `model_type` and an unsupported `rope_scaling` are each
-    /// rejected with a clear message rather than mis-emitted. (Untied embeddings and
-    /// the Gemma / Qwen3 / SmolLM3 / OLMo2/3 families are now accepted; see their
+    /// An unsupported `rope_scaling` is rejected with a clear message rather
+    /// than mis-emitted. (Mamba1 and the other supported families have their
     /// own parse tests.)
     #[test]
     fn from_json_rejects_unsupported_configs() {
-        let mamba = r#"{"model_type":"mamba","tie_word_embeddings":true,"hidden_size":8,
-            "num_attention_heads":2,"intermediate_size":16,"num_hidden_layers":2,
-            "num_key_value_heads":1,"rms_norm_eps":1e-6,"rope_theta":1e4,"vocab_size":10}"#;
-        assert!(
-            Config::from_json_str(mamba)
-                .unwrap_err()
-                .contains("model_type")
-        );
-
         // yarn RoPE (e.g. OLMo3 at full size) is not supported yet.
         let yarn = r#"{"model_type":"qwen2","tie_word_embeddings":true,"hidden_size":8,
             "num_attention_heads":2,"intermediate_size":16,"num_hidden_layers":2,
@@ -631,13 +659,13 @@ mod tests {
                 "prefill",
             ),
             (
-                super::model::emit_decode_batched(&with, 4, false),
-                super::model::emit_decode_batched(&without, 4, false),
+                super::model::emit_decode_batched(&with, 4, false).unwrap(),
+                super::model::emit_decode_batched(&without, 4, false).unwrap(),
                 "batched",
             ),
             (
-                emit_decode_ragged(&with, 4, false),
-                emit_decode_ragged(&without, 4, false),
+                emit_decode_ragged(&with, 4, false).unwrap(),
+                emit_decode_ragged(&without, 4, false).unwrap(),
                 "ragged",
             ),
         ];
@@ -748,7 +776,7 @@ mod tests {
 
         // The other graph kinds keep the full-cache ABI: the ragged decode takes
         // the caches as arguments, and prefill still returns them.
-        let ragged = emit_decode_ragged(&c, 4, false);
+        let ragged = emit_decode_ragged(&c, 4, false).unwrap();
         assert!(
             ragged.contains("loc(\"kcache\")"),
             "ragged decode keeps the full-cache argument ABI"
@@ -936,7 +964,7 @@ mod tests {
     fn ragged_decode_keeps_the_f32_cache_abi_under_f16() {
         let c = Config::llama_3_2_1b();
         let bsz = 4;
-        let graph = emit_decode_ragged_with(&c, bsz, false, Precision::F16);
+        let graph = emit_decode_ragged_with(&c, bsz, false, Precision::F16).unwrap();
         let cache_ty = format!(
             "tensor<{}x{}x{}x{}x{}xf32>",
             bsz,
@@ -1021,6 +1049,52 @@ mod tests {
         );
     }
 
+    /// Issue #3364: the single-sequence engine uploads `kv_b_proj` transposed
+    /// (`[kv_lora_rank, n_q * (nope + v)]`, issue #2859). The latent expansion
+    /// must split that layout on its own axes; reshaping it as the
+    /// checkpoint's `[n_q, nope + v, kv_lora_rank]` scrambled every head and
+    /// made the production Youtu-VL CLI repeat one token.
+    #[test]
+    fn mla_latent_expansion_follows_the_projection_layout() {
+        // Distinct rank (12), heads (4) and head width (8 + 6) so each
+        // reshape target names exactly one layout.
+        let json = r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
+            "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
+            "kv_lora_rank":12,"q_lora_rank":24,"qk_nope_head_dim":8,
+            "qk_rope_head_dim":4,"v_head_dim":6,"rope_interleave":true,
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#;
+        let base = Config::from_json_str(json)
+            .unwrap()
+            .with_context_capacity(16)
+            .unwrap();
+        let checkpoint = "(tensor<56x12xf32>) -> tensor<4x14x12xf32>";
+        let transposed = "(tensor<12x56xf32>) -> tensor<12x4x14xf32>";
+        let mut inout = base.clone();
+        inout.projection_layout = ProjectionLayout::InOut;
+        for graph in [
+            emit_decode_with(&inout, false, Precision::F32),
+            emit_prefill_with(&inout, false, Precision::F32),
+        ] {
+            assert!(
+                graph.contains(transposed),
+                "InOut must expand kv_b on its transposed axes"
+            );
+            assert!(
+                !graph.contains(checkpoint),
+                "InOut must not reshape kv_b as the checkpoint layout"
+            );
+        }
+        let mut outin = base;
+        outin.projection_layout = ProjectionLayout::OutIn;
+        let graph = emit_decode_ragged(&outin, 2, false).unwrap();
+        assert!(
+            graph.contains(checkpoint),
+            "OutIn keeps the checkpoint split"
+        );
+        assert!(!graph.contains(transposed));
+    }
+
     fn main_signature<'a>(mlir: &'a str, graph: &str) -> &'a str {
         mlir.split("func.func public @main(")
             .nth(1)
@@ -1077,13 +1151,13 @@ mod tests {
         assert!(!mrope.contains("@scalar_inputs"));
 
         // Ragged / lockstep batch decode and prefill keep their signatures.
-        let ragged = emit_decode_ragged(&c, 4, false);
+        let ragged = emit_decode_ragged(&c, 4, false).unwrap();
         let ragged_sig = main_signature(&ragged, "ragged decode");
         assert!(ragged_sig.contains("tensor<4xi32> loc(\"token\")"));
         assert!(ragged_sig.contains("tensor<4xi32> loc(\"cache_len\")"));
         assert!(!ragged.contains("@scalar_inputs"));
 
-        let batched = emit_decode_batched(&c, 4, false);
+        let batched = emit_decode_batched(&c, 4, false).unwrap();
         let batched_sig = main_signature(&batched, "batched decode");
         assert!(batched_sig.contains("tensor<4xi32> loc(\"token\")"));
         assert!(!batched.contains("@scalar_inputs"));
@@ -1110,7 +1184,7 @@ mod tests {
         for (c, want_tanh) in [(&gemma, true), (&llama, false)] {
             let kinds = [
                 ("decode", emit_decode(c, false)),
-                ("ragged", emit_decode_ragged(c, 4, false)),
+                ("ragged", emit_decode_ragged(c, 4, false).unwrap()),
                 ("prefill", emit_prefill(c, false)),
             ];
             for (name, g) in kinds {
@@ -1148,13 +1222,13 @@ mod tests {
                 "prefill",
             ),
             (
-                super::model::emit_decode_batched(&untied, 4, false),
-                super::model::emit_decode_batched(&tied, 4, false),
+                super::model::emit_decode_batched(&untied, 4, false).unwrap(),
+                super::model::emit_decode_batched(&tied, 4, false).unwrap(),
                 "batched",
             ),
             (
-                emit_decode_ragged(&untied, 4, false),
-                emit_decode_ragged(&tied, 4, false),
+                emit_decode_ragged(&untied, 4, false).unwrap(),
+                emit_decode_ragged(&tied, 4, false).unwrap(),
                 "ragged",
             ),
         ];
@@ -1270,8 +1344,8 @@ mod tests {
                 "prefill",
             ),
             (
-                emit_decode_ragged(&with, 4, false),
-                emit_decode_ragged(&without, 4, false),
+                emit_decode_ragged(&with, 4, false).unwrap(),
+                emit_decode_ragged(&without, 4, false).unwrap(),
                 "ragged",
             ),
         ];
@@ -1407,13 +1481,14 @@ mod tests {
             .expect("write token prefill graph");
         std::fs::write(
             dir.join("prefill_embeddings_logits.mlir"),
-            emit_prefill_embeddings(&cfg, false),
+            emit_prefill_embeddings(&cfg, false).unwrap(),
         )
         .expect("write embeddings prefill graph");
         if cfg.deepstack.is_some() {
             std::fs::write(
                 dir.join("prefill_embeddings_deepstack_logits.mlir"),
-                emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32),
+                emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32)
+                    .unwrap(),
             )
             .expect("write DeepStack embeddings prefill graph");
             std::fs::write(
@@ -1421,7 +1496,8 @@ mod tests {
                 emit_prefill_embeddings_deepstack_diagnostics_with(
                     &cfg,
                     super::builder::Precision::F32,
-                ),
+                )
+                .unwrap(),
             )
             .expect("write DeepStack post-hook diagnostics graph");
         }
@@ -1432,8 +1508,8 @@ mod tests {
         let cfg = gemma2_like(None);
         let lp = cfg.context_capacity;
         let token = emit_prefill(&cfg, false);
-        let embeddings = emit_prefill_embeddings(&cfg, false);
-        let sampled_embeddings = emit_prefill_embeddings(&cfg, true);
+        let embeddings = emit_prefill_embeddings(&cfg, false).unwrap();
+        let sampled_embeddings = emit_prefill_embeddings(&cfg, true).unwrap();
 
         assert!(token.starts_with("module @prefill {"));
         assert!(embeddings.starts_with("module @prefill_embeddings {"));
@@ -1486,7 +1562,7 @@ mod tests {
     #[test]
     fn prefill_embeddings_preserves_tied_and_untied_head_weights() {
         let tied = qwen_like(false);
-        let tied_mlir = emit_prefill_embeddings(&tied, false);
+        let tied_mlir = emit_prefill_embeddings(&tied, false).unwrap();
         assert!(tied_mlir.contains("loc(\"params['embed']\")"));
         assert!(!tied_mlir.contains("params['lm_head']"));
         let tied_tail = tied_mlir
@@ -1497,7 +1573,7 @@ mod tests {
 
         let mut untied = tied;
         untied.tie_word_embeddings = false;
-        let untied_mlir = emit_prefill_embeddings(&untied, false);
+        let untied_mlir = emit_prefill_embeddings(&untied, false).unwrap();
         assert!(untied_mlir.contains("loc(\"params['embed']\")"));
         assert!(untied_mlir.contains("loc(\"params['lm_head']\")"));
         let untied_tail = untied_mlir
@@ -1511,7 +1587,7 @@ mod tests {
     fn deepstack_prefill_is_distinct_sparse_and_leaves_ordinary_graph_byte_exact() {
         let mut cfg = qwen_like(false);
         cfg.n_layers = 4;
-        let ordinary = emit_prefill_embeddings(&cfg, false);
+        let ordinary = emit_prefill_embeddings(&cfg, false).unwrap();
         let token = emit_prefill(&cfg, false);
         let decode = emit_decode(&cfg, false);
         cfg.deepstack = Some(DeepStackConfig {
@@ -1520,7 +1596,7 @@ mod tests {
         });
 
         assert_eq!(
-            emit_prefill_embeddings(&cfg, false),
+            emit_prefill_embeddings(&cfg, false).unwrap(),
             ordinary,
             "declaring DeepStack must not change the ordinary embeddings entry"
         );
@@ -1535,7 +1611,8 @@ mod tests {
             "declaring DeepStack must not change decode"
         );
         let deepstack =
-            emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32);
+            emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32)
+                .unwrap();
         assert!(deepstack.starts_with("module @prefill_embeddings_deepstack {"));
         assert!(
             !deepstack.contains("tensor<4x2048x8xf32>"),
@@ -1575,7 +1652,8 @@ mod tests {
         let diagnostics = emit_prefill_embeddings_deepstack_diagnostics_with(
             &cfg,
             super::builder::Precision::F32,
-        );
+        )
+        .unwrap();
         assert!(diagnostics.starts_with("module @prefill_embeddings_deepstack_diagnostics {"));
         assert!(
             diagnostics.contains("tensor<3x256x8xf32>"),
@@ -2134,7 +2212,8 @@ mod tests {
                 "#mlxcel_qmv_target = #hal.executable.target<\"rocm\", \"rocm-hsaco-fb\">\n",
                 "  source-block\n",
             )),
-        );
+        )
+        .unwrap();
         assert!(
             mlir.starts_with("#mlxcel_qmv_target = #hal.executable.target")
                 && mlir.contains("  source-block")
@@ -2197,7 +2276,8 @@ mod tests {
                 "#mlxcel_qmv_target = #hal.executable.target<\"rocm\", \"rocm-hsaco-fb\">\n",
                 "  source-block\n",
             )),
-        );
+        )
+        .unwrap();
         for dispatch in [
             "flow.dispatch @custom_qmv_multi::@qmv4_multi_kernel[",
             "flow.dispatch @custom_qmv_multi::@qmv4_multi_row_kernel[",
@@ -2224,7 +2304,7 @@ mod tests {
         // emitted.
         let mut fallback_cfg = Config::llama_3_2_1b();
         fallback_cfg.projection_layout = ProjectionLayout::OutIn;
-        let fallback = emit_decode_ragged_with(&fallback_cfg, 8, true, Precision::F16);
+        let fallback = emit_decode_ragged_with(&fallback_cfg, 8, true, Precision::F16).unwrap();
         assert!(!fallback.contains("@custom_qmv"));
         assert!(fallback.contains("stablehlo.dot_general"));
         assert!(fallback.contains("tensor<8192x2048xf16>"));
@@ -2358,7 +2438,7 @@ mod tests {
         for (name, graph) in [
             ("prefill", emit_prefill(&config, false)),
             ("decode", emit_decode(&config, false)),
-            ("ragged", emit_decode_ragged(&config, 2, false)),
+            ("ragged", emit_decode_ragged(&config, 2, false).unwrap()),
         ] {
             let mlir_path = directory.join(format!("{name}.mlir"));
             let vmfb_path = directory.join(format!("{name}.vmfb"));
@@ -2393,7 +2473,7 @@ mod tests {
             let g_co = match kind {
                 "decode" => emit_decode(&co, false),
                 "prefill" => emit_prefill(&co, false),
-                _ => emit_decode_ragged(&co, 4, false),
+                _ => emit_decode_ragged(&co, 4, false).unwrap(),
             };
             assert!(
                 g_co.contains("['in_ln']"),
@@ -2419,7 +2499,7 @@ mod tests {
             let g = match kind {
                 "decode" => emit_decode(&sc, false),
                 "prefill" => emit_prefill(&sc, false),
-                _ => emit_decode_ragged(&sc, 4, false),
+                _ => emit_decode_ragged(&sc, 4, false).unwrap(),
             };
             assert!(!g.contains("['gate']"), "{kind}: dense MLP has no gate");
             assert!(
@@ -2627,11 +2707,12 @@ mod tests {
             max_visual_positions: 2,
         });
         let prefill = emit_prefill(&cfg, false);
-        let embeddings = emit_prefill_embeddings(&cfg, false);
+        let embeddings = emit_prefill_embeddings(&cfg, false).unwrap();
         let deepstack =
-            emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32);
+            emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32)
+                .unwrap();
         let decode = emit_decode(&cfg, false);
-        let ragged = emit_decode_ragged(&cfg, 4, false);
+        let ragged = emit_decode_ragged(&cfg, 4, false).unwrap();
 
         for graph in [&prefill, &embeddings, &deepstack] {
             assert!(
@@ -2727,7 +2808,7 @@ mod tests {
     fn shared_core_kinds(c: &Config) -> [(&'static str, String); 3] {
         [
             ("decode", emit_decode(c, false)),
-            ("ragged", emit_decode_ragged(c, 4, false)),
+            ("ragged", emit_decode_ragged(c, 4, false).unwrap()),
             ("prefill", emit_prefill(c, false)),
         ]
     }
@@ -3056,8 +3137,11 @@ mod tests {
         let graphs = [
             ("decode", emit_decode(&c, false)),
             ("prefill", emit_prefill(&c, false)),
-            ("ragged", emit_decode_ragged(&c, 4, false)),
-            ("batched", super::model::emit_decode_batched(&c, 4, false)),
+            ("ragged", emit_decode_ragged(&c, 4, false).unwrap()),
+            (
+                "batched",
+                super::model::emit_decode_batched(&c, 4, false).unwrap(),
+            ),
         ];
         for (name, g) in graphs {
             assert!(g.contains("['moe_router']"), "{name}: router arg");
@@ -3086,7 +3170,7 @@ mod tests {
         for g in [
             emit_decode(&Config::llama_3_2_1b(), true),
             emit_prefill(&qwen_like(true), false),
-            emit_decode_ragged(&qwen_like(true), 4, false),
+            emit_decode_ragged(&qwen_like(true), 4, false).unwrap(),
         ] {
             assert!(!g.contains("moe_"), "a dense config must emit no MoE arg");
         }
@@ -3185,7 +3269,7 @@ mod tests {
             for (kind, g) in [
                 ("decode", emit_decode(&c, false)),
                 ("prefill", emit_prefill(&c, false)),
-                ("ragged", emit_decode_ragged(&c, 4, false)),
+                ("ragged", emit_decode_ragged(&c, 4, false).unwrap()),
             ] {
                 assert!(
                     g.contains("['q_norm']") && g.contains("['k_norm']"),
@@ -3376,5 +3460,30 @@ mod tests {
         let text = std::fs::read_to_string(&cfg_path).expect("read MLXCEL_DUMP_CONFIG");
         let cfg = Config::from_json_str(&text).expect("parse MoE config.json");
         std::fs::write(&out_path, emit_moe_probe(&cfg, n)).expect("write MLXCEL_DUMP_OUT");
+    }
+
+    /// Opt-in graph dump for the out-of-crate SSM execution check (issue
+    /// #3337). Ignored by default; with `--ignored` and `MLXCEL_DUMP_OUT` set it
+    /// writes the single-layer Mamba2 mixer probe (`emit_ssm_probe`) for the
+    /// `ssm_oracle.py` tiny config, so the graph can be inspected or compiled
+    /// with a stock `iree-compile`. `MLXCEL_SSM_MODE` is `prefill` (default) or
+    /// `decode`; `MLXCEL_SSM_T` sets the rows (default 16). The executing check
+    /// is `examples/xla_ssm_probe.rs`, which emits the same graph in-process.
+    #[test]
+    #[ignore = "opt-in: writes the SSM probe graph to disk for the spike/openxla execution check"]
+    fn dump_ssm_probe_for_execution_check() {
+        let out_path =
+            std::env::var("MLXCEL_DUMP_OUT").expect("set MLXCEL_DUMP_OUT to the target .mlir path");
+        let t: usize = std::env::var("MLXCEL_SSM_T")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(16);
+        let mode = match std::env::var("MLXCEL_SSM_MODE").as_deref() {
+            Ok("decode") => ProbeMode::Decode,
+            _ => ProbeMode::Prefill,
+        };
+        let cfg = SsmConfig::tiny_mamba2();
+        std::fs::write(&out_path, emit_ssm_probe(&cfg, 16, t, mode))
+            .expect("write MLXCEL_DUMP_OUT");
     }
 }

@@ -19,6 +19,8 @@ use super::InklingModel;
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
+use crate::models::speculative_exactness_diag as diag;
+use crate::models::speculative_exactness_draws as draws;
 
 /// Prompt length of one exactness-probe draw (matches the Qwen 3.5, Gemma 4
 /// and GLM-4.7-Flash probes).
@@ -48,8 +50,12 @@ impl InklingModel {
         )
     }
 
-    /// Forward a B=1 verify block after capturing every layer's exact KV and
-    /// four-convolution pre-forward state.
+    /// Forward a B=1 verify block. A block the row-invariant scope covers
+    /// records its own rewind data (see
+    /// [`Self::keep_verified_prefix_for_sequence`]) and returns an empty
+    /// snapshot, as does a one-row block; any other block first captures every layer's exact KV and
+    /// four-convolution pre-forward state for
+    /// [`Self::restore_and_replay_speculative_for_sequence`].
     pub(crate) fn forward_speculative_for_sequence(
         &self,
         input: &MlxArray,
@@ -65,15 +71,62 @@ impl InklingModel {
             || self.make_internal_caches(),
             |caches| {
                 let mut snapshot_tensors = Vec::new();
-                let mut snapshot_scalars = Vec::with_capacity(caches.len() * 2);
-                for cache in caches.iter() {
-                    cache.capture_flat(&mut snapshot_tensors, &mut snapshot_scalars);
+                let mut snapshot_scalars = Vec::new();
+                if !self.verify_block_needs_no_snapshot(input) {
+                    for cache in caches.iter() {
+                        cache.capture_flat(&mut snapshot_tensors, &mut snapshot_scalars);
+                    }
                 }
+                let _verify = self.verify_block_scope();
                 let embeddings = self.embed_tokens.forward(input);
                 let hidden_pre = self.pre_norm_hidden_embeddings_with_caches(&embeddings, caches);
                 let hidden_post = self.norm.forward(&hidden_pre);
                 let logits = self.project_hidden(&hidden_post);
                 (logits, hidden_pre, snapshot_tensors, snapshot_scalars)
+            },
+        )
+    }
+
+    /// Whether a verify forward over `input [1, L]` needs no pre-verify
+    /// snapshot: a block of 2 to 16 rows records the convolution windows
+    /// [`Self::keep_verified_prefix_for_sequence`] rewinds from, and a
+    /// one-row block keeps its only row (the MTP round loop finalizes it as
+    /// a classic decode step, issue #3425), so a snapshot would only cost a
+    /// copy of every layer's state and a replay.
+    fn verify_block_needs_no_snapshot(&self, input: &MlxArray) -> bool {
+        let shape = mlxcel_core::array_shape(input);
+        shape.len() == 2
+            && shape[0] == 1
+            && (shape[1] == 1
+                || (self.row_kernel_enabled()
+                    && (2..=mlxcel_core::row_invariant::MAX_ROWS).contains(&shape[1])))
+    }
+
+    /// After a verify block of `appended` rows, keep its first `kept` rows in
+    /// place: every layer trims its KV tail and takes its convolution states
+    /// from the block's own input windows. A row-invariant verify block
+    /// equals the single-token chain, so the result is the chain's state
+    /// after those rows; the replay of the accepted prefix it replaces ran
+    /// outside the verify scope and was a second target forward per round
+    /// (issue #3280). Refused, with nothing changed, unless every layer
+    /// recorded its windows.
+    pub(crate) fn keep_verified_prefix_for_sequence(
+        &self,
+        seq_id: Option<SequenceId>,
+        appended: usize,
+        kept: usize,
+    ) -> Result<(), String> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| {
+                if !caches.iter().all(|cache| cache.holds_block_tails()) {
+                    return Err("an Inkling layer recorded no verify-block windows".into());
+                }
+                for cache in caches.iter_mut() {
+                    cache.keep_verified_prefix(appended as i32, kept as i32)?;
+                }
+                Ok(())
             },
         )
     }
@@ -135,6 +188,18 @@ impl InklingModel {
     /// under the default `qmv_wide` dispatch, while `MLXCEL_QMV_WIDE=0` made
     /// both widths byte-identical (issue #1549).
     ///
+    /// Since issue #3409 the model's dense products, short convolutions,
+    /// sliding attention and experts are row-invariant inside a verify block
+    /// (`mlxcel_core::row_invariant`), and the probe passes on the bf16
+    /// `inkling-0.6b` checkpoint at widths 2, 4 and 8 on an M3 Ultra, also
+    /// after prompts past the sliding window. The probe adds a long draw past
+    /// that window. `MLXCEL_INKLING_ROW_INVARIANT=0` restores the old
+    /// products, under which the probe declines. On `Inkling-Small-mlx-4bit`
+    /// the probe passed at widths 2, 3, 4 and 8 but declined at 10, the MTP
+    /// default, from layer 0 on: past 8 queries MLX's SDPA leaves its
+    /// per-query kernel, so a verify block now attends in groups of at most 8
+    /// rows (issue #3280).
+    ///
     /// Used by: `speculative_burst::mtp_capable_target`, the offline
     /// `run_offline_mtp` gate.
     pub fn mtp_exactness_allows(&self, block_size: usize) -> bool {
@@ -159,6 +224,31 @@ impl InklingModel {
     ///
     /// Used by: [`Self::mtp_exactness_allows`].
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
+        let lengths =
+            draws::prompt_lengths(PROBE_PROMPT_LEN, PROBE_DRAWS, self.probe_long_context());
+        self.probe_block_chain_exactness_at(block_size, &lengths)
+    }
+
+    /// Prompt length of the probe's long draw: past the sliding window, where
+    /// a verify block's rows and the decode steps stop seeing the same keys
+    /// unless the model accounts for it (issue #3409). `None` without a
+    /// sliding layer.
+    fn probe_long_context(&self) -> Option<usize> {
+        let text = &self.config.text_config;
+        (0..text.num_hidden_layers)
+            .any(|index| text.layer_is_sliding(index))
+            .then(|| draws::past_window(text.sliding_window_size))
+    }
+
+    /// [`Self::probe_block_chain_exactness`] over draws of the given prompt
+    /// lengths, one draw per entry.
+    ///
+    /// Used by: [`Self::probe_block_chain_exactness`] and the exactness survey test.
+    pub fn probe_block_chain_exactness_at(
+        &self,
+        block_size: usize,
+        prompt_lengths: &[usize],
+    ) -> BlockChainExactness {
         if block_size < 2 {
             return BlockChainExactness::NotRun("block width below 2 drafts nothing");
         }
@@ -167,52 +257,91 @@ impl InklingModel {
         if vocab < 2 {
             return BlockChainExactness::NotRun("degenerate vocabulary");
         }
-        for draw in 0..PROBE_DRAWS {
-            let verdict = self.probe_one_draw(block_size, vocab, draw);
-            if !verdict.is_equal() {
-                return verdict;
-            }
-        }
-        BlockChainExactness::Equal
+        draws::run_draws(prompt_lengths, |draw, prompt_len| {
+            self.probe_one_draw(block_size, vocab, draw, prompt_len)
+        })
     }
 
-    /// One (prompt, walk) draw of [`Self::probe_block_chain_exactness`].
-    fn probe_one_draw(&self, block_size: usize, vocab: usize, draw: usize) -> BlockChainExactness {
-        let salt = draw * 977 + 1;
-        let wrap =
-            |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
-        let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
-        let walk: Vec<i32> = (0..block_size * PROBE_BLOCKS_PER_DRAW)
-            .map(|i| wrap(i, 13, 3))
-            .collect();
+    /// One (prompt, walk) draw of [`Self::probe_block_chain_exactness`]. A
+    /// diverging draw is run again under [`diag`] capture, and the verdict
+    /// then names the first layer whose output differs.
+    fn probe_one_draw(
+        &self,
+        block_size: usize,
+        vocab: usize,
+        draw: usize,
+        prompt_len: usize,
+    ) -> BlockChainExactness {
+        let verdict = self
+            .probe_arms(block_size, vocab, draw, prompt_len, false)
+            .0;
+        if verdict.is_equal() || matches!(verdict, BlockChainExactness::NotRun(_)) {
+            return verdict;
+        }
+        match self.probe_arms(block_size, vocab, draw, prompt_len, true) {
+            (_, Some(location)) => BlockChainExactness::Localized {
+                verdict: Box::new(verdict),
+                location,
+            },
+            _ => verdict,
+        }
+    }
 
-        let as_input =
-            |tokens: &[i32]| mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
-        let position_bytes = |logits: &MlxArray, index: i32| -> Vec<u8> {
-            let shape = mlxcel_core::array_shape(logits);
-            let row = mlxcel_core::slice(logits, &[0, index, 0], &[shape[0], index + 1, shape[2]]);
-            mlxcel_core::eval(&row);
-            mlxcel_core::array_to_raw_bytes(&row)
+    /// Both arms of one draw. With `trace`, also where the first block
+    /// parts from its chain steps, when it does.
+    fn probe_arms(
+        &self,
+        block_size: usize,
+        vocab: usize,
+        draw: usize,
+        prompt_len: usize,
+        trace: bool,
+    ) -> (BlockChainExactness, Option<String>) {
+        let prompt = draws::prompt_tokens(draw, prompt_len, vocab);
+        let walk = draws::block_tokens(draw, block_size * PROBE_BLOCKS_PER_DRAW, vocab);
+        let traced = |run: &mut dyn FnMut() -> UniquePtr<MlxArray>| {
+            if trace {
+                diag::with_capture(run)
+            } else {
+                (run(), Vec::new())
+            }
         };
 
         let mut chain_caches = self.make_internal_caches();
-        let _ = self.forward_with_caches(&as_input(&prompt), &mut chain_caches);
+        let _ = self.forward_with_caches(&draws::as_input(&prompt), &mut chain_caches);
         let mut chain_positions = Vec::with_capacity(walk.len());
+        let mut chain_trace = Vec::with_capacity(walk.len());
         for token in &walk {
-            let logits = self.forward_with_caches(&as_input(&[*token]), &mut chain_caches);
-            chain_positions.push(position_bytes(&logits, 0));
+            let (logits, stages) = traced(&mut || {
+                self.forward_with_caches(&draws::as_input(&[*token]), &mut chain_caches)
+            });
+            chain_positions.push(draws::position_bytes(&logits, 0));
+            chain_trace.push(stages);
         }
 
         let mut block_caches = self.make_internal_caches();
-        let _ = self.forward_with_caches(&as_input(&prompt), &mut block_caches);
+        let _ = self.forward_with_caches(&draws::as_input(&prompt), &mut block_caches);
         let mut block_positions = Vec::with_capacity(walk.len());
-        for block in walk.chunks(block_size) {
-            let logits = self.forward_with_caches(&as_input(block), &mut block_caches);
+        let mut location = None;
+        for (index, block) in walk.chunks(block_size).enumerate() {
+            let (logits, stages) = traced(&mut || {
+                // The scope the verify forward enters.
+                let _verify = self.verify_block_scope();
+                self.forward_with_caches(&draws::as_input(block), &mut block_caches)
+            });
             for i in 0..block.len() {
-                block_positions.push(position_bytes(&logits, i as i32));
+                block_positions.push(draws::position_bytes(&logits, i as i32));
+            }
+            if trace && location.is_none() {
+                let start = index * block_size;
+                location =
+                    diag::first_divergence(&stages, &chain_trace[start..start + block.len()]);
             }
         }
 
-        compare_block_against_chain(&block_positions, &chain_positions)
+        (
+            compare_block_against_chain(&block_positions, &chain_positions),
+            location,
+        )
     }
 }

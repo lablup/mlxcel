@@ -325,6 +325,8 @@ async fn generate_summary(
     options.image_soft_tokens = prepared.image_soft_tokens;
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.thinking_enter_block_on_start = primed_open_thinking;
+    options.thinking_primed_close =
+        super::chat::primed_open_thinking_close_marker(&state.thinking_markers, &prepared.prompt);
     // The summarized prefix is the prompt of earlier turns, so the prompt
     // cache can serve it.
     options.prompt_cache_ctx = build_prompt_cache_request_context(

@@ -118,6 +118,18 @@ impl DFlashVerifyOutput for crate::models::laguna_speculative::LagunaVerifyOutpu
     }
 }
 
+impl DFlashVerifyOutput for crate::models::inkling2::speculative::Inkling2VerifyOutput {
+    fn logits(&self) -> &MlxArray {
+        self.logits
+            .as_ref()
+            .expect("Inkling 2 verify output must carry logits")
+    }
+
+    fn hidden_states(&self) -> &[UniquePtr<MlxArray>] {
+        &self.hidden_states
+    }
+}
+
 impl DFlashVerifyOutput for crate::models::muse_glimmer::VerifyOutput {
     fn logits(&self) -> &MlxArray {
         self.logits
@@ -147,12 +159,16 @@ pub(crate) enum DFlashDrafterFamily {
     MuseAssistant,
     /// The Poolside Laguna DFlash drafter (issue #1351).
     Laguna,
+    /// The DSpark drafter bundled with an Inkling 2 checkpoint (issue #3374).
+    Inkling2DSpark,
 }
 
 impl DFlashDrafterFamily {
     /// Which family a loaded drafter is, read off its two self-reports.
     fn of(drafter: &dyn Drafter) -> Self {
-        if drafter.is_dspark() {
+        if drafter.is_inkling2_dspark() {
+            Self::Inkling2DSpark
+        } else if drafter.is_dspark() {
             Self::DSpark
         } else if drafter.is_muse_assistant() {
             Self::MuseAssistant
@@ -198,6 +214,24 @@ pub(crate) trait DFlashTargetModel:
     /// below pin each family's answer without a checkpoint on disk.
     fn first_hidden_rows() -> FirstHiddenRows {
         FirstHiddenRows::LastPromptPosition
+    }
+
+    /// The burst's prompt prefill. `chunk` and `boundary` are the scheduler's
+    /// classic partition of this prompt (`--prefill-chunk-size` and the
+    /// prompt-cache snapshot splits), which a target whose drafter-on text
+    /// must equal classic decode past one chunk mirrors (Inkling 2, issue
+    /// #3410). The default prefills through
+    /// `SpeculativeTarget::prefill_forward_with_capture_layers` unchanged.
+    fn prefill_burst(
+        &self,
+        prompt: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Self::VerifyOut {
+        let _ = (chunk, boundary);
+        self.prefill_forward_with_capture_layers(prompt, caches, capture_layer_ids)
     }
 
     /// Hook for a target whose caches need arming for a multi-row verify
@@ -371,6 +405,47 @@ impl DFlashTargetModel for crate::models::LagunaWrapper {
     }
 }
 
+/// Inkling 2 (issue #3374), driven by the DSpark drafter bundled in its own
+/// checkpoint: every prompt row seeds the drafter context, the block width is
+/// gated by the exactness probe, and the burst is B = 1 only.
+impl DFlashTargetModel for crate::vision::Inkling2VlModel {
+    fn make_dflash_caches(&self) -> Vec<mlxcel_core::inkling_layer::InklingLayerCache> {
+        self.text.make_speculative_caches()
+    }
+    fn first_hidden_rows() -> FirstHiddenRows {
+        FirstHiddenRows::EveryPromptRow
+    }
+    fn prefill_burst(
+        &self,
+        prompt: &MlxArray,
+        caches: &mut [mlxcel_core::inkling_layer::InklingLayerCache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Self::VerifyOut {
+        let suppressed = crate::models::inkling2::speculative::suppression_map(
+            &LanguageModel::output_suppressed_token_ids(self),
+        );
+        self.text.prefill_speculative_planned(
+            prompt,
+            caches,
+            capture_layer_ids,
+            &suppressed,
+            chunk,
+            boundary,
+        )
+    }
+    fn exactness_allows(&self, block_size: usize) -> bool {
+        self.text.dflash_exactness_allows(block_size)
+    }
+    fn required_drafter_family() -> Option<DFlashDrafterFamily> {
+        Some(DFlashDrafterFamily::Inkling2DSpark)
+    }
+    fn supports_batched() -> bool {
+        false
+    }
+}
+
 impl DFlashTargetModel for crate::vision::MuseGlimmerVlmModel {
     fn make_dflash_caches(&self) -> Vec<crate::models::muse_glimmer::MuseCache> {
         self.text.make_speculative_caches()
@@ -449,6 +524,7 @@ fn required_family_pairing_error(
         DFlashDrafterFamily::DSpark => "an LFM2 DSpark drafter",
         DFlashDrafterFamily::MuseAssistant => "the Muse Glimmer assistant drafter",
         DFlashDrafterFamily::Laguna => "a Laguna DFlash drafter",
+        DFlashDrafterFamily::Inkling2DSpark => "the DSpark drafter bundled with Inkling 2",
     };
     Some(match required {
         DFlashDrafterFamily::DSpark => format!(
@@ -478,6 +554,12 @@ fn required_family_pairing_error(
              residual streams it was trained on, at a width this target does not produce, \
              and its mask token id indexes a different vocabulary. Point --model-draft at a \
              Laguna DFlash drafter, or drop it to serve this model with classic decode."
+        ),
+        DFlashDrafterFamily::Inkling2DSpark => format!(
+            "the target is an Inkling 2 checkpoint and the drafter passed to --model-draft is \
+             {got}, not its bundled DSpark drafter. An Inkling 2 target drafts with the \
+             mtp.safetensors shipped in its own checkpoint: pass the same directory to \
+             --model-draft, or drop it to serve this model with classic decode."
         ),
         DFlashDrafterFamily::Dflash => format!(
             "the target admits only the Qwen 3.5 DFlash drafter and the drafter passed to \
@@ -554,6 +636,7 @@ pub(crate) fn run_dflash_on_target<T>(
     drafter_slot: &mut WorkerDrafterSlot,
     cancel: &AtomicBool,
     logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    prefill_partition: (usize, mlxcel_core::prefill_plan::PrefillSplits),
 ) -> Result<DFlashTargetRun, BurstOutcome>
 where
     T: DFlashTargetModel,
@@ -616,8 +699,14 @@ where
         .unwrap_or_else(|| target.capture_layer_ids().to_vec());
     let prompt_arr = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
     let prefill_verify_start = Instant::now();
-    let verify_out =
-        target.prefill_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
+    let (chunk, boundary) = prefill_partition;
+    let verify_out = target.prefill_burst(
+        &prompt_arr,
+        &mut caches,
+        &capture_layer_ids,
+        chunk,
+        boundary,
+    );
     let prefill_verify_ms = prefill_verify_start.elapsed().as_secs_f64() * 1000.0;
 
     // First bonus from the last-position logits, under the request's
@@ -712,6 +801,7 @@ where
                 zero_accept_rounds = diagnostics.zero_accept_rounds,
                 partial_accept_rounds = diagnostics.partial_accept_rounds,
                 full_accept_rounds = diagnostics.full_accept_rounds,
+                classic_steps = diagnostics.classic_steps,
                 prefill_verify_ms,
                 first_bonus_ms,
                 first_hidden_ms,

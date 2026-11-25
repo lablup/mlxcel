@@ -1,0 +1,52 @@
+== build budget-only variant
+M  src/lib/mlxcel-core/src/cache/paged.rs
+M  src/lib/mlxcelverse/kernels/paged_attention_v2.cpp
+    Finished `release` profile [optimized] target(s) in 3m 52s
+== nsys qwen3-0.6b 8192x4
+{"usage": [{"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}, {"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}, {"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}, {"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}]}
+{"usage": [{"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}, {"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}, {"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}, {"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}]}
+{"usage": [{"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}, {"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}, {"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}, {"prompt_tokens": 8192, "completion_tokens": 1024, "total_tokens": 9216}]}
+q-main: wall/step=13466us gpu_busy/step=10745us kern_sum/step=11408us kernels/step=827 graphLaunch=47.8/1431us addNode=740.0/1245us execUpdate=47.8/2940us evSync=0.0/0us malloc=0.3/2us memcpy=0.2/6us
+    28.0/step  7709.6us/step  custom_kernel_mlxcel_paged_attention_v2_partial_128_32_2_2_1_4_8_float
+    94.5/step  1603.7us/step  qmv_multirow_kernel
+    46.5/step   698.8us/step  qmv_kernel
+    28.0/step   324.1us/step  custom_kernel_mlxcel_paged_attention_merge_states_128_float_float
+   113.0/step   232.6us/step  rms_norm_small
+   138.9/step   208.7us/step  copy_v
+    97.4/step   199.2us/step  copy_gg_nd
+    97.4/step   176.2us/step  rope_single
+    56.0/step    63.6us/step  binary_vv
+    28.0/step    53.3us/step  CV2ISigmoidADV2IBroadcastACEV2IBroadcastCAFV2IMultiplyDEGV2IBroadcastF
+    37.5/step    42.4us/step  copy_g_nd
+    28.0/step    41.1us/step  copy_s
+q-branch: wall/step=13447us gpu_busy/step=10951us kern_sum/step=11531us kernels/step=763 graphLaunch=37.6/1864us addNode=676.0/1072us execUpdate=37.6/2864us evSync=0.0/0us malloc=0.3/1us memcpy=0.3/5us
+    28.0/step  7855.7us/step  custom_kernel_mlxcel_paged_attention_v2_partial_128_32_2_2_1_4_8_bfloa
+    94.1/step  1621.2us/step  qmv_multirow_kernel
+    46.9/step   715.4us/step  qmv_kernel
+    28.0/step   354.1us/step  custom_kernel_mlxcel_paged_attention_merge_states_128_float_float
+   113.0/step   241.6us/step  rms_norm_small
+    97.2/step   203.7us/step  rope_single
+    97.2/step   179.3us/step  copy_gg_nd
+   110.3/step   138.1us/step  copy_v
+    56.0/step    65.9us/step  binary_vv
+    28.0/step    54.7us/step  CV2ISigmoidADV2IBroadcastACEV2IBroadcastCAFV2IMultiplyDEGV2IBroadcastF
+    37.4/step    50.2us/step  copy_g_nd
+     1.0/step    20.6us/step  arg_reduce_general
+q-budget: wall/step=12769us gpu_busy/step=10172us kern_sum/step=10694us kernels/step=793 graphLaunch=38.0/1519us addNode=705.7/1208us execUpdate=38.0/3020us evSync=0.0/0us malloc=0.3/1us memcpy=0.3/4us
+    28.0/step  7154.5us/step  custom_kernel_mlxcel_paged_attention_v2_partial_128_32_2_2_1_4_8_float
+    84.2/step  1382.9us/step  qmv_multirow_kernel
+    56.8/step   778.5us/step  qmv_kernel
+    28.0/step   355.0us/step  custom_kernel_mlxcel_paged_attention_merge_states_128_float_float
+   113.0/step   229.7us/step  rms_norm_small
+    89.5/step   194.9us/step  rope_single
+   122.9/step   171.5us/step  copy_v
+    89.5/step   170.3us/step  copy_gg_nd
+    56.0/step    65.6us/step  binary_vv
+    28.0/step    61.3us/step  CV2ISigmoidADV2IBroadcastACEV2IBroadcastCAFV2IMultiplyDEGV2IBroadcastF
+    28.0/step    40.8us/step  copy_s
+    33.5/step    35.3us/step  copy_g_nd
+== bench main vs budget-only 8192x4
+ 17:51:40 up 19 days,  6:18,  4 users,  load average: 1.52, 1.43, 0.78
+{"model": "qwen3-0.6b-4bit", "prompt": 8192, "batch": 4, "main_a_median": 148.44, "main_b_median": 146.585, "branch_median": 147.935, "main_min": 144.05, "main_max": 150.09, "branch_min": 144.92, "branch_max": 149.44, "null_spread_medians": 1.85, "branch_vs_main_pct": 0.33, "within_main_range": true, "b1_text_main_a_eq_main_b": true, "b1_text_main_eq_branch": true}
+ 18:18:34 up 19 days,  6:45,  3 users,  load average: 0.90, 1.87, 2.11
+ALLDONE

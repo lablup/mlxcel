@@ -89,6 +89,7 @@ pub enum LoadedModel {
     MuseGlimmer(models::MuseGlimmerTextWrapper),
     MuseGlimmerVLM(vision::MuseGlimmerVlmModel),
     InklingVLM(vision::InklingVlModel),
+    Inkling2VLM(vision::Inkling2VlModel),
     GraniteVisionVLM(vision::GraniteVisionVLModel),
     Granite4VisionVLM(vision::Granite4VisionVLModel),
     DeepSeekOcrVLM(vision::deepseekocr::DeepSeekOcrVlModel),
@@ -168,6 +169,7 @@ pub enum LoadedModel {
     DeepSeekV2(models::DeepSeekV2Model),
     DeepSeekV3(models::DeepSeekV3Model),
     DeepSeekV32(models::DeepSeekV32Model),
+    HyV4(models::HyV4Model),
     DeepSeekV4(models::DeepSeekV4Model),
     Xing40(models::Xing40Model),
     Dots1(models::Dots1Model),
@@ -303,6 +305,7 @@ macro_rules! delegate_language_model {
             LoadedModel::MuseGlimmer(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MuseGlimmerVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::InklingVLM(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Inkling2VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::GraniteVisionVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Granite4VisionVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekOcrVLM(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -364,6 +367,7 @@ macro_rules! delegate_language_model {
             LoadedModel::DeepSeekV2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekV3(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekV32(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::HyV4(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekV4(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Xing40(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Dots1(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -583,6 +587,12 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, lm_head_module())
     }
 
+    fn inkling2_dspark_binding(
+        &self,
+    ) -> Option<mlxcel_core::drafter::inkling2_dspark::Inkling2DsparkBinding> {
+        delegate_language_model!(self, inkling2_dspark_binding())
+    }
+
     fn after_prefill(&self) {
         delegate_language_model!(self, after_prefill())
     }
@@ -755,6 +765,26 @@ impl LanguageModel for LoadedModel {
 
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         delegate_language_model!(self, sequence_state_layout())
+    }
+
+    fn layer_state_kinds(&self) -> Option<Vec<mlxcel_core::cache::LayerStateKind>> {
+        delegate_language_model!(self, layer_state_kinds())
+    }
+
+    fn make_layer_state(&self) -> Option<Vec<mlxcel_core::cache::LayerState>> {
+        delegate_language_model!(self, make_layer_state())
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<mlxcel_core::cache::LayerStateSnapshotSpec> {
+        delegate_language_model!(self, layer_state_snapshot_spec())
+    }
+
+    fn forward_layer_state(
+        &self,
+        request: &mlxcel_core::cache::LayerStateForward<'_>,
+        rows: &mut [&mut [mlxcel_core::cache::LayerState]],
+    ) -> Result<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>, String> {
+        delegate_language_model!(self, forward_layer_state(request, rows))
     }
 
     fn supports_padded_prefill(&self) -> bool {

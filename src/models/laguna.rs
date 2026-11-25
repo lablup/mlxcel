@@ -41,7 +41,8 @@
 use crate::models::laguna_layers::{DecoderLayer, LagunaCache};
 use crate::models::laguna_sanitize::sanitize_weights;
 use crate::models::mellum::{YarnRope, compute_yarn_rope};
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
@@ -767,7 +768,7 @@ impl mlxcel_core::generate::LanguageModel for LagunaWrapper {
                 .get(layer_idx)
                 .is_some_and(|layer| layer.self_attn.is_sliding)
                 .then_some(window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 

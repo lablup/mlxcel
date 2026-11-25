@@ -206,8 +206,9 @@ pub(crate) fn exact_gelu(builder: &mut Builder, value: &Val) -> Val {
 /// Hugging Face `quick_gelu` / MLX `nn.gelu_fast_approx`:
 /// `x * sigmoid(1.702 x)`, with the sigmoid spelled `1 / (1 + exp(-z))`.
 ///
-/// Used by: the CLIP-towered LLaVA vision MLP, the Qwen2-VL ViT MLP and the
-/// Molmo ViT MLP (#2548), matching the eager `GeluActivation::Fast`.
+/// Used by: the CLIP-towered LLaVA vision MLP and the Qwen2-VL ViT MLP,
+/// matching the eager `GeluActivation::Fast` (Molmo uses `quick_gelu_f16`,
+/// #3390).
 pub(crate) fn quick_gelu(builder: &mut Builder, value: &Val) -> Val {
     let shape = value.ty.shape.clone();
     let one = builder.const_f32(1.0);

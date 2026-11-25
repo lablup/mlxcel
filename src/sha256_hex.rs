@@ -27,7 +27,15 @@ use sha2::{Digest, Sha256};
 // the fixture-hash checks in the vision/dense tests.
 /// Lowercase hex SHA-256 digest of `data`.
 pub(crate) fn sha256_hex(data: impl AsRef<[u8]>) -> String {
-    let digest = Sha256::digest(data.as_ref());
+    hex_lower(Sha256::digest(data.as_ref()))
+}
+
+// Used by: incremental digests (a `Sha256` fed with `update`) that already
+// hold a finished digest. Passing `hasher.finalize()` to `sha256_hex` would
+// hash the digest a second time (#3365).
+/// Lowercase hex encoding of an already computed digest, with no hashing.
+pub(crate) fn hex_lower(digest: impl AsRef<[u8]>) -> String {
+    let digest = digest.as_ref();
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {
         // Writing to a `String` cannot fail.
@@ -38,7 +46,16 @@ pub(crate) fn sha256_hex(data: impl AsRef<[u8]>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sha256_hex;
+    use sha2::{Digest, Sha256};
+
+    use super::{hex_lower, sha256_hex};
+
+    #[test]
+    fn hex_lower_encodes_a_finished_digest_without_rehashing() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"abc");
+        assert_eq!(hex_lower(hasher.finalize()), sha256_hex("abc"));
+    }
 
     #[test]
     fn matches_known_vectors() {

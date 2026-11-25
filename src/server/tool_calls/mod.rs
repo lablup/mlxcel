@@ -23,6 +23,7 @@
 mod atem;
 mod formats;
 pub mod incremental;
+mod inkling;
 mod json_scan;
 pub mod parser;
 pub mod stream_filter;

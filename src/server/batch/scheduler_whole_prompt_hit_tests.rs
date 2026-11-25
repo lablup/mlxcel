@@ -29,7 +29,6 @@ use super::scheduler_model_owned_cache_tests::{
     test_store, tiny_gemma3_args, tiny_gemma3_weights,
 };
 use super::*;
-use mlxcel_core::generate::LanguageModel;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 
@@ -39,11 +38,13 @@ use crate::server::prompt_cache::PromptCacheRejectReason;
 /// Per-layer cache offset of `seq_id`'s live model-owned state, read from the
 /// snapshot the model itself would donate. The tiny fixture has one layer.
 fn restored_offset(sched: &BatchScheduler, seq_id: SequenceId, kind: &str) -> i32 {
-    let snapshot = sched
-        .engine
-        .model()
-        .snapshot_sequence_state(seq_id, 0)
-        .expect("restored sequence has model-owned state");
+    let snapshot = crate::server::prompt_cache::state_snapshot::snapshot_sequence_state(
+        sched.engine.model(),
+        sched.engine.pool(),
+        seq_id,
+        0,
+    )
+    .expect("restored sequence has model-owned state");
     let name = format!("layer0.{kind}.offset");
     let offset = snapshot
         .tensor(&name)
@@ -106,6 +107,7 @@ fn identical_prompt_replay_restores_all_but_the_last_token() {
 
     let (seq_id, adopted) = sched
         .try_adopt_cached_prefix(&cache_ctx(), &first, false)
+        .adopted()
         .expect("an identical replay hits the cache");
     assert_eq!(adopted, first.len() - 1, "adopt stops one token short");
     assert_eq!(
@@ -127,6 +129,7 @@ fn whole_entry_hit_restores_len_minus_one_and_prefills_one_token() {
 
     let (seq_id, adopted) = sched
         .try_adopt_cached_prefix(&cache_ctx(), &replay, false)
+        .adopted()
         .expect("the stored conversation hits its own entry");
     assert_eq!(adopted, replay.len() - 1);
     assert_eq!(
@@ -165,7 +168,9 @@ fn untruncatable_whole_entry_hit_falls_back_to_cold_prefill() {
         .batch_observability
         .prompt_cache_reject_reasons
         .count(PromptCacheRejectReason::LayoutConstraints);
-    let adopted = sched.try_adopt_cached_prefix(&cache_ctx(), &replay, false);
+    let adopted = sched
+        .try_adopt_cached_prefix(&cache_ctx(), &replay, false)
+        .adopted();
     assert!(
         adopted.is_none(),
         "a wrapped ring cannot drop the last token, so the hit must decline"

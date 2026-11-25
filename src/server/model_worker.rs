@@ -1573,7 +1573,12 @@ pub(crate) fn spawn_xla_model_worker(
             };
             let engine =
                 match mlxcel_xla::XlaBucketSet::load(&model_path, b_max, &device, &capacities) {
-                    Ok((engine, dropped)) => {
+                    Ok((mut engine, dropped)) => {
+                        // Stop on the eager backend's EOS set, which also
+                        // covers the tokenizer's `eos_token` (#3292).
+                        engine.set_eos_token_ids(&crate::backend::xla::xla_stop_token_ids(
+                            &model_path,
+                        ));
                         // A bucket after the first can fail to compile or to
                         // allocate its cache without costing the process: the
                         // remaining shapes still serve every request that fits
@@ -2585,14 +2590,17 @@ fn materialize_phi4mm_ordered_prompt(
         ORDERED_MEDIA_PREFIX, OrderedMediaSegment, parse_ordered_media_segments,
     };
 
+    // A prompt without ordered markers did not come from the server's ordered
+    // content renderer: the CLI renders the user turn through the checkpoint
+    // template, which has no media branch, so `mlxcel generate --audio` reaches
+    // here with plain text (issue #3362). Pass it through unchanged, as the
+    // Gemma3n path keeps its pre-rendered prompt (#922):
+    // `prepare_phi4mm_prompt_tokens` keeps explicit `<|audio_N|>` /
+    // `<|image_N|>` tags, inserts missing ones at the start of the user turn
+    // (the same normalization the OpenXLA CLI applies), and still rejects any
+    // placeholder count that disagrees with the request.
     if !prompt.contains(ORDERED_MEDIA_PREFIX) {
-        return if expected_images == 0 && expected_audio == 0 {
-            Ok(prompt.to_string())
-        } else {
-            Err(anyhow!(
-                "rendered Phi4MM prompt lost ordered media markers for {expected_images} image/{expected_audio} audio inputs"
-            ))
-        };
+        return Ok(prompt.to_string());
     }
     let mut materialized = String::with_capacity(prompt.len());
     let mut images = 0usize;

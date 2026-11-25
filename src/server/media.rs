@@ -357,6 +357,20 @@ pub(crate) fn media_kind_refusal(kind: &str, model_id: &str) -> String {
     message
 }
 
+/// The refusal for an audio part sent to an Inkling 2 checkpoint, shared by the
+/// HTTP boundary and the CLI so every surface says the same thing (issue #3376).
+///
+/// Inkling 2's checkpoints carry only `model.llm.*` and `model.visual.*`
+/// weights and no `audio_config`, and the official chat template raises
+/// `Inkling 2 does not accept audio input` for `audio`, `input_audio` and
+/// `audio_url` parts. The prefix matches [`media_kind_refusal`]'s
+/// `<kind> input is not supported - hint: ` shape so a client matching on it
+/// keeps working.
+///
+/// Used by: `server::startup`, `commands::generate`.
+pub const INKLING2_AUDIO_REFUSAL: &str = "audio input is not supported - hint: Inkling 2 has no \
+audio encoder; its checkpoints carry only text and vision weights";
+
 /// The refusal for a request that mixes video and audio on a checkpoint whose
 /// merge path takes only one of the two.
 ///
@@ -382,15 +396,30 @@ pub(crate) fn media_capability_rejection(
     model_id: &str,
 ) -> Option<crate::server::types::ErrorResponse> {
     let refuse = |kind: &str| {
-        Some(crate::server::types::ErrorResponse::not_supported(
-            media_kind_refusal(kind, model_id),
-        ))
+        // A family with a stated reason for having no audio encoder answers
+        // with that sentence instead of the generic per-kind wording
+        // (issue #3376). `--no-mmproj` never reaches here with a reason set:
+        // `ModelMediaSupport::none()` carries `audio_refusal: None`, so its own
+        // hint keeps priority.
+        let message = match support.audio_refusal {
+            Some(reason) if kind == "audio" => reason.to_string(),
+            _ => media_kind_refusal(kind, model_id),
+        };
+        Some(crate::server::types::ErrorResponse::not_supported(message))
     };
     if !support.image && !request.image_urls().is_empty() {
         return refuse("image");
     }
-    if !support.audio && !request.audio_inputs().is_empty() {
+    if !support.audio && (!request.audio_inputs().is_empty() || request.has_audio_urls()) {
         return refuse("audio");
+    }
+    if request.has_audio_urls() {
+        // No checkpoint reads an `audio_url` part, so an audio-capable one
+        // is told which shape it takes rather than being served silence.
+        return Some(crate::server::types::ErrorResponse::new(
+            "audio_url content parts are not supported; send audio as an input_audio part",
+            "invalid_request_error",
+        ));
     }
     if !support.video() && !request.video_urls().is_empty() {
         return refuse("video");

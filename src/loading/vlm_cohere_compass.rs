@@ -28,7 +28,6 @@
 //! ```
 
 use anyhow::Result;
-use serde_json::Value;
 use std::path::Path;
 
 use crate::LoadedModel;
@@ -39,7 +38,7 @@ use super::qwen3_vision::load_qwen3_vl_vision_encoder;
 use super::{
     QwenVisionTokenIds, inherit_qwen_vision_quantization, load_vlm_weights_common,
     parse_required_vlm_subconfig, qwen_vl_processor_with_norm, qwen_vl_token_ids,
-    read_optional_model_json, read_sanitized_vlm_config, remap_qwen3_vl_weights,
+    read_sanitized_vlm_config, remap_qwen3_vl_weights,
 };
 
 /// Vision token ids of the published Compass checkpoints. Every one supplies
@@ -80,13 +79,13 @@ pub(crate) fn load_cohere_compass_vlm(model_path: &Path) -> Result<LoadedModel> 
         .map_err(|e| anyhow::anyhow!("Failed to load Cohere Compass vision encoder: {}", e))?;
 
     // The sidecars normalize to mean/std 0.5, the same as the Qwen3-VL
-    // processor default this helper takes. The resize bounds are not the family
-    // defaults, though, and the two sidecars disagree; see
-    // `compass_pixel_bounds`.
+    // processor default this helper takes. The helper also applies the
+    // checkpoint resize policy; the published checkpoint's two sidecars
+    // disagree on the bounds, and the nested `processor_config.json` block HF
+    // builds from wins (16384 / 3868706, 49 tokens for a 224x224 image), see
+    // `qwen_image_policy`.
     let processor =
         qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])?;
-    let (min_pixels, max_pixels) = compass_pixel_bounds(model_path);
-    let processor = processor.with_pixel_bounds(min_pixels, max_pixels);
     let token_ids = qwen_vl_token_ids(
         &full_config,
         QwenVisionTokenIds {
@@ -108,54 +107,3 @@ pub(crate) fn load_cohere_compass_vlm(model_path: &Path) -> Result<LoadedModel> 
 
     Ok(LoadedModel::CohereCompassVLM(vlm))
 }
-
-/// Resize bounds in pixel *area*, as `smart_resize` consumes them.
-///
-/// Two sidecars carry them and they disagree on the published checkpoint.
-/// `processor_config.json` nests an `image_processor` block holding
-/// `min_pixels` 16384 / `max_pixels` 3868706, while the standalone
-/// `preprocessor_config.json` says `size.shortest_edge` 65536 /
-/// `size.longest_edge` 16777216. HF's `AutoProcessor` builds the image
-/// processor from the nested block, so 16384 is what the reference
-/// implementation actually resizes against; taking 65536 instead upscales any
-/// image under 256x256 and changes its token count. Measured on
-/// `tests/fixtures/test_image.png` (224x224): the reference keeps a 14x14 grid
-/// (49 image tokens), while the 65536 bound produces 16x16 (64), which
-/// silently desynchronizes the prompt from the oracle.
-///
-/// So: the nested block wins, `preprocessor_config.json` is the fallback, and
-/// the Qwen family defaults are the last resort. Explicit `min_pixels` /
-/// `max_pixels` beat `size` within each file, matching what the HF processor
-/// reads.
-fn compass_pixel_bounds(model_path: &Path) -> (usize, usize) {
-    use vision::processors::qwen2_vl::{DEFAULT_MAX_PIXELS, DEFAULT_MIN_PIXELS};
-
-    let nested = read_optional_model_json(model_path, "processor_config.json")
-        .and_then(|v| v.get("image_processor").cloned());
-    let standalone = read_optional_model_json(model_path, "preprocessor_config.json");
-
-    let read = |source: Option<&Value>, primary: &str, nested_key: &str| -> Option<usize> {
-        let source = source?;
-        let value = source
-            .get(primary)
-            .filter(|v| !v.is_null())
-            .or_else(|| source.get("size").and_then(|s| s.get(nested_key)))?;
-        usize::try_from(value.as_u64()?).ok().filter(|v| *v > 0)
-    };
-
-    let pick = |primary: &str, nested_key: &str| -> Option<usize> {
-        read(nested.as_ref(), primary, nested_key)
-            .or_else(|| read(standalone.as_ref(), primary, nested_key))
-    };
-
-    let min_pixels = pick("min_pixels", "shortest_edge").unwrap_or(DEFAULT_MIN_PIXELS);
-    let max_pixels = pick("max_pixels", "longest_edge").unwrap_or(DEFAULT_MAX_PIXELS);
-    if min_pixels > max_pixels {
-        return (DEFAULT_MIN_PIXELS, DEFAULT_MAX_PIXELS);
-    }
-    (min_pixels, max_pixels)
-}
-
-#[cfg(test)]
-#[path = "vlm_cohere_compass_tests.rs"]
-mod tests;

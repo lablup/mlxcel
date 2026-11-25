@@ -1175,6 +1175,8 @@ pub(crate) async fn stream_asr_completion(
     // native renderer closes. `None` for every template-rendered request.
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.thinking_enter_block_on_start = primed_open_thinking;
+    options.thinking_primed_close =
+        primed_open_thinking_close_marker(&state.thinking_markers, &prepared.prompt);
 
     let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
         Ok(reservation) => reservation,
@@ -2230,6 +2232,7 @@ const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &[
     "</ifm|think>",
     "</ifm|think_fast>",
     "</ifm|think_faster>",
+    "</think:opensource>",
 ];
 
 /// Whether the prompt primed an open thinking block that the raw output never

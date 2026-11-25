@@ -181,6 +181,7 @@ fn gemma31b_batched_mtp_declines_before_drafter_io_and_preserves_requests() {
     second.seq_id = SequenceId::from_raw(43);
     let expected_prompts = [first.prompt_tokens.clone(), second.prompt_tokens.clone()];
     let ctx = super::speculative_burst::BurstContext {
+        layer_state: None,
         model: &model,
         tokenizer: &tokenizer,
         drafter_slot: &mut slot,
@@ -260,6 +261,7 @@ fn qwen35_batched_dflash_declines_a_failing_exactness_verdict_before_drafter_io(
     second.seq_id = SequenceId::from_raw(43);
     let expected_prompts = [first.prompt_tokens.clone(), second.prompt_tokens.clone()];
     let ctx = super::speculative_burst::BurstContext {
+        layer_state: None,
         model: &model,
         tokenizer: &tokenizer,
         drafter_slot: &mut slot,
