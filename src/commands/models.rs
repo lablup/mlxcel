@@ -469,6 +469,19 @@ pub(crate) fn run_remove(
     revision: Option<&str>,
     models_dir: Option<&Path>,
 ) -> Result<()> {
+    run_remove_with_confirm(repo_id, yes, revision, models_dir, confirm_removal)
+}
+
+/// [`run_remove`] with the confirmation prompt passed in, so tests can see
+/// whether the prompt was reached without depending on a TTY. `confirm`
+/// receives `(repo_id, path, size)` and returns whether to proceed.
+fn run_remove_with_confirm(
+    repo_id: &str,
+    yes: bool,
+    revision: Option<&str>,
+    models_dir: Option<&Path>,
+    confirm: impl FnOnce(&str, &str, &str) -> Result<bool>,
+) -> Result<()> {
     // Probe the store first so we can show what will be removed (and its size)
     // before asking for confirmation, and so a not-found / HF-cache-only repo
     // never reaches a confirmation prompt. Honors the `--models-dir` override
@@ -523,7 +536,7 @@ pub(crate) fn run_remove(
     // Confirm unless --yes.
     if !yes {
         let size = dir_size_for_prompt(&target);
-        if !confirm_removal(repo_id, &target.display().to_string(), &size)? {
+        if !confirm(repo_id, &target.display().to_string(), &size)? {
             println!("Aborted; nothing was removed.");
             return Ok(());
         }
@@ -1108,6 +1121,67 @@ mod tests {
         assert!(
             models_root.join("acme/two").is_dir(),
             "acme/two must survive"
+        );
+    }
+
+    /// Stage `acme/one` and `acme/two` as complete snapshots under a models
+    /// root, the layout an owner id would otherwise match as a whole.
+    fn stage_two_acme_models(models_root: &Path) {
+        for name in ["one", "two"] {
+            let dir = models_root.join("acme").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        }
+    }
+
+    #[test]
+    fn run_remove_refuses_owner_id_before_the_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_root = tmp.path();
+        stage_two_acme_models(models_root);
+        let prompted = std::cell::Cell::new(false);
+
+        let err = run_remove_with_confirm("acme", false, None, Some(models_root), |_, _, _| {
+            prompted.set(true);
+            Ok(true)
+        })
+        .expect_err("`mlxcel rm acme` must be refused");
+
+        assert!(
+            !prompted.get(),
+            "the operator must never be asked to confirm deleting an owner directory"
+        );
+        assert!(err.to_string().contains("<owner>/<name>"), "{err}");
+        assert!(
+            models_root.join("acme/one").is_dir(),
+            "acme/one must survive"
+        );
+        assert!(
+            models_root.join("acme/two").is_dir(),
+            "acme/two must survive"
+        );
+    }
+
+    #[test]
+    fn run_remove_prompts_for_one_model_and_honors_a_no() {
+        // Pins the other side of the test above: for a real model the prompt
+        // is reached, with that model's path, and its answer is respected.
+        let tmp = tempfile::tempdir().unwrap();
+        let models_root = tmp.path();
+        stage_two_acme_models(models_root);
+        let prompted_path = std::cell::RefCell::new(None);
+
+        run_remove_with_confirm("acme/one", false, None, Some(models_root), |_, path, _| {
+            *prompted_path.borrow_mut() = Some(path.to_string());
+            Ok(false)
+        })
+        .expect("declining the prompt is not an error");
+
+        let expected = models_root.join("acme/one").display().to_string();
+        assert_eq!(prompted_path.into_inner(), Some(expected));
+        assert!(
+            models_root.join("acme/one").is_dir(),
+            "a declined rm must not delete"
         );
     }
 }
