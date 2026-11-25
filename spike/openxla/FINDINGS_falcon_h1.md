@@ -46,8 +46,27 @@ The integration suite prints the selected device for real-checkpoint token parit
 
 At source head `205d0a3dd2d92eca2dbcba3dffcefba54e825eca`, pinned IREE `3.12.0rc20260721` passed the independent synthetic gate on both `local-task` and NVIDIA GB10 `cuda`: all three normalization modes, four unequal-length trajectories each, eight generated tokens each, per-step ragged logits within `3e-4` absolute error with matching argmax, and slot re-admission. Original Tiny90M engine generation matched all 40 committed HF fp32 oracle tokens on both devices. Focused emitter/configuration tests, all registered byte-exact goldens, every-family weight-layout agreement, 27 recurrent regression tests, five Nemotron-H tests, original-checkpoint shape validation, formatting, and narrow core-crate clippy passed. These are local results; HIP acceptance remains external.
 
-The CUDA CLI also matched the independent 40-token oracle with `--no-chat-template`, temperature zero, and printed token IDs. Four simultaneous `/v1/completions` requests then matched their separate 24-token CLI references in exact response text and prompt/completion token counts. The response intervals overlapped and the owned server process was reaped afterward. The HTTP API does not expose generated token IDs, so this HTTP result is text/count parity, not a direct HTTP token-ID observation. Command/environment and binary hashes are recorded in `falcon_h1_reference/cuda-cli-server-provenance.json`.
+The CUDA CLI also matched the independent 40-token oracle with `--no-chat-template`, temperature zero, and printed token IDs. Four simultaneous `/v1/completions` requests then matched the raw token decode of their separate 24-token CLI references and prompt/completion token counts. That original harness did not compare displayed stdout: it decoded the printed token IDs. The response intervals overlapped and the owned server process was reaped afterward. The HTTP API does not expose generated token IDs, so this HTTP result is text/count parity, not a direct HTTP token-ID observation. Command/environment and binary hashes are recorded in `falcon_h1_reference/cuda-cli-server-provenance.json`.
 
 The CUDA `xla_batch_bench` gate passed with batch 4, requests 8, maximum per-request budget 24, and context capacity 256: all 170 emitted tokens across staggered requests and reused slots were reference-exact. The local test-fast run measured 102.21 tokens/s batched versus 67.58 tokens/s sequential (1.5x); these are bounded acceptance measurements rather than release-build performance claims. The exact output is in `falcon_h1_reference/cuda-batch-b4-n8.log`.
 
 The final core-crate regression run passed 544 tests with 22 ignored and zero failures. The ignored real-checkpoint and synthetic IREE gates were executed separately as recorded above. `local-validation.json` summarizes the measured source and evidence boundaries.
+
+## Displayed CLI whitespace follow-up
+
+External ROCm acceptance at `852129eb1b4bf45d957f4c63b082d9d0276e4951` passed the numerical, 40-token CLI, batch/recycling, and release `validate_arch.sh` gates ([results](https://github.com/lablup/mlxcel/pull/3414#issuecomment-7147795531)). The stricter displayed CLI/server check passed only three of four prompts: the Germany completion ended in two spaces and a newline, which raw HTTP retained and CLI rendering removed ([diagnosis](https://github.com/lablup/mlxcel/pull/3414#issuecomment-7147960509)). All four server strings matched the raw decode of CLI token IDs. This is inherited numerical evidence for that exact head, not a HIP result for subsequent changes.
+
+`StreamFilter::flush` intentionally trims chat and structured-message whitespace. Full CLI display now opts into preserving plain completion whitespace, restoring its documented byte-preserving behavior. Consumed reasoning/tool/Harmony/Muse delimiters and prompt-primed reasoning still select the existing cleanup policy; chat callers keep the default flush. Raw streaming CLI already forwards text unchanged. CPU regressions cover the exact `"  \n"` suffix, whitespace-only and Unicode replies, chunk accounting, and structured-message cleanup.
+
+The portable replay compares actual displayed CLI stdout with four concurrent 40-token HTTP completions, including the Germany prompt. It removes only the CLI preamble and two framing newlines, without trimming model text, and separately verifies the original 40-token HF oracle. After rebuilding both binaries at the candidate head, external ROCm replay must explicitly select HIP:
+
+```sh
+eval "$(scripts/iree/setup-rocm.sh --env)"
+export MLXCEL_XLA_DEVICE=hip MLXCEL_XLA_ROCM_TARGET=gfx1151 MLXCEL_XLA_PRECISION=f32
+scripts/rocm_gpu_guard.sh --hold -- "$MLXCEL_ORACLE_PYTHON" \
+  spike/openxla/falcon_h1_cli_server_check.py --device hip \
+  --model "$MLXCEL_FALCON_H1_MODEL" --bin-dir "$PWD/target/release" \
+  --binary-source-head "$(git rev-parse HEAD)" --out /tmp/falcon-h1-displayed-hip
+```
+
+The replay writes byte-preserved CLI stdout, token IDs, HTTP responses, exact comparisons, binary hashes, and owned-server termination evidence. Output-policy CPU tests and CUDA replay do not claim a new HIP run; the external replay remains a separate evidence boundary.
