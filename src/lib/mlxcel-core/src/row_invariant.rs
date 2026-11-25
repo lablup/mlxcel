@@ -114,6 +114,17 @@ pub fn is_verify_block(shape: &[i32]) -> bool {
         && (2..=MAX_ROWS).contains(&shape[1])
 }
 
+/// Whether a [`Scope`] is open on this thread, for a model whose fused
+/// kernels (a compiled MLP, a projection fused with its rotation) would take
+/// products the helpers here do not cover: inside a scope it builds the
+/// composed form from [`linear_whole_block`] instead, in decode steps and
+/// verify blocks alike.
+///
+/// Used by: `models::llama3::Attention::forward` and `models::llama3::MLP`.
+pub fn active() -> bool {
+    mode().is_some()
+}
+
 /// Whether the products built now belong to a verify block, for callers
 /// that split a product the helpers here do not cover.
 pub fn in_verify_block() -> bool {
@@ -208,8 +219,9 @@ pub fn linear(layer: &UnifiedLinear, x: &MlxArray) -> UniquePtr<MlxArray> {
 /// forward, call for call, so a model that enters the scope only on request
 /// is otherwise untouched.
 ///
-/// Used by: the DeepSeek V3 decoder (`models::deepseek_v3`) and
-/// `models::xing4_0`.
+/// Used by: the DeepSeek V3 decoder (`models::deepseek_v3`),
+/// `models::xing4_0`, DeepSeek V3.2 and V2, Arcee, OLMoE, and
+/// [`crate::layers::FusedQKVLinear::forward`] (the Llama-class attention).
 pub fn linear_whole_block(layer: &UnifiedLinear, x: &MlxArray) -> UniquePtr<MlxArray> {
     if mode().is_none() {
         return layer.forward(x);

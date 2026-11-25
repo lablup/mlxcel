@@ -24,6 +24,8 @@ pub(crate) mod batched_decode_harness;
 #[cfg(test)]
 pub(crate) mod deepstack_state_test_support;
 #[cfg(test)]
+mod dense_verify_block_tests;
+#[cfg(test)]
 mod last_row_logits_coverage_tests;
 #[cfg(test)]
 pub(crate) mod last_row_logits_harness;

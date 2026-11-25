@@ -532,3 +532,20 @@ fn longcat_flash_ngram_yarn_block_reaches_every_attention() {
     }
     assert!(worst <= 1e-3, "YaRN incremental decode diverged: {worst}");
 }
+
+/// The token-only verify round (prompt lookup, a full-model drafter) refuses
+/// both LongCat variants: one model-owned state slot, and pad or rejected
+/// positions land in caches and the n-gram tail no trim reaches. So neither
+/// runs a verify block, and the exact MLA verify scope
+/// (`MLXCEL_MLA_ROW_INVARIANT`) is not extended to them (#3421).
+#[test]
+fn the_token_only_verify_round_refuses_this_model() {
+    for model_type in ["longcat_flash", "longcat_flash_ngram"] {
+        let model = tiny_model(model_type);
+        assert!(
+            mlxcel_core::speculative::prompt_lookup::prompt_lookup_unsupported_reason(&model)
+                .is_some(),
+            "{model_type}"
+        );
+    }
+}

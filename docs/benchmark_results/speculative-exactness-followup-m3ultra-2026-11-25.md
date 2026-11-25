@@ -135,12 +135,81 @@ The exact block costs prompt lookup 43% of its throughput on bf16 and 24% on 8-b
 | DeepSeek V3 family (`DeepSeekV3Model`) | Exact verify block available, off by default. Byte identity costs prompt lookup 24% to 43% of its throughput and the round's contract does not promise it. `MLXCEL_MLA_ROW_INVARIANT=1` turns it on; quantized checkpoints also need `MLXCEL_QMV_WIDE=0`. |
 | Xing4.0 | Same switch, same layers, plus the hyper connection's two products. Equal on the 8-bit and the mixed-width optiq checkpoint. |
 | GLM-4.7-Flash engine path | Same switch: the token-only block takes the MTP gate's row-wise verify forward. Equal on narrow. |
-| DeepSeek V3.2, Kimi Linear, Kimi K3, LongCat | Not changed. They carry the same `use_absorbed_mla` split in their own attention code. `deepseek-v3.2-4bit` is over this run's memory limit, and the others were not surveyed. |
-| Arcee (`afm-4.5b`, bf16) | Kept as documented. First divergence: layer 0 output (rows 0 to 3 depending on the draw; layer 1 in one cell). The products are the Llama-class dense projections; making them row-invariant means moving that shared decode path onto the matvec kernel. |
-| K2 Horizon (`k2-horizon-0.9b`, bf16, `Llama3Model`) | Kept as documented. First divergence: layer 0 output, row 0, in all 9 cells. Same reason. |
-| OLMoE (`olmoe-1b-7b-0125-4bit`) | Kept as documented. First divergence: layer 0 output, row 0, on both kernels. |
+| DeepSeek V3.2, Kimi Linear, Kimi K3, LongCat | Not changed here. They carry the same `use_absorbed_mla` split in their own attention code. `deepseek-v3.2-4bit` is over this run's memory limit, and the others were not surveyed. Updated by #3421, section 3: V3.2 joins the switch, the other three are refused by the token-only round. |
+| Arcee (`afm-4.5b`, bf16) | Kept as documented. First divergence: layer 0 output (rows 0 to 3 depending on the draw; layer 1 in one cell). The products are the Llama-class dense projections; making them row-invariant means moving that shared decode path onto the matvec kernel. Fixed under the switch by #3421, section 3. |
+| K2 Horizon (`k2-horizon-0.9b`, bf16, `Llama3Model`) | Kept as documented. First divergence: layer 0 output, row 0, in all 9 cells. Same reason. Fixed under the switch by #3421, section 3. |
+| OLMoE (`olmoe-1b-7b-0125-4bit`) | Kept as documented. First divergence: layer 0 output, row 0, on both kernels. Fixed under the switch by #3421, section 3. |
 
 No gate was added: prompt lookup and the full-model drafter run on every model they ran on before, with or without the variable.
+
+## 3. Remaining MLA and dense families (issue #3421)
+
+Section 2 left DeepSeek V3.2, Kimi Linear, Kimi K3 and LongCat unchanged and Arcee, K2 Horizon and OLMoE documented but not fixed. Everything below is behind the same opt-in, `MLXCEL_MLA_ROW_INVARIANT=1`; with it unset no forward enters a row-invariant scope and the code takes its previous path.
+
+### Which families form a token-only block
+
+The engine's token-only round (prompt lookup, a full-model drafter) refuses Kimi Linear, Kimi K3 and both LongCat variants (`prompt_lookup_unsupported_reason`): Kimi keeps model-owned KDA and MLA state without a verify rewind, and LongCat keeps one model-owned state slot and an n-gram tail no cache trim reaches. The survey confirms it: every engine cell on `kimi-linear-48b-a3b-instruct-4bit`, `longcat-flash-lite-4bit` and `longcat-flash-lite-sparse-4bit` reports "the token-only verify round does not take this model". So no verify block forms on them, Kimi Linear's recurrent KDA layers never see one, and the scope is not extended to them; a test per family pins the refusal, so a change that lets the round take one of them fails there first. DeepSeek V2 does take the round and carries the same split through its latent cache, so it is in.
+
+### Change
+
+- DeepSeek V3.2: the single-query DSA attention is one helper (`MLAAttention::single_query_attention`), used by a decode step and, inside a verify block, by every row over its prefix of the stored `[latent | indexer key]` window with its own indexer query and top-k. The projections (including the indexer's `wk`, `wq_b` and `weights_proj`), the MoE gate and the LM head are row-invariant in the scope; float experts run per position.
+- DeepSeek V2: a verify block appends and attends one row at a time on both cache layouts (the latent cache's own `attend`, or per-head K/V and single-query SDPA). Projections, gate and float experts as above.
+- `Llama3Model` (K2 Horizon) and `ArceeModel`: the fused QKV projection takes `row_invariant::linear_whole_block`, which is the layer's own forward outside a scope; inside one the fused rope launchers and the compiled MLP give way to the composed graph (decode steps too, so they agree with the block), and a verify block attends one row at a time through the cache.
+- OLMoE: a verify block routes and runs the experts one position at a time (each position takes the fused single-token MoE kernel its decode step takes) and attends one row at a time; projections and router through `linear_whole_block`.
+- MLA path stats: the rows of a per-row verify block count as one call per layer (`mla::stats::as_one_call`), so a width-K block no longer reads as K decode steps. Decode counts are unchanged.
+
+### Verdicts
+
+`models::speculative_exactness_survey_tests::survey_block_vs_chain`, engine path, widths 2, 4 and 8 at 8, 600 and 2100 prompt tokens (9 cells per kernel). A diverging wide cell is rerun on the narrow kernel (`qmv_wide` off, the effect of `MLXCEL_QMV_WIDE=0`). One locked block per checkpoint, load average 20 to 27 (another unit was building).
+
+| Checkpoint | Dtype | Variable off, wide | Variable off, narrow | First difference, off | Variable on, wide | Variable on, narrow |
+|---|---|---|---|---|---|---|
+| kimi-linear-48b-a3b-instruct-4bit | 4-bit | not run (round refuses the model) | | | not run | |
+| longcat-flash-lite-4bit | 4-bit | not run (round refuses the model) | | | not run | |
+| longcat-flash-lite-sparse-4bit | 4-bit | not run (round refuses the model) | | | not run | |
+| deepseek-v2-lite-chat-4bit-mlx | 4-bit | differs, 9 of 9 | differs, 9 of 9 | layer 0 output, row 0 | differs, 9 of 9 | **equal**, 9 of 9 |
+| afm-4.5b (Arcee) | bf16 | differs, 9 of 9 | differs, 9 of 9 | layer 0 output (rows 0, 1 or 3), layer 1 in one cell | **equal**, 9 of 9 | not needed |
+| k2-horizon-0.9b (`Llama3Model`) | bf16 | differs, 9 of 9 | differs, 9 of 9 | layer 0 output, row 0 | **equal**, 9 of 9 | not needed |
+| olmoe-1b-7b-0125-4bit | 4-bit | differs, 9 of 9 | differs, 9 of 9 | layer 0 output, row 0 | differs, 9 of 9 | **equal**, 9 of 9 |
+
+The diagnostic captures the layer output only, so "first difference" names a layer, not an op. Inside layer 0 every candidate the issue named is replaced at once (gemv against gemm in every dense product, the fused MLP and rope launchers, the block SDPA, the expert kernels), and the cells turn equal; which one alone would have sufficed was not measured. As on the DeepSeek V3 family, a quantized checkpoint needs `MLXCEL_QMV_WIDE=0` as well.
+
+`deepseek-v3.2-4bit` (352 GB) was not loaded; a tiny DSA model (a dense layer, a float MoE layer with a shared expert, top-k 4 and 64) covers it. Kimi K3 has no checkpoint and is refused by the round like Kimi Linear.
+
+### Decode
+
+With the variable unset the default path must not move. `mlxcel generate --temp 0 --profile --show-reasoning -n 256`, arm A built from `origin/main` (7994c1eb), arm B from this change, one locked block, 4 ABAB cycles per checkpoint, load average 17 to 21 (another unit was building). Both arms produced the same 256 tokens on every checkpoint.
+
+| Checkpoint | Arm A, main (4 runs) | Mean | Arm B, this change (4 runs) | Mean |
+|---|---|---|---|---|
+| k2-horizon-0.9b (`Llama3Model`, bf16) | 213.15, 210.48, 213.57, 208.81 | 211.50 | 206.42, 213.32, 214.29, 213.18 | 211.80 |
+| olmoe-1b-7b-0125-4bit | 377.12, 421.30, 421.57, 420.85 | 410.21 | 421.53, 422.86, 419.30, 421.14 | 421.21 |
+| deepseek-v2-lite-chat-4bit-mlx | 170.47, 173.47, 174.69, 174.48 | 173.28 | 174.50, 174.72, 174.11, 174.97 | 174.58 |
+
+No regression: the arms are within 0.8% on every checkpoint. OLMoE's first A run is a cold start; without it arm A averages 421.24 against 421.21. Arcee shares the K2 Horizon attention and DeepSeek V3.2 was not loaded.
+
+### Decision per family
+
+| Family | Decision |
+|---|---|
+| DeepSeek V3.2 | In the switch. Exact on the tiny model at widths 2, 4, 8, 12 with and without the matvec kernel; not measured on a checkpoint. |
+| DeepSeek V2 | In the switch. Equal on the narrow kernel in all 9 cells. |
+| Kimi Linear, Kimi K3, LongCat | Out: the token-only round refuses them, so there is no block to make exact. |
+| Arcee, K2 Horizon (`Llama3Model`) | In the switch. Equal on bf16 in all 9 cells. |
+| OLMoE | In the switch. Equal with `MLXCEL_QMV_WIDE=0` in all 9 cells. |
+
+The default stays off for the reason section 2 gives: the round's contract does not promise byte identity, and the per-row block costs prompt lookup throughput.
+
+### Commands
+
+```bash
+/usr/bin/lockf -k /Users/devops/Development/.mlxcel-gpu.lock \
+  env RUST_MIN_STACK=16777216 MLXCEL_MLA_ROW_INVARIANT=1 \
+  EXACTNESS_SURVEY_MODEL=models/olmoe-1b-7b-0125-4bit \
+  EXACTNESS_SURVEY_PATH=engine EXACTNESS_SURVEY_DIAG=1 \
+  cargo test --profile test-fast --features metal,accelerate --lib \
+  models::speculative_exactness_survey_tests -- --ignored --nocapture
+```
 
 ## Commands
 

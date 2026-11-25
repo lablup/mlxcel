@@ -206,11 +206,31 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Overrides [`row_invariant_mode`] on this thread until dropped.
+#[cfg(test)]
+pub(crate) struct RowInvariantTestMode;
+
+#[cfg(test)]
+impl RowInvariantTestMode {
+    pub(crate) fn set(mode: Option<bool>) -> Self {
+        ROW_INVARIANT_TEST_MODE.with(|cell| cell.set(Some(mode)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RowInvariantTestMode {
+    fn drop(&mut self) {
+        ROW_INVARIANT_TEST_MODE.with(|cell| cell.set(None));
+    }
+}
+
 /// The row-invariant scope of one single-sequence forward over
 /// `shape = [batch, length, ..]`, or `None` when the mode is off. A masked
 /// multi-token forward is a padded prefill, never a verify block.
 ///
-/// Used by: `DeepSeekV3Model::forward_rows`, `Xing40Model::forward_rows`.
+/// Used by: `DeepSeekV3Model::forward_rows`, `Xing40Model::forward_rows`,
+/// `DeepSeekV32Model::forward_rows`, `DeepSeekV2Model::forward_rows`.
 pub(crate) fn row_invariant_scope(
     shape: &[i32],
     masked: bool,
@@ -226,8 +246,9 @@ pub(crate) fn row_invariant_scope(
 /// The first `keys` cached positions of `window`, in its own storage form:
 /// what the single-token step that appended position `keys - 1` read.
 ///
-/// Used by: `DeepSeekV3Attention::forward`, whose verify block runs each row
-/// as that step's single query (issue #3418).
+/// Used by: `DeepSeekV3Attention::forward` (issue #3418) and the DeepSeek
+/// V3.2 `MLAAttention::verify_block_attention` (#3421), whose verify blocks
+/// run each row as that step's single query.
 pub(crate) fn latent_window_prefix(window: &LatentWindow, keys: i32) -> LatentWindow {
     let cut = |a: &MlxArray| mlxcel_core::utils::slice_axis(a, 2, 0, keys);
     match window {
