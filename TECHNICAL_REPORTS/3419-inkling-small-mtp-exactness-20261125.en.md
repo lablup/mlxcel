@@ -63,4 +63,4 @@ The drafter was compared with mlx-vlm 466069f5 `speculative/drafters/inkling_mtp
 
 - No width gives a speedup, so the issue's "throughput gain" branch is answered by documentation. The remaining costs are the 2-row verify (the dense products read once, the experts twice) and the drafter's two bf16 LM-head passes per round. Neither changes acceptance.
 - The #3417 adaptive verify width is a DFlash round-loop policy. Inkling MTP runs the MTP loop, which has its own adaptive controller, so `exact_at_every_verify_width` was not wired.
-- `trim_state` (the prompt-lookup rewind) still clears the convolution states. It could use the same windows, but that is outside this issue.
+- `trim_state` still clears the convolution states. It serves padded prefill only, not prompt lookup: when this report was written prompt lookup refused first-generation Inkling at its gate, and issue #3422 later enabled it through `rewind_decode_appends`, which uses the same windows.

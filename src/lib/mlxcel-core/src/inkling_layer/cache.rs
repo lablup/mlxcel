@@ -21,7 +21,8 @@ pub struct InklingLayerCache {
     pub kv: KVCache,
     pub conv: [Option<UniquePtr<MlxArray>>; 4],
     /// Each convolution's whole `[1, kernel - 1 + L, C]` input window from
-    /// the last forward when it was a verify block of `L` rows, so
+    /// the last forward when it was a verify block or a speculative append
+    /// (`crate::cache::speculative_append_active`) of `L` rows, so
     /// [`Self::keep_verified_prefix`] can rewind to any accepted prefix
     /// without replaying it; `None` after any other forward.
     pub block_tails: [Option<UniquePtr<MlxArray>>; 4],
@@ -46,18 +47,42 @@ impl InklingLayerCache {
             && self.block_tails.iter().any(Option::is_some)
     }
 
+    /// Rows the last verify block appended, read off its recorded windows:
+    /// each window holds the `kernel - 1` rows the convolution state keeps
+    /// plus the block's own rows. `None` when no window was recorded or the
+    /// windows disagree.
+    pub fn verify_block_rows(&self) -> Option<i32> {
+        if !self.holds_block_tails() {
+            return None;
+        }
+        let mut rows = None;
+        for (state, tail) in self.conv.iter().zip(&self.block_tails) {
+            let (Some(state), Some(tail)) = (state, tail) else {
+                continue;
+            };
+            let appended = crate::array_shape(tail)[1] - crate::array_shape(state)[1];
+            if appended < 1 || rows.is_some_and(|rows| rows != appended) {
+                return None;
+            }
+            rows = Some(appended);
+        }
+        rows
+    }
+
     /// Keep the first `kept` of the `appended` rows the last verify block
     /// added: the KV tail is trimmed and each convolution state becomes the
     /// `kernel - 1` input rows before row `kept`, which is the state the
-    /// single-token chain holds after those rows (issue #3280). Refused, with
-    /// nothing changed, when the last forward recorded no tails.
+    /// single-token chain holds after those rows (issue #3280). `kept == 0`
+    /// drops the whole block and restores the state from before it.
+    /// Refused, with nothing changed, when the last forward recorded no tails.
     ///
-    /// Used by: `InklingModel::keep_verified_prefix_for_sequence`.
+    /// Used by: `InklingModel::keep_verified_prefix_for_sequence`,
+    /// [`drop_newest_verify_rows`].
     pub fn keep_verified_prefix(&mut self, appended: i32, kept: i32) -> Result<(), String> {
         if !self.holds_block_tails() {
             return Err("the last Inkling forward was not a verify block".into());
         }
-        if !(1..=appended).contains(&kept) {
+        if !(0..=appended).contains(&kept) {
             return Err(format!("cannot keep {kept} of {appended} verify rows"));
         }
         for tail in self.block_tails.iter().flatten() {
@@ -176,6 +201,47 @@ impl InklingLayerCache {
         }
         Ok(())
     }
+}
+
+/// Drop the newest `n` rows of the last verify block from every layer of one
+/// sequence, through [`InklingLayerCache::keep_verified_prefix`]; `n` may be
+/// the whole block (a failed round or a width warm-up unwinds every append).
+/// Every layer is checked first, so a refusal changes nothing: a layer
+/// without recorded windows, layers that disagree on the block length, or
+/// `n` past the block.
+///
+/// Used by: `InklingModel::rewind_decode_appends` (prompt-lookup verify
+/// rounds, issue #3422).
+pub fn drop_newest_verify_rows(caches: &mut [InklingLayerCache], n: i32) -> Result<(), String> {
+    if n <= 0 {
+        return Ok(());
+    }
+    let mut appended = None;
+    for (layer, cache) in caches.iter().enumerate() {
+        let rows = cache
+            .verify_block_rows()
+            .ok_or_else(|| format!("Inkling layer {layer} recorded no verify-block windows"))?;
+        if let Some(expected) = appended
+            && expected != rows
+        {
+            return Err(format!(
+                "Inkling layer {layer} recorded a {rows}-row verify block, not {expected}"
+            ));
+        }
+        appended = Some(rows);
+    }
+    let Some(appended) = appended else {
+        return Err("an Inkling sequence without layers has no verify block".into());
+    };
+    if n > appended {
+        return Err(format!(
+            "cannot drop {n} rows of a {appended}-row Inkling verify block"
+        ));
+    }
+    for cache in caches.iter_mut() {
+        cache.keep_verified_prefix(appended, appended - n)?;
+    }
+    Ok(())
 }
 
 impl Default for InklingLayerCache {
