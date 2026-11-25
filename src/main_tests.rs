@@ -2230,6 +2230,28 @@ fn generate_accepts_space_separated_unlimited_max_tokens() {
 }
 
 #[test]
+fn embed_accepts_space_separated_no_normalization() {
+    // The help documents `-1` as "none" and `--embd-normalize=-1` already
+    // parsed, but the space-separated spelling `serve` takes (#1459) stopped
+    // at clap with "unexpected argument '-1' found".
+    let cli = Cli::try_parse_from([
+        "mlxcel",
+        "embed",
+        "--model",
+        "model",
+        "--prompt",
+        "text",
+        "--embd-normalize",
+        "-1",
+    ])
+    .expect("embed must accept a space-separated `--embd-normalize -1`");
+    let Commands::Embed(args) = cli.command else {
+        panic!("expected the embed subcommand");
+    };
+    assert_eq!(args.embd_normalize, Some(-1));
+}
+
+#[test]
 fn serve_spec_draft_spellings_resolve_to_the_draft_controls() {
     // b10621 canonical spellings (#1433) on `mlxcel serve`, mirroring the
     // mlxcel-server assertions in src/bin/mlx_server.rs.
