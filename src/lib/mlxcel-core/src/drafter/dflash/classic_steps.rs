@@ -94,7 +94,7 @@ pub(super) fn run_classic_steps<T: SpeculativeTarget>(
             (out, token, hidden)
         });
         if let Some((out, token, hidden)) = in_flight.take() {
-            let value = super::materialize_argmax_i32_vec(&ffi::reshape(&token, &[1]), 1)[0];
+            let value = super::materialize_argmax_i32_vec(&token, 1)[0];
             first_read.get_or_insert_with(Instant::now);
             if logprobs_config.enabled {
                 let lp =

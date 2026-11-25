@@ -64,7 +64,40 @@ The MTP round loop now reuses the DFlash width policy (`ExpectedThroughputWidth`
 
 The default width goes from 0.27x to 0.81x classic and width 2 on prose from 0.86x to 0.90x; on code width 2 the fallback is 1% behind the fixed width. At width 10 the first two rounds run at the ceiling (134 ms each, plus 185 ms of drafting) before the policy has measured a narrow round, which is most of the gap to width 2 over 128 tokens.
 
-The fallback does not reach classic decode. Its classic steps cost 23.7 ms each (22.1 ms steady after the first read) against 21.7 ms in the engine, and a pure classic run inside the MTP session (drafting disabled after the first round, an uncommitted experiment) ran at 40.4 tok/s against 45.8 over 256 tokens. Host time dominates: building and queuing a step takes 19.7 ms of the 23.7 (`classic_build_ms` 2364 over 120 steps), against about 2 ms of waiting. Each of these left the gap unchanged (all uncommitted, measured on this pair): carrying a queued classic step across calls, the decode command-buffer budget, the batched decode forward the scheduler uses, a dedicated generation stream, `MLX_MAX_MB_PER_BUFFER`, `MLX_MAX_OPS_PER_BUFFER` 300 and 4000, `MLXCEL_CACHE_LIMIT`, `MLXCEL_QMV_WIDE=0`, evaluating only the token, running the exactness probe before classic decode, and loading and binding the drafter before classic decode (the last two keep engine classic at 45.6 to 45.8 tok/s). The remaining difference between the engine's decode loop and the session's classic step is not identified.
+The fallback does not reach classic decode. Its classic steps cost 23.7 ms each (22.1 ms steady after the first read) against 21.7 ms in the engine, and a pure classic run inside the MTP session (drafting disabled after the first round, an uncommitted experiment) ran at 40.4 tok/s against 45.8 over 256 tokens. Host time dominates: building and queuing a step takes 19.7 ms of the 23.7 (`classic_build_ms` 2364 over 120 steps), against about 2 ms of waiting. Each of these left the gap unchanged (all uncommitted, measured on this pair): carrying a queued classic step across calls, the decode command-buffer budget, the batched decode forward the scheduler uses, a dedicated generation stream, `MLX_MAX_MB_PER_BUFFER`, `MLX_MAX_OPS_PER_BUFFER` 300 and 4000, `MLXCEL_CACHE_LIMIT`, `MLXCEL_QMV_WIDE=0`, evaluating only the token, running the exactness probe before classic decode, and loading and binding the drafter before classic decode (the last two keep engine classic at 45.6 to 45.8 tok/s). Issue #3430 found the cause; see the next section.
+
+### Classic steps inside the session (issue #3430)
+
+The classic step read each token back through `dflash::materialize_argmax_i32_vec`, which called `array_to_raw_bytes`: it builds `contiguous(token)` and evaluates it. That op, and the event the read waits on, are queued behind step `i + 1`, which is already scheduled on the same stream, so every read waited for the whole next forward and the pipeline ran as synchronous decode. The engine reads its tokens with `array_evaluated_bytes`, which waits on the token's own event and enqueues nothing (#632). Host timing per step (scratch instrumentation, 128 tokens, prose):
+
+| Path | Graph build | `async_eval` | Token read wait | tok/s |
+|---|---|---|---|---|
+| engine classic decode | 1.5 ms | 20.0 ms | about 0 | 46.3 |
+| engine classic, forced synchronous after each step | 1.1 ms | 16.3 ms | 6.7 ms (sync) | 41.6 |
+| session classic step, before | 1.1 ms | 18.5 ms | 4.1 ms | 41.6 |
+| session classic step, after | 1.1 ms | 20.6 ms | 0.27 ms | 45.0 |
+
+The session's classic steps ran at the speed of the engine forced synchronous. Building the step from the engine's own forward with the speculative append scope, evaluating only the token, `MLXCEL_KV_INPLACE_WRITE=0` and runs of 16 or unlimited steps each left them at 41.4 to 41.9 tok/s. `materialize_argmax_i32_vec` now reads through `array_evaluated_bytes` (a non-contiguous array still takes the copy), and the DFlash classic steps (#3417) pass their token directly instead of a fresh `reshape`, which had the same effect.
+
+Pure classic inside the session (drafting disabled, an uncommitted switch), one build with the old read behind a scratch switch, ABAB in one locked block per length, load average 7.5 to 12.5:
+
+| Tokens | Prompt | Engine classic | Session, old read | Session, new read | Session, new read, no 16-step cap |
+|---|---|---|---|---|---|
+| 128 | prose | 46.48, 45.38 | 40.41, 41.58 | 44.49, 45.18 | 45.52, 45.69 |
+| 128 | code | 46.53, 46.15 | 41.59, 41.84 | 45.37, 44.95 | 44.85, 45.34 |
+| 256 | prose | 45.26, 45.65 | 41.38, 41.25 | 44.56, 44.63 | 45.00, 44.89 |
+| 256 | code | 45.57, 45.46 | 41.23, 41.31 | 44.59, 44.82 | 44.89, 44.86 |
+
+Every arm produced the same text as classic decode. The new read reaches 0.97x to 0.99x the engine; what remains is the step at the start of each call of the round loop, which has no queued predecessor (34 ms of read wait over 128 tokens at the 16-step cap, 4 ms without it), and the cap stays so a server tick returns as often as a drafted round.
+
+MTP with the fallback, 128 tokens, same build, ABAB, load average 6.2 to 8.4:
+
+| Prompt | Classic | Width 10 (default), before | Width 10, after | Width 2, before | Width 2, after |
+|---|---|---|---|---|---|
+| prose | 46.12, 46.05 | 37.01, 37.71 | 40.30, 40.44 | 41.04, 41.04 | 43.95, 44.11 |
+| code | 45.86, 45.81 | 37.06, 37.28 | 39.66, 39.76 | 40.95, 41.16 | 43.77, 43.86 |
+
+The default width goes from 0.81x to 0.87x classic and width 2 from 0.89x to 0.95x, with output identical to classic decode. A classic step costs 20.6 to 20.8 ms against 22.1 to 22.4 ms before. The default width's remaining gap is mostly its first two rounds at the ceiling (135 ms each).
 
 ## Acceptance against mlx-vlm
 
@@ -72,4 +105,4 @@ The drafter matches mlx-vlm's `inkling_mtp` (upstream 466069f5) in the points th
 
 ## Outcome
 
-MTP does not help Inkling-Small on this host. Since #3425 the default width stops drafting when classic decode is faster, which takes it from 0.27x to 0.81x classic (0.90x at width 2), but it stays below classic decode. It stays opt-in: it engages only when `--draft-model` (server `--model-draft`) names the head, and nothing selects it by default. When it is used, its temperature-0 output now equals classic decode at every width the gate admits. The adaptive verify width from #3417 does not apply: it belongs to the DFlash round loop (`SpeculativeTarget::exact_at_every_verify_width`), while Inkling MTP runs the MTP round loop and its own adaptive controller.
+MTP does not help Inkling-Small on this host. Since #3425 the default width stops drafting when classic decode is faster, which takes it from 0.27x to 0.81x classic (0.90x at width 2), and since #3430 its classic steps keep the decode pipeline, which takes it to 0.87x (0.95x at width 2), but it stays below classic decode. It stays opt-in: it engages only when `--draft-model` (server `--model-draft`) names the head, and nothing selects it by default. When it is used, its temperature-0 output now equals classic decode at every width the gate admits. The adaptive verify width from #3417 does not apply: it belongs to the DFlash round loop (`SpeculativeTarget::exact_at_every_verify_width`), while Inkling MTP runs the MTP round loop and its own adaptive controller.
