@@ -170,10 +170,14 @@ Limits
   equal a file stem accounts for that file. A looser match can hide a missing
   name; it cannot fail a correct annotation.
 * A public or visibility-restricted ``use`` of a scoped function fails at
-  the re-export, including a glob of the defining module. Downstream callers
-  can otherwise use a path the checker cannot resolve. Macros are not
-  expanded. Block-local imports are collected per file. Complex binding
-  patterns and nested block comments are not parsed.
+  the re-export, and so does one of its module (``pub use mlxcel_core::utils;``
+  or a glob of it) or of an ancestor of that module (``pub use
+  mlxcel_core::*;``). Downstream callers can otherwise use a path the checker
+  cannot resolve. Macros are not expanded. Block-local imports are collected
+  per file. Complex binding patterns and nested block comments are not parsed:
+  under a glob import, a scoped name rebound by a ``for``, ``match``, closure
+  or tuple pattern and then used as a value counts as a use. That fails
+  closed; rename the binding rather than naming the file.
 * The regenerating command is matched textually, as ``grep`` would, so the
   files it lists can include test files and comment mentions. That is what
   the annotation's own count is measured against; the caller set above is
@@ -262,11 +266,15 @@ ATTRIBUTE_RE = re.compile(r"\s*#\[[^\]]*\]")
 BRACE_RE = re.compile(r"[{};]")
 MOD_RE = re.compile(r"\bmod\s+(\w+)\s*[;{]")
 USE_RE = re.compile(r"\b(?P<public>pub(?:\s*\([^)]*\))?\s+)?use\s+(?P<tree>[^;]+);")
+# A cheap pre-filter: a file with a public `use` is lexed even when it never
+# spells a scoped name, since `pub use mlxcel_core::*;` re-exports them all.
+PUB_USE_RE = re.compile(r"\bpub\s*(?:\([^)]*\)\s*)?use\b")
 USE_TOKEN_RE = re.compile(r"::|[{},*]|\w+")
 QUALIFIER_RE = re.compile(r"(?:\b\w+\s*::\s*)+\Z")
-# Delimiters after a bare function expression, including calls, callbacks,
-# assignments and casts. A field label, type qualifier or macro name differs.
-VALUE_FOLLOW_RE = re.compile(r"\s*(?:[(),;\]}?.]|as\b)")
+# Delimiters after a bare function expression, including calls, turbofish
+# calls (`fused_add_rms_norm::<N>(..)`), callbacks, assignments and casts. A
+# field label, type qualifier or macro name differs.
+VALUE_FOLLOW_RE = re.compile(r"\s*(?:[(),;\]}?.]|::\s*<|as\b)")
 FN_HEADER_RE = re.compile(r"\bfn\s+\w+[^;{}]*\{")
 FN_KEYWORD_RE = re.compile(r"\bfn\s+\Z")
 TOP_LEVEL_PUB_FN_RE = re.compile(
@@ -650,10 +658,11 @@ def find_callers(tree: Tree, scoped: RustFile, functions: list[Function]) -> lis
         # `use` or as a qualifier; inside the crate a `super::*` glob need not.
         # Plain substring tests first: they rule out most of the tree before
         # anything is lexed.
-        if file.crate != scoped.crate and leaf not in file.raw:
+        reexports = PUB_USE_RE.search(file.raw) is not None
+        if file.crate != scoped.crate and leaf not in file.raw and not reexports:
             continue
         present = [name for name in by_name if name in file.raw]
-        if not present and "*" not in file.raw:
+        if not present and "*" not in file.raw and not reexports:
             continue
         file.lex()
         code = file.code
@@ -669,8 +678,16 @@ def find_callers(tree: Tree, scoped: RustFile, functions: list[Function]) -> lis
             elif len(short) == 1 and short[0] not in file.bindings and short[0] not in local_fns:
                 targets.update(module + short for module in glob_modules)
             for target in sorted(targets):
-                if use.local == "*" and target == prefix and use.public:
-                    exported = f"scoped module `{'::'.join(prefix)}` through a glob"
+                module = "::".join(prefix)
+                if use.public and target == prefix:
+                    # `pub use mlxcel_core::utils;` gives callers a
+                    # `facade::utils::NAME` path as surely as a glob does.
+                    how = "through a glob" if use.local == "*" else "as a module"
+                    exported = f"scoped module `{module}` {how}"
+                elif use.public and target == prefix[: len(target)]:
+                    # An ancestor (`pub use mlxcel_core::*;`, `pub use
+                    # mlxcel_core as core;`) exposes the module path below it.
+                    exported = f"`{'::'.join(target)}`, which contains scoped module `{module}`"
                 elif target[:-1] == prefix and target[-1] in by_name:
                     if not use.public:
                         if file.rel != scoped.rel:

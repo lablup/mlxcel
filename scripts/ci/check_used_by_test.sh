@@ -490,6 +490,28 @@ if run_case re-export-glob "$dir" 1; then
   assert_contains re-export-glob "src/models/facade.rs:1: re-exports scoped module \`mlxcel_core::utils\` through a glob"
 fi
 
+# The module, or a crate that contains it, is as good a facade as the function.
+# Neither file spells a scoped function name, so the pre-filter must keep them.
+cat >"$dir/src/models/facade.rs" <<'RS'
+pub use mlxcel_core::utils as shared;
+RS
+if run_case re-export-module "$dir" 1; then
+  assert_contains re-export-module "src/models/facade.rs:1: re-exports scoped module \`mlxcel_core::utils\` as a module"
+fi
+cat >"$dir/src/models/facade.rs" <<'RS'
+pub use mlxcel_core::*;
+RS
+if run_case re-export-crate-glob "$dir" 1; then
+  assert_contains re-export-crate-glob "src/models/facade.rs:1: re-exports \`mlxcel_core\`, which contains scoped module \`mlxcel_core::utils\`"
+fi
+
+# A generic helper called with a turbofish under a glob is still a caller.
+dir="$(make_tree turbofish)"
+add_model "$dir" turbofish 'use mlxcel_core::utils::*; prefill_causal_mask::<>(4)'
+if run_case turbofish "$dir" 1; then
+  assert_contains turbofish 'annotation: src/models/turbofish.rs.'
+fi
+
 # The same disambiguation, made to gate. With its annotation removed `softcap`
 # still passes, because one caller is under the absence threshold. A checker
 # that took every bare `softcap(` for a call would see six files (the caller
