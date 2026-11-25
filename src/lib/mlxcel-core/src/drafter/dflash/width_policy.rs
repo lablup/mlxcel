@@ -40,6 +40,14 @@
 //! re-tries drafting after [`PROBE_AFTER_CLASSIC`] classic steps so a run
 //! that turns repetitive (code after prose) gets the drafter back.
 //!
+//! The MTP round loop reuses the policy for first-generation Inkling
+//! (issue #3425, `crate::speculative::mtp::classic_fallback`). There a
+//! drafted round costs about 1.6 decode steps and a re-try is a full drafted
+//! round, so it asks for [`ExpectedThroughputWidth::with_probe_backoff`]: each
+//! re-try that loses doubles the classic run before the next one, up to a
+//! cap, and a re-try that wins resets it. Without the call the period stays
+//! [`PROBE_AFTER_CLASSIC`], which is what the DFlash round loop runs.
+//!
 //! It runs only for a target that declares
 //! [`super::round_loop::SpeculativeTarget::exact_at_every_verify_width`]: a
 //! block of any width up to the requested one, a single row included,
@@ -92,6 +100,15 @@ pub(crate) struct ExpectedThroughputWidth {
     /// Rounds run at each width (`rounds_at[w - 1]`), for the run summary.
     rounds_at: Vec<usize>,
     classic_streak: usize,
+    /// Classic steps before the next re-try of the drafter.
+    probe_after: usize,
+    /// Largest `probe_after` the backoff may reach; equal to
+    /// [`PROBE_AFTER_CLASSIC`] (no backoff) unless
+    /// [`Self::with_probe_backoff`] raised it.
+    probe_after_cap: usize,
+    /// The last drafted round was a re-try after a classic run, so the next
+    /// decision tells whether it won.
+    probing: bool,
 }
 
 impl ExpectedThroughputWidth {
@@ -104,7 +121,25 @@ impl ExpectedThroughputWidth {
             cost: vec![None; ceiling],
             rounds_at: vec![0; ceiling],
             classic_streak: 0,
+            probe_after: PROBE_AFTER_CLASSIC,
+            probe_after_cap: PROBE_AFTER_CLASSIC,
+            probing: false,
         }
+    }
+
+    /// Let a re-try that loses double the classic run before the next one,
+    /// up to `cap` classic steps (a re-try that wins resets the run to
+    /// [`PROBE_AFTER_CLASSIC`]). A `cap` at or below that period keeps the
+    /// fixed period.
+    #[must_use]
+    pub(crate) fn with_probe_backoff(mut self, cap: usize) -> Self {
+        self.probe_after_cap = cap.max(PROBE_AFTER_CLASSIC);
+        self
+    }
+
+    /// Classic steps the policy now runs before it re-tries the drafter.
+    pub(crate) fn probe_period(&self) -> usize {
+        self.probe_after
     }
 
     /// `p_j` for draft positions `1..ceiling`.
@@ -177,7 +212,7 @@ impl ExpectedThroughputWidth {
         if self.cost[0].is_none() {
             return 1;
         }
-        if self.classic_streak >= PROBE_AFTER_CLASSIC {
+        if self.classic_streak >= self.probe_after {
             return self.best_in(2..=cap).unwrap_or(cap);
         }
         self.best_in(1..=cap).unwrap_or(cap)
@@ -208,9 +243,7 @@ impl ExpectedThroughputWidth {
     /// How many classic steps the round loop should run back to back once
     /// [`Self::decide`] picked width 1: up to the next re-try of the drafter.
     pub(crate) fn classic_run_len(&self) -> usize {
-        PROBE_AFTER_CLASSIC
-            .saturating_sub(self.classic_streak)
-            .max(1)
+        self.probe_after.saturating_sub(self.classic_streak).max(1)
     }
 
     /// Feed `steps` classic steps run back to back, at `step_ms` each when
@@ -219,6 +252,10 @@ impl ExpectedThroughputWidth {
     pub(crate) fn record_classic_steps(&mut self, steps: usize, step_ms: Option<f64>) {
         if steps == 0 {
             return;
+        }
+        if std::mem::take(&mut self.probing) {
+            // The re-try lost: classic decode came straight back.
+            self.probe_after = (self.probe_after * 2).min(self.probe_after_cap);
         }
         self.rounds_at[0] += steps;
         self.classic_streak += steps;
@@ -249,6 +286,11 @@ impl ExpectedThroughputWidth {
             return;
         }
         self.rounds_at[width - 1] += 1;
+        if std::mem::take(&mut self.probing) {
+            // Two drafted rounds in a row: the re-try won.
+            self.probe_after = PROBE_AFTER_CLASSIC;
+        }
+        self.probing = self.classic_streak >= self.probe_after;
         self.classic_streak = 0;
         for value in self.tried.iter_mut().chain(self.hit.iter_mut()) {
             *value *= DECAY;

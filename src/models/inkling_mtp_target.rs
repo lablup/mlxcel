@@ -9,7 +9,8 @@ use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::{LanguageModel, SamplingConfig};
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 use mlxcel_core::speculative::mtp::target::{
-    MtpTarget, MtpVerifyOutput, TreeVerifyUnsupported, VerifyCaptured, VerifyForwardOutput,
+    MtpClassicStep, MtpTarget, MtpVerifyOutput, TreeVerifyUnsupported, VerifyCaptured,
+    VerifyForwardOutput,
 };
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -152,7 +153,10 @@ impl MtpTarget for InklingMtpTargetAdapter<'_> {
             accepted < shape[1] as usize,
             "accepted prefix exceeds verify input"
         );
-        if scalars.is_empty() {
+        if shape[1] == 1 {
+            // A one-row block is a classic decode step and keeps its row
+            // (issue #3425).
+        } else if scalars.is_empty() {
             // A row-invariant verify block rewinds in place (issue #3280).
             self.model
                 .keep_verified_prefix_for_sequence(self.seq_id, shape[1] as usize, accepted + 1)
@@ -192,6 +196,30 @@ impl MtpTarget for InklingMtpTargetAdapter<'_> {
         Err(TreeVerifyUnsupported {
             reason: "Inkling short-convolution state is linear and has no tree-aware fork",
         })
+    }
+
+    /// A verify block of 2 to 16 rows is row-invariant (issues #3409 and
+    /// #3280) and a one-row block is a classic decode step, so every width
+    /// the MTP gate admits reproduces classic decode while the row kernel is
+    /// on (issue #3425).
+    fn exact_at_every_verify_width(&self) -> bool {
+        self.model.row_kernel_enabled()
+    }
+
+    fn classic_step(&self, input: &MlxArray, sampler: &SamplingConfig) -> Option<MtpClassicStep> {
+        let (logits, hidden) = self
+            .model
+            .forward_prefill_with_hidden_for_sequence(input, self.seq_id);
+        let logits = if sampler.token_bias.is_empty() {
+            logits
+        } else {
+            mlxcel_core::sampling::apply_token_bias(&logits, &sampler.token_bias)
+        };
+        let token = mlxcel_core::astype(
+            &mlxcel_core::reshape(&mlxcel_core::argmax_last_axis(&logits), &[1]),
+            mlxcel_core::dtype::INT32,
+        );
+        Some(MtpClassicStep { token, hidden })
     }
 
     fn num_layers(&self) -> usize {
@@ -274,6 +302,14 @@ impl MtpTarget for InklingVLMtpTargetAdapter<'_> {
     ) -> Result<VerifyForwardOutput, TreeVerifyUnsupported> {
         self.inner
             .verify_forward_tree(tree, sampler, logprobs_config)
+    }
+
+    fn exact_at_every_verify_width(&self) -> bool {
+        self.inner.exact_at_every_verify_width()
+    }
+
+    fn classic_step(&self, input: &MlxArray, sampler: &SamplingConfig) -> Option<MtpClassicStep> {
+        self.inner.classic_step(input, sampler)
     }
 
     fn num_layers(&self) -> usize {

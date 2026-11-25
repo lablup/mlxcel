@@ -198,3 +198,60 @@ fn a_classic_run_ends_at_the_next_draft_retry() {
     policy.record_round(4, 0, 90.0);
     assert_eq!(policy.classic_run_len(), PROBE_AFTER_CLASSIC);
 }
+
+/// Lengths of the runs of classic steps in `widths`.
+fn classic_streaks(widths: &[usize]) -> Vec<usize> {
+    widths
+        .split(|&w| w > 1)
+        .map(<[usize]>::len)
+        .filter(|&n| n > 0)
+        .collect()
+}
+
+/// Issue #3425: with a backoff cap, each re-try that loses doubles the next
+/// classic run up to the cap; without one the period stays fixed, as the
+/// DFlash round loop runs it.
+#[test]
+fn a_probe_backoff_doubles_the_classic_run_after_each_lost_retry() {
+    let mut fixed = ExpectedThroughputWidth::new(4);
+    let streaks = classic_streaks(&drive(&mut fixed, 200, |_, _| false));
+    assert!(
+        streaks[1..streaks.len() - 1]
+            .iter()
+            .all(|&n| n == PROBE_AFTER_CLASSIC),
+        "{streaks:?}"
+    );
+
+    let mut backoff = ExpectedThroughputWidth::new(4).with_probe_backoff(64);
+    let streaks = classic_streaks(&drive(&mut backoff, 400, |_, _| false));
+    // Every complete run is at least as long as the one before it (the
+    // last run is cut off by the end of the drive).
+    assert!(
+        streaks[..streaks.len() - 1]
+            .windows(2)
+            .all(|pair| pair[1] >= pair[0]),
+        "{streaks:?}"
+    );
+    assert!(streaks.contains(&64), "reaches the cap: {streaks:?}");
+    assert!(streaks.iter().all(|&n| n <= 64), "{streaks:?}");
+    assert_eq!(backoff.probe_period(), 64);
+}
+
+/// A re-try that wins resets the period, so a drafter that starts landing
+/// (code after prose) is re-tried at the base period again.
+#[test]
+fn a_winning_retry_resets_the_probe_period() {
+    let mut policy = ExpectedThroughputWidth::new(4).with_probe_backoff(64);
+    drive(&mut policy, 300, |_, _| false);
+    assert!(policy.probe_period() > PROBE_AFTER_CLASSIC);
+    // Full accepts at 3 ms a round beat a 51 ms step only once the estimate
+    // catches up, so drive with a cheap round instead of `small_cost`.
+    for _ in 0..400 {
+        let width = policy.decide(1000);
+        let accepted = width - 1;
+        let cost = if width == 1 { 51.0 } else { 20.0 };
+        policy.record_round(width, accepted, cost);
+    }
+    assert_eq!(policy.probe_period(), PROBE_AFTER_CLASSIC);
+    assert!(policy.decide(1000) > 1);
+}

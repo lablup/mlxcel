@@ -737,6 +737,6 @@ mod prompt_lookup_tests;
 #[path = "inkling_tests.rs"]
 mod tests;
 #[cfg(test)]
-mod tiny_tests;
+pub(crate) mod tiny_tests;
 #[cfg(test)]
 pub(crate) use tiny_tests::{tiny_audio_model, tiny_model};
