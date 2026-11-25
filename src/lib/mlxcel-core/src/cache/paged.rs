@@ -533,10 +533,13 @@ type NormalizedBlock = (UniquePtr<MlxArray>, (i32, i32, i32));
 
 /// Run a resolved v2 plan and return the result in `q`'s dtype.
 ///
-/// The kernels read Q and emit their output in f32 deterministically (they
-/// never re-specialise by dtype), so Q is cast in and the result cast back.
-/// That is the same round trip [`PagedBlockPool::paged_decode_fused`] performs,
-/// which is what keeps v1, v2, and gather byte-comparable.
+/// The partial kernel converts each Q element to f32 as it stages it, exactly
+/// as it converts K and V, and both kernels emit f32; the result is cast back.
+/// Converting a 16-bit float to f32 is exact, so handing the kernel Q in its
+/// own dtype gives the same bytes as the f32 round trip
+/// [`PagedBlockPool::paged_decode_fused`] performs (v1, v2, and gather stay
+/// byte-comparable) without a cast kernel per layer per decode step
+/// (lablup/mlxcel#3256).
 fn launch_v2(
     q: &MlxArray,
     pool_k: &MlxArray,
@@ -546,13 +549,7 @@ fn launch_v2(
     scale: f32,
 ) -> Result<UniquePtr<MlxArray>, String> {
     let q_dtype = ffi::array_dtype(q);
-    let q_f32 = if q_dtype == crate::dtype::FLOAT32 {
-        None
-    } else {
-        Some(ffi::astype(q, crate::dtype::FLOAT32))
-    };
-    let q_in: &MlxArray = q_f32.as_deref().unwrap_or(q);
-    let ctx = crate::paged_v2::V2Context::build(q_in, pool_k, pool_v, view, plan.geometry, scale)?;
+    let ctx = crate::paged_v2::V2Context::build(q, pool_k, pool_v, view, plan.geometry, scale)?;
     let out_f32 = ctx.launch(plan)?;
     Ok(if q_dtype == crate::dtype::FLOAT32 {
         out_f32

@@ -44,6 +44,7 @@ use super::{Lfm2LayerCache, Lfm2Model};
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
+use crate::models::speculative_exactness_draws as draws;
 
 /// Independent synthetic inputs the exactness probe compares before it
 /// reports equality; see `models::qwen3_5::PROBE_DRAWS` for why one is not
@@ -293,6 +294,19 @@ impl Lfm2Model {
     /// contract's reference; on a MoE checkpoint it also takes the fused
     /// single-row expert kernel that the block arm cannot.
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
+        let lengths = draws::prompt_lengths(PROBE_PROMPT_LEN, PROBE_DRAWS, None);
+        self.probe_block_chain_exactness_at(block_size, &lengths)
+    }
+
+    /// [`Self::probe_block_chain_exactness`] over draws of the given prompt
+    /// lengths, one draw per entry.
+    ///
+    /// Used by: [`Self::probe_block_chain_exactness`] and the exactness survey test.
+    pub fn probe_block_chain_exactness_at(
+        &self,
+        block_size: usize,
+        prompt_lengths: &[usize],
+    ) -> BlockChainExactness {
         if block_size < 2 {
             return BlockChainExactness::NotRun("block width below 2 drafts nothing");
         }
@@ -300,20 +314,22 @@ impl Lfm2Model {
         if vocab < 2 {
             return BlockChainExactness::NotRun("degenerate vocabulary");
         }
-        for draw in 0..PROBE_DRAWS {
-            let verdict = self.probe_one_draw(block_size, vocab, draw);
-            if !verdict.is_equal() {
-                return verdict;
-            }
-        }
-        BlockChainExactness::Equal
+        draws::run_draws(prompt_lengths, |draw, prompt_len| {
+            self.probe_one_draw(block_size, vocab, draw, prompt_len)
+        })
     }
 
-    fn probe_one_draw(&self, block_size: usize, vocab: usize, draw: usize) -> BlockChainExactness {
+    fn probe_one_draw(
+        &self,
+        block_size: usize,
+        vocab: usize,
+        draw: usize,
+        prompt_len: usize,
+    ) -> BlockChainExactness {
         let salt = draw * 977 + 1;
         let wrap =
             |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
-        let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
+        let prompt: Vec<i32> = (0..prompt_len).map(|i| wrap(i, 7, 1)).collect();
         let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
         let as_input =

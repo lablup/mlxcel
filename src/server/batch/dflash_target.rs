@@ -216,6 +216,24 @@ pub(crate) trait DFlashTargetModel:
         FirstHiddenRows::LastPromptPosition
     }
 
+    /// The burst's prompt prefill. `chunk` and `boundary` are the scheduler's
+    /// classic partition of this prompt (`--prefill-chunk-size` and the
+    /// prompt-cache snapshot splits), which a target whose drafter-on text
+    /// must equal classic decode past one chunk mirrors (Inkling 2, issue
+    /// #3410). The default prefills through
+    /// `SpeculativeTarget::prefill_forward_with_capture_layers` unchanged.
+    fn prefill_burst(
+        &self,
+        prompt: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Self::VerifyOut {
+        let _ = (chunk, boundary);
+        self.prefill_forward_with_capture_layers(prompt, caches, capture_layer_ids)
+    }
+
     /// Hook for a target whose caches need arming for a multi-row verify
     /// (for example a rotating buffer sized to the block). No-op by
     /// default; runs on the fresh caches before the prefill.
@@ -396,6 +414,26 @@ impl DFlashTargetModel for crate::vision::Inkling2VlModel {
     }
     fn first_hidden_rows() -> FirstHiddenRows {
         FirstHiddenRows::EveryPromptRow
+    }
+    fn prefill_burst(
+        &self,
+        prompt: &MlxArray,
+        caches: &mut [mlxcel_core::inkling_layer::InklingLayerCache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Self::VerifyOut {
+        let suppressed = crate::models::inkling2::speculative::suppression_map(
+            &LanguageModel::output_suppressed_token_ids(self),
+        );
+        self.text.prefill_speculative_planned(
+            prompt,
+            caches,
+            capture_layer_ids,
+            &suppressed,
+            chunk,
+            boundary,
+        )
     }
     fn exactness_allows(&self, block_size: usize) -> bool {
         self.text.dflash_exactness_allows(block_size)
@@ -598,6 +636,7 @@ pub(crate) fn run_dflash_on_target<T>(
     drafter_slot: &mut WorkerDrafterSlot,
     cancel: &AtomicBool,
     logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    prefill_partition: (usize, mlxcel_core::prefill_plan::PrefillSplits),
 ) -> Result<DFlashTargetRun, BurstOutcome>
 where
     T: DFlashTargetModel,
@@ -660,8 +699,14 @@ where
         .unwrap_or_else(|| target.capture_layer_ids().to_vec());
     let prompt_arr = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
     let prefill_verify_start = Instant::now();
-    let verify_out =
-        target.prefill_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
+    let (chunk, boundary) = prefill_partition;
+    let verify_out = target.prefill_burst(
+        &prompt_arr,
+        &mut caches,
+        &capture_layer_ids,
+        chunk,
+        boundary,
+    );
     let prefill_verify_ms = prefill_verify_start.elapsed().as_secs_f64() * 1000.0;
 
     // First bonus from the last-position logits, under the request's
@@ -756,6 +801,7 @@ where
                 zero_accept_rounds = diagnostics.zero_accept_rounds,
                 partial_accept_rounds = diagnostics.partial_accept_rounds,
                 full_accept_rounds = diagnostics.full_accept_rounds,
+                classic_steps = diagnostics.classic_steps,
                 prefill_verify_ms,
                 first_bonus_ms,
                 first_hidden_ms,

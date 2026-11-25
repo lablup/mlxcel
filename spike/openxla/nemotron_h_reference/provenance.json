@@ -1,0 +1,26 @@
+{
+  "repo_id": "nvidia/Nemotron-H-4B-Base-8K",
+  "revision": "faba3b731ad7ea5781b9518ae75fb610a94affcf",
+  "gated": false,
+  "url": "https://huggingface.co/nvidia/Nemotron-H-4B-Base-8K",
+  "captured_at": "2026-11-25",
+  "device": "cpu",
+  "torch": "2.12.1+cpu",
+  "transformers": "5.12.1",
+  "precision": "float32",
+  "trust_remote_code": false,
+  "implementation": "Native transformers NemotronHForCausalLM, torch fallback, greedy full-prefix recomputation with no KV or SSM state carried between forward calls",
+  "prompt_tokens": 6,
+  "continuation_tokens": 40,
+  "exit_code": 0,
+  "script_sha256": "dc022c16d80d73771be9edae8f322cd24df5dd31fa0f7a5eec7a783152834df4",
+  "oracle_sha256": "7ae9544e782f8813ebc29865fdff11c3830435ea48cf33a14ec6d28d015c5f10",
+  "checkpoint_metadata_sha256": {
+    "config.json": "11011d07b45701ee84e6c2a516123b8fdb257e964d06fb20704c6f0cc47709d4",
+    "model.safetensors.index.json": "38ed5dd06288b54095078c191b4a03b98a605bf86443c96ca7f62d064160c6ea",
+    "tokenizer.json": "3277c00fe5fb3963b3cb7c07b7f183722d2af4d775a4aea7cfb3684d7cccbc2f",
+    "tokenizer_config.json": "6e61a6fb777622d9e80d4e56015f82ebb28519a6d28145ea94fdc7c3a585b5f7"
+  },
+  "command": "OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 $MLXCEL_ORACLE_PYTHON spike/openxla/oracle_continuation.py --model models/hf/nemotron-h-4b --out /tmp/nemotron-h-hf-f32.json --prompt 'The capital of France is' --max-new 40",
+  "evidence_boundary": "Independent HF reference only. No XLA token parity or ROCm acceptance is implied."
+}

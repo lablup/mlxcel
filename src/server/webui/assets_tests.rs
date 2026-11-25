@@ -38,7 +38,7 @@ async fn request(path: &str, method: Method) -> axum::response::Response {
 fn embedded_manifest_is_valid_and_budgeted() {
     let manifest: Value = serde_json::from_str(manifest_json()).expect("manifest is valid JSON");
     assert_eq!(manifest["schema_version"], 1);
-    assert_eq!(manifest["package_manager"], "pnpm@12.16.1");
+    assert_eq!(manifest["package_manager"], "pnpm@12.23.0");
     let files = manifest["files"].as_array().expect("files list");
     assert!(files.iter().any(|file| file["path"] == "index.html"));
     assert!(
@@ -47,7 +47,13 @@ fn embedded_manifest_is_valid_and_budgeted() {
             .any(|file| file["path"] == "third-party-licenses.txt")
     );
     let budgets = manifest["budgets"].as_object().expect("budgets object");
-    assert!(budgets["initial_js_gzip_bytes"].as_u64().unwrap() <= 256 * 1024);
+    // `MAX_INITIAL_JS_GZIP` in scripts/webui/build_bundle.py; raised from 256 KiB when
+    // Astryx 0.7.11 grew the shell's first paint.
+    assert_eq!(
+        budgets["initial_js_gzip_limit_bytes"].as_u64(),
+        Some(384 * 1024)
+    );
+    assert!(budgets["initial_js_gzip_bytes"].as_u64().unwrap() <= 384 * 1024);
     assert!(budgets["total_js_gzip_bytes"].as_u64().unwrap() <= 700 * 1024);
     assert!(budgets["embedded_asset_bytes"].as_u64().unwrap() <= 5 * 1024 * 1024);
 }

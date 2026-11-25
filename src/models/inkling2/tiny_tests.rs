@@ -28,7 +28,7 @@ use super::config::Inkling2Config;
 const H: i32 = 16;
 const HEADS: i32 = 2;
 const KV: i32 = 1;
-const HD: i32 = 8;
+const HD: i32 = 64;
 const REL: i32 = 4;
 const WINDOW: i32 = 4;
 const EXTENT: i32 = 8;

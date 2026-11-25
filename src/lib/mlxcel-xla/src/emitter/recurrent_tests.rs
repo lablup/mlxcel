@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Mamba2 config, weight order, and state-threaded graph checks (issue #3338).
-//! The numeric gate against HF is `spike/openxla/ssm_model_check.py`.
+//! Mamba2/Mamba1 config, weight order, and state-threaded graph checks (issues
+//! #3338 and #3348). The numeric gates against HF are the OpenXLA SSM oracles.
 
 use super::builder::Precision;
 use super::config::{
-    Config, MixerKind, QuantConfig, SsmConfig, StateElem, StateTensorSpec, WeightScheme,
+    Config, MixerKind, QuantConfig, SsmConfig, SsmKind, StateElem, StateTensorSpec, WeightScheme,
 };
 use super::model::{
     emit_decode, emit_decode_batched, emit_decode_with, emit_prefill, emit_prefill_embeddings,
@@ -37,8 +37,22 @@ const TINY_MAMBA2: &str = r#"{
   "hidden_act": "silu", "tie_word_embeddings": true
 }"#;
 
+const TINY_MAMBA1: &str = r#"{
+  "model_type": "mamba", "hidden_size": 8, "intermediate_size": 16,
+  "num_hidden_layers": 2, "vocab_size": 40, "state_size": 4,
+  "time_step_rank": 2, "conv_kernel": 4, "use_conv_bias": true,
+  "use_bias": false, "tie_word_embeddings": true, "layer_norm_epsilon": 1e-5
+}"#;
+
 fn tiny() -> Config {
     Config::from_json_str(TINY_MAMBA2).expect("tiny mamba2 parses")
+}
+
+fn tiny_mamba1() -> Config {
+    Config::from_json_str(TINY_MAMBA1)
+        .expect("tiny mamba1 parses")
+        .with_context_capacity(9)
+        .expect("small test capacity")
 }
 
 fn main_signature(graph: &str) -> &str {
@@ -58,6 +72,7 @@ fn assert_lowerable(graph: &str) {
 fn mamba2_config_parses_ssm_schedule_and_state_abi() {
     let c = tiny();
     let expected = SsmConfig {
+        kind: SsmKind::Mamba2,
         n_heads: 4,
         head_dim: 8,
         state_size: 16,
@@ -98,6 +113,159 @@ fn mamba2_config_parses_ssm_schedule_and_state_abi() {
             },
         ]
     );
+}
+
+#[test]
+fn mamba1_and_falcon_mamba_parse_diagonal_state_abi() {
+    for (model_type, bcdt_norm, norm_eps) in [("mamba", false, 1e-5), ("falcon_mamba", true, 1e-6)]
+    {
+        let text = TINY_MAMBA1
+            .replace(
+                r#""model_type": "mamba""#,
+                &format!(r#""model_type": "{model_type}""#),
+            )
+            .replace(
+                r#""layer_norm_epsilon": 1e-5"#,
+                r#""layer_norm_epsilon": 1e-5, "mixer_rms_eps": 1e-6"#,
+            );
+        let c = Config::from_json_str(&text).expect("Mamba1 config parses");
+        let ssm = c.ssm.as_ref().expect("Mamba1 carries SSM config");
+        assert_eq!(
+            ssm.kind,
+            SsmKind::Mamba1 {
+                dt_rank: 2,
+                bcdt_norm,
+            }
+        );
+        assert_eq!(ssm.norm_eps, norm_eps);
+        assert_eq!((ssm.d_inner(), ssm.conv_dim), (16, 16));
+        assert_eq!(c.layer_mixers, vec![MixerKind::Mamba1; 2]);
+        assert_eq!(c.weight_scheme, WeightScheme::Mamba1);
+        assert!(!c.has_kv_cache());
+        assert_eq!(
+            c.state_tensors(),
+            vec![
+                StateTensorSpec {
+                    name: "ssm_h",
+                    dims: vec![2, 16, 4],
+                    elem: StateElem::F32,
+                },
+                StateTensorSpec {
+                    name: "ssm_conv",
+                    dims: vec![2, 3, 16],
+                    elem: StateElem::F32,
+                },
+            ]
+        );
+    }
+}
+
+#[test]
+fn mamba1_legacy_bias_aliases_and_canonical_precedence() {
+    let aliases = TINY_MAMBA1
+        .replace(r#""use_conv_bias": true"#, r#""conv_bias": false"#)
+        .replace(r#""use_bias": false"#, r#""bias": true"#);
+    let c = Config::from_json_str(&aliases).expect("legacy Mamba1 aliases parse");
+    let ssm = c.ssm.as_ref().expect("Mamba1 carries SSM config");
+    assert!(!ssm.use_conv_bias);
+    assert!(ssm.use_bias);
+    let names = weight_specs_q(&c, false)
+        .into_iter()
+        .map(|spec| spec.tensor_name().to_string())
+        .collect::<Vec<_>>();
+    assert!(!names.iter().any(|name| name.ends_with("conv1d.bias")));
+    assert!(names.iter().any(|name| name.ends_with("in_proj.bias")));
+    assert!(names.iter().any(|name| name.ends_with("out_proj.bias")));
+
+    let both = TINY_MAMBA1
+        .replace(
+            r#""use_conv_bias": true"#,
+            r#""conv_bias": false, "use_conv_bias": true"#,
+        )
+        .replace(r#""use_bias": false"#, r#""bias": true, "use_bias": false"#);
+    let c = Config::from_json_str(&both).expect("canonical Mamba1 keys take precedence");
+    let ssm = c.ssm.as_ref().expect("Mamba1 carries SSM config");
+    assert!(ssm.use_conv_bias);
+    assert!(!ssm.use_bias);
+}
+
+#[test]
+fn mamba1_rejects_unsupported_norms_and_nonpositive_epsilons() {
+    for replacement in [
+        r#""layer_norm_epsilon": 1e-5, "rms_norm": false"#,
+        r#""layer_norm_epsilon": 0"#,
+        r#""layer_norm_epsilon": -1"#,
+    ] {
+        let text = TINY_MAMBA1.replace(r#""layer_norm_epsilon": 1e-5"#, replacement);
+        let error = Config::from_json_str(&text).expect_err("invalid Mamba1 norm must fail");
+        assert!(
+            error.contains("not supported") || error.contains("finite and positive"),
+            "{error}"
+        );
+    }
+
+    let falcon = TINY_MAMBA1
+        .replace(
+            r#""model_type": "mamba""#,
+            r#""model_type": "falcon_mamba""#,
+        )
+        .replace(
+            r#""layer_norm_epsilon": 1e-5"#,
+            r#""layer_norm_epsilon": 1e-5, "mixer_rms_eps": 0"#,
+        );
+    let error = Config::from_json_str(&falcon).expect_err("zero Falcon mixer epsilon must fail");
+    assert!(error.contains("mixer_rms_eps") && error.contains("finite and positive"));
+}
+
+#[test]
+fn mamba1_weight_specs_match_the_hf_mixer_order() {
+    let c = tiny_mamba1();
+    let names = weight_specs_q(&c, false)
+        .into_iter()
+        .map(|spec| spec.tensor_name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &names[..11],
+        &[
+            "backbone.embeddings.weight",
+            "backbone.norm_f.weight",
+            "backbone.layers.0.norm.weight",
+            "backbone.layers.0.mixer.in_proj.weight",
+            "backbone.layers.0.mixer.conv1d.weight",
+            "backbone.layers.0.mixer.conv1d.bias",
+            "backbone.layers.0.mixer.x_proj.weight",
+            "backbone.layers.0.mixer.dt_proj.weight",
+            "backbone.layers.0.mixer.dt_proj.bias",
+            "backbone.layers.0.mixer.A_log",
+            "backbone.layers.0.mixer.D",
+        ]
+    );
+    assert_eq!(names[11], "backbone.layers.0.mixer.out_proj.weight");
+    assert_eq!(names, graph_weight_tensors(&emit_prefill(&c, false)));
+    assert_eq!(names, graph_weight_tensors(&emit_decode(&c, false)));
+}
+
+#[test]
+fn mamba1_whole_model_graphs_thread_diagonal_state() {
+    let c = tiny_mamba1();
+    let prefill = emit_prefill(&c, false);
+    assert_lowerable(&prefill);
+    let sig = main_signature(&prefill);
+    assert!(sig.contains("tensor<2x16x4xf32> loc(\"ssm_h\")"), "{sig}");
+    assert!(
+        sig.contains("tensor<2x3x16xf32> loc(\"ssm_conv\")"),
+        "{sig}"
+    );
+    assert!(
+        sig.ends_with("-> (tensor<40xf32>, tensor<2x16x4xf32>, tensor<2x3x16xf32>) {"),
+        "{sig}"
+    );
+    let decode = emit_decode(&c, false);
+    assert_lowerable(&decode);
+    assert!(decode.contains("util.global private mutable @ssm_h : tensor<2x16x4xf32>"));
+    assert!(decode.contains(
+        "func.func public @state_import(%s0: tensor<2x16x4xf32>, %s1: tensor<2x3x16xf32>)"
+    ));
 }
 
 #[test]
@@ -198,6 +366,9 @@ fn tensor_for_loc(li: usize, key: &str) -> String {
         "ssm.in_proj_b" => format!("{m}in_proj.bias"),
         "ssm.conv_w" => format!("{m}conv1d.weight"),
         "ssm.conv_b" => format!("{m}conv1d.bias"),
+        "ssm.x_proj" => format!("{m}x_proj.weight"),
+        "ssm.dt_proj" => format!("{m}dt_proj.weight"),
+        "ssm.dt_proj_b" => format!("{m}dt_proj.bias"),
         "ssm.dt_bias" => format!("{m}dt_bias"),
         "ssm.a_log" => format!("{m}A_log"),
         "ssm.d" => format!("{m}D"),

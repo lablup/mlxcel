@@ -1,0 +1,12 @@
+
+running 7 tests
+test reasoning_display::tests::reasoning_only_needs_hidden_text_and_no_visible_output ... ok
+test reasoning_display::tests::primed_prompt_detection_tolerates_trailing_whitespace ... ok
+test reasoning_display::tests::render_full_starts_inside_a_primed_block ... ok
+test reasoning_display::tests::plain_text_passes_through ... ok
+test reasoning_display::tests::plain_whitespace_flush_is_chunk_independent_and_accounts_positions ... ok
+test reasoning_display::tests::render_full_hides_reasoning_unless_asked ... ok
+test reasoning_display::tests::preserving_plain_whitespace_keeps_structured_cleanup ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 13166 filtered out; finished in 0.00s
+

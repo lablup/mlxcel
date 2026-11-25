@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
+
 use crate::UniquePtr;
+use crate::drafter::DrafterError;
 use crate::ffi::{self, MlxArray};
-use crate::weights::WeightMap;
+use crate::weights::{WeightMap, dir_has_tensor_name, load_weights_from_dir_index_filtered};
 
 pub(super) fn is_inkling_mtp_tensor_name(name: &str) -> bool {
     name.starts_with("model.mtp.layers.") || name.starts_with("mtp.layers.")
@@ -146,4 +149,40 @@ fn map_transformer_weight(
         }
     }
     Ok(())
+}
+
+/// Load and sanitize the `model.mtp.layers.*` tensors under `path`, keeping
+/// their checkpoint dtype.
+///
+/// Deliberately skips the shared drafter bf16 -> f16 load policy
+/// (`apply_drafter_load_dtype_policy`). Inkling targets stay in their
+/// checkpoint dtype on every backend (the f16 cast breaks the native NVFP4
+/// target, issue #1549), so an f16 drafter would put an f16/bf16 boundary at
+/// every shared embedding, norm and LM-head call, and MLX promotes that mix to
+/// float32. Measured on an M3 Ultra with `Inkling-Small-mlx-4bit` and the
+/// published bf16 `mtp.safetensors`: 128 greedy tokens at
+/// `--draft-block-size 2` took 11.6 s with an f16 drafter and 5.1 s with the
+/// bf16 shard as published, at the same acceptance.
+///
+/// Used by: [`super::InklingMtpDraftModel::from_path`].
+pub(super) fn load_drafter_weights(path: &Path) -> Result<WeightMap, DrafterError> {
+    let mut weights = load_weights_from_dir_index_filtered(path, |name| {
+        is_inkling_mtp_tensor_name(name) || name.starts_with("blocks.")
+    })
+    .map_err(|reason| DrafterError::WeightLoad { reason })?;
+    if weights.is_empty() {
+        return Err(DrafterError::WeightLoad {
+            reason: format!(
+                "{} has no model.mtp.layers.* tensors; an Inkling config flag alone is not a drafter",
+                path.display()
+            ),
+        });
+    }
+    sanitize_weights(&mut weights).map_err(|reason| DrafterError::WeightLoad { reason })?;
+    Ok(weights)
+}
+
+pub fn has_inkling_mtp_tensors(path: &Path) -> Result<bool, DrafterError> {
+    dir_has_tensor_name(path, is_inkling_mtp_tensor_name)
+        .map_err(|reason| DrafterError::WeightLoad { reason })
 }

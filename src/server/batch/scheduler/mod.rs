@@ -1174,6 +1174,10 @@ mod scheduler_whole_prompt_hit_tests;
 mod scheduler_prompt_lookup_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_inkling_prompt_lookup_tests.rs"]
+mod scheduler_inkling_prompt_lookup_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_dflash_routing_tests.rs"]
 mod scheduler_dflash_routing_tests;
 

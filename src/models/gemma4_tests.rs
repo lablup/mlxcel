@@ -1943,14 +1943,15 @@ fn linear_singleton_geometry_and_long_probe_are_limited_to_measured_backends() {
     let args = cache_isolation::make_test_gemma4_args_with_layer("sliding_attention");
     let mut config = parse_text_config(args.text_config);
     config.sliding_window = 1024;
-    for (heads, kv, global_kv, dim, global_dim, always, gated) in [
-        (32, 16, 4, 256, 512, true, false), // unchanged 31B on every backend
-        (16, 8, 1, 256, 512, false, true),  // 12B only on supported backend policy
-        (32, 8, 2, 256, 512, false, false),
-        (16, 8, 2, 256, 512, false, false),
-        (16, 8, 1, 128, 512, false, false),
-        (32, 16, 4, 128, 512, false, false),
-        (32, 16, 4, 256, 256, false, false),
+    // `metal_only` is the 26B A4B geometry, measured on Metal alone (#3418).
+    for (heads, kv, global_kv, dim, global_dim, always, gated, metal_only) in [
+        (32, 16, 4, 256, 512, true, false, false), // unchanged 31B on every backend
+        (16, 8, 1, 256, 512, false, true, false),  // 12B only on supported backend policy
+        (16, 8, 2, 256, 512, false, false, true),  // 26B A4B only on measured Metal
+        (32, 8, 2, 256, 512, false, false, false),
+        (16, 8, 1, 128, 512, false, false, false),
+        (32, 16, 4, 128, 512, false, false, false),
+        (32, 16, 4, 256, 256, false, false, false),
     ] {
         config.num_attention_heads = heads;
         config.num_key_value_heads = kv;
@@ -1967,13 +1968,13 @@ fn linear_singleton_geometry_and_long_probe_are_limited_to_measured_backends() {
         ] {
             assert_eq!(
                 config.mtp_requires_linear_singleton_on(cuda, metal, gpu),
-                always || (gated && supported),
+                always || (gated && supported) || (metal_only && metal && gpu),
                 "heads={heads}, kv={kv}, global_kv={global_kv}, cuda={cuda}, metal={metal}, gpu={gpu}"
             );
         }
-        let supported = mlxcel_core::cuda_is_available()
-            || (mlxcel_core::metal_is_available() && mlxcel_core::default_device_is_gpu());
-        let expected = always || (gated && supported);
+        let metal_gpu = mlxcel_core::metal_is_available() && mlxcel_core::default_device_is_gpu();
+        let supported = mlxcel_core::cuda_is_available() || metal_gpu;
+        let expected = always || (gated && supported) || (metal_only && metal_gpu);
         assert_eq!(config.mtp_requires_linear_singleton(), expected);
         assert_eq!(
             config.mtp_probe_prompt_lengths(),

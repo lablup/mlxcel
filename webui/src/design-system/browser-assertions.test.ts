@@ -22,9 +22,12 @@ describe('layout helper inline-style enforcement', () => {
     await expect(expectSafeLayout(page)).rejects.toThrow();
   });
   it('retains the narrow existing geometry allowlist and rejects extra declarations', async () => {
-    document.body.innerHTML = '<div class="ds-progress"><div class="astryx-progress-bar-fill" style="width: 50%"></div></div>';
+    // Astryx 0.7.11 publishes the filled share as `--_progress-bar-fill`; an inline width is no longer its write.
+    document.body.innerHTML = '<div class="ds-progress"><div class="astryx-progress-bar-fill" style="--_progress-bar-fill: 50%; --_progress-bar-move: 200ms"></div></div>';
     await expect(expectSafeLayout(page)).resolves.toBeUndefined();
     document.querySelector<HTMLElement>('.astryx-progress-bar-fill')?.style.setProperty('color', 'red');
+    await expect(expectSafeLayout(page)).rejects.toThrow();
+    document.body.innerHTML = '<div class="ds-progress"><div class="astryx-progress-bar-fill" style="width: 50%"></div></div>';
     await expect(expectSafeLayout(page)).rejects.toThrow();
   });
 });

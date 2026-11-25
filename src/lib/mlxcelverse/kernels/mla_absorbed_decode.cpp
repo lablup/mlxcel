@@ -16,9 +16,12 @@
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
+#include <mlx/transforms.h>
 
 #include "kernel_port.h"
 
+#include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -434,6 +437,42 @@ mlx::core::array launch(
     return merged[0];
 }
 
+// Whether `build`'s graph evaluates, remembered per `key` for the process.
+//
+// Metal compiles a pipeline with a thread limit derived from the kernel's
+// register use, and MLX checks the launch against it only at eval (it throws
+// before the dispatch is encoded, so the stream stays usable). The partial
+// pass cannot be resized without changing its exchange, so the honest answer
+// to "does it run here" is to run it: once, on a one-key window, at the exact
+// template geometry the caller would launch. The lock is held across the
+// probe so concurrent first calls do not compile and evaluate it twice.
+bool probe_evaluates(const std::string& key, const std::function<mlx::core::array()>& build) {
+    static std::mutex mutex;
+    static std::map<std::string, bool> results;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (const auto it = results.find(key); it != results.end()) {
+        return it->second;
+    }
+    bool evaluates = false;
+    try {
+        auto out = build();
+        mlx::core::eval(out);
+        evaluates = true;
+    } catch (const std::exception&) {
+        evaluates = false;
+    }
+    results.emplace(key, evaluates);
+    return evaluates;
+}
+
+std::string dtype_key(mlx::core::Dtype dt) {
+    return std::to_string(static_cast<int>(dt.val())) + "/" + std::to_string(dt.size());
+}
+
+bool in_rank_contract(int R, int P) {
+    return R > 0 && P > 0 && R % 32 == 0 && P % 32 == 0 && R <= 1024;
+}
+
 } // namespace
 
 bool mla_absorbed_decode_available() {
@@ -462,9 +501,56 @@ mlx::core::array mla_absorbed_decode(
         {{"T", q_abs.dtype()}, {"R", q_abs.shape(3)}, {"P", q_pe.shape(3)}});
 }
 
+bool mla_absorbed_decode_supported(mlx::core::Dtype dtype, int R, int P) {
+    using namespace mlx::core;
+    if (!mla_absorbed_decode_available() || !is_kernel_float(dtype) || !in_rank_contract(R, P)) {
+        return false;
+    }
+    const std::string key = "dense:" + dtype_key(dtype) + ":" + std::to_string(R) + ":" +
+        std::to_string(P);
+    return probe_evaluates(key, [&] {
+        const array q_abs = zeros({1, 1, 1, R}, dtype);
+        const array q_pe = zeros({1, 1, 1, P}, dtype);
+        const array ckv = zeros({1, 1, 1, R}, dtype);
+        const array kpe = zeros({1, 1, 1, P}, dtype);
+        eval({q_abs, q_pe, ckv, kpe});
+        return mla_absorbed_decode(q_abs, q_pe, ckv, kpe, 1.0f);
+    });
+}
+
 bool mla_absorbed_decode_quantized_available() {
     return mlx::core::default_device() == mlx::core::Device::gpu &&
         mlxcel::has_kernel_port(mla_absorbed_decode_quantized_ports());
+}
+
+bool mla_absorbed_decode_quantized_supported(
+    mlx::core::Dtype dtype,
+    mlx::core::Dtype kpe_dtype,
+    mlx::core::Dtype scales_dtype,
+    int R,
+    int P,
+    int group_size,
+    int bits) {
+    using namespace mlx::core;
+    if (!mla_absorbed_decode_quantized_available() || !is_kernel_float(dtype) ||
+        !is_kernel_float(kpe_dtype) || !is_kernel_float(scales_dtype) || !in_rank_contract(R, P) ||
+        bits <= 0 || 32 % bits != 0 || group_size <= 0 || R % group_size != 0) {
+        return false;
+    }
+    const std::string key = "quantized:" + dtype_key(dtype) + ":" + dtype_key(kpe_dtype) + ":" +
+        dtype_key(scales_dtype) + ":" + std::to_string(R) + ":" + std::to_string(P) + ":" +
+        std::to_string(group_size) + ":" + std::to_string(bits);
+    return probe_evaluates(key, [&] {
+        const array q_abs = zeros({1, 1, 1, R}, dtype);
+        const array q_pe = zeros({1, 1, 1, P}, dtype);
+        const array ckv_q = zeros({1, 1, 1, R * bits / 32}, uint32);
+        const array scales = zeros({1, 1, 1, R / group_size}, scales_dtype);
+        const array biases = zeros({1, 1, 1, R / group_size}, scales_dtype);
+        const array kpe = zeros({1, 1, 1, P}, kpe_dtype);
+        eval({q_abs, q_pe, ckv_q, scales, biases, kpe});
+        return mla_absorbed_decode_quantized(
+            q_abs, q_pe, ckv_q, scales, biases, kpe, 1.0f, group_size, bits);
+    });
 }
 
 mlx::core::array mla_absorbed_decode_quantized(

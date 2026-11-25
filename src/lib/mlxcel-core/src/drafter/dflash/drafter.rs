@@ -184,7 +184,7 @@ impl DFlashDrafter {
 ///
 /// Used by: DFlash drafter load, Muse Glimmer drafter load, Qwen 3.5 MTP
 /// drafter load. The Inkling MTP drafter keeps its checkpoint dtype instead
-/// (`inkling_mtp::model::load_drafter_weights`, issue #1549).
+/// (`inkling_mtp::sanitize::load_drafter_weights`, issue #1549).
 pub(crate) fn apply_drafter_load_dtype_policy(weights: &mut WeightMap) {
     if drafter_bf16_to_f16_at_load() {
         convert_bf16_to_f16_non_quantized(weights);

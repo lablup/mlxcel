@@ -34,10 +34,12 @@
 //! is byte-identical to before.
 
 use super::builder::{Builder, Precision, ProjectionLayout, Ty, Val, precision_from_env};
-use super::config::{Config, DeepStackConfig, MropeLayout, NormStyle, SsmConfig};
+use super::config::{
+    Config, DeepStackConfig, ExpertAct, MoeScoring, MropeLayout, NormStyle, SsmConfig, SsmKind,
+};
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
-use super::ssm::{self, Mamba2MixerW, SsmLayerState};
+use super::ssm::{self, Mamba1MixerW, Mamba2MixerW, SsmLayerState, SsmMixerW};
 use super::ssm_scan::SsmPrefillForm;
 
 #[path = "model_recurrent.rs"]
@@ -283,9 +285,9 @@ struct LayerW {
     /// Phi4MM's immutable speech/vision adapter pairs. The request's numeric
     /// mode gates their deltas per row; the base weights are never mutated.
     phi4_lora: Option<Phi4LayerLoraW>,
-    /// The Mamba2 mixer of a recurrent layer (issue #3338); `None` on every
-    /// attention layer. A recurrent layer sets only this and `in_ln`.
-    ssm: Option<Mamba2MixerW>,
+    /// The SSM mixer of a recurrent layer; `None` on every attention layer. A
+    /// recurrent layer sets only this and `in_ln`.
+    ssm: Option<SsmMixerW>,
 }
 
 struct MlaLayerW {
@@ -682,7 +684,10 @@ fn take_layer_weights(
     c: &Config,
     li: usize,
 ) -> LayerW {
-    if c.layer_mixer(li).is_recurrent() {
+    if matches!(
+        c.layer_mixer(li),
+        super::config::MixerKind::Mamba2 | super::config::MixerKind::Mamba1
+    ) {
         return recurrent::take_ssm_layer_weights(b, decls, idx, c, li);
     }
     let h = c.hidden;
@@ -695,20 +700,25 @@ fn take_layer_weights(
     // Llama family, so its arg order is unchanged. A MoE layer (issue #500) takes no
     // dense MLP weights (down/gate/up) here; its expert bank is appended last.
     let gated = !c.dense_mlp;
-    let has_post = !c.parallel_block;
+    let has_ffn = c.layer_has_ffn(li);
+    let has_attn = c.attn_layer_index(li).is_some();
+    let has_post = !c.parallel_block && has_ffn && has_attn;
     let moe_layer = c.is_moe_layer(li);
     // The big linear projections take the packed-quantized path when enabled
     // (issue #516: `take_weight` declares packed+scales+biases and dequants in the
     // graph); the norms below stay f32. Byte-identical when unquantized / packed off.
-    let down = (!moe_layer).then(|| take_weight(b, decls, idx, c, h, inter, p("down")));
-    let gate = (gated && !moe_layer).then(|| take_weight(b, decls, idx, c, inter, h, p("gate")));
+    let down = (has_ffn && !moe_layer).then(|| take_weight(b, decls, idx, c, h, inter, p("down")));
+    let gate = (has_ffn && gated && !moe_layer)
+        .then(|| take_weight(b, decls, idx, c, inter, h, p("gate")));
     // input_layernorm: present unless the reordered (OLMo) post-norm drops it.
     let in_ln = c
         .has_input_norm()
         .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("in_ln")));
     let post_ln = has_post.then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("post_ln")));
-    let up = (!moe_layer).then(|| take_weight(b, decls, idx, c, inter, h, p("up")));
-    let (wk, wo, wq, wv, mla) = if let Some(m) = c.mla {
+    let up = (has_ffn && !moe_layer).then(|| take_weight(b, decls, idx, c, inter, h, p("up")));
+    let (wk, wo, wq, wv, mla) = if !has_attn {
+        (None, None, None, None, None)
+    } else if let Some(m) = c.mla {
         let q_a = take_weight(b, decls, idx, c, m.q_lora_rank, h, p("mla_q_a"));
         let q_a_norm = take_arg(decls, idx, Ty::f32(vec![m.q_lora_rank]), p("mla_q_a_norm"));
         let q_b = take_weight(
@@ -760,7 +770,7 @@ fn take_layer_weights(
         let wv = take_weight(b, decls, idx, c, kv, h, p("wv"));
         (Some(wk), Some(wo), Some(wq), Some(wv), None)
     };
-    let (bk, bq, bv) = if c.qkv_bias {
+    let (bk, bq, bv) = if has_attn && c.qkv_bias {
         let bk = take_arg(decls, idx, Ty::f32(vec![kv]), p("bk"));
         let bq = take_arg(decls, idx, Ty::f32(vec![qd]), p("bq"));
         let bv = take_arg(decls, idx, Ty::f32(vec![kv]), p("bv"));
@@ -800,17 +810,14 @@ fn take_layer_weights(
         .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("in_ln_bias")));
     let post_ln_bias = (c.norm_bias && has_post)
         .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("post_ln_bias")));
-    let wo_bias = c
-        .attn_o_bias
-        .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("wo_bias")));
-    let down_bias = c
-        .mlp_bias
-        .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("down_bias")));
-    let gate_bias =
-        (c.mlp_bias && gated).then(|| take_arg(decls, idx, Ty::f32(vec![inter]), p("gate_bias")));
-    let up_bias = c
-        .mlp_bias
-        .then(|| take_arg(decls, idx, Ty::f32(vec![inter]), p("up_bias")));
+    let wo_bias =
+        (has_attn && c.attn_o_bias).then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("wo_bias")));
+    let down_bias =
+        (has_ffn && c.mlp_bias).then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("down_bias")));
+    let gate_bias = (has_ffn && c.mlp_bias && gated)
+        .then(|| take_arg(decls, idx, Ty::f32(vec![inter]), p("gate_bias")));
+    let up_bias =
+        (has_ffn && c.mlp_bias).then(|| take_arg(decls, idx, Ty::f32(vec![inter]), p("up_bias")));
     // MoE expert bank (issue #500): router, stacked experts, optional shared expert,
     // appended after the attention weights / biases / FF norms on a MoE layer, in the
     // same order `weight_specs` (`weights.rs`) lists them so the args line up.
@@ -898,7 +905,10 @@ fn take_layer_weights(
         up_bias,
         moe,
         phi4_lora,
-        ssm: None,
+        ssm: c
+            .falcon_h1
+            .as_ref()
+            .map(|_| recurrent::take_ssm_mixer_weights(b, decls, idx, c, li)),
     }
 }
 
@@ -914,12 +924,22 @@ fn take_moe_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li: u
     let i = m.intermediate;
     let p = |k: &str| format!("params['layers'][{}]['{}']", li, k);
     let router = take_arg(decls, idx, Ty::f32(vec![e, h]), p("moe_router"));
-    let w_gate = take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_gate"));
+    let correction_bias = matches!(
+        m.scoring,
+        MoeScoring::Sigmoid {
+            correction_bias: true,
+            ..
+        }
+    )
+    .then(|| take_arg(decls, idx, Ty::f32(vec![e]), p("moe_correction_bias")));
+    let w_gate = (m.expert_act == ExpertAct::SwiGlu)
+        .then(|| take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_gate")));
     let w_up = take_arg(decls, idx, Ty::f32(vec![e, i, h]), p("moe_up"));
     let w_down = take_arg(decls, idx, Ty::f32(vec![e, h, i]), p("moe_down"));
     let shared = if let Some(sh) = m.shared {
         let is = sh.intermediate;
-        let gate = take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_gate"));
+        let gate = (m.expert_act == ExpertAct::SwiGlu)
+            .then(|| take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_gate")));
         let up = take_arg(decls, idx, Ty::f32(vec![is, h]), p("moe_shared_up"));
         let down = take_arg(decls, idx, Ty::f32(vec![h, is]), p("moe_shared_down"));
         let expert_gate = if sh.gated {
@@ -943,6 +963,7 @@ fn take_moe_weights(decls: &mut Vec<ArgDecl>, idx: &mut usize, c: &Config, li: u
     };
     MoeLayerW {
         router,
+        correction_bias,
         w_gate,
         w_up,
         w_down,
@@ -1038,7 +1059,7 @@ fn build_arg_schema(b: &mut Builder, c: &Config, scalar_abi: bool) -> (Vec<ArgDe
         &mut decls,
         &mut idx,
         Ty::f32(vec![
-            c.n_layers,
+            c.attn_layer_count(),
             c.context_capacity,
             c.cache_heads(),
             c.cache_dim(),
@@ -1049,7 +1070,7 @@ fn build_arg_schema(b: &mut Builder, c: &Config, scalar_abi: bool) -> (Vec<ArgDe
         &mut decls,
         &mut idx,
         Ty::f32(vec![
-            c.n_layers,
+            c.attn_layer_count(),
             c.context_capacity,
             c.cache_heads(),
             c.cache_dim(),
@@ -1544,7 +1565,14 @@ fn emit_mlp_body(
         // Dense (StarCoder2): up == c_fc, then gelu, then down == c_proj. No gate.
         let up = layout.linear(b, hn, LayerW::dense(&lw.up));
         let up = layout.add_bias(b, up, lw.up_bias.as_ref());
-        let act = gelu_tanh(b, &up);
+        let act = match c.dense_mlp_activation {
+            super::config::DenseMlpActivation::Gelu => gelu_tanh(b, &up),
+            super::config::DenseMlpActivation::Relu2 => {
+                let zero = b.broadcast(&k.zero, &[], up.ty.shape.clone());
+                let relu = b.maximum(&up, &zero);
+                b.multiply(&relu, &relu)
+            }
+        };
         let down = layout.linear(b, &act, LayerW::dense(&lw.down));
         return layout.add_bias(b, down, lw.down_bias.as_ref());
     }
@@ -1592,6 +1620,10 @@ fn emit_mlp_body(
             }
         }
     };
+    let gate = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| gate.clone(), |f| super::ssm::scale(b, &gate, f.mlp[0]));
     let act = if c.mlp_geglu {
         gelu_tanh(b, &gate)
     } else {
@@ -1607,6 +1639,10 @@ fn emit_mlp_body(
         None => down,
     };
     let down = layout.add_bias(b, down, lw.down_bias.as_ref());
+    let down = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| down.clone(), |f| super::ssm::scale(b, &down, f.mlp[1]));
     if c.has_post_ff_norm() {
         let w = norm_w(
             b,
@@ -2155,6 +2191,9 @@ impl AttnLayout {
         kcache: &mut Val,
         vcache: &mut Val,
     ) -> (Val, Val) {
+        let li = c
+            .attn_layer_index(li)
+            .expect("attention layer has a KV row");
         let d = c.head_dim;
         let nkv = c.n_kv;
         let seq = c.context_capacity;
@@ -2938,7 +2977,15 @@ fn emit_attention(
         return emit_mla_attention(b, c, k, lw, li, x, layout, kcache, vcache);
     }
     let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
-    let (q, kk, vv) = layout.project_qkv(b, c, &hn, lw);
+    let attn_in = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| hn.clone(), |f| super::ssm::scale(b, &hn, f.attention_in));
+    let (q, kk, vv) = layout.project_qkv(b, c, &attn_in, lw);
+    let kk = c
+        .falcon_h1
+        .as_ref()
+        .map_or_else(|| kk.clone(), |f| super::ssm::scale(b, &kk, f.key));
     // q/k-norm hook (issue #494): Qwen3 / Gemma3 norm each head over head_dim,
     // OLMo2/3 norm the whole flat projection; both before RoPE, applied once here so
     // they reach the single / ragged / prefill paths together. A config without
@@ -2961,6 +3008,10 @@ fn emit_attention(
     let o = layout.context(b, c, &attn, &vslab);
     let attn_out = layout.o_proj(b, &o, lw);
     let attn_out = post_attn_norm(b, c, k, layout, attn_out, lw);
+    let attn_out = c.falcon_h1.as_ref().map_or_else(
+        || attn_out.clone(),
+        |f| super::ssm::scale(b, &attn_out, f.attention_out),
+    );
     (hn, attn_out)
 }
 
@@ -2975,7 +3026,7 @@ fn emit_attention(
 ///
 /// The layer's mixer comes from `c.layer_mixer(li)` (issue #3338): an attention
 /// layer runs the block below and writes the KV cache; a recurrent layer runs
-/// [`recurrent::emit_mamba2_block`] and advances its row of `state` instead.
+/// [`recurrent::emit_recurrent_block`] and advances its row of `state` instead.
 #[allow(clippy::too_many_arguments)]
 fn emit_transformer_layer(
     b: &mut Builder,
@@ -2989,8 +3040,29 @@ fn emit_transformer_layer(
     vcache: &mut Val,
     state: &mut RecurrentLayers,
 ) -> Val {
-    if c.layer_mixer(li).is_recurrent() {
-        return recurrent::emit_mamba2_block(b, c, k, lw, li, x, layout, state);
+    if matches!(
+        c.layer_mixer(li),
+        super::config::MixerKind::Mamba2 | super::config::MixerKind::Mamba1
+    ) {
+        return recurrent::emit_recurrent_block(b, c, k, lw, li, x, layout, state);
+    }
+    if c.layer_mixer(li) == super::config::MixerKind::ParallelMamba2Attention {
+        let (hn, attn) = emit_attention(b, c, k, lw, li, x, layout, kcache, vcache);
+        let ssm = recurrent::emit_recurrent_mixer(b, c, lw, li, &hn, layout, state);
+        let mixed = b.add(&ssm, &attn);
+        let x1 = b.add(x, &mixed);
+        let hn2 = mlp_pre_norm(b, c, k, layout, &x1, lw);
+        let down = emit_ffn_body(b, c, k, layout, &hn2, lw, li);
+        return b.add(&x1, &down);
+    }
+    if c.layer_mixer(li) == super::config::MixerKind::None {
+        let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
+        let out = emit_ffn_body(b, c, k, layout, &hn, lw, li);
+        return b.add(x, &out);
+    }
+    if !c.layer_has_ffn(li) {
+        let (_, out) = emit_attention(b, c, k, lw, li, x, layout, kcache, vcache);
+        return b.add(x, &out);
     }
     if c.parallel_block {
         // Parallel: attention and MLP both read the one input_layernorm output;
@@ -3155,7 +3227,7 @@ fn emit_decode_impl(
     let cache_elt = b.precision().dot_elt().unwrap_or("f32");
     let cache_ty = Ty::new(
         vec![
-            c.n_layers,
+            c.attn_layer_count(),
             c.context_capacity,
             c.cache_heads(),
             c.cache_dim(),
@@ -3409,7 +3481,7 @@ fn build_batched_arg_schema(
         &mut idx,
         Ty::f32(vec![
             bsz,
-            c.n_layers,
+            c.attn_layer_count(),
             c.context_capacity,
             c.cache_heads(),
             c.cache_dim(),
@@ -3421,7 +3493,7 @@ fn build_batched_arg_schema(
         &mut idx,
         Ty::f32(vec![
             bsz,
-            c.n_layers,
+            c.attn_layer_count(),
             c.context_capacity,
             c.cache_heads(),
             c.cache_dim(),
@@ -3686,7 +3758,14 @@ fn emit_decode_batched_impl(c: &Config, bsz: usize, sample: bool, precision: Pre
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.cache_heads(), c.cache_dim()]).render();
+    let cache_ty = Ty::f32(vec![
+        bsz,
+        c.attn_layer_count(),
+        seq,
+        c.cache_heads(),
+        c.cache_dim(),
+    ])
+    .render();
     format!(
         "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,
@@ -3794,7 +3873,7 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
     let kv = c.has_kv_cache().then(|| {
         let cache_ty = Ty::f32(vec![
             bsz,
-            c.n_layers,
+            c.attn_layer_count(),
             c.context_capacity,
             c.cache_heads(),
             c.cache_dim(),
@@ -3849,8 +3928,8 @@ pub fn emit_decode_ragged_with(
 /// the same f16 one emitted before this issue.
 ///
 /// An attention-free recurrent config (Mamba2) threads its per-slot state
-/// through the graph (issue #3340). A hybrid (KV plus state) is an `Err` until
-/// its attention and recurrent layers are validated together (#3344).
+/// through the graph (issue #3340). Hybrids append state after their compact
+/// attention-only KV region (issue #3344).
 pub fn emit_decode_ragged_with_native(
     c: &Config,
     bsz: usize,
@@ -3858,9 +3937,6 @@ pub fn emit_decode_ragged_with_native(
     precision: Precision,
     native: Option<(&str, &str)>,
 ) -> Result<String, String> {
-    if c.has_kv_cache() {
-        c.reject_recurrent("ragged decode")?;
-    }
     Ok(emit_decode_ragged_impl(c, bsz, sample, precision, native))
 }
 
@@ -4009,7 +4085,14 @@ fn emit_decode_ragged_impl(
     // then one `[B, ...dims]` result per state tensor in spec order.
     let mut results = vec![(out_val, out_ty)];
     if has_kv {
-        let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.cache_heads(), c.cache_dim()]).render();
+        let cache_ty = Ty::f32(vec![
+            bsz,
+            c.attn_layer_count(),
+            seq,
+            c.cache_heads(),
+            c.cache_dim(),
+        ])
+        .render();
         results.push((kcache.name.clone(), cache_ty.clone()));
         results.push((vcache.name.clone(), cache_ty));
     }
@@ -4699,8 +4782,8 @@ fn emit_prefill_module(
     // caches start as zeros; prefill writes the [0:Lp] block and returns them
     let (mut kcache, mut vcache) = if has_kv {
         (
-            b.broadcast(&k.zero, &[], vec![c.n_layers, lp, nkv, d]),
-            b.broadcast(&k.zero, &[], vec![c.n_layers, lp, nkv, d]),
+            b.broadcast(&k.zero, &[], vec![c.attn_layer_count(), lp, nkv, d]),
+            b.broadcast(&k.zero, &[], vec![c.attn_layer_count(), lp, nkv, d]),
         )
     } else {
         (k.zero.clone(), k.zero.clone())
@@ -4772,7 +4855,13 @@ fn emit_prefill_module(
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![c.n_layers, lp, c.cache_heads(), c.cache_dim()]).render();
+    let cache_ty = Ty::f32(vec![
+        c.attn_layer_count(),
+        lp,
+        c.cache_heads(),
+        c.cache_dim(),
+    ])
+    .render();
     let module_name = match (input_kind, capture_deepstack_states) {
         (PrefillInputKind::DeepStack, true) => "prefill_embeddings_deepstack_diagnostics",
         (PrefillInputKind::Tokens, false) => "prefill",
@@ -4938,23 +5027,50 @@ pub(crate) fn emit_ssm_probe_with(
     let in_proj_b = c.use_bias.then(|| arg(vec![c.in_proj_dim()], "in_proj_b"));
     let conv_w = arg(vec![cd, 1, k], "conv_w");
     let conv_b = c.use_conv_bias.then(|| arg(vec![cd], "conv_b"));
-    let dt_bias = arg(vec![hh], "dt_bias");
-    let a_log = arg(vec![hh], "a_log");
-    let d = arg(vec![hh], "d");
-    let norm_w = arg(vec![di], "norm_w");
-    let out_proj = arg(vec![hidden, di], "out_proj");
-    let out_proj_b = c.use_bias.then(|| arg(vec![hidden], "out_proj_b"));
-    let w = Mamba2MixerW {
-        in_proj,
-        in_proj_b,
-        conv_w,
-        conv_b,
-        dt_bias,
-        a_log,
-        d,
-        norm_w,
-        out_proj,
-        out_proj_b,
+    let w = match c.kind {
+        SsmKind::Mamba2 => {
+            let dt_bias = arg(vec![hh], "dt_bias");
+            let a_log = arg(vec![hh], "a_log");
+            let d = arg(vec![hh], "d");
+            let norm_w = arg(vec![di], "norm_w");
+            let out_proj = arg(vec![hidden, di], "out_proj");
+            let out_proj_b = c.use_bias.then(|| arg(vec![hidden], "out_proj_b"));
+            SsmMixerW::Mamba2(Mamba2MixerW {
+                in_proj,
+                in_proj_b,
+                conv_w,
+                conv_b,
+                dt_bias,
+                a_log,
+                d,
+                norm_w: Some(norm_w),
+                falcon: None,
+                out_proj,
+                out_proj_b,
+            })
+        }
+        SsmKind::Mamba1 { dt_rank, .. } => {
+            let x_proj = arg(vec![dt_rank + 2 * n, di], "x_proj");
+            let dt_proj = arg(vec![di, dt_rank], "dt_proj");
+            let dt_proj_b = arg(vec![di], "dt_proj_b");
+            let a_log = arg(vec![di, n], "a_log");
+            let d = arg(vec![di], "d");
+            let out_proj = arg(vec![hidden, di], "out_proj");
+            let out_proj_b = c.use_bias.then(|| arg(vec![hidden], "out_proj_b"));
+            SsmMixerW::Mamba1(Mamba1MixerW {
+                in_proj,
+                in_proj_b,
+                conv_w,
+                conv_b,
+                x_proj,
+                dt_proj,
+                dt_proj_b,
+                a_log,
+                d,
+                out_proj,
+                out_proj_b,
+            })
+        }
     };
     let x = arg(vec![t, hidden], "x");
 
@@ -4967,25 +5083,38 @@ pub(crate) fn emit_ssm_probe_with(
                 Ty::scalar("i32"),
                 "ssm.real_len".into(),
             );
-            let h0 = take_arg(
-                &mut decls,
-                &mut idx,
-                Ty::f32(vec![hh, p, n]),
-                "ssm.h0".into(),
-            );
+            let h_shape = match c.kind {
+                SsmKind::Mamba2 => vec![hh, p, n],
+                SsmKind::Mamba1 { .. } => vec![di, n],
+            };
+            let h0 = take_arg(&mut decls, &mut idx, Ty::f32(h_shape), "ssm.h0".into());
             let conv0 = take_arg(
                 &mut decls,
                 &mut idx,
                 Ty::f32(vec![k - 1, cd]),
                 "ssm.conv0".into(),
             );
-            ssm::mamba2_mixer_prefill_form(&mut b, c, form, &w, &x, &real_len, &h0, &conv0)
+            match &w {
+                SsmMixerW::Mamba2(w) => {
+                    ssm::mamba2_mixer_prefill_form(&mut b, c, form, w, &x, &real_len, &h0, &conv0)
+                }
+                SsmMixerW::Mamba1(w) => {
+                    ssm::mamba1_mixer_prefill(&mut b, c, w, &x, &real_len, &h0, &conv0)
+                }
+            }
         }
         ProbeMode::Decode => {
             let (h_ty, conv_ty) = ssm::ssm_state_types(c, t);
             let h = take_arg(&mut decls, &mut idx, h_ty, "ssm.h0".into());
             let conv = take_arg(&mut decls, &mut idx, conv_ty, "ssm.conv0".into());
-            let (y, st) = ssm::mamba2_mixer_step(&mut b, c, &w, &x, &SsmLayerState { h, conv });
+            let (y, st) = match &w {
+                SsmMixerW::Mamba2(w) => {
+                    ssm::mamba2_mixer_step(&mut b, c, w, &x, &SsmLayerState { h, conv })
+                }
+                SsmMixerW::Mamba1(w) => {
+                    ssm::mamba1_mixer_step(&mut b, c, w, &x, &SsmLayerState { h, conv })
+                }
+            };
             (y, st.h, st.conv)
         }
     };

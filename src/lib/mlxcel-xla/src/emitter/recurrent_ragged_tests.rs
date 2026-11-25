@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The ragged (continuous-batching) decode for recurrent configs (issue
-//! #3340): per-slot `[B, ...dims]` state inputs and results, no KV for an
-//! attention-free model, and a hybrid still refused until #3344.
+//! The ragged (continuous-batching) decode for recurrent configs (issues #3340,
+//! #3348): per-slot `[B, ...dims]` state inputs and results, and no KV for an
+//! attention-free Mamba1/Mamba2 model. Hybrid coverage is in `nemotron_h_tests`.
 
 use super::builder::Precision;
-use super::config::{Config, MixerKind};
+use super::config::Config;
 use super::model::{emit_decode_ragged, emit_decode_ragged_with};
 
 const TINY_MAMBA2: &str = r#"{
@@ -29,8 +29,19 @@ const TINY_MAMBA2: &str = r#"{
   "hidden_act": "silu", "tie_word_embeddings": true
 }"#;
 
+const TINY_MAMBA1: &str = r#"{
+  "model_type": "mamba", "hidden_size": 8, "intermediate_size": 16,
+  "num_hidden_layers": 2, "vocab_size": 40, "state_size": 4,
+  "time_step_rank": 2, "conv_kernel": 4, "use_conv_bias": true,
+  "use_bias": false, "tie_word_embeddings": true, "layer_norm_epsilon": 1e-5
+}"#;
+
 fn tiny() -> Config {
     Config::from_json_str(TINY_MAMBA2).expect("tiny mamba2 parses")
+}
+
+fn tiny_mamba1() -> Config {
+    Config::from_json_str(TINY_MAMBA1).expect("tiny mamba1 parses")
 }
 
 fn main_signature(graph: &str) -> &str {
@@ -89,6 +100,22 @@ fn mamba2_ragged_decode_samples_and_emits_at_every_precision() {
     }
 }
 
+#[test]
+fn mamba1_ragged_decode_threads_per_slot_diagonal_state() {
+    let graph = emit_decode_ragged(&tiny_mamba1(), 4, false).expect("ragged Mamba1 emits");
+    let sig = main_signature(&graph);
+    assert!(sig.contains("tensor<4x2x16x4xf32> loc(\"ssm_h\")"), "{sig}");
+    assert!(
+        sig.contains("tensor<4x2x3x16xf32> loc(\"ssm_conv\")"),
+        "{sig}"
+    );
+    assert!(
+        sig.ends_with("-> (tensor<4x40xf32>, tensor<4x2x16x4xf32>, tensor<4x2x3x16xf32>) {"),
+        "{sig}"
+    );
+    assert!(!graph.contains("kcache"));
+}
+
 /// Each slot's state row is written back at its own layer row with the batch
 /// axis intact: one write per state tensor per recurrent layer.
 #[test]
@@ -99,16 +126,6 @@ fn mamba2_ragged_decode_writes_every_layer_row_back() {
         .filter(|line| line.contains("stablehlo.dynamic_update_slice"))
         .count();
     assert_eq!(writes, 2 * 2, "ssm_h and ssm_conv for each of two layers");
-}
-
-#[test]
-fn hybrid_ragged_decode_is_refused_until_its_layers_are_validated() {
-    let mut hybrid = Config::llama_3_2_1b();
-    hybrid.layer_mixers[0] = MixerKind::Mamba2;
-    hybrid.ssm = tiny().ssm;
-    assert!(hybrid.has_kv_cache() && hybrid.has_recurrent_state());
-    let error = emit_decode_ragged(&hybrid, 4, false).expect_err("hybrid ragged");
-    assert!(error.contains("ragged decode"), "{error}");
 }
 
 #[test]

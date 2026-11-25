@@ -19,9 +19,9 @@
 //! (`mlx_vlm/models/inkling2/language.py`, MIT).
 //!
 //! The expert matvec runs through [`expert_projections`] (the gather path),
-//! except inside a short speculative verify forward of a looped model, where
-//! the grouped Metal kernel (mlx-vlm `grouped_experts.py`, issue #3359; gate
-//! in `super::kernels`) decodes each expert's weights once for all its routes.
+//! except inside a short speculative verify forward, where the grouped Metal
+//! kernel (mlx-vlm `grouped_experts.py`, issue #3359; gate in
+//! `super::kernels`) decodes each expert's weights once for all its routes.
 
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
@@ -38,8 +38,8 @@ pub struct Inkling2Moe {
     experts: SwitchGLU,
     top_k: i32,
     route_scale: f32,
-    /// Grouped verify kernel (issue #3359): a looped model whose three planes
-    /// the kernel decodes, kernels on at load.
+    /// Grouped verify kernel (issue #3359): three planes the kernel decodes,
+    /// kernels on at load. Mini and Small alike since issue #3410.
     grouped: bool,
 }
 
@@ -167,7 +167,7 @@ impl Inkling2Moe {
             beta: config.mlp_gate_softcap,
             linear_beta: Some(config.mlp_up_softcap),
         });
-        let grouped = super::kernels::loop_kernels_wanted(config, super::kernels::enabled())
+        let grouped = super::kernels::grouped_experts_wanted(config, super::kernels::enabled())
             && super::kernels::grouped_experts_supported(&experts_glu);
         Ok(Self {
             gate_weight: mlxcel_core::astype(gate_weight, dtype::FLOAT32),
@@ -181,9 +181,9 @@ impl Inkling2Moe {
 
     /// `(indices [N, k] uint32-compatible, weights [N, k] f32)`.
     fn route(&self, x: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        let scores = mlxcel_core::sigmoid(&mlxcel_core::matmul(
+        let scores = mlxcel_core::sigmoid(&mlxcel_core::row_invariant::dense(
             &mlxcel_core::astype(x, dtype::FLOAT32),
-            &mlxcel_core::transpose(&self.gate_weight),
+            &self.gate_weight,
         ));
         let biased = mlxcel_core::negative(&mlxcel_core::add(&scores, &self.bias));
         let order = mlxcel_core::argpartition(&biased, self.top_k - 1, -1);
@@ -223,10 +223,31 @@ impl Inkling2Moe {
 }
 
 /// Routed expert outputs `[N, k, hidden]` for `x [N, hidden]`.
+///
+/// Dense (unquantized) experts multiply through `gather_mm`, which, like
+/// `matmul`, takes a different kernel for one row than for several, so a
+/// verify block runs them one token at a time to match decode steps (issue
+/// #3280). The quantized gather already agrees row for row.
 pub(crate) fn expert_projections(
     experts: &SwitchGLU,
     x: &MlxArray,
     indices: &MlxArray,
 ) -> UniquePtr<MlxArray> {
-    experts.forward(x, indices)
+    let tokens = mlxcel_core::array_shape(x)[0];
+    let split = experts.down_quantized_parts().is_none()
+        && mlxcel_core::row_invariant::in_verify_block()
+        && (2..=mlxcel_core::row_invariant::MAX_ROWS).contains(&tokens);
+    if !split {
+        return experts.forward(x, indices);
+    }
+    let parts: Vec<_> = (0..tokens)
+        .map(|t| {
+            experts.forward(
+                &mlxcel_core::utils::slice_axis(x, 0, t, t + 1),
+                &mlxcel_core::utils::slice_axis(indices, 0, t, t + 1),
+            )
+        })
+        .collect();
+    let refs: Vec<&MlxArray> = parts.iter().map(|p| &**p).collect();
+    mlxcel_core::concatenate_many(&refs, 0)
 }

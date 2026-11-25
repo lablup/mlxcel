@@ -861,3 +861,13 @@ fn a_config_without_model_type_parses() {
     assert!(config.mla_scale_q_lora && config.mla_scale_kv_lora);
     assert!(config.indexer_rope_interleave);
 }
+
+/// The token-only verify round refuses this model (one model-owned state
+/// slot), so the exact MLA verify scope is not extended to it (#3421).
+#[test]
+fn the_token_only_verify_round_refuses_this_model() {
+    assert!(
+        mlxcel_core::speculative::prompt_lookup::prompt_lookup_unsupported_reason(&tiny_model())
+            .is_some()
+    );
+}

@@ -1995,6 +1995,7 @@ fn run_dflash_burst(
                 ctx.drafter_slot,
                 cancel,
                 &logprobs_config,
+                (ctx.prefill_chunk_size, ctx.prefill_boundary),
             )?
         };
     }

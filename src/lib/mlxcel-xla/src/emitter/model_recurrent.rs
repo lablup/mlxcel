@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Recurrent (Mamba2) layers in the shared model graphs (epic #564, #3338).
+//! Recurrent Mamba2/Mamba1 layers in the shared model graphs (epic #564,
+//! issues #3338 and #3348).
 //!
 //! A child of `model`, so it reuses the private weight-argument and layer
 //! plumbing. The state ABI is the one [`Config::state_tensors`] lists: every
@@ -37,8 +38,8 @@ use super::*;
 /// the prefill row count the prefill mixer masks with.
 pub(super) struct RecurrentLayers {
     /// One entry per recurrent layer, indexed by [`Config::state_layer_index`].
-    /// Prefill rows are per-sequence (`h [H, P, N]`, `conv [K-1, C]`); the
-    /// single-sequence decode keeps a batch of one (`[1, H, P, N]`).
+    /// Prefill rows are per-sequence (`h [H,P,N]` for Mamba2 or `[D,N]` for
+    /// Mamba1, plus `conv [K-1,C]`); single-sequence decode adds a batch of one.
     layers: Vec<SsmLayerState>,
     /// `real_len` of the prefill; `None` in a decode graph.
     real_len: Option<Val>,
@@ -66,18 +67,24 @@ impl RecurrentLayers {
             return Self::none();
         };
         let [h_all, conv_all] = tensors else {
-            panic!("a Mamba2 config threads exactly two state tensors");
+            panic!("a recurrent config threads exactly two state tensors");
         };
-        let (hh, p, n) = (ssm.n_heads, ssm.head_dim, ssm.state_size);
+        let (hh, p, n, d) = (ssm.n_heads, ssm.head_dim, ssm.state_size, ssm.d_inner());
         let (k1, cd) = (ssm.conv_kernel - 1, ssm.conv_dim);
         let unbatched = real_len.is_some();
         let layers = (0..c.recurrent_layer_count())
             .map(|s| {
-                let h = b.slice(h_all, &[(s, s + 1), (0, hh), (0, p), (0, n)]);
+                let h = match ssm.kind {
+                    SsmKind::Mamba2 => b.slice(h_all, &[(s, s + 1), (0, hh), (0, p), (0, n)]),
+                    SsmKind::Mamba1 { .. } => b.slice(h_all, &[(s, s + 1), (0, d), (0, n)]),
+                };
                 let conv = b.slice(conv_all, &[(s, s + 1), (0, k1), (0, cd)]);
                 if unbatched {
                     SsmLayerState {
-                        h: b.reshape(&h, vec![hh, p, n]),
+                        h: match ssm.kind {
+                            SsmKind::Mamba2 => b.reshape(&h, vec![hh, p, n]),
+                            SsmKind::Mamba1 { .. } => b.reshape(&h, vec![d, n]),
+                        },
                         conv: b.reshape(&conv, vec![k1, cd]),
                     }
                 } else {
@@ -96,16 +103,26 @@ impl RecurrentLayers {
             return Self::none();
         };
         let [h_all, conv_all] = tensors else {
-            panic!("a Mamba2 config threads exactly two state tensors");
+            panic!("a recurrent config threads exactly two state tensors");
         };
-        let (hh, p, n) = (ssm.n_heads, ssm.head_dim, ssm.state_size);
+        let (hh, p, n, d) = (ssm.n_heads, ssm.head_dim, ssm.state_size, ssm.d_inner());
         let (k1, cd) = (ssm.conv_kernel - 1, ssm.conv_dim);
         let layers = (0..c.recurrent_layer_count())
             .map(|s| {
-                let h = b.slice(h_all, &[(0, bsz), (s, s + 1), (0, hh), (0, p), (0, n)]);
+                let h = match ssm.kind {
+                    SsmKind::Mamba2 => {
+                        b.slice(h_all, &[(0, bsz), (s, s + 1), (0, hh), (0, p), (0, n)])
+                    }
+                    SsmKind::Mamba1 { .. } => {
+                        b.slice(h_all, &[(0, bsz), (s, s + 1), (0, d), (0, n)])
+                    }
+                };
                 let conv = b.slice(conv_all, &[(0, bsz), (s, s + 1), (0, k1), (0, cd)]);
                 SsmLayerState {
-                    h: b.reshape(&h, vec![bsz, hh, p, n]),
+                    h: match ssm.kind {
+                        SsmKind::Mamba2 => b.reshape(&h, vec![bsz, hh, p, n]),
+                        SsmKind::Mamba1 { .. } => b.reshape(&h, vec![bsz, d, n]),
+                    },
                     conv: b.reshape(&conv, vec![bsz, k1, cd]),
                 }
             })
@@ -134,8 +151,14 @@ impl RecurrentLayers {
             conv_shape.extend(&conv_all.ty.shape[2..]);
             let h = b.reshape(&layer.h, h_shape);
             let conv = b.reshape(&layer.conv, conv_shape);
-            h_all = b.dynamic_update_slice(&h_all, &h, &[&zero, &row, &zero, &zero, &zero]);
-            conv_all = b.dynamic_update_slice(&conv_all, &conv, &[&zero, &row, &zero, &zero]);
+            let mut h_starts = vec![zero.clone(); h_all.ty.shape.len()];
+            h_starts[1] = row.clone();
+            let h_starts = h_starts.iter().collect::<Vec<_>>();
+            h_all = b.dynamic_update_slice(&h_all, &h, &h_starts);
+            let mut conv_starts = vec![zero.clone(); conv_all.ty.shape.len()];
+            conv_starts[1] = row;
+            let conv_starts = conv_starts.iter().collect::<Vec<_>>();
+            conv_all = b.dynamic_update_slice(&conv_all, &conv, &conv_starts);
         }
         vec![h_all, conv_all]
     }
@@ -158,16 +181,21 @@ impl RecurrentLayers {
             conv_shape.extend(&conv_all.ty.shape[1..]);
             let h = b.reshape(&layer.h, h_shape);
             let conv = b.reshape(&layer.conv, conv_shape);
-            h_all = b.dynamic_update_slice(&h_all, &h, &[&row, &zero, &zero, &zero]);
-            conv_all = b.dynamic_update_slice(&conv_all, &conv, &[&row, &zero, &zero]);
+            let mut h_starts = vec![zero.clone(); h_all.ty.shape.len()];
+            h_starts[0] = row.clone();
+            let h_starts = h_starts.iter().collect::<Vec<_>>();
+            h_all = b.dynamic_update_slice(&h_all, &h, &h_starts);
+            let mut conv_starts = vec![zero.clone(); conv_all.ty.shape.len()];
+            conv_starts[0] = row;
+            let conv_starts = conv_starts.iter().collect::<Vec<_>>();
+            conv_all = b.dynamic_update_slice(&conv_all, &conv, &conv_starts);
         }
         vec![h_all, conv_all]
     }
 }
 
-/// Take one Mamba2 layer's weights in the order `push_ssm_layer_specs`
-/// (`weights.rs`) lists them: the block norm, in_proj (+ bias), conv1d (+ bias),
-/// dt_bias, A_log, D, the gated-norm weight, out_proj (+ bias). Only the block
+/// Take one recurrent layer's weights in the exact order
+/// `push_ssm_layer_specs` (`weights.rs`) lists for its SSM kind. Only the block
 /// norm (`in_ln`) and the mixer are set on the returned [`LayerW`].
 pub(super) fn take_ssm_layer_weights(
     b: &mut Builder,
@@ -176,40 +204,9 @@ pub(super) fn take_ssm_layer_weights(
     c: &Config,
     li: usize,
 ) -> LayerW {
-    let ssm = c
-        .ssm
-        .as_ref()
-        .expect("a recurrent layer implies an SsmConfig");
-    let h = c.hidden;
-    let (di, cd, nh) = (ssm.d_inner(), ssm.conv_dim, ssm.n_heads);
-    let p = |k: &str| format!("params['layers'][{li}]['{k}']");
-    let in_ln = take_arg(decls, idx, Ty::f32(vec![h]), p("in_ln"));
-    let in_proj = take_weight(b, decls, idx, c, ssm.in_proj_dim(), h, p("ssm.in_proj"));
-    let in_proj_b = ssm.use_bias.then(|| {
-        take_arg(
-            decls,
-            idx,
-            Ty::f32(vec![ssm.in_proj_dim()]),
-            p("ssm.in_proj_b"),
-        )
-    });
-    let conv_w = take_arg(
-        decls,
-        idx,
-        Ty::f32(vec![cd, 1, ssm.conv_kernel]),
-        p("ssm.conv_w"),
-    );
-    let conv_b = ssm
-        .use_conv_bias
-        .then(|| take_arg(decls, idx, Ty::f32(vec![cd]), p("ssm.conv_b")));
-    let dt_bias = take_arg(decls, idx, Ty::f32(vec![nh]), p("ssm.dt_bias"));
-    let a_log = take_arg(decls, idx, Ty::f32(vec![nh]), p("ssm.a_log"));
-    let d = take_arg(decls, idx, Ty::f32(vec![nh]), p("ssm.d"));
-    let norm_w = take_arg(decls, idx, Ty::f32(vec![di]), p("ssm.norm_w"));
-    let out_proj = take_weight(b, decls, idx, c, h, di, p("ssm.out_proj"));
-    let out_proj_b = ssm
-        .use_bias
-        .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("ssm.out_proj_b")));
+    let p = format!("params['layers'][{li}]['in_ln']");
+    let in_ln = take_arg(decls, idx, Ty::f32(vec![c.hidden]), p);
+    let mixer = take_ssm_mixer_weights(b, decls, idx, c, li);
     LayerW {
         down: None,
         gate: None,
@@ -236,32 +233,137 @@ pub(super) fn take_ssm_layer_weights(
         up_bias: None,
         moe: None,
         phi4_lora: None,
-        ssm: Some(Mamba2MixerW {
-            in_proj,
-            in_proj_b,
-            conv_w,
-            conv_b,
-            dt_bias,
-            a_log,
-            d,
-            norm_w,
-            out_proj,
-            out_proj_b,
-        }),
+        ssm: Some(mixer),
     }
 }
 
-/// One pure Mamba2 block, `x + mixer(norm(x))`, at the rank of `layout`. The
-/// layer's state row is read from and written back to `state`. A Mamba2 block
-/// has no FFN (`Config::layer_has_ffn` is false), so nothing follows the mixer.
+/// Mixer weights without a block norm, also used by parallel hybrid blocks.
+pub(super) fn take_ssm_mixer_weights(
+    b: &mut Builder,
+    decls: &mut Vec<ArgDecl>,
+    idx: &mut usize,
+    c: &Config,
+    li: usize,
+) -> SsmMixerW {
+    let ssm = c
+        .ssm
+        .as_ref()
+        .expect("a recurrent layer implies an SsmConfig");
+    let h = c.hidden;
+    let (di, cd) = (ssm.d_inner(), ssm.conv_dim);
+    let p = |k: &str| format!("params['layers'][{li}]['{k}']");
+    let in_proj = take_weight(b, decls, idx, c, ssm.in_proj_dim(), h, p("ssm.in_proj"));
+    let in_proj_b = ssm.use_bias.then(|| {
+        take_arg(
+            decls,
+            idx,
+            Ty::f32(vec![ssm.in_proj_dim()]),
+            p("ssm.in_proj_b"),
+        )
+    });
+    let conv_w = take_arg(
+        decls,
+        idx,
+        Ty::f32(vec![cd, 1, ssm.conv_kernel]),
+        p("ssm.conv_w"),
+    );
+    let conv_b = ssm
+        .use_conv_bias
+        .then(|| take_arg(decls, idx, Ty::f32(vec![cd]), p("ssm.conv_b")));
+    match ssm.kind {
+        SsmKind::Mamba2 => {
+            let nh = ssm.n_heads;
+            let dt_bias = take_arg(decls, idx, Ty::f32(vec![nh]), p("ssm.dt_bias"));
+            let a_log = take_arg(decls, idx, Ty::f32(vec![nh]), p("ssm.a_log"));
+            let d = take_arg(decls, idx, Ty::f32(vec![nh]), p("ssm.d"));
+            let norm_w = c
+                .falcon_h1
+                .as_ref()
+                .is_none_or(|f| f.rms_norm)
+                .then(|| take_arg(decls, idx, Ty::f32(vec![di]), p("ssm.norm_w")));
+            SsmMixerW::Mamba2(Mamba2MixerW {
+                in_proj,
+                in_proj_b,
+                conv_w,
+                conv_b,
+                dt_bias,
+                a_log,
+                d,
+                norm_w,
+                falcon: c.falcon_h1.clone(),
+                out_proj: take_weight(b, decls, idx, c, h, di, p("ssm.out_proj")),
+                out_proj_b: c
+                    .falcon_h1
+                    .as_ref()
+                    .map_or(ssm.use_bias, |f| f.out_bias)
+                    .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("ssm.out_proj_b"))),
+            })
+        }
+        SsmKind::Mamba1 { dt_rank, .. } => {
+            let x_proj = take_weight(
+                b,
+                decls,
+                idx,
+                c,
+                dt_rank + 2 * ssm.state_size,
+                di,
+                p("ssm.x_proj"),
+            );
+            let dt_proj = take_weight(b, decls, idx, c, di, dt_rank, p("ssm.dt_proj"));
+            let dt_proj_b = take_arg(decls, idx, Ty::f32(vec![di]), p("ssm.dt_proj_b"));
+            let a_log = take_arg(
+                decls,
+                idx,
+                Ty::f32(vec![di, ssm.state_size]),
+                p("ssm.a_log"),
+            );
+            let d = take_arg(decls, idx, Ty::f32(vec![di]), p("ssm.d"));
+            SsmMixerW::Mamba1(Mamba1MixerW {
+                in_proj,
+                in_proj_b,
+                conv_w,
+                conv_b,
+                x_proj,
+                dt_proj,
+                dt_proj_b,
+                a_log,
+                d,
+                out_proj: take_weight(b, decls, idx, c, h, di, p("ssm.out_proj")),
+                out_proj_b: ssm
+                    .use_bias
+                    .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("ssm.out_proj_b"))),
+            })
+        }
+    }
+}
+
+/// One pure Mamba block, `x + mixer(norm(x))`, at the rank of `layout`. The
+/// layer's state row is read from and written back to `state`. A Mamba block has
+/// no FFN (`Config::layer_has_ffn` is false), so nothing follows the mixer.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn emit_mamba2_block(
+pub(super) fn emit_recurrent_block(
     b: &mut Builder,
     c: &Config,
     k: &Consts,
     lw: &LayerW,
     li: usize,
     x: &Val,
+    layout: &AttnLayout,
+    state: &mut RecurrentLayers,
+) -> Val {
+    let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, None);
+    let mixed = emit_recurrent_mixer(b, c, lw, li, &hn, layout, state);
+    b.add(x, &mixed)
+}
+
+/// Advance only the mixer from an already normalized input.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_recurrent_mixer(
+    b: &mut Builder,
+    c: &Config,
+    lw: &LayerW,
+    li: usize,
+    hn: &Val,
     layout: &AttnLayout,
     state: &mut RecurrentLayers,
 ) -> Val {
@@ -272,38 +374,47 @@ pub(super) fn emit_mamba2_block(
     let w = lw
         .ssm
         .as_ref()
-        .expect("a recurrent layer takes Mamba2 mixer weights");
+        .expect("a recurrent layer takes SSM mixer weights");
     let s = c
         .state_layer_index(li)
         .expect("a recurrent layer has a state row");
-    debug_assert!(!c.layer_has_ffn(li), "a Mamba2 block has no FFN");
-    let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, None);
-    let mixed = match layout {
+    match layout {
         AttnLayout::Prefill { .. } => {
             let real_len = state
                 .real_len
                 .clone()
                 .expect("the prefill threads real_len to its recurrent layers");
             let current = &state.layers[s];
-            let (y, h, conv) =
-                ssm::mamba2_mixer_prefill(b, ssm, w, &hn, &real_len, &current.h, &current.conv);
+            let (y, h, conv) = match w {
+                SsmMixerW::Mamba2(w) => {
+                    ssm::mamba2_mixer_prefill(b, ssm, w, hn, &real_len, &current.h, &current.conv)
+                }
+                SsmMixerW::Mamba1(w) => {
+                    ssm::mamba1_mixer_prefill(b, ssm, w, hn, &real_len, &current.h, &current.conv)
+                }
+            };
             state.layers[s] = SsmLayerState { h, conv };
             y
         }
         AttnLayout::Single { .. } => {
-            let row = b.reshape(&hn, vec![1, c.hidden]);
-            let (y, next) = ssm::mamba2_mixer_step(b, ssm, w, &row, &state.layers[s]);
+            let row = b.reshape(hn, vec![1, c.hidden]);
+            let (y, next) = match w {
+                SsmMixerW::Mamba2(w) => ssm::mamba2_mixer_step(b, ssm, w, &row, &state.layers[s]),
+                SsmMixerW::Mamba1(w) => ssm::mamba1_mixer_step(b, ssm, w, &row, &state.layers[s]),
+            };
             state.layers[s] = next;
             b.reshape(&y, vec![c.hidden])
         }
         AttnLayout::Ragged { .. } => {
             // `[B, hidden]` rows, one per slot, each advancing its own state row.
-            let (y, next) = ssm::mamba2_mixer_step(b, ssm, w, &hn, &state.layers[s]);
+            let (y, next) = match w {
+                SsmMixerW::Mamba2(w) => ssm::mamba2_mixer_step(b, ssm, w, hn, &state.layers[s]),
+                SsmMixerW::Mamba1(w) => ssm::mamba1_mixer_step(b, ssm, w, hn, &state.layers[s]),
+            };
             state.layers[s] = next;
             y
         }
-    };
-    b.add(x, &mixed)
+    }
 }
 
 /// Declare one prefill input per state tensor, at its per-sequence shape.

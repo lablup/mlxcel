@@ -23,7 +23,7 @@
 //! feature-gated `iree.rs`) so it is unit-tested without the IREE runtime and stays
 //! in lock-step with the emitter's arg order (`emitter::model::take_layer_weights`).
 
-use crate::emitter::{Config, ProjectionLayout};
+use crate::emitter::{Config, ExpertAct, MoeScoring, ProjectionLayout};
 
 /// One checkpoint weight the loader reads, in the emitter's arg order. Most are a
 /// whole safetensors tensor; a Phi3 checkpoint fuses q/k/v into one `qkv_proj` and
@@ -205,8 +205,12 @@ fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant:
         .ssm
         .as_ref()
         .expect("a recurrent layer implies an SsmConfig");
-    let m = format!("{p}mixer.");
-    out.push(WeightSpec::Whole(format!("{p}norm.weight")));
+    let m = if cfg.falcon_h1.is_some() {
+        format!("{p}mamba.")
+    } else {
+        out.push(WeightSpec::Whole(format!("{p}norm.weight")));
+        format!("{p}mixer.")
+    };
     push_proj(out, format!("{m}in_proj.weight"), quant);
     if ssm.use_bias {
         out.push(WeightSpec::Whole(format!("{m}in_proj.bias")));
@@ -215,11 +219,26 @@ fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant:
     if ssm.use_conv_bias {
         out.push(WeightSpec::Whole(format!("{m}conv1d.bias")));
     }
-    for name in ["dt_bias", "A_log", "D", "norm.weight"] {
-        out.push(WeightSpec::Whole(format!("{m}{name}")));
+    match ssm.kind {
+        crate::emitter::SsmKind::Mamba2 => {
+            for name in ["dt_bias", "A_log", "D"] {
+                out.push(WeightSpec::Whole(format!("{m}{name}")));
+            }
+            if cfg.falcon_h1.as_ref().is_none_or(|f| f.rms_norm) {
+                out.push(WeightSpec::Whole(format!("{m}norm.weight")));
+            }
+        }
+        crate::emitter::SsmKind::Mamba1 { .. } => {
+            push_proj(out, format!("{m}x_proj.weight"), quant);
+            push_proj(out, format!("{m}dt_proj.weight"), quant);
+            out.push(WeightSpec::Whole(format!("{m}dt_proj.bias")));
+            for name in ["A_log", "D"] {
+                out.push(WeightSpec::Whole(format!("{m}{name}")));
+            }
+        }
     }
     push_proj(out, format!("{m}out_proj.weight"), quant);
-    if ssm.use_bias {
+    if cfg.falcon_h1.as_ref().map_or(ssm.use_bias, |f| f.out_bias) {
         out.push(WeightSpec::Whole(format!("{m}out_proj.bias")));
     }
 }
@@ -234,7 +253,6 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     let nq = cfg.n_q * hd;
     let nkv = cfg.n_kv * hd;
     let gated = !cfg.dense_mlp;
-    let has_post = !cfg.parallel_block;
 
     let mut out: Vec<WeightSpec> = Vec::new();
     out.push(WeightSpec::Whole(s.embed.to_string()));
@@ -277,16 +295,23 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     for i in 0..cfg.n_layers {
         let p = format!("{}{i}.", s.layer_stem);
         // A recurrent (Mamba2) layer has its own tensor list (issue #3338).
-        if cfg.layer_mixer(i).is_recurrent() {
+        if matches!(
+            cfg.layer_mixer(i),
+            crate::emitter::MixerKind::Mamba2 | crate::emitter::MixerKind::Mamba1
+        ) {
             push_ssm_layer_specs(&mut out, cfg, &p, quant);
             continue;
         }
+        let has_ffn = cfg.layer_has_ffn(i);
+        let has_attn = cfg.attn_layer_index(i).is_some();
+        let has_post = !cfg.parallel_block && has_ffn && has_attn;
+        let nemotron = cfg.weight_scheme == crate::emitter::WeightScheme::NemotronH;
         // A MoE layer (issue #500) takes no dense MLP weights (down/gate/up); its
         // expert bank is appended after the attention weights / norms instead.
         let moe_layer = cfg.is_moe_layer(i);
         // down (dense StarCoder2 uses c_proj; else the scheme's down projection).
-        if !moe_layer {
-            let name = if cfg.dense_mlp {
+        if has_ffn && !moe_layer {
+            let name = if cfg.dense_mlp && !nemotron {
                 format!("{p}mlp.c_proj.weight")
             } else {
                 format!("{p}{}", s.down)
@@ -294,7 +319,7 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             push_proj(&mut out, phi4_base_projection(cfg, name), quant);
         }
         // gate (gated MLP only; the first half of gate_up_proj for a fused Phi3).
-        if gated && !moe_layer {
+        if has_ffn && gated && !moe_layer {
             if cfg.fused_gate_up {
                 let (name, (start, end), _) = fused_gate_up(cfg, &p);
                 out.push(WeightSpec::Rows {
@@ -323,7 +348,7 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         // up (c_fc for dense; the second half of gate_up_proj for a fused Phi3).
         // Skipped on a MoE layer (issue #500), which has no dense up projection.
-        if !moe_layer {
+        if has_ffn && !moe_layer {
             if cfg.fused_gate_up {
                 let (name, _, (start, end)) = fused_gate_up(cfg, &p);
                 out.push(WeightSpec::Rows {
@@ -331,7 +356,7 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                     start,
                     end,
                 });
-            } else if cfg.dense_mlp {
+            } else if cfg.dense_mlp && !nemotron {
                 // `c_fc` is a projection like `c_proj`: the emitter takes it
                 // through `take_weight`, so the loader must follow the graph's
                 // layout and f16-resident rule for it (issue #2859; a `Whole`
@@ -347,7 +372,9 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         // Attention projections. Youtu-VL uses the checkpoint's native MLA
         // factors; ordinary families keep wk/wo/wq/wv in their historical order.
-        if cfg.mla.is_some() {
+        if !has_attn {
+            // FFN-only block: no attention projections.
+        } else if cfg.mla.is_some() {
             push_proj(&mut out, format!("{p}self_attn.q_a_proj.weight"), quant);
             out.push(WeightSpec::Whole(format!(
                 "{p}self_attn.q_a_layernorm.weight"
@@ -407,7 +434,7 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             );
         }
         // q/k/v projection biases (k, q, v order).
-        if cfg.qkv_bias {
+        if has_attn && cfg.qkv_bias {
             if cfg.fused_qkv && cfg.weight_scheme == crate::emitter::WeightScheme::Molmo {
                 let bias = format!("{p}{}", s.q_bias);
                 out.push(WeightSpec::Elements {
@@ -452,22 +479,48 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 )));
             }
         }
-        if cfg.attn_o_bias {
-            out.push(WeightSpec::Whole(format!("{p}self_attn.o_proj.bias")));
+        if has_attn && cfg.attn_o_bias {
+            let stem = if nemotron { "mixer" } else { "self_attn" };
+            out.push(WeightSpec::Whole(format!("{p}{stem}.o_proj.bias")));
         }
-        if cfg.mlp_bias {
-            out.push(WeightSpec::Whole(if cfg.dense_mlp {
+        if has_ffn && cfg.mlp_bias {
+            out.push(WeightSpec::Whole(if cfg.dense_mlp && !nemotron {
                 format!("{p}mlp.c_proj.bias")
             } else {
-                format!("{p}mlp.down_proj.bias")
+                format!(
+                    "{p}{}.down_proj.bias",
+                    if nemotron {
+                        "mixer"
+                    } else if cfg.falcon_h1.is_some() {
+                        "feed_forward"
+                    } else {
+                        "mlp"
+                    }
+                )
             }));
             if gated {
-                out.push(WeightSpec::Whole(format!("{p}mlp.gate_proj.bias")));
+                out.push(WeightSpec::Whole(format!(
+                    "{p}{}.gate_proj.bias",
+                    if cfg.falcon_h1.is_some() {
+                        "feed_forward"
+                    } else {
+                        "mlp"
+                    }
+                )));
             }
-            out.push(WeightSpec::Whole(if cfg.dense_mlp {
+            out.push(WeightSpec::Whole(if cfg.dense_mlp && !nemotron {
                 format!("{p}mlp.c_fc.bias")
             } else {
-                format!("{p}mlp.up_proj.bias")
+                format!(
+                    "{p}{}.up_proj.bias",
+                    if nemotron {
+                        "mixer"
+                    } else if cfg.falcon_h1.is_some() {
+                        "feed_forward"
+                    } else {
+                        "mlp"
+                    }
+                )
             }));
         }
         // MoE expert bank (issue #500), last in the layer: the router, the stacked
@@ -479,24 +532,48 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             let m = cfg.moe.as_ref().expect("a MoE layer has a MoeConfig");
             let mp = m.weight_prefix;
             out.push(WeightSpec::Whole(format!("{p}{mp}.gate.weight")));
-            out.push(WeightSpec::Whole(format!(
-                "{p}{mp}.switch_mlp.gate_proj.weight"
-            )));
-            out.push(WeightSpec::Whole(format!(
-                "{p}{mp}.switch_mlp.up_proj.weight"
-            )));
-            out.push(WeightSpec::Whole(format!(
-                "{p}{mp}.switch_mlp.down_proj.weight"
-            )));
+            if matches!(
+                m.scoring,
+                MoeScoring::Sigmoid {
+                    correction_bias: true,
+                    ..
+                }
+            ) {
+                out.push(WeightSpec::Whole(format!(
+                    "{p}{mp}.gate.e_score_correction_bias"
+                )));
+            }
+            match m.expert_act {
+                ExpertAct::SwiGlu => {
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.switch_mlp.gate_proj.weight"
+                    )));
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.switch_mlp.up_proj.weight"
+                    )));
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.switch_mlp.down_proj.weight"
+                    )));
+                }
+                ExpertAct::Relu2 => {
+                    out.push(WeightSpec::Whole(format!("{p}{mp}.switch_mlp.fc1.weight")));
+                    out.push(WeightSpec::Whole(format!("{p}{mp}.switch_mlp.fc2.weight")));
+                }
+            }
             if let Some(sh) = m.shared {
+                let stem = if m.expert_act == ExpertAct::Relu2 {
+                    "shared_experts"
+                } else {
+                    "shared_expert"
+                };
+                if m.expert_act == ExpertAct::SwiGlu {
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.{stem}.gate_proj.weight"
+                    )));
+                }
+                out.push(WeightSpec::Whole(format!("{p}{mp}.{stem}.up_proj.weight")));
                 out.push(WeightSpec::Whole(format!(
-                    "{p}{mp}.shared_expert.gate_proj.weight"
-                )));
-                out.push(WeightSpec::Whole(format!(
-                    "{p}{mp}.shared_expert.up_proj.weight"
-                )));
-                out.push(WeightSpec::Whole(format!(
-                    "{p}{mp}.shared_expert.down_proj.weight"
+                    "{p}{mp}.{stem}.down_proj.weight"
                 )));
                 if sh.gated {
                     out.push(WeightSpec::Whole(format!(
@@ -504,6 +581,9 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                     )));
                 }
             }
+        }
+        if cfg.falcon_h1.is_some() {
+            push_ssm_layer_specs(&mut out, cfg, &p, quant);
         }
         if cfg.phi4_lora.is_some() {
             for stem in [
@@ -1718,6 +1798,10 @@ mod tests {
             ),
             ("youtu_vl", youtu.into()),
             ("mamba2", mamba2.into()),
+            (
+                "falcon_h1",
+                include_str!("../assets/falcon_h1/config.json").into(),
+            ),
         ];
         for (family, json) in &families {
             let base = Config::from_json_str(json)

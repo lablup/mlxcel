@@ -1,6 +1,9 @@
 // Copyright © 2025 Apple Inc.
 // Modified by mlxcel: captured child graphs (cuBLASLt, cuDNN, and every other
 // stream capture) are barriers inside an MLX CUDA graph (issue #2462).
+// Modified by mlxcel: set_input_bytes_uncounted lets a kernel that reads a
+// small part of a large input leave it out of the graph byte budget
+// (lablup/mlxcel#3256).
 // Modified from upstream MLX 9f806b3606eaa9f7c807238f6bd465185cd94d6d mlx/backend/cuda/device.cpp
 
 #include "mlx/backend/cuda/device.h"
@@ -382,11 +385,24 @@ void CommandEncoder::add_completed_handler(std::function<void()> task) {
   worker_->add_task(std::move(task));
 }
 
+namespace {
+// Set by the custom-kernel overlay around the inputs of a kernel that reads
+// only part of them; thread-local because each stream encodes on its own
+// thread.
+thread_local bool input_bytes_uncounted = false;
+} // namespace
+
+void set_input_bytes_uncounted(bool uncounted) {
+  input_bytes_uncounted = uncounted;
+}
+
 void CommandEncoder::set_input_array(const array& arr) {
   if (!use_cuda_graphs()) {
     return;
   }
-  bytes_in_graph_ += arr.data_size();
+  if (!input_bytes_uncounted) {
+    bytes_in_graph_ += arr.data_size();
+  }
   auto id = reinterpret_cast<std::uintptr_t>(arr.buffer().ptr());
   active_deps_.push_back(id);
 #ifndef NDEBUG

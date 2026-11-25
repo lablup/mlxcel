@@ -90,6 +90,16 @@ impl std::fmt::Debug for VerifyCaptured {
     }
 }
 
+/// One classic decode step built by [`MtpTarget::classic_step`], not yet
+/// read back.
+pub struct MtpClassicStep {
+    /// The greedy token, a lazy `[1]` int32 array.
+    pub token: UniquePtr<MlxArray>,
+    /// The target's pre-norm last hidden at the step's input position
+    /// (`[1, 1, H]`), which a stateful drafter pairs with `token`.
+    pub hidden: UniquePtr<MlxArray>,
+}
+
 /// Output of one [`MtpTarget::verify_forward`] call.
 ///
 /// Pairs the target tokens (used for the speculative walk) with the
@@ -430,6 +440,30 @@ pub trait MtpTarget {
         })
     }
 
+    /// Whether a verify block of ANY width from 1 up to the requested one
+    /// reproduces that many classic decode steps bit for bit, so the round
+    /// loop may narrow a round, or run classic steps with no draft, without
+    /// leaving classic decode's text (issue #3425). The exactness probe runs
+    /// at the requested width only, so a target says this only when its
+    /// verify forward is row-invariant by construction. A target that says
+    /// yes also implements [`Self::classic_step`], and its drafter must not
+    /// read [`MtpVerifyOutput::next_shared_kv`], which a classic run leaves
+    /// empty. The default keeps the requested width.
+    fn exact_at_every_verify_width(&self) -> bool {
+        false
+    }
+
+    /// Build one classic decode step on `input` (`[1, 1]` int32, possibly
+    /// not yet evaluated, so steps can be queued back to back) without
+    /// reading anything back. The step appends one row to the target's
+    /// cache, as classic decode does, and returns the greedy token (after
+    /// `sampler.token_bias`) and the hidden row a stateful drafter pairs
+    /// with it. `None` when the target has no such step, the default.
+    #[allow(unused_variables)]
+    fn classic_step(&self, input: &MlxArray, sampler: &SamplingConfig) -> Option<MtpClassicStep> {
+        None
+    }
+
     /// Number of decoder layers in the target. Used by the round-loop
     /// only for diagnostic logging.
     fn num_layers(&self) -> usize;
@@ -564,6 +598,14 @@ impl<T: MtpTarget + ?Sized> MtpTarget for &T {
         captured: VerifyCaptured,
     ) -> MtpVerifyOutput {
         (**self).verify_finalize(accepted, block_size, captured)
+    }
+
+    fn exact_at_every_verify_width(&self) -> bool {
+        (**self).exact_at_every_verify_width()
+    }
+
+    fn classic_step(&self, input: &MlxArray, sampler: &SamplingConfig) -> Option<MtpClassicStep> {
+        (**self).classic_step(input, sampler)
     }
 
     fn num_layers(&self) -> usize {

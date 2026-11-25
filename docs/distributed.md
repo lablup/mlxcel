@@ -569,8 +569,8 @@ pair of processes built from different versions fails with an explicit
 version message rather than a confusing I/O error. Mixed versions in one
 cluster are not supported: every node must be upgraded together. Discovery
 beacons and stage assignments both pin `CARGO_PKG_VERSION`, so the rule
-applies to release versions as well as to protocol versions, and v0.8.1 and
-v0.9.0-beta.1 cannot share a cluster.
+applies to release versions as well as to protocol versions, and v0.9.0-beta.1
+and v0.9.0-beta.2 cannot share a cluster.
 
 Residual risks:
 

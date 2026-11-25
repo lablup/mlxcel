@@ -169,8 +169,15 @@ impl DecoderLayer {
             self.self_attn
                 .forward_batched_decode(&attention_input, caches, shared_kv);
         timer.tick("self_attn", &attention);
-        let hidden =
-            self.finish_layer(x, &attention, per_layer_input, &mut timer, false, layer_idx);
+        let hidden = self.finish_layer(
+            x,
+            &attention,
+            per_layer_input,
+            &mut timer,
+            false,
+            layer_idx,
+            false,
+        );
         (hidden, stored_kv)
     }
 }

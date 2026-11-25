@@ -36,21 +36,27 @@ fn conv(channels: i32, kernel: i32, seed: usize) -> UniquePtr<MlxArray> {
 }
 
 pub(crate) fn tiny_model() -> InklingModel {
-    tiny_model_impl(false)
+    tiny_model_impl(false, 4, 2, 8)
 }
 
 pub(crate) fn tiny_audio_model() -> InklingModel {
-    tiny_model_impl(true)
+    tiny_model_impl(true, 4, 2, 8)
 }
 
-fn tiny_model_impl(with_audio: bool) -> InklingModel {
-    const HIDDEN: i32 = 4;
+/// The tiny model at the attention geometry real checkpoints run: MLX's
+/// fused SDPA does not take a 2-wide head and falls back to an unfused path
+/// whose arithmetic depends on the block length, which no checkpoint takes
+/// (the Inkling 2 tiny model needed the same, issue #3280).
+pub(crate) fn tiny_model_with_real_heads() -> InklingModel {
+    tiny_model_impl(false, 128, 64, 32)
+}
+
+#[allow(non_snake_case)]
+fn tiny_model_impl(with_audio: bool, HIDDEN: i32, HEAD_DIM: i32, VOCAB: i32) -> InklingModel {
     const HEADS: i32 = 2;
     const KV_HEADS: i32 = 1;
-    const HEAD_DIM: i32 = 2;
     const D_REL: i32 = 2;
     const DENSE: i32 = 6;
-    const VOCAB: i32 = 8;
     const KERNEL: i32 = 2;
     let mut config = json!({
         "vocab_size": VOCAB,
@@ -132,23 +138,23 @@ fn tiny_model_impl(with_audio: bool) -> InklingModel {
         let attn = format!("{prefix}.self_attn");
         weights.insert(
             format!("{attn}.q_proj.weight"),
-            matrix(4, HIDDEN, layer + 1),
+            matrix(HEADS * HEAD_DIM, HIDDEN, layer + 1),
         );
         weights.insert(
             format!("{attn}.k_proj.weight"),
-            matrix(2, HIDDEN, layer + 2),
+            matrix(KV_HEADS * HEAD_DIM, HIDDEN, layer + 2),
         );
         weights.insert(
             format!("{attn}.v_proj.weight"),
-            matrix(2, HIDDEN, layer + 3),
+            matrix(KV_HEADS * HEAD_DIM, HIDDEN, layer + 3),
         );
         weights.insert(
             format!("{attn}.r_proj.weight"),
-            matrix(4, HIDDEN, layer + 4),
+            matrix(HEADS * D_REL, HIDDEN, layer + 4),
         );
         weights.insert(
             format!("{attn}.o_proj.weight"),
-            matrix(HIDDEN, 4, layer + 5),
+            matrix(HIDDEN, HEADS * HEAD_DIM, layer + 5),
         );
         weights.insert(
             format!("{attn}.q_norm.weight"),
@@ -160,11 +166,11 @@ fn tiny_model_impl(with_audio: bool) -> InklingModel {
         );
         weights.insert(
             format!("{attn}.k_sconv.conv.weight"),
-            conv(2, KERNEL, layer + 6),
+            conv(KV_HEADS * HEAD_DIM, KERNEL, layer + 6),
         );
         weights.insert(
             format!("{attn}.v_sconv.conv.weight"),
-            conv(2, KERNEL, layer + 7),
+            conv(KV_HEADS * HEAD_DIM, KERNEL, layer + 7),
         );
         let extent = if layer == 0 { 3 } else { 4 };
         weights.insert(format!("{attn}.rel_proj"), matrix(D_REL, extent, layer + 8));
@@ -256,6 +262,8 @@ fn mtp_verify_argmax_matches_the_incremental_target_chain() {
     assert_eq!(verify.target_tokens, expected);
 }
 
+/// Without the row-invariant products a verify block keeps a pre-verify
+/// snapshot, and a partial accept restores it and replays the kept prefix.
 #[test]
 fn mtp_partial_accept_restores_then_replays_kv_and_conv_state_exactly() {
     // Exact comparison of two computations: both must run on one default
@@ -264,7 +272,8 @@ fn mtp_partial_accept_restores_then_replays_kv_and_conv_state_exactly() {
     let prompt = [1, 2, 3];
     let verify_input = [4, 5, 6];
     let accepted = 1;
-    let model = tiny_model();
+    let mut model = tiny_model();
+    model.set_row_invariant_for_test(false);
     let _ = model.make_caches();
     let adapter = crate::models::inkling_mtp_target::InklingMtpTargetAdapter::new(&model, None);
     let sampler = mlxcel_core::generate::SamplingConfig::greedy();
@@ -274,7 +283,8 @@ fn mtp_partial_accept_restores_then_replays_kv_and_conv_state_exactly() {
     let finalized = adapter.verify_finalize(accepted, verify_input.len(), verify.captured);
     assert_eq!(finalized.kv_offset, prompt.len() + accepted + 1);
 
-    let reference = tiny_model();
+    let mut reference = tiny_model();
+    reference.set_row_invariant_for_test(false);
     let _ = reference.make_caches();
     let prompt_arr = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
     let _ = reference.forward_prefill_with_hidden_for_sequence(&prompt_arr, None);
@@ -292,6 +302,62 @@ fn mtp_partial_accept_restores_then_replays_kv_and_conv_state_exactly() {
     mlxcel_core::eval(&hidden_equal);
     assert!(mlxcel_core::item_bool(&logits_equal));
     assert!(mlxcel_core::item_bool(&hidden_equal));
+}
+
+/// Issue #3280: a partial accept keeps the verify block's own state in
+/// place (KV tail trim, convolution windows from the block), so the next
+/// step equals classic decode, which fed every kept token alone. The replay
+/// it replaces ran the kept prefix as one forward outside the verify scope,
+/// whose products and convolution are not the single-token step's, and was
+/// a second target forward per round. Widths 3 and 10 (the Inkling-Small
+/// MTP default, past the 8 queries MLX's SDPA runs per query).
+#[test]
+fn mtp_partial_accept_keeps_the_single_token_chain_state_on_metal() {
+    if !mlxcel_core::row_invariant::available() {
+        eprintln!("skipping: the row-invariant kernel needs the Metal device");
+        return;
+    }
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let sampler = mlxcel_core::generate::SamplingConfig::greedy();
+    let logprobs = LogprobsConfig::default();
+    let prompt: Vec<i32> = (0..8).map(|i| (i * 5 + 1) % 32).collect();
+    let step = |model: &InklingModel, tokens: &[i32]| {
+        let input = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+        model.forward_prefill_with_hidden_for_sequence(&input, None)
+    };
+    for width in [3_usize, 10] {
+        let verify_input: Vec<i32> = (0..width as i32).map(|i| (i * 7 + 3) % 32).collect();
+        for accepted in 0..width {
+            let model = tiny_model_with_real_heads();
+            let adapter =
+                crate::models::inkling_mtp_target::InklingMtpTargetAdapter::new(&model, None);
+            let _ = adapter.prefill_and_seed(&prompt, &sampler, &prompt, &logprobs);
+            let verify = adapter.verify_forward(&verify_input, &sampler, &logprobs);
+            let finalized = adapter.verify_finalize(accepted, width, verify.captured);
+            assert_eq!(finalized.kv_offset, prompt.len() + accepted + 1);
+
+            let chain = tiny_model_with_real_heads();
+            let _ = step(&chain, &prompt);
+            for token in &verify_input[..=accepted] {
+                let _ = step(&chain, &[*token]);
+            }
+            for next in [9, 17] {
+                let (actual_logits, actual_hidden) = step(&model, &[next]);
+                let (expected_logits, expected_hidden) = step(&chain, &[next]);
+                let context = format!("width {width}, accepted {accepted}, next {next}");
+                assert_eq!(
+                    crate::models::speculative_exactness_draws::position_bytes(&actual_logits, 0),
+                    crate::models::speculative_exactness_draws::position_bytes(&expected_logits, 0),
+                    "logits, {context}"
+                );
+                assert_eq!(
+                    crate::models::speculative_exactness_draws::position_bytes(&actual_hidden, 0),
+                    crate::models::speculative_exactness_draws::position_bytes(&expected_hidden, 0),
+                    "hidden, {context}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -345,4 +411,90 @@ fn exactness_probe_runs_on_the_tiny_model() {
         model.probe_block_chain_exactness(1),
         crate::models::speculative_exactness::BlockChainExactness::NotRun(_)
     ));
+}
+
+/// Issue #3409: with the row-invariant products a verify block of the tiny
+/// model equals the single-token chain at every surveyed width, short draws
+/// and the long draw past the 3-token sliding window alike. Without them
+/// (the code before this change) it differs from layer 0 on.
+#[test]
+fn the_verify_block_matches_the_chain_on_metal() {
+    use crate::models::speculative_exactness::BlockChainExactness;
+    if !mlxcel_core::row_invariant::available() {
+        eprintln!("skipping: the row-invariant kernel needs the Metal device");
+        return;
+    }
+    let model = tiny_model_with_real_heads();
+    for width in [2, 4, 8, 10, 16] {
+        assert_eq!(
+            model.probe_block_chain_exactness(width),
+            BlockChainExactness::Equal,
+            "width {width}"
+        );
+        assert_eq!(
+            model.probe_block_chain_exactness_at(width, &[40]),
+            BlockChainExactness::Equal,
+            "width {width}, 40-token prompt"
+        );
+    }
+    let mut plain = tiny_model_with_real_heads();
+    plain.set_row_invariant_for_test(false);
+    let before = plain.probe_block_chain_exactness(8);
+    assert!(
+        matches!(&before, BlockChainExactness::Localized { location, .. }
+            if location.contains("layer 0")),
+        "without the row-invariant products the block must differ, got {before:?}"
+    );
+}
+
+/// Issue #3409 on a real checkpoint: without the row-invariant products the
+/// probe declines Inkling at every width (the state before the change) and
+/// names layer 0; with them the block is byte-identical, also after prompts
+/// past the 512-token sliding window and the 2048-token prefill chunk, and
+/// at width 10, the Inkling-Small MTP default (issue #3280; passes on
+/// `models/inkling-small-mlx-4bit` too).
+/// Ignored; run under the GPU lock. `INKLING_PROBE_MODEL` picks the
+/// checkpoint (default `models/inkling-0.6b-a0.6b`).
+#[test]
+#[ignore = "needs a real Inkling checkpoint and the GPU lock"]
+fn real_checkpoint_probe_fails_without_row_invariant_and_passes_with_it() {
+    use crate::models::speculative_exactness::BlockChainExactness;
+    let path =
+        std::env::var("INKLING_PROBE_MODEL").unwrap_or_else(|_| "models/inkling-0.6b-a0.6b".into());
+    if !std::path::Path::new(&path).join("config.json").exists() {
+        eprintln!("skipping: {path} is not present");
+        return;
+    }
+    let (mut model, _) = InklingModel::load(&path).unwrap();
+    for width in [2, 4, 8, 10] {
+        model.set_row_invariant_for_test(false);
+        let before = model.probe_block_chain_exactness(width);
+        assert!(
+            matches!(&before, BlockChainExactness::Localized { location, .. }
+                if location.contains("layer 0")),
+            "width {width} without row_invariant: {before:?}"
+        );
+        model.set_row_invariant_for_test(true);
+        assert_eq!(
+            model.probe_block_chain_exactness(width),
+            BlockChainExactness::Equal,
+            "width {width} with row_invariant"
+        );
+        assert_eq!(
+            model.probe_block_chain_exactness_at(width, &[600, 2100]),
+            BlockChainExactness::Equal,
+            "width {width} with row_invariant, long prompts"
+        );
+    }
+}
+
+/// Issue #3422: prompt lookup takes Inkling only with the row kernel on.
+#[test]
+fn prompt_lookup_gate_follows_the_row_kernel() {
+    use mlxcel_core::speculative::prompt_lookup::prompt_lookup_unsupported_reason as reason;
+    let mut model = tiny_model();
+    model.set_row_invariant_for_test(true);
+    assert_eq!(reason(&model), None);
+    model.set_row_invariant_for_test(false);
+    assert!(reason(&model).is_some());
 }

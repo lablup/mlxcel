@@ -114,6 +114,17 @@ fn an_emitter_loadable_mamba2_is_refused_through_has_recurrent_state() {
 }
 
 #[test]
+fn an_emitter_loadable_nemotron_h_gets_no_prompt_cache_or_apc() {
+    let config = include_str!("../lib/mlxcel-xla/assets/nemotron_h/config.json");
+    assert_eq!(
+        mlxcel_xla::config_json_has_recurrent_state(config),
+        Ok(true)
+    );
+    let dir = model_dir(config);
+    assert_refused(dir.path(), "tiny nemotron_h hybrid");
+}
+
+#[test]
 fn an_attention_model_keeps_its_store_and_apc() {
     let dir = model_dir(TINY_LLAMA);
     assert!(xla_recurrent_family(dir.path()).is_none());
