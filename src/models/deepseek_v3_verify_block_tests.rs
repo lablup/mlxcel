@@ -26,9 +26,14 @@ use super::tests::{test_config_dense_direct_q, tiny_dense_model_weights};
 use super::{DeepSeekV3Config, DeepSeekV3Model};
 use crate::models::mla_batched::ROW_INVARIANT_TEST_MODE;
 
-/// Wide enough for the fused single-query kernel and the row-invariant
-/// matvec (every product width a multiple of 4).
+/// Wide enough for the row-invariant matvec (every product width a multiple
+/// of 4). A rope width of 16 keeps a single query on the composed MLA path;
+/// 32 is the smallest the fused kernel takes.
 fn config() -> DeepSeekV3Config {
+    config_with_rope(16)
+}
+
+fn config_with_rope(qk_rope_head_dim: usize) -> DeepSeekV3Config {
     DeepSeekV3Config {
         vocab_size: 96,
         hidden_size: 64,
@@ -36,7 +41,7 @@ fn config() -> DeepSeekV3Config {
         num_attention_heads: 4,
         num_key_value_heads: 4,
         kv_lora_rank: 64,
-        qk_rope_head_dim: 16,
+        qk_rope_head_dim,
         qk_nope_head_dim: 32,
         v_head_dim: 32,
         num_hidden_layers: 3,
@@ -113,17 +118,52 @@ fn a_verify_block_matches_the_single_token_chain_on_metal() {
     if !mlxcel_core::metal_is_available() {
         return;
     }
-    let cfg = config();
-    let model = model(&cfg);
-    for kernel in [true, false] {
-        let _mode = ModeGuard::set(Some(kernel));
-        for width in [2, 4, 8, 12] {
-            assert_eq!(
-                differing_rows(&model, width),
-                Vec::<usize>::new(),
-                "width {width}, matvec kernel {kernel}: block rows differ from the chain"
-            );
+    for rope in [16, 32] {
+        let cfg = config_with_rope(rope);
+        let model = model(&cfg);
+        for kernel in [true, false] {
+            let _mode = ModeGuard::set(Some(kernel));
+            for width in [2, 4, 8, 12] {
+                assert_eq!(
+                    differing_rows(&model, width),
+                    Vec::<usize>::new(),
+                    "rope {rope}, width {width}, matvec kernel {kernel}: block rows differ from \
+                     the chain"
+                );
+            }
         }
+    }
+}
+
+/// The two geometries above cover both single-query paths: every row of a
+/// verify block takes the fused kernel at rope 32 and the composed form at
+/// rope 16, as its decode step does.
+#[test]
+fn verify_block_rows_take_the_single_query_paths_on_metal() {
+    use mlxcel_core::mla::MlaDecodePath;
+    if !mlxcel_core::metal_is_available() {
+        return;
+    }
+    let _mode = ModeGuard::set(Some(true));
+    for (rope, path) in [
+        (16, MlaDecodePath::AbsorbedComposed),
+        (32, MlaDecodePath::AbsorbedFused),
+    ] {
+        let cfg = config_with_rope(rope);
+        let model = model(&cfg);
+        let mut caches = prefilled(&model, &[3, 5, 7, 2, 11, 6]);
+        let (_, counts) = mlxcel_core::mla::stats::scoped(|| {
+            let _speculative = DecodeLookaheadAppendScope::enter();
+            let logits = model.forward_impl(&input(&[9, 4, 13, 8]), &mut caches, None);
+            mlxcel_core::eval(&logits);
+        });
+        assert_eq!(
+            counts.get(path),
+            4 * model.layers.len() as u64,
+            "rope {rope}: one single-query step per row and layer"
+        );
+        assert_eq!(counts.get(MlaDecodePath::AbsorbedPrefill), 0, "rope {rope}");
+        assert_eq!(counts.get(MlaDecodePath::Decompressed), 0, "rope {rope}");
     }
 }
 

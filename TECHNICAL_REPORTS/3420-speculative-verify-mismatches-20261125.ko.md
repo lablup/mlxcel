@@ -36,8 +36,9 @@ DeepSeek V3 계열에서 쿼리 하나는 fused absorbed MLA 커널을 타고, �
 |---|---|---|
 | gigachat3 bf16 | 일치 | 필요 없음 |
 | gigachat3 8-bit, Kimi-VL 4-bit, moonlight 4-bit | 다름 | 일치 |
-| xing4.0 8-bit, GLM-4.7-Flash 엔진 경로 | 다름 | 일치 |
-| xing4.0 optiq 4-bit | 다름 | 9칸 중 8칸 일치 |
+| xing4.0 8-bit과 optiq 4-bit, GLM-4.7-Flash 엔진 경로 | 다름 | 일치 |
+
+Xing4.0은 hyper connection도 손봐야 했습니다. 공유 레이어만 스코프에 넣었을 때는 optiq의 한 칸(폭 8, 2100 토큰)이 레이어 38에서 여전히 달랐습니다. mixer는 dense `matmul`이고 `hc_expand`는 위치 축에 대한 배치 matmul인데, diff 리뷰에서 이 둘이 지목됐고, 이제 스코프 안에서는 둘 다 row-invariant입니다.
 
 모든 칸은 폭 2, 4, 8과 프롬프트 8, 600, 2100 토큰의 조합입니다. 변수를 끄면 모든 칸이 다릅니다.
 
@@ -60,13 +61,12 @@ plain 디코드는 느려지지 않지만(bf16은 커널 사용 시 116.58 대 1
 ## 4. 테스트
 
 - `gemma4::moe_verify_tests`: 양자화된 expert plane, 폭 2, 4, 8, 12. verify 블록의 expert 출력이 단일 토큰 디코드와 바이트 단위로 같고, 블록 전체 곱(변경 전 동작)은 같지 않습니다.
-- `deepseek_v3::verify_block_tests`: 작은 모델, 폭 2, 4, 8, 12, matvec 커널을 켠 경우와 끈 경우. 블록이 체인과 같고, 스코프가 없으면 같지 않습니다.
+- `deepseek_v3::verify_block_tests`: 작은 모델, 폭 2, 4, 8, 12, matvec 커널을 켠 경우와 끈 경우, 그리고 fused MLA 커널을 타는 rope 폭과 composed 형태를 타는 rope 폭. 블록이 체인과 같고, 스코프가 없으면 같지 않습니다. 두 번째 테스트는 MLA 경로 횟수를 세어 블록의 모든 행이 단일 쿼리 경로를 타는지 확인합니다.
 - `a_token_only_verify_block_takes_the_row_wise_verify_forward` (GLM): append 스코프 안의 일반 forward는 모드가 켜져 있으면 행 단위 verify forward이고, 아니면 classic forward입니다.
 - `linear_singleton_geometry_and_long_probe_are_limited_to_measured_backends`가 이제 26B A4B 기하를 Metal에 한정합니다.
 
 ## 5. 하지 않은 것
 
 - Gemma 4 26B A4B의 MTP 처리량(드래프터가 디스크에 없음).
-- Xing4.0 optiq의 한 칸(폭 8, 2100 토큰, 레이어 38의 6번 행에서 처음 갈라짐)은 레이어 출력 아래로 더 추적하지 않았습니다.
 - DeepSeek V3.2, Kimi Linear, Kimi K3, LongCat은 각자의 attention 코드에 같은 MLA 분기가 있고, 바꾸지 않았습니다.
 - fused MLA 커널을 다중 쿼리로 만드는 것이 정확한 블록의 8-bit 비용을 줄일 가능성이 높은 방법입니다. 여기서는 시도하지 않았고 효과도 측정하지 않았습니다.

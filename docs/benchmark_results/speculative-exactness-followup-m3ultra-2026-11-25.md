@@ -61,6 +61,7 @@ On the DeepSeek V3 family the survey's diagnostic put the first divergence at th
 - A verify block (speculative append scope, one sequence, 2 to 16 rows, no caller mask) runs every row of its MLA attention as the single query its decode step runs, over the prefix of the stored latent that step would see. Both a dense and a quantized latent window are sliced.
 - Dense projections take the row-invariant matvec kernel for up to 16 rows, in decode steps and verify blocks alike. Float experts run one position at a time inside a verify block.
 - Quantized projections are left as one product (`row_invariant::linear_whole_block`). Splitting them would read each weight once per row; they are row-invariant with `qmv_wide` off.
+- Xing4.0's hyper connection takes the row-invariant product for its mixer and multiplies `hc_expand` per position inside a verify block.
 - GLM-4.7-Flash routes a verify block of the token-only round to `Glm4MoeLiteModel::forward_verify`, the row-wise forward its MTP gate already probes.
 
 ### Verdicts with the variable on
@@ -74,10 +75,12 @@ Every cell is all three widths at 8, 600 and 2100 prompt tokens (9 comparisons).
 | Kimi-VL-A3B-Thinking-4bit | DeepSeek V3 text, 4-bit | differs | differs | differs | **equal** |
 | moonlight-16b-a3b-instruct-4bit | DeepSeek V3, 4-bit | differs | differs | differs | **equal** |
 | xing4.0-29b-a4b-mlx-8bit | xing4_0, affine 8-bit | differs | differs | differs | **equal** |
-| xing4.0-29b-a4b-optiq-4bit | xing4_0, mixed 4/8-bit | differs | differs | differs | equal in 8 of 9; width 8 at 2100 tokens differs first at layer 38, row 6 |
+| xing4.0-29b-a4b-optiq-4bit | xing4_0, mixed 4/8-bit | differs | differs | differs | **equal** |
 | glm-4.7-flash-4bit (engine path) | GLM-4.7-Flash, 4-bit | differs | differs | differs | **equal** |
 
-The remaining wide-kernel difference on quantized checkpoints is `qmv_wide`: turning that one switch off is what makes the row equal. So a quantized checkpoint needs `MLXCEL_MLA_ROW_INVARIANT=1` together with `MLXCEL_QMV_WIDE=0`, and a bf16 checkpoint needs only the first. The one optiq cell that still differs was not traced past the layer output.
+The remaining wide-kernel difference on quantized checkpoints is `qmv_wide`: turning that one switch off is what makes the row equal. So a quantized checkpoint needs `MLXCEL_MLA_ROW_INVARIANT=1` together with `MLXCEL_QMV_WIDE=0`, and a bf16 checkpoint needs only the first.
+
+Xing4.0 needed one more product. With only the DeepSeek V3 layers in the scope, the optiq checkpoint was equal in 8 of 9 cells and differed at width 8 after 2100 tokens, first at layer 38, row 6. The cause is the hyper connection: its mixer is a dense `matmul` over `[1, L, hc * D]` (gemv for one row, gemm for several) and `hc_expand` is a batched matmul over the positions. The mixer now goes through `row_invariant::dense` and `hc_expand` multiplies each position alone inside a verify block; all 9 cells are equal.
 
 ### End to end
 
@@ -130,7 +133,7 @@ The exact block costs prompt lookup 43% of its throughput on bf16 and 24% on 8-b
 |---|---|
 | Gemma 4 26B A4B (MTP gate) | Fixed and on by default. The gate needs exactness to engage at all, and decode is unchanged. |
 | DeepSeek V3 family (`DeepSeekV3Model`) | Exact verify block available, off by default. Byte identity costs prompt lookup 24% to 43% of its throughput and the round's contract does not promise it. `MLXCEL_MLA_ROW_INVARIANT=1` turns it on; quantized checkpoints also need `MLXCEL_QMV_WIDE=0`. |
-| Xing4.0 | Same switch, same layers. Equal on the 8-bit checkpoint; one of nine cells still differs on the mixed-width optiq checkpoint. |
+| Xing4.0 | Same switch, same layers, plus the hyper connection's two products. Equal on the 8-bit and the mixed-width optiq checkpoint. |
 | GLM-4.7-Flash engine path | Same switch: the token-only block takes the MTP gate's row-wise verify forward. Equal on narrow. |
 | DeepSeek V3.2, Kimi Linear, Kimi K3, LongCat | Not changed. They carry the same `use_absorbed_mla` split in their own attention code. `deepseek-v3.2-4bit` is over this run's memory limit, and the others were not surveyed. |
 | Arcee (`afm-4.5b`, bf16) | Kept as documented. First divergence: layer 0 output (rows 0 to 3 depending on the draw; layer 1 in one cell). The products are the Llama-class dense projections; making them row-invariant means moving that shared decode path onto the matvec kernel. |
@@ -162,4 +165,4 @@ MLXCEL_MLA_ROW_INVARIANT=1 MLXCEL_QMV_WIDE=0 \
   mlxcel generate -m models/gigachat3-10b-a1.8b-mlx-8bit --temp 0 --prompt-lookup -p "..."
 ```
 
-The decode and prompt-lookup tables, and the survey verdicts, were first taken on a build in which the row-invariant scope was on by default and `MLXCEL_DEEPSEEK_V3_ROW_INVARIANT=0` turned it off (`verify` selected the dropped third arm); the variable was then renamed and its default inverted without touching either code path. On the final build the checks were repeated in part: the survey gave the same verdicts for Gemma 4 26B A4B (all 18 rows), gigachat3 bf16 with the variable on (9 cells equal) and off (width 4, differs), gigachat3 8-bit with it on (widths 2 and 8) and GLM-4.7-Flash with it on (width 4); prompt lookup on gigachat3 bf16 ran at 264.9 tok/s by default and 149.8 with the variable on (2 cycles, another build running); and on the long prompt gigachat3 8-bit again left plain decode by default and matched it with the variable on, both with `MLXCEL_QMV_WIDE=0`.
+The decode and prompt-lookup tables, and the survey verdicts, were first taken on a build in which the row-invariant scope was on by default and `MLXCEL_DEEPSEEK_V3_ROW_INVARIANT=0` turned it off (`verify` selected the dropped third arm); the variable was then renamed and its default inverted without touching either code path. On the final build the checks were repeated in part: the survey gave the same verdicts for Gemma 4 26B A4B (all 18 rows), gigachat3 bf16 with the variable on (9 cells equal) and off (width 4, differs), gigachat3 8-bit with it on (widths 2 and 8) and GLM-4.7-Flash with it on (width 4); prompt lookup on gigachat3 bf16 ran at 264.9 tok/s by default and 149.8 with the variable on (2 cycles, another build running); and on the long prompt gigachat3 8-bit again left plain decode by default and matched it with the variable on, both with `MLXCEL_QMV_WIDE=0`. The Xing4.0 rows are from the final build, after the hyper-connection change (9 of 9 cells on each checkpoint with the variable on; the 8-bit checkpoint differs on both kernels with it off).

@@ -163,7 +163,7 @@ Issue #3418 traced where a token-only verify block parts from single-token decod
 | Family | First difference | Decision |
 |--------|------------------|----------|
 | DeepSeek V3 (`DeepSeekV3Model`: deepseek_v3, kimi_k2, joyai_llm_flash, kimi_vl, kimi_k25, youtu) | Layer 0: a single query takes the fused absorbed MLA kernel, a block takes rope-folded SDPA chosen by the `use_absorbed_mla` cost model; on bf16 also gemv against gemm and `gather_mm` | `MLXCEL_MLA_ROW_INVARIANT=1` makes the block byte-identical (per-row MLA, row-invariant dense products, per-position float experts). Off by default: it costs prompt lookup 24% (8-bit) to 43% (bf16) of its throughput on a copy-heavy reply. A quantized checkpoint also needs `MLXCEL_QMV_WIDE=0` |
-| Xing4.0 | The same layers | The same switch. One of nine cells still differs on the mixed-width optiq checkpoint (layer 38, width 8, 2100 tokens) |
+| Xing4.0 | The same layers, and the hyper connection's dense mixer and batched `hc_expand` | The same switch; equal on the 8-bit and optiq checkpoints with `MLXCEL_QMV_WIDE=0` |
 | GLM-4.7-Flash, engine path | The block attention, where the MTP path already ran row-wise | The same switch routes the block to the MTP gate's row-wise verify forward; equal with `MLXCEL_QMV_WIDE=0` |
 | DeepSeek V3.2, Kimi Linear, Kimi K3, LongCat | The same `use_absorbed_mla` split, in their own attention code | Not changed, not measured |
 | Arcee, K2 Horizon (Llama-class, bf16) | Layer 0 output: gemv against gemm in the shared dense projections | Kept: a fix moves the Llama-class decode path onto the row-invariant kernel |

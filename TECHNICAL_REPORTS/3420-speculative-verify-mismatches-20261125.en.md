@@ -36,8 +36,9 @@ With `MLXCEL_MLA_ROW_INVARIANT=1`, `DeepSeekV3Model` and `Xing40Model` enter a `
 |---|---|---|
 | gigachat3 bf16 | equal | not needed |
 | gigachat3 8-bit, Kimi-VL 4-bit, moonlight 4-bit | differs | equal |
-| xing4.0 8-bit, GLM-4.7-Flash engine path | differs | equal |
-| xing4.0 optiq 4-bit | differs | equal in 8 of 9 cells |
+| xing4.0 8-bit and optiq 4-bit, GLM-4.7-Flash engine path | differs | equal |
+
+Xing4.0 needed its hyper connection too: with only the shared layers in the scope, one optiq cell (width 8, 2100 tokens) still differed at layer 38. The mixer is a dense `matmul` and `hc_expand` a batched matmul over the positions; a review of the diff pointed at them, and both are now row-invariant inside the scope.
 
 All cells are widths 2, 4, 8 at 8, 600 and 2100 prompt tokens. Without the variable every cell differs.
 
@@ -60,13 +61,12 @@ A variant that kept MLX `matmul` for decode and multiplied the block's dense pro
 ## 4. Tests
 
 - `gemma4::moe_verify_tests`: quantized expert planes, widths 2, 4, 8, 12; the verify-block experts equal single-token decode byte for byte, and the block-wide product does not (the pre-change behavior).
-- `deepseek_v3::verify_block_tests`: a tiny model, widths 2, 4, 8, 12, with and without the matvec kernel; the block equals the chain, and without the scope it does not.
+- `deepseek_v3::verify_block_tests`: a tiny model, widths 2, 4, 8, 12, with and without the matvec kernel, at a rope width that takes the fused MLA kernel and one that takes the composed form; the block equals the chain, and without the scope it does not. A second test counts the MLA paths to confirm every block row takes the single-query path.
 - `a_token_only_verify_block_takes_the_row_wise_verify_forward` (GLM): the plain forward inside the append scope is the row-wise verify forward when the mode is on and the classic forward otherwise.
 - `linear_singleton_geometry_and_long_probe_are_limited_to_measured_backends` now pins the 26B A4B geometry to Metal.
 
 ## 5. Not done
 
 - MTP throughput on Gemma 4 26B A4B (no drafter on disk).
-- One Xing4.0 optiq cell (width 8, 2100 tokens, first difference at layer 38 row 6) is not traced past the layer output.
 - DeepSeek V3.2, Kimi Linear, Kimi K3 and LongCat carry the same MLA split in their own attention code and are unchanged.
 - A multi-query form of the fused MLA kernel is the likely way to cut the 8-bit cost of the exact block. It is not attempted here, and its effect is not measured.

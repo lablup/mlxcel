@@ -281,8 +281,12 @@ impl XingHyperConnection {
         let flat = mlxcel_core::astype(&flat, f32_);
         let flat = mlxcel_core::fast_rms_norm_no_weight(&flat, self.norm_eps);
         let flat = mlxcel_core::astype(&flat, x_dtype);
-        let fn_t = mlxcel_core::transpose(&mlxcel_core::astype(&self.hc_fn, x_dtype));
-        let mix = mlxcel_core::astype(&mlxcel_core::matmul(&flat, &fn_t), f32_);
+        // `dense` is `matmul(flat, fn.T)` outside a row-invariant scope and
+        // the row-invariant product inside one (issue #3418).
+        let mix = mlxcel_core::astype(
+            &mlxcel_core::row_invariant::dense(&flat, &mlxcel_core::astype(&self.hc_fn, x_dtype)),
+            f32_,
+        );
 
         let pre = slice_axis(&mix, -1, 0, hc);
         let post = slice_axis(&mix, -1, hc, 2 * hc);
@@ -328,7 +332,20 @@ pub(crate) fn hc_expand(
     let post = mlxcel_core::expand_dims(post, -1);
     let out = mlxcel_core::expand_dims(out, 2);
     let gated = mlxcel_core::multiply(&post, &out);
-    let mixed = mlxcel_core::matmul(comb, x);
+    // A batched matmul over the positions: inside a verify block each
+    // position is multiplied alone, as its decode step multiplies it.
+    let length = mlxcel_core::array_shape(x)[1];
+    let mixed = if length > 1 && mlxcel_core::row_invariant::in_verify_block() {
+        let parts: Vec<UniquePtr<MlxArray>> = (0..length)
+            .map(|i| {
+                mlxcel_core::matmul(&slice_axis(comb, 1, i, i + 1), &slice_axis(x, 1, i, i + 1))
+            })
+            .collect();
+        let refs: Vec<&MlxArray> = parts.iter().map(|part| &**part).collect();
+        mlxcel_core::concatenate_many(&refs, 1)
+    } else {
+        mlxcel_core::matmul(comb, x)
+    };
     mlxcel_core::add(&gated, &mixed)
 }
 
