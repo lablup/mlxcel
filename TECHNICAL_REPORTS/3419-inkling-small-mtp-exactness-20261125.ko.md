@@ -63,4 +63,4 @@ K 토큰을 verify하고 드래프트 `a`개를 수락하면, adapter는 verify 
 
 - 어떤 폭에서도 속도 향상이 없으므로, 이슈의 "처리량 향상" 항목은 문서로 답했습니다. 남은 비용은 2행 verify(dense 연산은 한 번 읽고 expert는 두 번 읽음)와 라운드마다 두 번 도는 드래프터의 bf16 LM head입니다. 둘 다 수락률을 바꾸지는 않습니다.
 - #3417의 adaptive verify width는 DFlash 라운드 루프의 정책입니다. Inkling MTP는 자체 adaptive controller가 있는 MTP 루프를 돌기 때문에 `exact_at_every_verify_width`를 연결하지 않았습니다.
-- `trim_state`(prompt lookup의 되감기)는 여전히 컨볼루션 상태를 비웁니다. 같은 창을 쓸 수는 있지만 이 이슈의 범위 밖입니다.
+- `trim_state`는 여전히 컨볼루션 상태를 비웁니다. 이 훅은 padded prefill에만 쓰이며 prompt lookup의 되감기가 아닙니다. 이 보고서를 쓸 당시 prompt lookup은 게이트에서 1세대 Inkling을 거부했고, 이후 이슈 #3422가 같은 창을 쓰는 `rewind_decode_appends`로 이를 활성화했습니다.

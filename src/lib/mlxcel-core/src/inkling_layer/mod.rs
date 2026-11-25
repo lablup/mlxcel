@@ -28,7 +28,7 @@ use crate::weights::WeightMap;
 use crate::{MlxArray, UniquePtr};
 
 pub use attention::{InklingAttention, banded_additive_mask, log_scaling_tau, repeat_kv_heads};
-pub use cache::InklingLayerCache;
+pub use cache::{InklingLayerCache, drop_newest_verify_rows};
 pub use conv::InklingShortConv;
 pub use dense_mlp::InklingDenseMlp;
 

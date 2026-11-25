@@ -47,7 +47,7 @@ pub(crate) fn tiny_audio_model() -> InklingModel {
 /// fused SDPA does not take a 2-wide head and falls back to an unfused path
 /// whose arithmetic depends on the block length, which no checkpoint takes
 /// (the Inkling 2 tiny model needed the same, issue #3280).
-fn tiny_model_with_real_heads() -> InklingModel {
+pub(super) fn tiny_model_with_real_heads() -> InklingModel {
     tiny_model_impl(false, 128, 64, 32)
 }
 
@@ -486,4 +486,15 @@ fn real_checkpoint_probe_fails_without_row_invariant_and_passes_with_it() {
             "width {width} with row_invariant, long prompts"
         );
     }
+}
+
+/// Issue #3422: prompt lookup takes Inkling only with the row kernel on.
+#[test]
+fn prompt_lookup_gate_follows_the_row_kernel() {
+    use mlxcel_core::speculative::prompt_lookup::prompt_lookup_unsupported_reason as reason;
+    let mut model = tiny_model();
+    model.set_row_invariant_for_test(true);
+    assert_eq!(reason(&model), None);
+    model.set_row_invariant_for_test(false);
+    assert!(reason(&model).is_some());
 }
