@@ -18,8 +18,9 @@
 //! when the slot is recycled. Every batched stream must equal the request's
 //! single-sequence reference (`IreeLlama`, the CLI path).
 //!
-//! The checkpoint is a synthetic five-layer Nemotron-H (M*-M-); `scripts/xla/validate_arch.sh`
-//! runs the same gate on a real one against the HF fp32 oracle.
+//! The checkpoint is a synthetic five-layer Nemotron-H (M*EM-) with an eight-expert
+//! grouped-sigmoid MoE block; `scripts/xla/validate_arch.sh` runs the same gate on a
+//! real checkpoint against the HF fp32 oracle.
 //!
 //! Ignored in ordinary CI; run with the pinned IREE distribution:
 //! `cargo test --release --features xla-iree,test-utils --test xla_hybrid_nemotron_h -- --ignored`.
@@ -47,6 +48,9 @@ const KERNEL: usize = 4;
 const D_INNER: usize = HEADS * HEAD_DIM;
 const CONV_DIM: usize = D_INNER + 2 * 2 * STATE;
 const IN_PROJ: usize = D_INNER + CONV_DIM + HEADS;
+const EXPERTS: usize = 8;
+const EXPERT_INTERMEDIATE: usize = 12;
+const SHARED_INTERMEDIATE: usize = 20;
 /// Bytes of one sequence's state: `ssm_h [L, H, P, N]` plus `ssm_conv
 /// [L, K-1, conv_dim]`, f32.
 const STATE_ROW_BYTES: u64 =
@@ -54,7 +58,7 @@ const STATE_ROW_BYTES: u64 =
 
 /// Distinct prompts of different lengths; the EOS id (31) never appears in
 /// them.
-const PROMPTS: [&[i32]; 7] = [
+const PROMPTS: [&[i32]; 8] = [
     &[3, 17, 5, 29, 11, 8],
     &[21, 4, 4, 19, 2],
     &[9],
@@ -62,6 +66,7 @@ const PROMPTS: [&[i32]; 7] = [
     &[2, 30, 13],
     &[22, 5, 16, 16, 9, 1, 3],
     &[11, 28],
+    &[26, 3, 10, 7],
 ];
 
 struct TinyModel {
@@ -93,7 +98,7 @@ fn create_tiny_nemotron_h() -> TinyModel {
     std::fs::write(
         dir.path().join("config.json"),
         format!(
-            r#"{{"model_type":"nemotron_h","hybrid_override_pattern":"M*-M-","num_attention_heads":4,"num_key_value_heads":2,"attention_head_dim":8,"intermediate_size":32,"hidden_size":{HIDDEN},"num_hidden_layers":5,"vocab_size":{VOCAB},"mamba_num_heads":{HEADS},"mamba_head_dim":{HEAD_DIM},"ssm_state_size":{STATE},"n_groups":2,"conv_kernel":{KERNEL},"chunk_size":128,"expand":2,"use_bias":false,"use_conv_bias":true,"tie_word_embeddings":true,"layer_norm_epsilon":1e-5,"rms_norm":true,"hidden_act":"silu","eos_token_id":31}}"#
+            r#"{{"model_type":"nemotron_h","hybrid_override_pattern":"M*EM-","num_attention_heads":4,"num_key_value_heads":2,"attention_head_dim":8,"intermediate_size":32,"hidden_size":{HIDDEN},"num_hidden_layers":5,"vocab_size":{VOCAB},"mamba_num_heads":{HEADS},"mamba_head_dim":{HEAD_DIM},"ssm_state_size":{STATE},"n_groups":2,"conv_kernel":{KERNEL},"chunk_size":128,"expand":2,"use_bias":false,"use_conv_bias":true,"tie_word_embeddings":true,"layer_norm_epsilon":1e-5,"rms_norm":true,"hidden_act":"silu","mlp_hidden_act":"relu2","n_routed_experts":{EXPERTS},"num_experts_per_tok":2,"moe_intermediate_size":{EXPERT_INTERMEDIATE},"n_group":2,"topk_group":1,"norm_topk_prob":true,"routed_scaling_factor":1.25,"n_shared_experts":1,"moe_shared_expert_intermediate_size":{SHARED_INTERMEDIATE},"eos_token_id":31}}"#
         ),
     )
     .expect("model config");
@@ -110,7 +115,48 @@ fn create_tiny_nemotron_h() -> TinyModel {
         ),
     ];
     for layer in 0..5 {
-        if layer == 1 || layer == 2 || layer == 4 {
+        if layer == 2 {
+            let p = format!("backbone.layers.{layer}.");
+            tensors.extend([
+                (
+                    format!("{p}norm.weight"),
+                    vec![HIDDEN],
+                    ranged_values(HIDDEN, layer + 40, 0.6, 1.4),
+                ),
+                (
+                    format!("{p}mixer.gate.weight"),
+                    vec![EXPERTS, HIDDEN],
+                    deterministic_values(EXPERTS * HIDDEN, 101, 0.18),
+                ),
+                (
+                    format!("{p}mixer.gate.e_score_correction_bias"),
+                    vec![EXPERTS],
+                    vec![0.07, -0.03, 0.02, -0.06, -0.01, 0.05, -0.04, 0.03],
+                ),
+                (
+                    format!("{p}mixer.switch_mlp.fc1.weight"),
+                    vec![EXPERTS, EXPERT_INTERMEDIATE, HIDDEN],
+                    deterministic_values(EXPERTS * EXPERT_INTERMEDIATE * HIDDEN, 102, 0.16),
+                ),
+                (
+                    format!("{p}mixer.switch_mlp.fc2.weight"),
+                    vec![EXPERTS, HIDDEN, EXPERT_INTERMEDIATE],
+                    deterministic_values(EXPERTS * HIDDEN * EXPERT_INTERMEDIATE, 103, 0.16),
+                ),
+                (
+                    format!("{p}mixer.shared_experts.up_proj.weight"),
+                    vec![SHARED_INTERMEDIATE, HIDDEN],
+                    deterministic_values(SHARED_INTERMEDIATE * HIDDEN, 104, 0.12),
+                ),
+                (
+                    format!("{p}mixer.shared_experts.down_proj.weight"),
+                    vec![HIDDEN, SHARED_INTERMEDIATE],
+                    deterministic_values(HIDDEN * SHARED_INTERMEDIATE, 105, 0.12),
+                ),
+            ]);
+            continue;
+        }
+        if layer == 1 || layer == 4 {
             let p = format!("backbone.layers.{layer}.");
             tensors.push((
                 format!("{p}norm.weight"),

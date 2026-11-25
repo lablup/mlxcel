@@ -183,7 +183,7 @@ pub(crate) use qwen3_vl::{
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.
 #[allow(unused_imports)]
-pub(crate) use config::{MoeConfig, SharedExpertConfig};
+pub(crate) use config::{ExpertAct, MoeConfig, MoeScoring, SharedExpertConfig};
 // SSM mixer types (issue #3337), consumed by the probe runner and #3338.
 #[allow(unused_imports)]
 pub(crate) use config::{SSM_DEFAULT_CHUNK_SIZE, SsmConfig};
@@ -479,6 +479,8 @@ mod tests {
                 intermediate: 12,
                 norm_topk_prob: true,
                 routed_scaling_factor: 1.0,
+                scoring: MoeScoring::Softmax,
+                expert_act: ExpertAct::SwiGlu,
                 shared: if shared {
                     Some(SharedExpertConfig {
                         intermediate: 10,
@@ -488,6 +490,7 @@ mod tests {
                     None
                 },
                 first_k_dense: 0,
+                layer_mask: None,
                 weight_prefix: "mlp",
             }),
             // sliding_pattern (2), use_rope_layers, weight_scheme, and the #498

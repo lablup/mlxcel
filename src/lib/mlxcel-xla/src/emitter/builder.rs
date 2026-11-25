@@ -1755,6 +1755,9 @@ impl Builder {
     pub fn reduce_max(&mut self, x: &Val, dim: usize, init: &Val) -> Val {
         self.reduce("maximum", x, dim, init)
     }
+    pub fn reduce_min(&mut self, x: &Val, dim: usize, init: &Val) -> Val {
+        self.reduce("minimum", x, dim, init)
+    }
 
     /// Inclusive prefix sum along one static axis using a left-padded window.
     ///

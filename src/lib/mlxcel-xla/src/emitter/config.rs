@@ -220,15 +220,37 @@ pub struct SharedExpertConfig {
     pub gated: bool,
 }
 
-/// Mixture-of-Experts FFN parameters (issue #500). The router linear scores the
-/// `n_experts`, a softmax over ALL experts forms routing probabilities, the top
-/// `top_k` are selected, their probabilities are renormalized to sum to one when
-/// `norm_topk_prob`, scaled by `routed_scaling_factor`, and used to combine the
-/// selected experts' SwiGLU outputs (Mixtral / Qwen2-MoE / DeepSeek
-/// `scoring_func = "softmax"`, softmax-before-top-k). Experts are a stacked SwiGLU
-/// of `intermediate` width (mlx-lm `switch_mlp`, one `[n_experts, out, in]` tensor
-/// per projection). `shared` is the shared-expert branch when the family has one.
+/// How the router scores and selects experts. The softmax form preserves the
+/// issue-#500 router byte-for-byte. The sigmoid form is Nemotron-H / DeepSeek-style:
+/// selection may add a correction bias and restrict candidates to the best expert
+/// groups, while the combine weights always come from the uncorrected sigmoid.
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MoeScoring {
+    Softmax,
+    Sigmoid {
+        correction_bias: bool,
+        n_group: usize,
+        topk_group: usize,
+        routed_scaling_factor: f32,
+        norm_topk_prob: bool,
+    },
+}
+
+/// The routed and shared experts' feed-forward activation and tensor schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpertAct {
+    /// `down(silu(gate(x)) * up(x))`, with gate/up/down projections.
+    SwiGlu,
+    /// `down(relu(up(x))^2)`, with only up/down projections.
+    Relu2,
+}
+
+/// Mixture-of-Experts FFN parameters (issues #500 / #3345). Existing families
+/// use softmax routing and stacked SwiGLU experts. Nemotron-H uses grouped sigmoid
+/// routing and stacked relu2 experts. `shared` is the always-on expert branch when
+/// the family has one; `layer_mask` distinguishes Nemotron-H's `E` blocks from its
+/// ordinary `-` FFN blocks, which both have [`MixerKind::None`].
+#[derive(Clone, Debug, PartialEq)]
 pub struct MoeConfig {
     /// Total number of routed experts (`num_experts` / `num_local_experts`).
     pub n_experts: usize,
@@ -243,12 +265,19 @@ pub struct MoeConfig {
     /// Scale applied to the routed combine weights (`routed_scaling_factor`, 1.0
     /// for Mixtral / Qwen2-MoE). Emitted only when not exactly 1.0.
     pub routed_scaling_factor: f64,
+    /// Router scoring and candidate-selection semantics.
+    pub scoring: MoeScoring,
+    /// Routed and shared expert activation / projection schema.
+    pub expert_act: ExpertAct,
     /// The shared-expert branch, when the family has one (Qwen2-MoE / DeepSeek).
     pub shared: Option<SharedExpertConfig>,
     /// Layers with index `< first_k_dense` are ordinary dense SwiGLU MLP layers
     /// (DeepSeek `first_k_dense_replace`); 0 for an all-MoE model (Mixtral,
     /// Qwen2-MoE). A dense layer takes the dense `mlp.{gate,up,down}_proj` weights.
     pub first_k_dense: usize,
+    /// Optional exact per-layer MoE mask. `None` uses `first_k_dense`; Nemotron-H
+    /// stores one entry per hybrid block so dense `-` and MoE `E` stay distinct.
+    pub layer_mask: Option<Vec<bool>>,
     /// The checkpoint's per-layer MoE weight-name prefix: `block_sparse_moe`
     /// (Mixtral) or `mlp` (Qwen2-MoE / DeepSeek). Read by the weight loader only.
     pub weight_prefix: &'static str,
@@ -1727,8 +1756,11 @@ impl Config {
                 // Mixtral always renormalizes the selected top-k routing weights.
                 norm_topk_prob: true,
                 routed_scaling_factor: 1.0,
+                scoring: MoeScoring::Softmax,
+                expert_act: ExpertAct::SwiGlu,
                 shared: None,
                 first_k_dense: 0,
+                layer_mask: None,
                 weight_prefix: "block_sparse_moe",
             }),
             Some("qwen2_moe") => Some(MoeConfig {
@@ -1740,12 +1772,15 @@ impl Config {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
                 routed_scaling_factor: 1.0,
+                scoring: MoeScoring::Softmax,
+                expert_act: ExpertAct::SwiGlu,
                 shared: Some(SharedExpertConfig {
                     intermediate: u("shared_expert_intermediate_size")?,
                     // Qwen2-MoE gates the shared expert by sigmoid(x @ Wg^T).
                     gated: true,
                 }),
                 first_k_dense: 0,
+                layer_mask: None,
                 weight_prefix: "mlp",
             }),
             Some("qwen3_moe") => {
@@ -1775,9 +1810,12 @@ impl Config {
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
                     routed_scaling_factor: 1.0,
+                    scoring: MoeScoring::Softmax,
+                    expert_act: ExpertAct::SwiGlu,
                     // Qwen3-MoE has no shared expert.
                     shared: None,
                     first_k_dense: 0,
+                    layer_mask: None,
                     weight_prefix: "mlp",
                 })
             }
@@ -1791,9 +1829,12 @@ impl Config {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
                 routed_scaling_factor: 1.0,
+                scoring: MoeScoring::Softmax,
+                expert_act: ExpertAct::SwiGlu,
                 // OLMoE has no shared expert.
                 shared: None,
                 first_k_dense: 0,
+                layer_mask: None,
                 weight_prefix: "mlp",
             }),
             _ => None,
@@ -2084,7 +2125,12 @@ impl Config {
     /// like DeepSeek keeps as ordinary MLP). A dense config returns `false` for
     /// every layer, so its graphs emit no MoE op and stay byte-for-byte unchanged.
     pub fn is_moe_layer(&self, li: usize) -> bool {
-        self.moe.as_ref().is_some_and(|m| li >= m.first_k_dense)
+        self.moe.as_ref().is_some_and(|m| {
+            m.layer_mask
+                .as_ref()
+                .and_then(|mask| mask.get(li).copied())
+                .unwrap_or(li >= m.first_k_dense)
+        })
     }
 }
 
