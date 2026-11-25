@@ -1,5 +1,7 @@
 # Speculative exactness survey across drafter-capable models (M3 Ultra, 2026-11-25)
 
+Follow-up: the two mismatches this survey left untraced (Gemma 4 26B A4B, and the token-only verify round on the MLA families) are traced and fixed or decided in [speculative-exactness-followup-m3ultra-2026-11-25.md](speculative-exactness-followup-m3ultra-2026-11-25.md) (issue #3418). The rows for those models below are the state before that work.
+
 Issue #3409. PR #3405 made an Inkling 2 verify block byte-identical to decode and found two causes the 8-token startup probe cannot see (a sliding window, a chunked prefill). This survey asks the same question of the other drafter-capable families: is a K-row verify block byte-identical to K single-token decode steps, at widths 2, 4 and 8, after a short prompt and after prompts past the sliding window and the 2048-token prefill chunk.
 
 Host: Apple M3 Ultra, 512 GB, Metal. Every run is serialized under the shared GPU lock. Load average was 18 to 25 for the first 13 checkpoints (another build was running) and 2 to 3 for the rest; the verdicts are byte comparisons and do not depend on load.

@@ -89,7 +89,7 @@ acceptance-optimal rule: see the next section.
 |------|--------------------|-------------------|
 | `PromptLookupDrafter` on the engine's token-only loop (`mlxcel generate --prompt-lookup`) | greedy argmax (lossless) | **sampler-match** (lossless, and acceptance-optimal here) |
 | `PromptLookupDrafter` in the server scheduler (`--draft-kind prompt-lookup`, the same `Engine::verify_round`) | greedy argmax (lossless) | **sampler-match** (lossless, and acceptance-optimal here) |
-| `FullModelDrafter` on the engine's token-only loop (`mlxcel generate --draft-model <ordinary model>`, `mlxcel-server --draft-model <ordinary model>`, #2757) | greedy argmax, no probe gate, not byte-identical to plain decode (the same class and the same streams as prompt lookup: see [Offline routing](#offline-routing)) | **sampler-match** (lossless): the drafter proposes its own argmax, the target's draw decides |
+| `FullModelDrafter` on the engine's token-only loop (`mlxcel generate --draft-model <ordinary model>`, `mlxcel-server --draft-model <ordinary model>`, #2757) | greedy argmax, no probe gate, not byte-identical to plain decode (the same class and the same streams as prompt lookup: see [Offline routing](#offline-routing); the MLA families have an opt-in exact block, see [Token-only verify blocks, per family](#token-only-verify-blocks-per-family)) | **sampler-match** (lossless): the drafter proposes its own argmax, the target's draw decides |
 | Gemma 4 MTP round loop | argmax (lossless here) | argmax-against-argmax (**biased**) |
 | DFlash round loop (Qwen 3.5 DFlash drafter) | argmax (lossless here) | argmax-against-argmax (**biased**) |
 | DFlash round loop (LFM2 DSpark drafter) | argmax (lossless here, probe-gated) | declines to classic decode |
@@ -155,6 +155,23 @@ once its KV history is built by multi-token forwards. The pull request for #2757
 A drafter's proposals cannot move the stream on their own, because the
 target decides every position from its own caches; a misaligned draft cache costs
 acceptance only. The sampled stream passes the chi-square and Markov guards.
+
+### Token-only verify blocks, per family
+
+Issue #3418 traced where a token-only verify block parts from single-token decode and decided each family by cost. Nothing gates on the result: prompt lookup and the full-model drafter run on every model they ran on before. Numbers and commands are in [speculative-exactness-followup-m3ultra-2026-11-25.md](benchmark_results/speculative-exactness-followup-m3ultra-2026-11-25.md).
+
+| Family | First difference | Decision |
+|--------|------------------|----------|
+| DeepSeek V3 (`DeepSeekV3Model`: deepseek_v3, kimi_k2, joyai_llm_flash, kimi_vl, kimi_k25, youtu) | Layer 0: a single query takes the fused absorbed MLA kernel, a block takes rope-folded SDPA chosen by the `use_absorbed_mla` cost model; on bf16 also gemv against gemm and `gather_mm` | `MLXCEL_MLA_ROW_INVARIANT=1` makes the block byte-identical (per-row MLA, row-invariant dense products, per-position float experts). Off by default: it costs prompt lookup 24% (8-bit) to 43% (bf16) of its throughput on a copy-heavy reply. A quantized checkpoint also needs `MLXCEL_QMV_WIDE=0` |
+| Xing4.0 | The same layers | The same switch. One of nine cells still differs on the mixed-width optiq checkpoint (layer 38, width 8, 2100 tokens) |
+| GLM-4.7-Flash, engine path | The block attention, where the MTP path already ran row-wise | The same switch routes the block to the MTP gate's row-wise verify forward; equal with `MLXCEL_QMV_WIDE=0` |
+| DeepSeek V3.2, Kimi Linear, Kimi K3, LongCat | The same `use_absorbed_mla` split, in their own attention code | Not changed, not measured |
+| Arcee, K2 Horizon (Llama-class, bf16) | Layer 0 output: gemv against gemm in the shared dense projections | Kept: a fix moves the Llama-class decode path onto the row-invariant kernel |
+| OLMoE (4-bit) | Layer 0 output, on both quantized kernels | Kept |
+
+With the switch on and the narrow kernel, `--prompt-lookup` text equalled plain decode on six of six checkpoint and prompt pairs on an M3 Ultra (gigachat3 8-bit, Kimi-VL, moonlight; a copy prompt and a 2.5K-token prompt each); with it off, two of the six diverged. On the bf16 checkpoint both settings matched plain decode on both prompts.
+
+The Gemma 4 26B A4B MoE checkpoint is a different case, because its MTP path is gated: its verify block now runs the routed experts per position and its attention row-wise, so the startup probe passes on the narrow kernel and the drafter engages as it does on the 12B and 31B checkpoints (`MLXCEL_GEMMA4_MOE_VERIFY_PER_POSITION`).
 
 A DFlash or DSpark drafter on a target without an offline arm gets the same
 refusal plus a pointer to `mlxcel-server`, which drives the DFlash round loop for

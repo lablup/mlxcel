@@ -74,8 +74,10 @@ pub fn capturing() -> bool {
 /// Record `tensor [1, T, ..]` when a [`with_capture`] scope is open; a no-op
 /// otherwise.
 ///
-/// Used by: the Gemma 4 decoder layers and startup probe, the Inkling layer
-/// loop and startup probe, the DeepSeek V3 layer loop (survey diagnostic).
+/// Used by: the Gemma 4 decoder layers (including the MoE feed-forward
+/// stages) and startup probe, the Inkling layer loop and startup probe, and
+/// the DeepSeek V3, Xing4.0, Arcee, OLMoE and Llama 3 (K2 Horizon) layer
+/// loops (survey diagnostic).
 pub fn capture(layer: usize, kind: &str, op: &'static str, tensor: &MlxArray) {
     CAPTURE.with(|slot| {
         let mut slot = slot.borrow_mut();

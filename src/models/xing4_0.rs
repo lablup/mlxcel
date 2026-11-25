@@ -468,13 +468,22 @@ impl Xing40Model {
         row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
+        // The DeepSeek V3 layers' row-invariant scope, when
+        // `MLXCEL_MLA_ROW_INVARIANT` is on (issue #3418): a verify block of
+        // the engine's token-only round runs its MLA per row.
+        let _row_invariant = crate::models::mla_batched::row_invariant_scope(
+            &mlxcel_core::array_shape(&h),
+            mask.is_some(),
+        );
         let mut h = hc_widen(&h, self.config.hc_mult as i32);
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+        for (i, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
             h = layer.forward(&h, cache, mask);
+            // Recorded only under the block-versus-chain diagnostic (#3418).
+            crate::models::speculative_exactness_diag::capture(i, "mla", "layer output", &h);
         }
         let h = mlxcel_core::generate::select_row(hc_head(&h), row);
         let h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        crate::models::deepseek_v3::row_linear(&self.lm_head, &h)
     }
 
     pub fn forward_impl(
