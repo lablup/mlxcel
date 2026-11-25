@@ -26,8 +26,9 @@
 //! unchanged. The conv tail is the last `K-1` pre-conv inputs ending at
 //! `real_len`, taken with `dynamic_slice` from the sequence left-padded with the
 //! incoming tail (zeros for a fresh sequence). The builder has no `while` op and
-//! IREE-CUDA rejects scatter, so every form uses `dot_general`, `pad`, slices,
-//! `select` and `reduce_window` only. The prefill form choice and its measured
+//! IREE-CUDA rejects scatter, so every form uses `dot_general`, `pad`, slices
+//! and `select` only (no `reduce_window`: IREE-Metal miscompiles the prefix-sum
+//! form, issue #3343). The prefill form choice and its measured
 //! alternatives are recorded in `spike/openxla/FINDINGS_ssm.md`.
 
 use super::builder::{Builder, Ty, Val};

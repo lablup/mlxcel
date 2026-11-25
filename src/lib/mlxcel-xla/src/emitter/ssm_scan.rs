@@ -20,15 +20,19 @@
 //!
 //! * [`SsmPrefillForm::ChunkedSsd`], the chosen one: Mamba2's state-space
 //!   duality. Within a chunk of `Q` rows the scan is a masked
-//!   `dot_general` against a segment-sum decay matrix built with
-//!   `reduce_window_prefix_add`; across chunks the carried states are one
-//!   `dot_general` against the chunk-level decay matrix (HF's form), so nothing
-//!   is unrolled.
+//!   `dot_general` against a segment-sum decay matrix built with [`prefix_add`];
+//!   across chunks the carried states are one `dot_general` against the
+//!   chunk-level decay matrix (HF's form), so nothing is unrolled.
 //! * [`SsmPrefillForm::Associative`]: a log-depth Hillis-Steele scan over
 //!   `(decay, input)` pairs. It materializes `[T, H, P, N]` per level.
 //! * [`SsmPrefillForm::Sequential`]: `T` unrolled decode steps, the baseline.
 //!
 //! Every form takes `dt = 0` on padded rows, so the state passes through them.
+//!
+//! No form may emit a prefix-sum `stablehlo.reduce_window`. IREE rewrites that
+//! pattern to `iree_linalg_ext.scan`, and the IREE-Metal target returns
+//! unrelated values for that op on any tensor of rank 2 or more (issue #3343;
+//! a `[3, 3]` input already reproduces it). [`prefix_add`] is the replacement.
 
 use super::builder::{Builder, Val};
 use super::config::SsmConfig;
@@ -84,6 +88,40 @@ pub(crate) fn selective_scan_prefill_form(
     (b.add(&y, &skip), h_t)
 }
 
+/// Shift `v` by `by` positions toward higher indices along `axis`, filling the
+/// vacated positions with `fill`.
+fn shift_along(b: &mut Builder, v: &Val, axis: usize, by: usize, fill: f32) -> Val {
+    let rank = v.ty.shape.len();
+    let mut keep: Vec<(usize, usize)> = v.ty.shape.iter().map(|&s| (0, s)).collect();
+    keep[axis].1 -= by;
+    let kept = b.slice(v, &keep);
+    let fill = b.const_f32(fill);
+    let mut low = vec![0; rank];
+    low[axis] = by;
+    b.pad(&kept, &fill, &low, &vec![0; rank])
+}
+
+/// Inclusive f32 prefix sum of `v` along `axis`, as a log-depth chain of
+/// shifted adds (`ceil(log2(len))` levels of `slice`, `pad` and `add`).
+///
+/// This replaces the left-padded `stablehlo.reduce_window` cumsum, which
+/// IREE-Metal miscompiles at rank 2 and above (issue #3343, see the module
+/// docs). The pairwise association also carries less rounding error than the
+/// sequential fold that `reduce_window` lowered to.
+// Used by: Mamba2 chunked SSD prefill (`exp_segsum`, `chunked_ssd`).
+pub(super) fn prefix_add(b: &mut Builder, v: &Val, axis: usize) -> Val {
+    assert_eq!(v.ty.elt, "f32", "the scan accumulates in f32");
+    let len = v.ty.shape[axis];
+    let mut sums = v.clone();
+    let mut step = 1;
+    while step < len {
+        let shifted = shift_along(b, &sums, axis, step, 0.0);
+        sums = b.add(&sums, &shifted);
+        step *= 2;
+    }
+    sums
+}
+
 /// `exp(segsum)` for per-step log decays `v [.., L]` along the last axis:
 /// `out[.., i, j] = exp(sum_{k=j+1..=i} v[k])` for `i >= j`, else 0. Built as
 /// HF's `segment_sum` does (a masked prefix sum, not a difference of prefix
@@ -104,7 +142,7 @@ fn exp_segsum(b: &mut Builder, v: &Val) -> Val {
     let on_or_below = b.compare("GE", &i, &j, "SIGNED");
     let zeros = splat(b, 0.0, &square);
     let masked = b.select(&below, &rows, &zeros);
-    let sums = b.reduce_window_prefix_add(&masked, rank - 1);
+    let sums = prefix_add(b, &masked, rank - 1);
     let neg_inf = splat(b, f32::NEG_INFINITY, &square);
     let sums = b.select(&on_or_below, &sums, &neg_inf);
     b.exponential(&sums)
@@ -148,7 +186,7 @@ fn chunked_ssd(
     let a_b = b.broadcast(a, &[1], vec![tp, hh]);
     let ad = b.multiply(&dt, &a_b);
     let ad = b.reshape(&ad, vec![nc, q, hh]);
-    let acum = b.reduce_window_prefix_add(&ad, 1); // [nc, q, H]
+    let acum = prefix_add(b, &ad, 1); // [nc, q, H]
 
     // 1. Intra-chunk (diagonal blocks): (C B^T  o  L) (x dt).
     let ad_t = b.transpose(&ad, &[0, 2, 1]); // [nc, H, q]
@@ -246,15 +284,7 @@ fn chunked_ssd(
 
 /// Shift `v` down by `by` rows along axis 0, filling with `fill`.
 fn shift_rows(b: &mut Builder, v: &Val, by: usize, fill: f32) -> Val {
-    let rank = v.ty.shape.len();
-    let t = v.ty.shape[0];
-    let mut keep: Vec<(usize, usize)> = v.ty.shape.iter().map(|&s| (0, s)).collect();
-    keep[0] = (0, t - by);
-    let kept = b.slice(v, &keep);
-    let fill = b.const_f32(fill);
-    let mut low = vec![0; rank];
-    low[0] = by;
-    b.pad(&kept, &fill, &low, &vec![0; rank])
+    shift_along(b, v, 0, by, fill)
 }
 
 /// Log-depth inclusive scan of `h_t = a_t h_{t-1} + u_t`, without `D`.

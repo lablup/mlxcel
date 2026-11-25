@@ -20,7 +20,7 @@ use super::builder::{Builder, Precision, Ty};
 use super::config::{SsmConfig, SsmKind};
 use super::model::{ProbeMode, emit_ssm_probe, emit_ssm_probe_with};
 use super::ssm;
-use super::ssm_scan::SsmPrefillForm;
+use super::ssm_scan::{SsmPrefillForm, prefix_add};
 
 const HIDDEN: usize = 16;
 
@@ -32,7 +32,14 @@ fn signature(graph: &str) -> &str {
 }
 
 fn assert_lowerable(graph: &str) {
-    for banned in ["scatter", "stablehlo.while", "stablehlo.custom_call"] {
+    // `reduce_window` is banned because IREE turns the prefix-sum form into
+    // `iree_linalg_ext.scan`, which IREE-Metal miscompiles (issue #3343).
+    for banned in [
+        "scatter",
+        "stablehlo.while",
+        "stablehlo.custom_call",
+        "reduce_window",
+    ] {
         assert!(!graph.contains(banned), "probe must not emit {banned}");
     }
 }
@@ -147,8 +154,66 @@ fn ssm_prefill_probe_signature_and_results() {
     // The tail is a dynamic_slice at real_len; padded rows are masked by select.
     assert!(graph.contains("stablehlo.dynamic_slice"));
     assert!(graph.contains("stablehlo.compare LT"));
-    assert!(graph.contains("stablehlo.reduce_window"));
     assert_lowerable(&graph);
+}
+
+/// Issue #3343: IREE-Metal returns unrelated values for the
+/// `iree_linalg_ext.scan` that a prefix-sum `reduce_window` becomes, so the
+/// production chunked prefill returned NaN `y` and a wrong `h_T` there. No
+/// prefill form may emit `reduce_window` at any chunk geometry or precision.
+#[test]
+fn ssm_prefill_never_emits_reduce_window() {
+    let forms = [
+        SsmPrefillForm::ChunkedSsd,
+        SsmPrefillForm::Associative,
+        SsmPrefillForm::Sequential,
+    ];
+    for precision in [Precision::F32, Precision::F16, Precision::Bf16] {
+        for form in forms {
+            // One chunk, an exact multiple, and a ragged last chunk.
+            for (rows, chunk) in [(16, 128), (16, 4), (19, 8)] {
+                let mut c = SsmConfig::tiny_mamba2();
+                c.chunk_size = chunk;
+                let graph =
+                    emit_ssm_probe_with(&c, HIDDEN, rows, ProbeMode::Prefill, form, precision);
+                assert!(
+                    !graph.contains("reduce_window"),
+                    "{form:?} at rows={rows} chunk={chunk} {precision:?} emits reduce_window"
+                );
+            }
+        }
+    }
+}
+
+/// The replacement prefix sum is a log-depth chain of shifted adds in f32:
+/// `ceil(log2(len))` levels, each shifting by the next power of two along the
+/// scanned axis only, whatever the projection precision.
+#[test]
+fn prefix_add_is_a_log_depth_f32_shift_chain() {
+    for (len, levels) in [(1, 0), (2, 1), (3, 2), (8, 3), (9, 4), (128, 7)] {
+        let mut b = Builder::new().with_precision(Precision::F16);
+        let v = Builder::arg(0, Ty::f32(vec![2, len, 5]));
+        let out = prefix_add(&mut b, &v, 1);
+        let body = b.body();
+        assert_eq!(out.ty.shape, [2, len, 5]);
+        assert_eq!(out.ty.elt, "f32");
+        assert_eq!(body.matches("stablehlo.add").count(), levels, "len={len}");
+        assert_eq!(body.matches("stablehlo.pad").count(), levels, "len={len}");
+        assert_eq!(body.matches("stablehlo.slice").count(), levels, "len={len}");
+        for level in 0..levels {
+            let step = 1usize << level;
+            assert!(
+                body.contains(&format!("edge_padding_low = array<i64: 0, {step}, 0>")),
+                "len={len} misses the shift by {step}: {body}"
+            );
+            assert!(
+                body.contains(&format!("[0:2, 0:{}, 0:5]", len - step)),
+                "len={len} misses the slice for shift {step}: {body}"
+            );
+        }
+        assert!(!body.contains("f16"), "the scan must stay f32: {body}");
+        assert!(!body.contains("reduce_window"));
+    }
 }
 
 #[test]
