@@ -65,6 +65,19 @@ fn read_int_array(path: &std::path::Path, key: &str) -> Vec<i32> {
         .collect()
 }
 
+/// The oracle's top-1 minus top-2 logit gap and runner-up token at `step`, when
+/// the oracle was written with `oracle_continuation.py --top2`.
+fn oracle_top2(path: &std::path::Path, step: usize) -> Option<(f64, i64)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let gap = value.get("ref_top2_gaps")?.get(step)?.as_f64()?;
+    let runner = value.get("ref_top2_ids")?.get(step)?.as_i64()?;
+    Some((gap, runner))
+}
+
+/// The epic's near-tie tolerance for reduced-precision runs (issue #3343).
+const NEAR_TIE_GAP: f64 = 0.01;
+
 fn main() {
     let model = PathBuf::from(arg("--model", "models/qwen2.5-0.5b-instruct-bf16"));
     let oracle = PathBuf::from(arg("--oracle", "/tmp/qwen_oracle.json"));
@@ -111,6 +124,18 @@ fn main() {
             let hi = (j + 3).min(m);
             println!("  ref[{lo}..{hi}] = {:?}", &reference[lo..hi]);
             println!("  got[{lo}..{hi}] = {:?}", &got[lo..hi]);
+            // Reported only: the exit status stays strict. Only this first
+            // divergence is meaningful, later tokens follow a different prefix.
+            if let Some((gap, runner)) = oracle_top2(&oracle, j) {
+                println!(
+                    "  oracle top-2 logit gap at {j} = {gap:.6} (runner-up id {runner}): {}",
+                    if gap < NEAR_TIE_GAP {
+                        "NEAR-TIE (gap < 0.01)"
+                    } else {
+                        "not a near-tie"
+                    }
+                );
+            }
         }
     }
     println!(
