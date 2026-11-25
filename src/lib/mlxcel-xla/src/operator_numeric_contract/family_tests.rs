@@ -218,23 +218,23 @@ const QWEN3: &[&str] = &[
 ];
 
 const MOLMO: &[&str] = &[
-    "encoder.attention-context dense-matmul f32 f32>f32 backend-algorithm dense",
-    "encoder.attention-projection dense-matmul affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
+    "encoder.attention-context dense-matmul f32 f32>f16 backend-algorithm dense",
+    "encoder.attention-projection dense-matmul affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
     "encoder.attention-scores dense-matmul f32 f32>f32 backend-algorithm dense",
     "encoder.attention-softmax attention-softmax f32 f32>f32 backend-algorithm dense",
-    "encoder.mlp-activation-projection gelu-projection affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
-    "encoder.mlp-down-projection dense-matmul affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
-    "encoder.norm layer-norm f16 f32>f32 backend-algorithm dense",
-    "encoder.residual-add residual-add f32 f32>f32 sequential dense",
-    "patch-embedding dense-matmul f16 f32>f32 backend-algorithm dense",
+    "encoder.mlp-activation-projection gelu-projection affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
+    "encoder.mlp-down-projection dense-matmul affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
+    "encoder.norm layer-norm f16 f32>f16 backend-algorithm dense",
+    "encoder.residual-add residual-add f32 f32>f16 sequential dense",
+    "patch-embedding dense-matmul f16 f32>f16 backend-algorithm dense",
     "pool.attention-context dense-matmul f32 f32>f32 backend-algorithm dense",
-    "pool.attention-projection dense-matmul affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
+    "pool.attention-projection dense-matmul affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
     "pool.attention-scores dense-matmul f32 f32>f32 backend-algorithm dense",
     "pool.attention-softmax attention-softmax f32 f32>f32 backend-algorithm dense",
-    "projector.down-projection dense-matmul affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
-    "projector.silu-projection silu-projection affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
-    "projector.up-projection dense-matmul affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
-    "weight-dequantize affine-q4-dequantize affine-u4 f32>f32 sequential packed-affine-in-graph",
+    "projector.down-projection dense-matmul affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
+    "projector.silu-projection silu-projection affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
+    "projector.up-projection dense-matmul affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
+    "weight-dequantize affine-q4-dequantize affine-u4 f32>f16 sequential packed-affine-in-graph",
 ];
 
 const MOLMO2: &[&str] = &[
@@ -416,7 +416,7 @@ fn molmo_eight_bit_checkpoints_declare_q8_dequantization() {
     );
     let lines = fixed("m", &molmo_vision_operators(8), Precision::F32, packed);
     assert!(lines.contains(
-        &"weight-dequantize affine-q8-dequantize affine-u8 f32>f32 sequential packed-affine-in-graph"
+        &"weight-dequantize affine-q8-dequantize affine-u8 f32>f16 sequential packed-affine-in-graph"
             .to_string()
     ));
 }

@@ -68,6 +68,7 @@ mod molmo2_config;
 mod molmo2_vision;
 mod molmo_vision;
 mod molmo_vision_config;
+mod molmo_vision_f16;
 mod molmo_vision_ops;
 mod nemotron_h_config;
 pub(crate) mod numeric_ops;
