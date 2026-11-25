@@ -206,3 +206,45 @@ fn all_admin_mutations_are_control_limited_without_capping_data_plane() {
         }
     }
 }
+
+fn loopback_policy(port: u16) -> WebUiSecurityPolicy {
+    let hosts: Vec<String> = ["127.0.0.1", "[::1]", "localhost"]
+        .iter()
+        .map(|host| format!("{host}:{port}"))
+        .collect();
+    let origins = hosts
+        .iter()
+        .map(|host| HeaderValue::from_str(&format!("http://{host}")).unwrap())
+        .collect();
+    WebUiSecurityPolicy::new(hosts, origins).unwrap()
+}
+
+fn sorted_hosts(policy: &WebUiSecurityPolicy) -> Vec<String> {
+    let mut hosts = policy.allowed_hosts.read().unwrap().clone();
+    hosts.sort();
+    hosts
+}
+
+#[test]
+fn exact_origin_update_keeps_loopback_aliases() {
+    let policy = loopback_policy(18037);
+    policy
+        .update_exact_origin(origin("http://127.0.0.1:18037"))
+        .unwrap();
+    assert_eq!(
+        sorted_hosts(&policy),
+        vec!["127.0.0.1:18037", "[::1]:18037", "localhost:18037"]
+    );
+}
+
+#[test]
+fn exact_origin_update_moves_port_zero_aliases_to_bound_port() {
+    let policy = loopback_policy(0);
+    policy
+        .update_exact_origin(origin("http://127.0.0.1:54321"))
+        .unwrap();
+    assert_eq!(
+        sorted_hosts(&policy),
+        vec!["127.0.0.1:54321", "[::1]:54321", "localhost:54321"]
+    );
+}
