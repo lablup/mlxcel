@@ -115,9 +115,9 @@ pub use resolver::resolve_model_source_quietly_with_options;
 pub use resolver::resolve_model_source_with_options;
 pub use resolver::resolve_model_source_with_override;
 pub use store::{
-    RemoveError, RemoveOutcome, StoredModel, dir_size, hf_cache_snapshot, list_models,
-    list_models_with_override, model_dir, model_dir_with_override, models_root, remove_model,
-    remove_model_with_override, store_root,
+    RemoveError, RemoveOutcome, StoredModel, dir_size, ensure_single_model_with_override,
+    hf_cache_snapshot, list_models, list_models_with_override, model_dir, model_dir_with_override,
+    models_root, remove_model, remove_model_with_override, store_root,
 };
 
 use anyhow::{Context, Result, anyhow};

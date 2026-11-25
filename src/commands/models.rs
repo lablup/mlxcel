@@ -37,8 +37,8 @@ use anyhow::{Result, anyhow};
 use serde::Serialize;
 
 use mlxcel::downloader::{
-    RemoveOutcome, StoredModel, dir_size, list_models_with_override, models_root,
-    remove_model_with_override,
+    RemoveOutcome, StoredModel, dir_size, ensure_single_model_with_override,
+    list_models_with_override, models_root, remove_model_with_override,
 };
 
 /// Maximum rendered width of the `NAME` column in the default/verbose tables.
@@ -515,7 +515,12 @@ pub(crate) fn run_remove(
         }
     }
 
-    // Store hit. Confirm unless --yes.
+    // Store hit. Refuse an owner directory or a path inside a model before
+    // the prompt, so the operator is never asked to confirm deleting more
+    // than one model (`mlxcel rm acme` would otherwise offer all of `acme/*`).
+    ensure_single_model_with_override(repo_id, models_dir)?;
+
+    // Confirm unless --yes.
     if !yes {
         let size = dir_size_for_prompt(&target);
         if !confirm_removal(repo_id, &target.display().to_string(), &size)? {
@@ -1078,5 +1083,31 @@ mod tests {
         // A path that is not under $HOME is returned unchanged.
         let p = "/var/lib/mlxcel/models";
         assert_eq!(contract_home(p), p);
+    }
+
+    // ── rm ───────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_remove_refuses_owner_id_even_with_yes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_root = tmp.path();
+        for name in ["one", "two"] {
+            let dir = models_root.join("acme").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        }
+
+        let err = run_remove("acme", true, None, Some(models_root))
+            .expect_err("`mlxcel rm acme -y` must not delete the whole owner directory");
+
+        assert!(err.to_string().contains("<owner>/<name>"), "{err}");
+        assert!(
+            models_root.join("acme/one").is_dir(),
+            "acme/one must survive"
+        );
+        assert!(
+            models_root.join("acme/two").is_dir(),
+            "acme/two must survive"
+        );
     }
 }

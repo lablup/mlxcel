@@ -497,6 +497,11 @@ pub enum RemoveError {
     /// enforced defensively so a future regression can never delete outside
     /// the store.
     OutsideStore(PathBuf),
+    /// The resolved target exists but is not one model snapshot: an owner
+    /// directory (`rm acme` would otherwise delete every `acme/*` model) or a
+    /// directory inside a model. Refused so a partial id can never widen the
+    /// deletion beyond the single model `mlxcel list` reports.
+    NotAModel(PathBuf),
     /// Deleting the store directory failed (I/O error), with the offending
     /// path and underlying error.
     Io {
@@ -517,6 +522,12 @@ impl std::fmt::Display for RemoveError {
             RemoveError::OutsideStore(p) => write!(
                 f,
                 "refusing to remove {}: resolved path is outside the model store",
+                p.display()
+            ),
+            RemoveError::NotAModel(p) => write!(
+                f,
+                "refusing to remove {}: it is not a single model. \
+                 Pass the full <owner>/<name> id shown by `mlxcel list`",
                 p.display()
             ),
             RemoveError::Io { path, source } => {
@@ -622,6 +633,7 @@ fn remove_model_under(
     }
 
     if target.is_dir() {
+        ensure_single_model_under(models_root, repo_id)?;
         let size = dir_size(&target);
         std::fs::remove_dir_all(&target).map_err(|source| RemoveError::Io {
             path: target.clone(),
@@ -639,6 +651,42 @@ fn remove_model_under(
     }
 
     Ok(RemoveOutcome::NotFound)
+}
+
+/// Refuse a `repo_id` whose store directory exists but is not one model, so
+/// callers can reject it before prompting for confirmation.
+///
+/// Uses the same override-aware [`models_root`] as
+/// [`remove_model_with_override`]. Returns `Ok(())` when the directory does
+/// not exist: there is nothing to protect, and the caller's not-found / HF
+/// cache handling applies.
+pub fn ensure_single_model_with_override(
+    repo_id: &str,
+    override_dir: Option<&Path>,
+) -> Result<(), RemoveError> {
+    let models_root = models_root(override_dir).ok_or(RemoveError::NoStoreRoot)?;
+    ensure_single_model_under(&models_root, repo_id)
+}
+
+/// Accept only the directories [`list_models_with_override`] reports as one
+/// model: `<owner>/<name>`, or a bare `<name>` that is itself a snapshot.
+/// A single segment that is not a snapshot is an owner directory holding
+/// several models, and three or more segments point inside a model.
+fn ensure_single_model_under(models_root: &Path, repo_id: &str) -> Result<(), RemoveError> {
+    let target = model_dir_under(models_root, repo_id);
+    if !target.is_dir() {
+        return Ok(());
+    }
+    let is_one_model = match sanitize_repo_id_segments(repo_id).len() {
+        1 => snapshot_is_complete(&target),
+        2 => true,
+        _ => false,
+    };
+    if is_one_model {
+        Ok(())
+    } else {
+        Err(RemoveError::NotAModel(target))
+    }
 }
 
 /// True when `child` is `base` itself or lexically nested under it.
@@ -1218,6 +1266,72 @@ mod tests {
         assert!(
             outside.exists(),
             "file outside the store must not be removed"
+        );
+    }
+
+    // ── remove deletes exactly one model, never an owner directory ───────────
+
+    #[test]
+    fn remove_model_in_refuses_owner_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let one = make_store_snapshot(root, "acme/one", 10);
+        let two = make_store_snapshot(root, "acme/two", 10);
+
+        let outcome = remove_model_in(root, "acme", None);
+
+        let err = outcome.expect_err("an owner id must not delete every model under it");
+        assert!(err.to_string().contains("<owner>/<name>"), "{err}");
+        assert!(one.is_dir(), "acme/one must survive");
+        assert!(two.is_dir(), "acme/two must survive");
+    }
+
+    #[test]
+    fn remove_model_in_refuses_owner_directory_spelled_with_extra_separators() {
+        // Each of these sanitizes to the single segment `acme`, so it must be
+        // refused just like the bare owner id.
+        for spelling in ["acme/", "acme/.", "./acme", "acme//"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            let one = make_store_snapshot(root, "acme/one", 10);
+
+            let outcome = remove_model_in(root, spelling, None);
+
+            assert!(outcome.is_err(), "{spelling:?} must be refused");
+            assert!(one.is_dir(), "{spelling:?} must not delete acme/one");
+        }
+    }
+
+    #[test]
+    fn remove_model_in_refuses_directory_inside_a_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let model = make_store_snapshot(root, "acme/one", 10);
+        let component = model.join("text_encoder");
+        std::fs::create_dir_all(&component).unwrap();
+        std::fs::write(component.join("config.json"), b"{}").unwrap();
+
+        let outcome = remove_model_in(root, "acme/one/text_encoder", None);
+
+        assert!(outcome.is_err(), "a path inside a model is not a model id");
+        assert!(component.is_dir(), "the model's component must survive");
+    }
+
+    #[test]
+    fn remove_model_in_still_deletes_bare_id_snapshot() {
+        // `list` reports a snapshot stored directly at models/<name> under the
+        // bare id, so `rm <name>` must keep removing it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = make_store_snapshot(root, "gpt2", 10);
+
+        match remove_model_in(root, "gpt2", None).unwrap() {
+            RemoveOutcome::Removed { path, .. } => assert_eq!(path, dir),
+            other => panic!("expected Removed, got {other:?}"),
+        }
+        assert!(
+            !dir.exists(),
+            "bare-id snapshot should be gone after removal"
         );
     }
 
