@@ -1720,19 +1720,11 @@ const AGGRESSIVE_FUSION_FLAG: &str = "--iree-dispatch-creation-enable-aggressive
 fn decode_compile_flags(cfg: &RuntimeConfig, flags: &[String]) -> Vec<String> {
     let mut decode_flags = flags.to_vec();
     match cfg {
-        RuntimeConfig::Dense(config) if has_softmax_moe(config) => {}
+        RuntimeConfig::Dense(config) if config.has_softmax_moe() => {}
         RuntimeConfig::Dense(_) => decode_flags.push(AGGRESSIVE_FUSION_FLAG.to_string()),
         RuntimeConfig::Gemma3n(_) => {}
     }
     decode_flags
-}
-
-/// Whether `config` routes any MoE layer with the softmax router.
-fn has_softmax_moe(config: &Config) -> bool {
-    config
-        .moe
-        .as_ref()
-        .is_some_and(|moe| moe.scoring == crate::emitter::MoeScoring::Softmax)
 }
 
 #[cfg(test)]

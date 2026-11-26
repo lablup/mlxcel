@@ -819,6 +819,15 @@ pub struct Config {
 }
 
 impl Config {
+    /// Whether any MoE layer routes with the softmax router. The IREE decode
+    /// compile keeps the default dispatch fusion for these configs (#3349).
+    #[must_use]
+    pub fn has_softmax_moe(&self) -> bool {
+        self.moe
+            .as_ref()
+            .is_some_and(|moe| moe.scoring == MoeScoring::Softmax)
+    }
+
     /// Hard-coded Llama-3.2-1B-Instruct values (config.json of the spike model).
     pub fn llama_3_2_1b() -> Self {
         Config {

@@ -128,6 +128,35 @@ fn jamba_tiny_moe_schedule_and_hf_router() {
     );
 }
 
+/// The IREE decode compile drops aggressive fusion for exactly these configs
+/// (`iree::decode_compile_flags`, #3349): a softmax router, not any MoE.
+#[test]
+fn softmax_moe_selects_the_unfused_decode_compile() {
+    for (what, json, softmax) in [
+        ("jamba MoE", TINY.to_string(), true),
+        ("jamba 3B dense", REASONING_3B.to_string(), false),
+        ("jamba one expert", with("num_experts", 1.into()), false),
+        (
+            "qwen2_moe",
+            include_str!("../../assets/qwen2-moe-tiny/config.json").to_string(),
+            true,
+        ),
+        (
+            "olmoe",
+            include_str!("../../assets/olmoe-tiny/config.json").to_string(),
+            true,
+        ),
+        (
+            "llama",
+            include_str!("../../assets/llama-3.2-1b/config.json").to_string(),
+            false,
+        ),
+    ] {
+        let c = Config::from_json_str(&json).unwrap();
+        assert_eq!(c.has_softmax_moe(), softmax, "{what}");
+    }
+}
+
 #[test]
 fn jamba_config_rejections() {
     for (key, value, needle) in [
