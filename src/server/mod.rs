@@ -70,6 +70,7 @@ mod realtime_session;
 pub(crate) mod reasoning_echo;
 pub mod reasoning_format;
 pub(crate) mod reasoning_steering;
+mod reasoning_steering_startup_guard;
 mod request_options;
 pub mod rerank_maxsim;
 pub mod rerank_model;

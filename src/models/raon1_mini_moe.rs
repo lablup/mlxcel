@@ -66,6 +66,22 @@ impl RaonSituMlp {
         })
     }
 
+    /// Input widths (issue #3457): `gate_proj` / `up_proj` take `hidden`,
+    /// `down_proj` takes `intermediate`.
+    pub fn check_input_widths(
+        &self,
+        prefix: &str,
+        hidden: usize,
+        intermediate: usize,
+    ) -> Result<(), String> {
+        self.gate_proj
+            .check_input_width(&format!("{prefix}.gate_proj"), hidden)?;
+        self.up_proj
+            .check_input_width(&format!("{prefix}.up_proj"), hidden)?;
+        self.down_proj
+            .check_input_width(&format!("{prefix}.down_proj"), intermediate)
+    }
+
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         use mlxcel_core::row_invariant::linear;
         let gate = linear(&self.gate_proj, x);
@@ -185,6 +201,30 @@ impl RaonMoe {
             steering,
             spec,
         })
+    }
+
+    /// Input widths of the routed experts (`moe_intermediate`) and the
+    /// shared experts (`shared_intermediate`) (issue #3457).
+    pub fn check_input_widths(
+        &self,
+        prefix: &str,
+        moe_intermediate: usize,
+        shared_intermediate: usize,
+    ) -> Result<(), String> {
+        let hidden = self.spec.hidden_size;
+        self.switch_mlp.check_input_widths(
+            &format!("{prefix}.switch_mlp"),
+            hidden,
+            moe_intermediate,
+        )?;
+        match &self.shared_experts {
+            Some(shared) => shared.check_input_widths(
+                &format!("{prefix}.shared_experts"),
+                hidden,
+                shared_intermediate,
+            ),
+            None => Ok(()),
+        }
     }
 
     /// The layer's reasoning-effort steering vector, when the layer is steered.

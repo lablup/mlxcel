@@ -193,7 +193,7 @@ impl RaonDeltaAttention {
             mlxcel_core::reshape(&dt_bias, &[spec.num_heads as i32, spec.head_dim as i32]);
         let o_norm = flat_f32(weights, &format!("{prefix}.o_norm.weight"), spec.head_dim)?;
 
-        Ok(Self {
+        let layer = Self {
             q_proj: linear("q_proj")?,
             k_proj: linear("k_proj")?,
             v_proj: linear("v_proj")?,
@@ -209,7 +209,39 @@ impl RaonDeltaAttention {
             dt_bias,
             o_norm,
             spec,
-        })
+        };
+        layer.check_input_widths(weights, prefix)?;
+        Ok(layer)
+    }
+
+    /// Each projection's input width against the spec (issue #3457): the
+    /// x-side projections take `hidden_size`, `f_b_proj` takes `f_a_proj`'s
+    /// output rows, `o_proj` takes `num_heads * head_dim`.
+    fn check_input_widths(&self, weights: &WeightMap, prefix: &str) -> Result<(), String> {
+        let hidden = self.spec.hidden_size;
+        for (leaf, layer) in [
+            ("q_proj", &self.q_proj),
+            ("k_proj", &self.k_proj),
+            ("v_proj", &self.v_proj),
+            ("g_proj", &self.g_proj),
+            ("f_a_proj", &self.f_a_proj),
+            ("b_proj", &self.b_proj),
+            ("rda_w_proj", &self.w_proj),
+        ] {
+            layer.check_input_width(&format!("{prefix}.{leaf}"), hidden)?;
+        }
+        let f_a_key = format!("{prefix}.f_a_proj.weight");
+        let rank = weights
+            .get(&f_a_key)
+            .and_then(|w| mlxcel_core::array_shape(w).first().copied())
+            .and_then(|r| usize::try_from(r).ok())
+            .ok_or_else(|| format!("Missing weight: {f_a_key}"))?;
+        self.f_b_proj
+            .check_input_width(&format!("{prefix}.f_b_proj"), rank)?;
+        self.o_proj.check_input_width(
+            &format!("{prefix}.o_proj"),
+            self.spec.num_heads * self.spec.head_dim,
+        )
     }
 
     fn projection_dim(&self) -> i32 {

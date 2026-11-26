@@ -396,3 +396,61 @@ fn native_batched_decode_matches_per_sequence_decode() {
 }
 
 crate::models::last_row_logits_harness::last_row_case!(raon1_mini_last_row_logits, tiny_model);
+
+/// The load error for the tiny checkpoint after the two edits:
+/// `raw` edits the checkpoint's own layout, `sanitized` the loader's.
+fn load_error(raw: impl FnOnce(&mut WeightMap), sanitized: impl FnOnce(&mut WeightMap)) -> String {
+    let config = tiny_config();
+    let mut weights = raw_weights();
+    raw(&mut weights);
+    let mut weights = Raon1MiniModel::sanitize_weights(weights, &config).expect("sanitize");
+    sanitized(&mut weights);
+    match Raon1MiniModel::from_weights(&weights, &config) {
+        Ok(_) => panic!("a projection with the wrong input width must fail the load"),
+        Err(err) => err,
+    }
+}
+
+/// A projection whose input width disagrees with the config is a load error
+/// naming the tensor (issue #3457), not an abort in the first matmul. Row
+/// counts alone cannot catch it: the plane is otherwise self-consistent.
+#[test]
+fn a_projection_with_the_wrong_input_width_fails_the_load_by_name() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let key = "model.layers.0.self_attn.q_proj.weight";
+    let err = load_error(
+        |w| {
+            let data = vec![0.1f32; RDA_HEADS * RDA_DIM * (HIDDEN + 8)];
+            let shape = [(RDA_HEADS * RDA_DIM) as i32, (HIDDEN + 8) as i32];
+            w.insert(key.into(), mlxcel_core::from_slice_f32(&data, &shape));
+        },
+        |_| {},
+    );
+    assert!(err.contains(key), "{err}");
+    assert!(err.contains(&(HIDDEN + 8).to_string()), "{err}");
+
+    // The routed experts' down projection, stacked and MXFP8-packed: one more
+    // quantization group on the input axis than `moe_intermediate_size`.
+    let prefix = "model.layers.1.moe.switch_mlp.down_proj";
+    let err = load_error(
+        |_| {},
+        |w| {
+            let weight = &w[&format!("{prefix}.weight")];
+            let scales = &w[&format!("{prefix}.scales")];
+            let (ws, ss) = (
+                mlxcel_core::array_shape(weight),
+                mlxcel_core::array_shape(scales),
+            );
+            let (wd, sd) = (
+                mlxcel_core::array_dtype(weight),
+                mlxcel_core::array_dtype(scales),
+            );
+            let words_per_group = ws[2] / ss[2];
+            let wider = mlxcel_core::zeros(&[ws[0], ws[1], ws[2] + words_per_group], wd);
+            let wider_scales = mlxcel_core::zeros(&[ss[0], ss[1], ss[2] + 1], sd);
+            w.insert(format!("{prefix}.weight"), wider);
+            w.insert(format!("{prefix}.scales"), wider_scales);
+        },
+    );
+    assert!(err.contains(&format!("{prefix}.weight")), "{err}");
+}
