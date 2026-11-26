@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict Falcon-H1 displayed CLI/concurrent HTTP parity; run under the GPU guard.
+"""Strict displayed CLI/concurrent HTTP parity (Falcon-H1, Jamba); run under the GPU guard.
 
 Requires tokenizers. Select --device explicitly and use the pinned IREE environment.
 The CLI parser removes only its documented preamble and two framing newlines;
@@ -33,6 +33,8 @@ parser.add_argument('--device', choices=['local-task', 'cuda', 'hip'], required=
 parser.add_argument('--bin-dir', type=Path, default=ROOT / 'target/test-fast')
 parser.add_argument('--binary-source-head', required=True)
 parser.add_argument('--http-mode', choices=['nonstream', 'sse', 'both'], default='both')
+# The default is the pinned Falcon-H1 Tiny90M revision; Jamba (#3349) passes its own.
+parser.add_argument('--checkpoint-revision', default='e6389502a0b12cd8da894b395ba5bf7436873b16')
 args = parser.parse_args()
 OUT, MODEL, ORACLE = args.out.resolve(), args.model.resolve(), args.oracle.resolve()
 PROMPTS = [
@@ -155,7 +157,7 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     provenance: dict[str, object] = {
-        'head': head, 'binary_source_head': args.binary_source_head, 'server_ctx_size': 2048, 'checkpoint_revision': 'e6389502a0b12cd8da894b395ba5bf7436873b16',
+        'head': head, 'binary_source_head': args.binary_source_head, 'server_ctx_size': 2048, 'checkpoint_revision': args.checkpoint_revision,
         'model': str(MODEL), 'precision': 'f32', 'device': args.device,
         'context_capacity_override': 256, 'max_batch_size': 4,
         'http_mode': args.http_mode,

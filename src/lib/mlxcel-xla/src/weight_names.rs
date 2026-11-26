@@ -190,7 +190,8 @@ pub(crate) fn scheme_names(scheme: WeightScheme) -> SchemeNames {
             pre_ff_norm: "unused.pre_ff_norm.weight",
             post_ff_norm: "unused.post_ff_norm.weight",
         },
-        WeightScheme::FalconH1 => SchemeNames {
+        // Jamba shares Falcon-H1's outer names; its MoE router is `router`.
+        WeightScheme::FalconH1 | WeightScheme::Jamba => SchemeNames {
             final_norm: "model.final_layernorm.weight",
             down: "feed_forward.down_proj.weight",
             gate: "feed_forward.gate_proj.weight",
@@ -262,6 +263,15 @@ pub(crate) fn scheme_names(scheme: WeightScheme) -> SchemeNames {
             pre_ff_norm: "unused.pre_ff_norm.weight",
             post_ff_norm: "unused.post_ff_norm.weight",
         },
+    }
+}
+
+/// The MoE router tensor stem under a layer's `weight_prefix`: Jamba names it
+/// `router`, every other MoE family `gate`.
+pub(crate) fn moe_router_stem(scheme: WeightScheme) -> &'static str {
+    match scheme {
+        WeightScheme::Jamba => "router",
+        _ => "gate",
     }
 }
 

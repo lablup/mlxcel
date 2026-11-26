@@ -124,6 +124,37 @@ fn an_emitter_loadable_nemotron_h_gets_no_prompt_cache_or_apc() {
     assert_refused(dir.path(), "tiny nemotron_h hybrid");
 }
 
+/// Jamba (issue #3349) is attention + Mamba1 + MoE: it has a KV cache, so the
+/// guard must still refuse it through its recurrent state, for both the tiny
+/// MoE fixture and the real 3B checkpoint's dense schedule.
+#[test]
+fn an_emitter_loadable_jamba_gets_no_prompt_cache_or_apc() {
+    let tiny = include_str!("../lib/mlxcel-xla/assets/jamba/config.json");
+    let real_3b = r#"{"model_type": "jamba", "hidden_size": 2560,
+      "intermediate_size": 8192, "num_hidden_layers": 28, "vocab_size": 65536,
+      "num_attention_heads": 20, "num_key_value_heads": 1,
+      "attn_layer_period": 14, "attn_layer_offset": 7,
+      "expert_layer_period": 2, "expert_layer_offset": 1, "num_experts": 1,
+      "num_experts_per_tok": 1, "mamba_d_state": 16, "mamba_d_conv": 4,
+      "mamba_expand": 2, "mamba_dt_rank": 160, "mamba_conv_bias": true,
+      "mamba_proj_bias": false, "hidden_act": "silu", "rms_norm_eps": 1e-06,
+      "sliding_window": null, "tie_word_embeddings": true}"#;
+    for (what, config) in [("tiny jamba MoE", tiny), ("jamba 3B dense", real_3b)] {
+        assert_eq!(
+            mlxcel_xla::config_json_has_recurrent_state(config),
+            Ok(true),
+            "{what}"
+        );
+        let dir = model_dir(config);
+        assert_eq!(
+            xla_recurrent_family(dir.path()).as_deref(),
+            Some("jamba"),
+            "{what}"
+        );
+        assert_refused(dir.path(), what);
+    }
+}
+
 #[test]
 fn an_emitter_loadable_plamo2_gets_no_prompt_cache_or_apc() {
     let config = include_str!("../lib/mlxcel-xla/assets/plamo2/config.json");

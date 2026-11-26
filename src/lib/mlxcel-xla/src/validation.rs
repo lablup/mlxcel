@@ -652,10 +652,40 @@ pub(crate) static PLAMO2: ArchFixture = ArchFixture {
     ],
 };
 
+/// Jamba (synthetic tiny, issue #3349): Mamba1 with learned dt/B/C RMSNorms,
+/// attention without RoPE, and dense and softmax-routed MoE FFNs, one block of
+/// each Mamba1/attention by dense/MoE combination. The weights and HF parity
+/// evidence come from `spike/openxla/jamba_moe_fixture.py`.
+pub(crate) static JAMBA: ArchFixture = ArchFixture {
+    arch: "jamba",
+    config_json: include_str!("../assets/jamba/config.json"),
+    graphs: &[
+        GraphFixture {
+            kind: GraphKind::Decode { sample: true },
+            golden_name: "decode.mlir",
+            golden: include_str!("../assets/jamba/decode.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: true },
+            golden_name: "prefill.mlir",
+            golden: include_str!("../assets/jamba/prefill.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::DecodeRagged {
+                b_max: 4,
+                sample: false,
+            },
+            golden_name: "decode_ragged_logits_b4.mlir",
+            golden: include_str!("../assets/jamba/decode_ragged_logits_b4.mlir"),
+        },
+    ],
+};
+
 pub(crate) static REGISTERED: &[&ArchFixture] = &[
     &NEMOTRON_H,
     &FALCON_H1,
     &PLAMO2,
+    &JAMBA,
     &LLAMA_3_2_1B,
     &COHERE,
     &COHERE2,

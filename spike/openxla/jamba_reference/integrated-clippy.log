@@ -1,0 +1,4 @@
+$ cargo clippy --profile test-fast -p mlxcel-xla --all-targets -- -D warnings
+   Compiling mlxcel-xla v0.9.0-beta.2 (/tmp/epic564-issue-3349/src/lib/mlxcel-xla)
+    Checking mlxcel-core v0.9.0-beta.2 (/tmp/epic564-issue-3349/src/lib/mlxcel-core)
+    Finished `test-fast` profile [optimized] target(s) in 5.02s

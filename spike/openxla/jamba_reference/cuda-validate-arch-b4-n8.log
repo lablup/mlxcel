@@ -1,0 +1,44 @@
+== [structural] byte-exact + per-family signature emitter gate (cargo test) ==
+
+running 10 tests
+test validation::tests::freeze_mamba1_goldens ... ok
+test validation::tests::precision_default_detection ... ok
+test validation::tests::freeze_goldens ... ok
+test validation::tests::freeze_moe_goldens ... ok
+test validation::tests::check_arch_detects_drift ... ok
+test validation::tests::dense_pack_families_reuse_proven_graphs ... ok
+test validation::tests::emit_graphs_drives_a_golden_less_arch ... ok
+test validation::tests::structural_families_emit_expected_signature ... ok
+test validation::tests::emit_all_reproduces_registered_goldens ... ok
+test validation::tests::registered_fixtures_are_byte_exact ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 585 filtered out; finished in 0.15s
+
+[structural] PASS
+== validate_arch: model=/tmp/epic564-models/jamba-3b device=cuda ==
+== [oracle] reusing existing oracle -> /tmp/epic564-plan/jamba-3b-oracle.json ==
+== [gate 1/2] token-exact single-seq (xla_oracle_check) ==
+model = /tmp/epic564-models/jamba-3b
+device = cuda, prompt = 6 tokens, reference = 40 tokens
+RESULT: TOKEN-EXACT PASS (OpenXLA greedy == HF oracle)
+== [gate 2/2] serve reference-exact (xla_batch_bench) ==
+model = /tmp/epic564-models/jamba-3b
+device = cuda, slots B_max = 4, requests N = 8, full prompt = 6, buckets = None, eos = [519]
+  req 0: len 6 cap 12  req 1: len 6 cap 23  req 2: len 6 cap 24  req 3: len 6 cap 17
+  req 4: len 6 cap 24  req 5: len 6 cap 24  req 6: len 6 cap 22  req 7: len 6 cap 24
+
+phase 1 load: reference engine (B_max=4, capacity 256) 9.91 s
+phase 1: captured 8 single-seq references (170 tokens, 6.42 tok/s sequential baseline, generation only)
+phase 2 load: batch engine (B_max=4, capacity 256) 33.68 s
+
+phase 2: 46 pump steps, 8 requests served, 170 tokens
+throughput: 5.18 tok/s batched (vs 6.42 tok/s sequential baseline, 0.8x)
+RESULT: REFERENCE-EXACT PASS (every request matches its single-seq reference)
+BENCH	device=cuda	B=4	N=8	tok_s=5.183	pass=true
+
+== summary ==
+structural (byte-exact) : PASS
+token-exact single-seq  : PASS
+serve reference-exact   : PASS
+RESULT: PASS (both execution gates)
+exit=0

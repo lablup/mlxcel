@@ -166,6 +166,11 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
      "Falcon-H1 StableHLO goldens", (
         "MLXCEL_FREEZE_FALCON_H1",
     )),
+    ("fixture-authoring: makes a #[cfg(test)] test in "
+     "mlxcel-xla/src/emitter/jamba_tests.rs rewrite the committed "
+     "Jamba StableHLO goldens", (
+        "MLXCEL_FREEZE_JAMBA",
+    )),
     ("test-only: original checkpoint path for the ignored Falcon-H1 "
      "shape-validation test in mlxcel-xla/src/emitter/falcon_h1_tests.rs", (
         "MLXCEL_FALCON_H1_MODEL",
