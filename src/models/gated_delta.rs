@@ -17,7 +17,7 @@
 //! This module provides the core gated delta net primitives used by models
 //! that employ hybrid transformer + linear attention architectures.
 //!
-//! Used by: Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear, KimiK3
+//! Used by: Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear, KimiK3, Raon1Mini
 //!
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gated_delta.py
 
@@ -166,7 +166,7 @@ fn compute_g_float32(a_log: &MlxArray, a: &MlxArray, dt_bias: &MlxArray) -> Uniq
 /// path behind [`gated_delta_ops`] is unchanged: the gate is a plain
 /// `[B, T, H, Dk]` (or `[B, T, H]`) float32 input either way.
 ///
-/// Used by: KimiK3
+/// Used by: KimiK3, Raon1Mini
 pub fn compute_g_lower_bounded(
     a_log: &MlxArray,
     a: &MlxArray,
@@ -286,7 +286,7 @@ pub fn gated_delta_step(
 ///
 /// Returns: (y: [B, T, Hv, Dv] in q dtype, state: [B, Hv, Dv, Dk] in float32)
 ///
-/// Used by: Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear, KimiK3
+/// Used by: Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear, KimiK3, Raon1Mini
 pub fn gated_delta_ops(
     q: &MlxArray,
     k: &MlxArray,

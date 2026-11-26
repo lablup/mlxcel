@@ -328,6 +328,12 @@ pub mod qwen4_exp;
 pub mod qwen4_exp_mtp_config;
 pub mod qwen4_exp_mtp_drafter;
 pub mod qwen4_exp_mtp_target;
+pub mod raon1_mini;
+mod raon1_mini_config;
+pub(crate) mod raon1_mini_moe;
+pub(crate) mod raon1_mini_sanitize;
+pub(crate) mod raon_mhc;
+pub(crate) mod raon_rda;
 pub mod recurrent_gemma;
 pub mod rwkv7;
 pub mod seed_oss;
@@ -494,6 +500,7 @@ pub use qwen3_next::Qwen3NextModel;
 pub use qwen3_vl::Qwen3VLModel;
 pub use qwen3_vl_moe::Qwen3VLMoeModel;
 pub use qwen4_exp::Qwen4ExpModel;
+pub use raon1_mini::Raon1MiniModel;
 pub use recurrent_gemma::GriffinModel;
 pub use rwkv7::Rwkv7;
 pub(crate) use sanitize::{
@@ -805,6 +812,9 @@ pub enum ModelType {
 
     // Kimi models
     KimiLinear,
+    /// KRAFTON Raon-1 mini (4-stream Raon_mHC residual, RDA gated-delta +
+    /// NoPE gated MLA, SiTU MLP, sigmoid-routed MXFP8 MoE).
+    Raon1Mini,
     KimiK3, // Kimi K3 text backbone (fused-QKV KDA + gated NoPE-MLA + latent SiTU MoE + AttnRes)
     KimiK3VLM, // Kimi K3 VLM (MoonViT3D tower + patchmergerv2 projector + the K3 backbone)
     KimiVL, // Kimi-VL (MoonViT vision encoder + DeepSeek-V3-style MoE text)
@@ -1060,6 +1070,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Kimi models
     ModelType::KimiLinear,
     ModelType::KimiK3,
+    ModelType::Raon1Mini,
     ModelType::KimiK3VLM,
     ModelType::KimiVL,
     ModelType::KimiK25,
@@ -1308,6 +1319,10 @@ impl ModelType {
             ModelType::KimiLinear => ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)"),
             ModelType::KimiK3 => (
                 "Kimi K3 (KDA + gated NoPE-MLA + latent SiTU MoE + AttnRes)",
+                "MoE (other)",
+            ),
+            ModelType::Raon1Mini => (
+                "Raon-1 mini (mHC streams, RDA + NoPE MLA, MXFP8 SiTU MoE)",
                 "MoE (other)",
             ),
             ModelType::KimiK3VLM => ("Kimi K3 VLM (MoonViT3D + K3 latent MoE)", "Kimi VLM"),
@@ -1747,6 +1762,7 @@ mod metadata_tests {
             GraniteMoeHybrid,
             KimiLinear,
             KimiK3,
+            Raon1Mini,
             KimiK3VLM,
             KimiVL,
             KimiK25,

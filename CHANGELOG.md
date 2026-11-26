@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Raon-1 mini** (`raon1_mini`, #3225). KRAFTON's 28.8B hybrid (`KRAFTON/Raon-1-mini`, revision `6691a076`) runs from its original bf16 + MXFP8 checkpoint in `mlxcel generate`, `mlxcel-server` and `mlxcel arch`: four-stream Raon_mHC residuals on the Helmert chart, 18 RDA gated-delta layers and 7 NoPE gated MLA layers, SiTU MLPs, and a sigmoid-routed MoE whose MXFP8 experts are read in MLX's native `mxfp8` layout without conversion. Reasoning-effort steering is loaded but not applied (alpha 0, the reference's `max` setting; #3435). The vendor MLX export and NVFP4 exports are refused at load by name (#3437). `scripts/raon1_mini_oracle_trace.py` is the Transformers reference arm for greedy and teacher-forced comparison.
+
 ### Fixed
 
 - **WebUI opens at `localhost` again** (#3433). `mlxcel serve --webui` and `mlxcel-server --webui` on a loopback address replaced the WebUI Host and Origin allow-list with the bound address after bind, so `http://localhost:<port>/webui/` and `[::1]` were refused with 403 `Host header is not allowed`; only `127.0.0.1` worked. The startup names are now kept and moved to the bound port, so `--port 0` still gets the real port, and unknown hosts are still refused.

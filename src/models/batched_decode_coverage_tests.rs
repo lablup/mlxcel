@@ -200,6 +200,7 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "MuseGlimmerTextWrapper@src/models/muse_glimmer.rs",
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
     "Qwen4ExpModel@src/models/qwen4_exp.rs",
+    "Raon1MiniModel@src/models/raon1_mini_lm.rs",
     "TensorParallelGemma4Model@src/distributed/tensor_parallel/llama_runtime.rs",
 ];
 

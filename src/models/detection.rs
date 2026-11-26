@@ -1154,6 +1154,9 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
                 Ok(ModelType::KimiK3)
             }
         }
+        // The vendor MLX export shares this model_type; `Raon1MiniConfig`
+        // rejects it by name at load (#3437).
+        "raon1_mini" => Ok(ModelType::Raon1Mini),
         "kimi_vl" => Ok(ModelType::KimiVL),
         "kimi_k25" => Ok(ModelType::KimiK25),
         // LocateAnything: MoonViT tower + MLP connector + Qwen2 text decoder.

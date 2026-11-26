@@ -273,6 +273,7 @@ macro_rules! for_each_model_registration {
             NemotronNAS => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             KimiLinear => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             KimiK3 => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
+            Raon1Mini => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Raon1MiniModel::load, args: models::raon1_mini::Raon1MiniConfig, weight_builder: models::Raon1MiniModel::from_checkpoint_weights, wrap: LoadedModel::Raon1Mini } };
             KimiK3VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Kimi K3 VLM does not support adapter loading; use load_model() instead") };
             LongcatFlash => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             LongcatFlashNgram => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };

@@ -847,6 +847,7 @@ impl ModelType {
             ModelType::GraniteMoeHybrid => "granitemoehybrid",
             ModelType::KimiLinear => "kimi_linear",
             ModelType::KimiK3 => "kimi_k3",
+            ModelType::Raon1Mini => "raon1_mini",
             ModelType::KimiK3VLM => "kimi_k3_vlm",
             ModelType::KimiVL => "kimi_vl",
             ModelType::KimiK25 => "kimi_k25",
@@ -996,6 +997,7 @@ impl ModelType {
             | ModelType::KimiLinear
             | ModelType::KimiK3
             | ModelType::KimiK3VLM
+            | ModelType::Raon1Mini
             | ModelType::LongcatFlash
             | ModelType::LongcatFlashNgram
             | ModelType::LongcatFlashSparse
@@ -1257,6 +1259,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::Z1t => &["z1t"],
         ModelType::KimiLinear => &["kimi_linear"],
         ModelType::KimiK3 | ModelType::KimiK3VLM => &["kimi_k3"],
+        ModelType::Raon1Mini => &["raon1_mini"],
         ModelType::KimiVL => &["kimi_vl"],
         ModelType::KimiK25 => &["kimi_k25"],
         ModelType::LocateAnythingVLM => &["locateanything"],
