@@ -409,4 +409,17 @@ fn steering_vectors_are_kept_in_float32_and_not_applied() {
     assert_eq!(values(&a), values(&b));
 }
 
+/// Native batched decode (stacked RDA states, per-row MLA latent caches)
+/// equals decoding each sequence alone, across fresh, mixed and B=1
+/// transitions; the MLA layer (index 2) is the only paged one.
+#[test]
+fn native_batched_decode_matches_per_sequence_decode() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths_prepared_b1(
+        tiny_model,
+        &[0, 0, 3, 0],
+    );
+    crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(tiny_model);
+}
+
 crate::models::last_row_logits_harness::last_row_case!(raon1_mini_last_row_logits, tiny_model);

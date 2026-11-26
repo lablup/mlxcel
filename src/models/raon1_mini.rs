@@ -138,24 +138,35 @@ impl Raon1MiniDecoderLayer {
         cache: &mut Raon1MiniLayerCache,
         masks: &StepMasks,
     ) -> UniquePtr<MlxArray> {
+        self.forward_with_mixer(streams, |mixer, x| match (mixer, cache) {
+            (Mixer::Rda(attn), Raon1MiniLayerCache::Delta(c)) => {
+                attn.forward(x, c, masks.token_mask.as_deref())
+            }
+            (Mixer::Mla(attn), Raon1MiniLayerCache::Attn(c)) => {
+                attn.forward(x, masks.mla_mask.as_deref(), c)
+            }
+            _ => panic!(
+                "raon1_mini: cache kind mismatch at layer {}",
+                self.layer_idx
+            ),
+        })
+    }
+
+    /// Both mHC sites and the FFN around `mixer`, which runs the token
+    /// mixer (RDA or MLA) on the normalized branch input `x`. The single
+    /// sequence forward and the native batched decode differ only there.
+    fn forward_with_mixer(
+        &self,
+        streams: &MlxArray,
+        mixer: impl FnOnce(&Mixer, &MlxArray) -> UniquePtr<MlxArray>,
+    ) -> UniquePtr<MlxArray> {
         let dt = mlxcel_core::array_dtype(streams);
         let route = self.attn_mhc.route(streams);
         let sf = mlxcel_core::astype(streams, dtype::FLOAT32);
         let x = self
             .input_layernorm
             .forward(&raon_mhc::aggregate(&sf, &route.h_pre, dt));
-        let y = match (&self.mixer, cache) {
-            (Mixer::Rda(attn), Raon1MiniLayerCache::Delta(c)) => {
-                attn.forward(&x, c, masks.token_mask.as_deref())
-            }
-            (Mixer::Mla(attn), Raon1MiniLayerCache::Attn(c)) => {
-                attn.forward(&x, masks.mla_mask.as_deref(), c)
-            }
-            _ => panic!(
-                "raon1_mini: cache kind mismatch at layer {}",
-                self.layer_idx
-            ),
-        };
+        let y = mixer(&self.mixer, &x);
         let streams = raon_mhc::mix(&sf, &y, &route, dt);
 
         let route = self.mlp_mhc.route(&streams);
@@ -414,7 +425,13 @@ impl Raon1MiniModel {
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             streams = layer.forward(&streams, cache, masks);
         }
-        let h = raon_mhc::reduce_streams(&streams, self.act_dtype);
+        self.head(&streams, row)
+    }
+
+    /// Stream reduction, final norm and LM head, for every position
+    /// (`row == None`) or only `row`.
+    pub(crate) fn head(&self, streams: &MlxArray, row: Option<usize>) -> UniquePtr<MlxArray> {
+        let h = raon_mhc::reduce_streams(streams, self.act_dtype);
         let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         match &self.lm_head {

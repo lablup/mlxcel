@@ -1132,7 +1132,12 @@ impl KimiK3MLAAttention {
         )
     }
 
-    fn forward_batched_decode(
+    /// One decode token per row (`x` `[B, 1, hidden]`) against each row's
+    /// own latent cache, which may differ in length.
+    ///
+    /// Used by: KimiK3 (`forward_batched_attention`), Raon1Mini (native
+    /// batched decode, `raon1_mini_lm.rs`)
+    pub(crate) fn forward_batched_decode(
         &self,
         x: &MlxArray,
         caches: &mut [&mut KVCache],
